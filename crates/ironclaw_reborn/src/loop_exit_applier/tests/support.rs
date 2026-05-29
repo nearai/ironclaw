@@ -20,7 +20,8 @@ use ironclaw_turns::{
         ApplyValidatedLoopExitRequest, BlockRunRequest, CancelRunCompletionRequest,
         ClaimRunRequest, ClaimedTurnRun, CompleteRunRequest, FailRunRequest, HeartbeatRequest,
         RecordModelRouteSnapshotRequest, RecordRecoveryRequiredRequest,
-        RecoverExpiredLeasesRequest, RecoverExpiredLeasesResponse, TurnRunTransitionPort,
+        RecordTerminalFailureRequest, RecoverExpiredLeasesRequest, RecoverExpiredLeasesResponse,
+        TurnRunTransitionPort,
     },
 };
 
@@ -355,6 +356,22 @@ impl TurnRunTransitionPort for RecordingTransitionPort {
         ))
     }
 
+    async fn record_terminal_failure(
+        &self,
+        request: RecordTerminalFailureRequest,
+    ) -> Result<TurnRunState, TurnError> {
+        self.raw_failures
+            .lock()
+            .expect("lock")
+            .push(request.failure.category().to_string());
+        Ok(state_for_mapping(
+            TurnStatus::Failed,
+            request.run_id,
+            Some(request.failure),
+            None,
+        ))
+    }
+
     async fn record_recovery_required(
         &self,
         request: RecordRecoveryRequiredRequest,
@@ -364,7 +381,7 @@ impl TurnRunTransitionPort for RecordingTransitionPort {
             .expect("lock")
             .push(request.failure.category().to_string());
         Ok(state_for_mapping(
-            TurnStatus::RecoveryRequired,
+            TurnStatus::Failed,
             request.run_id,
             Some(request.failure),
             None,
@@ -418,7 +435,7 @@ impl TurnRunTransitionPort for RecordingTransitionPort {
                 }
             },
             ironclaw_turns::LoopExitMapping::RecoveryRequired { failure } => {
-                self.record_recovery_required(RecordRecoveryRequiredRequest {
+                self.record_terminal_failure(RecordTerminalFailureRequest {
                     run_id: request.run_id,
                     runner_id: request.runner_id,
                     lease_token: request.lease_token,

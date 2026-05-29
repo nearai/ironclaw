@@ -29,7 +29,7 @@ use ironclaw_turns::{
     TurnRunWakeNotifyError, TurnRunnerId, TurnScope, TurnStatus,
     runner::{
         ClaimRunRequest, ClaimedTurnRun, HeartbeatRequest, RecordModelRouteSnapshotRequest,
-        RecordRecoveryRequiredRequest, RecoverExpiredLeasesRequest, TurnRunTransitionPort,
+        RecordTerminalFailureRequest, RecoverExpiredLeasesRequest, TurnRunTransitionPort,
     },
 };
 
@@ -91,7 +91,7 @@ pub trait HostFactory: Send + Sync {
     /// Construct a host for the given claimed run.
     ///
     /// The returned host must be valid for the entire duration of the driver
-    /// invocation. Errors here result in `RecoveryRequired` for the run.
+    /// invocation. Errors here result in a terminal failed/cancelled transition.
     async fn create_host(
         &self,
         claimed: &ClaimedTurnRun,
@@ -352,7 +352,7 @@ impl TurnRunnerWorker {
             tokio::pin!(heartbeat);
 
             // Resolve driver from registry and invoke it. Driver panics indicate
-            // unknown partial state, so convert them to RecoveryRequired.
+            // unknown partial state, so fail the active run with a sanitized category.
             let driver = AssertUnwindSafe(self.invoke_driver(&claimed)).catch_unwind();
             tokio::pin!(driver);
 
@@ -374,7 +374,7 @@ impl TurnRunnerWorker {
         // Keep heartbeat scoped above so a losing heartbeat future is dropped
         // before exit application re-enters the same turn-state store.
 
-        // Apply the exit or record recovery
+        // Apply the exit or fail/cancel the claimed run through the compatibility transition.
         match exit_result {
             Ok(exit) => {
                 self.apply_exit(&claimed, exit).await;
@@ -384,9 +384,9 @@ impl TurnRunnerWorker {
                     runner_id = ?runner_id,
                     run_id = ?run_id,
                     error = %err,
-                    "driver invocation failed, recording recovery required"
+                    "driver invocation failed, recording terminal failure"
                 );
-                self.record_recovery(run_id, runner_id, lease_token, &err)
+                self.record_terminal_failure(run_id, runner_id, lease_token, &err)
                     .await;
             }
         }
@@ -521,34 +521,33 @@ impl TurnRunnerWorker {
                     error = %err,
                     "failed to apply loop exit"
                 );
-                // If exit application fails, try recording recovery
+                // If exit application fails, try recording terminal failure through
+                // the compatibility transition.
                 let Some(failure) = sanitized_failure("exit_application_failed") else {
                     return;
                 };
-                let recovery_request = RecordRecoveryRequiredRequest {
+                let request = RecordTerminalFailureRequest {
                     run_id,
                     runner_id,
                     lease_token,
                     failure,
                 };
-                if let Err(recovery_err) = self
-                    .transition_port
-                    .record_recovery_required(recovery_request)
-                    .await
+                if let Err(recovery_err) =
+                    self.transition_port.record_terminal_failure(request).await
                 {
-                    log_recovery_record_failure(
+                    log_terminal_failure_record_failure(
                         runner_id,
                         run_id,
                         &recovery_err,
-                        "failed to record recovery after exit application failure",
+                        "failed to record terminal failure after exit application failure",
                     );
                 }
             }
         }
     }
 
-    /// Record recovery required for a failed driver invocation.
-    async fn record_recovery(
+    /// Record terminal failure/cancellation for a failed driver invocation.
+    async fn record_terminal_failure(
         &self,
         run_id: TurnRunId,
         runner_id: TurnRunnerId,
@@ -580,31 +579,31 @@ impl TurnRunnerWorker {
         let Some(failure) = sanitized_failure(category) else {
             return;
         };
-        let request = RecordRecoveryRequiredRequest {
+        let request = RecordTerminalFailureRequest {
             run_id,
             runner_id,
             lease_token,
             failure,
         };
 
-        if let Err(err) = self.transition_port.record_recovery_required(request).await {
-            log_recovery_record_failure(
+        if let Err(err) = self.transition_port.record_terminal_failure(request).await {
+            log_terminal_failure_record_failure(
                 runner_id,
                 run_id,
                 &err,
-                "failed to record recovery required",
+                "failed to record terminal failure",
             );
         }
     }
 }
 
-fn log_recovery_record_failure(
+fn log_terminal_failure_record_failure(
     runner_id: TurnRunnerId,
     run_id: TurnRunId,
     error: &TurnError,
     message: &'static str,
 ) {
-    if recovery_record_rejection_is_expected(error) {
+    if terminal_failure_record_rejection_is_expected(error) {
         debug!(
             runner_id = ?runner_id,
             run_id = ?run_id,
@@ -621,7 +620,7 @@ fn log_recovery_record_failure(
     }
 }
 
-fn recovery_record_rejection_is_expected(error: &TurnError) -> bool {
+fn terminal_failure_record_rejection_is_expected(error: &TurnError) -> bool {
     matches!(error, TurnError::LeaseMismatch)
         || matches!(
             error,
@@ -633,7 +632,7 @@ fn recovery_record_rejection_is_expected(error: &TurnError) -> bool {
                     | TurnStatus::BlockedAuth
                     | TurnStatus::BlockedResource
                     | TurnStatus::RecoveryRequired,
-                to: TurnStatus::RecoveryRequired,
+                to: TurnStatus::Failed,
             }
         )
 }

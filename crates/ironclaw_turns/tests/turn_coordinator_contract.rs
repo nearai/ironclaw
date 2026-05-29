@@ -37,8 +37,8 @@ use ironclaw_turns::{
         ApplyValidatedLoopExitRequest, BlockRunRequest, CancelRunCompletionRequest,
         ClaimRunRequest, ClaimedTurnRun, CompleteRunRequest, FailRunRequest, HeartbeatRequest,
         RecordModelRouteSnapshotRequest, RecordRecoveryRequiredRequest,
-        RecoverExpiredLeasesRequest, RecoverExpiredLeasesResponse, TurnRunTransitionPort,
-        TurnRunnerOutcome,
+        RecordTerminalFailureRequest, RecoverExpiredLeasesRequest, RecoverExpiredLeasesResponse,
+        TurnRunTransitionPort, TurnRunnerOutcome,
     },
 };
 
@@ -1045,7 +1045,7 @@ async fn event_publishing_transition_port_publishes_blocked_and_terminal_events(
 }
 
 #[tokio::test]
-async fn event_publishing_transition_port_publishes_recovered_lease_events() {
+async fn event_publishing_transition_port_publishes_expired_lease_terminal_events() {
     let store = Arc::new(InMemoryTurnStateStore::default());
     let sink = Arc::new(InMemoryTurnEventSink::default());
     let transition_port = lifecycle_publishing_store(store, None, Some(sink.clone()));
@@ -1106,7 +1106,7 @@ async fn event_publishing_transition_port_publishes_recovered_lease_events() {
     let recovered_events = events
         .iter()
         .filter(|event| {
-            event.kind == TurnEventKind::RecoveryRequired
+            event.kind == TurnEventKind::Failed
                 && event.sanitized_reason.as_deref() == Some("lease_expired")
         })
         .collect::<Vec<_>>();
@@ -1272,13 +1272,13 @@ async fn event_publishing_transition_port_preserves_lease_expired_recovery_reaso
 
     assert!(sink.events().iter().any(|event| {
         event.run_id == run_id
-            && event.kind == TurnEventKind::RecoveryRequired
+            && event.kind == TurnEventKind::Failed
             && event.sanitized_reason.as_deref() == Some("lease_expired")
     }));
 }
 
 #[tokio::test]
-async fn event_publishing_transition_port_attempts_all_recovered_events_after_sink_error() {
+async fn event_publishing_transition_port_attempts_all_expired_lease_events_after_sink_error() {
     let store = Arc::new(InMemoryTurnStateStore::default());
     let sink = Arc::new(FailFirstRecordingTurnEventSink::default());
     let transition_port = lifecycle_publishing_store(store.clone(), None, Some(sink.clone()));
@@ -1341,10 +1341,10 @@ async fn event_publishing_transition_port_attempts_all_recovered_events_after_si
 }
 
 #[tokio::test]
-async fn event_publishing_transition_port_attempts_all_recovered_events_after_observer_error() {
+async fn event_publishing_transition_port_attempts_all_expired_lease_events_after_observer_error() {
     let store = Arc::new(InMemoryTurnStateStore::default());
     let observer = Arc::new(FailFirstRecordingCommittedEventObserver::failing_on(
-        TurnStatus::RecoveryRequired,
+        TurnStatus::Failed,
     ));
     let transition_port = lifecycle_publishing_store(
         store.clone(),
@@ -1418,7 +1418,7 @@ async fn event_publishing_transition_port_attempts_all_recovered_events_after_ob
     assert!(
         observed_events
             .iter()
-            .any(|event| event.status == TurnStatus::RecoveryRequired)
+            .any(|event| event.status == TurnStatus::Failed)
     );
 }
 
@@ -1719,7 +1719,7 @@ async fn lifecycle_publishing_store_publishes_failed_run_event() {
 }
 
 #[tokio::test]
-async fn lifecycle_publishing_store_publishes_record_recovery_required_event() {
+async fn lifecycle_publishing_store_publishes_record_recovery_required_as_failed_event() {
     let raw_store = Arc::new(InMemoryTurnStateStore::default());
     let sink = Arc::new(InMemoryTurnEventSink::default());
     let transition_port = lifecycle_publishing_store(raw_store, None, Some(sink.clone()));
@@ -1757,8 +1757,8 @@ async fn lifecycle_publishing_store_publishes_record_recovery_required_event() {
 
     assert!(sink.events().iter().any(|event| {
         event.run_id == run_id
-            && event.kind == TurnEventKind::RecoveryRequired
-            && event.status == TurnStatus::RecoveryRequired
+            && event.kind == TurnEventKind::Failed
+            && event.status == TurnStatus::Failed
             && event.sanitized_reason.as_deref() == Some("driver_timeout")
     }));
 }
@@ -3721,7 +3721,7 @@ async fn admission_limit_provider_unavailable_fails_closed_without_run_or_reserv
 }
 
 #[tokio::test]
-async fn blocked_resume_and_recovery_required_keep_existing_admission_reservation() {
+async fn blocked_resume_then_recovery_failure_releases_admission_reservation() {
     let limits = StaticTurnAdmissionLimitProvider::default()
         .with_total_limit(TurnAdmissionAxisKind::Tenant, 1);
     let store = Arc::new(InMemoryTurnStateStore::with_admission_limit_provider(
@@ -3795,7 +3795,7 @@ async fn blocked_resume_and_recovery_required_keep_existing_admission_reservatio
         })
         .await
         .unwrap();
-    assert_eq!(store.active_admission_reservations().len(), 1);
+    assert_eq!(store.active_admission_reservations().len(), 0);
 }
 
 #[tokio::test]
@@ -4850,7 +4850,7 @@ async fn cancel_requested_runner_heartbeat_does_not_extend_lease() {
         .await
         .unwrap();
     assert_eq!(recovered.recovered.len(), 1);
-    assert_eq!(recovered.recovered[0].status, TurnStatus::RecoveryRequired);
+    assert_eq!(recovered.recovered[0].status, TurnStatus::Cancelled);
 }
 
 #[tokio::test]
@@ -5061,7 +5061,7 @@ async fn runner_claim_and_heartbeat_persist_lease_expiry() {
 }
 
 #[tokio::test]
-async fn expired_running_lease_enters_recovery_required_and_keeps_thread_locked() {
+async fn expired_running_lease_fails_and_releases_thread_lock() {
     let (coordinator, store) = coordinator();
     let run_id = accepted_run_id(
         &coordinator
@@ -5107,57 +5107,37 @@ async fn expired_running_lease_enters_recovery_required_and_keeps_thread_locked(
         .unwrap();
     assert_eq!(recovered.recovered.len(), 1);
     assert_eq!(recovered.recovered[0].run_id, run_id);
-    assert_eq!(recovered.recovered[0].status, TurnStatus::RecoveryRequired);
+    assert_eq!(recovered.recovered[0].status, TurnStatus::Failed);
 
     let snapshot = store.persistence_snapshot();
-    let run = snapshot
-        .runs
-        .iter()
-        .find(|record| record.run_id == run_id)
-        .unwrap();
-    assert_eq!(run.status, TurnStatus::RecoveryRequired);
-    assert_eq!(run.runner_id, None);
-    assert_eq!(run.lease_token, None);
-    assert_eq!(run.lease_expires_at, None);
-    let lock = snapshot
-        .active_locks
-        .iter()
-        .find(|lock| lock.run_id == run_id)
-        .unwrap();
-    assert_eq!(lock.status, TurnStatus::RecoveryRequired);
-
-    let busy = coordinator
-        .submit_turn(submit_request("thread-a", "idem-submit-after-recovery"))
-        .await
-        .unwrap_err();
-    assert!(matches!(
-        busy,
-        TurnError::ThreadBusy(ThreadBusy {
-            status: TurnStatus::RecoveryRequired,
-            ..
-        })
-    ));
+    if let Some(run) = snapshot.runs.iter().find(|record| record.run_id == run_id) {
+        assert_eq!(run.status, TurnStatus::Failed);
+        assert_eq!(
+            run.failure.as_ref().map(SanitizedFailure::category),
+            Some("lease_expired")
+        );
+    }
     assert!(
-        store
-            .claim_next_run(ClaimRunRequest {
-                runner_id: TurnRunnerId::new(),
-                lease_token: TurnLeaseToken::new(),
-                scope_filter: None,
-            })
-            .await
-            .unwrap()
-            .is_none(),
-        "recovery-required work must not be auto-retried by the normal claim path"
+        snapshot
+            .active_locks
+            .iter()
+            .all(|lock| lock.run_id != run_id)
     );
+
+    let replacement = coordinator
+        .submit_turn(submit_request("thread-a", "idem-submit-after-expiry"))
+        .await
+        .unwrap();
+    assert!(matches!(replacement, SubmitTurnResponse::Accepted { .. }));
     assert!(store.events().iter().any(|event| {
         event.run_id == run_id
-            && event.kind == TurnEventKind::RecoveryRequired
+            && event.kind == TurnEventKind::Failed
             && event.sanitized_reason.as_deref() == Some("lease_expired")
     }));
 }
 
 #[tokio::test]
-async fn expired_cancel_requested_lease_enters_recovery_required_and_can_be_cancelled() {
+async fn expired_cancel_requested_lease_cancels_and_releases_thread_lock() {
     let (coordinator, store) = coordinator();
     let run_id = accepted_run_id(
         &coordinator
@@ -5200,38 +5180,18 @@ async fn expired_cancel_requested_lease_enters_recovery_required_and_can_be_canc
         .unwrap();
     assert_eq!(recovered.recovered.len(), 1);
     assert_eq!(recovered.recovered[0].run_id, run_id);
-    assert_eq!(recovered.recovered[0].status, TurnStatus::RecoveryRequired);
+    assert_eq!(recovered.recovered[0].status, TurnStatus::Cancelled);
 
     let snapshot = store.persistence_snapshot();
-    let run = snapshot
-        .runs
-        .iter()
-        .find(|record| record.run_id == run_id)
-        .unwrap();
-    assert_eq!(run.status, TurnStatus::RecoveryRequired);
-    assert_eq!(run.runner_id, None);
-    assert_eq!(run.lease_token, None);
-    assert_eq!(run.lease_expires_at, None);
-    let busy = coordinator
-        .submit_turn(submit_request(
-            "thread-a",
-            "idem-submit-after-cancel-recovery",
-        ))
-        .await
-        .unwrap_err();
-    assert!(matches!(busy, TurnError::ThreadBusy(_)));
-
-    let cancelled = coordinator
-        .cancel_run(cancel_request("thread-a", run_id, "idem-cancel-recovered"))
-        .await
-        .unwrap();
-    assert_eq!(cancelled.status, TurnStatus::Cancelled);
-    assert!(store.persistence_snapshot().active_locks.is_empty());
+    if let Some(run) = snapshot.runs.iter().find(|record| record.run_id == run_id) {
+        assert_eq!(run.status, TurnStatus::Cancelled);
+    }
+    assert!(snapshot.active_locks.is_empty());
 
     let replacement = coordinator
         .submit_turn(submit_request(
             "thread-a",
-            "idem-submit-after-recovered-cancel",
+            "idem-submit-after-expired-cancel",
         ))
         .await
         .unwrap();
@@ -5239,7 +5199,7 @@ async fn expired_cancel_requested_lease_enters_recovery_required_and_can_be_canc
 }
 
 #[tokio::test]
-async fn cancel_recovery_required_run_releases_lock_and_allows_new_submit() {
+async fn cancel_after_expired_failed_run_reports_already_terminal_and_allows_new_submit() {
     let (coordinator, store) = coordinator();
     let run_id = accepted_run_id(
         &coordinator
@@ -5284,16 +5244,13 @@ async fn cancel_recovery_required_run_releases_lock_and_allows_new_submit() {
         })
         .await
         .unwrap();
-    assert_eq!(cancelled.status, TurnStatus::Cancelled);
-    assert!(!cancelled.already_terminal);
+    assert_eq!(cancelled.status, TurnStatus::Failed);
+    assert!(cancelled.already_terminal);
     let snapshot = store.persistence_snapshot();
     assert!(snapshot.active_locks.is_empty());
-    let run = snapshot
-        .runs
-        .iter()
-        .find(|record| record.run_id == run_id)
-        .unwrap();
-    assert_eq!(run.failure, None);
+    if let Some(run) = snapshot.runs.iter().find(|record| record.run_id == run_id) {
+        assert_eq!(run.status, TurnStatus::Failed);
+    }
 
     let replacement = coordinator
         .submit_turn(submit_request("thread-a", "idem-submit-replacement"))
@@ -6468,7 +6425,7 @@ fn event_from_state_for_recording(state: &TurnRunState) -> TurnLifecycleEvent {
 #[derive(Default)]
 struct FailFirstRecordingTurnEventSink {
     attempts: Mutex<Vec<TurnLifecycleEvent>>,
-    failed_recovery: AtomicBool,
+    failed_first_terminal: AtomicBool,
 }
 
 impl FailFirstRecordingTurnEventSink {
@@ -6481,8 +6438,8 @@ impl FailFirstRecordingTurnEventSink {
 impl TurnEventSink for FailFirstRecordingTurnEventSink {
     async fn publish(&self, event: TurnLifecycleEvent) -> Result<(), TurnError> {
         let mut attempts = self.attempts.lock().unwrap();
-        let should_fail = event.kind == TurnEventKind::RecoveryRequired
-            && !self.failed_recovery.swap(true, Ordering::SeqCst);
+        let should_fail = event.kind == TurnEventKind::Failed
+            && !self.failed_first_terminal.swap(true, Ordering::SeqCst);
         attempts.push(event);
         if should_fail {
             return Err(TurnError::Unavailable {
@@ -6549,6 +6506,15 @@ impl TurnRunTransitionPort for AtomicLoopExitPort {
 
     async fn fail_run(&self, _request: FailRunRequest) -> Result<TurnRunState, TurnError> {
         panic!("cancelled loop-exit application must not fail runs")
+    }
+
+    async fn record_terminal_failure(
+        &self,
+        _request: RecordTerminalFailureRequest,
+    ) -> Result<TurnRunState, TurnError> {
+        panic!(
+            "cancelled loop-exit application must not use a separate terminal failure transition"
+        )
     }
 
     async fn record_recovery_required(
@@ -6761,7 +6727,7 @@ async fn loop_exit_application_blocks_with_checkpoint_and_keeps_lock() {
 }
 
 #[tokio::test]
-async fn invalid_loop_exit_application_records_recovery_required_and_keeps_lock() {
+async fn invalid_loop_exit_application_fails_and_releases_lock() {
     let (coordinator, store) = coordinator();
     let run_id = accepted_run_id(
         &coordinator
@@ -6781,7 +6747,7 @@ async fn invalid_loop_exit_application_records_recovery_required_and_keeps_lock(
         .unwrap()
         .unwrap();
 
-    let recovered = apply_test_loop_exit(
+    let failed = apply_test_loop_exit(
         store.as_ref(),
         run_id,
         runner_id,
@@ -6791,18 +6757,16 @@ async fn invalid_loop_exit_application_records_recovery_required_and_keeps_lock(
     .await
     .unwrap();
 
-    assert_eq!(recovered.status, TurnStatus::RecoveryRequired);
+    assert_eq!(failed.status, TurnStatus::Failed);
     assert_eq!(
-        recovered.failure.as_ref().map(SanitizedFailure::category),
+        failed.failure.as_ref().map(SanitizedFailure::category),
         Some("driver_protocol_violation")
     );
-    assert!(matches!(
-        coordinator
-            .submit_turn(submit_request("thread-a", "idem-submit-b"))
-            .await
-            .unwrap_err(),
-        TurnError::ThreadBusy(_)
-    ));
+    let replacement = coordinator
+        .submit_turn(submit_request("thread-a", "idem-submit-b"))
+        .await
+        .unwrap();
+    assert!(matches!(replacement, SubmitTurnResponse::Accepted { .. }));
 }
 
 #[tokio::test]
@@ -6909,7 +6873,7 @@ async fn non_cancelled_loop_exit_after_public_cancel_does_not_terminally_cancel(
         }
     );
 
-    let recovered_after_cancel = apply_test_loop_exit(
+    let cancelled_after_cancel = apply_test_loop_exit(
         store.as_ref(),
         run_id,
         runner_id,
@@ -6918,25 +6882,16 @@ async fn non_cancelled_loop_exit_after_public_cancel_does_not_terminally_cancel(
     )
     .await
     .unwrap();
-    assert_eq!(recovered_after_cancel.status, TurnStatus::RecoveryRequired);
-    assert_eq!(
-        recovered_after_cancel
-            .failure
-            .as_ref()
-            .map(SanitizedFailure::category),
-        Some("driver_protocol_violation")
-    );
-    assert!(matches!(
-        coordinator
-            .submit_turn(submit_request("thread-a", "idem-submit-b"))
-            .await
-            .unwrap_err(),
-        TurnError::ThreadBusy(_)
-    ));
+    assert_eq!(cancelled_after_cancel.status, TurnStatus::Cancelled);
+    let replacement = coordinator
+        .submit_turn(submit_request("thread-a", "idem-submit-b"))
+        .await
+        .unwrap();
+    assert!(matches!(replacement, SubmitTurnResponse::Accepted { .. }));
 }
 
 #[tokio::test]
-async fn observed_cancelled_loop_exit_without_recorded_cancel_enters_recovery_required() {
+async fn observed_cancelled_loop_exit_without_recorded_cancel_fails_and_releases_lock() {
     let (coordinator, store) = coordinator();
     let run_id = accepted_run_id(
         &coordinator
@@ -6956,7 +6911,7 @@ async fn observed_cancelled_loop_exit_without_recorded_cancel_enters_recovery_re
         .unwrap()
         .unwrap();
 
-    let recovered = apply_test_loop_exit(
+    let failed = apply_test_loop_exit(
         store.as_ref(),
         run_id,
         runner_id,
@@ -6966,18 +6921,16 @@ async fn observed_cancelled_loop_exit_without_recorded_cancel_enters_recovery_re
     .await
     .unwrap();
 
-    assert_eq!(recovered.status, TurnStatus::RecoveryRequired);
+    assert_eq!(failed.status, TurnStatus::Failed);
     assert_eq!(
-        recovered.failure.as_ref().map(SanitizedFailure::category),
+        failed.failure.as_ref().map(SanitizedFailure::category),
         Some("interrupted_unexpectedly")
     );
-    assert!(matches!(
-        coordinator
-            .submit_turn(submit_request("thread-a", "idem-submit-b"))
-            .await
-            .unwrap_err(),
-        TurnError::ThreadBusy(_)
-    ));
+    let replacement = coordinator
+        .submit_turn(submit_request("thread-a", "idem-submit-b"))
+        .await
+        .unwrap();
+    assert!(matches!(replacement, SubmitTurnResponse::Accepted { .. }));
 
     let cancelled = coordinator
         .cancel_run(CancelRunRequest {
@@ -6989,14 +6942,15 @@ async fn observed_cancelled_loop_exit_without_recorded_cancel_enters_recovery_re
         })
         .await
         .unwrap();
-    assert_eq!(cancelled.status, TurnStatus::Cancelled);
+    assert_eq!(cancelled.status, TurnStatus::Failed);
+    assert!(cancelled.already_terminal);
     let snapshot = store.persistence_snapshot();
-    let run = snapshot
-        .runs
-        .iter()
-        .find(|record| record.run_id == run_id)
-        .unwrap();
-    assert_eq!(run.failure, None);
+    if let Some(run) = snapshot.runs.iter().find(|record| record.run_id == run_id) {
+        assert_eq!(
+            run.failure.as_ref().map(SanitizedFailure::category),
+            Some("interrupted_unexpectedly")
+        );
+    }
 }
 
 #[tokio::test]

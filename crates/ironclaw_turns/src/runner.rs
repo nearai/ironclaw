@@ -90,6 +90,36 @@ pub struct RecordRecoveryRequiredRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecordTerminalFailureRequest {
+    pub run_id: TurnRunId,
+    pub runner_id: TurnRunnerId,
+    pub lease_token: TurnLeaseToken,
+    pub failure: SanitizedFailure,
+}
+
+impl From<RecordTerminalFailureRequest> for RecordRecoveryRequiredRequest {
+    fn from(request: RecordTerminalFailureRequest) -> Self {
+        Self {
+            run_id: request.run_id,
+            runner_id: request.runner_id,
+            lease_token: request.lease_token,
+            failure: request.failure,
+        }
+    }
+}
+
+impl From<RecordRecoveryRequiredRequest> for RecordTerminalFailureRequest {
+    fn from(request: RecordRecoveryRequiredRequest) -> Self {
+        Self {
+            run_id: request.run_id,
+            runner_id: request.runner_id,
+            lease_token: request.lease_token,
+            failure: request.failure,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApplyValidatedLoopExitRequest {
     pub run_id: TurnRunId,
     pub runner_id: TurnRunnerId,
@@ -141,10 +171,17 @@ pub trait TurnRunTransitionPort: Send + Sync {
 
     async fn fail_run(&self, request: FailRunRequest) -> Result<TurnRunState, TurnError>;
 
+    async fn record_terminal_failure(
+        &self,
+        request: RecordTerminalFailureRequest,
+    ) -> Result<TurnRunState, TurnError>;
+
     async fn record_recovery_required(
         &self,
         request: RecordRecoveryRequiredRequest,
-    ) -> Result<TurnRunState, TurnError>;
+    ) -> Result<TurnRunState, TurnError> {
+        self.record_terminal_failure(request.into()).await
+    }
 
     async fn apply_validated_loop_exit(
         &self,

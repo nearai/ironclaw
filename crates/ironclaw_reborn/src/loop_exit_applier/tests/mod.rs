@@ -251,7 +251,7 @@ async fn thread_checkpoint_evidence_accepts_durable_cancelled_run() {
 }
 
 #[tokio::test]
-async fn invalid_exit_after_before_side_effect_requires_recovery() {
+async fn invalid_exit_after_before_side_effect_fails_terminally() {
     let evidence = InMemoryLoopExitEvidencePort::new()
         .with_latest_checkpoint_kind(Some(LoopCheckpointKind::BeforeSideEffect));
     let fixture = Fixture::new(evidence);
@@ -263,7 +263,7 @@ async fn invalid_exit_after_before_side_effect_requires_recovery() {
         .await
         .expect("applied");
 
-    assert_eq!(state.status, TurnStatus::RecoveryRequired);
+    assert_eq!(state.status, TurnStatus::Failed);
     assert_eq!(
         state.failure.expect("failure").category(),
         "driver_protocol_violation"
@@ -271,8 +271,9 @@ async fn invalid_exit_after_before_side_effect_requires_recovery() {
 }
 
 #[tokio::test]
-async fn recovery_required_keeps_active_thread_lock() {
-    assert!(TurnStatus::RecoveryRequired.keeps_active_lock());
+async fn legacy_recovery_required_status_is_terminal() {
+    assert!(TurnStatus::RecoveryRequired.is_terminal());
+    assert!(!TurnStatus::RecoveryRequired.keeps_active_lock());
 }
 
 #[tokio::test]

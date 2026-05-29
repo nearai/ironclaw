@@ -13,12 +13,13 @@ use crate::{
     TurnAdmissionPolicy, TurnCommittedEventObserver, TurnError, TurnEventKind, TurnEventSink,
     TurnLifecycleEvent, TurnRunId, TurnRunRecord, TurnRunState, TurnSpawnTreeStateStore,
     TurnStateStore, TurnStatus,
-    events::EventCursor,
+    events::{EventCursor, event_kind_for_run_state, sanitized_reason_for_run_state},
     runner::{
         ApplyValidatedLoopExitRequest, BlockRunRequest, CancelRunCompletionRequest,
         ClaimRunRequest, ClaimedTurnRun, CompleteRunRequest, FailRunRequest, HeartbeatRequest,
         RecordModelRouteSnapshotRequest, RecordRecoveryRequiredRequest,
-        RecoverExpiredLeasesRequest, RecoverExpiredLeasesResponse, TurnRunTransitionPort,
+        RecordTerminalFailureRequest, RecoverExpiredLeasesRequest, RecoverExpiredLeasesResponse,
+        TurnRunTransitionPort,
     },
     store::SpawnTreeReservation,
 };
@@ -429,31 +430,6 @@ fn cancel_event(
     })
 }
 
-fn event_kind_for_state(state: &TurnRunState) -> TurnEventKind {
-    match state.status {
-        TurnStatus::Running => TurnEventKind::RunnerClaimed,
-        TurnStatus::BlockedApproval
-        | TurnStatus::BlockedAuth
-        | TurnStatus::BlockedResource
-        | TurnStatus::BlockedDependentRun => TurnEventKind::Blocked,
-        TurnStatus::Completed => TurnEventKind::Completed,
-        TurnStatus::Cancelled => TurnEventKind::Cancelled,
-        TurnStatus::Failed => TurnEventKind::Failed,
-        TurnStatus::RecoveryRequired => TurnEventKind::RecoveryRequired,
-        TurnStatus::Queued | TurnStatus::CancelRequested => TurnEventKind::RunnerHeartbeat,
-    }
-}
-
-fn sanitized_reason_for_state(state: &TurnRunState) -> Option<String> {
-    match state.status {
-        TurnStatus::Failed | TurnStatus::RecoveryRequired => state
-            .failure
-            .as_ref()
-            .map(|failure| failure.category().to_string()),
-        _ => None,
-    }
-}
-
 #[async_trait]
 impl<S> TurnStateStore for LifecyclePublishingTurnStateStore<S>
 where
@@ -598,11 +574,15 @@ where
         for state in &response.recovered {
             let event = TurnLifecycleEvent::from_run_state(
                 state,
-                TurnEventKind::RecoveryRequired,
-                Some("lease_expired".to_string()),
+                event_kind_for_run_state(state),
+                sanitized_reason_for_run_state(state),
             );
-            self.publish_state_once_best_effort(state.clone(), event, "committed lease recovery")
-                .await;
+            self.publish_state_once_best_effort(
+                state.clone(),
+                event,
+                "committed lease terminalization",
+            )
+            .await;
         }
         Ok(response)
     }
@@ -643,7 +623,21 @@ where
         let event = TurnLifecycleEvent::from_run_state(
             &state,
             TurnEventKind::Failed,
-            sanitized_reason_for_state(&state),
+            sanitized_reason_for_run_state(&state),
+        );
+        self.publish_state_once(state.clone(), event).await?;
+        Ok(state)
+    }
+
+    async fn record_terminal_failure(
+        &self,
+        request: RecordTerminalFailureRequest,
+    ) -> Result<TurnRunState, TurnError> {
+        let state = self.inner.record_terminal_failure(request).await?;
+        let event = TurnLifecycleEvent::from_run_state(
+            &state,
+            event_kind_for_run_state(&state),
+            sanitized_reason_for_run_state(&state),
         );
         self.publish_state_once(state.clone(), event).await?;
         Ok(state)
@@ -656,8 +650,8 @@ where
         let state = self.inner.record_recovery_required(request).await?;
         let event = TurnLifecycleEvent::from_run_state(
             &state,
-            TurnEventKind::RecoveryRequired,
-            sanitized_reason_for_state(&state),
+            event_kind_for_run_state(&state),
+            sanitized_reason_for_run_state(&state),
         );
         self.publish_state_once(state.clone(), event).await?;
         Ok(state)
@@ -670,8 +664,8 @@ where
         let state = self.inner.apply_validated_loop_exit(request).await?;
         let event = TurnLifecycleEvent::from_run_state(
             &state,
-            event_kind_for_state(&state),
-            sanitized_reason_for_state(&state),
+            event_kind_for_run_state(&state),
+            sanitized_reason_for_run_state(&state),
         );
         self.publish_state_once(state.clone(), event).await?;
         Ok(state)

@@ -1732,15 +1732,14 @@ output_schema_ref = "schemas/test.output.json"
     fn capability_failure_disposition_maps_failure_kinds_once() {
         use crate::CapabilityFailureDisposition::*;
 
-        let safe = true;
         let cases = [
             (RuntimeFailureKind::Authorization, ModelVisibleToolError),
             (RuntimeFailureKind::Backend, RetrySameCall),
-            (RuntimeFailureKind::Cancelled, RecoverableRunFailure),
-            (RuntimeFailureKind::Dispatcher, RecoverableRunFailure),
+            (RuntimeFailureKind::Cancelled, ModelVisibleToolError),
+            (RuntimeFailureKind::Dispatcher, ModelVisibleToolError),
             (RuntimeFailureKind::Internal, RetrySameCall),
             (RuntimeFailureKind::InvalidInput, ModelVisibleToolError),
-            (RuntimeFailureKind::InvalidOutput, RecoverableRunFailure),
+            (RuntimeFailureKind::InvalidOutput, ModelVisibleToolError),
             (RuntimeFailureKind::MissingRuntime, ModelVisibleToolError),
             (RuntimeFailureKind::Network, RetrySameCall),
             (RuntimeFailureKind::OperationFailed, ModelVisibleToolError),
@@ -1750,12 +1749,12 @@ output_schema_ref = "schemas/test.output.json"
             (RuntimeFailureKind::Resource, ModelVisibleToolError),
             (RuntimeFailureKind::Transient, RetrySameCall),
             (RuntimeFailureKind::Unavailable, RetrySameCall),
-            (RuntimeFailureKind::Unknown, RecoverableRunFailure),
+            (RuntimeFailureKind::Unknown, ModelVisibleToolError),
         ];
 
         for (kind, expected) in cases {
             assert_eq!(
-                crate::capability_failure_disposition(kind, safe),
+                crate::capability_failure_disposition(kind),
                 expected,
                 "{kind:?}"
             );
@@ -1773,7 +1772,7 @@ output_schema_ref = "schemas/test.output.json"
             RuntimeFailureKind::Unavailable,
         ] {
             assert_eq!(
-                crate::capability_failure_disposition(kind, true),
+                crate::capability_failure_disposition(kind),
                 RetrySameCall,
                 "{kind:?}"
             );

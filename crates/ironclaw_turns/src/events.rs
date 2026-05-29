@@ -52,6 +52,31 @@ impl TurnBlockedGateKind {
     }
 }
 
+pub fn event_kind_for_run_state(state: &TurnRunState) -> TurnEventKind {
+    match state.status {
+        TurnStatus::Running => TurnEventKind::RunnerClaimed,
+        TurnStatus::BlockedApproval
+        | TurnStatus::BlockedAuth
+        | TurnStatus::BlockedResource
+        | TurnStatus::BlockedDependentRun => TurnEventKind::Blocked,
+        TurnStatus::Completed => TurnEventKind::Completed,
+        TurnStatus::Cancelled => TurnEventKind::Cancelled,
+        TurnStatus::Failed => TurnEventKind::Failed,
+        TurnStatus::RecoveryRequired => TurnEventKind::RecoveryRequired,
+        TurnStatus::Queued | TurnStatus::CancelRequested => TurnEventKind::RunnerHeartbeat,
+    }
+}
+
+pub fn sanitized_reason_for_run_state(state: &TurnRunState) -> Option<String> {
+    match state.status {
+        TurnStatus::Failed | TurnStatus::RecoveryRequired => state
+            .failure
+            .as_ref()
+            .map(|failure| failure.category().to_string()),
+        _ => None,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TurnBlockedGateMetadata {
     pub gate_ref: GateRef,

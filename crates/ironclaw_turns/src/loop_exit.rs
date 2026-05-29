@@ -251,20 +251,11 @@ impl LoopExitApplier {
         turn_id: TurnId,
         run_id: TurnRunId,
     ) -> Result<LoopExitInvalidHandling, TurnError> {
-        match self
+        let _ = self
             .evidence_port
             .latest_checkpoint_kind(scope, turn_id, run_id)
-            .await?
-        {
-            Some(
-                LoopCheckpointKind::BeforeSideEffect
-                | LoopCheckpointKind::BeforeBlock
-                | LoopCheckpointKind::Final,
-            ) => Ok(LoopExitInvalidHandling::RecoveryRequired),
-            Some(LoopCheckpointKind::BeforeModel) | None => {
-                Ok(LoopExitInvalidHandling::FailTerminal)
-            }
-        }
+            .await?;
+        Ok(LoopExitInvalidHandling::FailTerminal)
     }
 }
 
@@ -486,7 +477,6 @@ impl LoopFailureKind {
 #[serde(rename_all = "snake_case")]
 pub enum LoopExitInvalidHandling {
     FailTerminal,
-    RecoveryRequired,
 }
 
 /// Host-derived policy for validating a driver-supplied [`LoopExit`] claim.
@@ -507,10 +497,6 @@ pub(crate) struct LoopExitValidationPolicy {
 }
 
 impl LoopExitValidationPolicy {
-    pub(crate) fn recovery_required() -> Self {
-        Self::default()
-    }
-
     #[cfg(test)]
     pub(crate) fn fail_terminal() -> Self {
         Self {
@@ -614,7 +600,7 @@ impl Default for LoopExitValidationPolicy {
             allow_no_reply_completion: false,
             final_checkpoint_verified: false,
             host_cancellation_observed: false,
-            invalid_handling: LoopExitInvalidHandling::RecoveryRequired,
+            invalid_handling: LoopExitInvalidHandling::FailTerminal,
             completion_refs_verified: false,
             blocked_evidence_verified: false,
             failure_evidence_verified: false,
@@ -666,15 +652,12 @@ impl<'de> Deserialize<'de> for LoopExitValidationPolicy {
                 "loop exit validation policy wire payload cannot mint host-verified evidence or relaxed completion policy",
             ));
         }
-        if matches!(
-            wire.invalid_handling,
-            Some(LoopExitInvalidHandling::FailTerminal)
-        ) {
+        if wire.invalid_handling.is_some() {
             return Err(de::Error::custom(
-                "loop exit validation policy wire payload cannot select terminal invalid-exit handling",
+                "loop exit validation policy wire payload cannot select invalid-exit handling",
             ));
         }
-        Ok(Self::recovery_required().with_final_checkpoint_required(wire.require_final_checkpoint))
+        Ok(Self::default().with_final_checkpoint_required(wire.require_final_checkpoint))
     }
 }
 
@@ -910,13 +893,10 @@ fn validate_failed_exit(
 fn invalid_exit_decision(
     exit_id: LoopExitId,
     kind: LoopExitViolationKind,
-    handling: LoopExitInvalidHandling,
+    _handling: LoopExitInvalidHandling,
 ) -> LoopExitValidationDecision {
     let failure = SanitizedFailure::from_trusted_static(kind.failure_category());
-    let mapping = match handling {
-        LoopExitInvalidHandling::FailTerminal => TurnRunnerOutcome::Failed { failure }.into(),
-        LoopExitInvalidHandling::RecoveryRequired => LoopExitMapping::RecoveryRequired { failure },
-    };
+    let mapping = TurnRunnerOutcome::Failed { failure }.into();
 
     LoopExitValidationDecision {
         exit_id,

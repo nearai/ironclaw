@@ -47,7 +47,7 @@ pub use events::{
     TurnBlockedGateMetadata, TurnCommittedEventObserver, TurnEventKind, TurnEventPage,
     TurnEventProjectionCursor, TurnEventProjectionError, TurnEventProjectionRequest,
     TurnEventProjectionService, TurnEventProjectionSnapshot, TurnEventProjectionSource,
-    TurnEventSink, TurnLifecycleEvent,
+    TurnEventSink, TurnLifecycleEvent, event_kind_for_run_state, sanitized_reason_for_run_state,
 };
 pub use filesystem_store::FilesystemTurnStateStore;
 pub use ids::{
