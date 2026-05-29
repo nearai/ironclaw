@@ -70,7 +70,20 @@ Raw HTTP diagnostic logging is intentionally double-gated: the unsafe `IRONCLAW_
 
 MCP HTTP/SSE follows the same rule through `ironclaw_mcp::McpHostHttpClient`: the host supplies an `McpRuntimeHttpAdapter<RuntimeHttpEgress>` and an egress planner for scoped network policy, credential injection handles, response body limits, and timeouts. Generic or direct-network MCP clients keep `uses_host_mediated_http_egress() == false`, so `McpRuntime` rejects HTTP/SSE manifests before any outbound attempt.
 
+For MCP HTTP/SSE credentials, the host planner is called once for the real
+`tools/call` JSON-RPC body before the handshake. The client validates that plan
+up front, then reuses it when sending `tools/call`; the handshake requests are
+planned separately and strip credential injections. This keeps the planner
+idempotent and prevents staged secret handles from being recomputed from
+runtime-visible MCP input.
+
 Credential injection plans identify their material source. Production runtime tool egress for first-party/native, MCP, script, and WASM lanes must use `RuntimeCredentialSource::StagedObligation { capability_id }`, the `InjectSecretOnce` handoff path. `HostHttpEgressService` must be configured with the same `RuntimeSecretInjectionStore` as the obligation handler and must call `take(scope, capability_id, handle)` before runtime/network use. Missing required staged material fails before outbound transport, and successful or failed transport attempts cannot reuse the staged value because `take(...)` removes it first. `RuntimeCredentialSource::SecretStoreLease` is retained only for explicitly named legacy/test compatibility paths that are not backed by an already-satisfied authorization obligation; production egress rejects direct secret-store leases before transport. If one approved request plan injects the same source+handle into multiple targets, the egress service consumes the staged or leased material once and reuses it only within that request. Header, query-param, and path-placeholder credential targets are supported; request-body targets remain out of scope.
+
+GSuite first-party handlers use the same staged-obligation path even though
+their credential handle is selected dynamically from product-auth account state
+instead of a static manifest `runtime_credentials` entry. Composition stages the
+selected Google access-secret handle through the host obligation handler before
+the first-party HTTP request is sent.
 
 Path-placeholder credential targets are higher risk than headers or query parameters because upstream access logs, CDN edge logs, reverse proxies, crash dumps, and `Referer` propagation routinely capture URL paths and rarely apply credential redaction to path segments. `HostHttpEgressService` therefore allows path-placeholder injection only for HTTPS URLs, requires the placeholder to appear exactly once as a full path segment, and accepts only non-empty unreserved path-segment credential values other than `.` or `..`. Capability owners should prefer header or query-param targets unless a documented upstream contract specifically requires path placement.
 

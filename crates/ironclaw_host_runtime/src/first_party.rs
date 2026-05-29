@@ -103,11 +103,24 @@ impl FirstPartyCapabilityResult {
 pub struct FirstPartyCapabilityError {
     kind: RuntimeDispatchErrorKind,
     usage: Option<ResourceUsage>,
+    auth_required: bool,
 }
 
 impl FirstPartyCapabilityError {
     pub fn new(kind: RuntimeDispatchErrorKind) -> Self {
-        Self { kind, usage: None }
+        Self {
+            kind,
+            usage: None,
+            auth_required: false,
+        }
+    }
+
+    pub fn auth_required() -> Self {
+        Self {
+            kind: RuntimeDispatchErrorKind::Client,
+            usage: None,
+            auth_required: true,
+        }
     }
 
     pub fn with_usage(mut self, usage: ResourceUsage) -> Self {
@@ -121,6 +134,10 @@ impl FirstPartyCapabilityError {
 
     pub fn usage(&self) -> Option<&ResourceUsage> {
         self.usage.as_ref()
+    }
+
+    pub fn is_auth_required(&self) -> bool {
+        self.auth_required
     }
 }
 

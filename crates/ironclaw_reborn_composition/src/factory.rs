@@ -97,7 +97,7 @@ use crate::{
     extension_lifecycle_capabilities::{
         extend_builtin_first_party_package, insert_handlers as insert_extension_lifecycle_handlers,
     },
-    gsuite::register_bundled_gsuite_first_party_handlers,
+    gsuite::{ObligationGsuiteCredentialStager, register_bundled_gsuite_first_party_handlers},
     nearai_mcp::{nearai_mcp_endpoint_from_env, nearai_mcp_runtime},
     web_access::register_bundled_web_access_first_party_handlers,
 };
@@ -519,10 +519,14 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         services = services.with_runtime_process_port(Arc::new(process_port));
     }
     services = apply_runtime_process_binding(services, runtime_process_binding);
+    let product_auth_runtime_ports = require_product_auth_runtime_ports(&services)?;
     let google_provider_client = google_oauth_config
         .map(|config| {
-            let runtime_ports = require_product_auth_runtime_ports(&services)?;
-            google_provider_client(config, Arc::clone(&secret_store), runtime_ports)
+            google_provider_client(
+                config,
+                Arc::clone(&secret_store),
+                product_auth_runtime_ports.clone(),
+            )
         })
         .transpose()?;
     let product_auth = match product_auth_ports {
@@ -542,6 +546,9 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     register_bundled_gsuite_first_party_handlers(
         &mut first_party_registry,
         product_auth.credential_account_service(),
+        Arc::new(ObligationGsuiteCredentialStager::new(
+            product_auth_runtime_ports.obligation_handler(),
+        )),
     )
     .map_err(|error| RebornBuildError::InvalidConfig {
         reason: format!("GSuite first-party handlers are invalid: {error}"),
@@ -1633,6 +1640,7 @@ where
         google_oauth_config,
     } = context;
     let secret_store: Arc<dyn SecretStore> = stores.secret_credentials.secret_store.clone();
+    let mut first_party_registry = builtin_first_party_registry()?;
     let services = HostRuntimeServices::new(
         Arc::new(builtin_extension_registry()?),
         Arc::clone(&stores.filesystem),
@@ -1643,7 +1651,6 @@ where
     )
     .with_trust_policy(production_wiring.trust_policy)
     .with_runtime_policy(production_wiring.runtime_policy)
-    .with_first_party_capabilities(Arc::new(builtin_first_party_registry()?))
     .with_capability_leases(stores.leases)
     .with_secret_store(stores.secret_credentials.secret_store)
     .with_credential_broker(stores.secret_credentials.credential_broker)
@@ -1660,11 +1667,11 @@ where
     .with_filesystem_turn_state_store(stores.scoped_filesystem)
     .with_run_profile_resolver(planned_run_profile_resolver()?)
     .with_turn_run_wake_notifier(production_wiring.turn_run_wake_notifier);
+    let product_auth_runtime_ports = require_product_auth_runtime_ports(&services)?;
     let services = attach_nearai_mcp_runtime(services)?;
     let google_provider_client = google_oauth_config
         .map(|config| {
-            let runtime_ports = require_product_auth_runtime_ports(&services)?;
-            google_provider_client(config, secret_store, runtime_ports)
+            google_provider_client(config, secret_store, product_auth_runtime_ports.clone())
         })
         .transpose()?;
     let services = apply_production_runtime_process_binding(
@@ -1674,12 +1681,26 @@ where
 
     let turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator> =
         Arc::new(services.turn_coordinator_for_production()?);
-    let host_runtime: Arc<dyn ironclaw_host_runtime::HostRuntime> =
-        Arc::new(services.host_runtime_for_production(&wiring_config)?);
     let product_auth = product_auth_ports.map(|ports| {
         compose_product_auth_services(ports, turn_coordinator.clone(), google_provider_client)
     });
     let product_auth_ready = product_auth.is_some();
+    if let Some(product_auth) = &product_auth {
+        register_bundled_gsuite_first_party_handlers(
+            &mut first_party_registry,
+            product_auth.credential_account_service(),
+            Arc::new(ObligationGsuiteCredentialStager::new(
+                product_auth_runtime_ports.obligation_handler(),
+            )),
+        )
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("GSuite first-party handlers are invalid: {error}"),
+        })?;
+    }
+    let services = services.with_first_party_capabilities(Arc::new(first_party_registry));
+
+    let host_runtime: Arc<dyn ironclaw_host_runtime::HostRuntime> =
+        Arc::new(services.host_runtime_for_production(&wiring_config)?);
 
     Ok(RebornServices {
         host_runtime: Some(host_runtime),

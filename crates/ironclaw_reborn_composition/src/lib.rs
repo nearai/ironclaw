@@ -81,7 +81,10 @@ pub use extension_lifecycle_command::{
     execute_reborn_extension_lifecycle_command, render_reborn_extension_lifecycle_response,
 };
 pub use factory::{RebornServices, build_reborn_services};
-pub use gsuite::{bundled_gsuite_extension_packages, bundled_gsuite_first_party_handlers};
+pub use gsuite::{
+    bundled_gsuite_extension_packages, bundled_gsuite_first_party_handlers,
+    bundled_gsuite_first_party_handlers_with_credential_stager,
+};
 pub use input::{OAuthClientConfig, RebornBuildInput, RebornRuntimeProcessBinding};
 pub use ironclaw_product_workflow::{
     LifecycleExtensionSource, LifecycleExtensionSummary, LifecyclePhase, LifecycleProductPayload,

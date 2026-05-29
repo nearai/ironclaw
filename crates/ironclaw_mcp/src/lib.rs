@@ -262,9 +262,10 @@ pub struct McpHostHttpEgressPlanRequest<'a> {
 /// timeouts for the shared egress service.
 ///
 /// `plan` must be deterministic and side-effect-free. The concrete HTTP client
-/// calls it once before the MCP handshake to fail closed on disallowed
-/// `tools/call` credential plans, then again while building each JSON-RPC
-/// exchange so request headers and body bytes match the actual transport call.
+/// plans the real `tools/call` body once before the MCP handshake, validates
+/// its credential sources, then threads that plan into the later `tools/call`
+/// transport send. Handshake requests are planned independently and remain
+/// credential-free.
 pub trait McpHostHttpEgressPlanner: Send + Sync {
     fn plan(&self, request: McpHostHttpEgressPlanRequest<'_>) -> McpHostHttpEgressPlan;
 }
@@ -311,6 +312,11 @@ struct McpHostHttpClientState {
 struct McpHostHttpSessionCleanup {
     state: Arc<McpHostHttpClientState>,
     session_key: McpHostHttpSessionKey,
+}
+
+struct PlannedMcpJsonRpc {
+    body: Vec<u8>,
+    plan: McpHostHttpEgressPlan,
 }
 
 impl McpHostHttpSessionCleanup {
@@ -384,6 +390,19 @@ where
         method: McpJsonRpcMethod,
         params: Option<Value>,
     ) -> Result<McpJsonRpcExchange, String> {
+        let planned = self.plan_json_rpc(request, session_key, id, method, params)?;
+        self.send_planned_json_rpc(request, session_key, id, method, planned)
+            .await
+    }
+
+    fn plan_json_rpc(
+        &self,
+        request: &McpClientRequest,
+        session_key: &McpHostHttpSessionKey,
+        id: Option<u64>,
+        method: McpJsonRpcMethod,
+        params: Option<Value>,
+    ) -> Result<PlannedMcpJsonRpc, String> {
         let url = request.url.as_deref().ok_or_else(request_denied)?;
         let body = encode_json_rpc_request(id, method.as_str(), params)?;
         let mut headers = vec![
@@ -407,10 +426,35 @@ where
             headers: &headers,
             body: &body,
         });
+        Ok(PlannedMcpJsonRpc { body, plan })
+    }
 
-        let response_body_limit =
-            effective_mcp_response_body_limit(plan.response_body_limit, request.max_output_bytes);
-        let credential_injections = method.credential_injections(plan.credential_injections)?;
+    async fn send_planned_json_rpc(
+        &self,
+        request: &McpClientRequest,
+        session_key: &McpHostHttpSessionKey,
+        id: Option<u64>,
+        method: McpJsonRpcMethod,
+        planned: PlannedMcpJsonRpc,
+    ) -> Result<McpJsonRpcExchange, String> {
+        let url = request.url.as_deref().ok_or_else(request_denied)?;
+        let mut headers = vec![
+            ("Content-Type".to_string(), "application/json".to_string()),
+            (
+                "Accept".to_string(),
+                "application/json, text/event-stream".to_string(),
+            ),
+        ];
+        if let Some(session_id) = self.current_session_id(session_key)? {
+            headers.push(("Mcp-Session-Id".to_string(), session_id));
+        }
+
+        let response_body_limit = effective_mcp_response_body_limit(
+            planned.plan.response_body_limit,
+            request.max_output_bytes,
+        );
+        let credential_injections =
+            method.credential_injections(planned.plan.credential_injections)?;
         let response = self
             .http
             .request(McpHostHttpRequest {
@@ -419,11 +463,11 @@ where
                 method: NetworkMethod::Post,
                 url: url.to_string(),
                 headers,
-                body,
-                network_policy: plan.network_policy,
+                body: planned.body,
+                network_policy: planned.plan.network_policy,
                 credential_injections,
                 response_body_limit,
-                timeout_ms: plan.timeout_ms,
+                timeout_ms: planned.plan.timeout_ms,
             })
             .await
             .map_err(mcp_client_http_error)?;
@@ -452,36 +496,6 @@ where
             response: parse_mcp_response(&response, id)?,
             usage,
         })
-    }
-
-    fn preflight_tools_call_credentials(
-        &self,
-        request: &McpClientRequest,
-        params: Value,
-    ) -> Result<(), String> {
-        let url = request.url.as_deref().ok_or_else(request_denied)?;
-        let body =
-            encode_json_rpc_request(Some(0), McpJsonRpcMethod::ToolsCall.as_str(), Some(params))?;
-        let headers = vec![
-            ("Content-Type".to_string(), "application/json".to_string()),
-            (
-                "Accept".to_string(),
-                "application/json, text/event-stream".to_string(),
-            ),
-        ];
-        let plan = self.planner.plan(McpHostHttpEgressPlanRequest {
-            provider: &request.provider,
-            capability_id: &request.capability_id,
-            scope: &request.scope,
-            transport: &request.transport,
-            method: NetworkMethod::Post,
-            url,
-            headers: &headers,
-            body: &body,
-        });
-        McpJsonRpcMethod::ToolsCall
-            .credential_injections(plan.credential_injections)
-            .map(|_| ())
     }
 
     fn current_session_id(
@@ -549,14 +563,25 @@ where
             "name": tool_name,
             "arguments": request.input.clone(),
         });
-        self.preflight_tools_call_credentials(&request, tool_call_params.clone())?;
+        let initialize_id = self.next_request_id();
+        let tool_call_id = self.next_request_id();
+        let tool_call_plan = self.plan_json_rpc(
+            &request,
+            &session_key,
+            Some(tool_call_id),
+            McpJsonRpcMethod::ToolsCall,
+            Some(tool_call_params),
+        )?;
+        McpJsonRpcMethod::ToolsCall
+            .credential_injections(tool_call_plan.plan.credential_injections.clone())
+            .map(|_| ())?;
 
         let mut usage = ResourceUsage::default();
         let initialize = self
             .send_json_rpc(
                 &request,
                 &session_key,
-                Some(self.next_request_id()),
+                Some(initialize_id),
                 McpJsonRpcMethod::Initialize,
                 Some(json_rpc_initialize_params()),
             )
@@ -581,12 +606,12 @@ where
         }
 
         let call = self
-            .send_json_rpc(
+            .send_planned_json_rpc(
                 &request,
                 &session_key,
-                Some(self.next_request_id()),
+                Some(tool_call_id),
                 McpJsonRpcMethod::ToolsCall,
-                Some(tool_call_params),
+                tool_call_plan,
             )
             .await?;
         accumulate_usage(&mut usage, call.usage);

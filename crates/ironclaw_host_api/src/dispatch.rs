@@ -133,6 +133,7 @@ pub enum DispatchFailureKind {
     RuntimeMismatch,
     MissingRuntimeBackend,
     UnsupportedRuntime,
+    AuthRequired,
     Runtime(RuntimeDispatchErrorKind),
 }
 
@@ -144,6 +145,7 @@ impl DispatchFailureKind {
             Self::RuntimeMismatch => "RuntimeMismatch",
             Self::MissingRuntimeBackend => "MissingRuntimeBackend",
             Self::UnsupportedRuntime => "UnsupportedRuntime",
+            Self::AuthRequired => "AuthRequired",
             Self::Runtime(kind) => kind.as_str(),
         }
     }
@@ -182,6 +184,8 @@ pub enum DispatchError {
         capability: CapabilityId,
         runtime: RuntimeKind,
     },
+    #[error("capability {capability} dispatch requires authentication")]
+    AuthRequired { capability: CapabilityId },
     #[error("MCP dispatch failed: {kind}")]
     Mcp { kind: RuntimeDispatchErrorKind },
     #[error("script dispatch failed: {kind}")]
@@ -200,6 +204,7 @@ impl DispatchError {
             Self::RuntimeMismatch { .. } => DispatchFailureKind::RuntimeMismatch,
             Self::MissingRuntimeBackend { .. } => DispatchFailureKind::MissingRuntimeBackend,
             Self::UnsupportedRuntime { .. } => DispatchFailureKind::UnsupportedRuntime,
+            Self::AuthRequired { .. } => DispatchFailureKind::AuthRequired,
             Self::Mcp { kind }
             | Self::Script { kind }
             | Self::Wasm { kind }

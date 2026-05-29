@@ -150,7 +150,14 @@ Transport-specific policy is a host adapter responsibility:
 
 - stdio process spawning should reuse the mediated process/sandbox substrate where appropriate
 - HTTP/SSE transport must go through host network policy, not ambient network access
-- secret injection must be explicit and audited in a later auth/secrets slice
+- HTTP/SSE credential planning is host-owned. The MCP client plans the real
+  `tools/call` JSON-RPC body once before the handshake, rejects direct
+  `SecretStoreLease` sources before any transport request, and threads the
+  approved staged plan into the eventual `tools/call` send.
+- `initialize` and `notifications/initialized` remain credential-free even
+  when the host-planned `tools/call` carries staged credentials.
+- MCP protocol code consumes `RuntimeCredentialInjection` plans only; product
+  auth account selection belongs to composition, not to the MCP crate.
 
 ---
 

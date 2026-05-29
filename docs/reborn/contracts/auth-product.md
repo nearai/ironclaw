@@ -227,6 +227,46 @@ Rules:
   state. They must not expose raw provider error text, response bodies, host
   paths, access-token handles, refresh-token handles, or secret values.
 
+### Runtime Credential Consumers
+
+Product-auth accounts are the account-selection and recovery authority for
+runtime credential consumers; runtime lanes still consume only host-staged
+secret material. Composition resolves this boundary as follows:
+
+- GSuite first-party capabilities continue to choose a Google account
+  dynamically through `CredentialAccountService` because the selected access
+  secret is account-specific. Reborn composition stages that selected access
+  secret through the host-runtime `InjectSecretOnce` obligation handler before
+  first-party HTTP egress consumes the `StagedObligation`. GSuite should not
+  publish static `runtime_credentials` declarations until a manifest credential
+  handle can name a stable product-auth account binding without bypassing
+  account selection, refresh, or recovery.
+- GitHub first-party WASM starts as a manual-token product-auth provider. The
+  manifest handle `github_token` is the runtime credential declaration; host
+  composition maps that handle to an authorized configured GitHub account and
+  stages that account's access secret for the declared `api.github.com`
+  audience only.
+- MCP HTTP/SSE auth is modeled as server-scoped product-auth account
+  selection. A host-owned MCP server entry supplies the provider/server auth
+  requirement; composition selects the account before building a runtime egress
+  plan. MCP protocol code must not choose accounts.
+- When multiple authorized accounts match a GitHub extension or MCP server,
+  account selection returns `account_selection_required`. Consumers must not
+  pick the first account as a fallback.
+- Missing, expired, revoked, refresh-failed, inactive, unauthorized, or
+  ambiguous credentials project typed auth recovery (`setup_required`,
+  `reauthorize_required`, or `account_selection_required`) so product workflow
+  can surface `AuthRequired` and resume the blocked turn. Non-recoverable
+  backend failures return stable fail-closed errors.
+- Refresh-on-use is provider-specific behind
+  `CredentialAccountService::refresh_account` and provider clients. Runtime
+  egress and MCP/WASM/first-party consumers must not implement generic token
+  refresh or inspect provider token material.
+- Header and query-param credential targets are the preferred first production
+  targets. Path-placeholder targets are supported by host egress for
+  compatibility, but consumers should use them only when an upstream protocol
+  explicitly requires URL path placement.
+
 ---
 
 ## Manual Token Setup

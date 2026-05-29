@@ -459,6 +459,7 @@ fn dispatch_error_kind(error: &DispatchError) -> &'static str {
         DispatchError::RuntimeMismatch { .. } => "runtime_mismatch",
         DispatchError::MissingRuntimeBackend { .. } => "missing_runtime_backend",
         DispatchError::UnsupportedRuntime { .. } => "unsupported_runtime",
+        DispatchError::AuthRequired { .. } => "auth_required",
         DispatchError::Mcp { kind }
         | DispatchError::Script { kind }
         | DispatchError::Wasm { kind }

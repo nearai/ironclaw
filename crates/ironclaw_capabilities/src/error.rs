@@ -109,8 +109,13 @@ impl From<ProcessError> for CapabilityInvocationError {
 
 impl From<DispatchError> for CapabilityInvocationError {
     fn from(error: DispatchError) -> Self {
-        Self::Dispatch {
-            kind: dispatch_error_kind(&error),
+        match error {
+            DispatchError::AuthRequired { capability } => {
+                Self::AuthorizationRequiresAuth { capability }
+            }
+            other => Self::Dispatch {
+                kind: dispatch_error_kind(&other),
+            },
         }
     }
 }

@@ -320,6 +320,11 @@ where
                     reservation.id,
                     error.usage(),
                 )?;
+                if error.is_auth_required() {
+                    return Err(DispatchError::AuthRequired {
+                        capability: request.capability_id.clone(),
+                    });
+                }
                 return Err(DispatchError::FirstParty { kind: error.kind() });
             }
             Err(_) => {

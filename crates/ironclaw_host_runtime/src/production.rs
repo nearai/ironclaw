@@ -1396,6 +1396,7 @@ fn dispatch_kind_to_failure(kind: DispatchFailureKind) -> RuntimeFailureKind {
         DispatchFailureKind::MissingRuntimeBackend | DispatchFailureKind::UnsupportedRuntime => {
             RuntimeFailureKind::MissingRuntime
         }
+        DispatchFailureKind::AuthRequired => RuntimeFailureKind::Authorization,
         DispatchFailureKind::RuntimeMismatch => RuntimeFailureKind::Backend,
         DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::ExtensionRuntimeMismatch) => {
             RuntimeFailureKind::MissingRuntime
