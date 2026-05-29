@@ -571,6 +571,12 @@ specific invocation. Account-backed sources resolve through product auth before
 runtime egress and stage material under the runtime slot handle, so the WASM
 guest never sees account ids or backend secret handles.
 
+The `required` field applies uniformly across sources: when `required = false`,
+the obligation is skipped entirely. For `SecretHandle`, a missing grant secret
+does not block dispatch. For `ProductAuthAccount`, a missing or unconfigured
+account does not block dispatch. When `required = true` (the default), a missing
+secret or unresolved account is a hard dispatch failure.
+
 ### 10.3 Capability grants
 
 A grant says who may use a capability and under what constraints.

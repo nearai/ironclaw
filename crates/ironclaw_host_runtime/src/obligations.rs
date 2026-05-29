@@ -43,9 +43,11 @@ pub struct RuntimeCredentialAccountRequest<'a> {
     pub requester_extension: &'a ExtensionId,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum RuntimeCredentialAccountError {
+    #[error("product-auth account requires re-authentication")]
     AuthRequired,
+    #[error("product-auth credential resolution failed")]
     Failed,
 }
 
@@ -1257,11 +1259,17 @@ impl BuiltinObligationHandler {
             let lease = secret_store
                 .lease_once(&request.context.resource_scope, &access_secret)
                 .await
-                .map_err(|_| secret_obligation_failed())?;
+                .map_err(|e| {
+                    tracing::debug!(err = %e, "credential account lease_once failed");
+                    secret_obligation_failed()
+                })?;
             let secret = secret_store
                 .consume(&request.context.resource_scope, lease.id)
                 .await
-                .map_err(|_| secret_obligation_failed())?;
+                .map_err(|e| {
+                    tracing::debug!(err = %e, "credential account consume failed");
+                    secret_obligation_failed()
+                })?;
             secret_injections
                 .insert(
                     &request.context.resource_scope,
@@ -1269,7 +1277,10 @@ impl BuiltinObligationHandler {
                     obligation.handle,
                     secret,
                 )
-                .map_err(|_| secret_obligation_failed())?;
+                .map_err(|e| {
+                    tracing::debug!(err = %e, "credential account injection insert failed");
+                    secret_obligation_failed()
+                })?;
         }
 
         Ok(())

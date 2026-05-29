@@ -1171,11 +1171,16 @@ fn obligations_for_grant(
                     }
                 }
                 RuntimeCredentialRequirementSource::ProductAuthAccount { provider } => {
-                    obligations.push(Obligation::InjectCredentialAccountOnce {
-                        handle: credential.handle.clone(),
-                        provider: provider.clone(),
-                        requester_extension: descriptor.provider.clone(),
-                    });
+                    // Mirror SecretHandle: only mandate the obligation when the credential is
+                    // required. An optional product-auth credential is skipped rather than
+                    // injected so that a missing account does not hard-fail dispatch.
+                    if credential.required {
+                        obligations.push(Obligation::InjectCredentialAccountOnce {
+                            handle: credential.handle.clone(),
+                            provider: provider.clone(),
+                            requester_extension: descriptor.provider.clone(),
+                        });
+                    }
                 }
             }
         }

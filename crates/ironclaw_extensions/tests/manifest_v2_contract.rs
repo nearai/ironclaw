@@ -229,6 +229,27 @@ default_permission = "allow""#,
 }
 
 #[test]
+fn rejects_unknown_runtime_credential_source_type() {
+    // An unknown `source.type` in the manifest must produce a parse error rather than
+    // silently defaulting. This catches forward-incompatible manifests from future versions.
+    let toml = third_party_wasm_manifest("acme-tools", "acme-tools.echo").replace(
+        r#"default_permission = "allow""#,
+        r#"effects = ["network", "use_secret"]
+runtime_credentials = [
+  { handle = "api_token", source = { type = "oauth_token_v99" }, audience = { scheme = "https", host_pattern = "api.example.com" }, target = { type = "header", name = "authorization" } },
+]
+default_permission = "allow""#,
+    );
+    let err =
+        ExtensionManifestV2::parse(&toml, ManifestSource::InstalledLocal, &catalog()).unwrap_err();
+    // Unknown source.type produces a Parse error (serde unknown variant), not Invalid.
+    assert!(
+        matches!(err, ManifestV2Error::Parse { .. }),
+        "expected parse error for unknown source type, got {err:?}"
+    );
+}
+
+#[test]
 fn rejects_duplicate_runtime_credential_handles() {
     let toml = third_party_wasm_manifest("acme-tools", "acme-tools.echo").replace(
         r#"default_permission = "allow""#,
