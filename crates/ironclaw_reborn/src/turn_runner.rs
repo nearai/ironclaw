@@ -386,7 +386,7 @@ impl TurnRunnerWorker {
                     error = %err,
                     "driver invocation failed, recording terminal failure"
                 );
-                self.record_recovery(run_id, runner_id, lease_token, &err)
+                self.record_terminal_failure(run_id, runner_id, lease_token, &err)
                     .await;
             }
         }
@@ -526,7 +526,7 @@ impl TurnRunnerWorker {
                 let Some(failure) = sanitized_failure("exit_application_failed") else {
                     return;
                 };
-                let recovery_request = RecordRunnerFailureRequest {
+                let failure_request = RecordRunnerFailureRequest {
                     run_id,
                     runner_id,
                     lease_token,
@@ -534,7 +534,7 @@ impl TurnRunnerWorker {
                 };
                 if let Err(recovery_err) = self
                     .transition_port
-                    .record_runner_failure(recovery_request)
+                    .record_runner_failure(failure_request)
                     .await
                 {
                     log_recovery_record_failure(
@@ -549,7 +549,7 @@ impl TurnRunnerWorker {
     }
 
     /// Record terminal failure/cancellation for a failed driver invocation.
-    async fn record_recovery(
+    async fn record_terminal_failure(
         &self,
         run_id: TurnRunId,
         runner_id: TurnRunnerId,
