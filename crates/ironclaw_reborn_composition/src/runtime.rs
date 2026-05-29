@@ -702,21 +702,8 @@ impl RebornRuntime {
             if state.status.is_terminal() {
                 return Ok(state.status);
             }
-            if state.status == TurnStatus::RecoveryRequired {
-                // RecoveryRequired keeps the durable turn active because a
-                // future recovery worker may resume it. The standalone
-                // runtime has no recovery worker, so cancel it before
-                // returning to release the conversation lock.
-                let response = self
-                    .cancel_run(
-                        scope,
-                        run_id,
-                        SanitizedCancelReason::OperatorRequested,
-                        "recovery-required-cancel",
-                    )
-                    .await?;
-                return Ok(response.status);
-            }
+            // TurnStatus::RecoveryRequired is now terminal (is_terminal() returns true)
+            // so the branch above handles it; no special cancel-to-release-lock is needed.
             if start.elapsed() > self.poll_settings.max_total {
                 self.cancel_run(
                     scope,

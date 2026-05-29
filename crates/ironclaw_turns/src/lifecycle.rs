@@ -17,7 +17,7 @@ use crate::{
     runner::{
         ApplyValidatedLoopExitRequest, BlockRunRequest, CancelRunCompletionRequest,
         ClaimRunRequest, ClaimedTurnRun, CompleteRunRequest, FailRunRequest, HeartbeatRequest,
-        RecordModelRouteSnapshotRequest, RecordRunnerFailureRequest,
+        RecordModelRouteSnapshotRequest, RecordRunnerFailureRequest, RelinquishRunRequest,
         RecoverExpiredLeasesRequest, RecoverExpiredLeasesResponse, TurnRunTransitionPort,
     },
     store::SpawnTreeReservation,
@@ -654,6 +654,20 @@ where
         request: RecordRunnerFailureRequest,
     ) -> Result<TurnRunState, TurnError> {
         let state = self.inner.record_runner_failure(request).await?;
+        let event = TurnLifecycleEvent::from_run_state(
+            &state,
+            event_kind_for_state(&state),
+            sanitized_reason_for_state(&state),
+        );
+        self.publish_state_once(state.clone(), event).await?;
+        Ok(state)
+    }
+
+    async fn relinquish_run(
+        &self,
+        request: RelinquishRunRequest,
+    ) -> Result<TurnRunState, TurnError> {
+        let state = self.inner.relinquish_run(request).await?;
         let event = TurnLifecycleEvent::from_run_state(
             &state,
             event_kind_for_state(&state),

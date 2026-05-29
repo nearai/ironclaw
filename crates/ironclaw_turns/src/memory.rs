@@ -28,7 +28,7 @@ use crate::{
     runner::{
         ApplyValidatedLoopExitRequest, BlockRunRequest, CancelRunCompletionRequest,
         ClaimRunRequest, ClaimedTurnRun, CompleteRunRequest, FailRunRequest, HeartbeatRequest,
-        RecordModelRouteSnapshotRequest, RecordRunnerFailureRequest,
+        RecordModelRouteSnapshotRequest, RecordRunnerFailureRequest, RelinquishRunRequest,
         RecoverExpiredLeasesRequest, RecoverExpiredLeasesResponse, TurnRunTransitionPort,
         TurnRunnerOutcome,
     },
@@ -1384,6 +1384,14 @@ impl TurnRunTransitionPort for InMemoryTurnStateStore {
         )
     }
 
+    async fn relinquish_run(
+        &self,
+        request: RelinquishRunRequest,
+    ) -> Result<TurnRunState, TurnError> {
+        let mut inner = self.lock_inner()?;
+        inner.relinquish_transition(request.run_id, request.runner_id, request.lease_token)
+    }
+
     async fn apply_validated_loop_exit(
         &self,
         request: ApplyValidatedLoopExitRequest,
@@ -2312,6 +2320,68 @@ impl Inner {
             self.cancel_or_fail_claimed_record(record, failure)
         })();
         self.commit_transition(transition)
+    }
+
+    fn relinquish_transition(
+        &mut self,
+        run_id: TurnRunId,
+        runner_id: crate::TurnRunnerId,
+        lease_token: crate::TurnLeaseToken,
+    ) -> Result<TurnRunState, TurnError> {
+        let now = Utc::now();
+        let mut record = self.take_record(run_id)?;
+        let mut requeue = false;
+        let result = (|| {
+            ensure_active_lease(&record, runner_id, lease_token, now)?;
+            if !matches!(
+                record.status,
+                TurnStatus::Running | TurnStatus::CancelRequested
+            ) {
+                return Err(TurnError::InvalidTransition {
+                    from: record.status,
+                    to: TurnStatus::Queued,
+                });
+            }
+            let (status, failure, event_kind) = match record.status {
+                TurnStatus::Running => {
+                    requeue = true;
+                    (TurnStatus::Queued, None, TurnEventKind::RunnerHeartbeat)
+                }
+                TurnStatus::CancelRequested => {
+                    (TurnStatus::Cancelled, None, TurnEventKind::Cancelled)
+                }
+                _ => unreachable!("status checked above"),
+            };
+            record.status = status;
+            record.failure = failure;
+            record.runner_id = None;
+            record.lease_token = None;
+            record.lease_expires_at = None;
+            record.event_cursor = self.next_cursor();
+            if requeue {
+                self.update_active_lock(&record, now);
+            } else {
+                self.release_active_lock(&record);
+                self.remove_queued_run(record.run_id);
+            }
+            let state = record.state();
+            self.push_event(&record, event_kind, None);
+            if !requeue {
+                self.mark_terminal(record.run_id);
+            }
+            Ok(state)
+        })();
+        self.records.insert(record.run_id, record);
+        if requeue && result.is_ok() {
+            self.queued_runs.push_back(run_id);
+        }
+        if result
+            .as_ref()
+            .is_ok_and(|state| state.status.is_terminal())
+        {
+            self.prune_terminal_records();
+        }
+        result
     }
 
     fn update_active_lock(&mut self, record: &RunRecord, updated_at: crate::TurnTimestamp) {

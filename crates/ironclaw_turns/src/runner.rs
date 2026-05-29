@@ -90,6 +90,13 @@ pub struct RecordRunnerFailureRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RelinquishRunRequest {
+    pub run_id: TurnRunId,
+    pub runner_id: TurnRunnerId,
+    pub lease_token: TurnLeaseToken,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApplyValidatedLoopExitRequest {
     pub run_id: TurnRunId,
     pub runner_id: TurnRunnerId,
@@ -152,6 +159,20 @@ pub trait TurnRunTransitionPort: Send + Sync {
             failure: request.failure,
         })
         .await
+    }
+
+    /// Release the lease and re-queue the run so another worker can claim it.
+    ///
+    /// Use for transient worker-side events (`WorkerCancelled`, `HeartbeatStopped`) where
+    /// the turn should be retried rather than permanently failed.
+    /// If the run is already `CancelRequested`, the cancellation intent is honored and the
+    /// run transitions to `Cancelled` instead of being re-queued.
+    async fn relinquish_run(
+        &self,
+        request: RelinquishRunRequest,
+    ) -> Result<TurnRunState, TurnError> {
+        let _ = request;
+        unimplemented!("relinquish_run not implemented for this TurnRunTransitionPort")
     }
 
     async fn apply_validated_loop_exit(

@@ -29,7 +29,8 @@ use ironclaw_turns::{
     TurnRunWakeNotifyError, TurnRunnerId, TurnScope, TurnStatus,
     runner::{
         ClaimRunRequest, ClaimedTurnRun, HeartbeatRequest, RecordModelRouteSnapshotRequest,
-        RecordRunnerFailureRequest, RecoverExpiredLeasesRequest, TurnRunTransitionPort,
+        RecordRunnerFailureRequest, RelinquishRunRequest, RecoverExpiredLeasesRequest,
+        TurnRunTransitionPort,
     },
 };
 
@@ -548,7 +549,10 @@ impl TurnRunnerWorker {
         }
     }
 
-    /// Record terminal failure/cancellation for a failed driver invocation.
+    /// Handle a failed driver invocation.
+    ///
+    /// Transient worker events (`WorkerCancelled`, `HeartbeatStopped`) relinquish the
+    /// lease so another worker can retry.  All other errors record a terminal failure.
     async fn record_terminal_failure(
         &self,
         run_id: TurnRunId,
@@ -556,6 +560,30 @@ impl TurnRunnerWorker {
         lease_token: TurnLeaseToken,
         error: &DriverInvocationError,
     ) {
+        // Errors that warrant relinquish (re-queue) rather than terminal failure.
+        let relinquish = matches!(
+            error,
+            DriverInvocationError::WorkerCancelled
+                | DriverInvocationError::HeartbeatStopped
+        );
+
+        if relinquish {
+            let request = RelinquishRunRequest {
+                run_id,
+                runner_id,
+                lease_token,
+            };
+            if let Err(err) = self.transition_port.relinquish_run(request).await {
+                log_runner_failure_record_error(
+                    runner_id,
+                    run_id,
+                    &err,
+                    "failed to relinquish run",
+                );
+            }
+            return;
+        }
+
         let category = match error {
             DriverInvocationError::DriverNotFound { .. } => "driver_not_found",
             DriverInvocationError::HostCreationFailed { .. } => "host_creation_failed",
@@ -572,10 +600,11 @@ impl TurnRunnerWorker {
                 "driver_failed"
             }
             DriverInvocationError::DriverPanic => "driver_panic",
-            DriverInvocationError::HeartbeatFailed(_) | DriverInvocationError::HeartbeatStopped => {
-                "heartbeat_failed"
+            DriverInvocationError::HeartbeatFailed(_) => "heartbeat_failed",
+            // WorkerCancelled and HeartbeatStopped handled by relinquish branch above.
+            DriverInvocationError::WorkerCancelled | DriverInvocationError::HeartbeatStopped => {
+                unreachable!("relinquish branch handles these")
             }
-            DriverInvocationError::WorkerCancelled => "worker_cancelled",
         };
 
         let Some(failure) = sanitized_failure(category) else {

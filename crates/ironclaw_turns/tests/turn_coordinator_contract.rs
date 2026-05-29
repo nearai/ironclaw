@@ -6986,3 +6986,188 @@ async fn loop_exit_application_cancels_only_after_public_cancel_request() {
         .unwrap();
     assert_ne!(accepted_run_id(&next), run_id);
 }
+
+// M3: record_runner_failure on CancelRequested → Cancelled (not Failed)
+#[tokio::test]
+async fn lifecycle_publishing_store_publishes_record_runner_failure_as_cancelled_event_when_cancel_requested() {
+    let raw_store = Arc::new(InMemoryTurnStateStore::default());
+    let sink = Arc::new(InMemoryTurnEventSink::default());
+    let transition_port = lifecycle_publishing_store(raw_store, None, Some(sink.clone()));
+    let coordinator = DefaultTurnCoordinator::new(transition_port.clone());
+    let run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request(
+                "thread-runner-failure-cancel",
+                "idem-runner-failure-cancel",
+            ))
+            .await
+            .unwrap(),
+    );
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+    transition_port
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: Some(scope("thread-runner-failure-cancel")),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    // Public cancel request while runner holds the lease.
+    coordinator
+        .cancel_run(CancelRunRequest {
+            scope: scope("thread-runner-failure-cancel"),
+            actor: actor(),
+            run_id,
+            reason: SanitizedCancelReason::OperatorRequested,
+            idempotency_key: IdempotencyKey::new("idem-cancel-runner-failure-cancel").unwrap(),
+        })
+        .await
+        .unwrap();
+    // Runner then records a terminal failure (e.g. driver error after cancel was requested).
+    let state = transition_port
+        .record_runner_failure(RecordRunnerFailureRequest {
+            run_id,
+            runner_id,
+            lease_token,
+            failure: SanitizedFailure::new("driver_timeout").unwrap(),
+        })
+        .await
+        .unwrap();
+    // The CancelRequested branch produces Cancelled (not Failed) and discards the failure.
+    assert_eq!(state.status, TurnStatus::Cancelled);
+    assert!(state.failure.is_none(), "failure should be None on cancel branch");
+    // Published event should be Cancelled, not Failed.
+    assert!(
+        sink.events().iter().any(|event| {
+            event.run_id == run_id
+                && event.kind == TurnEventKind::Cancelled
+                && event.status == TurnStatus::Cancelled
+                && event.sanitized_reason.is_none()
+        }),
+        "expected Cancelled lifecycle event, got: {:?}",
+        sink.events()
+            .iter()
+            .filter(|e| e.run_id == run_id)
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        !sink.events().iter().any(|event| {
+            event.run_id == run_id && event.kind == TurnEventKind::Failed
+        }),
+        "should not emit a Failed event when CancelRequested"
+    );
+}
+
+// L3: cancel_run against a legacy RecoveryRequired record returns already_terminal
+#[tokio::test]
+async fn cancel_on_legacy_recovery_required_run_reports_already_terminal() {
+    let (coordinator, store) = coordinator();
+    let run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request(
+                "thread-legacy-rr-cancel",
+                "idem-legacy-rr-cancel",
+            ))
+            .await
+            .unwrap(),
+    );
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: Some(scope("thread-legacy-rr-cancel")),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    // Simulate a record loaded with legacy RecoveryRequired status
+    // by directly injecting the status via the apply_validated_loop_exit path with
+    // a RecoveryRequired mapping (the compat shim).
+    let rr_state = store
+        .apply_validated_loop_exit(ApplyValidatedLoopExitRequest {
+            run_id,
+            runner_id,
+            lease_token,
+            mapping: LoopExitMapping::RecoveryRequired {
+                failure: SanitizedFailure::new("driver_protocol_violation").unwrap(),
+            },
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        rr_state.status,
+        TurnStatus::Failed,
+        "RecoveryRequired compat mapping transitions to Failed"
+    );
+    // RecoveryRequired is now terminal (is_terminal() == true),
+    // so cancel_run returns already_terminal = true without emitting a Cancelled event.
+    let cancel_response = coordinator
+        .cancel_run(CancelRunRequest {
+            scope: scope("thread-legacy-rr-cancel"),
+            actor: actor(),
+            run_id,
+            reason: SanitizedCancelReason::OperatorRequested,
+            idempotency_key: IdempotencyKey::new("idem-legacy-rr-cancel-cancel").unwrap(),
+        })
+        .await
+        .unwrap();
+    assert!(
+        cancel_response.already_terminal,
+        "cancel on a terminal RecoveryRequired-turned-Failed run should report already_terminal"
+    );
+}
+
+// L4: record_runner_failure produces terminal Failed with sanitized failure category preserved
+#[tokio::test]
+async fn record_runner_failure_produces_terminal_failed_with_sanitized_category() {
+    let (coordinator, store) = coordinator();
+    let run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request("thread-rrf-terminal", "idem-rrf-terminal"))
+            .await
+            .unwrap(),
+    );
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: Some(scope("thread-rrf-terminal")),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    let state = store
+        .record_runner_failure(RecordRunnerFailureRequest {
+            run_id,
+            runner_id,
+            lease_token,
+            failure: SanitizedFailure::new("driver_timeout").unwrap(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(state.status, TurnStatus::Failed);
+    assert_eq!(
+        state.failure.as_ref().map(|f| f.category()),
+        Some("driver_timeout"),
+        "sanitized failure category must be preserved in the terminal state"
+    );
+    // Run should be terminal and not claimable by another runner.
+    let next_claim = store
+        .claim_next_run(ClaimRunRequest {
+            runner_id: TurnRunnerId::new(),
+            lease_token: TurnLeaseToken::new(),
+            scope_filter: Some(scope("thread-rrf-terminal")),
+        })
+        .await
+        .unwrap();
+    assert!(
+        next_claim.is_none(),
+        "terminal Failed run must not be claimable"
+    );
+}

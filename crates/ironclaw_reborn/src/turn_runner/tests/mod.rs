@@ -18,7 +18,7 @@ use ironclaw_turns::{
     runner::{
         ApplyValidatedLoopExitRequest, BlockRunRequest, CancelRunCompletionRequest,
         ClaimRunRequest, ClaimedTurnRun, CompleteRunRequest, FailRunRequest, HeartbeatRequest,
-        RecordModelRouteSnapshotRequest, RecordRunnerFailureRequest,
+        RecordModelRouteSnapshotRequest, RecordRunnerFailureRequest, RelinquishRunRequest,
         RecoverExpiredLeasesRequest, RecoverExpiredLeasesResponse, TurnRunTransitionPort,
         TurnRunnerOutcome,
     },
@@ -153,6 +153,7 @@ enum TransitionCall {
     ApplyValidatedLoopExit,
     RecordModelRouteSnapshot,
     RecordRunnerFailure,
+    Relinquish,
 }
 
 struct MockTransitionPort {
@@ -169,6 +170,8 @@ struct MockTransitionPort {
     apply_exit_requests: Mutex<Vec<ApplyValidatedLoopExitRequest>>,
     route_snapshot_requests: Mutex<Vec<RecordModelRouteSnapshotRequest>>,
     runner_failure_requests: Mutex<Vec<RecordRunnerFailureRequest>>,
+    relinquish_result: Mutex<Result<TurnRunState, TurnError>>,
+    relinquish_requests: Mutex<Vec<RelinquishRunRequest>>,
 }
 
 impl MockTransitionPort {
@@ -189,6 +192,8 @@ impl MockTransitionPort {
             apply_exit_requests: Mutex::new(Vec::new()),
             route_snapshot_requests: Mutex::new(Vec::new()),
             runner_failure_requests: Mutex::new(Vec::new()),
+            relinquish_result: Mutex::new(Ok(test_run_state(test_scope(), TurnStatus::Queued))),
+            relinquish_requests: Mutex::new(Vec::new()),
         }
     }
 
@@ -311,6 +316,18 @@ impl TurnRunTransitionPort for MockTransitionPort {
             .push(TransitionCall::RecordRunnerFailure);
         self.runner_failure_requests.lock().expect("lock").push(request);
         self.runner_failure_result.lock().expect("lock").clone()
+    }
+
+    async fn relinquish_run(
+        &self,
+        request: RelinquishRunRequest,
+    ) -> Result<TurnRunState, TurnError> {
+        self.calls
+            .lock()
+            .expect("lock")
+            .push(TransitionCall::Relinquish);
+        self.relinquish_requests.lock().expect("lock").push(request);
+        self.relinquish_result.lock().expect("lock").clone()
     }
 
     async fn apply_validated_loop_exit(
@@ -1113,7 +1130,7 @@ async fn worker_records_terminal_failure_when_heartbeat_fails() {
 }
 
 #[tokio::test]
-async fn worker_cancellation_stops_active_driver_promptly() {
+async fn worker_cancellation_relinquishes_run() {
     let desc = test_descriptor();
     let driver = Arc::new(MockDriver::completing(desc.clone()).with_delay(Duration::from_secs(60)));
     let registry = Arc::new(setup_registry(driver));
@@ -1149,11 +1166,21 @@ async fn worker_cancellation_stops_active_driver_promptly() {
         panic!("worker cancellation should stop active driver promptly");
     }
     result.unwrap().expect("worker task should complete");
+    // WorkerCancelled routes through relinquish_run (re-queue) rather than
+    // record_runner_failure (terminal), so the run stays available for retry.
     assert!(
         port.calls()
-            .contains(&TransitionCall::RecordRunnerFailure)
+            .contains(&TransitionCall::Relinquish),
+        "WorkerCancelled should relinquish the run, not terminate it"
     );
-    assert_first_terminal_failure_matches_first_claim(&port, run_id);
+    assert!(!port.calls().contains(&TransitionCall::RecordRunnerFailure));
+    let claim_requests = port.claim_requests.lock().expect("lock");
+    let relinquish_requests = port.relinquish_requests.lock().expect("lock");
+    let claim = claim_requests.first().expect("claim should be issued");
+    let relinquish = relinquish_requests.first().expect("relinquish should be issued");
+    assert_eq!(relinquish.run_id, run_id);
+    assert_eq!(relinquish.runner_id, claim.runner_id);
+    assert_eq!(relinquish.lease_token, claim.lease_token);
 }
 
 #[tokio::test]
