@@ -18,6 +18,10 @@ pub(crate) enum BlockedGateStateError {
 }
 
 /// Checks the parked run by actor first, then matches status and gate.
+///
+/// Callers that already read run-state for facade routing should still use
+/// this before mutating typed gate state: the second read is a freshness /
+/// TOCTOU guard immediately before resume/cancel side effects.
 pub(crate) async fn blocked_gate_state(
     turn_coordinator: &dyn TurnCoordinator,
     scope: &TurnScope,

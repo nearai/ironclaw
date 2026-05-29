@@ -1011,6 +1011,10 @@ impl RebornServices {
         if state.actor.as_ref() != Some(actor) {
             return Err(participant_denied());
         }
+        // This read only selects the WebUI route. The typed auth/approval
+        // services intentionally re-read run-state through `blocked_gate_state`
+        // before mutating auth/approval records or resuming/cancelling a run,
+        // so stale facade classification cannot authorize a side effect.
         GateResolutionRoute::from_run_state(
             state.status,
             state.gate_ref.as_ref(),

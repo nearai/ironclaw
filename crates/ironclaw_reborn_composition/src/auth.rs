@@ -348,6 +348,13 @@ pub struct RebornProductAuthServices {
     provider_client: Arc<dyn AuthProviderClient>,
     cleanup_service: Arc<dyn SecretCleanupService>,
     continuation_dispatcher: Arc<dyn RebornAuthContinuationDispatcher>,
+    /// Optional read projection for WebUI/local-dev auth interactions.
+    ///
+    /// `RebornProductAuthServices` may still support OAuth callbacks,
+    /// manual-token setup, credential refresh, and continuation dispatch
+    /// without this port. When absent, runtime composition must expose the
+    /// WebUI pending-auth interaction surface as explicitly unavailable
+    /// instead of silently fabricating an unscoped read model.
     flow_record_source: Option<Arc<dyn AuthFlowRecordSource>>,
 }
 
@@ -453,6 +460,11 @@ impl RebornProductAuthServices {
         self.flow_manager.clone()
     }
 
+    /// Auth-flow read projection used only by product/WebUI interaction views.
+    ///
+    /// `None` is an intentional unsupported mode for bundles that can perform
+    /// product-auth side effects but do not provide a scoped pending-auth
+    /// projection. Callers must map it to a stable unavailable surface.
     pub(crate) fn flow_record_source(&self) -> Option<Arc<dyn AuthFlowRecordSource>> {
         self.flow_record_source.clone()
     }
@@ -495,6 +507,8 @@ impl RebornProductAuthServices {
         self
     }
 
+    /// Enable WebUI/local-dev auth interaction read models from a scoped
+    /// auth-flow projection source.
     pub(crate) fn with_flow_record_source(mut self, source: Arc<dyn AuthFlowRecordSource>) -> Self {
         self.flow_record_source = Some(source);
         self
