@@ -114,15 +114,7 @@ impl GitHubProvider {
             // carries it.
             .user_agent("IronClaw-WebChat-v2")
             .build()
-            // safety: ClientBuilder::build only fails when the rustls /
-            // tokio runtime cannot initialize — an unrecoverable
-            // process-level fault. A silent fallback to
-            // `reqwest::Client::new()` would drop both the timeout and
-            // the User-Agent (letting a hung GitHub call park the task
-            // unbounded, and triggering GitHub 403s), and `new()` is
-            // itself `builder().build().expect(..)` so it panics on the
-            // same condition — making the fallback a misleading no-op.
-            .expect("reqwest client build failed: TLS/runtime init is unrecoverable");
+            .expect("reqwest client build failed: TLS/runtime init is unrecoverable"); // safety: ClientBuilder::build only fails on unrecoverable rustls/tokio init; a silent Client::new() fallback would drop the timeout + User-Agent (unbounded hang, GitHub 403s) and panics on the same fault anyway
         Self {
             name: OAuthProviderName::new("github").expect("\"github\" satisfies the grammar"), // safety: literal satisfies OAuthProviderName grammar (lowercase ascii, 6 chars); checked by `OAuthProviderName::accepts_lowercase_alphanumeric`
             client_id: config.client_id,
