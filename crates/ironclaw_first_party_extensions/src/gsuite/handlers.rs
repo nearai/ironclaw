@@ -186,7 +186,7 @@ pub struct GsuiteDispatchResult {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GsuiteCredentialDispatchReason {
-    Recovery(CredentialRecoveryProjection),
+    Recovery(Box<CredentialRecoveryProjection>),
     MissingScopes {
         missing_scopes: Vec<ProviderScope>,
     },
@@ -766,7 +766,7 @@ fn map_credential_error(error: GoogleCredentialError) -> GsuiteDispatchError {
     match error {
         GoogleCredentialError::Recovery(recovery) => {
             GsuiteDispatchError::new(map_recovery_kind(&recovery))
-                .with_reason(GsuiteCredentialDispatchReason::Recovery(recovery))
+                .with_reason(GsuiteCredentialDispatchReason::Recovery(Box::new(recovery)))
         }
         GoogleCredentialError::MissingScopes { missing_scopes } => {
             GsuiteDispatchError::new(RuntimeDispatchErrorKind::Client)
@@ -1156,7 +1156,9 @@ mod tests {
             },
         );
         let configured_recovery = GsuiteDispatchError::new(RuntimeDispatchErrorKind::Backend)
-            .with_reason(GsuiteCredentialDispatchReason::Recovery(configured_proj));
+            .with_reason(GsuiteCredentialDispatchReason::Recovery(Box::new(
+                configured_proj,
+            )));
         assert_eq!(
             configured_recovery.auth_requirement(),
             None,
@@ -1167,13 +1169,13 @@ mod tests {
         // Recovery(SetupRequired) -> Some(empty): user-actionable, triggers auth gate.
         // Richer projection is preserved via reason() per the doc-comment contract.
         let recovery = GsuiteDispatchError::new(RuntimeDispatchErrorKind::Client).with_reason(
-            GsuiteCredentialDispatchReason::Recovery(
+            GsuiteCredentialDispatchReason::Recovery(Box::new(
                 ironclaw_auth::CredentialRecoveryProjection::setup_required(
                     ironclaw_auth::AuthProviderId::new("google").unwrap(),
                     ironclaw_auth::CredentialRecoveryReason::NoAccount,
                     Vec::new(),
                 ),
-            ),
+            )),
         );
         assert_eq!(recovery.auth_requirement(), Some(Vec::new()));
         assert!(recovery.is_auth_required());
