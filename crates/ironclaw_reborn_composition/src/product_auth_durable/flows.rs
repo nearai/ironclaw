@@ -83,7 +83,15 @@ where
             .read_flow(scope, request.flow_id)
             .await?
             .ok_or(AuthProductError::UnknownOrExpiredFlow)?;
-        validate_callback_claim(&mut record, scope, &request, now)?;
+        match validate_callback_claim(&mut record, scope, &request, now) {
+            Ok(()) => {}
+            Err(AuthProductError::UnknownOrExpiredFlow) => {
+                self.write_flow(scope, &record, CasExpectation::Version(version))
+                    .await?;
+                return Err(AuthProductError::UnknownOrExpiredFlow);
+            }
+            Err(e) => return Err(e),
+        }
         if record.status == AuthFlowStatus::Completed {
             return Ok(record);
         }
@@ -106,7 +114,16 @@ where
             .read_flow(scope, input.flow_id)
             .await?
             .ok_or(AuthProductError::UnknownOrExpiredFlow)?;
-        let callback = prepare_callback_flow(&mut record, scope, &input.opaque_state_hash, now)?;
+        let callback =
+            match prepare_callback_flow(&mut record, scope, &input.opaque_state_hash, now) {
+                Ok(cb) => cb,
+                Err(AuthProductError::UnknownOrExpiredFlow) => {
+                    self.write_flow(scope, &record, CasExpectation::Version(version))
+                        .await?;
+                    return Err(AuthProductError::UnknownOrExpiredFlow);
+                }
+                Err(e) => return Err(e),
+            };
         let exchange = match input.outcome {
             ProviderCallbackOutcome::Denied => {
                 record.status = AuthFlowStatus::Failed;
@@ -192,7 +209,15 @@ where
             .read_flow(scope, input.flow_id)
             .await?
             .ok_or(AuthProductError::UnknownOrExpiredFlow)?;
-        prepare_callback_flow(&mut record, scope, &input.opaque_state_hash, now)?;
+        match prepare_callback_flow(&mut record, scope, &input.opaque_state_hash, now) {
+            Ok(_) => {}
+            Err(AuthProductError::UnknownOrExpiredFlow) => {
+                self.write_flow(scope, &record, CasExpectation::Version(version))
+                    .await?;
+                return Err(AuthProductError::UnknownOrExpiredFlow);
+            }
+            Err(e) => return Err(e),
+        }
         record.status = AuthFlowStatus::Failed;
         record.error = Some(input.error);
         record.updated_at = now;
@@ -352,9 +377,21 @@ where
                         if account.provider != request.provider {
                             return Err(AuthProductError::TokenExchangeFailed);
                         }
-                        update_account_from_request(&mut account, request, Utc::now())?;
+                        let previous_access_secret = account.access_secret.clone();
+                        let previous_refresh_secret = account.refresh_secret.clone();
+                        update_account_from_request(&mut account, request.clone(), Utc::now())?;
                         self.write_account(&account, CasExpectation::Version(version))
                             .await?;
+                        if let Some(h) = &previous_access_secret
+                            && previous_access_secret.as_ref() != account.access_secret.as_ref()
+                        {
+                            let _ = self.secret_store.delete(&request.scope.resource, h).await;
+                        }
+                        if let Some(h) = &previous_refresh_secret
+                            && previous_refresh_secret.as_ref() != account.refresh_secret.as_ref()
+                        {
+                            let _ = self.secret_store.delete(&request.scope.resource, h).await;
+                        }
                         Ok(account.id)
                     }
                     Err(error) => Err(error),
