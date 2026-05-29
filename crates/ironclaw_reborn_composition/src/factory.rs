@@ -81,6 +81,7 @@ use crate::local_dev_mounts::{
     workspace_mount_view,
 };
 use crate::mcp::host_mediated_mcp_runtime;
+use crate::mcp_router::McpExecutorRouter;
 use crate::{
     RebornAuthContinuationDispatcher, RebornBuildError, RebornBuildInput, RebornCompositionProfile,
     RebornFacadeReadiness, RebornProductAuthServices, RebornReadiness, RebornReadinessState,
@@ -88,6 +89,7 @@ use crate::{
 use crate::{
     available_extensions::{
         AvailableExtensionCatalog, gmail_manifest_digest, google_calendar_manifest_digest,
+        notion_mcp_manifest_digest,
     },
     extension_installation_store::FilesystemExtensionInstallationStore,
     extension_lifecycle::{
@@ -218,7 +220,7 @@ where
         })
 }
 
-fn with_host_mediated_mcp_runtime<F, G, S, R>(
+fn attach_hosted_mcp_runtime<F, G, S, R>(
     services: HostRuntimeServices<F, G, S, R>,
 ) -> Result<HostRuntimeServices<F, G, S, R>, RebornBuildError>
 where
@@ -227,19 +229,31 @@ where
     S: ironclaw_processes::ProcessStore + 'static,
     R: ironclaw_processes::ProcessResultStore + 'static,
 {
-    let runtime_http_egress = services
-        .product_auth_provider_runtime_ports()
-        .ok_or_else(|| RebornBuildError::InvalidConfig {
-            reason: "MCP runtime requires host runtime HTTP egress".to_string(),
-        })?
-        .runtime_http_egress();
+    // Soft-disable when host runtime HTTP egress is absent (matches the NEAR AI
+    // MCP attach pattern, #4223). Builds without egress — in-memory test
+    // services, minimal compositions — must still succeed; only hosted MCP
+    // capabilities go dark.
+    //
+    // NOTE: After rebasing onto reborn-integration, fold the NEAR AI
+    // `attach_nearai_mcp_runtime` call site here by inserting NEAR AI into the
+    // same router before the Notion executor:
+    //   router.insert("nearai", nearai_mcp_runtime(egress.clone(), endpoint));
+    let Some(runtime_ports) = services.product_auth_provider_runtime_ports() else {
+        tracing::debug!(
+            "skipping hosted MCP runtime: host runtime HTTP egress absent \
+             (only affects hosted MCP extensions, e.g. Notion)"
+        );
+        return Ok(services);
+    };
+    let runtime_http_egress = runtime_ports.runtime_http_egress();
     let registry = services.shared_extension_registry();
-    Ok(
-        services.with_mcp_runtime(Arc::new(host_mediated_mcp_runtime(
-            registry,
-            runtime_http_egress,
-        ))),
-    )
+
+    let mut router = McpExecutorRouter::new();
+    router.insert(
+        "notion",
+        Arc::new(host_mediated_mcp_runtime(registry, runtime_http_egress)),
+    );
+    Ok(services.with_mcp_runtime(Arc::new(router)))
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -512,7 +526,7 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         services = services.with_runtime_process_port(Arc::new(process_port));
     }
     services = apply_runtime_process_binding(services, runtime_process_binding);
-    services = with_host_mediated_mcp_runtime(services)?;
+    services = attach_hosted_mcp_runtime(services)?;
     let google_provider_client = google_oauth_config
         .map(|config| {
             let runtime_ports = require_product_auth_runtime_ports(&services)?;
@@ -1161,6 +1175,16 @@ fn local_dev_first_party_trust_policy() -> Result<HostTrustPolicy, RebornBuildEr
             gsuite_allowed_effects(),
             None,
         ),
+        AdminEntry::for_local_manifest(
+            PackageId::new("notion").map_err(|error| RebornBuildError::InvalidConfig {
+                reason: format!("Notion MCP first-party package id is invalid: {error}"),
+            })?,
+            "/system/extensions/notion/manifest.toml".to_string(),
+            Some(notion_mcp_manifest_digest()),
+            HostTrustAssignment::first_party(),
+            notion_mcp_allowed_effects(),
+            None,
+        ),
     ]))])
     .map_err(|error| RebornBuildError::InvalidConfig {
         reason: format!("built-in first-party trust policy is invalid: {error}"),
@@ -1168,6 +1192,15 @@ fn local_dev_first_party_trust_policy() -> Result<HostTrustPolicy, RebornBuildEr
 }
 
 fn gsuite_allowed_effects() -> Vec<EffectKind> {
+    vec![
+        EffectKind::DispatchCapability,
+        EffectKind::Network,
+        EffectKind::UseSecret,
+        EffectKind::ExternalWrite,
+    ]
+}
+
+fn notion_mcp_allowed_effects() -> Vec<EffectKind> {
     vec![
         EffectKind::DispatchCapability,
         EffectKind::Network,
@@ -1626,7 +1659,7 @@ where
     .with_filesystem_turn_state_store(stores.scoped_filesystem)
     .with_run_profile_resolver(planned_run_profile_resolver()?)
     .with_turn_run_wake_notifier(production_wiring.turn_run_wake_notifier);
-    let services = with_host_mediated_mcp_runtime(services)?;
+    let services = attach_hosted_mcp_runtime(services)?;
     let google_provider_client = google_oauth_config
         .map(|config| {
             let runtime_ports = require_product_auth_runtime_ports(&services)?;
@@ -1770,6 +1803,31 @@ mod tests {
                 .is_some()
         );
         assert_eq!(services.readiness.state, RebornReadinessState::DevOnly);
+    }
+
+    /// Verify that `attach_hosted_mcp_runtime` is soft-disabled when the host
+    /// runtime has no HTTP egress (e.g. in-memory-only test services). The
+    /// function must not panic or return an error; it simply skips the MCP
+    /// runtime attachment so the rest of the composition continues.
+    #[test]
+    fn attach_hosted_mcp_runtime_skips_services_without_http_egress() {
+        let services = HostRuntimeServices::new(
+            Arc::new(ExtensionRegistry::new()),
+            Arc::new(LocalFilesystem::new()),
+            Arc::new(InMemoryResourceGovernor::new()),
+            Arc::new(GrantAuthorizer::new()),
+            ProcessServices::in_memory(),
+            CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        );
+        // product_auth_provider_runtime_ports() is None without HTTP egress.
+        assert!(services.product_auth_provider_runtime_ports().is_none());
+
+        // attach_hosted_mcp_runtime must succeed (soft-skip) rather than error.
+        let services =
+            attach_hosted_mcp_runtime(services).expect("soft-disable must not error");
+
+        // Runtime ports still absent — no egress was added by the attachment.
+        assert!(services.product_auth_provider_runtime_ports().is_none());
     }
 
     #[tokio::test]
