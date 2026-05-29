@@ -511,11 +511,6 @@ struct AnthropicToolChoice {
     name: Option<String>,
 }
 
-impl AnthropicToolChoice {
-    fn forces_tool_use(&self) -> bool {
-        matches!(self.choice_type.as_str(), "any" | "tool")
-    }
-}
 
 #[derive(Debug, Deserialize)]
 struct AnthropicResponse {
