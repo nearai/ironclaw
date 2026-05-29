@@ -4,6 +4,8 @@
 //! normalized runtime result. Concrete dispatcher/runtime crates implement the
 //! behavior; caller-facing workflow crates depend only on this neutral port.
 
+use std::fmt;
+
 use async_trait::async_trait;
 use serde_json::Value;
 use thiserror::Error;
@@ -158,7 +160,7 @@ impl std::fmt::Display for DispatchFailureKind {
 }
 
 /// Runtime dispatch failures surfaced through the neutral host API port.
-#[derive(Debug, Error)]
+#[derive(Error)]
 pub enum DispatchError {
     #[error("unknown capability {capability}")]
     UnknownCapability { capability: CapabilityId },
@@ -184,6 +186,11 @@ pub enum DispatchError {
         capability: CapabilityId,
         runtime: RuntimeKind,
     },
+    /// Authentication is required to dispatch this capability.
+    ///
+    /// `required_secrets` names the credentials the caller must stage.  The
+    /// field is intentionally absent from the `Debug` output to avoid leaking
+    /// secret-handle identifiers into logs.
     #[error("capability {capability} dispatch requires authentication")]
     AuthRequired {
         capability: CapabilityId,
@@ -197,6 +204,64 @@ pub enum DispatchError {
     Wasm { kind: RuntimeDispatchErrorKind },
     #[error("first-party dispatch failed: {kind}")]
     FirstParty { kind: RuntimeDispatchErrorKind },
+}
+
+impl fmt::Debug for DispatchError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnknownCapability { capability } => f
+                .debug_struct("UnknownCapability")
+                .field("capability", capability)
+                .finish(),
+            Self::UnknownProvider {
+                capability,
+                provider,
+            } => f
+                .debug_struct("UnknownProvider")
+                .field("capability", capability)
+                .field("provider", provider)
+                .finish(),
+            Self::RuntimeMismatch {
+                capability,
+                descriptor_runtime,
+                package_runtime,
+            } => f
+                .debug_struct("RuntimeMismatch")
+                .field("capability", capability)
+                .field("descriptor_runtime", descriptor_runtime)
+                .field("package_runtime", package_runtime)
+                .finish(),
+            Self::MissingRuntimeBackend { runtime } => f
+                .debug_struct("MissingRuntimeBackend")
+                .field("runtime", runtime)
+                .finish(),
+            Self::UnsupportedRuntime {
+                capability,
+                runtime,
+            } => f
+                .debug_struct("UnsupportedRuntime")
+                .field("capability", capability)
+                .field("runtime", runtime)
+                .finish(),
+            // `required_secrets` handle names are omitted from Debug output to
+            // prevent leaking secret identifiers into logs and error chains.
+            Self::AuthRequired {
+                capability,
+                required_secrets,
+            } => f
+                .debug_struct("AuthRequired")
+                .field("capability", capability)
+                .field(
+                    "required_secrets",
+                    &format!("[{} handle(s) redacted]", required_secrets.len()),
+                )
+                .finish(),
+            Self::Mcp { kind } => f.debug_struct("Mcp").field("kind", kind).finish(),
+            Self::Script { kind } => f.debug_struct("Script").field("kind", kind).finish(),
+            Self::Wasm { kind } => f.debug_struct("Wasm").field("kind", kind).finish(),
+            Self::FirstParty { kind } => f.debug_struct("FirstParty").field("kind", kind).finish(),
+        }
+    }
 }
 
 /// Stable two-variant error for staged credential operations.

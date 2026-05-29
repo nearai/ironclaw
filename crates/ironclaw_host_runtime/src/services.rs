@@ -230,9 +230,18 @@ impl ProductAuthProviderRuntimePorts {
 /// so the runtime auth gate fires instead of surfacing a generic backend
 /// failure. Anything else is a true backend defect.
 ///
-/// `pub(crate)` for testing; not part of the public API.
+/// `pub(crate)` so it can be unit-tested directly; used in production by
+/// [`ProductAuthProviderRuntimePorts::stage_secret_once`]. Not part of the public API.
 pub(crate) fn stage_secret_error(error: SecretStoreError) -> ProductAuthCredentialStageError {
-    if error.is_unknown_secret() || error.is_expired() || error.is_revoked() {
+    // Unknown / expired / revoked / consumed / unknown-lease are all user-actionable
+    // re-auth conditions: the credential is missing or no longer valid.  Anything
+    // else is a true backend defect.
+    if error.is_unknown_secret()
+        || error.is_unknown_lease()
+        || error.is_expired()
+        || error.is_revoked()
+        || error.is_consumed()
+    {
         ProductAuthCredentialStageError::AuthRequired
     } else {
         ProductAuthCredentialStageError::Backend

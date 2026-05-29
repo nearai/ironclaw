@@ -1689,3 +1689,29 @@ fn sample_network_policy() -> NetworkPolicy {
         max_egress_bytes: Some(1024 * 1024),
     }
 }
+
+#[test]
+fn dispatch_error_event_kind_pins_auth_required_token() {
+    // "auth_required" is a stable observability token used in tracing and metrics.
+    // Regressions (typos, missing match arms) must be caught here.
+    let cap = || CapabilityId::new("test.cap").unwrap();
+    let handle = SecretHandle::new("google-access-token").unwrap();
+
+    assert_eq!(
+        DispatchError::AuthRequired {
+            capability: cap(),
+            required_secrets: vec![handle],
+        }
+        .event_kind(),
+        "auth_required"
+    );
+    // Empty required_secrets must produce the same token.
+    assert_eq!(
+        DispatchError::AuthRequired {
+            capability: cap(),
+            required_secrets: Vec::new(),
+        }
+        .event_kind(),
+        "auth_required"
+    );
+}

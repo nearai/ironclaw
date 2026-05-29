@@ -571,9 +571,7 @@ where
             McpJsonRpcMethod::ToolsCall,
             Some(tool_call_params),
         )?;
-        McpJsonRpcMethod::ToolsCall
-            .credential_injections(tool_call_plan.plan.credential_injections.clone())
-            .map(|_| ())?;
+        validate_tools_call_credential_injections(&tool_call_plan.plan.credential_injections)?;
 
         let mut usage = ResourceUsage::default();
         let initialize = self
@@ -674,6 +672,23 @@ impl McpJsonRpcMethod {
             Self::Initialize | Self::InitializedNotification => Ok(Vec::new()),
         }
     }
+}
+
+/// Validate credential injections planned for a `tools/call` request without
+/// consuming the list, so the caller can reuse it in the actual send.
+///
+/// Returns `Err(denied)` if any injection uses a [`RuntimeCredentialSource::SecretStoreLease`],
+/// which is not permitted over the MCP `tools/call` boundary.
+fn validate_tools_call_credential_injections(
+    credential_injections: &[RuntimeCredentialInjection],
+) -> Result<(), String> {
+    if credential_injections
+        .iter()
+        .any(|injection| matches!(injection.source, RuntimeCredentialSource::SecretStoreLease))
+    {
+        return Err(request_denied());
+    }
+    Ok(())
 }
 
 fn mcp_client_http_error(error: McpHostHttpError) -> String {

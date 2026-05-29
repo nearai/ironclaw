@@ -316,11 +316,18 @@ where
                     is_auth_required = error.is_auth_required(),
                     "first-party runtime adapter handler failed"
                 );
-                account_or_release_failed_first_party_execution(
+                if let Err(acct_err) = account_or_release_failed_first_party_execution(
                     request.governor,
                     reservation.id,
                     error.usage(),
-                )?;
+                ) {
+                    tracing::warn!(
+                        reservation_id = %reservation.id,
+                        error = ?acct_err,
+                        "first-party resource accounting failed on handler error; \
+                         returning original handler error"
+                    );
+                }
                 return match error {
                     FirstPartyCapabilityError::AuthRequired {
                         required_secrets, ..
@@ -352,6 +359,7 @@ where
                     reservation_id = %reservation.id,
                     "first-party runtime adapter output serialization failed"
                 );
+                release_first_party_reservation(request.governor, reservation.id);
                 DispatchError::FirstParty {
                     kind: RuntimeDispatchErrorKind::OutputDecode,
                 }

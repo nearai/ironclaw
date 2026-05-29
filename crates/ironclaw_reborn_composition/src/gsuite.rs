@@ -151,6 +151,15 @@ fn capability_manifest(
     })
 }
 
+/// Convert a [`GsuiteDispatchError`] into the neutral [`FirstPartyCapabilityError`].
+///
+/// Recovery context carried by [`GsuiteCredentialDispatchReason::Recovery`] and
+/// [`GsuiteCredentialDispatchReason::MissingScopes`] (recovery kind, provider id,
+/// available accounts, missing OAuth scopes) is intentionally dropped here:
+/// [`FirstPartyCapabilityError`] has no recovery-payload field.  Upper services
+/// receive a generic `AuthRequired` gate.  To thread structured recovery hints
+/// through to the runtime, `FirstPartyCapabilityError::AuthRequired` must be
+/// extended with an opaque reason payload (tracked as a follow-up).
 fn gsuite_error(error: GsuiteDispatchError) -> FirstPartyCapabilityError {
     let usage = error.usage().cloned();
     let base = match error.auth_requirement() {

@@ -998,6 +998,23 @@ fn stage_secret_error_maps_auth_and_backend_variants() {
             },
             AuthRequired,
         ),
+        // Consumed lease: one-shot lease already used by a concurrent call.
+        // stable_reason = "CredentialExpired" — user-actionable, must be AuthRequired.
+        (
+            SecretStoreError::LeaseConsumed {
+                lease_id: SecretLeaseId::default(),
+            },
+            AuthRequired,
+        ),
+        // Unknown lease: lease gone (expired/evicted between lease_once and consume).
+        // stable_reason = "MissingCredential" — user-actionable, must be AuthRequired.
+        (
+            SecretStoreError::UnknownLease {
+                scope: Box::new(scope.clone()),
+                lease_id: SecretLeaseId::default(),
+            },
+            AuthRequired,
+        ),
         (
             SecretStoreError::BackendMisconfigured {
                 reason: "vault offline".to_string(),
@@ -1018,4 +1035,50 @@ fn stage_secret_error_maps_auth_and_backend_variants() {
             "error: {error:?}"
         );
     }
+}
+
+// T6 — RegisteredRuntimeHealth
+#[tokio::test]
+async fn registered_runtime_health_empty_available_reports_all_required_as_missing() {
+    use crate::services::{RegisteredRuntimeHealth, RuntimeBackendHealth};
+    let health = RegisteredRuntimeHealth::new(vec![]);
+    let missing = health
+        .missing_runtime_backends(&[RuntimeKind::Wasm, RuntimeKind::Mcp])
+        .await
+        .expect("health check must succeed");
+    // Both kinds are missing; order is normalized by runtime_sort_key.
+    assert!(
+        missing.contains(&RuntimeKind::Wasm),
+        "Wasm must be missing; got {missing:?}"
+    );
+    assert!(
+        missing.contains(&RuntimeKind::Mcp),
+        "Mcp must be missing; got {missing:?}"
+    );
+    assert_eq!(missing.len(), 2);
+}
+
+#[tokio::test]
+async fn registered_runtime_health_deduplicates_duplicate_required_kinds() {
+    use crate::services::{RegisteredRuntimeHealth, RuntimeBackendHealth};
+    let health = RegisteredRuntimeHealth::new(vec![RuntimeKind::Wasm]);
+    let missing = health
+        .missing_runtime_backends(&[RuntimeKind::Mcp, RuntimeKind::Mcp, RuntimeKind::Wasm])
+        .await
+        .expect("health check must succeed");
+    assert_eq!(missing, vec![RuntimeKind::Mcp], "got {missing:?}");
+}
+
+#[tokio::test]
+async fn registered_runtime_health_returns_empty_when_all_required_available() {
+    use crate::services::{RegisteredRuntimeHealth, RuntimeBackendHealth};
+    let health = RegisteredRuntimeHealth::new(vec![RuntimeKind::Wasm, RuntimeKind::Mcp]);
+    let missing = health
+        .missing_runtime_backends(&[RuntimeKind::Wasm])
+        .await
+        .expect("health check must succeed");
+    assert!(
+        missing.is_empty(),
+        "expected no missing kinds; got {missing:?}"
+    );
 }

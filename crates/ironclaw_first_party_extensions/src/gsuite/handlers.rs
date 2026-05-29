@@ -243,10 +243,21 @@ impl GsuiteDispatchError {
     /// `BackendAuth` and `HostApi` return `None`; all other reasons return `Some`.
     /// `AuthRequired` forwards its explicit handle list; the remaining auth reasons
     /// return an empty `Vec` (the caller reads [`Self::reason`] for richer context).
+    /// `Recovery(Configured)` returns `None` because it signals a backend infrastructure
+    /// failure — prompting the user to re-authenticate would be incorrect.
     pub fn auth_requirement(&self) -> Option<Vec<ironclaw_host_api::SecretHandle>> {
         match self.reason.as_ref()? {
-            GsuiteCredentialDispatchReason::Recovery(_)
-            | GsuiteCredentialDispatchReason::MissingScopes { .. }
+            GsuiteCredentialDispatchReason::Recovery(recovery) => {
+                match recovery.kind() {
+                    // Backend infrastructure failure: do not trigger the auth gate.
+                    CredentialRecoveryKind::Configured => None,
+                    // User-actionable recovery: trigger auth gate with no specific handle.
+                    CredentialRecoveryKind::SetupRequired
+                    | CredentialRecoveryKind::ReauthorizeRequired
+                    | CredentialRecoveryKind::AccountSelectionRequired => Some(Vec::new()),
+                }
+            }
+            GsuiteCredentialDispatchReason::MissingScopes { .. }
             | GsuiteCredentialDispatchReason::MissingAccessSecret => Some(Vec::new()),
             GsuiteCredentialDispatchReason::AuthRequired { required_secrets } => {
                 Some(required_secrets.clone())
@@ -789,7 +800,7 @@ fn map_stage_error(
         }),
         GsuiteCredentialStageError::Backend => {
             GsuiteDispatchError::new(RuntimeDispatchErrorKind::Backend)
-                .with_reason(GsuiteCredentialDispatchReason::HostApi)
+                .with_reason(GsuiteCredentialDispatchReason::BackendAuth)
         }
     }
 }
@@ -1355,6 +1366,41 @@ mod tests {
         assert_eq!(merged.len(), 3);
         assert_eq!(merged[0]["name"], "new");
         assert_eq!(merged[2]["email"], "carol@example.com");
+    }
+
+    #[test]
+    fn merge_attendees_with_empty_existing_list() {
+        let merged = merge_attendees(
+            vec![],
+            vec![serde_json::json!({"email": "alice@example.com"})],
+        );
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0]["email"], "alice@example.com");
+    }
+
+    #[test]
+    fn merge_attendees_appends_addition_without_email_field() {
+        // An addition object that has no "email" key cannot be deduped and is
+        // appended unconditionally.
+        let merged = merge_attendees(
+            vec![serde_json::json!({"email": "alice@example.com"})],
+            vec![
+                serde_json::json!({"displayName": "Bob"}), // no email
+                serde_json::json!({"email": "carol@example.com"}),
+            ],
+        );
+        assert_eq!(merged.len(), 3, "got {merged:?}");
+        // Ordering: existing first, then no-email addition, then carol.
+        assert_eq!(merged[0]["email"], "alice@example.com");
+        assert_eq!(merged[1]["displayName"], "Bob");
+        assert_eq!(merged[2]["email"], "carol@example.com");
+    }
+
+    #[test]
+    fn merge_attendees_with_no_additions() {
+        let existing = vec![serde_json::json!({"email": "alice@example.com"})];
+        let merged = merge_attendees(existing.clone(), vec![]);
+        assert_eq!(merged, existing);
     }
 
     #[test]

@@ -414,3 +414,82 @@ async fn bundled_gsuite_handler_fails_closed_without_runtime_egress() {
 
     assert_eq!(error.kind(), Some(RuntimeDispatchErrorKind::NetworkDenied));
 }
+
+// ---------------------------------------------------------------------------
+// T5: gsuite_error integration — tests that staging errors are projected
+// correctly into FirstPartyCapabilityError through handler dispatch.
+// ---------------------------------------------------------------------------
+
+struct BackendStager;
+
+#[async_trait::async_trait]
+impl GsuiteCredentialStager for BackendStager {
+    async fn stage(
+        &self,
+        _request: GsuiteCredentialStageRequest<'_>,
+    ) -> Result<(), GsuiteCredentialStageError> {
+        Err(GsuiteCredentialStageError::Backend)
+    }
+}
+
+#[tokio::test]
+async fn bundled_gsuite_handler_projects_stage_auth_required_to_first_party_auth_required() {
+    let scope = scope();
+    let auth = auth_with_google_account(&scope).await;
+    let registry = bundled_gsuite_first_party_handlers(
+        auth,
+        Arc::new(RecordingCredentialStager::auth_required()),
+    )
+    .unwrap();
+    let capability_id = cap_id(GMAIL_SEND_MESSAGE_CAPABILITY_ID);
+    let handler = registry.get(&capability_id).expect("handler registered");
+
+    let error = handler
+        .dispatch(FirstPartyCapabilityRequest::request_for_test(
+            capability_id,
+            scope,
+            json!({ "message": { "raw": "base64url-rfc822" } }),
+            Some(Arc::new(RecordingEgress::default()) as Arc<dyn RuntimeHttpEgress>),
+        ))
+        .await
+        .unwrap_err();
+
+    assert!(
+        error.is_auth_required(),
+        "stage AuthRequired must project to FirstPartyCapabilityError::AuthRequired; got {error:?}"
+    );
+    assert_eq!(
+        error.kind(),
+        None,
+        "AuthRequired variant must have no dispatch kind"
+    );
+}
+
+#[tokio::test]
+async fn bundled_gsuite_handler_projects_stage_backend_to_first_party_dispatch_backend() {
+    let scope = scope();
+    let auth = auth_with_google_account(&scope).await;
+    let registry = bundled_gsuite_first_party_handlers(auth, Arc::new(BackendStager)).unwrap();
+    let capability_id = cap_id(GMAIL_SEND_MESSAGE_CAPABILITY_ID);
+    let handler = registry.get(&capability_id).expect("handler registered");
+
+    let error = handler
+        .dispatch(FirstPartyCapabilityRequest::request_for_test(
+            capability_id,
+            scope,
+            json!({ "message": { "raw": "base64url-rfc822" } }),
+            Some(Arc::new(RecordingEgress::default()) as Arc<dyn RuntimeHttpEgress>),
+        ))
+        .await
+        .unwrap_err();
+
+    assert!(
+        !error.is_auth_required(),
+        "stage Backend must NOT project to AuthRequired; got {error:?}"
+    );
+    assert_eq!(
+        error.kind(),
+        Some(RuntimeDispatchErrorKind::Backend),
+        "stage Backend must produce Dispatch {{ kind: Backend }}"
+    );
+}

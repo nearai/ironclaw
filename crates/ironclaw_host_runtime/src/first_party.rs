@@ -238,3 +238,63 @@ impl FirstPartyCapabilityRegistry {
         self.handlers.is_empty()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ironclaw_host_api::{ResourceUsage, SecretHandle};
+
+    #[test]
+    fn first_party_capability_error_kind_returns_none_for_auth_required() {
+        // kind() must return None for both auth_required() and auth_required_with().
+        assert_eq!(FirstPartyCapabilityError::auth_required().kind(), None);
+        let handle = SecretHandle::new("google-access-token").unwrap();
+        assert_eq!(
+            FirstPartyCapabilityError::auth_required_with(vec![handle.clone()]).kind(),
+            None
+        );
+        assert!(FirstPartyCapabilityError::auth_required().is_auth_required());
+    }
+
+    #[test]
+    fn first_party_capability_error_with_usage_preserves_required_secrets() {
+        let handle = SecretHandle::new("google-access-token").unwrap();
+        let usage = ResourceUsage {
+            network_egress_bytes: 42,
+            ..ResourceUsage::default()
+        };
+        let error = FirstPartyCapabilityError::auth_required_with(vec![handle.clone()])
+            .with_usage(usage.clone());
+
+        assert!(error.is_auth_required());
+        assert_eq!(
+            error.kind(),
+            None,
+            "kind() must remain None for AuthRequired after with_usage"
+        );
+        assert_eq!(
+            error.required_secrets(),
+            Some(&vec![handle]),
+            "required_secrets must survive with_usage"
+        );
+        assert_eq!(
+            error.usage().map(|u| u.network_egress_bytes),
+            Some(42),
+            "usage must be set"
+        );
+    }
+
+    #[test]
+    fn first_party_capability_error_with_usage_on_dispatch_variant() {
+        use ironclaw_host_api::RuntimeDispatchErrorKind;
+        let error = FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::Backend).with_usage(
+            ResourceUsage {
+                network_egress_bytes: 10,
+                ..ResourceUsage::default()
+            },
+        );
+        assert_eq!(error.kind(), Some(RuntimeDispatchErrorKind::Backend));
+        assert_eq!(error.required_secrets(), None);
+        assert!(!error.is_auth_required());
+    }
+}
