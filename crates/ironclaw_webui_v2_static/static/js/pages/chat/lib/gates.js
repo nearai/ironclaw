@@ -24,6 +24,8 @@ export function gateFromEvent(eventType, prompt) {
       // path is `/runs/{run_id}/gates/{gate_ref}/resolve` — auth
       // prompts therefore round-trip through the same gate_ref slot.
       gateRef: prompt.auth_request_ref,
+      provider: prompt.provider || "github",
+      accountLabel: prompt.account_label || "Manual token",
       headline: prompt.headline,
       body: prompt.body,
     };

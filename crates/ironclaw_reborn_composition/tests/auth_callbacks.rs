@@ -371,6 +371,18 @@ async fn oauth_callback_handler_completes_flow_and_dispatches_typed_continuation
     assert!(!serialized.contains("raw-pkce-verifier"));
     assert!(!serialized.contains("oauth-access-"));
     assert!(!serialized.contains("oauth-refresh-"));
+
+    let replay = services
+        .handle_oauth_callback(authorized_request(owner, flow_id))
+        .await
+        .expect("completed callback replay should return sanitized completion");
+    assert_eq!(replay, response);
+    assert_eq!(provider_client.calls(), 1);
+    assert_eq!(
+        dispatcher.events().len(),
+        1,
+        "completed callback replay must not redispatch continuations"
+    );
 }
 
 #[tokio::test]

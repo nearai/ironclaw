@@ -5,6 +5,7 @@
 //! policy/transport with scoped secret leases; runtime crates must not perform
 //! their own outbound HTTP, DNS, private-IP checks, or credential injection.
 
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -374,21 +375,23 @@ pub fn is_sensitive_runtime_response_header(name: &str) -> bool {
             .any(|marker| normalized.contains(marker))
 }
 
+#[async_trait]
 pub trait RuntimeHttpEgress: Send + Sync {
-    fn execute(
+    async fn execute(
         &self,
         request: RuntimeHttpEgressRequest,
     ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError>;
 }
 
+#[async_trait]
 impl<T> RuntimeHttpEgress for std::sync::Arc<T>
 where
     T: RuntimeHttpEgress + ?Sized,
 {
-    fn execute(
+    async fn execute(
         &self,
         request: RuntimeHttpEgressRequest,
     ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
-        self.as_ref().execute(request)
+        self.as_ref().execute(request).await
     }
 }

@@ -128,6 +128,8 @@ pub struct AuthFlowRecord {
     pub authorization_code_hash: Option<AuthorizationCodeHash>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<AuthErrorCode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continuation_emitted_at: Option<Timestamp>,
     pub created_at: Timestamp,
     pub updated_at: Timestamp,
     pub expires_at: Timestamp,
@@ -226,6 +228,13 @@ pub trait AuthFlowManager: Send + Sync {
         input: OAuthCallbackFailureInput,
     ) -> Result<AuthFlowRecord, AuthProductError>;
 
+    async fn mark_continuation_dispatched(
+        &self,
+        scope: &AuthProductScope,
+        flow_id: AuthFlowId,
+        emitted_at: Timestamp,
+    ) -> Result<AuthFlowRecord, AuthProductError>;
+
     async fn cancel_flow(
         &self,
         scope: &AuthProductScope,
@@ -247,6 +256,6 @@ pub trait AuthFlowRecordSource: Send + Sync {
     fn flow_records_snapshot(&self) -> Vec<AuthFlowRecord>;
 }
 
-pub(crate) fn credential_status_for_completed_flow() -> CredentialAccountStatus {
+pub fn credential_status_for_completed_flow() -> CredentialAccountStatus {
     CredentialAccountStatus::Configured
 }

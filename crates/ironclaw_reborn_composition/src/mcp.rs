@@ -426,6 +426,7 @@ mod tests {
                             runtime_credentials: vec![
                                 ironclaw_host_api::RuntimeCredentialRequirement {
                                     handle: SecretHandle::new("mcp_notion_access_token").unwrap(),
+                                    source: ironclaw_host_api::RuntimeCredentialRequirementSource::default(),
                                     audience: NetworkTargetPattern {
                                         scheme: Some(NetworkScheme::Https),
                                         host_pattern: "mcp.notion.com".to_string(),

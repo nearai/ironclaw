@@ -148,7 +148,6 @@ impl AuthProviderClient for GoogleProviderClient {
             .authorize_google_token_exchange(&callback_scope, &self.capability_id, &network_policy)
             .await?;
 
-        let egress = Arc::clone(&self.egress);
         let egress_request = RuntimeHttpEgressRequest {
             runtime: self.runtime,
             scope: callback_scope.clone(),
@@ -172,10 +171,11 @@ impl AuthProviderClient for GoogleProviderClient {
         // Production host egress requires the policy staged above for this
         // scope/capability. The request-carried policy is only a legacy/test
         // fallback and must not be treated as authority on the production path.
-        let response = tokio::task::spawn_blocking(move || egress.execute(egress_request))
+        let response = self
+            .egress
+            .execute(egress_request)
             .await
             .map_err(|_| AuthProductError::BackendUnavailable)?;
-        let response = response.map_err(|_| AuthProductError::BackendUnavailable)?;
 
         if !(200..300).contains(&response.status) {
             return Err(AuthProductError::TokenExchangeFailed);
@@ -232,7 +232,6 @@ impl AuthProviderClient for GoogleProviderClient {
             .authorize_google_token_exchange(&refresh_scope, &self.capability_id, &network_policy)
             .await?;
 
-        let egress = Arc::clone(&self.egress);
         let egress_request = RuntimeHttpEgressRequest {
             runtime: self.runtime,
             scope: refresh_scope.clone(),
@@ -256,10 +255,11 @@ impl AuthProviderClient for GoogleProviderClient {
         // Production host egress requires the policy staged above for this
         // scope/capability. The request-carried policy is only a legacy/test
         // fallback and must not be treated as authority on the production path.
-        let response = tokio::task::spawn_blocking(move || egress.execute(egress_request))
+        let response = self
+            .egress
+            .execute(egress_request)
             .await
             .map_err(|_| AuthProductError::BackendUnavailable)?;
-        let response = response.map_err(|_| AuthProductError::BackendUnavailable)?;
 
         if !(200..300).contains(&response.status) {
             return Err(map_refresh_error(response.status));

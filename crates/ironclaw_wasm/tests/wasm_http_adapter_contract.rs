@@ -13,8 +13,8 @@ use ironclaw_wasm::{
 };
 use serde_json::{Value, json};
 
-#[test]
-fn wasm_runtime_http_adapter_uses_shared_runtime_egress() {
+#[tokio::test(flavor = "multi_thread")]
+async fn wasm_runtime_http_adapter_uses_shared_runtime_egress() {
     let egress = RecordingRuntimeEgress::ok(RuntimeHttpEgressResponse {
         status: 201,
         headers: vec![("content-type".to_string(), "application/json".to_string())],
@@ -73,8 +73,72 @@ fn wasm_runtime_http_adapter_uses_shared_runtime_egress() {
     assert_eq!(requests[0].timeout_ms, Some(1234));
 }
 
+#[tokio::test]
+async fn wasm_runtime_http_adapter_works_inside_current_thread_runtime() {
+    let egress = RecordingRuntimeEgress::ok(RuntimeHttpEgressResponse {
+        status: 204,
+        headers: Vec::new(),
+        body: Vec::new(),
+        saved_body: None,
+        request_bytes: 0,
+        response_bytes: 0,
+        redaction_applied: false,
+    });
+    let adapter = WasmRuntimeHttpAdapter::new(
+        Arc::new(egress.clone()),
+        sample_scope(),
+        sample_capability_id(),
+        sample_policy(),
+    );
+
+    let response = adapter
+        .request(WasmHttpRequest {
+            method: "GET".to_string(),
+            url: "https://wasm-api.example.test/current-thread".to_string(),
+            headers_json: "{}".to_string(),
+            body: None,
+            timeout_ms: None,
+        })
+        .expect("current-thread runtimes should use the worker bridge without panicking");
+
+    assert_eq!(response.status, 204);
+    assert_eq!(egress.requests.lock().unwrap().len(), 1);
+}
+
 #[test]
-fn wasm_runtime_http_adapter_strips_sensitive_response_headers() {
+fn wasm_runtime_http_adapter_reuses_worker_runtime_without_active_tokio_runtime() {
+    let egress = RecordingRuntimeEgress::ok(RuntimeHttpEgressResponse {
+        status: 204,
+        headers: Vec::new(),
+        body: Vec::new(),
+        saved_body: None,
+        request_bytes: 0,
+        response_bytes: 0,
+        redaction_applied: false,
+    });
+    let adapter = WasmRuntimeHttpAdapter::new(
+        Arc::new(egress.clone()),
+        sample_scope(),
+        sample_capability_id(),
+        sample_policy(),
+    );
+
+    let response = adapter
+        .request(WasmHttpRequest {
+            method: "GET".to_string(),
+            url: "https://wasm-api.example.test/no-runtime".to_string(),
+            headers_json: "{}".to_string(),
+            body: None,
+            timeout_ms: None,
+        })
+        .expect("sync callers should use the shared WASM HTTP runtime");
+
+    assert_eq!(response.status, 204);
+    assert_eq!(egress.requests.lock().unwrap().len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn wasm_runtime_http_adapter_strips_sensitive_response_headers() {
     let egress = RecordingRuntimeEgress::ok(RuntimeHttpEgressResponse {
         status: 200,
         headers: vec![
@@ -139,8 +203,8 @@ fn wasm_runtime_http_adapter_strips_sensitive_response_headers() {
     assert!(!response.headers_json.contains("x-credential"));
 }
 
-#[test]
-fn wasm_runtime_http_adapter_combines_duplicate_response_headers() {
+#[tokio::test(flavor = "multi_thread")]
+async fn wasm_runtime_http_adapter_combines_duplicate_response_headers() {
     let egress = RecordingRuntimeEgress::ok(RuntimeHttpEgressResponse {
         status: 200,
         headers: vec![
@@ -187,8 +251,8 @@ fn wasm_runtime_http_adapter_combines_duplicate_response_headers() {
     );
 }
 
-#[test]
-fn wasm_runtime_http_adapter_resolves_credentials_per_request_destination() {
+#[tokio::test(flavor = "multi_thread")]
+async fn wasm_runtime_http_adapter_resolves_credentials_per_request_destination() {
     let egress = RecordingRuntimeEgress::ok(RuntimeHttpEgressResponse {
         status: 200,
         headers: vec![],
@@ -225,8 +289,8 @@ fn wasm_runtime_http_adapter_resolves_credentials_per_request_destination() {
     assert_eq!(requests[0].credential_injections, vec![injection]);
 }
 
-#[test]
-fn wasm_runtime_http_adapter_does_not_reuse_credentials_for_other_destinations() {
+#[tokio::test(flavor = "multi_thread")]
+async fn wasm_runtime_http_adapter_does_not_reuse_credentials_for_other_destinations() {
     let egress = RecordingRuntimeEgress::ok(RuntimeHttpEgressResponse {
         status: 200,
         headers: vec![],
@@ -262,8 +326,8 @@ fn wasm_runtime_http_adapter_does_not_reuse_credentials_for_other_destinations()
     assert!(requests[0].credential_injections.is_empty());
 }
 
-#[test]
-fn wasm_runtime_http_adapter_can_build_staged_obligation_credentials() {
+#[tokio::test(flavor = "multi_thread")]
+async fn wasm_runtime_http_adapter_can_build_staged_obligation_credentials() {
     let egress = RecordingRuntimeEgress::ok(RuntimeHttpEgressResponse {
         status: 200,
         headers: vec![],
@@ -317,8 +381,8 @@ fn wasm_runtime_http_adapter_can_build_staged_obligation_credentials() {
     );
 }
 
-#[test]
-fn wasm_runtime_http_adapter_rejects_invalid_guest_headers_before_egress() {
+#[tokio::test(flavor = "multi_thread")]
+async fn wasm_runtime_http_adapter_rejects_invalid_guest_headers_before_egress() {
     let egress = RecordingRuntimeEgress::ok(RuntimeHttpEgressResponse {
         status: 200,
         headers: vec![],
@@ -349,8 +413,8 @@ fn wasm_runtime_http_adapter_rejects_invalid_guest_headers_before_egress() {
     assert!(egress.requests.lock().unwrap().is_empty());
 }
 
-#[test]
-fn wasm_runtime_http_adapter_redacts_credential_errors_before_guest_visibility() {
+#[tokio::test(flavor = "multi_thread")]
+async fn wasm_runtime_http_adapter_redacts_credential_errors_before_guest_visibility() {
     let adapter = WasmRuntimeHttpAdapter::new(
         Arc::new(RecordingRuntimeEgress::err(
             RuntimeHttpEgressError::Credential {
@@ -379,8 +443,8 @@ fn wasm_runtime_http_adapter_redacts_credential_errors_before_guest_visibility()
     assert!(!rendered.contains("sk-test-secret"));
 }
 
-#[test]
-fn wasm_runtime_http_adapter_redacts_shared_request_error_reasons() {
+#[tokio::test(flavor = "multi_thread")]
+async fn wasm_runtime_http_adapter_redacts_shared_request_error_reasons() {
     let adapter = WasmRuntimeHttpAdapter::new(
         Arc::new(RecordingRuntimeEgress::err(
             RuntimeHttpEgressError::Request {
@@ -411,8 +475,8 @@ fn wasm_runtime_http_adapter_redacts_shared_request_error_reasons() {
     assert!(!rendered.contains("sk-test-secret"));
 }
 
-#[test]
-fn wasm_runtime_http_adapter_redacts_shared_network_denial_reasons() {
+#[tokio::test(flavor = "multi_thread")]
+async fn wasm_runtime_http_adapter_redacts_shared_network_denial_reasons() {
     let adapter = WasmRuntimeHttpAdapter::new(
         Arc::new(RecordingRuntimeEgress::err(
             RuntimeHttpEgressError::Network {
@@ -443,8 +507,8 @@ fn wasm_runtime_http_adapter_redacts_shared_network_denial_reasons() {
     assert!(!rendered.contains("sk-test-secret"));
 }
 
-#[test]
-fn wasm_runtime_http_adapter_marks_post_send_shared_egress_errors_for_accounting() {
+#[tokio::test(flavor = "multi_thread")]
+async fn wasm_runtime_http_adapter_marks_post_send_shared_egress_errors_for_accounting() {
     let adapter = WasmRuntimeHttpAdapter::new(
         Arc::new(RecordingRuntimeEgress::err(
             RuntimeHttpEgressError::Response {
@@ -476,8 +540,8 @@ fn wasm_runtime_http_adapter_marks_post_send_shared_egress_errors_for_accounting
     assert!(!rendered.contains("sk-test-secret"));
 }
 
-#[test]
-fn wasm_runtime_http_adapter_marks_zero_body_response_failures_after_send() {
+#[tokio::test(flavor = "multi_thread")]
+async fn wasm_runtime_http_adapter_marks_zero_body_response_failures_after_send() {
     let adapter = WasmRuntimeHttpAdapter::new(
         Arc::new(RecordingRuntimeEgress::err(
             RuntimeHttpEgressError::Network {
@@ -509,8 +573,33 @@ fn wasm_runtime_http_adapter_marks_zero_body_response_failures_after_send() {
     assert!(!rendered.contains("sk-test-secret"));
 }
 
-#[test]
-fn wasm_runtime_http_adapter_redacts_credential_provider_errors() {
+#[tokio::test(flavor = "multi_thread")]
+async fn wasm_runtime_http_adapter_maps_panicking_runtime_egress_to_failed_error() {
+    let adapter = WasmRuntimeHttpAdapter::new(
+        Arc::new(PanickingRuntimeEgress),
+        sample_scope(),
+        sample_capability_id(),
+        sample_policy(),
+    );
+
+    let error = adapter
+        .request(WasmHttpRequest {
+            method: "GET".to_string(),
+            url: "https://wasm-api.example.test/run".to_string(),
+            headers_json: "{}".to_string(),
+            body: None,
+            timeout_ms: Some(1000),
+        })
+        .expect_err("runtime egress panics should be contained at the WASM host boundary");
+
+    assert!(matches!(
+        error,
+        WasmHostError::Failed(reason) if reason == "runtime_http_egress_panicked"
+    ));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn wasm_runtime_http_adapter_redacts_credential_provider_errors() {
     let adapter = WasmRuntimeHttpAdapter::new(
         Arc::new(RecordingRuntimeEgress::ok(RuntimeHttpEgressResponse {
             status: 200,
@@ -544,8 +633,8 @@ fn wasm_runtime_http_adapter_redacts_credential_provider_errors() {
     assert!(!rendered.contains("sk-test-secret"));
 }
 
-#[test]
-fn wasm_runtime_http_adapter_discards_staged_policy_on_pre_egress_request_failure() {
+#[tokio::test(flavor = "multi_thread")]
+async fn wasm_runtime_http_adapter_discards_staged_policy_on_pre_egress_request_failure() {
     let egress = RecordingRuntimeEgress::ok(RuntimeHttpEgressResponse {
         status: 200,
         headers: vec![],
@@ -581,8 +670,8 @@ fn wasm_runtime_http_adapter_discards_staged_policy_on_pre_egress_request_failur
     assert_eq!(discarder.discards(), vec![(scope, capability_id)]);
 }
 
-#[test]
-fn wasm_runtime_http_adapter_discards_staged_policy_on_credential_provider_failure() {
+#[tokio::test(flavor = "multi_thread")]
+async fn wasm_runtime_http_adapter_discards_staged_policy_on_credential_provider_failure() {
     let egress = RecordingRuntimeEgress::ok(RuntimeHttpEgressResponse {
         status: 200,
         headers: vec![],
@@ -641,13 +730,27 @@ impl RecordingRuntimeEgress {
     }
 }
 
+#[async_trait::async_trait]
 impl RuntimeHttpEgress for RecordingRuntimeEgress {
-    fn execute(
+    async fn execute(
         &self,
         request: RuntimeHttpEgressRequest,
     ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
         self.requests.lock().unwrap().push(request);
         self.response.clone()
+    }
+}
+
+#[derive(Clone)]
+struct PanickingRuntimeEgress;
+
+#[async_trait::async_trait]
+impl RuntimeHttpEgress for PanickingRuntimeEgress {
+    async fn execute(
+        &self,
+        _request: RuntimeHttpEgressRequest,
+    ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
+        panic!("runtime HTTP egress should not unwind through WASM host");
     }
 }
 

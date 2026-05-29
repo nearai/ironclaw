@@ -259,7 +259,10 @@ pub(crate) fn build_runtime_input_with_options(
             interval: Duration::from_millis(200),
             max_total: Duration::from_secs(180),
         })
-        .with_identity(runtime_identity(runtime_services.config_file.as_ref()));
+        .with_identity(runtime_identity(runtime_services.config_file.as_ref()))
+        .with_regex_skill_activation_enabled(regex_skill_activation_enabled(
+            runtime_services.config_file.as_ref(),
+        ));
 
     #[cfg(feature = "root-llm-provider")]
     {
@@ -407,6 +410,15 @@ fn runtime_identity(
     }
 }
 
+fn regex_skill_activation_enabled(
+    config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
+) -> bool {
+    config_file
+        .and_then(|file| file.skills.as_ref())
+        .and_then(|skills| skills.regex_activation_enabled)
+        .unwrap_or(true)
+}
+
 pub(crate) fn effective_profile(
     config: &RebornBootConfig,
     config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
@@ -543,6 +555,33 @@ default_owner = "custom-owner"
         assert_eq!(runtime_input.identity.agent_id, "custom-agent");
         assert_eq!(runtime_input.identity.source_binding_id, "reborn-cli");
         assert_eq!(runtime_input.identity.reply_target_binding_id, "reborn-cli");
+    }
+
+    #[test]
+    fn build_runtime_input_maps_regex_skill_activation_config() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("reborn-home");
+        std::fs::create_dir_all(&reborn_home).expect("mkdir");
+        std::fs::write(
+            reborn_home.join("config.toml"),
+            r#"
+[skills]
+regex_activation_enabled = false
+"#,
+        )
+        .expect("write config");
+        let config = RebornBootConfig::resolve_from_env_parts(
+            Some(reborn_home.into_os_string()),
+            None,
+            None,
+            None,
+        )
+        .expect("boot config");
+
+        let runtime_input =
+            build_runtime_input(&config, RuntimeInputCaller::Run).expect("runtime input");
+
+        assert!(!runtime_input.regex_skill_activation_enabled);
     }
 
     #[test]

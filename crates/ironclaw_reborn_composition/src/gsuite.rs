@@ -7,7 +7,8 @@ use ironclaw_extensions::{
     ExtensionRuntime, MANIFEST_SCHEMA_VERSION, ManifestSource,
 };
 use ironclaw_first_party_extensions::{
-    GsuiteCapabilitySpec, GsuiteDispatchError, GsuiteDispatchRequest, GsuiteExecutor,
+    GsuiteCapabilitySpec, GsuiteCredentialStageError, GsuiteCredentialStageRequest,
+    GsuiteCredentialStager, GsuiteDispatchError, GsuiteDispatchRequest, GsuiteExecutor,
     GsuitePackageSpec, gsuite_package_specs, gsuite_resource_profile,
 };
 use ironclaw_host_api::{
@@ -16,7 +17,7 @@ use ironclaw_host_api::{
 };
 use ironclaw_host_runtime::{
     FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
-    FirstPartyCapabilityRequest, FirstPartyCapabilityResult,
+    FirstPartyCapabilityRequest, FirstPartyCapabilityResult, ProductAuthProviderRuntimePorts,
 };
 
 /// Host-bundled GSuite packages available to an install/activation surface.
@@ -38,18 +39,20 @@ pub fn bundled_gsuite_extension_packages() -> Result<Vec<ExtensionPackage>, Exte
 /// dispatch still requires active package descriptors.
 pub fn bundled_gsuite_first_party_handlers(
     accounts: Arc<dyn CredentialAccountService>,
+    credential_stager: Arc<dyn GsuiteCredentialStager>,
 ) -> Result<FirstPartyCapabilityRegistry, HostApiError> {
     let mut registry = FirstPartyCapabilityRegistry::new();
-    register_bundled_gsuite_first_party_handlers(&mut registry, accounts)?;
+    register_bundled_gsuite_first_party_handlers(&mut registry, accounts, credential_stager)?;
     Ok(registry)
 }
 
 pub(crate) fn register_bundled_gsuite_first_party_handlers(
     registry: &mut FirstPartyCapabilityRegistry,
     accounts: Arc<dyn CredentialAccountService>,
+    credential_stager: Arc<dyn GsuiteCredentialStager>,
 ) -> Result<(), HostApiError> {
     let handler = Arc::new(GsuiteFirstPartyHandler {
-        executor: GsuiteExecutor::new(accounts),
+        executor: GsuiteExecutor::new(accounts, credential_stager),
     });
     for package in gsuite_package_specs() {
         for capability in package.capabilities {
@@ -148,11 +151,47 @@ fn capability_manifest(
     })
 }
 
+/// Convert a [`GsuiteDispatchError`] into the neutral [`FirstPartyCapabilityError`].
+///
+/// Recovery context carried by [`GsuiteCredentialDispatchReason::Recovery`] and
+/// [`GsuiteCredentialDispatchReason::MissingScopes`] (recovery kind, provider id,
+/// available accounts, missing OAuth scopes) is intentionally dropped here:
+/// [`FirstPartyCapabilityError`] has no recovery-payload field.  Upper services
+/// receive a generic `AuthRequired` gate.  To thread structured recovery hints
+/// through to the runtime, `FirstPartyCapabilityError::AuthRequired` must be
+/// extended with an opaque reason payload (tracked as a follow-up).
 fn gsuite_error(error: GsuiteDispatchError) -> FirstPartyCapabilityError {
-    let mapped = FirstPartyCapabilityError::new(error.kind());
-    if let Some(usage) = error.usage().cloned() {
-        mapped.with_usage(usage)
-    } else {
-        mapped
+    let usage = error.usage().cloned();
+    let base = match error.auth_requirement() {
+        Some(required_secrets) => FirstPartyCapabilityError::auth_required_with(required_secrets),
+        None => FirstPartyCapabilityError::new(error.kind()),
+    };
+    match usage {
+        Some(u) => base.with_usage(u),
+        None => base,
+    }
+}
+
+pub(crate) struct ProductAuthRuntimeGsuiteCredentialStager {
+    runtime_ports: ProductAuthProviderRuntimePorts,
+}
+
+impl ProductAuthRuntimeGsuiteCredentialStager {
+    pub(crate) fn new(runtime_ports: ProductAuthProviderRuntimePorts) -> Self {
+        Self { runtime_ports }
+    }
+}
+
+#[async_trait]
+impl GsuiteCredentialStager for ProductAuthRuntimeGsuiteCredentialStager {
+    async fn stage(
+        &self,
+        request: GsuiteCredentialStageRequest<'_>,
+    ) -> Result<(), GsuiteCredentialStageError> {
+        // Both GsuiteCredentialStageError and ProductAuthCredentialStageError are
+        // type aliases for ironclaw_host_api::CredentialStageError — no conversion needed.
+        self.runtime_ports
+            .stage_secret_once(request.scope, request.capability_id, request.access_secret)
+            .await
     }
 }

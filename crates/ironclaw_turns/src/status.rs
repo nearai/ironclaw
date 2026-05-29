@@ -25,7 +25,10 @@ pub enum TurnStatus {
 
 impl TurnStatus {
     pub fn is_terminal(self) -> bool {
-        matches!(self, Self::Cancelled | Self::Completed | Self::Failed)
+        matches!(
+            self,
+            Self::Cancelled | Self::Completed | Self::Failed | Self::RecoveryRequired
+        )
     }
 
     pub fn keeps_active_lock(self) -> bool {

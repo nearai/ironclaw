@@ -82,6 +82,10 @@ WebUI gate resolution routing should use current run-state first: a
 enters `AuthInteractionService`, and generic fallback is only for non-typed
 blocked gates or legacy/replay shapes. Do not let generic WebUI gate handling
 resume/cancel auth-blocked runs.
+Typed auth/approval interaction services intentionally re-read run-state through
+`blocked_gate_state` immediately before resume/cancel side effects. Treat that
+second read as a freshness/TOCTOU guard unless a future coordinator returns a
+sealed gate grant that can safely replace it.
 
 WebUI-facing facade methods must bind browser thread ids through
 `SessionThreadService` using a `ThreadScope` derived from the authenticated

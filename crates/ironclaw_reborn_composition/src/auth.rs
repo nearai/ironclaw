@@ -19,6 +19,18 @@ use ironclaw_product_workflow::ProductAuthTurnGateResumeDispatcher;
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 
+/// Dispatches a typed continuation event once an OAuth callback flow has
+/// completed.
+///
+/// # Idempotency contract
+///
+/// Implementations MUST be idempotent on `flow_id`.  The product-auth layer
+/// guarantees *at-least-once* delivery: if `dispatch_auth_continuation`
+/// succeeds but the subsequent `mark_continuation_dispatched` call fails
+/// (e.g. a transient `BackendConflict` or `BackendUnavailable`), the caller
+/// will retry the full callback path and dispatch the same `flow_id` again.
+/// An implementation that assumes exactly-once delivery will process duplicate
+/// continuations and is incorrect.
 #[async_trait]
 pub trait RebornAuthContinuationDispatcher: Send + Sync {
     async fn dispatch_auth_continuation(
@@ -289,11 +301,26 @@ impl RebornProductAuthServicePorts {
             + SecretCleanupService
             + 'static,
     {
+        let provider_client: Arc<dyn AuthProviderClient> = services.clone();
+        Self::from_shared_with_provider(services, provider_client)
+    }
+
+    pub fn from_shared_with_provider<T>(
+        services: Arc<T>,
+        provider_client: Arc<dyn AuthProviderClient>,
+    ) -> Self
+    where
+        T: AuthFlowManager
+            + AuthInteractionService
+            + CredentialSetupService
+            + CredentialAccountService
+            + SecretCleanupService
+            + 'static,
+    {
         let flow_manager: Arc<dyn AuthFlowManager> = services.clone();
         let interaction_service: Arc<dyn AuthInteractionService> = services.clone();
         let credential_setup_service: Arc<dyn CredentialSetupService> = services.clone();
         let credential_account_service: Arc<dyn CredentialAccountService> = services.clone();
-        let provider_client: Arc<dyn AuthProviderClient> = services.clone();
         let cleanup_service: Arc<dyn SecretCleanupService> = services;
 
         Self::new(
@@ -304,6 +331,10 @@ impl RebornProductAuthServicePorts {
             provider_client,
             cleanup_service,
         )
+    }
+
+    pub fn credential_account_service(&self) -> Arc<dyn CredentialAccountService> {
+        self.credential_account_service.clone()
     }
 
     pub(crate) fn into_services(
@@ -348,6 +379,13 @@ pub struct RebornProductAuthServices {
     provider_client: Arc<dyn AuthProviderClient>,
     cleanup_service: Arc<dyn SecretCleanupService>,
     continuation_dispatcher: Arc<dyn RebornAuthContinuationDispatcher>,
+    /// Optional read projection for WebUI/local-dev auth interactions.
+    ///
+    /// `RebornProductAuthServices` may still support OAuth callbacks,
+    /// manual-token setup, credential refresh, and continuation dispatch
+    /// without this port. When absent, runtime composition must expose the
+    /// WebUI pending-auth interaction surface as explicitly unavailable
+    /// instead of silently fabricating an unscoped read model.
     flow_record_source: Option<Arc<dyn AuthFlowRecordSource>>,
 }
 
@@ -453,6 +491,11 @@ impl RebornProductAuthServices {
         self.flow_manager.clone()
     }
 
+    /// Auth-flow read projection used only by product/WebUI interaction views.
+    ///
+    /// `None` is an intentional unsupported mode for bundles that can perform
+    /// product-auth side effects but do not provide a scoped pending-auth
+    /// projection. Callers must map it to a stable unavailable surface.
     pub(crate) fn flow_record_source(&self) -> Option<Arc<dyn AuthFlowRecordSource>> {
         self.flow_record_source.clone()
     }
@@ -495,6 +538,8 @@ impl RebornProductAuthServices {
         self
     }
 
+    /// Enable WebUI/local-dev auth interaction read models from a scoped
+    /// auth-flow projection source.
     pub(crate) fn with_flow_record_source(mut self, source: Arc<dyn AuthFlowRecordSource>) -> Self {
         self.flow_record_source = Some(source);
         self
@@ -534,7 +579,7 @@ impl RebornProductAuthServices {
         &self,
         request: RebornOAuthCallbackRequest,
     ) -> Result<RebornOAuthCallbackResponse, RebornOAuthCallbackError> {
-        let completed = match request.outcome {
+        let (mut completed, should_dispatch_continuation) = match request.outcome {
             RebornOAuthCallbackOutcome::Authorized { provider_request } => {
                 let claimed = self
                     .flow_manager
@@ -551,7 +596,8 @@ impl RebornProductAuthServices {
                     .map_err(RebornOAuthCallbackError::from)?;
 
                 if claimed.status == AuthFlowStatus::Completed {
-                    claimed
+                    let should_dispatch = claimed.continuation_emitted_at.is_none();
+                    (claimed, should_dispatch)
                 } else {
                     let exchange = match self
                         .provider_client
@@ -590,7 +636,7 @@ impl RebornProductAuthServices {
                         }
                     };
                     let exchange_for_cleanup = exchange.clone();
-                    match self
+                    let completed = match self
                         .flow_manager
                         .complete_oauth_callback(
                             &request.scope,
@@ -624,7 +670,8 @@ impl RebornProductAuthServices {
                             }
                             return Err(error.into());
                         }
-                    }
+                    };
+                    (completed, true)
                 }
             }
             RebornOAuthCallbackOutcome::ProviderDenied => self
@@ -638,36 +685,45 @@ impl RebornProductAuthServices {
                     },
                 )
                 .await
+                .map(|completed| (completed, true))
                 .map_err(RebornOAuthCallbackError::from)?,
             RebornOAuthCallbackOutcome::Malformed => {
                 return Err(AuthProductError::MalformedCallback.into());
             }
         };
 
-        let event = AuthContinuationEvent {
-            flow_id: completed.id,
-            scope: completed.scope.clone(),
-            continuation: completed.continuation.clone(),
-            credential_account_id: completed.credential_account_id,
-            emitted_at: Utc::now(),
-        };
-        if let Err(error) = self
-            .continuation_dispatcher
-            .dispatch_auth_continuation(event)
-            .await
-        {
-            tracing::debug!(
-                flow_id = %completed.id,
-                error_code = ?error.code(),
-                "reborn auth callback completed but continuation dispatch failed"
-            );
-            let error = match error {
-                AuthProductError::TokenExchangeFailed
-                | AuthProductError::ProviderDenied
-                | AuthProductError::MalformedCallback => AuthProductError::BackendUnavailable,
-                error => error,
+        if should_dispatch_continuation {
+            let emitted_at = Utc::now();
+            let event = AuthContinuationEvent {
+                flow_id: completed.id,
+                scope: completed.scope.clone(),
+                continuation: completed.continuation.clone(),
+                credential_account_id: completed.credential_account_id,
+                emitted_at,
             };
-            return Err(error.into());
+            if let Err(error) = self
+                .continuation_dispatcher
+                .dispatch_auth_continuation(event)
+                .await
+            {
+                tracing::debug!(
+                    flow_id = %completed.id,
+                    error_code = ?error.code(),
+                    "reborn auth callback completed but continuation dispatch failed"
+                );
+                let error = match error {
+                    AuthProductError::TokenExchangeFailed
+                    | AuthProductError::ProviderDenied
+                    | AuthProductError::MalformedCallback => AuthProductError::BackendUnavailable,
+                    error => error,
+                };
+                return Err(error.into());
+            }
+            completed = self
+                .flow_manager
+                .mark_continuation_dispatched(&completed.scope, completed.id, emitted_at)
+                .await
+                .map_err(RebornOAuthCallbackError::from)?;
         }
 
         Ok(RebornOAuthCallbackResponse {
@@ -780,6 +836,17 @@ impl RebornProductAuthServices {
         })
     }
 
+    pub async fn abandon_manual_token(
+        &self,
+        scope: &AuthProductScope,
+        interaction_id: AuthInteractionId,
+    ) -> Result<bool, RebornManualTokenError> {
+        self.interaction_service
+            .abandon_manual_token(scope, interaction_id)
+            .await
+            .map_err(RebornManualTokenError::from)
+    }
+
     pub(crate) fn local_dev_in_memory(
         continuation_dispatcher: Arc<dyn RebornAuthContinuationDispatcher>,
     ) -> Self {
@@ -883,6 +950,31 @@ mod tests {
         assert_eq!(arc_data_ptr(&services.cleanup_service()), shared_ptr);
     }
 
+    #[test]
+    fn reborn_product_auth_ports_from_shared_with_provider_uses_separate_provider_client() {
+        let shared = Arc::new(SharedAuthTestDouble);
+        let provider_client: Arc<dyn AuthProviderClient> = Arc::new(SharedAuthTestDouble);
+        let shared_ptr = arc_data_ptr(&shared);
+        let provider_ptr = arc_data_ptr(&provider_client);
+
+        let ports =
+            RebornProductAuthServicePorts::from_shared_with_provider(shared, provider_client);
+        let services = ports.into_services(Arc::new(NoopAuthContinuationDispatcher));
+
+        assert_eq!(arc_data_ptr(&services.flow_manager()), shared_ptr);
+        assert_eq!(arc_data_ptr(&services.interaction_service()), shared_ptr);
+        assert_eq!(
+            arc_data_ptr(&services.credential_setup_service()),
+            shared_ptr
+        );
+        assert_eq!(
+            arc_data_ptr(&services.credential_account_service()),
+            shared_ptr
+        );
+        assert_eq!(arc_data_ptr(&services.provider_client()), provider_ptr);
+        assert_eq!(arc_data_ptr(&services.cleanup_service()), shared_ptr);
+    }
+
     #[async_trait::async_trait]
     impl AuthFlowManager for SharedAuthTestDouble {
         async fn create_flow(
@@ -939,6 +1031,15 @@ mod tests {
         ) -> Result<AuthFlowRecord, AuthProductError> {
             unreachable!("constructor tests do not call auth-flow methods")
         }
+
+        async fn mark_continuation_dispatched(
+            &self,
+            _scope: &AuthProductScope,
+            _flow_id: AuthFlowId,
+            _emitted_at: ironclaw_auth::Timestamp,
+        ) -> Result<AuthFlowRecord, AuthProductError> {
+            unreachable!("constructor tests do not call auth-flow methods")
+        }
     }
 
     #[async_trait::async_trait]
@@ -955,6 +1056,14 @@ mod tests {
             _scope: &AuthProductScope,
             _request: SecretSubmitRequest,
         ) -> Result<SecretSubmitResult, AuthProductError> {
+            unreachable!("constructor tests do not call auth-interaction methods")
+        }
+
+        async fn abandon_manual_token(
+            &self,
+            _scope: &AuthProductScope,
+            _interaction_id: AuthInteractionId,
+        ) -> Result<bool, AuthProductError> {
             unreachable!("constructor tests do not call auth-interaction methods")
         }
     }

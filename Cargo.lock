@@ -4133,12 +4133,11 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "chrono",
- "hex",
+ "ironclaw_common",
  "ironclaw_host_api",
  "secrecy",
  "serde",
  "serde_json",
- "sha2 0.10.9",
  "subtle",
  "thiserror 2.0.18",
  "tokio",
@@ -4189,10 +4188,14 @@ dependencies = [
 name = "ironclaw_common"
 version = "0.4.2"
 dependencies = [
+ "base64 0.22.1",
  "chrono-tz",
  "dirs",
+ "hex",
+ "rand 0.8.6",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "thiserror 2.0.18",
  "tracing",
 ]
@@ -4388,6 +4391,7 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "blake3",
+ "futures-util",
  "glob",
  "ironclaw_auth",
  "ironclaw_filesystem",
@@ -4592,6 +4596,7 @@ name = "ironclaw_mcp"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "futures-util",
  "ironclaw_extensions",
  "ironclaw_host_api",
  "ironclaw_resources",
@@ -4626,6 +4631,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "ironclaw_host_api",
+ "percent-encoding",
  "reqwest",
  "thiserror 2.0.18",
  "tokio",
@@ -5095,6 +5101,8 @@ dependencies = [
 name = "ironclaw_scripts"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "futures-util",
  "ironclaw_extensions",
  "ironclaw_host_api",
  "ironclaw_resources",
@@ -7638,7 +7646,6 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "encoding_rs",
- "futures-channel",
  "futures-core",
  "futures-util",
  "h2 0.4.14",

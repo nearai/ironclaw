@@ -1,5 +1,6 @@
 import { React, html } from "../../lib/html.js";
 import { ApprovalCard } from "./components/approval-card.js";
+import { AuthTokenCard } from "./components/auth-token-card.js";
 import { ChatInput } from "./components/chat-input.js";
 import { ConnectionStatus } from "./components/connection-status.js";
 import { EmptyState } from "./components/empty-state.js";
@@ -35,6 +36,7 @@ export function Chat({
     recoverHistory,
     loadMore,
     setSuggestions,
+    submitAuthToken,
   } = useChat(activeThreadId);
 
   const activeThread = React.useMemo(
@@ -111,7 +113,16 @@ export function Chat({
             `}
             ${isProcessing && !pendingGate && html`<${TypingIndicator} />`}
             ${pendingGate &&
-            html`
+            (pendingGate.kind === "auth_required"
+              ? html`
+                <${AuthTokenCard}
+                  gate=${pendingGate}
+                  onSubmit=${submitAuthToken}
+                  onCancel=${() =>
+                    approve(pendingGate.requestId, "cancel", pendingGate.kind)}
+                />
+              `
+              : html`
               <${ApprovalCard}
                 gate=${pendingGate}
                 onApprove=${() =>
@@ -121,7 +132,7 @@ export function Chat({
                 onAlways=${() =>
                   approve(pendingGate.requestId, "always", pendingGate.kind)}
               />
-            `}
+            `)}
           <//>
 
           <${SuggestionChips}

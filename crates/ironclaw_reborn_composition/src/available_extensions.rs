@@ -8,6 +8,9 @@ use ironclaw_product_workflow::{
     LifecycleExtensionSource, LifecycleExtensionSummary, LifecyclePackageKind, LifecyclePackageRef,
     ProductWorkflowError,
 };
+use toml::Value;
+
+use crate::nearai_mcp::{NearAiMcpEndpoint, nearai_mcp_endpoint_from_env};
 
 const GITHUB_MANIFEST: &str =
     include_str!("../../ironclaw_first_party_extensions/assets/github/manifest.toml");
@@ -19,6 +22,10 @@ const GMAIL_MANIFEST: &str =
     include_str!("../../ironclaw_first_party_extensions/assets/gmail/manifest.toml");
 const NOTION_MCP_MANIFEST: &str =
     include_str!("../../ironclaw_first_party_extensions/assets/notion-mcp/manifest.toml");
+const WEB_ACCESS_MANIFEST: &str =
+    include_str!("../../ironclaw_first_party_extensions/assets/web-access/manifest.toml");
+const NEARAI_MCP_MANIFEST: &str =
+    include_str!("../../ironclaw_first_party_extensions/assets/nearai-mcp/manifest.toml");
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct AvailableExtensionAsset {
@@ -70,6 +77,8 @@ impl AvailableExtensionCatalog {
         Ok(Self::from_packages(vec![
             github_package()?,
             notion_mcp_package()?,
+            web_access_package()?,
+            nearai_mcp_package()?,
             google_calendar_package()?,
             gmail_package()?,
         ]))
@@ -156,6 +165,20 @@ fn notion_mcp_package() -> Result<AvailableExtensionPackage, ProductWorkflowErro
     )
 }
 
+fn web_access_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
+    bundled_extension_package(
+        "web-access",
+        "Web Access",
+        WEB_ACCESS_MANIFEST,
+        web_access_assets(),
+    )
+}
+
+fn nearai_mcp_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
+    let manifest = nearai_mcp_manifest_toml()?;
+    bundled_extension_package("nearai", "NEAR AI", &manifest, nearai_mcp_assets(&manifest))
+}
+
 fn google_calendar_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
     bundled_extension_package(
         "google-calendar",
@@ -179,6 +202,66 @@ pub(crate) fn gmail_manifest_digest() -> String {
 
 pub(crate) fn notion_mcp_manifest_digest() -> String {
     sha256_digest_token(NOTION_MCP_MANIFEST.as_bytes())
+}
+
+pub(crate) fn web_access_manifest_digest() -> String {
+    sha256_digest_token(WEB_ACCESS_MANIFEST.as_bytes())
+}
+
+pub(crate) fn nearai_mcp_manifest_toml() -> Result<String, ProductWorkflowError> {
+    let endpoint = nearai_mcp_endpoint_from_env().map_err(map_binding_error)?;
+    nearai_mcp_manifest_toml_for_endpoint(&endpoint)
+}
+
+fn nearai_mcp_manifest_toml_for_endpoint(
+    endpoint: &NearAiMcpEndpoint,
+) -> Result<String, ProductWorkflowError> {
+    let mut manifest = toml::from_str::<Value>(NEARAI_MCP_MANIFEST).map_err(|error| {
+        map_binding_error(format!("bundled NEAR AI manifest TOML is invalid: {error}"))
+    })?;
+    let runtime = manifest
+        .get_mut("runtime")
+        .and_then(Value::as_table_mut)
+        .ok_or_else(|| map_binding_error("bundled NEAR AI manifest lacks runtime table"))?;
+    runtime.insert("url".to_string(), Value::String(endpoint.url.clone()));
+
+    let capabilities = manifest
+        .get_mut("capabilities")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| map_binding_error("bundled NEAR AI manifest lacks capabilities array"))?;
+    let search = capabilities
+        .first_mut()
+        .and_then(Value::as_table_mut)
+        .ok_or_else(|| map_binding_error("bundled NEAR AI manifest lacks search capability"))?;
+    let runtime_credentials = search
+        .get_mut("runtime_credentials")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| map_binding_error("bundled NEAR AI manifest lacks runtime credentials"))?;
+    let credential = runtime_credentials
+        .first_mut()
+        .and_then(Value::as_table_mut)
+        .ok_or_else(|| map_binding_error("bundled NEAR AI manifest lacks runtime credential"))?;
+    let audience = credential
+        .get_mut("audience")
+        .and_then(Value::as_table_mut)
+        .ok_or_else(|| {
+            map_binding_error("bundled NEAR AI manifest lacks runtime credential audience")
+        })?;
+    audience.insert(
+        "host_pattern".to_string(),
+        Value::String(endpoint.host_pattern.clone()),
+    );
+    if let Some(port) = endpoint.port {
+        audience.insert("port".to_string(), Value::Integer(i64::from(port)));
+    } else {
+        audience.remove("port");
+    }
+
+    toml::to_string(&manifest).map_err(|error| {
+        map_binding_error(format!(
+            "bundled NEAR AI manifest TOML render failed: {error}"
+        ))
+    })
 }
 
 fn bundled_extension_package(
@@ -364,6 +447,72 @@ fn notion_mcp_assets() -> Vec<AvailableExtensionAsset> {
         notion_prompt_asset!("notion-get-users.md"),
         notion_prompt_asset!("notion-get-user.md"),
         notion_prompt_asset!("notion-get-self.md"),
+    ]
+}
+
+fn web_access_assets() -> Vec<AvailableExtensionAsset> {
+    vec![
+        bytes_asset("manifest.toml", WEB_ACCESS_MANIFEST.as_bytes()),
+        bytes_asset(
+            "schemas/web-access/search.input.v1.json",
+            include_bytes!(
+                "../../ironclaw_first_party_extensions/assets/web-access/schemas/web-access/search.input.v1.json"
+            ),
+        ),
+        bytes_asset(
+            "schemas/web-access/search.output.v1.json",
+            include_bytes!(
+                "../../ironclaw_first_party_extensions/assets/web-access/schemas/web-access/search.output.v1.json"
+            ),
+        ),
+        bytes_asset(
+            "schemas/web-access/get_content.input.v1.json",
+            include_bytes!(
+                "../../ironclaw_first_party_extensions/assets/web-access/schemas/web-access/get_content.input.v1.json"
+            ),
+        ),
+        bytes_asset(
+            "schemas/web-access/get_content.output.v1.json",
+            include_bytes!(
+                "../../ironclaw_first_party_extensions/assets/web-access/schemas/web-access/get_content.output.v1.json"
+            ),
+        ),
+        bytes_asset(
+            "prompts/web-access/search.md",
+            include_bytes!(
+                "../../ironclaw_first_party_extensions/assets/web-access/prompts/web-access/search.md"
+            ),
+        ),
+        bytes_asset(
+            "prompts/web-access/get_content.md",
+            include_bytes!(
+                "../../ironclaw_first_party_extensions/assets/web-access/prompts/web-access/get_content.md"
+            ),
+        ),
+    ]
+}
+
+fn nearai_mcp_assets(manifest: &str) -> Vec<AvailableExtensionAsset> {
+    vec![
+        bytes_asset("manifest.toml", manifest.as_bytes()),
+        bytes_asset(
+            "schemas/nearai/search.input.v1.json",
+            include_bytes!(
+                "../../ironclaw_first_party_extensions/assets/nearai-mcp/schemas/nearai/search.input.v1.json"
+            ),
+        ),
+        bytes_asset(
+            "schemas/nearai/search.output.v1.json",
+            include_bytes!(
+                "../../ironclaw_first_party_extensions/assets/nearai-mcp/schemas/nearai/search.output.v1.json"
+            ),
+        ),
+        bytes_asset(
+            "prompts/nearai/search.md",
+            include_bytes!(
+                "../../ironclaw_first_party_extensions/assets/nearai-mcp/prompts/nearai/search.md"
+            ),
+        ),
     ]
 }
 
@@ -844,6 +993,7 @@ mod tests {
     use ironclaw_host_api::{EffectKind, HostPortCatalog};
 
     use super::*;
+    use crate::nearai_mcp::nearai_mcp_endpoint_from_base;
 
     #[test]
     fn visible_capability_ids_excludes_write_effects() {
@@ -862,7 +1012,7 @@ mod tests {
     fn bundled_first_party_manifest_asset_refs_are_packaged() {
         let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
 
-        for extension_id in ["notion", "google-calendar", "gmail"] {
+        for extension_id in ["notion", "web-access", "nearai", "google-calendar", "gmail"] {
             let package_ref =
                 LifecyclePackageRef::new(LifecyclePackageKind::Extension, extension_id).unwrap();
             let package = catalog.resolve(&package_ref).unwrap();
@@ -900,6 +1050,31 @@ mod tests {
     #[test]
     fn bundled_mcp_manifest_digests_are_sha256_tokens() {
         assert!(notion_mcp_manifest_digest().starts_with("sha256:"));
+    }
+
+    #[test]
+    fn nearai_manifest_renderer_uses_validated_endpoint_fields() {
+        let endpoint =
+            nearai_mcp_endpoint_from_base(Some("https://10.0.0.12:8443/%22%0Atrust=%22system"))
+                .unwrap();
+
+        let manifest_toml = nearai_mcp_manifest_toml_for_endpoint(&endpoint).unwrap();
+        let manifest: Value = toml::from_str(&manifest_toml).unwrap();
+
+        assert_eq!(manifest["trust"].as_str(), Some("first_party_requested"));
+        assert_eq!(
+            manifest["runtime"]["url"].as_str(),
+            Some("https://10.0.0.12:8443/%22%0Atrust=%22system/mcp")
+        );
+        assert_eq!(
+            manifest["capabilities"][0]["runtime_credentials"][0]["audience"]["host_pattern"]
+                .as_str(),
+            Some("10.0.0.12")
+        );
+        assert_eq!(
+            manifest["capabilities"][0]["runtime_credentials"][0]["audience"]["port"].as_integer(),
+            Some(8443)
+        );
     }
 
     #[test]

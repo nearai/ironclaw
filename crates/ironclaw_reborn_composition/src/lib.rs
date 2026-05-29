@@ -41,6 +41,9 @@ mod local_dev_mounts;
 mod local_runtime_profile;
 mod mcp;
 mod mcp_router;
+mod nearai_mcp;
+mod product_auth_durable;
+mod product_auth_runtime_credentials;
 #[cfg(feature = "webui-v2-beta")]
 mod product_auth_serve;
 mod product_live_adapters;
@@ -56,6 +59,7 @@ mod readiness;
 mod runtime;
 mod runtime_input;
 mod skill_listing;
+mod web_access;
 mod webui;
 #[cfg(feature = "webui-v2-beta")]
 mod webui_body_limit;

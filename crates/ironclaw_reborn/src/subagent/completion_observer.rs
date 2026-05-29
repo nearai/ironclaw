@@ -473,7 +473,7 @@ fn map_host_error(error: AgentLoopHostError) -> TurnError {
 }
 
 fn is_subagent_terminal_status(status: TurnStatus) -> bool {
-    status.is_terminal() || status == TurnStatus::RecoveryRequired
+    status.is_terminal()
 }
 
 fn background_completion_payload(

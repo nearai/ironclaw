@@ -1792,15 +1792,6 @@ fn runtime_failure_to_loop(
                 ),
             }))
         }
-        CapabilityFailureDisposition::RecoverableRunFailure => {
-            Ok(CapabilityOutcome::Failed(CapabilityFailure {
-                error_kind: recoverable_runtime_failure_kind_to_loop(failure.kind)?,
-                safe_summary: runtime_failure_safe_summary(
-                    &failure,
-                    "capability invocation could not safely continue",
-                ),
-            }))
-        }
     }
 }
 
@@ -1852,21 +1843,6 @@ fn model_visible_runtime_failure_kind_to_loop(
     kind: RuntimeFailureKind,
 ) -> Result<CapabilityFailureKind, AgentLoopHostError> {
     runtime_failure_kind_to_loop(kind)
-}
-
-fn recoverable_runtime_failure_kind_to_loop(
-    kind: RuntimeFailureKind,
-) -> Result<CapabilityFailureKind, AgentLoopHostError> {
-    // Only protocol kinds with useful loop-level categories stay distinct here.
-    // Other recoverable dispositions abort as `Permanent` by design instead of
-    // being appended as ordinary model-visible tool results.
-    Ok(match kind {
-        RuntimeFailureKind::Cancelled => CapabilityFailureKind::Cancelled,
-        RuntimeFailureKind::InvalidOutput => CapabilityFailureKind::InvalidOutput,
-        RuntimeFailureKind::Dispatcher => CapabilityFailureKind::Dispatcher,
-        RuntimeFailureKind::Unknown => capability_failure_kind("unknown")?,
-        _ => CapabilityFailureKind::Permanent,
-    })
 }
 
 fn ensure_runtime_outcome_matches(

@@ -27,7 +27,7 @@ use serde_json::{Value, json};
 use wit_component::{ComponentEncoder, StringEncoding, embed_component_metadata};
 use wit_parser::Resolve;
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn wasm_lane_loads_component_from_root_filesystem_and_uses_fresh_instances() {
     let component = tool_component(COUNTER_TOOL_WAT);
     let fs = filesystem_with_wasm_component("wasm-smoke", "wasm/counter.wasm", &component).await;
@@ -81,7 +81,7 @@ async fn wasm_lane_loads_component_from_root_filesystem_and_uses_fresh_instances
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn wasm_lane_guest_trap_releases_reservation_and_preserves_dispatch_failure() {
     let component = tool_component(TRAP_TOOL_WAT);
     let fs = filesystem_with_wasm_component("wasm-smoke", "wasm/trap.wasm", &component).await;
@@ -123,7 +123,7 @@ async fn wasm_lane_guest_trap_releases_reservation_and_preserves_dispatch_failur
     assert_eq!(recorded[2].error_kind.as_deref(), Some("guest"));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn wasm_lane_execution_failure_reconciles_preserved_usage_from_runtime() {
     let component = tool_component(&trap_after_http_wat());
     let fs = filesystem_with_wasm_component("wasm-smoke", "wasm/http-trap.wasm", &component).await;
@@ -197,7 +197,7 @@ async fn wasm_lane_execution_failure_reconciles_preserved_usage_from_runtime() {
     assert_eq!(recorded[2].error_kind.as_deref(), Some("guest"));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn wasm_lane_missing_module_file_returns_sanitized_filesystem_error() {
     let fs = mounted_empty_extension_root();
     let registry = Arc::new(registry_with_package(WASM_MANIFEST));
@@ -243,7 +243,7 @@ async fn wasm_lane_missing_module_file_returns_sanitized_filesystem_error() {
     assert_eq!(recorded[2].error_kind.as_deref(), Some("filesystem_denied"));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn wasm_lane_malformed_module_returns_sanitized_manifest_error() {
     let fs = filesystem_with_wasm_component("wasm-smoke", "wasm/counter.wasm", b"not wasm").await;
     let registry = Arc::new(registry_with_package(WASM_MANIFEST));
@@ -287,7 +287,7 @@ async fn wasm_lane_malformed_module_returns_sanitized_manifest_error() {
     assert_eq!(recorded[2].error_kind.as_deref(), Some("manifest"));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn wasm_lane_invalid_output_json_returns_sanitized_output_error() {
     let invalid_output_wat = COUNTER_TOOL_WAT
         .replace(
@@ -345,7 +345,7 @@ async fn wasm_lane_invalid_output_json_returns_sanitized_output_error() {
     assert_eq!(recorded[2].error_kind.as_deref(), Some("output_decode"));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn wasm_lane_rejects_unsupported_import_through_dispatcher_without_reservation_leak() {
     let raw_unsupported_import = wat::parse_str(UNSUPPORTED_IMPORT_MODULE_WAT).unwrap();
     let fs =
@@ -396,7 +396,7 @@ async fn wasm_lane_rejects_unsupported_import_through_dispatcher_without_reserva
     assert!(!serialized_events.contains("UNSUPPORTED_IMPORT_SENTINEL_3067"));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn wasm_lane_enforces_memory_growth_budget_through_dispatcher() {
     let memory_growth = COUNTER_TOOL_WAT.replace(
         "global.get $count\n    i32.const 1\n    i32.add",
@@ -455,7 +455,7 @@ async fn wasm_lane_enforces_memory_growth_budget_through_dispatcher() {
     assert!(!serialized_events.contains("MEMORY_BOUND_SENTINEL_3067"));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn wasm_lane_caps_overdue_host_import_at_dispatch_execution_deadline() {
     let component = tool_component(&trap_after_http_wat());
     let fs = filesystem_with_wasm_component("wasm-smoke", "wasm/http-trap.wasm", &component).await;
@@ -546,8 +546,9 @@ impl RecordingRuntimeEgress {
     }
 }
 
+#[async_trait::async_trait]
 impl RuntimeHttpEgress for RecordingRuntimeEgress {
-    fn execute(
+    async fn execute(
         &self,
         request: RuntimeHttpEgressRequest,
     ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
@@ -571,8 +572,9 @@ impl SlowRuntimeEgress {
     }
 }
 
+#[async_trait::async_trait]
 impl RuntimeHttpEgress for SlowRuntimeEgress {
-    fn execute(
+    async fn execute(
         &self,
         request: RuntimeHttpEgressRequest,
     ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {

@@ -75,6 +75,12 @@ pub trait AuthInteractionService: Send + Sync {
         scope: &AuthProductScope,
         request: SecretSubmitRequest,
     ) -> Result<SecretSubmitResult, AuthProductError>;
+
+    async fn abandon_manual_token(
+        &self,
+        scope: &AuthProductScope,
+        interaction_id: AuthInteractionId,
+    ) -> Result<bool, AuthProductError>;
 }
 
 #[derive(Debug, Clone)]
