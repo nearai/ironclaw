@@ -347,7 +347,9 @@ mod tests {
         assert!(capability_ids.contains(&WRITE_FILE_CAPABILITY_ID));
         assert!(capability_ids.contains(&APPLY_PATCH_CAPABILITY_ID));
         assert!(capability_ids.contains(&SKILL_LIST_CAPABILITY_ID));
-        assert!(capability_ids.contains(&SKILL_ACTIVATE_CAPABILITY_ID));
+        // SKILL_ACTIVATE_CAPABILITY_ID is a synthetic capability added by
+        // wrap_local_dev_synthetic_capabilities, not a policy capability.
+        assert!(!capability_ids.contains(&SKILL_ACTIVATE_CAPABILITY_ID));
         assert!(capability_ids.contains(&SKILL_INSTALL_CAPABILITY_ID));
         assert!(capability_ids.contains(&SKILL_REMOVE_CAPABILITY_ID));
         assert!(capability_ids.contains(&SHELL_CAPABILITY_ID));
