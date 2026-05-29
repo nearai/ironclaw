@@ -6,6 +6,8 @@
 **Target branch:** `reborn-integration` — the Reborn crates and contracts
 referenced below exist on `reborn-integration`, not on `staging`. Any review or
 implementation worktree must branch from `reborn-integration`.
+**Related design:** nearai/ironclaw#4240
+(`docs/superpowers/specs/2026-05-29-channel-communication-delivery-resolution.md`)
 
 ## 1. Purpose
 
@@ -24,6 +26,12 @@ turn-coordination wiring is a Level-3 item still in progress per the contract
 freeze index. This design depends on that wiring and must not ship before it.
 The "job queue" a trigger extends is the Reborn turn queue.
 
+The reusable abstraction is **trigger source provider**, not product adapter.
+Product adapters normalize external products into IronClaw messages. Trigger
+sources decide when a stored trigger should fire. Cron, webhook, and
+message-regex support can share a `TriggerFire` path without pretending that
+cron is an external transport.
+
 ## 2. Scope
 
 ### In V1
@@ -35,7 +43,8 @@ The "job queue" a trigger extends is the Reborn turn queue.
 - A background `TriggerPollerWorker`.
 - One new dedicated thread/conversation per fire.
 - Delivery of the final turn output to a configured default notification
-  channel — gated on Reborn outbound being available (see §6).
+  target resolved by the communication delivery policy — gated on Reborn
+  outbound being available (see §6).
 - A contract extension to `ironclaw_conversations`: a host-trusted inbound
   ingress method (`handle_inbound_turn_with_trusted_scope`).
 
@@ -66,8 +75,9 @@ schedule, runs a turn in a new dedicated thread, and the thread persists.
 | V1 trigger source | Cron/interval/once only; `TriggerSourceKind` stays an enum so other sources drop in later. |
 | Management surface | `trigger_*` capabilities through the Reborn capability/dispatch surface, persisted to a typed repo. |
 | Trigger scope | Inherits the creating user's `tenant/user/agent/project` scope, captured at create time (see §7, M4 — deliberate security decision). |
-| Delivery | Final turn output delivered to a configured default notification channel, gated on Reborn outbound. |
-| Submission seam | Synthetic inbound through `ironclaw_conversations`, host-trusted ingress path. |
+| Delivery | Final turn output delivered to a communication-policy-resolved target, gated on Reborn outbound. |
+| Source abstraction | `TriggerSourceProvider` implementations emit `TriggerFire`; they are not product adapters. |
+| Submission seam | `TriggerFire` becomes synthetic inbound through `ironclaw_conversations`, host-trusted ingress path. |
 
 ## 4. Verified pipeline and the trusted-ingress requirement
 
@@ -114,11 +124,11 @@ facade method is the honest fix.
 Conversation binding identity is the stable route tuple
 `(space_id, conversation_id, thread_id)` (`conversation-binding.md` §4.8);
 per-message external IDs do not fork threads. The synthetic
-`ExternalConversationRef` therefore places a fresh value in the **stable**
-`thread_id` route field each fire (see §5.4 for how that value is derived
-deterministically). Binding resolution sees a novel stable identity → creates
-exactly one new canonical thread and one source/reply binding pair
-(`conversation-binding.md` §4.1).
+`ExternalConversationRef` therefore places a per-scheduled-slot value in the
+**stable** `thread_id` route field each fire (see §5.5 for how that value is
+derived deterministically). Binding resolution sees a novel stable identity for
+each scheduled slot → creates exactly one new canonical thread and one
+source/reply binding pair (`conversation-binding.md` §4.1).
 
 ### Idempotency contract (replaces the earlier hand-wave)
 
@@ -128,19 +138,24 @@ exactly one new canonical thread and one source/reply binding pair
 external_conversation_ref, external_event_id)`; a hit replays the original
 `AcceptedInboundMessage` and `SubmitTurnResponse` instead of submitting a second
 turn (`conversation-binding.md` §11-12). The trigger system relies on this:
-each fire supplies a **deterministic** `external_event_id` (§5.4) so a
-re-attempt of the same scheduled slot — whether from a poller crash-retry or a
-second poller instance — replays rather than double-submits. The trigger
-system stores nothing of its own for idempotency; the conversation layer owns
-it.
+each fire supplies a **deterministic** route identity and
+`external_event_id` (§5.5) so a re-attempt of the same scheduled slot — whether
+from a poller crash-retry or a second poller instance — replays rather than
+double-submits. These values are computed from `(trigger_id,
+fire_slot)` at the trigger source-provider boundary and carried as
+`TriggerFireIdentity`; `TriggerRecord` does **not** persist an
+`external_event_id` or a separate trigger-fire idempotency ledger. The
+conversation layer owns idempotency storage.
 
 ## 5. Components
 
 ### 5.1 New crate: `ironclaw_triggers`
 
 Owns: the typed `TriggerRepository`, the `TriggerPollerWorker`, the `TriggerId`
-/ `TriggerSchedule` / `TriggerSourceKind` domain types, and the `trigger_*`
-capability handlers. Does not own turn execution, binding internals, or egress.
+/ `TriggerSchedule` / `TriggerSourceKind` domain types, trigger source
+providers, `TriggerFire` construction, and the `trigger_*` capability handlers.
+Does not own turn execution, binding internals, product adapter lifecycles, or
+egress.
 
 Dependency direction: `ironclaw_triggers` depends on `ironclaw_conversations`
 (facade) and `ironclaw_host_api` (vocabulary). It must not depend upward on
@@ -162,7 +177,6 @@ name               String               display
 source             TriggerSourceKind    enum, V1 = Schedule only
 schedule           TriggerSchedule       enum { Cron(expr), Interval(secs), Once(ts) }
 prompt             String                workflow instruction
-delivery           TriggerDelivery       enum, V1 = DefaultChannel
 enabled            bool
 state              TriggerState          enum { Scheduled, Paused, Completed }
 next_run_at        DateTime              poller bookkeeping
@@ -195,7 +209,7 @@ Without it the query is a full table scan that scales O(n) with trigger count.
 `TriggerSourceKind` is a domain enum with only a `Schedule` variant in V1;
 webhook / regex / system-event variants are added later without reshaping the
 record. This is the trigger crate's own taxonomy — it is **not** the wire
-`AdapterKind` (see §5.4, H1).
+`AdapterKind` (see §5.5, H1).
 
 `TriggerSchedule::Cron(expr)` is validated at `trigger_create` time (L2): the
 expression is parsed eagerly with a Rust cron crate (`cron` or `saffron` —
@@ -203,37 +217,84 @@ decide during implementation, prefer whichever the workspace already pulls in);
 an invalid expression is rejected at create, never deferred to poll time. The
 same crate computes `next_run_at`.
 
-### 5.3 `TriggerPollerWorker`
+### 5.3 Source providers and `TriggerFire`
+
+Trigger sources are provider implementations owned by `ironclaw_triggers`.
+Their job is to decide **whether** a persisted trigger should fire, compute its
+canonical fire slot, and produce a normalized `TriggerFire`:
+
+```
+TriggerFireIdentity {
+    trigger_id,
+    fire_slot,
+    route_thread_id,     // digest("ironclaw-trigger-route", trigger_id, fire_slot)
+    external_event_id,   // digest("ironclaw-trigger-event", trigger_id, fire_slot)
+}
+
+TriggerFire {
+    identity,
+    tenant_id,
+    creator_user_id,
+    agent_id,
+    project_id,
+    prompt,
+}
+```
+
+`TriggerFireIdentity.fire_slot` is the provider's canonical dedupe coordinate.
+For the V1 schedule provider it is the scheduled cron/interval/once slot.
+Future providers must define an equivalent stable coordinate before they can
+safely retry: a webhook source might use the validated webhook delivery id,
+while a message-regex source might derive one from the source inbound message id
+plus trigger id. The route and event ids are derived once when the identity is
+constructed, then passed through to synthetic inbound construction.
+
+V1 has one provider: `ScheduleTriggerSourceProvider`, driven by cron /
+interval / once records. Future webhook and message-regex support should add
+providers that emit the same `TriggerFire` shape:
+
+- Webhook provider: owns HTTP/auth validation for trigger webhooks, then emits a
+  `TriggerFire`; it may reuse ingress policy machinery, but it is not a product
+  adapter unless it is normalizing an external product conversation.
+- Message-regex provider: observes already-normalized inbound messages from real
+  product adapters, matches trigger rules, then emits a `TriggerFire`; it must
+  not re-normalize or re-bind the original product message.
+
+This keeps ownership crisp: product adapters turn products into inbound user
+messages; trigger source providers turn persisted trigger rules into trigger
+fires; `InboundTurnService` starts the resulting agent turn.
+
+### 5.4 `TriggerPollerWorker`
 
 A background tokio task modelled on `TurnRunnerWorker`
 (`crates/ironclaw_reborn/src/turn_runner.rs`), which is the existing precedent
 for a long-lived Reborn background worker. Loop:
 
 1. Tick every `poll_interval` (config, default ~30s).
-2. Query `TriggerRepository` for `enabled && state == Scheduled &&
-   next_run_at <= now`, system-wide across all tenants — tenant isolation is
-   enforced by the captured scope on each `TriggerRecord`, not by query-level
-   scoping. Apply `max_fires_per_tick` (config, default 50) as a LIMIT so a
-   thundering-herd of co-scheduled triggers does not overflow a single tick;
-   excess triggers fire on subsequent ticks.
-3. For each due trigger, compute the **scheduled fire slot** — the canonical
-   timestamp the trigger was due for (the cron/interval slot, not wall-clock
-   now). Before submitting: check active turn-run count on threads belonging to
-   this trigger (threads whose `conversation_id` in the synthetic
-   `ExternalConversationRef` matches `trigger_id`). If the count exceeds
-   `max_concurrent_fires_per_trigger` (config, default 3), skip this trigger for
-   the current tick — this is a lightweight V1 back-pressure substitute for the
-   deferred `skip-if-running` guard and prevents unbounded thread accumulation
-   for short-interval / long-running trigger combinations. Then:
+2. Ask the schedule source provider to query `TriggerRepository` for `enabled &&
+   state == Scheduled && next_run_at <= now`, system-wide across all tenants —
+   tenant isolation is enforced by the captured scope on each `TriggerRecord`,
+   not by query-level scoping. Apply `max_fires_per_tick` (config, default 50)
+   as a LIMIT so a thundering-herd of co-scheduled triggers does not overflow a
+   single tick; excess triggers fire on subsequent ticks.
+3. For each `TriggerFire` emitted by the provider, check active turn-run count
+   on threads belonging to this trigger (threads whose `conversation_id` in the
+   synthetic `ExternalConversationRef` matches `identity.trigger_id`). If the
+   count exceeds `max_concurrent_fires_per_trigger` (config, default 3), skip
+   this trigger for the current tick — this is a lightweight V1 back-pressure
+   substitute for the deferred `skip-if-running` guard and prevents unbounded
+   thread accumulation for short-interval / long-running trigger combinations.
+   Then:
    a. Materialize `prompt` into the transcript/content store → `content_ref`.
       During a crash-retry or dual-poller scenario the same prompt is
       materialized twice; this is safe provided the content store is
       content-addressed (same bytes → same ref). Implementation must confirm
       content-store semantics; prefer content-addressed storage.
-   b. Build the synthetic `InboundTurnRequest` (§5.4) with a deterministic
-      `external_event_id` derived from `(trigger_id, scheduled_fire_slot)`.
+   b. Build the synthetic `InboundTurnRequest` (§5.5) with
+      `identity.route_thread_id` and `identity.external_event_id`.
    c. Call `handle_inbound_turn_with_trusted_scope(req, agent_id, project_id)`.
-4. On submit success: set `last_run_at`, `last_fired_slot = scheduled_slot`,
+4. On submit success: set `last_run_at`,
+   `last_fired_slot = identity.fire_slot`,
    `last_status = Ok` (= "submitted to turn queue"), recompute `next_run_at =
    next_slot_after(now)` — advancing from **now**, not from
    `last_fired_slot`. This means missed slots are skipped rather than
@@ -247,15 +308,17 @@ for a long-lived Reborn background worker. Loop:
 **At-least-once and the crash window (M1, M2).** The poller is not transactional
 across "submit turn" and "persist `last_fired_slot`". A crash in that window,
 or a second poller instance during a rolling deploy, will re-attempt the same
-scheduled slot. This is **safe by construction**: step 3b derives
-`external_event_id` deterministically from `(trigger_id, scheduled_fire_slot)`,
-so the re-attempt hits `InboundTurnService` idempotency replay (§4) and returns
-the original turn instead of creating a duplicate. No advisory lock is needed
-for correctness. The deterministic slot — not a random sequence number — is the
-mechanism; the earlier `{trigger_id}:{fire_seq}` form was wrong because two
-pollers would mint different sequence numbers. A single poller instance is
-still the V1 default for simplicity; a distributed lease remains deferred, now
-as an efficiency optimization rather than a correctness fix.
+scheduled slot. This is **safe by construction**: the provider derives
+`TriggerFireIdentity` deterministically from `(trigger_id, fire_slot)`, so step
+3b reuses the same stable route identity and `external_event_id`; the re-attempt
+hits `InboundTurnService` idempotency replay (§4) and returns the original turn
+instead of creating a duplicate. No advisory lock is needed for correctness. The
+deterministic slot — not a random
+sequence number — is the mechanism; the earlier `{trigger_id}:{fire_seq}` form
+was wrong because two pollers would mint different sequence numbers. A single
+poller instance is still the V1 default for simplicity; a distributed lease
+remains deferred, now as an efficiency optimization rather than a correctness
+fix.
 
 The worker is started by the Reborn composition root — the same startup path
 that spawns `TurnRunnerWorker`. `ironclaw_reborn_composition` owns wiring it
@@ -263,36 +326,41 @@ from config; the worker code lives in `ironclaw_triggers`. Implementation must
 confirm the composition root exposes a background-worker spawn hook and add one
 if it does not (H3).
 
-### 5.4 Synthetic `InboundTurnRequest` per fire
+### 5.5 Synthetic `InboundTurnRequest` per fire
 
 | Field | Value |
 | --- | --- |
 | `adapter_kind` | a reserved host-internal ingress value — see note below (H1) |
-| `external_conversation_ref` | `{ space_id: "trigger", conversation_id: trigger_id, thread_id: <per-fire ULID> }` → new thread |
-| `external_event_id` | deterministic: digest of `(trigger_id, scheduled_fire_slot)` |
+| `external_conversation_ref` | `{ space_id: "trigger", conversation_id: identity.trigger_id, thread_id: identity.route_thread_id }` → one new thread per fire slot |
+| `external_event_id` | `identity.external_event_id` |
 | `actor` | `TurnActor { user_id: creator_user_id }` — the creator's real authority, not a fake system actor |
 | `content_ref` | trigger prompt, materialized into the content store |
 | `route_kind` | direct |
 
 **`adapter_kind` and the transport question (H1).** A trigger fire is not a
-transport adapter — it is a host-internal synthetic event. The trigger crate's
-own taxonomy is `TriggerSourceKind` (§5.2). The wire `adapter_kind` on
-`InboundTurnRequest` is a separate concern: it identifies the *ingress* to the
-conversation layer. The trusted-ingress contract extension (§4) must define how
-host-internal ingress is represented in `adapter_kind` — either a reserved
-value dedicated to host-internal trusted ingress, or a representation that the
-conversation contract explicitly marks as non-transport. This is an open
-contract-extension question to settle during Level-0 ratification (§10); the
-design does not assume a specific `AdapterKind::Trigger` variant.
+product adapter event — it is a host-internal synthetic event produced by a
+trigger source provider (§5.3). The trigger crate's own taxonomy is
+`TriggerSourceKind` (§5.2). The wire `adapter_kind` on `InboundTurnRequest` is a
+separate concern: it identifies the *ingress* to the conversation layer for
+binding and idempotency. The trusted-ingress contract extension (§4) must define
+how host-internal trigger ingress is represented in `adapter_kind` — either a
+reserved value dedicated to host-internal trusted ingress, or a representation
+that the conversation contract explicitly marks as non-transport and
+unconstructible by product adapters. This is an open contract-extension
+question to settle during Level-0 ratification (§10); the design does not
+assume a specific `AdapterKind::Trigger` variant.
 
-The per-fire `thread_id` ULID is fresh per fire so each fire forks a new
-canonical thread. It is distinct from `external_event_id`: the ULID gives
-thread uniqueness, the deterministic `external_event_id` gives idempotency. A
-crash-retry of the same slot reuses the same `external_event_id` and replays —
-the replayed `AcceptedInboundMessage` carries the original thread, so a retry
-does not strand a second empty thread.
+The per-slot `thread_id` is deterministic, not stored. It is distinct from
+`external_event_id`: `identity.route_thread_id` gives one canonical thread per
+scheduled slot, while `identity.external_event_id` gives inbound idempotency. A
+crash-retry of the same slot recomputes the same `TriggerFireIdentity` and
+replays; the replayed
+`AcceptedInboundMessage` carries the original thread, so a retry does not
+strand a second empty thread. A future trigger-fire ledger could replace this
+computed inbound event identity, but V1 should not duplicate idempotency storage
+that the conversation layer already owns.
 
-### 5.5 Capabilities (`trigger_*`)
+### 5.6 Capabilities (`trigger_*`)
 
 `trigger_create`, `trigger_list`, `trigger_remove` are exposed through the
 Reborn capability/dispatch surface (`ironclaw_capabilities` /
@@ -324,18 +392,24 @@ lock.
 
 A dedicated trigger thread has no real external channel binding. The intended
 mechanism: on turn completion for a trigger thread, route the final assistant
-message to a configured **default notification channel** through Reborn
-outbound (`ironclaw_outbound`), using a validated reply target — the trigger's
-inbound carries a `reply_target_binding_ref` addressing the default channel's
-binding, and egress delivers through the standard validated reply-target path.
-This must **not** be a direct `SseManager::broadcast` call
-(`.claude/rules/gateway-events.md`).
+message through the communication delivery resolver
+(`2026-05-29-channel-communication-delivery-resolution.md`, proposed in
+nearai/ironclaw#4240) and then through Reborn outbound (`ironclaw_outbound`).
+The resolver is owned by
+`ironclaw_outbound` and receives enough context to distinguish triggered jobs
+from live user messages and approval-needed events; it returns only a candidate
+`ReplyTargetBindingRef`. `ironclaw_outbound` revalidates the target before send.
+The synthetic inbound request owns only trigger ingress identity; it must not
+smuggle the default notification destination through inbound binding state. This
+must **not** be a direct
+`SseManager::broadcast` call (`.claude/rules/gateway-events.md`).
 
-**Honest dependency note.** Reborn user-facing event/SSE transport and full
-product-channel egress are not all implemented yet. V1 delivery therefore
-requires: (a) `ironclaw_outbound` able to deliver to at least one channel, and
-(b) a configured, bound default-notification destination. If either is missing
-at implementation time, delivery moves to fast-follow and V1 acceptance is the
+**Honest dependency note.** Reborn user-facing event/SSE transport,
+communication delivery resolution, and full product-channel egress are not all
+implemented yet. V1 delivery therefore requires: (a) `ironclaw_outbound` able
+to validate and prepare delivery to at least one channel, and (b) a configured,
+bound communication target for the trigger creator. If either is missing at
+implementation time, delivery moves to fast-follow and V1 acceptance is the
 reduced criterion in §2 (trigger fires, turn runs, thread persists — the user
 reads the thread directly). Delivery design is not on the critical path for
 proving the trigger loop itself works.
@@ -345,21 +419,25 @@ proving the trigger loop itself works.
 - **Unattended approvals.** A triggered turn runs with no human present.
   Approvals are exact-invocation leases with no auto-approve (`approvals.md`).
   A tool call inside the loop that requires approval **fails closed** — there
-  is no human to grant it. When the turn-lifecycle feedback path is wired (H5),
-  the run updates `last_status = ApprovalBlocked`; before that path exists,
-  the blocked status is visible in the thread's turn history but not reflected
-  in `TriggerRecord.last_status`. V1 recommends triggered runs use a run
-  profile whose tool ceiling avoids approval-gated tools. A failed-closed
-  approval inside a triggered run is acceptable V1 behavior, not a bug.
-- **Create-time scope capture is a deliberate security decision (M4).** A
-  trigger captures `tenant/user/agent/project` at `trigger_create` time and
-  runs with that scope on every fire. If the creator's agent/project access is
-  later revoked, the trigger still fires with the originally captured scope
-  until it is removed. This is intentional: a trigger is a durable artifact
-  owned by its creator, not a live re-evaluation of current access. It is
-  documented here so it is a decision, not an accident. Revocation of a
-  trigger's authority is done by disabling/removing the trigger, or — as
-  fast-follow — by a re-validation step at fire time.
+  is no live human to grant it. The normal run-state/event path records
+  `ApprovalNeeded` / `BlockedApproval`; communication delivery resolution may
+  notify the user's approval target if the target supports gate prompts, but it
+  does not approve, deny, or resume the invocation. When the turn-lifecycle
+  feedback path is wired (H5), the run updates `last_status = ApprovalBlocked`;
+  before that path exists, the blocked status is visible in the thread's turn
+  history but not reflected in `TriggerRecord.last_status`. V1 recommends
+  triggered runs use a run profile whose tool ceiling avoids approval-gated
+  tools. A failed-closed approval inside a triggered run is acceptable V1
+  behavior, not a bug.
+- **Create-time scope capture plus fire-time revalidation (M4).** A trigger
+  captures `tenant/user/agent/project` at `trigger_create` time so schedule
+  execution is stable and auditable. Before each fire is submitted, the trigger
+  worker must revalidate that the creator and captured agent/project scope are
+  still authorized. If the tenant, user, agent, or project access has been
+  revoked, the fire is rejected fail-closed, `last_status = Error` (or a more
+  specific revocation status once modeled), and the trigger should be disabled
+  or surfaced for owner/admin action. A durable trigger is not a way to preserve
+  revoked authority.
 - **Fail-closed submission.** Binding or scope errors set `last_status = Error`
   and surface in `trigger_list`. No `unwrap_or_default` / `.ok()?` on repo or
   ingress calls.
@@ -372,20 +450,26 @@ proving the trigger loop itself works.
 - **Scope flow.** `tenant / user / agent / project` flows unbroken:
   `trigger_create` → `TriggerRecord` → synthetic inbound → trusted binding →
   `TurnScope` → agent loop. No axis is dropped.
+- **Trusted ingress is type-sealed.** The host-internal trigger ingress marker
+  and trusted-scope witness must be unconstructible by product adapters. The
+  conversation-binding contract must reject host-internal trusted ingress values
+  from all untrusted product-adapter paths; a plain public `adapter_kind` value
+  is not sufficient.
 
 ## 8. Testing
 
 - **Unit:** `next_run_at` / scheduled-slot computation for cron / interval /
   once; cron expression validation rejects bad input at create;
   `TriggerSchedule` / `TriggerRunStatus` serde round-trip; deterministic
-  `external_event_id` derivation is stable for a fixed `(trigger_id, slot)`.
+  `TriggerFireIdentity` derivation is stable for a fixed `(trigger_id, slot)`
+  and changes for a different slot.
 - **Caller-level (required — the poller gates turn submission, a side effect):**
   drive `TriggerPollerWorker` against a real `InboundTurnService` plus an
   in-memory `TurnCoordinator`, and assert:
   1. each fire creates a new canonical thread;
   2. binding resolution receives the trusted scope;
   3. a re-run of the same scheduled slot (simulated crash-retry and simulated
-     second poller) replays via the deterministic `external_event_id` rather
+     second poller) recomputes the same `TriggerFireIdentity` and replays rather
      than double-submitting.
 - **Capability tests** exercise `trigger_*` through the Reborn
   capability/dispatch surface, not the handler in isolation
@@ -401,9 +485,13 @@ proving the trigger loop itself works.
 
 - `docs/reborn/contracts/conversation-binding.md` — add the host-trusted
   ingress requirement, the `handle_inbound_turn_with_trusted_scope` facade
-  method, and the host-internal `adapter_kind` representation (§5.4, H1).
+  method, and the host-internal `adapter_kind` representation (§5.5, H1).
 - A new contract doc for the trigger system covering the `TriggerRecord` model,
-  poller semantics, deterministic-slot idempotency, and scope rules.
+  source-provider boundary, `TriggerFireIdentity`, poller semantics,
+  deterministic-slot idempotency, and scope rules.
+- The communication delivery resolution design from nearai/ironclaw#4240
+  (`2026-05-29-channel-communication-delivery-resolution.md`) must be promoted
+  to contracts before trigger delivery or approval notifications ship.
 - `docs/reborn/2026-04-25-current-architecture-map.md` — add `ironclaw_triggers`
   once the slice lands.
 
@@ -411,7 +499,7 @@ proving the trigger loop itself works.
 
 **Level-0 gate (must ratify before implementation).** The trusted-ingress
 contract extension to `conversation-binding.md` (§4) and the host-internal
-`adapter_kind` representation (§5.4) must be written and ratified first. This
+`adapter_kind` representation (§5.5) must be written and ratified first. This
 also depends on the Reborn turn-coordination wiring (Level-3 freeze-index item)
 being far enough along to run an end-to-end turn.
 
@@ -420,12 +508,13 @@ being far enough along to run an end-to-end turn.
 2. Implement `handle_inbound_turn_with_trusted_scope` in
    `ironclaw_conversations` with caller-level tests.
 3. New crate `ironclaw_triggers`: `TriggerRecord`, `TriggerRepository` trait,
-   domain enums, cron validation, in-memory implementation.
+   `TriggerSourceProvider` / `TriggerFire` / `TriggerFireIdentity` domain
+   types, cron validation, in-memory implementation.
 4. PostgreSQL + libSQL `TriggerRepository` implementations + parity tests.
 5. `TriggerPollerWorker` + caller-level tests (including slot-replay).
 6. `trigger_*` capabilities + registration on the Reborn capability surface.
-7. Delivery wiring to the default notification channel — only if Reborn
-   outbound is ready (§6); otherwise fast-follow.
+7. Delivery wiring through communication delivery resolution and Reborn outbound
+   — only if both are ready (§6); otherwise fast-follow.
 8. Composition wiring in `ironclaw_reborn_composition`; architecture tests.
 
 ## 11. Rejected review findings (for the record)
