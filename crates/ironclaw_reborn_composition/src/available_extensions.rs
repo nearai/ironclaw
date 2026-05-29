@@ -159,6 +159,9 @@ fn web_access_package() -> Result<AvailableExtensionPackage, ProductWorkflowErro
         "Web Access",
         WEB_ACCESS_MANIFEST,
         web_access_assets(),
+    )
+}
+
 fn nearai_mcp_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
     let manifest = nearai_mcp_manifest_toml()?;
     bundled_extension_package("nearai", "NEAR AI", &manifest, nearai_mcp_assets(&manifest))
@@ -185,16 +188,13 @@ pub(crate) fn gmail_manifest_digest() -> String {
     sha256_digest_token(GMAIL_MANIFEST.as_bytes())
 }
 
-<<<<<<< HEAD
 pub(crate) fn web_access_manifest_digest() -> String {
     sha256_digest_token(WEB_ACCESS_MANIFEST.as_bytes())
-pub(crate) fn nearai_mcp_manifest_toml() -> String {
-    NEARAI_MCP_MANIFEST.replace("https://private.near.ai/mcp", &nearai_mcp_url_from_env())
-=======
+}
+
 pub(crate) fn nearai_mcp_manifest_toml() -> Result<String, ProductWorkflowError> {
     let endpoint = nearai_mcp_endpoint_from_env().map_err(map_binding_error)?;
     nearai_mcp_manifest_toml_for_endpoint(&endpoint)
->>>>>>> a274bf73c (Address NEAR AI MCP review feedback)
 }
 
 fn nearai_mcp_manifest_toml_for_endpoint(
@@ -388,6 +388,11 @@ fn web_access_assets() -> Vec<AvailableExtensionAsset> {
             "prompts/web-access/get_content.md",
             include_bytes!(
                 "../../ironclaw_first_party_extensions/assets/web-access/prompts/web-access/get_content.md"
+            ),
+        ),
+    ]
+}
+
 fn nearai_mcp_assets(manifest: &str) -> Vec<AvailableExtensionAsset> {
     vec![
         bytes_asset("manifest.toml", manifest.as_bytes()),
@@ -908,8 +913,7 @@ mod tests {
     fn bundled_first_party_manifest_asset_refs_are_packaged() {
         let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
 
-        for extension_id in ["web-access", "google-calendar", "gmail"] {
-        for extension_id in ["nearai", "google-calendar", "gmail"] {
+        for extension_id in ["web-access", "nearai", "google-calendar", "gmail"] {
             let package_ref =
                 LifecyclePackageRef::new(LifecyclePackageKind::Extension, extension_id).unwrap();
             let package = catalog.resolve(&package_ref).unwrap();

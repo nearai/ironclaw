@@ -98,12 +98,8 @@ use crate::{
         extend_builtin_first_party_package, insert_handlers as insert_extension_lifecycle_handlers,
     },
     gsuite::register_bundled_gsuite_first_party_handlers,
-<<<<<<< HEAD
-    web_access::register_bundled_web_access_first_party_handlers,
-    nearai_mcp::nearai_mcp_runtime,
-=======
     nearai_mcp::{nearai_mcp_endpoint_from_env, nearai_mcp_runtime},
->>>>>>> a274bf73c (Address NEAR AI MCP review feedback)
+    web_access::register_bundled_web_access_first_party_handlers,
 };
 
 #[cfg(feature = "libsql")]
@@ -1203,6 +1199,8 @@ fn gsuite_allowed_effects() -> Vec<EffectKind> {
 
 fn web_access_allowed_effects() -> Vec<EffectKind> {
     vec![EffectKind::DispatchCapability, EffectKind::Network]
+}
+
 #[cfg(test)]
 fn nearai_allowed_effects() -> Vec<EffectKind> {
     vec![
@@ -1929,10 +1927,6 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let services = build_reborn_services(RebornBuildInput::local_dev(
             "local-dev-web-access-owner",
-    async fn local_dev_nearai_mcp_installs_and_activates_model_visible_capability() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let services = build_reborn_services(RebornBuildInput::local_dev(
-            "local-dev-nearai-mcp-owner",
             dir.path().join("local-dev"),
         ))
         .await
@@ -1977,6 +1971,22 @@ mod tests {
         };
         assert_eq!(failure.capability_id.as_str(), "web-access.search");
         assert_eq!(failure.kind, RuntimeFailureKind::Backend);
+    }
+
+    #[tokio::test]
+    async fn local_dev_nearai_mcp_installs_and_activates_model_visible_capability() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let services = build_reborn_services(RebornBuildInput::local_dev(
+            "local-dev-nearai-mcp-owner",
+            dir.path().join("local-dev"),
+        ))
+        .await
+        .expect("local-dev services build");
+        let local_runtime = services.local_runtime.as_ref().expect("local runtime");
+        let extension_management = local_runtime
+            .extension_management
+            .as_ref()
+            .expect("extension management");
         let nearai_ref =
             LifecyclePackageRef::new(LifecyclePackageKind::Extension, "nearai").expect("valid ref");
 

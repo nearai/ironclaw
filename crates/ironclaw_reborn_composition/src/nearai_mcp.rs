@@ -315,6 +315,64 @@ mod tests {
         );
     }
 
+    #[test]
+    fn planner_denies_nearai_url_for_wrong_provider() {
+        let endpoint = nearai_mcp_endpoint_from_base(None).unwrap();
+        let planner = NearAiMcpEgressPlanner {
+            endpoint: endpoint.clone(),
+        };
+        let other_provider = ironclaw_host_api::ExtensionId::new("not-nearai").unwrap();
+        let capability_id = CapabilityId::new("nearai.search").unwrap();
+        let scope = scope();
+        let request = McpHostHttpEgressPlanRequest {
+            provider: &other_provider,
+            capability_id: &capability_id,
+            scope: &scope,
+            transport: "http",
+            method: ironclaw_host_api::NetworkMethod::Post,
+            url: "https://private.near.ai/mcp",
+            headers: &[],
+            body: &[],
+        };
+        assert!(
+            planner
+                .plan(request)
+                .network_policy
+                .allowed_targets
+                .is_empty(),
+            "wrong provider must produce empty plan"
+        );
+    }
+
+    #[test]
+    fn planner_denies_http_nearai_url() {
+        let endpoint = nearai_mcp_endpoint_from_base(None).unwrap();
+        let planner = NearAiMcpEgressPlanner {
+            endpoint: endpoint.clone(),
+        };
+        let provider = ironclaw_host_api::ExtensionId::new("nearai").unwrap();
+        let capability_id = CapabilityId::new("nearai.search").unwrap();
+        let scope = scope();
+        let request = McpHostHttpEgressPlanRequest {
+            provider: &provider,
+            capability_id: &capability_id,
+            scope: &scope,
+            transport: "http",
+            method: ironclaw_host_api::NetworkMethod::Post,
+            url: "http://private.near.ai/mcp",
+            headers: &[],
+            body: &[],
+        };
+        assert!(
+            planner
+                .plan(request)
+                .network_policy
+                .allowed_targets
+                .is_empty(),
+            "http scheme must produce empty plan"
+        );
+    }
+
     fn scope() -> ResourceScope {
         ResourceScope {
             tenant_id: TenantId::new("tenant-a").unwrap(),
