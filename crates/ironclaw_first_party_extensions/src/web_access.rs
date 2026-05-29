@@ -1,8 +1,9 @@
 use std::{
     collections::{HashMap, VecDeque},
-    sync::{Arc, Mutex, OnceLock},
+    sync::{Arc, Mutex},
 };
 
+use futures_util::FutureExt as _;
 use ironclaw_host_api::{
     CapabilityId, InvocationId, NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern,
     ResourceScope, ResourceUsage, RuntimeDispatchErrorKind, RuntimeHttpEgress,
@@ -28,7 +29,6 @@ const DEFAULT_CONTEXT_CHARS: u64 = 3_000;
 const INCLUDE_CONTENT_CONTEXT_CHARS: u64 = 50_000;
 const DEFAULT_TIMEOUT_MS: u32 = 60_000;
 const RESPONSE_BODY_LIMIT: u64 = 2 * 1024 * 1024;
-const MAX_BLOCKING_HTTP_EGRESS: usize = 8;
 
 #[derive(Debug, Default)]
 pub struct WebAccessExecutor {
@@ -359,17 +359,8 @@ async fn execute_runtime_http(
     request: RuntimeHttpEgressRequest,
     egress: Arc<dyn RuntimeHttpEgress>,
 ) -> Result<ironclaw_host_api::RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
-    static HTTP_EGRESS_SEMAPHORE: OnceLock<tokio::sync::Semaphore> = OnceLock::new();
-    let _permit = HTTP_EGRESS_SEMAPHORE
-        .get_or_init(|| tokio::sync::Semaphore::new(MAX_BLOCKING_HTTP_EGRESS))
-        .acquire()
-        .await
-        .map_err(|_| RuntimeHttpEgressError::Network {
-            reason: "worker_join".to_string(),
-            request_bytes: 0,
-            response_bytes: 0,
-        })?;
-    tokio::task::spawn_blocking(move || egress.execute(request))
+    std::panic::AssertUnwindSafe(egress.execute(request))
+        .catch_unwind()
         .await
         .map_err(|_| RuntimeHttpEgressError::Network {
             reason: "worker_join".to_string(),
@@ -682,8 +673,9 @@ mod tests {
         }
     }
 
+    #[async_trait::async_trait]
     impl RuntimeHttpEgress for RecordingEgress {
-        fn execute(
+        async fn execute(
             &self,
             _request: RuntimeHttpEgressRequest,
         ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
