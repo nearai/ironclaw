@@ -14,15 +14,16 @@ selecting, refreshing, and cleaning up credentials for integrations,
 providers, extensions, MCP servers, WASM tools/channels, and future identity
 login flows.
 
-This slice is contract-first. It defines Reborn-native vocabulary and fake
-services, #3811 adds a Reborn composition seam, #3812 adds callback completion
-handling, #3881 mounts the first Reborn-native OAuth start/callback HTTP routes
-through `ironclaw_reborn_composition`, #3882 adds the composition-facing
-manual-token secure-submit entrypoint, #3883 adds recovery/selection facade
-coverage, and #3884 adds refresh/cleanup lifecycle contracts. It does not
-migrate production extension setup routes, CLI/setup flows, durable secret
-storage, a production refresh scheduler/HTTP provider implementation, or runtime
-credential injection.
+This slice is contract-first. `ironclaw_auth` defines Reborn-native vocabulary,
+traits, validation helpers, and fake services. `ironclaw_reborn_composition`
+owns the production filesystem-backed adapter and factory wiring. #3811 adds a
+Reborn composition seam, #3812 adds callback completion handling, #3881 mounts
+the first Reborn-native OAuth start/callback HTTP routes through
+`ironclaw_reborn_composition`, #3882 adds the composition-facing manual-token
+secure-submit entrypoint, #3883 adds recovery/selection facade coverage, and
+#3884 adds refresh/cleanup lifecycle contracts. It does not migrate production
+extension setup routes, CLI/setup flows, a production refresh scheduler/HTTP
+provider implementation, or runtime credential injection.
 
 Behavior may remain compatible with legacy UX. Code paths must not mingle V1
 components with Reborn components: V1 route handlers, pending maps, extension
@@ -58,7 +59,9 @@ claims the flow through `AuthFlowManager`, performs provider exchange through
 dispatches an `AuthContinuationEvent` to the injected continuation dispatcher.
 If continuation dispatch fails, the handler returns a sanitized retryable error
 instead of reporting callback success; retrying an already-completed callback
-may re-dispatch the typed continuation without re-exchanging provider code.
+may re-dispatch the typed continuation without re-exchanging provider code until
+that dispatch is durably marked. After the continuation marker is stored,
+callback replay returns the completed flow without dispatching again.
 Callback route code must not activate extensions, resume turns, replay prompts,
 or dispatch runtime work directly.
 
@@ -111,6 +114,61 @@ AuthProductScope + CredentialAccountId -> CredentialAccount
 In-memory maps are allowed only as fakes, tests, or non-authoritative
 accelerators. Production product authority must be durable Reborn state, not
 V1 pending maps.
+
+## Durable Production Slice (#4175)
+
+Production product-auth records use the `ironclaw_auth` contract types and are
+stored by the `ironclaw_reborn_composition` filesystem adapter under the normal
+Reborn scoped filesystem substrate, rooted at the caller's
+`/secrets/product-auth/{surface}` tree. The production factory constructs
+`FilesystemAuthProductServices` over the same libSQL/PostgreSQL-backed
+`ScopedFilesystem` and `SecretStore` used by the rest of Reborn; callers no
+longer need to inject `InMemoryAuthProductServices` or an external product-auth
+facade for production.
+
+The storage-home decision is deliberately **not** to make
+`ironclaw_secrets::CredentialAccountStore` own product-auth UX records. Runtime
+credential broker accounts and product-auth account records have different
+semantics. Product-auth durable records store provider id, label, ownership,
+owner extension, grants, status, provider scopes, and access/refresh secret
+handles directly in filesystem JSON records; raw manual-token values and
+provider token values are stored only through `SecretStore` and referenced by
+handles.
+
+Indexing is path-first for this slice:
+
+```text
+/secrets/.../product-auth/{surface}/flows/{flow_id}.json
+/secrets/.../product-auth/{surface}/interactions/{interaction_id}.json
+/secrets/.../product-auth/{surface}/accounts/{account_id}.json
+```
+
+Account lookup by provider/scope/extension/status is implemented by scoped
+account listing plus in-memory filtering over redacted metadata. This keeps raw
+secret values, host paths, and backend details out of query indexes while the
+record volume is still small. If product-auth account volume grows, add
+filesystem record indexes for provider/status/owner/grants without indexing
+secret handles or raw token material.
+
+OAuth callback de-duplication is flow-id based. Callback-created accounts use
+a deterministic account id derived from the flow id; bound reauthorization
+updates the pre-authorized account id captured in the flow. Completed flows
+return their stored credential account id on callback retry/replay, so provider
+code is not re-exchanged after a completed durable claim.
+
+Google OAuth production config is resolved by host composition before provider
+client construction. Injected `OAuthClientConfig` is the canonical production
+source for client id, optional client secret, and redirect URI in this slice.
+Legacy Google tool environment variables remain bootstrap compatibility for
+older v1/v2 tool paths only until a Reborn settings-config resolver explicitly
+adopts and documents them. Production startup rejects malformed OAuth config at
+construction time through the typed `OAuthClientConfig` validators.
+
+The HA-safe PKCE decision for this slice is documented sticky callback routing:
+the mounted WebUI OAuth route keeps raw PKCE verifiers in process-local bounded
+state while durable flow records store only hashes. Single-instance or sticky
+callback deployments are supported. Multi-replica/restart-surviving deployments
+must add a host-owned encrypted verifier store before claiming HA safety.
 
 ---
 

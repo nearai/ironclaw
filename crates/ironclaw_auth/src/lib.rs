@@ -11,6 +11,7 @@
 
 mod cleanup;
 mod credential;
+mod domain;
 mod error;
 mod fakes;
 mod flow;
