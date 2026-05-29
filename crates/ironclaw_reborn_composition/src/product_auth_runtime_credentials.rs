@@ -11,7 +11,6 @@ use ironclaw_host_runtime::{
     RuntimeCredentialAccountError, RuntimeCredentialAccountRequest,
     RuntimeCredentialAccountResolver,
 };
-use tracing;
 
 #[derive(Clone)]
 pub(crate) struct ProductAuthRuntimeCredentialResolver {

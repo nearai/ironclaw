@@ -1256,31 +1256,18 @@ impl BuiltinObligationHandler {
                 })
                 .await
                 .map_err(runtime_credential_account_error)?;
-            let lease = secret_store
-                .lease_once(&request.context.resource_scope, &access_secret)
-                .await
-                .map_err(|e| {
-                    tracing::debug!(err = %e, "credential account lease_once failed");
-                    secret_obligation_failed()
-                })?;
-            let secret = secret_store
-                .consume(&request.context.resource_scope, lease.id)
-                .await
-                .map_err(|e| {
-                    tracing::debug!(err = %e, "credential account consume failed");
-                    secret_obligation_failed()
-                })?;
-            secret_injections
-                .insert(
-                    &request.context.resource_scope,
-                    request.capability_id,
-                    obligation.handle,
-                    secret,
-                )
-                .map_err(|e| {
-                    tracing::debug!(err = %e, "credential account injection insert failed");
-                    secret_obligation_failed()
-                })?;
+            // Retrieve and stage the resolved credential under the obligation's injection handle.
+            // The access_secret names the material in the secret store; obligation.handle is
+            // the slot name the WASM guest expects.
+            stage_credential_material(
+                secret_store.as_ref(),
+                secret_injections,
+                &request.context.resource_scope,
+                request.capability_id,
+                &access_secret,
+                obligation.handle,
+            )
+            .await?;
         }
 
         Ok(())
@@ -1729,6 +1716,37 @@ fn runtime_credential_account_error(
         RuntimeCredentialAccountError::AuthRequired => CapabilityObligationError::AuthRequired,
         RuntimeCredentialAccountError::Failed => secret_obligation_failed(),
     }
+}
+
+/// Retrieve `source` from the secret store and stage the material under `target`
+/// in the injection store for the given capability invocation.
+///
+/// Used when the secret store key (`source`) differs from the runtime injection slot
+/// (`target`) — for example, when a product-auth account's backing secret is resolved
+/// to a concrete handle before being injected under the WASM guest's declared slot name.
+async fn stage_credential_material(
+    secret_store: &dyn SecretStore,
+    secret_injections: &RuntimeSecretInjectionStore,
+    scope: &ResourceScope,
+    capability_id: &CapabilityId,
+    source: &SecretHandle,
+    target: &SecretHandle,
+) -> Result<(), CapabilityObligationError> {
+    let lease = secret_store.lease_once(scope, source).await.map_err(|e| {
+        tracing::debug!(err = %e, "stage_credential_material: lease_once failed");
+        secret_obligation_failed()
+    })?;
+    let secret = secret_store.consume(scope, lease.id).await.map_err(|e| {
+        tracing::debug!(err = %e, "stage_credential_material: consume failed");
+        secret_obligation_failed()
+    })?;
+    secret_injections
+        .insert(scope, capability_id, target, secret)
+        .map_err(|e| {
+            tracing::debug!(err = %e, "stage_credential_material: insert failed");
+            secret_obligation_failed()
+        })?;
+    Ok(())
 }
 
 fn network_policy_obligation(
