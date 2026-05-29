@@ -461,7 +461,7 @@ impl LoopFailureKind {
 /// Fields are private so callers cannot mint trusted evidence with struct
 /// literal syntax outside this module. Use named constructors for fail-closed
 /// test policies, and derive production policies from host-owned evidence.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
 pub(crate) struct LoopExitValidationPolicy {
     require_final_checkpoint: bool,
     allow_no_reply_completion: bool,
@@ -553,20 +553,6 @@ impl LoopExitValidationPolicy {
     #[cfg(test)]
     pub(crate) fn failure_evidence_verified(&self) -> bool {
         self.failure_evidence_verified
-    }
-}
-
-impl Default for LoopExitValidationPolicy {
-    fn default() -> Self {
-        Self {
-            require_final_checkpoint: false,
-            allow_no_reply_completion: false,
-            final_checkpoint_verified: false,
-            host_cancellation_observed: false,
-            completion_refs_verified: false,
-            blocked_evidence_verified: false,
-            failure_evidence_verified: false,
-        }
     }
 }
 
