@@ -1604,6 +1604,15 @@ where
     .with_filesystem_turn_state_store(stores.scoped_filesystem)
     .with_run_profile_resolver(planned_run_profile_resolver()?)
     .with_turn_run_wake_notifier(production_wiring.turn_run_wake_notifier);
+    // Wire product-auth credential resolver when product auth is available, so that
+    // ProductAuthAccount runtime credentials are resolved before host-runtime egress.
+    // Mirrors the same wiring in build_local_dev.
+    let services = match &product_auth_ports {
+        Some(ports) => services.with_runtime_credential_account_resolver(Arc::new(
+            ProductAuthRuntimeCredentialResolver::new(ports.credential_account_service()),
+        )),
+        None => services,
+    };
     let google_provider_client = google_oauth_config
         .map(|config| {
             let runtime_ports = require_product_auth_runtime_ports(&services)?;
