@@ -1139,8 +1139,33 @@ mod tests {
 
     #[test]
     fn auth_requirement_classifies_each_credential_dispatch_reason() {
-        // Recovery -> Some(default): projection is preserved via reason(),
-        // not via the requirement struct (see auth_requirement doc-comment).
+        // Recovery(Configured) -> None: backend infra failure, must NOT trigger the
+        // auth gate even though it carries a Recovery reason.  This is the S1 fix—
+        // the old catch-all Recovery(_) arm incorrectly returned Some(vec![]) here.
+        let configured_proj = ironclaw_auth::CredentialRecoveryProjection::configured(
+            ironclaw_auth::AuthProviderId::new("google").unwrap(),
+            ironclaw_auth::CredentialAccountProjection {
+                id: ironclaw_auth::CredentialAccountId::new(),
+                provider: ironclaw_auth::AuthProviderId::new("google").unwrap(),
+                label: ironclaw_auth::CredentialAccountLabel::new("Google").unwrap(),
+                status: ironclaw_auth::CredentialAccountStatus::Configured,
+                ownership: ironclaw_auth::CredentialOwnership::UserReusable,
+                owner_extension: None,
+                granted_extensions: Vec::new(),
+                secret_handle_count: 1,
+            },
+        );
+        let configured_recovery = GsuiteDispatchError::new(RuntimeDispatchErrorKind::Backend)
+            .with_reason(GsuiteCredentialDispatchReason::Recovery(configured_proj));
+        assert_eq!(
+            configured_recovery.auth_requirement(),
+            None,
+            "Recovery(Configured) is a backend infra failure — must not trigger the auth gate"
+        );
+        assert!(!configured_recovery.is_auth_required());
+
+        // Recovery(SetupRequired) -> Some(empty): user-actionable, triggers auth gate.
+        // Richer projection is preserved via reason() per the doc-comment contract.
         let recovery = GsuiteDispatchError::new(RuntimeDispatchErrorKind::Client).with_reason(
             GsuiteCredentialDispatchReason::Recovery(
                 ironclaw_auth::CredentialRecoveryProjection::setup_required(
