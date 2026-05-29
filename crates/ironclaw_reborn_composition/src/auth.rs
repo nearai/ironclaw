@@ -19,6 +19,18 @@ use ironclaw_product_workflow::ProductAuthTurnGateResumeDispatcher;
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 
+/// Dispatches a typed continuation event once an OAuth callback flow has
+/// completed.
+///
+/// # Idempotency contract
+///
+/// Implementations MUST be idempotent on `flow_id`.  The product-auth layer
+/// guarantees *at-least-once* delivery: if `dispatch_auth_continuation`
+/// succeeds but the subsequent `mark_continuation_dispatched` call fails
+/// (e.g. a transient `BackendConflict` or `BackendUnavailable`), the caller
+/// will retry the full callback path and dispatch the same `flow_id` again.
+/// An implementation that assumes exactly-once delivery will process duplicate
+/// continuations and is incorrect.
 #[async_trait]
 pub trait RebornAuthContinuationDispatcher: Send + Sync {
     async fn dispatch_auth_continuation(
