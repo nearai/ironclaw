@@ -8,8 +8,8 @@ use ironclaw_threads::{
 };
 use ironclaw_turns::{
     LoopBlockedKind, LoopCheckpointKind, LoopCompleted, LoopCompletionKind, LoopExit, LoopFailed,
-    LoopFailureKind, LoopMessageRef, LoopResultRef, TurnCheckpointId, TurnError, TurnId, TurnRunId,
-    TurnScope, TurnStateStore, TurnStatus,
+    LoopFailureKind, LoopGateRef, LoopMessageRef, LoopResultRef, TurnCheckpointId, TurnError,
+    TurnId, TurnRunId, TurnScope, TurnStateStore, TurnStatus,
 };
 
 use super::{
@@ -154,11 +154,13 @@ async fn auth_blocked_exit_with_durable_checkpoint_maps_to_blocked_auth() {
     let checkpoint_id = TurnCheckpointId::new();
     let state_ref = ironclaw_turns::LoopCheckpointStateRef::new("checkpoint:auth-blocked-state")
         .expect("valid state ref");
-    let checkpoint = loop_checkpoint_record(
+    let gate_ref = LoopGateRef::new("gate:test").expect("valid gate ref");
+    let checkpoint = loop_checkpoint_record_with_gate(
         &claimed,
         checkpoint_id,
         state_ref.clone(),
         LoopCheckpointKind::BeforeBlock,
+        Some(gate_ref),
     );
     let transition = Arc::new(RecordingTransitionPort::new());
     let evidence = Arc::new(text_checkpoint_evidence(Arc::new(
@@ -907,11 +909,13 @@ async fn thread_checkpoint_evidence_verifies_auth_blocked_checkpoint() {
     let checkpoint_id = TurnCheckpointId::new();
     let state_ref = ironclaw_turns::LoopCheckpointStateRef::new("checkpoint:auth-blocked-state")
         .expect("valid state ref");
-    let checkpoint = loop_checkpoint_record(
+    let gate_ref = LoopGateRef::new("gate:test").expect("valid gate ref");
+    let checkpoint = loop_checkpoint_record_with_gate(
         &claimed,
         checkpoint_id,
         state_ref.clone(),
         LoopCheckpointKind::BeforeBlock,
+        Some(gate_ref),
     );
     let evidence = text_checkpoint_evidence(Arc::new(StaticLoopCheckpointStore::new(checkpoint)));
     let exit = blocked_exit_with_checkpoint(LoopBlockedKind::Auth, checkpoint_id, state_ref);
@@ -929,6 +933,45 @@ async fn thread_checkpoint_evidence_verifies_auth_blocked_checkpoint() {
         .expect("auth blocked evidence should verify through checkpoint lookup");
 
     assert!(verified);
+}
+
+#[tokio::test]
+async fn thread_checkpoint_evidence_rejects_auth_blocked_checkpoint_gate_mismatch() {
+    // A checkpoint from a different gate (e.g. an Approval block) must not
+    // validate as Auth evidence even when the state_ref matches.
+    let claimed = claimed_run();
+    let checkpoint_id = TurnCheckpointId::new();
+    let state_ref = ironclaw_turns::LoopCheckpointStateRef::new("checkpoint:auth-blocked-state")
+        .expect("valid state ref");
+    // Checkpoint carries a *different* gate_ref (e.g. from an Approval block).
+    let checkpoint_gate = LoopGateRef::new("gate:approval").expect("valid gate ref");
+    let checkpoint = loop_checkpoint_record_with_gate(
+        &claimed,
+        checkpoint_id,
+        state_ref.clone(),
+        LoopCheckpointKind::BeforeBlock,
+        Some(checkpoint_gate),
+    );
+    let evidence = text_checkpoint_evidence(Arc::new(StaticLoopCheckpointStore::new(checkpoint)));
+    // Blocked exit claims Auth but reuses the Approval-gate checkpoint id.
+    let exit = blocked_exit_with_checkpoint(LoopBlockedKind::Auth, checkpoint_id, state_ref);
+    let LoopExit::Blocked(blocked) = &exit else {
+        unreachable!("blocked helper returns blocked exit")
+    };
+    let verified = evidence
+        .verify_blocked_evidence(BlockedEvidenceRequest {
+            scope: &claimed.state.scope,
+            turn_id: claimed.state.turn_id,
+            run_id: claimed.state.run_id,
+            blocked,
+        })
+        .await
+        .expect("gate mismatch should be a closed evidence miss, not an error");
+
+    assert!(
+        !verified,
+        "cross-gate checkpoint reuse must not verify as Auth"
+    );
 }
 
 #[tokio::test]

@@ -283,6 +283,11 @@ where
                 // applier persist that state.
                 return Ok(false);
             }
+            // `LoopBlockedKind` is `#[non_exhaustive]` in a sibling crate, so
+            // the compiler requires a wildcard arm. Any unknown variant is
+            // intentionally failed closed: we have no evidence model for it
+            // yet, and treating it as unverified prevents a new variant from
+            // silently routing through the Auth carve-out.
             _ => return Ok(false),
         }
 
@@ -299,8 +304,13 @@ where
             return Ok(false);
         };
 
+        // Bind gate identity: the checkpoint must have been created for the
+        // exact same gate that the blocked exit reports. This prevents a rogue
+        // driver from reusing a legitimate BeforeBlock checkpoint (e.g. from
+        // an Approval or Resource gate in the same run) as Auth evidence.
         Ok(checkpoint.kind == LoopCheckpointKind::BeforeBlock
-            && checkpoint.state_ref == request.blocked.state_ref)
+            && checkpoint.state_ref == request.blocked.state_ref
+            && checkpoint.gate_ref.as_ref() == Some(&request.blocked.gate_ref))
     }
 
     async fn verify_failure_evidence(

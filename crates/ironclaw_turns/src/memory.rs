@@ -410,6 +410,7 @@ impl LoopCheckpointStore for InMemoryTurnStateStore {
             schema_id: request.schema_id,
             schema_version: request.schema_version,
             kind: request.kind,
+            gate_ref: request.gate_ref,
             created_at: Utc::now(),
         };
         let mut inner = self.lock_inner()?;

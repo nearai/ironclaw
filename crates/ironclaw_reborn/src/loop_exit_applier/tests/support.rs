@@ -207,6 +207,16 @@ pub(super) fn loop_checkpoint_record(
     state_ref: LoopCheckpointStateRef,
     kind: LoopCheckpointKind,
 ) -> LoopCheckpointRecord {
+    loop_checkpoint_record_with_gate(claimed, checkpoint_id, state_ref, kind, None)
+}
+
+pub(super) fn loop_checkpoint_record_with_gate(
+    claimed: &ClaimedTurnRun,
+    checkpoint_id: TurnCheckpointId,
+    state_ref: LoopCheckpointStateRef,
+    kind: LoopCheckpointKind,
+    gate_ref: Option<LoopGateRef>,
+) -> LoopCheckpointRecord {
     LoopCheckpointRecord {
         checkpoint_id,
         scope: claimed.state.scope.clone(),
@@ -216,6 +226,7 @@ pub(super) fn loop_checkpoint_record(
         schema_id: claimed.resolved_run_profile.checkpoint_schema_id.clone(),
         schema_version: claimed.resolved_run_profile.checkpoint_schema_version,
         kind,
+        gate_ref,
         created_at: chrono::Utc::now(),
     }
 }

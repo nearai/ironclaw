@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
-    CheckpointSchemaId, LoopCheckpointKind, LoopCheckpointStateRef, RunProfileVersion,
+    CheckpointSchemaId, LoopCheckpointKind, LoopCheckpointStateRef, LoopGateRef, RunProfileVersion,
     TurnCheckpointId, TurnError, TurnId, TurnRunId, TurnScope, TurnTimestamp,
 };
 
@@ -170,6 +170,11 @@ pub struct LoopCheckpointRecord {
     pub schema_id: CheckpointSchemaId,
     pub schema_version: RunProfileVersion,
     pub kind: LoopCheckpointKind,
+    /// Gate that triggered this checkpoint. `None` for checkpoint kinds other
+    /// than `BeforeBlock` and for legacy records persisted before this field
+    /// was added.
+    #[serde(default)]
+    pub gate_ref: Option<LoopGateRef>,
     pub created_at: TurnTimestamp,
 }
 
@@ -182,6 +187,8 @@ pub struct PutLoopCheckpointRequest {
     pub schema_id: CheckpointSchemaId,
     pub schema_version: RunProfileVersion,
     pub kind: LoopCheckpointKind,
+    /// Gate identity for `BeforeBlock` checkpoints; `None` for other kinds.
+    pub gate_ref: Option<LoopGateRef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -279,6 +286,7 @@ impl LoopCheckpointStore for InMemoryLoopCheckpointStore {
             schema_id: request.schema_id,
             schema_version: request.schema_version,
             kind: request.kind,
+            gate_ref: request.gate_ref,
             created_at: Utc::now(),
         };
         let mut records = self.records.lock().map_err(|_| TurnError::Unavailable {
