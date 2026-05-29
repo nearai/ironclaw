@@ -935,15 +935,12 @@ impl Agent {
 
         // Phase 2: Score-based selection on the rewritten message
         let skills_cfg = &self.deps.skills_config;
-        let outcome = ironclaw_skills::prefilter_skills_with_options(
+        let outcome = ironclaw_skills::prefilter_skills(
             &rewritten,
             &available,
             skills_cfg.max_active_skills,
             skills_cfg.max_context_tokens,
             &satisfied,
-            ironclaw_skills::SkillSelectionOptions::with_regex_activation_enabled(
-                skills_cfg.regex_activation_enabled,
-            ),
         );
 
         // Feedback notes: start with the selector's own notes (chain-load,

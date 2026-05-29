@@ -86,27 +86,3 @@ impl SkillsConfig {
         })
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::config::helpers::lock_env;
-
-    #[test]
-    fn skills_config_resolve_reads_regex_activation_enabled_from_env() {
-        let _guard = lock_env();
-        let key = "SKILLS_REGEX_ACTIVATION_ENABLED";
-        // SAFETY: test runs under ENV_MUTEX
-        unsafe { std::env::set_var(key, "false") };
-
-        let settings = crate::settings::Settings::default();
-        let config = SkillsConfig::resolve(&settings).expect("should resolve");
-        assert!(
-            !config.regex_activation_enabled,
-            "env var should disable regex activation when settings at default"
-        );
-
-        // Clean up
-        unsafe { std::env::remove_var(key) };
-    }
-}

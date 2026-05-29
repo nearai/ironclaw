@@ -144,7 +144,15 @@ pub trait TurnRunTransitionPort: Send + Sync {
     async fn record_runner_failure(
         &self,
         request: RecordRunnerFailureRequest,
-    ) -> Result<TurnRunState, TurnError>;
+    ) -> Result<TurnRunState, TurnError> {
+        self.fail_run(FailRunRequest {
+            run_id: request.run_id,
+            runner_id: request.runner_id,
+            lease_token: request.lease_token,
+            failure: request.failure,
+        })
+        .await
+    }
 
     async fn apply_validated_loop_exit(
         &self,

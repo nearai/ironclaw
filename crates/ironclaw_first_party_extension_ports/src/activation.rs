@@ -11,8 +11,8 @@ use ironclaw_loop_support::{
     SkillSourceKind, sort_skill_bundle_descriptors,
 };
 use ironclaw_skills::{
-    LoadedSkill, SkillSelectionOptions, SkillSource, extract_skill_mentions, parse_skill_md,
-    prefilter_skills_with_options, skill_token_cost,
+    LoadedSkill, SkillSource, extract_skill_mentions, parse_skill_md, prefilter_skills,
+    skill_token_cost,
 };
 use ironclaw_turns::run_profile::{LoopRunContext, SkillVisibility};
 use ironclaw_turns::{AcceptedMessageRef, TurnRunId, TurnScope};
@@ -63,7 +63,6 @@ pub enum SkillActivationMode {
 pub struct SkillActivationSelectorConfig {
     pub max_active_skills: usize,
     pub max_context_tokens: usize,
-    pub regex_activation_enabled: bool,
 }
 
 impl Default for SkillActivationSelectorConfig {
@@ -71,7 +70,6 @@ impl Default for SkillActivationSelectorConfig {
         Self {
             max_active_skills: DEFAULT_MAX_ACTIVE_SKILLS,
             max_context_tokens: DEFAULT_MAX_SKILL_CONTEXT_TOKENS,
-            regex_activation_enabled: true,
         }
     }
 }
@@ -82,6 +80,17 @@ pub struct SkillActivationSelection {
     pub activations: Vec<SkillActivationRequest>,
     pub rewritten_message: String,
     pub feedback: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillActivationObservedEvent {
+    pub run_context: LoopRunContext,
+    pub activations: Vec<SkillActivationRequest>,
+    pub feedback: Vec<String>,
+}
+
+pub trait SkillActivationObserver: std::fmt::Debug + Send + Sync {
+    fn observe_skill_activation(&self, event: SkillActivationObservedEvent);
 }
 
 /// Fully resolved activation output for one user message.
@@ -171,6 +180,7 @@ where
     bundle_source: Arc<S>,
     config: SkillActivationSelectorConfig,
     setup_marker_source: Option<Arc<dyn SetupMarkerSource>>,
+    activation_observer: Mutex<Option<Arc<dyn SkillActivationObserver>>>,
     messages_by_run: Mutex<HashMap<SkillActivationMessageKey, SkillActivationMessage>>,
     activation_cache: Mutex<HashMap<ActivationCandidateCacheKey, CachedActivationCandidate>>,
     plans_by_run: Mutex<HashMap<(TurnScope, TurnRunId), CapturedSkillActivationPlan>>,
@@ -195,15 +205,11 @@ where
             bundle_source,
             config,
             setup_marker_source: None,
+            activation_observer: Mutex::new(None),
             messages_by_run: Mutex::new(HashMap::new()),
             activation_cache: Mutex::new(HashMap::new()),
             plans_by_run: Mutex::new(HashMap::new()),
         }
-    }
-
-    /// Access the selector config for verification/testing.
-    pub fn selector_config(&self) -> &SkillActivationSelectorConfig {
-        &self.config
     }
 
     pub(crate) fn with_setup_marker_source<T>(mut self, source: Arc<T>) -> Self
@@ -254,6 +260,17 @@ where
 
     pub(crate) fn bundle_source(&self) -> Arc<S> {
         Arc::clone(&self.bundle_source)
+    }
+
+    pub fn set_activation_observer(
+        &self,
+        observer: Arc<dyn SkillActivationObserver>,
+    ) -> Result<(), SkillActivationSelectionError> {
+        *self
+            .activation_observer
+            .lock()
+            .map_err(|_| SkillActivationSelectionError::Internal)? = Some(observer);
+        Ok(())
     }
 
     pub(crate) fn take_activation_plan_for_run(
@@ -326,6 +343,20 @@ where
                         run_context: run_context.clone(),
                     },
                 );
+        }
+        let has_activation_event =
+            !plan.selection.activations.is_empty() || !plan.selection.feedback.is_empty();
+        let activation_observer = self
+            .activation_observer
+            .lock()
+            .map_err(|_| SkillActivationSelectionError::Internal)?
+            .clone();
+        if let (true, Some(observer)) = (has_activation_event, activation_observer) {
+            observer.observe_skill_activation(SkillActivationObservedEvent {
+                run_context: run_context.clone(),
+                activations: plan.selection.activations.clone(),
+                feedback: plan.selection.feedback.clone(),
+            });
         }
         if plan.selection.activations.is_empty() {
             return Ok(Vec::new());
@@ -671,13 +702,12 @@ fn select_skill_activations(
         }
     }
 
-    let outcome = prefilter_skills_with_options(
+    let outcome = prefilter_skills(
         &rewritten_message,
         &loaded_skills,
         remaining_slots,
         remaining_tokens,
         satisfied_setup_markers,
-        SkillSelectionOptions::with_regex_activation_enabled(config.regex_activation_enabled),
     );
     feedback.extend(outcome.notes);
 
@@ -1233,99 +1263,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn selector_can_disable_regex_activation_criteria() {
-        let source = Arc::new(StaticSkillBundleSource::new(vec![
-            (
-                SkillSourceKind::User,
-                "regex-review",
-                &skill_md_with_activation(
-                    "regex-review",
-                    "  patterns: [\"review\\\\s+this\"]",
-                    "REGEX_REVIEW_SENTINEL",
-                ),
-            ),
-            (
-                SkillSourceKind::User,
-                "keyword-review",
-                &skill_md(
-                    "keyword-review",
-                    "Review code",
-                    &["review"],
-                    "KEYWORD_REVIEW_SENTINEL",
-                ),
-            ),
-        ]));
-        let selectable = SelectableSkillContextSource::new(
-            source,
-            SkillActivationSelectorConfig {
-                regex_activation_enabled: false,
-                ..SkillActivationSelectorConfig::default()
-            },
-        );
-        let context = run_context().await;
-        selectable
-            .record_user_message(
-                context.scope.clone(),
-                accepted_message_ref(&context),
-                "please review this PR",
-            )
-            .expect("record message");
-
-        let selected = selectable
-            .load_skill_context_candidates(&context)
-            .await
-            .expect("selection succeeds");
-
-        let combined = selected
-            .iter()
-            .map(|candidate| candidate.skill_md.as_deref().unwrap_or(""))
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        assert_eq!(selected.len(), 1);
-        assert!(combined.contains("KEYWORD_REVIEW_SENTINEL"));
-        assert!(!combined.contains("REGEX_REVIEW_SENTINEL"));
-    }
-
-    #[tokio::test]
-    async fn selector_keeps_explicit_activation_when_regex_activation_is_disabled() {
-        let source = Arc::new(StaticSkillBundleSource::new(vec![(
-            SkillSourceKind::User,
-            "code-review",
-            &skill_md("code-review", "Review code", &[], "CODE_REVIEW_SENTINEL"),
-        )]));
-        let selectable = SelectableSkillContextSource::new(
-            source,
-            SkillActivationSelectorConfig {
-                regex_activation_enabled: false,
-                ..SkillActivationSelectorConfig::default()
-            },
-        );
-        let context = run_context().await;
-        selectable
-            .record_user_message(
-                context.scope.clone(),
-                accepted_message_ref(&context),
-                "$code-review this PR",
-            )
-            .expect("record message");
-
-        let selected = selectable
-            .load_skill_context_candidates(&context)
-            .await
-            .expect("selection succeeds");
-
-        assert_eq!(selected.len(), 1);
-        assert!(
-            selected[0]
-                .skill_md
-                .as_ref()
-                .expect("skill context")
-                .contains("CODE_REVIEW_SENTINEL")
-        );
-    }
-
-    #[tokio::test]
     async fn selector_suppresses_explicit_skill_when_setup_marker_is_satisfied() {
         let source = Arc::new(StaticSkillBundleSource::new(vec![(
             SkillSourceKind::User,
@@ -1651,7 +1588,6 @@ mod tests {
             SkillActivationSelectorConfig {
                 max_active_skills: 1,
                 max_context_tokens: 4,
-                ..SkillActivationSelectorConfig::default()
             },
         );
         let context = run_context().await;

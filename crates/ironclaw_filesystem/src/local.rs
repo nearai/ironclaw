@@ -542,15 +542,15 @@ fn io_error(
     operation: FilesystemOperation,
     error: std::io::Error,
 ) -> FilesystemError {
+    tracing::debug!(
+        virtual_path = path.as_str(),
+        %operation,
+        error = %error,
+        "local filesystem backend error"
+    );
     if error.kind() == std::io::ErrorKind::NotFound {
         FilesystemError::NotFound { path, operation }
     } else {
-        tracing::debug!(
-            virtual_path = path.as_str(),
-            %operation,
-            error = %error,
-            "local filesystem backend error"
-        );
         FilesystemError::Backend {
             path,
             operation,
