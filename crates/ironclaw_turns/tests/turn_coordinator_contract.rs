@@ -6512,7 +6512,7 @@ impl TurnRunTransitionPort for AtomicLoopExitPort {
         &self,
         _request: ironclaw_turns::runner::RecordRunnerFailureRequest,
     ) -> Result<TurnRunState, TurnError> {
-        panic!("cancelled loop-exit application must not use a separate recovery transition")
+        panic!("cancelled loop-exit application must not use a separate terminal failure transition")
     }
 
     async fn apply_validated_loop_exit(

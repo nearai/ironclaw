@@ -260,7 +260,7 @@ impl TurnRunTransitionPort for FailingClaimTransitions {
         &self,
         _request: RecordRunnerFailureRequest,
     ) -> Result<TurnRunState, TurnError> {
-        panic!("failing claim transitions should not record recovery")
+        panic!("failing claim transitions should not record terminal failure")
     }
 
     async fn apply_validated_loop_exit(
@@ -503,7 +503,7 @@ impl TurnRunTransitionPort for DurableTurnStoreStub {
         &self,
         _request: RecordRunnerFailureRequest,
     ) -> Result<TurnRunState, TurnError> {
-        panic!("transition stub should not record recovery")
+        panic!("transition stub should not record terminal failure")
     }
 
     async fn apply_validated_loop_exit(
