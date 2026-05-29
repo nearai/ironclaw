@@ -3,6 +3,8 @@ use std::{
     sync::{Arc, Mutex, Weak},
 };
 
+use futures::future;
+
 use chrono::Utc;
 use ironclaw_filesystem::{
     CasExpectation, ContentType, Entry, FilesystemError, RecordVersion, RootFilesystem,
@@ -155,25 +157,49 @@ where
         &self,
         scope: &ironclaw_auth::AuthProductScope,
     ) -> Result<Vec<CredentialAccount>, AuthProductError> {
+        self.accounts_for_scope_bounded(scope, usize::MAX).await
+    }
+
+    async fn accounts_for_scope_bounded(
+        &self,
+        scope: &ironclaw_auth::AuthProductScope,
+        max_entries: usize,
+    ) -> Result<Vec<CredentialAccount>, AuthProductError> {
         let root = account_root(scope)?;
-        let entries = match self.filesystem.list_dir(&scope.resource, &root).await {
+        // Use list_dir_bounded to avoid unbounded directory scans.  The caller
+        // supplies an upper bound so callers that only need a few records (e.g.
+        // select_unique_configured_account) can stop early at the storage layer.
+        let entries = match self
+            .filesystem
+            .list_dir_bounded(&scope.resource, &root, max_entries)
+            .await
+        {
             Ok(entries) => entries,
             Err(FilesystemError::NotFound { .. }) => return Ok(Vec::new()),
             Err(error) => return Err(fs_error(error)),
         };
-        let mut accounts = Vec::new();
-        for entry in entries {
-            if !entry.name.ends_with(".json") {
-                continue;
-            }
-            let path = join_scoped(&root, &entry.name)?;
-            let Some((account, _)) = self
-                .read_record::<CredentialAccount>(&scope.resource, &path)
-                .await?
-            else {
-                continue;
-            };
-            if scope_matches(scope, &account.scope) {
+        // Build read futures for all .json entries concurrently.
+        let json_entries: Vec<_> = entries
+            .into_iter()
+            .filter(|e| e.name.ends_with(".json"))
+            .collect();
+        let read_futures: Vec<_> = json_entries
+            .iter()
+            .map(|entry| {
+                let path = join_scoped(&root, &entry.name);
+                async move {
+                    let path = path?;
+                    self.read_record::<CredentialAccount>(&scope.resource, &path)
+                        .await
+                }
+            })
+            .collect();
+        let results = future::join_all(read_futures).await;
+        let mut accounts = Vec::with_capacity(results.len());
+        for result in results {
+            if let Some((account, _)) = result?
+                && scope_matches(scope, &account.scope)
+            {
                 accounts.push(account);
             }
         }

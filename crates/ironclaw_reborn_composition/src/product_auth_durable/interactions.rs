@@ -150,6 +150,10 @@ where
                     .await?
                     .ok_or(AuthProductError::CredentialMissing)?;
                 validate_account_update_target(&account, &request)?;
+                // Capture the old handle so we can delete it from SecretStore after a
+                // successful rotation write.  The new handle is stored first so that
+                // a write failure still leaves the old material reachable.
+                let previous_access_secret = account.access_secret.clone();
                 self.store_manual_secret(pending, access_secret, secret)
                     .await?;
                 update_account_from_request(&mut account, request, Utc::now())?;
@@ -157,9 +161,17 @@ where
                     .write_account(&account, CasExpectation::Version(version))
                     .await
                 {
+                    // Write failed — clean up the newly stored secret; the old one is
+                    // still referenced by the on-disk account record.
                     self.cleanup_manual_secret(&pending.scope.resource, &account.access_secret)
                         .await;
                     return Err(error);
+                }
+                // Write succeeded — the new handle is now canonical.  Delete the
+                // previous handle if it differs so we don’t orphan it in SecretStore.
+                if previous_access_secret.as_ref() != account.access_secret.as_ref() {
+                    self.cleanup_manual_secret(&pending.scope.resource, &previous_access_secret)
+                        .await;
                 }
                 Ok(account)
             }

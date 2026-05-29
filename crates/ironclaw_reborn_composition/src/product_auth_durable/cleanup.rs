@@ -48,10 +48,32 @@ where
                         report.retained_accounts.push(current.id);
                     }
                     SecretCleanupAction::Uninstall => {
+                        // Capture handles before nulling so we can delete from
+                        // SecretStore after the account record is persisted.
+                        let revoked_access = current.access_secret.take();
+                        let revoked_refresh = current.refresh_secret.take();
                         if current.status != CredentialAccountStatus::Revoked {
                             current.status = CredentialAccountStatus::Revoked;
                             report.revoked_accounts.push(current.id);
                         }
+                        current.updated_at = Utc::now();
+                        self.write_account(&current, CasExpectation::Version(version))
+                            .await?;
+                        // Purge the raw secret material now that the account
+                        // record no longer references these handles.
+                        if let Some(handle) = &revoked_access {
+                            let _ = self
+                                .secret_store
+                                .delete(&request.scope.resource, handle)
+                                .await;
+                        }
+                        if let Some(handle) = &revoked_refresh {
+                            let _ = self
+                                .secret_store
+                                .delete(&request.scope.resource, handle)
+                                .await;
+                        }
+                        continue;
                     }
                 }
             } else if had_grant {

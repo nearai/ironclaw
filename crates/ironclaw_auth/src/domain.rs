@@ -9,13 +9,13 @@ use crate::{
     flow::credential_status_for_completed_flow, scope_matches,
 };
 
-pub(crate) struct PreparedCallbackFlow {
-    pub(crate) scope: crate::AuthProductScope,
-    pub(crate) update_binding: Option<CredentialAccountUpdateBinding>,
-    pub(crate) expected_pkce_verifier_hash: Option<crate::PkceVerifierHash>,
+pub struct PreparedCallbackFlow {
+    pub scope: crate::AuthProductScope,
+    pub update_binding: Option<CredentialAccountUpdateBinding>,
+    pub expected_pkce_verifier_hash: Option<crate::PkceVerifierHash>,
 }
 
-pub(crate) fn prepare_callback_flow(
+pub fn prepare_callback_flow(
     record: &mut AuthFlowRecord,
     scope: &crate::AuthProductScope,
     opaque_state_hash: &crate::OpaqueStateHash,
@@ -45,7 +45,7 @@ pub(crate) fn prepare_callback_flow(
     })
 }
 
-pub(crate) fn validate_callback_claim(
+pub fn validate_callback_claim(
     record: &mut AuthFlowRecord,
     scope: &crate::AuthProductScope,
     request: &OAuthCallbackClaimRequest,
@@ -85,7 +85,7 @@ pub(crate) fn validate_callback_claim(
     Ok(())
 }
 
-pub(crate) fn validate_selection_flow(
+pub fn validate_selection_flow(
     record: &mut AuthFlowRecord,
     scope: &crate::AuthProductScope,
     input: &CredentialSelectionInput,
@@ -140,7 +140,7 @@ fn expire_if_needed(record: &mut AuthFlowRecord, now: Timestamp) -> Result<(), A
     Err(AuthProductError::UnknownOrExpiredFlow)
 }
 
-pub(crate) fn update_account_from_exchange(
+pub fn update_account_from_exchange(
     account: &mut CredentialAccount,
     exchange: &OAuthProviderExchange,
     now: Timestamp,
@@ -153,7 +153,7 @@ pub(crate) fn update_account_from_exchange(
     account.updated_at = now;
 }
 
-pub(crate) fn update_account_from_request(
+pub fn update_account_from_request(
     account: &mut CredentialAccount,
     request: NewCredentialAccount,
     now: Timestamp,
@@ -169,7 +169,7 @@ pub(crate) fn update_account_from_request(
     Ok(account.clone())
 }
 
-pub(crate) fn validate_account_update_target(
+pub fn validate_account_update_target(
     account: &CredentialAccount,
     request: &NewCredentialAccount,
 ) -> Result<(), AuthProductError> {
@@ -189,7 +189,7 @@ pub(crate) fn validate_account_update_target(
     )
 }
 
-pub(crate) fn validate_flow_update_binding(
+pub fn validate_flow_update_binding(
     account: &CredentialAccount,
     request: &NewAuthFlow,
 ) -> Result<(), AuthProductError> {
@@ -205,7 +205,7 @@ pub(crate) fn validate_flow_update_binding(
     )
 }
 
-pub(crate) fn validate_manual_token_update_binding(
+pub fn validate_manual_token_update_binding(
     account: &CredentialAccount,
     request: &ManualTokenSetupRequest,
     binding: &CredentialAccountUpdateBinding,
@@ -235,7 +235,7 @@ fn validate_scoped_update_binding(
     validate_bound_update_authority(account, binding)
 }
 
-pub(crate) fn validate_bound_update_authority(
+pub fn validate_bound_update_authority(
     account: &CredentialAccount,
     binding: &CredentialAccountUpdateBinding,
 ) -> Result<(), AuthProductError> {
@@ -262,7 +262,7 @@ fn validate_update_authority_fields(
     Ok(())
 }
 
-pub(crate) fn account_is_authorized_for_requester(
+pub fn account_is_authorized_for_requester(
     account: &CredentialAccount,
     requester_extension: Option<&ExtensionId>,
 ) -> bool {
@@ -278,7 +278,7 @@ pub(crate) fn account_is_authorized_for_requester(
     }
 }
 
-pub(crate) fn validate_new_credential_account(
+pub fn validate_new_credential_account(
     request: &NewCredentialAccount,
 ) -> Result<(), AuthProductError> {
     if request.ownership == CredentialOwnership::ExtensionOwned && request.owner_extension.is_none()
@@ -290,7 +290,7 @@ pub(crate) fn validate_new_credential_account(
     Ok(())
 }
 
-pub(crate) fn validate_credential_status_transition(
+pub fn validate_credential_status_transition(
     current: crate::CredentialAccountStatus,
     next: crate::CredentialAccountStatus,
 ) -> Result<(), AuthProductError> {
@@ -321,7 +321,7 @@ fn credential_status_transition_allowed(
     }
 }
 
-pub(crate) fn validate_refresh_target(
+pub fn validate_refresh_target(
     account: &CredentialAccount,
     request: &CredentialRefreshRequest,
 ) -> Result<(), AuthProductError> {
@@ -343,7 +343,7 @@ pub(crate) fn validate_refresh_target(
     Ok(())
 }
 
-pub(crate) fn recovery_projection_for_single_account(
+pub fn recovery_projection_for_single_account(
     provider: crate::AuthProviderId,
     account: &CredentialAccount,
 ) -> CredentialRecoveryProjection {
@@ -370,7 +370,7 @@ pub(crate) fn recovery_projection_for_single_account(
     }
 }
 
-pub(crate) fn recovery_projection_for_unconfigured_accounts(
+pub fn recovery_projection_for_unconfigured_accounts(
     provider: crate::AuthProviderId,
     accounts: &[&CredentialAccount],
 ) -> CredentialRecoveryProjection {

@@ -11,7 +11,7 @@
 
 mod cleanup;
 mod credential;
-mod domain;
+pub mod domain;
 mod error;
 mod fakes;
 mod flow;
@@ -99,11 +99,11 @@ fn validate_public_text(
     Ok(value)
 }
 
-fn scope_matches(left: &AuthProductScope, right: &AuthProductScope) -> bool {
+pub(crate) fn scope_matches(left: &AuthProductScope, right: &AuthProductScope) -> bool {
     left == right
 }
 
-fn is_terminal_status(status: AuthFlowStatus) -> bool {
+pub(crate) fn is_terminal_status(status: AuthFlowStatus) -> bool {
     matches!(
         status,
         AuthFlowStatus::Completed

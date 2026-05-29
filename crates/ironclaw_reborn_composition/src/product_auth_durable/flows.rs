@@ -247,6 +247,11 @@ where
         if record.status != AuthFlowStatus::Completed {
             return Err(AuthProductError::FlowAlreadyTerminal);
         }
+        // Idempotent: if the continuation was already marked by a concurrent
+        // caller, return the existing record without writing.
+        if record.continuation_emitted_at.is_some() {
+            return Ok(record);
+        }
         record.continuation_emitted_at = Some(emitted_at);
         record.updated_at = emitted_at;
         self.write_flow(scope, &record, CasExpectation::Version(version))
@@ -314,11 +319,20 @@ where
                     .await
                 {
                     Ok(account) => Ok(account.id),
-                    Err(AuthProductError::BackendUnavailable) => {
+                    // CAS conflict: another concurrent callback already created the account.
+                    // Re-read, validate it belongs to this flow/scope/provider, then
+                    // overwrite only if identity matches.
+                    Err(AuthProductError::BackendConflict) => {
                         let (mut account, version) = self
                             .read_account(&request.scope, account_id)
                             .await?
-                            .ok_or(AuthProductError::BackendUnavailable)?;
+                            .ok_or(AuthProductError::BackendConflict)?;
+                        if !scope_matches(&request.scope, &account.scope) {
+                            return Err(AuthProductError::CrossScopeDenied);
+                        }
+                        if account.provider != request.provider {
+                            return Err(AuthProductError::TokenExchangeFailed);
+                        }
                         update_account_from_request(&mut account, request, Utc::now())?;
                         self.write_account(&account, CasExpectation::Version(version))
                             .await?;

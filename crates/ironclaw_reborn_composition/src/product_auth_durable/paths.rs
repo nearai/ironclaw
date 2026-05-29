@@ -89,7 +89,8 @@ pub(super) fn manual_token_secret_handle(
 
 pub(super) fn fs_error(error: FilesystemError) -> AuthProductError {
     match error {
-        FilesystemError::VersionMismatch { .. } => AuthProductError::BackendUnavailable,
+        // CAS precondition failure — callers can detect and retry on BackendConflict.
+        FilesystemError::VersionMismatch { .. } => AuthProductError::BackendConflict,
         _ => AuthProductError::BackendUnavailable,
     }
 }

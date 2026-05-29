@@ -350,6 +350,10 @@ impl AuthFlowManager for InMemoryAuthProductServices {
         if record.status != AuthFlowStatus::Completed {
             return Err(AuthProductError::FlowAlreadyTerminal);
         }
+        // Idempotent: if already marked by a concurrent caller, return existing record.
+        if record.continuation_emitted_at.is_some() {
+            return Ok(record.clone());
+        }
         record.continuation_emitted_at = Some(emitted_at);
         record.updated_at = emitted_at;
         Ok(record.clone())
