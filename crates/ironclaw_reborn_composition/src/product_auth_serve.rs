@@ -8,6 +8,7 @@
 use std::{
     num::{NonZeroU32, NonZeroU64, NonZeroUsize},
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
 use axum::{
@@ -19,11 +20,11 @@ use axum::{
 };
 use chrono::{Duration as ChronoDuration, Utc};
 use ironclaw_auth::{
-    AuthContinuationRef, AuthErrorCode, AuthFlowId, AuthFlowStatus, AuthGateRef, AuthProductError,
-    AuthProductScope, AuthProviderId, AuthSessionId, AuthSurface, AuthorizationCodeHash,
-    CredentialAccountId, CredentialAccountLabel, CredentialAccountStatus, OAuthAuthorizationCode,
-    OAuthAuthorizationUrl, OAuthProviderCallbackRequest, OpaqueStateHash, PkceVerifierHash,
-    PkceVerifierSecret, ProviderScope, Timestamp, TurnRunRef,
+    AuthContinuationRef, AuthErrorCode, AuthFlowId, AuthFlowStatus, AuthGateRef, AuthInteractionId,
+    AuthProductError, AuthProductScope, AuthProviderId, AuthSessionId, AuthSurface,
+    AuthorizationCodeHash, CredentialAccountId, CredentialAccountLabel, CredentialAccountStatus,
+    OAuthAuthorizationCode, OAuthAuthorizationUrl, OAuthProviderCallbackRequest, OpaqueStateHash,
+    PkceVerifierHash, PkceVerifierSecret, ProviderScope, Timestamp, TurnRunRef,
 };
 use ironclaw_host_api::NetworkMethod;
 use ironclaw_host_api::ingress::{
@@ -82,6 +83,7 @@ const OAUTH_RATE_WINDOW_SECONDS: NonZeroU32 = match NonZeroU32::new(60) {
     None => unreachable!(),
 };
 const PRODUCT_AUTH_FLOW_MAX_TTL_SECONDS: i64 = 10 * 60;
+const PRODUCT_AUTH_BACKEND_TIMEOUT: Duration = Duration::from_secs(30);
 const OAUTH_CALLBACK_QUERY_MAX_BYTES: usize = 16 * 1024;
 const OAUTH_CALLBACK_FIELD_MAX_BYTES: usize = 512;
 const OAUTH_CALLBACK_SCOPES_MAX_BYTES: usize = 4 * 1024;
@@ -414,6 +416,13 @@ impl ProductAuthRouteFailure {
             AuthErrorCode::BackendUnavailable,
         )
     }
+
+    fn backend_timeout() -> Self {
+        Self::new(
+            StatusCode::GATEWAY_TIMEOUT,
+            AuthErrorCode::BackendUnavailable,
+        )
+    }
 }
 
 impl IntoResponse for ProductAuthRouteFailure {
@@ -541,40 +550,53 @@ async fn manual_token_submit_handler(
     };
     let expires_at = Utc::now() + ChronoDuration::seconds(PRODUCT_AUTH_FLOW_MAX_TTL_SECONDS);
 
-    let challenge = state
-        .product_auth
-        .request_manual_token_setup(RebornManualTokenSetupRequest::new(
-            scope.clone(),
-            provider,
-            label,
-            continuation,
-            expires_at,
-        ))
-        .await
-        .map_err(ProductAuthRouteFailure::from)?;
-    let submitted = match state
-        .product_auth
-        .submit_manual_token(RebornManualTokenSubmitRequest::new(
-            scope.clone(),
-            challenge.interaction_id,
-            token.into_secret(),
-        ))
-        .await
+    let challenge = tokio::time::timeout(
+        PRODUCT_AUTH_BACKEND_TIMEOUT,
+        state
+            .product_auth
+            .request_manual_token_setup(RebornManualTokenSetupRequest::new(
+                scope.clone(),
+                provider,
+                label,
+                continuation,
+                expires_at,
+            )),
+    )
+    .await
+    .map_err(|_| ProductAuthRouteFailure::backend_timeout())?
+    .map_err(ProductAuthRouteFailure::from)?;
+    let submitted = match tokio::time::timeout(
+        PRODUCT_AUTH_BACKEND_TIMEOUT,
+        state
+            .product_auth
+            .submit_manual_token(RebornManualTokenSubmitRequest::new(
+                scope.clone(),
+                challenge.interaction_id,
+                token.into_secret(),
+            )),
+    )
+    .await
     {
-        Ok(submitted) => submitted,
-        Err(error) => {
-            if let Err(cleanup_error) = state
-                .product_auth
-                .abandon_manual_token(&scope, challenge.interaction_id)
-                .await
-            {
-                tracing::debug!(
-                    error_code = ?error.code,
-                    cleanup_error_code = ?cleanup_error.code,
-                    "manual-token submit failed and interaction cleanup failed"
-                );
-            }
+        Ok(Ok(submitted)) => submitted,
+        Ok(Err(error)) => {
+            abandon_manual_token_after_submit_failure(
+                &state,
+                &scope,
+                challenge.interaction_id,
+                error.code,
+            )
+            .await;
             return Err(ProductAuthRouteFailure::from(error));
+        }
+        Err(_) => {
+            abandon_manual_token_after_submit_failure(
+                &state,
+                &scope,
+                challenge.interaction_id,
+                AuthErrorCode::BackendUnavailable,
+            )
+            .await;
+            return Err(ProductAuthRouteFailure::backend_timeout());
         }
     };
 
@@ -583,6 +605,38 @@ async fn manual_token_submit_handler(
         status: submitted.status,
         continuation: submitted.continuation,
     }))
+}
+
+async fn abandon_manual_token_after_submit_failure(
+    state: &ProductAuthRouteState,
+    scope: &AuthProductScope,
+    interaction_id: AuthInteractionId,
+    submit_error_code: AuthErrorCode,
+) {
+    match tokio::time::timeout(
+        PRODUCT_AUTH_BACKEND_TIMEOUT,
+        state
+            .product_auth
+            .abandon_manual_token(scope, interaction_id),
+    )
+    .await
+    {
+        Ok(Ok(_)) => {}
+        Ok(Err(cleanup_error)) => {
+            tracing::debug!(
+                error_code = ?submit_error_code,
+                cleanup_error_code = ?cleanup_error.code,
+                "manual-token submit failed and interaction cleanup failed"
+            );
+        }
+        Err(_) => {
+            tracing::debug!(
+                error_code = ?submit_error_code,
+                cleanup_error_code = ?AuthErrorCode::BackendUnavailable,
+                "manual-token submit failed and interaction cleanup timed out"
+            );
+        }
+    }
 }
 
 async fn oauth_callback_handler(

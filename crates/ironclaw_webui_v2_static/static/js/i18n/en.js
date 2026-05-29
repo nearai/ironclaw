@@ -117,6 +117,8 @@ registerPack("en", {
   "authGate.submitting": "Checking...",
   "authGate.cancel": "Cancel",
   "authGate.submitFailed": "Could not save the token.",
+  "authGate.resolveFailedAfterTokenSaved":
+    "Token saved. Could not resume the blocked run; retry to resume it.",
 
   // Error
   "error.gatewayConnection": "Unable to connect to the gateway",

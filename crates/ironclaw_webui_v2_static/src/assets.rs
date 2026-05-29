@@ -49,16 +49,22 @@ mod tests {
         let auth_card = asset_text("js/pages/chat/components/auth-token-card.js");
         assert!(auth_card.contains("await onSubmit(value);"));
         assert!(auth_card.contains("setToken(\"\");"));
-        assert!(auth_card.contains("setError(t(\"authGate.submitFailed\"));"));
+        assert!(auth_card.contains("t(\"authGate.submitFailed\")"));
+        assert!(auth_card.contains("authGate.resolveFailedAfterTokenSaved"));
         assert!(!auth_card.contains("err?.message"));
 
         let api = asset_text("js/lib/api.js");
         assert!(api.contains("/api/reborn/product-auth/manual-token/submit"));
+        assert!(api.contains("signal,"));
         assert!(api.contains("account_label: accountLabel"));
         assert!(api.contains("gate_ref: gateRef"));
 
         let use_chat = asset_text("js/pages/chat/hooks/useChat.js");
+        assert!(use_chat.contains("AUTH_TOKEN_FLOW_TIMEOUT_MS"));
+        assert!(use_chat.contains("authTokenSubmitRef"));
         assert!(use_chat.contains("submitManualToken({"));
+        assert!(use_chat.contains("authTokenSubmitRef.current.credentialRef"));
+        assert!(use_chat.contains("authTokenSubmitRef.current.inFlight"));
         assert!(use_chat.contains("throw new Error(\"auth gate is no longer pending\")"));
         assert!(
             use_chat
@@ -67,5 +73,6 @@ mod tests {
         assert!(use_chat.contains("resolveGateRequest({"));
         assert!(use_chat.contains("resolution: \"credential_provided\""));
         assert!(use_chat.contains("credentialRef"));
+        assert!(use_chat.contains("safeAuthGateCode"));
     }
 }

@@ -23,8 +23,12 @@ export function AuthTokenCard({ gate, onSubmit, onCancel }) {
       try {
         await onSubmit(value);
         setToken("");
-      } catch (_) {
-        setError(t("authGate.submitFailed"));
+      } catch (err) {
+        setError(
+          err?.safeAuthGateCode === "credential_stored_gate_resolution_failed"
+            ? t("authGate.resolveFailedAfterTokenSaved")
+            : t("authGate.submitFailed"),
+        );
       } finally {
         setIsSubmitting(false);
       }

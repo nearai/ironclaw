@@ -145,6 +145,35 @@ impl AuthInteractionService for SubmitFailingManualTokenInteractions {
     }
 }
 
+#[derive(Debug)]
+struct SetupFailingManualTokenInteractions;
+
+#[async_trait]
+impl AuthInteractionService for SetupFailingManualTokenInteractions {
+    async fn request_secret_input(
+        &self,
+        _request: ManualTokenSetupRequest,
+    ) -> Result<AuthChallenge, AuthProductError> {
+        Err(AuthProductError::BackendUnavailable)
+    }
+
+    async fn submit_manual_token(
+        &self,
+        _scope: &AuthProductScope,
+        _request: SecretSubmitRequest,
+    ) -> Result<SecretSubmitResult, AuthProductError> {
+        unreachable!("setup-failure test does not submit manual tokens")
+    }
+
+    async fn abandon_manual_token(
+        &self,
+        _scope: &AuthProductScope,
+        _interaction_id: AuthInteractionId,
+    ) -> Result<bool, AuthProductError> {
+        unreachable!("setup-failure test does not abandon manual tokens")
+    }
+}
+
 struct UnusedServices;
 
 #[async_trait]
@@ -549,6 +578,8 @@ async fn product_auth_manual_token_submit_abandons_interaction_on_submit_failure
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let body = read_body_string(response).await;
     assert!(!body.contains("ghp_submit_fails_after_interaction"));
+    assert!(!body.contains("credential_ref"));
+    assert!(!body.contains("interaction_id"));
 
     let abandoned = interactions.abandoned();
     assert_eq!(abandoned.len(), 1);
@@ -567,6 +598,22 @@ async fn product_auth_manual_token_submit_abandons_interaction_on_submit_failure
             .map(|id| id.as_str()),
         Some("thread-cleanup-1")
     );
+}
+
+#[tokio::test]
+async fn product_auth_manual_token_submit_handles_setup_service_error() {
+    let app = build_app_with_product_auth_service(product_auth_with_interaction_service(Arc::new(
+        SetupFailingManualTokenInteractions,
+    )));
+    let raw_pat = "ghp_setup_fails_before_submit";
+
+    let response = post_manual_token_submit(&app, manual_token_body(raw_pat, json!({}))).await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = read_body_string(response).await;
+    assert!(body.contains("\"code\":\"backend_unavailable\""));
+    assert!(!body.contains(raw_pat));
+    assert!(!body.contains("credential_ref"));
+    assert!(!body.contains("interaction_id"));
 }
 
 #[tokio::test]
@@ -625,6 +672,32 @@ async fn product_auth_manual_token_submit_invalid_fields_are_sanitized() {
         assert!(!body.contains("ghp_invalid_label_secret"));
         assert!(!body.contains("ghp_invalid_run_secret"));
         assert!(!body.contains("ghp_invalid_gate_secret"));
+    }
+}
+
+#[tokio::test]
+async fn product_auth_manual_token_submit_invalid_scope_fields_are_sanitized() {
+    let (app, _) = build_app_with_product_auth();
+
+    let invalid_requests = [
+        manual_token_body(
+            "ghp_invalid_thread_secret",
+            json!({ "thread_id": "bad/thread" }),
+        ),
+        manual_token_body(
+            "ghp_invalid_session_secret",
+            json!({ "session_id": "bad\u{0}session" }),
+        ),
+    ];
+
+    for body in invalid_requests {
+        let response = post_manual_token_submit(&app, body).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = read_body_string(response).await;
+        assert!(body.contains("\"code\":\"invalid_request\""));
+        assert!(!body.contains("ghp_invalid_thread_secret"));
+        assert!(!body.contains("ghp_invalid_session_secret"));
+        assert!(!body.contains("credential_ref"));
     }
 }
 
