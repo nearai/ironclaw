@@ -11,9 +11,12 @@ use axum::extract::ConnectInfo;
 use axum::http::{HeaderValue, Method, Request, StatusCode, header};
 use chrono::{Duration as ChronoDuration, Utc};
 use ironclaw_auth::{
-    AuthContinuationEvent, AuthProductError, AuthProviderClient, InMemoryAuthProductServices,
-    OAuthProviderCallbackRequest, OAuthProviderExchange, OAuthProviderExchangeContext,
-    OAuthProviderRefresh, OAuthProviderRefreshRequest,
+    AuthChallenge, AuthContinuationEvent, AuthFlowManager, AuthInteractionId,
+    AuthInteractionService, AuthProductError, AuthProductScope, AuthProviderClient,
+    CredentialAccountService, CredentialSetupService, InMemoryAuthProductServices,
+    ManualTokenSetupRequest, OAuthProviderCallbackRequest, OAuthProviderExchange,
+    OAuthProviderExchangeContext, OAuthProviderRefresh, OAuthProviderRefreshRequest,
+    SecretCleanupService, SecretSubmitRequest, SecretSubmitResult,
 };
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
 use ironclaw_product_workflow::{
@@ -87,6 +90,58 @@ impl AuthProviderClient for FailingProviderClient {
         _request: OAuthProviderRefreshRequest,
     ) -> Result<OAuthProviderRefresh, AuthProductError> {
         Err(AuthProductError::RefreshFailed)
+    }
+}
+
+#[derive(Debug, Default)]
+struct SubmitFailingManualTokenInteractions {
+    interaction_id: AuthInteractionId,
+    abandoned: Mutex<Vec<(AuthProductScope, AuthInteractionId)>>,
+}
+
+impl SubmitFailingManualTokenInteractions {
+    fn abandoned(&self) -> Vec<(AuthProductScope, AuthInteractionId)> {
+        self.abandoned
+            .lock()
+            .expect("abandoned interactions lock")
+            .clone()
+    }
+}
+
+#[async_trait]
+impl AuthInteractionService for SubmitFailingManualTokenInteractions {
+    async fn request_secret_input(
+        &self,
+        request: ManualTokenSetupRequest,
+    ) -> Result<AuthChallenge, AuthProductError> {
+        Ok(AuthChallenge::ManualTokenRequired {
+            interaction_id: self.interaction_id,
+            provider: request.provider,
+            label: request.label,
+            expires_at: request.expires_at,
+        })
+    }
+
+    async fn submit_manual_token(
+        &self,
+        _scope: &AuthProductScope,
+        _request: SecretSubmitRequest,
+    ) -> Result<SecretSubmitResult, AuthProductError> {
+        Err(AuthProductError::InvalidRequest {
+            reason: "provider rejected token".to_string(),
+        })
+    }
+
+    async fn abandon_manual_token(
+        &self,
+        scope: &AuthProductScope,
+        interaction_id: AuthInteractionId,
+    ) -> Result<bool, AuthProductError> {
+        self.abandoned
+            .lock()
+            .expect("abandoned interactions lock")
+            .push((scope.clone(), interaction_id));
+        Ok(true)
     }
 }
 
@@ -207,6 +262,27 @@ fn build_app_with_product_auth_service(
     .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
     .with_default_project_id(ProjectId::new(PROJECT).expect("project"));
     webui_v2_app(bundle, config).expect("webui v2 app")
+}
+
+fn product_auth_with_interaction_service(
+    interaction_service: Arc<dyn AuthInteractionService>,
+) -> Arc<RebornProductAuthServices> {
+    let shared = Arc::new(InMemoryAuthProductServices::new());
+    let flow_manager: Arc<dyn AuthFlowManager> = shared.clone();
+    let credential_setup_service: Arc<dyn CredentialSetupService> = shared.clone();
+    let credential_account_service: Arc<dyn CredentialAccountService> = shared.clone();
+    let provider_client: Arc<dyn AuthProviderClient> = shared.clone();
+    let cleanup_service: Arc<dyn SecretCleanupService> = shared;
+
+    Arc::new(RebornProductAuthServices::new(
+        flow_manager,
+        interaction_service,
+        credential_setup_service,
+        credential_account_service,
+        provider_client,
+        cleanup_service,
+        Arc::new(RecordingAuthDispatcher::default()),
+    ))
 }
 
 #[derive(Debug)]
@@ -452,6 +528,45 @@ async fn product_auth_manual_token_submit_rejects_invalid_secret_without_echoing
     let body = read_body_string(response).await;
     assert!(!body.contains(raw_pat));
     assert!(body.contains("invalid_request"));
+}
+
+#[tokio::test]
+async fn product_auth_manual_token_submit_abandons_interaction_on_submit_failure() {
+    let interactions = Arc::new(SubmitFailingManualTokenInteractions::default());
+    let expected_interaction_id = interactions.interaction_id;
+    let app = build_app_with_product_auth_service(product_auth_with_interaction_service(
+        interactions.clone(),
+    ));
+
+    let response = post_manual_token_submit(
+        &app,
+        manual_token_body(
+            "ghp_submit_fails_after_interaction",
+            json!({ "thread_id": "thread-cleanup-1" }),
+        ),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = read_body_string(response).await;
+    assert!(!body.contains("ghp_submit_fails_after_interaction"));
+
+    let abandoned = interactions.abandoned();
+    assert_eq!(abandoned.len(), 1);
+    assert_eq!(abandoned[0].1, expected_interaction_id);
+    assert_eq!(
+        abandoned[0].0.resource.tenant_id,
+        TenantId::new(TENANT).unwrap()
+    );
+    assert_eq!(abandoned[0].0.resource.user_id, UserId::new(USER).unwrap());
+    assert_eq!(
+        abandoned[0]
+            .0
+            .resource
+            .thread_id
+            .as_ref()
+            .map(|id| id.as_str()),
+        Some("thread-cleanup-1")
+    );
 }
 
 #[tokio::test]

@@ -54,6 +54,14 @@ impl AuthInteractionService for FailingInteractionService {
     ) -> Result<SecretSubmitResult, AuthProductError> {
         Err(self.error.clone())
     }
+
+    async fn abandon_manual_token(
+        &self,
+        _scope: &AuthProductScope,
+        _interaction_id: AuthInteractionId,
+    ) -> Result<bool, AuthProductError> {
+        Ok(false)
+    }
 }
 
 #[derive(Debug, Default)]
@@ -78,6 +86,14 @@ impl AuthInteractionService for UnexpectedChallengeInteractionService {
         _request: SecretSubmitRequest,
     ) -> Result<SecretSubmitResult, AuthProductError> {
         unreachable!("unexpected-challenge test does not submit manual tokens")
+    }
+
+    async fn abandon_manual_token(
+        &self,
+        _scope: &AuthProductScope,
+        _interaction_id: AuthInteractionId,
+    ) -> Result<bool, AuthProductError> {
+        unreachable!("unexpected-challenge test does not abandon manual tokens")
     }
 }
 

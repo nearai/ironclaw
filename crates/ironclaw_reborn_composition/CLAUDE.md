@@ -145,6 +145,8 @@ Reborn-native product-auth surface:
   `RebornProductAuthServices`, and returns the resulting
   `credential_ref`. The browser must then call v2 `resolve_gate` with
   that `credential_ref`; raw token values never go through gate resolution.
+  If submit fails after the interaction is created, the route abandons that
+  scoped interaction before returning a sanitized error.
 - Raw `state`, OAuth authorization codes, PKCE verifiers, provider
   token handles, provider bodies, and host paths must not be logged or
   serialized by the route. Responses use the sanitized product-auth

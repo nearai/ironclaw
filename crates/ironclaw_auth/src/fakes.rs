@@ -777,6 +777,21 @@ impl AuthInteractionService for InMemoryAuthProductServices {
             continuation,
         })
     }
+
+    async fn abandon_manual_token(
+        &self,
+        scope: &crate::AuthProductScope,
+        interaction_id: crate::AuthInteractionId,
+    ) -> Result<bool, AuthProductError> {
+        let mut state = self.lock_state();
+        let Some(pending) = state.interactions.get(&interaction_id) else {
+            return Ok(false);
+        };
+        if !scope_matches(scope, &pending.scope) {
+            return Err(AuthProductError::CrossScopeDenied);
+        }
+        Ok(state.interactions.remove(&interaction_id).is_some())
+    }
 }
 
 #[async_trait]

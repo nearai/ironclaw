@@ -780,6 +780,17 @@ impl RebornProductAuthServices {
         })
     }
 
+    pub async fn abandon_manual_token(
+        &self,
+        scope: &AuthProductScope,
+        interaction_id: AuthInteractionId,
+    ) -> Result<bool, RebornManualTokenError> {
+        self.interaction_service
+            .abandon_manual_token(scope, interaction_id)
+            .await
+            .map_err(RebornManualTokenError::from)
+    }
+
     pub(crate) fn local_dev_in_memory(
         continuation_dispatcher: Arc<dyn RebornAuthContinuationDispatcher>,
     ) -> Self {
@@ -955,6 +966,14 @@ mod tests {
             _scope: &AuthProductScope,
             _request: SecretSubmitRequest,
         ) -> Result<SecretSubmitResult, AuthProductError> {
+            unreachable!("constructor tests do not call auth-interaction methods")
+        }
+
+        async fn abandon_manual_token(
+            &self,
+            _scope: &AuthProductScope,
+            _interaction_id: AuthInteractionId,
+        ) -> Result<bool, AuthProductError> {
             unreachable!("constructor tests do not call auth-interaction methods")
         }
     }

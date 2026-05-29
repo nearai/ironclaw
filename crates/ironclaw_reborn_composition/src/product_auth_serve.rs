@@ -552,15 +552,31 @@ async fn manual_token_submit_handler(
         ))
         .await
         .map_err(ProductAuthRouteFailure::from)?;
-    let submitted = state
+    let submitted = match state
         .product_auth
         .submit_manual_token(RebornManualTokenSubmitRequest::new(
-            scope,
+            scope.clone(),
             challenge.interaction_id,
             token.into_secret(),
         ))
         .await
-        .map_err(ProductAuthRouteFailure::from)?;
+    {
+        Ok(submitted) => submitted,
+        Err(error) => {
+            if let Err(cleanup_error) = state
+                .product_auth
+                .abandon_manual_token(&scope, challenge.interaction_id)
+                .await
+            {
+                tracing::debug!(
+                    error_code = ?error.code,
+                    cleanup_error_code = ?cleanup_error.code,
+                    "manual-token submit failed and interaction cleanup failed"
+                );
+            }
+            return Err(ProductAuthRouteFailure::from(error));
+        }
+    };
 
     Ok(Json(ManualTokenSubmitResponse {
         credential_ref: submitted.account_id,
