@@ -307,6 +307,10 @@ pub struct McpHostHttpClient<H, P> {
 #[derive(Debug)]
 struct McpHostHttpClientState {
     next_id: AtomicU64,
+    // `std::sync::Mutex` is appropriate here: the lock is held only for O(1)
+    // HashMap operations (never across an `.await`), and the key includes
+    // `invocation_id` so concurrent dispatches from different invocations act
+    // on disjoint map entries with no real contention.
     session_ids: Mutex<HashMap<McpHostHttpSessionKey, String>>,
 }
 

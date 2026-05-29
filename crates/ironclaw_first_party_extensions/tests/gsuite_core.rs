@@ -373,6 +373,65 @@ async fn gsuite_handler_errors_when_refresh_retry_is_still_auth_expired() {
     );
 }
 
+#[tokio::test]
+async fn gsuite_handler_stage_credential_failure_on_refresh_retry_returns_auth_required() {
+    // stage_credential is called twice: once after initial resolve (line 87 in handlers.rs)
+    // and once after the 401-triggered token refresh (line 112).  This test verifies the
+    // second call's failure (CredentialStageError::AuthRequired) is correctly projected
+    // to GsuiteDispatchError::auth_requirement() -> Some([handle]).
+    let scope = scope();
+    let auth = Arc::new(InMemoryAuthProductServices::new());
+    let access_handle = SecretHandle::new("google-access-token").unwrap();
+    ironclaw_auth::CredentialAccountService::create_account(
+        auth.as_ref(),
+        NewCredentialAccount {
+            scope: auth_scope(&scope),
+            provider: google_provider_id().unwrap(),
+            label: CredentialAccountLabel::new("work google").unwrap(),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: Vec::new(),
+            access_secret: Some(access_handle.clone()),
+            refresh_secret: Some(SecretHandle::new("google-refresh-token").unwrap()),
+            scopes: vec![provider_scope(GOOGLE_GMAIL_SEND_SCOPE)],
+        },
+    )
+    .await
+    .unwrap();
+    // Egress: 401 on first call triggers refresh; second call succeeds at egress level
+    // but the post-refresh stager fails with AuthRequired before egress is reached.
+    let egress = Arc::new(RecordingEgress::with_responses(vec![
+        RecordingEgress::json_status(
+            401,
+            json!({"error":{"status":"UNAUTHENTICATED","message":"expired"}}),
+        ),
+        // second egress response is never consumed — stager fails first
+    ]));
+
+    let error = dispatch_error_with_stager(
+        auth,
+        scope,
+        GMAIL_SEND_MESSAGE_CAPABILITY_ID,
+        json!({ "message": { "raw": "base64url-rfc822" } }),
+        egress.clone(),
+        FailOnNthCallStager::fail_on_second_call(),
+    )
+    .await;
+
+    // stage_credential failure on the refresh path must surface as auth_required.
+    assert!(
+        error.is_auth_required(),
+        "post-refresh staging failure must produce auth_required; got: {error:?}"
+    );
+    // Only one egress request was made (the 401-triggering initial request).
+    assert_eq!(
+        egress.requests().len(),
+        1,
+        "exactly one egress request must have been made before stage_credential failure"
+    );
+}
+
 struct AccountSwitchingAuthService {
     state: Mutex<AccountSwitchingAuthState>,
 }

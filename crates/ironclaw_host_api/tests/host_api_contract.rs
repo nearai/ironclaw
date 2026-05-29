@@ -1715,3 +1715,31 @@ fn dispatch_error_event_kind_pins_auth_required_token() {
         "auth_required"
     );
 }
+
+#[test]
+fn dispatch_error_auth_required_debug_redacts_required_secrets() {
+    let handle = SecretHandle::new("google-access-token").unwrap();
+    let error = DispatchError::AuthRequired {
+        capability: CapabilityId::new("test.cap").unwrap(),
+        required_secrets: vec![handle],
+    };
+    let debug = format!("{error:?}");
+    assert!(
+        !debug.contains("google-access-token"),
+        "handle name must not appear in Debug output; got: {debug}"
+    );
+    assert!(
+        debug.contains("1 handle(s) redacted"),
+        "redaction count must appear in Debug output; got: {debug}"
+    );
+    // Empty list variant.
+    let empty = DispatchError::AuthRequired {
+        capability: CapabilityId::new("test.cap").unwrap(),
+        required_secrets: Vec::new(),
+    };
+    let debug_empty = format!("{empty:?}");
+    assert!(
+        debug_empty.contains("0 handle(s) redacted"),
+        "zero redaction count must appear; got: {debug_empty}"
+    );
+}
