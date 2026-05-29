@@ -19,7 +19,6 @@ use ironclaw_host_api::{
 use ironclaw_host_runtime::FirstPartyCapabilityRequest;
 use ironclaw_reborn_composition::{
     bundled_gsuite_extension_packages, bundled_gsuite_first_party_handlers,
-    bundled_gsuite_first_party_handlers_with_credential_stager,
 };
 use serde_json::json;
 
@@ -266,7 +265,9 @@ async fn bundled_gsuite_asset_manifests_match_package_specs() {
 async fn bundled_gsuite_handlers_register_and_forward_runtime_egress() {
     let scope = scope();
     let auth = auth_with_google_account(&scope).await;
-    let registry = bundled_gsuite_first_party_handlers(auth).unwrap();
+    let registry =
+        bundled_gsuite_first_party_handlers(auth, Arc::new(RecordingCredentialStager::default()))
+            .unwrap();
     let capability_id = cap_id(GMAIL_SEND_MESSAGE_CAPABILITY_ID);
     let egress = Arc::new(RecordingEgress::default());
     let egress_port: Arc<dyn RuntimeHttpEgress> = egress.clone();
@@ -297,7 +298,7 @@ async fn bundled_gsuite_handlers_stage_selected_account_secret_before_egress() {
     let scope = scope();
     let auth = auth_with_google_account(&scope).await;
     let stager = Arc::new(RecordingCredentialStager::default());
-    let registry = bundled_gsuite_first_party_handlers_with_credential_stager(
+    let registry = bundled_gsuite_first_party_handlers(
         auth,
         stager.clone() as Arc<dyn GsuiteCredentialStager>,
     )
@@ -335,11 +336,9 @@ async fn bundled_gsuite_handlers_project_staging_auth_failures_as_auth_required(
     let scope = scope();
     let auth = auth_with_google_account(&scope).await;
     let stager = Arc::new(RecordingCredentialStager::auth_required());
-    let registry = bundled_gsuite_first_party_handlers_with_credential_stager(
-        auth,
-        stager as Arc<dyn GsuiteCredentialStager>,
-    )
-    .unwrap();
+    let registry =
+        bundled_gsuite_first_party_handlers(auth, stager as Arc<dyn GsuiteCredentialStager>)
+            .unwrap();
     let capability_id = cap_id(GMAIL_SEND_MESSAGE_CAPABILITY_ID);
     let egress = Arc::new(RecordingEgress::default());
     let egress_port: Arc<dyn RuntimeHttpEgress> = egress.clone();
@@ -355,7 +354,13 @@ async fn bundled_gsuite_handlers_project_staging_auth_failures_as_auth_required(
         .await
         .unwrap_err();
 
-    assert!(error.is_auth_required());
+    assert_eq!(
+        error
+            .auth_requirement()
+            .expect("staging auth failure should surface auth requirement")
+            .required_secrets,
+        vec![SecretHandle::new("google-access-token").unwrap()]
+    );
     assert!(egress.requests().is_empty());
 }
 
@@ -363,7 +368,9 @@ async fn bundled_gsuite_handlers_project_staging_auth_failures_as_auth_required(
 async fn bundled_gsuite_handlers_register_all_gsuite_capabilities() {
     let scope = scope();
     let auth = auth_with_google_account(&scope).await;
-    let registry = bundled_gsuite_first_party_handlers(auth).unwrap();
+    let registry =
+        bundled_gsuite_first_party_handlers(auth, Arc::new(RecordingCredentialStager::default()))
+            .unwrap();
     let expected_capability_ids = gsuite_package_specs()
         .iter()
         .flat_map(|package| {
@@ -386,7 +393,9 @@ async fn bundled_gsuite_handlers_register_all_gsuite_capabilities() {
 async fn bundled_gsuite_handler_fails_closed_without_runtime_egress() {
     let scope = scope();
     let auth = Arc::new(InMemoryAuthProductServices::new());
-    let registry = bundled_gsuite_first_party_handlers(auth).unwrap();
+    let registry =
+        bundled_gsuite_first_party_handlers(auth, Arc::new(RecordingCredentialStager::default()))
+            .unwrap();
     let capability_id = cap_id(GMAIL_SEND_MESSAGE_CAPABILITY_ID);
     let handler = registry.get(&capability_id).expect("handler registered");
 

@@ -11,7 +11,7 @@ use std::{collections::HashMap, fmt, sync::Arc};
 use async_trait::async_trait;
 use ironclaw_host_api::{
     CapabilityId, MountView, ResourceEstimate, ResourceScope, ResourceUsage,
-    RuntimeDispatchErrorKind,
+    RuntimeDispatchErrorKind, SecretHandle,
 };
 use serde_json::Value;
 
@@ -103,7 +103,12 @@ impl FirstPartyCapabilityResult {
 pub struct FirstPartyCapabilityError {
     kind: RuntimeDispatchErrorKind,
     usage: Option<ResourceUsage>,
-    auth_required: bool,
+    auth: Option<FirstPartyAuthRequirement>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FirstPartyAuthRequirement {
+    pub required_secrets: Vec<SecretHandle>,
 }
 
 impl FirstPartyCapabilityError {
@@ -111,15 +116,19 @@ impl FirstPartyCapabilityError {
         Self {
             kind,
             usage: None,
-            auth_required: false,
+            auth: None,
         }
     }
 
     pub fn auth_required() -> Self {
+        Self::auth_required_with(FirstPartyAuthRequirement::default())
+    }
+
+    pub fn auth_required_with(auth: FirstPartyAuthRequirement) -> Self {
         Self {
             kind: RuntimeDispatchErrorKind::Client,
             usage: None,
-            auth_required: true,
+            auth: Some(auth),
         }
     }
 
@@ -136,8 +145,12 @@ impl FirstPartyCapabilityError {
         self.usage.as_ref()
     }
 
+    pub fn auth_requirement(&self) -> Option<&FirstPartyAuthRequirement> {
+        self.auth.as_ref()
+    }
+
     pub fn is_auth_required(&self) -> bool {
-        self.auth_required
+        self.auth.is_some()
     }
 }
 

@@ -2,10 +2,6 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_auth::CredentialAccountService;
-use ironclaw_capabilities::{
-    CapabilityObligationError, CapabilityObligationHandler, CapabilityObligationPhase,
-    CapabilityObligationRequest,
-};
 use ironclaw_extensions::{
     CapabilityManifest, CapabilityVisibility, ExtensionError, ExtensionManifest, ExtensionPackage,
     ExtensionRuntime, MANIFEST_SCHEMA_VERSION, ManifestSource,
@@ -13,16 +9,16 @@ use ironclaw_extensions::{
 use ironclaw_first_party_extensions::{
     GsuiteCapabilitySpec, GsuiteCredentialStageError, GsuiteCredentialStageRequest,
     GsuiteCredentialStager, GsuiteDispatchError, GsuiteDispatchRequest, GsuiteExecutor,
-    GsuitePackageSpec, NoopGsuiteCredentialStager, gsuite_package_specs, gsuite_resource_profile,
+    GsuitePackageSpec, gsuite_package_specs, gsuite_resource_profile,
 };
 use ironclaw_host_api::{
-    CapabilityId, CapabilityProfileSchemaRef, CapabilitySet, CorrelationId, ExecutionContext,
-    ExtensionId, HostApiError, MountView, Obligation, RequestedTrustClass, ResourceEstimate,
-    ResourceScope, RuntimeKind, TrustClass, VirtualPath,
+    CapabilityId, CapabilityProfileSchemaRef, ExtensionId, HostApiError, RequestedTrustClass,
+    TrustClass, VirtualPath,
 };
 use ironclaw_host_runtime::{
-    FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
-    FirstPartyCapabilityRequest, FirstPartyCapabilityResult,
+    FirstPartyAuthRequirement, FirstPartyCapabilityError, FirstPartyCapabilityHandler,
+    FirstPartyCapabilityRegistry, FirstPartyCapabilityRequest, FirstPartyCapabilityResult,
+    ProductAuthCredentialStageError, ProductAuthProviderRuntimePorts,
 };
 
 /// Host-bundled GSuite packages available to an install/activation surface.
@@ -44,15 +40,6 @@ pub fn bundled_gsuite_extension_packages() -> Result<Vec<ExtensionPackage>, Exte
 /// dispatch still requires active package descriptors.
 pub fn bundled_gsuite_first_party_handlers(
     accounts: Arc<dyn CredentialAccountService>,
-) -> Result<FirstPartyCapabilityRegistry, HostApiError> {
-    bundled_gsuite_first_party_handlers_with_credential_stager(
-        accounts,
-        Arc::new(NoopGsuiteCredentialStager),
-    )
-}
-
-pub fn bundled_gsuite_first_party_handlers_with_credential_stager(
-    accounts: Arc<dyn CredentialAccountService>,
     credential_stager: Arc<dyn GsuiteCredentialStager>,
 ) -> Result<FirstPartyCapabilityRegistry, HostApiError> {
     let mut registry = FirstPartyCapabilityRegistry::new();
@@ -66,7 +53,7 @@ pub(crate) fn register_bundled_gsuite_first_party_handlers(
     credential_stager: Arc<dyn GsuiteCredentialStager>,
 ) -> Result<(), HostApiError> {
     let handler = Arc::new(GsuiteFirstPartyHandler {
-        executor: GsuiteExecutor::new(accounts).with_credential_stager(credential_stager),
+        executor: GsuiteExecutor::new(accounts, credential_stager),
     });
     for package in gsuite_package_specs() {
         for capability in package.capabilities {
@@ -166,8 +153,10 @@ fn capability_manifest(
 }
 
 fn gsuite_error(error: GsuiteDispatchError) -> FirstPartyCapabilityError {
-    let mapped = if error.is_auth_required() {
-        FirstPartyCapabilityError::auth_required()
+    let mapped = if let Some(auth) = error.auth_requirement() {
+        FirstPartyCapabilityError::auth_required_with(FirstPartyAuthRequirement {
+            required_secrets: auth.required_secrets,
+        })
     } else {
         FirstPartyCapabilityError::new(error.kind())
     };
@@ -178,74 +167,34 @@ fn gsuite_error(error: GsuiteDispatchError) -> FirstPartyCapabilityError {
     }
 }
 
-pub(crate) struct ObligationGsuiteCredentialStager {
-    obligation_handler: Arc<dyn CapabilityObligationHandler>,
+pub(crate) struct ProductAuthRuntimeGsuiteCredentialStager {
+    runtime_ports: ProductAuthProviderRuntimePorts,
 }
 
-impl ObligationGsuiteCredentialStager {
-    pub(crate) fn new(obligation_handler: Arc<dyn CapabilityObligationHandler>) -> Self {
-        Self { obligation_handler }
+impl ProductAuthRuntimeGsuiteCredentialStager {
+    pub(crate) fn new(runtime_ports: ProductAuthProviderRuntimePorts) -> Self {
+        Self { runtime_ports }
     }
 }
 
 #[async_trait]
-impl GsuiteCredentialStager for ObligationGsuiteCredentialStager {
+impl GsuiteCredentialStager for ProductAuthRuntimeGsuiteCredentialStager {
     async fn stage(
         &self,
         request: GsuiteCredentialStageRequest<'_>,
     ) -> Result<(), GsuiteCredentialStageError> {
-        let context = gsuite_staging_context(request.scope, request.extension_id.clone())?;
-        let obligation = Obligation::InjectSecretOnce {
-            handle: request.access_secret.clone(),
-        };
-        let obligations = [obligation];
-        let estimate = ResourceEstimate::default();
-        self.obligation_handler
-            .satisfy(CapabilityObligationRequest {
-                phase: CapabilityObligationPhase::Invoke,
-                context: &context,
-                capability_id: request.capability_id,
-                estimate: &estimate,
-                obligations: &obligations,
-            })
+        self.runtime_ports
+            .stage_secret_once(request.scope, request.capability_id, request.access_secret)
             .await
-            .map_err(stage_obligation_error)
+            .map_err(stage_runtime_credential_error)
     }
 }
 
-fn gsuite_staging_context(
-    scope: &ResourceScope,
-    extension_id: ExtensionId,
-) -> Result<ExecutionContext, GsuiteCredentialStageError> {
-    let mounts = MountView::new(Vec::new()).map_err(|_| GsuiteCredentialStageError::Backend)?;
-    let context = ExecutionContext {
-        invocation_id: scope.invocation_id,
-        correlation_id: CorrelationId::new(),
-        process_id: None,
-        parent_process_id: None,
-        tenant_id: scope.tenant_id.clone(),
-        user_id: scope.user_id.clone(),
-        agent_id: scope.agent_id.clone(),
-        project_id: scope.project_id.clone(),
-        mission_id: scope.mission_id.clone(),
-        thread_id: scope.thread_id.clone(),
-        extension_id,
-        runtime: RuntimeKind::FirstParty,
-        trust: TrustClass::FirstParty,
-        grants: CapabilitySet::default(),
-        mounts,
-        resource_scope: scope.clone(),
-    };
-    context
-        .validate()
-        .map_err(|_| GsuiteCredentialStageError::Backend)?;
-    Ok(context)
-}
-
-fn stage_obligation_error(error: CapabilityObligationError) -> GsuiteCredentialStageError {
+fn stage_runtime_credential_error(
+    error: ProductAuthCredentialStageError,
+) -> GsuiteCredentialStageError {
     match error {
-        CapabilityObligationError::AuthRequired => GsuiteCredentialStageError::AuthRequired,
-        CapabilityObligationError::Unsupported { .. }
-        | CapabilityObligationError::Failed { .. } => GsuiteCredentialStageError::Backend,
+        ProductAuthCredentialStageError::AuthRequired => GsuiteCredentialStageError::AuthRequired,
+        ProductAuthCredentialStageError::Backend => GsuiteCredentialStageError::Backend,
     }
 }

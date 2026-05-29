@@ -31,7 +31,7 @@ use ironclaw_filesystem::PostgresRootFilesystem;
 use ironclaw_filesystem::{LocalFilesystem, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
     CapabilityDispatcher, CapabilityId, DispatchError, ResourceReservationId, ResourceScope,
-    ResourceUsage, RuntimeDispatchErrorKind, RuntimeHttpEgress, RuntimeKind,
+    ResourceUsage, RuntimeDispatchErrorKind, RuntimeHttpEgress, RuntimeKind, SecretHandle,
     runtime_policy::{
         DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind, NetworkMode,
         ProcessBackendKind, RuntimeProfile, SecretMode,
@@ -161,23 +161,35 @@ where
 
 /// Canonical host-runtime ports used by product-auth provider adapters.
 ///
-/// This intentionally exposes only the already-composed egress and obligation
-/// handler. Product/auth adapters must not receive the mutable handoff stores
-/// that back those ports.
+/// This intentionally exposes only the already-composed egress, obligation
+/// handler, and scoped one-shot secret staging operation. Product/auth adapters
+/// must not receive the mutable handoff stores that back those ports.
 #[derive(Clone)]
 pub struct ProductAuthProviderRuntimePorts {
     runtime_http_egress: Arc<dyn RuntimeHttpEgress>,
     obligation_handler: Arc<dyn CapabilityObligationHandler>,
+    secret_store: Arc<dyn SecretStore>,
+    secret_injection_store: Arc<RuntimeSecretInjectionStore>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProductAuthCredentialStageError {
+    AuthRequired,
+    Backend,
 }
 
 impl ProductAuthProviderRuntimePorts {
     fn new(
         runtime_http_egress: Arc<dyn RuntimeHttpEgress>,
         obligation_handler: Arc<dyn CapabilityObligationHandler>,
+        secret_store: Arc<dyn SecretStore>,
+        secret_injection_store: Arc<RuntimeSecretInjectionStore>,
     ) -> Self {
         Self {
             runtime_http_egress,
             obligation_handler,
+            secret_store,
+            secret_injection_store,
         }
     }
 
@@ -187,6 +199,36 @@ impl ProductAuthProviderRuntimePorts {
 
     pub fn obligation_handler(&self) -> Arc<dyn CapabilityObligationHandler> {
         Arc::clone(&self.obligation_handler)
+    }
+
+    pub async fn stage_secret_once(
+        &self,
+        scope: &ResourceScope,
+        capability_id: &CapabilityId,
+        handle: &SecretHandle,
+    ) -> Result<(), ProductAuthCredentialStageError> {
+        let exists = self
+            .secret_store
+            .metadata(scope, handle)
+            .await
+            .map_err(|_| ProductAuthCredentialStageError::Backend)?
+            .is_some();
+        if !exists {
+            return Err(ProductAuthCredentialStageError::AuthRequired);
+        }
+        let lease = self
+            .secret_store
+            .lease_once(scope, handle)
+            .await
+            .map_err(|_| ProductAuthCredentialStageError::Backend)?;
+        let secret = self
+            .secret_store
+            .consume(scope, lease.id)
+            .await
+            .map_err(|_| ProductAuthCredentialStageError::Backend)?;
+        self.secret_injection_store
+            .insert(scope, capability_id, handle, secret)
+            .map_err(|_| ProductAuthCredentialStageError::Backend)
     }
 }
 
@@ -364,9 +406,12 @@ where
     /// product-auth provider adapters.
     pub fn product_auth_provider_runtime_ports(&self) -> Option<ProductAuthProviderRuntimePorts> {
         let runtime_http_egress = runtime_http_egress(&self.runtime_http_egress)?;
+        let secret_store = self.secret_store.clone()?;
         Some(ProductAuthProviderRuntimePorts::new(
             runtime_http_egress,
             Arc::new(self.builtin_obligation_handler()),
+            secret_store,
+            Arc::clone(&self.secret_injection_store),
         ))
     }
 

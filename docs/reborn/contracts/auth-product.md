@@ -246,6 +246,10 @@ secret material. Composition resolves this boundary as follows:
   composition maps that handle to an authorized configured GitHub account and
   stages that account's access secret for the declared `api.github.com`
   audience only.
+- GSuite first-party handlers receive an explicit credential stager backed by
+  host-runtime product-auth ports. Composition does not synthesize an
+  `ExecutionContext`; host runtime owns the scoped one-shot secret handoff into
+  `RuntimeCredentialSource::StagedObligation`.
 - MCP HTTP/SSE auth is modeled as server-scoped product-auth account
   selection. A host-owned MCP server entry supplies the provider/server auth
   requirement; composition selects the account before building a runtime egress

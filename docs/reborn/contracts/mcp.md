@@ -154,6 +154,9 @@ Transport-specific policy is a host adapter responsibility:
   `tools/call` JSON-RPC body once before the handshake, rejects direct
   `SecretStoreLease` sources before any transport request, and threads the
   approved staged plan into the eventual `tools/call` send.
+- Planner-visible headers exclude the dynamic MCP session header. The protocol
+  client appends `Mcp-Session-Id` after planning when the server establishes a
+  session.
 - `initialize` and `notifications/initialized` remain credential-free even
   when the host-planned `tools/call` carries staged credentials.
 - MCP protocol code consumes `RuntimeCredentialInjection` plans only; product

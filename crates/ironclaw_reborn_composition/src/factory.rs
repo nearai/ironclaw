@@ -97,7 +97,9 @@ use crate::{
     extension_lifecycle_capabilities::{
         extend_builtin_first_party_package, insert_handlers as insert_extension_lifecycle_handlers,
     },
-    gsuite::{ObligationGsuiteCredentialStager, register_bundled_gsuite_first_party_handlers},
+    gsuite::{
+        ProductAuthRuntimeGsuiteCredentialStager, register_bundled_gsuite_first_party_handlers,
+    },
     nearai_mcp::{nearai_mcp_endpoint_from_env, nearai_mcp_runtime},
     web_access::register_bundled_web_access_first_party_handlers,
 };
@@ -546,8 +548,8 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     register_bundled_gsuite_first_party_handlers(
         &mut first_party_registry,
         product_auth.credential_account_service(),
-        Arc::new(ObligationGsuiteCredentialStager::new(
-            product_auth_runtime_ports.obligation_handler(),
+        Arc::new(ProductAuthRuntimeGsuiteCredentialStager::new(
+            product_auth_runtime_ports.clone(),
         )),
     )
     .map_err(|error| RebornBuildError::InvalidConfig {
@@ -1689,8 +1691,8 @@ where
         register_bundled_gsuite_first_party_handlers(
             &mut first_party_registry,
             product_auth.credential_account_service(),
-            Arc::new(ObligationGsuiteCredentialStager::new(
-                product_auth_runtime_ports.obligation_handler(),
+            Arc::new(ProductAuthRuntimeGsuiteCredentialStager::new(
+                product_auth_runtime_ports.clone(),
             )),
         )
         .map_err(|error| RebornBuildError::InvalidConfig {

@@ -73,9 +73,10 @@ MCP HTTP/SSE follows the same rule through `ironclaw_mcp::McpHostHttpClient`: th
 For MCP HTTP/SSE credentials, the host planner is called once for the real
 `tools/call` JSON-RPC body before the handshake. The client validates that plan
 up front, then reuses it when sending `tools/call`; the handshake requests are
-planned separately and strip credential injections. This keeps the planner
-idempotent and prevents staged secret handles from being recomputed from
-runtime-visible MCP input.
+planned separately and strip credential injections. Planner-visible headers are
+stable policy headers only; the protocol-owned `Mcp-Session-Id` header is added
+after planning. This keeps the planner idempotent and prevents staged secret
+handles from being recomputed from runtime-visible MCP input.
 
 Credential injection plans identify their material source. Production runtime tool egress for first-party/native, MCP, script, and WASM lanes must use `RuntimeCredentialSource::StagedObligation { capability_id }`, the `InjectSecretOnce` handoff path. `HostHttpEgressService` must be configured with the same `RuntimeSecretInjectionStore` as the obligation handler and must call `take(scope, capability_id, handle)` before runtime/network use. Missing required staged material fails before outbound transport, and successful or failed transport attempts cannot reuse the staged value because `take(...)` removes it first. `RuntimeCredentialSource::SecretStoreLease` is retained only for explicitly named legacy/test compatibility paths that are not backed by an already-satisfied authorization obligation; production egress rejects direct secret-store leases before transport. If one approved request plan injects the same source+handle into multiple targets, the egress service consumes the staged or leased material once and reuses it only within that request. Header, query-param, and path-placeholder credential targets are supported; request-body targets remain out of scope.
 

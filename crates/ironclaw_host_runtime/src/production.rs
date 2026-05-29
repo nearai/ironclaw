@@ -25,7 +25,7 @@ use ironclaw_capabilities::{
 use ironclaw_extensions::{ExtensionPackage, ExtensionRegistry, SharedExtensionRegistry};
 use ironclaw_host_api::{
     ApprovalRequestId, CapabilityDispatcher, CapabilityId, DispatchFailureKind, InvocationId,
-    PackageSource, ResourceScope, RuntimeDispatchErrorKind, RuntimeKind,
+    PackageSource, ResourceScope, RuntimeDispatchErrorKind, RuntimeKind, SecretHandle,
     runtime_policy::EffectiveRuntimePolicy,
 };
 use ironclaw_process_sandbox::{
@@ -527,9 +527,10 @@ impl HostRuntime for DefaultHostRuntime {
                     "capability resume failed"
                 );
                 match error {
-                    CapabilityInvocationError::AuthorizationRequiresAuth { capability } => {
-                        Ok(auth_required_outcome(capability))
-                    }
+                    CapabilityInvocationError::AuthorizationRequiresAuth {
+                        capability,
+                        required_secrets,
+                    } => Ok(auth_required_outcome(capability, required_secrets)),
                     other => Ok(RuntimeCapabilityOutcome::Failed(failure_from(
                         other,
                         capability_id,
@@ -983,9 +984,10 @@ impl DefaultHostRuntime {
                     }
                 }
             }
-            CapabilityInvocationError::AuthorizationRequiresAuth { capability } => {
-                Ok(auth_required_outcome(capability))
-            }
+            CapabilityInvocationError::AuthorizationRequiresAuth {
+                capability,
+                required_secrets,
+            } => Ok(auth_required_outcome(capability, required_secrets)),
             other => Ok(RuntimeCapabilityOutcome::Failed(failure_from(
                 other,
                 capability_id,
@@ -1256,12 +1258,15 @@ fn completed_outcome_from(
     }
 }
 
-fn auth_required_outcome(capability_id: CapabilityId) -> RuntimeCapabilityOutcome {
+fn auth_required_outcome(
+    capability_id: CapabilityId,
+    required_secrets: Vec<SecretHandle>,
+) -> RuntimeCapabilityOutcome {
     RuntimeCapabilityOutcome::AuthRequired(RuntimeAuthGate {
         gate_id: RuntimeGateId::new(),
         capability_id,
         reason: RuntimeBlockedReason::AuthRequired,
-        required_secrets: Vec::new(),
+        required_secrets,
     })
 }
 

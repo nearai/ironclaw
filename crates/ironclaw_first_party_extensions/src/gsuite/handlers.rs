@@ -55,16 +55,14 @@ pub struct GsuiteExecutor {
 }
 
 impl GsuiteExecutor {
-    pub fn new(accounts: Arc<dyn CredentialAccountService>) -> Self {
+    pub fn new(
+        accounts: Arc<dyn CredentialAccountService>,
+        credential_stager: Arc<dyn GsuiteCredentialStager>,
+    ) -> Self {
         Self {
             resolver: Arc::new(GoogleCredentialResolver::new(accounts)),
-            credential_stager: Arc::new(NoopGsuiteCredentialStager),
+            credential_stager,
         }
-    }
-
-    pub fn with_credential_stager(mut self, stager: Arc<dyn GsuiteCredentialStager>) -> Self {
-        self.credential_stager = stager;
-        self
     }
 
     pub async fn dispatch(
@@ -171,7 +169,7 @@ impl GsuiteExecutor {
                 access_secret: &access_secret,
             })
             .await
-            .map_err(map_stage_error)
+            .map_err(|error| map_stage_error(error, access_secret))
     }
 }
 
@@ -191,11 +189,20 @@ pub struct GsuiteDispatchResult {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GsuiteCredentialDispatchReason {
     Recovery(CredentialRecoveryProjection),
-    MissingScopes { missing_scopes: Vec<ProviderScope> },
+    MissingScopes {
+        missing_scopes: Vec<ProviderScope>,
+    },
     MissingAccessSecret,
-    AuthRequired,
+    AuthRequired {
+        required_secrets: Vec<ironclaw_host_api::SecretHandle>,
+    },
     BackendAuth,
     HostApi,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GsuiteAuthRequirement {
+    pub required_secrets: Vec<ironclaw_host_api::SecretHandle>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -237,16 +244,25 @@ impl GsuiteDispatchError {
         self.usage.as_ref()
     }
 
+    pub fn auth_requirement(&self) -> Option<GsuiteAuthRequirement> {
+        match self.reason.as_ref()? {
+            GsuiteCredentialDispatchReason::Recovery(_)
+            | GsuiteCredentialDispatchReason::MissingScopes { .. }
+            | GsuiteCredentialDispatchReason::MissingAccessSecret => {
+                Some(GsuiteAuthRequirement::default())
+            }
+            GsuiteCredentialDispatchReason::AuthRequired { required_secrets } => {
+                Some(GsuiteAuthRequirement {
+                    required_secrets: required_secrets.clone(),
+                })
+            }
+            GsuiteCredentialDispatchReason::BackendAuth
+            | GsuiteCredentialDispatchReason::HostApi => None,
+        }
+    }
+
     pub fn is_auth_required(&self) -> bool {
-        matches!(
-            self.reason,
-            Some(
-                GsuiteCredentialDispatchReason::Recovery(_)
-                    | GsuiteCredentialDispatchReason::MissingScopes { .. }
-                    | GsuiteCredentialDispatchReason::MissingAccessSecret
-                    | GsuiteCredentialDispatchReason::AuthRequired
-            )
-        )
+        self.auth_requirement().is_some()
     }
 }
 
@@ -269,19 +285,6 @@ pub trait GsuiteCredentialStager: Send + Sync {
         &self,
         request: GsuiteCredentialStageRequest<'_>,
     ) -> Result<(), GsuiteCredentialStageError>;
-}
-
-#[derive(Debug, Default)]
-pub struct NoopGsuiteCredentialStager;
-
-#[async_trait]
-impl GsuiteCredentialStager for NoopGsuiteCredentialStager {
-    async fn stage(
-        &self,
-        _request: GsuiteCredentialStageRequest<'_>,
-    ) -> Result<(), GsuiteCredentialStageError> {
-        Ok(())
-    }
 }
 
 enum CapabilityExecution {
@@ -778,12 +781,17 @@ fn map_credential_error(error: GoogleCredentialError) -> GsuiteDispatchError {
     }
 }
 
-fn map_stage_error(error: GsuiteCredentialStageError) -> GsuiteDispatchError {
+fn map_stage_error(
+    error: GsuiteCredentialStageError,
+    required_secret: ironclaw_host_api::SecretHandle,
+) -> GsuiteDispatchError {
     match error {
-        GsuiteCredentialStageError::AuthRequired => {
-            GsuiteDispatchError::new(RuntimeDispatchErrorKind::Client)
-                .with_reason(GsuiteCredentialDispatchReason::AuthRequired)
-        }
+        GsuiteCredentialStageError::AuthRequired => GsuiteDispatchError::new(
+            RuntimeDispatchErrorKind::Client,
+        )
+        .with_reason(GsuiteCredentialDispatchReason::AuthRequired {
+            required_secrets: vec![required_secret],
+        }),
         GsuiteCredentialStageError::Backend => {
             GsuiteDispatchError::new(RuntimeDispatchErrorKind::Backend)
                 .with_reason(GsuiteCredentialDispatchReason::HostApi)

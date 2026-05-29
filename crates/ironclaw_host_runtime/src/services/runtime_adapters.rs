@@ -320,9 +320,10 @@ where
                     reservation.id,
                     error.usage(),
                 )?;
-                if error.is_auth_required() {
+                if let Some(auth) = error.auth_requirement() {
                     return Err(DispatchError::AuthRequired {
                         capability: request.capability_id.clone(),
+                        required_secrets: auth.required_secrets.clone(),
                     });
                 }
                 return Err(DispatchError::FirstParty { kind: error.kind() });

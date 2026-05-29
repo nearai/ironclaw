@@ -21,7 +21,7 @@ use ironclaw_processes::{InMemoryProcessResultStore, InMemoryProcessStore, Proce
 use ironclaw_resources::{
     InMemoryResourceGovernor, ResourceAccount, ResourceGovernor, ResourceTally,
 };
-use ironclaw_secrets::{InMemorySecretStore, SecretMaterial};
+use ironclaw_secrets::{InMemorySecretStore, SecretMaterial, SecretStore};
 use serde_json::{Value, json};
 
 use super::{
@@ -34,6 +34,8 @@ use super::{
 };
 use crate::CommandExecutionRequest;
 use crate::obligations::{NetworkObligationPolicyStore, RuntimeSecretInjectionStore};
+
+mod first_party_runtime_adapter;
 
 #[tokio::test]
 async fn shared_extension_registry_returns_same_instance() {
@@ -53,10 +55,22 @@ async fn product_auth_provider_runtime_ports_returns_none_without_egress() {
 
 #[tokio::test]
 async fn product_auth_provider_runtime_ports_returns_configured_egress_and_obligation_handler() {
+    let secret_store = Arc::new(InMemorySecretStore::new());
     let services = test_services()
-        .with_secret_store(Arc::new(InMemorySecretStore::new()))
+        .with_secret_store(Arc::clone(&secret_store))
         .try_with_host_http_egress(RecordingNetwork::ok())
         .expect("host HTTP egress should wire with graph secret store");
+    let scope = sample_scope();
+    let capability_id = sample_capability_id();
+    let handle = SecretHandle::new("product-auth-secret").unwrap();
+    secret_store
+        .put(
+            scope.clone(),
+            handle.clone(),
+            SecretMaterial::from("product-auth-material"),
+        )
+        .await
+        .expect("test secret should store");
 
     let ports = services
         .product_auth_provider_runtime_ports()
@@ -66,6 +80,17 @@ async fn product_auth_provider_runtime_ports_returns_configured_egress_and_oblig
         &configured_egress(&services)
     ));
     let _handler = ports.obligation_handler();
+    ports
+        .stage_secret_once(&scope, &capability_id, &handle)
+        .await
+        .expect("runtime ports should stage product auth secret");
+    assert!(
+        services
+            .secret_injection_store
+            .take(&scope, &capability_id, &handle)
+            .expect("staged secret should be readable for assertion")
+            .is_some()
+    );
 }
 
 #[tokio::test]
@@ -645,55 +670,6 @@ async fn first_party_adapter_releases_reservation_when_planner_denies() {
     );
 }
 
-#[tokio::test]
-async fn first_party_adapter_maps_handler_auth_required_to_dispatch_auth_required() {
-    let descriptor = test_descriptor(RuntimeKind::FirstParty, Vec::new());
-    let registry = Arc::new(FirstPartyCapabilityRegistry::new().with_handler(
-        descriptor.id.clone(),
-        Arc::new(AuthRequiredFirstPartyHandler),
-    ));
-    let adapter = FirstPartyRuntimeAdapter::from_registry(
-        registry,
-        Arc::new(LocalInvocationServicesResolver::new(
-            Arc::new(LocalFilesystem::new()),
-            None,
-            Arc::new(LocalHostProcessPort::new()),
-            None,
-        )),
-    );
-    let filesystem = LocalFilesystem::new();
-    let governor = InMemoryResourceGovernor::new();
-    let scope = sample_scope();
-    let package = test_package(WASM_MANIFEST, "test-wasm");
-    let policy = policy_with(
-        FilesystemBackendKind::HostWorkspace,
-        ProcessBackendKind::LocalHost,
-        NetworkMode::DirectLogged,
-        SecretMode::ScrubbedEnv,
-    );
-
-    let result = adapter
-        .dispatch_json(RuntimeAdapterRequest {
-            package: &package,
-            descriptor: &descriptor,
-            filesystem: &filesystem,
-            governor: &governor,
-            runtime_policy: &policy,
-            capability_id: &descriptor.id,
-            scope,
-            estimate: ResourceEstimate::default(),
-            mounts: None,
-            resource_reservation: None,
-            input: json!({}),
-        })
-        .await;
-
-    assert!(matches!(
-        result,
-        Err(DispatchError::AuthRequired { capability }) if capability == descriptor.id
-    ));
-}
-
 fn test_services() -> HostRuntimeServices<
     LocalFilesystem,
     InMemoryResourceGovernor,
@@ -827,18 +803,6 @@ impl crate::FirstPartyCapabilityHandler for PanicFirstPartyHandler {
         _request: crate::FirstPartyCapabilityRequest,
     ) -> Result<crate::FirstPartyCapabilityResult, crate::FirstPartyCapabilityError> {
         panic!("service-resolution denial should happen before handler dispatch")
-    }
-}
-
-struct AuthRequiredFirstPartyHandler;
-
-#[async_trait]
-impl crate::FirstPartyCapabilityHandler for AuthRequiredFirstPartyHandler {
-    async fn dispatch(
-        &self,
-        _request: crate::FirstPartyCapabilityRequest,
-    ) -> Result<crate::FirstPartyCapabilityResult, crate::FirstPartyCapabilityError> {
-        Err(crate::FirstPartyCapabilityError::auth_required())
     }
 }
 

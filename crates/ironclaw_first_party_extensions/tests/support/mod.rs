@@ -5,11 +5,13 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use async_trait::async_trait;
 use ironclaw_auth::{
     AuthProductScope, AuthSurface, CredentialAccountLabel, CredentialAccountStatus,
     CredentialOwnership, InMemoryAuthProductServices, NewCredentialAccount, ProviderScope,
 };
 use ironclaw_first_party_extensions::{
+    GsuiteCredentialStageError, GsuiteCredentialStageRequest, GsuiteCredentialStager,
     GsuiteDispatchError, GsuiteDispatchRequest, GsuiteExecutor, google_provider_id,
 };
 use ironclaw_host_api::{
@@ -17,6 +19,23 @@ use ironclaw_host_api::{
     RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, SecretHandle, UserId,
 };
 use serde_json::json;
+
+#[derive(Debug, Default)]
+pub(crate) struct NoopCredentialStager;
+
+#[async_trait]
+impl GsuiteCredentialStager for NoopCredentialStager {
+    async fn stage(
+        &self,
+        _request: GsuiteCredentialStageRequest<'_>,
+    ) -> Result<(), GsuiteCredentialStageError> {
+        Ok(())
+    }
+}
+
+pub(crate) fn noop_credential_stager() -> Arc<dyn GsuiteCredentialStager> {
+    Arc::new(NoopCredentialStager)
+}
 
 pub(crate) struct RecordingEgress {
     requests: Mutex<Vec<RuntimeHttpEgressRequest>>,
@@ -228,7 +247,7 @@ pub(crate) async fn dispatch_ok(
     input: serde_json::Value,
     egress: Arc<RecordingEgress>,
 ) -> serde_json::Value {
-    let executor = GsuiteExecutor::new(auth);
+    let executor = GsuiteExecutor::new(auth, noop_credential_stager());
     let capability_id = capability_id(capability);
     executor
         .dispatch(GsuiteDispatchRequest {
@@ -249,7 +268,7 @@ pub(crate) async fn dispatch_error(
     input: serde_json::Value,
     egress: Arc<RecordingEgress>,
 ) -> GsuiteDispatchError {
-    let executor = GsuiteExecutor::new(auth);
+    let executor = GsuiteExecutor::new(auth, noop_credential_stager());
     let capability_id = capability_id(capability);
     executor
         .dispatch(GsuiteDispatchRequest {

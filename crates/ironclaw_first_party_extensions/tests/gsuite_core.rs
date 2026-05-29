@@ -236,7 +236,7 @@ async fn gsuite_handler_refresh_retries_with_the_same_account_after_account_sele
     ]));
     let capability_id = capability_id(GMAIL_SEND_MESSAGE_CAPABILITY_ID);
 
-    let output = GsuiteExecutor::new(auth.clone())
+    let output = GsuiteExecutor::new(auth.clone(), noop_credential_stager())
         .dispatch(GsuiteDispatchRequest {
             capability_id: &capability_id,
             scope: &scope,
@@ -351,7 +351,7 @@ async fn gsuite_handler_errors_when_refresh_retry_is_still_auth_expired() {
     ]));
     let capability_id = capability_id(GMAIL_SEND_MESSAGE_CAPABILITY_ID);
 
-    let error = GsuiteExecutor::new(auth)
+    let error = GsuiteExecutor::new(auth, noop_credential_stager())
         .dispatch(GsuiteDispatchRequest {
             capability_id: &capability_id,
             scope: &scope,
@@ -576,7 +576,7 @@ async fn gsuite_handler_uses_selected_credential_handle_for_runtime_egress() {
     let scope = scope();
     let auth =
         auth_with_google_account(&scope, vec![provider_scope(GOOGLE_GMAIL_SEND_SCOPE)]).await;
-    let executor = GsuiteExecutor::new(auth);
+    let executor = GsuiteExecutor::new(auth, noop_credential_stager());
     let capability_id = capability_id(GMAIL_SEND_MESSAGE_CAPABILITY_ID);
     let egress = Arc::new(RecordingEgress::permissive_success());
 
@@ -613,7 +613,7 @@ async fn gsuite_handler_applies_google_api_network_policy() {
     let scope = scope();
     let auth =
         auth_with_google_account(&scope, vec![provider_scope(GOOGLE_GMAIL_SEND_SCOPE)]).await;
-    let executor = GsuiteExecutor::new(auth);
+    let executor = GsuiteExecutor::new(auth, noop_credential_stager());
     let capability_id = capability_id(GMAIL_SEND_MESSAGE_CAPABILITY_ID);
     let egress = Arc::new(RecordingEgress::permissive_success());
 
@@ -649,7 +649,7 @@ async fn gsuite_handler_fails_before_egress_when_scope_is_missing() {
     let scope = scope();
     let auth =
         auth_with_google_account(&scope, vec![provider_scope(GOOGLE_GMAIL_SEND_SCOPE)]).await;
-    let executor = GsuiteExecutor::new(auth);
+    let executor = GsuiteExecutor::new(auth, noop_credential_stager());
     let capability_id = capability_id(GMAIL_TRASH_MESSAGE_CAPABILITY_ID);
     let egress = Arc::new(RecordingEgress::permissive_success());
 
@@ -1291,7 +1291,7 @@ async fn add_attendees_refreshes_expired_get_and_retries_patch() {
         RecordingEgress::json_with_request_bytes(json!({"id":"evt-1","updated":true}), 211),
     ]));
 
-    let result = GsuiteExecutor::new(auth)
+    let result = GsuiteExecutor::new(auth, noop_credential_stager())
         .dispatch(GsuiteDispatchRequest {
             capability_id: &capability_id,
             scope: &scope,
@@ -1345,7 +1345,7 @@ async fn add_attendees_reports_both_google_api_requests() {
         vec![provider_scope(ironclaw_auth::GOOGLE_CALENDAR_EVENTS_SCOPE)],
     )
     .await;
-    let executor = GsuiteExecutor::new(auth);
+    let executor = GsuiteExecutor::new(auth, noop_credential_stager());
     let capability_id = capability_id(CALENDAR_ADD_ATTENDEES_CAPABILITY_ID);
     let egress = Arc::new(RecordingEgress::with_responses(vec![
         RecordingEgress::json_with_request_bytes(
@@ -1381,7 +1381,7 @@ async fn add_attendees_reports_failed_initial_get_network_usage() {
         vec![provider_scope(ironclaw_auth::GOOGLE_CALENDAR_EVENTS_SCOPE)],
     )
     .await;
-    let executor = GsuiteExecutor::new(auth);
+    let executor = GsuiteExecutor::new(auth, noop_credential_stager());
     let capability_id = capability_id(CALENDAR_ADD_ATTENDEES_CAPABILITY_ID);
     let egress = Arc::new(RecordingEgress::with_errors(vec![
         RuntimeHttpEgressError::Network {

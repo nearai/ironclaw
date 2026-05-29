@@ -10,7 +10,7 @@ use thiserror::Error;
 
 use crate::{
     CapabilityId, ExtensionId, MountView, ResourceEstimate, ResourceReceipt, ResourceReservation,
-    ResourceScope, ResourceUsage, RuntimeKind,
+    ResourceScope, ResourceUsage, RuntimeKind, SecretHandle,
 };
 
 /// Request for one already-authorized declared capability dispatch.
@@ -185,7 +185,10 @@ pub enum DispatchError {
         runtime: RuntimeKind,
     },
     #[error("capability {capability} dispatch requires authentication")]
-    AuthRequired { capability: CapabilityId },
+    AuthRequired {
+        capability: CapabilityId,
+        required_secrets: Vec<SecretHandle>,
+    },
     #[error("MCP dispatch failed: {kind}")]
     Mcp { kind: RuntimeDispatchErrorKind },
     #[error("script dispatch failed: {kind}")]

@@ -264,8 +264,9 @@ pub struct McpHostHttpEgressPlanRequest<'a> {
 /// `plan` must be deterministic and side-effect-free. The concrete HTTP client
 /// plans the real `tools/call` body once before the MCP handshake, validates
 /// its credential sources, then threads that plan into the later `tools/call`
-/// transport send. Handshake requests are planned independently and remain
-/// credential-free.
+/// transport send. Planner-visible headers are stable policy headers only; the
+/// dynamic MCP session header is added by the protocol client after planning.
+/// Handshake requests are planned independently and remain credential-free.
 pub trait McpHostHttpEgressPlanner: Send + Sync {
     fn plan(&self, request: McpHostHttpEgressPlanRequest<'_>) -> McpHostHttpEgressPlan;
 }
@@ -315,6 +316,7 @@ struct McpHostHttpSessionCleanup {
 }
 
 struct PlannedMcpJsonRpc {
+    policy_headers: Vec<(String, String)>,
     body: Vec<u8>,
     plan: McpHostHttpEgressPlan,
 }
@@ -390,7 +392,7 @@ where
         method: McpJsonRpcMethod,
         params: Option<Value>,
     ) -> Result<McpJsonRpcExchange, String> {
-        let planned = self.plan_json_rpc(request, session_key, id, method, params)?;
+        let planned = self.plan_json_rpc(request, id, method, params)?;
         self.send_planned_json_rpc(request, session_key, id, method, planned)
             .await
     }
@@ -398,23 +400,19 @@ where
     fn plan_json_rpc(
         &self,
         request: &McpClientRequest,
-        session_key: &McpHostHttpSessionKey,
         id: Option<u64>,
         method: McpJsonRpcMethod,
         params: Option<Value>,
     ) -> Result<PlannedMcpJsonRpc, String> {
         let url = request.url.as_deref().ok_or_else(request_denied)?;
         let body = encode_json_rpc_request(id, method.as_str(), params)?;
-        let mut headers = vec![
+        let policy_headers = vec![
             ("Content-Type".to_string(), "application/json".to_string()),
             (
                 "Accept".to_string(),
                 "application/json, text/event-stream".to_string(),
             ),
         ];
-        if let Some(session_id) = self.current_session_id(session_key)? {
-            headers.push(("Mcp-Session-Id".to_string(), session_id));
-        }
 
         let plan = self.planner.plan(McpHostHttpEgressPlanRequest {
             provider: &request.provider,
@@ -423,10 +421,14 @@ where
             transport: &request.transport,
             method: NetworkMethod::Post,
             url,
-            headers: &headers,
+            headers: &policy_headers,
             body: &body,
         });
-        Ok(PlannedMcpJsonRpc { body, plan })
+        Ok(PlannedMcpJsonRpc {
+            policy_headers,
+            body,
+            plan,
+        })
     }
 
     async fn send_planned_json_rpc(
@@ -438,13 +440,7 @@ where
         planned: PlannedMcpJsonRpc,
     ) -> Result<McpJsonRpcExchange, String> {
         let url = request.url.as_deref().ok_or_else(request_denied)?;
-        let mut headers = vec![
-            ("Content-Type".to_string(), "application/json".to_string()),
-            (
-                "Accept".to_string(),
-                "application/json, text/event-stream".to_string(),
-            ),
-        ];
+        let mut headers = planned.policy_headers;
         if let Some(session_id) = self.current_session_id(session_key)? {
             headers.push(("Mcp-Session-Id".to_string(), session_id));
         }
@@ -567,7 +563,6 @@ where
         let tool_call_id = self.next_request_id();
         let tool_call_plan = self.plan_json_rpc(
             &request,
-            &session_key,
             Some(tool_call_id),
             McpJsonRpcMethod::ToolsCall,
             Some(tool_call_params),

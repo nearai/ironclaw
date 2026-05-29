@@ -1,6 +1,7 @@
 use ironclaw_authorization::CapabilityLeaseError;
 use ironclaw_host_api::{
     CapabilityId, DenyReason, DispatchError, DispatchFailureKind, HostApiError, Obligation,
+    SecretHandle,
 };
 use ironclaw_processes::ProcessError;
 
@@ -38,7 +39,10 @@ pub enum CapabilityInvocationError {
     #[error("capability {capability} invocation requires approval")]
     AuthorizationRequiresApproval { capability: CapabilityId },
     #[error("capability {capability} invocation requires authentication")]
-    AuthorizationRequiresAuth { capability: CapabilityId },
+    AuthorizationRequiresAuth {
+        capability: CapabilityId,
+        required_secrets: Vec<SecretHandle>,
+    },
     #[error("capability {capability} invocation fingerprint failed: {source}")]
     InvocationFingerprint {
         capability: CapabilityId,
@@ -110,9 +114,13 @@ impl From<ProcessError> for CapabilityInvocationError {
 impl From<DispatchError> for CapabilityInvocationError {
     fn from(error: DispatchError) -> Self {
         match error {
-            DispatchError::AuthRequired { capability } => {
-                Self::AuthorizationRequiresAuth { capability }
-            }
+            DispatchError::AuthRequired {
+                capability,
+                required_secrets,
+            } => Self::AuthorizationRequiresAuth {
+                capability,
+                required_secrets,
+            },
             other => Self::Dispatch {
                 kind: dispatch_error_kind(&other),
             },
