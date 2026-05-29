@@ -54,6 +54,7 @@ mod readiness;
 mod runtime;
 mod runtime_input;
 mod skill_listing;
+mod web_access;
 mod webui;
 #[cfg(feature = "webui-v2-beta")]
 mod webui_body_limit;

@@ -348,6 +348,7 @@ Trace Commons issuer/TenantCtx note: the server-side `zmanian/tracedao-server` s
 | Stuck loop detection | ✅ | ❌ | Exponential backoff on stuck agent loops; unknown-tool guard default-on |
 | llms.txt discovery | ✅ | ❌ | Auto-discover site metadata |
 | Multiple images per tool call | ✅ | ❌ | Single tool call, multiple images |
+| Web search extension | ✅ | 🚧 | Host-bundled `web-access` extension provides no-config Exa MCP search and saved-result content retrieval; Brave backend and generic fetch parity still pending |
 | URL allowlist (web_search/fetch) | ✅ | ❌ | Restrict web tool targets |
 | suppressToolErrors config | ✅ | ❌ | Hide tool errors from user |
 | Intent-first tool display | ✅ | ❌ | Details and exec summaries |

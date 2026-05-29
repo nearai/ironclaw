@@ -3,7 +3,7 @@ use std::{collections::BTreeMap, sync::Arc};
 use chrono::Utc;
 use ironclaw_host_api::{
     CapabilityGrant, CapabilityGrantId, EffectKind, ExtensionId, GrantConstraints, MountView,
-    NetworkPolicy, Principal,
+    NetworkPolicy, NetworkScheme, NetworkTargetPattern, Principal,
 };
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 
@@ -97,21 +97,7 @@ impl LocalDevExtensionSurface {
         GrantConstraints {
             allowed_effects: capability.effects.clone(),
             mounts: MountView::default(),
-            network: NetworkPolicy {
-                // Installed extensions get only their declared credential audiences as
-                // egress targets; missing audiences intentionally fail closed.
-                allowed_targets: {
-                    let mut targets = Vec::new();
-                    for credential in &capability.runtime_credentials {
-                        if !targets.contains(&credential.audience) {
-                            targets.push(credential.audience.clone());
-                        }
-                    }
-                    targets
-                },
-                deny_private_ip_ranges: true,
-                max_egress_bytes: None,
-            },
+            network: extension_network_policy(capability),
             secrets: {
                 let mut handles = Vec::new();
                 for credential in &capability.runtime_credentials {
@@ -125,5 +111,59 @@ impl LocalDevExtensionSurface {
             expires_at: None,
             max_invocations: None,
         }
+    }
+}
+
+fn extension_network_policy(capability: &ActiveExtensionCapability) -> NetworkPolicy {
+    let mut targets = Vec::new();
+    for credential in &capability.runtime_credentials {
+        if !targets.contains(&credential.audience) {
+            targets.push(credential.audience.clone());
+        }
+    }
+    if capability.provider.as_str() == "web-access"
+        && capability.id.as_str() == "web-access.search"
+        && !targets
+            .iter()
+            .any(|target| target.host_pattern == "mcp.exa.ai")
+    {
+        targets.push(NetworkTargetPattern {
+            scheme: Some(NetworkScheme::Https),
+            host_pattern: "mcp.exa.ai".to_string(),
+            port: None,
+        });
+    }
+    NetworkPolicy {
+        allowed_targets: targets,
+        deny_private_ip_ranges: true,
+        max_egress_bytes: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ironclaw_host_api::CapabilityId;
+
+    #[test]
+    fn web_access_search_gets_exa_mcp_network_target_without_credentials() {
+        let capability = ActiveExtensionCapability {
+            id: CapabilityId::new("web-access.search").unwrap(),
+            provider: ExtensionId::new("web-access").unwrap(),
+            effects: vec![EffectKind::DispatchCapability, EffectKind::Network],
+            runtime_credentials: Vec::new(),
+        };
+
+        let policy = extension_network_policy(&capability);
+
+        assert_eq!(
+            policy.allowed_targets,
+            vec![NetworkTargetPattern {
+                scheme: Some(NetworkScheme::Https),
+                host_pattern: "mcp.exa.ai".to_string(),
+                port: None,
+            }]
+        );
+        assert!(policy.deny_private_ip_ranges);
     }
 }

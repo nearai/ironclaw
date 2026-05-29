@@ -87,6 +87,7 @@ use crate::{
 use crate::{
     available_extensions::{
         AvailableExtensionCatalog, gmail_manifest_digest, google_calendar_manifest_digest,
+        web_access_manifest_digest,
     },
     extension_installation_store::FilesystemExtensionInstallationStore,
     extension_lifecycle::{
@@ -97,6 +98,7 @@ use crate::{
         extend_builtin_first_party_package, insert_handlers as insert_extension_lifecycle_handlers,
     },
     gsuite::register_bundled_gsuite_first_party_handlers,
+    web_access::register_bundled_web_access_first_party_handlers,
 };
 
 #[cfg(feature = "libsql")]
@@ -514,6 +516,11 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     .map_err(|error| RebornBuildError::InvalidConfig {
         reason: format!("GSuite first-party handlers are invalid: {error}"),
     })?;
+    register_bundled_web_access_first_party_handlers(&mut first_party_registry).map_err(
+        |error| RebornBuildError::InvalidConfig {
+            reason: format!("web access first-party handlers are invalid: {error}"),
+        },
+    )?;
     let mut available_extensions = AvailableExtensionCatalog::from_filesystem_root(
         filesystem.as_ref(),
         &VirtualPath::new("/system/extensions")?,
@@ -1116,6 +1123,16 @@ fn local_dev_first_party_trust_policy() -> Result<HostTrustPolicy, RebornBuildEr
             None,
         ),
         AdminEntry::for_local_manifest(
+            PackageId::new("web-access").map_err(|error| RebornBuildError::InvalidConfig {
+                reason: format!("Web Access first-party package id is invalid: {error}"),
+            })?,
+            "/system/extensions/web-access/manifest.toml".to_string(),
+            Some(web_access_manifest_digest()),
+            HostTrustAssignment::first_party(),
+            web_access_allowed_effects(),
+            None,
+        ),
+        AdminEntry::for_local_manifest(
             PackageId::new("google-calendar").map_err(|error| RebornBuildError::InvalidConfig {
                 reason: format!("Google Calendar first-party package id is invalid: {error}"),
             })?,
@@ -1148,6 +1165,10 @@ fn gsuite_allowed_effects() -> Vec<EffectKind> {
         EffectKind::UseSecret,
         EffectKind::ExternalWrite,
     ]
+}
+
+fn web_access_allowed_effects() -> Vec<EffectKind> {
+    vec![EffectKind::DispatchCapability, EffectKind::Network]
 }
 
 async fn build_production_shaped(
@@ -1821,6 +1842,57 @@ mod tests {
         assert_ne!(failure.kind, RuntimeFailureKind::MissingRuntime);
     }
 
+    #[tokio::test]
+    async fn local_dev_web_access_installs_activates_and_dispatches_through_host_runtime() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let services = build_reborn_services(RebornBuildInput::local_dev(
+            "local-dev-web-access-owner",
+            dir.path().join("local-dev"),
+        ))
+        .await
+        .expect("local-dev services build");
+        let local_runtime = services.local_runtime.as_ref().expect("local runtime");
+        let extension_management = local_runtime
+            .extension_management
+            .as_ref()
+            .expect("extension management");
+        let web_access_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "web-access")
+                .expect("valid ref");
+
+        extension_management
+            .install(web_access_ref.clone())
+            .await
+            .expect("install Web Access");
+        extension_management
+            .activate(web_access_ref)
+            .await
+            .expect("activate Web Access");
+
+        let outcome = services
+            .host_runtime
+            .as_ref()
+            .expect("host runtime")
+            .invoke_capability(RuntimeCapabilityRequest::new(
+                web_access_context("web-access.search"),
+                CapabilityId::new("web-access.search").unwrap(),
+                ResourceEstimate::default(),
+                serde_json::json!({
+                    "provider": "brave",
+                    "query": "ironclaw reborn"
+                }),
+                trust_decision(),
+            ))
+            .await
+            .expect("runtime invocation completes");
+
+        let RuntimeCapabilityOutcome::Failed(failure) = outcome else {
+            panic!("expected fail-closed handler outcome, got {outcome:?}");
+        };
+        assert_eq!(failure.capability_id.as_str(), "web-access.search");
+        assert_eq!(failure.kind, RuntimeFailureKind::Backend);
+    }
+
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn local_dev_services_persist_thread_records_across_rebuilds() {
@@ -2148,6 +2220,47 @@ mod tests {
             MountView::new(Vec::new()).expect("valid empty mount view"),
         )
         .expect("valid execution context")
+    }
+
+    fn web_access_context(capability_id: &str) -> ExecutionContext {
+        let extension_id = ExtensionId::new("caller").expect("valid extension id");
+        ExecutionContext::local_default(
+            UserId::new("local-dev-test-user").expect("valid user id"),
+            extension_id.clone(),
+            RuntimeKind::FirstParty,
+            TrustClass::FirstParty,
+            CapabilitySet {
+                grants: vec![CapabilityGrant {
+                    id: CapabilityGrantId::new(),
+                    capability: CapabilityId::new(capability_id).expect("valid capability id"),
+                    grantee: Principal::Extension(extension_id),
+                    issued_by: Principal::HostRuntime,
+                    constraints: GrantConstraints {
+                        allowed_effects: web_access_allowed_effects(),
+                        mounts: MountView::new(Vec::new()).expect("valid empty mount view"),
+                        network: web_access_network_policy(),
+                        secrets: Vec::new(),
+                        resource_ceiling: None,
+                        expires_at: None,
+                        max_invocations: None,
+                    },
+                }],
+            },
+            MountView::new(Vec::new()).expect("valid empty mount view"),
+        )
+        .expect("valid execution context")
+    }
+
+    fn web_access_network_policy() -> NetworkPolicy {
+        NetworkPolicy {
+            allowed_targets: vec![NetworkTargetPattern {
+                scheme: Some(ironclaw_host_api::NetworkScheme::Https),
+                host_pattern: "mcp.exa.ai".to_string(),
+                port: None,
+            }],
+            deny_private_ip_ranges: true,
+            max_egress_bytes: None,
+        }
     }
 
     fn execution_context(capability_id: &str, mounts: MountView) -> ExecutionContext {
