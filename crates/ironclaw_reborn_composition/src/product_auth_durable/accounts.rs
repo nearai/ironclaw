@@ -54,12 +54,11 @@ where
         request: CredentialAccountListRequest,
     ) -> Result<CredentialAccountListPage, AuthProductError> {
         validate_account_list_request(&request)?;
-        // Fetch one extra record to detect whether a next page exists, and
-        // bound the directory scan to `limit + 1` so we don’t read every
-        // account in the scope when only a small page is needed.
-        let fetch_limit = request.limit.saturating_add(1);
+        // accounts_for_scope reads all accounts then filters; we cannot push
+        // provider/cursor/auth filters to the storage layer without a per-
+        // provider directory layout, so pagination is applied in-memory here.
         let mut accounts = self
-            .accounts_for_scope_bounded(&request.scope, fetch_limit)
+            .accounts_for_scope(&request.scope)
             .await?
             .into_iter()
             .filter(|account| {

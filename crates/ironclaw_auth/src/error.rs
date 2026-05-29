@@ -21,10 +21,6 @@ pub enum AuthErrorCode {
     AccountSelectionRequired,
     #[error("backend_unavailable")]
     BackendUnavailable,
-    /// A compare-and-swap precondition failed; the caller should re-read and
-    /// retry if appropriate.
-    #[error("backend_conflict")]
-    BackendConflict,
     #[error("malformed_callback")]
     MalformedCallback,
     #[error("canceled")]
@@ -87,7 +83,9 @@ impl AuthProductError {
             Self::CredentialMissing => AuthErrorCode::CredentialMissing,
             Self::AccountSelectionRequired => AuthErrorCode::AccountSelectionRequired,
             Self::BackendUnavailable => AuthErrorCode::BackendUnavailable,
-            Self::BackendConflict => AuthErrorCode::BackendConflict,
+            // CAS conflicts are an infrastructure detail; surface as BackendUnavailable
+            // at all stable product boundaries.
+            Self::BackendConflict => AuthErrorCode::BackendUnavailable,
             Self::Canceled => AuthErrorCode::Canceled,
             Self::FlowAlreadyTerminal => AuthErrorCode::FlowAlreadyTerminal,
             Self::InvalidRequest { .. } => AuthErrorCode::InvalidRequest,

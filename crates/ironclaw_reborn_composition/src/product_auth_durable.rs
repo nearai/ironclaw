@@ -39,6 +39,28 @@ pub(crate) use provider::UnavailableAuthProviderClient;
 /// Records live under the caller's scoped `/secrets/product-auth` tree. Raw
 /// provider tokens and manual token values are stored only through
 /// [`SecretStore`] and represented here by opaque secret handles.
+//
+// TODO(#4175 follow-up): project completed product-auth accounts into
+// `ironclaw_secrets::CredentialAccountStore` so the runtime credential
+// broker shares one source of truth with the product-auth UX layer.
+//
+// Today two `CredentialAccount` records coexist:
+//   * `ironclaw_auth::CredentialAccount` — product-auth UX record stored
+//     here (provider id, label, owner_extension, grants, status,
+//     provider_scopes, access/refresh secret handles). Read/written by
+//     setup, OAuth callback, manual-token submit, uninstall cleanup.
+//   * `ironclaw_secrets::CredentialAccount` — runtime broker record
+//     consumed on every extension HTTP call to issue
+//     `CredentialSessionRequest`s (invocation_id, capability_id,
+//     extension_id, method, url, expires_at, max_uses).
+//
+// They are deliberately separate stores (see
+// `docs/reborn/contracts/auth-product.md` → "Durable Production Slice")
+// because their consumers, lifecycles, and access patterns differ. The
+// missing link is a one-way projection product-auth → broker on flow
+// completion / account update / cleanup, so the two universes cannot
+// drift. Until that lands, broker-account population stays the caller's
+// responsibility and drift is not policed here.
 pub(crate) struct FilesystemAuthProductServices<F>
 where
     F: RootFilesystem,
@@ -179,12 +201,9 @@ where
             Err(error) => return Err(fs_error(error)),
         };
         // Build read futures for all .json entries concurrently.
-        let json_entries: Vec<_> = entries
+        let read_futures: Vec<_> = entries
             .into_iter()
             .filter(|e| e.name.ends_with(".json"))
-            .collect();
-        let read_futures: Vec<_> = json_entries
-            .iter()
             .map(|entry| {
                 let path = join_scoped(&root, &entry.name);
                 async move {

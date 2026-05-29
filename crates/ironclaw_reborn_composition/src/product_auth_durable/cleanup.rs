@@ -41,6 +41,9 @@ where
             if had_grant {
                 report.removed_grants.push(current.id);
             }
+            // Capture secret handles before any mutations so we can purge
+            // them from SecretStore after the account record is persisted.
+            let mut handles_to_purge: [Option<ironclaw_host_api::SecretHandle>; 2] = [None, None];
             if owns_extension_account {
                 match request.action {
                     SecretCleanupAction::Deactivate => {
@@ -48,32 +51,12 @@ where
                         report.retained_accounts.push(current.id);
                     }
                     SecretCleanupAction::Uninstall => {
-                        // Capture handles before nulling so we can delete from
-                        // SecretStore after the account record is persisted.
-                        let revoked_access = current.access_secret.take();
-                        let revoked_refresh = current.refresh_secret.take();
+                        handles_to_purge =
+                            [current.access_secret.take(), current.refresh_secret.take()];
                         if current.status != CredentialAccountStatus::Revoked {
                             current.status = CredentialAccountStatus::Revoked;
                             report.revoked_accounts.push(current.id);
                         }
-                        current.updated_at = Utc::now();
-                        self.write_account(&current, CasExpectation::Version(version))
-                            .await?;
-                        // Purge the raw secret material now that the account
-                        // record no longer references these handles.
-                        if let Some(handle) = &revoked_access {
-                            let _ = self
-                                .secret_store
-                                .delete(&request.scope.resource, handle)
-                                .await;
-                        }
-                        if let Some(handle) = &revoked_refresh {
-                            let _ = self
-                                .secret_store
-                                .delete(&request.scope.resource, handle)
-                                .await;
-                        }
-                        continue;
                     }
                 }
             } else if had_grant {
@@ -82,6 +65,14 @@ where
             current.updated_at = Utc::now();
             self.write_account(&current, CasExpectation::Version(version))
                 .await?;
+            // Purge raw secret material after the account record is safely
+            // persisted without the handles.
+            for handle in handles_to_purge.iter().flatten() {
+                let _ = self
+                    .secret_store
+                    .delete(&request.scope.resource, handle)
+                    .await;
+            }
         }
         Ok(report)
     }
