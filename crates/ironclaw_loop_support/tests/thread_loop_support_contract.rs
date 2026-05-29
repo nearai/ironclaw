@@ -954,6 +954,42 @@ async fn model_port_limits_provider_tool_definitions_to_model_visible_capability
 }
 
 #[tokio::test]
+async fn model_port_maps_invalid_model_output_to_recoverable_model_error() {
+    let fixture = ThreadFixture::new().await;
+    let messages = user_model_messages(&fixture);
+    issue_prompt_grant(&fixture.run_context, &messages);
+
+    let gateway = Arc::new(RecordingGateway::model_error(
+        HostManagedModelErrorKind::InvalidOutput,
+        "model returned a tool call outside the advertised capability surface",
+    ));
+    let model_port = ThreadBackedLoopModelPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        gateway.clone(),
+        16,
+    );
+
+    let error = model_port
+        .stream_model(LoopModelRequest {
+            messages,
+            surface_version: None,
+            model_preference: None,
+            capability_view: None,
+        })
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::Unavailable);
+    assert_eq!(
+        error.safe_summary,
+        "model returned a tool call outside the advertised capability surface"
+    );
+    assert_eq!(gateway.calls.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
 async fn model_port_preserves_capability_info_for_filtered_capability_view() {
     let fixture = ThreadFixture::new().await;
     let messages = user_model_messages(&fixture);
@@ -3837,6 +3873,14 @@ impl RecordingGateway {
                 HostManagedModelErrorKind::PolicyDenied,
                 safe_summary,
             )),
+        }
+    }
+
+    fn model_error(kind: HostManagedModelErrorKind, safe_summary: &str) -> Self {
+        Self {
+            calls: Mutex::new(Vec::new()),
+            tool_definition_calls: Mutex::new(Vec::new()),
+            response: Err(HostManagedModelError::safe(kind, safe_summary)),
         }
     }
 
