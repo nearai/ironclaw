@@ -109,8 +109,8 @@ async fn mcp_runtime_requires_host_mediated_egress_for_http_transports() {
     assert!(client.requests.lock().unwrap().is_empty());
 }
 
-#[test]
-fn mcp_host_http_adapter_returns_sanitized_shared_egress_errors() {
+#[tokio::test]
+async fn mcp_host_http_adapter_returns_sanitized_shared_egress_errors() {
     let adapter = McpRuntimeHttpAdapter::new(Arc::new(SecretEchoRuntimeEgress));
 
     let error = adapter
@@ -126,6 +126,7 @@ fn mcp_host_http_adapter_returns_sanitized_shared_egress_errors() {
             response_body_limit: Some(4096),
             timeout_ms: Some(1000),
         })
+        .await
         .expect_err("MCP HTTP adapter errors should be sanitized before runtime visibility");
 
     let rendered = error.to_string();
@@ -1032,8 +1033,9 @@ impl RecordingRuntimeEgress {
     }
 }
 
+#[async_trait::async_trait]
 impl RuntimeHttpEgress for RecordingRuntimeEgress {
-    fn execute(
+    async fn execute(
         &self,
         request: RuntimeHttpEgressRequest,
     ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
@@ -1216,8 +1218,9 @@ impl ScopedSessionRuntimeEgress {
     }
 }
 
+#[async_trait::async_trait]
 impl RuntimeHttpEgress for ScopedSessionRuntimeEgress {
-    fn execute(
+    async fn execute(
         &self,
         request: RuntimeHttpEgressRequest,
     ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
@@ -1258,8 +1261,9 @@ impl RuntimeHttpEgress for ScopedSessionRuntimeEgress {
 #[derive(Debug)]
 struct InvalidSessionRuntimeEgress;
 
+#[async_trait::async_trait]
 impl RuntimeHttpEgress for InvalidSessionRuntimeEgress {
-    fn execute(
+    async fn execute(
         &self,
         request: RuntimeHttpEgressRequest,
     ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
@@ -1282,8 +1286,9 @@ impl RuntimeHttpEgress for InvalidSessionRuntimeEgress {
 #[derive(Debug)]
 struct MissingIdRuntimeEgress;
 
+#[async_trait::async_trait]
 impl RuntimeHttpEgress for MissingIdRuntimeEgress {
-    fn execute(
+    async fn execute(
         &self,
         request: RuntimeHttpEgressRequest,
     ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
@@ -1335,8 +1340,9 @@ impl ErrorSessionRuntimeEgress {
     }
 }
 
+#[async_trait::async_trait]
 impl RuntimeHttpEgress for ErrorSessionRuntimeEgress {
-    fn execute(
+    async fn execute(
         &self,
         request: RuntimeHttpEgressRequest,
     ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
@@ -1392,8 +1398,9 @@ impl RuntimeHttpEgress for ErrorSessionRuntimeEgress {
 #[derive(Debug)]
 struct SecretEchoRuntimeEgress;
 
+#[async_trait::async_trait]
 impl RuntimeHttpEgress for SecretEchoRuntimeEgress {
-    fn execute(
+    async fn execute(
         &self,
         _request: RuntimeHttpEgressRequest,
     ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {

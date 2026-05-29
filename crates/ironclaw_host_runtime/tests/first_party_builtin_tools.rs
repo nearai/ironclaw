@@ -2583,6 +2583,21 @@ async fn builtin_http_maps_runtime_egress_errors_by_source() {
 }
 
 #[tokio::test]
+async fn builtin_http_maps_panicking_runtime_egress_to_backend_failure() {
+    let runtime = runtime_with_http_egress(Arc::new(PanickingRuntimeHttpEgress));
+    let error = invoke_with_context(
+        &runtime,
+        HTTP_CAPABILITY_ID,
+        json!({"url": "https://api.example.test/v1/items"}),
+        execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy()),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error, RuntimeFailureKind::Backend);
+}
+
+#[tokio::test]
 async fn builtin_http_rejects_sensitive_headers_through_host_validator() {
     let transport = RecordingTransport::ok(NetworkHttpResponse {
         status: 200,
@@ -2675,7 +2690,7 @@ async fn builtin_http_returns_redirects_without_following_private_location() {
 }
 
 #[tokio::test]
-async fn builtin_http_runs_blocking_egress_off_tokio_worker() {
+async fn builtin_http_awaits_async_egress_without_blocking_tokio_worker() {
     let egress = Arc::new(SleepingRuntimeHttpEgress {
         delay: Duration::from_millis(100),
         body: Vec::new(),
@@ -2690,7 +2705,7 @@ async fn builtin_http_runs_blocking_egress_off_tokio_worker() {
     tokio::pin!(invocation);
 
     tokio::select! {
-        _ = &mut invocation => panic!("HTTP dispatch blocked the tokio worker"),
+        _ = &mut invocation => panic!("HTTP dispatch should remain pending while async egress sleeps"),
         _ = tokio::time::sleep(Duration::from_millis(20)) => {}
     }
 
@@ -4418,8 +4433,9 @@ impl RecordingRuntimeHttpEgress {
     }
 }
 
+#[async_trait::async_trait]
 impl RuntimeHttpEgress for RecordingRuntimeHttpEgress {
-    fn execute(
+    async fn execute(
         &self,
         request: RuntimeHttpEgressRequest,
     ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
@@ -4455,12 +4471,13 @@ struct SleepingRuntimeHttpEgress {
     body: Vec<u8>,
 }
 
+#[async_trait::async_trait]
 impl RuntimeHttpEgress for SleepingRuntimeHttpEgress {
-    fn execute(
+    async fn execute(
         &self,
         request: RuntimeHttpEgressRequest,
     ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
-        thread::sleep(self.delay);
+        tokio::time::sleep(self.delay).await;
         let body = if self.body.is_empty() {
             b"ok".to_vec()
         } else {
@@ -4479,6 +4496,19 @@ impl RuntimeHttpEgress for SleepingRuntimeHttpEgress {
 }
 
 #[derive(Debug, Clone)]
+struct PanickingRuntimeHttpEgress;
+
+#[async_trait::async_trait]
+impl RuntimeHttpEgress for PanickingRuntimeHttpEgress {
+    async fn execute(
+        &self,
+        _request: RuntimeHttpEgressRequest,
+    ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
+        panic!("runtime HTTP egress panic")
+    }
+}
+
+#[derive(Debug, Clone)]
 struct RecordingTransport {
     response: Result<NetworkHttpResponse, NetworkHttpError>,
     requests: Arc<std::sync::Mutex<Vec<NetworkTransportRequest>>>,
@@ -4493,8 +4523,9 @@ impl RecordingTransport {
     }
 }
 
+#[async_trait::async_trait]
 impl NetworkHttpTransport for RecordingTransport {
-    fn execute(
+    async fn execute(
         &self,
         request: NetworkTransportRequest,
     ) -> Result<NetworkHttpResponse, NetworkHttpError> {

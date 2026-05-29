@@ -5098,6 +5098,7 @@ dependencies = [
 name = "ironclaw_scripts"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "ironclaw_extensions",
  "ironclaw_host_api",
  "ironclaw_resources",
@@ -7641,7 +7642,6 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "encoding_rs",
- "futures-channel",
  "futures-core",
  "futures-util",
  "h2 0.4.14",

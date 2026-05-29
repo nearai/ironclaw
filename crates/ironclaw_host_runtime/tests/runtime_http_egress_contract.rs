@@ -36,8 +36,8 @@ use std::{
 };
 use tempfile::tempdir;
 
-#[test]
-fn host_http_egress_consumes_staged_obligation_secret_once() {
+#[tokio::test]
+async fn host_http_egress_consumes_staged_obligation_secret_once() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![],
@@ -90,24 +90,27 @@ fn host_http_egress_consumes_staged_obligation_secret_once() {
 
     service
         .execute(request.clone())
+        .await
         .expect("staged secret should be injected through host egress");
 
-    let requests = network_recorder.lock().unwrap();
-    assert_eq!(requests.len(), 1);
-    assert_eq!(
-        requests[0]
-            .headers
-            .iter()
-            .find(|(name, _)| name == "authorization"),
-        Some(&(
-            "authorization".to_string(),
-            "Bearer sk-staged-secret".to_string()
-        ))
-    );
-    drop(requests);
+    {
+        let requests = network_recorder.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0]
+                .headers
+                .iter()
+                .find(|(name, _)| name == "authorization"),
+            Some(&(
+                "authorization".to_string(),
+                "Bearer sk-staged-secret".to_string()
+            ))
+        );
+    }
 
     let error = service
         .execute(request)
+        .await
         .expect_err("staged secret must not be reusable");
     assert!(matches!(
         error,
@@ -193,6 +196,7 @@ async fn host_http_egress_consumes_secret_staged_by_builtin_obligation_handler()
             save_body_to: None,
             timeout_ms: None,
         })
+        .await
         .expect("host egress should consume material staged by the obligation handler");
 
     let requests = network_recorder.lock().unwrap();
@@ -209,8 +213,8 @@ async fn host_http_egress_consumes_secret_staged_by_builtin_obligation_handler()
     );
 }
 
-#[test]
-fn host_http_egress_reuses_staged_secret_for_multiple_targets_in_one_request() {
+#[tokio::test]
+async fn host_http_egress_reuses_staged_secret_for_multiple_targets_in_one_request() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![],
@@ -283,6 +287,7 @@ fn host_http_egress_reuses_staged_secret_for_multiple_targets_in_one_request() {
             save_body_to: None,
             timeout_ms: None,
         })
+        .await
         .expect("same staged handle should be reusable within a single request plan");
 
     let requests = network_recorder.lock().unwrap();
@@ -304,8 +309,8 @@ fn host_http_egress_reuses_staged_secret_for_multiple_targets_in_one_request() {
     drop(requests);
 }
 
-#[test]
-fn host_http_egress_restores_staged_secret_when_later_injection_target_fails() {
+#[tokio::test]
+async fn host_http_egress_restores_staged_secret_when_later_injection_target_fails() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![],
@@ -368,6 +373,7 @@ fn host_http_egress_restores_staged_secret_when_later_injection_target_fails() {
             save_body_to: None,
             timeout_ms: None,
         })
+        .await
         .expect_err("later injection target failure should fail before dispatch");
 
     assert!(matches!(
@@ -403,6 +409,7 @@ fn host_http_egress_restores_staged_secret_when_later_injection_target_fails() {
             save_body_to: None,
             timeout_ms: None,
         })
+        .await
         .expect("staged secret should be restored after target-application failure");
 
     let requests = network_recorder.lock().unwrap();
@@ -419,8 +426,8 @@ fn host_http_egress_restores_staged_secret_when_later_injection_target_fails() {
     );
 }
 
-#[test]
-fn host_http_egress_rejects_invalid_path_placeholder_before_transport() {
+#[tokio::test]
+async fn host_http_egress_rejects_invalid_path_placeholder_before_transport() {
     for (placeholder, url) in [
         ("", "https://api.example.test/v1/__credential__/run"),
         (
@@ -489,6 +496,7 @@ fn host_http_egress_rejects_invalid_path_placeholder_before_transport() {
                 save_body_to: None,
                 timeout_ms: None,
             })
+            .await
             .expect_err("invalid path placeholder must fail before network dispatch");
 
         assert!(matches!(
@@ -502,8 +510,8 @@ fn host_http_egress_rejects_invalid_path_placeholder_before_transport() {
     }
 }
 
-#[test]
-fn host_http_egress_rejects_path_placeholder_value_breaking_chars_before_transport() {
+#[tokio::test]
+async fn host_http_egress_rejects_path_placeholder_value_breaking_chars_before_transport() {
     for material in [
         "",
         ".",
@@ -520,6 +528,7 @@ fn host_http_egress_rejects_path_placeholder_value_breaking_chars_before_transpo
             "__credential__",
             material,
         )
+        .await
         .expect_err("invalid path placeholder credential value must fail before network dispatch");
 
         assert!(matches!(
@@ -534,13 +543,14 @@ fn host_http_egress_rejects_path_placeholder_value_breaking_chars_before_transpo
     }
 }
 
-#[test]
-fn host_http_egress_requires_https_for_path_placeholder_before_transport() {
+#[tokio::test]
+async fn host_http_egress_requires_https_for_path_placeholder_before_transport() {
     let (error, network_recorder) = execute_path_placeholder_egress(
         "http://api.example.test/v1/__credential__/run",
         "__credential__",
         "sk-staged-secret",
     )
+    .await
     .expect_err("path placeholder credential injection must require HTTPS");
 
     assert!(matches!(
@@ -551,13 +561,14 @@ fn host_http_egress_requires_https_for_path_placeholder_before_transport() {
     assert!(network_recorder.lock().unwrap().is_empty());
 }
 
-#[test]
-fn host_http_egress_rejects_multiple_path_placeholder_occurrences_before_transport() {
+#[tokio::test]
+async fn host_http_egress_rejects_multiple_path_placeholder_occurrences_before_transport() {
     let (error, network_recorder) = execute_path_placeholder_egress(
         "https://api.example.test/__credential__/v1/__credential__/run",
         "__credential__",
         "sk-staged-secret",
     )
+    .await
     .expect_err("path placeholder credential injection must have one target segment");
 
     assert!(matches!(
@@ -568,13 +579,14 @@ fn host_http_egress_rejects_multiple_path_placeholder_occurrences_before_transpo
     assert!(network_recorder.lock().unwrap().is_empty());
 }
 
-#[test]
-fn host_http_egress_preserves_existing_path_encoding_when_rewriting_placeholder() {
+#[tokio::test]
+async fn host_http_egress_preserves_existing_path_encoding_when_rewriting_placeholder() {
     let (_response, network_recorder) = execute_path_placeholder_egress(
         "https://api.example.test/v1/foo%20bar/__credential__/run%2Ftail",
         "__credential__",
         "sk-staged-secret",
     )
+    .await
     .expect("path placeholder rewrite should preserve existing encoded segments");
 
     let requests = network_recorder.lock().unwrap();
@@ -585,8 +597,8 @@ fn host_http_egress_preserves_existing_path_encoding_when_rewriting_placeholder(
     );
 }
 
-#[test]
-fn host_http_egress_rejects_path_placeholder_target_url_errors_before_transport() {
+#[tokio::test]
+async fn host_http_egress_rejects_path_placeholder_target_url_errors_before_transport() {
     for (url, expected_reason) in [
         ("not a url", "credential injection target URL is invalid"),
         (
@@ -595,9 +607,11 @@ fn host_http_egress_rejects_path_placeholder_target_url_errors_before_transport(
         ),
     ] {
         let (error, network_recorder) =
-            execute_path_placeholder_egress(url, "__credential__", "sk-staged-secret").expect_err(
-                "invalid path placeholder target URL must fail before network dispatch",
-            );
+            execute_path_placeholder_egress(url, "__credential__", "sk-staged-secret")
+                .await
+                .expect_err(
+                    "invalid path placeholder target URL must fail before network dispatch",
+                );
 
         assert!(matches!(
             error,
@@ -611,8 +625,8 @@ fn host_http_egress_rejects_path_placeholder_target_url_errors_before_transport(
     }
 }
 
-#[test]
-fn host_http_egress_fails_closed_when_required_staged_secret_is_missing() {
+#[tokio::test]
+async fn host_http_egress_fails_closed_when_required_staged_secret_is_missing() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![],
@@ -655,6 +669,7 @@ fn host_http_egress_fails_closed_when_required_staged_secret_is_missing() {
             save_body_to: None,
             timeout_ms: None,
         })
+        .await
         .expect_err("missing staged material must fail before network dispatch");
 
     assert!(matches!(
@@ -664,8 +679,8 @@ fn host_http_egress_fails_closed_when_required_staged_secret_is_missing() {
     assert!(network_recorder.lock().unwrap().is_empty());
 }
 
-#[test]
-fn host_http_egress_does_not_take_staged_secret_from_other_capability() {
+#[tokio::test]
+async fn host_http_egress_does_not_take_staged_secret_from_other_capability() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![],
@@ -717,6 +732,7 @@ fn host_http_egress_does_not_take_staged_secret_from_other_capability() {
             save_body_to: None,
             timeout_ms: None,
         })
+        .await
         .expect_err("staged material for a different capability must not authorize egress");
 
     assert!(matches!(
@@ -726,8 +742,8 @@ fn host_http_egress_does_not_take_staged_secret_from_other_capability() {
     assert!(network_recorder.lock().unwrap().is_empty());
 }
 
-#[test]
-fn host_http_egress_does_not_take_staged_secret_for_other_handle() {
+#[tokio::test]
+async fn host_http_egress_does_not_take_staged_secret_for_other_handle() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![],
@@ -779,6 +795,7 @@ fn host_http_egress_does_not_take_staged_secret_for_other_handle() {
             save_body_to: None,
             timeout_ms: None,
         })
+        .await
         .expect_err("staged material for a different handle must not authorize egress");
 
     assert!(matches!(
@@ -788,8 +805,8 @@ fn host_http_egress_does_not_take_staged_secret_for_other_handle() {
     assert!(network_recorder.lock().unwrap().is_empty());
 }
 
-#[test]
-fn host_http_egress_removes_staged_secret_before_network_errors() {
+#[tokio::test]
+async fn host_http_egress_removes_staged_secret_before_network_errors() {
     let network = RecordingNetwork::err(NetworkHttpError::Transport {
         reason: "upstream rejected sk-staged-secret".to_string(),
         request_bytes: 12,
@@ -835,6 +852,7 @@ fn host_http_egress_removes_staged_secret_before_network_errors() {
             save_body_to: None,
             timeout_ms: None,
         })
+        .await
         .expect_err("network error should be sanitized after staged injection is consumed");
 
     assert!(matches!(
@@ -845,8 +863,8 @@ fn host_http_egress_removes_staged_secret_before_network_errors() {
     assert_eq!(network_recorder.lock().unwrap().len(), 1);
 }
 
-#[test]
-fn host_http_egress_skips_optional_missing_staged_secret() {
+#[tokio::test]
+async fn host_http_egress_skips_optional_missing_staged_secret() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![],
@@ -889,6 +907,7 @@ fn host_http_egress_skips_optional_missing_staged_secret() {
             save_body_to: None,
             timeout_ms: None,
         })
+        .await
         .expect("optional missing staged material should not block egress");
 
     assert_eq!(response.status, 200);
@@ -903,8 +922,8 @@ fn host_http_egress_skips_optional_missing_staged_secret() {
     );
 }
 
-#[test]
-fn host_http_egress_does_not_take_staged_secret_from_other_scope() {
+#[tokio::test]
+async fn host_http_egress_does_not_take_staged_secret_from_other_scope() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![],
@@ -956,6 +975,7 @@ fn host_http_egress_does_not_take_staged_secret_from_other_scope() {
             save_body_to: None,
             timeout_ms: None,
         })
+        .await
         .expect_err("staged material for a different scope must not authorize egress");
 
     assert!(matches!(
@@ -965,8 +985,8 @@ fn host_http_egress_does_not_take_staged_secret_from_other_scope() {
     assert!(network_recorder.lock().unwrap().is_empty());
 }
 
-#[test]
-fn host_http_egress_rejects_header_injection_prefix_control_chars() {
+#[tokio::test]
+async fn host_http_egress_rejects_header_injection_prefix_control_chars() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![],
@@ -1011,6 +1031,7 @@ fn host_http_egress_rejects_header_injection_prefix_control_chars() {
             save_body_to: None,
             timeout_ms: None,
         })
+        .await
         .expect_err("header injection prefixes with control characters must be rejected");
 
     assert!(matches!(
@@ -1021,8 +1042,8 @@ fn host_http_egress_rejects_header_injection_prefix_control_chars() {
     assert!(network_recorder.lock().unwrap().is_empty());
 }
 
-#[test]
-fn host_http_egress_rejects_header_injection_value_control_chars() {
+#[tokio::test]
+async fn host_http_egress_rejects_header_injection_value_control_chars() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![],
@@ -1073,6 +1094,7 @@ fn host_http_egress_rejects_header_injection_value_control_chars() {
             save_body_to: None,
             timeout_ms: None,
         })
+        .await
         .expect_err("header injection values with control characters must be rejected");
 
     assert_eq!(
@@ -1083,8 +1105,8 @@ fn host_http_egress_rejects_header_injection_value_control_chars() {
     assert!(network_recorder.lock().unwrap().is_empty());
 }
 
-#[test]
-fn host_http_egress_injects_staged_credentials_and_redacts_errors() {
+#[tokio::test]
+async fn host_http_egress_injects_staged_credentials_and_redacts_errors() {
     let network = RecordingNetwork::err(NetworkHttpError::Transport {
         reason: "upstream rejected token sk-test-secret".to_string(),
         request_bytes: 12,
@@ -1124,6 +1146,7 @@ fn host_http_egress_injects_staged_credentials_and_redacts_errors() {
             save_body_to: None,
             timeout_ms: None,
         })
+        .await
         .expect_err("network error should be sanitized");
 
     let rendered = error.to_string();
@@ -1144,8 +1167,8 @@ fn host_http_egress_injects_staged_credentials_and_redacts_errors() {
     );
 }
 
-#[test]
-fn host_http_egress_requires_available_required_credentials_before_network() {
+#[tokio::test]
+async fn host_http_egress_requires_available_required_credentials_before_network() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![],
@@ -1188,6 +1211,7 @@ fn host_http_egress_requires_available_required_credentials_before_network() {
             save_body_to: None,
             timeout_ms: None,
         })
+        .await
         .expect_err("missing required credentials should fail before network dispatch");
 
     assert!(matches!(
@@ -1197,8 +1221,8 @@ fn host_http_egress_requires_available_required_credentials_before_network() {
     assert!(network_recorder.lock().unwrap().is_empty());
 }
 
-#[test]
-fn host_http_egress_required_credential_still_fails_after_optional_negative_cache() {
+#[tokio::test]
+async fn host_http_egress_required_credential_still_fails_after_optional_negative_cache() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![],
@@ -1255,6 +1279,7 @@ fn host_http_egress_required_credential_still_fails_after_optional_negative_cach
             save_body_to: None,
             timeout_ms: None,
         })
+        .await
         .expect_err("required reuse of a negatively cached credential must fail closed");
 
     assert_eq!(
@@ -1264,8 +1289,8 @@ fn host_http_egress_required_credential_still_fails_after_optional_negative_cach
     assert!(network_recorder.lock().unwrap().is_empty());
 }
 
-#[test]
-fn host_http_egress_injects_and_redacts_url_encoded_query_credentials() {
+#[tokio::test]
+async fn host_http_egress_injects_and_redacts_url_encoded_query_credentials() {
     let network = UrlEchoNetwork::new();
     let network_recorder = network.requests.clone();
     let scope = sample_scope();
@@ -1306,6 +1331,7 @@ fn host_http_egress_injects_and_redacts_url_encoded_query_credentials() {
             save_body_to: None,
             timeout_ms: None,
         })
+        .await
         .expect_err("network error should be sanitized");
 
     let rendered = error.to_string();
@@ -1320,8 +1346,8 @@ fn host_http_egress_injects_and_redacts_url_encoded_query_credentials() {
     );
 }
 
-#[test]
-fn host_http_egress_redacts_path_placeholder_credentials_from_response() {
+#[tokio::test]
+async fn host_http_egress_redacts_path_placeholder_credentials_from_response() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 302,
         headers: vec![(
@@ -1372,6 +1398,7 @@ fn host_http_egress_redacts_path_placeholder_credentials_from_response() {
             save_body_to: None,
             timeout_ms: None,
         })
+        .await
         .expect("path placeholder credential response echoes should be redacted");
 
     assert_eq!(response.status, 302);
@@ -1396,8 +1423,8 @@ fn host_http_egress_redacts_path_placeholder_credentials_from_response() {
     );
 }
 
-#[test]
-fn host_http_egress_redacts_path_placeholder_credentials_from_network_errors() {
+#[tokio::test]
+async fn host_http_egress_redacts_path_placeholder_credentials_from_network_errors() {
     let network = UrlEchoNetwork::new();
     let network_recorder = network.requests.clone();
     let scope = sample_scope();
@@ -1436,6 +1463,7 @@ fn host_http_egress_redacts_path_placeholder_credentials_from_network_errors() {
             save_body_to: None,
             timeout_ms: None,
         })
+        .await
         .expect_err("network errors after path placeholder injection should be sanitized");
 
     let rendered = error.to_string();
@@ -1450,8 +1478,8 @@ fn host_http_egress_redacts_path_placeholder_credentials_from_network_errors() {
     );
 }
 
-#[test]
-fn host_http_egress_forwards_timeout_to_network() {
+#[tokio::test]
+async fn host_http_egress_forwards_timeout_to_network() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![],
@@ -1480,6 +1508,7 @@ fn host_http_egress_forwards_timeout_to_network() {
             save_body_to: None,
             timeout_ms: Some(250),
         })
+        .await
         .expect("network response should be returned");
 
     let requests = network_recorder.lock().unwrap();
@@ -1487,8 +1516,8 @@ fn host_http_egress_forwards_timeout_to_network() {
     assert_eq!(requests[0].timeout_ms, Some(250));
 }
 
-#[test]
-fn host_http_egress_with_reqwest_transport_returns_redirect_without_following() {
+#[tokio::test]
+async fn host_http_egress_with_reqwest_transport_returns_redirect_without_following() {
     let (url, server) = single_response_server(
         "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:9/followed\r\nContent-Length: 0\r\n\r\n",
     );
@@ -1511,6 +1540,7 @@ fn host_http_egress_with_reqwest_transport_returns_redirect_without_following() 
             save_body_to: None,
             timeout_ms: None,
         })
+        .await
         .expect("redirect responses should be returned to the caller, not followed");
     server.join().unwrap();
 
@@ -1525,8 +1555,8 @@ fn host_http_egress_with_reqwest_transport_returns_redirect_without_following() 
     );
 }
 
-#[test]
-fn host_http_egress_preserves_request_and_response_byte_accounting() {
+#[tokio::test]
+async fn host_http_egress_preserves_request_and_response_byte_accounting() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![],
@@ -1555,6 +1585,7 @@ fn host_http_egress_preserves_request_and_response_byte_accounting() {
             save_body_to: None,
             timeout_ms: None,
         })
+        .await
         .expect("network response should be returned");
 
     assert_eq!(response.request_bytes, 5);
@@ -1565,8 +1596,8 @@ fn host_http_egress_preserves_request_and_response_byte_accounting() {
     assert_eq!(requests[0].response_body_limit, Some(4096));
 }
 
-#[test]
-fn host_http_egress_without_policy_store_fails_closed_before_transport() {
+#[tokio::test]
+async fn host_http_egress_without_policy_store_fails_closed_before_transport() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![],
@@ -1595,6 +1626,7 @@ fn host_http_egress_without_policy_store_fails_closed_before_transport() {
             save_body_to: None,
             timeout_ms: None,
         })
+        .await
         .expect_err("runtime HTTP egress must not trust caller-supplied network policy without a staged-policy store");
 
     assert!(matches!(
@@ -1608,8 +1640,8 @@ fn host_http_egress_without_policy_store_fails_closed_before_transport() {
     assert!(network_recorder.lock().unwrap().is_empty());
 }
 
-#[test]
-fn host_http_egress_borrows_staged_network_policy_before_transport() {
+#[tokio::test]
+async fn host_http_egress_borrows_staged_network_policy_before_transport() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![],
@@ -1643,6 +1675,7 @@ fn host_http_egress_borrows_staged_network_policy_before_transport() {
             save_body_to: None,
             timeout_ms: None,
         })
+        .await
         .expect("staged network policy should authorize host-mediated HTTP");
 
     let requests = network_recorder.lock().unwrap();
@@ -1651,8 +1684,8 @@ fn host_http_egress_borrows_staged_network_policy_before_transport() {
     drop(requests);
 }
 
-#[test]
-fn production_host_http_egress_rejects_direct_secret_store_lease_before_transport() {
+#[tokio::test]
+async fn production_host_http_egress_rejects_direct_secret_store_lease_before_transport() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![],
@@ -1700,6 +1733,7 @@ fn production_host_http_egress_rejects_direct_secret_store_lease_before_transpor
             save_body_to: None,
             timeout_ms: Some(1000),
         })
+        .await
         .expect_err("production egress must require staged secret obligations");
 
     assert!(matches!(
@@ -1710,8 +1744,9 @@ fn production_host_http_egress_rejects_direct_secret_store_lease_before_transpor
     assert!(network_recorder.lock().unwrap().is_empty());
 }
 
-#[test]
-fn production_host_http_egress_discards_staged_policy_when_direct_secret_store_lease_is_rejected() {
+#[tokio::test]
+async fn production_host_http_egress_discards_staged_policy_when_direct_secret_store_lease_is_rejected()
+ {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![],
@@ -1753,6 +1788,7 @@ fn production_host_http_egress_discards_staged_policy_when_direct_secret_store_l
             save_body_to: None,
             timeout_ms: Some(1000),
         })
+        .await
         .expect_err("rejected direct lease should discard staged policy");
     assert!(matches!(error, RuntimeHttpEgressError::Credential { .. }));
 
@@ -1771,6 +1807,7 @@ fn production_host_http_egress_discards_staged_policy_when_direct_secret_store_l
             save_body_to: None,
             timeout_ms: Some(1000),
         })
+        .await
         .expect_err("discarded staged policy must not authorize retry");
 
     assert!(matches!(
@@ -1784,8 +1821,9 @@ fn production_host_http_egress_discards_staged_policy_when_direct_secret_store_l
     assert!(network_recorder.lock().unwrap().is_empty());
 }
 
-#[test]
-fn production_host_http_egress_rejects_cross_capability_staged_credentials_before_transport() {
+#[tokio::test]
+async fn production_host_http_egress_rejects_cross_capability_staged_credentials_before_transport()
+{
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![],
@@ -1837,6 +1875,7 @@ fn production_host_http_egress_rejects_cross_capability_staged_credentials_befor
             save_body_to: None,
             timeout_ms: Some(1000),
         })
+        .await
         .expect_err("cross-capability staged credentials must be rejected");
 
     assert!(matches!(
@@ -1847,8 +1886,8 @@ fn production_host_http_egress_rejects_cross_capability_staged_credentials_befor
     assert!(network_recorder.lock().unwrap().is_empty());
 }
 
-#[test]
-fn wasm_http_adapter_borrows_real_host_staged_network_policy() {
+#[tokio::test]
+async fn wasm_http_adapter_borrows_real_host_staged_network_policy() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![],
@@ -1893,8 +1932,8 @@ fn wasm_http_adapter_borrows_real_host_staged_network_policy() {
     drop(requests);
 }
 
-#[test]
-fn script_http_adapter_borrows_real_host_staged_network_policy() {
+#[tokio::test]
+async fn script_http_adapter_borrows_real_host_staged_network_policy() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 202,
         headers: vec![],
@@ -1927,6 +1966,7 @@ fn script_http_adapter_borrows_real_host_staged_network_policy() {
             response_body_limit: Some(4096),
             timeout_ms: Some(1000),
         })
+        .await
         .expect("script adapter should reach host egress using staged policy");
 
     assert_eq!(response.status, 202);
@@ -1939,8 +1979,8 @@ fn script_http_adapter_borrows_real_host_staged_network_policy() {
     drop(requests);
 }
 
-#[test]
-fn mcp_http_adapter_borrows_real_host_staged_network_policy() {
+#[tokio::test]
+async fn mcp_http_adapter_borrows_real_host_staged_network_policy() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 203,
         headers: vec![],
@@ -1973,6 +2013,7 @@ fn mcp_http_adapter_borrows_real_host_staged_network_policy() {
             response_body_limit: Some(4096),
             timeout_ms: Some(1000),
         })
+        .await
         .expect("MCP adapter should reach host egress using staged policy");
 
     assert_eq!(response.status, 203);
@@ -2187,8 +2228,8 @@ async fn mcp_http_client_cannot_use_direct_secret_store_lease_with_production_eg
     }));
 }
 
-#[test]
-fn first_party_http_egress_cannot_use_direct_secret_store_lease_with_production_egress() {
+#[tokio::test]
+async fn first_party_http_egress_cannot_use_direct_secret_store_lease_with_production_egress() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![],
@@ -2229,6 +2270,7 @@ fn first_party_http_egress_cannot_use_direct_secret_store_lease_with_production_
             save_body_to: None,
             timeout_ms: None,
         })
+        .await
         .expect_err("production first-party egress must require staged credentials");
 
     assert!(matches!(
@@ -2239,8 +2281,8 @@ fn first_party_http_egress_cannot_use_direct_secret_store_lease_with_production_
     assert!(network_recorder.lock().unwrap().is_empty());
 }
 
-#[test]
-fn host_http_egress_fails_closed_without_staged_network_policy() {
+#[tokio::test]
+async fn host_http_egress_fails_closed_without_staged_network_policy() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![],
@@ -2270,6 +2312,7 @@ fn host_http_egress_fails_closed_without_staged_network_policy() {
             save_body_to: None,
             timeout_ms: None,
         })
+        .await
         .expect_err("missing staged network policy should fail before transport");
 
     assert!(matches!(
@@ -2283,8 +2326,8 @@ fn host_http_egress_fails_closed_without_staged_network_policy() {
     assert!(network_recorder.lock().unwrap().is_empty());
 }
 
-#[test]
-fn host_http_egress_does_not_use_cross_scope_or_cross_capability_policy() {
+#[tokio::test]
+async fn host_http_egress_does_not_use_cross_scope_or_cross_capability_policy() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![],
@@ -2321,6 +2364,7 @@ fn host_http_egress_does_not_use_cross_scope_or_cross_capability_policy() {
             save_body_to: None,
             timeout_ms: None,
         })
+        .await
         .expect_err("cross-scope or cross-capability staged policies must not authorize egress");
 
     assert!(matches!(
@@ -2334,8 +2378,8 @@ fn host_http_egress_does_not_use_cross_scope_or_cross_capability_policy() {
     assert!(network_recorder.lock().unwrap().is_empty());
 }
 
-#[test]
-fn host_http_egress_consumes_staged_policy_when_dispatch_fails_before_transport() {
+#[tokio::test]
+async fn host_http_egress_consumes_staged_policy_when_dispatch_fails_before_transport() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![],
@@ -2376,14 +2420,15 @@ fn host_http_egress_consumes_staged_policy_when_dispatch_fails_before_transport(
             save_body_to: None,
             timeout_ms: None,
         })
+        .await
         .expect_err("credential failure should not leave reusable network policy state");
 
     assert!(matches!(error, RuntimeHttpEgressError::Credential { .. }));
     assert!(network_recorder.lock().unwrap().is_empty());
 }
 
-#[test]
-fn host_http_egress_consumes_staged_policy_when_request_validation_fails() {
+#[tokio::test]
+async fn host_http_egress_consumes_staged_policy_when_request_validation_fails() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![],
@@ -2419,14 +2464,15 @@ fn host_http_egress_consumes_staged_policy_when_request_validation_fails() {
             save_body_to: None,
             timeout_ms: None,
         })
+        .await
         .expect_err("request validation failure should not leave reusable policy state");
 
     assert!(matches!(error, RuntimeHttpEgressError::Request { .. }));
     assert!(network_recorder.lock().unwrap().is_empty());
 }
 
-#[test]
-fn host_http_egress_redacts_injected_credentials_from_runtime_visible_response() {
+#[tokio::test]
+async fn host_http_egress_redacts_injected_credentials_from_runtime_visible_response() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![
@@ -2476,6 +2522,7 @@ fn host_http_egress_redacts_injected_credentials_from_runtime_visible_response()
             save_body_to: None,
             timeout_ms: None,
         })
+        .await
         .expect("sanitized response should be returned");
 
     assert!(response.redaction_applied);
@@ -2486,8 +2533,8 @@ fn host_http_egress_redacts_injected_credentials_from_runtime_visible_response()
     assert_eq!(response.body, b"upstream echoed [REDACTED]".to_vec());
 }
 
-#[test]
-fn host_http_egress_redacts_lowercase_percent_encoded_secret_echoes() {
+#[tokio::test]
+async fn host_http_egress_redacts_lowercase_percent_encoded_secret_echoes() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![(
@@ -2539,6 +2586,7 @@ fn host_http_egress_redacts_lowercase_percent_encoded_secret_echoes() {
             save_body_to: None,
             timeout_ms: None,
         })
+        .await
         .expect("lowercase percent-encoded echoed credentials should be redacted");
 
     assert!(response.redaction_applied);
@@ -2549,8 +2597,8 @@ fn host_http_egress_redacts_lowercase_percent_encoded_secret_echoes() {
     assert_eq!(response.body, b"upstream echoed [REDACTED]".to_vec());
 }
 
-#[test]
-fn host_http_egress_saves_sanitized_response_body_to_store() {
+#[tokio::test]
+async fn host_http_egress_saves_sanitized_response_body_to_store() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![("content-type".to_string(), "text/plain".to_string())],
@@ -2580,6 +2628,7 @@ fn host_http_egress_saves_sanitized_response_body_to_store() {
             save_body_to: Some(target.clone()),
             timeout_ms: None,
         })
+        .await
         .expect("response body should be saved");
 
     assert_eq!(response.body, Vec::<u8>::new());
@@ -2601,8 +2650,8 @@ fn host_http_egress_saves_sanitized_response_body_to_store() {
     assert_eq!(writes[0].body, b"large patch body".to_vec());
 }
 
-#[test]
-fn host_http_egress_saves_response_body_to_scoped_filesystem_store() {
+#[tokio::test]
+async fn host_http_egress_saves_response_body_to_scoped_filesystem_store() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![("content-type".to_string(), "text/plain".to_string())],
@@ -2642,6 +2691,7 @@ fn host_http_egress_saves_response_body_to_scoped_filesystem_store() {
             save_body_to: Some(target.clone()),
             timeout_ms: None,
         })
+        .await
         .expect("response body should be saved through the scoped filesystem");
 
     assert_eq!(response.body, Vec::<u8>::new());
@@ -2703,6 +2753,7 @@ async fn host_http_egress_saves_response_body_to_scoped_filesystem_store_from_to
             save_body_to: Some(target),
             timeout_ms: None,
         })
+        .await
         .expect("response body should be saved without nested Tokio runtime panic");
 
     assert_eq!(
@@ -2719,8 +2770,8 @@ async fn host_http_egress_saves_response_body_to_scoped_filesystem_store_from_to
     assert_eq!(saved, b"tokio filesystem body".to_vec());
 }
 
-#[test]
-fn host_http_egress_rejects_save_when_target_mount_view_is_read_only() {
+#[tokio::test]
+async fn host_http_egress_rejects_save_when_target_mount_view_is_read_only() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![("content-type".to_string(), "text/plain".to_string())],
@@ -2770,14 +2821,15 @@ fn host_http_egress_rejects_save_when_target_mount_view_is_read_only() {
             save_body_to: Some(target.clone()),
             timeout_ms: None,
         })
+        .await
         .expect_err("read-only target mount should deny saving before network");
 
     assert_eq!(error.stable_runtime_reason(), "request_denied");
     assert!(network_recorder.lock().unwrap().is_empty());
 }
 
-#[test]
-fn host_http_egress_save_target_requires_configured_body_store_before_network() {
+#[tokio::test]
+async fn host_http_egress_save_target_requires_configured_body_store_before_network() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![],
@@ -2806,14 +2858,15 @@ fn host_http_egress_save_target_requires_configured_body_store_before_network() 
             save_body_to: Some(save_target("/workspace/pr.diff")),
             timeout_ms: None,
         })
+        .await
         .expect_err("missing body store should fail closed");
 
     assert!(matches!(error, RuntimeHttpEgressError::Request { .. }));
     assert!(network_recorder.lock().unwrap().is_empty());
 }
 
-#[test]
-fn host_http_egress_save_target_requires_write_authorization_before_network() {
+#[tokio::test]
+async fn host_http_egress_save_target_requires_write_authorization_before_network() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![],
@@ -2846,6 +2899,7 @@ fn host_http_egress_save_target_requires_write_authorization_before_network() {
             save_body_to: Some(save_target("/workspace/pr.diff")),
             timeout_ms: None,
         })
+        .await
         .expect_err("unauthorized save target should fail closed");
 
     match error {
@@ -2863,8 +2917,8 @@ fn host_http_egress_save_target_requires_write_authorization_before_network() {
     assert!(network_recorder.lock().unwrap().is_empty());
 }
 
-#[test]
-fn host_http_egress_rejects_save_when_body_store_is_unavailable() {
+#[tokio::test]
+async fn host_http_egress_rejects_save_when_body_store_is_unavailable() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![],
@@ -2894,6 +2948,7 @@ fn host_http_egress_rejects_save_when_body_store_is_unavailable() {
             save_body_to: Some(save_target("/workspace/pr.diff")),
             timeout_ms: None,
         })
+        .await
         .expect_err("unavailable body store should fail closed");
 
     match error {
@@ -2911,8 +2966,8 @@ fn host_http_egress_rejects_save_when_body_store_is_unavailable() {
     assert!(network_recorder.lock().unwrap().is_empty());
 }
 
-#[test]
-fn host_http_egress_discards_staged_secret_on_pre_injection_error() {
+#[tokio::test]
+async fn host_http_egress_discards_staged_secret_on_pre_injection_error() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![],
@@ -2964,6 +3019,7 @@ fn host_http_egress_discards_staged_secret_on_pre_injection_error() {
             save_body_to: Some(save_target("/workspace/pr.diff")),
             timeout_ms: None,
         })
+        .await
         .expect_err("pre-injection body-store failure should fail closed");
 
     stage_policy_sync(&services, &scope, &capability_id, sample_policy());
@@ -2992,6 +3048,7 @@ fn host_http_egress_discards_staged_secret_on_pre_injection_error() {
             save_body_to: None,
             timeout_ms: None,
         })
+        .await
         .expect_err("pre-injection failure should discard staged secrets");
 
     assert!(matches!(
@@ -3002,8 +3059,8 @@ fn host_http_egress_discards_staged_secret_on_pre_injection_error() {
     assert!(network_recorder.lock().unwrap().is_empty());
 }
 
-#[test]
-fn host_http_egress_fails_closed_when_body_store_write_fails() {
+#[tokio::test]
+async fn host_http_egress_fails_closed_when_body_store_write_fails() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![("content-type".to_string(), "text/plain".to_string())],
@@ -3032,6 +3089,7 @@ fn host_http_egress_fails_closed_when_body_store_write_fails() {
             save_body_to: Some(save_target("/workspace/pr.diff")),
             timeout_ms: None,
         })
+        .await
         .expect_err("body store write failure should fail closed");
 
     match error {
@@ -3049,8 +3107,8 @@ fn host_http_egress_fails_closed_when_body_store_write_fails() {
     assert!(store.writes().is_empty());
 }
 
-#[test]
-fn host_http_egress_fails_closed_when_real_scoped_filesystem_write_fails() {
+#[tokio::test]
+async fn host_http_egress_fails_closed_when_real_scoped_filesystem_write_fails() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![("content-type".to_string(), "text/plain".to_string())],
@@ -3097,6 +3155,7 @@ fn host_http_egress_fails_closed_when_real_scoped_filesystem_write_fails() {
             save_body_to: Some(target),
             timeout_ms: None,
         })
+        .await
         .expect_err("real scoped filesystem write failure should fail closed");
 
     match error {
@@ -3117,8 +3176,8 @@ fn host_http_egress_fails_closed_when_real_scoped_filesystem_write_fails() {
     );
 }
 
-#[test]
-fn host_http_egress_saves_redacted_response_body() {
+#[tokio::test]
+async fn host_http_egress_saves_redacted_response_body() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![],
@@ -3163,6 +3222,7 @@ fn host_http_egress_saves_redacted_response_body() {
             save_body_to: Some(save_target("/workspace/redacted.txt")),
             timeout_ms: None,
         })
+        .await
         .expect("sanitized response body should be saved");
 
     assert!(response.redaction_applied);
@@ -3172,8 +3232,8 @@ fn host_http_egress_saves_redacted_response_body() {
     assert_eq!(writes[0].body, b"upstream echoed [REDACTED]".to_vec());
 }
 
-#[test]
-fn host_http_egress_strips_all_sensitive_response_headers() {
+#[tokio::test]
+async fn host_http_egress_strips_all_sensitive_response_headers() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![
@@ -3220,6 +3280,7 @@ fn host_http_egress_strips_all_sensitive_response_headers() {
             save_body_to: None,
             timeout_ms: None,
         })
+        .await
         .expect("sensitive response headers should be stripped before runtime visibility");
 
     assert!(response.redaction_applied);
@@ -3229,8 +3290,8 @@ fn host_http_egress_strips_all_sensitive_response_headers() {
     );
 }
 
-#[test]
-fn host_http_egress_blocks_credential_shaped_response_body() {
+#[tokio::test]
+async fn host_http_egress_blocks_credential_shaped_response_body() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![],
@@ -3258,6 +3319,7 @@ fn host_http_egress_blocks_credential_shaped_response_body() {
             save_body_to: None,
             timeout_ms: None,
         })
+        .await
         .expect_err("credential-shaped response bodies should not reach runtimes");
 
     assert!(matches!(
@@ -3270,8 +3332,8 @@ fn host_http_egress_blocks_credential_shaped_response_body() {
     assert_eq!(error.response_bytes(), 43);
 }
 
-#[test]
-fn host_http_egress_blocks_percent_encoded_credential_path_before_network() {
+#[tokio::test]
+async fn host_http_egress_blocks_percent_encoded_credential_path_before_network() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![],
@@ -3301,6 +3363,7 @@ fn host_http_egress_blocks_percent_encoded_credential_path_before_network() {
             save_body_to: None,
             timeout_ms: None,
         })
+        .await
         .expect_err("percent-encoded credential-shaped path should fail before network dispatch");
 
     assert!(matches!(
@@ -3311,8 +3374,8 @@ fn host_http_egress_blocks_percent_encoded_credential_path_before_network() {
     assert!(network_recorder.lock().unwrap().is_empty());
 }
 
-#[test]
-fn host_http_egress_blocks_credential_shaped_runtime_request_before_network() {
+#[tokio::test]
+async fn host_http_egress_blocks_credential_shaped_runtime_request_before_network() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![],
@@ -3341,6 +3404,7 @@ fn host_http_egress_blocks_credential_shaped_runtime_request_before_network() {
             save_body_to: None,
             timeout_ms: None,
         })
+        .await
         .expect_err("credential-shaped runtime requests should fail before network dispatch");
 
     assert!(matches!(
@@ -3352,8 +3416,8 @@ fn host_http_egress_blocks_credential_shaped_runtime_request_before_network() {
     assert!(network_recorder.lock().unwrap().is_empty());
 }
 
-#[test]
-fn host_http_egress_blocks_runtime_supplied_sensitive_headers_before_network() {
+#[tokio::test]
+async fn host_http_egress_blocks_runtime_supplied_sensitive_headers_before_network() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![],
@@ -3385,6 +3449,7 @@ fn host_http_egress_blocks_runtime_supplied_sensitive_headers_before_network() {
             save_body_to: None,
             timeout_ms: None,
         })
+        .await
         .expect_err("runtime-supplied sensitive headers should fail before network dispatch");
 
     assert!(matches!(
@@ -3395,8 +3460,8 @@ fn host_http_egress_blocks_runtime_supplied_sensitive_headers_before_network() {
     assert!(network_recorder.lock().unwrap().is_empty());
 }
 
-#[test]
-fn host_http_egress_blocks_leaky_response_header_values() {
+#[tokio::test]
+async fn host_http_egress_blocks_leaky_response_header_values() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![(
@@ -3427,6 +3492,7 @@ fn host_http_egress_blocks_leaky_response_header_values() {
             save_body_to: None,
             timeout_ms: None,
         })
+        .await
         .expect_err("leaky response headers should fail closed");
 
     assert!(matches!(
@@ -3436,8 +3502,8 @@ fn host_http_egress_blocks_leaky_response_header_values() {
     ));
 }
 
-#[test]
-fn host_http_egress_blocks_runtime_supplied_credential_query_before_network() {
+#[tokio::test]
+async fn host_http_egress_blocks_runtime_supplied_credential_query_before_network() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![],
@@ -3466,6 +3532,7 @@ fn host_http_egress_blocks_runtime_supplied_credential_query_before_network() {
             save_body_to: None,
             timeout_ms: None,
         })
+        .await
         .expect_err("runtime-supplied credential query params should fail before network dispatch");
 
     assert!(matches!(
@@ -3476,8 +3543,8 @@ fn host_http_egress_blocks_runtime_supplied_credential_query_before_network() {
     assert!(network_recorder.lock().unwrap().is_empty());
 }
 
-#[test]
-fn host_http_egress_blocks_percent_encoded_credential_values_before_network() {
+#[tokio::test]
+async fn host_http_egress_blocks_percent_encoded_credential_values_before_network() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![],
@@ -3506,6 +3573,7 @@ fn host_http_egress_blocks_percent_encoded_credential_values_before_network() {
             save_body_to: None,
             timeout_ms: None,
         })
+        .await
         .expect_err("percent-encoded credential values should fail before network dispatch");
 
     assert!(matches!(
@@ -3516,8 +3584,8 @@ fn host_http_egress_blocks_percent_encoded_credential_values_before_network() {
     assert!(network_recorder.lock().unwrap().is_empty());
 }
 
-#[test]
-fn host_http_egress_blocks_runtime_supplied_auth_like_headers_before_network() {
+#[tokio::test]
+async fn host_http_egress_blocks_runtime_supplied_auth_like_headers_before_network() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![],
@@ -3546,6 +3614,7 @@ fn host_http_egress_blocks_runtime_supplied_auth_like_headers_before_network() {
             save_body_to: None,
             timeout_ms: None,
         })
+        .await
         .expect_err("runtime-supplied auth-like headers should fail before network dispatch");
 
     assert!(matches!(
@@ -3556,8 +3625,8 @@ fn host_http_egress_blocks_runtime_supplied_auth_like_headers_before_network() {
     assert!(network_recorder.lock().unwrap().is_empty());
 }
 
-#[test]
-fn host_http_egress_maps_network_errors_to_stable_runtime_reasons() {
+#[tokio::test]
+async fn host_http_egress_maps_network_errors_to_stable_runtime_reasons() {
     let network = RecordingNetwork::err(NetworkHttpError::Transport {
         reason: "connection failed for https://api.example.test/path?token=raw-secret".to_string(),
         request_bytes: 12,
@@ -3580,6 +3649,7 @@ fn host_http_egress_maps_network_errors_to_stable_runtime_reasons() {
             save_body_to: None,
             timeout_ms: None,
         })
+        .await
         .expect_err("network errors should surface as stable sanitized variants");
 
     assert!(matches!(
@@ -3689,8 +3759,9 @@ impl UrlEchoNetwork {
     }
 }
 
+#[async_trait::async_trait]
 impl NetworkHttpEgress for UrlEchoNetwork {
-    fn execute(
+    async fn execute(
         &self,
         request: NetworkHttpRequest,
     ) -> Result<NetworkHttpResponse, NetworkHttpError> {
@@ -3711,8 +3782,9 @@ impl JsonRpcMcpNetwork {
     }
 }
 
+#[async_trait::async_trait]
 impl NetworkHttpEgress for JsonRpcMcpNetwork {
-    fn execute(
+    async fn execute(
         &self,
         request: NetworkHttpRequest,
     ) -> Result<NetworkHttpResponse, NetworkHttpError> {
@@ -3784,8 +3856,9 @@ impl RecordingNetwork {
     }
 }
 
+#[async_trait::async_trait]
 impl NetworkHttpEgress for RecordingNetwork {
-    fn execute(
+    async fn execute(
         &self,
         request: NetworkHttpRequest,
     ) -> Result<NetworkHttpResponse, NetworkHttpError> {
@@ -3800,7 +3873,7 @@ type PathPlaceholderEgressResult = Result<
     (RuntimeHttpEgressError, RecordedRequests),
 >;
 
-fn execute_path_placeholder_egress(
+async fn execute_path_placeholder_egress(
     url: &str,
     placeholder: &str,
     material: &str,
@@ -3847,6 +3920,7 @@ fn execute_path_placeholder_egress(
     });
 
     response
+        .await
         .map(|response| (response, network_recorder.clone()))
         .map_err(|error| (error, network_recorder))
 }
@@ -3879,8 +3953,9 @@ struct RequestPolicyStagingEgress {
     inner: Arc<dyn RuntimeHttpEgress>,
 }
 
+#[async_trait::async_trait]
 impl RuntimeHttpEgress for RequestPolicyStagingEgress {
-    fn execute(
+    async fn execute(
         &self,
         request: RuntimeHttpEgressRequest,
     ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
@@ -3890,7 +3965,7 @@ impl RuntimeHttpEgress for RequestPolicyStagingEgress {
             &request.capability_id,
             request.network_policy.clone(),
         );
-        self.inner.execute(request)
+        self.inner.execute(request).await
     }
 }
 

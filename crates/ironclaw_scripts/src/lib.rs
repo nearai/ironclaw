@@ -187,7 +187,7 @@ where
         Self { egress }
     }
 
-    pub fn request(
+    pub async fn request(
         &self,
         request: ScriptHostHttpRequest,
     ) -> Result<ScriptHostHttpResponse, ScriptHostHttpError> {
@@ -206,6 +206,7 @@ where
                 save_body_to: None,
                 timeout_ms: request.timeout_ms,
             })
+            .await
             .map_err(script_http_error)
     }
 }

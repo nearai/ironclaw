@@ -1,4 +1,7 @@
+use std::panic::AssertUnwindSafe;
+
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
+use futures_util::FutureExt as _;
 use ironclaw_extensions::{CapabilityManifest, ExtensionError};
 use ironclaw_host_api::{
     EffectKind, MountAlias, MountGrant, MountPermissions, MountView, NetworkMethod, NetworkPolicy,
@@ -199,12 +202,11 @@ pub(super) async fn dispatch(
         save_body_to,
         timeout_ms: Some(timeout_ms),
     };
-    let response = tokio::task::spawn_blocking(move || egress.execute(http_request))
+    let response = AssertUnwindSafe(egress.execute(http_request))
+        .catch_unwind()
         .await
-        .map_err(|error| {
-            if error.is_panic() {
-                tracing::error!("first-party HTTP egress worker panicked");
-            }
+        .map_err(|_| {
+            tracing::error!("first-party HTTP egress future panicked");
             FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::Backend)
         })?
         .map_err(http_error)?;

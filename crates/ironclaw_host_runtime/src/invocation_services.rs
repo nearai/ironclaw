@@ -285,8 +285,9 @@ mod tests {
 
     struct NoopRuntimeHttpEgress;
 
+    #[async_trait::async_trait]
     impl ironclaw_host_api::RuntimeHttpEgress for NoopRuntimeHttpEgress {
-        fn execute(
+        async fn execute(
             &self,
             _request: ironclaw_host_api::RuntimeHttpEgressRequest,
         ) -> Result<

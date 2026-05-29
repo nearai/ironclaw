@@ -374,21 +374,23 @@ pub fn is_sensitive_runtime_response_header(name: &str) -> bool {
             .any(|marker| normalized.contains(marker))
 }
 
+#[async_trait::async_trait]
 pub trait RuntimeHttpEgress: Send + Sync {
-    fn execute(
+    async fn execute(
         &self,
         request: RuntimeHttpEgressRequest,
     ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError>;
 }
 
+#[async_trait::async_trait]
 impl<T> RuntimeHttpEgress for std::sync::Arc<T>
 where
     T: RuntimeHttpEgress + ?Sized,
 {
-    fn execute(
+    async fn execute(
         &self,
         request: RuntimeHttpEgressRequest,
     ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
-        self.as_ref().execute(request)
+        self.as_ref().execute(request).await
     }
 }

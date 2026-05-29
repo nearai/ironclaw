@@ -313,10 +313,7 @@ async fn execute_runtime_http(
     request: RuntimeHttpEgressRequest,
     egress: Arc<dyn RuntimeHttpEgress>,
 ) -> Result<ironclaw_host_api::RuntimeHttpEgressResponse, GsuiteDispatchError> {
-    tokio::task::spawn_blocking(move || egress.execute(request))
-        .await
-        .map_err(|_| GsuiteDispatchError::new(RuntimeDispatchErrorKind::Backend))?
-        .map_err(map_egress_error)
+    egress.execute(request).await.map_err(map_egress_error)
 }
 
 fn response_output(
