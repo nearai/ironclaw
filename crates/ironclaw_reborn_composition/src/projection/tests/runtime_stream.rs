@@ -413,13 +413,20 @@ async fn webui_event_stream_drains_live_reasoning_projection_from_update_source(
         thread_id.clone(),
     );
 
+    let thinking_body = "Thinking Steps • Summary\n\
+[] Inspect nearai/ironclaw.\n\
+[] Read the thermo-loop SKILL.md fully.\n\
+() Find the PR details using gh CLI.\n\
+[] Run the thermonuclear code quality review.\n\
+! Fix actionable findings.";
+
     sink.publish_loop_milestone(LoopHostMilestone {
         scope: scope.clone(),
         turn_id: TurnId::new(),
         run_id: TurnRunId::new(),
         loop_driver_id: LoopDriverId::new("test_loop").unwrap(),
         kind: LoopHostMilestoneKind::ModelReasoningDelta {
-            safe_delta: "checking context".to_string(),
+            safe_delta: thinking_body.to_string(),
         },
     })
     .await
@@ -442,7 +449,7 @@ async fn webui_event_stream_drains_live_reasoning_projection_from_update_source(
                 if state.thread_id == thread_id.to_string()
                     && state.items.iter().any(|item| matches!(
                         item,
-                        ProductProjectionItem::Thinking { body, .. } if body == "checking context"
+                        ProductProjectionItem::Thinking { body, .. } if body == thinking_body
                     ))
         )
     }));

@@ -14,6 +14,7 @@ use rust_decimal::Decimal;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 
+use crate::anthropic_thinking::{AnthropicThinking, thinking_for_request};
 use crate::config::RegistryProviderConfig;
 use crate::costs;
 use crate::error::LlmError;
@@ -290,19 +291,21 @@ impl LlmProvider for AnthropicOAuthProvider {
             .unwrap_or_else(|| self.active_model_name());
         self.strip_unsupported_completion_params(&mut req);
         let (system, messages) = convert_messages(req.messages);
+        let max_tokens = req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
 
         let request = AnthropicRequest {
+            thinking: thinking_for_request(&model, max_tokens, req.temperature, false),
             model,
             messages,
             system,
-            max_tokens: req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
+            max_tokens,
             temperature: req.temperature,
             tools: None,
             tool_choice: None,
         };
 
         let response: AnthropicResponse = self.send_request(&request).await?;
-        let (content, _tool_calls) = extract_response_content(&response);
+        let extracted = extract_response_content(&response);
 
         let finish_reason = match response.stop_reason.as_deref() {
             Some("end_turn") | Some("stop") => FinishReason::Stop,
@@ -312,11 +315,11 @@ impl LlmProvider for AnthropicOAuthProvider {
         };
 
         Ok(CompletionResponse {
-            content: content.unwrap_or_default(),
+            content: extracted.content.unwrap_or_default(),
             finish_reason,
             input_tokens: response.usage.input_tokens,
             output_tokens: response.usage.output_tokens,
-            reasoning: None,
+            reasoning: extracted.reasoning,
             cache_creation_input_tokens: response.usage.cache_creation_input_tokens,
             cache_read_input_tokens: response.usage.cache_read_input_tokens,
         })
@@ -361,26 +364,35 @@ impl LlmProvider for AnthropicOAuthProvider {
                 name: Some(specific.to_string()),
             },
         });
+        let max_tokens = req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
 
         let request = AnthropicRequest {
+            thinking: thinking_for_request(
+                &model,
+                max_tokens,
+                req.temperature,
+                tool_choice
+                    .as_ref()
+                    .is_some_and(AnthropicToolChoice::forces_tool_use),
+            ),
             model,
             messages,
             system,
-            max_tokens: req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
+            max_tokens,
             temperature: req.temperature,
             tools: if tools.is_empty() { None } else { Some(tools) },
             tool_choice,
         };
 
         let response: AnthropicResponse = self.send_request(&request).await?;
-        let (content, tool_calls) = extract_response_content(&response);
+        let extracted = extract_response_content(&response);
 
         let finish_reason = match response.stop_reason.as_deref() {
             Some("end_turn") | Some("stop") => FinishReason::Stop,
             Some("max_tokens") => FinishReason::Length,
             Some("tool_use") => FinishReason::ToolUse,
             _ => {
-                if !tool_calls.is_empty() {
+                if !extracted.tool_calls.is_empty() {
                     FinishReason::ToolUse
                 } else {
                     FinishReason::Unknown
@@ -389,13 +401,13 @@ impl LlmProvider for AnthropicOAuthProvider {
         };
 
         Ok(ToolCompletionResponse {
-            content,
-            tool_calls,
+            content: extracted.content,
+            tool_calls: extracted.tool_calls,
             finish_reason,
             input_tokens: response.usage.input_tokens,
             output_tokens: response.usage.output_tokens,
             cache_creation_input_tokens: response.usage.cache_creation_input_tokens,
-            reasoning: None,
+            reasoning: extracted.reasoning,
             cache_read_input_tokens: response.usage.cache_read_input_tokens,
         })
     }
@@ -440,6 +452,8 @@ struct AnthropicRequest {
     max_tokens: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking: Option<AnthropicThinking>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tools: Option<Vec<AnthropicTool>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -493,6 +507,12 @@ struct AnthropicToolChoice {
     name: Option<String>,
 }
 
+impl AnthropicToolChoice {
+    fn forces_tool_use(&self) -> bool {
+        matches!(self.choice_type.as_str(), "any" | "tool")
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct AnthropicResponse {
     content: Vec<AnthropicResponseBlock>,
@@ -506,12 +526,25 @@ struct AnthropicResponse {
 enum AnthropicResponseBlock {
     #[serde(rename = "text")]
     Text { text: String },
+    #[serde(rename = "thinking")]
+    Thinking {
+        #[serde(default)]
+        thinking: Option<String>,
+        #[serde(default)]
+        summary: Option<String>,
+        #[serde(default, rename = "signature")]
+        _signature: Option<String>,
+    },
+    #[serde(rename = "redacted_thinking")]
+    RedactedThinking {},
     #[serde(rename = "tool_use")]
     ToolUse {
         id: String,
         name: String,
         input: serde_json::Value,
     },
+    #[serde(other)]
+    Other,
 }
 
 #[derive(Debug, Deserialize)]
@@ -610,9 +643,17 @@ fn convert_messages(messages: Vec<ChatMessage>) -> (Option<String>, Vec<Anthropi
     (system, anthropic_msgs)
 }
 
+#[derive(Debug, Default)]
+struct ExtractedAnthropicResponse {
+    content: Option<String>,
+    reasoning: Option<String>,
+    tool_calls: Vec<ToolCall>,
+}
+
 /// Extract text content and tool calls from an Anthropic response.
-fn extract_response_content(response: &AnthropicResponse) -> (Option<String>, Vec<ToolCall>) {
+fn extract_response_content(response: &AnthropicResponse) -> ExtractedAnthropicResponse {
     let mut text_parts: Vec<String> = Vec::new();
+    let mut reasoning_parts: Vec<String> = Vec::new();
     let mut tool_calls: Vec<ToolCall> = Vec::new();
 
     for block in &response.content {
@@ -620,6 +661,24 @@ fn extract_response_content(response: &AnthropicResponse) -> (Option<String>, Ve
             AnthropicResponseBlock::Text { text } => {
                 text_parts.push(text.clone());
             }
+            AnthropicResponseBlock::Thinking {
+                thinking,
+                summary,
+                _signature: _,
+            } => {
+                if let Some(reasoning) = summary
+                    .as_deref()
+                    .filter(|summary| !summary.trim().is_empty())
+                    .or_else(|| {
+                        thinking
+                            .as_deref()
+                            .filter(|thinking| !thinking.trim().is_empty())
+                    })
+                {
+                    reasoning_parts.push(reasoning.to_string());
+                }
+            }
+            AnthropicResponseBlock::RedactedThinking {} | AnthropicResponseBlock::Other => {}
             AnthropicResponseBlock::ToolUse { id, name, input } => {
                 tool_calls.push(ToolCall {
                     id: id.clone(),
@@ -638,7 +697,17 @@ fn extract_response_content(response: &AnthropicResponse) -> (Option<String>, Ve
         Some(text_parts.join(""))
     };
 
-    (content, tool_calls)
+    let reasoning = if reasoning_parts.is_empty() {
+        None
+    } else {
+        Some(reasoning_parts.join("\n"))
+    };
+
+    ExtractedAnthropicResponse {
+        content,
+        reasoning,
+        tool_calls,
+    }
 }
 
 #[cfg(test)]
@@ -706,9 +775,9 @@ mod tests {
                 cache_read_input_tokens: 0,
             },
         };
-        let (content, tool_calls) = extract_response_content(&response);
-        assert_eq!(content, Some("Hello!".to_string()));
-        assert!(tool_calls.is_empty());
+        let extracted = extract_response_content(&response);
+        assert_eq!(extracted.content, Some("Hello!".to_string()));
+        assert!(extracted.tool_calls.is_empty());
     }
 
     #[test]
@@ -732,10 +801,36 @@ mod tests {
                 cache_read_input_tokens: 0,
             },
         };
-        let (content, tool_calls) = extract_response_content(&response);
-        assert_eq!(content, Some("Let me search.".to_string()));
-        assert_eq!(tool_calls.len(), 1);
-        assert_eq!(tool_calls[0].name, "search");
+        let extracted = extract_response_content(&response);
+        assert_eq!(extracted.content, Some("Let me search.".to_string()));
+        assert_eq!(extracted.tool_calls.len(), 1);
+        assert_eq!(extracted.tool_calls[0].name, "search");
+    }
+
+    #[test]
+    fn test_extract_response_preserves_thinking_as_reasoning() {
+        let response = AnthropicResponse {
+            content: vec![
+                AnthropicResponseBlock::Thinking {
+                    thinking: Some("Raw thinking".to_string()),
+                    summary: Some("Summarized thinking".to_string()),
+                    _signature: Some("sig".to_string()),
+                },
+                AnthropicResponseBlock::Text {
+                    text: "Done.".to_string(),
+                },
+            ],
+            stop_reason: Some("end_turn".to_string()),
+            usage: AnthropicUsage {
+                input_tokens: 20,
+                output_tokens: 15,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
+            },
+        };
+        let extracted = extract_response_content(&response);
+        assert_eq!(extracted.content, Some("Done.".to_string()));
+        assert_eq!(extracted.reasoning, Some("Summarized thinking".to_string()));
     }
 
     /// Regression test for #1136: token field must be mutable via RwLock

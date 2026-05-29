@@ -286,6 +286,7 @@ impl CodexChatGptProvider {
             "input": input,
             "stream": true,
             "store": false,
+            "reasoning": crate::responses_reasoning::summary_request(),
         });
 
         if !api_tools.is_empty() {
@@ -621,6 +622,12 @@ impl CodexChatGptProvider {
                     result.text.push_str(delta);
                 }
             }
+            event_type
+                if crate::responses_reasoning::apply_summary_event(
+                    &mut result.reasoning,
+                    event_type,
+                    parsed,
+                ) => {}
             "response.output_item.added" => {
                 // Capture function call metadata when the item is first added.
                 // The item has: id (item_id), call_id, name, type.
@@ -706,6 +713,7 @@ impl CodexChatGptProvider {
 #[derive(Debug, Default)]
 struct ResponsesResult {
     text: String,
+    reasoning: String,
     /// Keyed by item_id (the SSE item identifier, e.g. "fc_...").
     pending_tool_calls: std::collections::HashMap<String, PendingToolCall>,
     input_tokens: u32,
@@ -747,7 +755,7 @@ impl LlmProvider for CodexChatGptProvider {
             input_tokens: result.input_tokens,
             output_tokens: result.output_tokens,
             finish_reason: FinishReason::Stop,
-            reasoning: None,
+            reasoning: crate::responses_reasoning::finish_summary(result.reasoning),
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
         })
@@ -812,7 +820,7 @@ impl LlmProvider for CodexChatGptProvider {
             finish_reason,
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
-            reasoning: None,
+            reasoning: crate::responses_reasoning::finish_summary(result.reasoning),
         })
     }
 }
@@ -972,6 +980,29 @@ data: {"response":{"usage":{"input_tokens":10,"output_tokens":5}}}
         assert_eq!(result.input_tokens, 10);
         assert_eq!(result.output_tokens, 5);
         assert!(result.pending_tool_calls.is_empty());
+    }
+
+    #[test]
+    fn test_parse_sse_reasoning_summary_response() {
+        let sse = r#"event: response.reasoning_summary_text.delta
+data: {"delta":"Thinking Steps\n"}
+
+event: response.reasoning_summary_text.delta
+data: {"delta":"[] Inspect context."}
+
+event: response.output_text.delta
+data: {"delta":"Done."}
+
+event: response.completed
+data: {"response":{"usage":{"input_tokens":10,"output_tokens":5}}}
+
+"#;
+        let result = CodexChatGptProvider::parse_sse_response(sse).unwrap();
+        assert_eq!(result.text, "Done.");
+        assert_eq!(
+            crate::responses_reasoning::finish_summary(result.reasoning).as_deref(),
+            Some("Thinking Steps\n[] Inspect context.")
+        );
     }
 
     #[test]

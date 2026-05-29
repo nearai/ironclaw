@@ -648,6 +648,7 @@ impl LlmProvider for NearAiChatProvider {
             .filter(|s| !s.trim().is_empty())
             .or_else(|| reasoning.filter(|s| !s.trim().is_empty()));
         emit_reasoning_trace(reasoning_fallback.as_deref());
+        let provider_reasoning = reasoning_fallback.clone();
 
         let tool_calls: Vec<ToolCall> = message_tool_calls
             .unwrap_or_default()
@@ -701,7 +702,7 @@ impl LlmProvider for NearAiChatProvider {
             output_tokens,
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
-            reasoning: None,
+            reasoning: provider_reasoning,
         })
     }
 
@@ -1770,6 +1771,92 @@ mod tests {
             "emission should use ironclaw_llm::reasoning target"
         );
         assert!(logs_contain("trace-target-marker"));
+    }
+
+    #[tokio::test]
+    async fn complete_with_tools_preserves_provider_reasoning_without_content_leak() {
+        use crate::provider::ToolDefinition;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                let mut request = vec![0_u8; 4096];
+                let Ok(n) = socket.read(&mut request).await else {
+                    continue;
+                };
+                let request = String::from_utf8_lossy(&request[..n]);
+                let body = if request.starts_with("POST /v1/chat/completions ") {
+                    serde_json::json!({
+                        "id": "chatcmpl-test",
+                        "choices": [{
+                            "message": {
+                                "role": "assistant",
+                                "content": null,
+                                "reasoning_content": "Thinking Steps\n[] Inspect context.",
+                                "tool_calls": [{
+                                    "id": "call_abc123",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "search",
+                                        "arguments": "{\"query\":\"test\"}"
+                                    }
+                                }]
+                            },
+                            "finish_reason": "tool_calls"
+                        }],
+                        "usage": { "prompt_tokens": 100, "completion_tokens": 50 }
+                    })
+                    .to_string()
+                } else {
+                    serde_json::json!({ "models": [] }).to_string()
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+            }
+        });
+
+        let provider = NearAiChatProvider::new_with_options(
+            test_nearai_config(&base_url),
+            test_session(),
+            false,
+            5,
+        )
+        .expect("provider");
+        let response = provider
+            .complete_with_tools(ToolCompletionRequest::new(
+                vec![ChatMessage::user("Search for test")],
+                vec![ToolDefinition {
+                    name: "search".to_string(),
+                    description: "Search".to_string(),
+                    parameters: serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "query": { "type": "string" }
+                        },
+                        "required": ["query"]
+                    }),
+                }],
+            ))
+            .await
+            .expect("tool completion");
+
+        assert_eq!(response.content, None);
+        assert_eq!(
+            response.reasoning.as_deref(),
+            Some("Thinking Steps\n[] Inspect context.")
+        );
+        assert_eq!(response.tool_calls.len(), 1);
+        assert_eq!(response.tool_calls[0].name, "search");
     }
 
     /// Regression: payloads that include BOTH reasoning fields must parse
