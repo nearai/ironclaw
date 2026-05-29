@@ -80,6 +80,9 @@ fn scan_decoded_url_for_leaks(
     if let Some(password) = parsed.password() {
         scan_decoded_component_for_leaks(detector, password)?;
     }
+    if let Some(fragment) = parsed.fragment() {
+        scan_decoded_component_for_leaks(detector, fragment)?;
+    }
     for (name, value) in parsed.query_pairs() {
         detector
             .scan_and_clean(name.as_ref())
@@ -152,28 +155,42 @@ pub(super) fn sanitize_runtime_response(
         sanitized_headers.push((name, cleaned));
     }
 
-    let body_text = String::from_utf8_lossy(&body).into_owned();
-    let exact_redacted = redact_exact_values(body_text, redaction_values);
-    let exact_body_redacted = exact_redacted.contains("[REDACTED]");
-    if exact_body_redacted {
-        redaction_applied = true;
-    }
-    let cleaned = leak_detector.scan_and_clean(&exact_redacted).map_err(|_| {
-        RuntimeHttpEgressError::Response {
-            reason: "response_leak_blocked".to_string(),
-            request_bytes: usage.request_bytes,
-            response_bytes: usage.response_bytes,
+    let (replacement_body, body_redacted) = {
+        let body_text = String::from_utf8_lossy(&body);
+        if redaction_values.is_empty() {
+            let cleaned = leak_detector
+                .scan_and_clean(body_text.as_ref())
+                .map_err(|_| RuntimeHttpEgressError::Response {
+                    reason: "response_leak_blocked".to_string(),
+                    request_bytes: usage.request_bytes,
+                    response_bytes: usage.response_bytes,
+                })?;
+            let leak_detector_redacted = cleaned != body_text.as_ref();
+            (
+                leak_detector_redacted.then(|| cleaned.into_bytes()),
+                leak_detector_redacted,
+            )
+        } else {
+            let exact_redacted = redact_exact_values(body_text.into_owned(), redaction_values);
+            let exact_body_redacted = exact_redacted.contains("[REDACTED]");
+            let cleaned = leak_detector.scan_and_clean(&exact_redacted).map_err(|_| {
+                RuntimeHttpEgressError::Response {
+                    reason: "response_leak_blocked".to_string(),
+                    request_bytes: usage.request_bytes,
+                    response_bytes: usage.response_bytes,
+                }
+            })?;
+            let leak_detector_redacted = cleaned != exact_redacted;
+            (
+                (exact_body_redacted || leak_detector_redacted).then(|| cleaned.into_bytes()),
+                exact_body_redacted || leak_detector_redacted,
+            )
         }
-    })?;
-    let leak_detector_redacted = cleaned != exact_redacted;
-    if leak_detector_redacted {
+    };
+    if body_redacted {
         redaction_applied = true;
     }
-    let body = if exact_body_redacted || leak_detector_redacted {
-        cleaned.into_bytes()
-    } else {
-        body
-    };
+    let body = replacement_body.unwrap_or(body);
 
     Ok((
         NetworkHttpResponse {
@@ -184,4 +201,51 @@ pub(super) fn sanitize_runtime_response(
         },
         redaction_applied,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scan_decoded_url_for_leaks_allows_unparseable_encoded_url() {
+        let detector = LeakDetector::new();
+
+        scan_decoded_url_for_leaks(
+            &detector,
+            "://%73%6b%2d%70%72%6f%6a%2dtest1234567890abcdefghij",
+        )
+        .expect("decoded scan is skipped when URL parsing fails");
+    }
+
+    #[test]
+    fn scan_runtime_url_for_leaks_blocks_raw_secret_when_url_parse_fails() {
+        let detector = LeakDetector::new();
+
+        let error = scan_runtime_url_for_leaks(&detector, "://sk-proj-test1234567890abcdefghij")
+            .expect_err("raw scan should run before decoded URL parsing");
+
+        assert!(matches!(
+            error,
+            RuntimeHttpEgressError::Request { ref reason, .. }
+                if reason == "credential_leak_blocked"
+        ));
+    }
+
+    #[test]
+    fn scan_decoded_url_for_leaks_blocks_percent_encoded_fragment() {
+        let detector = LeakDetector::new();
+
+        let error = scan_decoded_url_for_leaks(
+            &detector,
+            "https://api.example.test/v1/run#%73%6b%2d%70%72%6f%6a%2dtest1234567890abcdefghij",
+        )
+        .expect_err("decoded fragment leak should be blocked");
+
+        assert!(matches!(
+            error,
+            RuntimeHttpEgressError::Request { ref reason, .. }
+                if reason == "credential_leak_blocked"
+        ));
+    }
 }

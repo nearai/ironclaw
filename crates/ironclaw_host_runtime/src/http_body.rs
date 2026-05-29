@@ -1,6 +1,6 @@
 use std::{fmt, sync::LazyLock};
 
-use ironclaw_filesystem::{FilesystemError, FilesystemOperation, RootFilesystem, ScopedFilesystem};
+use ironclaw_filesystem::{FilesystemError, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
     CapabilityId, MountView, ResourceScope, RuntimeHttpEgressError, RuntimeHttpSaveTarget,
     RuntimeHttpSavedBody,
@@ -86,11 +86,7 @@ where
             .map_err(runtime_http_body_store_unauthorized_error)?;
         if !grant.permissions.write {
             return Err(RuntimeHttpBodyStoreError::Unauthorized {
-                reason: format!(
-                    "write permission denied for {} on {}",
-                    FilesystemOperation::WriteFile,
-                    target.path
-                ),
+                reason: "write permission denied".to_string(),
             });
         }
         Ok(())
@@ -174,10 +170,10 @@ where
 }
 
 fn runtime_http_body_store_unauthorized_error(
-    error: impl std::fmt::Display,
+    _error: impl std::fmt::Display,
 ) -> RuntimeHttpBodyStoreError {
     RuntimeHttpBodyStoreError::Unauthorized {
-        reason: error.to_string(),
+        reason: "write authorization failed".to_string(),
     }
 }
 
@@ -225,4 +221,25 @@ pub(crate) fn apply_body_disposition(
             bytes_written,
         }),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn block_on_filesystem_maps_worker_panic_to_failed_error() {
+        let result = block_on_filesystem(async {
+            panic!("filesystem worker test panic");
+            #[allow(unreachable_code)]
+            Ok::<(), FilesystemError>(())
+        });
+
+        assert_eq!(
+            result,
+            Err(RuntimeHttpBodyStoreError::Failed {
+                reason: "filesystem worker panicked".to_string(),
+            })
+        );
+    }
 }

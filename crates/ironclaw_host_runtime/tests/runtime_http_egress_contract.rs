@@ -305,6 +305,121 @@ fn host_http_egress_reuses_staged_secret_for_multiple_targets_in_one_request() {
 }
 
 #[test]
+fn host_http_egress_restores_staged_secret_when_later_injection_target_fails() {
+    let network = RecordingNetwork::ok(NetworkHttpResponse {
+        status: 200,
+        headers: vec![],
+        body: br#"{\"ok\":true}"#.to_vec(),
+        usage: NetworkUsage {
+            request_bytes: 5,
+            response_bytes: 11,
+            resolved_ip: None,
+        },
+    });
+    let network_recorder = network.requests.clone();
+    let scope = sample_scope();
+    let capability_id = sample_capability_id();
+    let handle = SecretHandle::new("api-token").unwrap();
+    let services = test_obligation_services();
+    stage_policy_sync(&services, &scope, &capability_id, sample_policy());
+    stage_secret_sync(
+        &services,
+        &scope,
+        &capability_id,
+        &handle,
+        "sk-staged-secret",
+    );
+    let service = services.host_http_egress(network);
+
+    let error = service
+        .execute(RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::Script,
+            scope: scope.clone(),
+            capability_id: capability_id.clone(),
+            method: NetworkMethod::Post,
+            url: "https://api.example.test/v1/__credential__/run".to_string(),
+            headers: vec![],
+            body: b"hello".to_vec(),
+            network_policy: sample_policy(),
+            credential_injections: vec![
+                RuntimeCredentialInjection {
+                    handle: handle.clone(),
+                    source: RuntimeCredentialSource::StagedObligation {
+                        capability_id: capability_id.clone(),
+                    },
+                    target: RuntimeCredentialTarget::Header {
+                        name: "authorization".to_string(),
+                        prefix: Some("Bearer ".to_string()),
+                    },
+                    required: true,
+                },
+                RuntimeCredentialInjection {
+                    handle: handle.clone(),
+                    source: RuntimeCredentialSource::StagedObligation {
+                        capability_id: capability_id.clone(),
+                    },
+                    target: RuntimeCredentialTarget::PathPlaceholder {
+                        placeholder: "__missing__".to_string(),
+                    },
+                    required: true,
+                },
+            ],
+            response_body_limit: Some(4096),
+            save_body_to: None,
+            timeout_ms: None,
+        })
+        .expect_err("later injection target failure should fail before dispatch");
+
+    assert!(matches!(
+        error,
+        RuntimeHttpEgressError::Credential { ref reason }
+            if reason == "credential injection path placeholder was not found"
+    ));
+    assert!(network_recorder.lock().unwrap().is_empty());
+
+    stage_policy_sync(&services, &scope, &capability_id, sample_policy());
+    service
+        .execute(RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::Script,
+            scope: scope.clone(),
+            capability_id: capability_id.clone(),
+            method: NetworkMethod::Post,
+            url: "https://api.example.test/v1/run".to_string(),
+            headers: vec![],
+            body: b"hello".to_vec(),
+            network_policy: sample_policy(),
+            credential_injections: vec![RuntimeCredentialInjection {
+                handle: handle.clone(),
+                source: RuntimeCredentialSource::StagedObligation {
+                    capability_id: capability_id.clone(),
+                },
+                target: RuntimeCredentialTarget::Header {
+                    name: "authorization".to_string(),
+                    prefix: Some("Bearer ".to_string()),
+                },
+                required: true,
+            }],
+            response_body_limit: Some(4096),
+            save_body_to: None,
+            timeout_ms: None,
+        })
+        .expect("staged secret should be restored after target-application failure");
+
+    let requests = network_recorder.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0]
+            .headers
+            .iter()
+            .find(|(name, _)| name == "authorization"),
+        Some(&(
+            "authorization".to_string(),
+            "Bearer sk-staged-secret".to_string()
+        ))
+    );
+}
+
+#[test]
 fn host_http_egress_rejects_invalid_path_placeholder_before_transport() {
     for (placeholder, url) in [
         ("", "https://api.example.test/v1/__credential__/run"),
@@ -2635,6 +2750,11 @@ fn host_http_egress_rejects_save_when_target_mount_view_is_read_only() {
     )])
     .unwrap();
     let target = save_target_with_mount("/workspace/pr.diff", &read_only_mounts);
+    let direct_error = scoped_filesystem
+        .authorize_write(&sample_scope(), &sample_capability_id(), &target)
+        .expect_err("direct body-store authorization should fail");
+    assert!(!direct_error.to_string().contains("/workspace/pr.diff"));
+
     let error = service
         .execute(RuntimeHttpEgressRequest {
             runtime: RuntimeKind::FirstParty,
@@ -2740,6 +2860,145 @@ fn host_http_egress_save_target_requires_write_authorization_before_network() {
         }
         other => panic!("expected request authorization error, got {other:?}"),
     }
+    assert!(network_recorder.lock().unwrap().is_empty());
+}
+
+#[test]
+fn host_http_egress_rejects_save_when_body_store_is_unavailable() {
+    let network = RecordingNetwork::ok(NetworkHttpResponse {
+        status: 200,
+        headers: vec![],
+        body: b"large patch body".to_vec(),
+        usage: NetworkUsage {
+            request_bytes: 5,
+            response_bytes: 16,
+            resolved_ip: None,
+        },
+    });
+    let network_recorder = network.requests.clone();
+    let store = Arc::new(RecordingBodyStore::default().with_authorize_unavailable());
+    let service = request_policy_staging_egress_with_body_store(network, store);
+
+    let error = service
+        .execute(RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::FirstParty,
+            scope: sample_scope(),
+            capability_id: sample_capability_id(),
+            method: NetworkMethod::Get,
+            url: "https://api.example.test/v1/run".to_string(),
+            headers: vec![],
+            body: b"hello".to_vec(),
+            network_policy: sample_policy(),
+            credential_injections: vec![],
+            response_body_limit: Some(4096),
+            save_body_to: Some(save_target("/workspace/pr.diff")),
+            timeout_ms: None,
+        })
+        .expect_err("unavailable body store should fail closed");
+
+    match error {
+        RuntimeHttpEgressError::Request {
+            reason,
+            request_bytes,
+            response_bytes,
+        } => {
+            assert_eq!(request_bytes, 0);
+            assert_eq!(response_bytes, 0);
+            assert_eq!(reason, "response_body_store_unavailable");
+        }
+        other => panic!("expected body store unavailable error, got {other:?}"),
+    }
+    assert!(network_recorder.lock().unwrap().is_empty());
+}
+
+#[test]
+fn host_http_egress_discards_staged_secret_on_pre_injection_error() {
+    let network = RecordingNetwork::ok(NetworkHttpResponse {
+        status: 200,
+        headers: vec![],
+        body: b"large patch body".to_vec(),
+        usage: NetworkUsage {
+            request_bytes: 5,
+            response_bytes: 16,
+            resolved_ip: None,
+        },
+    });
+    let network_recorder = network.requests.clone();
+    let store = Arc::new(RecordingBodyStore::default().with_authorize_unavailable());
+    let scope = sample_scope();
+    let capability_id = sample_capability_id();
+    let handle = SecretHandle::new("api-token").unwrap();
+    let services = test_obligation_services();
+    stage_policy_sync(&services, &scope, &capability_id, sample_policy());
+    stage_secret_sync(
+        &services,
+        &scope,
+        &capability_id,
+        &handle,
+        "sk-staged-secret",
+    );
+    let service = services.host_http_egress_with_body_store(network, store);
+
+    service
+        .execute(RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::FirstParty,
+            scope: scope.clone(),
+            capability_id: capability_id.clone(),
+            method: NetworkMethod::Get,
+            url: "https://api.example.test/v1/run".to_string(),
+            headers: vec![],
+            body: b"hello".to_vec(),
+            network_policy: sample_policy(),
+            credential_injections: vec![RuntimeCredentialInjection {
+                handle: handle.clone(),
+                source: RuntimeCredentialSource::StagedObligation {
+                    capability_id: capability_id.clone(),
+                },
+                target: RuntimeCredentialTarget::Header {
+                    name: "authorization".to_string(),
+                    prefix: Some("Bearer ".to_string()),
+                },
+                required: true,
+            }],
+            response_body_limit: Some(4096),
+            save_body_to: Some(save_target("/workspace/pr.diff")),
+            timeout_ms: None,
+        })
+        .expect_err("pre-injection body-store failure should fail closed");
+
+    stage_policy_sync(&services, &scope, &capability_id, sample_policy());
+    let error = service
+        .execute(RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::FirstParty,
+            scope: scope.clone(),
+            capability_id: capability_id.clone(),
+            method: NetworkMethod::Get,
+            url: "https://api.example.test/v1/run".to_string(),
+            headers: vec![],
+            body: b"hello".to_vec(),
+            network_policy: sample_policy(),
+            credential_injections: vec![RuntimeCredentialInjection {
+                handle: handle.clone(),
+                source: RuntimeCredentialSource::StagedObligation {
+                    capability_id: capability_id.clone(),
+                },
+                target: RuntimeCredentialTarget::Header {
+                    name: "authorization".to_string(),
+                    prefix: Some("Bearer ".to_string()),
+                },
+                required: true,
+            }],
+            response_body_limit: Some(4096),
+            save_body_to: None,
+            timeout_ms: None,
+        })
+        .expect_err("pre-injection failure should discard staged secrets");
+
+    assert!(matches!(
+        error,
+        RuntimeHttpEgressError::Credential { ref reason }
+            if reason == "required credential is unavailable"
+    ));
     assert!(network_recorder.lock().unwrap().is_empty());
 }
 
@@ -3359,6 +3618,11 @@ impl RecordingBodyStore {
         *self.authorize_error.lock().unwrap() = Some(RuntimeHttpBodyStoreError::Unauthorized {
             reason: reason.to_string(),
         });
+        self
+    }
+
+    fn with_authorize_unavailable(self) -> Self {
+        *self.authorize_error.lock().unwrap() = Some(RuntimeHttpBodyStoreError::Unavailable);
         self
     }
 

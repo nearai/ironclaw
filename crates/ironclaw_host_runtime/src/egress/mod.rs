@@ -14,22 +14,15 @@ use std::{fmt, sync::Arc};
 use crate::http_body::RuntimeHttpBodyStore;
 use crate::obligations::{NetworkObligationPolicyStore, RuntimeSecretInjectionStore};
 
-#[derive(Debug, Clone)]
-enum NetworkPolicySource {
-    Production {
-        network_policy_store: Arc<NetworkObligationPolicyStore>,
-        secret_injections: Arc<RuntimeSecretInjectionStore>,
-    },
-}
-
 #[derive(Clone)]
 pub struct HostHttpEgressService<N, S> {
-    pub(super) network: N,
-    pub(super) secrets: S,
-    pub(super) leak_detector: Arc<LeakDetector>,
-    network_policy_source: NetworkPolicySource,
-    pub(super) unsafe_raw_diagnostics_allowed: bool,
-    pub(super) body_store: Arc<dyn RuntimeHttpBodyStore>,
+    network: N,
+    secrets: S,
+    leak_detector: Arc<LeakDetector>,
+    network_policy_store: Arc<NetworkObligationPolicyStore>,
+    secret_injections: Arc<RuntimeSecretInjectionStore>,
+    unsafe_raw_diagnostics_allowed: bool,
+    body_store: Arc<dyn RuntimeHttpBodyStore>,
 }
 
 impl<N, S> fmt::Debug for HostHttpEgressService<N, S>
@@ -42,7 +35,8 @@ where
             .field("network", &self.network)
             .field("secrets", &self.secrets)
             .field("leak_detector", &"<shared>")
-            .field("network_policy_source", &self.network_policy_source)
+            .field("network_policy_store", &self.network_policy_store)
+            .field("secret_injections", &self.secret_injections)
             .field(
                 "unsafe_raw_diagnostics_allowed",
                 &self.unsafe_raw_diagnostics_allowed,
@@ -64,10 +58,8 @@ impl<N, S> HostHttpEgressService<N, S> {
             network,
             secrets,
             leak_detector: Arc::new(LeakDetector::new()),
-            network_policy_source: NetworkPolicySource::Production {
-                network_policy_store,
-                secret_injections,
-            },
+            network_policy_store,
+            secret_injections,
             unsafe_raw_diagnostics_allowed: false,
             body_store,
         }
@@ -83,15 +75,8 @@ impl<N, S> HostHttpEgressService<N, S> {
         expected_network_policy_store: &Arc<NetworkObligationPolicyStore>,
         expected_secret_injections: &Arc<RuntimeSecretInjectionStore>,
     ) -> bool {
-        match &self.network_policy_source {
-            NetworkPolicySource::Production {
-                network_policy_store,
-                secret_injections,
-            } => {
-                Arc::ptr_eq(network_policy_store, expected_network_policy_store)
-                    && Arc::ptr_eq(secret_injections, expected_secret_injections)
-            }
-        }
+        Arc::ptr_eq(&self.network_policy_store, expected_network_policy_store)
+            && Arc::ptr_eq(&self.secret_injections, expected_secret_injections)
     }
 
     pub fn with_body_store(mut self, store: Arc<dyn RuntimeHttpBodyStore>) -> Self {
@@ -103,28 +88,37 @@ impl<N, S> HostHttpEgressService<N, S> {
         &self,
         request: &mut RuntimeHttpEgressRequest,
     ) -> Result<NetworkPolicy, PipelineError> {
-        match &self.network_policy_source {
-            NetworkPolicySource::Production {
-                network_policy_store,
-                ..
-            } => network_policy_store
-                .get(&request.scope, &request.capability_id)
-                .ok_or_else(|| {
-                    PipelineError::pre_transport(RuntimeHttpEgressError::Network {
-                        reason: "network_policy_missing".to_string(),
-                        request_bytes: 0,
-                        response_bytes: 0,
-                    })
-                }),
-        }
+        self.network_policy_store
+            .get(&request.scope, &request.capability_id)
+            .ok_or_else(|| {
+                PipelineError::pre_transport(RuntimeHttpEgressError::Network {
+                    reason: "network_policy_missing".to_string(),
+                    request_bytes: 0,
+                    response_bytes: 0,
+                })
+            })
     }
 
     fn discard_staged_policy(&self, scope: &ResourceScope, capability_id: &CapabilityId) {
-        let NetworkPolicySource::Production {
-            network_policy_store,
-            ..
-        } = &self.network_policy_source;
-        network_policy_store.discard_for_capability(scope, capability_id);
+        self.network_policy_store
+            .discard_for_capability(scope, capability_id);
+    }
+
+    fn discard_staged_secret_injections(
+        &self,
+        scope: &ResourceScope,
+        capability_id: &CapabilityId,
+    ) {
+        if let Err(error) = self
+            .secret_injections
+            .discard_for_capability(scope, capability_id)
+        {
+            tracing::debug!(
+                error = ?error,
+                capability_id = %capability_id,
+                "runtime HTTP egress failed to discard staged secret injections"
+            );
+        }
     }
 
     pub(super) fn validate_credential_sources_for_request(
@@ -135,11 +129,27 @@ impl<N, S> HostHttpEgressService<N, S> {
     }
 
     pub(super) fn secret_injections(&self) -> Option<&RuntimeSecretInjectionStore> {
-        match &self.network_policy_source {
-            NetworkPolicySource::Production {
-                secret_injections, ..
-            } => Some(secret_injections.as_ref()),
-        }
+        Some(self.secret_injections.as_ref())
+    }
+
+    pub(super) fn network(&self) -> &N {
+        &self.network
+    }
+
+    pub(super) fn secrets(&self) -> &S {
+        &self.secrets
+    }
+
+    pub(super) fn leak_detector(&self) -> &LeakDetector {
+        &self.leak_detector
+    }
+
+    pub(super) fn unsafe_raw_diagnostics_allowed(&self) -> bool {
+        self.unsafe_raw_diagnostics_allowed
+    }
+
+    pub(super) fn body_store(&self) -> &dyn RuntimeHttpBodyStore {
+        self.body_store.as_ref()
     }
 }
 
@@ -161,6 +171,9 @@ where
                 if error.should_discard_staged_policy() {
                     self.discard_staged_policy(&scope, &capability_id);
                 }
+                if error.should_discard_staged_secret_injections() {
+                    self.discard_staged_secret_injections(&scope, &capability_id);
+                }
                 Err(error.into_inner())
             }
         }
@@ -170,6 +183,7 @@ where
 pub(super) struct PipelineError {
     error: RuntimeHttpEgressError,
     discard_staged_policy: bool,
+    discard_staged_secret_injections: bool,
 }
 
 impl PipelineError {
@@ -177,6 +191,15 @@ impl PipelineError {
         Self {
             error,
             discard_staged_policy: true,
+            discard_staged_secret_injections: true,
+        }
+    }
+
+    pub(super) fn pre_transport_keep_staged_secrets(error: RuntimeHttpEgressError) -> Self {
+        Self {
+            error,
+            discard_staged_policy: true,
+            discard_staged_secret_injections: false,
         }
     }
 
@@ -184,11 +207,16 @@ impl PipelineError {
         Self {
             error,
             discard_staged_policy: false,
+            discard_staged_secret_injections: false,
         }
     }
 
     fn should_discard_staged_policy(&self) -> bool {
         self.discard_staged_policy
+    }
+
+    fn should_discard_staged_secret_injections(&self) -> bool {
+        self.discard_staged_secret_injections
     }
 
     fn into_inner(self) -> RuntimeHttpEgressError {
@@ -216,7 +244,7 @@ fn log_raw_network_http_error_for_local_diagnostics(
         return;
     }
 
-    tracing::warn!(
+    tracing::debug!(
         network_error_kind = error.kind().as_str(),
         unsafe_raw_diagnostics = true,
         "unsafe raw HTTP egress error diagnostic enabled"

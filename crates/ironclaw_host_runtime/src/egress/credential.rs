@@ -126,13 +126,20 @@ where
     let mut parsed_url = None;
     let credential_injections = std::mem::take(&mut request.credential_injections);
     for injection in &credential_injections {
-        let value = credential_value_for_injection(
+        let value = match credential_value_for_injection(
             &mut credential_materials,
             secrets,
             secret_injections,
             request,
             injection,
-        )?;
+        ) {
+            Ok(value) => value,
+            Err(error) => {
+                restore_staged_secrets(secret_injections, request, &mut credential_materials);
+                request.credential_injections = credential_injections;
+                return Err(error);
+            }
+        };
         let Some(value) = value else {
             continue;
         };
@@ -145,13 +152,50 @@ where
         // consume raw bytes, but the cache itself never holds a non-zeroizing
         // copy.
         let plaintext = value.expose_secret();
-        apply_credential_injection(request, &mut parsed_url, &injection.target, plaintext)?;
+        if let Err(error) =
+            apply_credential_injection(request, &mut parsed_url, &injection.target, plaintext)
+        {
+            restore_staged_secrets(secret_injections, request, &mut credential_materials);
+            request.credential_injections = credential_injections;
+            return Err(error);
+        }
         redaction_values.extend(redaction_values_for_secret(plaintext));
     }
     if let Some(url) = parsed_url {
         request.url = url.to_string();
     }
     Ok(redaction_values)
+}
+
+fn restore_staged_secrets(
+    secret_injections: Option<&RuntimeSecretInjectionStore>,
+    request: &RuntimeHttpEgressRequest,
+    cache: &mut Vec<CredentialCacheEntry>,
+) {
+    let Some(secret_injections) = secret_injections else {
+        return;
+    };
+    for entry in cache.drain(..) {
+        let (
+            CredentialCacheKey::StagedObligation {
+                capability_id,
+                handle,
+            },
+            Some(material),
+        ) = (entry.key, entry.value)
+        else {
+            continue;
+        };
+        if let Err(error) =
+            secret_injections.insert(&request.scope, &capability_id, &handle, material)
+        {
+            tracing::debug!(
+                error = ?error,
+                capability_id = %capability_id,
+                "runtime HTTP egress failed to restore staged secret after injection failure"
+            );
+        }
+    }
 }
 
 fn credential_value_for_injection<'cache, S>(
@@ -701,6 +745,22 @@ mod tests {
             Self::yield_to_tokio().await;
             self.inner.leases_for_scope(scope).await
         }
+    }
+
+    #[test]
+    fn block_on_secret_store_maps_worker_panic_to_store_unavailable() {
+        let result = block_on_secret_store(async {
+            panic!("secret store worker test panic");
+            #[allow(unreachable_code)]
+            Ok::<(), SecretStoreError>(())
+        });
+
+        assert_eq!(
+            result,
+            Err(SecretStoreError::StoreUnavailable {
+                reason: "secret store worker panicked".to_string(),
+            })
+        );
     }
 
     fn block_on_test<T>(future: impl std::future::Future<Output = T>) -> T {
