@@ -511,7 +511,6 @@ struct AnthropicToolChoice {
     name: Option<String>,
 }
 
-
 #[derive(Debug, Deserialize)]
 struct AnthropicResponse {
     content: Vec<AnthropicResponseBlock>,
