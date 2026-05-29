@@ -37,6 +37,8 @@ permissions:
   pull-requests: write  # gh pr view + gh pr comment + reactions on PR comments
   issues: write         # belt-and-suspenders; also covers parse-error comment
   contents: read
+  id-token: write       # the called workflow uses OIDC and must be
+                        # granted this or it fails to start.
 
 jobs:
   parse:
