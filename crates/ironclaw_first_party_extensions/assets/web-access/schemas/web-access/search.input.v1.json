@@ -3,12 +3,15 @@
   "properties": {
     "query": {
       "type": "string",
+      "maxLength": 500,
       "description": "Search query"
     },
     "queries": {
       "type": "array",
+      "maxItems": 10,
       "items": {
-        "type": "string"
+        "type": "string",
+        "maxLength": 500
       },
       "description": "Batch of search queries"
     },
@@ -31,8 +34,10 @@
     },
     "domain_filter": {
       "type": "array",
+      "maxItems": 20,
       "items": {
-        "type": "string"
+        "type": "string",
+        "maxLength": 200
       },
       "description": "Domains to include, or prefix with '-' to exclude"
     },

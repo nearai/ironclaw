@@ -27,6 +27,7 @@ pub use gsuite::{
     google_provider_id, gsuite_package_specs, gsuite_resource_profile,
 };
 pub use web_access::{
-    WEB_ACCESS_EXTENSION_ID, WEB_GET_CONTENT_CAPABILITY_ID, WEB_SEARCH_CAPABILITY_ID,
-    WebAccessDispatchError, WebAccessDispatchRequest, WebAccessDispatchResult, WebAccessExecutor,
+    EXA_MCP_HOST, NETWORK_EGRESS_LIMIT, WEB_ACCESS_EXTENSION_ID, WEB_GET_CONTENT_CAPABILITY_ID,
+    WEB_SEARCH_CAPABILITY_ID, WebAccessDispatchError, WebAccessDispatchRequest,
+    WebAccessDispatchResult, WebAccessExecutor,
 };
