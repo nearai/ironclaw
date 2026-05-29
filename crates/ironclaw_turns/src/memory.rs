@@ -2094,14 +2094,10 @@ impl Inner {
                     self.complete_claimed_record(record)
                 }
                 LoopExitMapping::RunnerOutcome(TurnRunnerOutcome::Cancelled) => {
-                    if record.status == TurnStatus::CancelRequested {
-                        self.cancel_claimed_record(record)
-                    } else {
-                        self.fail_recovery_claimed_record(
-                            record,
-                            SanitizedFailure::from_trusted_static("interrupted_unexpectedly"),
-                        )
-                    }
+                    self.fail_recovery_claimed_record(
+                        record,
+                        SanitizedFailure::from_trusted_static("interrupted_unexpectedly"),
+                    )
                 }
                 LoopExitMapping::RunnerOutcome(TurnRunnerOutcome::Blocked {
                     checkpoint_id,
@@ -2116,7 +2112,14 @@ impl Inner {
                 }
             }
         })();
-        match result {
+        self.commit_transition(result)
+    }
+
+    fn commit_transition(
+        &mut self,
+        transition: AppliedLoopTransition,
+    ) -> Result<TurnRunState, TurnError> {
+        match transition {
             AppliedLoopTransition::Applied {
                 record,
                 state,
@@ -2274,48 +2277,20 @@ impl Inner {
 
     fn fail_recovery_claimed_record(
         &mut self,
-        mut record: RunRecord,
+        record: RunRecord,
         failure: SanitizedFailure,
     ) -> AppliedLoopTransition {
-        if !matches!(
-            record.status,
-            TurnStatus::Running | TurnStatus::CancelRequested
-        ) {
-            let from = record.status;
-            return AppliedLoopTransition::Rejected {
+        let from = record.status;
+        match from {
+            TurnStatus::Running => self.fail_claimed_record(record, failure),
+            TurnStatus::CancelRequested => self.cancel_claimed_record(record),
+            _ => AppliedLoopTransition::Rejected {
                 record: Box::new(record),
                 error: TurnError::InvalidTransition {
                     from,
                     to: TurnStatus::Failed,
                 },
-            };
-        }
-
-        match record.status {
-            TurnStatus::Running => {
-                record.status = TurnStatus::Failed;
-                record.failure = Some(failure.clone());
-                record.runner_id = None;
-                record.lease_token = None;
-                record.lease_expires_at = None;
-                record.event_cursor = self.next_cursor();
-                self.release_active_lock(&record);
-                self.remove_queued_run(record.run_id);
-                let state = record.state();
-                self.push_event(
-                    &record,
-                    TurnEventKind::Failed,
-                    Some(failure.into_category()),
-                );
-                self.mark_terminal(record.run_id);
-                AppliedLoopTransition::Applied {
-                    record: Box::new(record),
-                    state: Box::new(state),
-                    prune_terminal: true,
-                }
-            }
-            TurnStatus::CancelRequested => self.cancel_claimed_record(record),
-            _ => unreachable!("status checked above"),
+            },
         }
     }
 
@@ -2326,51 +2301,17 @@ impl Inner {
         lease_token: crate::TurnLeaseToken,
         failure: SanitizedFailure,
     ) -> Result<TurnRunState, TurnError> {
-        let mut record = self.take_record(run_id)?;
-        let result = (|| {
-            ensure_active_lease(&record, runner_id, lease_token, Utc::now())?;
-            if !matches!(
-                record.status,
-                TurnStatus::Running | TurnStatus::CancelRequested
-            ) {
-                return Err(TurnError::InvalidTransition {
-                    from: record.status,
-                    to: TurnStatus::Failed,
-                });
+        let record = self.take_record(run_id)?;
+        let transition = (|| {
+            if let Err(error) = ensure_active_lease(&record, runner_id, lease_token, Utc::now()) {
+                return AppliedLoopTransition::Rejected {
+                    record: Box::new(record),
+                    error,
+                };
             }
-            let (status, failure, event_kind, event_detail) = match record.status {
-                TurnStatus::Running => (
-                    TurnStatus::Failed,
-                    Some(failure.clone()),
-                    TurnEventKind::Failed,
-                    Some(failure.into_category()),
-                ),
-                TurnStatus::CancelRequested => {
-                    (TurnStatus::Cancelled, None, TurnEventKind::Cancelled, None)
-                }
-                _ => unreachable!("status checked above"),
-            };
-            record.status = status;
-            record.failure = failure;
-            record.runner_id = None;
-            record.lease_token = None;
-            record.lease_expires_at = None;
-            record.event_cursor = self.next_cursor();
-            self.release_active_lock(&record);
-            self.remove_queued_run(record.run_id);
-            let state = record.state();
-            self.push_event(&record, event_kind, event_detail);
-            self.mark_terminal(record.run_id);
-            Ok(state)
+            self.fail_recovery_claimed_record(record, failure)
         })();
-        self.records.insert(record.run_id, record);
-        if result
-            .as_ref()
-            .is_ok_and(|state| state.status.is_terminal())
-        {
-            self.prune_terminal_records();
-        }
-        result
+        self.commit_transition(transition)
     }
 
     fn update_active_lock(&mut self, record: &RunRecord, updated_at: crate::TurnTimestamp) {
