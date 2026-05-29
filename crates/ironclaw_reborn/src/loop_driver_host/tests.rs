@@ -67,6 +67,7 @@ async fn checkpoint_port_load_payload_roundtrips_staged_payload() {
         .checkpoint(LoopCheckpointRequest {
             kind: LoopCheckpointKind::BeforeSideEffect,
             state_ref,
+            gate_ref: None,
         })
         .await
         .expect("write checkpoint metadata");
@@ -104,6 +105,7 @@ async fn checkpoint_port_load_payload_rejects_schema_mismatch() {
         .checkpoint(LoopCheckpointRequest {
             kind: LoopCheckpointKind::BeforeModel,
             state_ref,
+            gate_ref: None,
         })
         .await
         .expect("write checkpoint metadata");
@@ -139,6 +141,7 @@ async fn checkpoint_port_load_payload_rejects_schema_version_mismatch() {
         .checkpoint(LoopCheckpointRequest {
             kind: LoopCheckpointKind::BeforeModel,
             state_ref,
+            gate_ref: None,
         })
         .await
         .expect("write checkpoint metadata");
@@ -194,6 +197,7 @@ async fn checkpoint_port_load_payload_missing_state_record_is_unavailable() {
             schema_id: expected_schema_id.clone(),
             schema_version: expected_schema_version,
             kind: LoopCheckpointKind::BeforeBlock,
+            gate_ref: None,
         })
         .await
         .expect("write checkpoint metadata");

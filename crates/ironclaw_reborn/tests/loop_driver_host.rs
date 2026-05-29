@@ -233,6 +233,7 @@ async fn text_only_host_factory_builds_complete_agent_loop_driver_host() {
         .checkpoint(LoopCheckpointRequest {
             kind: LoopCheckpointKind::BeforeModel,
             state_ref: checkpoint_state.state_ref.clone(),
+            gate_ref: None,
         })
         .await
         .unwrap();
@@ -1664,21 +1665,21 @@ async fn turn_runner_rejects_driver_fabricated_approval_block_without_durable_ga
     let cancel_clone = cancel.clone();
     let handle = tokio::spawn(async move { worker.run(cancel_clone).await });
 
-    let recovery_state = wait_for_run_status(
+    let failed_state = wait_for_run_status(
         turn_store.as_ref(),
         &fixture.context.scope,
         run_id,
-        TurnStatus::RecoveryRequired,
+        TurnStatus::Failed,
         "production-like evidence must reject fabricated approval block",
     )
     .await;
     cancel.cancel();
     handle.await.unwrap();
 
-    assert_eq!(recovery_state.run_id, run_id);
-    assert_eq!(recovery_state.gate_ref, None);
+    assert_eq!(failed_state.run_id, run_id);
+    assert_eq!(failed_state.gate_ref, None);
     assert_eq!(
-        recovery_state.failure.expect("failure").category(),
+        failed_state.failure.expect("failure").category(),
         "driver_protocol_violation"
     );
     assert!(fixture.gateway.requests().is_empty());
@@ -1905,6 +1906,7 @@ async fn text_only_host_e2e_keeps_persisted_model_route_through_full_flow() {
         .checkpoint(LoopCheckpointRequest {
             kind: LoopCheckpointKind::BeforeModel,
             state_ref: checkpoint_state.state_ref.clone(),
+            gate_ref: None,
         })
         .await
         .unwrap();
@@ -1940,7 +1942,7 @@ async fn text_only_host_e2e_keeps_persisted_model_route_through_full_flow() {
 }
 
 #[tokio::test]
-async fn turn_runner_worker_records_recovery_when_real_host_factory_rejects_claimed_scope() {
+async fn turn_runner_worker_fails_when_real_host_factory_rejects_claimed_scope() {
     let fixture = HostFixture::new_unsubmitted("thread-runner-host-edge", "hello edge").await;
     let turn_store = Arc::new(InMemoryTurnStateStore::default());
     let resolver = InMemoryRunProfileResolver::default();
@@ -2006,13 +2008,13 @@ async fn turn_runner_worker_records_recovery_when_real_host_factory_rejects_clai
             })
             .await
             .unwrap();
-        if state.status == TurnStatus::RecoveryRequired {
+        if state.status == TurnStatus::Failed {
             assert!(state.failure.is_some());
             break;
         }
         assert!(
             tokio::time::Instant::now() < deadline,
-            "host factory scope rejection should record RecoveryRequired"
+            "host factory scope rejection should fail the run"
         );
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
@@ -2990,6 +2992,7 @@ async fn text_only_host_e2e_flow_persists_checkpoint_mapping_in_turn_state_store
         .checkpoint(LoopCheckpointRequest {
             kind: LoopCheckpointKind::BeforeBlock,
             state_ref: checkpoint_state.state_ref.clone(),
+            gate_ref: None,
         })
         .await
         .unwrap();
@@ -3621,6 +3624,7 @@ async fn text_only_host_checkpoint_port_persists_ref_without_public_payload() {
         .checkpoint(LoopCheckpointRequest {
             kind: LoopCheckpointKind::BeforeSideEffect,
             state_ref: checkpoint_state.state_ref.clone(),
+            gate_ref: None,
         })
         .await
         .unwrap();
@@ -3684,6 +3688,7 @@ async fn text_only_host_checkpoint_port_rejects_foreign_state_ref() {
         .checkpoint(LoopCheckpointRequest {
             kind: LoopCheckpointKind::BeforeModel,
             state_ref: foreign_state.state_ref,
+            gate_ref: None,
         })
         .await
         .unwrap_err();
@@ -3703,6 +3708,7 @@ async fn text_only_host_checkpoint_port_rejects_kind_mismatch() {
         .checkpoint(LoopCheckpointRequest {
             kind: LoopCheckpointKind::BeforeSideEffect,
             state_ref: state.state_ref,
+            gate_ref: None,
         })
         .await
         .unwrap_err();
@@ -3729,6 +3735,7 @@ async fn text_only_host_checkpoint_port_maps_store_failures_to_unavailable() {
         .checkpoint(LoopCheckpointRequest {
             kind: LoopCheckpointKind::BeforeBlock,
             state_ref: state.state_ref,
+            gate_ref: None,
         })
         .await
         .unwrap_err();
@@ -3764,6 +3771,7 @@ async fn text_only_host_stage_checkpoint_payload_returns_ref_usable_by_checkpoin
         .checkpoint(LoopCheckpointRequest {
             kind: LoopCheckpointKind::BeforeSideEffect,
             state_ref: state_ref.clone(),
+            gate_ref: None,
         })
         .await
         .expect("checkpoint should accept the staged state_ref");

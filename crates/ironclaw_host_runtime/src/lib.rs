@@ -100,9 +100,10 @@ pub use sandbox_process::{
     RebornScopedSandboxCommandTransport,
 };
 pub use services::{
-    HostRuntimeServices, ProductAuthProviderRuntimePorts, ProductionEventStoreWiringError,
-    ProductionWiringComponent, ProductionWiringConfig, ProductionWiringIssue,
-    ProductionWiringIssueKind, ProductionWiringReport, RegisteredRuntimeHealth,
+    HostRuntimeServices, ProductAuthCredentialStageError, ProductAuthProviderRuntimePorts,
+    ProductionEventStoreWiringError, ProductionWiringComponent, ProductionWiringConfig,
+    ProductionWiringIssue, ProductionWiringIssueKind, ProductionWiringReport,
+    RegisteredRuntimeHealth,
 };
 pub use surface::{CapabilitySurfacePolicy, VisibleCapability, VisibleCapabilityAccess};
 pub use turn_scheduler::{
@@ -668,8 +669,6 @@ pub enum CapabilityFailureDisposition {
     /// The loop recovery strategy owns the retry budget and post-exhaustion
     /// fallback; the host-runtime disposition only classifies the first outcome.
     RetrySameCall,
-    /// End this unsafe run cleanly and provide recovery context on the next turn.
-    RecoverableRunFailure,
 }
 
 const MAX_RUNTIME_FAILURE_SUMMARY_CHARS: usize = 512;
@@ -697,11 +696,7 @@ impl RuntimeCapabilityFailure {
     }
 
     pub fn disposition(&self) -> CapabilityFailureDisposition {
-        let has_safe_summary = self
-            .message
-            .as_deref()
-            .is_some_and(|summary| !summary.trim().is_empty());
-        capability_failure_disposition(self.kind, has_safe_summary)
+        capability_failure_disposition(self.kind)
     }
 }
 
@@ -720,44 +715,22 @@ fn bounded_runtime_failure_summary(summary: &str) -> String {
 
 /// Central disposition policy for runtime capability failures.
 ///
-/// Same-loop continuation is reserved for model-correctable failures. Most of
-/// those require a safe runtime summary; malformed caller input remains
-/// model-visible even when only the failure kind is available, so the loop can
-/// return a normal tool error and let the model repair the arguments. Protocol,
-/// cancellation, and unknown failures end the current run even if they have a
-/// displayable message, so the next turn can receive recovery context without
-/// corrupting the assistant/tool-result transcript.
+/// Runtime failures should be surfaced through normal model-visible tool-error
+/// handling whenever they are not retryable infrastructure outages. Security
+/// isolation failures must use a separate quarantine path instead of this
+/// generic failure disposition.
 pub const fn capability_failure_disposition(
     kind: RuntimeFailureKind,
-    has_safe_summary: bool,
 ) -> CapabilityFailureDisposition {
     if matches!(kind, RuntimeFailureKind::InvalidInput) {
         return CapabilityFailureDisposition::ModelVisibleToolError;
-    }
-
-    if runtime_failure_requires_run_recovery(kind) {
-        return CapabilityFailureDisposition::RecoverableRunFailure;
     }
 
     if runtime_failure_is_retryable(kind) {
         return CapabilityFailureDisposition::RetrySameCall;
     }
 
-    if has_safe_summary {
-        CapabilityFailureDisposition::ModelVisibleToolError
-    } else {
-        CapabilityFailureDisposition::RecoverableRunFailure
-    }
-}
-
-const fn runtime_failure_requires_run_recovery(kind: RuntimeFailureKind) -> bool {
-    matches!(
-        kind,
-        RuntimeFailureKind::Cancelled
-            | RuntimeFailureKind::InvalidOutput
-            | RuntimeFailureKind::Dispatcher
-            | RuntimeFailureKind::Unknown
-    )
+    CapabilityFailureDisposition::ModelVisibleToolError
 }
 
 const fn runtime_failure_is_retryable(kind: RuntimeFailureKind) -> bool {

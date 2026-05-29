@@ -4,13 +4,15 @@
 //! normalized runtime result. Concrete dispatcher/runtime crates implement the
 //! behavior; caller-facing workflow crates depend only on this neutral port.
 
+use std::fmt;
+
 use async_trait::async_trait;
 use serde_json::Value;
 use thiserror::Error;
 
 use crate::{
     CapabilityId, ExtensionId, MountView, ResourceEstimate, ResourceReceipt, ResourceReservation,
-    ResourceScope, ResourceUsage, RuntimeKind,
+    ResourceScope, ResourceUsage, RuntimeKind, SecretHandle,
 };
 
 /// Request for one already-authorized declared capability dispatch.
@@ -133,6 +135,7 @@ pub enum DispatchFailureKind {
     RuntimeMismatch,
     MissingRuntimeBackend,
     UnsupportedRuntime,
+    AuthRequired,
     Runtime(RuntimeDispatchErrorKind),
 }
 
@@ -144,6 +147,7 @@ impl DispatchFailureKind {
             Self::RuntimeMismatch => "RuntimeMismatch",
             Self::MissingRuntimeBackend => "MissingRuntimeBackend",
             Self::UnsupportedRuntime => "UnsupportedRuntime",
+            Self::AuthRequired => "AuthRequired",
             Self::Runtime(kind) => kind.as_str(),
         }
     }
@@ -156,7 +160,7 @@ impl std::fmt::Display for DispatchFailureKind {
 }
 
 /// Runtime dispatch failures surfaced through the neutral host API port.
-#[derive(Debug, Error)]
+#[derive(Error)]
 pub enum DispatchError {
     #[error("unknown capability {capability}")]
     UnknownCapability { capability: CapabilityId },
@@ -182,6 +186,16 @@ pub enum DispatchError {
         capability: CapabilityId,
         runtime: RuntimeKind,
     },
+    /// Authentication is required to dispatch this capability.
+    ///
+    /// `required_secrets` names the credentials the caller must stage.  The
+    /// field is intentionally absent from the `Debug` output to avoid leaking
+    /// secret-handle identifiers into logs.
+    #[error("capability {capability} dispatch requires authentication")]
+    AuthRequired {
+        capability: CapabilityId,
+        required_secrets: Vec<SecretHandle>,
+    },
     #[error("MCP dispatch failed: {kind}")]
     Mcp { kind: RuntimeDispatchErrorKind },
     #[error("script dispatch failed: {kind}")]
@@ -192,6 +206,77 @@ pub enum DispatchError {
     FirstParty { kind: RuntimeDispatchErrorKind },
 }
 
+impl fmt::Debug for DispatchError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnknownCapability { capability } => f
+                .debug_struct("UnknownCapability")
+                .field("capability", capability)
+                .finish(),
+            Self::UnknownProvider {
+                capability,
+                provider,
+            } => f
+                .debug_struct("UnknownProvider")
+                .field("capability", capability)
+                .field("provider", provider)
+                .finish(),
+            Self::RuntimeMismatch {
+                capability,
+                descriptor_runtime,
+                package_runtime,
+            } => f
+                .debug_struct("RuntimeMismatch")
+                .field("capability", capability)
+                .field("descriptor_runtime", descriptor_runtime)
+                .field("package_runtime", package_runtime)
+                .finish(),
+            Self::MissingRuntimeBackend { runtime } => f
+                .debug_struct("MissingRuntimeBackend")
+                .field("runtime", runtime)
+                .finish(),
+            Self::UnsupportedRuntime {
+                capability,
+                runtime,
+            } => f
+                .debug_struct("UnsupportedRuntime")
+                .field("capability", capability)
+                .field("runtime", runtime)
+                .finish(),
+            // `required_secrets` handle names are omitted from Debug output to
+            // prevent leaking secret identifiers into logs and error chains.
+            Self::AuthRequired {
+                capability,
+                required_secrets,
+            } => f
+                .debug_struct("AuthRequired")
+                .field("capability", capability)
+                .field(
+                    "required_secrets",
+                    &format!("[{} handle(s) redacted]", required_secrets.len()),
+                )
+                .finish(),
+            Self::Mcp { kind } => f.debug_struct("Mcp").field("kind", kind).finish(),
+            Self::Script { kind } => f.debug_struct("Script").field("kind", kind).finish(),
+            Self::Wasm { kind } => f.debug_struct("Wasm").field("kind", kind).finish(),
+            Self::FirstParty { kind } => f.debug_struct("FirstParty").field("kind", kind).finish(),
+        }
+    }
+}
+
+/// Stable two-variant error for staged credential operations.
+///
+/// Both the host-runtime staging layer (`ProductAuthCredentialStageError`) and the
+/// per-extension staging traits (e.g. `GsuiteCredentialStageError`) map 1:1 to this
+/// type so that no mechanical conversion glue is needed across crate boundaries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CredentialStageError {
+    /// Credential is missing, expired, or revoked — user must re-authenticate.
+    AuthRequired,
+    /// Internal staging failure not attributable to the user's credentials.
+    Backend,
+}
+
 impl DispatchError {
     pub const fn failure_kind(&self) -> DispatchFailureKind {
         match self {
@@ -200,10 +285,30 @@ impl DispatchError {
             Self::RuntimeMismatch { .. } => DispatchFailureKind::RuntimeMismatch,
             Self::MissingRuntimeBackend { .. } => DispatchFailureKind::MissingRuntimeBackend,
             Self::UnsupportedRuntime { .. } => DispatchFailureKind::UnsupportedRuntime,
+            Self::AuthRequired { .. } => DispatchFailureKind::AuthRequired,
             Self::Mcp { kind }
             | Self::Script { kind }
             | Self::Wasm { kind }
             | Self::FirstParty { kind } => DispatchFailureKind::Runtime(*kind),
+        }
+    }
+
+    /// Stable event-token string for the error, suitable for telemetry and structured logging.
+    ///
+    /// This is the single canonical source for dispatch error event tokens; crates should
+    /// call this method rather than maintaining a parallel local `match` over `DispatchError`.
+    pub fn event_kind(&self) -> &'static str {
+        match self {
+            Self::UnknownCapability { .. } => "unknown_capability",
+            Self::UnknownProvider { .. } => "unknown_provider",
+            Self::RuntimeMismatch { .. } => "runtime_mismatch",
+            Self::MissingRuntimeBackend { .. } => "missing_runtime_backend",
+            Self::UnsupportedRuntime { .. } => "unsupported_runtime",
+            Self::AuthRequired { .. } => "auth_required",
+            Self::Mcp { kind }
+            | Self::Script { kind }
+            | Self::Wasm { kind }
+            | Self::FirstParty { kind } => kind.event_kind(),
         }
     }
 }

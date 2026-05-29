@@ -361,7 +361,7 @@ where
             capability_id,
             provider,
             runtime,
-            dispatch_error_kind(error),
+            error.event_kind(),
         ))
         .await
     }
@@ -452,16 +452,5 @@ where
     }
 }
 
-fn dispatch_error_kind(error: &DispatchError) -> &'static str {
-    match error {
-        DispatchError::UnknownCapability { .. } => "unknown_capability",
-        DispatchError::UnknownProvider { .. } => "unknown_provider",
-        DispatchError::RuntimeMismatch { .. } => "runtime_mismatch",
-        DispatchError::MissingRuntimeBackend { .. } => "missing_runtime_backend",
-        DispatchError::UnsupportedRuntime { .. } => "unsupported_runtime",
-        DispatchError::Mcp { kind }
-        | DispatchError::Script { kind }
-        | DispatchError::Wasm { kind }
-        | DispatchError::FirstParty { kind } => kind.event_kind(),
-    }
-}
+// Removed: dispatch_error_kind was a local copy of DispatchError::event_kind() from ironclaw_host_api.
+// Call error.event_kind() directly instead.

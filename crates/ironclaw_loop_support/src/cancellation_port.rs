@@ -339,7 +339,7 @@ impl TurnStateRunCancellationFactory {
         let handles = Arc::clone(&self.handles);
         let base_interval = self.poll_interval;
         tokio::spawn(async move {
-            // Exponential backoff caps long-lived stuck runs (e.g. `RecoveryRequired`)
+            // Exponential backoff caps long-lived stuck runs
             // at one poll every `MAX_POLL_INTERVAL` instead of hammering the store at
             // `base_interval` for the full owner lifetime.
             const MAX_POLL_INTERVAL: Duration = Duration::from_secs(5);

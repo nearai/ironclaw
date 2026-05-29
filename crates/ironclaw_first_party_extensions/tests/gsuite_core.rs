@@ -236,7 +236,7 @@ async fn gsuite_handler_refresh_retries_with_the_same_account_after_account_sele
     ]));
     let capability_id = capability_id(GMAIL_SEND_MESSAGE_CAPABILITY_ID);
 
-    let output = GsuiteExecutor::new(auth.clone())
+    let output = GsuiteExecutor::new(auth.clone(), noop_credential_stager())
         .dispatch(GsuiteDispatchRequest {
             capability_id: &capability_id,
             scope: &scope,
@@ -351,7 +351,7 @@ async fn gsuite_handler_errors_when_refresh_retry_is_still_auth_expired() {
     ]));
     let capability_id = capability_id(GMAIL_SEND_MESSAGE_CAPABILITY_ID);
 
-    let error = GsuiteExecutor::new(auth)
+    let error = GsuiteExecutor::new(auth, noop_credential_stager())
         .dispatch(GsuiteDispatchRequest {
             capability_id: &capability_id,
             scope: &scope,
@@ -370,6 +370,65 @@ async fn gsuite_handler_errors_when_refresh_retry_is_still_auth_expired() {
     assert_eq!(
         error.usage().map(|usage| usage.network_egress_bytes),
         Some(246)
+    );
+}
+
+#[tokio::test]
+async fn gsuite_handler_stage_credential_failure_on_refresh_retry_returns_auth_required() {
+    // stage_credential is called twice: once after initial resolve (line 87 in handlers.rs)
+    // and once after the 401-triggered token refresh (line 112).  This test verifies the
+    // second call's failure (CredentialStageError::AuthRequired) is correctly projected
+    // to GsuiteDispatchError::auth_requirement() -> Some([handle]).
+    let scope = scope();
+    let auth = Arc::new(InMemoryAuthProductServices::new());
+    let access_handle = SecretHandle::new("google-access-token").unwrap();
+    ironclaw_auth::CredentialAccountService::create_account(
+        auth.as_ref(),
+        NewCredentialAccount {
+            scope: auth_scope(&scope),
+            provider: google_provider_id().unwrap(),
+            label: CredentialAccountLabel::new("work google").unwrap(),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: Vec::new(),
+            access_secret: Some(access_handle.clone()),
+            refresh_secret: Some(SecretHandle::new("google-refresh-token").unwrap()),
+            scopes: vec![provider_scope(GOOGLE_GMAIL_SEND_SCOPE)],
+        },
+    )
+    .await
+    .unwrap();
+    // Egress: 401 on first call triggers refresh; second call succeeds at egress level
+    // but the post-refresh stager fails with AuthRequired before egress is reached.
+    let egress = Arc::new(RecordingEgress::with_responses(vec![
+        RecordingEgress::json_status(
+            401,
+            json!({"error":{"status":"UNAUTHENTICATED","message":"expired"}}),
+        ),
+        // second egress response is never consumed — stager fails first
+    ]));
+
+    let error = dispatch_error_with_stager(
+        auth,
+        scope,
+        GMAIL_SEND_MESSAGE_CAPABILITY_ID,
+        json!({ "message": { "raw": "base64url-rfc822" } }),
+        egress.clone(),
+        FailOnNthCallStager::fail_on_second_call(),
+    )
+    .await;
+
+    // stage_credential failure on the refresh path must surface as auth_required.
+    assert!(
+        error.is_auth_required(),
+        "post-refresh staging failure must produce auth_required; got: {error:?}"
+    );
+    // Only one egress request was made (the 401-triggering initial request).
+    assert_eq!(
+        egress.requests().len(),
+        1,
+        "exactly one egress request must have been made before stage_credential failure"
     );
 }
 
@@ -576,7 +635,7 @@ async fn gsuite_handler_uses_selected_credential_handle_for_runtime_egress() {
     let scope = scope();
     let auth =
         auth_with_google_account(&scope, vec![provider_scope(GOOGLE_GMAIL_SEND_SCOPE)]).await;
-    let executor = GsuiteExecutor::new(auth);
+    let executor = GsuiteExecutor::new(auth, noop_credential_stager());
     let capability_id = capability_id(GMAIL_SEND_MESSAGE_CAPABILITY_ID);
     let egress = Arc::new(RecordingEgress::permissive_success());
 
@@ -613,7 +672,7 @@ async fn gsuite_handler_applies_google_api_network_policy() {
     let scope = scope();
     let auth =
         auth_with_google_account(&scope, vec![provider_scope(GOOGLE_GMAIL_SEND_SCOPE)]).await;
-    let executor = GsuiteExecutor::new(auth);
+    let executor = GsuiteExecutor::new(auth, noop_credential_stager());
     let capability_id = capability_id(GMAIL_SEND_MESSAGE_CAPABILITY_ID);
     let egress = Arc::new(RecordingEgress::permissive_success());
 
@@ -649,7 +708,7 @@ async fn gsuite_handler_fails_before_egress_when_scope_is_missing() {
     let scope = scope();
     let auth =
         auth_with_google_account(&scope, vec![provider_scope(GOOGLE_GMAIL_SEND_SCOPE)]).await;
-    let executor = GsuiteExecutor::new(auth);
+    let executor = GsuiteExecutor::new(auth, noop_credential_stager());
     let capability_id = capability_id(GMAIL_TRASH_MESSAGE_CAPABILITY_ID);
     let egress = Arc::new(RecordingEgress::permissive_success());
 
@@ -1291,7 +1350,7 @@ async fn add_attendees_refreshes_expired_get_and_retries_patch() {
         RecordingEgress::json_with_request_bytes(json!({"id":"evt-1","updated":true}), 211),
     ]));
 
-    let result = GsuiteExecutor::new(auth)
+    let result = GsuiteExecutor::new(auth, noop_credential_stager())
         .dispatch(GsuiteDispatchRequest {
             capability_id: &capability_id,
             scope: &scope,
@@ -1345,7 +1404,7 @@ async fn add_attendees_reports_both_google_api_requests() {
         vec![provider_scope(ironclaw_auth::GOOGLE_CALENDAR_EVENTS_SCOPE)],
     )
     .await;
-    let executor = GsuiteExecutor::new(auth);
+    let executor = GsuiteExecutor::new(auth, noop_credential_stager());
     let capability_id = capability_id(CALENDAR_ADD_ATTENDEES_CAPABILITY_ID);
     let egress = Arc::new(RecordingEgress::with_responses(vec![
         RecordingEgress::json_with_request_bytes(
@@ -1381,7 +1440,7 @@ async fn add_attendees_reports_failed_initial_get_network_usage() {
         vec![provider_scope(ironclaw_auth::GOOGLE_CALENDAR_EVENTS_SCOPE)],
     )
     .await;
-    let executor = GsuiteExecutor::new(auth);
+    let executor = GsuiteExecutor::new(auth, noop_credential_stager());
     let capability_id = capability_id(CALENDAR_ADD_ATTENDEES_CAPABILITY_ID);
     let egress = Arc::new(RecordingEgress::with_errors(vec![
         RuntimeHttpEgressError::Network {
@@ -1410,5 +1469,64 @@ async fn add_attendees_reports_failed_initial_get_network_usage() {
     assert_eq!(
         error.usage().map(|usage| usage.network_egress_bytes),
         Some(101)
+    );
+}
+
+#[tokio::test]
+async fn add_attendees_restages_credential_before_patch() {
+    // P2 regression: the staged-obligation store is one-shot.
+    // execute_add_attendees makes GET then PATCH; without restaging, the PATCH
+    // fires with no credential. We use FailOnNthCallStager to verify the second
+    // staging call happens — if it doesn't happen, the dispatch succeeds instead
+    // of returning AuthRequired.
+    let scope = scope();
+    let auth = auth_with_google_account(
+        &scope,
+        vec![provider_scope(ironclaw_auth::GOOGLE_CALENDAR_EVENTS_SCOPE)],
+    )
+    .await;
+    let capability_id = capability_id(CALENDAR_ADD_ATTENDEES_CAPABILITY_ID);
+    let egress = Arc::new(RecordingEgress::with_responses(vec![
+        RecordingEgress::json_with_request_bytes(
+            json!({
+                "attendees": [{"email": "existing@example.com"}],
+                "etag": "test-etag"
+            }),
+            50,
+        ),
+        // PATCH response — would succeed, but stager fails before we get here
+        RecordingEgress::json_with_request_bytes(json!({"id": "evt-1", "updated": true}), 80),
+    ]));
+
+    // Stager succeeds on first call (for GET), fails AuthRequired on second call (for PATCH).
+    // Without the P2 fix, the second staging call never happens and dispatch succeeds.
+    let error = GsuiteExecutor::new(auth, FailOnNthCallStager::fail_on_second_call())
+        .dispatch(GsuiteDispatchRequest {
+            capability_id: &capability_id,
+            scope: &scope,
+            input: &json!({
+                "calendar_id": "primary",
+                "event_id": "evt-1",
+                "attendees": [{"email": "new@example.com"}]
+            }),
+            runtime_http_egress: egress.clone(),
+        })
+        .await
+        .expect_err("second staging should fail with AuthRequired before PATCH fires");
+
+    assert!(
+        error.is_auth_required(),
+        "stager auth-required on PATCH restage must surface as AuthRequired; got {error:?}"
+    );
+    // Only the GET fired; PATCH was blocked by staging failure
+    assert_eq!(
+        egress.requests().len(),
+        1,
+        "PATCH must not fire after staging failure; egress count should be 1 (GET only)"
+    );
+    assert_eq!(
+        error.usage().map(|u| u.network_egress_bytes),
+        Some(50),
+        "GET network bytes must be reported even when PATCH staging fails"
     );
 }

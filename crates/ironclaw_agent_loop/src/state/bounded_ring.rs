@@ -131,6 +131,15 @@ impl<'de, T: serde::Deserialize<'de>, const N: usize> serde::Deserialize<'de>
                 formatter.write_str("a bounded ring with an items array")
             }
 
+            /// Support non-self-describing formats (e.g. Bincode, Postcard) that
+            /// serialize structs as sequences rather than maps.
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+                let items = seq
+                    .next_element_seed(BoundedItemsVisitor::<T, N> { item: PhantomData })?
+                    .ok_or_else(|| serde::de::Error::invalid_length(0, &self))?;
+                Ok(BoundedRing { items })
+            }
+
             fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
                 let mut items = None;
                 while let Some(field) = map.next_key::<Field>()? {

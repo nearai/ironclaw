@@ -470,8 +470,15 @@ where
                     &obligation_outcome,
                 )
                 .await;
-                fail_run_if_configured(self.run_state, &scope, invocation_id, "Dispatch").await;
-                return Err(CapabilityInvocationError::from(error));
+                let invocation_error = CapabilityInvocationError::from(error);
+                apply_run_state_transition_if_configured(
+                    self.run_state,
+                    &scope,
+                    invocation_id,
+                    &invocation_error,
+                )
+                .await;
+                return Err(invocation_error);
             }
         };
 
@@ -807,8 +814,14 @@ where
                     &obligation_outcome,
                 )
                 .await;
-                fail_run_if_configured(Some(run_state), &scope, invocation_id, "Dispatch").await;
                 let invocation_error = CapabilityInvocationError::from(error);
+                apply_run_state_transition_if_configured(
+                    Some(run_state),
+                    &scope,
+                    invocation_id,
+                    &invocation_error,
+                )
+                .await;
                 if let Err(revoke_error) = capability_leases
                     .revoke(&scope, claimed_lease.grant.id)
                     .await
@@ -1640,8 +1653,15 @@ fn prepare_obligation_error_to_invocation(
             }
         }
         CapabilityObligationError::AuthRequired => {
+            // CapabilityObligationError::AuthRequired is a unit variant (no secret
+            // handle list).  The obligation handler does not surface which staged
+            // secret was missing, so required_secrets is left empty here.  The
+            // runtime auth gate accepts an empty list and falls back to the generic
+            // re-auth prompt; the dispatch-side conversion in error.rs forwards the
+            // real list when DispatchError::AuthRequired is raised instead.
             CapabilityInvocationError::AuthorizationRequiresAuth {
                 capability: capability_id.clone(),
+                required_secrets: Vec::new(),
             }
         }
         CapabilityObligationError::Failed { kind } => CapabilityInvocationError::ObligationFailed {

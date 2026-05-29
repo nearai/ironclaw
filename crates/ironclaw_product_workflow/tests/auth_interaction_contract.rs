@@ -8,7 +8,7 @@ use ironclaw_auth::{
     CredentialAccountId, CredentialAccountLabel, CredentialAccountProjection,
     CredentialAccountStatus, CredentialAccountUpdateBinding, CredentialOwnership,
     CredentialSelectionInput, NewAuthFlow, OAuthAuthorizationUrl, OAuthCallbackClaimRequest,
-    OAuthCallbackFailureInput, OAuthCallbackInput, TurnRunRef,
+    OAuthCallbackFailureInput, OAuthCallbackInput, Timestamp, TurnRunRef,
 };
 use ironclaw_host_api::{
     AgentId, ExtensionId, InvocationId, ProjectId, ResourceScope, TenantId, ThreadId, UserId,
@@ -183,6 +183,30 @@ impl AuthFlowManager for RecordingFlowManager {
         record.status = AuthFlowStatus::Canceled;
         record.updated_at = Utc::now();
         self.cancellations.lock().expect("lock").push(flow_id);
+        Ok(record.clone())
+    }
+
+    async fn mark_continuation_dispatched(
+        &self,
+        scope: &AuthProductScope,
+        flow_id: AuthFlowId,
+        emitted_at: Timestamp,
+    ) -> Result<AuthFlowRecord, AuthProductError> {
+        let mut flow = self.flow.lock().expect("lock");
+        let Some(record) = flow.as_mut() else {
+            return Err(AuthProductError::UnknownOrExpiredFlow);
+        };
+        if record.id != flow_id {
+            return Err(AuthProductError::UnknownOrExpiredFlow);
+        }
+        if &record.scope != scope {
+            return Err(AuthProductError::CrossScopeDenied);
+        }
+        if record.continuation_emitted_at.is_some() {
+            return Ok(record.clone());
+        }
+        record.continuation_emitted_at = Some(emitted_at);
+        record.updated_at = emitted_at;
         Ok(record.clone())
     }
 }
@@ -1036,6 +1060,7 @@ fn auth_flow(
         created_at: now,
         updated_at: now,
         expires_at: now + Duration::minutes(10),
+        continuation_emitted_at: None,
     }
 }
 

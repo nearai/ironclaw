@@ -12,18 +12,29 @@ use crate::{
     CredentialAccountId, CredentialAccountListPage, CredentialAccountListRequest,
     CredentialAccountLookupRequest, CredentialAccountMutation, CredentialAccountProjection,
     CredentialAccountSelectionRequest, CredentialAccountService, CredentialAccountStatus,
-    CredentialAccountUpdateBinding, CredentialOwnership, CredentialRecoveryKind,
-    CredentialRecoveryProjection, CredentialRecoveryReason, CredentialRecoveryRequest,
-    CredentialRefreshReport, CredentialRefreshRequest, CredentialSelectionInput,
-    CredentialSetupService, ManualTokenSetupRequest, NewAuthFlow, NewCredentialAccount,
-    OAuthCallbackClaimRequest, OAuthCallbackFailureInput, OAuthCallbackInput,
+    CredentialOwnership, CredentialRecoveryProjection, CredentialRecoveryReason,
+    CredentialRecoveryRequest, CredentialRefreshReport, CredentialRefreshRequest,
+    CredentialSelectionInput, CredentialSetupService, ManualTokenSetupRequest, NewAuthFlow,
+    NewCredentialAccount, OAuthCallbackClaimRequest, OAuthCallbackFailureInput, OAuthCallbackInput,
     OAuthProviderCallbackRequest, OAuthProviderExchange, OAuthProviderExchangeContext,
     OAuthProviderRefresh, OAuthProviderRefreshRequest, ProviderCallbackOutcome,
     SecretCleanupAction, SecretCleanupQuarantine, SecretCleanupQuarantineReason,
     SecretCleanupReport, SecretCleanupRequest, SecretCleanupService, SecretSubmitRequest,
-    SecretSubmitResult, cleanup::SecretCleanupAction::Deactivate,
-    flow::credential_status_for_completed_flow, interaction::PendingSecretInteraction,
-    provider::validate_provider_callback_request, scope_matches,
+    SecretSubmitResult, Timestamp,
+    cleanup::SecretCleanupAction::Deactivate,
+    domain::{
+        PreparedCallbackFlow, account_is_authorized_for_requester, prepare_callback_flow,
+        recovery_projection_for_single_account, recovery_projection_for_unconfigured_accounts,
+        update_account_from_exchange, update_account_from_request, validate_account_update_target,
+        validate_bound_update_authority, validate_callback_claim,
+        validate_credential_status_transition, validate_flow_update_binding,
+        validate_manual_token_update_binding, validate_new_credential_account,
+        validate_refresh_target, validate_selection_flow,
+    },
+    flow::credential_status_for_completed_flow,
+    interaction::PendingSecretInteraction,
+    provider::validate_provider_callback_request,
+    scope_matches,
 };
 
 #[derive(Default)]
@@ -129,6 +140,7 @@ impl AuthFlowManager for InMemoryAuthProductServices {
             pkce_verifier_hash: request.pkce_verifier_hash,
             authorization_code_hash: None,
             error: None,
+            continuation_emitted_at: None,
             created_at: now,
             updated_at: now,
             expires_at: request.expires_at,
@@ -163,41 +175,9 @@ impl AuthFlowManager for InMemoryAuthProductServices {
             .flows
             .get_mut(&request.flow_id)
             .ok_or(AuthProductError::UnknownOrExpiredFlow)?;
-        if !scope_matches(scope, &record.scope) {
-            return Err(AuthProductError::CrossScopeDenied);
-        }
-        if !record
-            .opaque_state_hash
-            .as_ref()
-            .is_some_and(|expected| expected.constant_time_eq(&request.opaque_state_hash))
-        {
-            return Err(AuthProductError::CrossScopeDenied);
-        }
-        if record.provider != request.provider {
-            return Err(AuthProductError::TokenExchangeFailed);
-        }
-        if !record
-            .pkce_verifier_hash
-            .as_ref()
-            .is_some_and(|expected| expected.constant_time_eq(&request.pkce_verifier_hash))
-        {
-            return Err(AuthProductError::CrossScopeDenied);
-        }
-        if crate::is_terminal_status(record.status) {
-            return match record.status {
-                AuthFlowStatus::Completed => Ok(record.clone()),
-                AuthFlowStatus::Canceled => Err(AuthProductError::Canceled),
-                _ => Err(AuthProductError::FlowAlreadyTerminal),
-            };
-        }
-        if now > record.expires_at {
-            record.status = AuthFlowStatus::Expired;
-            record.error = Some(crate::AuthErrorCode::UnknownOrExpiredFlow);
-            record.updated_at = now;
-            return Err(AuthProductError::UnknownOrExpiredFlow);
-        }
-        if record.status != AuthFlowStatus::AwaitingUser {
-            return Err(AuthProductError::FlowAlreadyTerminal);
+        validate_callback_claim(record, scope, &request, now)?;
+        if record.status == AuthFlowStatus::Completed {
+            return Ok(record.clone());
         }
         record.status = AuthFlowStatus::CallbackReceived;
         record.updated_at = now;
@@ -274,48 +254,9 @@ impl AuthFlowManager for InMemoryAuthProductServices {
                 .flows
                 .get_mut(&input.flow_id)
                 .ok_or(AuthProductError::UnknownOrExpiredFlow)?;
-            if !scope_matches(scope, &record.scope) {
-                return Err(AuthProductError::CrossScopeDenied);
-            }
-            if crate::is_terminal_status(record.status) {
-                return match (record.status, record.credential_account_id) {
-                    (AuthFlowStatus::Completed, Some(account_id))
-                        if account_id == input.credential_account_id =>
-                    {
-                        Ok(record.clone())
-                    }
-                    (AuthFlowStatus::Canceled, _) => Err(AuthProductError::Canceled),
-                    _ => Err(AuthProductError::FlowAlreadyTerminal),
-                };
-            }
-            if now > record.expires_at {
-                record.status = AuthFlowStatus::Expired;
-                record.error = Some(crate::AuthErrorCode::UnknownOrExpiredFlow);
-                record.updated_at = now;
-                return Err(AuthProductError::UnknownOrExpiredFlow);
-            }
-            if record.status != AuthFlowStatus::AwaitingUser {
-                return Err(AuthProductError::FlowAlreadyTerminal);
-            }
-            let Some(AuthChallenge::AccountSelectionRequired { provider, accounts }) =
-                &record.challenge
-            else {
-                return Err(AuthProductError::invalid_request(
-                    "auth flow is not awaiting credential selection",
-                ));
-            };
-            if provider != &record.provider {
-                return Err(AuthProductError::invalid_request(
-                    "auth flow credential selection provider mismatch",
-                ));
-            }
-            let selected = accounts.iter().any(|account| {
-                account.id == input.credential_account_id
-                    && account.provider == record.provider
-                    && account.status == CredentialAccountStatus::Configured
-            });
-            if !selected {
-                return Err(AuthProductError::CredentialMissing);
+            validate_selection_flow(record, scope, &input, now)?;
+            if record.status == AuthFlowStatus::Completed {
+                return Ok(record.clone());
             }
             (record.scope.clone(), record.provider.clone())
         };
@@ -389,6 +330,32 @@ impl AuthFlowManager for InMemoryAuthProductServices {
         record.status = AuthFlowStatus::Canceled;
         record.error = Some(crate::AuthErrorCode::Canceled);
         record.updated_at = now;
+        Ok(record.clone())
+    }
+
+    async fn mark_continuation_dispatched(
+        &self,
+        scope: &crate::AuthProductScope,
+        flow_id: AuthFlowId,
+        emitted_at: Timestamp,
+    ) -> Result<AuthFlowRecord, AuthProductError> {
+        let mut state = self.lock_state();
+        let record = state
+            .flows
+            .get_mut(&flow_id)
+            .ok_or(AuthProductError::UnknownOrExpiredFlow)?;
+        if !scope_matches(scope, &record.scope) {
+            return Err(AuthProductError::CrossScopeDenied);
+        }
+        if record.status != AuthFlowStatus::Completed {
+            return Err(AuthProductError::FlowAlreadyTerminal);
+        }
+        // Idempotent: if already marked by a concurrent caller, return existing record.
+        if record.continuation_emitted_at.is_some() {
+            return Ok(record.clone());
+        }
+        record.continuation_emitted_at = Some(emitted_at);
+        record.updated_at = emitted_at;
         Ok(record.clone())
     }
 }
@@ -929,47 +896,6 @@ fn create_account_in_state(
     Ok(account)
 }
 
-struct PreparedCallbackFlow {
-    scope: crate::AuthProductScope,
-    update_binding: Option<crate::CredentialAccountUpdateBinding>,
-    expected_pkce_verifier_hash: Option<crate::PkceVerifierHash>,
-}
-
-fn prepare_callback_flow(
-    record: &mut AuthFlowRecord,
-    scope: &crate::AuthProductScope,
-    opaque_state_hash: &crate::OpaqueStateHash,
-    now: crate::Timestamp,
-) -> Result<PreparedCallbackFlow, AuthProductError> {
-    if !scope_matches(scope, &record.scope) {
-        return Err(AuthProductError::CrossScopeDenied);
-    }
-    if crate::is_terminal_status(record.status) {
-        return Err(match record.status {
-            AuthFlowStatus::Canceled => AuthProductError::Canceled,
-            _ => AuthProductError::FlowAlreadyTerminal,
-        });
-    }
-    if now > record.expires_at {
-        record.status = AuthFlowStatus::Expired;
-        record.error = Some(crate::AuthErrorCode::UnknownOrExpiredFlow);
-        record.updated_at = now;
-        return Err(AuthProductError::UnknownOrExpiredFlow);
-    }
-    if !record
-        .opaque_state_hash
-        .as_ref()
-        .is_some_and(|expected| expected.constant_time_eq(opaque_state_hash))
-    {
-        return Err(AuthProductError::CrossScopeDenied);
-    }
-    Ok(PreparedCallbackFlow {
-        scope: record.scope.clone(),
-        update_binding: record.update_binding.clone(),
-        expected_pkce_verifier_hash: record.pkce_verifier_hash.clone(),
-    })
-}
-
 fn resolve_callback_account(
     state: &mut AuthState,
     callback: PreparedCallbackFlow,
@@ -1038,21 +964,6 @@ fn create_callback_account(
     .id)
 }
 
-fn update_account_from_request(
-    account: &mut CredentialAccount,
-    request: NewCredentialAccount,
-    now: crate::Timestamp,
-) -> Result<CredentialAccount, AuthProductError> {
-    validate_new_credential_account(&request)?;
-    account.label = request.label;
-    account.status = request.status;
-    account.access_secret = request.access_secret;
-    account.refresh_secret = request.refresh_secret;
-    account.scopes = request.scopes;
-    account.updated_at = now;
-    Ok(account.clone())
-}
-
 fn create_or_update_manual_token_account(
     state: &mut AuthState,
     pending: PendingSecretInteraction,
@@ -1103,292 +1014,6 @@ fn manual_token_account_request(
         refresh_secret: None,
         scopes: Vec::new(),
     })
-}
-
-fn update_account_from_exchange(
-    account: &mut CredentialAccount,
-    exchange: &OAuthProviderExchange,
-    now: crate::Timestamp,
-) {
-    account.label = exchange.account_label.clone();
-    account.status = credential_status_for_completed_flow();
-    account.access_secret = Some(exchange.access_secret.clone());
-    account.refresh_secret = exchange.refresh_secret.clone();
-    account.scopes = exchange.scopes.clone();
-    account.updated_at = now;
-}
-
-fn validate_account_update_target(
-    account: &CredentialAccount,
-    request: &NewCredentialAccount,
-) -> Result<(), AuthProductError> {
-    if !scope_matches(&request.scope, &account.scope) {
-        return Err(AuthProductError::CrossScopeDenied);
-    }
-    if account.provider != request.provider {
-        return Err(AuthProductError::invalid_request(
-            "credential account update target provider mismatch",
-        ));
-    }
-    validate_update_authority_fields(
-        account,
-        request.ownership,
-        request.owner_extension.as_ref(),
-        &request.granted_extensions,
-    )
-}
-
-fn validate_flow_update_binding(
-    account: &CredentialAccount,
-    request: &NewAuthFlow,
-) -> Result<(), AuthProductError> {
-    let Some(binding) = request.update_binding.as_ref() else {
-        return Ok(());
-    };
-    validate_scoped_update_binding(
-        account,
-        &request.scope,
-        &request.provider,
-        binding,
-        UpdateBindingValidationContext::AuthFlow,
-    )
-}
-
-fn validate_manual_token_update_binding(
-    account: &CredentialAccount,
-    request: &ManualTokenSetupRequest,
-    binding: &CredentialAccountUpdateBinding,
-) -> Result<(), AuthProductError> {
-    validate_scoped_update_binding(
-        account,
-        &request.scope,
-        &request.provider,
-        binding,
-        UpdateBindingValidationContext::ManualToken,
-    )
-}
-
-#[derive(Debug, Clone, Copy)]
-enum UpdateBindingValidationContext {
-    AuthFlow,
-    ManualToken,
-}
-
-fn validate_scoped_update_binding(
-    account: &CredentialAccount,
-    scope: &crate::AuthProductScope,
-    provider: &crate::AuthProviderId,
-    binding: &CredentialAccountUpdateBinding,
-    context: UpdateBindingValidationContext,
-) -> Result<(), AuthProductError> {
-    if !scope_matches(scope, &account.scope) {
-        return Err(AuthProductError::CrossScopeDenied);
-    }
-    if &account.provider != provider {
-        return Err(AuthProductError::invalid_request(match context {
-            UpdateBindingValidationContext::AuthFlow => "auth flow update target provider mismatch",
-            UpdateBindingValidationContext::ManualToken => {
-                "manual token update target provider mismatch"
-            }
-        }));
-    }
-    validate_bound_update_authority(account, binding)
-}
-
-fn validate_bound_update_authority(
-    account: &CredentialAccount,
-    binding: &crate::CredentialAccountUpdateBinding,
-) -> Result<(), AuthProductError> {
-    validate_update_authority_fields(
-        account,
-        binding.ownership,
-        binding.owner_extension.as_ref(),
-        &binding.granted_extensions,
-    )
-}
-
-fn validate_update_authority_fields(
-    account: &CredentialAccount,
-    ownership: CredentialOwnership,
-    owner_extension: Option<&ExtensionId>,
-    granted_extensions: &[ExtensionId],
-) -> Result<(), AuthProductError> {
-    if account.ownership != ownership
-        || account.owner_extension.as_ref() != owner_extension
-        || account.granted_extensions.as_slice() != granted_extensions
-    {
-        return Err(AuthProductError::CrossScopeDenied);
-    }
-    Ok(())
-}
-
-fn recovery_projection_for_single_account(
-    provider: crate::AuthProviderId,
-    account: &CredentialAccount,
-) -> CredentialRecoveryProjection {
-    let (kind, reason) = recovery_kind_and_reason_for_status(account.status);
-    match kind {
-        CredentialRecoveryKind::Configured => {
-            CredentialRecoveryProjection::configured(provider, account.projection())
-        }
-        CredentialRecoveryKind::SetupRequired => CredentialRecoveryProjection::setup_required(
-            provider,
-            reason,
-            vec![account.projection()],
-        ),
-        CredentialRecoveryKind::ReauthorizeRequired => {
-            CredentialRecoveryProjection::reauthorize_required(
-                provider,
-                reason,
-                vec![account.projection()],
-            )
-        }
-        CredentialRecoveryKind::AccountSelectionRequired => {
-            unreachable!("single account recovery cannot produce account selection required")
-        }
-    }
-}
-
-fn recovery_projection_for_unconfigured_accounts(
-    provider: crate::AuthProviderId,
-    accounts: &[&CredentialAccount],
-) -> CredentialRecoveryProjection {
-    let setup_reason = accounts
-        .iter()
-        .map(|account| recovery_kind_and_reason_for_status(account.status))
-        .find_map(|(kind, reason)| {
-            (kind == CredentialRecoveryKind::SetupRequired).then_some(reason)
-        });
-    let reason = setup_reason.unwrap_or_else(|| {
-        accounts
-            .iter()
-            .map(|account| recovery_kind_and_reason_for_status(account.status).1)
-            .next()
-            .unwrap_or(CredentialRecoveryReason::NoAccount)
-    });
-    let choices = accounts
-        .iter()
-        .map(|account| account.projection())
-        .collect::<Vec<_>>();
-    if setup_reason.is_some() {
-        CredentialRecoveryProjection::setup_required(provider, reason, choices)
-    } else {
-        CredentialRecoveryProjection::reauthorize_required(provider, reason, choices)
-    }
-}
-
-fn recovery_kind_and_reason_for_status(
-    status: CredentialAccountStatus,
-) -> (CredentialRecoveryKind, CredentialRecoveryReason) {
-    match status {
-        CredentialAccountStatus::Configured => (
-            CredentialRecoveryKind::Configured,
-            CredentialRecoveryReason::Configured,
-        ),
-        CredentialAccountStatus::PendingSetup => (
-            CredentialRecoveryKind::SetupRequired,
-            CredentialRecoveryReason::PendingSetup,
-        ),
-        CredentialAccountStatus::Missing => (
-            CredentialRecoveryKind::SetupRequired,
-            CredentialRecoveryReason::AccountMissing,
-        ),
-        CredentialAccountStatus::Inactive => (
-            CredentialRecoveryKind::SetupRequired,
-            CredentialRecoveryReason::AccountInactive,
-        ),
-        CredentialAccountStatus::Expired => (
-            CredentialRecoveryKind::ReauthorizeRequired,
-            CredentialRecoveryReason::AccountExpired,
-        ),
-        CredentialAccountStatus::RefreshFailed => (
-            CredentialRecoveryKind::ReauthorizeRequired,
-            CredentialRecoveryReason::RefreshFailed,
-        ),
-        CredentialAccountStatus::Revoked => (
-            CredentialRecoveryKind::ReauthorizeRequired,
-            CredentialRecoveryReason::AccountRevoked,
-        ),
-    }
-}
-
-fn account_is_authorized_for_requester(
-    account: &CredentialAccount,
-    requester_extension: Option<&ironclaw_host_api::ExtensionId>,
-) -> bool {
-    match account.ownership {
-        CredentialOwnership::UserReusable => true,
-        CredentialOwnership::ExtensionOwned => account
-            .owner_extension
-            .as_ref()
-            .is_some_and(|owner_extension| requester_extension == Some(owner_extension)),
-        CredentialOwnership::SharedAdminManaged => requester_extension
-            .is_some_and(|requester| account.granted_extensions.contains(requester)),
-        CredentialOwnership::System => false,
-    }
-}
-
-fn validate_refresh_target(
-    account: &CredentialAccount,
-    request: &CredentialRefreshRequest,
-) -> Result<(), AuthProductError> {
-    if !scope_matches(&request.scope, &account.scope) || account.provider != request.provider {
-        return Err(AuthProductError::CrossScopeDenied);
-    }
-    if !account_is_authorized_for_requester(account, request.requester_extension.as_ref()) {
-        return Err(AuthProductError::CrossScopeDenied);
-    }
-    if matches!(
-        account.status,
-        CredentialAccountStatus::Missing
-            | CredentialAccountStatus::PendingSetup
-            | CredentialAccountStatus::Inactive
-            | CredentialAccountStatus::Revoked
-    ) {
-        return Err(AuthProductError::CredentialMissing);
-    }
-    Ok(())
-}
-
-fn validate_new_credential_account(request: &NewCredentialAccount) -> Result<(), AuthProductError> {
-    if request.ownership == CredentialOwnership::ExtensionOwned && request.owner_extension.is_none()
-    {
-        return Err(AuthProductError::invalid_request(
-            "extension-owned credential accounts require owner_extension",
-        ));
-    }
-    Ok(())
-}
-
-fn validate_credential_status_transition(
-    current: CredentialAccountStatus,
-    next: CredentialAccountStatus,
-) -> Result<(), AuthProductError> {
-    if current == next || credential_status_transition_allowed(current, next) {
-        return Ok(());
-    }
-    Err(AuthProductError::invalid_request(
-        "credential account status transition is not allowed",
-    ))
-}
-
-fn credential_status_transition_allowed(
-    current: CredentialAccountStatus,
-    next: CredentialAccountStatus,
-) -> bool {
-    use CredentialAccountStatus::{
-        Configured, Expired, Inactive, Missing, PendingSetup, RefreshFailed, Revoked,
-    };
-
-    match current {
-        PendingSetup => matches!(next, Configured | Missing | Expired | Inactive | Revoked),
-        Configured => matches!(next, RefreshFailed | Missing | Expired | Inactive | Revoked),
-        RefreshFailed => matches!(next, Configured | Missing | Expired | Inactive | Revoked),
-        Missing => matches!(next, PendingSetup | Configured | Inactive | Revoked),
-        Expired => matches!(next, PendingSetup | Configured | Inactive | Revoked),
-        Inactive => matches!(next, PendingSetup | Configured | Revoked),
-        Revoked => false,
-    }
 }
 
 fn generated_secret_handle(prefix: &str) -> Result<SecretHandle, AuthProductError> {

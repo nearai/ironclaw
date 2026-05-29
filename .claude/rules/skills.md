@@ -47,7 +47,7 @@ compatibility.
 ## Selection Pipeline
 
 1. **Gating** -- Check binary/env/config requirements; skip skills whose prerequisites are missing
-2. **Scoring** -- Deterministic scoring: keywords (10/5 pts, cap 30) + patterns (20 pts, cap 40) + tags (3 pts, cap 15). `exclude_keywords` veto (score = 0 if any present)
+2. **Scoring** -- Deterministic scoring: keywords (10/5 pts, cap 30) + patterns (20 pts, cap 40) + tags (3 pts, cap 15). `exclude_keywords` veto (score = 0 if any present). Pattern (regex) scoring is gated on `SKILLS_REGEX_ACTIVATION_ENABLED` (default `true`); when `false`, regex activation contributes 0 and only keywords/tags/explicit mentions can select a skill.
 3. **Budget** -- Select top-scoring skills within `SKILLS_MAX_TOKENS` prompt budget
 4. **Attenuation** -- Minimum trust across active skills determines tool ceiling; installed skills lose dangerous tools
 

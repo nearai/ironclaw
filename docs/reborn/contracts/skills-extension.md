@@ -111,6 +111,13 @@ Approved `SKILL.md` instruction content transformed into loop snippets through
 `HostSkillContextSource`. This is the only path by which full skill instructions
 become model-visible runtime context.
 
+Reborn local-dev selection follows a catalog/list-first flow: the model may
+inspect visible skills through `skill_list`, then request full context for
+chosen skill names through the local-dev synthetic `skill_activate` capability.
+Natural-language activation criteria may rank or describe skills, but they must
+not inject full runtime skill context in this flow. Explicit `$skill-name`
+mentions remain a direct activation path.
+
 Implementations must not reuse a catalog/admin descriptor as a model selection
 descriptor, and must not reuse either descriptor as runtime skill context.
 

@@ -3,6 +3,8 @@ use std::{
     sync::Arc,
 };
 
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+use crate::product_auth_durable::{FilesystemAuthProductServices, UnavailableAuthProviderClient};
 use ironclaw_auth::AuthProviderClient;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_authorization::FilesystemCapabilityLeaseStore;
@@ -88,6 +90,7 @@ use crate::{
 use crate::{
     available_extensions::{
         AvailableExtensionCatalog, gmail_manifest_digest, google_calendar_manifest_digest,
+        web_access_manifest_digest,
     },
     extension_installation_store::FilesystemExtensionInstallationStore,
     extension_lifecycle::{
@@ -97,7 +100,11 @@ use crate::{
     extension_lifecycle_capabilities::{
         extend_builtin_first_party_package, insert_handlers as insert_extension_lifecycle_handlers,
     },
-    gsuite::register_bundled_gsuite_first_party_handlers,
+    gsuite::{
+        ProductAuthRuntimeGsuiteCredentialStager, register_bundled_gsuite_first_party_handlers,
+    },
+    nearai_mcp::{nearai_mcp_endpoint_from_env, nearai_mcp_runtime},
+    web_access::register_bundled_web_access_first_party_handlers,
 };
 
 #[cfg(feature = "libsql")]
@@ -214,8 +221,36 @@ where
     services
         .product_auth_provider_runtime_ports()
         .ok_or_else(|| RebornBuildError::InvalidConfig {
-            reason: "Google OAuth provider backend requires host runtime HTTP egress".to_string(),
+            reason: "product auth runtime ports unavailable; host runtime must be configured with HTTP egress and a secret store".to_string(),
         })
+}
+
+fn attach_nearai_mcp_runtime<F, G, S, R>(
+    services: HostRuntimeServices<F, G, S, R>,
+) -> Result<HostRuntimeServices<F, G, S, R>, RebornBuildError>
+where
+    F: ironclaw_filesystem::RootFilesystem + 'static,
+    G: ironclaw_resources::ResourceGovernor + 'static,
+    S: ironclaw_processes::ProcessStore + 'static,
+    R: ironclaw_processes::ProcessResultStore + 'static,
+{
+    let Some(runtime_ports) = services.product_auth_provider_runtime_ports() else {
+        tracing::debug!("skipping NEAR AI MCP runtime because host runtime HTTP egress is absent");
+        return Ok(services);
+    };
+    let endpoint = match nearai_mcp_endpoint_from_env() {
+        Ok(endpoint) => endpoint,
+        Err(reason) => {
+            tracing::debug!(
+                "skipping NEAR AI MCP runtime: {reason} (this only affects the optional NEAR AI MCP extension)"
+            );
+            return Ok(services);
+        }
+    };
+    Ok(services.with_mcp_runtime(nearai_mcp_runtime(
+        runtime_ports.runtime_http_egress(),
+        endpoint,
+    )))
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -476,6 +511,7 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     .with_approval_requests(Arc::clone(&store_graph.approval_requests))
     .with_capability_leases(Arc::clone(&store_graph.capability_leases))
     .with_turn_state_and_transition_port(Arc::clone(&store_graph.turn_state));
+    services = attach_nearai_mcp_runtime(services)?;
     let local_dev_process_port = local_dev_process_port_for_policy(
         &runtime_policy,
         &workspace_root,
@@ -488,10 +524,14 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         services = services.with_runtime_process_port(Arc::new(process_port));
     }
     services = apply_runtime_process_binding(services, runtime_process_binding);
+    let product_auth_runtime_ports = require_product_auth_runtime_ports(&services)?;
     let google_provider_client = google_oauth_config
         .map(|config| {
-            let runtime_ports = require_product_auth_runtime_ports(&services)?;
-            google_provider_client(config, Arc::clone(&secret_store), runtime_ports)
+            google_provider_client(
+                config,
+                Arc::clone(&secret_store),
+                product_auth_runtime_ports.clone(),
+            )
         })
         .transpose()?;
     let product_auth = match product_auth_ports {
@@ -514,10 +554,18 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     register_bundled_gsuite_first_party_handlers(
         &mut first_party_registry,
         product_auth.credential_account_service(),
+        Arc::new(ProductAuthRuntimeGsuiteCredentialStager::new(
+            product_auth_runtime_ports.clone(),
+        )),
     )
     .map_err(|error| RebornBuildError::InvalidConfig {
         reason: format!("GSuite first-party handlers are invalid: {error}"),
     })?;
+    register_bundled_web_access_first_party_handlers(&mut first_party_registry).map_err(
+        |error| RebornBuildError::InvalidConfig {
+            reason: format!("web access first-party handlers are invalid: {error}"),
+        },
+    )?;
     let mut available_extensions = AvailableExtensionCatalog::from_filesystem_root(
         filesystem.as_ref(),
         &VirtualPath::new("/system/extensions")?,
@@ -1120,6 +1168,16 @@ fn local_dev_first_party_trust_policy() -> Result<HostTrustPolicy, RebornBuildEr
             None,
         ),
         AdminEntry::for_local_manifest(
+            PackageId::new("web-access").map_err(|error| RebornBuildError::InvalidConfig {
+                reason: format!("Web Access first-party package id is invalid: {error}"),
+            })?,
+            "/system/extensions/web-access/manifest.toml".to_string(),
+            Some(web_access_manifest_digest()),
+            HostTrustAssignment::first_party(),
+            web_access_allowed_effects(),
+            None,
+        ),
+        AdminEntry::for_local_manifest(
             PackageId::new("google-calendar").map_err(|error| RebornBuildError::InvalidConfig {
                 reason: format!("Google Calendar first-party package id is invalid: {error}"),
             })?,
@@ -1154,6 +1212,19 @@ fn gsuite_allowed_effects() -> Vec<EffectKind> {
     ]
 }
 
+fn web_access_allowed_effects() -> Vec<EffectKind> {
+    vec![EffectKind::DispatchCapability, EffectKind::Network]
+}
+
+#[cfg(test)]
+fn nearai_allowed_effects() -> Vec<EffectKind> {
+    vec![
+        EffectKind::DispatchCapability,
+        EffectKind::Network,
+        EffectKind::UseSecret,
+    ]
+}
+
 async fn build_production_shaped(
     input: RebornBuildInput,
 ) -> Result<RebornServices, RebornBuildError> {
@@ -1177,11 +1248,6 @@ async fn build_production_shaped(
         require_runtime_http_egress,
         require_wasm_credentials,
     );
-    if google_oauth_config.is_some() && product_auth_ports.is_none() {
-        return Err(RebornBuildError::InvalidConfig {
-            reason: "Google OAuth backend config requires product-auth ports".to_string(),
-        });
-    }
     #[cfg(not(any(feature = "libsql", feature = "postgres")))]
     let _ = (
         production_trust_policy,
@@ -1577,6 +1643,8 @@ where
         google_oauth_config,
     } = context;
     let secret_store: Arc<dyn SecretStore> = stores.secret_credentials.secret_store.clone();
+    let mut first_party_registry = builtin_first_party_registry()?;
+    let product_auth_filesystem = Arc::clone(&stores.scoped_filesystem);
     let services = HostRuntimeServices::new(
         Arc::new(builtin_extension_registry()?),
         Arc::clone(&stores.filesystem),
@@ -1587,9 +1655,8 @@ where
     )
     .with_trust_policy(production_wiring.trust_policy)
     .with_runtime_policy(production_wiring.runtime_policy)
-    .with_first_party_capabilities(Arc::new(builtin_first_party_registry()?))
     .with_capability_leases(stores.leases)
-    .with_secret_store(stores.secret_credentials.secret_store)
+    .with_secret_store(Arc::clone(&stores.secret_credentials.secret_store))
     .with_credential_broker(stores.secret_credentials.credential_broker)
     .try_with_host_http_egress_with_body_store(
         ironclaw_network::PolicyNetworkHttpEgress::new(
@@ -1601,22 +1668,18 @@ where
     .with_reborn_event_store_config(profile.to_event_store_profile(), stores.event_store)
     .await?
     .with_filesystem_run_state(Arc::clone(&stores.scoped_filesystem))
-    .with_filesystem_turn_state_store(stores.scoped_filesystem)
+    .with_filesystem_turn_state_store(Arc::clone(&stores.scoped_filesystem))
     .with_run_profile_resolver(planned_run_profile_resolver()?)
     .with_turn_run_wake_notifier(production_wiring.turn_run_wake_notifier);
-    // Wire product-auth credential resolver when product auth is available, so that
-    // ProductAuthAccount runtime credentials are resolved before host-runtime egress.
-    // Mirrors the same wiring in build_local_dev.
-    let services = match &product_auth_ports {
-        Some(ports) => services.with_runtime_credential_account_resolver(Arc::new(
-            ProductAuthRuntimeCredentialResolver::new(ports.credential_account_service()),
-        )),
-        None => services,
-    };
+    let product_auth_runtime_ports = require_product_auth_runtime_ports(&services)?;
+    let services = attach_nearai_mcp_runtime(services)?;
     let google_provider_client = google_oauth_config
         .map(|config| {
-            let runtime_ports = require_product_auth_runtime_ports(&services)?;
-            google_provider_client(config, secret_store, runtime_ports)
+            google_provider_client(
+                config,
+                Arc::clone(&secret_store),
+                product_auth_runtime_ports.clone(),
+            )
         })
         .transpose()?;
     let services = apply_production_runtime_process_binding(
@@ -1626,18 +1689,52 @@ where
 
     let turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator> =
         Arc::new(services.turn_coordinator_for_production()?);
+    let product_auth_ports = product_auth_ports.unwrap_or_else(|| {
+        let durable = Arc::new(FilesystemAuthProductServices::new(
+            product_auth_filesystem,
+            Arc::clone(&secret_store),
+        ));
+        RebornProductAuthServicePorts::from_shared_with_provider(
+            durable,
+            Arc::new(UnavailableAuthProviderClient),
+        )
+    });
+    let product_auth_services = compose_product_auth_services(
+        product_auth_ports,
+        turn_coordinator.clone(),
+        google_provider_client,
+    );
+    let product_auth_ready = true;
+    // Wire ProductAuthAccount runtime credential resolver before
+    // host_runtime_for_production so WASM extensions whose manifest declares a
+    // ProductAuthAccount runtime credential source resolve through
+    // CredentialAccountService. Unconditional in production: product_auth_services
+    // always exists (durable filesystem fallback from #4234).
+    let services = services.with_runtime_credential_account_resolver(Arc::new(
+        ProductAuthRuntimeCredentialResolver::new(
+            product_auth_services.credential_account_service(),
+        ),
+    ));
+    register_bundled_gsuite_first_party_handlers(
+        &mut first_party_registry,
+        product_auth_services.credential_account_service(),
+        Arc::new(ProductAuthRuntimeGsuiteCredentialStager::new(
+            product_auth_runtime_ports.clone(),
+        )),
+    )
+    .map_err(|error| RebornBuildError::InvalidConfig {
+        reason: format!("GSuite first-party handlers are invalid: {error}"),
+    })?;
+    let services = services.with_first_party_capabilities(Arc::new(first_party_registry));
+
     let host_runtime: Arc<dyn ironclaw_host_runtime::HostRuntime> =
         Arc::new(services.host_runtime_for_production(&wiring_config)?);
-    let product_auth = product_auth_ports.map(|ports| {
-        compose_product_auth_services(ports, turn_coordinator.clone(), google_provider_client)
-    });
-    let product_auth_ready = product_auth.is_some();
 
     Ok(RebornServices {
         host_runtime: Some(host_runtime),
         turn_coordinator: Some(turn_coordinator),
         readiness: readiness_for(profile, true, true, product_auth_ready),
-        product_auth,
+        product_auth: Some(product_auth_services),
         local_runtime: None,
     })
 }
@@ -1732,6 +1829,8 @@ mod tests {
     };
     use ironclaw_product_workflow::{LifecyclePackageKind, LifecyclePackageRef};
     use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
+
+    use crate::runtime::SKILL_ACTIVATE_CAPABILITY_ID;
 
     #[tokio::test]
     async fn local_dev_services_include_repl_runtime_substrate() {
@@ -1870,6 +1969,121 @@ mod tests {
         );
         assert_ne!(failure.kind, RuntimeFailureKind::Authorization);
         assert_ne!(failure.kind, RuntimeFailureKind::MissingRuntime);
+    }
+
+    #[tokio::test]
+    async fn local_dev_web_access_installs_activates_and_dispatches_through_host_runtime() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let services = build_reborn_services(RebornBuildInput::local_dev(
+            "local-dev-web-access-owner",
+            dir.path().join("local-dev"),
+        ))
+        .await
+        .expect("local-dev services build");
+        let local_runtime = services.local_runtime.as_ref().expect("local runtime");
+        let extension_management = local_runtime
+            .extension_management
+            .as_ref()
+            .expect("extension management");
+        let web_access_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "web-access")
+                .expect("valid ref");
+
+        extension_management
+            .install(web_access_ref.clone())
+            .await
+            .expect("install Web Access");
+        extension_management
+            .activate(web_access_ref)
+            .await
+            .expect("activate Web Access");
+
+        let outcome = services
+            .host_runtime
+            .as_ref()
+            .expect("host runtime")
+            .invoke_capability(RuntimeCapabilityRequest::new(
+                web_access_context("web-access.search"),
+                CapabilityId::new("web-access.search").unwrap(),
+                ResourceEstimate::default(),
+                serde_json::json!({
+                    "provider": "brave",
+                    "query": "ironclaw reborn"
+                }),
+                trust_decision(),
+            ))
+            .await
+            .expect("runtime invocation completes");
+
+        let RuntimeCapabilityOutcome::Failed(failure) = outcome else {
+            panic!("expected fail-closed handler outcome, got {outcome:?}");
+        };
+        assert_eq!(failure.capability_id.as_str(), "web-access.search");
+        assert_eq!(failure.kind, RuntimeFailureKind::Backend);
+    }
+
+    #[tokio::test]
+    async fn local_dev_nearai_mcp_installs_and_activates_model_visible_capability() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let services = build_reborn_services(RebornBuildInput::local_dev(
+            "local-dev-nearai-mcp-owner",
+            dir.path().join("local-dev"),
+        ))
+        .await
+        .expect("local-dev services build");
+        let local_runtime = services.local_runtime.as_ref().expect("local runtime");
+        let extension_management = local_runtime
+            .extension_management
+            .as_ref()
+            .expect("extension management");
+        let nearai_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "nearai").expect("valid ref");
+
+        extension_management
+            .install(nearai_ref.clone())
+            .await
+            .expect("install NEAR AI MCP");
+        extension_management
+            .activate(nearai_ref)
+            .await
+            .expect("activate NEAR AI MCP");
+
+        let capabilities = extension_management
+            .active_model_visible_capabilities()
+            .await
+            .expect("active capabilities");
+        let search = capabilities
+            .iter()
+            .find(|capability| capability.id.as_str() == "nearai.search")
+            .expect("nearai.search active");
+
+        assert_eq!(search.provider.as_str(), "nearai");
+        assert_eq!(search.effects, nearai_allowed_effects());
+        assert_eq!(search.runtime_credentials.len(), 1);
+        assert_eq!(
+            search.runtime_credentials[0].handle,
+            SecretHandle::new("llm_nearai_api_key").unwrap()
+        );
+        assert_eq!(
+            search.runtime_credentials[0].audience.host_pattern,
+            "private.near.ai"
+        );
+    }
+
+    #[test]
+    fn attach_nearai_mcp_runtime_skips_services_without_runtime_http_egress() {
+        let services = HostRuntimeServices::new(
+            Arc::new(ExtensionRegistry::new()),
+            Arc::new(LocalFilesystem::new()),
+            Arc::new(InMemoryResourceGovernor::new()),
+            Arc::new(GrantAuthorizer::new()),
+            ProcessServices::in_memory(),
+            CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        );
+
+        let services = attach_nearai_mcp_runtime(services).expect("attach is optional");
+
+        assert!(services.product_auth_provider_runtime_ports().is_none());
     }
 
     #[cfg(feature = "libsql")]
@@ -2103,6 +2317,7 @@ mod tests {
             .map(|capability| capability.id.as_str())
             .collect::<Vec<_>>();
         assert!(ids.contains(&SKILL_LIST_CAPABILITY_ID));
+        assert!(!ids.contains(&SKILL_ACTIVATE_CAPABILITY_ID));
         assert!(ids.contains(&SKILL_INSTALL_CAPABILITY_ID));
         assert!(ids.contains(&SKILL_REMOVE_CAPABILITY_ID));
 
@@ -2114,6 +2329,9 @@ mod tests {
         ] {
             assert!(registry.contains_handler(&ironclaw_host_api::CapabilityId::new(id).unwrap()));
         }
+        assert!(!registry.contains_handler(
+            &ironclaw_host_api::CapabilityId::new(SKILL_ACTIVATE_CAPABILITY_ID).unwrap()
+        ));
     }
 
     #[test]
@@ -2199,6 +2417,47 @@ mod tests {
             MountView::new(Vec::new()).expect("valid empty mount view"),
         )
         .expect("valid execution context")
+    }
+
+    fn web_access_context(capability_id: &str) -> ExecutionContext {
+        let extension_id = ExtensionId::new("caller").expect("valid extension id");
+        ExecutionContext::local_default(
+            UserId::new("local-dev-test-user").expect("valid user id"),
+            extension_id.clone(),
+            RuntimeKind::FirstParty,
+            TrustClass::FirstParty,
+            CapabilitySet {
+                grants: vec![CapabilityGrant {
+                    id: CapabilityGrantId::new(),
+                    capability: CapabilityId::new(capability_id).expect("valid capability id"),
+                    grantee: Principal::Extension(extension_id),
+                    issued_by: Principal::HostRuntime,
+                    constraints: GrantConstraints {
+                        allowed_effects: web_access_allowed_effects(),
+                        mounts: MountView::new(Vec::new()).expect("valid empty mount view"),
+                        network: web_access_network_policy(),
+                        secrets: Vec::new(),
+                        resource_ceiling: None,
+                        expires_at: None,
+                        max_invocations: None,
+                    },
+                }],
+            },
+            MountView::new(Vec::new()).expect("valid empty mount view"),
+        )
+        .expect("valid execution context")
+    }
+
+    fn web_access_network_policy() -> NetworkPolicy {
+        NetworkPolicy {
+            allowed_targets: vec![NetworkTargetPattern {
+                scheme: Some(ironclaw_host_api::NetworkScheme::Https),
+                host_pattern: "mcp.exa.ai".to_string(),
+                port: None,
+            }],
+            deny_private_ip_ranges: true,
+            max_egress_bytes: None,
+        }
     }
 
     fn execution_context(capability_id: &str, mounts: MountView) -> ExecutionContext {

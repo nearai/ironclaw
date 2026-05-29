@@ -39,6 +39,8 @@ mod llm_catalog;
 mod local_dev_capability_policy;
 mod local_dev_mounts;
 mod local_runtime_profile;
+mod nearai_mcp;
+mod product_auth_durable;
 mod product_auth_runtime_credentials;
 #[cfg(feature = "webui-v2-beta")]
 mod product_auth_serve;
@@ -55,6 +57,7 @@ mod readiness;
 mod runtime;
 mod runtime_input;
 mod skill_listing;
+mod web_access;
 mod webui;
 #[cfg(feature = "webui-v2-beta")]
 mod webui_body_limit;

@@ -138,7 +138,7 @@ async fn event_publishing_transition_port_publishes_blocked_and_terminal_events(
 }
 
 #[tokio::test]
-async fn event_publishing_transition_port_publishes_recovered_lease_events() {
+async fn event_publishing_transition_port_publishes_expired_lease_terminal_events() {
     let store = Arc::new(InMemoryTurnStateStore::default());
     let coordinator = DefaultTurnCoordinator::new(store.clone());
     let sink = Arc::new(InMemoryTurnEventSink::default());
@@ -202,7 +202,7 @@ async fn event_publishing_transition_port_publishes_recovered_lease_events() {
     let recovered_events = events
         .iter()
         .filter(|event| {
-            event.kind == TurnEventKind::RecoveryRequired
+            event.kind == TurnEventKind::Failed
                 && event.sanitized_reason.as_deref() == Some("lease_expired")
         })
         .collect::<Vec<_>>();

@@ -6,6 +6,7 @@ use std::{
     time::Instant,
 };
 
+use async_trait::async_trait;
 use futures_util::FutureExt as _;
 use ironclaw_auth::{
     CredentialAccountService, CredentialRecoveryKind, CredentialRecoveryProjection, ProviderScope,
@@ -50,12 +51,17 @@ const GMAIL_API_BASE: &str = "https://gmail.googleapis.com/gmail/v1";
 #[derive(Clone)]
 pub struct GsuiteExecutor {
     resolver: Arc<GoogleCredentialResolver>,
+    credential_stager: Arc<dyn GsuiteCredentialStager>,
 }
 
 impl GsuiteExecutor {
-    pub fn new(accounts: Arc<dyn CredentialAccountService>) -> Self {
+    pub fn new(
+        accounts: Arc<dyn CredentialAccountService>,
+        credential_stager: Arc<dyn GsuiteCredentialStager>,
+    ) -> Self {
         Self {
             resolver: Arc::new(GoogleCredentialResolver::new(accounts)),
+            credential_stager,
         }
     }
 
@@ -76,9 +82,17 @@ impl GsuiteExecutor {
             .resolve(request.scope, &extension, &scopes)
             .await
             .map_err(map_credential_error)?;
+        // Stage after parsing so a parse failure doesn't leave a staged credential
+        // behind in the injection store.
         let execution = capability_execution(capability, request.input)?;
+        self.stage_credential(&request, credential.access_secret.clone())
+            .await?;
         let (response, network_egress_bytes) = match execution
-            .execute(&request, credential.access_secret)
+            .execute(
+                &request,
+                credential.access_secret,
+                self.credential_stager.as_ref(),
+            )
             .await?
         {
             CapabilityExecutionOutcome::Response {
@@ -101,9 +115,18 @@ impl GsuiteExecutor {
                     .map_err(|error| {
                         add_network_usage(map_credential_error(error), network_egress_bytes)
                     })?;
+                // Parse before staging for the same reason as the primary path:
+                // a parse failure should not leave a credential staged.
                 let retry_execution = capability_execution(capability, request.input)?;
+                self.stage_credential(&request, refreshed.access_secret.clone())
+                    .await
+                    .map_err(|error| add_network_usage(error, network_egress_bytes))?;
                 match retry_execution
-                    .execute(&request, refreshed.access_secret)
+                    .execute(
+                        &request,
+                        refreshed.access_secret,
+                        self.credential_stager.as_ref(),
+                    )
                     .await
                     .map_err(|error| add_network_usage(error, network_egress_bytes))?
                 {
@@ -143,6 +166,21 @@ impl GsuiteExecutor {
             },
         })
     }
+
+    async fn stage_credential(
+        &self,
+        request: &GsuiteDispatchRequest<'_>,
+        access_secret: ironclaw_host_api::SecretHandle,
+    ) -> Result<(), GsuiteDispatchError> {
+        self.credential_stager
+            .stage(GsuiteCredentialStageRequest {
+                scope: request.scope,
+                capability_id: request.capability_id,
+                access_secret: &access_secret,
+            })
+            .await
+            .map_err(|error| map_stage_error(error, access_secret))
+    }
 }
 
 pub struct GsuiteDispatchRequest<'a> {
@@ -160,8 +198,14 @@ pub struct GsuiteDispatchResult {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GsuiteCredentialDispatchReason {
-    MissingScopes { missing_scopes: Vec<ProviderScope> },
+    Recovery(Box<CredentialRecoveryProjection>),
+    MissingScopes {
+        missing_scopes: Vec<ProviderScope>,
+    },
     MissingAccessSecret,
+    AuthRequired {
+        required_secrets: Vec<ironclaw_host_api::SecretHandle>,
+    },
     BackendAuth,
     HostApi,
 }
@@ -204,6 +248,61 @@ impl GsuiteDispatchError {
     pub fn usage(&self) -> Option<&ResourceUsage> {
         self.usage.as_ref()
     }
+
+    /// Returns the secret handles the runtime auth gate must prompt for, or `None`
+    /// if the error is an infrastructure failure rather than a user-actionable auth condition.
+    ///
+    /// `BackendAuth` and `HostApi` return `None`; all other reasons return `Some`.
+    /// `AuthRequired` forwards its explicit handle list; the remaining auth reasons
+    /// return an empty `Vec` (the caller reads [`Self::reason`] for richer context).
+    /// `Recovery(Configured)` returns `None` because it signals a backend infrastructure
+    /// failure — prompting the user to re-authenticate would be incorrect.
+    pub fn auth_requirement(&self) -> Option<Vec<ironclaw_host_api::SecretHandle>> {
+        match self.reason.as_ref()? {
+            GsuiteCredentialDispatchReason::Recovery(recovery) => {
+                match recovery.kind() {
+                    // Backend infrastructure failure: do not trigger the auth gate.
+                    CredentialRecoveryKind::Configured => None,
+                    // User-actionable recovery: trigger auth gate with no specific handle.
+                    CredentialRecoveryKind::SetupRequired
+                    | CredentialRecoveryKind::ReauthorizeRequired
+                    | CredentialRecoveryKind::AccountSelectionRequired => Some(Vec::new()),
+                }
+            }
+            GsuiteCredentialDispatchReason::MissingScopes { .. }
+            | GsuiteCredentialDispatchReason::MissingAccessSecret => Some(Vec::new()),
+            GsuiteCredentialDispatchReason::AuthRequired { required_secrets } => {
+                Some(required_secrets.clone())
+            }
+            GsuiteCredentialDispatchReason::BackendAuth
+            | GsuiteCredentialDispatchReason::HostApi => None,
+        }
+    }
+
+    pub fn is_auth_required(&self) -> bool {
+        self.auth_requirement().is_some()
+    }
+}
+
+pub struct GsuiteCredentialStageRequest<'a> {
+    pub scope: &'a ResourceScope,
+    pub capability_id: &'a CapabilityId,
+    pub access_secret: &'a ironclaw_host_api::SecretHandle,
+}
+
+/// Alias for [`ironclaw_host_api::CredentialStageError`].
+///
+/// The shared type lives in `ironclaw_host_api` so that both the GSuite staging
+/// trait and the host-runtime staging layer use the same type without a
+/// cross-crate conversion step.
+pub type GsuiteCredentialStageError = ironclaw_host_api::CredentialStageError;
+
+#[async_trait]
+pub trait GsuiteCredentialStager: Send + Sync {
+    async fn stage(
+        &self,
+        request: GsuiteCredentialStageRequest<'_>,
+    ) -> Result<(), GsuiteCredentialStageError>;
 }
 
 enum CapabilityExecution {
@@ -230,6 +329,7 @@ impl CapabilityExecution {
         self,
         request: &GsuiteDispatchRequest<'_>,
         access_secret: ironclaw_host_api::SecretHandle,
+        stager: &dyn GsuiteCredentialStager,
     ) -> Result<CapabilityExecutionOutcome, GsuiteDispatchError> {
         match self {
             Self::Single { method, url, body } => {
@@ -241,7 +341,9 @@ impl CapabilityExecution {
                 let network_egress_bytes = response.request_bytes;
                 Ok(response_outcome(response, network_egress_bytes))
             }
-            Self::AddAttendees(input) => execute_add_attendees(request, access_secret, input).await,
+            Self::AddAttendees(input) => {
+                execute_add_attendees(request, access_secret, stager, input).await
+            }
         }
     }
 }
@@ -249,6 +351,7 @@ impl CapabilityExecution {
 async fn execute_add_attendees(
     request: &GsuiteDispatchRequest<'_>,
     access_secret: ironclaw_host_api::SecretHandle,
+    stager: &dyn GsuiteCredentialStager,
     input: CalendarAddAttendeesInput,
 ) -> Result<CapabilityExecutionOutcome, GsuiteDispatchError> {
     let url = input.event_path.url();
@@ -277,6 +380,22 @@ async fn execute_add_attendees(
         .cloned()
         .unwrap_or_default();
     let attendees = merge_attendees(existing, input.attendees);
+    // Re-stage before the PATCH: the staged-obligation store is one-shot,
+    // so the GET egress consumed the first injection. Stage again so the
+    // PATCH egress has its credential available.
+    stager
+        .stage(GsuiteCredentialStageRequest {
+            scope: request.scope,
+            capability_id: request.capability_id,
+            access_secret: &access_secret,
+        })
+        .await
+        .map_err(|error| {
+            add_network_usage(
+                map_stage_error(error, access_secret.clone()),
+                network_egress_bytes,
+            )
+        })?;
     let mut patch = runtime_request(
         request,
         access_secret,
@@ -679,6 +798,7 @@ fn map_credential_error(error: GoogleCredentialError) -> GsuiteDispatchError {
     match error {
         GoogleCredentialError::Recovery(recovery) => {
             GsuiteDispatchError::new(map_recovery_kind(&recovery))
+                .with_reason(GsuiteCredentialDispatchReason::Recovery(Box::new(recovery)))
         }
         GoogleCredentialError::MissingScopes { missing_scopes } => {
             GsuiteDispatchError::new(RuntimeDispatchErrorKind::Client)
@@ -695,6 +815,24 @@ fn map_credential_error(error: GoogleCredentialError) -> GsuiteDispatchError {
         GoogleCredentialError::HostApi(_) => {
             GsuiteDispatchError::new(RuntimeDispatchErrorKind::Backend)
                 .with_reason(GsuiteCredentialDispatchReason::HostApi)
+        }
+    }
+}
+
+fn map_stage_error(
+    error: GsuiteCredentialStageError,
+    required_secret: ironclaw_host_api::SecretHandle,
+) -> GsuiteDispatchError {
+    match error {
+        GsuiteCredentialStageError::AuthRequired => GsuiteDispatchError::new(
+            RuntimeDispatchErrorKind::Client,
+        )
+        .with_reason(GsuiteCredentialDispatchReason::AuthRequired {
+            required_secrets: vec![required_secret],
+        }),
+        GsuiteCredentialStageError::Backend => {
+            GsuiteDispatchError::new(RuntimeDispatchErrorKind::Backend)
+                .with_reason(GsuiteCredentialDispatchReason::BackendAuth)
         }
     }
 }
@@ -1032,6 +1170,89 @@ mod tests {
     }
 
     #[test]
+    fn auth_requirement_classifies_each_credential_dispatch_reason() {
+        // Recovery(Configured) -> None: backend infra failure, must NOT trigger the
+        // auth gate even though it carries a Recovery reason.  This is the S1 fix—
+        // the old catch-all Recovery(_) arm incorrectly returned Some(vec![]) here.
+        let configured_proj = ironclaw_auth::CredentialRecoveryProjection::configured(
+            ironclaw_auth::AuthProviderId::new("google").unwrap(),
+            ironclaw_auth::CredentialAccountProjection {
+                id: ironclaw_auth::CredentialAccountId::new(),
+                provider: ironclaw_auth::AuthProviderId::new("google").unwrap(),
+                label: ironclaw_auth::CredentialAccountLabel::new("Google").unwrap(),
+                status: ironclaw_auth::CredentialAccountStatus::Configured,
+                ownership: ironclaw_auth::CredentialOwnership::UserReusable,
+                owner_extension: None,
+                granted_extensions: Vec::new(),
+                secret_handle_count: 1,
+            },
+        );
+        let configured_recovery = GsuiteDispatchError::new(RuntimeDispatchErrorKind::Backend)
+            .with_reason(GsuiteCredentialDispatchReason::Recovery(Box::new(
+                configured_proj,
+            )));
+        assert_eq!(
+            configured_recovery.auth_requirement(),
+            None,
+            "Recovery(Configured) is a backend infra failure — must not trigger the auth gate"
+        );
+        assert!(!configured_recovery.is_auth_required());
+
+        // Recovery(SetupRequired) -> Some(empty): user-actionable, triggers auth gate.
+        // Richer projection is preserved via reason() per the doc-comment contract.
+        let recovery = GsuiteDispatchError::new(RuntimeDispatchErrorKind::Client).with_reason(
+            GsuiteCredentialDispatchReason::Recovery(Box::new(
+                ironclaw_auth::CredentialRecoveryProjection::setup_required(
+                    ironclaw_auth::AuthProviderId::new("google").unwrap(),
+                    ironclaw_auth::CredentialRecoveryReason::NoAccount,
+                    Vec::new(),
+                ),
+            )),
+        );
+        assert_eq!(recovery.auth_requirement(), Some(Vec::new()));
+        assert!(recovery.is_auth_required());
+        assert!(recovery.reason().is_some());
+
+        // MissingScopes -> Some(empty): richer projection lives in reason().
+        let scope =
+            ProviderScope::new("https://www.googleapis.com/auth/gmail.modify").expect("scope");
+        let missing_scopes = GsuiteDispatchError::new(RuntimeDispatchErrorKind::Client)
+            .with_reason(GsuiteCredentialDispatchReason::MissingScopes {
+                missing_scopes: vec![scope],
+            });
+        assert_eq!(missing_scopes.auth_requirement(), Some(Vec::new()));
+
+        // MissingAccessSecret -> Some(empty).
+        let missing_access = GsuiteDispatchError::new(RuntimeDispatchErrorKind::Client)
+            .with_reason(GsuiteCredentialDispatchReason::MissingAccessSecret);
+        assert_eq!(missing_access.auth_requirement(), Some(Vec::new()));
+
+        // AuthRequired { required_secrets } -> Some with secrets forwarded.
+        let handle = ironclaw_host_api::SecretHandle::new("google-access-token").unwrap();
+        let auth_required = GsuiteDispatchError::new(RuntimeDispatchErrorKind::Client).with_reason(
+            GsuiteCredentialDispatchReason::AuthRequired {
+                required_secrets: vec![handle.clone()],
+            },
+        );
+        assert_eq!(auth_required.auth_requirement(), Some(vec![handle]));
+
+        // BackendAuth -> None (infra failure, not user-actionable).
+        let backend_auth = GsuiteDispatchError::new(RuntimeDispatchErrorKind::Backend)
+            .with_reason(GsuiteCredentialDispatchReason::BackendAuth);
+        assert_eq!(backend_auth.auth_requirement(), None);
+        assert!(!backend_auth.is_auth_required());
+
+        // HostApi -> None.
+        let host_api = GsuiteDispatchError::new(RuntimeDispatchErrorKind::Backend)
+            .with_reason(GsuiteCredentialDispatchReason::HostApi);
+        assert_eq!(host_api.auth_requirement(), None);
+
+        // No reason at all -> None.
+        let no_reason = GsuiteDispatchError::new(RuntimeDispatchErrorKind::Client);
+        assert_eq!(no_reason.auth_requirement(), None);
+    }
+
+    #[test]
     fn map_egress_error_tests() {
         let cases = [
             (
@@ -1204,6 +1425,41 @@ mod tests {
         assert_eq!(merged.len(), 3);
         assert_eq!(merged[0]["name"], "new");
         assert_eq!(merged[2]["email"], "carol@example.com");
+    }
+
+    #[test]
+    fn merge_attendees_with_empty_existing_list() {
+        let merged = merge_attendees(
+            vec![],
+            vec![serde_json::json!({"email": "alice@example.com"})],
+        );
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0]["email"], "alice@example.com");
+    }
+
+    #[test]
+    fn merge_attendees_appends_addition_without_email_field() {
+        // An addition object that has no "email" key cannot be deduped and is
+        // appended unconditionally.
+        let merged = merge_attendees(
+            vec![serde_json::json!({"email": "alice@example.com"})],
+            vec![
+                serde_json::json!({"displayName": "Bob"}), // no email
+                serde_json::json!({"email": "carol@example.com"}),
+            ],
+        );
+        assert_eq!(merged.len(), 3, "got {merged:?}");
+        // Ordering: existing first, then no-email addition, then carol.
+        assert_eq!(merged[0]["email"], "alice@example.com");
+        assert_eq!(merged[1]["displayName"], "Bob");
+        assert_eq!(merged[2]["email"], "carol@example.com");
+    }
+
+    #[test]
+    fn merge_attendees_with_no_additions() {
+        let existing = vec![serde_json::json!({"email": "alice@example.com"})];
+        let merged = merge_attendees(existing.clone(), vec![]);
+        assert_eq!(merged, existing);
     }
 
     #[test]
