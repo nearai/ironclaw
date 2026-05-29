@@ -56,7 +56,7 @@ Reply | CapabilityCalls
 
 Where:
 
-- `Reply` = user-visible assistant output for the active thread. Loop implementations may internally classify a reply as `FinalReply` vs `AskUser`, but that classification stays loop-owned metadata rather than becoming a new host-wide protocol branch.
+- `Reply` = user-visible assistant output for the active thread. Loop implementations may internally run reply admission such as `AcceptFinal` vs `RejectFinal`, but that classification stays loop-owned metadata rather than becoming a new host-wide protocol branch.
 - `CapabilityCalls` = one or more explicit capability invocations against the visible capability surface. Provider-native tool calls are normalized into this host contract before action-time authorization and dispatch.
 
 The parent model can reply or request explicit capabilities. It cannot switch the entire engine protocol into an ad hoc execution mode.

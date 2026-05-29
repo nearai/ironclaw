@@ -31,15 +31,15 @@ pub use credential::{
     CredentialAccountStatus, CredentialAccountUpdate, CredentialOwnership, CredentialRecoveryKind,
     CredentialRecoveryProjection, CredentialRecoveryReason, CredentialRecoveryRequest,
     CredentialRecoveryState, CredentialRefreshReport, CredentialRefreshRequest,
-    CredentialSetupService, NewCredentialAccount,
+    CredentialSetupService, NewCredentialAccount, ProviderBackedCredentialAccountService,
 };
 pub use error::{AuthErrorCode, AuthProductError};
 pub use fakes::InMemoryAuthProductServices;
 pub use flow::{
     AuthChallenge, AuthContinuationEvent, AuthContinuationRef, AuthFlowKind, AuthFlowManager,
-    AuthFlowRecord, AuthFlowStatus, CredentialAccountUpdateBinding, CredentialSelectionInput,
-    NewAuthFlow, OAuthCallbackClaimRequest, OAuthCallbackFailureInput, OAuthCallbackInput,
-    ProviderCallbackOutcome,
+    AuthFlowRecord, AuthFlowRecordSource, AuthFlowStatus, CredentialAccountUpdateBinding,
+    CredentialSelectionInput, NewAuthFlow, OAuthCallbackClaimRequest, OAuthCallbackFailureInput,
+    OAuthCallbackInput, ProviderCallbackOutcome,
 };
 pub use ids::{
     AuthFlowId, AuthGateRef, AuthInteractionId, AuthProviderId, AuthSessionId,

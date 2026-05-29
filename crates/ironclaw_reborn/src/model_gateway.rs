@@ -16,7 +16,7 @@ use async_trait::async_trait;
 use ironclaw_host_api::sha256_digest_token;
 use ironclaw_llm::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmProvider, Role,
-    ToolCall, ToolCompletionRequest, ToolCompletionResponse, ToolDefinition,
+    ToolCall, ToolCompletionRequest, ToolCompletionResponse, ToolDefinition, clean_response,
 };
 use ironclaw_loop_support::{
     HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
@@ -893,7 +893,7 @@ async fn tool_response_to_host(
 
     match response.finish_reason {
         FinishReason::Stop => {
-            let content = response.content.unwrap_or_default();
+            let content = clean_response(&response.content.unwrap_or_default());
             debug!(
                 content_bytes = content.len(),
                 "reborn model gateway classified tool-capable provider response as assistant reply"
@@ -968,10 +968,13 @@ fn response_to_host_reply(
     response: CompletionResponse,
 ) -> Result<HostManagedModelResponse, HostManagedModelError> {
     match response.finish_reason {
-        FinishReason::Stop => Ok(HostManagedModelResponse::assistant_reply_with_reasoning(
-            response.content,
-            response.reasoning,
-        )),
+        FinishReason::Stop => {
+            let content = clean_response(&response.content);
+            Ok(HostManagedModelResponse::assistant_reply_with_reasoning(
+                content,
+                response.reasoning,
+            ))
+        }
         FinishReason::Length => Err(HostManagedModelError::safe(
             HostManagedModelErrorKind::BudgetExceeded,
             "model response was truncated before completion",

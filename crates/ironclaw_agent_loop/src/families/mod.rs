@@ -22,7 +22,8 @@ const DEFAULT_FAMILY_FINGERPRINT: &[u8] = concat!(
     "batch:DefaultBatchPolicyStrategy(exclusive_sequential),",
     "gate:DefaultGateHandlingStrategy(block),",
     "recovery:DefaultRecoveryStrategy(max_attempts_per_class=2),",
-    "stop:DefaultStopConditionStrategy(window=5,repeat=3,failure_run=3),",
+    "reply_admission:DefaultReplyAdmissionStrategy(reject_empty_and_provider_transcript_artifacts),",
+    "stop:DefaultStopConditionStrategy(window=5,repeat=3,failure_run=3,rejected_reply=invalid_model_output),",
     "drain:DefaultInputDrainStrategy(steering=true,followup=true),",
     "budget:DefaultBudgetStrategy(iteration_limit=32,wall_clock_limit=none)"
 )
@@ -33,8 +34,8 @@ const DEFAULT_FAMILY_FINGERPRINT: &[u8] = concat!(
 /// Update this digest when the default family composition, planner behavior, or
 /// identity schema changes in a replay-relevant way.
 pub const DEFAULT_FAMILY_DIGEST: ComponentDigest = ComponentDigest([
-    0x0a, 0x51, 0x21, 0x6c, 0x20, 0x1b, 0xc4, 0x55, 0xbc, 0x9d, 0xa7, 0x7e, 0x97, 0x28, 0x2f, 0x2f,
-    0x83, 0x20, 0x85, 0x9d, 0x03, 0x22, 0xb7, 0x23, 0x75, 0xbd, 0xed, 0x46, 0x7e, 0x68, 0x5f, 0xbb,
+    0x77, 0x5b, 0x40, 0x4f, 0xa3, 0x7d, 0x78, 0x8d, 0x0e, 0x1b, 0xd5, 0xd3, 0x93, 0x83, 0x8e, 0x76,
+    0x06, 0x27, 0x4d, 0xd4, 0x71, 0xc8, 0x69, 0x61, 0x86, 0x89, 0x56, 0x16, 0x8e, 0x46, 0x3f, 0x09,
 ]);
 
 /// The default loop family: the text-tool-use baseline.

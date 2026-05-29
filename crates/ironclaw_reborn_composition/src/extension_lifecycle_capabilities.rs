@@ -118,6 +118,7 @@ struct ExtensionLifecycleToolHandler {
 
 #[derive(Debug, Deserialize)]
 struct SearchInput {
+    #[serde(default)]
     query: String,
 }
 
@@ -246,8 +247,9 @@ mod tests {
         let search = descriptor_for(&surface, EXTENSION_SEARCH_CAPABILITY_ID);
         assert_eq!(search.default_permission, PermissionMode::Allow);
         assert_eq!(
-            search.parameters_schema["required"],
-            serde_json::json!(["query"])
+            search.parameters_schema.get("required"),
+            None,
+            "extension_search query should be optional so models can list all extensions"
         );
 
         let install = descriptor_for(&surface, EXTENSION_INSTALL_CAPABILITY_ID);
@@ -337,7 +339,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_dev_extension_lifecycle_tool_rejects_malformed_and_unknown_inputs() {
+    async fn local_dev_extension_lifecycle_tool_lists_all_and_rejects_malformed_inputs() {
         let dir = tempfile::tempdir().expect("tempdir");
         let services = build_reborn_services(RebornBuildInput::local_dev(
             "extension-tools-invalid-owner",
@@ -347,14 +349,17 @@ mod tests {
         .expect("local-dev services build");
         let runtime = services.host_runtime.expect("host runtime composed");
 
-        assert_eq!(
-            invoke_json(
-                runtime.as_ref(),
-                EXTENSION_SEARCH_CAPABILITY_ID,
-                serde_json::json!({})
-            )
-            .await,
-            Err(RuntimeFailureKind::InvalidInput)
+        let list_all = invoke_json(
+            runtime.as_ref(),
+            EXTENSION_SEARCH_CAPABILITY_ID,
+            serde_json::json!({}),
+        )
+        .await
+        .expect("search without a query should list all extensions");
+        assert_eq!(list_all["payload"]["kind"], "extension_search");
+        assert!(
+            list_all["payload"]["count"].as_u64().unwrap_or_default() > 0,
+            "list-all extension search should return the bundled local-dev packages"
         );
         assert_eq!(
             invoke_json(

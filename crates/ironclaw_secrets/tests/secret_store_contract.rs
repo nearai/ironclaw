@@ -52,6 +52,48 @@ async fn secret_store_consumes_one_shot_secret_lease() {
 }
 
 #[tokio::test]
+async fn consuming_one_lease_does_not_delete_underlying_secret() {
+    let store = InMemorySecretStore::new();
+    let scope = sample_scope("tenant-a", "user-a");
+    let handle = SecretHandle::new("refresh_token").unwrap();
+    store
+        .put(
+            scope.clone(),
+            handle.clone(),
+            SecretMaterial::from("refresh-secret"),
+        )
+        .await
+        .unwrap();
+
+    let first_lease = store.lease_once(&scope, &handle).await.unwrap();
+    assert_eq!(
+        store
+            .consume(&scope, first_lease.id)
+            .await
+            .unwrap()
+            .expose_secret(),
+        "refresh-secret"
+    );
+    assert!(
+        store
+            .consume(&scope, first_lease.id)
+            .await
+            .unwrap_err()
+            .is_consumed()
+    );
+
+    let second_lease = store.lease_once(&scope, &handle).await.unwrap();
+    assert_eq!(
+        store
+            .consume(&scope, second_lease.id)
+            .await
+            .unwrap()
+            .expose_secret(),
+        "refresh-secret"
+    );
+}
+
+#[tokio::test]
 async fn secret_store_isolates_same_handle_between_tenants() {
     let store = InMemorySecretStore::new();
     let tenant_a = sample_scope("tenant-a", "user-a");
@@ -99,6 +141,45 @@ async fn secret_store_isolates_same_handle_between_tenants() {
         .await
         .unwrap_err();
     assert!(cross_scope.is_unknown_lease());
+}
+
+#[tokio::test]
+async fn secret_store_delete_is_idempotent_and_scope_isolated() {
+    let store = InMemorySecretStore::new();
+    let owner = sample_scope("tenant-a", "user-a");
+    let other = sample_scope("tenant-a", "user-b");
+    let handle = SecretHandle::new("shared_name").unwrap();
+    store
+        .put(
+            owner.clone(),
+            handle.clone(),
+            SecretMaterial::from("owner-secret"),
+        )
+        .await
+        .unwrap();
+    store
+        .put(
+            other.clone(),
+            handle.clone(),
+            SecretMaterial::from("other-secret"),
+        )
+        .await
+        .unwrap();
+
+    assert!(store.delete(&owner, &handle).await.unwrap());
+    assert!(!store.delete(&owner, &handle).await.unwrap());
+    assert!(store.metadata(&owner, &handle).await.unwrap().is_none());
+    assert!(store.metadata(&other, &handle).await.unwrap().is_some());
+
+    let other_lease = store.lease_once(&other, &handle).await.unwrap();
+    assert_eq!(
+        store
+            .consume(&other, other_lease.id)
+            .await
+            .unwrap()
+            .expose_secret(),
+        "other-secret"
+    );
 }
 
 #[tokio::test]

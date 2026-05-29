@@ -14,8 +14,9 @@ use crate::strategies::{
     DefaultBatchPolicyStrategy, DefaultBudgetStrategy, DefaultCapabilityStrategy,
     DefaultCompactionStrategy, DefaultContextStrategy, DefaultGateHandlingStrategy,
     DefaultInputDrainStrategy, DefaultModelStrategy, DefaultRecoveryStrategy,
-    DefaultStopConditionStrategy, GateHandlingStrategy, InputDrainStrategy, ModelStrategy,
-    RecoveryStrategy, StopConditionStrategy,
+    DefaultReplyAdmissionStrategy, DefaultStopConditionStrategy, GateHandlingStrategy,
+    InputDrainStrategy, ModelStrategy, RecoveryStrategy, ReplyAdmissionStrategy,
+    StopConditionStrategy,
 };
 
 /// The reference planner: a concrete, Builtin-only strategy composition.
@@ -31,6 +32,7 @@ pub(crate) struct DefaultPlanner {
     batch: Arc<dyn BatchPolicyStrategy>,
     gate: Arc<dyn GateHandlingStrategy>,
     recovery: Arc<dyn RecoveryStrategy>,
+    reply_admission: Arc<dyn ReplyAdmissionStrategy>,
     stop: Arc<dyn StopConditionStrategy>,
     drain: Arc<dyn InputDrainStrategy>,
     budget: Arc<dyn BudgetStrategy>,
@@ -64,6 +66,7 @@ impl DefaultPlanner {
             batch: slots.batch,
             gate: slots.gate,
             recovery: slots.recovery,
+            reply_admission: slots.reply_admission,
             stop: slots.stop,
             drain: slots.drain,
             budget: slots.budget,
@@ -112,6 +115,14 @@ impl DefaultPlanner {
 
     pub(crate) fn with_recovery(mut self, strategy: Arc<dyn RecoveryStrategy>) -> Self {
         self.recovery = strategy;
+        self
+    }
+
+    pub(crate) fn with_reply_admission(
+        mut self,
+        strategy: Arc<dyn ReplyAdmissionStrategy>,
+    ) -> Self {
+        self.reply_admission = strategy;
         self
     }
 
@@ -170,6 +181,10 @@ impl AgentLoopPlannerInternal for DefaultPlanner {
         &*self.recovery
     }
 
+    fn reply_admission(&self) -> &dyn ReplyAdmissionStrategy {
+        &*self.reply_admission
+    }
+
     fn stop(&self) -> &dyn StopConditionStrategy {
         &*self.stop
     }
@@ -195,6 +210,7 @@ pub(crate) struct DefaultStrategySlots {
     batch: Arc<dyn BatchPolicyStrategy>,
     gate: Arc<dyn GateHandlingStrategy>,
     recovery: Arc<dyn RecoveryStrategy>,
+    reply_admission: Arc<dyn ReplyAdmissionStrategy>,
     stop: Arc<dyn StopConditionStrategy>,
     drain: Arc<dyn InputDrainStrategy>,
     budget: Arc<dyn BudgetStrategy>,
@@ -210,6 +226,7 @@ impl Default for DefaultStrategySlots {
             batch: Arc::new(DefaultBatchPolicyStrategy),
             gate: Arc::new(DefaultGateHandlingStrategy),
             recovery: Arc::new(DefaultRecoveryStrategy::default()),
+            reply_admission: Arc::new(DefaultReplyAdmissionStrategy),
             stop: Arc::new(DefaultStopConditionStrategy::default()),
             drain: Arc::new(DefaultInputDrainStrategy),
             budget: Arc::new(DefaultBudgetStrategy::default()),
@@ -234,7 +251,7 @@ mod tests {
 
     use crate::family::{ComponentDigest, LoopFamilyId};
     use crate::state::LoopExecutionState;
-    use crate::strategies::{BatchPolicy, CapabilityFilter, ContextStrategy};
+    use crate::strategies::{BatchPolicy, CapabilityFilter, ContextPlan, ContextStrategy};
 
     use super::*;
 
@@ -266,18 +283,18 @@ mod tests {
 
         #[async_trait]
         impl ContextStrategy for CustomContext {
-            async fn plan_context_request(
-                &self,
-                _state: &LoopExecutionState,
-            ) -> LoopPromptBundleRequest {
-                LoopPromptBundleRequest {
-                    mode: PromptMode::TextOnly,
-                    context_cursor: None,
-                    surface_version: None,
-                    checkpoint_state_ref: None,
-                    max_messages: Some(7),
-                    inline_messages: Vec::new(),
-                    capability_view: None,
+            async fn plan_context_request(&self, _state: &LoopExecutionState) -> ContextPlan {
+                ContextPlan {
+                    request: LoopPromptBundleRequest {
+                        mode: PromptMode::TextOnly,
+                        context_cursor: None,
+                        surface_version: None,
+                        checkpoint_state_ref: None,
+                        max_messages: Some(7),
+                        inline_messages: Vec::new(),
+                        capability_view: None,
+                    },
+                    emitted_admission_control: false,
                 }
             }
         }
@@ -294,7 +311,7 @@ mod tests {
 
         let state = LoopExecutionState::initial_for_run(&test_run_context());
         let request = planner.context().plan_context_request(&state).await;
-        assert_eq!(request.max_messages, Some(7));
+        assert_eq!(request.request.max_messages, Some(7));
     }
 
     #[tokio::test]

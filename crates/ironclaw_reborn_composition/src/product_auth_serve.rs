@@ -33,7 +33,6 @@ use ironclaw_host_api::ingress::{
 };
 use ironclaw_host_api::{
     AgentId, InvocationId, ProjectId, ResourceScope, TenantId, ThreadId, UserId,
-    sha256_digest_token,
 };
 use ironclaw_product_workflow::WebUiAuthenticatedCaller;
 use lru::LruCache;
@@ -849,11 +848,7 @@ fn authorization_code_hash(value: &str) -> Result<AuthorizationCodeHash, Product
 }
 
 fn sha256_hex(value: &str) -> String {
-    let digest = sha256_digest_token(value.as_bytes());
-    digest
-        .strip_prefix("sha256:")
-        .unwrap_or(digest.as_str())
-        .to_string()
+    ironclaw_common::hashing::sha256_hex(value.as_bytes())
 }
 
 fn parse_provider_scopes(raw: Option<&str>) -> Result<Vec<ProviderScope>, ProductAuthRouteFailure> {
@@ -1009,6 +1004,19 @@ mod tests {
             None,
             None,
         )
+    }
+
+    #[test]
+    fn sha256_hex_produces_plain_lowercase_hex_without_prefix() {
+        // Regression guard for the switch off `sha256_digest_token` (which
+        // returned a "sha256:"-prefixed token): the route hashes must stay
+        // plain lowercase hex so stored state/verifier/code hashes match.
+        let hashed = sha256_hex("abc");
+        assert_eq!(
+            hashed,
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert!(!hashed.starts_with("sha256:"));
     }
 
     #[test]

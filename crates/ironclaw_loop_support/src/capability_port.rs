@@ -2126,6 +2126,19 @@ mod tests {
     #[test]
     fn runtime_failure_to_loop_honors_model_visible_disposition() {
         let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
+        let invalid_input = runtime_failure_to_loop(RuntimeCapabilityFailure::new(
+            capability_id.clone(),
+            RuntimeFailureKind::InvalidInput,
+            None,
+        ))
+        .expect("convert invalid input without runtime detail");
+        assert!(matches!(
+            invalid_input,
+            CapabilityOutcome::Failed(failure)
+                if failure.error_kind == CapabilityFailureKind::InvalidInput
+                    && failure.safe_summary == "capability invocation failed"
+        ));
+
         let denied = runtime_failure_to_loop(RuntimeCapabilityFailure::new(
             capability_id.clone(),
             RuntimeFailureKind::PolicyDenied,

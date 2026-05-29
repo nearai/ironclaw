@@ -7,11 +7,13 @@
 
 use std::{
     io::{Read, Write},
+    panic::AssertUnwindSafe,
     process::{Command, Stdio},
     thread,
     time::{Duration, Instant},
 };
 
+use futures_util::FutureExt as _;
 use ironclaw_extensions::{ExtensionPackage, ExtensionRuntime};
 use ironclaw_host_api::{
     CapabilityId, ExtensionId, MountView, ResourceEstimate, ResourceReservation,
@@ -187,26 +189,30 @@ where
         Self { egress }
     }
 
-    pub fn request(
+    pub async fn request(
         &self,
         request: ScriptHostHttpRequest,
     ) -> Result<ScriptHostHttpResponse, ScriptHostHttpError> {
-        self.egress
-            .execute(RuntimeHttpEgressRequest {
-                runtime: RuntimeKind::Script,
-                scope: request.scope,
-                capability_id: request.capability_id,
-                method: request.method,
-                url: request.url,
-                headers: request.headers,
-                body: request.body,
-                network_policy: request.network_policy,
-                credential_injections: request.credential_injections,
-                response_body_limit: request.response_body_limit,
-                save_body_to: None,
-                timeout_ms: request.timeout_ms,
-            })
-            .map_err(script_http_error)
+        AssertUnwindSafe(self.egress.execute(RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::Script,
+            scope: request.scope,
+            capability_id: request.capability_id,
+            method: request.method,
+            url: request.url,
+            headers: request.headers,
+            body: request.body,
+            network_policy: request.network_policy,
+            credential_injections: request.credential_injections,
+            response_body_limit: request.response_body_limit,
+            save_body_to: None,
+            timeout_ms: request.timeout_ms,
+        }))
+        .catch_unwind()
+        .await
+        .map_err(|_| ScriptHostHttpError::Egress {
+            reason: "runtime_http_egress_panicked".to_string(),
+        })?
+        .map_err(script_http_error)
     }
 }
 
