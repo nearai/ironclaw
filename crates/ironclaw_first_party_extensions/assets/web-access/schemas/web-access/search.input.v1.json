@@ -47,7 +47,7 @@
     },
     "provider": {
       "type": "string",
-      "enum": ["auto", "exa_mcp", "brave"],
+      "enum": ["auto", "exa_mcp"],
       "description": "Search provider. auto uses zero-config Exa MCP."
     }
   },
