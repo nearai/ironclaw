@@ -470,8 +470,15 @@ where
                     &obligation_outcome,
                 )
                 .await;
-                fail_run_if_configured(self.run_state, &scope, invocation_id, "Dispatch").await;
-                return Err(CapabilityInvocationError::from(error));
+                let invocation_error = CapabilityInvocationError::from(error);
+                apply_run_state_transition_if_configured(
+                    self.run_state,
+                    &scope,
+                    invocation_id,
+                    &invocation_error,
+                )
+                .await;
+                return Err(invocation_error);
             }
         };
 
@@ -807,8 +814,14 @@ where
                     &obligation_outcome,
                 )
                 .await;
-                fail_run_if_configured(Some(run_state), &scope, invocation_id, "Dispatch").await;
                 let invocation_error = CapabilityInvocationError::from(error);
+                apply_run_state_transition_if_configured(
+                    Some(run_state),
+                    &scope,
+                    invocation_id,
+                    &invocation_error,
+                )
+                .await;
                 if let Err(revoke_error) = capability_leases
                     .revoke(&scope, claimed_lease.grant.id)
                     .await

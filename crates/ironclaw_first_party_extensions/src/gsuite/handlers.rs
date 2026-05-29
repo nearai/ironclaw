@@ -82,11 +82,17 @@ impl GsuiteExecutor {
             .resolve(request.scope, &extension, &scopes)
             .await
             .map_err(map_credential_error)?;
+        // Stage after parsing so a parse failure doesn't leave a staged credential
+        // behind in the injection store.
+        let execution = capability_execution(capability, request.input)?;
         self.stage_credential(&request, credential.access_secret.clone())
             .await?;
-        let execution = capability_execution(capability, request.input)?;
         let (response, network_egress_bytes) = match execution
-            .execute(&request, credential.access_secret)
+            .execute(
+                &request,
+                credential.access_secret,
+                self.credential_stager.as_ref(),
+            )
             .await?
         {
             CapabilityExecutionOutcome::Response {
@@ -109,12 +115,18 @@ impl GsuiteExecutor {
                     .map_err(|error| {
                         add_network_usage(map_credential_error(error), network_egress_bytes)
                     })?;
+                // Parse before staging for the same reason as the primary path:
+                // a parse failure should not leave a credential staged.
+                let retry_execution = capability_execution(capability, request.input)?;
                 self.stage_credential(&request, refreshed.access_secret.clone())
                     .await
                     .map_err(|error| add_network_usage(error, network_egress_bytes))?;
-                let retry_execution = capability_execution(capability, request.input)?;
                 match retry_execution
-                    .execute(&request, refreshed.access_secret)
+                    .execute(
+                        &request,
+                        refreshed.access_secret,
+                        self.credential_stager.as_ref(),
+                    )
                     .await
                     .map_err(|error| add_network_usage(error, network_egress_bytes))?
                 {
@@ -317,6 +329,7 @@ impl CapabilityExecution {
         self,
         request: &GsuiteDispatchRequest<'_>,
         access_secret: ironclaw_host_api::SecretHandle,
+        stager: &dyn GsuiteCredentialStager,
     ) -> Result<CapabilityExecutionOutcome, GsuiteDispatchError> {
         match self {
             Self::Single { method, url, body } => {
@@ -328,7 +341,9 @@ impl CapabilityExecution {
                 let network_egress_bytes = response.request_bytes;
                 Ok(response_outcome(response, network_egress_bytes))
             }
-            Self::AddAttendees(input) => execute_add_attendees(request, access_secret, input).await,
+            Self::AddAttendees(input) => {
+                execute_add_attendees(request, access_secret, stager, input).await
+            }
         }
     }
 }
@@ -336,6 +351,7 @@ impl CapabilityExecution {
 async fn execute_add_attendees(
     request: &GsuiteDispatchRequest<'_>,
     access_secret: ironclaw_host_api::SecretHandle,
+    stager: &dyn GsuiteCredentialStager,
     input: CalendarAddAttendeesInput,
 ) -> Result<CapabilityExecutionOutcome, GsuiteDispatchError> {
     let url = input.event_path.url();
@@ -364,6 +380,22 @@ async fn execute_add_attendees(
         .cloned()
         .unwrap_or_default();
     let attendees = merge_attendees(existing, input.attendees);
+    // Re-stage before the PATCH: the staged-obligation store is one-shot,
+    // so the GET egress consumed the first injection. Stage again so the
+    // PATCH egress has its credential available.
+    stager
+        .stage(GsuiteCredentialStageRequest {
+            scope: request.scope,
+            capability_id: request.capability_id,
+            access_secret: &access_secret,
+        })
+        .await
+        .map_err(|error| {
+            add_network_usage(
+                map_stage_error(error, access_secret.clone()),
+                network_egress_bytes,
+            )
+        })?;
     let mut patch = runtime_request(
         request,
         access_secret,
