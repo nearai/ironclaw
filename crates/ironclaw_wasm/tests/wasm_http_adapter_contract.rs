@@ -574,6 +574,31 @@ async fn wasm_runtime_http_adapter_marks_zero_body_response_failures_after_send(
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn wasm_runtime_http_adapter_maps_panicking_runtime_egress_to_failed_error() {
+    let adapter = WasmRuntimeHttpAdapter::new(
+        Arc::new(PanickingRuntimeEgress),
+        sample_scope(),
+        sample_capability_id(),
+        sample_policy(),
+    );
+
+    let error = adapter
+        .request(WasmHttpRequest {
+            method: "GET".to_string(),
+            url: "https://wasm-api.example.test/run".to_string(),
+            headers_json: "{}".to_string(),
+            body: None,
+            timeout_ms: Some(1000),
+        })
+        .expect_err("runtime egress panics should be contained at the WASM host boundary");
+
+    assert!(matches!(
+        error,
+        WasmHostError::Failed(reason) if reason == "runtime_http_egress_panicked"
+    ));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn wasm_runtime_http_adapter_redacts_credential_provider_errors() {
     let adapter = WasmRuntimeHttpAdapter::new(
         Arc::new(RecordingRuntimeEgress::ok(RuntimeHttpEgressResponse {
@@ -713,6 +738,19 @@ impl RuntimeHttpEgress for RecordingRuntimeEgress {
     ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
         self.requests.lock().unwrap().push(request);
         self.response.clone()
+    }
+}
+
+#[derive(Clone)]
+struct PanickingRuntimeEgress;
+
+#[async_trait::async_trait]
+impl RuntimeHttpEgress for PanickingRuntimeEgress {
+    async fn execute(
+        &self,
+        _request: RuntimeHttpEgressRequest,
+    ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
+        panic!("runtime HTTP egress should not unwind through WASM host");
     }
 }
 

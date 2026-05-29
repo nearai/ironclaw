@@ -139,6 +139,30 @@ async fn script_host_http_adapter_returns_sanitized_shared_egress_errors() {
     assert!(!rendered.contains("network request denied by policy"));
 }
 
+#[tokio::test]
+async fn script_host_http_adapter_maps_panicking_runtime_egress_to_sanitized_error() {
+    let adapter = ScriptRuntimeHttpAdapter::new(Arc::new(PanickingRuntimeEgress));
+
+    let error = adapter
+        .request(ScriptHostHttpRequest {
+            scope: sample_scope(),
+            capability_id: sample_capability_id(),
+            method: NetworkMethod::Get,
+            url: "https://script-api.example.test/run".to_string(),
+            headers: vec![],
+            body: vec![],
+            network_policy: sample_policy(),
+            credential_injections: vec![],
+            response_body_limit: Some(4096),
+            timeout_ms: None,
+        })
+        .await
+        .expect_err("runtime egress panics should be contained at the script host boundary");
+
+    let rendered = error.to_string();
+    assert!(rendered.contains("runtime_http_egress_panicked"));
+}
+
 #[derive(Clone)]
 struct RecordingRuntimeEgress {
     response: Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError>,
@@ -169,6 +193,19 @@ impl RuntimeHttpEgress for RecordingRuntimeEgress {
     ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
         self.requests.lock().unwrap().push(request);
         self.response.clone()
+    }
+}
+
+#[derive(Clone)]
+struct PanickingRuntimeEgress;
+
+#[async_trait::async_trait]
+impl RuntimeHttpEgress for PanickingRuntimeEgress {
+    async fn execute(
+        &self,
+        _request: RuntimeHttpEgressRequest,
+    ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
+        panic!("runtime HTTP egress should not unwind through script host");
     }
 }
 

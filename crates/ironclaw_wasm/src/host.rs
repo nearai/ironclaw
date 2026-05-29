@@ -1,5 +1,6 @@
 use std::{
     future::Future,
+    panic::{AssertUnwindSafe, catch_unwind},
     sync::{Arc, LazyLock, Mutex, mpsc},
 };
 
@@ -387,7 +388,10 @@ where
 {
     match Handle::try_current() {
         Ok(handle) if handle.runtime_flavor() == RuntimeFlavor::MultiThread => {
-            tokio::task::block_in_place(|| handle.block_on(future))
+            catch_unwind(AssertUnwindSafe(|| {
+                tokio::task::block_in_place(|| handle.block_on(future))
+            }))
+            .map_err(|_| runtime_http_egress_panicked())?
         }
         Ok(_) => run_runtime_http_egress_on_worker(future),
         Err(_) => run_runtime_http_egress_future(future),
@@ -419,7 +423,13 @@ where
     let runtime = WASM_HTTP_EGRESS_RUNTIME
         .as_ref()
         .map_err(|error| error.clone())?;
-    runtime.block_on(future)
+    catch_unwind(AssertUnwindSafe(|| runtime.block_on(future)))
+        .map_err(|_| runtime_http_egress_panicked())?
+}
+
+fn runtime_http_egress_panicked() -> WasmHostError {
+    tracing::error!("WASM runtime HTTP egress future panicked");
+    WasmHostError::Failed("runtime_http_egress_panicked".to_string())
 }
 
 fn wasm_network_method(method: &str) -> Result<NetworkMethod, WasmHostError> {
