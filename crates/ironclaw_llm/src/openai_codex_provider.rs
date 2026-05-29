@@ -146,10 +146,12 @@ impl OpenAiCodexProvider {
             "stream": true,
             "input": input,
             "text": { "verbosity": "medium" },
-            "reasoning": crate::responses_reasoning::summary_request(),
-            // Safe for non-reasoning models — API ignores unrecognized include values
-            "include": ["reasoning.encrypted_content"],
         });
+
+        if crate::reasoning_models::supports_openai_reasoning(&self.model) {
+            body["reasoning"] = crate::responses_reasoning::summary_request();
+            body["include"] = serde_json::json!(["reasoning.encrypted_content"]);
+        }
 
         if !instructions.is_empty() {
             body["instructions"] = serde_json::Value::String(instructions);

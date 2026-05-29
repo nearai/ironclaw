@@ -366,21 +366,25 @@ impl LlmProvider for AnthropicOAuthProvider {
         });
         let max_tokens = req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
 
+        // Suppress thinking for tool-capable requests to avoid signature round-trip issues.
+        // Anthropic requires signed thinking blocks to be echoed back on subsequent tool_result
+        // turns; without round-tripping the signature, the next turn fails. Reasoning is
+        // preserved on text-only turns via `complete()`.
+        let has_tools = !tools.is_empty();
+        let opt_tools = if has_tools { Some(tools) } else { None };
+
         let request = AnthropicRequest {
-            thinking: thinking_for_request(
-                &model,
-                max_tokens,
-                req.temperature,
-                tool_choice
-                    .as_ref()
-                    .is_some_and(AnthropicToolChoice::forces_tool_use),
-            ),
+            thinking: if has_tools {
+                None
+            } else {
+                thinking_for_request(&model, max_tokens, req.temperature, false)
+            },
             model,
             messages,
             system,
             max_tokens,
             temperature: req.temperature,
-            tools: if tools.is_empty() { None } else { Some(tools) },
+            tools: opt_tools,
             tool_choice,
         };
 

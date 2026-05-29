@@ -71,4 +71,95 @@ mod tests {
             "Checked the user request and selected a concise answer."
         );
     }
+
+    #[test]
+    fn captures_summary_text_done_when_accumulator_empty() {
+        let mut reasoning = String::new();
+        let data = json!({
+            "text": "Fallback reasoning from done event"
+        });
+
+        assert!(apply_summary_event(
+            &mut reasoning,
+            "response.reasoning_summary_text.done",
+            &data
+        ));
+        assert_eq!(reasoning, "Fallback reasoning from done event");
+    }
+
+    #[test]
+    fn done_event_does_not_overwrite_accumulated_deltas() {
+        let mut reasoning = "Existing delta content".to_string();
+        let data = json!({
+            "text": "This should not overwrite"
+        });
+
+        assert!(apply_summary_event(
+            &mut reasoning,
+            "response.reasoning_summary_text.done",
+            &data
+        ));
+        // Done event should not overwrite when accumulator has content
+        assert_eq!(reasoning, "Existing delta content");
+    }
+
+    #[test]
+    fn delta_event_appends_to_accumulator() {
+        let mut reasoning = "Initial ".to_string();
+        let data = json!({
+            "delta": "continuation"
+        });
+
+        assert!(apply_summary_event(
+            &mut reasoning,
+            "response.reasoning_summary_text.delta",
+            &data
+        ));
+        assert_eq!(reasoning, "Initial continuation");
+    }
+
+    #[test]
+    fn delta_event_ignores_non_string_delta() {
+        let mut reasoning = String::new();
+        let data = json!({
+            "delta": 123  // Invalid type
+        });
+
+        assert!(apply_summary_event(
+            &mut reasoning,
+            "response.reasoning_summary_text.delta",
+            &data
+        ));
+        assert_eq!(reasoning, "");
+    }
+
+    #[test]
+    fn unknown_event_type_returns_false() {
+        let mut reasoning = String::new();
+        let data = json!({});
+
+        assert!(!apply_summary_event(
+            &mut reasoning,
+            "response.unknown_event",
+            &data
+        ));
+    }
+
+    #[test]
+    fn finish_summary_returns_none_for_empty_string() {
+        assert_eq!(finish_summary(String::new()), None);
+    }
+
+    #[test]
+    fn finish_summary_returns_none_for_whitespace_only() {
+        assert_eq!(finish_summary("   \n\t  ".to_string()), None);
+    }
+
+    #[test]
+    fn finish_summary_returns_some_for_valid_content() {
+        assert_eq!(
+            finish_summary("Valid reasoning".to_string()),
+            Some("Valid reasoning".to_string())
+        );
+    }
 }

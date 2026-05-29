@@ -286,8 +286,13 @@ impl CodexChatGptProvider {
             "input": input,
             "stream": true,
             "store": false,
-            "reasoning": crate::responses_reasoning::summary_request(),
         });
+
+        // Only add `reasoning` for models that support it;
+        // the Responses API hard-rejects it on non-reasoning models.
+        if crate::reasoning_models::supports_openai_reasoning(model) {
+            body["reasoning"] = crate::responses_reasoning::summary_request();
+        }
 
         if !api_tools.is_empty() {
             body["tools"] = json!(api_tools);
