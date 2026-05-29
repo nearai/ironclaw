@@ -1,6 +1,71 @@
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use ed25519_dalek::{Signature, VerifyingKey};
 use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_HUB_MANIFEST_URL: &str = "https://hub.ironclaw.com/api/catalog/manifest.json";
+
+// Ed25519 PUBLIC keys trusted to verify the catalog manifest signature, by key_id.
+// PUBLIC KEYS ONLY. The private signing key lives off the catalog host (IronHub
+// IRONHUB_MANIFEST_SIGNING_KEY) and must never appear in this repo or binary.
+// Embedding the public half is deliberate: changing which key the agent trusts
+// requires changing this source, not compromising the catalog host.
+pub const MANIFEST_VERIFY_KEYS: &[(&str, &str)] = &[(
+    "5895a21abea89672",
+    "f64d2d3a3228b16ca59450364d26b278071a1a425544f242504033341d8459bd",
+)];
+
+#[derive(Debug, Deserialize)]
+struct SignedManifestEnvelope {
+    v: u8,
+    key_id: String,
+    manifest_b64: String,
+    sig: String,
+}
+
+fn verifying_key_from_hex(hex: &str) -> Result<VerifyingKey, String> {
+    if hex.len() != 64 {
+        return Err("verify key must be 64 hex chars".to_string());
+    }
+    let mut raw = [0u8; 32];
+    for (i, byte) in raw.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16)
+            .map_err(|_| "verify key is not valid hex".to_string())?;
+    }
+    VerifyingKey::from_bytes(&raw).map_err(|e| format!("invalid ed25519 verify key: {e}"))
+}
+
+/// Verifies a signed-manifest envelope and returns the exact inner manifest bytes
+/// the signature covers. Fail-closed: any decode, key-lookup, or signature failure
+/// returns Err and never yields partial bytes.
+pub fn verify_signed_manifest(
+    envelope_bytes: &[u8],
+    keys: &[(&str, &str)],
+) -> Result<Vec<u8>, String> {
+    let env: SignedManifestEnvelope = serde_json::from_slice(envelope_bytes)
+        .map_err(|e| format!("signed-manifest envelope parse failed: {e}"))?;
+    if env.v != 1 {
+        return Err(format!("unsupported signed-manifest version {}", env.v));
+    }
+    let key_hex = keys
+        .iter()
+        .find(|(id, _)| *id == env.key_id)
+        .map(|(_, hex)| *hex)
+        .ok_or_else(|| format!("unknown manifest signing key_id '{}'", env.key_id))?;
+    let verifying_key = verifying_key_from_hex(key_hex)?;
+    let manifest_bytes = URL_SAFE_NO_PAD
+        .decode(env.manifest_b64.as_bytes())
+        .map_err(|e| format!("manifest_b64 decode failed: {e}"))?;
+    let sig_bytes = URL_SAFE_NO_PAD
+        .decode(env.sig.as_bytes())
+        .map_err(|e| format!("signature decode failed: {e}"))?;
+    let signature =
+        Signature::from_slice(&sig_bytes).map_err(|e| format!("signature malformed: {e}"))?;
+    verifying_key
+        .verify_strict(&manifest_bytes, &signature)
+        .map_err(|_| "manifest signature verification failed".to_string())?;
+    Ok(manifest_bytes)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -97,6 +162,65 @@ pub struct HubArtifact {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Shared cross-language vector: a fixed manifest signed with a throwaway test
+    // Ed25519 key. The same (pubkey, manifest_b64, sig) tuple is asserted in the
+    // IronHub signer's tests. All public; the test private key was discarded.
+    const VEC_KEY_ID: &str = "test-vector";
+    const VEC_PUBKEY_HEX: &str = "ca46572f4dcd485599cdf95442934a3e3c86e2cae766a85fbffc8d6540959928";
+    const VEC_MANIFEST_B64: &str = "eyJ2ZXJzaW9uIjoiMSIsImdlbmVyYXRlZF9hdCI6IjIwMjYtMDEtMDFUMDA6MDA6MDBaIiwicmVsZWFzZV90YWciOiJ0ZXN0IiwicmVwbyI6Im5lYXJhaS9pcm9uaHViIiwidG9vbHMiOltdLCJza2lsbHMiOltdfQ";
+    const VEC_SIG: &str =
+        "KjsUDgi1enj3iTPNQI6gU1Bwxf01hIUItlFvX9PxgWNybPPrJNIV7vFG-G8hJOalFMwFs5zQHrxbtFDZAlgtBg";
+    const VEC_MANIFEST_BYTES: &str = r#"{"version":"1","generated_at":"2026-01-01T00:00:00Z","release_tag":"test","repo":"nearai/ironhub","tools":[],"skills":[]}"#;
+
+    fn vec_keys() -> Vec<(&'static str, &'static str)> {
+        vec![(VEC_KEY_ID, VEC_PUBKEY_HEX)]
+    }
+
+    fn vec_envelope(manifest_b64: &str, sig: &str) -> String {
+        format!(r#"{{"v":1,"key_id":"test-vector","manifest_b64":"{manifest_b64}","sig":"{sig}"}}"#)
+    }
+
+    #[test]
+    fn verify_signed_manifest_accepts_valid_vector() {
+        let env = vec_envelope(VEC_MANIFEST_B64, VEC_SIG);
+        let bytes =
+            verify_signed_manifest(env.as_bytes(), &vec_keys()).expect("valid vector must verify");
+        assert_eq!(bytes, VEC_MANIFEST_BYTES.as_bytes());
+    }
+
+    #[test]
+    fn verify_signed_manifest_rejects_tampered_manifest() {
+        let tampered = URL_SAFE_NO_PAD.encode(br#"{"version":"1","tools":[{"name":"evil"}]}"#);
+        let env = vec_envelope(&tampered, VEC_SIG);
+        assert!(verify_signed_manifest(env.as_bytes(), &vec_keys()).is_err());
+    }
+
+    #[test]
+    fn verify_signed_manifest_rejects_wrong_key() {
+        let wrong = vec![(VEC_KEY_ID, MANIFEST_VERIFY_KEYS[0].1)];
+        let env = vec_envelope(VEC_MANIFEST_B64, VEC_SIG);
+        assert!(verify_signed_manifest(env.as_bytes(), &wrong).is_err());
+    }
+
+    #[test]
+    fn verify_signed_manifest_rejects_unknown_key_id() {
+        let env = format!(
+            r#"{{"v":1,"key_id":"nope","manifest_b64":"{VEC_MANIFEST_B64}","sig":"{VEC_SIG}"}}"#
+        );
+        assert!(verify_signed_manifest(env.as_bytes(), &vec_keys()).is_err());
+    }
+
+    #[test]
+    fn embedded_manifest_verify_keys_are_valid_public_keys() {
+        for (key_id, hex) in MANIFEST_VERIFY_KEYS {
+            assert_eq!(hex.len(), 64, "key {key_id} must be 64 hex chars");
+            assert!(
+                verifying_key_from_hex(hex).is_ok(),
+                "embedded key {key_id} must decode to a valid ed25519 public key"
+            );
+        }
+    }
 
     const SAMPLE_MANIFEST: &str = r#"{
         "version": "1",

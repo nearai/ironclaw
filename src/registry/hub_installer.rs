@@ -9,11 +9,13 @@ use tokio::sync::Mutex as AsyncMutex;
 use crate::bootstrap::ironclaw_base_dir;
 use crate::registry::catalog::RegistryError;
 use crate::registry::hub_manifest::{
-    DEFAULT_HUB_MANIFEST_URL, HubManifest, HubSkillEntry, HubToolEntry, Provenance,
+    DEFAULT_HUB_MANIFEST_URL, HubManifest, HubSkillEntry, HubToolEntry, MANIFEST_VERIFY_KEYS,
+    Provenance, verify_signed_manifest,
 };
 use crate::registry::installer::{download_artifact, validate_artifact_url, verify_sha256};
 
 const MAX_MANIFEST_BYTES: usize = 1024 * 1024;
+const MAX_SIGNED_MANIFEST_BYTES: usize = MAX_MANIFEST_BYTES * 2;
 const MAX_METADATA_BYTES: usize = 1024 * 1024;
 const MAX_WASM_BYTES: usize = 16 * 1024 * 1024;
 
@@ -223,7 +225,26 @@ impl HubInstaller {
     pub async fn fetch_manifest(&self) -> Result<HubManifest, RegistryError> {
         validate_artifact_url("hub-manifest", "manifest_url", &self.manifest_url)?;
 
-        let bytes = download_artifact(&self.manifest_url, MAX_MANIFEST_BYTES as u64).await?;
+        let envelope =
+            download_artifact(&self.manifest_url, MAX_SIGNED_MANIFEST_BYTES as u64).await?;
+        if envelope.len() > MAX_SIGNED_MANIFEST_BYTES {
+            return Err(RegistryError::DownloadFailed {
+                url: self.manifest_url.clone(),
+                reason: format!(
+                    "signed manifest exceeds {} byte cap (got {})",
+                    MAX_SIGNED_MANIFEST_BYTES,
+                    envelope.len()
+                ),
+            });
+        }
+
+        let bytes = verify_signed_manifest(&envelope, MANIFEST_VERIFY_KEYS).map_err(|reason| {
+            RegistryError::InvalidManifest {
+                name: "hub-manifest".to_string(),
+                field: "signature",
+                reason,
+            }
+        })?;
         if bytes.len() > MAX_MANIFEST_BYTES {
             return Err(RegistryError::DownloadFailed {
                 url: self.manifest_url.clone(),

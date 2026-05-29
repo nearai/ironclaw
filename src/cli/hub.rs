@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use clap::Subcommand;
 
-use crate::cli::hub_install::{hub_manifest_url_for_tag, validate_hub_name};
+use crate::cli::hub_install::validate_hub_name;
 use crate::registry::{HubInstaller, HubManifest, HubSkillEntry, HubToolEntry, Provenance};
 
 #[derive(Subcommand, Debug, Clone)]
@@ -97,6 +97,13 @@ fn build_installer(
     tools_dir_override: Option<PathBuf>,
     skills_dir_override: Option<PathBuf>,
 ) -> anyhow::Result<HubInstaller> {
+    if let Some(tag) = release_tag.as_deref() {
+        anyhow::bail!(
+            "--release-tag ('{tag}') is not supported: pinning to a GitHub release fetches an \
+             unsigned manifest, which the agent rejects fail-closed. Install from the default \
+             signed catalog by omitting --release-tag."
+        );
+    }
     let mut installer = HubInstaller::with_defaults();
     if let Some(dir) = tools_dir_override {
         installer = HubInstaller::new(
@@ -111,9 +118,6 @@ fn build_installer(
             installer.tools_dir().to_path_buf(),
             dir,
         );
-    }
-    if let Some(tag) = release_tag.as_deref() {
-        installer = installer.with_manifest_url(hub_manifest_url_for_tag(tag)?);
     }
     Ok(installer)
 }
@@ -477,6 +481,16 @@ mod tests {
             size_bytes: 1024,
             sha256: "a".repeat(64),
         }
+    }
+
+    #[test]
+    fn build_installer_rejects_release_tag() {
+        let msg = match build_installer(Some("release-2026-05-12-24".into()), None, None) {
+            Ok(_) => panic!("--release-tag must be rejected under signed manifests"),
+            Err(e) => e.to_string(),
+        };
+        assert!(msg.contains("--release-tag"), "got: {msg}");
+        assert!(msg.contains("signed catalog"), "got: {msg}");
     }
 
     fn manifest_with(tools: Vec<&str>, skills: Vec<&str>) -> HubManifest {
