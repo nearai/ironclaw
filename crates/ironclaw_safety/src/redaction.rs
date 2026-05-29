@@ -134,4 +134,16 @@ mod tests {
 
         assert_eq!(redacted, "raw [REDACTED] and encoded [REDACTED]");
     }
+
+    #[test]
+    fn redact_exact_values_prefers_longest_match_first() {
+        let redacted = redact_exact_values(
+            "raw secret%20value and secret".to_string(),
+            &["secret".to_string(), "secret%20value".to_string()],
+        );
+
+        assert_eq!(redacted, "raw [REDACTED] and [REDACTED]");
+        assert!(!redacted.contains("secret%20value"));
+        assert!(!redacted.contains("secret"));
+    }
 }

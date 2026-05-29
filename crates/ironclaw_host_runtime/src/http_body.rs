@@ -9,6 +9,8 @@ use ironclaw_network::NetworkHttpResponse;
 use thiserror::Error;
 
 pub(crate) const RESPONSE_BODY_STORE_UNAVAILABLE_REASON: &str = "response_body_store_unavailable";
+pub(crate) const RESPONSE_BODY_STORE_UNAUTHORIZED_REASON: &str = "response_body_store_unauthorized";
+pub(crate) const RESPONSE_BODY_STORE_FAILED_REASON: &str = "response_body_store_failed";
 
 pub trait RuntimeHttpBodyStore: fmt::Debug + Send + Sync {
     fn authorize_write(
@@ -28,9 +30,13 @@ pub trait RuntimeHttpBodyStore: fmt::Debug + Send + Sync {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
-#[error("runtime HTTP body store error: {reason}")]
-pub struct RuntimeHttpBodyStoreError {
-    pub reason: String,
+pub enum RuntimeHttpBodyStoreError {
+    #[error("runtime HTTP body store unavailable")]
+    Unavailable,
+    #[error("runtime HTTP body store unauthorized: {reason}")]
+    Unauthorized { reason: String },
+    #[error("runtime HTTP body store failed: {reason}")]
+    Failed { reason: String },
 }
 
 #[derive(Debug, Clone, Default)]
@@ -43,9 +49,7 @@ impl RuntimeHttpBodyStore for UnsupportedRuntimeHttpBodyStore {
         _capability_id: &CapabilityId,
         _target: &RuntimeHttpSaveTarget,
     ) -> Result<(), RuntimeHttpBodyStoreError> {
-        Err(RuntimeHttpBodyStoreError {
-            reason: RESPONSE_BODY_STORE_UNAVAILABLE_REASON.to_string(),
-        })
+        Err(RuntimeHttpBodyStoreError::Unavailable)
     }
 
     fn write_body(
@@ -55,9 +59,7 @@ impl RuntimeHttpBodyStore for UnsupportedRuntimeHttpBodyStore {
         _target: &RuntimeHttpSaveTarget,
         _body: &[u8],
     ) -> Result<(), RuntimeHttpBodyStoreError> {
-        Err(RuntimeHttpBodyStoreError {
-            reason: RESPONSE_BODY_STORE_UNAVAILABLE_REASON.to_string(),
-        })
+        Err(RuntimeHttpBodyStoreError::Unavailable)
     }
 }
 
@@ -72,12 +74,18 @@ where
         target: &RuntimeHttpSaveTarget,
     ) -> Result<(), RuntimeHttpBodyStoreError> {
         let mut resolved_view = None;
-        let view = target_mount_view(self, scope, target, &mut resolved_view)?;
+        let view = target_mount_view(
+            self,
+            scope,
+            target,
+            &mut resolved_view,
+            runtime_http_body_store_unauthorized_error,
+        )?;
         let (_path, grant) = view
             .resolve_with_grant(&target.path)
-            .map_err(runtime_http_body_store_error)?;
+            .map_err(runtime_http_body_store_unauthorized_error)?;
         if !grant.permissions.write {
-            return Err(RuntimeHttpBodyStoreError {
+            return Err(RuntimeHttpBodyStoreError::Unauthorized {
                 reason: format!(
                     "write permission denied for {} on {}",
                     FilesystemOperation::WriteFile,
@@ -96,7 +104,13 @@ where
         body: &[u8],
     ) -> Result<(), RuntimeHttpBodyStoreError> {
         let mut resolved_view = None;
-        let view = target_mount_view(self, scope, target, &mut resolved_view)?;
+        let view = target_mount_view(
+            self,
+            scope,
+            target,
+            &mut resolved_view,
+            runtime_http_body_store_failed_error,
+        )?;
         let write = async {
             self.write_bytes_with_mount_view(view, &target.path, body)
                 .await
@@ -110,17 +124,18 @@ fn target_mount_view<'a, F>(
     scope: &ResourceScope,
     target: &RuntimeHttpSaveTarget,
     resolved_view: &'a mut Option<MountView>,
+    map_error: fn(String) -> RuntimeHttpBodyStoreError,
 ) -> Result<&'a MountView, RuntimeHttpBodyStoreError>
 where
     F: RootFilesystem + ?Sized,
 {
     let view = match target.mount_grant.as_ref() {
         Some(grant) => {
-            MountView::new(vec![grant.clone()]).map_err(runtime_http_body_store_error)?
+            MountView::new(vec![grant.clone()]).map_err(|error| map_error(error.to_string()))?
         }
         None => filesystem
             .mount_view(scope)
-            .map_err(runtime_http_body_store_error)?,
+            .map_err(|error| map_error(error.to_string()))?,
     };
     Ok(resolved_view.insert(view))
 }
@@ -132,9 +147,7 @@ static FILESYSTEM_RUNTIME: LazyLock<Result<tokio::runtime::Runtime, RuntimeHttpB
             .thread_name("runtime-http-body-store")
             .enable_all()
             .build()
-            .map_err(|_| RuntimeHttpBodyStoreError {
-                reason: "filesystem runtime unavailable".to_string(),
-            })
+            .map_err(|_| RuntimeHttpBodyStoreError::Unavailable)
     });
 
 fn block_on_filesystem<T>(
@@ -149,19 +162,29 @@ where
             .spawn(move || {
                 runtime
                     .block_on(future)
-                    .map_err(runtime_http_body_store_error)
+                    .map_err(runtime_http_body_store_failed_error)
             })
             .join()
     });
     joined.unwrap_or_else(|_| {
-        Err(RuntimeHttpBodyStoreError {
+        Err(RuntimeHttpBodyStoreError::Failed {
             reason: "filesystem worker panicked".to_string(),
         })
     })
 }
 
-fn runtime_http_body_store_error(error: impl std::fmt::Display) -> RuntimeHttpBodyStoreError {
-    RuntimeHttpBodyStoreError {
+fn runtime_http_body_store_unauthorized_error(
+    error: impl std::fmt::Display,
+) -> RuntimeHttpBodyStoreError {
+    RuntimeHttpBodyStoreError::Unauthorized {
+        reason: error.to_string(),
+    }
+}
+
+fn runtime_http_body_store_failed_error(
+    error: impl std::fmt::Display,
+) -> RuntimeHttpBodyStoreError {
+    RuntimeHttpBodyStoreError::Failed {
         reason: error.to_string(),
     }
 }
@@ -183,12 +206,12 @@ pub(crate) fn apply_body_disposition(
         .write_body(scope, capability_id, &target, &body)
         .map_err(|error| {
             tracing::debug!(
-                error = %error.reason,
+                error = %error,
                 capability_id = %capability_id,
                 "runtime HTTP response body store failed"
             );
             RuntimeHttpEgressError::Response {
-                reason: format!("response_body_store_failed: {}", error.reason),
+                reason: RESPONSE_BODY_STORE_FAILED_REASON.to_string(),
                 request_bytes: response.usage.request_bytes,
                 response_bytes: response.usage.response_bytes,
             }

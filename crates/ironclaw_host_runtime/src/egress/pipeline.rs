@@ -6,7 +6,10 @@ use ironclaw_network::{NetworkHttpEgress, NetworkHttpRequest};
 use ironclaw_secrets::SecretStore;
 
 use super::{HostHttpEgressService, PipelineError, runtime_network_error, runtime_response};
-use crate::http_body::{self, RESPONSE_BODY_STORE_UNAVAILABLE_REASON};
+use crate::http_body::{
+    self, RESPONSE_BODY_STORE_UNAUTHORIZED_REASON, RESPONSE_BODY_STORE_UNAVAILABLE_REASON,
+    RuntimeHttpBodyStoreError,
+};
 
 pub(super) fn execute<N, S>(
     service: &HostHttpEgressService<N, S>,
@@ -27,7 +30,6 @@ where
     let redaction_values = super::credential::apply_credential_injections(
         &service.secrets,
         service.secret_injections(),
-        service.allows_direct_secret_lease(),
         &mut request,
     )
     .map_err(PipelineError::pre_transport)?;
@@ -66,18 +68,23 @@ fn authorize_body_store<N, S>(
                 .body_store
                 .authorize_write(&request.scope, &request.capability_id, target)
         {
-            if error.reason == RESPONSE_BODY_STORE_UNAVAILABLE_REASON {
-                return Err(PipelineError::pre_transport(
-                    RuntimeHttpEgressError::Request {
-                        reason: error.reason,
-                        request_bytes: 0,
-                        response_bytes: 0,
-                    },
-                ));
-            }
+            tracing::debug!(
+                error = %error,
+                capability_id = %request.capability_id,
+                "runtime HTTP response body store authorization failed"
+            );
+            let reason = match error {
+                RuntimeHttpBodyStoreError::Unavailable => {
+                    RESPONSE_BODY_STORE_UNAVAILABLE_REASON.to_string()
+                }
+                RuntimeHttpBodyStoreError::Unauthorized { .. }
+                | RuntimeHttpBodyStoreError::Failed { .. } => {
+                    RESPONSE_BODY_STORE_UNAUTHORIZED_REASON.to_string()
+                }
+            };
             return Err(PipelineError::pre_transport(
                 RuntimeHttpEgressError::Request {
-                    reason: format!("response_body_store_unauthorized: {}", error.reason),
+                    reason,
                     request_bytes: 0,
                     response_bytes: 0,
                 },

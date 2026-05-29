@@ -49,12 +49,12 @@ fn scan_decoded_url_for_leaks(
         return Ok(());
     };
 
-    scan_component_for_leaks(detector, parsed.path())?;
+    scan_decoded_component_for_leaks(detector, parsed.path())?;
     if !parsed.username().is_empty() {
-        scan_component_for_leaks(detector, parsed.username())?;
+        scan_decoded_component_for_leaks(detector, parsed.username())?;
     }
     if let Some(password) = parsed.password() {
-        scan_component_for_leaks(detector, password)?;
+        scan_decoded_component_for_leaks(detector, password)?;
     }
     for (name, value) in parsed.query_pairs() {
         detector
@@ -67,7 +67,11 @@ fn scan_decoded_url_for_leaks(
     Ok(())
 }
 
-fn scan_component_for_leaks(
+/// Scan percent-decoded URL components for leak matches.
+///
+/// The raw URL string is scanned earlier, so this helper only needs to catch
+/// decoded-delta forms that appear after parsing path and userinfo segments.
+fn scan_decoded_component_for_leaks(
     detector: &LeakDetector,
     component: &str,
 ) -> Result<(), RuntimeHttpEgressError> {

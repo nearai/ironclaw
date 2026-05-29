@@ -2,7 +2,7 @@ use ironclaw_capabilities::{
     CapabilityObligationHandler, CapabilityObligationPhase, CapabilityObligationRequest,
 };
 use ironclaw_events::InMemoryAuditSink;
-use ironclaw_filesystem::{InMemoryBackend, RootFilesystem, ScopedFilesystem};
+use ironclaw_filesystem::{InMemoryBackend, LocalFilesystem, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
     AgentId, CapabilityId, CapabilitySet, ExecutionContext, ExtensionId, InvocationId, MountAlias,
     MountGrant, MountPermissions, MountView, NetworkMethod, NetworkPolicy, NetworkScheme,
@@ -12,8 +12,7 @@ use ironclaw_host_api::{
     ScopedPath, SecretHandle, TenantId, TrustClass, UserId, VirtualPath,
 };
 use ironclaw_host_runtime::{
-    BuiltinObligationServices, HostHttpEgressService, RuntimeHttpBodyStore,
-    RuntimeHttpBodyStoreError,
+    BuiltinObligationServices, RuntimeHttpBodyStore, RuntimeHttpBodyStoreError,
 };
 use ironclaw_mcp::{
     McpClient, McpClientRequest, McpHostHttpClient, McpHostHttpEgressPlan, McpHostHttpRequest,
@@ -29,11 +28,13 @@ use ironclaw_secrets::{InMemorySecretStore, SecretMaterial, SecretStore};
 use ironclaw_wasm::{WasmHostHttp, WasmHttpRequest, WasmRuntimeHttpAdapter};
 use serde_json::{Value, json};
 use std::{
+    fs,
     io::{Read, Write},
     net::TcpListener,
     sync::{Arc, Mutex},
     time::Duration,
 };
+use tempfile::tempdir;
 
 #[test]
 fn host_http_egress_consumes_staged_obligation_secret_once() {
@@ -1462,7 +1463,7 @@ fn host_http_egress_without_policy_store_fails_closed_before_transport() {
         },
     });
     let network_recorder = network.requests.clone();
-    let service = HostHttpEgressService::new(network, InMemorySecretStore::new());
+    let service = test_obligation_services().host_http_egress(network);
 
     let error = service
         .execute(RuntimeHttpEgressRequest {
@@ -2735,10 +2736,7 @@ fn host_http_egress_save_target_requires_write_authorization_before_network() {
         } => {
             assert_eq!(request_bytes, 0);
             assert_eq!(response_bytes, 0);
-            assert_eq!(
-                reason,
-                "response_body_store_unauthorized: write permission denied for /workspace/pr.diff"
-            );
+            assert_eq!(reason, "response_body_store_unauthorized");
         }
         other => panic!("expected request authorization error, got {other:?}"),
     }
@@ -2785,11 +2783,79 @@ fn host_http_egress_fails_closed_when_body_store_write_fails() {
         } => {
             assert_eq!(request_bytes, 5);
             assert_eq!(response_bytes, 16);
-            assert_eq!(reason, "response_body_store_failed: disk full");
+            assert_eq!(reason, "response_body_store_failed");
         }
         other => panic!("expected response body store error, got {other:?}"),
     }
     assert!(store.writes().is_empty());
+}
+
+#[test]
+fn host_http_egress_fails_closed_when_real_scoped_filesystem_write_fails() {
+    let network = RecordingNetwork::ok(NetworkHttpResponse {
+        status: 200,
+        headers: vec![("content-type".to_string(), "text/plain".to_string())],
+        body: b"large patch body".to_vec(),
+        usage: NetworkUsage {
+            request_bytes: 5,
+            response_bytes: 16,
+            resolved_ip: None,
+        },
+    });
+    let temp = tempdir().unwrap();
+    let mut root = LocalFilesystem::new();
+    root.mount_local(
+        VirtualPath::new("/projects/workspace").unwrap(),
+        ironclaw_host_api::HostPath::from_path_buf(temp.path().to_path_buf()),
+    )
+    .unwrap();
+    let scoped_filesystem = Arc::new(ScopedFilesystem::with_fixed_view(
+        Arc::new(root),
+        MountView::new(Vec::new()).unwrap(),
+    ));
+    fs::write(temp.path().join("dir"), b"blocking file").unwrap();
+    let service = request_policy_staging_egress_with_body_store(network, scoped_filesystem);
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/workspace").unwrap(),
+        VirtualPath::new("/projects/workspace").unwrap(),
+        MountPermissions::read_write(),
+    )])
+    .unwrap();
+    let target = save_target_with_mount("/workspace/dir/file.txt", &mounts);
+
+    let error = service
+        .execute(RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::FirstParty,
+            scope: sample_scope(),
+            capability_id: sample_capability_id(),
+            method: NetworkMethod::Get,
+            url: "https://api.example.test/v1/run".to_string(),
+            headers: vec![],
+            body: b"hello".to_vec(),
+            network_policy: sample_policy(),
+            credential_injections: vec![],
+            response_body_limit: Some(4096),
+            save_body_to: Some(target),
+            timeout_ms: None,
+        })
+        .expect_err("real scoped filesystem write failure should fail closed");
+
+    match error {
+        RuntimeHttpEgressError::Response {
+            reason,
+            request_bytes,
+            response_bytes,
+        } => {
+            assert_eq!(request_bytes, 5);
+            assert_eq!(response_bytes, 16);
+            assert_eq!(reason, "response_body_store_failed");
+        }
+        other => panic!("expected response body store error, got {other:?}"),
+    }
+    assert_eq!(
+        fs::read(temp.path().join("dir")).unwrap(),
+        b"blocking file".to_vec()
+    );
 }
 
 #[test]
@@ -2946,6 +3012,47 @@ fn host_http_egress_blocks_credential_shaped_response_body() {
 }
 
 #[test]
+fn host_http_egress_blocks_percent_encoded_credential_path_before_network() {
+    let network = RecordingNetwork::ok(NetworkHttpResponse {
+        status: 200,
+        headers: vec![],
+        body: br#"{"ok":true}"#.to_vec(),
+        usage: NetworkUsage {
+            request_bytes: 5,
+            response_bytes: 11,
+            resolved_ip: None,
+        },
+    });
+    let network_recorder = network.requests.clone();
+    let service = request_policy_staging_egress(network);
+
+    let error = service
+        .execute(RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::Script,
+            scope: sample_scope(),
+            capability_id: sample_capability_id(),
+            method: NetworkMethod::Post,
+            url: "https://api.example.test/v1/%73%6b%2d%70%72%6f%6a%2dtest1234567890abcdefghij/run"
+                .to_string(),
+            headers: vec![],
+            body: b"hello".to_vec(),
+            network_policy: sample_policy(),
+            credential_injections: vec![],
+            response_body_limit: Some(4096),
+            save_body_to: None,
+            timeout_ms: None,
+        })
+        .expect_err("percent-encoded credential-shaped path should fail before network dispatch");
+
+    assert!(matches!(
+        error,
+        ironclaw_host_api::RuntimeHttpEgressError::Request { ref reason, .. }
+            if reason == "credential_leak_blocked"
+    ));
+    assert!(network_recorder.lock().unwrap().is_empty());
+}
+
+#[test]
 fn host_http_egress_blocks_credential_shaped_runtime_request_before_network() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
@@ -3027,6 +3134,47 @@ fn host_http_egress_blocks_runtime_supplied_sensitive_headers_before_network() {
     ));
     assert!(error.to_string().contains("sensitive_header"));
     assert!(network_recorder.lock().unwrap().is_empty());
+}
+
+#[test]
+fn host_http_egress_blocks_leaky_response_header_values() {
+    let network = RecordingNetwork::ok(NetworkHttpResponse {
+        status: 200,
+        headers: vec![(
+            "x-note".to_string(),
+            "leaked sk-proj-test1234567890abcdefghij".to_string(),
+        )],
+        body: br#"{"ok":true}"#.to_vec(),
+        usage: NetworkUsage {
+            request_bytes: 5,
+            response_bytes: 11,
+            resolved_ip: None,
+        },
+    });
+    let service = request_policy_staging_egress(network);
+
+    let error = service
+        .execute(RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::Script,
+            scope: sample_scope(),
+            capability_id: sample_capability_id(),
+            method: NetworkMethod::Post,
+            url: "https://api.example.test/v1/run".to_string(),
+            headers: vec![],
+            body: b"hello".to_vec(),
+            network_policy: sample_policy(),
+            credential_injections: vec![],
+            response_body_limit: Some(4096),
+            save_body_to: None,
+            timeout_ms: None,
+        })
+        .expect_err("leaky response headers should fail closed");
+
+    assert!(matches!(
+        error,
+        ironclaw_host_api::RuntimeHttpEgressError::Response { ref reason, .. }
+            if reason == "response_leak_blocked"
+    ));
 }
 
 #[test]
@@ -3208,14 +3356,14 @@ struct RecordedBodyWrite {
 
 impl RecordingBodyStore {
     fn with_authorize_error(self, reason: &str) -> Self {
-        *self.authorize_error.lock().unwrap() = Some(RuntimeHttpBodyStoreError {
+        *self.authorize_error.lock().unwrap() = Some(RuntimeHttpBodyStoreError::Unauthorized {
             reason: reason.to_string(),
         });
         self
     }
 
     fn with_write_error(self, reason: &str) -> Self {
-        *self.write_error.lock().unwrap() = Some(RuntimeHttpBodyStoreError {
+        *self.write_error.lock().unwrap() = Some(RuntimeHttpBodyStoreError::Failed {
             reason: reason.to_string(),
         });
         self

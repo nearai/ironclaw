@@ -43,11 +43,11 @@ use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     BuiltinObligationHandler, BuiltinObligationServices, CancelReason, CancelRuntimeWorkRequest,
     CapabilitySurfaceVersion, CommandExecutionOutput, CommandExecutionRequest, DefaultHostRuntime,
-    HostHttpEgressService, HostRuntime, HostRuntimeServices, ProcessObligationLifecycleStore,
-    ProductionWiringComponent, ProductionWiringConfig, ProductionWiringIssueKind,
-    RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeCapabilityResumeRequest,
-    RuntimeFailureKind, RuntimeProcessError, RuntimeProcessPort, RuntimeStatusRequest,
-    RuntimeWorkId, SandboxCommandTransport, TenantSandboxProcessPort, builtin_first_party_handlers,
+    HostRuntime, HostRuntimeServices, ProcessObligationLifecycleStore, ProductionWiringComponent,
+    ProductionWiringConfig, ProductionWiringIssueKind, RuntimeCapabilityOutcome,
+    RuntimeCapabilityRequest, RuntimeCapabilityResumeRequest, RuntimeFailureKind,
+    RuntimeProcessError, RuntimeProcessPort, RuntimeStatusRequest, RuntimeWorkId,
+    SandboxCommandTransport, TenantSandboxProcessPort, builtin_first_party_handlers,
     builtin_first_party_package,
 };
 use ironclaw_mcp::{McpError, McpExecutionRequest, McpExecutionResult, McpExecutor};
@@ -1157,10 +1157,7 @@ fn production_wiring_validation_rejects_unverified_runtime_http_egress() {
         ProcessServices::in_memory(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
-    .with_runtime_http_egress(Arc::new(HostHttpEgressService::new(
-        RecordingNetworkHttpEgress::new(),
-        InMemorySecretStore::new(),
-    )));
+    .with_runtime_http_egress(Arc::new(RecordingRuntimeHttpEgress::new()));
 
     let report = services
         .validate_production_wiring(&ProductionWiringConfig::new([]).require_runtime_http_egress())

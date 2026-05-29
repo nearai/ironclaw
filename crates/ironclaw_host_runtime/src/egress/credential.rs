@@ -6,6 +6,7 @@ use ironclaw_network::is_rfc3986_unreserved_segment;
 use ironclaw_safety::redaction_values_for_secret;
 use ironclaw_secrets::{SecretMaterial, SecretStore, SecretStoreError};
 use secrecy::ExposeSecret;
+use std::sync::LazyLock;
 
 use crate::obligations::RuntimeSecretInjectionStore;
 
@@ -48,17 +49,15 @@ impl<'a> CredentialSourceStrategy<'a> {
     fn validate_for_request(
         &self,
         request: &RuntimeHttpEgressRequest,
-        allow_direct_secret_lease: bool,
     ) -> Result<(), RuntimeHttpEgressError> {
         match self {
-            Self::SecretStoreLease if !allow_direct_secret_lease => {
-                Err(RuntimeHttpEgressError::Credential {
-                    reason:
-                        "direct secret-store leases are unavailable for production runtime egress"
-                            .to_string(),
-                })
-            }
-            Self::SecretStoreLease => Ok(()),
+            Self::SecretStoreLease => Err(RuntimeHttpEgressError::Credential {
+                // Production egress accepts one-shot staged obligations only;
+                // direct store leases are retained behind crate-local tests for
+                // legacy mapping coverage, not as a runtime path.
+                reason: "direct secret-store leases are unavailable for production runtime egress"
+                    .to_string(),
+            }),
             Self::StagedObligation { capability_id }
                 if *capability_id != &request.capability_id =>
             {
@@ -107,11 +106,9 @@ impl<'a> CredentialSourceStrategy<'a> {
 
 pub(super) fn validate_sources_for_request(
     request: &RuntimeHttpEgressRequest,
-    allow_direct_secret_lease: bool,
 ) -> Result<(), RuntimeHttpEgressError> {
     for injection in &request.credential_injections {
-        CredentialSourceStrategy::for_injection(injection)
-            .validate_for_request(request, allow_direct_secret_lease)?;
+        CredentialSourceStrategy::for_injection(injection).validate_for_request(request)?;
     }
     Ok(())
 }
@@ -119,7 +116,6 @@ pub(super) fn validate_sources_for_request(
 pub(super) fn apply_credential_injections<S>(
     secrets: &S,
     secret_injections: Option<&RuntimeSecretInjectionStore>,
-    allow_direct_secret_lease: bool,
     request: &mut RuntimeHttpEgressRequest,
 ) -> Result<Vec<String>, RuntimeHttpEgressError>
 where
@@ -134,7 +130,6 @@ where
             &mut credential_materials,
             secrets,
             secret_injections,
-            allow_direct_secret_lease,
             request,
             injection,
         )?;
@@ -163,7 +158,6 @@ fn credential_value_for_injection<'cache, S>(
     cache: &'cache mut Vec<CredentialCacheEntry>,
     secrets: &S,
     secret_injections: Option<&RuntimeSecretInjectionStore>,
-    allow_direct_secret_lease: bool,
     request: &RuntimeHttpEgressRequest,
     injection: &RuntimeCredentialInjection,
 ) -> Result<Option<&'cache SecretMaterial>, RuntimeHttpEgressError>
@@ -171,7 +165,6 @@ where
     S: SecretStore,
 {
     let strategy = CredentialSourceStrategy::for_injection(injection);
-    strategy.validate_for_request(request, allow_direct_secret_lease)?;
     let key = strategy.cache_key(injection);
     if let Some(idx) = cache.iter().position(|entry| entry.key == key) {
         // Negative cache hit (missing optional credential on a prior pass)
@@ -256,19 +249,21 @@ fn block_on_secret_store<T>(
 where
     T: Send,
 {
-    let joined = std::thread::scope(|scope| {
-        scope
-            .spawn(move || {
-                let runtime = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .map_err(|_| SecretStoreError::StoreUnavailable {
-                        reason: "secret store runtime unavailable".to_string(),
-                    })?;
-                runtime.block_on(future)
-            })
-            .join()
-    });
+    static SECRET_STORE_RUNTIME: LazyLock<Result<tokio::runtime::Runtime, SecretStoreError>> =
+        LazyLock::new(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .thread_name("runtime-http-secret-store")
+                .enable_all()
+                .build()
+                .map_err(|_| SecretStoreError::StoreUnavailable {
+                    reason: "secret store runtime unavailable".to_string(),
+                })
+        });
+    let runtime = SECRET_STORE_RUNTIME
+        .as_ref()
+        .map_err(|error| error.clone())?;
+    let joined = std::thread::scope(|scope| scope.spawn(move || runtime.block_on(future)).join());
     joined.unwrap_or_else(|_| {
         Err(SecretStoreError::StoreUnavailable {
             reason: "secret store worker panicked".to_string(),
