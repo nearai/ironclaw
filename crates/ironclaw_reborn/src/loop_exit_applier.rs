@@ -12,8 +12,9 @@ use ironclaw_threads::{
     ThreadMessageId, ThreadMessageRecord, ThreadScope, ToolResultReferenceEnvelope,
 };
 use ironclaw_turns::{
-    GetRunStateRequest, LoopCheckpointKind, LoopMessageRef, LoopResultRef, TurnError, TurnId,
-    TurnRunId, TurnScope, TurnStateStore, TurnStatus,
+    GetLoopCheckpointRequest, GetRunStateRequest, LoopBlockedKind, LoopCheckpointKind,
+    LoopMessageRef, LoopResultRef, TurnError, TurnId, TurnRunId, TurnScope, TurnStateStore,
+    TurnStatus,
 };
 
 pub use ironclaw_turns::loop_exit::{
@@ -267,13 +268,39 @@ where
 
     async fn verify_blocked_evidence(
         &self,
-        _request: BlockedEvidenceRequest<'_>,
+        request: BlockedEvidenceRequest<'_>,
     ) -> Result<bool, TurnError> {
-        // A BeforeBlock checkpoint alone is not sufficient: #3424 requires a
-        // durable pending gate/process ref. The current text-only adapter has
-        // no gate/process outcome store, so it must fail closed without doing
-        // unrelated checkpoint I/O.
-        Ok(false)
+        match request.blocked.kind {
+            LoopBlockedKind::Auth => {}
+            LoopBlockedKind::Approval
+            | LoopBlockedKind::Resource
+            | LoopBlockedKind::AwaitDependentRun => {
+                // A BeforeBlock checkpoint alone is not sufficient for approval,
+                // resource, or dependent-run gates: #3424 requires a durable
+                // pending gate/process ref for those block types. Auth gates use
+                // the blocked turn state itself as the product-visible pending ref,
+                // so verifying the pre-block checkpoint is enough to let the
+                // applier persist that state.
+                return Ok(false);
+            }
+            _ => return Ok(false),
+        }
+
+        let Some(checkpoint) = self
+            .loop_checkpoint_store
+            .get_loop_checkpoint(GetLoopCheckpointRequest {
+                scope: request.scope.clone(),
+                turn_id: request.turn_id,
+                run_id: request.run_id,
+                checkpoint_id: request.blocked.checkpoint_id,
+            })
+            .await?
+        else {
+            return Ok(false);
+        };
+
+        Ok(checkpoint.kind == LoopCheckpointKind::BeforeBlock
+            && checkpoint.state_ref == request.blocked.state_ref)
     }
 
     async fn verify_failure_evidence(

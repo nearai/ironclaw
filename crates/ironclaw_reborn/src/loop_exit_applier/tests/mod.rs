@@ -149,6 +149,35 @@ async fn blocked_exit_requires_before_block_checkpoint() {
 }
 
 #[tokio::test]
+async fn auth_blocked_exit_with_durable_checkpoint_maps_to_blocked_auth() {
+    let claimed = claimed_run();
+    let checkpoint_id = TurnCheckpointId::new();
+    let state_ref = ironclaw_turns::LoopCheckpointStateRef::new("checkpoint:auth-blocked-state")
+        .expect("valid state ref");
+    let checkpoint = loop_checkpoint_record(
+        &claimed,
+        checkpoint_id,
+        state_ref.clone(),
+        LoopCheckpointKind::BeforeBlock,
+    );
+    let transition = Arc::new(RecordingTransitionPort::new());
+    let evidence = Arc::new(text_checkpoint_evidence(Arc::new(
+        StaticLoopCheckpointStore::new(checkpoint),
+    )));
+    let applier = Arc::new(LoopExitApplier::new(transition.clone(), evidence));
+    let exit = blocked_exit_with_checkpoint(LoopBlockedKind::Auth, checkpoint_id, state_ref);
+
+    let state = applier.apply(&claimed, exit).await.expect("applied");
+
+    assert_eq!(state.status, TurnStatus::BlockedAuth);
+    assert_eq!(
+        state.gate_ref.as_ref().map(|gate_ref| gate_ref.as_str()),
+        Some("gate:test")
+    );
+    assert_eq!(transition.apply_count(), 1);
+}
+
+#[tokio::test]
 async fn cancelled_exit_requires_observed_cancel_input() {
     let fixture =
         Fixture::new(InMemoryLoopExitEvidencePort::new().with_final_checkpoint_verified(true));
@@ -868,6 +897,70 @@ async fn thread_checkpoint_evidence_does_not_read_checkpoint_for_blocked_claims(
         })
         .await
         .expect("blocked evidence should fail closed without checkpoint I/O");
+
+    assert!(!verified);
+}
+
+#[tokio::test]
+async fn thread_checkpoint_evidence_verifies_auth_blocked_checkpoint() {
+    let claimed = claimed_run();
+    let checkpoint_id = TurnCheckpointId::new();
+    let state_ref = ironclaw_turns::LoopCheckpointStateRef::new("checkpoint:auth-blocked-state")
+        .expect("valid state ref");
+    let checkpoint = loop_checkpoint_record(
+        &claimed,
+        checkpoint_id,
+        state_ref.clone(),
+        LoopCheckpointKind::BeforeBlock,
+    );
+    let evidence = text_checkpoint_evidence(Arc::new(StaticLoopCheckpointStore::new(checkpoint)));
+    let exit = blocked_exit_with_checkpoint(LoopBlockedKind::Auth, checkpoint_id, state_ref);
+    let LoopExit::Blocked(blocked) = &exit else {
+        unreachable!("blocked helper returns blocked exit")
+    };
+    let verified = evidence
+        .verify_blocked_evidence(BlockedEvidenceRequest {
+            scope: &claimed.state.scope,
+            turn_id: claimed.state.turn_id,
+            run_id: claimed.state.run_id,
+            blocked,
+        })
+        .await
+        .expect("auth blocked evidence should verify through checkpoint lookup");
+
+    assert!(verified);
+}
+
+#[tokio::test]
+async fn thread_checkpoint_evidence_rejects_auth_blocked_checkpoint_state_mismatch() {
+    let claimed = claimed_run();
+    let checkpoint_id = TurnCheckpointId::new();
+    let checkpoint = loop_checkpoint_record(
+        &claimed,
+        checkpoint_id,
+        ironclaw_turns::LoopCheckpointStateRef::new("checkpoint:other-state")
+            .expect("valid state ref"),
+        LoopCheckpointKind::BeforeBlock,
+    );
+    let evidence = text_checkpoint_evidence(Arc::new(StaticLoopCheckpointStore::new(checkpoint)));
+    let exit = blocked_exit_with_checkpoint(
+        LoopBlockedKind::Auth,
+        checkpoint_id,
+        ironclaw_turns::LoopCheckpointStateRef::new("checkpoint:auth-blocked-state")
+            .expect("valid state ref"),
+    );
+    let LoopExit::Blocked(blocked) = &exit else {
+        unreachable!("blocked helper returns blocked exit")
+    };
+    let verified = evidence
+        .verify_blocked_evidence(BlockedEvidenceRequest {
+            scope: &claimed.state.scope,
+            turn_id: claimed.state.turn_id,
+            run_id: claimed.state.run_id,
+            blocked,
+        })
+        .await
+        .expect("state mismatch should be a closed evidence miss");
 
     assert!(!verified);
 }
