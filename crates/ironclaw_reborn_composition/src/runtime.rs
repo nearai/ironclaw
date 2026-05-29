@@ -1213,6 +1213,26 @@ struct LocalDevSkillContextSource {
     execution_adapter: Arc<LocalDevSkillExecutionAdapter>,
 }
 
+/// Build the [`SkillActivationSelectorConfig`] used by the local-dev
+/// filesystem skill context source. Extracted from
+/// [`local_dev_filesystem_skill_context_source`] so the wiring of the
+/// `regex_skill_activation_enabled` flag from [`RebornRuntimeInput`] is
+/// covered by a unit test (see `tests::local_dev_selector_config_*`).
+/// Without this seam the propagation was tested only indirectly through
+/// the full [`build_reborn_runtime`] path, where an accidental
+/// `..SkillActivationSelectorConfig::default()` regression would slip
+/// through silently.
+fn local_dev_selector_config(
+    regex_skill_activation_enabled: bool,
+) -> SkillActivationSelectorConfig {
+    SkillActivationSelectorConfig {
+        selection_mode:
+            ironclaw_first_party_extension_ports::SkillActivationSelectionMode::ExplicitOnly,
+        regex_activation_enabled: regex_skill_activation_enabled,
+        ..SkillActivationSelectorConfig::default()
+    }
+}
+
 fn local_dev_filesystem_skill_context_source(
     local_runtime: &crate::factory::RebornLocalRuntimeServices,
     tenant_id: &TenantId,
@@ -1230,12 +1250,7 @@ fn local_dev_filesystem_skill_context_source(
     .map_err(|reason| RebornRuntimeError::InvalidArgument {
         reason: format!("first-party skills extension source: {reason}"),
     })?;
-    let selector_config = SkillActivationSelectorConfig {
-        selection_mode:
-            ironclaw_first_party_extension_ports::SkillActivationSelectionMode::ExplicitOnly,
-        regex_activation_enabled: regex_skill_activation_enabled,
-        ..SkillActivationSelectorConfig::default()
-    };
+    let selector_config = local_dev_selector_config(regex_skill_activation_enabled);
     let selectable_skills = extension.selectable_skill_runtime_with_setup_markers(
         selector_config,
         Arc::clone(&local_runtime.workspace_filesystem),
@@ -1352,6 +1367,36 @@ mod tests {
     use std::time::Duration;
 
     use async_trait::async_trait;
+
+    /// Wiring guard: the `regex_skill_activation_enabled` flag from
+    /// [`RebornRuntimeInput`] must reach
+    /// [`SkillActivationSelectorConfig::regex_activation_enabled`]
+    /// unchanged, not get clobbered by a stray
+    /// `..SkillActivationSelectorConfig::default()` spread or by the
+    /// helper accidentally taking `Default::default()`. Covers the
+    /// composition-level path that
+    /// [`local_dev_filesystem_skill_context_source`] depends on.
+    #[test]
+    fn local_dev_selector_config_propagates_regex_activation_disabled() {
+        let cfg = super::local_dev_selector_config(false);
+        assert!(
+            !cfg.regex_activation_enabled,
+            "regex_skill_activation_enabled=false must propagate into SkillActivationSelectorConfig"
+        );
+        assert!(matches!(
+            cfg.selection_mode,
+            ironclaw_first_party_extension_ports::SkillActivationSelectionMode::ExplicitOnly
+        ));
+    }
+
+    #[test]
+    fn local_dev_selector_config_propagates_regex_activation_enabled() {
+        let cfg = super::local_dev_selector_config(true);
+        assert!(
+            cfg.regex_activation_enabled,
+            "regex_skill_activation_enabled=true must propagate into SkillActivationSelectorConfig"
+        );
+    }
     use ironclaw_authorization::CapabilityLeaseStore;
     use ironclaw_events::{EventStreamKey, ReadScope};
     use ironclaw_host_api::{

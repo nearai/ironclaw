@@ -941,9 +941,9 @@ impl Agent {
             skills_cfg.max_active_skills,
             skills_cfg.max_context_tokens,
             &satisfied,
-            ironclaw_skills::SkillSelectionOptions::regex_activation_enabled(
-                skills_cfg.regex_activation_enabled,
-            ),
+            ironclaw_skills::SkillSelectionOptions {
+                regex_activation_enabled: skills_cfg.regex_activation_enabled,
+            },
         );
 
         // Feedback notes: start with the selector's own notes (chain-load,

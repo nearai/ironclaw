@@ -62,14 +62,6 @@ impl Default for SkillSelectionOptions {
     }
 }
 
-impl SkillSelectionOptions {
-    pub fn regex_activation_enabled(enabled: bool) -> Self {
-        Self {
-            regex_activation_enabled: enabled,
-        }
-    }
-}
-
 /// Reason a `try_select` call didn't add a skill. Callers use this to
 /// render distinct notes (budget vs. marker vs. duplicate) rather than
 /// lumping them into one opaque "skipped".
@@ -177,23 +169,6 @@ fn try_select<'a>(
 ///
 /// Pass an empty set to disable marker filtering (the legacy behavior
 /// where every skill competes regardless of workspace state).
-pub fn prefilter_skills<'a>(
-    message: &str,
-    available_skills: &'a [LoadedSkill],
-    max_candidates: usize,
-    max_context_tokens: usize,
-    satisfied_setup_markers: &std::collections::HashSet<String>,
-) -> SelectionOutcome<'a> {
-    prefilter_skills_with_options(
-        message,
-        available_skills,
-        max_candidates,
-        max_context_tokens,
-        satisfied_setup_markers,
-        SkillSelectionOptions::default(),
-    )
-}
-
 pub fn prefilter_skills_with_options<'a>(
     message: &str,
     available_skills: &'a [LoadedSkill],
@@ -504,14 +479,37 @@ mod tests {
         max_candidates: usize,
         max_context_tokens: usize,
     ) -> Vec<&'a LoadedSkill> {
-        super::prefilter_skills(
+        super::prefilter_skills_with_options(
             message,
             available,
             max_candidates,
             max_context_tokens,
             &HashSet::new(),
+            super::SkillSelectionOptions::default(),
         )
         .selected
+    }
+
+    /// Internal test shim: forward to `prefilter_skills_with_options` with
+    /// the default selection policy. The non-options public wrapper was
+    /// removed; tests that don't exercise the policy keep using this
+    /// shim to avoid restating `SkillSelectionOptions::default()` at
+    /// every call site.
+    fn prefilter_skills<'a>(
+        message: &str,
+        available: &'a [LoadedSkill],
+        max_candidates: usize,
+        max_context_tokens: usize,
+        satisfied_setup_markers: &HashSet<String>,
+    ) -> super::SelectionOutcome<'a> {
+        super::prefilter_skills_with_options(
+            message,
+            available,
+            max_candidates,
+            max_context_tokens,
+            satisfied_setup_markers,
+            super::SkillSelectionOptions::default(),
+        )
     }
 
     fn make_skill(name: &str, keywords: &[&str], tags: &[&str], patterns: &[&str]) -> LoadedSkill {
@@ -594,7 +592,9 @@ mod tests {
             3,
             MAX_SKILL_CONTEXT_TOKENS,
             &HashSet::new(),
-            super::SkillSelectionOptions::regex_activation_enabled(false),
+            super::SkillSelectionOptions {
+                regex_activation_enabled: false,
+            },
         );
 
         assert!(result.selected.is_empty());
@@ -615,7 +615,9 @@ mod tests {
             3,
             MAX_SKILL_CONTEXT_TOKENS,
             &HashSet::new(),
-            super::SkillSelectionOptions::regex_activation_enabled(false),
+            super::SkillSelectionOptions {
+                regex_activation_enabled: false,
+            },
         );
 
         assert_eq!(result.selected.len(), 1);

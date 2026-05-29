@@ -838,7 +838,9 @@ fn select_skill_activations(
             remaining_slots,
             remaining_tokens,
             satisfied_setup_markers,
-            SkillSelectionOptions::regex_activation_enabled(config.regex_activation_enabled),
+            SkillSelectionOptions {
+                regex_activation_enabled: config.regex_activation_enabled,
+            },
         );
         feedback.extend(outcome.notes);
 

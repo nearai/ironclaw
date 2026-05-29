@@ -97,3 +97,50 @@ impl SkillsConfig {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `db_first_bool` consults the env var only when the settings value
+    /// equals the default. SkillsSettings defaults `regex_activation_enabled`
+    /// to `true`, so setting `SKILLS_REGEX_ACTIVATION_ENABLED=false` with a
+    /// default settings struct must flip the resolved config to `false`.
+    /// Regression guard for the env-var wiring added in #4144 — the
+    /// `db_first_bool` path was previously untested.
+    #[test]
+    fn skills_config_reads_regex_activation_enabled_from_env() {
+        // Serialise with the other env-touching tests in the workspace.
+        // We can't reach `tests::ENV_LOCK` from here; rely on the env var
+        // being unique to this PR and on cargo's per-test thread isolation
+        // being acceptable for a single-variable toggle.
+        let key = "SKILLS_REGEX_ACTIVATION_ENABLED";
+        let prior = std::env::var(key).ok();
+
+        // SAFETY (Rust 2024): no other threads are reading this env var
+        // during the test — SkillsConfig::resolve is called synchronously
+        // on the test thread, and the var is restored before return.
+        unsafe { std::env::set_var(key, "false") };
+
+        let settings = Settings::default();
+        let cfg = SkillsConfig::resolve(&settings).expect("resolve skills config");
+        assert!(
+            !cfg.regex_activation_enabled,
+            "SKILLS_REGEX_ACTIVATION_ENABLED=false must disable regex activation"
+        );
+
+        // Flip it back on and re-resolve to confirm the env value, not a
+        // sticky default, drives the resolved field.
+        unsafe { std::env::set_var(key, "true") };
+        let cfg_on = SkillsConfig::resolve(&settings).expect("resolve skills config");
+        assert!(cfg_on.regex_activation_enabled);
+
+        // Restore.
+        unsafe {
+            match prior {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+    }
+}

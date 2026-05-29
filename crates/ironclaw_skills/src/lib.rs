@@ -72,7 +72,7 @@ pub use management::{
 pub use parser::{ParsedSkill, SkillParseError, parse_skill_md};
 pub use selector::{
     MAX_SKILL_CONTEXT_TOKENS, SelectionOutcome, SkillSelectionOptions, extract_skill_mentions,
-    prefilter_skills, prefilter_skills_with_options, skill_token_cost,
+    prefilter_skills_with_options, skill_token_cost,
 };
 pub use validation::{
     SafeRelativePathError, escape_skill_content, escape_xml_attr, normalize_line_endings,
