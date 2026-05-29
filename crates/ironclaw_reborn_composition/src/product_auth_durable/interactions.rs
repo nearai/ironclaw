@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use chrono::Utc;
-use ironclaw_filesystem::{CasExpectation, RecordVersion, RootFilesystem};
+use ironclaw_filesystem::{CasExpectation, FilesystemError, RecordVersion, RootFilesystem};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 
@@ -10,7 +10,7 @@ use super::{
         update_account_from_request, validate_account_update_target,
         validate_manual_token_update_binding, validate_new_credential_account,
     },
-    paths::{interaction_path, manual_token_secret_handle},
+    paths::{fs_error, interaction_path, manual_token_secret_handle},
     scope_matches,
 };
 use ironclaw_auth::{
@@ -83,6 +83,9 @@ where
             return Err(AuthProductError::UnknownOrExpiredFlow);
         }
         let continuation = pending.continuation.clone();
+        let account = self
+            .create_or_update_manual_token_account(&pending, request.secret)
+            .await?;
         pending.consumed_at = Some(now);
         self.write_record(
             &scope.resource,
@@ -91,14 +94,24 @@ where
             CasExpectation::Version(version),
         )
         .await?;
-        let account = self
-            .create_or_update_manual_token_account(&pending, request.secret)
-            .await?;
         Ok(SecretSubmitResult {
             account_id: account.id,
             status: account.status,
             continuation,
         })
+    }
+
+    async fn abandon_manual_token(
+        &self,
+        scope: &ironclaw_auth::AuthProductScope,
+        interaction_id: AuthInteractionId,
+    ) -> Result<bool, AuthProductError> {
+        let path = interaction_path(scope, interaction_id)?;
+        match self.filesystem.delete(&scope.resource, &path).await {
+            Ok(()) => Ok(true),
+            Err(FilesystemError::NotFound { .. }) => Ok(false),
+            Err(error) => Err(fs_error(error)),
+        }
     }
 }
 

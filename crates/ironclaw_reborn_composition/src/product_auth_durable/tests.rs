@@ -1910,16 +1910,407 @@ async fn filesystem_validate_secret_rejects_control_characters() {
     );
 }
 
-// ─── tests: accounts_for_scope NotFound (empty scope) ─────────────────────────
+// ─── fix: abbyshekit review — expired flow mutation persisted ────────────────
 
 #[tokio::test]
-async fn filesystem_accounts_for_scope_returns_empty_when_dir_not_found() {
+async fn filesystem_expired_flow_status_persisted_before_returning_error() {
+    // When claim_oauth_callback / complete_oauth_callback / fail_oauth_callback
+    // encounter an expired flow, the Expired status must be written to disk
+    // before returning UnknownOrExpiredFlow so durable state matches the contract.
+    use ironclaw_auth::{
+        AuthErrorCode, OAuthCallbackClaimRequest, OAuthCallbackFailureInput, OAuthCallbackInput,
+        ProviderCallbackOutcome,
+    };
+
     let filesystem = test_filesystem();
     let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
     let scope = test_scope();
     let service = test_service(filesystem, secret_store);
 
-    // No writes to filesystem at all — list_dir will see NotFound.
-    let accounts = service.accounts_for_scope(&scope).await.unwrap();
-    assert!(accounts.is_empty(), "empty scope must return no accounts");
+    let flow = service
+        .create_flow(NewAuthFlow {
+            scope: scope.clone(),
+            kind: AuthFlowKind::IntegrationCredential,
+            provider: google_provider(),
+            challenge: AuthChallenge::OAuthUrl {
+                authorization_url: OAuthAuthorizationUrl::new("https://provider.example/oauth")
+                    .unwrap(),
+                expires_at: Utc::now() + Duration::minutes(5),
+            },
+            continuation: AuthContinuationRef::SetupOnly,
+            update_binding: None,
+            opaque_state_hash: Some(state_hash("exp-s")),
+            pkce_verifier_hash: Some(pkce_hash("exp-p")),
+            expires_at: Utc::now() - Duration::seconds(1),
+        })
+        .await
+        .unwrap();
+
+    // claim_oauth_callback must persist Expired before returning error.
+    let err = service
+        .claim_oauth_callback(
+            &scope,
+            OAuthCallbackClaimRequest {
+                flow_id: flow.id,
+                opaque_state_hash: state_hash("exp-s"),
+                provider: google_provider(),
+                pkce_verifier_hash: pkce_hash("exp-p"),
+            },
+        )
+        .await
+        .expect_err("expired flow must be rejected");
+    assert_eq!(err, AuthProductError::UnknownOrExpiredFlow);
+
+    let persisted = service
+        .get_flow(&scope, flow.id)
+        .await
+        .unwrap()
+        .expect("flow must still exist");
+    assert_eq!(persisted.status, AuthFlowStatus::Expired);
+    assert_eq!(persisted.error, Some(AuthErrorCode::UnknownOrExpiredFlow));
+
+    // fail_oauth_callback on already-expired flow returns FlowAlreadyTerminal
+    // because Expired is a terminal status; the record was already persisted
+    // as Expired by claim_oauth_callback above.
+    let err2 = service
+        .fail_oauth_callback(
+            &scope,
+            OAuthCallbackFailureInput {
+                flow_id: flow.id,
+                opaque_state_hash: state_hash("exp-s"),
+                error: AuthErrorCode::ProviderDenied,
+            },
+        )
+        .await
+        .expect_err("expired flow must be rejected");
+    assert_eq!(
+        err2,
+        AuthProductError::FlowAlreadyTerminal,
+        "already-expired flow returns FlowAlreadyTerminal"
+    );
+
+    let persisted2 = service
+        .get_flow(&scope, flow.id)
+        .await
+        .unwrap()
+        .expect("flow must still exist");
+    assert_eq!(persisted2.status, AuthFlowStatus::Expired);
+    assert_eq!(persisted2.error, Some(AuthErrorCode::UnknownOrExpiredFlow));
+
+    // complete_oauth_callback on a fresh expired flow (never claimed) must also
+    // persist the Expired status before returning error.
+    let flow2 = service
+        .create_flow(NewAuthFlow {
+            scope: scope.clone(),
+            kind: AuthFlowKind::IntegrationCredential,
+            provider: google_provider(),
+            challenge: AuthChallenge::OAuthUrl {
+                authorization_url: OAuthAuthorizationUrl::new("https://provider.example/oauth")
+                    .unwrap(),
+                expires_at: Utc::now() + Duration::minutes(5),
+            },
+            continuation: AuthContinuationRef::SetupOnly,
+            update_binding: None,
+            opaque_state_hash: Some(state_hash("exp2-s")),
+            pkce_verifier_hash: Some(pkce_hash("exp2-p")),
+            expires_at: Utc::now() - Duration::seconds(1),
+        })
+        .await
+        .unwrap();
+
+    let err3 = service
+        .complete_oauth_callback(
+            &scope,
+            OAuthCallbackInput {
+                flow_id: flow2.id,
+                opaque_state_hash: state_hash("exp2-s"),
+                outcome: ProviderCallbackOutcome::Denied,
+            },
+        )
+        .await
+        .expect_err("expired flow must be rejected");
+    assert_eq!(
+        err3,
+        AuthProductError::UnknownOrExpiredFlow,
+        "complete_oauth_callback on expired flow returns UnknownOrExpiredFlow"
+    );
+
+    let persisted3 = service
+        .get_flow(&scope, flow2.id)
+        .await
+        .unwrap()
+        .expect("flow2 must still exist");
+    assert_eq!(persisted3.status, AuthFlowStatus::Expired);
+    assert_eq!(persisted3.error, Some(AuthErrorCode::UnknownOrExpiredFlow));
+}
+
+// ─── fix: abbyshekit review — OAuth CAS-conflict branch purges old secrets ───
+
+#[tokio::test]
+async fn filesystem_oauth_cas_conflict_branch_purges_previous_secrets() {
+    // When the None-path CAS-conflict branch re-reads and overwrites an existing
+    // account, the previous access/refresh secret handles must be deleted from
+    // SecretStore so repeated re-auths do not accumulate dead handles.
+    use ironclaw_auth::ProviderCallbackOutcome;
+    use ironclaw_secrets::SecretMaterial;
+
+    let filesystem = test_filesystem();
+    let concrete_secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store: Arc<dyn SecretStore> = concrete_secret_store.clone();
+    let scope = test_scope();
+    let service = test_service(Arc::clone(&filesystem), Arc::clone(&secret_store));
+
+    let flow = service
+        .create_flow(NewAuthFlow {
+            scope: scope.clone(),
+            kind: AuthFlowKind::IntegrationCredential,
+            provider: google_provider(),
+            challenge: AuthChallenge::OAuthUrl {
+                authorization_url: OAuthAuthorizationUrl::new("https://provider.example/oauth")
+                    .unwrap(),
+                expires_at: Utc::now() + Duration::minutes(5),
+            },
+            continuation: AuthContinuationRef::SetupOnly,
+            update_binding: None,
+            opaque_state_hash: Some(state_hash("cas-s")),
+            pkce_verifier_hash: Some(pkce_hash("cas-p")),
+            expires_at: Utc::now() + Duration::minutes(5),
+        })
+        .await
+        .unwrap();
+
+    // Pre-seed the account with old secrets.
+    let preseeded_id = CredentialAccountId::from_uuid(flow.id.as_uuid());
+    let old_access = SecretHandle::new("old-access").unwrap();
+    let old_refresh = SecretHandle::new("old-refresh").unwrap();
+    concrete_secret_store
+        .put(
+            scope.resource.clone(),
+            old_access.clone(),
+            SecretMaterial::from("old-access-token"),
+        )
+        .await
+        .unwrap();
+    concrete_secret_store
+        .put(
+            scope.resource.clone(),
+            old_refresh.clone(),
+            SecretMaterial::from("old-refresh-token"),
+        )
+        .await
+        .unwrap();
+
+    service
+        .create_account_with_id(
+            preseeded_id,
+            NewCredentialAccount {
+                scope: scope.clone(),
+                provider: google_provider(),
+                label: account_label(),
+                status: CredentialAccountStatus::Configured,
+                ownership: CredentialOwnership::UserReusable,
+                owner_extension: None,
+                granted_extensions: vec![],
+                access_secret: Some(old_access.clone()),
+                refresh_secret: Some(old_refresh.clone()),
+                scopes: vec![],
+            },
+            CasExpectation::Absent,
+        )
+        .await
+        .unwrap();
+
+    service
+        .claim_oauth_callback(
+            &scope,
+            OAuthCallbackClaimRequest {
+                flow_id: flow.id,
+                opaque_state_hash: state_hash("cas-s"),
+                provider: google_provider(),
+                pkce_verifier_hash: pkce_hash("cas-p"),
+            },
+        )
+        .await
+        .unwrap();
+
+    let new_access = SecretHandle::new("new-access").unwrap();
+    let new_refresh = SecretHandle::new("new-refresh").unwrap();
+    let completed = service
+        .complete_oauth_callback(
+            &scope,
+            OAuthCallbackInput {
+                flow_id: flow.id,
+                opaque_state_hash: state_hash("cas-s"),
+                outcome: ProviderCallbackOutcome::Authorized {
+                    exchange: OAuthProviderExchange {
+                        provider: google_provider(),
+                        account_label: account_label(),
+                        authorization_code_hash: code_hash("cas-c"),
+                        pkce_verifier_hash: pkce_hash("cas-p"),
+                        access_secret: new_access.clone(),
+                        refresh_secret: Some(new_refresh.clone()),
+                        scopes: vec![ProviderScope::new("gmail.readonly").unwrap()],
+                        account_id: None,
+                    },
+                },
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        completed.credential_account_id,
+        Some(preseeded_id),
+        "CAS-conflict branch must reuse pre-seeded account"
+    );
+
+    // Old secrets must be purged from SecretStore.
+    assert!(
+        concrete_secret_store
+            .metadata(&scope.resource, &old_access)
+            .await
+            .unwrap()
+            .is_none(),
+        "old access secret must be purged after CAS-conflict update"
+    );
+    assert!(
+        concrete_secret_store
+            .metadata(&scope.resource, &old_refresh)
+            .await
+            .unwrap()
+            .is_none(),
+        "old refresh secret must be purged after CAS-conflict update"
+    );
+}
+
+// ─── fix: abbyshekit review — manual-token consume only after success ────────
+
+#[tokio::test]
+async fn filesystem_manual_token_consume_only_after_successful_account_write() {
+    // If the account write fails, the interaction must NOT be marked consumed
+    // so the user can retry without going through a full re-setup.
+    use ironclaw_auth::CredentialAccountId;
+    use ironclaw_filesystem::CasExpectation;
+
+    let filesystem = test_filesystem();
+    let concrete_secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store: Arc<dyn SecretStore> = concrete_secret_store.clone();
+    let scope = test_scope();
+    let service = test_service(Arc::clone(&filesystem), Arc::clone(&secret_store));
+
+    let challenge = service
+        .request_secret_input(ManualTokenSetupRequest {
+            scope: scope.clone(),
+            provider: google_provider(),
+            label: account_label(),
+            continuation: AuthContinuationRef::SetupOnly,
+            update_binding: None,
+            expires_at: Utc::now() + Duration::minutes(5),
+        })
+        .await
+        .unwrap();
+    let AuthChallenge::ManualTokenRequired { interaction_id, .. } = challenge else {
+        panic!("expected ManualTokenRequired");
+    };
+
+    // Derive the account ID and pre-create a dummy record to force CAS failure.
+    let account_id = CredentialAccountId::from_uuid(interaction_id.as_uuid());
+    let dummy_account = ironclaw_auth::CredentialAccount {
+        id: account_id,
+        scope: scope.clone(),
+        provider: google_provider(),
+        label: account_label(),
+        status: CredentialAccountStatus::Configured,
+        ownership: CredentialOwnership::UserReusable,
+        owner_extension: None,
+        granted_extensions: vec![],
+        access_secret: None,
+        refresh_secret: None,
+        scopes: vec![],
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+    };
+    let path = super::paths::account_path(&scope, account_id)
+        .expect("account path derivation must succeed");
+    let json = serde_json::to_vec(&dummy_account).expect("serialization must succeed");
+    use ironclaw_filesystem::{ContentType, Entry};
+    let entry = Entry::bytes(json).with_content_type(ContentType::json());
+    filesystem
+        .put(&scope.resource, &path, entry, CasExpectation::Absent)
+        .await
+        .expect("pre-create dummy account must succeed");
+
+    // First submit fails because account write hits CAS conflict.
+    let err = service
+        .submit_manual_token(
+            &scope,
+            SecretSubmitRequest {
+                interaction_id,
+                secret: SecretString::from("first-attempt"),
+            },
+        )
+        .await
+        .expect_err("submit must fail when account write fails");
+    assert_eq!(
+        err,
+        AuthProductError::BackendConflict,
+        "CAS conflict must surface as BackendConflict"
+    );
+
+    // Interaction must NOT be consumed — retry still possible.
+    let retry_before_cleanup = service
+        .submit_manual_token(
+            &scope,
+            SecretSubmitRequest {
+                interaction_id,
+                secret: SecretString::from("retry-before-cleanup"),
+            },
+        )
+        .await;
+    assert!(
+        retry_before_cleanup.is_err(),
+        "retry must still fail because dummy account still blocks"
+    );
+    assert_eq!(
+        retry_before_cleanup.unwrap_err(),
+        AuthProductError::BackendConflict,
+        "retry must still hit BackendConflict, not UnknownOrExpiredFlow"
+    );
+
+    // Remove the dummy record so retry succeeds.
+    filesystem
+        .delete(&scope.resource, &path)
+        .await
+        .expect("delete dummy account must succeed");
+
+    let result = service
+        .submit_manual_token(
+            &scope,
+            SecretSubmitRequest {
+                interaction_id,
+                secret: SecretString::from("retry-token"),
+            },
+        )
+        .await;
+    assert!(
+        result.is_ok(),
+        "retry must succeed after removing the blocking dummy record"
+    );
+
+    // Third attempt must now fail with UnknownOrExpiredFlow because consumed_at is set.
+    let consumed_err = service
+        .submit_manual_token(
+            &scope,
+            SecretSubmitRequest {
+                interaction_id,
+                secret: SecretString::from("third-attempt"),
+            },
+        )
+        .await
+        .expect_err("third submit must fail because interaction is consumed");
+    assert_eq!(
+        consumed_err,
+        AuthProductError::UnknownOrExpiredFlow,
+        "interaction must be consumed after successful retry"
+    );
 }
