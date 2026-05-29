@@ -6,7 +6,7 @@ use ironclaw_network::{NetworkHttpEgress, NetworkHttpRequest};
 use ironclaw_secrets::SecretStore;
 
 use super::{HostHttpEgressService, PipelineError, runtime_network_error, runtime_response};
-use crate::http_body;
+use crate::http_body::{self, RESPONSE_BODY_STORE_UNAVAILABLE_REASON};
 
 pub(super) fn execute<N, S>(
     service: &HostHttpEgressService<N, S>,
@@ -19,7 +19,8 @@ where
     let network_policy = service.network_policy_for_request(&mut request)?;
     service.validate_credential_sources_for_request(&request)?;
     let save_body_to = authorize_body_store(service, &mut request)?;
-    super::sanitize::validate_runtime_request(&request, &service.leak_detector)?;
+    super::sanitize::validate_runtime_request(&request, &service.leak_detector)
+        .map_err(PipelineError::pre_transport)?;
     let scope = request.scope.clone();
     let capability_id = request.capability_id.clone();
 
@@ -28,7 +29,8 @@ where
         service.secret_injections(),
         service.allows_direct_secret_lease(),
         &mut request,
-    )?;
+    )
+    .map_err(PipelineError::pre_transport)?;
 
     let response = dispatch_network(service, request, network_policy)?;
     let credentials_injected = !redaction_values.is_empty();
@@ -41,7 +43,7 @@ where
     let (response, saved_body) = http_body::apply_body_disposition(
         response,
         save_body_to,
-        service.body_store.as_deref(),
+        service.body_store.as_ref(),
         &scope,
         &capability_id,
     )
@@ -59,16 +61,20 @@ fn authorize_body_store<N, S>(
 ) -> Result<Option<RuntimeHttpSaveTarget>, PipelineError> {
     let save_body_to = std::mem::take(&mut request.save_body_to);
     if let Some(target) = &save_body_to {
-        let Some(store) = service.body_store.as_deref() else {
-            return Err(PipelineError::pre_transport(
-                RuntimeHttpEgressError::Request {
-                    reason: "response_body_store_unavailable".to_string(),
-                    request_bytes: 0,
-                    response_bytes: 0,
-                },
-            ));
-        };
-        if let Err(error) = store.authorize_write(&request.scope, &request.capability_id, target) {
+        if let Err(error) =
+            service
+                .body_store
+                .authorize_write(&request.scope, &request.capability_id, target)
+        {
+            if error.reason == RESPONSE_BODY_STORE_UNAVAILABLE_REASON {
+                return Err(PipelineError::pre_transport(
+                    RuntimeHttpEgressError::Request {
+                        reason: error.reason,
+                        request_bytes: 0,
+                        response_bytes: 0,
+                    },
+                ));
+            }
             return Err(PipelineError::pre_transport(
                 RuntimeHttpEgressError::Request {
                     reason: format!("response_body_store_unauthorized: {}", error.reason),

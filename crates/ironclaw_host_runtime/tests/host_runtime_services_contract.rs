@@ -1157,12 +1157,10 @@ fn production_wiring_validation_rejects_unverified_runtime_http_egress() {
         ProcessServices::in_memory(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
-    .with_runtime_http_egress(Arc::new(
-        HostHttpEgressService::new_with_request_policy_for_tests(
-            RecordingNetworkHttpEgress::new(),
-            InMemorySecretStore::new(),
-        ),
-    ));
+    .with_runtime_http_egress(Arc::new(HostHttpEgressService::new(
+        RecordingNetworkHttpEgress::new(),
+        InMemorySecretStore::new(),
+    )));
 
     let report = services
         .validate_production_wiring(&ProductionWiringConfig::new([]).require_runtime_http_egress())

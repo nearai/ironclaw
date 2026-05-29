@@ -11,7 +11,7 @@ use ironclaw_safety::LeakDetector;
 use ironclaw_secrets::SecretStore;
 use std::{fmt, sync::Arc};
 
-use crate::http_body::RuntimeHttpBodyStore;
+use crate::http_body::{RuntimeHttpBodyStore, UnsupportedRuntimeHttpBodyStore};
 use crate::obligations::{NetworkObligationPolicyStore, RuntimeSecretInjectionStore};
 
 #[derive(Debug, Clone)]
@@ -21,7 +21,6 @@ enum NetworkPolicySource {
         secret_injections: Arc<RuntimeSecretInjectionStore>,
     },
     MissingStagedForTests,
-    RequestPolicyFallbackForTests,
 }
 
 #[derive(Clone)]
@@ -31,7 +30,7 @@ pub struct HostHttpEgressService<N, S> {
     pub(super) leak_detector: Arc<LeakDetector>,
     network_policy_source: NetworkPolicySource,
     pub(super) unsafe_raw_diagnostics_allowed: bool,
-    pub(super) body_store: Option<Arc<dyn RuntimeHttpBodyStore>>,
+    pub(super) body_store: Arc<dyn RuntimeHttpBodyStore>,
 }
 
 impl<N, S> fmt::Debug for HostHttpEgressService<N, S>
@@ -55,10 +54,10 @@ where
 }
 
 impl<N, S> HostHttpEgressService<N, S> {
-    /// Construct host HTTP egress in fail-closed test mode.
+    /// Construct host HTTP egress without staged handoff stores.
     ///
-    /// Production composition should call [`Self::production`] so the staged
-    /// network-policy and secret-injection stores are required at construction.
+    /// This service rejects requests before transport until production
+    /// composition supplies staged network-policy and secret-injection stores.
     pub fn new(network: N, secrets: S) -> Self {
         Self {
             network,
@@ -66,7 +65,7 @@ impl<N, S> HostHttpEgressService<N, S> {
             leak_detector: Arc::new(LeakDetector::new()),
             network_policy_source: NetworkPolicySource::MissingStagedForTests,
             unsafe_raw_diagnostics_allowed: false,
-            body_store: None,
+            body_store: Arc::new(UnsupportedRuntimeHttpBodyStore),
         }
     }
 
@@ -75,6 +74,7 @@ impl<N, S> HostHttpEgressService<N, S> {
         secrets: S,
         network_policy_store: Arc<NetworkObligationPolicyStore>,
         secret_injections: Arc<RuntimeSecretInjectionStore>,
+        body_store: Arc<dyn RuntimeHttpBodyStore>,
     ) -> Self {
         Self {
             network,
@@ -85,24 +85,7 @@ impl<N, S> HostHttpEgressService<N, S> {
                 secret_injections,
             },
             unsafe_raw_diagnostics_allowed: false,
-            body_store: None,
-        }
-    }
-
-    /// Construct host HTTP egress that uses the policy embedded in each request.
-    ///
-    /// This is intentionally named as a test/legacy seam: production Reborn
-    /// runtime egress must consume staged `ApplyNetworkPolicy` handoffs from
-    /// the staged network-policy store instead of trusting runtime/caller
-    /// request policy fields.
-    pub fn new_with_request_policy_for_tests(network: N, secrets: S) -> Self {
-        Self {
-            network,
-            secrets,
-            leak_detector: Arc::new(LeakDetector::new()),
-            network_policy_source: NetworkPolicySource::RequestPolicyFallbackForTests,
-            unsafe_raw_diagnostics_allowed: false,
-            body_store: None,
+            body_store,
         }
     }
 
@@ -124,13 +107,12 @@ impl<N, S> HostHttpEgressService<N, S> {
                 Arc::ptr_eq(network_policy_store, expected_network_policy_store)
                     && Arc::ptr_eq(secret_injections, expected_secret_injections)
             }
-            NetworkPolicySource::MissingStagedForTests
-            | NetworkPolicySource::RequestPolicyFallbackForTests => false,
+            NetworkPolicySource::MissingStagedForTests => false,
         }
     }
 
     pub fn with_body_store(mut self, store: Arc<dyn RuntimeHttpBodyStore>) -> Self {
-        self.body_store = Some(store);
+        self.body_store = store;
         self
     }
 
@@ -158,9 +140,6 @@ impl<N, S> HostHttpEgressService<N, S> {
                     response_bytes: 0,
                 },
             )),
-            NetworkPolicySource::RequestPolicyFallbackForTests => {
-                Ok(std::mem::take(&mut request.network_policy))
-            }
         }
     }
 
@@ -187,16 +166,12 @@ impl<N, S> HostHttpEgressService<N, S> {
             NetworkPolicySource::Production {
                 secret_injections, ..
             } => Some(secret_injections.as_ref()),
-            NetworkPolicySource::MissingStagedForTests
-            | NetworkPolicySource::RequestPolicyFallbackForTests => None,
+            NetworkPolicySource::MissingStagedForTests => None,
         }
     }
 
     pub(super) fn allows_direct_secret_lease(&self) -> bool {
-        matches!(
-            self.network_policy_source,
-            NetworkPolicySource::RequestPolicyFallbackForTests
-        )
+        false
     }
 }
 
@@ -250,12 +225,6 @@ impl PipelineError {
 
     fn into_inner(self) -> RuntimeHttpEgressError {
         self.error
-    }
-}
-
-impl From<RuntimeHttpEgressError> for PipelineError {
-    fn from(error: RuntimeHttpEgressError) -> Self {
-        Self::pre_transport(error)
     }
 }
 

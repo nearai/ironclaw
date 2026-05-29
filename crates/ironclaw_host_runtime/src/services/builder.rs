@@ -25,6 +25,7 @@ use super::{
 };
 use crate::LocalHostProcessPort;
 use crate::RuntimeHttpBodyStore;
+use crate::http_body::UnsupportedRuntimeHttpBodyStore;
 use crate::wasm_credentials::SharedHostWasmRuntimeCredentials;
 use ironclaw_secrets::{CredentialAccountStore, CredentialSessionStore};
 
@@ -776,7 +777,7 @@ where
     where
         N: NetworkHttpEgress + 'static,
     {
-        self.try_with_host_http_egress_internal(network, None)
+        self.try_with_host_http_egress_internal(network, Arc::new(UnsupportedRuntimeHttpBodyStore))
     }
 
     pub fn try_with_host_http_egress_with_body_store<N, T>(
@@ -789,13 +790,13 @@ where
         T: RuntimeHttpBodyStore + 'static,
     {
         let body_store: Arc<dyn RuntimeHttpBodyStore> = body_store;
-        self.try_with_host_http_egress_internal(network, Some(body_store))
+        self.try_with_host_http_egress_internal(network, body_store)
     }
 
     fn try_with_host_http_egress_internal<N>(
         self,
         network: N,
-        body_store: Option<Arc<dyn RuntimeHttpBodyStore>>,
+        body_store: Arc<dyn RuntimeHttpBodyStore>,
     ) -> Result<Self, ProductionWiringReport>
     where
         N: NetworkHttpEgress + 'static,
@@ -807,18 +808,16 @@ where
                 None,
             ));
         };
-        let mut service = crate::HostHttpEgressService::production(
+        let service = crate::HostHttpEgressService::production(
             network,
             SharedSecretStore(secret_store),
             Arc::clone(&self.network_policy_store),
             Arc::clone(&self.secret_injection_store),
+            body_store,
         )
         .with_unsafe_raw_diagnostics_allowed(
             crate::runtime_policy_allows_unsafe_raw_http_diagnostics(self.runtime_policy.as_ref()),
         );
-        if let Some(store) = body_store {
-            service = service.with_body_store(store);
-        }
         let runtime_http_egress = Arc::new(service);
         Ok(self.with_host_http_egress_service(runtime_http_egress))
     }

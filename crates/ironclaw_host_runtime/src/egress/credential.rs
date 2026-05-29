@@ -414,3 +414,305 @@ const _: fn(&CredentialCacheEntry) = |entry| {
         require_zeroize_on_drop(value);
     }
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ironclaw_host_api::{
+        InvocationId, NetworkMethod, NetworkPolicy, ResourceScope, RuntimeKind, TenantId, UserId,
+    };
+    use ironclaw_secrets::{
+        InMemorySecretStore, SecretLease, SecretLeaseId, SecretMetadata, SecretStoreError,
+    };
+
+    fn sample_scope() -> ResourceScope {
+        ResourceScope {
+            tenant_id: TenantId::new("tenant1").unwrap(),
+            user_id: UserId::new("user1").unwrap(),
+            agent_id: None,
+            project_id: None,
+            mission_id: None,
+            thread_id: None,
+            invocation_id: InvocationId::new(),
+        }
+    }
+
+    fn sample_request(scope: ResourceScope) -> RuntimeHttpEgressRequest {
+        RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::Script,
+            scope,
+            capability_id: CapabilityId::new("runtime.http").unwrap(),
+            method: NetworkMethod::Post,
+            url: "https://api.example.test/v1/run".to_string(),
+            headers: vec![],
+            body: b"hello".to_vec(),
+            network_policy: NetworkPolicy {
+                allowed_targets: vec![],
+                deny_private_ip_ranges: true,
+                max_egress_bytes: Some(4096),
+            },
+            credential_injections: vec![],
+            response_body_limit: Some(4096),
+            save_body_to: None,
+            timeout_ms: None,
+        }
+    }
+
+    fn sample_injection(handle: SecretHandle) -> RuntimeCredentialInjection {
+        RuntimeCredentialInjection {
+            handle,
+            source: RuntimeCredentialSource::SecretStoreLease,
+            target: RuntimeCredentialTarget::Header {
+                name: "authorization".to_string(),
+                prefix: Some("Bearer ".to_string()),
+            },
+            required: true,
+        }
+    }
+
+    #[test]
+    fn lease_secret_maps_secret_store_errors_to_sanitized_reasons() {
+        let scope = sample_scope();
+        let handle = SecretHandle::new("api-token").unwrap();
+        let lease_id = SecretLeaseId::new();
+        let cases = vec![
+            (
+                SecretStoreError::UnknownSecret {
+                    scope: Box::new(scope.clone()),
+                    handle: handle.clone(),
+                },
+                "required credential is unavailable",
+            ),
+            (
+                SecretStoreError::UnknownLease {
+                    scope: Box::new(scope.clone()),
+                    lease_id,
+                },
+                "credential lease is unavailable",
+            ),
+            (
+                SecretStoreError::LeaseConsumed { lease_id },
+                "credential lease was already used",
+            ),
+            (
+                SecretStoreError::LeaseRevoked { lease_id },
+                "credential lease was revoked",
+            ),
+            (
+                SecretStoreError::LeaseExpired { lease_id },
+                "credential expired",
+            ),
+            (SecretStoreError::SecretExpired, "credential expired"),
+            (
+                SecretStoreError::BackendMisconfigured {
+                    reason: "raw backend detail".to_string(),
+                },
+                "credential store is misconfigured",
+            ),
+            (
+                SecretStoreError::StoreUnavailable {
+                    reason: "raw store detail".to_string(),
+                },
+                "credential store unavailable",
+            ),
+        ];
+
+        let request = sample_request(scope.clone());
+        for (store_error, expected_reason) in cases {
+            let store = FailingLeaseSecretStore {
+                scope: scope.clone(),
+                handle: handle.clone(),
+                error: store_error,
+            };
+            let error =
+                lease_secret_for_injection(&store, &request, &sample_injection(handle.clone()))
+                    .expect_err("failing secret store should reject lease resolution");
+            assert_eq!(credential_reason(&error), expected_reason);
+        }
+    }
+
+    #[test]
+    fn lease_secret_runs_tokio_backed_secret_store_future() {
+        let scope = sample_scope();
+        let handle = SecretHandle::new("api-token").unwrap();
+        let store = TokioBackedSecretStore::new();
+        block_on_test(store.put(
+            scope.clone(),
+            handle.clone(),
+            SecretMaterial::from("sk-test-secret"),
+        ))
+        .unwrap();
+
+        let material =
+            lease_secret_for_injection(&store, &sample_request(scope), &sample_injection(handle))
+                .expect("tokio-backed secret store should resolve through the sync bridge")
+                .expect("required credential should be present");
+
+        assert_eq!(material.expose_secret(), "sk-test-secret");
+    }
+
+    fn credential_reason(error: &RuntimeHttpEgressError) -> &str {
+        match error {
+            RuntimeHttpEgressError::Credential { reason } => reason,
+            other => panic!("expected credential error, got {other:?}"),
+        }
+    }
+
+    struct FailingLeaseSecretStore {
+        scope: ResourceScope,
+        handle: SecretHandle,
+        error: SecretStoreError,
+    }
+
+    #[async_trait::async_trait]
+    impl SecretStore for FailingLeaseSecretStore {
+        async fn put(
+            &self,
+            scope: ResourceScope,
+            handle: SecretHandle,
+            _material: SecretMaterial,
+        ) -> Result<SecretMetadata, SecretStoreError> {
+            Ok(SecretMetadata { scope, handle })
+        }
+
+        async fn metadata(
+            &self,
+            _scope: &ResourceScope,
+            _handle: &SecretHandle,
+        ) -> Result<Option<SecretMetadata>, SecretStoreError> {
+            Ok(Some(SecretMetadata {
+                scope: self.scope.clone(),
+                handle: self.handle.clone(),
+            }))
+        }
+
+        async fn delete(
+            &self,
+            _scope: &ResourceScope,
+            _handle: &SecretHandle,
+        ) -> Result<bool, SecretStoreError> {
+            Ok(false)
+        }
+
+        async fn lease_once(
+            &self,
+            _scope: &ResourceScope,
+            _handle: &SecretHandle,
+        ) -> Result<SecretLease, SecretStoreError> {
+            Err(self.error.clone())
+        }
+
+        async fn consume(
+            &self,
+            _scope: &ResourceScope,
+            _lease_id: SecretLeaseId,
+        ) -> Result<SecretMaterial, SecretStoreError> {
+            Err(self.error.clone())
+        }
+
+        async fn revoke(
+            &self,
+            _scope: &ResourceScope,
+            _lease_id: SecretLeaseId,
+        ) -> Result<SecretLease, SecretStoreError> {
+            Err(self.error.clone())
+        }
+
+        async fn leases_for_scope(
+            &self,
+            _scope: &ResourceScope,
+        ) -> Result<Vec<SecretLease>, SecretStoreError> {
+            Ok(Vec::new())
+        }
+    }
+
+    struct TokioBackedSecretStore {
+        inner: InMemorySecretStore,
+    }
+
+    impl TokioBackedSecretStore {
+        fn new() -> Self {
+            Self {
+                inner: InMemorySecretStore::new(),
+            }
+        }
+
+        async fn yield_to_tokio() {
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl SecretStore for TokioBackedSecretStore {
+        async fn put(
+            &self,
+            scope: ResourceScope,
+            handle: SecretHandle,
+            material: SecretMaterial,
+        ) -> Result<SecretMetadata, SecretStoreError> {
+            Self::yield_to_tokio().await;
+            self.inner.put(scope, handle, material).await
+        }
+
+        async fn metadata(
+            &self,
+            scope: &ResourceScope,
+            handle: &SecretHandle,
+        ) -> Result<Option<SecretMetadata>, SecretStoreError> {
+            Self::yield_to_tokio().await;
+            self.inner.metadata(scope, handle).await
+        }
+
+        async fn delete(
+            &self,
+            scope: &ResourceScope,
+            handle: &SecretHandle,
+        ) -> Result<bool, SecretStoreError> {
+            Self::yield_to_tokio().await;
+            self.inner.delete(scope, handle).await
+        }
+
+        async fn lease_once(
+            &self,
+            scope: &ResourceScope,
+            handle: &SecretHandle,
+        ) -> Result<SecretLease, SecretStoreError> {
+            Self::yield_to_tokio().await;
+            self.inner.lease_once(scope, handle).await
+        }
+
+        async fn consume(
+            &self,
+            scope: &ResourceScope,
+            lease_id: SecretLeaseId,
+        ) -> Result<SecretMaterial, SecretStoreError> {
+            Self::yield_to_tokio().await;
+            self.inner.consume(scope, lease_id).await
+        }
+
+        async fn revoke(
+            &self,
+            scope: &ResourceScope,
+            lease_id: SecretLeaseId,
+        ) -> Result<SecretLease, SecretStoreError> {
+            Self::yield_to_tokio().await;
+            self.inner.revoke(scope, lease_id).await
+        }
+
+        async fn leases_for_scope(
+            &self,
+            scope: &ResourceScope,
+        ) -> Result<Vec<SecretLease>, SecretStoreError> {
+            Self::yield_to_tokio().await;
+            self.inner.leases_for_scope(scope).await
+        }
+    }
+
+    fn block_on_test<T>(future: impl std::future::Future<Output = T>) -> T {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(future)
+    }
+}
