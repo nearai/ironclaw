@@ -37,8 +37,6 @@ permissions:
   pull-requests: write  # gh pr view + gh pr comment + reactions on PR comments
   issues: write         # belt-and-suspenders; also covers parse-error comment
   contents: read
-  id-token: write       # the called workflow uses OIDC and must be
-                        # granted this or it fails to start.
 
 jobs:
   parse:
@@ -173,6 +171,9 @@ jobs:
       contents: read
       pull-requests: write
       issues: write
+      id-token: write       # the called workflow uses OIDC to assume an
+                            # AWS role for S3 persistence; without this it
+                            # fails to start.
     # Concurrency lives on the authorized job, not the workflow root —
     # otherwise an unauthorized commenter typing `/benchmark whatever`
     # would acquire the per-PR group and cancel an in-flight maintainer
