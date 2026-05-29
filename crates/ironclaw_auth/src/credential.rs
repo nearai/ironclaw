@@ -36,7 +36,7 @@ pub enum CredentialOwnership {
 
 /// Durable credential account metadata. Secret values live behind handles and
 /// never appear in this record.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CredentialAccount {
     pub id: CredentialAccountId,
     pub scope: AuthProductScope,

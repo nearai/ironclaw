@@ -3,6 +3,7 @@ use std::{
     sync::Arc,
 };
 
+use crate::product_auth_durable::{FilesystemAuthProductServices, UnavailableAuthProviderClient};
 use ironclaw_auth::AuthProviderClient;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_authorization::FilesystemCapabilityLeaseStore;
@@ -1233,11 +1234,6 @@ async fn build_production_shaped(
         require_runtime_http_egress,
         require_wasm_credentials,
     );
-    if google_oauth_config.is_some() && product_auth_ports.is_none() {
-        return Err(RebornBuildError::InvalidConfig {
-            reason: "Google OAuth backend config requires product-auth ports".to_string(),
-        });
-    }
     #[cfg(not(any(feature = "libsql", feature = "postgres")))]
     let _ = (
         production_trust_policy,
@@ -1633,6 +1629,7 @@ where
         google_oauth_config,
     } = context;
     let secret_store: Arc<dyn SecretStore> = stores.secret_credentials.secret_store.clone();
+    let product_auth_filesystem = Arc::clone(&stores.scoped_filesystem);
     let services = HostRuntimeServices::new(
         Arc::new(builtin_extension_registry()?),
         Arc::clone(&stores.filesystem),
@@ -1645,7 +1642,7 @@ where
     .with_runtime_policy(production_wiring.runtime_policy)
     .with_first_party_capabilities(Arc::new(builtin_first_party_registry()?))
     .with_capability_leases(stores.leases)
-    .with_secret_store(stores.secret_credentials.secret_store)
+    .with_secret_store(Arc::clone(&stores.secret_credentials.secret_store))
     .with_credential_broker(stores.secret_credentials.credential_broker)
     .try_with_host_http_egress_with_body_store(
         ironclaw_network::PolicyNetworkHttpEgress::new(
@@ -1657,14 +1654,14 @@ where
     .with_reborn_event_store_config(profile.to_event_store_profile(), stores.event_store)
     .await?
     .with_filesystem_run_state(Arc::clone(&stores.scoped_filesystem))
-    .with_filesystem_turn_state_store(stores.scoped_filesystem)
+    .with_filesystem_turn_state_store(Arc::clone(&stores.scoped_filesystem))
     .with_run_profile_resolver(planned_run_profile_resolver()?)
     .with_turn_run_wake_notifier(production_wiring.turn_run_wake_notifier);
     let services = attach_nearai_mcp_runtime(services)?;
     let google_provider_client = google_oauth_config
         .map(|config| {
             let runtime_ports = require_product_auth_runtime_ports(&services)?;
-            google_provider_client(config, secret_store, runtime_ports)
+            google_provider_client(config, Arc::clone(&secret_store), runtime_ports)
         })
         .transpose()?;
     let services = apply_production_runtime_process_binding(
@@ -1676,10 +1673,22 @@ where
         Arc::new(services.turn_coordinator_for_production()?);
     let host_runtime: Arc<dyn ironclaw_host_runtime::HostRuntime> =
         Arc::new(services.host_runtime_for_production(&wiring_config)?);
-    let product_auth = product_auth_ports.map(|ports| {
-        compose_product_auth_services(ports, turn_coordinator.clone(), google_provider_client)
+    let product_auth_ports = product_auth_ports.unwrap_or_else(|| {
+        let durable = Arc::new(FilesystemAuthProductServices::new(
+            product_auth_filesystem,
+            Arc::clone(&secret_store),
+        ));
+        RebornProductAuthServicePorts::from_shared_with_provider(
+            durable,
+            Arc::new(UnavailableAuthProviderClient),
+        )
     });
-    let product_auth_ready = product_auth.is_some();
+    let product_auth = Some(compose_product_auth_services(
+        product_auth_ports,
+        turn_coordinator.clone(),
+        google_provider_client,
+    ));
+    let product_auth_ready = true;
 
     Ok(RebornServices {
         host_runtime: Some(host_runtime),
