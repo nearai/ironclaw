@@ -622,10 +622,19 @@ impl HostRuntime for DefaultHostRuntime {
                     idempotency_key = idempotency_key.as_deref().unwrap_or(""),
                     "capability spawn resume failed"
                 );
-                Ok(RuntimeCapabilityOutcome::Failed(failure_from(
-                    error,
-                    capability_id,
-                )))
+                // Mirror resume_capability: AuthorizationRequiresAuth must return
+                // AuthRequired, not Failed. Without this arm a spawned capability
+                // that needs re-auth after an approval resume silently fails.
+                match error {
+                    CapabilityInvocationError::AuthorizationRequiresAuth {
+                        capability,
+                        required_secrets,
+                    } => Ok(auth_required_outcome(capability, required_secrets)),
+                    other => Ok(RuntimeCapabilityOutcome::Failed(failure_from(
+                        other,
+                        capability_id,
+                    ))),
+                }
             }
         }
     }
@@ -1389,67 +1398,66 @@ pub(crate) fn failure_kind_from(error: &CapabilityInvocationError) -> RuntimeFai
         CapabilityInvocationError::Lease(_)
         | CapabilityInvocationError::RunState(_)
         | CapabilityInvocationError::Process(_) => RuntimeFailureKind::Backend,
-        CapabilityInvocationError::Dispatch { kind } => dispatch_kind_to_failure(*kind),
+        CapabilityInvocationError::Dispatch { kind } => RuntimeFailureKind::from(*kind),
     }
 }
 
-fn dispatch_kind_to_failure(kind: DispatchFailureKind) -> RuntimeFailureKind {
-    match kind {
-        DispatchFailureKind::UnknownCapability | DispatchFailureKind::UnknownProvider => {
-            RuntimeFailureKind::InvalidOutput
-        }
-        DispatchFailureKind::MissingRuntimeBackend | DispatchFailureKind::UnsupportedRuntime => {
-            RuntimeFailureKind::MissingRuntime
-        }
-        DispatchFailureKind::AuthRequired => RuntimeFailureKind::Authorization,
-        DispatchFailureKind::RuntimeMismatch => RuntimeFailureKind::Backend,
-        DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::ExtensionRuntimeMismatch) => {
-            RuntimeFailureKind::MissingRuntime
-        }
-        DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Memory)
-        | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Resource) => {
-            RuntimeFailureKind::Resource
-        }
-        DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::NetworkDenied) => {
-            RuntimeFailureKind::Network
-        }
-        DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::PolicyDenied) => {
-            RuntimeFailureKind::PolicyDenied
-        }
-        DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::OutputTooLarge) => {
-            RuntimeFailureKind::OutputTooLarge
-        }
-        DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::FilesystemDenied) => {
-            RuntimeFailureKind::Authorization
-        }
-        DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::SecretDenied) => {
-            RuntimeFailureKind::Authorization
-        }
-        DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::ExitFailure) => {
-            RuntimeFailureKind::Process
-        }
-        DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::InputEncode) => {
-            RuntimeFailureKind::InvalidInput
-        }
-        DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::OutputDecode)
-        | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::InvalidResult) => {
-            RuntimeFailureKind::InvalidOutput
-        }
-        DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::OperationFailed) => {
-            RuntimeFailureKind::OperationFailed
-        }
-        DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Backend)
-        | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Client)
-        | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Executor)
-        | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Guest)
-        | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Manifest)
-        | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::MethodMissing)
-        | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::UndeclaredCapability)
-        | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::UnsupportedRunner) => {
-            RuntimeFailureKind::Backend
-        }
-        DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Unknown) => {
-            RuntimeFailureKind::Unknown
+impl From<DispatchFailureKind> for RuntimeFailureKind {
+    fn from(kind: DispatchFailureKind) -> Self {
+        match kind {
+            DispatchFailureKind::UnknownCapability | DispatchFailureKind::UnknownProvider => {
+                RuntimeFailureKind::InvalidOutput
+            }
+            DispatchFailureKind::MissingRuntimeBackend
+            | DispatchFailureKind::UnsupportedRuntime => RuntimeFailureKind::MissingRuntime,
+            DispatchFailureKind::AuthRequired => RuntimeFailureKind::Authorization,
+            DispatchFailureKind::RuntimeMismatch => RuntimeFailureKind::Backend,
+            DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::ExtensionRuntimeMismatch) => {
+                RuntimeFailureKind::MissingRuntime
+            }
+            DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Memory)
+            | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Resource) => {
+                RuntimeFailureKind::Resource
+            }
+            DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::NetworkDenied) => {
+                RuntimeFailureKind::Network
+            }
+            DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::PolicyDenied) => {
+                RuntimeFailureKind::PolicyDenied
+            }
+            DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::OutputTooLarge) => {
+                RuntimeFailureKind::OutputTooLarge
+            }
+            DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::FilesystemDenied) => {
+                RuntimeFailureKind::Authorization
+            }
+            DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::SecretDenied) => {
+                RuntimeFailureKind::Authorization
+            }
+            DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::ExitFailure) => {
+                RuntimeFailureKind::Process
+            }
+            DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::InputEncode) => {
+                RuntimeFailureKind::InvalidInput
+            }
+            DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::OutputDecode)
+            | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::InvalidResult) => {
+                RuntimeFailureKind::InvalidOutput
+            }
+            DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::OperationFailed) => {
+                RuntimeFailureKind::OperationFailed
+            }
+            DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Backend)
+            | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Client)
+            | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Executor)
+            | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Guest)
+            | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Manifest)
+            | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::MethodMissing)
+            | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::UndeclaredCapability)
+            | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::UnsupportedRunner) => {
+                RuntimeFailureKind::Backend
+            }
+            DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Unknown) => Self::Unknown,
         }
     }
 }
@@ -1626,7 +1634,7 @@ output_schema_ref = "schemas/test.output.json"
         ];
         for (variant, expected) in cases {
             let kind = DispatchFailureKind::Runtime(*variant);
-            let actual = dispatch_kind_to_failure(kind);
+            let actual = RuntimeFailureKind::from(kind);
             assert_eq!(
                 actual, *expected,
                 "dispatch kind {kind:?} should map to {expected:?}, got {actual:?}"
@@ -1636,30 +1644,35 @@ output_schema_ref = "schemas/test.output.json"
 
     #[test]
     fn dispatch_kind_to_failure_pins_dispatch_error_top_level_kinds() {
-        assert_eq!(
-            dispatch_kind_to_failure(DispatchFailureKind::UnknownCapability),
-            RuntimeFailureKind::InvalidOutput
-        );
-        assert_eq!(
-            dispatch_kind_to_failure(DispatchFailureKind::UnknownProvider),
-            RuntimeFailureKind::InvalidOutput
-        );
-        assert_eq!(
-            dispatch_kind_to_failure(DispatchFailureKind::MissingRuntimeBackend),
-            RuntimeFailureKind::MissingRuntime
-        );
-        assert_eq!(
-            dispatch_kind_to_failure(DispatchFailureKind::UnsupportedRuntime),
-            RuntimeFailureKind::MissingRuntime
-        );
-        assert_eq!(
-            dispatch_kind_to_failure(DispatchFailureKind::RuntimeMismatch),
-            RuntimeFailureKind::Backend
-        );
-        assert_eq!(
-            dispatch_kind_to_failure(DispatchFailureKind::AuthRequired),
-            RuntimeFailureKind::Authorization
-        );
+        let cases: &[(DispatchFailureKind, RuntimeFailureKind)] = &[
+            (
+                DispatchFailureKind::UnknownCapability,
+                RuntimeFailureKind::InvalidOutput,
+            ),
+            (
+                DispatchFailureKind::UnknownProvider,
+                RuntimeFailureKind::InvalidOutput,
+            ),
+            (
+                DispatchFailureKind::MissingRuntimeBackend,
+                RuntimeFailureKind::MissingRuntime,
+            ),
+            (
+                DispatchFailureKind::UnsupportedRuntime,
+                RuntimeFailureKind::MissingRuntime,
+            ),
+            (
+                DispatchFailureKind::RuntimeMismatch,
+                RuntimeFailureKind::Backend,
+            ),
+            (
+                DispatchFailureKind::AuthRequired,
+                RuntimeFailureKind::Authorization,
+            ),
+        ];
+        for (kind, expected) in cases {
+            assert_eq!(RuntimeFailureKind::from(*kind), *expected, "kind {kind:?}");
+        }
     }
 
     #[test]

@@ -229,7 +229,7 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert_eq!(error.kind(), RuntimeDispatchErrorKind::Backend);
+        assert_eq!(error.kind(), Some(RuntimeDispatchErrorKind::Backend));
         assert_eq!(error.usage(), Some(&ResourceUsage::default()));
     }
 

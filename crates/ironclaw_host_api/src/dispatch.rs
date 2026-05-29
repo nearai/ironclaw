@@ -199,6 +199,19 @@ pub enum DispatchError {
     FirstParty { kind: RuntimeDispatchErrorKind },
 }
 
+/// Stable two-variant error for staged credential operations.
+///
+/// Both the host-runtime staging layer (`ProductAuthCredentialStageError`) and the
+/// per-extension staging traits (e.g. `GsuiteCredentialStageError`) map 1:1 to this
+/// type so that no mechanical conversion glue is needed across crate boundaries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CredentialStageError {
+    /// Credential is missing, expired, or revoked — user must re-authenticate.
+    AuthRequired,
+    /// Internal staging failure not attributable to the user's credentials.
+    Backend,
+}
+
 impl DispatchError {
     pub const fn failure_kind(&self) -> DispatchFailureKind {
         match self {
@@ -212,6 +225,25 @@ impl DispatchError {
             | Self::Script { kind }
             | Self::Wasm { kind }
             | Self::FirstParty { kind } => DispatchFailureKind::Runtime(*kind),
+        }
+    }
+
+    /// Stable event-token string for the error, suitable for telemetry and structured logging.
+    ///
+    /// This is the single canonical source for dispatch error event tokens; crates should
+    /// call this method rather than maintaining a parallel local `match` over `DispatchError`.
+    pub fn event_kind(&self) -> &'static str {
+        match self {
+            Self::UnknownCapability { .. } => "unknown_capability",
+            Self::UnknownProvider { .. } => "unknown_provider",
+            Self::RuntimeMismatch { .. } => "runtime_mismatch",
+            Self::MissingRuntimeBackend { .. } => "missing_runtime_backend",
+            Self::UnsupportedRuntime { .. } => "unsupported_runtime",
+            Self::AuthRequired { .. } => "auth_required",
+            Self::Mcp { kind }
+            | Self::Script { kind }
+            | Self::Wasm { kind }
+            | Self::FirstParty { kind } => kind.event_kind(),
         }
     }
 }

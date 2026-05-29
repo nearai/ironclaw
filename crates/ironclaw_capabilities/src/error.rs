@@ -248,42 +248,31 @@ mod tests {
     }
 
     #[test]
-    fn from_dispatch_auth_required_preserves_required_secrets() {
-        let secrets = vec![
-            SecretHandle::new("google-access-token").unwrap(),
-            SecretHandle::new("google-refresh-token").unwrap(),
+    fn from_dispatch_auth_required_round_trips_required_secrets() {
+        let cases: &[&[&str]] = &[
+            &[],
+            &["google-access-token"],
+            &["google-access-token", "google-refresh-token"],
         ];
-        let err = CapabilityInvocationError::from(DispatchError::AuthRequired {
-            capability: cap(),
-            required_secrets: secrets.clone(),
-        });
-        match err {
-            CapabilityInvocationError::AuthorizationRequiresAuth {
-                capability,
-                required_secrets,
-            } => {
-                assert_eq!(capability, cap());
-                assert_eq!(required_secrets, secrets);
+        for handles in cases {
+            let secrets: Vec<SecretHandle> = handles
+                .iter()
+                .map(|h| SecretHandle::new(*h).unwrap())
+                .collect();
+            let err = CapabilityInvocationError::from(DispatchError::AuthRequired {
+                capability: cap(),
+                required_secrets: secrets.clone(),
+            });
+            match err {
+                CapabilityInvocationError::AuthorizationRequiresAuth {
+                    capability,
+                    required_secrets,
+                } => {
+                    assert_eq!(capability, cap(), "handles: {handles:?}");
+                    assert_eq!(required_secrets, secrets, "handles: {handles:?}");
+                }
+                other => panic!("expected AuthorizationRequiresAuth, got {other:?}"),
             }
-            other => panic!("expected AuthorizationRequiresAuth, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn from_dispatch_auth_required_preserves_empty_required_secrets() {
-        let err = CapabilityInvocationError::from(DispatchError::AuthRequired {
-            capability: cap(),
-            required_secrets: Vec::new(),
-        });
-        match err {
-            CapabilityInvocationError::AuthorizationRequiresAuth {
-                capability,
-                required_secrets,
-            } => {
-                assert_eq!(capability, cap());
-                assert!(required_secrets.is_empty());
-            }
-            other => panic!("expected AuthorizationRequiresAuth, got {other:?}"),
         }
     }
 }

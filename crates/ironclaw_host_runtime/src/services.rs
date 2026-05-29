@@ -172,11 +172,11 @@ pub struct ProductAuthProviderRuntimePorts {
     secret_injection_store: Arc<RuntimeSecretInjectionStore>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ProductAuthCredentialStageError {
-    AuthRequired,
-    Backend,
-}
+/// Alias for [`ironclaw_host_api::CredentialStageError`].
+///
+/// The shared type lives in `ironclaw_host_api` so that per-extension staging
+/// traits can use it without a dependency on `ironclaw_host_runtime`.
+pub type ProductAuthCredentialStageError = ironclaw_host_api::CredentialStageError;
 
 impl ProductAuthProviderRuntimePorts {
     fn new(
@@ -229,7 +229,9 @@ impl ProductAuthProviderRuntimePorts {
 /// conditions: they map to [`ProductAuthCredentialStageError::AuthRequired`]
 /// so the runtime auth gate fires instead of surfacing a generic backend
 /// failure. Anything else is a true backend defect.
-fn stage_secret_error(error: SecretStoreError) -> ProductAuthCredentialStageError {
+///
+/// `pub(crate)` for testing; not part of the public API.
+pub(crate) fn stage_secret_error(error: SecretStoreError) -> ProductAuthCredentialStageError {
     if error.is_unknown_secret() || error.is_expired() || error.is_revoked() {
         ProductAuthCredentialStageError::AuthRequired
     } else {

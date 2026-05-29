@@ -66,8 +66,8 @@ pub use extension_contracts::{
     discover_extensions_with_default_host_api_contracts_and_catalog,
 };
 pub use first_party::{
-    FirstPartyAuthRequirement, FirstPartyCapabilityError, FirstPartyCapabilityHandler,
-    FirstPartyCapabilityRegistry, FirstPartyCapabilityRequest, FirstPartyCapabilityResult,
+    FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
+    FirstPartyCapabilityRequest, FirstPartyCapabilityResult,
 };
 pub use first_party_tools::{
     APPLY_PATCH_CAPABILITY_ID, BUILTIN_FIRST_PARTY_PROVIDER, BuiltinFirstPartyTools,

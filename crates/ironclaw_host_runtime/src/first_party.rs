@@ -98,59 +98,92 @@ impl FirstPartyCapabilityResult {
 }
 
 /// Stable redacted first-party handler failure.
+///
+/// Two distinct outcomes are modelled as enum variants rather than optional
+/// fields so that the compiler enforces exhaustive handling and the `Display`
+/// impl produces a meaningful message for both paths.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("first-party capability dispatch failed: {kind}")]
-pub struct FirstPartyCapabilityError {
-    kind: RuntimeDispatchErrorKind,
-    usage: Option<ResourceUsage>,
-    auth: Option<FirstPartyAuthRequirement>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct FirstPartyAuthRequirement {
-    pub required_secrets: Vec<SecretHandle>,
+pub enum FirstPartyCapabilityError {
+    /// Runtime dispatch failed for a non-auth reason.
+    #[error("first-party capability dispatch failed: {kind}")]
+    Dispatch {
+        kind: RuntimeDispatchErrorKind,
+        usage: Option<ResourceUsage>,
+    },
+    /// Dispatch was blocked because a staged credential is missing or expired.
+    #[error("first-party capability requires authentication")]
+    AuthRequired {
+        /// Specific secret handles the runtime auth gate must prompt for.
+        /// May be empty when the obligation layer does not know which handle failed.
+        required_secrets: Vec<SecretHandle>,
+        usage: Option<ResourceUsage>,
+    },
 }
 
 impl FirstPartyCapabilityError {
+    /// Construct a dispatch failure with no auth context.
     pub fn new(kind: RuntimeDispatchErrorKind) -> Self {
-        Self {
-            kind,
-            usage: None,
-            auth: None,
-        }
+        Self::Dispatch { kind, usage: None }
     }
 
+    /// Construct an auth-required failure with no specific secret handles.
     pub fn auth_required() -> Self {
-        Self::auth_required_with(FirstPartyAuthRequirement::default())
-    }
-
-    pub fn auth_required_with(auth: FirstPartyAuthRequirement) -> Self {
-        Self {
-            kind: RuntimeDispatchErrorKind::Client,
+        Self::AuthRequired {
+            required_secrets: Vec::new(),
             usage: None,
-            auth: Some(auth),
         }
     }
 
-    pub fn with_usage(mut self, usage: ResourceUsage) -> Self {
-        self.usage = Some(usage);
-        self
+    /// Construct an auth-required failure naming the handles to re-authorize.
+    pub fn auth_required_with(required_secrets: Vec<SecretHandle>) -> Self {
+        Self::AuthRequired {
+            required_secrets,
+            usage: None,
+        }
     }
 
-    pub fn kind(&self) -> RuntimeDispatchErrorKind {
-        self.kind
+    /// Attach resource usage. Builder-style for use in handler return expressions.
+    pub fn with_usage(self, usage: ResourceUsage) -> Self {
+        match self {
+            Self::Dispatch { kind, .. } => Self::Dispatch {
+                kind,
+                usage: Some(usage),
+            },
+            Self::AuthRequired {
+                required_secrets, ..
+            } => Self::AuthRequired {
+                required_secrets,
+                usage: Some(usage),
+            },
+        }
+    }
+
+    /// Runtime dispatch error kind. Returns `None` for `AuthRequired` variants.
+    pub fn kind(&self) -> Option<RuntimeDispatchErrorKind> {
+        match self {
+            Self::Dispatch { kind, .. } => Some(*kind),
+            Self::AuthRequired { .. } => None,
+        }
     }
 
     pub fn usage(&self) -> Option<&ResourceUsage> {
-        self.usage.as_ref()
+        match self {
+            Self::Dispatch { usage, .. } | Self::AuthRequired { usage, .. } => usage.as_ref(),
+        }
     }
 
-    pub fn auth_requirement(&self) -> Option<&FirstPartyAuthRequirement> {
-        self.auth.as_ref()
+    /// Secret handles required for re-authentication, if this is an auth failure.
+    pub fn required_secrets(&self) -> Option<&Vec<SecretHandle>> {
+        match self {
+            Self::AuthRequired {
+                required_secrets, ..
+            } => Some(required_secrets),
+            Self::Dispatch { .. } => None,
+        }
     }
 
     pub fn is_auth_required(&self) -> bool {
-        self.auth.is_some()
+        matches!(self, Self::AuthRequired { .. })
     }
 }
 

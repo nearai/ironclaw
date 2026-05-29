@@ -354,12 +354,15 @@ async fn bundled_gsuite_handlers_project_staging_auth_failures_as_auth_required(
         .await
         .unwrap_err();
 
+    assert!(
+        error.is_auth_required(),
+        "staging auth failure should be auth required"
+    );
     assert_eq!(
         error
-            .auth_requirement()
-            .expect("staging auth failure should surface auth requirement")
-            .required_secrets,
-        vec![SecretHandle::new("google-access-token").unwrap()]
+            .required_secrets()
+            .expect("staging auth failure should surface required secrets"),
+        &vec![SecretHandle::new("google-access-token").unwrap()]
     );
     assert!(egress.requests().is_empty());
 }
@@ -409,5 +412,5 @@ async fn bundled_gsuite_handler_fails_closed_without_runtime_egress() {
         .await
         .unwrap_err();
 
-    assert_eq!(error.kind(), RuntimeDispatchErrorKind::NetworkDenied);
+    assert_eq!(error.kind(), Some(RuntimeDispatchErrorKind::NetworkDenied));
 }

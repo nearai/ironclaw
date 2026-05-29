@@ -198,11 +198,6 @@ pub enum GsuiteCredentialDispatchReason {
     HostApi,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct GsuiteAuthRequirement {
-    pub required_secrets: Vec<ironclaw_host_api::SecretHandle>,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("GSuite capability dispatch failed: {kind}")]
 pub struct GsuiteDispatchError {
@@ -242,35 +237,19 @@ impl GsuiteDispatchError {
         self.usage.as_ref()
     }
 
-    /// Project the credential dispatch reason onto a [`GsuiteAuthRequirement`]
-    /// for the host runtime auth gate.
+    /// Returns the secret handles the runtime auth gate must prompt for, or `None`
+    /// if the error is an infrastructure failure rather than a user-actionable auth condition.
     ///
-    /// `GsuiteAuthRequirement` is intentionally narrow: it only carries the
-    /// `required_secrets` list the runtime needs to prompt re-auth. Richer
-    /// recovery context (provider, selected/candidate accounts, recovery
-    /// reason) is exposed separately via [`Self::reason`]; the host runtime
-    /// reads `reason()` for telemetry and surfacing user-facing recovery state,
-    /// while the auth gate only needs the secret list. That is why:
-    ///
-    /// * `Recovery(_)`, `MissingScopes { .. }`, and `MissingAccessSecret`
-    ///   return `Some(GsuiteAuthRequirement::default())` — they are auth
-    ///   required, but the specific staged secrets are unknown at this layer;
-    ///   the projection survives via `reason()`.
-    /// * `AuthRequired { required_secrets }` forwards the explicit list so the
-    ///   gate can name the missing handles.
-    /// * `BackendAuth` and `HostApi` are infrastructure failures, not
-    ///   user-actionable, and return `None`.
-    pub fn auth_requirement(&self) -> Option<GsuiteAuthRequirement> {
+    /// `BackendAuth` and `HostApi` return `None`; all other reasons return `Some`.
+    /// `AuthRequired` forwards its explicit handle list; the remaining auth reasons
+    /// return an empty `Vec` (the caller reads [`Self::reason`] for richer context).
+    pub fn auth_requirement(&self) -> Option<Vec<ironclaw_host_api::SecretHandle>> {
         match self.reason.as_ref()? {
             GsuiteCredentialDispatchReason::Recovery(_)
             | GsuiteCredentialDispatchReason::MissingScopes { .. }
-            | GsuiteCredentialDispatchReason::MissingAccessSecret => {
-                Some(GsuiteAuthRequirement::default())
-            }
+            | GsuiteCredentialDispatchReason::MissingAccessSecret => Some(Vec::new()),
             GsuiteCredentialDispatchReason::AuthRequired { required_secrets } => {
-                Some(GsuiteAuthRequirement {
-                    required_secrets: required_secrets.clone(),
-                })
+                Some(required_secrets.clone())
             }
             GsuiteCredentialDispatchReason::BackendAuth
             | GsuiteCredentialDispatchReason::HostApi => None,
@@ -288,11 +267,12 @@ pub struct GsuiteCredentialStageRequest<'a> {
     pub access_secret: &'a ironclaw_host_api::SecretHandle,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GsuiteCredentialStageError {
-    AuthRequired,
-    Backend,
-}
+/// Alias for [`ironclaw_host_api::CredentialStageError`].
+///
+/// The shared type lives in `ironclaw_host_api` so that both the GSuite staging
+/// trait and the host-runtime staging layer use the same type without a
+/// cross-crate conversion step.
+pub type GsuiteCredentialStageError = ironclaw_host_api::CredentialStageError;
 
 #[async_trait]
 pub trait GsuiteCredentialStager: Send + Sync {
@@ -1159,32 +1139,23 @@ mod tests {
                 ),
             ),
         );
-        assert_eq!(
-            recovery.auth_requirement(),
-            Some(GsuiteAuthRequirement::default())
-        );
+        assert_eq!(recovery.auth_requirement(), Some(Vec::new()));
         assert!(recovery.is_auth_required());
         assert!(recovery.reason().is_some());
 
-        // MissingScopes -> Some(default).
+        // MissingScopes -> Some(empty): richer projection lives in reason().
         let scope =
             ProviderScope::new("https://www.googleapis.com/auth/gmail.modify").expect("scope");
         let missing_scopes = GsuiteDispatchError::new(RuntimeDispatchErrorKind::Client)
             .with_reason(GsuiteCredentialDispatchReason::MissingScopes {
                 missing_scopes: vec![scope],
             });
-        assert_eq!(
-            missing_scopes.auth_requirement(),
-            Some(GsuiteAuthRequirement::default())
-        );
+        assert_eq!(missing_scopes.auth_requirement(), Some(Vec::new()));
 
-        // MissingAccessSecret -> Some(default).
+        // MissingAccessSecret -> Some(empty).
         let missing_access = GsuiteDispatchError::new(RuntimeDispatchErrorKind::Client)
             .with_reason(GsuiteCredentialDispatchReason::MissingAccessSecret);
-        assert_eq!(
-            missing_access.auth_requirement(),
-            Some(GsuiteAuthRequirement::default())
-        );
+        assert_eq!(missing_access.auth_requirement(), Some(Vec::new()));
 
         // AuthRequired { required_secrets } -> Some with secrets forwarded.
         let handle = ironclaw_host_api::SecretHandle::new("google-access-token").unwrap();
@@ -1193,12 +1164,7 @@ mod tests {
                 required_secrets: vec![handle.clone()],
             },
         );
-        assert_eq!(
-            auth_required.auth_requirement(),
-            Some(GsuiteAuthRequirement {
-                required_secrets: vec![handle],
-            })
-        );
+        assert_eq!(auth_required.auth_requirement(), Some(vec![handle]));
 
         // BackendAuth -> None (infra failure, not user-actionable).
         let backend_auth = GsuiteDispatchError::new(RuntimeDispatchErrorKind::Backend)

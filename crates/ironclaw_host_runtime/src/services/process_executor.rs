@@ -80,7 +80,7 @@ impl ProcessExecutor for RuntimeDispatchProcessExecutor {
                 input: request.input,
             })
             .await
-            .map_err(|error| ProcessExecutionError::new(dispatch_error_kind(&error)))?;
+            .map_err(|error| ProcessExecutionError::new(error.event_kind()))?;
         if request.cancellation.is_cancelled() {
             return Err(ProcessExecutionError::new("cancelled"));
         }
@@ -90,20 +90,8 @@ impl ProcessExecutor for RuntimeDispatchProcessExecutor {
     }
 }
 
-fn dispatch_error_kind(error: &DispatchError) -> &'static str {
-    match error {
-        DispatchError::UnknownCapability { .. } => "unknown_capability",
-        DispatchError::UnknownProvider { .. } => "unknown_provider",
-        DispatchError::RuntimeMismatch { .. } => "runtime_mismatch",
-        DispatchError::MissingRuntimeBackend { .. } => "missing_runtime_backend",
-        DispatchError::UnsupportedRuntime { .. } => "unsupported_runtime",
-        DispatchError::AuthRequired { .. } => "auth_required",
-        DispatchError::Mcp { kind }
-        | DispatchError::Script { kind }
-        | DispatchError::Wasm { kind }
-        | DispatchError::FirstParty { kind } => kind.event_kind(),
-    }
-}
+// Removed: dispatch_error_kind was a local copy of DispatchError::event_kind() from ironclaw_host_api.
+// Call error.event_kind() directly instead.
 
 #[cfg(test)]
 mod tests {
@@ -361,7 +349,7 @@ mod tests {
         ];
 
         for (error, expected) in cases {
-            assert_eq!(dispatch_error_kind(&error), expected);
+            assert_eq!(error.event_kind(), expected);
         }
     }
 

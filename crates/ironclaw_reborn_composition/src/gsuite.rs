@@ -16,9 +16,8 @@ use ironclaw_host_api::{
     TrustClass, VirtualPath,
 };
 use ironclaw_host_runtime::{
-    FirstPartyAuthRequirement, FirstPartyCapabilityError, FirstPartyCapabilityHandler,
-    FirstPartyCapabilityRegistry, FirstPartyCapabilityRequest, FirstPartyCapabilityResult,
-    ProductAuthCredentialStageError, ProductAuthProviderRuntimePorts,
+    FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
+    FirstPartyCapabilityRequest, FirstPartyCapabilityResult, ProductAuthProviderRuntimePorts,
 };
 
 /// Host-bundled GSuite packages available to an install/activation surface.
@@ -153,17 +152,14 @@ fn capability_manifest(
 }
 
 fn gsuite_error(error: GsuiteDispatchError) -> FirstPartyCapabilityError {
-    let mapped = if let Some(auth) = error.auth_requirement() {
-        FirstPartyCapabilityError::auth_required_with(FirstPartyAuthRequirement {
-            required_secrets: auth.required_secrets,
-        })
-    } else {
-        FirstPartyCapabilityError::new(error.kind())
+    let usage = error.usage().cloned();
+    let base = match error.auth_requirement() {
+        Some(required_secrets) => FirstPartyCapabilityError::auth_required_with(required_secrets),
+        None => FirstPartyCapabilityError::new(error.kind()),
     };
-    if let Some(usage) = error.usage().cloned() {
-        mapped.with_usage(usage)
-    } else {
-        mapped
+    match usage {
+        Some(u) => base.with_usage(u),
+        None => base,
     }
 }
 
@@ -183,18 +179,10 @@ impl GsuiteCredentialStager for ProductAuthRuntimeGsuiteCredentialStager {
         &self,
         request: GsuiteCredentialStageRequest<'_>,
     ) -> Result<(), GsuiteCredentialStageError> {
+        // Both GsuiteCredentialStageError and ProductAuthCredentialStageError are
+        // type aliases for ironclaw_host_api::CredentialStageError — no conversion needed.
         self.runtime_ports
             .stage_secret_once(request.scope, request.capability_id, request.access_secret)
             .await
-            .map_err(stage_runtime_credential_error)
-    }
-}
-
-fn stage_runtime_credential_error(
-    error: ProductAuthCredentialStageError,
-) -> GsuiteCredentialStageError {
-    match error {
-        ProductAuthCredentialStageError::AuthRequired => GsuiteCredentialStageError::AuthRequired,
-        ProductAuthCredentialStageError::Backend => GsuiteCredentialStageError::Backend,
     }
 }
