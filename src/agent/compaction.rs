@@ -103,6 +103,17 @@ impl ContextCompactor {
         // Generate summary
         let summary = self.generate_summary(&to_summarize).await?;
 
+        // Pre-flush: persist critical context to a dedicated memory file before
+        // the turn window is discarded. Best-effort — a write failure must not
+        // abort compaction or cause context loss.
+        if let Some(ws) = workspace
+            && let Some(critical) = extract_critical_context(&summary)
+        {
+            self.write_memory_flush_to_workspace(ws, &critical)
+                .await
+                .unwrap_or_else(|e| tracing::warn!("Memory flush write failed (non-fatal): {}", e));
+        }
+
         // Write to workspace if available.
         // If archival fails, preserve turns to avoid context loss.
         let (summary_written, turns_removed) = if let Some(ws) = workspace {
@@ -183,21 +194,36 @@ impl ContextCompactor {
         })
     }
 
-    /// Generate a summary of messages using the LLM.
+    /// Generate a structured summary of messages using the LLM.
+    ///
+    /// Produces a fixed-section format so that `extract_critical_context`
+    /// can reliably pull out the "Critical Context" section for the memory
+    /// flush step before context is discarded.
     async fn generate_summary(&self, messages: &[ChatMessage]) -> Result<String, Error> {
         let prompt = ChatMessage::system(
-            r#"Summarize the following conversation concisely. Focus on:
-- Key decisions made
-- Important information exchanged
-- Actions taken
-- Outcomes achieved
-
-Be brief but capture all important details. Use bullet points."#,
+            "Analyze the following conversation and produce a structured summary using \
+             exactly these section headers in this order:\n\
+             \n\
+             ## Goal\n\
+             What the user/agent was trying to accomplish.\n\
+             \n\
+             ## Progress\n\
+             What was completed or achieved in this conversation window.\n\
+             \n\
+             ## Decisions\n\
+             Key decisions made (bullet list, one per line).\n\
+             \n\
+             ## Files & Resources\n\
+             Files, URLs, APIs, services, or tools referenced (bullet list).\n\
+             \n\
+             ## Next Steps\n\
+             What remains to be done or should happen next.\n\
+             \n\
+             ## Critical Context\n\
+             Facts that must be remembered long-term: constraints, user preferences, \
+             key discoveries, important invariants. Be specific and concise.",
         );
 
-        let mut request_messages = vec![prompt];
-
-        // Add a user message with the conversation to summarize
         let formatted = messages
             .iter()
             .map(|m| {
@@ -218,19 +244,35 @@ Be brief but capture all important details. Use bullet points."#,
             .collect::<Vec<_>>()
             .join("\n\n");
 
-        request_messages.push(ChatMessage::user(format!(
-            "Please summarize this conversation:\n\n{}",
-            formatted
-        )));
-
-        let request = CompletionRequest::new(request_messages)
-            .with_max_tokens(1024)
-            .with_temperature(0.3);
+        let request = CompletionRequest::new(vec![
+            prompt,
+            ChatMessage::user(format!("Summarize this conversation:\n\n{}", formatted)),
+        ])
+        .with_max_tokens(2048)
+        .with_temperature(0.3);
 
         let reasoning =
             Reasoning::new(self.llm.clone()).with_model_name(self.llm.active_model_name());
         let (text, _) = reasoning.complete(request).await?;
         Ok(text)
+    }
+
+    /// Write the critical-context section to a dedicated memory-flush file.
+    ///
+    /// Best-effort: callers log a warning on failure rather than aborting
+    /// compaction, so context is never lost due to a flush write failure.
+    async fn write_memory_flush_to_workspace(
+        &self,
+        workspace: &Workspace,
+        critical_context: &str,
+    ) -> Result<(), Error> {
+        let entry = format!(
+            "\n## Context Flush ({})\n\n{}\n",
+            Utc::now().format("%Y-%m-%d %H:%M UTC"),
+            critical_context
+        );
+        workspace.append("context/memory-flush.md", &entry).await?;
+        Ok(())
     }
 
     /// Write a summary to the workspace daily log.
@@ -309,6 +351,21 @@ fn format_turns_for_storage(turns: &[crate::agent::session::Turn]) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Extract the text under the "## Critical Context" heading from a structured summary.
+///
+/// Returns `None` when the section is absent or empty so callers can skip the
+/// memory flush when the summary does not follow the structured template (e.g.
+/// produced by an older version or a model that ignored the format).
+fn extract_critical_context(summary: &str) -> Option<String> {
+    const MARKER: &str = "## Critical Context";
+    let start = summary.find(MARKER)?;
+    let after_heading = &summary[start + MARKER.len()..];
+    // Content ends at the next `## ` section header or at end-of-string.
+    let end = after_heading.find("\n## ").unwrap_or(after_heading.len());
+    let text = after_heading[..end].trim().to_string();
+    if text.is_empty() { None } else { Some(text) }
 }
 
 #[cfg(test)]
@@ -895,5 +952,39 @@ mod tests {
         assert_eq!(thread.turns[0].user_input, "msg-17");
         assert_eq!(thread.turns[1].user_input, "msg-18");
         assert_eq!(thread.turns[2].user_input, "msg-19");
+    }
+
+    // --- extract_critical_context tests ---
+
+    #[test]
+    fn test_extract_critical_context_present() {
+        let summary = "## Goal\nBuild a thing.\n\n## Progress\nDid stuff.\n\n\
+                       ## Critical Context\nUser prefers Rust. DB is PostgreSQL.\n\n\
+                       ## Next Steps\nMore work.";
+        let result = super::extract_critical_context(summary);
+        assert_eq!(
+            result.as_deref(),
+            Some("User prefers Rust. DB is PostgreSQL.")
+        );
+    }
+
+    #[test]
+    fn test_extract_critical_context_last_section() {
+        // Section is last — no trailing `## ` marker.
+        let summary = "## Goal\nBuild.\n\n## Critical Context\nKey fact here.";
+        let result = super::extract_critical_context(summary);
+        assert_eq!(result.as_deref(), Some("Key fact here."));
+    }
+
+    #[test]
+    fn test_extract_critical_context_absent() {
+        let summary = "## Goal\nBuild.\n\n## Progress\nDone.";
+        assert!(super::extract_critical_context(summary).is_none());
+    }
+
+    #[test]
+    fn test_extract_critical_context_empty_section() {
+        let summary = "## Goal\nBuild.\n\n## Critical Context\n\n## Next Steps\nTodo.";
+        assert!(super::extract_critical_context(summary).is_none());
     }
 }
