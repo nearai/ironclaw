@@ -2094,7 +2094,7 @@ impl Inner {
                     self.complete_claimed_record(record)
                 }
                 LoopExitMapping::RunnerOutcome(TurnRunnerOutcome::Cancelled) => {
-                    self.fail_recovery_claimed_record(
+                    self.cancel_or_fail_claimed_record(
                         record,
                         SanitizedFailure::from_trusted_static("interrupted_unexpectedly"),
                     )
@@ -2108,7 +2108,7 @@ impl Inner {
                     self.fail_claimed_record(record, failure)
                 }
                 LoopExitMapping::RecoveryRequired { failure } => {
-                    self.fail_recovery_claimed_record(record, failure)
+                    self.cancel_or_fail_claimed_record(record, failure)
                 }
             }
         })();
@@ -2275,7 +2275,7 @@ impl Inner {
         }
     }
 
-    fn fail_recovery_claimed_record(
+    fn cancel_or_fail_claimed_record(
         &mut self,
         record: RunRecord,
         failure: SanitizedFailure,
@@ -2309,7 +2309,7 @@ impl Inner {
                     error,
                 };
             }
-            self.fail_recovery_claimed_record(record, failure)
+            self.cancel_or_fail_claimed_record(record, failure)
         })();
         self.commit_transition(transition)
     }

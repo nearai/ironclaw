@@ -532,15 +532,15 @@ impl TurnRunnerWorker {
                     lease_token,
                     failure,
                 };
-                if let Err(recovery_err) = self
+                if let Err(record_err) = self
                     .transition_port
                     .record_runner_failure(failure_request)
                     .await
                 {
-                    log_recovery_record_failure(
+                    log_runner_failure_record_error(
                         runner_id,
                         run_id,
-                        &recovery_err,
+                        &record_err,
                         "failed to record terminal failure after exit application failure",
                     );
                 }
@@ -589,7 +589,7 @@ impl TurnRunnerWorker {
         };
 
         if let Err(err) = self.transition_port.record_runner_failure(request).await {
-            log_recovery_record_failure(
+            log_runner_failure_record_error(
                 runner_id,
                 run_id,
                 &err,
@@ -599,13 +599,13 @@ impl TurnRunnerWorker {
     }
 }
 
-fn log_recovery_record_failure(
+fn log_runner_failure_record_error(
     runner_id: TurnRunnerId,
     run_id: TurnRunId,
     error: &TurnError,
     message: &'static str,
 ) {
-    if recovery_record_rejection_is_expected(error) {
+    if runner_failure_rejection_is_expected(error) {
         debug!(
             runner_id = ?runner_id,
             run_id = ?run_id,
@@ -622,7 +622,7 @@ fn log_recovery_record_failure(
     }
 }
 
-fn recovery_record_rejection_is_expected(error: &TurnError) -> bool {
+fn runner_failure_rejection_is_expected(error: &TurnError) -> bool {
     matches!(error, TurnError::LeaseMismatch)
         || matches!(
             error,
