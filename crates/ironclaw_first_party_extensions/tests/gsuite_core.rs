@@ -922,6 +922,25 @@ async fn gsuite_handler_maps_runtime_egress_errors() {
 }
 
 #[tokio::test]
+async fn gsuite_handler_maps_panicking_runtime_egress_to_backend() {
+    let scope = scope();
+    let auth =
+        auth_with_google_account(&scope, vec![provider_scope(GOOGLE_GMAIL_SEND_SCOPE)]).await;
+    let egress = Arc::new(RecordingEgress::with_responses(Vec::new()));
+
+    let error = dispatch_error(
+        auth,
+        scope,
+        GMAIL_SEND_MESSAGE_CAPABILITY_ID,
+        json!({ "message": { "raw": "base64url-rfc822" } }),
+        egress,
+    )
+    .await;
+
+    assert_eq!(error.kind(), RuntimeDispatchErrorKind::Backend);
+}
+
+#[tokio::test]
 async fn gsuite_handler_fails_before_egress_when_google_account_is_missing_or_ambiguous() {
     let scope = scope();
     let auth = Arc::new(InMemoryAuthProductServices::new());

@@ -1521,6 +1521,10 @@ fn sanitized_reasoning_deltas(reasoning: Option<String>) -> Vec<String> {
 #[serde(rename_all = "snake_case")]
 pub enum HostManagedModelErrorKind {
     InvalidRequest,
+    /// Provider/model output was structurally invalid for the active loop
+    /// contract. This is model-side bad output, not caller misuse of the host
+    /// model port.
+    InvalidOutput,
     PolicyDenied,
     ConfigurationError,
     BudgetExceeded,
@@ -1816,6 +1820,7 @@ fn model_gateway_error(error: HostManagedModelError) -> AgentLoopHostError {
 fn model_error_kind(kind: HostManagedModelErrorKind) -> AgentLoopHostErrorKind {
     match kind {
         HostManagedModelErrorKind::InvalidRequest => AgentLoopHostErrorKind::InvalidInvocation,
+        HostManagedModelErrorKind::InvalidOutput => AgentLoopHostErrorKind::Unavailable,
         HostManagedModelErrorKind::PolicyDenied => AgentLoopHostErrorKind::PolicyDenied,
         HostManagedModelErrorKind::ConfigurationError => AgentLoopHostErrorKind::Unavailable,
         HostManagedModelErrorKind::BudgetExceeded => AgentLoopHostErrorKind::BudgetExceeded,
@@ -1830,6 +1835,7 @@ fn model_error_kind(kind: HostManagedModelErrorKind) -> AgentLoopHostErrorKind {
 fn safe_model_summary(kind: HostManagedModelErrorKind) -> &'static str {
     match kind {
         HostManagedModelErrorKind::InvalidRequest => "model request is invalid",
+        HostManagedModelErrorKind::InvalidOutput => "model output is invalid",
         HostManagedModelErrorKind::PolicyDenied => "model profile is not permitted",
         HostManagedModelErrorKind::ConfigurationError => "model route configuration is invalid",
         HostManagedModelErrorKind::BudgetExceeded => "model request exceeded its budget",

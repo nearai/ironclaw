@@ -1,11 +1,11 @@
 use std::{
     collections::HashMap,
-    io::Read,
     net::SocketAddr,
     sync::{Arc, Mutex},
     time::Duration,
 };
 
+use async_trait::async_trait;
 use ironclaw_host_api::NetworkMethod;
 
 use crate::{
@@ -22,7 +22,7 @@ const MAX_REQWEST_CLIENT_CACHE_ENTRIES: usize = 128;
 #[derive(Clone)]
 pub struct ReqwestNetworkTransport {
     timeout: Duration,
-    client_cache: Arc<Mutex<HashMap<ReqwestClientKey, reqwest::blocking::Client>>>,
+    client_cache: Arc<Mutex<HashMap<ReqwestClientKey, reqwest::Client>>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -55,33 +55,33 @@ impl ReqwestNetworkTransport {
         }
     }
 
-    fn client_for(
+    async fn client_for(
         &self,
         key: ReqwestClientKey,
         request_bytes: u64,
-    ) -> Result<reqwest::blocking::Client, NetworkHttpError> {
-        if let Some(client) = self
-            .client_cache
-            .lock()
-            .map_err(|_| NetworkHttpError::Transport {
-                reason: "reqwest client cache lock poisoned".to_string(),
+    ) -> Result<reqwest::Client, NetworkHttpError> {
+        {
+            let cache = self
+                .client_cache
+                .lock()
+                .map_err(|_| NetworkHttpError::Transport {
+                    reason: "reqwest client cache lock poisoned".to_string(),
+                    request_bytes,
+                    response_bytes: 0,
+                })?;
+            if let Some(client) = cache.get(&key).cloned() {
+                return Ok(client);
+            }
+        }
+
+        let build_key = key.clone();
+        let client = tokio::task::spawn_blocking(move || build_reqwest_client(&build_key))
+            .await
+            .map_err(|error| NetworkHttpError::Transport {
+                reason: format!("reqwest client builder task failed: {error}"),
                 request_bytes,
                 response_bytes: 0,
             })?
-            .get(&key)
-            .cloned()
-        {
-            return Ok(client);
-        }
-
-        let mut builder = reqwest::blocking::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(key.timeout);
-        if !key.resolved_addrs.is_empty() {
-            builder = builder.resolve_to_addrs(&key.host, &key.resolved_addrs);
-        }
-        let client = builder
-            .build()
             .map_err(|error| NetworkHttpError::Transport {
                 reason: reqwest_error_diagnostic(&error),
                 request_bytes,
@@ -103,8 +103,19 @@ impl ReqwestNetworkTransport {
     }
 }
 
+fn build_reqwest_client(key: &ReqwestClientKey) -> Result<reqwest::Client, reqwest::Error> {
+    let mut builder = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(key.timeout);
+    if !key.resolved_addrs.is_empty() {
+        builder = builder.resolve_to_addrs(&key.host, &key.resolved_addrs);
+    }
+    builder.build()
+}
+
+#[async_trait]
 impl NetworkHttpTransport for ReqwestNetworkTransport {
-    fn execute(
+    async fn execute(
         &self,
         request: NetworkTransportRequest,
     ) -> Result<NetworkHttpResponse, NetworkHttpError> {
@@ -137,15 +148,17 @@ impl NetworkHttpTransport for ReqwestNetworkTransport {
             .copied()
             .map(|resolved_ip| SocketAddr::new(resolved_ip, port))
             .collect::<Vec<_>>();
-        let client = self.client_for(
-            ReqwestClientKey {
-                host,
-                port,
-                resolved_addrs,
-                timeout: effective_request_timeout(request.timeout_ms, self.timeout),
-            },
-            request_bytes,
-        )?;
+        let client = self
+            .client_for(
+                ReqwestClientKey {
+                    host,
+                    port,
+                    resolved_addrs,
+                    timeout: effective_request_timeout(request.timeout_ms, self.timeout),
+                },
+                request_bytes,
+            )
+            .await?;
 
         let mut req = client
             .request(reqwest_method(request.method), url)
@@ -153,11 +166,14 @@ impl NetworkHttpTransport for ReqwestNetworkTransport {
         for (name, value) in request.headers {
             req = req.header(name, value);
         }
-        let response = req.send().map_err(|error| NetworkHttpError::Transport {
-            reason: reqwest_error_diagnostic(&error),
-            request_bytes,
-            response_bytes: 0,
-        })?;
+        let mut response = req
+            .send()
+            .await
+            .map_err(|error| NetworkHttpError::Transport {
+                reason: reqwest_error_diagnostic(&error),
+                request_bytes,
+                response_bytes: 0,
+            })?;
         let status = response.status().as_u16();
         let headers = response
             .headers()
@@ -166,23 +182,38 @@ impl NetworkHttpTransport for ReqwestNetworkTransport {
             .collect::<Vec<_>>();
         let limit = effective_response_body_limit(request.response_body_limit);
         let mut body = Vec::new();
-        let mut reader = response.take(limit.saturating_add(1));
-        reader
-            .read_to_end(&mut body)
-            .map_err(|error| NetworkHttpError::Transport {
-                reason: error.to_string(),
-                request_bytes,
-                response_bytes: body.len() as u64,
-            })?;
-        let response_bytes = body.len() as u64;
-        if response_bytes > limit {
-            return Err(NetworkHttpError::ResponseBodyLimit {
-                limit,
-                request_bytes,
-                response_bytes,
-            });
+        while let Some(chunk) =
+            response
+                .chunk()
+                .await
+                .map_err(|error| NetworkHttpError::Transport {
+                    reason: error.to_string(),
+                    request_bytes,
+                    response_bytes: body.len() as u64,
+                })?
+        {
+            let current_len = body.len() as u64;
+            let remaining = limit.saturating_sub(current_len);
+            if chunk.len() as u64 > remaining {
+                let take = remaining.saturating_add(1) as usize;
+                body.extend_from_slice(&chunk[..take.min(chunk.len())]);
+                return Err(NetworkHttpError::ResponseBodyLimit {
+                    limit,
+                    request_bytes,
+                    response_bytes: body.len() as u64,
+                });
+            }
+            body.extend_from_slice(&chunk);
+            let response_bytes = body.len() as u64;
+            if response_bytes > limit {
+                return Err(NetworkHttpError::ResponseBodyLimit {
+                    limit,
+                    request_bytes,
+                    response_bytes,
+                });
+            }
         }
-
+        let response_bytes = body.len() as u64;
         Ok(NetworkHttpResponse {
             status,
             headers,
@@ -265,8 +296,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn reqwest_transport_caches_clients_by_resolution_key() {
+    #[tokio::test]
+    async fn reqwest_transport_caches_clients_by_resolution_key() {
         let transport = ReqwestNetworkTransport::new(Duration::from_secs(1));
         let key = ReqwestClientKey {
             host: "api.example.test".to_string(),
@@ -278,8 +309,8 @@ mod tests {
             timeout: Duration::from_secs(1),
         };
 
-        let _ = transport.client_for(key.clone(), 0).unwrap();
-        let _ = transport.client_for(key, 0).unwrap();
+        let _ = transport.client_for(key.clone(), 0).await.unwrap();
+        let _ = transport.client_for(key, 0).await.unwrap();
 
         assert_eq!(transport.client_cache.lock().unwrap().len(), 1);
     }

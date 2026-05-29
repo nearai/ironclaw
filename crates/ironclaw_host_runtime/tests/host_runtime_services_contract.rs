@@ -43,11 +43,11 @@ use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     BuiltinObligationHandler, BuiltinObligationServices, CancelReason, CancelRuntimeWorkRequest,
     CapabilitySurfaceVersion, CommandExecutionOutput, CommandExecutionRequest, DefaultHostRuntime,
-    HostHttpEgressService, HostRuntime, HostRuntimeServices, ProcessObligationLifecycleStore,
-    ProductionWiringComponent, ProductionWiringConfig, ProductionWiringIssueKind,
-    RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeCapabilityResumeRequest,
-    RuntimeFailureKind, RuntimeProcessError, RuntimeProcessPort, RuntimeStatusRequest,
-    RuntimeWorkId, SandboxCommandTransport, TenantSandboxProcessPort, builtin_first_party_handlers,
+    HostRuntime, HostRuntimeServices, ProcessObligationLifecycleStore, ProductionWiringComponent,
+    ProductionWiringConfig, ProductionWiringIssueKind, RuntimeCapabilityOutcome,
+    RuntimeCapabilityRequest, RuntimeCapabilityResumeRequest, RuntimeFailureKind,
+    RuntimeProcessError, RuntimeProcessPort, RuntimeStatusRequest, RuntimeWorkId,
+    SandboxCommandTransport, TenantSandboxProcessPort, builtin_first_party_handlers,
     builtin_first_party_package,
 };
 use ironclaw_mcp::{McpError, McpExecutionRequest, McpExecutionResult, McpExecutor};
@@ -75,7 +75,9 @@ use ironclaw_scripts::{
     ScriptBackend, ScriptBackendOutput, ScriptBackendRequest, ScriptExecutionRequest,
     ScriptExecutionResult, ScriptExecutor, ScriptRuntime, ScriptRuntimeConfig,
 };
-use ironclaw_secrets::{InMemorySecretStore, SecretMaterial, SecretStore};
+use ironclaw_secrets::{
+    InMemoryCredentialBroker, InMemorySecretStore, SecretMaterial, SecretStore,
+};
 use ironclaw_trust::{
     AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
     HostTrustPolicy, TrustDecision, TrustProvenance,
@@ -98,8 +100,8 @@ use serde_json::json;
 use wit_component::{ComponentEncoder, StringEncoding, embed_component_metadata};
 use wit_parser::Resolve;
 
-#[test]
-fn production_wiring_validation_rejects_missing_components_and_local_only_defaults() {
+#[tokio::test]
+async fn production_wiring_validation_rejects_missing_components_and_local_only_defaults() {
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
         Arc::new(LocalFilesystem::new()),
@@ -221,8 +223,8 @@ fn production_wiring_validation_rejects_missing_components_and_local_only_defaul
     );
 }
 
-#[test]
-fn production_wiring_validation_rejects_local_only_runtime_policy() {
+#[tokio::test]
+async fn production_wiring_validation_rejects_local_only_runtime_policy() {
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
         Arc::new(LocalFilesystem::new()),
@@ -246,8 +248,8 @@ fn production_wiring_validation_rejects_local_only_runtime_policy() {
     );
 }
 
-#[test]
-fn production_wiring_validation_rejects_each_local_only_runtime_policy_field() {
+#[tokio::test]
+async fn production_wiring_validation_rejects_each_local_only_runtime_policy_field() {
     let mut host_workspace = hosted_dev_runtime_policy();
     host_workspace.filesystem_backend = FilesystemBackendKind::HostWorkspace;
     assert_local_only_runtime_policy_rejected(host_workspace, "host_workspace_filesystem");
@@ -273,8 +275,8 @@ fn production_wiring_validation_rejects_each_local_only_runtime_policy_field() {
     assert_local_only_runtime_policy_rejected(inherited_secrets, "local_secret_environment");
 }
 
-#[test]
-fn production_wiring_validation_accepts_production_safe_runtime_policy_shape() {
+#[tokio::test]
+async fn production_wiring_validation_accepts_production_safe_runtime_policy_shape() {
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
         Arc::new(LocalFilesystem::new()),
@@ -298,8 +300,8 @@ fn production_wiring_validation_accepts_production_safe_runtime_policy_shape() {
     );
 }
 
-#[test]
-fn production_wiring_validation_accepts_persistent_resource_governor_component() {
+#[tokio::test]
+async fn production_wiring_validation_accepts_persistent_resource_governor_component() {
     let dir = tempfile::tempdir().unwrap();
     let governor = Arc::new(PersistentResourceGovernor::new(
         JsonFileResourceGovernorStore::new(dir.path().join("resource-governor.json")),
@@ -462,8 +464,8 @@ async fn with_filesystem_resource_governor_closes_process_reservations_on_cancel
     ));
 }
 
-#[test]
-fn production_wiring_validation_classifies_combined_store_as_run_state_and_approvals() {
+#[tokio::test]
+async fn production_wiring_validation_classifies_combined_store_as_run_state_and_approvals() {
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
         Arc::new(LocalFilesystem::new()),
@@ -510,8 +512,8 @@ fn production_wiring_validation_classifies_combined_store_as_run_state_and_appro
     );
 }
 
-#[test]
-fn production_wiring_validation_rejects_unsupported_runtime_requirements() {
+#[tokio::test]
+async fn production_wiring_validation_rejects_unsupported_runtime_requirements() {
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
         Arc::new(LocalFilesystem::new()),
@@ -737,8 +739,8 @@ async fn production_turn_coordinator_requires_explicit_run_profile_resolver() {
     ));
 }
 
-#[test]
-fn production_wiring_validation_rejects_noop_turn_wake_notifier() {
+#[tokio::test]
+async fn production_wiring_validation_rejects_noop_turn_wake_notifier() {
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
         Arc::new(LocalFilesystem::new()),
@@ -761,8 +763,8 @@ fn production_wiring_validation_rejects_noop_turn_wake_notifier() {
     );
 }
 
-#[test]
-fn production_wiring_validation_accepts_configured_turn_wake_notifier() {
+#[tokio::test]
+async fn production_wiring_validation_accepts_configured_turn_wake_notifier() {
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
         Arc::new(LocalFilesystem::new()),
@@ -916,8 +918,8 @@ async fn production_event_store_config_installs_verified_event_and_audit_sinks()
     );
 }
 
-#[test]
-fn production_wiring_validation_uses_configured_runtime_requirements() {
+#[tokio::test]
+async fn production_wiring_validation_uses_configured_runtime_requirements() {
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
         Arc::new(LocalFilesystem::new()),
@@ -964,8 +966,8 @@ fn production_wiring_validation_uses_configured_runtime_requirements() {
     );
 }
 
-#[test]
-fn production_wiring_validation_sees_underlying_in_memory_durable_logs() {
+#[tokio::test]
+async fn production_wiring_validation_sees_underlying_in_memory_durable_logs() {
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
         Arc::new(LocalFilesystem::new()),
@@ -997,8 +999,8 @@ fn production_wiring_validation_sees_underlying_in_memory_durable_logs() {
     );
 }
 
-#[test]
-fn production_wiring_validation_rejects_direct_durable_sink_wrappers_as_unverified() {
+#[tokio::test]
+async fn production_wiring_validation_rejects_direct_durable_sink_wrappers_as_unverified() {
     let event_log: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
     let audit_log: Arc<dyn DurableAuditLog> = Arc::new(InMemoryDurableAuditLog::new());
     let services = HostRuntimeServices::new(
@@ -1032,8 +1034,8 @@ fn production_wiring_validation_rejects_direct_durable_sink_wrappers_as_unverifi
     );
 }
 
-#[test]
-fn production_wiring_validation_accepts_verified_host_http_egress_shape() {
+#[tokio::test]
+async fn production_wiring_validation_accepts_verified_host_http_egress_shape() {
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
         Arc::new(LocalFilesystem::new()),
@@ -1059,8 +1061,8 @@ fn production_wiring_validation_accepts_verified_host_http_egress_shape() {
     );
 }
 
-#[test]
-fn host_http_egress_helper_requires_graph_secret_store() {
+#[tokio::test]
+async fn host_http_egress_helper_requires_graph_secret_store() {
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
         Arc::new(LocalFilesystem::new()),
@@ -1081,8 +1083,40 @@ fn host_http_egress_helper_requires_graph_secret_store() {
     ));
 }
 
-#[test]
-fn production_wiring_validation_rejects_unverified_runtime_http_egress() {
+#[tokio::test]
+async fn production_wiring_validation_requires_credential_broker_when_configured() {
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    );
+
+    let report = services
+        .validate_production_wiring(&ProductionWiringConfig::new([]).require_credential_broker())
+        .expect_err("production credential broker requirement must fail closed when missing");
+
+    assert!(
+        report.contains(
+            ProductionWiringComponent::CredentialAccountStore,
+            ProductionWiringIssueKind::Missing
+        ),
+        "missing credential account store should be reported: {report:?}"
+    );
+    assert!(
+        report.contains(
+            ProductionWiringComponent::CredentialSessionStore,
+            ProductionWiringIssueKind::Missing
+        ),
+        "missing credential session store should be reported: {report:?}"
+    );
+}
+
+#[tokio::test]
+async fn production_wiring_validation_rejects_local_only_credential_broker() {
+    let broker = Arc::new(InMemoryCredentialBroker::new());
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
         Arc::new(LocalFilesystem::new()),
@@ -1091,12 +1125,39 @@ fn production_wiring_validation_rejects_unverified_runtime_http_egress() {
         ProcessServices::in_memory(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
-    .with_runtime_http_egress(Arc::new(
-        HostHttpEgressService::new_with_request_policy_for_tests(
-            RecordingNetworkHttpEgress::new(),
-            InMemorySecretStore::new(),
+    .with_credential_broker(broker);
+
+    let report = services
+        .validate_production_wiring(&ProductionWiringConfig::new([]).require_credential_broker())
+        .expect_err("in-memory credential broker must not satisfy production guardrail");
+
+    assert!(
+        report.contains(
+            ProductionWiringComponent::CredentialAccountStore,
+            ProductionWiringIssueKind::LocalOnlyImplementation
         ),
-    ));
+        "in-memory credential account store should be reported as local-only: {report:?}"
+    );
+    assert!(
+        report.contains(
+            ProductionWiringComponent::CredentialSessionStore,
+            ProductionWiringIssueKind::LocalOnlyImplementation
+        ),
+        "in-memory credential session store should be reported as local-only: {report:?}"
+    );
+}
+
+#[tokio::test]
+async fn production_wiring_validation_rejects_unverified_runtime_http_egress() {
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_runtime_http_egress(Arc::new(RecordingRuntimeHttpEgress::new()));
 
     let report = services
         .validate_production_wiring(&ProductionWiringConfig::new([]).require_runtime_http_egress())
@@ -1113,8 +1174,8 @@ fn production_wiring_validation_rejects_unverified_runtime_http_egress() {
     );
 }
 
-#[test]
-fn production_wiring_validation_tracks_process_port_for_builtin_shell() {
+#[tokio::test]
+async fn production_wiring_validation_tracks_process_port_for_builtin_shell() {
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_builtin_first_party_package()),
         Arc::new(LocalFilesystem::new()),
@@ -1161,8 +1222,8 @@ fn production_wiring_validation_tracks_process_port_for_builtin_shell() {
     );
 }
 
-#[test]
-fn production_wiring_validation_tracks_tenant_sandbox_process_port_for_builtin_shell() {
+#[tokio::test]
+async fn production_wiring_validation_tracks_tenant_sandbox_process_port_for_builtin_shell() {
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_builtin_first_party_package()),
         Arc::new(LocalFilesystem::new()),
@@ -1247,8 +1308,8 @@ fn production_wiring_validation_tracks_tenant_sandbox_process_port_for_builtin_s
     );
 }
 
-#[test]
-fn production_wiring_validation_rejects_empty_verified_wasm_credentials() {
+#[tokio::test]
+async fn production_wiring_validation_rejects_empty_verified_wasm_credentials() {
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(WASM_HTTP_SUCCESS_MANIFEST)),
         Arc::new(LocalFilesystem::new()),
@@ -1276,8 +1337,8 @@ fn production_wiring_validation_rejects_empty_verified_wasm_credentials() {
     );
 }
 
-#[test]
-fn production_wiring_validation_rejects_wasm_credentials_added_after_adapter() {
+#[tokio::test]
+async fn production_wiring_validation_rejects_wasm_credentials_added_after_adapter() {
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(WASM_HTTP_SUCCESS_MANIFEST)),
         Arc::new(LocalFilesystem::new()),
@@ -1307,8 +1368,8 @@ fn production_wiring_validation_rejects_wasm_credentials_added_after_adapter() {
     );
 }
 
-#[test]
-fn production_wiring_validation_rejects_wasm_credentials_replaced_after_adapter() {
+#[tokio::test]
+async fn production_wiring_validation_rejects_wasm_credentials_replaced_after_adapter() {
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(WASM_HTTP_SUCCESS_MANIFEST)),
         Arc::new(LocalFilesystem::new()),
@@ -4544,8 +4605,8 @@ async fn host_runtime_services_denies_wasm_http_when_shared_egress_has_no_policy
     );
 }
 
-#[test]
-fn host_runtime_services_wasm_input_encode_releases_prepared_reservation() {
+#[tokio::test]
+async fn host_runtime_services_wasm_input_encode_releases_prepared_reservation() {
     let services = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/services.rs"),
     )
@@ -5965,6 +6026,7 @@ impl RuntimeProcessPort for ProductionCandidateProcessPort {
     ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
         Ok(CommandExecutionOutput {
             output: String::new(),
+            saved_output: None,
             exit_code: 0,
             sandboxed: true,
             duration: Duration::ZERO,
@@ -5983,6 +6045,7 @@ impl SandboxCommandTransport for ProductionCandidateSandboxTransport {
     ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
         Ok(CommandExecutionOutput {
             output: String::new(),
+            saved_output: None,
             exit_code: 0,
             sandboxed: false,
             duration: Duration::ZERO,
@@ -6005,8 +6068,9 @@ impl RecordingNetworkHttpEgress {
     }
 }
 
+#[async_trait::async_trait]
 impl NetworkHttpEgress for RecordingNetworkHttpEgress {
-    fn execute(
+    async fn execute(
         &self,
         request: NetworkHttpRequest,
     ) -> Result<NetworkHttpResponse, NetworkHttpError> {
@@ -6082,8 +6146,9 @@ impl RecordingRuntimeHttpEgress {
     }
 }
 
+#[async_trait::async_trait]
 impl RuntimeHttpEgress for RecordingRuntimeHttpEgress {
-    fn execute(
+    async fn execute(
         &self,
         request: RuntimeHttpEgressRequest,
     ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {

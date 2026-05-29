@@ -168,7 +168,31 @@ pub struct ThreadLiveProjectionUpdate {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ThreadLiveProjectionItem {
-    Thinking { id: String, body: String },
+    Thinking {
+        id: String,
+        body: String,
+    },
+    WorkSummary {
+        id: String,
+        run_id: TurnRunId,
+        phase: ThreadLiveWorkSummaryPhase,
+        body: String,
+    },
+    SkillActivation {
+        id: String,
+        run_id: TurnRunId,
+        skill_names: Vec<String>,
+        feedback: Vec<String>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThreadLiveWorkSummaryPhase {
+    Planning,
+    Waiting,
+    Retrying,
+    Context,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -44,6 +44,23 @@ fn runtime_credential_targets_validate_declaration_shape() {
         .validate_declaration()
         .is_err()
     );
+    assert!(
+        RuntimeCredentialTarget::PathPlaceholder {
+            placeholder: "__credential__".to_string(),
+        }
+        .validate_declaration()
+        .is_ok()
+    );
+    for invalid in ["", ".", "..", "bad/placeholder", "bad\nplaceholder"] {
+        assert!(
+            RuntimeCredentialTarget::PathPlaceholder {
+                placeholder: invalid.to_string(),
+            }
+            .validate_declaration()
+            .is_err(),
+            "{invalid:?} should be rejected"
+        );
+    }
 }
 
 #[test]
@@ -96,6 +113,23 @@ fn network_target_patterns_reject_control_and_invalid_label_characters() {
             "{invalid:?} should be rejected"
         );
     }
+}
+
+#[test]
+fn runtime_credential_target_serializes_path_placeholder() {
+    let target = RuntimeCredentialTarget::PathPlaceholder {
+        placeholder: "__credential__".to_string(),
+    };
+    let wire = json!({
+        "type": "path_placeholder",
+        "placeholder": "__credential__"
+    });
+
+    assert_eq!(serde_json::to_value(&target).unwrap(), wire);
+    assert_eq!(
+        serde_json::from_value::<RuntimeCredentialTarget>(wire).unwrap(),
+        target
+    );
 }
 
 #[test]

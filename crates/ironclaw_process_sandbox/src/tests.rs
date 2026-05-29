@@ -137,6 +137,25 @@ fn plan_validation_rejects_credentialed_run_without_lockdown() {
 }
 
 #[test]
+fn plan_validation_rejects_unsupported_credential_targets() {
+    for target in [
+        RuntimeCredentialTarget::QueryParam {
+            name: "access_token".to_string(),
+        },
+        RuntimeCredentialTarget::PathPlaceholder {
+            placeholder: "__credential__".to_string(),
+        },
+    ] {
+        let mut plan = sample_plan();
+        plan.credentials[0].target = target;
+
+        let error = plan.validate().unwrap_err();
+
+        assert_eq!(error, SandboxPlanError::UnsupportedCredentialTarget);
+    }
+}
+
+#[test]
 fn plan_validation_rejects_writable_quarantine_during_credentialed_run() {
     let mut plan = sample_plan();
     plan.mounts.tools.writable = true;

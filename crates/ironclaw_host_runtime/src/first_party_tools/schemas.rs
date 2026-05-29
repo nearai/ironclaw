@@ -149,9 +149,8 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
         "schemas/builtin/extension_search.input.v1.json" => json!({
             "type": "object",
             "properties": {
-                "query": { "type": "string", "description": "Search query for locally available Reborn extensions" }
+                "query": { "type": "string", "description": "Optional search query for locally available Reborn extensions. Omit to list all extensions." }
             },
-            "required": ["query"],
             "additionalProperties": false
         }),
         "schemas/builtin/extension_install.input.v1.json"

@@ -1,3 +1,4 @@
+use async_trait::async_trait;
 use ironclaw_host_api::NetworkMethod;
 
 use crate::{
@@ -9,13 +10,17 @@ use crate::{
     url_target::network_target_for_http_url,
 };
 
+#[async_trait]
 pub trait NetworkHttpEgress: Send + Sync {
-    fn execute(&self, request: NetworkHttpRequest)
-    -> Result<NetworkHttpResponse, NetworkHttpError>;
+    async fn execute(
+        &self,
+        request: NetworkHttpRequest,
+    ) -> Result<NetworkHttpResponse, NetworkHttpError>;
 }
 
+#[async_trait]
 pub trait NetworkHttpTransport: Send + Sync {
-    fn execute(
+    async fn execute(
         &self,
         request: NetworkTransportRequest,
     ) -> Result<NetworkHttpResponse, NetworkHttpError>;
@@ -49,12 +54,13 @@ impl<T, R> PolicyNetworkHttpEgress<T, R> {
     }
 }
 
+#[async_trait]
 impl<T, R> NetworkHttpEgress for PolicyNetworkHttpEgress<T, R>
 where
-    T: NetworkHttpTransport,
-    R: NetworkResolver,
+    T: NetworkHttpTransport + Send + Sync,
+    R: NetworkResolver + Clone + Send + Sync + 'static,
 {
-    fn execute(
+    async fn execute(
         &self,
         request: NetworkHttpRequest,
     ) -> Result<NetworkHttpResponse, NetworkHttpError> {
@@ -78,12 +84,17 @@ where
                 request_bytes: estimated_request_bytes,
                 response_bytes: 0,
             })?;
-        let resolved_ips = resolve_public_ips(
-            &target,
-            &request.policy,
-            &self.resolver,
-            estimated_request_bytes,
-        )?;
+        let resolver = self.resolver.clone();
+        let policy = request.policy.clone();
+        let resolved_ips = tokio::task::spawn_blocking(move || {
+            resolve_public_ips(&target, &policy, &resolver, estimated_request_bytes)
+        })
+        .await
+        .map_err(|error| NetworkHttpError::Transport {
+            reason: format!("network resolver worker failed: {error}"),
+            request_bytes: estimated_request_bytes,
+            response_bytes: 0,
+        })??;
         let transport_request = NetworkTransportRequest {
             method: permit.method,
             url: request.url,
@@ -93,7 +104,7 @@ where
             response_body_limit: request.response_body_limit,
             timeout_ms: request.timeout_ms,
         };
-        self.transport.execute(transport_request)
+        self.transport.execute(transport_request).await
     }
 }
 

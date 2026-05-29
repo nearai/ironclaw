@@ -13,14 +13,15 @@ use ironclaw_host_api::{MountView, ResourceScope};
 #[cfg(unix)]
 use libc::{SIGKILL, kill};
 use thiserror::Error;
-use tokio::{io::AsyncReadExt, process::Command};
+use tokio::process::Command;
 
 use crate::process_aliases::{
     LocalHostWorkdirAlias, resolve_local_host_workdir, rewrite_local_host_command_aliases,
 };
-
-/// Maximum captured output before middle truncation.
-pub(crate) const COMMAND_MAX_OUTPUT_SIZE: usize = 64 * 1024;
+use crate::process_output::{
+    CapturedCommandOutput, SavedCommandOutput, StreamCapture, capture_command_output,
+    read_stream_capped, truncate_output,
+};
 
 const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -77,6 +78,7 @@ pub struct CommandExecutionRequest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandExecutionOutput {
     pub output: String,
+    pub saved_output: Option<SavedCommandOutput>,
     pub exit_code: i64,
     pub sandboxed: bool,
     pub duration: Duration,
@@ -230,11 +232,18 @@ impl RuntimeProcessPort for LocalHostProcessPort {
         }
         let command = rewrite_local_host_command_aliases(&request.command, &self.workdir_aliases);
         let start = std::time::Instant::now();
-        let (output, exit_code) =
-            execute_local_command(&command, &cwd, timeout, &request.extra_env, self.env_mode)
-                .await?;
+        let (output, exit_code) = execute_local_command(
+            &request.scope,
+            &command,
+            &cwd,
+            timeout,
+            &request.extra_env,
+            self.env_mode,
+        )
+        .await?;
         Ok(CommandExecutionOutput {
-            output,
+            output: output.preview,
+            saved_output: output.saved_output,
             exit_code: i64::from(exit_code),
             sandboxed: false,
             duration: start.elapsed(),
@@ -243,12 +252,13 @@ impl RuntimeProcessPort for LocalHostProcessPort {
 }
 
 async fn execute_local_command(
+    scope: &ResourceScope,
     cmd: &str,
     workdir: &PathBuf,
     timeout: Duration,
     extra_env: &HashMap<String, String>,
     env_mode: LocalHostProcessEnvMode,
-) -> Result<(String, i32), RuntimeProcessError> {
+) -> Result<(CapturedCommandOutput, i32), RuntimeProcessError> {
     let mut command = if cfg!(target_os = "windows") {
         let mut c = Command::new("cmd");
         c.args(["/C", cmd]);
@@ -292,38 +302,33 @@ async fn execute_local_command(
     let result = tokio::time::timeout(timeout, async {
         let stdout_fut = async {
             if let Some(out) = stdout_handle {
-                read_stream_limited(out).await
+                read_stream_capped(scope, out).await
             } else {
-                String::new()
+                Ok(StreamCapture::default())
             }
         };
 
         let stderr_fut = async {
             if let Some(err) = stderr_handle {
-                read_stream_limited(err).await
+                read_stream_capped(scope, err).await
             } else {
-                String::new()
+                Ok(StreamCapture::default())
             }
         };
 
         let (stdout, stderr, wait_result) = tokio::join!(stdout_fut, stderr_fut, child.wait());
-        let status = wait_result?;
-        let output = if stderr.is_empty() {
-            stdout
-        } else if stdout.is_empty() {
-            stderr
-        } else {
-            format!("{stdout}\n\n--- stderr ---\n{stderr}")
-        };
-        Ok::<_, std::io::Error>((output, status.code().unwrap_or(-1)))
+        let status = wait_result.map_err(|error| {
+            RuntimeProcessError::ExecutionFailed(format!("Command execution failed: {error}"))
+        })?;
+        Ok::<_, RuntimeProcessError>((stdout?, stderr?, status.code().unwrap_or(-1)))
     })
     .await;
 
     match result {
-        Ok(Ok((output, code))) => Ok((truncate_output(&output), code)),
-        Ok(Err(e)) => Err(RuntimeProcessError::ExecutionFailed(format!(
-            "Command execution failed: {e}"
-        ))),
+        Ok(Ok((stdout, stderr, code))) => {
+            Ok((capture_command_output(scope, stdout, stderr)?, code))
+        }
+        Ok(Err(e)) => Err(e),
         Err(_) => {
             terminate_child_tree(&mut child).await;
             Err(RuntimeProcessError::Timeout(timeout))
@@ -344,53 +349,10 @@ async fn terminate_child_tree(child: &mut tokio::process::Child) {
     let _ = child.wait().await;
 }
 
-async fn read_stream_limited<R>(mut stream: R) -> String
-where
-    R: tokio::io::AsyncRead + Unpin,
-{
-    let mut buf = Vec::new();
-    (&mut stream)
-        .take((COMMAND_MAX_OUTPUT_SIZE + 1) as u64)
-        .read_to_end(&mut buf)
-        .await
-        .ok();
-    tokio::io::copy(&mut stream, &mut tokio::io::sink())
-        .await
-        .ok();
-    let output = String::from_utf8_lossy(&buf).to_string();
-    truncate_output(&output)
-}
-
-fn truncate_output(s: &str) -> String {
-    if s.len() <= COMMAND_MAX_OUTPUT_SIZE {
-        s.to_string()
-    } else {
-        let half = COMMAND_MAX_OUTPUT_SIZE / 2;
-        let head_end = floor_char_boundary(s, half);
-        let tail_start = floor_char_boundary(s, s.len() - half);
-        format!(
-            "{}\n\n... [truncated {} bytes] ...\n\n{}",
-            &s[..head_end], // safety: head_end was clamped to a UTF-8 character boundary.
-            s.len() - COMMAND_MAX_OUTPUT_SIZE,
-            &s[tail_start..]
-        )
-    }
-}
-
-fn floor_char_boundary(s: &str, pos: usize) -> usize {
-    if pos >= s.len() {
-        return s.len();
-    }
-    let mut i = pos;
-    while !s.is_char_boundary(i) {
-        i -= 1;
-    }
-    i
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::process_output::{COMMAND_MAX_OUTPUT_SIZE, SavedCommandOutputSanitization};
     use std::sync::Mutex;
 
     #[derive(Debug)]
@@ -423,6 +385,7 @@ mod tests {
             self.requests.lock().unwrap().push(request);
             Ok(CommandExecutionOutput {
                 output: self.output.clone(),
+                saved_output: None,
                 exit_code: 0,
                 sandboxed: false,
                 duration: Duration::from_millis(3),
@@ -562,38 +525,33 @@ mod tests {
         assert!(output.output.contains("... [truncated 1 bytes] ..."));
     }
 
-    #[test]
-    fn truncate_output_preserves_exact_limit() {
-        let output = "x".repeat(COMMAND_MAX_OUTPUT_SIZE);
-
-        assert_eq!(truncate_output(&output), output);
-    }
-
-    #[test]
-    fn truncate_output_respects_utf8_boundaries() {
-        let output = format!(
-            "{}{}{}",
-            "a".repeat(COMMAND_MAX_OUTPUT_SIZE / 2 - 1),
-            "é",
-            "b".repeat(COMMAND_MAX_OUTPUT_SIZE)
-        );
-
-        let truncated = truncate_output(&output);
-
-        assert!(truncated.is_char_boundary(COMMAND_MAX_OUTPUT_SIZE / 2 - 1));
-        assert!(truncated.contains("... [truncated "));
-        assert!(truncated.starts_with(&"a".repeat(COMMAND_MAX_OUTPUT_SIZE / 2 - 1)));
-        assert!(truncated.ends_with(&"b".repeat(COMMAND_MAX_OUTPUT_SIZE / 2)));
-    }
-
+    #[cfg(unix)]
     #[tokio::test]
-    async fn read_stream_limited_truncates_after_limit() {
-        let input = "x".repeat(COMMAND_MAX_OUTPUT_SIZE + 1);
+    async fn execute_local_command_saves_large_output_file() {
+        let workdir = tempfile::tempdir().expect("tempdir");
+        let middle = "MIDDLE-FROM-COMMAND";
 
-        let output = read_stream_limited(input.as_bytes()).await;
+        let (output, exit_code) = execute_local_command(
+            &ResourceScope::system(),
+            "yes a | head -c 70000; printf 'MIDDLE-FROM-COMMAND'; yes z | head -c 70000",
+            &workdir.path().to_path_buf(),
+            Duration::from_secs(5),
+            &HashMap::new(),
+            LocalHostProcessEnvMode::Scrubbed,
+        )
+        .await
+        .expect("command succeeds");
+        let saved_output = output.saved_output.expect("saved output metadata");
+        let saved = std::fs::read_to_string(&saved_output.path).expect("saved output readable");
+        let _ = std::fs::remove_file(&saved_output.path);
 
-        assert!(output.len() > COMMAND_MAX_OUTPUT_SIZE);
-        assert!(output.contains("... [truncated 1 bytes] ..."));
+        assert_eq!(exit_code, 0);
+        assert!(!output.preview.contains(middle));
+        assert_eq!(
+            saved_output.sanitization,
+            SavedCommandOutputSanitization::Clean
+        );
+        assert!(saved.contains(middle));
     }
 
     #[cfg(unix)]
@@ -602,6 +560,7 @@ mod tests {
         let workdir = tempfile::tempdir().expect("tempdir");
 
         let (output, exit_code) = execute_local_command(
+            &ResourceScope::system(),
             "printf '%s' \"$HOME\"",
             &workdir.path().to_path_buf(),
             Duration::from_secs(5),
@@ -612,7 +571,8 @@ mod tests {
         .expect("command succeeds");
 
         assert_eq!(exit_code, 0);
-        assert_eq!(output, workdir.path().display().to_string());
+        assert_eq!(output.preview, workdir.path().display().to_string());
+        assert_eq!(output.saved_output, None);
     }
 
     #[cfg(unix)]
@@ -622,6 +582,7 @@ mod tests {
         let home = std::env::var("HOME").expect("HOME set for inherited env test");
 
         let (output, exit_code) = execute_local_command(
+            &ResourceScope::system(),
             "printf '%s\\n%s' \"$HOME\" \"$IRONCLAW_REBORN_SENTINEL\"",
             &workdir.path().to_path_buf(),
             Duration::from_secs(5),
@@ -635,7 +596,8 @@ mod tests {
         .expect("command succeeds");
 
         assert_eq!(exit_code, 0);
-        assert_eq!(output, format!("{home}\ninherited"));
+        assert_eq!(output.preview, format!("{home}\ninherited"));
+        assert_eq!(output.saved_output, None);
     }
 
     #[tokio::test]
@@ -699,6 +661,7 @@ mod tests {
         let workdir = tempfile::tempdir().expect("tempdir");
 
         let (output, exit_code) = execute_local_command(
+            &ResourceScope::system(),
             "echo %HOME%",
             &workdir.path().to_path_buf(),
             Duration::from_secs(5),
@@ -709,6 +672,7 @@ mod tests {
         .expect("command succeeds");
 
         assert_eq!(exit_code, 0);
-        assert_eq!(output.trim(), workdir.path().display().to_string());
+        assert_eq!(output.preview.trim(), workdir.path().display().to_string());
+        assert_eq!(output.saved_output, None);
     }
 }

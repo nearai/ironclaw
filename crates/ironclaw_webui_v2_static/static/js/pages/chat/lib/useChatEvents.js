@@ -307,6 +307,33 @@ function applyProjectionItems({
         setIsProcessing(false);
       }
     }
+
+    if (item.skill_activation) {
+      const {
+        id,
+        skill_names: skillNames = [],
+        feedback = [],
+      } = item.skill_activation;
+      if (skillNames.length || feedback.length) {
+        const messageId = `skill-${id || skillNames.join("-") || "activation"}`;
+        const content = [
+          skillNames.length ? `Skill activated: ${skillNames.join(", ")}` : "",
+          ...feedback,
+        ].filter(Boolean).join("\n");
+        setMessages((prev) => {
+          if (prev.some((m) => m.id === messageId)) return prev;
+          return [
+            ...prev,
+            {
+              id: messageId,
+              role: "system",
+              content,
+              timestamp: new Date().toISOString(),
+            },
+          ];
+        });
+      }
+    }
   }
   if (latestRunIdRef && activeRunId) {
     latestRunIdRef.current = activeRunId;

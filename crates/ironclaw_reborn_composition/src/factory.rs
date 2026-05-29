@@ -49,9 +49,9 @@ use ironclaw_resources::{FilesystemResourceGovernorStore, PersistentResourceGove
 use ironclaw_run_state::{FilesystemApprovalRequestStore, FilesystemRunStateStore};
 #[cfg(not(feature = "libsql"))]
 use ironclaw_run_state::{InMemoryApprovalRequestStore, InMemoryRunStateStore};
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-use ironclaw_secrets::FilesystemSecretStore;
 use ironclaw_secrets::SecretStore;
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+use ironclaw_secrets::{FilesystemCredentialBroker, FilesystemSecretStore};
 #[cfg(feature = "libsql")]
 use ironclaw_threads::FilesystemSessionThreadService;
 #[cfg(not(feature = "libsql"))]
@@ -355,7 +355,7 @@ fn production_config(
     if require_wasm_credentials {
         config = config.require_wasm_credentials();
     }
-    config
+    config.require_credential_broker()
 }
 
 async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, RebornBuildError> {
@@ -1412,8 +1412,11 @@ where
 {
     let scoped_filesystem = crate::wrap_scoped(Arc::clone(&filesystem));
     let process_services = ProcessServices::filesystem(Arc::clone(&scoped_filesystem));
-    let secret_store =
-        build_filesystem_secret_store(Arc::clone(&scoped_filesystem), secret_master_key).await?;
+    let secret_credentials = build_filesystem_secret_credential_stores(
+        Arc::clone(&scoped_filesystem),
+        secret_master_key,
+    )
+    .await?;
     let resource_store = FilesystemResourceGovernorStore::new(Arc::clone(&scoped_filesystem));
     let governor = Arc::new(PersistentResourceGovernor::new(resource_store));
     let capability_leases = Arc::new(FilesystemCapabilityLeaseStore::new(Arc::clone(
@@ -1432,7 +1435,8 @@ where
     .with_trust_policy(trust_policy)
     .with_runtime_policy(runtime_policy)
     .with_capability_leases(capability_leases)
-    .with_secret_store(Arc::clone(&secret_store))
+    .with_secret_store(Arc::clone(&secret_credentials.secret_store))
+    .with_credential_broker(secret_credentials.credential_broker)
     .with_turn_run_wake_notifier(turn_run_wake_notifier)
     .with_filesystem_run_state(Arc::clone(&scoped_filesystem))
     .with_filesystem_turn_state_store(Arc::clone(&scoped_filesystem))
@@ -1458,30 +1462,64 @@ where
     Ok(services)
 }
 
-/// Build the per-process [`ironclaw_secrets::SecretStore`] over the shared
+/// Central production secret/credential stores over the shared
 /// [`ScopedFilesystem`].
 ///
 /// Backend selection is now a property of the underlying
-/// [`RootFilesystem`] (libSQL/Postgres/in-memory), not of the secret store
-/// itself. Master-key correctness remains a lazy per-tenant decrypt check; the
-/// old startup sentinel/`verify_can_decrypt_existing_secrets` path was removed
-/// in PR #3679, not by this composition refactor.
+/// [`RootFilesystem`] (libSQL/Postgres/in-memory), not of each store itself.
+/// The secret store and credential broker are deliberately built together from
+/// one scoped filesystem and one crypto handle so production composition does
+/// not grow parallel ad hoc secret/credential stores.
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-async fn build_filesystem_secret_store<F>(
+struct FilesystemSecretCredentialStores<F>
+where
+    F: RootFilesystem + 'static,
+{
+    secret_store: Arc<FilesystemSecretStore<F>>,
+    credential_broker: Arc<FilesystemCredentialBroker<F>>,
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+impl<F> FilesystemSecretCredentialStores<F>
+where
+    F: RootFilesystem + 'static,
+{
+    fn new(
+        scoped_filesystem: Arc<ScopedFilesystem<F>>,
+        crypto: Arc<ironclaw_secrets::SecretsCrypto>,
+    ) -> Self {
+        Self {
+            secret_store: Arc::new(FilesystemSecretStore::new(
+                Arc::clone(&scoped_filesystem),
+                Arc::clone(&crypto),
+            )),
+            credential_broker: Arc::new(FilesystemCredentialBroker::new(scoped_filesystem, crypto)),
+        }
+    }
+
+    fn from_master_key(
+        scoped_filesystem: Arc<ScopedFilesystem<F>>,
+        master_key: ironclaw_secrets::SecretMaterial,
+    ) -> Result<Self, crate::RebornCompositionError> {
+        Ok(Self::new(
+            scoped_filesystem,
+            Arc::new(ironclaw_secrets::SecretsCrypto::new(master_key)?),
+        ))
+    }
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+async fn build_filesystem_secret_credential_stores<F>(
     scoped_filesystem: Arc<ScopedFilesystem<F>>,
     master_key: Option<ironclaw_secrets::SecretMaterial>,
-) -> Result<Arc<FilesystemSecretStore<F>>, crate::RebornCompositionError>
+) -> Result<FilesystemSecretCredentialStores<F>, crate::RebornCompositionError>
 where
     F: RootFilesystem + 'static,
 {
     let master_key = resolve_explicit_or_keychain_master_key(master_key)
         .await?
         .ok_or(crate::RebornCompositionError::MissingSecretMasterKey)?;
-    let crypto = Arc::new(ironclaw_secrets::SecretsCrypto::new(master_key)?);
-    Ok(Arc::new(FilesystemSecretStore::new(
-        scoped_filesystem,
-        crypto,
-    )))
+    FilesystemSecretCredentialStores::from_master_key(scoped_filesystem, master_key)
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -1507,7 +1545,7 @@ where
     filesystem: Arc<F>,
     scoped_filesystem: Arc<ScopedFilesystem<F>>,
     leases: Arc<FilesystemCapabilityLeaseStore<F>>,
-    secret_store: Arc<FilesystemSecretStore<F>>,
+    secret_credentials: FilesystemSecretCredentialStores<F>,
     event_store: ironclaw_reborn_event_store::RebornEventStoreConfig,
 }
 
@@ -1525,17 +1563,16 @@ where
         let leases = Arc::new(FilesystemCapabilityLeaseStore::new(Arc::clone(
             &scoped_filesystem,
         )));
-        let secret_crypto = Arc::new(ironclaw_secrets::SecretsCrypto::new(secret_master_key)?);
-        let secret_store = Arc::new(FilesystemSecretStore::new(
+        let secret_credentials = FilesystemSecretCredentialStores::from_master_key(
             Arc::clone(&scoped_filesystem),
-            secret_crypto,
-        ));
+            secret_master_key,
+        )?;
 
         Ok(Self {
             filesystem,
             scoped_filesystem,
             leases,
-            secret_store,
+            secret_credentials,
             event_store,
         })
     }
@@ -1556,7 +1593,7 @@ where
         product_auth_ports,
         google_oauth_config,
     } = context;
-    let secret_store: Arc<dyn SecretStore> = stores.secret_store.clone();
+    let secret_store: Arc<dyn SecretStore> = stores.secret_credentials.secret_store.clone();
     let services = HostRuntimeServices::new(
         Arc::new(builtin_extension_registry()?),
         Arc::clone(&stores.filesystem),
@@ -1569,7 +1606,8 @@ where
     .with_runtime_policy(production_wiring.runtime_policy)
     .with_first_party_capabilities(Arc::new(builtin_first_party_registry()?))
     .with_capability_leases(stores.leases)
-    .with_secret_store(stores.secret_store)
+    .with_secret_store(stores.secret_credentials.secret_store)
+    .with_credential_broker(stores.secret_credentials.credential_broker)
     .try_with_host_http_egress_with_body_store(
         ironclaw_network::PolicyNetworkHttpEgress::new(
             ironclaw_network::ReqwestNetworkTransport::default(),

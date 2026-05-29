@@ -16,6 +16,13 @@ const PROJECTION_CURSOR_MAX_BYTES: usize = 1024;
 const PROJECTION_THREAD_ID_MAX_BYTES: usize = 512;
 const PROJECTION_ITEM_ID_MAX_BYTES: usize = 512;
 const PROJECTION_TEXT_MAX_BYTES: usize = 128 * 1024;
+const PROJECTION_WORK_SUMMARY_MAX_BYTES: usize = 1024;
+/// Maximum byte length for a projected skill activation name.
+pub const PROJECTION_SKILL_NAME_MAX_BYTES: usize = 128;
+/// Maximum byte length for a projected skill activation feedback note.
+pub const PROJECTION_SKILL_FEEDBACK_MAX_BYTES: usize = 1024;
+/// Maximum number of skill activation names or feedback notes per projection item.
+pub const PROJECTION_SKILL_ACTIVATION_MAX_ITEMS: usize = 16;
 const CAPABILITY_ACTIVITY_ERROR_KIND_MAX_BYTES: usize = 64;
 const CAPABILITY_ACTIVITY_ERROR_KIND_SEGMENT_MAX_BYTES: usize = 24;
 const CAPABILITY_ACTIVITY_UNCLASSIFIED_ERROR_KIND: &str = "Unclassified";
@@ -182,6 +189,15 @@ pub enum ProgressKind {
     Typing,
     ToolRunning,
     Reflecting,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProductWorkSummaryPhase {
+    Planning,
+    Waiting,
+    Retrying,
+    Context,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -530,10 +546,34 @@ pub struct AuthPromptView {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProductProjectionItem {
-    Text { id: String, body: String },
-    Thinking { id: String, body: String },
-    RunStatus { run_id: TurnRunId, status: String },
-    Gate { gate_ref: String, headline: String },
+    Text {
+        id: String,
+        body: String,
+    },
+    Thinking {
+        id: String,
+        body: String,
+    },
+    WorkSummary {
+        id: String,
+        run_id: TurnRunId,
+        phase: ProductWorkSummaryPhase,
+        body: String,
+    },
+    RunStatus {
+        run_id: TurnRunId,
+        status: String,
+    },
+    Gate {
+        gate_ref: String,
+        headline: String,
+    },
+    SkillActivation {
+        id: String,
+        run_id: TurnRunId,
+        skill_names: Vec<String>,
+        feedback: Vec<String>,
+    },
 }
 
 impl ProductProjectionItem {
@@ -542,6 +582,14 @@ impl ProductProjectionItem {
             Self::Text { id, body } | Self::Thinking { id, body } => {
                 validate_bounded_text("projection_item_id", id, PROJECTION_ITEM_ID_MAX_BYTES)?;
                 validate_bounded_text("projection_text", body, PROJECTION_TEXT_MAX_BYTES)
+            }
+            Self::WorkSummary { id, body, .. } => {
+                validate_bounded_text("projection_item_id", id, PROJECTION_ITEM_ID_MAX_BYTES)?;
+                validate_bounded_text(
+                    "projection_work_summary",
+                    body,
+                    PROJECTION_WORK_SUMMARY_MAX_BYTES,
+                )
             }
             Self::RunStatus { status, .. } => validate_bounded_text(
                 "projection_run_status",
@@ -560,6 +608,41 @@ impl ProductProjectionItem {
                     PROJECTION_TEXT_MAX_BYTES,
                 )
             }
+            Self::SkillActivation {
+                id,
+                skill_names,
+                feedback,
+                ..
+            } => {
+                validate_bounded_text("projection_item_id", id, PROJECTION_ITEM_ID_MAX_BYTES)?;
+                if skill_names.len() > PROJECTION_SKILL_ACTIVATION_MAX_ITEMS {
+                    return Err(invalid(
+                        "projection_skill_names",
+                        "too many activated skills",
+                    ));
+                }
+                if feedback.len() > PROJECTION_SKILL_ACTIVATION_MAX_ITEMS {
+                    return Err(invalid(
+                        "projection_skill_feedback",
+                        "too many skill activation feedback entries",
+                    ));
+                }
+                for skill_name in skill_names {
+                    validate_bounded_text(
+                        "projection_skill_name",
+                        skill_name,
+                        PROJECTION_SKILL_NAME_MAX_BYTES,
+                    )?;
+                }
+                for note in feedback {
+                    validate_bounded_text(
+                        "projection_skill_feedback",
+                        note,
+                        PROJECTION_SKILL_FEEDBACK_MAX_BYTES,
+                    )?;
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -572,18 +655,64 @@ impl<'de> Deserialize<'de> for ProductProjectionItem {
         #[derive(Deserialize)]
         #[serde(rename_all = "snake_case")]
         enum Wire {
-            Text { id: String, body: String },
-            Thinking { id: String, body: String },
-            RunStatus { run_id: TurnRunId, status: String },
-            Gate { gate_ref: String, headline: String },
+            Text {
+                id: String,
+                body: String,
+            },
+            Thinking {
+                id: String,
+                body: String,
+            },
+            WorkSummary {
+                id: String,
+                run_id: TurnRunId,
+                phase: ProductWorkSummaryPhase,
+                body: String,
+            },
+            RunStatus {
+                run_id: TurnRunId,
+                status: String,
+            },
+            Gate {
+                gate_ref: String,
+                headline: String,
+            },
+            SkillActivation {
+                id: String,
+                run_id: TurnRunId,
+                skill_names: Vec<String>,
+                feedback: Vec<String>,
+            },
         }
         let value = match Wire::deserialize(deserializer)? {
             Wire::Text { id, body } => ProductProjectionItem::Text { id, body },
             Wire::Thinking { id, body } => ProductProjectionItem::Thinking { id, body },
+            Wire::WorkSummary {
+                id,
+                run_id,
+                phase,
+                body,
+            } => ProductProjectionItem::WorkSummary {
+                id,
+                run_id,
+                phase,
+                body,
+            },
             Wire::RunStatus { run_id, status } => {
                 ProductProjectionItem::RunStatus { run_id, status }
             }
             Wire::Gate { gate_ref, headline } => ProductProjectionItem::Gate { gate_ref, headline },
+            Wire::SkillActivation {
+                id,
+                run_id,
+                skill_names,
+                feedback,
+            } => ProductProjectionItem::SkillActivation {
+                id,
+                run_id,
+                skill_names,
+                feedback,
+            },
         };
         value.validate().map_err(serde::de::Error::custom)?;
         Ok(value)
@@ -755,6 +884,70 @@ mod tests {
         let decoded: ProductProjectionState =
             serde_json::from_value(value).expect("deserialize thinking projection");
         assert_eq!(decoded, state);
+    }
+
+    #[test]
+    fn projection_state_round_trips_work_summary_item() {
+        let run_id = TurnRunId::new();
+        let state = ProductProjectionState::new(
+            "thread-1",
+            vec![ProductProjectionItem::WorkSummary {
+                id: "work-summary:run:1".to_string(),
+                run_id,
+                phase: ProductWorkSummaryPhase::Planning,
+                body: "checking branch state".to_string(),
+            }],
+        )
+        .expect("valid work summary projection");
+        let value = serde_json::to_value(&state).expect("serialize");
+        assert_eq!(
+            value["items"][0]["work_summary"]["body"],
+            "checking branch state"
+        );
+        assert_eq!(value["items"][0]["work_summary"]["phase"], "planning");
+        let decoded: ProductProjectionState =
+            serde_json::from_value(value).expect("deserialize work summary projection");
+        assert_eq!(decoded, state);
+    }
+
+    #[test]
+    fn projection_state_round_trips_skill_activation_item() {
+        let run_id = TurnRunId::new();
+        let state = ProductProjectionState::new(
+            "thread-1",
+            vec![ProductProjectionItem::SkillActivation {
+                id: "skill-activation:run:1".to_string(),
+                run_id,
+                skill_names: vec!["code-review".to_string()],
+                feedback: vec!["code-review: force-activated via explicit mention".to_string()],
+            }],
+        )
+        .expect("valid skill activation projection");
+        let value = serde_json::to_value(&state).expect("serialize");
+        assert_eq!(
+            value["items"][0]["skill_activation"]["skill_names"][0],
+            "code-review"
+        );
+        let decoded: ProductProjectionState =
+            serde_json::from_value(value).expect("deserialize skill activation projection");
+        assert_eq!(decoded, state);
+    }
+
+    #[test]
+    fn projection_state_rejects_oversized_work_summary_body() {
+        let json = serde_json::json!({
+            "thread_id": "thread-1",
+            "items": [{
+                "work_summary": {
+                    "id": "work-summary:run:1",
+                    "run_id": TurnRunId::new(),
+                    "phase": "planning",
+                    "body": "x".repeat(PROJECTION_WORK_SUMMARY_MAX_BYTES + 1),
+                }
+            }]
+        });
+
+        assert!(serde_json::from_value::<ProductProjectionState>(json).is_err());
     }
 
     #[test]

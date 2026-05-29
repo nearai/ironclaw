@@ -78,7 +78,9 @@ async fn postgres_substrate_builder_wires_production_components_without_local_on
         .await
         .unwrap();
 
-    let production_config = ProductionWiringConfig::new([]).require_runtime_http_egress();
+    let production_config = ProductionWiringConfig::new([])
+        .require_runtime_http_egress()
+        .require_credential_broker();
     services
         .validate_production_wiring(&production_config)
         .expect("postgres substrate production wiring should not use fake seams");
@@ -156,11 +158,11 @@ async fn postgres_substrate_builder_rejects_weak_env_secret_master_key() {
 fn production_runtime_policy() -> EffectiveRuntimePolicy {
     EffectiveRuntimePolicy {
         deployment: DeploymentMode::HostedMultiTenant,
-        requested_profile: RuntimeProfile::HostedDev,
-        resolved_profile: RuntimeProfile::HostedDev,
+        requested_profile: RuntimeProfile::HostedSafe,
+        resolved_profile: RuntimeProfile::HostedSafe,
         filesystem_backend: FilesystemBackendKind::TenantWorkspace,
         process_backend: ProcessBackendKind::TenantSandbox,
-        network_mode: NetworkMode::Allowlist,
+        network_mode: NetworkMode::Brokered,
         secret_mode: SecretMode::TenantBroker,
         approval_policy: ApprovalPolicy::AskDestructive,
         audit_mode: AuditMode::Standard,
@@ -184,6 +186,7 @@ impl SandboxCommandTransport for RecordingSandboxTransport {
     ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
         Ok(CommandExecutionOutput {
             output: String::new(),
+            saved_output: None,
             exit_code: 0,
             sandboxed: true,
             duration: Duration::ZERO,

@@ -1,10 +1,12 @@
 use std::{
     collections::HashMap,
     io::{self, Write},
+    panic::AssertUnwindSafe,
     sync::Arc,
     time::Instant,
 };
 
+use futures_util::FutureExt as _;
 use ironclaw_auth::{
     CredentialAccountService, CredentialRecoveryKind, CredentialRecoveryProjection, ProviderScope,
 };
@@ -313,9 +315,13 @@ async fn execute_runtime_http(
     request: RuntimeHttpEgressRequest,
     egress: Arc<dyn RuntimeHttpEgress>,
 ) -> Result<ironclaw_host_api::RuntimeHttpEgressResponse, GsuiteDispatchError> {
-    tokio::task::spawn_blocking(move || egress.execute(request))
+    AssertUnwindSafe(egress.execute(request))
+        .catch_unwind()
         .await
-        .map_err(|_| GsuiteDispatchError::new(RuntimeDispatchErrorKind::Backend))?
+        .map_err(|_| {
+            tracing::error!("GSuite runtime HTTP egress future panicked");
+            GsuiteDispatchError::new(RuntimeDispatchErrorKind::Backend)
+        })?
         .map_err(map_egress_error)
 }
 

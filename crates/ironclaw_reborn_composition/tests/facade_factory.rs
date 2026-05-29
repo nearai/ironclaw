@@ -390,6 +390,7 @@ impl ironclaw_host_runtime::SandboxCommandTransport for ProductionReadySandboxTr
     > {
         Ok(ironclaw_host_runtime::CommandExecutionOutput {
             output: String::new(),
+            saved_output: None,
             exit_code: 0,
             sandboxed: true,
             duration: std::time::Duration::ZERO,

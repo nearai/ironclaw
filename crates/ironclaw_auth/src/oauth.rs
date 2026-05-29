@@ -8,9 +8,7 @@
 
 use std::fmt;
 
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use secrecy::{ExposeSecret, SecretString};
-use sha2::{Digest, Sha256};
 use url::Url;
 
 use crate::{
@@ -304,25 +302,29 @@ impl OAuthTokenResponse {
 }
 
 pub fn opaque_state_hash(state: &str) -> Result<OpaqueStateHash, AuthProductError> {
-    OpaqueStateHash::new(hex::encode(Sha256::digest(state.as_bytes())))
+    OpaqueStateHash::new(ironclaw_common::hashing::sha256_hex(state.as_bytes()))
 }
 
 pub fn pkce_verifier_hash(
     verifier: &PkceVerifierSecret,
 ) -> Result<PkceVerifierHash, AuthProductError> {
-    PkceVerifierHash::new(hex::encode(Sha256::digest(
+    PkceVerifierHash::new(ironclaw_common::hashing::sha256_hex(
         verifier.expose_secret().as_bytes(),
-    )))
+    ))
 }
 
 pub fn authorization_code_hash(
     code: &OAuthAuthorizationCode,
 ) -> Result<AuthorizationCodeHash, AuthProductError> {
-    AuthorizationCodeHash::new(hex::encode(Sha256::digest(code.expose_secret().as_bytes())))
+    AuthorizationCodeHash::new(ironclaw_common::hashing::sha256_hex(
+        code.expose_secret().as_bytes(),
+    ))
 }
 
 pub fn pkce_s256_challenge(verifier: &PkceVerifierSecret) -> PkceCodeChallenge {
-    PkceCodeChallenge(URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.expose_secret().as_bytes())))
+    PkceCodeChallenge(ironclaw_common::pkce::s256_challenge(
+        verifier.expose_secret().as_bytes(),
+    ))
 }
 
 pub fn build_authorization_url(

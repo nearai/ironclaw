@@ -4,11 +4,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
-use base64::{Engine as _, engine::general_purpose};
 use chrono::Utc;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
 use url::Url;
@@ -61,7 +59,6 @@ fn oauth_client_secret() -> String {
 const OAUTH_SCOPE: &str = "https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile";
 const GOOG_API_CLIENT: &str = concat!("gl-rust/1.0.0 ironclaw/", env!("CARGO_PKG_VERSION"));
 
-const PKCE_CHARSET: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~";
 const STATE_CHARSET: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 
 /// Synthetic thought signature injected into model functionCall parts
@@ -294,19 +291,10 @@ struct PKCEParams {
 fn generate_pkce_params() -> PKCEParams {
     use rand::Rng;
 
-    let mut rng = rand::thread_rng();
-    let code_verifier: String = (0..64)
-        .map(|_| {
-            let idx = rng.gen_range(0..PKCE_CHARSET.len());
-            PKCE_CHARSET[idx] as char
-        })
-        .collect();
+    let code_verifier = ironclaw_common::pkce::generate_code_verifier();
+    let code_challenge = ironclaw_common::pkce::s256_challenge(code_verifier.as_bytes());
 
-    let mut hasher = Sha256::new();
-    hasher.update(&code_verifier);
-    let hash = hasher.finalize();
-    let code_challenge = general_purpose::URL_SAFE_NO_PAD.encode(hash);
-
+    let mut rng = rand::rngs::OsRng;
     let state: String = (0..32)
         .map(|_| {
             let idx = rng.gen_range(0..STATE_CHARSET.len());

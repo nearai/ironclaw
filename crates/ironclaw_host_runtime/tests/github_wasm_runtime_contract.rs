@@ -197,8 +197,8 @@ async fn host_runtime_services_missing_github_runtime_secret_blocks_on_auth() {
     );
 }
 
-#[test]
-fn bundled_github_wasm_executes_search_get_and_comment_operations() {
+#[tokio::test]
+async fn bundled_github_wasm_executes_search_get_and_comment_operations() {
     let search_http = Arc::new(RecordingWasmHostHttp::ok(WasmHttpResponse {
         status: 200,
         headers_json: "{}".to_string(),
@@ -273,8 +273,8 @@ fn bundled_github_wasm_executes_search_get_and_comment_operations() {
     );
 }
 
-#[test]
-fn bundled_github_wasm_sanitizes_host_http_and_api_failures() {
+#[tokio::test]
+async fn bundled_github_wasm_sanitizes_host_http_and_api_failures() {
     let cases = [
         (
             RecordingWasmHostHttp::err(WasmHostError::Unavailable(
@@ -336,8 +336,8 @@ fn bundled_github_wasm_sanitizes_host_http_and_api_failures() {
     }
 }
 
-#[test]
-fn bundled_github_wasm_leaves_success_json_for_host_output_decode() {
+#[tokio::test]
+async fn bundled_github_wasm_leaves_success_json_for_host_output_decode() {
     let execution = execute_bundled_github_wasm(
         "github.search_issues",
         json!({"query": "repo:nearai/ironclaw is:issue", "limit": 1}),
@@ -371,8 +371,9 @@ impl RecordingNetworkHttpEgress {
     }
 }
 
+#[async_trait::async_trait]
 impl NetworkHttpEgress for RecordingNetworkHttpEgress {
-    fn execute(
+    async fn execute(
         &self,
         request: NetworkHttpRequest,
     ) -> Result<NetworkHttpResponse, NetworkHttpError> {

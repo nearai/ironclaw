@@ -1394,8 +1394,9 @@ mod tests {
         }
     }
 
+    #[async_trait::async_trait]
     impl RuntimeHttpEgress for RecordingEgress {
-        fn execute(
+        async fn execute(
             &self,
             request: RuntimeHttpEgressRequest,
         ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
@@ -1432,8 +1433,9 @@ mod tests {
         }
     }
 
+    #[async_trait::async_trait]
     impl NetworkHttpEgress for RecordingNetwork {
-        fn execute(
+        async fn execute(
             &self,
             request: NetworkHttpRequest,
         ) -> Result<NetworkHttpResponse, NetworkHttpError> {
