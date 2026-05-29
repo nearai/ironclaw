@@ -17,6 +17,8 @@ const GOOGLE_CALENDAR_MANIFEST: &str =
     include_str!("../../ironclaw_first_party_extensions/assets/google-calendar/manifest.toml");
 const GMAIL_MANIFEST: &str =
     include_str!("../../ironclaw_first_party_extensions/assets/gmail/manifest.toml");
+const WEB_ACCESS_MANIFEST: &str =
+    include_str!("../../ironclaw_first_party_extensions/assets/web-access/manifest.toml");
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct AvailableExtensionAsset {
@@ -67,6 +69,7 @@ impl AvailableExtensionCatalog {
     pub(crate) fn from_first_party_assets() -> Result<Self, ProductWorkflowError> {
         Ok(Self::from_packages(vec![
             github_package()?,
+            web_access_package()?,
             google_calendar_package()?,
             gmail_package()?,
         ]))
@@ -144,6 +147,15 @@ fn github_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
     bundled_extension_package("github", "GitHub", GITHUB_MANIFEST, github_assets())
 }
 
+fn web_access_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
+    bundled_extension_package(
+        "web-access",
+        "Web Access",
+        WEB_ACCESS_MANIFEST,
+        web_access_assets(),
+    )
+}
+
 fn google_calendar_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
     bundled_extension_package(
         "google-calendar",
@@ -163,6 +175,10 @@ pub(crate) fn google_calendar_manifest_digest() -> String {
 
 pub(crate) fn gmail_manifest_digest() -> String {
     sha256_digest_token(GMAIL_MANIFEST.as_bytes())
+}
+
+pub(crate) fn web_access_manifest_digest() -> String {
+    sha256_digest_token(WEB_ACCESS_MANIFEST.as_bytes())
 }
 
 fn bundled_extension_package(
@@ -265,6 +281,48 @@ fn github_assets() -> Vec<AvailableExtensionAsset> {
             ),
         ),
         bytes_asset("wasm/github_tool.wasm", GITHUB_WASM_MODULE),
+    ]
+}
+
+fn web_access_assets() -> Vec<AvailableExtensionAsset> {
+    vec![
+        bytes_asset("manifest.toml", WEB_ACCESS_MANIFEST.as_bytes()),
+        bytes_asset(
+            "schemas/web-access/search.input.v1.json",
+            include_bytes!(
+                "../../ironclaw_first_party_extensions/assets/web-access/schemas/web-access/search.input.v1.json"
+            ),
+        ),
+        bytes_asset(
+            "schemas/web-access/search.output.v1.json",
+            include_bytes!(
+                "../../ironclaw_first_party_extensions/assets/web-access/schemas/web-access/search.output.v1.json"
+            ),
+        ),
+        bytes_asset(
+            "schemas/web-access/get_content.input.v1.json",
+            include_bytes!(
+                "../../ironclaw_first_party_extensions/assets/web-access/schemas/web-access/get_content.input.v1.json"
+            ),
+        ),
+        bytes_asset(
+            "schemas/web-access/get_content.output.v1.json",
+            include_bytes!(
+                "../../ironclaw_first_party_extensions/assets/web-access/schemas/web-access/get_content.output.v1.json"
+            ),
+        ),
+        bytes_asset(
+            "prompts/web-access/search.md",
+            include_bytes!(
+                "../../ironclaw_first_party_extensions/assets/web-access/prompts/web-access/search.md"
+            ),
+        ),
+        bytes_asset(
+            "prompts/web-access/get_content.md",
+            include_bytes!(
+                "../../ironclaw_first_party_extensions/assets/web-access/prompts/web-access/get_content.md"
+            ),
+        ),
     ]
 }
 
@@ -760,10 +818,10 @@ mod tests {
     }
 
     #[test]
-    fn bundled_gsuite_manifest_asset_refs_are_packaged() {
+    fn bundled_first_party_manifest_asset_refs_are_packaged() {
         let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
 
-        for extension_id in ["google-calendar", "gmail"] {
+        for extension_id in ["web-access", "google-calendar", "gmail"] {
             let package_ref =
                 LifecyclePackageRef::new(LifecyclePackageKind::Extension, extension_id).unwrap();
             let package = catalog.resolve(&package_ref).unwrap();
