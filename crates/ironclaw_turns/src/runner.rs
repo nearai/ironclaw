@@ -172,7 +172,9 @@ pub trait TurnRunTransitionPort: Send + Sync {
         request: RelinquishRunRequest,
     ) -> Result<TurnRunState, TurnError> {
         let _ = request;
-        unimplemented!("relinquish_run not implemented for this TurnRunTransitionPort")
+        Err(TurnError::Unavailable {
+            reason: "relinquish_run not implemented for this TurnRunTransitionPort".to_string(),
+        })
     }
 
     async fn apply_validated_loop_exit(
