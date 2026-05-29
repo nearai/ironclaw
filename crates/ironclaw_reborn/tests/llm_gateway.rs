@@ -413,7 +413,7 @@ async fn gateway_rejects_unknown_provider_tool_call_before_registration() {
         .await
         .unwrap_err();
 
-    assert_eq!(error.kind, HostManagedModelErrorKind::InvalidRequest);
+    assert_eq!(error.kind, HostManagedModelErrorKind::InvalidOutput);
     assert!(capabilities.registered.lock().unwrap().is_empty());
 }
 
@@ -1155,7 +1155,7 @@ async fn gateway_rejects_tool_use_provider_responses() {
         .await
         .unwrap_err();
 
-    assert_eq!(error.kind, HostManagedModelErrorKind::InvalidRequest);
+    assert_eq!(error.kind, HostManagedModelErrorKind::InvalidOutput);
 }
 
 #[tokio::test]
@@ -1174,7 +1174,7 @@ async fn gateway_rejects_tool_use_without_tool_calls_on_capability_path() {
         .await
         .unwrap_err();
 
-    assert_eq!(error.kind, HostManagedModelErrorKind::InvalidRequest);
+    assert_eq!(error.kind, HostManagedModelErrorKind::InvalidOutput);
     assert!(capabilities.registered.lock().unwrap().is_empty());
 }
 

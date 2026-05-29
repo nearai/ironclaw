@@ -850,7 +850,7 @@ async fn tool_response_to_host(
             .any(|tool_call| !advertised_tool_names.contains(&tool_call.name))
         {
             return Err(HostManagedModelError::safe(
-                HostManagedModelErrorKind::InvalidRequest,
+                HostManagedModelErrorKind::InvalidOutput,
                 "model returned a tool call outside the advertised capability surface",
             ));
         }
@@ -912,7 +912,7 @@ async fn tool_response_to_host(
             "model response was blocked by provider policy",
         )),
         FinishReason::ToolUse => Err(HostManagedModelError::safe(
-            HostManagedModelErrorKind::InvalidRequest,
+            HostManagedModelErrorKind::InvalidOutput,
             "model returned tool-use finish without tool calls",
         )),
         FinishReason::Unknown => Err(HostManagedModelError::safe(
@@ -984,7 +984,7 @@ fn response_to_host_reply(
             "model response was blocked by provider policy",
         )),
         FinishReason::ToolUse => Err(HostManagedModelError::safe(
-            HostManagedModelErrorKind::InvalidRequest,
+            HostManagedModelErrorKind::InvalidOutput,
             "model returned unsupported tool calls for a text-only loop",
         )),
         FinishReason::Unknown => Err(HostManagedModelError::safe(
