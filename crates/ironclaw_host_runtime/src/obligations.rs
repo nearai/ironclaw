@@ -18,10 +18,10 @@ use ironclaw_events::{
 };
 use ironclaw_host_api::{
     ActionResultSummary, ActionSummary, AuditEnvelope, AuditEventId, AuditStage,
-    CapabilityDispatchResult, CapabilityId, DecisionSummary, EffectKind, ExtensionId, MountView,
-    NetworkPolicy, Obligation, ProcessId, ResourceCeiling, ResourceEstimate, ResourceReservation,
-    ResourceScope, ResourceUsage, RuntimeCredentialAccountProviderId, RuntimeHttpEgress,
-    SandboxQuota, SecretHandle,
+    CapabilityDispatchResult, CapabilityId, CredentialStageError, DecisionSummary, EffectKind,
+    ExtensionId, MountView, NetworkPolicy, Obligation, ProcessId, ResourceCeiling,
+    ResourceEstimate, ResourceReservation, ResourceScope, ResourceUsage,
+    RuntimeCredentialAccountProviderId, RuntimeHttpEgress, SandboxQuota, SecretHandle,
 };
 use ironclaw_network::NetworkHttpEgress;
 use ironclaw_processes::{ProcessError, ProcessRecord, ProcessStart, ProcessStore};
@@ -43,20 +43,20 @@ pub struct RuntimeCredentialAccountRequest<'a> {
     pub requester_extension: &'a ExtensionId,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum RuntimeCredentialAccountError {
-    #[error("product-auth account requires re-authentication")]
-    AuthRequired,
-    #[error("product-auth credential resolution failed")]
-    Failed,
-}
-
 #[async_trait]
 pub trait RuntimeCredentialAccountResolver: Send + Sync + fmt::Debug {
+    /// Resolve the access-secret handle for the requested product-auth account.
+    ///
+    /// Returns [`CredentialStageError::AuthRequired`] when the account is
+    /// missing/unconfigured/expired/revoked (user must re-authenticate), or
+    /// [`CredentialStageError::Backend`] for internal failures not attributable
+    /// to user credentials. Shares its error vocabulary with the rest of the
+    /// staged-credential surface (`ProductAuthCredentialStageError`,
+    /// `GsuiteCredentialStageError`) so no per-layer error mapping is needed.
     async fn resolve_access_secret(
         &self,
         request: RuntimeCredentialAccountRequest<'_>,
-    ) -> Result<SecretHandle, RuntimeCredentialAccountError>;
+    ) -> Result<SecretHandle, CredentialStageError>;
 }
 
 /// One-shot runtime secret material staged after `InjectSecretOnce` lease consumption.
@@ -1255,7 +1255,7 @@ impl BuiltinObligationHandler {
                     requester_extension: obligation.requester_extension,
                 })
                 .await
-                .map_err(runtime_credential_account_error)?;
+                .map_err(credential_stage_error_to_obligation_error)?;
             // Retrieve and stage the resolved credential under the obligation's injection handle.
             // The access_secret names the material in the secret store; obligation.handle is
             // the slot name the WASM guest expects.
@@ -1267,7 +1267,8 @@ impl BuiltinObligationHandler {
                 &access_secret,
                 obligation.handle,
             )
-            .await?;
+            .await
+            .map_err(credential_stage_error_to_obligation_error)?;
         }
 
         Ok(())
@@ -1709,12 +1710,18 @@ fn staged_secret_injection_handles(obligations: &[Obligation]) -> Vec<SecretHand
         .collect()
 }
 
-fn runtime_credential_account_error(
-    error: RuntimeCredentialAccountError,
+/// Map the canonical staged-credential error to the obligation-handler error type.
+///
+/// Used by both [`inject_credential_accounts`] (resolver-side errors) and
+/// [`stage_credential_material`] (storage-side errors) so the WASM
+/// `InjectCredentialAccountOnce` path and the first-party stager path share
+/// the same AuthRequired/Backend semantics.
+fn credential_stage_error_to_obligation_error(
+    error: CredentialStageError,
 ) -> CapabilityObligationError {
     match error {
-        RuntimeCredentialAccountError::AuthRequired => CapabilityObligationError::AuthRequired,
-        RuntimeCredentialAccountError::Failed => secret_obligation_failed(),
+        CredentialStageError::AuthRequired => CapabilityObligationError::AuthRequired,
+        CredentialStageError::Backend => secret_obligation_failed(),
     }
 }
 
@@ -1724,6 +1731,15 @@ fn runtime_credential_account_error(
 /// Used when the secret store key (`source`) differs from the runtime injection slot
 /// (`target`) — for example, when a product-auth account's backing secret is resolved
 /// to a concrete handle before being injected under the WASM guest's declared slot name.
+/// Lease → consume → insert the staged credential material.
+///
+/// Mirrors [`crate::services::ProductAuthProviderRuntimePorts::stage_secret_once`]
+/// so the WASM `InjectCredentialAccountOnce` path and the first-party stager path
+/// (e.g. `ProductAuthRuntimeGsuiteCredentialStager`) share identical lease/consume
+/// semantics and `CredentialStageError` mapping. `SecretStoreError` variants for
+/// unknown/expired/revoked/consumed material map to
+/// [`CredentialStageError::AuthRequired`] via [`crate::services::stage_secret_error`];
+/// other failures map to [`CredentialStageError::Backend`].
 async fn stage_credential_material(
     secret_store: &dyn SecretStore,
     secret_injections: &RuntimeSecretInjectionStore,
@@ -1731,22 +1747,21 @@ async fn stage_credential_material(
     capability_id: &CapabilityId,
     source: &SecretHandle,
     target: &SecretHandle,
-) -> Result<(), CapabilityObligationError> {
+) -> Result<(), CredentialStageError> {
     let lease = secret_store.lease_once(scope, source).await.map_err(|e| {
         tracing::debug!(err = %e, "stage_credential_material: lease_once failed");
-        secret_obligation_failed()
+        crate::services::stage_secret_error(e)
     })?;
     let secret = secret_store.consume(scope, lease.id).await.map_err(|e| {
         tracing::debug!(err = %e, "stage_credential_material: consume failed");
-        secret_obligation_failed()
+        crate::services::stage_secret_error(e)
     })?;
     secret_injections
         .insert(scope, capability_id, target, secret)
         .map_err(|e| {
             tracing::debug!(err = %e, "stage_credential_material: insert failed");
-            secret_obligation_failed()
-        })?;
-    Ok(())
+            CredentialStageError::Backend
+        })
 }
 
 fn network_policy_obligation(
@@ -2320,7 +2335,7 @@ mod tests {
         //   - capability_id + scope are populated
         //   - no payload (the offending string never appears in the event)
         let leaky_payload =
-            serde_json::Value::String("hello AKIAABCDEFGHIJKLMNOP goodbye".to_string());
+            serde_json::Value::String("hello AKIAIOSFODNN7EXAMPLE goodbye".to_string());
         let dispatch = CapabilityDispatchResult {
             capability_id: capability_id.clone(),
             provider: context.extension_id.clone(),
@@ -2410,7 +2425,7 @@ mod tests {
             capability_id: capability_id.clone(),
             provider: context.extension_id.clone(),
             runtime: RuntimeKind::Wasm,
-            output: serde_json::Value::String("leak AKIAABCDEFGHIJKLMNOP".to_string()),
+            output: serde_json::Value::String("leak AKIAIOSFODNN7EXAMPLE".to_string()),
             usage: ResourceUsage::default(),
             receipt: ResourceReceipt {
                 id: ResourceReservationId::new(),

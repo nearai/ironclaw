@@ -232,8 +232,11 @@ impl ProductAuthProviderRuntimePorts {
 /// so the runtime auth gate fires instead of surfacing a generic backend
 /// failure. Anything else is a true backend defect.
 ///
-/// `pub(crate)` so it can be unit-tested directly; used in production by
-/// [`ProductAuthProviderRuntimePorts::stage_secret_once`]. Not part of the public API.
+/// Used in production by [`ProductAuthProviderRuntimePorts::stage_secret_once`]
+/// and by the obligation-handler `stage_credential_material` helper so the
+/// WASM `InjectCredentialAccountOnce` lane and the first-party stager lane
+/// share identical AuthRequired classification. Crate-private: cross-crate
+/// callers must go through one of the two staging entry points above.
 pub(crate) fn stage_secret_error(error: SecretStoreError) -> ProductAuthCredentialStageError {
     // Unknown / expired / revoked / consumed / unknown-lease are all user-actionable
     // re-auth conditions: the credential is missing or no longer valid.  Anything

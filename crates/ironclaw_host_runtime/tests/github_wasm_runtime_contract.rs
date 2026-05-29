@@ -7,17 +7,16 @@ use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry
 use ironclaw_filesystem::LocalFilesystem;
 use ironclaw_host_api::{
     AgentId, CapabilityDescriptor, CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet,
-    CorrelationId, Decision, EffectKind, ExecutionContext, ExtensionId, GrantConstraints, HostPath,
-    InvocationId, MissionId, MountView, NetworkMethod, NetworkPolicy, NetworkScheme,
-    NetworkTargetPattern, Obligation, Obligations, PackageId, Principal, ProjectId,
+    CorrelationId, CredentialStageError, Decision, EffectKind, ExecutionContext, ExtensionId,
+    GrantConstraints, HostPath, InvocationId, MissionId, MountView, NetworkMethod, NetworkPolicy,
+    NetworkScheme, NetworkTargetPattern, Obligation, Obligations, PackageId, Principal, ProjectId,
     ResourceEstimate, ResourceScope, RuntimeCredentialAccountProviderId, RuntimeKind, SecretHandle,
     TenantId, TrustClass, UserId, VirtualPath,
 };
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, HostRuntime, HostRuntimeServices, RuntimeCapabilityOutcome,
-    RuntimeCapabilityRequest, RuntimeCredentialAccountError, RuntimeCredentialAccountRequest,
-    RuntimeCredentialAccountResolver, default_host_api_contract_registry,
-    default_host_port_catalog,
+    RuntimeCapabilityRequest, RuntimeCredentialAccountRequest, RuntimeCredentialAccountResolver,
+    default_host_api_contract_registry, default_host_port_catalog,
 };
 use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
@@ -151,7 +150,7 @@ async fn host_runtime_services_missing_github_runtime_secret_blocks_on_auth() {
     )
     .with_secret_store(Arc::clone(&secret_store))
     .with_runtime_credential_account_resolver(Arc::new(FixedRuntimeCredentialAccountResolver {
-        result: Err(RuntimeCredentialAccountError::AuthRequired),
+        result: Err(CredentialStageError::AuthRequired),
     }))
     .with_trust_policy(Arc::new(github_first_party_trust_policy()))
     .try_with_host_http_egress(network.clone())
@@ -419,7 +418,7 @@ impl TrustAwareCapabilityDispatchAuthorizer for ObligatingAuthorizer {
 
 #[derive(Debug)]
 struct FixedRuntimeCredentialAccountResolver {
-    result: Result<SecretHandle, RuntimeCredentialAccountError>,
+    result: Result<SecretHandle, CredentialStageError>,
 }
 
 #[async_trait]
@@ -427,7 +426,7 @@ impl RuntimeCredentialAccountResolver for FixedRuntimeCredentialAccountResolver 
     async fn resolve_access_secret(
         &self,
         request: RuntimeCredentialAccountRequest<'_>,
-    ) -> Result<SecretHandle, RuntimeCredentialAccountError> {
+    ) -> Result<SecretHandle, CredentialStageError> {
         assert_eq!(request.provider.as_str(), "github");
         assert_eq!(request.requester_extension.as_str(), "github");
         self.result.clone()

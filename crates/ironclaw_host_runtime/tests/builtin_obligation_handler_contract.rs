@@ -17,8 +17,7 @@ use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     BuiltinObligationHandler, BuiltinObligationServices, CapabilitySurfaceVersion,
     DefaultHostRuntime, HostRuntime, RuntimeCapabilityOutcome, RuntimeCapabilityRequest,
-    RuntimeCredentialAccountError, RuntimeCredentialAccountRequest,
-    RuntimeCredentialAccountResolver, RuntimeFailureKind,
+    RuntimeCredentialAccountRequest, RuntimeCredentialAccountResolver, RuntimeFailureKind,
 };
 use ironclaw_resources::{InMemoryResourceGovernor, ResourceAccount};
 use ironclaw_secrets::{InMemorySecretStore, SecretMaterial, SecretStore};
@@ -1258,8 +1257,8 @@ impl RuntimeCredentialAccountResolver for AlwaysAuthRequiredResolver {
     async fn resolve_access_secret(
         &self,
         _request: RuntimeCredentialAccountRequest<'_>,
-    ) -> Result<ironclaw_host_api::SecretHandle, RuntimeCredentialAccountError> {
-        Err(RuntimeCredentialAccountError::AuthRequired)
+    ) -> Result<ironclaw_host_api::SecretHandle, ironclaw_host_api::CredentialStageError> {
+        Err(ironclaw_host_api::CredentialStageError::AuthRequired)
     }
 }
 
@@ -1271,7 +1270,7 @@ impl RuntimeCredentialAccountResolver for FixedHandleResolver {
     async fn resolve_access_secret(
         &self,
         _request: RuntimeCredentialAccountRequest<'_>,
-    ) -> Result<ironclaw_host_api::SecretHandle, RuntimeCredentialAccountError> {
+    ) -> Result<ironclaw_host_api::SecretHandle, ironclaw_host_api::CredentialStageError> {
         Ok(self.0.clone())
     }
 }
@@ -1399,9 +1398,14 @@ async fn inject_credential_account_once_resolves_and_stages_secret() {
 }
 
 #[tokio::test]
-async fn inject_credential_account_once_fails_when_resolved_secret_not_in_store() {
+async fn inject_credential_account_once_maps_unknown_resolved_secret_to_auth_required() {
     // Resolver returns Ok(handle) but that handle has no material in the secret store.
-    // Expected: Failed (lease_once returns an error -> secret_obligation_failed).
+    // Expected: AuthRequired — lease_once on an unknown secret is classified as a
+    // user-actionable re-auth condition by `stage_secret_error`, shared with the
+    // first-party stager path (ProductAuthProviderRuntimePorts::stage_secret_once).
+    // This was Failed in earlier PR4233 iterations; aligned with reborn #4231
+    // staged-credential semantics so the runtime auth gate fires consistently
+    // regardless of which staging lane (obligation vs stager) discovered the gap.
     let access_handle = ironclaw_host_api::SecretHandle::new("missing_secret").unwrap();
     let secret_store = Arc::new(ironclaw_secrets::InMemorySecretStore::new()); // empty store
     let governor = Arc::new(ironclaw_resources::InMemoryResourceGovernor::new());
@@ -1433,8 +1437,8 @@ async fn inject_credential_account_once_fails_when_resolved_secret_not_in_store(
         .unwrap_err();
 
     assert!(
-        matches!(err, CapabilityObligationError::Failed { .. }),
-        "expected Failed when resolved handle not in store, got {err:?}"
+        matches!(err, CapabilityObligationError::AuthRequired),
+        "expected AuthRequired when resolved handle not in store, got {err:?}"
     );
 }
 

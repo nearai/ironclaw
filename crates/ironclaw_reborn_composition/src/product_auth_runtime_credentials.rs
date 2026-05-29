@@ -6,11 +6,8 @@ use ironclaw_auth::{
     CredentialAccountLookupRequest, CredentialAccountSelectionRequest, CredentialAccountService,
     CredentialAccountStatus,
 };
-use ironclaw_host_api::SecretHandle;
-use ironclaw_host_runtime::{
-    RuntimeCredentialAccountError, RuntimeCredentialAccountRequest,
-    RuntimeCredentialAccountResolver,
-};
+use ironclaw_host_api::{CredentialStageError, SecretHandle};
+use ironclaw_host_runtime::{RuntimeCredentialAccountRequest, RuntimeCredentialAccountResolver};
 
 #[derive(Clone)]
 pub(crate) struct ProductAuthRuntimeCredentialResolver {
@@ -37,7 +34,7 @@ impl RuntimeCredentialAccountResolver for ProductAuthRuntimeCredentialResolver {
     async fn resolve_access_secret(
         &self,
         request: RuntimeCredentialAccountRequest<'_>,
-    ) -> Result<SecretHandle, RuntimeCredentialAccountError> {
+    ) -> Result<SecretHandle, CredentialStageError> {
         let auth_scope = AuthProductScope::new(request.scope.clone(), AuthSurface::Api);
         let provider = AuthProviderId::new(request.provider.as_str()).map_err(|e| {
             tracing::debug!(
@@ -45,7 +42,7 @@ impl RuntimeCredentialAccountResolver for ProductAuthRuntimeCredentialResolver {
                 err = %e,
                 "product-auth provider id is invalid"
             );
-            RuntimeCredentialAccountError::Failed
+            CredentialStageError::Backend
         })?;
         let selected = self
             .accounts
@@ -63,24 +60,26 @@ impl RuntimeCredentialAccountResolver for ProductAuthRuntimeCredentialResolver {
             )
             .await
             .map_err(map_account_error)?
-            .ok_or(RuntimeCredentialAccountError::AuthRequired)?;
+            .ok_or(CredentialStageError::AuthRequired)?;
         if account.status != CredentialAccountStatus::Configured {
-            return Err(RuntimeCredentialAccountError::AuthRequired);
+            return Err(CredentialStageError::AuthRequired);
         }
-        // A Configured account missing access_secret indicates data corruption, not
-        // a re-auth prompt. Return Failed so the caller does not loop through auth.
-        account
-            .access_secret
-            .ok_or(RuntimeCredentialAccountError::Failed)
+        // A Configured account missing access_secret indicates data corruption,
+        // not a re-auth prompt. The durable product-auth store (#4234) preserves
+        // the Configured ↔ access_secret=Some invariant (manual-token submit sets
+        // both together; cleanup/uninstall clears status to Revoked together with
+        // the handle), so this branch can only fire on corrupt state. Return
+        // Backend so the caller does not loop through re-auth.
+        account.access_secret.ok_or(CredentialStageError::Backend)
     }
 }
 
-fn map_account_error(error: AuthProductError) -> RuntimeCredentialAccountError {
+fn map_account_error(error: AuthProductError) -> CredentialStageError {
     match error {
         AuthProductError::CredentialMissing
         | AuthProductError::CrossScopeDenied
-        | AuthProductError::AccountSelectionRequired => RuntimeCredentialAccountError::AuthRequired,
-        _ => RuntimeCredentialAccountError::Failed,
+        | AuthProductError::AccountSelectionRequired => CredentialStageError::AuthRequired,
+        _ => CredentialStageError::Backend,
     }
 }
 
@@ -150,7 +149,7 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert_eq!(error, RuntimeCredentialAccountError::AuthRequired);
+        assert_eq!(error, CredentialStageError::AuthRequired);
     }
 
     #[tokio::test]
@@ -186,11 +185,11 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert_eq!(error, RuntimeCredentialAccountError::AuthRequired);
+        assert_eq!(error, CredentialStageError::AuthRequired);
     }
 
     #[tokio::test]
-    async fn resolver_maps_configured_account_without_access_secret_to_failed() {
+    async fn resolver_maps_configured_account_without_access_secret_to_backend() {
         let accounts = Arc::new(InMemoryAuthProductServices::new());
         let scope =
             ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new())
@@ -222,8 +221,10 @@ mod tests {
             .await
             .unwrap_err();
 
-        // Data corruption: should be Failed, not AuthRequired (re-auth would not fix it)
-        assert_eq!(error, RuntimeCredentialAccountError::Failed);
+        // Data corruption: should be Backend, not AuthRequired (re-auth would not fix it).
+        // The durable product-auth store preserves Configured ↔ access_secret=Some,
+        // so this state cannot arise from legitimate cleanup or rotation paths.
+        assert_eq!(error, CredentialStageError::Backend);
     }
 
     #[tokio::test]
@@ -263,6 +264,6 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert_eq!(error, RuntimeCredentialAccountError::AuthRequired);
+        assert_eq!(error, CredentialStageError::AuthRequired);
     }
 }

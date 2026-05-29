@@ -84,8 +84,8 @@ pub use invocation_services::{
 };
 pub use obligations::{
     BuiltinObligationHandler, BuiltinObligationServices, LEAK_REDACT_FAILED_CODE,
-    ProcessObligationLifecycleStore, RuntimeCredentialAccountError,
-    RuntimeCredentialAccountRequest, RuntimeCredentialAccountResolver,
+    ProcessObligationLifecycleStore, RuntimeCredentialAccountRequest,
+    RuntimeCredentialAccountResolver,
 };
 pub use planner::{ExecutionPlan, PlannerError, plan_capability};
 pub use process_output::{SavedCommandOutput, SavedCommandOutputSanitization};
