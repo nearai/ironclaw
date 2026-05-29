@@ -80,6 +80,7 @@ use crate::local_dev_mounts::{
     ambient_workspace_mount_view, skill_context_mount_view, skill_management_mount_view,
     workspace_mount_view,
 };
+use crate::mcp::host_mediated_mcp_runtime;
 use crate::{
     RebornAuthContinuationDispatcher, RebornBuildError, RebornBuildInput, RebornCompositionProfile,
     RebornFacadeReadiness, RebornProductAuthServices, RebornReadiness, RebornReadinessState,
@@ -215,6 +216,30 @@ where
         .ok_or_else(|| RebornBuildError::InvalidConfig {
             reason: "Google OAuth provider backend requires host runtime HTTP egress".to_string(),
         })
+}
+
+fn with_host_mediated_mcp_runtime<F, G, S, R>(
+    services: HostRuntimeServices<F, G, S, R>,
+) -> Result<HostRuntimeServices<F, G, S, R>, RebornBuildError>
+where
+    F: ironclaw_filesystem::RootFilesystem + 'static,
+    G: ironclaw_resources::ResourceGovernor + 'static,
+    S: ironclaw_processes::ProcessStore + 'static,
+    R: ironclaw_processes::ProcessResultStore + 'static,
+{
+    let runtime_http_egress = services
+        .product_auth_provider_runtime_ports()
+        .ok_or_else(|| RebornBuildError::InvalidConfig {
+            reason: "MCP runtime requires host runtime HTTP egress".to_string(),
+        })?
+        .runtime_http_egress();
+    let registry = services.shared_extension_registry();
+    Ok(
+        services.with_mcp_runtime(Arc::new(host_mediated_mcp_runtime(
+            registry,
+            runtime_http_egress,
+        ))),
+    )
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -487,6 +512,7 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         services = services.with_runtime_process_port(Arc::new(process_port));
     }
     services = apply_runtime_process_binding(services, runtime_process_binding);
+    services = with_host_mediated_mcp_runtime(services)?;
     let google_provider_client = google_oauth_config
         .map(|config| {
             let runtime_ports = require_product_auth_runtime_ports(&services)?;
@@ -1600,6 +1626,7 @@ where
     .with_filesystem_turn_state_store(stores.scoped_filesystem)
     .with_run_profile_resolver(planned_run_profile_resolver()?)
     .with_turn_run_wake_notifier(production_wiring.turn_run_wake_notifier);
+    let services = with_host_mediated_mcp_runtime(services)?;
     let google_provider_client = google_oauth_config
         .map(|config| {
             let runtime_ports = require_product_auth_runtime_ports(&services)?;
@@ -1710,8 +1737,8 @@ mod tests {
     use ironclaw_host_api::{
         CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind,
         ExecutionContext, ExtensionId, GrantConstraints, InvocationId, MountAlias, MountGrant,
-        NetworkPolicy, NetworkTargetPattern, Principal, ResourceEstimate, ResourceScope,
-        RuntimeKind, ScopedPath, SecretHandle, TrustClass, UserId, VirtualPath,
+        NetworkPolicy, NetworkScheme, NetworkTargetPattern, Principal, ResourceEstimate,
+        ResourceScope, RuntimeKind, ScopedPath, SecretHandle, TrustClass, UserId, VirtualPath,
     };
     use ironclaw_host_runtime::{
         RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeFailureKind,
@@ -1857,6 +1884,67 @@ mod tests {
         );
         assert_ne!(failure.kind, RuntimeFailureKind::Authorization);
         assert_ne!(failure.kind, RuntimeFailureKind::MissingRuntime);
+    }
+
+    #[tokio::test]
+    async fn local_dev_notion_mcp_installs_activates_and_reaches_auth_gate() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let services = build_reborn_services(RebornBuildInput::local_dev(
+            "local-dev-notion-mcp-owner",
+            dir.path().join("local-dev"),
+        ))
+        .await
+        .expect("local-dev services build");
+        let local_runtime = services.local_runtime.as_ref().expect("local runtime");
+        let extension_management = local_runtime
+            .extension_management
+            .as_ref()
+            .expect("extension management");
+        let notion_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "notion").expect("valid ref");
+        let catalog = AvailableExtensionCatalog::from_first_party_assets()
+            .expect("first-party extensions load");
+        let notion_package = catalog.resolve(&notion_ref).expect("Notion MCP is bundled");
+        let capability_ids = notion_package
+            .package
+            .manifest
+            .capabilities
+            .iter()
+            .map(|capability| capability.id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(capability_ids.len(), 18);
+        assert!(capability_ids.contains(&"notion.notion-create-pages"));
+        assert!(capability_ids.contains(&"notion.notion-query-data-sources"));
+        assert!(capability_ids.contains(&"notion.notion-create-comment"));
+        assert!(capability_ids.contains(&"notion.notion-get-self"));
+
+        extension_management
+            .install(notion_ref.clone())
+            .await
+            .expect("install Notion MCP");
+        extension_management
+            .activate(notion_ref)
+            .await
+            .expect("activate Notion MCP");
+
+        let outcome = services
+            .host_runtime
+            .as_ref()
+            .expect("host runtime")
+            .invoke_capability(RuntimeCapabilityRequest::new(
+                notion_mcp_context("notion.notion-search"),
+                CapabilityId::new("notion.notion-search").unwrap(),
+                ResourceEstimate::default(),
+                serde_json::json!({ "query": "project notes" }),
+                notion_mcp_trust_decision(),
+            ))
+            .await
+            .expect("runtime invocation completes");
+
+        let RuntimeCapabilityOutcome::AuthRequired(gate) = outcome else {
+            panic!("expected missing Notion token to open auth gate, got {outcome:?}");
+        };
+        assert_eq!(gate.capability_id.as_str(), "notion.notion-search");
     }
 
     #[cfg(feature = "libsql")]
@@ -2188,6 +2276,35 @@ mod tests {
         .expect("valid execution context")
     }
 
+    fn notion_mcp_context(capability_id: &str) -> ExecutionContext {
+        let extension_id = ExtensionId::new("caller").expect("valid extension id");
+        ExecutionContext::local_default(
+            UserId::new("local-dev-test-user").expect("valid user id"),
+            extension_id.clone(),
+            RuntimeKind::Mcp,
+            TrustClass::Sandbox,
+            CapabilitySet {
+                grants: vec![CapabilityGrant {
+                    id: CapabilityGrantId::new(),
+                    capability: CapabilityId::new(capability_id).expect("valid capability id"),
+                    grantee: Principal::Extension(extension_id),
+                    issued_by: Principal::HostRuntime,
+                    constraints: GrantConstraints {
+                        allowed_effects: notion_mcp_allowed_effects(),
+                        mounts: MountView::new(Vec::new()).expect("valid empty mount view"),
+                        network: notion_mcp_network_policy(),
+                        secrets: vec![SecretHandle::new("mcp_notion_access_token").unwrap()],
+                        resource_ceiling: None,
+                        expires_at: None,
+                        max_invocations: None,
+                    },
+                }],
+            },
+            MountView::new(Vec::new()).expect("valid empty mount view"),
+        )
+        .expect("valid execution context")
+    }
+
     fn execution_context(capability_id: &str, mounts: MountView) -> ExecutionContext {
         let extension_id = ExtensionId::new("caller").expect("valid extension id");
         ExecutionContext::local_default(
@@ -2276,11 +2393,43 @@ mod tests {
         }
     }
 
+    fn notion_mcp_network_policy() -> NetworkPolicy {
+        NetworkPolicy {
+            allowed_targets: vec![NetworkTargetPattern {
+                scheme: Some(NetworkScheme::Https),
+                host_pattern: "mcp.notion.com".to_string(),
+                port: None,
+            }],
+            deny_private_ip_ranges: true,
+            max_egress_bytes: None,
+        }
+    }
+
+    fn notion_mcp_allowed_effects() -> Vec<EffectKind> {
+        vec![
+            EffectKind::DispatchCapability,
+            EffectKind::Network,
+            EffectKind::UseSecret,
+        ]
+    }
+
     fn trust_decision() -> TrustDecision {
         TrustDecision {
             effective_trust: EffectiveTrustClass::user_trusted(),
             authority_ceiling: AuthorityCeiling {
                 allowed_effects: allowed_effects(),
+                max_resource_ceiling: None,
+            },
+            provenance: TrustProvenance::Default,
+            evaluated_at: chrono::Utc::now(),
+        }
+    }
+
+    fn notion_mcp_trust_decision() -> TrustDecision {
+        TrustDecision {
+            effective_trust: EffectiveTrustClass::user_trusted(),
+            authority_ceiling: AuthorityCeiling {
+                allowed_effects: notion_mcp_allowed_effects(),
                 max_resource_ceiling: None,
             },
             provenance: TrustProvenance::Default,

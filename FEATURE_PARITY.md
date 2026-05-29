@@ -336,6 +336,7 @@ Trace Commons issuer/TenantCtx note: the server-side `zmanian/tracedao-server` s
 | Tool-level streaming | ✅ | ❌ | |
 | Z.AI tool_stream | ✅ | ❌ | Real-time tool call streaming |
 | Plugin tools | ✅ | ✅ | WASM tools |
+| Hosted MCP extensions | ✅ | 🚧 | Reborn composes host-mediated MCP runtime and bundles the current Notion MCP supported tool set; dynamic schema discovery/OAuth setup parity still pending |
 | Tool policies (allow/deny) | ✅ | ✅ | |
 | Exec approvals (`/approve`) | ✅ | ✅ | TUI approval overlay |
 | Tool inventory cache | ✅ | ❌ | Coalesced effective-tool inventory cache with channel-registry invalidation |
