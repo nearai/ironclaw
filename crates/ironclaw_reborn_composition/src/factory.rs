@@ -1695,15 +1695,15 @@ where
             Arc::new(UnavailableAuthProviderClient),
         )
     });
-    let product_auth = Some(compose_product_auth_services(
+    let product_auth_services = compose_product_auth_services(
         product_auth_ports,
         turn_coordinator.clone(),
         google_provider_client,
-    ));
+    );
     let product_auth_ready = true;
     register_bundled_gsuite_first_party_handlers(
         &mut first_party_registry,
-        product_auth.as_ref().unwrap().credential_account_service(),
+        product_auth_services.credential_account_service(),
         Arc::new(ProductAuthRuntimeGsuiteCredentialStager::new(
             product_auth_runtime_ports.clone(),
         )),
@@ -1720,7 +1720,7 @@ where
         host_runtime: Some(host_runtime),
         turn_coordinator: Some(turn_coordinator),
         readiness: readiness_for(profile, true, true, product_auth_ready),
-        product_auth,
+        product_auth: Some(product_auth_services),
         local_runtime: None,
     })
 }
