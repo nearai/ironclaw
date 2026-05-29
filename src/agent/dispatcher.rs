@@ -4,6 +4,7 @@
 //! loop (LLM call -> tool calls -> repeat) in its own focused module.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
@@ -24,6 +25,10 @@ use crate::generated_images::GeneratedImageSentinel;
 use crate::tools::permissions::{PermissionState, effective_permission};
 use crate::tools::redact_params;
 use ironclaw_llm::{ChatMessage, Reasoning, ReasoningContext, TokenUsage};
+
+/// Number of consecutive agentic iterations without a `memory_write` call before
+/// the loop injects a reminder nudge into the conversation context.
+const MEMORY_NUDGE_THRESHOLD: u32 = 5;
 
 fn selected_model_override(value: &serde_json::Value) -> Option<String> {
     ironclaw_llm::normalized_model_override(value.as_str()).map(str::to_string)
@@ -289,6 +294,8 @@ impl Agent {
             user_tz,
             turn_usage: std::sync::Mutex::new(TurnUsageSummary::default()),
             cached_admin_tool_policy: tokio::sync::OnceCell::new(),
+            turns_since_memory_write: AtomicU32::new(0),
+            memory_write_this_iter: AtomicBool::new(false),
         };
 
         // If /skill-name mentions were expanded, rewrite the last user message
@@ -403,6 +410,12 @@ struct ChatDelegate<'a> {
     user_tz: chrono_tz::Tz,
     turn_usage: std::sync::Mutex<TurnUsageSummary>,
     cached_admin_tool_policy: crate::tools::permissions::AdminToolPolicyCache,
+    /// Count of consecutive agentic iterations that ended without a `memory_write` call.
+    /// Reset to 0 when `memory_write` is detected; drives the memory nudge in `before_llm_call`.
+    turns_since_memory_write: AtomicU32,
+    /// Set to `true` within `execute_tool_calls` if any tool in the batch is `memory_write`.
+    /// Consumed (and reset) by `after_iteration`.
+    memory_write_this_iter: AtomicBool,
 }
 
 impl ChatDelegate<'_> {
@@ -451,6 +464,17 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                  Provide your best final answer on the next response \
                  using the information you have gathered so far. \
                  Do not call any more tools.",
+            ));
+        }
+
+        // Nudge the agent to save important context to memory when several
+        // consecutive iterations have passed without a `memory_write` call.
+        if self.turns_since_memory_write.load(Ordering::Relaxed) >= MEMORY_NUDGE_THRESHOLD {
+            reason_ctx.messages.push(ChatMessage::system(
+                "Reminder: you have not used `memory_write` recently. \
+                 If you have discovered important facts, made key decisions, or \
+                 identified constraints worth remembering across sessions, \
+                 call `memory_write` to persist them now.",
             ));
         }
 
@@ -755,6 +779,16 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
         TextAction::Return(LoopOutcome::Response(sanitized))
     }
 
+    async fn after_iteration(&self, _iteration: usize) {
+        // Consume the memory_write flag set by execute_tool_calls.
+        // If memory_write was called, reset the counter; otherwise increment it.
+        if self.memory_write_this_iter.swap(false, Ordering::Relaxed) {
+            self.turns_since_memory_write.store(0, Ordering::Relaxed);
+        } else {
+            self.turns_since_memory_write.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
     async fn execute_tool_calls(
         &self,
         tool_calls: Vec<ironclaw_llm::ToolCall>,
@@ -762,6 +796,12 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
         reason_ctx: &mut ReasoningContext,
         reasoning: Option<String>,
     ) -> Result<Option<LoopOutcome>, Error> {
+        // Track whether this batch contains a memory_write call so `after_iteration`
+        // can reset the turns_since_memory_write counter.
+        if tool_calls.iter().any(|tc| tc.name == "memory_write") {
+            self.memory_write_this_iter.store(true, Ordering::Relaxed);
+        }
+
         // Extract and sanitize the narrative before consuming `content`.
         let narrative = content
             .as_deref()
@@ -1803,6 +1843,7 @@ fn image_generation_record_content(sentinel: &GeneratedImageSentinel) -> String 
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
     use std::time::Duration;
 
     use async_trait::async_trait;
@@ -4234,5 +4275,35 @@ mod tests {
             !session.is_tool_auto_approved(tool_name),
             "v1 should preserve its hard-floor behavior for ApprovalRequirement::Always"
         );
+    }
+
+    /// Verify the memory-write nudge counter logic in isolation.
+    ///
+    /// The counter increments when `after_iteration` fires without a prior
+    /// `memory_write` flag, and resets to 0 when the flag is set.
+    #[test]
+    fn test_memory_nudge_counter_increments_and_resets() {
+        let counter = AtomicU32::new(0);
+        let flag = AtomicBool::new(false);
+
+        // Five iterations without memory_write → counter reaches threshold.
+        for _ in 0..5 {
+            if flag.swap(false, Ordering::Relaxed) {
+                counter.store(0, Ordering::Relaxed);
+            } else {
+                counter.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        assert_eq!(counter.load(Ordering::Relaxed), 5);
+        assert!(counter.load(Ordering::Relaxed) >= super::MEMORY_NUDGE_THRESHOLD);
+
+        // memory_write fires → flag set → counter resets on next after_iteration.
+        flag.store(true, Ordering::Relaxed);
+        if flag.swap(false, Ordering::Relaxed) {
+            counter.store(0, Ordering::Relaxed);
+        } else {
+            counter.fetch_add(1, Ordering::Relaxed);
+        }
+        assert_eq!(counter.load(Ordering::Relaxed), 0);
     }
 }
