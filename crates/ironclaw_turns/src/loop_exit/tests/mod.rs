@@ -48,12 +48,8 @@ fn validation_policy_named_constructors_keep_terminal_default_and_host_verified_
     assert!(!default_policy.requires_final_checkpoint());
     assert!(!default_policy.allows_no_reply_completion());
     assert!(!default_policy.final_checkpoint_verified());
-    assert_eq!(
-        default_policy.invalid_handling(),
-        LoopExitInvalidHandling::FailTerminal
-    );
 
-    let trusted_policy = LoopExitValidationPolicy::fail_terminal()
+    let trusted_policy = LoopExitValidationPolicy::default()
         .require_final_checkpoint()
         .with_allow_no_reply_completion()
         .with_host_verified_final_checkpoint()
@@ -68,10 +64,6 @@ fn validation_policy_named_constructors_keep_terminal_default_and_host_verified_
     assert!(trusted_policy.requires_final_checkpoint());
     assert!(trusted_policy.allows_no_reply_completion());
     assert!(trusted_policy.final_checkpoint_verified());
-    assert_eq!(
-        trusted_policy.invalid_handling(),
-        LoopExitInvalidHandling::FailTerminal
-    );
 }
 
 #[test]
@@ -130,10 +122,6 @@ fn loop_exit_validation_policy_deserialization_cannot_mint_host_verified_evidenc
     assert!(policy.requires_final_checkpoint());
     assert!(!policy.allows_no_reply_completion());
     assert!(!policy.completion_refs_verified());
-    assert_eq!(
-        policy.invalid_handling(),
-        LoopExitInvalidHandling::FailTerminal
-    );
 }
 
 #[test]
@@ -152,7 +140,6 @@ fn completed_ask_user_exit_maps_to_trusted_completed_outcome_without_final_check
         allow_no_reply_completion: false,
         final_checkpoint_verified: false,
         host_cancellation_observed: false,
-        invalid_handling: LoopExitInvalidHandling::FailTerminal,
         completion_refs_verified: true,
         blocked_evidence_verified: false,
         failure_evidence_verified: false,
@@ -179,7 +166,6 @@ fn completed_exit_without_durable_refs_maps_to_protocol_failure_or_recovery() {
         allow_no_reply_completion: false,
         final_checkpoint_verified: false,
         host_cancellation_observed: false,
-        invalid_handling: LoopExitInvalidHandling::FailTerminal,
         completion_refs_verified: true,
         blocked_evidence_verified: false,
         failure_evidence_verified: false,
@@ -201,7 +187,6 @@ fn completed_exit_without_durable_refs_maps_to_protocol_failure_or_recovery() {
         allow_no_reply_completion: false,
         final_checkpoint_verified: false,
         host_cancellation_observed: false,
-        invalid_handling: LoopExitInvalidHandling::FailTerminal,
         completion_refs_verified: true,
         blocked_evidence_verified: false,
         failure_evidence_verified: false,
@@ -231,7 +216,6 @@ fn completed_exit_requires_host_verified_completion_refs_before_trusted_mapping(
         allow_no_reply_completion: false,
         final_checkpoint_verified: false,
         host_cancellation_observed: false,
-        invalid_handling: LoopExitInvalidHandling::FailTerminal,
         completion_refs_verified: false,
         blocked_evidence_verified: false,
         failure_evidence_verified: false,
@@ -276,7 +260,6 @@ fn final_checkpoint_policy_rejects_terminal_exit_without_checkpoint() {
             allow_no_reply_completion: false,
             final_checkpoint_verified: false,
             host_cancellation_observed: true,
-            invalid_handling: LoopExitInvalidHandling::FailTerminal,
             completion_refs_verified: true,
             blocked_evidence_verified: false,
             failure_evidence_verified: true,
@@ -330,7 +313,6 @@ fn validation_policy_requires_final_checkpoint_only_when_configured() {
             allow_no_reply_completion: false,
             final_checkpoint_verified: false,
             host_cancellation_observed: false,
-            invalid_handling: LoopExitInvalidHandling::FailTerminal,
             completion_refs_verified: true,
             blocked_evidence_verified: false,
             failure_evidence_verified: false,
@@ -366,7 +348,6 @@ fn blocked_exit_maps_to_block_run_outcome_with_verified_checkpoint_and_gate_ref(
         allow_no_reply_completion: false,
         final_checkpoint_verified: false,
         host_cancellation_observed: false,
-        invalid_handling: LoopExitInvalidHandling::FailTerminal,
         completion_refs_verified: false,
         blocked_evidence_verified: true,
         failure_evidence_verified: false,
@@ -398,7 +379,6 @@ fn blocked_exit_requires_host_verified_gate_and_checkpoint_before_trusted_mappin
         allow_no_reply_completion: false,
         final_checkpoint_verified: false,
         host_cancellation_observed: false,
-        invalid_handling: LoopExitInvalidHandling::FailTerminal,
         completion_refs_verified: false,
         blocked_evidence_verified: false,
         failure_evidence_verified: false,
@@ -423,7 +403,6 @@ fn cancelled_exit_requires_observed_host_cancellation() {
         allow_no_reply_completion: false,
         final_checkpoint_verified: false,
         host_cancellation_observed: false,
-        invalid_handling: LoopExitInvalidHandling::FailTerminal,
         completion_refs_verified: false,
         blocked_evidence_verified: false,
         failure_evidence_verified: false,
@@ -445,7 +424,6 @@ fn cancelled_exit_requires_observed_host_cancellation() {
         allow_no_reply_completion: false,
         final_checkpoint_verified: false,
         host_cancellation_observed: true,
-        invalid_handling: LoopExitInvalidHandling::FailTerminal,
         completion_refs_verified: false,
         blocked_evidence_verified: false,
         failure_evidence_verified: false,
@@ -591,7 +569,6 @@ fn no_reply_with_empty_refs_requires_explicit_policy_permission() {
         allow_no_reply_completion: false,
         final_checkpoint_verified: false,
         host_cancellation_observed: false,
-        invalid_handling: LoopExitInvalidHandling::FailTerminal,
         completion_refs_verified: true,
         blocked_evidence_verified: false,
         failure_evidence_verified: false,
@@ -625,7 +602,6 @@ fn no_reply_with_empty_refs_maps_to_completed_when_policy_allows_it() {
         allow_no_reply_completion: true,
         final_checkpoint_verified: false,
         host_cancellation_observed: false,
-        invalid_handling: LoopExitInvalidHandling::FailTerminal,
         completion_refs_verified: false,
         blocked_evidence_verified: false,
         failure_evidence_verified: false,
@@ -650,7 +626,6 @@ fn delegated_result_with_result_refs_maps_to_trusted_completed() {
         allow_no_reply_completion: false,
         final_checkpoint_verified: false,
         host_cancellation_observed: false,
-        invalid_handling: LoopExitInvalidHandling::FailTerminal,
         completion_refs_verified: true,
         blocked_evidence_verified: false,
         failure_evidence_verified: false,
@@ -675,7 +650,6 @@ fn result_only_with_result_refs_maps_to_trusted_completed() {
         allow_no_reply_completion: false,
         final_checkpoint_verified: false,
         host_cancellation_observed: false,
-        invalid_handling: LoopExitInvalidHandling::FailTerminal,
         completion_refs_verified: true,
         blocked_evidence_verified: false,
         failure_evidence_verified: false,
@@ -692,7 +666,6 @@ fn completion_kind_must_match_durable_reference_shape() {
         allow_no_reply_completion: true,
         final_checkpoint_verified: false,
         host_cancellation_observed: false,
-        invalid_handling: LoopExitInvalidHandling::FailTerminal,
         completion_refs_verified: true,
         blocked_evidence_verified: false,
         failure_evidence_verified: false,

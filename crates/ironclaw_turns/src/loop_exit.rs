@@ -142,7 +142,6 @@ impl LoopExitApplier {
             allow_no_reply_completion: profile.checkpoint_policy.allow_no_reply_completion,
             final_checkpoint_verified: false,
             host_cancellation_observed: false,
-            invalid_handling: self.invalid_handling(scope, turn_id, run_id).await?,
             completion_refs_verified: false,
             blocked_evidence_verified: false,
             failure_evidence_verified: false,
@@ -245,18 +244,6 @@ impl LoopExitApplier {
             .await
     }
 
-    async fn invalid_handling(
-        &self,
-        scope: &TurnScope,
-        turn_id: TurnId,
-        run_id: TurnRunId,
-    ) -> Result<LoopExitInvalidHandling, TurnError> {
-        let _ = self
-            .evidence_port
-            .latest_checkpoint_kind(scope, turn_id, run_id)
-            .await?;
-        Ok(LoopExitInvalidHandling::FailTerminal)
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -295,14 +282,12 @@ impl LoopExit {
                     Err(()) => invalid_exit_decision(
                         exit_id,
                         LoopExitViolationKind::UnverifiedBlockedEvidence,
-                        policy.invalid_handling,
                     ),
                 }
             }
             Self::Blocked(_exit) => invalid_exit_decision(
                 exit_id,
                 LoopExitViolationKind::UnverifiedBlockedEvidence,
-                policy.invalid_handling,
             ),
             Self::Cancelled(exit) => validate_cancelled_exit(exit_id, exit, policy),
             Self::Failed(exit) => validate_failed_exit(exit_id, exit, policy),
@@ -473,12 +458,6 @@ impl LoopFailureKind {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LoopExitInvalidHandling {
-    FailTerminal,
-}
-
 /// Host-derived policy for validating a driver-supplied [`LoopExit`] claim.
 ///
 /// Fields are private so callers cannot mint trusted evidence with struct
@@ -490,21 +469,12 @@ pub(crate) struct LoopExitValidationPolicy {
     allow_no_reply_completion: bool,
     final_checkpoint_verified: bool,
     host_cancellation_observed: bool,
-    invalid_handling: LoopExitInvalidHandling,
     completion_refs_verified: bool,
     blocked_evidence_verified: bool,
     failure_evidence_verified: bool,
 }
 
 impl LoopExitValidationPolicy {
-    #[cfg(test)]
-    pub(crate) fn fail_terminal() -> Self {
-        Self {
-            invalid_handling: LoopExitInvalidHandling::FailTerminal,
-            ..Self::default()
-        }
-    }
-
     #[cfg(test)]
     pub(crate) fn require_final_checkpoint(mut self) -> Self {
         self.require_final_checkpoint = true;
@@ -573,11 +543,6 @@ impl LoopExitValidationPolicy {
     }
 
     #[cfg(test)]
-    pub(crate) fn invalid_handling(&self) -> LoopExitInvalidHandling {
-        self.invalid_handling
-    }
-
-    #[cfg(test)]
     pub(crate) fn completion_refs_verified(&self) -> bool {
         self.completion_refs_verified
     }
@@ -600,7 +565,6 @@ impl Default for LoopExitValidationPolicy {
             allow_no_reply_completion: false,
             final_checkpoint_verified: false,
             host_cancellation_observed: false,
-            invalid_handling: LoopExitInvalidHandling::FailTerminal,
             completion_refs_verified: false,
             blocked_evidence_verified: false,
             failure_evidence_verified: false,
@@ -631,8 +595,6 @@ impl<'de> Deserialize<'de> for LoopExitValidationPolicy {
             #[serde(default)]
             host_cancellation_observed: bool,
             #[serde(default)]
-            invalid_handling: Option<LoopExitInvalidHandling>,
-            #[serde(default)]
             completion_refs_verified: bool,
             #[serde(default)]
             blocked_evidence_verified: bool,
@@ -650,11 +612,6 @@ impl<'de> Deserialize<'de> for LoopExitValidationPolicy {
         {
             return Err(de::Error::custom(
                 "loop exit validation policy wire payload cannot mint host-verified evidence or relaxed completion policy",
-            ));
-        }
-        if wire.invalid_handling.is_some() {
-            return Err(de::Error::custom(
-                "loop exit validation policy wire payload cannot select invalid-exit handling",
             ));
         }
         Ok(Self::default().with_final_checkpoint_required(wire.require_final_checkpoint))
@@ -780,14 +737,13 @@ fn validate_completed_exit(
     policy: LoopExitValidationPolicy,
 ) -> LoopExitValidationDecision {
     if let Some(kind_violation) = completion_kind_ref_violation(&exit, policy) {
-        return invalid_exit_decision(exit_id, kind_violation, policy.invalid_handling);
+        return invalid_exit_decision(exit_id, kind_violation);
     }
 
     if exit.has_durable_completion_ref() && !policy.completion_refs_verified {
         return invalid_exit_decision(
             exit_id,
             LoopExitViolationKind::UnverifiedCompletionReference,
-            policy.invalid_handling,
         );
     }
 
@@ -797,7 +753,6 @@ fn validate_completed_exit(
         return invalid_exit_decision(
             exit_id,
             LoopExitViolationKind::MissingFinalCheckpoint,
-            policy.invalid_handling,
         );
     }
 
@@ -846,7 +801,6 @@ fn validate_cancelled_exit(
         return invalid_exit_decision(
             exit_id,
             LoopExitViolationKind::CancellationNotObserved,
-            policy.invalid_handling,
         );
     }
     if policy.require_final_checkpoint
@@ -855,7 +809,6 @@ fn validate_cancelled_exit(
         return invalid_exit_decision(
             exit_id,
             LoopExitViolationKind::MissingFinalCheckpoint,
-            policy.invalid_handling,
         );
     }
     LoopExitValidationDecision::trusted(exit_id, TurnRunnerOutcome::Cancelled)
@@ -870,7 +823,6 @@ fn validate_failed_exit(
         return invalid_exit_decision(
             exit_id,
             LoopExitViolationKind::UnverifiedFailureEvidence,
-            policy.invalid_handling,
         );
     }
     if policy.require_final_checkpoint
@@ -879,7 +831,6 @@ fn validate_failed_exit(
         return invalid_exit_decision(
             exit_id,
             LoopExitViolationKind::MissingFinalCheckpoint,
-            policy.invalid_handling,
         );
     }
     LoopExitValidationDecision::trusted(
@@ -893,7 +844,6 @@ fn validate_failed_exit(
 fn invalid_exit_decision(
     exit_id: LoopExitId,
     kind: LoopExitViolationKind,
-    _handling: LoopExitInvalidHandling,
 ) -> LoopExitValidationDecision {
     let failure = SanitizedFailure::from_trusted_static(kind.failure_category());
     let mapping = TurnRunnerOutcome::Failed { failure }.into();

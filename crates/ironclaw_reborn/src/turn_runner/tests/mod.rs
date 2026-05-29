@@ -18,9 +18,9 @@ use ironclaw_turns::{
     runner::{
         ApplyValidatedLoopExitRequest, BlockRunRequest, CancelRunCompletionRequest,
         ClaimRunRequest, ClaimedTurnRun, CompleteRunRequest, FailRunRequest, HeartbeatRequest,
-        RecordModelRouteSnapshotRequest, RecordRecoveryRequiredRequest,
-        RecordTerminalFailureRequest, RecoverExpiredLeasesRequest, RecoverExpiredLeasesResponse,
-        TurnRunTransitionPort, TurnRunnerOutcome,
+        RecordModelRouteSnapshotRequest, RecordRunnerFailureRequest,
+        RecoverExpiredLeasesRequest, RecoverExpiredLeasesResponse, TurnRunTransitionPort,
+        TurnRunnerOutcome,
     },
 };
 
@@ -153,7 +153,6 @@ enum TransitionCall {
     ApplyValidatedLoopExit,
     RecordModelRouteSnapshot,
     RecordRecoveryRequired,
-    RecordTerminalFailure,
 }
 
 struct MockTransitionPort {
@@ -169,8 +168,7 @@ struct MockTransitionPort {
     recover_requests: Mutex<Vec<RecoverExpiredLeasesRequest>>,
     apply_exit_requests: Mutex<Vec<ApplyValidatedLoopExitRequest>>,
     route_snapshot_requests: Mutex<Vec<RecordModelRouteSnapshotRequest>>,
-    recovery_requests: Mutex<Vec<RecordRecoveryRequiredRequest>>,
-    terminal_failure_requests: Mutex<Vec<RecordTerminalFailureRequest>>,
+    recovery_requests: Mutex<Vec<RecordRunnerFailureRequest>>,
 }
 
 impl MockTransitionPort {
@@ -191,7 +189,6 @@ impl MockTransitionPort {
             apply_exit_requests: Mutex::new(Vec::new()),
             route_snapshot_requests: Mutex::new(Vec::new()),
             recovery_requests: Mutex::new(Vec::new()),
-            terminal_failure_requests: Mutex::new(Vec::new()),
         }
     }
 
@@ -304,24 +301,9 @@ impl TurnRunTransitionPort for MockTransitionPort {
         Ok(test_run_state(test_scope(), TurnStatus::Failed))
     }
 
-    async fn record_terminal_failure(
+    async fn record_runner_failure(
         &self,
-        request: RecordTerminalFailureRequest,
-    ) -> Result<TurnRunState, TurnError> {
-        self.calls
-            .lock()
-            .expect("lock")
-            .push(TransitionCall::RecordTerminalFailure);
-        self.terminal_failure_requests
-            .lock()
-            .expect("lock")
-            .push(request);
-        self.recovery_result.lock().expect("lock").clone()
-    }
-
-    async fn record_recovery_required(
-        &self,
-        request: RecordRecoveryRequiredRequest,
+        request: RecordRunnerFailureRequest,
     ) -> Result<TurnRunState, TurnError> {
         self.calls
             .lock()
@@ -673,16 +655,16 @@ fn make_claimed_run(
 
 fn assert_first_terminal_failure_matches_first_claim(port: &MockTransitionPort, run_id: TurnRunId) {
     let claim_requests = port.claim_requests.lock().expect("lock");
-    let terminal_failure_requests = port.terminal_failure_requests.lock().expect("lock");
+    let recovery_requests = port.recovery_requests.lock().expect("lock");
     let claim = claim_requests
         .first()
-        .expect("worker should issue a claim request before terminal failure");
-    let terminal_failure = terminal_failure_requests
+        .expect("worker should issue a claim request before recovery");
+    let recovery = recovery_requests
         .first()
-        .expect("worker should record terminal failure");
-    assert_eq!(terminal_failure.run_id, run_id);
-    assert_eq!(terminal_failure.runner_id, claim.runner_id);
-    assert_eq!(terminal_failure.lease_token, claim.lease_token);
+        .expect("worker should record recovery");
+    assert_eq!(recovery.run_id, run_id);
+    assert_eq!(recovery.runner_id, claim.runner_id);
+    assert_eq!(recovery.lease_token, claim.lease_token);
 }
 
 fn setup_registry(driver: Arc<dyn AgentLoopDriver>) -> DriverRegistry {
@@ -1004,7 +986,7 @@ async fn worker_rejects_unvalidated_host_route_snapshot_before_persist() {
     assert!(port.route_snapshot_requests().is_empty());
     let calls = port.calls();
     assert!(calls.contains(&TransitionCall::RecordModelRouteSnapshot));
-    assert!(calls.contains(&TransitionCall::RecordTerminalFailure));
+    assert!(calls.contains(&TransitionCall::RecordRecoveryRequired));
     assert!(!calls.contains(&TransitionCall::ApplyValidatedLoopExit));
 }
 
@@ -1125,7 +1107,7 @@ async fn worker_records_terminal_failure_when_heartbeat_fails() {
     assert!(port.calls().contains(&TransitionCall::Heartbeat));
     assert!(
         port.calls()
-            .contains(&TransitionCall::RecordTerminalFailure)
+            .contains(&TransitionCall::RecordRecoveryRequired)
     );
     assert_first_terminal_failure_matches_first_claim(&port, run_id);
 }
@@ -1169,7 +1151,7 @@ async fn worker_cancellation_stops_active_driver_promptly() {
     result.unwrap().expect("worker task should complete");
     assert!(
         port.calls()
-            .contains(&TransitionCall::RecordTerminalFailure)
+            .contains(&TransitionCall::RecordRecoveryRequired)
     );
     assert_first_terminal_failure_matches_first_claim(&port, run_id);
 }
@@ -1214,7 +1196,7 @@ async fn worker_records_terminal_failure_on_driver_error() {
 
     assert!(
         port.calls()
-            .contains(&TransitionCall::RecordTerminalFailure)
+            .contains(&TransitionCall::RecordRecoveryRequired)
     );
     assert_first_terminal_failure_matches_first_claim(&port, run_id);
 }
@@ -1255,7 +1237,7 @@ async fn worker_records_terminal_failure_on_driver_panic() {
 
     assert!(
         port.calls()
-            .contains(&TransitionCall::RecordTerminalFailure)
+            .contains(&TransitionCall::RecordRecoveryRequired)
     );
 }
 
@@ -1298,7 +1280,7 @@ async fn worker_records_terminal_failure_on_host_factory_error() {
 
     assert!(
         port.calls()
-            .contains(&TransitionCall::RecordTerminalFailure)
+            .contains(&TransitionCall::RecordRecoveryRequired)
     );
     assert_first_terminal_failure_matches_first_claim(&port, run_id);
 }
@@ -1341,7 +1323,7 @@ async fn worker_records_terminal_failure_when_driver_not_found() {
 
     assert!(
         port.calls()
-            .contains(&TransitionCall::RecordTerminalFailure)
+            .contains(&TransitionCall::RecordRecoveryRequired)
     );
     assert_first_terminal_failure_matches_first_claim(&port, run_id);
 }

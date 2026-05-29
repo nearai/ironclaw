@@ -47,7 +47,7 @@ pub use events::{
     TurnBlockedGateMetadata, TurnCommittedEventObserver, TurnEventKind, TurnEventPage,
     TurnEventProjectionCursor, TurnEventProjectionError, TurnEventProjectionRequest,
     TurnEventProjectionService, TurnEventProjectionSnapshot, TurnEventProjectionSource,
-    TurnEventSink, TurnLifecycleEvent, event_kind_for_run_state, sanitized_reason_for_run_state,
+    TurnEventSink, TurnLifecycleEvent,
 };
 pub use filesystem_store::FilesystemTurnStateStore;
 pub use ids::{
@@ -64,7 +64,7 @@ pub use loop_exit::{
     BlockedEvidenceRequest, CompletionEvidenceRequest, FailureEvidenceRequest,
     FinalCheckpointEvidenceRequest, LoopBlocked, LoopBlockedKind, LoopCancelled,
     LoopCancelledReasonKind, LoopCompleted, LoopCompletionKind, LoopExit, LoopExitApplier,
-    LoopExitEvidencePort, LoopExitInvalidHandling, LoopExitMapping, LoopExitValidationDecision,
+    LoopExitEvidencePort, LoopExitMapping, LoopExitValidationDecision,
     LoopExitViolation, LoopExitViolationKind, LoopFailed, LoopFailureKind,
 };
 pub use memory::{InMemoryTurnStateStore, InMemoryTurnStateStoreLimits};

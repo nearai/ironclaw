@@ -31,9 +31,8 @@ use ironclaw_turns::{
     runner::{
         ApplyValidatedLoopExitRequest, BlockRunRequest, CancelRunCompletionRequest,
         ClaimRunRequest, ClaimedTurnRun, CompleteRunRequest, FailRunRequest, HeartbeatRequest,
-        RecordModelRouteSnapshotRequest, RecordRecoveryRequiredRequest,
-        RecordTerminalFailureRequest, RecoverExpiredLeasesRequest, RecoverExpiredLeasesResponse,
-        TurnRunTransitionPort,
+        RecordModelRouteSnapshotRequest, RecordRunnerFailureRequest,
+        RecoverExpiredLeasesRequest, RecoverExpiredLeasesResponse, TurnRunTransitionPort,
     },
 };
 use tokio::{sync::Notify, time::timeout};
@@ -257,16 +256,9 @@ impl TurnRunTransitionPort for FailingClaimTransitions {
         panic!("failing claim transitions should not fail runs")
     }
 
-    async fn record_terminal_failure(
+    async fn record_runner_failure(
         &self,
-        _request: RecordTerminalFailureRequest,
-    ) -> Result<TurnRunState, TurnError> {
-        panic!("failing claim transitions should not record terminal failure")
-    }
-
-    async fn record_recovery_required(
-        &self,
-        _request: RecordRecoveryRequiredRequest,
+        _request: RecordRunnerFailureRequest,
     ) -> Result<TurnRunState, TurnError> {
         panic!("failing claim transitions should not record recovery")
     }
@@ -413,18 +405,11 @@ impl TurnRunTransitionPort for DurableLikeTurnStore {
         self.inner.fail_run(request).await
     }
 
-    async fn record_terminal_failure(
+    async fn record_runner_failure(
         &self,
-        request: RecordTerminalFailureRequest,
+        request: RecordRunnerFailureRequest,
     ) -> Result<TurnRunState, TurnError> {
-        self.inner.record_terminal_failure(request).await
-    }
-
-    async fn record_recovery_required(
-        &self,
-        request: RecordRecoveryRequiredRequest,
-    ) -> Result<TurnRunState, TurnError> {
-        self.inner.record_recovery_required(request).await
+        self.inner.record_runner_failure(request).await
     }
 
     async fn apply_validated_loop_exit(
@@ -514,16 +499,9 @@ impl TurnRunTransitionPort for DurableTurnStoreStub {
         panic!("transition stub should not fail runs")
     }
 
-    async fn record_terminal_failure(
+    async fn record_runner_failure(
         &self,
-        _request: RecordTerminalFailureRequest,
-    ) -> Result<TurnRunState, TurnError> {
-        panic!("transition stub should not record terminal failure")
-    }
-
-    async fn record_recovery_required(
-        &self,
-        _request: RecordRecoveryRequiredRequest,
+        _request: RecordRunnerFailureRequest,
     ) -> Result<TurnRunState, TurnError> {
         panic!("transition stub should not record recovery")
     }
@@ -660,18 +638,11 @@ impl TurnRunTransitionPort for HeartbeatTrackingTransitions {
         self.store.fail_run(request).await
     }
 
-    async fn record_terminal_failure(
+    async fn record_runner_failure(
         &self,
-        request: RecordTerminalFailureRequest,
+        request: RecordRunnerFailureRequest,
     ) -> Result<TurnRunState, TurnError> {
-        self.store.record_terminal_failure(request).await
-    }
-
-    async fn record_recovery_required(
-        &self,
-        request: RecordRecoveryRequiredRequest,
-    ) -> Result<TurnRunState, TurnError> {
-        self.store.record_recovery_required(request).await
+        self.store.record_runner_failure(request).await
     }
 
     async fn apply_validated_loop_exit(
@@ -735,18 +706,11 @@ impl TurnRunTransitionPort for ClaimRecordingTransitions {
         self.store.fail_run(request).await
     }
 
-    async fn record_terminal_failure(
+    async fn record_runner_failure(
         &self,
-        request: RecordTerminalFailureRequest,
+        request: RecordRunnerFailureRequest,
     ) -> Result<TurnRunState, TurnError> {
-        self.store.record_terminal_failure(request).await
-    }
-
-    async fn record_recovery_required(
-        &self,
-        request: RecordRecoveryRequiredRequest,
-    ) -> Result<TurnRunState, TurnError> {
-        self.store.record_recovery_required(request).await
+        self.store.record_runner_failure(request).await
     }
 
     async fn apply_validated_loop_exit(

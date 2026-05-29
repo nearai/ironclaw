@@ -36,9 +36,9 @@ use ironclaw_turns::{
     runner::{
         ApplyValidatedLoopExitRequest, BlockRunRequest, CancelRunCompletionRequest,
         ClaimRunRequest, ClaimedTurnRun, CompleteRunRequest, FailRunRequest, HeartbeatRequest,
-        RecordModelRouteSnapshotRequest, RecordRecoveryRequiredRequest,
-        RecordTerminalFailureRequest, RecoverExpiredLeasesRequest, RecoverExpiredLeasesResponse,
-        TurnRunTransitionPort, TurnRunnerOutcome,
+        RecordModelRouteSnapshotRequest, RecordRunnerFailureRequest,
+        RecoverExpiredLeasesRequest, RecoverExpiredLeasesResponse, TurnRunTransitionPort,
+        TurnRunnerOutcome,
     },
 };
 
@@ -1719,7 +1719,7 @@ async fn lifecycle_publishing_store_publishes_failed_run_event() {
 }
 
 #[tokio::test]
-async fn lifecycle_publishing_store_publishes_record_recovery_required_as_failed_event() {
+async fn lifecycle_publishing_store_publishes_record_runner_failure_as_failed_event() {
     let raw_store = Arc::new(InMemoryTurnStateStore::default());
     let sink = Arc::new(InMemoryTurnEventSink::default());
     let transition_port = lifecycle_publishing_store(raw_store, None, Some(sink.clone()));
@@ -1746,7 +1746,7 @@ async fn lifecycle_publishing_store_publishes_record_recovery_required_as_failed
         .unwrap();
 
     transition_port
-        .record_recovery_required(RecordRecoveryRequiredRequest {
+        .record_runner_failure(RecordRunnerFailureRequest {
             run_id,
             runner_id,
             lease_token,
@@ -3787,7 +3787,7 @@ async fn blocked_resume_then_recovery_failure_releases_admission_reservation() {
         .unwrap()
         .unwrap();
     store
-        .record_recovery_required(ironclaw_turns::runner::RecordRecoveryRequiredRequest {
+        .record_runner_failure(ironclaw_turns::runner::RecordRunnerFailureRequest {
             run_id,
             runner_id,
             lease_token,
@@ -6508,18 +6508,9 @@ impl TurnRunTransitionPort for AtomicLoopExitPort {
         panic!("cancelled loop-exit application must not fail runs")
     }
 
-    async fn record_terminal_failure(
+    async fn record_runner_failure(
         &self,
-        _request: RecordTerminalFailureRequest,
-    ) -> Result<TurnRunState, TurnError> {
-        panic!(
-            "cancelled loop-exit application must not use a separate terminal failure transition"
-        )
-    }
-
-    async fn record_recovery_required(
-        &self,
-        _request: ironclaw_turns::runner::RecordRecoveryRequiredRequest,
+        _request: ironclaw_turns::runner::RecordRunnerFailureRequest,
     ) -> Result<TurnRunState, TurnError> {
         panic!("cancelled loop-exit application must not use a separate recovery transition")
     }

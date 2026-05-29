@@ -7,7 +7,7 @@ use ironclaw_turns::{
     SanitizedFailure, TurnError, TurnRunWake, TurnRunWakeNotifier, TurnRunWakeNotifyError,
     TurnRunnerId, TurnScope,
     runner::{
-        ClaimRunRequest, ClaimedTurnRun, HeartbeatRequest, RecordTerminalFailureRequest,
+        ClaimRunRequest, ClaimedTurnRun, HeartbeatRequest, RecordRunnerFailureRequest,
         RecoverExpiredLeasesRequest, TurnRunTransitionPort,
     },
 };
@@ -502,7 +502,7 @@ async fn record_terminal_failure(
     failure: SanitizedFailure,
 ) {
     let result = transitions
-        .record_terminal_failure(RecordTerminalFailureRequest {
+        .record_runner_failure(RecordRunnerFailureRequest {
             run_id,
             runner_id,
             lease_token,

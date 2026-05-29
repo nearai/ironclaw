@@ -53,9 +53,8 @@ use crate::{
     runner::{
         ApplyValidatedLoopExitRequest, BlockRunRequest, CancelRunCompletionRequest,
         ClaimRunRequest, ClaimedTurnRun, CompleteRunRequest, FailRunRequest, HeartbeatRequest,
-        RecordModelRouteSnapshotRequest, RecordRecoveryRequiredRequest,
-        RecordTerminalFailureRequest, RecoverExpiredLeasesRequest, RecoverExpiredLeasesResponse,
-        TurnRunTransitionPort,
+        RecordModelRouteSnapshotRequest, RecordRunnerFailureRequest,
+        RecoverExpiredLeasesRequest, RecoverExpiredLeasesResponse, TurnRunTransitionPort,
     },
 };
 
@@ -513,28 +512,14 @@ where
         .await
     }
 
-    async fn record_terminal_failure(
+    async fn record_runner_failure(
         &self,
-        request: RecordTerminalFailureRequest,
+        request: RecordRunnerFailureRequest,
     ) -> Result<TurnRunState, TurnError> {
         self.apply(|store| {
             let request = request.clone();
             async move {
-                let outcome = store.record_terminal_failure(request).await;
-                (outcome, store)
-            }
-        })
-        .await
-    }
-
-    async fn record_recovery_required(
-        &self,
-        request: RecordRecoveryRequiredRequest,
-    ) -> Result<TurnRunState, TurnError> {
-        self.apply(|store| {
-            let request = request.clone();
-            async move {
-                let outcome = store.record_recovery_required(request).await;
+                let outcome = store.record_runner_failure(request).await;
                 (outcome, store)
             }
         })
