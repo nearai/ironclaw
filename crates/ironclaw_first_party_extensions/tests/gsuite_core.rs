@@ -1471,3 +1471,62 @@ async fn add_attendees_reports_failed_initial_get_network_usage() {
         Some(101)
     );
 }
+
+#[tokio::test]
+async fn add_attendees_restages_credential_before_patch() {
+    // P2 regression: the staged-obligation store is one-shot.
+    // execute_add_attendees makes GET then PATCH; without restaging, the PATCH
+    // fires with no credential. We use FailOnNthCallStager to verify the second
+    // staging call happens — if it doesn't happen, the dispatch succeeds instead
+    // of returning AuthRequired.
+    let scope = scope();
+    let auth = auth_with_google_account(
+        &scope,
+        vec![provider_scope(ironclaw_auth::GOOGLE_CALENDAR_EVENTS_SCOPE)],
+    )
+    .await;
+    let capability_id = capability_id(CALENDAR_ADD_ATTENDEES_CAPABILITY_ID);
+    let egress = Arc::new(RecordingEgress::with_responses(vec![
+        RecordingEgress::json_with_request_bytes(
+            json!({
+                "attendees": [{"email": "existing@example.com"}],
+                "etag": "test-etag"
+            }),
+            50,
+        ),
+        // PATCH response — would succeed, but stager fails before we get here
+        RecordingEgress::json_with_request_bytes(json!({"id": "evt-1", "updated": true}), 80),
+    ]));
+
+    // Stager succeeds on first call (for GET), fails AuthRequired on second call (for PATCH).
+    // Without the P2 fix, the second staging call never happens and dispatch succeeds.
+    let error = GsuiteExecutor::new(auth, FailOnNthCallStager::fail_on_second_call())
+        .dispatch(GsuiteDispatchRequest {
+            capability_id: &capability_id,
+            scope: &scope,
+            input: &json!({
+                "calendar_id": "primary",
+                "event_id": "evt-1",
+                "attendees": [{"email": "new@example.com"}]
+            }),
+            runtime_http_egress: egress.clone(),
+        })
+        .await
+        .expect_err("second staging should fail with AuthRequired before PATCH fires");
+
+    assert!(
+        error.is_auth_required(),
+        "stager auth-required on PATCH restage must surface as AuthRequired; got {error:?}"
+    );
+    // Only the GET fired; PATCH was blocked by staging failure
+    assert_eq!(
+        egress.requests().len(),
+        1,
+        "PATCH must not fire after staging failure; egress count should be 1 (GET only)"
+    );
+    assert_eq!(
+        error.usage().map(|u| u.network_egress_bytes),
+        Some(50),
+        "GET network bytes must be reported even when PATCH staging fails"
+    );
+}
