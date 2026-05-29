@@ -8,6 +8,9 @@ use ironclaw_product_workflow::{
     LifecycleExtensionSource, LifecycleExtensionSummary, LifecyclePackageKind, LifecyclePackageRef,
     ProductWorkflowError,
 };
+use toml::Value;
+
+use crate::nearai_mcp::{NearAiMcpEndpoint, nearai_mcp_endpoint_from_env};
 
 const GITHUB_MANIFEST: &str =
     include_str!("../../ironclaw_first_party_extensions/assets/github/manifest.toml");
@@ -157,13 +160,8 @@ fn web_access_package() -> Result<AvailableExtensionPackage, ProductWorkflowErro
         WEB_ACCESS_MANIFEST,
         web_access_assets(),
 fn nearai_mcp_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
-    let manifest = nearai_mcp_manifest_toml();
-    bundled_extension_package(
-        "nearai",
-        "NEAR AI MCP",
-        &manifest,
-        nearai_mcp_assets(&manifest),
-    )
+    let manifest = nearai_mcp_manifest_toml()?;
+    bundled_extension_package("nearai", "NEAR AI", &manifest, nearai_mcp_assets(&manifest))
 }
 
 fn google_calendar_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
@@ -187,21 +185,67 @@ pub(crate) fn gmail_manifest_digest() -> String {
     sha256_digest_token(GMAIL_MANIFEST.as_bytes())
 }
 
+<<<<<<< HEAD
 pub(crate) fn web_access_manifest_digest() -> String {
     sha256_digest_token(WEB_ACCESS_MANIFEST.as_bytes())
 pub(crate) fn nearai_mcp_manifest_toml() -> String {
     NEARAI_MCP_MANIFEST.replace("https://private.near.ai/mcp", &nearai_mcp_url_from_env())
+=======
+pub(crate) fn nearai_mcp_manifest_toml() -> Result<String, ProductWorkflowError> {
+    let endpoint = nearai_mcp_endpoint_from_env().map_err(map_binding_error)?;
+    nearai_mcp_manifest_toml_for_endpoint(&endpoint)
+>>>>>>> a274bf73c (Address NEAR AI MCP review feedback)
 }
 
-fn nearai_mcp_url_from_env() -> String {
-    let configured_base = std::env::var("NEARAI_BASE_URL")
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty());
-    let base = configured_base.unwrap_or_else(|| "https://private.near.ai".to_string());
-    let base = base.trim_end_matches('/');
-    let base = base.strip_suffix("/v1").unwrap_or(base);
-    format!("{base}/mcp")
+fn nearai_mcp_manifest_toml_for_endpoint(
+    endpoint: &NearAiMcpEndpoint,
+) -> Result<String, ProductWorkflowError> {
+    let mut manifest = toml::from_str::<Value>(NEARAI_MCP_MANIFEST).map_err(|error| {
+        map_binding_error(format!("bundled NEAR AI manifest TOML is invalid: {error}"))
+    })?;
+    let runtime = manifest
+        .get_mut("runtime")
+        .and_then(Value::as_table_mut)
+        .ok_or_else(|| map_binding_error("bundled NEAR AI manifest lacks runtime table"))?;
+    runtime.insert("url".to_string(), Value::String(endpoint.url.clone()));
+
+    let capabilities = manifest
+        .get_mut("capabilities")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| map_binding_error("bundled NEAR AI manifest lacks capabilities array"))?;
+    let search = capabilities
+        .first_mut()
+        .and_then(Value::as_table_mut)
+        .ok_or_else(|| map_binding_error("bundled NEAR AI manifest lacks search capability"))?;
+    let runtime_credentials = search
+        .get_mut("runtime_credentials")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| map_binding_error("bundled NEAR AI manifest lacks runtime credentials"))?;
+    let credential = runtime_credentials
+        .first_mut()
+        .and_then(Value::as_table_mut)
+        .ok_or_else(|| map_binding_error("bundled NEAR AI manifest lacks runtime credential"))?;
+    let audience = credential
+        .get_mut("audience")
+        .and_then(Value::as_table_mut)
+        .ok_or_else(|| {
+            map_binding_error("bundled NEAR AI manifest lacks runtime credential audience")
+        })?;
+    audience.insert(
+        "host_pattern".to_string(),
+        Value::String(endpoint.host_pattern.clone()),
+    );
+    if let Some(port) = endpoint.port {
+        audience.insert("port".to_string(), Value::Integer(i64::from(port)));
+    } else {
+        audience.remove("port");
+    }
+
+    toml::to_string(&manifest).map_err(|error| {
+        map_binding_error(format!(
+            "bundled NEAR AI manifest TOML render failed: {error}"
+        ))
+    })
 }
 
 fn bundled_extension_package(
@@ -845,6 +889,7 @@ mod tests {
     use ironclaw_host_api::{EffectKind, HostPortCatalog};
 
     use super::*;
+    use crate::nearai_mcp::nearai_mcp_endpoint_from_base;
 
     #[test]
     fn visible_capability_ids_excludes_write_effects() {
@@ -897,6 +942,31 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn nearai_manifest_renderer_uses_validated_endpoint_fields() {
+        let endpoint =
+            nearai_mcp_endpoint_from_base(Some("https://10.0.0.12:8443/%22%0Atrust=%22system"))
+                .unwrap();
+
+        let manifest_toml = nearai_mcp_manifest_toml_for_endpoint(&endpoint).unwrap();
+        let manifest: Value = toml::from_str(&manifest_toml).unwrap();
+
+        assert_eq!(manifest["trust"].as_str(), Some("third_party"));
+        assert_eq!(
+            manifest["runtime"]["url"].as_str(),
+            Some("https://10.0.0.12:8443/%22%0Atrust=%22system/mcp")
+        );
+        assert_eq!(
+            manifest["capabilities"][0]["runtime_credentials"][0]["audience"]["host_pattern"]
+                .as_str(),
+            Some("10.0.0.12")
+        );
+        assert_eq!(
+            manifest["capabilities"][0]["runtime_credentials"][0]["audience"]["port"].as_integer(),
+            Some(8443)
+        );
     }
 
     #[test]

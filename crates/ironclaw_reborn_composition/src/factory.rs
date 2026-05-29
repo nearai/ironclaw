@@ -98,8 +98,12 @@ use crate::{
         extend_builtin_first_party_package, insert_handlers as insert_extension_lifecycle_handlers,
     },
     gsuite::register_bundled_gsuite_first_party_handlers,
+<<<<<<< HEAD
     web_access::register_bundled_web_access_first_party_handlers,
     nearai_mcp::nearai_mcp_runtime,
+=======
+    nearai_mcp::{nearai_mcp_endpoint_from_env, nearai_mcp_runtime},
+>>>>>>> a274bf73c (Address NEAR AI MCP review feedback)
 };
 
 #[cfg(feature = "libsql")]
@@ -229,12 +233,18 @@ where
     S: ironclaw_processes::ProcessStore + 'static,
     R: ironclaw_processes::ProcessResultStore + 'static,
 {
-    let runtime_ports = services
-        .product_auth_provider_runtime_ports()
-        .ok_or_else(|| RebornBuildError::InvalidConfig {
-            reason: "NEAR AI MCP runtime requires host runtime HTTP egress".to_string(),
+    let Some(runtime_ports) = services.product_auth_provider_runtime_ports() else {
+        tracing::debug!("skipping NEAR AI MCP runtime because host runtime HTTP egress is absent");
+        return Ok(services);
+    };
+    let endpoint =
+        nearai_mcp_endpoint_from_env().map_err(|reason| RebornBuildError::InvalidConfig {
+            reason: format!("NEAR AI MCP endpoint config is invalid: {reason}"),
         })?;
-    Ok(services.with_mcp_runtime(nearai_mcp_runtime(runtime_ports.runtime_http_egress())))
+    Ok(services.with_mcp_runtime(nearai_mcp_runtime(
+        runtime_ports.runtime_http_egress(),
+        endpoint,
+    )))
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -1992,8 +2002,24 @@ mod tests {
         );
         assert_eq!(
             search.runtime_credentials[0].audience.host_pattern,
-            "*.near.ai"
+            "private.near.ai"
         );
+    }
+
+    #[test]
+    fn attach_nearai_mcp_runtime_skips_services_without_runtime_http_egress() {
+        let services = HostRuntimeServices::new(
+            Arc::new(ExtensionRegistry::new()),
+            Arc::new(LocalFilesystem::new()),
+            Arc::new(InMemoryResourceGovernor::new()),
+            Arc::new(GrantAuthorizer::new()),
+            ProcessServices::in_memory(),
+            CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        );
+
+        let services = attach_nearai_mcp_runtime(services).expect("attach is optional");
+
+        assert!(services.product_auth_provider_runtime_ports().is_none());
     }
 
     #[cfg(feature = "libsql")]

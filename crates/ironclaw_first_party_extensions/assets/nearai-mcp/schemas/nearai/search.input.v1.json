@@ -1,11 +1,12 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
-  "additionalProperties": true,
+  "additionalProperties": false,
   "properties": {
     "query": {
       "type": "string",
       "minLength": 1,
+      "maxLength": 2048,
       "description": "Search query to send to NEAR AI MCP."
     }
   },
