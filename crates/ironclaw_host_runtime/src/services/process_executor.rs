@@ -1,9 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_host_api::{
-    CapabilityDispatchRequest, CapabilityDispatcher, DispatchError, RuntimeKind,
-};
+use ironclaw_host_api::{CapabilityDispatchRequest, CapabilityDispatcher, RuntimeKind};
 use ironclaw_processes::{
     ProcessExecutionError, ProcessExecutionRequest, ProcessExecutionResult, ProcessExecutor,
 };
@@ -99,8 +97,8 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use ironclaw_host_api::{
-        AgentId, CapabilityDispatchResult, CapabilityId, ExtensionId, InvocationId, MountView,
-        ProcessId, ProjectId, ReservationStatus, ResourceEstimate, ResourceReceipt,
+        AgentId, CapabilityDispatchResult, CapabilityId, DispatchError, ExtensionId, InvocationId,
+        MountView, ProcessId, ProjectId, ReservationStatus, ResourceEstimate, ResourceReceipt,
         ResourceReservationId, ResourceScope, ResourceUsage, RuntimeDispatchErrorKind, TenantId,
         ThreadId, UserId,
     };
