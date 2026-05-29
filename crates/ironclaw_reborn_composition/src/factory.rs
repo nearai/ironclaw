@@ -218,7 +218,7 @@ where
     services
         .product_auth_provider_runtime_ports()
         .ok_or_else(|| RebornBuildError::InvalidConfig {
-            reason: "Google OAuth provider backend requires host runtime HTTP egress".to_string(),
+            reason: "product auth runtime ports unavailable; host runtime must be configured with HTTP egress and a secret store".to_string(),
         })
 }
 
