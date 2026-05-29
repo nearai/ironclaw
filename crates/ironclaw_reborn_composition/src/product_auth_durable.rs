@@ -19,10 +19,12 @@ use ironclaw_auth::{
     NewCredentialAccount,
 };
 
+use self::broker_projection::{BrokerAccountProjector, CredentialBrokerProjector};
 use self::domain::validate_new_credential_account;
 use self::paths::{account_path, account_root, flow_path, fs_error, join_scoped};
 
 mod accounts;
+mod broker_projection;
 mod cleanup;
 mod domain;
 mod flows;
@@ -32,7 +34,20 @@ mod provider;
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+pub(crate) use broker_projection::NoopBrokerAccountProjector;
 pub(crate) use provider::UnavailableAuthProviderClient;
+
+/// Construct a default product-auth broker projector wired to the
+/// supplied [`CredentialAccountStore`].  Composition callers use this
+/// to wire the runtime credential broker as the projection sink; tests
+/// and substrate-only configurations may pass
+/// [`NoopBrokerAccountProjector`] instead.
+pub(crate) fn default_broker_projector(
+    store: Arc<dyn ironclaw_secrets::CredentialAccountStore>,
+) -> Arc<dyn BrokerAccountProjector> {
+    Arc::new(CredentialBrokerProjector::new(store))
+}
 
 /// Durable production implementation of the product-auth ports.
 ///
@@ -40,14 +55,10 @@ pub(crate) use provider::UnavailableAuthProviderClient;
 /// provider tokens and manual token values are stored only through
 /// [`SecretStore`] and represented here by opaque secret handles.
 //
-// TODO(#4175 follow-up): project completed product-auth accounts into
-// `ironclaw_secrets::CredentialAccountStore` so the runtime credential
-// broker shares one source of truth with the product-auth UX layer.
-//
-// Today two `CredentialAccount` records coexist:
+// Two `CredentialAccount` records coexist:
 //   * `ironclaw_auth::CredentialAccount` — product-auth UX record stored
 //     here (provider id, label, owner_extension, grants, status,
-//     provider_scopes, access/refresh secret handles). Read/written by
+//     provider_scopes, access/refresh secret handles).  Read/written by
 //     setup, OAuth callback, manual-token submit, uninstall cleanup.
 //   * `ironclaw_secrets::CredentialAccount` — runtime broker record
 //     consumed on every extension HTTP call to issue
@@ -56,11 +67,14 @@ pub(crate) use provider::UnavailableAuthProviderClient;
 //
 // They are deliberately separate stores (see
 // `docs/reborn/contracts/auth-product.md` → "Durable Production Slice")
-// because their consumers, lifecycles, and access patterns differ. The
-// missing link is a one-way projection product-auth → broker on flow
-// completion / account update / cleanup, so the two universes cannot
-// drift. Until that lands, broker-account population stays the caller's
-// responsibility and drift is not policed here.
+// because their consumers, lifecycles, and access patterns differ.
+// Drift is now policed by a one-way projection: every successful
+// `write_account` call is followed by a best-effort broker projection
+// through `broker_projection::BrokerAccountProjector`.  Projection
+// failure is logged at `warn` and does not block the product-auth flow
+// — product-auth remains source of truth.  See the
+// `broker_projection` module docs for known gaps (allowed_targets,
+// multi-extension grants, broker delete semantics).
 pub(crate) struct FilesystemAuthProductServices<F>
 where
     F: RootFilesystem,
@@ -68,6 +82,7 @@ where
     filesystem: Arc<ScopedFilesystem<F>>,
     secret_store: Arc<dyn SecretStore>,
     locks: Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>,
+    broker_projector: Arc<dyn BrokerAccountProjector>,
 }
 
 impl<F> FilesystemAuthProductServices<F>
@@ -77,11 +92,13 @@ where
     pub(crate) fn new(
         filesystem: Arc<ScopedFilesystem<F>>,
         secret_store: Arc<dyn SecretStore>,
+        broker_projector: Arc<dyn BrokerAccountProjector>,
     ) -> Self {
         Self {
             filesystem,
             secret_store,
             locks: Mutex::new(HashMap::new()),
+            broker_projector,
         }
     }
 
@@ -161,18 +178,36 @@ where
             .await
     }
 
+    /// Persist `account` to the product-auth durable store and project
+    /// the post-write state into the runtime credential broker.
+    ///
+    /// **Projection contract:** every successful product-auth account
+    /// write must invoke the broker projector exactly once with the
+    /// persisted record.  Projection is best-effort (see
+    /// [`broker_projection`] module docs); failures are logged but do
+    /// not fail the product-auth write.  Callers therefore see this
+    /// method behave identically to a plain `write_record` — the
+    /// projection is a side effect, not a contract obligation.
+    ///
+    /// All call sites within this module must route through
+    /// `write_account` rather than calling `write_record` against an
+    /// account path directly, so the projection chokepoint stays
+    /// single-source.
     async fn write_account(
         &self,
         account: &CredentialAccount,
         cas: CasExpectation,
     ) -> Result<RecordVersion, AuthProductError> {
-        self.write_record(
-            &account.scope.resource,
-            &account_path(&account.scope, account.id)?,
-            account,
-            cas,
-        )
-        .await
+        let version = self
+            .write_record(
+                &account.scope.resource,
+                &account_path(&account.scope, account.id)?,
+                account,
+                cas,
+            )
+            .await?;
+        self.broker_projector.project_account(account).await;
+        Ok(version)
     }
 
     /// Returns all credential accounts for `scope`, reading records concurrently.

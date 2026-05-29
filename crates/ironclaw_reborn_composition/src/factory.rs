@@ -1570,6 +1570,13 @@ where
     } = context;
     let secret_store: Arc<dyn SecretStore> = stores.secret_credentials.secret_store.clone();
     let product_auth_filesystem = Arc::clone(&stores.scoped_filesystem);
+    // Hold a separate handle on the credential broker so we can build
+    // the product-auth → broker projector below.  The broker itself is
+    // moved into the host-runtime services builder via
+    // `with_credential_broker`; the projector borrows the same store
+    // through the `CredentialAccountStore` trait object.
+    let credential_account_store: Arc<dyn ironclaw_secrets::CredentialAccountStore> =
+        Arc::clone(&stores.secret_credentials.credential_broker) as _;
     let services = HostRuntimeServices::new(
         Arc::new(builtin_extension_registry()?),
         Arc::clone(&stores.filesystem),
@@ -1616,6 +1623,7 @@ where
         let durable = Arc::new(FilesystemAuthProductServices::new(
             product_auth_filesystem,
             Arc::clone(&secret_store),
+            crate::product_auth_durable::default_broker_projector(credential_account_store),
         ));
         RebornProductAuthServicePorts::from_shared_with_provider(
             durable,
