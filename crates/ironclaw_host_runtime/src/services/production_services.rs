@@ -91,6 +91,18 @@ where
             ProductionWiringComponent::SecretStore,
             self.secret_store.is_some(),
         );
+        if config.require_credential_broker {
+            self.push_missing(
+                &mut issues,
+                ProductionWiringComponent::CredentialAccountStore,
+                self.component_types.credential_account_store.is_some(),
+            );
+            self.push_missing(
+                &mut issues,
+                ProductionWiringComponent::CredentialSessionStore,
+                self.component_types.credential_session_store.is_some(),
+            );
+        }
 
         if config.require_runtime_http_egress {
             let runtime_http_configured =
@@ -278,6 +290,16 @@ where
             &mut issues,
             ProductionWiringComponent::SecretStore,
             self.component_types.secret_store,
+        );
+        self.push_local_only(
+            &mut issues,
+            ProductionWiringComponent::CredentialAccountStore,
+            self.component_types.credential_account_store,
+        );
+        self.push_local_only(
+            &mut issues,
+            ProductionWiringComponent::CredentialSessionStore,
+            self.component_types.credential_session_store,
         );
         self.push_local_only(
             &mut issues,

@@ -3,12 +3,34 @@ import {
   createThread as createThreadRequest,
   resolveGate as resolveGateRequest,
   sendMessage,
+  submitManualToken,
 } from "../../../lib/api.js";
 import { queryClient } from "../../../lib/query-client.js";
 import { React } from "../../../lib/html.js";
 import { useChatEvents } from "../lib/useChatEvents.js";
 import { useHistory } from "./useHistory.js";
 import { useSSE } from "./useSSE.js";
+
+const AUTH_TOKEN_FLOW_TIMEOUT_MS = 30000;
+const AUTH_GATE_CREDENTIAL_STORED_ERROR =
+  "credential_stored_gate_resolution_failed";
+
+async function withAuthTokenTimeout(task) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), AUTH_TOKEN_FLOW_TIMEOUT_MS);
+  try {
+    return await task(controller.signal);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function credentialStoredGateResolutionError(cause) {
+  const error = new Error("auth gate resolution failed after credential storage");
+  error.safeAuthGateCode = AUTH_GATE_CREDENTIAL_STORED_ERROR;
+  error.cause = cause;
+  return error;
+}
 
 // v2 chat hook. Differences from the fork's v1 hook:
 // - No image / attachment plumbing — v2 SendMessage carries `content` only.
@@ -50,14 +72,33 @@ export function useChat(threadId) {
 
   const [isProcessing, setIsProcessing] = React.useState(false);
   const [pendingGate, setPendingGate] = React.useState(null);
+  const authTokenSubmitRef = React.useRef({
+    gateKey: null,
+    credentialRef: null,
+    inFlight: false,
+  });
 
   const cooldownSeconds = Math.max(0, Math.ceil((cooldownUntil - now) / 1000));
+  const pendingAuthGateKey =
+    pendingGate?.runId && pendingGate?.gateRef
+      ? `${pendingGate.runId}\n${pendingGate.gateRef}`
+      : null;
 
   React.useEffect(() => {
     if (!cooldownUntil) return;
     const timer = setInterval(() => setNow(Date.now()), 250);
     return () => clearInterval(timer);
   }, [cooldownUntil]);
+
+  React.useEffect(() => {
+    if (authTokenSubmitRef.current.gateKey !== pendingAuthGateKey) {
+      authTokenSubmitRef.current = {
+        gateKey: pendingAuthGateKey,
+        credentialRef: null,
+        inFlight: false,
+      };
+    }
+  }, [pendingAuthGateKey]);
 
   const handleEvent = useChatEvents({
     threadId,
@@ -195,6 +236,81 @@ export function useChat(threadId) {
     [pendingGate, threadId],
   );
 
+  const submitAuthToken = React.useCallback(
+    async (token) => {
+      if (!pendingGate) {
+        throw new Error("auth gate is no longer pending");
+      }
+      const { runId, gateRef, provider, accountLabel } = pendingGate;
+      if (!runId || !gateRef || !provider || !accountLabel) {
+        throw new Error("auth gate is missing required credential metadata");
+      }
+      const gateKey = `${runId}\n${gateRef}`;
+      if (authTokenSubmitRef.current.gateKey !== gateKey) {
+        authTokenSubmitRef.current = {
+          gateKey,
+          credentialRef: null,
+          inFlight: false,
+        };
+      }
+      if (authTokenSubmitRef.current.inFlight) {
+        throw new Error("auth token submission already in progress");
+      }
+      authTokenSubmitRef.current.inFlight = true;
+
+      try {
+        let credentialRef = authTokenSubmitRef.current.credentialRef;
+        if (!credentialRef) {
+          const submitted = await withAuthTokenTimeout((signal) =>
+            submitManualToken({
+              provider,
+              accountLabel,
+              token,
+              threadId,
+              runId,
+              gateRef,
+              signal,
+            }),
+          );
+          credentialRef = submitted?.credential_ref;
+          if (!credentialRef) {
+            throw new Error("manual token submit returned no credential_ref");
+          }
+          authTokenSubmitRef.current.credentialRef = credentialRef;
+        }
+
+        try {
+          await withAuthTokenTimeout((signal) =>
+            resolveGateRequest({
+              threadId,
+              runId,
+              gateRef,
+              resolution: "credential_provided",
+              credentialRef,
+              signal,
+            }),
+          );
+        } catch (err) {
+          throw credentialStoredGateResolutionError(err);
+        }
+
+        authTokenSubmitRef.current = {
+          gateKey: null,
+          credentialRef: null,
+          inFlight: false,
+        };
+        setPendingGate(null);
+        setIsProcessing(true);
+      } catch (err) {
+        if (authTokenSubmitRef.current.gateKey === gateKey) {
+          authTokenSubmitRef.current.inFlight = false;
+        }
+        throw err;
+      }
+    },
+    [pendingGate, threadId],
+  );
+
   const cancelRun = React.useCallback(
     async (reason) => {
       const runId = activeRun?.runId;
@@ -222,6 +338,7 @@ export function useChat(threadId) {
       let resolution = "approved";
       let always = false;
       if (action === "deny") resolution = "denied";
+      else if (action === "cancel") resolution = "cancelled";
       else if (action === "always") {
         resolution = "approved";
         always = true;
@@ -249,6 +366,7 @@ export function useChat(threadId) {
     cooldownSeconds,
     send,
     resolveGate,
+    submitAuthToken,
     cancelRun,
     loadMore,
     // fork-shape compatibility — see comments above

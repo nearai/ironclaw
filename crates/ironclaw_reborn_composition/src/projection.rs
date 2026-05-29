@@ -14,10 +14,10 @@ use ironclaw_event_streams::{
     InMemoryProjectionUpdateSource, NoExposureProjectionRedactionValidator,
     ProjectionStreamError as EventProjectionStreamError, ProjectionStreamItem,
     ProjectionSubscribeRequest, ProjectionSubscription as EventProjectionSubscription,
-    ProjectionTarget, ProjectionViewClass, SubscriberCapabilities, ThreadLiveProjectionItem,
-    ThreadLiveProjectionUpdate,
+    ProjectionTarget, ProjectionViewClass, SubscriberCapabilities, ThreadLiveProjectionUpdate,
 };
 use ironclaw_events::{DurableEventLog, EventCursor, EventStreamKey, ReadScope};
+use ironclaw_first_party_extension_ports::SkillActivationObserver;
 use ironclaw_host_api::UserId;
 use ironclaw_outbound::InMemoryOutboundStateStore;
 use ironclaw_product_adapters::{
@@ -34,11 +34,14 @@ use ironclaw_turns::{
 };
 
 mod display_preview;
-mod live_reasoning;
+mod live_progress;
 mod runtime_replay;
 mod turn_events;
 use display_preview::{CapabilityDisplayPreviewSource, NoopCapabilityDisplayPreviewSource};
-use live_reasoning::LiveReasoningMilestoneSink;
+use live_progress::{
+    LiveProgressMilestoneSink, LiveProjectionPublisher, LiveSkillActivationObserver,
+    product_items_for_live_update,
+};
 use runtime_replay::{
     RuntimePayloadCandidate, replay_payload_candidates, snapshot_payload_candidates,
 };
@@ -89,16 +92,29 @@ impl RebornProjectionServices {
         })
     }
 
-    pub(crate) fn with_live_reasoning_milestone_sink(
+    pub(crate) fn with_live_progress_milestone_sink_for_publisher(
         &self,
         inner: Arc<dyn LoopHostMilestoneSink>,
-        actor_user_id: UserId,
+        publisher: Arc<LiveProjectionPublisher>,
     ) -> Arc<dyn LoopHostMilestoneSink> {
-        Arc::new(LiveReasoningMilestoneSink::new(
-            inner,
+        Arc::new(LiveProgressMilestoneSink::new(inner, publisher))
+    }
+
+    pub(crate) fn live_projection_publisher(
+        &self,
+        actor_user_id: UserId,
+    ) -> Arc<LiveProjectionPublisher> {
+        Arc::new(LiveProjectionPublisher::new(
             Arc::clone(&self.live_updates),
             actor_user_id,
         ))
+    }
+
+    pub(crate) fn skill_activation_observer(
+        &self,
+        publisher: Arc<LiveProjectionPublisher>,
+    ) -> Arc<dyn SkillActivationObserver> {
+        Arc::new(LiveSkillActivationObserver::new(publisher))
     }
 }
 
@@ -538,16 +554,7 @@ fn live_update_payloads(
             reason: "runtime delivery offset exceeds runtime item payload count".to_string(),
         });
     }
-    let items = update
-        .items
-        .iter()
-        .map(|item| match item {
-            ThreadLiveProjectionItem::Thinking { id, body } => ProductProjectionItem::Thinking {
-                id: id.clone(),
-                body: body.clone(),
-            },
-        })
-        .collect::<Vec<_>>();
+    let items = product_items_for_live_update(update);
     if items.is_empty() {
         return Ok(None);
     }

@@ -22,20 +22,21 @@ use ironclaw_turns::{
         FinalizeAssistantMessage, HostManagedLoopModelPort, HostManagedLoopPromptPort,
         InMemoryInstructionMaterializationStore, InMemoryLoopHostMilestoneSink,
         InstructionBundleBuilder, InstructionBundleFingerprint, InstructionBundleRequest,
-        InstructionMaterializationStore, InstructionSafetyContext, LoopCancellationPort,
-        LoopCancellationSignal, LoopCapabilityPort, LoopCheckpointKind, LoopCheckpointPort,
-        LoopCheckpointRequest, LoopCheckpointStateRef, LoopContextBundle, LoopContextMessage,
-        LoopContextPort, LoopContextRequest, LoopContextSnippet, LoopContextSnippetMetadata,
-        LoopDriverId, LoopDriverNoteKind, LoopGateKind, LoopHostMilestone,
-        LoopHostMilestoneEmitter, LoopHostMilestoneKind, LoopHostMilestoneSink, LoopInputAckToken,
-        LoopInputBatch, LoopInputCursor, LoopInputCursorToken, LoopInputPort,
-        LoopModelBudgetAccountant, LoopModelCapabilityView, LoopModelGateway,
-        LoopModelGatewayError, LoopModelGatewayRequest, LoopModelMessage, LoopModelPolicyGuard,
-        LoopModelPort, LoopModelRequest, LoopModelResponse, LoopProgressEvent, LoopProgressPort,
-        LoopPromptBundle, LoopPromptBundleAuthority, LoopPromptBundleRef, LoopPromptBundleRequest,
-        LoopPromptPort, LoopRunContext, LoopRunInfoPort, LoopTranscriptPort, ModelCallOutcome,
-        ParentLoopOutput, PromptMode, PromptSkillContextMetadata, VisibleCapabilityRequest,
-        VisibleCapabilitySurface,
+        InstructionMaterializationStore, InstructionSafetyContext,
+        LOOP_CONTEXT_SNIPPET_MODEL_CONTENT_MAX_BYTES, LoopCancellationPort, LoopCancellationSignal,
+        LoopCapabilityPort, LoopCheckpointKind, LoopCheckpointPort, LoopCheckpointRequest,
+        LoopCheckpointStateRef, LoopCompactionError, LoopCompactionPort, LoopCompactionRequest,
+        LoopCompactionResponse, LoopContextBundle, LoopContextMessage, LoopContextPort,
+        LoopContextRequest, LoopContextSnippet, LoopContextSnippetMetadata, LoopDriverId,
+        LoopDriverNoteKind, LoopGateKind, LoopHostMilestone, LoopHostMilestoneEmitter,
+        LoopHostMilestoneKind, LoopHostMilestoneSink, LoopInputAckToken, LoopInputBatch,
+        LoopInputCursor, LoopInputCursorToken, LoopInputPort, LoopModelBudgetAccountant,
+        LoopModelCapabilityView, LoopModelGateway, LoopModelGatewayError, LoopModelGatewayRequest,
+        LoopModelMessage, LoopModelPolicyGuard, LoopModelPort, LoopModelRequest, LoopModelResponse,
+        LoopProgressEvent, LoopProgressPort, LoopPromptBundle, LoopPromptBundleAuthority,
+        LoopPromptBundleRef, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext,
+        LoopRunInfoPort, LoopTranscriptPort, ModelWorkOutcome, ModelWorkRequest, ParentLoopOutput,
+        PromptMode, PromptSkillContextMetadata, VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
     runner::{ClaimRunRequest, TurnRunTransitionPort},
 };
@@ -309,20 +310,24 @@ async fn instruction_bundle_builder_orders_sections_and_rebuilds_deterministical
                 message_ref: Some(LoopMessageRef::new("msg:identity").unwrap()),
                 role: "system".to_string(),
                 safe_summary: "identity safe".to_string(),
+                compaction: None,
             }],
             messages: vec![LoopContextMessage {
                 message_ref: Some(LoopMessageRef::new("msg:user-message").unwrap()),
                 role: "user".to_string(),
                 safe_summary: "user safe".to_string(),
+                compaction: None,
             }],
             instruction_snippets: vec![
                 LoopContextSnippet {
                     snippet_ref: "instruction:project".to_string(),
+                    model_content: "project rule".to_string(),
                     safe_summary: "project rule".to_string(),
                     metadata: None,
                 },
                 LoopContextSnippet {
                     snippet_ref: "skill:alpha".to_string(),
+                    model_content: "alpha skill".to_string(),
                     safe_summary: "alpha skill".to_string(),
                     metadata: Some(LoopContextSnippetMetadata {
                         source_name: "alpha".to_string(),
@@ -331,22 +336,26 @@ async fn instruction_bundle_builder_orders_sections_and_rebuilds_deterministical
                 },
                 LoopContextSnippet {
                     snippet_ref: "instruction:system".to_string(),
+                    model_content: "system rule".to_string(),
                     safe_summary: "system rule".to_string(),
                     metadata: None,
                 },
                 LoopContextSnippet {
                     snippet_ref: "instruction:user".to_string(),
+                    model_content: "user rule".to_string(),
                     safe_summary: "user rule".to_string(),
                     metadata: None,
                 },
                 LoopContextSnippet {
                     snippet_ref: "instruction:agent".to_string(),
+                    model_content: "agent rule".to_string(),
                     safe_summary: "agent rule".to_string(),
                     metadata: None,
                 },
             ],
             memory_snippets: vec![LoopContextSnippet {
                 snippet_ref: "memory:project-summary".to_string(),
+                model_content: "project memory".to_string(),
                 safe_summary: "project memory".to_string(),
                 metadata: None,
             }],
@@ -462,6 +471,8 @@ async fn instruction_bundle_builder_allows_safe_domain_terms_in_summaries() {
                 messages: Vec::new(),
                 instruction_snippets: vec![LoopContextSnippet {
                     snippet_ref: "instruction:system".to_string(),
+                    model_content: "Explain how to rotate a secret without exposing values"
+                        .to_string(),
                     safe_summary: "Explain how to rotate a secret without exposing values"
                         .to_string(),
                     metadata: None,
@@ -487,6 +498,7 @@ async fn instruction_bundle_builder_allows_terms_inside_larger_words() {
                 messages: Vec::new(),
                 instruction_snippets: vec![LoopContextSnippet {
                     snippet_ref: "instruction:system".to_string(),
+                    model_content: "Explain preauthorization sync behavior".to_string(),
                     safe_summary: "Explain preauthorization sync behavior".to_string(),
                     metadata: None,
                 }],
@@ -511,6 +523,7 @@ async fn instruction_bundle_builder_rejects_secret_credential_phrases() {
                 messages: Vec::new(),
                 instruction_snippets: vec![LoopContextSnippet {
                     snippet_ref: "instruction:system".to_string(),
+                    model_content: "client secret should not appear in prompt context".to_string(),
                     safe_summary: "client secret should not appear in prompt context".to_string(),
                     metadata: None,
                 }],
@@ -569,6 +582,7 @@ async fn instruction_bundle_serialization_hides_materialized_content() {
                 messages: Vec::new(),
                 instruction_snippets: vec![LoopContextSnippet {
                     snippet_ref: "instruction:system".to_string(),
+                    model_content: "RAW_MATERIALIZED_PROMPT_SENTINEL".to_string(),
                     safe_summary: "RAW_MATERIALIZED_PROMPT_SENTINEL".to_string(),
                     metadata: None,
                 }],
@@ -584,11 +598,304 @@ async fn instruction_bundle_serialization_hides_materialized_content() {
         bundle
             .materialized_messages
             .iter()
-            .any(|message| message.safe_content == "RAW_MATERIALIZED_PROMPT_SENTINEL")
+            .any(|message| message.model_content == "RAW_MATERIALIZED_PROMPT_SENTINEL")
     );
     let wire = serde_json::to_string(&bundle).unwrap();
     assert!(!wire.contains("RAW_MATERIALIZED_PROMPT_SENTINEL"));
     assert!(!wire.contains("materialized_messages"));
+}
+
+#[tokio::test]
+async fn instruction_bundle_materializes_oversized_snippet_content_separate_from_summary() {
+    let context = claimed_run_context().await;
+    let model_content = format!(
+        "skill description\n\n{}",
+        "trusted skill prompt content ".repeat(220)
+    );
+    assert!(model_content.len() > 4096);
+
+    let bundle = InstructionBundleBuilder::new(context)
+        .build(InstructionBundleRequest {
+            context_bundle: LoopContextBundle {
+                identity_messages: Vec::new(),
+                messages: Vec::new(),
+                instruction_snippets: vec![LoopContextSnippet {
+                    snippet_ref: "skill:github".to_string(),
+                    model_content: model_content.clone(),
+                    safe_summary: "GitHub skill".to_string(),
+                    metadata: Some(LoopContextSnippetMetadata {
+                        source_name: "github".to_string(),
+                        trust_level: "trusted".to_string(),
+                    }),
+                }],
+                memory_snippets: Vec::new(),
+            },
+            visible_surface: None,
+            safety_context: None,
+            inline_messages: Vec::new(),
+        })
+        .unwrap();
+
+    assert!(bundle.materialized_messages.iter().any(|message| {
+        message.model_content == model_content
+            && message
+                .content_ref
+                .as_str()
+                .starts_with("msg:snippet.skill.github.")
+    }));
+}
+
+fn skill_instruction_request(
+    model_content: impl Into<String>,
+    safe_summary: impl Into<String>,
+    trust_level: &str,
+) -> InstructionBundleRequest {
+    InstructionBundleRequest {
+        context_bundle: LoopContextBundle {
+            identity_messages: Vec::new(),
+            messages: Vec::new(),
+            instruction_snippets: vec![LoopContextSnippet {
+                snippet_ref: "skill:github".to_string(),
+                model_content: model_content.into(),
+                safe_summary: safe_summary.into(),
+                metadata: Some(LoopContextSnippetMetadata {
+                    source_name: "github".to_string(),
+                    trust_level: trust_level.to_string(),
+                }),
+            }],
+            memory_snippets: Vec::new(),
+        },
+        visible_surface: None,
+        safety_context: None,
+        inline_messages: Vec::new(),
+    }
+}
+
+#[tokio::test]
+async fn instruction_bundle_rejects_empty_model_content() {
+    let context = claimed_run_context().await;
+    let error = InstructionBundleBuilder::new(context)
+        .build(InstructionBundleRequest {
+            context_bundle: LoopContextBundle {
+                identity_messages: Vec::new(),
+                messages: Vec::new(),
+                instruction_snippets: vec![LoopContextSnippet {
+                    snippet_ref: "skill:empty".to_string(),
+                    model_content: String::new(),
+                    safe_summary: "empty skill".to_string(),
+                    metadata: Some(LoopContextSnippetMetadata {
+                        source_name: "empty".to_string(),
+                        trust_level: "trusted".to_string(),
+                    }),
+                }],
+                memory_snippets: Vec::new(),
+            },
+            visible_surface: None,
+            safety_context: None,
+            inline_messages: Vec::new(),
+        })
+        .unwrap_err();
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::PolicyDenied);
+    assert_eq!(
+        error.safe_summary,
+        "context snippet content is not model-safe"
+    );
+}
+
+#[tokio::test]
+async fn instruction_bundle_rejects_oversized_model_content() {
+    let context = claimed_run_context().await;
+    let error = InstructionBundleBuilder::new(context)
+        .build(InstructionBundleRequest {
+            context_bundle: LoopContextBundle {
+                identity_messages: Vec::new(),
+                messages: Vec::new(),
+                instruction_snippets: vec![LoopContextSnippet {
+                    snippet_ref: "skill:oversized".to_string(),
+                    model_content: "x".repeat(LOOP_CONTEXT_SNIPPET_MODEL_CONTENT_MAX_BYTES + 1),
+                    safe_summary: "oversized skill".to_string(),
+                    metadata: Some(LoopContextSnippetMetadata {
+                        source_name: "oversized".to_string(),
+                        trust_level: "trusted".to_string(),
+                    }),
+                }],
+                memory_snippets: Vec::new(),
+            },
+            visible_surface: None,
+            safety_context: None,
+            inline_messages: Vec::new(),
+        })
+        .unwrap_err();
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::PolicyDenied);
+    assert_eq!(
+        error.safe_summary,
+        "context snippet content is not model-safe"
+    );
+}
+
+#[tokio::test]
+async fn instruction_bundle_allows_security_vocabulary_in_model_content() {
+    let context = claimed_run_context().await;
+    let model_content = concat!(
+        "Review authorization checks, bearer handling, password flows, ",
+        "and API key redaction without treating these words as leaked values."
+    )
+    .to_string();
+
+    let bundle = InstructionBundleBuilder::new(context)
+        .build(skill_instruction_request(
+            model_content.clone(),
+            "Security review skill",
+            "trusted",
+        ))
+        .unwrap();
+
+    assert!(bundle.materialized_messages.iter().any(|message| {
+        message.model_content == model_content
+            && message
+                .content_ref
+                .as_str()
+                .starts_with("msg:snippet.skill.github.")
+    }));
+}
+
+#[tokio::test]
+async fn instruction_bundle_rejects_trusted_skill_actual_secret_value() {
+    let context = claimed_run_context().await;
+    let error = InstructionBundleBuilder::new(context)
+        .build(skill_instruction_request(
+            "Use Authorization: Bearer ghp_secretvalue123",
+            "GitHub skill",
+            "trusted",
+        ))
+        .unwrap_err();
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::PolicyDenied);
+}
+
+#[tokio::test]
+async fn instruction_bundle_rejects_trusted_skill_authorization_scheme_secret_value() {
+    let context = claimed_run_context().await;
+    let error = InstructionBundleBuilder::new(context)
+        .build(skill_instruction_request(
+            "Use Authorization: Basic QWxhZGRpbjpvcGVuIHNlc2FtZTEyMzQ",
+            "GitHub skill",
+            "trusted",
+        ))
+        .unwrap_err();
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::PolicyDenied);
+}
+
+#[tokio::test]
+async fn instruction_bundle_rejects_trusted_skill_security_vocabulary_in_summary() {
+    let context = claimed_run_context().await;
+    let error = InstructionBundleBuilder::new(context)
+        .build(skill_instruction_request(
+            "Use the GitHub API with an Authorization header.",
+            "Use Authorization: Bearer",
+            "trusted",
+        ))
+        .unwrap_err();
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::PolicyDenied);
+}
+
+#[tokio::test]
+async fn instruction_bundle_rejects_untrusted_skill_security_vocabulary() {
+    let context = claimed_run_context().await;
+    let error = InstructionBundleBuilder::new(context)
+        .build(skill_instruction_request(
+            "Use the GitHub API with an Authorization: Bearer header.",
+            "GitHub skill",
+            "installed",
+        ))
+        .unwrap_err();
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::PolicyDenied);
+}
+
+#[tokio::test]
+async fn instruction_bundle_rejects_generic_model_content_security_vocabulary() {
+    let context = claimed_run_context().await;
+    let error = InstructionBundleBuilder::new(context)
+        .build(InstructionBundleRequest {
+            context_bundle: LoopContextBundle {
+                identity_messages: Vec::new(),
+                messages: Vec::new(),
+                instruction_snippets: vec![LoopContextSnippet {
+                    snippet_ref: "instruction:system".to_string(),
+                    model_content: "Review authorization checks before release".to_string(),
+                    safe_summary: "Release review instruction".to_string(),
+                    metadata: None,
+                }],
+                memory_snippets: Vec::new(),
+            },
+            visible_surface: None,
+            safety_context: None,
+            inline_messages: Vec::new(),
+        })
+        .unwrap_err();
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::PolicyDenied);
+}
+
+#[tokio::test]
+async fn instruction_bundle_rejects_trusted_skill_host_path() {
+    let context = claimed_run_context().await;
+    let error = InstructionBundleBuilder::new(context)
+        .build(skill_instruction_request(
+            "Read /Users/alice/.config/token before calling GitHub",
+            "GitHub skill",
+            "trusted",
+        ))
+        .unwrap_err();
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::PolicyDenied);
+}
+
+#[tokio::test]
+async fn instruction_bundle_orders_snippets_by_model_content_when_summary_matches() {
+    let context = claimed_run_context().await;
+
+    let bundle = InstructionBundleBuilder::new(context)
+        .build(InstructionBundleRequest {
+            context_bundle: LoopContextBundle {
+                identity_messages: Vec::new(),
+                messages: Vec::new(),
+                instruction_snippets: Vec::new(),
+                memory_snippets: vec![
+                    LoopContextSnippet {
+                        snippet_ref: "memory:shared".to_string(),
+                        model_content: "zeta model content".to_string(),
+                        safe_summary: "same summary".to_string(),
+                        metadata: None,
+                    },
+                    LoopContextSnippet {
+                        snippet_ref: "memory:shared".to_string(),
+                        model_content: "alpha model content".to_string(),
+                        safe_summary: "same summary".to_string(),
+                        metadata: None,
+                    },
+                ],
+            },
+            visible_surface: None,
+            safety_context: None,
+            inline_messages: Vec::new(),
+        })
+        .unwrap();
+
+    let model_contents: Vec<&str> = bundle
+        .materialized_messages
+        .iter()
+        .map(|message| message.model_content.as_str())
+        .collect();
+    assert_eq!(
+        model_contents,
+        ["alpha model content", "zeta model content"]
+    );
 }
 
 #[tokio::test]
@@ -603,6 +910,7 @@ async fn instruction_bundle_builder_rejects_unsafe_instruction_context() {
                 messages: Vec::new(),
                 instruction_snippets: vec![LoopContextSnippet {
                     snippet_ref: "instruction:system".to_string(),
+                    model_content: "leaks /Users/alice/.ssh/id_rsa path".to_string(),
                     safe_summary: "leaks /Users/alice/.ssh/id_rsa path".to_string(),
                     metadata: None,
                 }],
@@ -712,12 +1020,12 @@ async fn loop_prompt_port_filters_visible_surface_by_capability_view() {
             store
                 .get_materialized_message(&host.context, &message.content_ref)
                 .unwrap()
-                .filter(|materialized| materialized.safe_content.starts_with("surface "))
+                .filter(|materialized| materialized.model_content.starts_with("surface "))
         })
         .expect("surface instruction materialized");
 
-    assert!(surface_message.safe_content.contains("demo.echo"));
-    assert!(!surface_message.safe_content.contains("demo.hidden"));
+    assert!(surface_message.model_content.contains("demo.echo"));
+    assert!(!surface_message.model_content.contains("demo.hidden"));
 }
 
 #[tokio::test]
@@ -732,6 +1040,7 @@ async fn prompt_bundle_authority_consumes_grant_after_successful_model_authoriza
         bundle_ref: LoopPromptBundleRef::for_run(&context, "bundle-once").unwrap(),
         messages: messages.clone(),
         surface_version: None,
+        compaction_message_index: Vec::new(),
         instruction_fingerprint: None,
         identity_message_count: 0,
         instruction_snippet_count: 0,
@@ -1050,11 +1359,8 @@ async fn loop_prompt_port_rejects_malformed_same_run_checkpoint_ref() {
             context_cursor: None,
             surface_version: None,
             checkpoint_state_ref: Some(
-                LoopCheckpointStateRef::new(format!(
-                    "checkpoint:{}:/host/path",
-                    host.context.run_id
-                ))
-                .unwrap(),
+                LoopCheckpointStateRef::new(format!("checkpoint:{}:", host.context.run_id))
+                    .unwrap(),
             ),
             max_messages: None,
             inline_messages: Vec::new(),
@@ -1994,6 +2300,7 @@ impl RecordingAgentLoopHost {
             message_ref: Some(LoopMessageRef::new(message_ref.into()).unwrap()),
             role: "system".to_string(),
             safe_summary: safe_summary.into(),
+            compaction: None,
         });
         self
     }
@@ -2008,6 +2315,7 @@ impl RecordingAgentLoopHost {
             message_ref: Some(LoopMessageRef::new(message_ref.into()).unwrap()),
             role: role.into(),
             safe_summary: safe_summary.into(),
+            compaction: None,
         });
         self
     }
@@ -2018,6 +2326,7 @@ impl RecordingAgentLoopHost {
         safe_summary: impl Into<String>,
     ) -> Self {
         let snippet_ref = snippet_ref.into();
+        let safe_summary = safe_summary.into();
         let metadata =
             snippet_ref
                 .strip_prefix("skill:")
@@ -2027,7 +2336,8 @@ impl RecordingAgentLoopHost {
                 });
         self.context_instruction_snippets.push(LoopContextSnippet {
             snippet_ref,
-            safe_summary: safe_summary.into(),
+            model_content: safe_summary.clone(),
+            safe_summary,
             metadata,
         });
         self
@@ -2038,9 +2348,11 @@ impl RecordingAgentLoopHost {
         snippet_ref: impl Into<String>,
         safe_summary: impl Into<String>,
     ) -> Self {
+        let safe_summary = safe_summary.into();
         self.context_memory_snippets.push(LoopContextSnippet {
             snippet_ref: snippet_ref.into(),
-            safe_summary: safe_summary.into(),
+            model_content: safe_summary.clone(),
+            safe_summary,
             metadata: None,
         });
         self
@@ -2107,6 +2419,7 @@ impl LoopContextPort for RecordingAgentLoopHost {
             message_ref: Some(LoopMessageRef::new("msg:user-message").unwrap()),
             role: "user".to_string(),
             safe_summary: self.context_message_safe_summary.clone(),
+            compaction: None,
         }];
         messages.extend(self.context_tail_messages.clone());
         Ok(LoopContextBundle {
@@ -2169,6 +2482,7 @@ impl LoopPromptPort for RecordingAgentLoopHost {
                 })
                 .collect(),
             surface_version: request.surface_version,
+            compaction_message_index: Vec::new(),
             instruction_fingerprint: None,
             identity_message_count: 0,
             instruction_snippet_count: 0,
@@ -2300,9 +2614,24 @@ impl LoopProgressPort for RecordingAgentLoopHost {
     }
 }
 
+#[async_trait]
+impl LoopCompactionPort for RecordingAgentLoopHost {
+    async fn compact_loop_context(
+        &self,
+        _request: LoopCompactionRequest,
+    ) -> Result<LoopCompactionResponse, LoopCompactionError> {
+        Err(LoopCompactionError::InputTooLarge)
+    }
+}
+
+#[async_trait]
 impl LoopCancellationPort for RecordingAgentLoopHost {
     fn observe_cancellation(&self) -> Option<LoopCancellationSignal> {
         None
+    }
+
+    async fn cancellation_requested(&self) -> LoopCancellationSignal {
+        std::future::pending().await
     }
 }
 
@@ -2384,10 +2713,10 @@ struct DenyAllPolicyGuard;
 
 #[async_trait]
 impl LoopModelPolicyGuard for DenyAllPolicyGuard {
-    async fn check_model_policy(
+    async fn check_model_work_policy(
         &self,
         _context: &LoopRunContext,
-        _request: &LoopModelRequest,
+        _request: &ModelWorkRequest,
     ) -> Result<(), LoopModelGatewayError> {
         Err(LoopModelGatewayError::new(
             AgentLoopHostErrorKind::PolicyDenied,
@@ -2445,10 +2774,10 @@ impl RecordingBudgetAccountant {
 
 #[async_trait]
 impl LoopModelBudgetAccountant for RecordingBudgetAccountant {
-    async fn pre_model_call(
+    async fn pre_model_work(
         &self,
         _context: &LoopRunContext,
-        _request: &LoopModelRequest,
+        _request: &ModelWorkRequest,
     ) -> Result<(), LoopModelGatewayError> {
         self.pre_called.store(true, Ordering::SeqCst);
         if self.reject_pre.load(Ordering::SeqCst) {
@@ -2461,14 +2790,14 @@ impl LoopModelBudgetAccountant for RecordingBudgetAccountant {
         Ok(())
     }
 
-    async fn post_model_call(
+    async fn post_model_work(
         &self,
         _context: &LoopRunContext,
-        _request: &LoopModelRequest,
-        outcome: ModelCallOutcome<'_>,
+        _request: &ModelWorkRequest,
+        outcome: ModelWorkOutcome,
     ) -> Result<(), LoopModelGatewayError> {
         self.post_called.store(true, Ordering::SeqCst);
-        if matches!(outcome, ModelCallOutcome::Failure(_)) {
+        if matches!(outcome, ModelWorkOutcome::Failure(_)) {
             self.post_saw_failure.store(true, Ordering::SeqCst);
         }
         if self.reject_post.load(Ordering::SeqCst) {

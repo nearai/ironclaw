@@ -168,8 +168,9 @@ impl RecordingNetwork {
     }
 }
 
+#[async_trait::async_trait]
 impl NetworkHttpEgress for RecordingNetwork {
-    fn execute(
+    async fn execute(
         &self,
         request: NetworkHttpRequest,
     ) -> Result<NetworkHttpResponse, NetworkHttpError> {
@@ -251,6 +252,7 @@ impl CapabilityDispatcher for ObligationAwareDispatcher {
                 save_body_to: None,
                 timeout_ms: None,
             })
+            .await
             .map_err(|_| DispatchError::Wasm {
                 kind: RuntimeDispatchErrorKind::NetworkDenied,
             })?;

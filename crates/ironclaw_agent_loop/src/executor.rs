@@ -16,6 +16,7 @@ mod mapping;
 mod model;
 mod pipeline;
 mod prompt;
+mod reply_admission;
 mod turn_stop;
 
 use assistant_reply::{AssistantReplyInput, AssistantReplyStage};
@@ -48,7 +49,8 @@ use mapping::{
 use model::{ModelInput, ModelStage, ModelStep};
 use pipeline::{DefaultExecutorPipeline, ExecutorStage, StageContext};
 use prompt::{PromptInput, PromptStage, PromptStep};
-use turn_stop::{StopInput, StopStage, StopStep};
+use reply_admission::{ReplyAdmissionInput, ReplyAdmissionStage, ReplyAdmissionStep};
+use turn_stop::{StopInput, StopObservationInput, StopObservationStep, StopStage, StopStep};
 
 use async_trait::async_trait;
 use ironclaw_turns::{

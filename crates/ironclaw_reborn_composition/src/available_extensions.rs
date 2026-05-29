@@ -73,7 +73,17 @@ impl AvailableExtensionCatalog {
     }
 
     pub(crate) fn extend(&mut self, other: Self) {
-        self.packages.extend(other.packages);
+        for package in other.packages {
+            if let Some(existing) = self
+                .packages
+                .iter_mut()
+                .find(|existing| existing.package_ref == package.package_ref)
+            {
+                *existing = package;
+            } else {
+                self.packages.push(package);
+            }
+        }
     }
 
     pub(crate) async fn from_filesystem_root<F>(
@@ -637,11 +647,17 @@ where
             entry.path.as_str().trim_end_matches('/')
         ))
         .map_err(map_binding_error)?;
-        let manifest_bytes = fs.read_file(&manifest_path).await.map_err(|error| {
-            ProductWorkflowError::Transient {
-                reason: format!("failed to read available extension manifest: {error}"),
+        let manifest_bytes = match fs.read_file(&manifest_path).await {
+            Ok(bytes) => bytes,
+            Err(FilesystemError::NotFound { .. }) | Err(FilesystemError::MountNotFound { .. }) => {
+                continue;
             }
-        })?;
+            Err(error) => {
+                return Err(ProductWorkflowError::Transient {
+                    reason: format!("failed to read available extension manifest: {error}"),
+                });
+            }
+        };
         let manifest_toml = String::from_utf8(manifest_bytes).map_err(|error| {
             ProductWorkflowError::InvalidBindingRequest {
                 reason: format!("available extension manifest is not UTF-8: {error}"),
@@ -782,6 +798,29 @@ mod tests {
         }
     }
 
+    #[test]
+    fn catalog_extend_replaces_duplicate_package_refs() {
+        let stale = test_extension_package_with_wasm_bytes(b"stale");
+        let bundled = test_extension_package_with_wasm_bytes(b"bundled");
+        let mut catalog = AvailableExtensionCatalog::from_packages(vec![stale]);
+        catalog.extend(AvailableExtensionCatalog::from_packages(vec![bundled]));
+
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture").unwrap();
+        let package = catalog.resolve(&package_ref).unwrap();
+        let wasm = package
+            .assets
+            .iter()
+            .find(|asset| asset.path == "wasm/fixture.wasm")
+            .expect("wasm asset");
+
+        assert_eq!(
+            wasm.content,
+            AvailableExtensionAssetContent::Bytes(b"bundled".to_vec())
+        );
+        assert_eq!(catalog.search("fixture").count(), 1);
+    }
+
     #[tokio::test]
     async fn materialize_fails_on_filesystem_error_and_rolls_back_written_assets() {
         let fs = FailingWriteFilesystem::default();
@@ -836,6 +875,26 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["manifest.toml", "wasm/fixture.wasm"]
         );
+    }
+
+    #[tokio::test]
+    async fn filesystem_catalog_skips_extension_dirs_without_manifest() {
+        let fs = InMemoryBackend::default();
+        fs.write_file(
+            &VirtualPath::new("/system/extensions/incomplete/cache/leftover").unwrap(),
+            b"stale",
+        )
+        .await
+        .unwrap();
+
+        let catalog = AvailableExtensionCatalog::from_filesystem_root(
+            &fs,
+            &VirtualPath::new("/system/extensions").unwrap(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(catalog.search("").count(), 0);
     }
 
     #[derive(Default)]
@@ -900,6 +959,10 @@ mod tests {
     }
 
     fn test_extension_package() -> AvailableExtensionPackage {
+        test_extension_package_with_wasm_bytes(b"wasm")
+    }
+
+    fn test_extension_package_with_wasm_bytes(wasm_bytes: &[u8]) -> AvailableExtensionPackage {
         static MANIFEST: &str = r#"
 schema_version = "reborn.extension_manifest.v2"
 id = "fixture"
@@ -953,7 +1016,7 @@ output_schema_ref = "schemas/write.output.json"
                 },
                 AvailableExtensionAsset {
                     path: "wasm/fixture.wasm".to_string(),
-                    content: AvailableExtensionAssetContent::Bytes(b"wasm".to_vec()),
+                    content: AvailableExtensionAssetContent::Bytes(wasm_bytes.to_vec()),
                 },
             ],
         }

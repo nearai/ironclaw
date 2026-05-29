@@ -123,15 +123,16 @@ pub(super) async fn fetch_url_response(
         save_body_to: None,
         timeout_ms: Some(SKILL_URL_FETCH_TIMEOUT_MS),
     };
-    let response = tokio::task::spawn_blocking(move || egress.execute(http_request))
-        .await
-        .map_err(|error| {
-            if error.is_panic() {
-                tracing::error!("skill URL fetch egress worker panicked");
-            }
+    let response = super::run_egress_catching_panic(
+        egress.execute(http_request),
+        "skill URL HTTP egress future panicked",
+        || {
             FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::Backend)
-        })?
-        .map_err(|error| skill_url_fetch_error(error, usage))?;
+                .with_usage(usage.clone())
+        },
+    )
+    .await?
+    .map_err(|error| skill_url_fetch_error(error, usage))?;
     usage.network_egress_bytes = usage
         .network_egress_bytes
         .saturating_add(response.request_bytes);
@@ -195,4 +196,65 @@ fn skill_url_fetch_error(
         }
     };
     FirstPartyCapabilityError::new(kind).with_usage(usage.clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use ironclaw_host_api::{
+        CapabilityId, InvocationId, ResourceScope, RuntimeHttpEgress, RuntimeHttpEgressResponse,
+        TenantId, UserId,
+    };
+    use serde_json::json;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn fetch_url_response_maps_panicking_runtime_egress_to_backend_failure() {
+        let request = FirstPartyCapabilityRequest::request_for_test(
+            CapabilityId::new("builtin.skill_install").unwrap(),
+            sample_scope(),
+            json!({}),
+            Some(Arc::new(PanickingRuntimeHttpEgress)),
+        );
+        let url = validate_skill_url(
+            "https://raw.githubusercontent.com/Pika-Labs/Pika-Skills/main/fetched-helper/SKILL.md",
+        )
+        .unwrap();
+        let mut usage = ResourceUsage::default();
+
+        let error = fetch_url_response(&request, &url, &mut usage, Vec::new())
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.kind(), RuntimeDispatchErrorKind::Backend);
+        assert_eq!(error.usage(), Some(&ResourceUsage::default()));
+    }
+
+    #[derive(Debug)]
+    struct PanickingRuntimeHttpEgress;
+
+    #[async_trait]
+    impl RuntimeHttpEgress for PanickingRuntimeHttpEgress {
+        async fn execute(
+            &self,
+            _request: RuntimeHttpEgressRequest,
+        ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
+            panic!("skill URL runtime HTTP egress panic")
+        }
+    }
+
+    fn sample_scope() -> ResourceScope {
+        ResourceScope {
+            tenant_id: TenantId::new("tenant1").unwrap(),
+            user_id: UserId::new("user1").unwrap(),
+            agent_id: None,
+            project_id: None,
+            mission_id: None,
+            thread_id: None,
+            invocation_id: InvocationId::new(),
+        }
+    }
 }

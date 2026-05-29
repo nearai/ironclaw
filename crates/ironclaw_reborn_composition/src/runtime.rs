@@ -83,12 +83,19 @@ use ironclaw_turns::{
 
 use crate::default_system_prompt::DefaultSystemPromptIdentitySource;
 use crate::factory::{LocalDevRootFilesystem, LocalDevTurnStateStore};
+use crate::local_dev_capability_policy::local_dev_capability_policy;
 use crate::projection::{RebornProjectionServices, build_reborn_projection_services};
 use crate::runtime_input::{PollSettings, RebornRuntimeIdentity, RebornRuntimeInput};
-use crate::{RebornBuildError, RebornCompositionProfile, RebornServices, build_reborn_services};
+use crate::{
+    RebornBuildError, RebornCompositionProfile, RebornProductAuthServices, RebornServices,
+    build_reborn_services,
+};
 
 mod approval;
 mod auth_interaction;
+#[cfg(test)]
+#[path = "runtime/tests/auth_interaction.rs"]
+mod auth_interaction_tests;
 #[cfg(test)]
 #[path = "runtime/tests/default_system_prompt.rs"]
 mod default_system_prompt_tests;
@@ -853,7 +860,7 @@ pub async fn build_reborn_runtime(
         identity,
         regex_skill_activation_enabled,
         skill_context_source: configured_skill_context_source,
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         model_gateway_override,
     } = input;
 
@@ -931,7 +938,7 @@ pub async fn build_reborn_runtime(
 
     #[cfg(feature = "root-llm-provider")]
     let model_gateway = {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if let Some(gateway) = model_gateway_override {
             gateway
         } else {
@@ -940,7 +947,7 @@ pub async fn build_reborn_runtime(
                 None => build_stub_gateway(),
             }
         }
-        #[cfg(not(test))]
+        #[cfg(not(any(test, feature = "test-support")))]
         {
             match llm {
                 Some(cfg) => build_llm_gateway(cfg).await?,
@@ -950,13 +957,13 @@ pub async fn build_reborn_runtime(
     };
     #[cfg(not(feature = "root-llm-provider"))]
     let model_gateway = {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if let Some(gateway) = model_gateway_override {
             gateway
         } else {
             build_stub_gateway()
         }
-        #[cfg(not(test))]
+        #[cfg(not(any(test, feature = "test-support")))]
         {
             build_stub_gateway()
         }
@@ -994,13 +1001,32 @@ pub async fn build_reborn_runtime(
         Arc::clone(&event_log),
         validated_identity.reply_target_binding_ref.clone(),
     );
-    let milestone_sink = projection_services
-        .with_live_reasoning_milestone_sink(durable_milestone_sink, actor_user_id.clone());
+    let live_projection_publisher =
+        projection_services.live_projection_publisher(actor_user_id.clone());
+    if let Some(skill_activation_source) = &skill_activation_source {
+        skill_activation_source
+            .set_activation_observer(
+                projection_services
+                    .skill_activation_observer(Arc::clone(&live_projection_publisher)),
+            )
+            .map_err(|error| RebornRuntimeError::SkillExecution(error.to_string()))?;
+    }
+    let milestone_sink = projection_services.with_live_progress_milestone_sink_for_publisher(
+        durable_milestone_sink,
+        live_projection_publisher,
+    );
+    let local_dev_capability_policy = Arc::new(local_dev_capability_policy().map_err(|error| {
+        tracing::error!(%error, "local-dev capability policy is invalid");
+        RebornRuntimeError::InvalidArgument {
+            reason: format!("local-dev capability policy is invalid: {error}"),
+        }
+    })?);
     let local_dev_capabilities = local_dev::capability_wiring(
         &services,
         Arc::clone(&thread_service) as Arc<dyn SessionThreadService>,
         thread_scope.clone(),
         actor_user_id.clone(),
+        Arc::clone(&local_dev_capability_policy),
         model_gateway,
         milestone_sink.clone(),
         skill_activation_source.clone(),
@@ -1088,29 +1114,18 @@ pub async fn build_reborn_runtime(
         Arc::new(DefaultApprovalInteractionService::new(
             approval_read_model,
             Arc::new(approval::LocalDevApprovalLeaseTermsProvider::new(
+                local_dev_capability_policy,
                 local_runtime.workspace_mounts.clone(),
                 local_runtime.skill_mounts.clone(),
             )),
             approval_resolver,
             Arc::clone(&planned_turn_coordinator),
         ));
-    let auth_interaction_service: Arc<dyn AuthInteractionService> =
-        if let Some(product_auth) = services.product_auth.as_ref() {
-            if let Some(flow_records) = product_auth.flow_record_source() {
-                Arc::new(DefaultAuthInteractionService::new(
-                    Arc::new(auth_interaction::LocalDevAuthInteractionReadModel::new(
-                        Arc::clone(&turn_state_store),
-                        flow_records,
-                    )),
-                    product_auth.flow_manager(),
-                    Arc::clone(&planned_turn_coordinator),
-                ))
-            } else {
-                Arc::new(auth_interaction::UnavailableAuthInteractionService)
-            }
-        } else {
-            Arc::new(auth_interaction::UnavailableAuthInteractionService)
-        };
+    let auth_interaction_service = build_webui_auth_interaction_service(
+        services.product_auth.as_deref(),
+        Arc::clone(&turn_state_store),
+        Arc::clone(&planned_turn_coordinator),
+    );
     let turn_event_source: Arc<dyn TurnEventProjectionSource> = turn_state_store.clone();
     let projection_services = projection_services
         .with_turn_events(turn_event_source, Arc::clone(&planned_turn_coordinator))
@@ -1149,6 +1164,32 @@ pub async fn build_reborn_runtime(
         skill_activation_source,
         skill_execution_adapter,
     })
+}
+
+fn build_webui_auth_interaction_service(
+    product_auth: Option<&RebornProductAuthServices>,
+    turn_state_store: Arc<LocalDevTurnStateStore>,
+    turn_coordinator: Arc<dyn TurnCoordinator>,
+) -> Arc<dyn AuthInteractionService> {
+    // `AuthFlowRecordSource` is optional on the product-auth bundle because
+    // production may supply a durable read projection that is not the flow
+    // manager itself. Local-dev can render pending WebUI auth interactions only
+    // when the bundle explicitly exposes this scoped projection; otherwise the
+    // WebUI surface fails closed with a stable unavailable error.
+    let Some(product_auth) = product_auth else {
+        return Arc::new(auth_interaction::UnavailableAuthInteractionService);
+    };
+    let Some(flow_records) = product_auth.flow_record_source() else {
+        return Arc::new(auth_interaction::UnavailableAuthInteractionService);
+    };
+    Arc::new(DefaultAuthInteractionService::new(
+        Arc::new(auth_interaction::LocalDevAuthInteractionReadModel::new(
+            turn_state_store,
+            flow_records,
+        )),
+        product_auth.flow_manager(),
+        turn_coordinator,
+    ))
 }
 
 const LOOP_RUN_CAPABILITY_ID: &str = "loop.run";
@@ -1812,6 +1853,7 @@ mod tests {
                 )
                 .expect("message ref"),
                 tool_result_provider_call: None,
+                tool_result_content: None,
             }],
             surface_version: None,
             resolved_model_route: None,

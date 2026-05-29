@@ -3194,6 +3194,36 @@ bedrock_profile = "prod-bedrock"
         assert!(settings.bedrock_profile.is_none());
     }
 
+    /// Regression guard: `SkillsSettings.regex_activation_enabled = false` must
+    /// survive a `to_db_map` → `from_db_map` round-trip.  A serialization
+    /// regression (e.g. `serde(default)` applied without a matching
+    /// `serde(skip_serializing_if)`) would cause the field to be omitted from
+    /// the map and silently revert to `true` on reload.
+    #[test]
+    fn test_db_map_round_trip_preserves_skills_regex_activation() {
+        let settings = Settings {
+            skills: crate::settings::SkillsSettings {
+                regex_activation_enabled: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let map = settings.to_db_map();
+        let restored = Settings::from_db_map(&map);
+        assert!(
+            !restored.skills.regex_activation_enabled,
+            "skills.regex_activation_enabled=false must survive DB round-trip"
+        );
+        // Confirm the default (true) is also preserved when round-tripping the
+        // default settings so we don't accidentally strip the default path.
+        let default_map = Settings::default().to_db_map();
+        let restored_default = Settings::from_db_map(&default_map);
+        assert!(
+            restored_default.skills.regex_activation_enabled,
+            "default skills.regex_activation_enabled=true must survive DB round-trip"
+        );
+    }
+
     /// `migrate_legacy_provider_fields` is idempotent in-memory: once the
     /// named fields are drained, repeated calls observe `None` and exit
     /// without touching `extras`.

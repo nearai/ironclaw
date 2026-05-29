@@ -15,6 +15,7 @@ use ironclaw_approvals::ApprovalResolver;
 use ironclaw_authorization::{
     CapabilityLeaseStore, InMemoryCapabilityLeaseStore, TrustAwareCapabilityDispatchAuthorizer,
 };
+use ironclaw_capabilities::CapabilityObligationHandler;
 use ironclaw_dispatcher::{
     RuntimeAdapter, RuntimeAdapterRequest, RuntimeAdapterResult, RuntimeDispatcher,
 };
@@ -55,7 +56,10 @@ use ironclaw_run_state::{
     InMemoryApprovalRequestStore, InMemoryRunStateStore, RunStateApprovalStore, RunStateStore,
 };
 use ironclaw_scripts::{ScriptError, ScriptExecutionRequest, ScriptExecutor, ScriptInvocation};
-use ironclaw_secrets::{InMemorySecretStore, SecretStore};
+use ironclaw_secrets::{
+    CredentialAccountStore, CredentialSessionStore, InMemoryCredentialBroker, InMemorySecretStore,
+    SecretStore,
+};
 use ironclaw_trust::{HostTrustPolicy, TrustPolicy};
 use ironclaw_turns::{
     DefaultTurnCoordinator, FilesystemTurnStateStore, InMemoryTurnStateStore,
@@ -131,6 +135,8 @@ where
     event_sink: Option<Arc<dyn EventSink>>,
     audit_sink: Option<Arc<dyn AuditSink>>,
     secret_store: Option<Arc<dyn SecretStore>>,
+    credential_account_store: Arc<dyn CredentialAccountStore>,
+    credential_session_store: Arc<dyn CredentialSessionStore>,
     network_policy_store: Arc<NetworkObligationPolicyStore>,
     secret_injection_store: Arc<RuntimeSecretInjectionStore>,
     process_lifecycle_store: Arc<ProcessObligationLifecycleStore>,
@@ -151,6 +157,37 @@ where
     turn_run_transition_port: Option<Arc<dyn TurnRunTransitionPort>>,
     turn_run_wake_notifier: Option<Arc<dyn TurnRunWakeNotifier>>,
     component_types: ProductionComponentTypes,
+}
+
+/// Canonical host-runtime ports used by product-auth provider adapters.
+///
+/// This intentionally exposes only the already-composed egress and obligation
+/// handler. Product/auth adapters must not receive the mutable handoff stores
+/// that back those ports.
+#[derive(Clone)]
+pub struct ProductAuthProviderRuntimePorts {
+    runtime_http_egress: Arc<dyn RuntimeHttpEgress>,
+    obligation_handler: Arc<dyn CapabilityObligationHandler>,
+}
+
+impl ProductAuthProviderRuntimePorts {
+    fn new(
+        runtime_http_egress: Arc<dyn RuntimeHttpEgress>,
+        obligation_handler: Arc<dyn CapabilityObligationHandler>,
+    ) -> Self {
+        Self {
+            runtime_http_egress,
+            obligation_handler,
+        }
+    }
+
+    pub fn runtime_http_egress(&self) -> Arc<dyn RuntimeHttpEgress> {
+        Arc::clone(&self.runtime_http_egress)
+    }
+
+    pub fn obligation_handler(&self) -> Arc<dyn CapabilityObligationHandler> {
+        Arc::clone(&self.obligation_handler)
+    }
 }
 
 impl<F, G, S, R> HostRuntimeServices<F, G, S, R>
@@ -176,6 +213,9 @@ where
             Arc::clone(&secret_injection_store),
             governor.clone(),
         ));
+        let credential_broker = Arc::new(InMemoryCredentialBroker::new());
+        let credential_account_store: Arc<dyn CredentialAccountStore> = credential_broker.clone();
+        let credential_session_store: Arc<dyn CredentialSessionStore> = credential_broker;
         Self {
             registry: Arc::new(SharedExtensionRegistry::new((*registry).clone())),
             trust_policy: Arc::new(HostTrustPolicy::fail_closed()),
@@ -192,6 +232,8 @@ where
             event_sink: None,
             audit_sink: None,
             secret_store: None,
+            credential_account_store,
+            credential_session_store,
             network_policy_store,
             secret_injection_store,
             process_lifecycle_store,
@@ -224,6 +266,8 @@ where
                 event_sink: None,
                 audit_sink: None,
                 secret_store: None,
+                credential_account_store: None,
+                credential_session_store: None,
                 runtime_http_egress: None,
                 runtime_http_egress_verified: false,
                 runtime_process_port: ProductionComponentType::of::<LocalHostProcessPort>(),
@@ -314,6 +358,16 @@ where
     /// Builds the upper facade without production validation.
     pub fn shared_extension_registry(&self) -> Arc<SharedExtensionRegistry> {
         Arc::clone(&self.registry)
+    }
+
+    /// Returns the canonical host-runtime egress/obligation ports for
+    /// product-auth provider adapters.
+    pub fn product_auth_provider_runtime_ports(&self) -> Option<ProductAuthProviderRuntimePorts> {
+        let runtime_http_egress = runtime_http_egress(&self.runtime_http_egress)?;
+        Some(ProductAuthProviderRuntimePorts::new(
+            runtime_http_egress,
+            Arc::new(self.builtin_obligation_handler()),
+        ))
     }
 
     #[doc(hidden)]

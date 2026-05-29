@@ -157,8 +157,8 @@ arguments, raw results, command strings, host paths, or provider payloads.
 
 `capability_display_preview` SSE frames are separate sanitized display artifacts
 for WebUI tool blocks. They may carry bounded summaries/previews only: summaries
-are capped at 2 KiB and output previews at 16 KiB or 120 lines, whichever comes
-first. They are not source-of-truth tool results. Full output remains behind the
+are capped at 2 KiB and output previews at 16 KiB. They are not source-of-truth
+tool results. Full output remains behind the
 scoped `result_ref` fetch path; SSE must never carry raw unbounded args/results.
 Preview generation belongs in the Reborn product/composition layer, using
 staged input/result-ref or transcript evidence where available, not in low-level

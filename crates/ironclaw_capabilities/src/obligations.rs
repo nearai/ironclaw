@@ -78,6 +78,8 @@ impl std::fmt::Display for CapabilityObligationFailureKind {
 pub enum CapabilityObligationError {
     #[error("unsupported authorization obligations: {count} item(s)", count = obligations.len())]
     Unsupported { obligations: Vec<Obligation> },
+    #[error("authorization requires authentication")]
+    AuthRequired,
     #[error("authorization obligation failed: {kind}")]
     Failed {
         kind: CapabilityObligationFailureKind,

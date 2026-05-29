@@ -42,6 +42,7 @@ use axum::{
     middleware::{self, Next},
     response::{IntoResponse, Response},
 };
+use ironclaw_host_api::ingress::IngressRouteDescriptor;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
 use ironclaw_webui_v2::{WebUiV2State, webui_v2_router};
 use tower_http::catch_panic::CatchPanicLayer;
@@ -145,6 +146,28 @@ pub struct WebuiServeConfig {
     /// flows; supply it when the host installation has a single
     /// canonical project.
     pub(crate) default_project_id: Option<ProjectId>,
+    /// Host-supplied public (unauthenticated) route mount merged
+    /// into the composed app outside the bearer auth layer. Used
+    /// by `ironclaw_reborn_webui_ingress::webui_v2_auth_router`
+    /// to mount the WebChat v2 OAuth login surface
+    /// (`/auth/providers`, `/auth/login/{provider}`,
+    /// `/auth/callback/{provider}`, `/auth/logout`). Both the
+    /// `Router` and the `Vec<IngressRouteDescriptor>` are required
+    /// so the descriptor-driven per-route rate-limit and
+    /// body-limit middlewares apply to these routes just like
+    /// they do to the v2 facade and the product-auth callback —
+    /// no side door. Defaults to `None`.
+    pub(crate) public_mount: Option<PublicRouteMount>,
+}
+
+/// A host-supplied public sub-router plus the descriptors composition
+/// needs to install the per-route policy middleware around it.
+/// Mirrors the shape `ProductAuthRouteMount` uses internally so the
+/// two public surfaces ride on the same machinery.
+#[derive(Clone)]
+pub struct PublicRouteMount {
+    pub router: Router,
+    pub descriptors: Vec<IngressRouteDescriptor>,
 }
 
 impl WebuiServeConfig {
@@ -164,7 +187,38 @@ impl WebuiServeConfig {
             canonical_host: None,
             default_agent_id: None,
             default_project_id: None,
+            public_mount: None,
         }
+    }
+
+    /// Attach a host-supplied public sub-router PLUS its route
+    /// descriptors. The router is merged into the composed app
+    /// outside the bearer auth layer; the descriptors fold into
+    /// the same per-route rate-limit / body-limit middlewares the
+    /// v2 facade and the product-auth callback already use, so
+    /// the public surface rides on the canonical policy stack —
+    /// no descriptor-less side door.
+    ///
+    /// Today this is the seam
+    /// `ironclaw_reborn_webui_ingress::webui_v2_auth_router` plugs
+    /// into; future host-owned public surfaces can reuse the same
+    /// hook by returning a [`PublicRouteMount`].
+    ///
+    /// **Do NOT pass a v1 gateway router through this hook.** v1's
+    /// `/auth/*` handlers in `src/channels/web/handlers/auth.rs`
+    /// share path names with the v2-native router from
+    /// `webui_v2_auth_router` (`/auth/providers`,
+    /// `/auth/login/{p}`, `/auth/callback/{p}`, `/auth/logout`) by
+    /// design — they implement the same protocol on two
+    /// independent listeners. Merging the v1 router here would
+    /// conflict with the v2-native router and, more importantly,
+    /// would route v1 traffic into the v2 host-owned `SessionStore`
+    /// it never had access to. The v2 listener is exclusively for
+    /// `webui_v2_auth_router` (and any future host-native public
+    /// surface that follows the same boundary rules).
+    pub fn with_public_route_mount(mut self, mount: PublicRouteMount) -> Self {
+        self.public_mount = Some(mount);
+        self
     }
 
     /// Set the canonical host for WebSocket same-origin checks. See
@@ -318,8 +372,12 @@ pub fn webui_v2_app(
             config.default_project_id.clone(),
         ))
     });
+    let public_mount = config.public_mount;
     let mut descriptors = ironclaw_webui_v2::webui_v2_routes();
     if let Some(mount) = &product_auth_mount {
+        descriptors.extend(mount.descriptors.iter().cloned());
+    }
+    if let Some(mount) = &public_mount {
         descriptors.extend(mount.descriptors.iter().cloned());
     }
     let rate_limit_state = build_rate_limit_state(&descriptors)?;
@@ -337,10 +395,16 @@ pub fn webui_v2_app(
         webui_v2_router(WebUiV2State::new(bundle.api.clone())).with_state(());
 
     let mut protected_inner = Router::new().merge(v2_inner);
-    let mut public_inner = None;
+    let mut public_inner: Option<Router> = None;
     if let Some(mount) = product_auth_mount {
         protected_inner = protected_inner.merge(mount.protected);
         public_inner = Some(mount.public);
+    }
+    if let Some(mount) = public_mount {
+        public_inner = Some(match public_inner {
+            Some(existing) => existing.merge(mount.router),
+            None => mount.router,
+        });
     }
 
     // Layer order matters. `route_layer` stacks inside-out from the
@@ -390,7 +454,6 @@ pub fn webui_v2_app(
             ));
         app = app.merge(public);
     }
-
     let app = app
         // SPA static assets served from the embedded
         // `ironclaw_webui_v2_static` bundle. Routed AFTER the

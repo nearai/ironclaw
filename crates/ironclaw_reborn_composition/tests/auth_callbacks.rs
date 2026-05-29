@@ -8,12 +8,13 @@ use chrono::{Duration, Utc};
 use ironclaw_auth::{
     AuthChallenge, AuthContinuationEvent, AuthContinuationRef, AuthErrorCode, AuthFlowId,
     AuthFlowKind, AuthProductError, AuthProductScope, AuthProviderClient, AuthProviderId,
-    AuthSessionId, AuthSurface, AuthorizationCodeHash, CredentialAccountLabel,
+    AuthSessionId, AuthSurface, AuthorizationCodeHash, CredentialAccountId, CredentialAccountLabel,
     InMemoryAuthProductServices, LifecyclePackageRef, NewAuthFlow, OAuthAuthorizationCode,
-    OAuthAuthorizationUrl, OAuthProviderCallbackRequest, OAuthProviderExchange, OpaqueStateHash,
-    PkceVerifierHash, PkceVerifierSecret, ProviderScope,
+    OAuthAuthorizationUrl, OAuthProviderCallbackRequest, OAuthProviderExchange,
+    OAuthProviderExchangeContext, OAuthProviderRefresh, OAuthProviderRefreshRequest,
+    OpaqueStateHash, PkceVerifierHash, PkceVerifierSecret, ProviderScope,
 };
-use ironclaw_host_api::{InvocationId, ResourceScope, UserId};
+use ironclaw_host_api::{InvocationId, ResourceScope, SecretHandle, UserId};
 use ironclaw_reborn_composition::{
     RebornAuthContinuationDispatcher, RebornOAuthCallbackOutcome, RebornOAuthCallbackRequest,
     RebornOAuthCallbackResponse, RebornProductAuthServices,
@@ -56,8 +57,16 @@ struct FailingProviderClient {
 impl AuthProviderClient for FailingProviderClient {
     async fn exchange_callback(
         &self,
+        _context: OAuthProviderExchangeContext,
         _request: OAuthProviderCallbackRequest,
     ) -> Result<OAuthProviderExchange, AuthProductError> {
+        Err(self.error.clone())
+    }
+
+    async fn refresh_token(
+        &self,
+        _request: OAuthProviderRefreshRequest,
+    ) -> Result<OAuthProviderRefresh, AuthProductError> {
         Err(self.error.clone())
     }
 }
@@ -77,15 +86,133 @@ impl CountingProviderClient {
 impl AuthProviderClient for CountingProviderClient {
     async fn exchange_callback(
         &self,
+        _context: OAuthProviderExchangeContext,
         _request: OAuthProviderCallbackRequest,
     ) -> Result<OAuthProviderExchange, AuthProductError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Err(AuthProductError::TokenExchangeFailed)
     }
+
+    async fn refresh_token(
+        &self,
+        _request: OAuthProviderRefreshRequest,
+    ) -> Result<OAuthProviderRefresh, AuthProductError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Err(AuthProductError::RefreshFailed)
+    }
+}
+
+#[derive(Default)]
+struct SuccessfulCountingProviderClient {
+    calls: AtomicUsize,
+    last_context: Mutex<Option<OAuthProviderExchangeContext>>,
+}
+
+impl SuccessfulCountingProviderClient {
+    fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+
+    fn last_context(&self) -> Option<OAuthProviderExchangeContext> {
+        self.last_context
+            .lock()
+            .expect("provider context lock poisoned")
+            .clone()
+    }
+}
+
+#[async_trait]
+impl AuthProviderClient for SuccessfulCountingProviderClient {
+    async fn exchange_callback(
+        &self,
+        context: OAuthProviderExchangeContext,
+        request: OAuthProviderCallbackRequest,
+    ) -> Result<OAuthProviderExchange, AuthProductError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        *self
+            .last_context
+            .lock()
+            .expect("provider context lock poisoned") = Some(context);
+        Ok(OAuthProviderExchange {
+            provider: request.provider,
+            account_label: request.account_label,
+            authorization_code_hash: request.authorization_code_hash,
+            pkce_verifier_hash: request.pkce_verifier_hash,
+            access_secret: SecretHandle::new("oauth-access").unwrap(),
+            refresh_secret: Some(SecretHandle::new("oauth-refresh").unwrap()),
+            scopes: request.scopes,
+            account_id: None,
+        })
+    }
+
+    async fn refresh_token(
+        &self,
+        request: OAuthProviderRefreshRequest,
+    ) -> Result<OAuthProviderRefresh, AuthProductError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(OAuthProviderRefresh {
+            provider: request.provider,
+            access_secret: SecretHandle::new("oauth-refreshed-access").unwrap(),
+            refresh_secret: Some(SecretHandle::new("oauth-refreshed-refresh").unwrap()),
+            scopes: request.scopes,
+        })
+    }
 }
 
 struct FailingContinuationDispatcher {
     error: AuthProductError,
+}
+
+#[derive(Default)]
+struct CleanupRecordingProviderClient {
+    cleaned: Mutex<Vec<SecretHandle>>,
+}
+
+impl CleanupRecordingProviderClient {
+    fn cleaned(&self) -> Vec<SecretHandle> {
+        self.cleaned
+            .lock()
+            .expect("cleaned handles lock poisoned")
+            .clone()
+    }
+}
+
+#[async_trait]
+impl AuthProviderClient for CleanupRecordingProviderClient {
+    async fn exchange_callback(
+        &self,
+        _context: OAuthProviderExchangeContext,
+        request: OAuthProviderCallbackRequest,
+    ) -> Result<OAuthProviderExchange, AuthProductError> {
+        Ok(OAuthProviderExchange {
+            provider: request.provider,
+            account_label: request.account_label,
+            authorization_code_hash: request.authorization_code_hash,
+            pkce_verifier_hash: request.pkce_verifier_hash,
+            access_secret: SecretHandle::new("orphan-access").unwrap(),
+            refresh_secret: Some(SecretHandle::new("orphan-refresh").unwrap()),
+            scopes: request.scopes,
+            account_id: Some(CredentialAccountId::new()),
+        })
+    }
+
+    async fn refresh_token(
+        &self,
+        _request: OAuthProviderRefreshRequest,
+    ) -> Result<OAuthProviderRefresh, AuthProductError> {
+        Err(AuthProductError::RefreshFailed)
+    }
+
+    async fn cleanup_exchange(
+        &self,
+        _context: OAuthProviderExchangeContext,
+        exchange: &OAuthProviderExchange,
+    ) -> Result<(), AuthProductError> {
+        let mut cleaned = self.cleaned.lock().expect("cleaned handles lock poisoned");
+        cleaned.push(exchange.access_secret.clone());
+        cleaned.extend(exchange.refresh_secret.clone());
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -197,7 +324,8 @@ fn authorized_request(scope: AuthProductScope, flow_id: AuthFlowId) -> RebornOAu
 #[tokio::test]
 async fn oauth_callback_handler_completes_flow_and_dispatches_typed_continuation() {
     let dispatcher = Arc::new(RecordingContinuationDispatcher::default());
-    let services = auth_services(dispatcher.clone());
+    let provider_client = Arc::new(SuccessfulCountingProviderClient::default());
+    let services = auth_services(dispatcher.clone()).with_provider_client(provider_client.clone());
     let owner = scope("alice");
     let flow_id = create_flow(&services, owner.clone()).await;
     let request = authorized_request(owner.clone(), flow_id);
@@ -212,6 +340,13 @@ async fn oauth_callback_handler_completes_flow_and_dispatches_typed_continuation
 
     assert_eq!(response.flow_id, flow_id);
     assert!(response.credential_account_id.is_some());
+    assert_eq!(
+        provider_client.last_context(),
+        Some(OAuthProviderExchangeContext {
+            scope: owner.clone(),
+            flow_id,
+        })
+    );
     assert_eq!(
         response.continuation,
         AuthContinuationRef::LifecycleActivation {
@@ -239,7 +374,7 @@ async fn oauth_callback_handler_completes_flow_and_dispatches_typed_continuation
 }
 
 #[tokio::test]
-async fn oauth_callback_handler_preserves_continuation_dispatch_error() {
+async fn oauth_callback_handler_reports_completed_continuation_dispatch_failure_as_retryable() {
     let shared_auth = Arc::new(InMemoryAuthProductServices::new());
     let services = RebornProductAuthServices::from_shared(
         shared_auth.clone(),
@@ -255,18 +390,52 @@ async fn oauth_callback_handler_preserves_continuation_dispatch_error() {
         .await
         .expect_err("dispatch failure is reported to caller");
 
-    assert_eq!(error.code, AuthErrorCode::TokenExchangeFailed);
-    assert!(!error.retryable);
+    assert_eq!(error.code, AuthErrorCode::BackendUnavailable);
+    assert!(error.retryable);
 
     let dispatcher = Arc::new(RecordingContinuationDispatcher::default());
-    let retry = RebornProductAuthServices::from_shared(shared_auth, dispatcher.clone())
+    let provider_client = Arc::new(SuccessfulCountingProviderClient::default());
+    let retry_services = RebornProductAuthServices::new(
+        shared_auth.clone(),
+        shared_auth.clone(),
+        shared_auth.clone(),
+        shared_auth.clone(),
+        provider_client.clone(),
+        shared_auth,
+        dispatcher.clone(),
+    );
+    let retry = retry_services
         .handle_oauth_callback(authorized_request(owner.clone(), flow_id))
         .await
         .expect("completed callback can be retried for continuation dispatch");
 
     assert_eq!(retry.flow_id, flow_id);
     assert_eq!(retry.status, ironclaw_auth::AuthFlowStatus::Completed);
+    assert_eq!(provider_client.calls(), 0);
     assert_eq!(dispatcher.events().len(), 1);
+}
+
+#[tokio::test]
+async fn oauth_callback_handler_cleans_provider_tokens_when_completion_rejects_exchange() {
+    let dispatcher = Arc::new(RecordingContinuationDispatcher::default());
+    let provider_client = Arc::new(CleanupRecordingProviderClient::default());
+    let services = auth_services(dispatcher).with_provider_client(provider_client.clone());
+    let owner = scope("alice");
+    let flow_id = create_flow(&services, owner.clone()).await;
+
+    let error = services
+        .handle_oauth_callback(authorized_request(owner, flow_id))
+        .await
+        .expect_err("invalid exchange account id is rejected");
+
+    assert_eq!(error.code, AuthErrorCode::CrossScopeDenied);
+    assert_eq!(
+        provider_client.cleaned(),
+        vec![
+            SecretHandle::new("orphan-access").unwrap(),
+            SecretHandle::new("orphan-refresh").unwrap(),
+        ]
+    );
 }
 
 #[tokio::test]

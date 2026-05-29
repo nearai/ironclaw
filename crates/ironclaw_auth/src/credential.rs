@@ -1,12 +1,14 @@
-use std::fmt;
+use std::{collections::HashMap, fmt, sync::Arc, sync::Mutex};
 
 use async_trait::async_trait;
 use ironclaw_host_api::{ExtensionId, SecretHandle};
 use serde::{Deserialize, Serialize};
+use tokio::sync::OwnedMutexGuard;
 
 use crate::{
-    AuthProductError, CredentialAccountId, CredentialAccountLabel, ProviderScope, Timestamp,
-    ids::AuthProviderId, scope::AuthProductScope,
+    AuthProductError, AuthProviderClient, CredentialAccountId, CredentialAccountLabel,
+    OAuthProviderRefreshRequest, ProviderScope, Timestamp, ids::AuthProviderId,
+    scope::AuthProductScope, scope_matches,
 };
 
 /// Credential account status projected to product surfaces.
@@ -401,6 +403,44 @@ impl CredentialAccountChoiceRequest {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CredentialRefreshRequest {
+    pub scope: AuthProductScope,
+    pub provider: AuthProviderId,
+    pub account_id: CredentialAccountId,
+    pub requester_extension: Option<ExtensionId>,
+}
+
+impl CredentialRefreshRequest {
+    pub fn new(
+        scope: AuthProductScope,
+        provider: AuthProviderId,
+        account_id: CredentialAccountId,
+    ) -> Self {
+        Self {
+            scope,
+            provider,
+            account_id,
+            requester_extension: None,
+        }
+    }
+
+    pub fn for_extension(mut self, extension_id: ExtensionId) -> Self {
+        self.requester_extension = Some(extension_id);
+        self
+    }
+}
+
+/// Adapter-safe refresh result. It carries the updated redacted account plus
+/// the stable recovery state after refresh. It never carries backend error
+/// strings, secret handles, or provider response bodies.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CredentialRefreshReport {
+    pub account: CredentialAccountProjection,
+    pub recovery: CredentialRecoveryProjection,
+    pub refreshed: bool,
+}
+
 /// Input used to create or update an account from an OAuth/manual setup result.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewCredentialAccount {
@@ -466,6 +506,11 @@ pub trait CredentialAccountService: Send + Sync {
         &self,
         request: CredentialAccountChoiceRequest,
     ) -> Result<CredentialAccountProjection, AuthProductError>;
+
+    async fn refresh_account(
+        &self,
+        request: CredentialRefreshRequest,
+    ) -> Result<CredentialRefreshReport, AuthProductError>;
 }
 
 #[async_trait]
@@ -474,4 +519,385 @@ pub trait CredentialSetupService: Send + Sync {
         &self,
         request: CredentialAccountMutation,
     ) -> Result<CredentialAccount, AuthProductError>;
+}
+
+/// Credential account service that refreshes through the provider client and
+/// persists account mutations through the backing account/setup services.
+pub struct ProviderBackedCredentialAccountService {
+    accounts: Arc<dyn CredentialAccountService>,
+    setup: Arc<dyn CredentialSetupService>,
+    provider: Arc<dyn AuthProviderClient>,
+    refresh_locks: Mutex<HashMap<CredentialAccountId, Arc<tokio::sync::Mutex<()>>>>,
+}
+
+impl ProviderBackedCredentialAccountService {
+    pub fn new(
+        accounts: Arc<dyn CredentialAccountService>,
+        setup: Arc<dyn CredentialSetupService>,
+        provider: Arc<dyn AuthProviderClient>,
+    ) -> Self {
+        Self {
+            accounts,
+            setup,
+            provider,
+            refresh_locks: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn refresh_lock(&self, account_id: CredentialAccountId) -> Arc<tokio::sync::Mutex<()>> {
+        let mut refresh_locks = self
+            .refresh_locks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        refresh_locks
+            .entry(account_id)
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    }
+
+    async fn acquire_refresh_lock(&self, account_id: CredentialAccountId) -> OwnedMutexGuard<()> {
+        self.refresh_lock(account_id).lock_owned().await
+    }
+
+    fn release_refresh_lock(&self, account_id: CredentialAccountId) {
+        let mut refresh_locks = self
+            .refresh_locks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if refresh_locks
+            .get(&account_id)
+            .is_some_and(|lock| Arc::strong_count(lock) == 1)
+        {
+            refresh_locks.remove(&account_id);
+        }
+    }
+
+    fn refresh_lookup_request(
+        request: &CredentialRefreshRequest,
+    ) -> CredentialAccountLookupRequest {
+        let mut lookup =
+            CredentialAccountLookupRequest::new(request.scope.clone(), request.account_id);
+        if let Some(requester_extension) = request.requester_extension.clone() {
+            lookup = lookup.for_extension(requester_extension);
+        }
+        lookup
+    }
+
+    fn validate_refresh_target(
+        account: &CredentialAccount,
+        request: &CredentialRefreshRequest,
+    ) -> Result<(), AuthProductError> {
+        if !scope_matches(&request.scope, &account.scope) || account.provider != request.provider {
+            return Err(AuthProductError::CrossScopeDenied);
+        }
+        if !account_is_authorized_for_requester(account, request.requester_extension.as_ref()) {
+            return Err(AuthProductError::CrossScopeDenied);
+        }
+        if matches!(
+            account.status,
+            CredentialAccountStatus::Missing
+                | CredentialAccountStatus::PendingSetup
+                | CredentialAccountStatus::Inactive
+                | CredentialAccountStatus::Revoked
+        ) {
+            return Err(AuthProductError::CredentialMissing);
+        }
+        Ok(())
+    }
+
+    fn account_update(
+        account: &CredentialAccount,
+        access_secret: Option<SecretHandle>,
+        refresh_secret: Option<SecretHandle>,
+        status: CredentialAccountStatus,
+        scopes: Vec<ProviderScope>,
+    ) -> CredentialAccountMutation {
+        CredentialAccountMutation::Update(CredentialAccountUpdate {
+            account_id: account.id,
+            account: NewCredentialAccount {
+                scope: account.scope.clone(),
+                provider: account.provider.clone(),
+                label: account.label.clone(),
+                status,
+                ownership: account.ownership,
+                owner_extension: account.owner_extension.clone(),
+                granted_extensions: account.granted_extensions.clone(),
+                access_secret,
+                refresh_secret,
+                scopes,
+            },
+        })
+    }
+
+    async fn report_for(
+        &self,
+        account: &CredentialAccount,
+        requester_extension: Option<&ExtensionId>,
+        refreshed: bool,
+    ) -> Result<CredentialRefreshReport, AuthProductError> {
+        let recovery_request =
+            CredentialRecoveryRequest::new(account.scope.clone(), account.provider.clone());
+        let recovery = self
+            .accounts
+            .project_credential_recovery(match requester_extension {
+                Some(requester_extension) => {
+                    recovery_request.for_extension(requester_extension.clone())
+                }
+                None => recovery_request,
+            })
+            // silent-ok: refresh reporting is allowed to degrade to the
+            // single-account projection when the broader recovery projection
+            // lookup fails; the refresh mutation has already been applied and
+            // the caller still gets the refreshed account snapshot.
+            .await
+            .unwrap_or_else(|_| single_account_recovery(account));
+        Ok(CredentialRefreshReport {
+            account: account.projection(),
+            recovery,
+            refreshed,
+        })
+    }
+}
+
+#[async_trait]
+impl CredentialAccountService for ProviderBackedCredentialAccountService {
+    async fn create_account(
+        &self,
+        request: NewCredentialAccount,
+    ) -> Result<CredentialAccount, AuthProductError> {
+        self.accounts.create_account(request).await
+    }
+
+    async fn get_account(
+        &self,
+        request: CredentialAccountLookupRequest,
+    ) -> Result<Option<CredentialAccount>, AuthProductError> {
+        self.accounts.get_account(request).await
+    }
+
+    async fn list_accounts(
+        &self,
+        request: CredentialAccountListRequest,
+    ) -> Result<CredentialAccountListPage, AuthProductError> {
+        self.accounts.list_accounts(request).await
+    }
+
+    async fn update_status(
+        &self,
+        scope: &AuthProductScope,
+        account_id: CredentialAccountId,
+        status: CredentialAccountStatus,
+    ) -> Result<CredentialAccount, AuthProductError> {
+        self.accounts.update_status(scope, account_id, status).await
+    }
+
+    async fn select_unique_configured_account(
+        &self,
+        request: CredentialAccountSelectionRequest,
+    ) -> Result<CredentialAccountProjection, AuthProductError> {
+        self.accounts
+            .select_unique_configured_account(request)
+            .await
+    }
+
+    async fn project_credential_recovery(
+        &self,
+        request: CredentialRecoveryRequest,
+    ) -> Result<CredentialRecoveryProjection, AuthProductError> {
+        self.accounts.project_credential_recovery(request).await
+    }
+
+    async fn select_configured_account(
+        &self,
+        request: CredentialAccountChoiceRequest,
+    ) -> Result<CredentialAccountProjection, AuthProductError> {
+        self.accounts.select_configured_account(request).await
+    }
+
+    async fn refresh_account(
+        &self,
+        request: CredentialRefreshRequest,
+    ) -> Result<CredentialRefreshReport, AuthProductError> {
+        let lookup_request = Self::refresh_lookup_request(&request);
+        let initial_account = self
+            .accounts
+            .get_account(lookup_request.clone())
+            .await?
+            .ok_or(AuthProductError::CredentialMissing)?;
+        Self::validate_refresh_target(&initial_account, &request)?;
+        let refresh_lock = self.acquire_refresh_lock(initial_account.id).await;
+        let result = async {
+            let account = self
+                .accounts
+                .get_account(lookup_request.clone())
+                .await?
+                .ok_or(AuthProductError::CredentialMissing)?;
+            if account != initial_account {
+                return self
+                    .report_for(&account, request.requester_extension.as_ref(), false)
+                    .await;
+            }
+
+            let Some(refresh_secret) = account.refresh_secret.clone() else {
+                let updated = self
+                    .setup
+                    .create_or_update_account(Self::account_update(
+                        &account,
+                        account.access_secret.clone(),
+                        account.refresh_secret.clone(),
+                        CredentialAccountStatus::RefreshFailed,
+                        account.scopes.clone(),
+                    ))
+                    .await?;
+                return self
+                    .report_for(&updated, request.requester_extension.as_ref(), false)
+                    .await;
+            };
+
+            let provider_request = OAuthProviderRefreshRequest {
+                provider: account.provider.clone(),
+                scope: account.scope.clone(),
+                account_id: account.id,
+                refresh_secret: refresh_secret.clone(),
+                scopes: account.scopes.clone(),
+            };
+
+            match self.provider.refresh_token(provider_request).await {
+                Ok(refresh) => {
+                    let current = self
+                        .accounts
+                        .get_account(lookup_request.clone())
+                        .await?
+                        .ok_or(AuthProductError::CredentialMissing)?;
+                    if current != account {
+                        return self
+                            .report_for(&current, request.requester_extension.as_ref(), false)
+                            .await;
+                    }
+                    if refresh.provider != current.provider {
+                        return Err(AuthProductError::CrossScopeDenied);
+                    }
+                    let refresh_secret = refresh
+                        .refresh_secret
+                        .or_else(|| current.refresh_secret.clone());
+                    let updated = self
+                        .setup
+                        .create_or_update_account(Self::account_update(
+                            &current,
+                            Some(refresh.access_secret),
+                            refresh_secret,
+                            CredentialAccountStatus::Configured,
+                            refresh.scopes,
+                        ))
+                        .await?;
+                    self.report_for(&updated, request.requester_extension.as_ref(), true)
+                        .await
+                }
+                Err(AuthProductError::RefreshFailed | AuthProductError::TokenExchangeFailed) => {
+                    let current = self
+                        .accounts
+                        .get_account(lookup_request.clone())
+                        .await?
+                        .ok_or(AuthProductError::CredentialMissing)?;
+                    if current != account {
+                        return self
+                            .report_for(&current, request.requester_extension.as_ref(), false)
+                            .await;
+                    }
+                    let updated = self
+                        .setup
+                        .create_or_update_account(Self::account_update(
+                            &current,
+                            current.access_secret.clone(),
+                            current.refresh_secret.clone(),
+                            CredentialAccountStatus::RefreshFailed,
+                            current.scopes.clone(),
+                        ))
+                        .await?;
+                    self.report_for(&updated, request.requester_extension.as_ref(), false)
+                        .await
+                }
+                Err(error) => Err(error),
+            }
+        }
+        .await;
+        drop(refresh_lock);
+        self.release_refresh_lock(initial_account.id);
+        result
+    }
+}
+
+fn account_is_authorized_for_requester(
+    account: &CredentialAccount,
+    requester_extension: Option<&ExtensionId>,
+) -> bool {
+    match account.ownership {
+        CredentialOwnership::UserReusable => true,
+        CredentialOwnership::ExtensionOwned => account
+            .owner_extension
+            .as_ref()
+            .is_some_and(|owner_extension| requester_extension == Some(owner_extension)),
+        CredentialOwnership::SharedAdminManaged => requester_extension
+            .is_some_and(|requester| account.granted_extensions.contains(requester)),
+        CredentialOwnership::System => false,
+    }
+}
+
+fn single_account_recovery(account: &CredentialAccount) -> CredentialRecoveryProjection {
+    let (kind, reason) = recovery_kind_and_reason_for_status(account.status);
+    match kind {
+        CredentialRecoveryKind::Configured => {
+            CredentialRecoveryProjection::configured(account.provider.clone(), account.projection())
+        }
+        CredentialRecoveryKind::SetupRequired => CredentialRecoveryProjection::setup_required(
+            account.provider.clone(),
+            reason,
+            vec![account.projection()],
+        ),
+        CredentialRecoveryKind::ReauthorizeRequired => {
+            CredentialRecoveryProjection::reauthorize_required(
+                account.provider.clone(),
+                reason,
+                vec![account.projection()],
+            )
+        }
+        CredentialRecoveryKind::AccountSelectionRequired => {
+            unreachable!("single account recovery cannot produce account selection required")
+        }
+    }
+}
+
+fn recovery_kind_and_reason_for_status(
+    status: CredentialAccountStatus,
+) -> (CredentialRecoveryKind, CredentialRecoveryReason) {
+    match status {
+        CredentialAccountStatus::Configured => (
+            CredentialRecoveryKind::Configured,
+            CredentialRecoveryReason::Configured,
+        ),
+        CredentialAccountStatus::PendingSetup => (
+            CredentialRecoveryKind::SetupRequired,
+            CredentialRecoveryReason::PendingSetup,
+        ),
+        CredentialAccountStatus::Missing => (
+            CredentialRecoveryKind::SetupRequired,
+            CredentialRecoveryReason::AccountMissing,
+        ),
+        CredentialAccountStatus::Inactive => (
+            CredentialRecoveryKind::SetupRequired,
+            CredentialRecoveryReason::AccountInactive,
+        ),
+        CredentialAccountStatus::Expired => (
+            CredentialRecoveryKind::ReauthorizeRequired,
+            CredentialRecoveryReason::AccountExpired,
+        ),
+        CredentialAccountStatus::RefreshFailed => (
+            CredentialRecoveryKind::ReauthorizeRequired,
+            CredentialRecoveryReason::RefreshFailed,
+        ),
+        CredentialAccountStatus::Revoked => (
+            CredentialRecoveryKind::ReauthorizeRequired,
+            CredentialRecoveryReason::AccountRevoked,
+        ),
+    }
 }

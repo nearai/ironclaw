@@ -23,14 +23,13 @@ use super::{
         resolve_optional_path, resolve_required_path, scoped_child_path, stat_optional,
         virtual_to_relative,
     },
-    state::{SharedCodingEditLocks, SharedCodingReadState, content_hash, read_scope_key},
+    state::{SharedCodingEditLocks, read_scope_key},
     text::{count_matches, decode_text, encode_text, reject_binary_probe, replace_content},
     types::{ListEntry, MatchMethod, ResolvedPath},
 };
 
 pub(super) async fn read_file(
     request: &CodingCapabilityRequest<'_>,
-    read_state: &SharedCodingReadState,
 ) -> Result<Value, CodingCapabilityError> {
     let resolved = resolve_required_path(request, "path", FilesystemOperation::ReadFile)?;
     let offset = optional_usize(request.input, "offset")?.unwrap_or(0);
@@ -75,15 +74,6 @@ pub(super) async fn read_file(
         .map(|(index, line)| format!("{:>6}│ {}", start_line + index + 1, line))
         .collect();
 
-    let partial = has_explicit_range || truncated_by_default;
-    read_state.write().await.record_read(
-        read_scope_key(request),
-        resolved.virtual_path.as_str().to_string(),
-        stat.modified,
-        content_hash(&bytes),
-        partial,
-    );
-
     Ok(json!({
         "content": selected_lines.join("\n"),
         "total_lines": total_lines,
@@ -95,7 +85,6 @@ pub(super) async fn read_file(
 
 pub(super) async fn write_file(
     request: &CodingCapabilityRequest<'_>,
-    read_state: &SharedCodingReadState,
     edit_locks: &SharedCodingEditLocks,
 ) -> Result<Value, CodingCapabilityError> {
     let path_str = required_str(request.input, "path")?;
@@ -124,14 +113,6 @@ pub(super) async fn write_file(
         .write_file(&resolved.virtual_path, content.as_bytes())
         .await
         .map_err(filesystem_error)?;
-    if let Some(stat) = stat_optional(request, &resolved.virtual_path).await? {
-        read_state.write().await.update_after_write(
-            &scope,
-            resolved.virtual_path.as_str(),
-            stat.modified,
-            content_hash(content.as_bytes()),
-        );
-    }
     Ok(json!({
         "path": resolved.scoped_path.as_str(),
         "bytes_written": content.len(),
@@ -252,7 +233,6 @@ fn format_size(bytes: u64) -> String {
 
 pub(super) async fn apply_patch(
     request: &CodingCapabilityRequest<'_>,
-    read_state: &SharedCodingReadState,
     edit_locks: &SharedCodingEditLocks,
 ) -> Result<Value, CodingCapabilityError> {
     let path_str = required_str(request.input, "path")?;
@@ -299,12 +279,6 @@ pub(super) async fn apply_patch(
         .read_file(&resolved.virtual_path)
         .await
         .map_err(filesystem_error)?;
-    let current_hash = content_hash(&bytes);
-    read_state.read().await.check_before_edit(
-        &scope,
-        resolved.virtual_path.as_str(),
-        &current_hash,
-    )?;
     reject_binary_probe(&bytes)?;
     let (content, encoding, line_ending) = decode_text(&bytes)?;
     let (match_count, match_method) = count_matches(&content, old_string);
@@ -323,14 +297,6 @@ pub(super) async fn apply_patch(
         .write_file(&resolved.virtual_path, &output)
         .await
         .map_err(filesystem_error)?;
-    if let Some(stat) = stat_optional(request, &resolved.virtual_path).await? {
-        read_state.write().await.update_after_write(
-            &scope,
-            resolved.virtual_path.as_str(),
-            stat.modified,
-            content_hash(&output),
-        );
-    }
     let mut result = json!({
         "path": resolved.scoped_path.as_str(),
         "replacements": replacements,

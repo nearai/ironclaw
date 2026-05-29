@@ -32,8 +32,9 @@ impl RecordingEgress {
     }
 }
 
+#[async_trait::async_trait]
 impl RuntimeHttpEgress for RecordingEgress {
-    fn execute(
+    async fn execute(
         &self,
         request: RuntimeHttpEgressRequest,
     ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
@@ -115,8 +116,8 @@ async fn auth_with_google_account(scope: &ResourceScope) -> Arc<InMemoryAuthProd
     auth
 }
 
-#[test]
-fn bundled_gsuite_input_schemas_reject_reviewed_shape_regressions() {
+#[tokio::test]
+async fn bundled_gsuite_input_schemas_reject_reviewed_shape_regressions() {
     let create_event = asset_schema("google-calendar/create_event.input.v1.json");
     let create_event_properties = create_event["properties"].as_object().unwrap();
     assert!(create_event_properties.contains_key("calendar_id"));
@@ -142,8 +143,8 @@ fn bundled_gsuite_input_schemas_reject_reviewed_shape_regressions() {
     );
 }
 
-#[test]
-fn bundled_gsuite_packages_are_host_bundled_but_not_registered_by_default() {
+#[tokio::test]
+async fn bundled_gsuite_packages_are_host_bundled_but_not_registered_by_default() {
     let packages = bundled_gsuite_extension_packages().unwrap();
 
     assert_eq!(packages.len(), 2);
@@ -167,8 +168,8 @@ fn bundled_gsuite_packages_are_host_bundled_but_not_registered_by_default() {
     assert_eq!(capability_count, 15);
 }
 
-#[test]
-fn bundled_gsuite_asset_manifests_match_package_specs() {
+#[tokio::test]
+async fn bundled_gsuite_asset_manifests_match_package_specs() {
     for spec in gsuite_package_specs() {
         let manifest = asset_manifest(spec.extension_id);
 

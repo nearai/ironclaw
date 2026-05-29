@@ -165,4 +165,3 @@ function toolStatusFromActivityStatus(status) {
       return "running";
   }
 }
-

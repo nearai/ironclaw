@@ -127,8 +127,78 @@ async fn host_runtime_services_routes_github_wasm_read_through_runtime_http_egre
     );
 }
 
-#[test]
-fn bundled_github_wasm_executes_search_get_and_comment_operations() {
+#[tokio::test]
+async fn host_runtime_services_missing_github_runtime_secret_blocks_on_auth() {
+    let capability_id = CapabilityId::new("github.search_issues").unwrap();
+    let scope = sample_scope(InvocationId::new());
+    let expected_url =
+        "https://api.github.com/search/issues?q=repo%3Anearai%2Fironclaw%20is%3Aissue&per_page=1";
+    let network = RecordingNetworkHttpEgress::with_body(
+        br#"{"total_count":0,"incomplete_results":false,"items":[]}"#.to_vec(),
+    );
+    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_handle = SecretHandle::new("github_token").unwrap();
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_github_package()),
+        Arc::new(filesystem_with_github_package()),
+        Arc::new(governor_with_default_limit(sample_account())),
+        Arc::new(ObligatingAuthorizer::new(vec![
+            Obligation::ApplyNetworkPolicy {
+                policy: github_policy(),
+            },
+            Obligation::InjectSecretOnce {
+                handle: secret_handle.clone(),
+            },
+        ])),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_secret_store(Arc::clone(&secret_store))
+    .with_trust_policy(Arc::new(github_first_party_trust_policy()))
+    .with_wasm_runtime_credential_provider(Arc::new(WasmStagedRuntimeCredentials::new(vec![
+        WasmStagedRuntimeCredential::for_exact_url(
+            secret_handle.clone(),
+            RuntimeCredentialTarget::Header {
+                name: "authorization".to_string(),
+                prefix: Some("Bearer ".to_string()),
+            },
+            true,
+            expected_url.to_string(),
+        ),
+    ])))
+    .try_with_host_http_egress(network.clone())
+    .unwrap()
+    .try_with_wasm_runtime(WitToolRuntimeConfig::default(), WitToolHost::deny_all())
+    .unwrap();
+
+    let outcome = services
+        .host_runtime_for_local_testing()
+        .invoke_capability(wasm_runtime_request_for_scope(
+            capability_id.clone(),
+            scope,
+            json!({"query": "repo:nearai/ironclaw is:issue", "limit": 1}),
+        ))
+        .await
+        .unwrap();
+
+    match outcome {
+        RuntimeCapabilityOutcome::AuthRequired(gate) => {
+            assert_eq!(gate.capability_id, capability_id);
+            assert!(
+                gate.required_secrets.is_empty(),
+                "secret handles are not product-visible until auth recovery projections carry them"
+            );
+        }
+        other => panic!("expected auth-required outcome, got {other:?}"),
+    }
+    assert!(
+        network.requests().is_empty(),
+        "missing credential must block before dispatch"
+    );
+}
+
+#[tokio::test]
+async fn bundled_github_wasm_executes_search_get_and_comment_operations() {
     let search_http = Arc::new(RecordingWasmHostHttp::ok(WasmHttpResponse {
         status: 200,
         headers_json: "{}".to_string(),
@@ -203,8 +273,8 @@ fn bundled_github_wasm_executes_search_get_and_comment_operations() {
     );
 }
 
-#[test]
-fn bundled_github_wasm_sanitizes_host_http_and_api_failures() {
+#[tokio::test]
+async fn bundled_github_wasm_sanitizes_host_http_and_api_failures() {
     let cases = [
         (
             RecordingWasmHostHttp::err(WasmHostError::Unavailable(
@@ -266,8 +336,8 @@ fn bundled_github_wasm_sanitizes_host_http_and_api_failures() {
     }
 }
 
-#[test]
-fn bundled_github_wasm_leaves_success_json_for_host_output_decode() {
+#[tokio::test]
+async fn bundled_github_wasm_leaves_success_json_for_host_output_decode() {
     let execution = execute_bundled_github_wasm(
         "github.search_issues",
         json!({"query": "repo:nearai/ironclaw is:issue", "limit": 1}),
@@ -301,8 +371,9 @@ impl RecordingNetworkHttpEgress {
     }
 }
 
+#[async_trait::async_trait]
 impl NetworkHttpEgress for RecordingNetworkHttpEgress {
-    fn execute(
+    async fn execute(
         &self,
         request: NetworkHttpRequest,
     ) -> Result<NetworkHttpResponse, NetworkHttpError> {

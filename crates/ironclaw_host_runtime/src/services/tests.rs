@@ -1,4 +1,7 @@
-use std::sync::{Arc, Mutex};
+use std::{
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use ironclaw_authorization::GrantAuthorizer;
@@ -25,13 +28,15 @@ use super::{
     CapabilitySurfaceVersion, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
     FirstPartyCapabilityRegistry, FirstPartyRuntimeAdapter, HostRuntimeServices,
     LocalHostProcessPort, LocalInvocationServicesResolver, NetworkMode, ProcessBackendKind,
-    ProcessResultStore, ProcessStore, RootFilesystem, RuntimeAdapter, RuntimeAdapterRequest,
+    ProcessResultStore, ProcessStore, ProductionWiringComponent, ProductionWiringConfig,
+    ProductionWiringIssueKind, RootFilesystem, RuntimeAdapter, RuntimeAdapterRequest,
     RuntimeAdapterResult, RuntimeProfile, SecretMode, ServiceResolvedRuntimeAdapter,
 };
 use crate::CommandExecutionRequest;
+use crate::obligations::{NetworkObligationPolicyStore, RuntimeSecretInjectionStore};
 
-#[test]
-fn shared_extension_registry_returns_same_instance() {
+#[tokio::test]
+async fn shared_extension_registry_returns_same_instance() {
     let services = test_services();
     let left = services.shared_extension_registry();
     let right = services.shared_extension_registry();
@@ -39,8 +44,32 @@ fn shared_extension_registry_returns_same_instance() {
     assert_eq!(Arc::as_ptr(&left), Arc::as_ptr(&right)); // safety: test assertion only; verifies both accessors expose the same shared registry.
 }
 
-#[test]
-fn host_http_egress_borrows_staged_policy_for_repeated_invocation_requests() {
+#[tokio::test]
+async fn product_auth_provider_runtime_ports_returns_none_without_egress() {
+    let services = test_services();
+
+    assert!(services.product_auth_provider_runtime_ports().is_none());
+}
+
+#[tokio::test]
+async fn product_auth_provider_runtime_ports_returns_configured_egress_and_obligation_handler() {
+    let services = test_services()
+        .with_secret_store(Arc::new(InMemorySecretStore::new()))
+        .try_with_host_http_egress(RecordingNetwork::ok())
+        .expect("host HTTP egress should wire with graph secret store");
+
+    let ports = services
+        .product_auth_provider_runtime_ports()
+        .expect("runtime ports should be configured");
+    assert!(Arc::ptr_eq(
+        &ports.runtime_http_egress(),
+        &configured_egress(&services)
+    ));
+    let _handler = ports.obligation_handler();
+}
+
+#[tokio::test]
+async fn host_http_egress_borrows_staged_policy_for_repeated_invocation_requests() {
     let network = RecordingNetwork::ok();
     let recorded_requests = Arc::clone(&network.requests);
     let services = test_services()
@@ -60,9 +89,11 @@ fn host_http_egress_borrows_staged_policy_for_repeated_invocation_requests() {
             scope.clone(),
             capability_id.clone(),
         ))
+        .await
         .expect("first request should observe staged policy");
     egress
         .execute(request_without_credentials(scope, capability_id))
+        .await
         .expect("second request in same invocation should observe borrowed staged policy");
 
     let requests = recorded_requests.lock().unwrap();
@@ -71,8 +102,8 @@ fn host_http_egress_borrows_staged_policy_for_repeated_invocation_requests() {
     assert_eq!(requests[1].policy, staged_policy);
 }
 
-#[test]
-fn host_http_egress_helper_injects_staged_credentials_from_handoff_store() {
+#[tokio::test]
+async fn host_http_egress_helper_injects_staged_credentials_from_handoff_store() {
     let scope = sample_scope();
     let capability_id = sample_capability_id();
     let handle = SecretHandle::new("api-token").unwrap();
@@ -99,6 +130,7 @@ fn host_http_egress_helper_injects_staged_credentials_from_handoff_store() {
 
     egress
         .execute(request_with_staged_credential(scope, capability_id, handle))
+        .await
         .expect("StagedObligation should inject from handoff store");
 
     let requests = recorded_requests.lock().unwrap();
@@ -112,6 +144,77 @@ fn host_http_egress_helper_injects_staged_credentials_from_handoff_store() {
             "authorization".to_string(),
             "Bearer staged-secret".to_string()
         ))
+    );
+}
+
+#[tokio::test]
+async fn host_http_egress_treats_expired_staged_secret_as_missing() {
+    let scope = sample_scope();
+    let capability_id = sample_capability_id();
+    let handle = SecretHandle::new("api-token").unwrap();
+
+    let network = RecordingNetwork::ok();
+    let recorded_requests = Arc::clone(&network.requests);
+    let mut services = test_services().with_secret_store(Arc::new(InMemorySecretStore::new()));
+    services.secret_injection_store = Arc::new(RuntimeSecretInjectionStore::with_ttl(
+        Duration::from_millis(5),
+    ));
+    services = services
+        .try_with_host_http_egress(network)
+        .expect("host HTTP egress should wire with graph secret store");
+    services
+        .network_policy_store
+        .insert(&scope, &capability_id, staged_policy());
+    services
+        .secret_injection_store
+        .insert(
+            &scope,
+            &capability_id,
+            &handle,
+            SecretMaterial::from("staged-secret"),
+        )
+        .expect("staged credential should be seeded");
+    std::thread::sleep(Duration::from_millis(20));
+    let egress = configured_egress(&services);
+
+    let error = egress
+        .execute(request_with_staged_credential(scope, capability_id, handle))
+        .await
+        .expect_err("expired staged secret should fail as missing");
+
+    assert!(matches!(
+        error,
+        ironclaw_host_api::RuntimeHttpEgressError::Credential { ref reason }
+            if reason == "required credential is unavailable"
+    ));
+    assert!(recorded_requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn host_http_egress_verification_rejects_mismatched_handoff_stores() {
+    let mismatched_network_policies = Arc::new(NetworkObligationPolicyStore::new());
+    let mismatched_secret_injections = Arc::new(RuntimeSecretInjectionStore::new());
+    let egress = Arc::new(crate::HostHttpEgressService::production(
+        RecordingNetwork::ok(),
+        InMemorySecretStore::new(),
+        mismatched_network_policies,
+        mismatched_secret_injections,
+        Arc::new(crate::http_body::UnsupportedRuntimeHttpBodyStore),
+    ));
+    let services = test_services()
+        .with_secret_store(Arc::new(InMemorySecretStore::new()))
+        .with_host_http_egress_service(egress);
+
+    let report = services
+        .validate_production_wiring(&ProductionWiringConfig::new([]).require_runtime_http_egress())
+        .expect_err("mismatched handoff stores must not satisfy production egress verification");
+
+    assert!(
+        report.contains(
+            ProductionWiringComponent::RuntimeHttpEgress,
+            ProductionWiringIssueKind::UnverifiedProductionImplementation
+        ),
+        "mismatched host HTTP egress stores should be reported as unverified: {report:?}"
     );
 }
 
@@ -818,8 +921,9 @@ impl RecordingNetwork {
     }
 }
 
+#[async_trait]
 impl NetworkHttpEgress for RecordingNetwork {
-    fn execute(
+    async fn execute(
         &self,
         request: NetworkHttpRequest,
     ) -> Result<NetworkHttpResponse, NetworkHttpError> {

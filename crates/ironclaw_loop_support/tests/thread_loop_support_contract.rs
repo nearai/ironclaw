@@ -12,12 +12,12 @@ use ironclaw_loop_support::{
     EmptyLoopCapabilityPort, HostIdentityContextBuildError, HostIdentityContextCandidate,
     HostIdentityContextSource, HostIdentityMessageContent, HostManagedModelError,
     HostManagedModelErrorKind, HostManagedModelGateway, HostManagedModelMessageRole,
-    HostManagedModelRequest, HostManagedModelResponse, HostSkillContextBuildError,
-    HostSkillContextCandidate, HostSkillContextSource, IdentityApplicability, IdentityBudget,
-    IdentityFileName, SkillBundleContextSource, SkillBundleDescriptor, SkillBundleId,
-    SkillBundleSource, SkillBundleSourceError, SkillFilePath, SkillSourceKind,
-    ThreadBackedLoopContextPort, ThreadBackedLoopModelPort, ThreadBackedLoopTranscriptPort,
-    build_skill_run_snapshot, identity_message_ref,
+    HostManagedModelRequest, HostManagedModelResponse, HostManagedToolResultContent,
+    HostSkillContextBuildError, HostSkillContextCandidate, HostSkillContextSource,
+    IdentityApplicability, IdentityBudget, IdentityFileName, SkillBundleContextSource,
+    SkillBundleDescriptor, SkillBundleId, SkillBundleSource, SkillBundleSourceError, SkillFilePath,
+    SkillSourceKind, ThreadBackedLoopContextPort, ThreadBackedLoopModelPort,
+    ThreadBackedLoopTranscriptPort, build_skill_run_snapshot, identity_message_ref,
 };
 use ironclaw_skills::SkillTrust;
 use ironclaw_threads::{
@@ -27,10 +27,10 @@ use ironclaw_threads::{
     CreateSummaryArtifactRequest, EnsureThreadRequest, InMemorySessionThreadService,
     LoadContextMessagesRequest, MessageContent, MessageKind, MessageStatus,
     ProviderToolCallReferenceEnvelope, RedactMessageRequest, ReplayAcceptedInboundMessageRequest,
-    SessionThreadError, SessionThreadRecord, SessionThreadService, SummaryArtifact, ThreadHistory,
-    ThreadHistoryRequest, ThreadMessageId, ThreadMessageRecord, ThreadScope,
-    ToolResultReferenceEnvelope, ToolResultSafeSummary, UpdateAssistantDraftRequest,
-    UpdateToolResultReferenceRequest,
+    SessionThreadError, SessionThreadRecord, SessionThreadService, SummaryArtifact,
+    SummaryModelContextPolicy, ThreadHistory, ThreadHistoryRequest, ThreadMessageId,
+    ThreadMessageRecord, ThreadScope, ToolResultReferenceEnvelope, ToolResultSafeSummary,
+    UpdateAssistantDraftRequest, UpdateToolResultReferenceRequest,
 };
 use ironclaw_turns::{
     LoopMessageRef, LoopResultRef, RunProfileResolutionRequest, RunProfileResolver, TurnActor,
@@ -41,15 +41,15 @@ use ironclaw_turns::{
         CapabilityDeniedReasonKind, CapabilityInputRef, CapabilityInvocation, CapabilityOutcome,
         CapabilitySurfaceVersion, FinalizeAssistantMessage, HostManagedLoopPromptPort,
         InMemoryInstructionMaterializationStore, InMemoryLoopHostMilestoneSink,
-        InMemoryRunProfileResolver, LoopCapabilityPort, LoopContextBundle, LoopContextMessage,
-        LoopContextPort, LoopContextRequest, LoopContextSnippet, LoopDriverNoteKind,
-        LoopHostMilestoneKind, LoopHostMilestoneSink, LoopInputCursor, LoopInputCursorToken,
-        LoopModelCapabilityView, LoopModelMessage, LoopModelPort, LoopModelRequest,
-        LoopModelRouteSnapshot, LoopPromptBundle, LoopPromptBundleAuthority, LoopPromptBundleRef,
-        LoopPromptPort, LoopRunContext, LoopTranscriptPort, ParentLoopOutput,
-        PersonalContextPolicy, PromptMode, PromptSkillContextMetadata, ProviderToolCallReference,
-        ProviderToolDefinition, SkillVisibility, UpdateAssistantDraft, VisibleCapabilityRequest,
-        VisibleCapabilitySurface,
+        InMemoryRunProfileResolver, LoopCapabilityPort, LoopContextBundle,
+        LoopContextCompactionKind, LoopContextMessage, LoopContextPort, LoopContextRequest,
+        LoopContextSnippet, LoopDriverNoteKind, LoopHostMilestoneKind, LoopHostMilestoneSink,
+        LoopInputCursor, LoopInputCursorToken, LoopModelCapabilityView, LoopModelMessage,
+        LoopModelPort, LoopModelRequest, LoopModelRouteSnapshot, LoopPromptBundle,
+        LoopPromptBundleAuthority, LoopPromptBundleRef, LoopPromptPort, LoopRunContext,
+        LoopTranscriptPort, ParentLoopOutput, PersonalContextPolicy, PromptMode,
+        PromptSkillContextMetadata, ProviderToolCallReference, ProviderToolDefinition,
+        SkillVisibility, UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
 };
 use tracing_test::traced_test;
@@ -85,6 +85,13 @@ async fn thread_context_port_loads_policy_filtered_transcript_messages() {
             .as_str(),
         format!("msg:{}", fixture.user_message_id).as_str()
     );
+    let compaction = bundle.messages[0]
+        .compaction
+        .as_ref()
+        .expect("model-visible transcript message should carry compaction metadata");
+    assert_eq!(compaction.sequence, 1);
+    assert_eq!(compaction.kind, LoopContextCompactionKind::User);
+    assert!(compaction.estimated_tokens > 0);
     assert!(bundle.memory_snippets.is_empty());
 }
 
@@ -98,9 +105,9 @@ async fn thread_context_port_preserves_summary_replacements_as_system_messages()
             thread_id: fixture.thread_id.clone(),
             start_sequence: 1,
             end_sequence: 1,
-            summary_kind: "model_context".to_string(),
+            summary_kind: ironclaw_threads::SummaryKind::Compaction,
             content: MessageContent::text("summarized hello"),
-            model_context_policy: Some("replace_range_when_selected".to_string()),
+            model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
         })
         .await
         .unwrap();
@@ -170,18 +177,14 @@ async fn thread_context_port_builds_skill_instruction_snippets_from_real_skill_m
         .unwrap();
 
     assert_eq!(bundle.instruction_snippets.len(), 1);
-    assert_eq!(bundle.instruction_snippets[0].snippet_ref, "skill:alpha");
-    assert!(
-        bundle.instruction_snippets[0]
-            .safe_summary
-            .contains("safe alpha description")
-    );
-    assert!(
-        bundle.instruction_snippets[0]
-            .safe_summary
-            .contains("Use alpha prompt content.")
-    );
-    assert!(!bundle.instruction_snippets[0].safe_summary.contains("/tmp"));
+    let snippet = &bundle.instruction_snippets[0];
+    assert_eq!(snippet.snippet_ref, "skill:alpha");
+    assert!(snippet.safe_summary.contains("safe alpha description"));
+    assert!(!snippet.safe_summary.contains("Use alpha prompt content."));
+    assert!(snippet.model_content.contains("safe alpha description"));
+    assert!(snippet.model_content.contains("Use alpha prompt content."));
+    assert!(!snippet.safe_summary.contains("/tmp"));
+    assert!(!snippet.model_content.contains("/tmp"));
 }
 
 #[tokio::test]
@@ -255,8 +258,18 @@ async fn thread_context_port_builds_skill_instruction_snippets_from_skill_bundle
             .contains("safe alpha description")
     );
     assert!(
-        bundle.instruction_snippets[0]
+        !bundle.instruction_snippets[0]
             .safe_summary
+            .contains("Use trusted alpha prompt content.")
+    );
+    assert!(
+        bundle.instruction_snippets[0]
+            .model_content
+            .contains("safe alpha description")
+    );
+    assert!(
+        bundle.instruction_snippets[0]
+            .model_content
             .contains("Use trusted alpha prompt content.")
     );
     assert!(
@@ -267,6 +280,11 @@ async fn thread_context_port_builds_skill_instruction_snippets_from_skill_bundle
     assert!(
         !bundle.instruction_snippets[1]
             .safe_summary
+            .contains("RAW_INSTALLED_PROMPT_SENTINEL")
+    );
+    assert!(
+        !bundle.instruction_snippets[1]
+            .model_content
             .contains("RAW_INSTALLED_PROMPT_SENTINEL")
     );
     assert_eq!(
@@ -936,6 +954,42 @@ async fn model_port_limits_provider_tool_definitions_to_model_visible_capability
 }
 
 #[tokio::test]
+async fn model_port_maps_invalid_model_output_to_recoverable_model_error() {
+    let fixture = ThreadFixture::new().await;
+    let messages = user_model_messages(&fixture);
+    issue_prompt_grant(&fixture.run_context, &messages);
+
+    let gateway = Arc::new(RecordingGateway::model_error(
+        HostManagedModelErrorKind::InvalidOutput,
+        "model returned a tool call outside the advertised capability surface",
+    ));
+    let model_port = ThreadBackedLoopModelPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        gateway.clone(),
+        16,
+    );
+
+    let error = model_port
+        .stream_model(LoopModelRequest {
+            messages,
+            surface_version: None,
+            model_preference: None,
+            capability_view: None,
+        })
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::Unavailable);
+    assert_eq!(
+        error.safe_summary,
+        "model returned a tool call outside the advertised capability surface"
+    );
+    assert_eq!(gateway.calls.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
 async fn model_port_preserves_capability_info_for_filtered_capability_view() {
     let fixture = ThreadFixture::new().await;
     let messages = user_model_messages(&fixture);
@@ -1032,9 +1086,14 @@ async fn thread_context_port_filters_skill_visibility_and_installed_prompt_conte
             .safe_summary
             .contains("installed prompt secret")
     );
-    let serialized = serde_json::to_string(&bundle).unwrap();
-    assert!(!serialized.contains("hidden"));
-    assert!(!serialized.contains("denied"));
+    for snippet in &bundle.instruction_snippets {
+        assert!(!snippet.snippet_ref.contains("hidden"));
+        assert!(!snippet.safe_summary.contains("hidden"));
+        assert!(!snippet.model_content.contains("hidden"));
+        assert!(!snippet.snippet_ref.contains("denied"));
+        assert!(!snippet.safe_summary.contains("denied"));
+        assert!(!snippet.model_content.contains("denied"));
+    }
 }
 
 #[test]
@@ -1098,12 +1157,12 @@ async fn thread_context_port_ignores_malformed_hidden_skill_content() {
         .unwrap();
 
     assert_eq!(bundle.instruction_snippets.len(), 1);
-    assert_eq!(bundle.instruction_snippets[0].snippet_ref, "skill:alpha");
-    assert!(
-        bundle.instruction_snippets[0]
-            .safe_summary
-            .contains("visible prompt")
-    );
+    let snippet = &bundle.instruction_snippets[0];
+    assert_eq!(snippet.snippet_ref, "skill:alpha");
+    assert!(snippet.safe_summary.contains("visible description"));
+    assert!(!snippet.safe_summary.contains("visible prompt"));
+    assert!(snippet.model_content.contains("visible description"));
+    assert!(snippet.model_content.contains("visible prompt"));
 }
 
 #[tokio::test]
@@ -1212,7 +1271,7 @@ async fn prompt_and_model_ports_send_selected_skill_context_to_gateway() {
     assert_eq!(prompt_bundle.messages[0].role, "system");
     assert_eq!(
         prompt_bundle.messages[0].content_ref,
-        LoopMessageRef::new("msg:snippet.skill.alpha.0.5241b0c7358325ab").unwrap()
+        LoopMessageRef::new("msg:snippet.skill.alpha.0.48cf250f887a9389").unwrap()
     );
 
     let gateway = Arc::new(RecordingGateway::reply("model says hi"));
@@ -1360,6 +1419,7 @@ async fn prompt_and_model_ports_resolve_instruction_memory_and_identity_refs() {
                 message_ref: Some(LoopMessageRef::new("msg:identity-policy").unwrap()),
                 role: "system".to_string(),
                 safe_summary: "identity policy summary".to_string(),
+                compaction: None,
             }],
             messages: vec![LoopContextMessage {
                 message_ref: Some(
@@ -1367,14 +1427,17 @@ async fn prompt_and_model_ports_resolve_instruction_memory_and_identity_refs() {
                 ),
                 role: "user".to_string(),
                 safe_summary: "user message available".to_string(),
+                compaction: None,
             }],
             instruction_snippets: vec![LoopContextSnippet {
                 snippet_ref: "instruction:project".to_string(),
+                model_content: "project instruction summary".to_string(),
                 safe_summary: "project instruction summary".to_string(),
                 metadata: None,
             }],
             memory_snippets: vec![LoopContextSnippet {
                 snippet_ref: "memory:project-summary".to_string(),
+                model_content: "project memory summary".to_string(),
                 safe_summary: "project memory summary".to_string(),
                 metadata: None,
             }],
@@ -2537,13 +2600,19 @@ async fn prompt_port_builds_bundle_with_tool_result_reference_context() {
 async fn model_port_round_trips_tool_result_reference_context_as_typed_model_input() {
     let fixture = ThreadFixture::new().await;
     let tool_result_ref = LoopMessageRef::new("msg:11111111-1111-1111-1111-111111111111").unwrap();
+    let envelope = ToolResultReferenceEnvelope {
+        version: 1,
+        result_ref: "result:round-trip".to_string(),
+        safe_summary: ToolResultSafeSummary::new("tool result content").unwrap(),
+    };
+    let envelope_content = serde_json::to_string(&envelope).unwrap();
     let thread_service = Arc::new(StaticContextThreadService::new(ContextMessage {
         message_id: Some(ThreadMessageId::parse("11111111-1111-1111-1111-111111111111").unwrap()),
         summary_id: None,
         sequence: 1,
         kind: MessageKind::ToolResultReference,
         tool_result_provider_call: None,
-        content: "tool result content".to_string(),
+        content: envelope_content.clone(),
     }));
     let context_port = ThreadBackedLoopContextPort::new(
         thread_service.clone(),
@@ -2597,7 +2666,51 @@ async fn model_port_round_trips_tool_result_reference_context_as_typed_model_inp
         calls[0].messages[0].role,
         HostManagedModelMessageRole::ToolResult
     );
-    assert_eq!(calls[0].messages[0].content, "tool result content");
+    assert_eq!(calls[0].messages[0].content, envelope_content);
+    assert_eq!(
+        calls[0].messages[0].tool_result_content,
+        Some(HostManagedToolResultContent::Reference { envelope })
+    );
+}
+
+#[tokio::test]
+async fn model_port_rejects_malformed_tool_result_reference_content() {
+    let fixture = ThreadFixture::new().await;
+    let tool_result_ref = LoopMessageRef::new("msg:22222222-2222-2222-2222-222222222222").unwrap();
+    let thread_service = Arc::new(StaticContextThreadService::new(ContextMessage {
+        message_id: Some(ThreadMessageId::parse("22222222-2222-2222-2222-222222222222").unwrap()),
+        summary_id: None,
+        sequence: 1,
+        kind: MessageKind::ToolResultReference,
+        tool_result_provider_call: None,
+        content: "not a tool-result reference envelope".to_string(),
+    }));
+    let gateway = Arc::new(RecordingGateway::reply("model says hi"));
+    let model_port = ThreadBackedLoopModelPort::new(
+        thread_service,
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        gateway.clone(),
+        16,
+    );
+    let messages = vec![LoopModelMessage {
+        role: "tool_result_reference".to_string(),
+        content_ref: tool_result_ref,
+    }];
+    issue_prompt_grant(&fixture.run_context, &messages);
+
+    let error = model_port
+        .stream_model(LoopModelRequest {
+            messages,
+            surface_version: None,
+            model_preference: None,
+            capability_view: None,
+        })
+        .await
+        .expect_err("malformed tool result reference content should fail");
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+    assert!(gateway.calls.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -3211,6 +3324,7 @@ fn issue_prompt_grant(context: &LoopRunContext, messages: &[LoopModelMessage]) {
         bundle_ref: LoopPromptBundleRef::for_run(context, "test-bundle").unwrap(),
         messages: messages.to_vec(),
         surface_version: None,
+        compaction_message_index: Vec::new(),
         instruction_fingerprint: None,
         identity_message_count: 0,
         instruction_snippet_count: 0,
@@ -3759,6 +3873,14 @@ impl RecordingGateway {
                 HostManagedModelErrorKind::PolicyDenied,
                 safe_summary,
             )),
+        }
+    }
+
+    fn model_error(kind: HostManagedModelErrorKind, safe_summary: &str) -> Self {
+        Self {
+            calls: Mutex::new(Vec::new()),
+            tool_definition_calls: Mutex::new(Vec::new()),
+            response: Err(HostManagedModelError::safe(kind, safe_summary)),
         }
     }
 

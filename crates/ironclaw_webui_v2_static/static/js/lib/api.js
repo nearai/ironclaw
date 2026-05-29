@@ -1,10 +1,12 @@
 // WebChat v2 ingress client.
 //
 // Every function in this module targets a `/api/webchat/v2/*` route
-// defined by issue #3815. The module deliberately contains no
-// `/api/chat`, `/api/engine`, `/auth/`, or `/api/profile` paths — the
-// hard non-goal of issue #3886 is enforced here as the single
-// network seam for the SPA. Add no v1 helpers.
+// defined by issue #3815, a v2-owned `/auth/*` route mounted by
+// `ironclaw_reborn_webui_ingress::webui_v2_auth_router`, or a
+// Reborn product-auth route mounted by host composition. The module
+// deliberately contains no `/api/chat`, `/api/engine`, or
+// `/api/profile` paths — the hard non-goal of issue #3886 still
+// stands for v1 gateway routes that lack a v2 counterpart.
 //
 // Request/response shapes mirror the Rust DTOs in
 // `ironclaw_product_workflow::webui_inbound` and
@@ -212,6 +214,7 @@ export function resolveGate({
   always,
   credentialRef,
   clientActionId: clientId,
+  signal,
 } = {}) {
   const body = {
     client_action_id: clientId || clientActionId(),
@@ -223,9 +226,35 @@ export function resolveGate({
     `${V2_BASE}/threads/${encodeURIComponent(threadId)}/runs/${encodeURIComponent(runId)}/gates/${encodeURIComponent(gateRef)}/resolve`,
     {
       method: "POST",
+      signal,
       body: JSON.stringify(body),
     },
   );
+}
+
+// --- Product auth ---
+
+export function submitManualToken({
+  provider,
+  accountLabel,
+  token,
+  threadId,
+  runId,
+  gateRef,
+  signal,
+} = {}) {
+  return apiFetch("/api/reborn/product-auth/manual-token/submit", {
+    method: "POST",
+    signal,
+    body: JSON.stringify({
+      provider,
+      account_label: accountLabel,
+      token,
+      thread_id: threadId,
+      run_id: runId,
+      gate_ref: gateRef,
+    }),
+  });
 }
 
 // --- Extension setup ---
@@ -245,12 +274,12 @@ export function setupExtension(extensionName, { action, payload } = {}) {
 
 // --- TODO stubs for v1-shaped helpers brought-back code still imports ---
 //
-// Issue #3886 Hard Non-Goal: the browser must not call `/auth/*`,
-// `/api/gateway/*`, or any other v1 endpoint without a v2 counterpart.
-// The functions below preserve the fork's import surface so the
-// admin/settings/extensions/login pages render, but they return
-// empty/null data without sending any HTTP request. When a v2
-// equivalent lands, replace the stub body with the real wire call.
+// Issue #3886 Hard Non-Goal: the browser must not call legacy
+// gateway routes without a v2 counterpart. The functions below
+// preserve the fork's import surface so the admin/settings/extensions
+// pages render, but they return empty/null data without sending any
+// HTTP request. When a v2 equivalent lands, replace the stub body
+// with the real wire call.
 
 export function gatewayStatus() {
   // TODO: requires v2 gateway-status endpoint. Returning a zeroed
@@ -266,9 +295,84 @@ export function gatewayStatus() {
   });
 }
 
-export function fetchAuthProviders() {
-  // TODO: requires v2 auth-providers endpoint. v2 only supports
-  // OIDC bearer tokens supplied externally; no OAuth providers
-  // are advertised through the v2 ingress.
-  return Promise.resolve({ providers: [], todo: true });
+// --- v2 auth surface ---
+//
+// The host mounts `webui_v2_auth_router` from
+// `ironclaw_reborn_webui_ingress` at the same origin as the SPA. The
+// providers endpoint is public; the login + callback routes are
+// reached via `<a href>` navigations from the login page (the SPA
+// does not invoke them via fetch). The callback redirects back with
+// a short-lived `login_ticket`; the SPA exchanges it over same-origin
+// JSON for the real bearer. Logout sends the current bearer so the
+// server-side session can be revoked.
+
+export async function fetchAuthProviders() {
+  // Unauthenticated GET — the server returns `{ providers: [] }`
+  // when nothing is configured. Network failures collapse to an
+  // empty list so a broken backend hides OAuth buttons rather than
+  // surfacing a stack trace on the login page.
+  try {
+    const response = await fetch("/auth/providers", {
+      headers: { Accept: "application/json" },
+      credentials: "same-origin",
+    });
+    if (!response.ok) return { providers: [] };
+    const data = await response.json();
+    return {
+      providers: Array.isArray(data?.providers) ? data.providers : [],
+    };
+  } catch (_) {
+    // silent-ok: login UI fail-safe — a broken /auth/providers hides
+    // OAuth buttons rather than breaking the login page, which still
+    // accepts manual token paste.
+    return { providers: [] };
+  }
+}
+
+export async function exchangeLoginTicket(ticket) {
+  const response = await fetch("/auth/session/exchange", {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+    },
+    credentials: "same-origin",
+    body: JSON.stringify({ ticket }),
+  });
+  if (!response.ok) {
+    throw new ApiError("Could not complete sign-in.", {
+      status: response.status,
+      statusText: response.statusText,
+      headers: response.headers,
+    });
+  }
+  const data = await response.json();
+  const token = (data?.token || "").trim();
+  if (!token) {
+    throw new ApiError("Sign-in response did not include a token.", {
+      status: response.status,
+      statusText: response.statusText,
+      headers: response.headers,
+      payload: data,
+    });
+  }
+  return token;
+}
+
+export async function logout() {
+  const token = readStoredToken();
+  if (!token) return;
+  const headers = new Headers({ Accept: "application/json" });
+  headers.set("Authorization", `Bearer ${token}`);
+  try {
+    await fetch("/auth/logout", {
+      method: "POST",
+      headers,
+      credentials: "same-origin",
+    });
+  } catch (_) {
+    // Network failure should not block the SPA's local sign-out —
+    // the caller still clears sessionStorage. Server-side cleanup
+    // will eventually expire the session.
+  }
 }

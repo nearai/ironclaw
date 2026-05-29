@@ -51,12 +51,14 @@ pub use inbound::{
 };
 pub use outbound::{
     AuthPromptView, CAPABILITY_DISPLAY_KIND_MAX_BYTES, CAPABILITY_DISPLAY_PREVIEW_MAX_BYTES,
-    CAPABILITY_DISPLAY_PREVIEW_MAX_LINES, CAPABILITY_DISPLAY_RESULT_REF_MAX_BYTES,
-    CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES, CapabilityActivityStatusView, CapabilityActivityView,
-    CapabilityActivityViewInput, CapabilityDisplayPreviewView, CapabilityDisplayPreviewViewInput,
-    FinalReplyView, GatePromptView, ProductOutboundEnvelope, ProductOutboundPayload,
+    CAPABILITY_DISPLAY_RESULT_REF_MAX_BYTES, CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES,
+    CapabilityActivityStatusView, CapabilityActivityView, CapabilityActivityViewInput,
+    CapabilityDisplayPreviewView, CapabilityDisplayPreviewViewInput, FinalReplyView,
+    GatePromptView, PROJECTION_SKILL_ACTIVATION_MAX_ITEMS, PROJECTION_SKILL_FEEDBACK_MAX_BYTES,
+    PROJECTION_SKILL_NAME_MAX_BYTES, ProductOutboundEnvelope, ProductOutboundPayload,
     ProductOutboundTarget, ProductProjectionItem, ProductProjectionState, ProductRenderOutcome,
-    ProductSynchronousResponse, ProgressKind, ProgressUpdateView, ProjectionCursor,
+    ProductSynchronousResponse, ProductWorkSummaryPhase, ProgressKind, ProgressUpdateView,
+    ProjectionCursor,
 };
 pub use projection::{ProjectionStream, ProjectionSubscriptionRequest};
 pub use redaction::{REDACTED_PLACEHOLDER, RedactedDebug, RedactedString};

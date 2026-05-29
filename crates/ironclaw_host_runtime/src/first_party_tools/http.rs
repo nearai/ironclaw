@@ -1,10 +1,11 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use ironclaw_extensions::{CapabilityManifest, ExtensionError};
 use ironclaw_host_api::{
-    EffectKind, MountView, NetworkMethod, NetworkPolicy, PermissionMode, ResourceCeiling,
-    ResourceEstimate, ResourceProfile, ResourceUsage, RuntimeDispatchErrorKind,
-    RuntimeHttpEgressError, RuntimeHttpEgressReasonCode, RuntimeHttpEgressRequest,
-    RuntimeHttpSaveTarget, RuntimeKind, SandboxQuota, ScopedPath, valid_http_field_name,
+    EffectKind, MountAlias, MountGrant, MountPermissions, MountView, NetworkMethod, NetworkPolicy,
+    PermissionMode, ResourceCeiling, ResourceEstimate, ResourceProfile, ResourceUsage,
+    RuntimeDispatchErrorKind, RuntimeHttpEgressError, RuntimeHttpEgressReasonCode,
+    RuntimeHttpEgressRequest, RuntimeHttpSaveTarget, RuntimeKind, SandboxQuota, ScopedPath,
+    VirtualPath, valid_http_field_name,
 };
 use serde_json::{Map, Value, json};
 
@@ -13,6 +14,7 @@ use crate::{FirstPartyCapabilityError, FirstPartyCapabilityRequest};
 use super::{first_party_capability_manifest, input_error};
 
 pub const HTTP_CAPABILITY_ID: &str = "builtin.http";
+pub const HTTP_SAVE_CAPABILITY_ID: &str = "builtin.http.save";
 
 const DEFAULT_HTTP_TIMEOUT_MS: u32 = 10_000;
 const MAX_HTTP_TIMEOUT_MS: u32 = 30_000;
@@ -29,32 +31,76 @@ pub(super) struct HttpDispatchOutput {
     pub network_egress_bytes: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HttpSaveMode {
+    Disabled,
+    Required,
+}
+
+impl HttpSaveMode {
+    fn for_capability(capability_id: &str) -> Self {
+        if capability_id == HTTP_SAVE_CAPABILITY_ID {
+            Self::Required
+        } else {
+            Self::Disabled
+        }
+    }
+}
+
 pub(super) fn manifest() -> Result<CapabilityManifest, ExtensionError> {
-    first_party_capability_manifest(
+    http_manifest(
         HTTP_CAPABILITY_ID,
         "Perform an outbound HTTP request through host egress. Redirect responses are returned; the host transport does not follow them.",
         vec![EffectKind::DispatchCapability, EffectKind::Network],
+    )
+}
+
+pub(super) fn save_manifest() -> Result<CapabilityManifest, ExtensionError> {
+    http_manifest(
+        HTTP_SAVE_CAPABILITY_ID,
+        "Perform an outbound HTTP request through host egress and save the sanitized response body through scoped filesystem authority.",
+        vec![
+            EffectKind::DispatchCapability,
+            EffectKind::Network,
+            EffectKind::WriteFilesystem,
+        ],
+    )
+}
+
+fn http_manifest(
+    capability_id: &str,
+    description: &str,
+    effects: Vec<EffectKind>,
+) -> Result<CapabilityManifest, ExtensionError> {
+    first_party_capability_manifest(
+        capability_id,
+        description,
+        effects,
         PermissionMode::Ask,
-        Some(ResourceProfile {
-            default_estimate: ResourceEstimate {
-                wall_clock_ms: Some(DEFAULT_HTTP_TIMEOUT_MS.into()),
-                output_bytes: Some(DEFAULT_RESPONSE_BODY_LIMIT),
-                network_egress_bytes: Some(DEFAULT_NETWORK_EGRESS_BYTES),
-                ..ResourceEstimate::default()
-            },
-            hard_ceiling: Some(ResourceCeiling {
-                max_usd: None,
-                max_input_tokens: None,
-                max_output_tokens: None,
-                max_wall_clock_ms: Some(MAX_HTTP_TIMEOUT_MS.into()),
-                max_output_bytes: Some(MAX_HTTP_OUTPUT_BYTES),
-                sandbox: Some(SandboxQuota {
-                    network_egress_bytes: Some(MAX_NETWORK_EGRESS_BYTES),
-                    ..SandboxQuota::default()
-                }),
+        Some(http_resource_profile()),
+    )
+}
+
+fn http_resource_profile() -> ResourceProfile {
+    ResourceProfile {
+        default_estimate: ResourceEstimate {
+            wall_clock_ms: Some(DEFAULT_HTTP_TIMEOUT_MS.into()),
+            output_bytes: Some(DEFAULT_RESPONSE_BODY_LIMIT),
+            network_egress_bytes: Some(DEFAULT_NETWORK_EGRESS_BYTES),
+            ..ResourceEstimate::default()
+        },
+        hard_ceiling: Some(ResourceCeiling {
+            max_usd: None,
+            max_input_tokens: None,
+            max_output_tokens: None,
+            max_wall_clock_ms: Some(MAX_HTTP_TIMEOUT_MS.into()),
+            max_output_bytes: Some(MAX_HTTP_OUTPUT_BYTES),
+            sandbox: Some(SandboxQuota {
+                network_egress_bytes: Some(MAX_NETWORK_EGRESS_BYTES),
+                ..SandboxQuota::default()
             }),
         }),
-    )
+    }
 }
 
 pub(super) async fn dispatch(
@@ -124,7 +170,12 @@ pub(super) async fn dispatch(
             error,
         )
     })?;
-    let save_body_to = save_body_to(&request.input, request.mounts.as_ref()).map_err(|error| {
+    let save_body_to = save_body_to(
+        &request.input,
+        request.mounts.as_ref(),
+        HttpSaveMode::for_capability(request.capability_id.as_str()),
+    )
+    .map_err(|error| {
         log_raw_http_input_error_for_local_diagnostics(
             unsafe_raw_diagnostics_allowed,
             &request.input,
@@ -148,15 +199,13 @@ pub(super) async fn dispatch(
         save_body_to,
         timeout_ms: Some(timeout_ms),
     };
-    let response = tokio::task::spawn_blocking(move || egress.execute(http_request))
-        .await
-        .map_err(|error| {
-            if error.is_panic() {
-                tracing::error!("first-party HTTP egress worker panicked");
-            }
-            FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::Backend)
-        })?
-        .map_err(http_error)?;
+    let response = super::run_egress_catching_panic(
+        egress.execute(http_request),
+        "first-party HTTP egress future panicked",
+        || FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::Backend),
+    )
+    .await?
+    .map_err(http_error)?;
     let mut output = Map::new();
     output.insert("status".to_string(), json!(response.status));
     output.insert("headers".to_string(), response_headers(response.headers));
@@ -331,23 +380,52 @@ fn timeout_ms(input: &Value) -> Result<u32, FirstPartyCapabilityError> {
 fn save_body_to(
     input: &Value,
     mounts: Option<&MountView>,
+    mode: HttpSaveMode,
 ) -> Result<Option<RuntimeHttpSaveTarget>, FirstPartyCapabilityError> {
     let Some(value) = input.get("save_to") else {
+        if mode == HttpSaveMode::Required {
+            return Err(input_error());
+        }
         return Ok(None);
     };
+    if mode == HttpSaveMode::Disabled {
+        return Err(input_error());
+    }
     let path = value.as_str().ok_or_else(input_error)?;
     if path.trim().is_empty() {
-        return Ok(None);
+        return Err(input_error());
     }
-    let path = match mounts {
-        Some(mounts) => mounts.scoped_path(path.to_string()),
-        None => ScopedPath::new(path.to_string()),
+    let mounts = mounts.ok_or_else(input_error)?;
+    let path = mounts
+        .scoped_path(path.to_string())
+        .map_err(|_| input_error())?;
+    let (virtual_path, grant) = mounts
+        .resolve_with_grant(&path)
+        .map_err(|_| input_error())?;
+    if !grant.permissions.write {
+        return Err(input_error());
     }
-    .map_err(|_| input_error())?;
     Ok(Some(RuntimeHttpSaveTarget {
+        mount_grant: Some(write_only_save_grant(&path, virtual_path)?),
         path,
-        mount_view: mounts.cloned(),
     }))
+}
+
+fn write_only_save_grant(
+    path: &ScopedPath,
+    virtual_path: VirtualPath,
+) -> Result<MountGrant, FirstPartyCapabilityError> {
+    Ok(MountGrant::new(
+        MountAlias::new(path.as_str()).map_err(|_| input_error())?,
+        virtual_path,
+        MountPermissions {
+            read: false,
+            write: true,
+            delete: false,
+            list: false,
+            execute: false,
+        },
+    ))
 }
 
 fn ranged_u64(
@@ -407,6 +485,10 @@ fn log_raw_http_input_error_for_local_diagnostics(
     validation_stage: &'static str,
     error: FirstPartyCapabilityError,
 ) -> FirstPartyCapabilityError {
+    tracing::debug!(
+        validation_stage,
+        "first-party HTTP tool input validation failed"
+    );
     if crate::unsafe_raw_http_diagnostics_enabled(unsafe_raw_diagnostics_allowed) {
         tracing::warn!(
             validation_stage,

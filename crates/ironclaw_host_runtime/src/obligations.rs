@@ -30,6 +30,8 @@ use ironclaw_secrets::{
     SecretLease, SecretLeaseId, SecretMaterial, SecretMetadata, SecretStore, SecretStoreError,
 };
 
+use crate::http_body::{RuntimeHttpBodyStore, UnsupportedRuntimeHttpBodyStore};
+
 /// Default maximum lifetime for one-shot runtime secret material staged in memory.
 pub(crate) const DEFAULT_RUNTIME_SECRET_INJECTION_TTL: Duration = Duration::from_secs(300);
 
@@ -423,9 +425,26 @@ impl BuiltinObligationServices {
     where
         N: NetworkHttpEgress + 'static,
     {
-        crate::HostHttpEgressService::new(network, SharedSecretStore(self.secret_store.clone()))
-            .with_network_policy_store(self.network_policies.clone())
-            .with_secret_injection_store(self.secret_injections.clone())
+        self.host_http_egress_with_body_store(network, Arc::new(UnsupportedRuntimeHttpBodyStore))
+    }
+
+    pub fn host_http_egress_with_body_store<N, T>(
+        &self,
+        network: N,
+        body_store: Arc<T>,
+    ) -> impl RuntimeHttpEgress + use<N, T>
+    where
+        N: NetworkHttpEgress + 'static,
+        T: RuntimeHttpBodyStore + 'static,
+    {
+        let body_store: Arc<dyn RuntimeHttpBodyStore> = body_store;
+        crate::HostHttpEgressService::production(
+            network,
+            SharedSecretStore(self.secret_store.clone()),
+            self.network_policies.clone(),
+            self.secret_injections.clone(),
+            body_store,
+        )
     }
 
     pub fn process_obligation_lifecycle_store<S>(
@@ -498,6 +517,14 @@ impl SecretStore for SharedSecretStore {
         handle: &SecretHandle,
     ) -> Result<Option<SecretMetadata>, SecretStoreError> {
         self.0.metadata(scope, handle).await
+    }
+
+    async fn delete(
+        &self,
+        scope: &ResourceScope,
+        handle: &SecretHandle,
+    ) -> Result<bool, SecretStoreError> {
+        self.0.delete(scope, handle).await
     }
 
     async fn lease_once(
@@ -1084,7 +1111,7 @@ impl BuiltinObligationHandler {
                 .map_err(|_| secret_obligation_failed())?
                 .is_some();
             if !exists {
-                return Err(secret_obligation_failed());
+                return Err(CapabilityObligationError::AuthRequired);
             }
         }
         Ok(())

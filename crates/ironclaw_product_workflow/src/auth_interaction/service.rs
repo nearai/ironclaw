@@ -6,8 +6,8 @@ use ironclaw_auth::{
     CredentialAccountId, CredentialSelectionInput,
 };
 use ironclaw_turns::{
-    CancelRunRequest, GateRef, GetRunStateRequest, ResumeTurnPrecondition, ResumeTurnRequest,
-    SanitizedCancelReason, TurnCoordinator, TurnError, TurnErrorCategory, TurnRunId, TurnStatus,
+    CancelRunRequest, GateRef, ResumeTurnPrecondition, ResumeTurnRequest, SanitizedCancelReason,
+    TurnCoordinator, TurnError, TurnErrorCategory, TurnRunId, TurnStatus,
 };
 
 use super::types::is_pending_auth_status;
@@ -19,6 +19,7 @@ use super::{
 };
 use crate::binding_ref::binding_ref_segment;
 use crate::error::ProductWorkflowError;
+use crate::gate_state::{BlockedGateState, BlockedGateStateError, blocked_gate_state};
 
 #[async_trait]
 pub trait AuthInteractionReadModel: Send + Sync {
@@ -74,12 +75,6 @@ pub struct DefaultAuthInteractionService {
     turn_coordinator: Arc<dyn TurnCoordinator>,
 }
 
-#[derive(Clone, Copy)]
-enum AuthTurnGateState {
-    ParkedOnGate,
-    NotParkedOnGate,
-}
-
 impl DefaultAuthInteractionService {
     pub fn new(
         read_model: Arc<dyn AuthInteractionReadModel>,
@@ -131,26 +126,17 @@ impl DefaultAuthInteractionService {
         &self,
         request: &ResolveAuthInteractionRequest,
         run_id: TurnRunId,
-    ) -> Result<AuthTurnGateState, ProductWorkflowError> {
-        let state = self
-            .turn_coordinator
-            .get_run_state(GetRunStateRequest {
-                scope: request.scope.clone(),
-                run_id,
-            })
-            .await
-            .map_err(map_gate_state_error)?;
-        if state.actor.as_ref() != Some(&request.actor) {
-            return Err(auth_rejected(
-                AuthInteractionRejectionKind::CrossScopeDenied,
-            ));
-        }
-        if state.status != TurnStatus::BlockedAuth
-            || state.gate_ref.as_ref() != Some(&request.gate_ref)
-        {
-            return Ok(AuthTurnGateState::NotParkedOnGate);
-        }
-        Ok(AuthTurnGateState::ParkedOnGate)
+    ) -> Result<BlockedGateState, ProductWorkflowError> {
+        blocked_gate_state(
+            self.turn_coordinator.as_ref(),
+            &request.scope,
+            &request.actor,
+            run_id,
+            &request.gate_ref,
+            TurnStatus::BlockedAuth,
+        )
+        .await
+        .map_err(map_blocked_gate_state_error)
     }
 
     async fn resume_completed_auth(
@@ -295,12 +281,12 @@ impl AuthInteractionService for DefaultAuthInteractionService {
             self.turn_gate_state(&request, run_id).await?,
             request.decision.clone(),
         ) {
-            (AuthTurnGateState::ParkedOnGate, AuthInteractionDecision::Deny) => {
+            (BlockedGateState::ParkedOnGate, AuthInteractionDecision::Deny) => {
                 let gate = self.refresh_gate(&gate).await?;
                 self.cancel_auth(request, gate, run_id).await
             }
             (
-                AuthTurnGateState::ParkedOnGate,
+                BlockedGateState::ParkedOnGate,
                 AuthInteractionDecision::CredentialProvided { credential_ref },
             ) => {
                 let gate = self.refresh_gate(&gate).await?;
@@ -309,28 +295,34 @@ impl AuthInteractionService for DefaultAuthInteractionService {
                     .await?;
                 self.resume_completed_auth(request, gate, run_id).await
             }
-            (
-                AuthTurnGateState::ParkedOnGate,
-                AuthInteractionDecision::CallbackCompleted { .. },
-            ) => {
+            (BlockedGateState::ParkedOnGate, AuthInteractionDecision::CallbackCompleted { .. }) => {
                 let gate = self.refresh_gate(&gate).await?;
                 self.resume_completed_auth(request, gate, run_id).await
             }
             (
-                AuthTurnGateState::NotParkedOnGate,
+                BlockedGateState::NotParkedOnGate,
                 AuthInteractionDecision::CredentialProvided { .. }
                 | AuthInteractionDecision::CallbackCompleted { .. },
             ) => {
                 let gate = self.refresh_gate(&gate).await?;
                 self.resume_completed_auth(request, gate, run_id).await
             }
-            (AuthTurnGateState::NotParkedOnGate, AuthInteractionDecision::Deny) => {
+            (BlockedGateState::NotParkedOnGate, AuthInteractionDecision::Deny) => {
                 let gate = self.refresh_gate(&gate).await?;
                 if gate.status() != AuthFlowStatus::Canceled {
                     return Err(auth_rejected(AuthInteractionRejectionKind::StaleAuth));
                 }
                 self.cancel_auth(request, gate, run_id).await
             }
+        }
+    }
+}
+
+fn map_blocked_gate_state_error(error: BlockedGateStateError) -> ProductWorkflowError {
+    match error {
+        BlockedGateStateError::Turn(error) => map_gate_state_error(error),
+        BlockedGateStateError::ActorMismatch => {
+            auth_rejected(AuthInteractionRejectionKind::CrossScopeDenied)
         }
     }
 }

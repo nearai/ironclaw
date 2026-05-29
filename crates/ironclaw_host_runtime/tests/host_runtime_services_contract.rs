@@ -43,11 +43,11 @@ use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     BuiltinObligationHandler, BuiltinObligationServices, CancelReason, CancelRuntimeWorkRequest,
     CapabilitySurfaceVersion, CommandExecutionOutput, CommandExecutionRequest, DefaultHostRuntime,
-    HostHttpEgressService, HostRuntime, HostRuntimeServices, ProcessObligationLifecycleStore,
-    ProductionWiringComponent, ProductionWiringConfig, ProductionWiringIssueKind,
-    RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeCapabilityResumeRequest,
-    RuntimeFailureKind, RuntimeProcessError, RuntimeProcessPort, RuntimeStatusRequest,
-    RuntimeWorkId, SandboxCommandTransport, TenantSandboxProcessPort, builtin_first_party_handlers,
+    HostRuntime, HostRuntimeServices, ProcessObligationLifecycleStore, ProductionWiringComponent,
+    ProductionWiringConfig, ProductionWiringIssueKind, RuntimeCapabilityOutcome,
+    RuntimeCapabilityRequest, RuntimeCapabilityResumeRequest, RuntimeFailureKind,
+    RuntimeProcessError, RuntimeProcessPort, RuntimeStatusRequest, RuntimeWorkId,
+    SandboxCommandTransport, TenantSandboxProcessPort, builtin_first_party_handlers,
     builtin_first_party_package,
 };
 use ironclaw_mcp::{McpError, McpExecutionRequest, McpExecutionResult, McpExecutor};
@@ -75,7 +75,9 @@ use ironclaw_scripts::{
     ScriptBackend, ScriptBackendOutput, ScriptBackendRequest, ScriptExecutionRequest,
     ScriptExecutionResult, ScriptExecutor, ScriptRuntime, ScriptRuntimeConfig,
 };
-use ironclaw_secrets::{InMemorySecretStore, SecretMaterial, SecretStore};
+use ironclaw_secrets::{
+    InMemoryCredentialBroker, InMemorySecretStore, SecretMaterial, SecretStore,
+};
 use ironclaw_trust::{
     AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
     HostTrustPolicy, TrustDecision, TrustProvenance,
@@ -98,8 +100,8 @@ use serde_json::json;
 use wit_component::{ComponentEncoder, StringEncoding, embed_component_metadata};
 use wit_parser::Resolve;
 
-#[test]
-fn production_wiring_validation_rejects_missing_components_and_local_only_defaults() {
+#[tokio::test]
+async fn production_wiring_validation_rejects_missing_components_and_local_only_defaults() {
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
         Arc::new(LocalFilesystem::new()),
@@ -221,8 +223,8 @@ fn production_wiring_validation_rejects_missing_components_and_local_only_defaul
     );
 }
 
-#[test]
-fn production_wiring_validation_rejects_local_only_runtime_policy() {
+#[tokio::test]
+async fn production_wiring_validation_rejects_local_only_runtime_policy() {
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
         Arc::new(LocalFilesystem::new()),
@@ -246,8 +248,8 @@ fn production_wiring_validation_rejects_local_only_runtime_policy() {
     );
 }
 
-#[test]
-fn production_wiring_validation_rejects_each_local_only_runtime_policy_field() {
+#[tokio::test]
+async fn production_wiring_validation_rejects_each_local_only_runtime_policy_field() {
     let mut host_workspace = hosted_dev_runtime_policy();
     host_workspace.filesystem_backend = FilesystemBackendKind::HostWorkspace;
     assert_local_only_runtime_policy_rejected(host_workspace, "host_workspace_filesystem");
@@ -273,8 +275,8 @@ fn production_wiring_validation_rejects_each_local_only_runtime_policy_field() {
     assert_local_only_runtime_policy_rejected(inherited_secrets, "local_secret_environment");
 }
 
-#[test]
-fn production_wiring_validation_accepts_production_safe_runtime_policy_shape() {
+#[tokio::test]
+async fn production_wiring_validation_accepts_production_safe_runtime_policy_shape() {
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
         Arc::new(LocalFilesystem::new()),
@@ -298,8 +300,8 @@ fn production_wiring_validation_accepts_production_safe_runtime_policy_shape() {
     );
 }
 
-#[test]
-fn production_wiring_validation_accepts_persistent_resource_governor_component() {
+#[tokio::test]
+async fn production_wiring_validation_accepts_persistent_resource_governor_component() {
     let dir = tempfile::tempdir().unwrap();
     let governor = Arc::new(PersistentResourceGovernor::new(
         JsonFileResourceGovernorStore::new(dir.path().join("resource-governor.json")),
@@ -462,8 +464,8 @@ async fn with_filesystem_resource_governor_closes_process_reservations_on_cancel
     ));
 }
 
-#[test]
-fn production_wiring_validation_classifies_combined_store_as_run_state_and_approvals() {
+#[tokio::test]
+async fn production_wiring_validation_classifies_combined_store_as_run_state_and_approvals() {
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
         Arc::new(LocalFilesystem::new()),
@@ -510,8 +512,8 @@ fn production_wiring_validation_classifies_combined_store_as_run_state_and_appro
     );
 }
 
-#[test]
-fn production_wiring_validation_rejects_unsupported_runtime_requirements() {
+#[tokio::test]
+async fn production_wiring_validation_rejects_unsupported_runtime_requirements() {
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
         Arc::new(LocalFilesystem::new()),
@@ -737,8 +739,8 @@ async fn production_turn_coordinator_requires_explicit_run_profile_resolver() {
     ));
 }
 
-#[test]
-fn production_wiring_validation_rejects_noop_turn_wake_notifier() {
+#[tokio::test]
+async fn production_wiring_validation_rejects_noop_turn_wake_notifier() {
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
         Arc::new(LocalFilesystem::new()),
@@ -761,8 +763,8 @@ fn production_wiring_validation_rejects_noop_turn_wake_notifier() {
     );
 }
 
-#[test]
-fn production_wiring_validation_accepts_configured_turn_wake_notifier() {
+#[tokio::test]
+async fn production_wiring_validation_accepts_configured_turn_wake_notifier() {
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
         Arc::new(LocalFilesystem::new()),
@@ -916,8 +918,8 @@ async fn production_event_store_config_installs_verified_event_and_audit_sinks()
     );
 }
 
-#[test]
-fn production_wiring_validation_uses_configured_runtime_requirements() {
+#[tokio::test]
+async fn production_wiring_validation_uses_configured_runtime_requirements() {
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
         Arc::new(LocalFilesystem::new()),
@@ -964,8 +966,8 @@ fn production_wiring_validation_uses_configured_runtime_requirements() {
     );
 }
 
-#[test]
-fn production_wiring_validation_sees_underlying_in_memory_durable_logs() {
+#[tokio::test]
+async fn production_wiring_validation_sees_underlying_in_memory_durable_logs() {
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
         Arc::new(LocalFilesystem::new()),
@@ -997,8 +999,8 @@ fn production_wiring_validation_sees_underlying_in_memory_durable_logs() {
     );
 }
 
-#[test]
-fn production_wiring_validation_rejects_direct_durable_sink_wrappers_as_unverified() {
+#[tokio::test]
+async fn production_wiring_validation_rejects_direct_durable_sink_wrappers_as_unverified() {
     let event_log: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
     let audit_log: Arc<dyn DurableAuditLog> = Arc::new(InMemoryDurableAuditLog::new());
     let services = HostRuntimeServices::new(
@@ -1032,8 +1034,8 @@ fn production_wiring_validation_rejects_direct_durable_sink_wrappers_as_unverifi
     );
 }
 
-#[test]
-fn production_wiring_validation_accepts_verified_host_http_egress_shape() {
+#[tokio::test]
+async fn production_wiring_validation_accepts_verified_host_http_egress_shape() {
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
         Arc::new(LocalFilesystem::new()),
@@ -1059,8 +1061,8 @@ fn production_wiring_validation_accepts_verified_host_http_egress_shape() {
     );
 }
 
-#[test]
-fn host_http_egress_helper_requires_graph_secret_store() {
+#[tokio::test]
+async fn host_http_egress_helper_requires_graph_secret_store() {
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
         Arc::new(LocalFilesystem::new()),
@@ -1081,8 +1083,40 @@ fn host_http_egress_helper_requires_graph_secret_store() {
     ));
 }
 
-#[test]
-fn production_wiring_validation_rejects_unverified_runtime_http_egress() {
+#[tokio::test]
+async fn production_wiring_validation_requires_credential_broker_when_configured() {
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    );
+
+    let report = services
+        .validate_production_wiring(&ProductionWiringConfig::new([]).require_credential_broker())
+        .expect_err("production credential broker requirement must fail closed when missing");
+
+    assert!(
+        report.contains(
+            ProductionWiringComponent::CredentialAccountStore,
+            ProductionWiringIssueKind::Missing
+        ),
+        "missing credential account store should be reported: {report:?}"
+    );
+    assert!(
+        report.contains(
+            ProductionWiringComponent::CredentialSessionStore,
+            ProductionWiringIssueKind::Missing
+        ),
+        "missing credential session store should be reported: {report:?}"
+    );
+}
+
+#[tokio::test]
+async fn production_wiring_validation_rejects_local_only_credential_broker() {
+    let broker = Arc::new(InMemoryCredentialBroker::new());
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
         Arc::new(LocalFilesystem::new()),
@@ -1091,12 +1125,39 @@ fn production_wiring_validation_rejects_unverified_runtime_http_egress() {
         ProcessServices::in_memory(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
-    .with_runtime_http_egress(Arc::new(
-        HostHttpEgressService::new_with_request_policy_for_tests(
-            RecordingNetworkHttpEgress::new(),
-            InMemorySecretStore::new(),
+    .with_credential_broker(broker);
+
+    let report = services
+        .validate_production_wiring(&ProductionWiringConfig::new([]).require_credential_broker())
+        .expect_err("in-memory credential broker must not satisfy production guardrail");
+
+    assert!(
+        report.contains(
+            ProductionWiringComponent::CredentialAccountStore,
+            ProductionWiringIssueKind::LocalOnlyImplementation
         ),
-    ));
+        "in-memory credential account store should be reported as local-only: {report:?}"
+    );
+    assert!(
+        report.contains(
+            ProductionWiringComponent::CredentialSessionStore,
+            ProductionWiringIssueKind::LocalOnlyImplementation
+        ),
+        "in-memory credential session store should be reported as local-only: {report:?}"
+    );
+}
+
+#[tokio::test]
+async fn production_wiring_validation_rejects_unverified_runtime_http_egress() {
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_runtime_http_egress(Arc::new(RecordingRuntimeHttpEgress::new()));
 
     let report = services
         .validate_production_wiring(&ProductionWiringConfig::new([]).require_runtime_http_egress())
@@ -1113,8 +1174,8 @@ fn production_wiring_validation_rejects_unverified_runtime_http_egress() {
     );
 }
 
-#[test]
-fn production_wiring_validation_tracks_process_port_for_builtin_shell() {
+#[tokio::test]
+async fn production_wiring_validation_tracks_process_port_for_builtin_shell() {
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_builtin_first_party_package()),
         Arc::new(LocalFilesystem::new()),
@@ -1161,8 +1222,8 @@ fn production_wiring_validation_tracks_process_port_for_builtin_shell() {
     );
 }
 
-#[test]
-fn production_wiring_validation_tracks_tenant_sandbox_process_port_for_builtin_shell() {
+#[tokio::test]
+async fn production_wiring_validation_tracks_tenant_sandbox_process_port_for_builtin_shell() {
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_builtin_first_party_package()),
         Arc::new(LocalFilesystem::new()),
@@ -1247,8 +1308,8 @@ fn production_wiring_validation_tracks_tenant_sandbox_process_port_for_builtin_s
     );
 }
 
-#[test]
-fn production_wiring_validation_rejects_empty_verified_wasm_credentials() {
+#[tokio::test]
+async fn production_wiring_validation_rejects_empty_verified_wasm_credentials() {
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(WASM_HTTP_SUCCESS_MANIFEST)),
         Arc::new(LocalFilesystem::new()),
@@ -1276,8 +1337,8 @@ fn production_wiring_validation_rejects_empty_verified_wasm_credentials() {
     );
 }
 
-#[test]
-fn production_wiring_validation_rejects_wasm_credentials_added_after_adapter() {
+#[tokio::test]
+async fn production_wiring_validation_rejects_wasm_credentials_added_after_adapter() {
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(WASM_HTTP_SUCCESS_MANIFEST)),
         Arc::new(LocalFilesystem::new()),
@@ -1307,8 +1368,8 @@ fn production_wiring_validation_rejects_wasm_credentials_added_after_adapter() {
     );
 }
 
-#[test]
-fn production_wiring_validation_rejects_wasm_credentials_replaced_after_adapter() {
+#[tokio::test]
+async fn production_wiring_validation_rejects_wasm_credentials_replaced_after_adapter() {
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(WASM_HTTP_SUCCESS_MANIFEST)),
         Arc::new(LocalFilesystem::new()),
@@ -2567,6 +2628,86 @@ async fn host_runtime_services_resumes_approved_capability_and_consumes_lease_on
 }
 
 #[tokio::test]
+async fn host_runtime_services_resume_missing_runtime_secret_returns_auth_gate() {
+    let run_state = Arc::new(InMemoryRunStateStore::new());
+    let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
+    let capability_leases = Arc::new(InMemoryCapabilityLeaseStore::new());
+    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_handle = SecretHandle::new("approval_resume_token").unwrap();
+    let script_runtime = Arc::new(RecordingScriptExecutor::default());
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(ApprovalThenSecretObligationAuthorizer {
+            handle: secret_handle,
+        }),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_trust_policy(Arc::new(local_manifest_trust_policy(
+        "script",
+        vec![EffectKind::DispatchCapability],
+    )))
+    .with_run_state(Arc::clone(&run_state))
+    .with_approval_requests(Arc::clone(&approval_requests))
+    .with_capability_leases(Arc::clone(&capability_leases))
+    .with_secret_store(Arc::clone(&secret_store))
+    .with_script_runtime(Arc::clone(&script_runtime));
+    let runtime = services.host_runtime_for_local_testing();
+    let context = execution_context_without_grants();
+    let scope = context.resource_scope.clone();
+    let estimate = ResourceEstimate::default();
+    let input = json!({"message": "approval then auth"});
+
+    let gate = block_for_approval(&runtime, context.clone(), estimate.clone(), input.clone()).await;
+    let lease =
+        approve_dispatch_for_services(&services, &scope, gate.approval_request_id, None).await;
+
+    let resumed = runtime
+        .resume_capability(RuntimeCapabilityResumeRequest::new(
+            context,
+            gate.approval_request_id,
+            script_capability_id(),
+            estimate,
+            input,
+            trust_decision_with_dispatch_authority(),
+        ))
+        .await
+        .unwrap();
+
+    match resumed {
+        RuntimeCapabilityOutcome::AuthRequired(auth_gate) => {
+            assert_eq!(auth_gate.capability_id, script_capability_id());
+            assert!(
+                auth_gate.required_secrets.is_empty(),
+                "secret handles are not product-visible until auth recovery projections carry them"
+            );
+        }
+        other => panic!("expected auth-required resume outcome, got {other:?}"),
+    }
+    let run = run_state
+        .get(&scope, scope.invocation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(run.status, RunStatus::BlockedAuth);
+    assert_eq!(run.error_kind.as_deref(), Some("AuthRequired"));
+    assert_eq!(
+        capability_leases
+            .get(&scope, lease.grant.id)
+            .await
+            .unwrap()
+            .status,
+        CapabilityLeaseStatus::Revoked
+    );
+    assert!(
+        script_runtime.recorded_mounts().is_empty(),
+        "missing credential must block before dispatch"
+    );
+}
+
+#[tokio::test]
 async fn host_runtime_services_resume_changed_input_fails_before_lease_claim_or_dispatch() {
     let fixture = approval_resume_fixture();
     let runtime = fixture.services.host_runtime_for_local_testing();
@@ -2971,6 +3112,452 @@ async fn host_runtime_routes_system_process_sandbox_to_configured_executor() {
     assert_eq!(handle.capability_id, process_sandbox_capability_id());
     wait_for_sandbox_process_result(&sandbox_executor, &scope, process_id, result_store.as_ref())
         .await;
+}
+
+#[tokio::test]
+async fn host_runtime_spawn_process_sandbox_routes_approved_request_to_configured_executor() {
+    let process_services = ProcessServices::in_memory();
+    let result_store = process_services.result_store();
+    let sandbox_executor = Arc::new(RecordingSandboxProcessExecutor::default());
+    let runtime = HostRuntimeServices::new(
+        Arc::new(registry_with_host_bundled_manifest(
+            PROCESS_SANDBOX_MANIFEST,
+        )),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        process_services,
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_trust_policy(Arc::new(local_manifest_trust_policy(
+        "system.process_sandbox",
+        process_sandbox_authority_effects(),
+    )))
+    .with_process_sandbox_executor(Arc::clone(&sandbox_executor))
+    .host_runtime_for_local_testing();
+    let scope = sample_scope(InvocationId::new());
+
+    let outcome = runtime
+        .spawn_capability(process_sandbox_runtime_request_for_scope(scope.clone()))
+        .await
+        .unwrap();
+
+    let process_id = match outcome {
+        RuntimeCapabilityOutcome::SpawnedProcess(handle) => {
+            assert_eq!(handle.capability_id, process_sandbox_capability_id());
+            handle.process_id
+        }
+        other => panic!("expected spawned process, got {other:?}"),
+    };
+    wait_for_sandbox_process_result(&sandbox_executor, &scope, process_id, result_store.as_ref())
+        .await;
+}
+
+#[tokio::test]
+async fn host_runtime_spawn_process_sandbox_rejects_invalid_plan_before_executor() {
+    let sandbox_executor = Arc::new(RecordingSandboxProcessExecutor::default());
+    let runtime = HostRuntimeServices::new(
+        Arc::new(registry_with_host_bundled_manifest(
+            PROCESS_SANDBOX_MANIFEST,
+        )),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_trust_policy(Arc::new(local_manifest_trust_policy(
+        "system.process_sandbox",
+        process_sandbox_authority_effects(),
+    )))
+    .with_process_sandbox_executor(Arc::clone(&sandbox_executor))
+    .host_runtime_for_local_testing();
+    let scope = sample_scope(InvocationId::new());
+    let mut request = process_sandbox_runtime_request_for_scope(scope);
+    request.input = invalid_process_sandbox_input();
+
+    let error = runtime
+        .spawn_capability(request)
+        .await
+        .expect_err("invalid sandbox plans must fail at the host runtime boundary");
+
+    match error {
+        ironclaw_host_runtime::HostRuntimeError::InvalidRequest { reason } => {
+            assert!(reason.contains("SandboxProcessPlan"));
+        }
+        other => panic!("expected invalid request, got {other:?}"),
+    }
+    assert!(
+        sandbox_executor.requests().is_empty(),
+        "invalid sandbox plan must not reach process spawn"
+    );
+}
+
+#[tokio::test]
+async fn host_runtime_spawn_process_sandbox_runtime_policy_denial_fails_before_executor() {
+    let sandbox_executor = Arc::new(RecordingSandboxProcessExecutor::default());
+    let runtime = HostRuntimeServices::new(
+        Arc::new(registry_with_host_bundled_manifest(
+            PROCESS_SANDBOX_MANIFEST,
+        )),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_trust_policy(Arc::new(local_manifest_trust_policy(
+        "system.process_sandbox",
+        process_sandbox_authority_effects(),
+    )))
+    .with_process_sandbox_executor(Arc::clone(&sandbox_executor))
+    .with_runtime_policy(network_denied_runtime_policy())
+    .host_runtime_for_local_testing();
+    let scope = sample_scope(InvocationId::new());
+
+    let outcome = runtime
+        .spawn_capability(process_sandbox_runtime_request_for_scope(scope))
+        .await
+        .unwrap();
+
+    assert_failed_outcome(outcome, RuntimeFailureKind::Authorization);
+    assert!(
+        sandbox_executor.requests().is_empty(),
+        "runtime policy denial must fail before process spawn"
+    );
+}
+
+#[tokio::test]
+async fn host_runtime_spawn_process_sandbox_host_failure_fails_after_preflight() {
+    let sandbox_executor = Arc::new(RecordingSandboxProcessExecutor::default());
+    let runtime = HostRuntimeServices::new(
+        Arc::new(registry_with_host_bundled_manifest(
+            PROCESS_SANDBOX_MANIFEST,
+        )),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_trust_policy(Arc::new(local_manifest_trust_policy(
+        "system.process_sandbox",
+        process_sandbox_authority_effects(),
+    )))
+    .with_process_sandbox_executor(Arc::clone(&sandbox_executor))
+    .host_runtime_for_local_testing()
+    .with_process_manager(Arc::new(FailingSpawnManager));
+    let scope = sample_scope(InvocationId::new());
+
+    let outcome = runtime
+        .spawn_capability(process_sandbox_runtime_request_for_scope(scope))
+        .await
+        .unwrap();
+
+    assert_failed_outcome(outcome, RuntimeFailureKind::Backend);
+    assert!(
+        sandbox_executor.requests().is_empty(),
+        "host spawn failure must not reach the process sandbox executor"
+    );
+}
+
+#[tokio::test]
+async fn host_runtime_spawn_process_sandbox_blocks_for_approval_before_executor() {
+    let run_state = Arc::new(InMemoryRunStateStore::new());
+    let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
+    let capability_leases = Arc::new(InMemoryCapabilityLeaseStore::new());
+    let process_services = ProcessServices::in_memory();
+    let result_store = process_services.result_store();
+    let sandbox_executor = Arc::new(RecordingSandboxProcessExecutor::default());
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_host_bundled_manifest(
+            PROCESS_SANDBOX_MANIFEST,
+        )),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(ApprovalThenGrantAuthorizer),
+        process_services,
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_trust_policy(Arc::new(local_manifest_trust_policy(
+        "system.process_sandbox",
+        process_sandbox_authority_effects(),
+    )))
+    .with_run_state(Arc::clone(&run_state))
+    .with_approval_requests(Arc::clone(&approval_requests))
+    .with_capability_leases(Arc::clone(&capability_leases))
+    .with_process_sandbox_executor(Arc::clone(&sandbox_executor));
+    let runtime = services.host_runtime_for_local_testing();
+    let scope = sample_scope(InvocationId::new());
+    let context = execution_context_without_grants_for_scope(scope.clone());
+    let input = process_sandbox_input();
+    let estimate = process_sandbox_estimate();
+
+    let blocked = runtime
+        .spawn_capability(RuntimeCapabilityRequest::new(
+            context.clone(),
+            process_sandbox_capability_id(),
+            estimate.clone(),
+            input.clone(),
+            process_sandbox_trust_decision(),
+        ))
+        .await
+        .unwrap();
+
+    let approval_request_id = match blocked {
+        RuntimeCapabilityOutcome::ApprovalRequired(gate) => {
+            assert_eq!(gate.capability_id, process_sandbox_capability_id());
+            gate.approval_request_id
+        }
+        other => panic!("expected approval gate, got {other:?}"),
+    };
+    assert!(
+        sandbox_executor.requests().is_empty(),
+        "process sandbox executor must not run before approval"
+    );
+
+    approve_spawn_for_services(&services, &scope, approval_request_id, None).await;
+    let resumed = runtime
+        .resume_spawn_capability(RuntimeCapabilityResumeRequest::new(
+            context,
+            approval_request_id,
+            process_sandbox_capability_id(),
+            estimate,
+            input,
+            process_sandbox_trust_decision(),
+        ))
+        .await
+        .unwrap();
+
+    let process_id = match resumed {
+        RuntimeCapabilityOutcome::SpawnedProcess(handle) => handle.process_id,
+        other => panic!("expected spawned process after approval, got {other:?}"),
+    };
+    wait_for_sandbox_process_result(&sandbox_executor, &scope, process_id, result_store.as_ref())
+        .await;
+}
+
+#[tokio::test]
+async fn host_runtime_spawn_process_sandbox_resume_changed_input_fails_before_executor() {
+    let run_state = Arc::new(InMemoryRunStateStore::new());
+    let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
+    let capability_leases = Arc::new(InMemoryCapabilityLeaseStore::new());
+    let sandbox_executor = Arc::new(RecordingSandboxProcessExecutor::default());
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_host_bundled_manifest(
+            PROCESS_SANDBOX_MANIFEST,
+        )),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(ApprovalThenGrantAuthorizer),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_trust_policy(Arc::new(local_manifest_trust_policy(
+        "system.process_sandbox",
+        process_sandbox_authority_effects(),
+    )))
+    .with_run_state(Arc::clone(&run_state))
+    .with_approval_requests(Arc::clone(&approval_requests))
+    .with_capability_leases(Arc::clone(&capability_leases))
+    .with_process_sandbox_executor(Arc::clone(&sandbox_executor));
+    let runtime = services.host_runtime_for_local_testing();
+    let scope = sample_scope(InvocationId::new());
+    let context = execution_context_without_grants_for_scope(scope.clone());
+    let input = process_sandbox_input();
+    let estimate = process_sandbox_estimate();
+
+    let blocked = runtime
+        .spawn_capability(RuntimeCapabilityRequest::new(
+            context.clone(),
+            process_sandbox_capability_id(),
+            estimate.clone(),
+            input,
+            process_sandbox_trust_decision(),
+        ))
+        .await
+        .unwrap();
+
+    let approval_request_id = match blocked {
+        RuntimeCapabilityOutcome::ApprovalRequired(gate) => gate.approval_request_id,
+        other => panic!("expected approval gate, got {other:?}"),
+    };
+    let lease = approve_spawn_for_services(&services, &scope, approval_request_id, None).await;
+
+    let outcome = runtime
+        .resume_spawn_capability(RuntimeCapabilityResumeRequest::new(
+            context,
+            approval_request_id,
+            process_sandbox_capability_id(),
+            estimate,
+            json!({"run": {"command": "echo", "args": ["changed"]}}),
+            process_sandbox_trust_decision(),
+        ))
+        .await
+        .unwrap();
+
+    assert_failed_outcome(outcome, RuntimeFailureKind::Authorization);
+    assert!(
+        sandbox_executor.requests().is_empty(),
+        "changed resume input must fail before process spawn"
+    );
+    assert_eq!(
+        capability_leases
+            .get(&scope, lease.grant.id)
+            .await
+            .unwrap()
+            .status,
+        CapabilityLeaseStatus::Active,
+        "fingerprint mismatch must fail before lease claim/consume"
+    );
+}
+
+#[tokio::test]
+async fn host_runtime_spawn_process_sandbox_resume_invalid_plan_fails_before_executor() {
+    let run_state = Arc::new(InMemoryRunStateStore::new());
+    let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
+    let capability_leases = Arc::new(InMemoryCapabilityLeaseStore::new());
+    let sandbox_executor = Arc::new(RecordingSandboxProcessExecutor::default());
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_host_bundled_manifest(
+            PROCESS_SANDBOX_MANIFEST,
+        )),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(ApprovalThenGrantAuthorizer),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_trust_policy(Arc::new(local_manifest_trust_policy(
+        "system.process_sandbox",
+        process_sandbox_authority_effects(),
+    )))
+    .with_run_state(Arc::clone(&run_state))
+    .with_approval_requests(Arc::clone(&approval_requests))
+    .with_capability_leases(Arc::clone(&capability_leases))
+    .with_process_sandbox_executor(Arc::clone(&sandbox_executor));
+    let runtime = services.host_runtime_for_local_testing();
+    let scope = sample_scope(InvocationId::new());
+    let context = execution_context_without_grants_for_scope(scope.clone());
+    let input = process_sandbox_input();
+    let estimate = process_sandbox_estimate();
+
+    let blocked = runtime
+        .spawn_capability(RuntimeCapabilityRequest::new(
+            context.clone(),
+            process_sandbox_capability_id(),
+            estimate.clone(),
+            input,
+            process_sandbox_trust_decision(),
+        ))
+        .await
+        .unwrap();
+
+    let approval_request_id = match blocked {
+        RuntimeCapabilityOutcome::ApprovalRequired(gate) => gate.approval_request_id,
+        other => panic!("expected approval gate, got {other:?}"),
+    };
+    let lease = approve_spawn_for_services(&services, &scope, approval_request_id, None).await;
+
+    let error = runtime
+        .resume_spawn_capability(RuntimeCapabilityResumeRequest::new(
+            context,
+            approval_request_id,
+            process_sandbox_capability_id(),
+            estimate,
+            invalid_process_sandbox_input(),
+            process_sandbox_trust_decision(),
+        ))
+        .await
+        .expect_err("invalid sandbox resume input must fail at the host runtime boundary");
+
+    match error {
+        ironclaw_host_runtime::HostRuntimeError::InvalidRequest { reason } => {
+            assert!(reason.contains("SandboxProcessPlan"));
+        }
+        other => panic!("expected invalid request, got {other:?}"),
+    }
+    assert!(
+        sandbox_executor.requests().is_empty(),
+        "invalid resume plan must not reach process spawn"
+    );
+    assert_eq!(
+        capability_leases
+            .get(&scope, lease.grant.id)
+            .await
+            .unwrap()
+            .status,
+        CapabilityLeaseStatus::Active,
+        "invalid resume input must fail before lease claim/consume"
+    );
+}
+
+#[tokio::test]
+async fn host_runtime_spawn_process_sandbox_resume_host_failure_fails_after_approval() {
+    let run_state = Arc::new(InMemoryRunStateStore::new());
+    let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
+    let capability_leases = Arc::new(InMemoryCapabilityLeaseStore::new());
+    let sandbox_executor = Arc::new(RecordingSandboxProcessExecutor::default());
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_host_bundled_manifest(
+            PROCESS_SANDBOX_MANIFEST,
+        )),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(ApprovalThenGrantAuthorizer),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_trust_policy(Arc::new(local_manifest_trust_policy(
+        "system.process_sandbox",
+        process_sandbox_authority_effects(),
+    )))
+    .with_run_state(Arc::clone(&run_state))
+    .with_approval_requests(Arc::clone(&approval_requests))
+    .with_capability_leases(Arc::clone(&capability_leases))
+    .with_process_sandbox_executor(Arc::clone(&sandbox_executor));
+    let runtime = services
+        .host_runtime_for_local_testing()
+        .with_process_manager(Arc::new(FailingSpawnManager));
+    let scope = sample_scope(InvocationId::new());
+    let context = execution_context_without_grants_for_scope(scope.clone());
+    let input = process_sandbox_input();
+    let estimate = process_sandbox_estimate();
+
+    let blocked = runtime
+        .spawn_capability(RuntimeCapabilityRequest::new(
+            context.clone(),
+            process_sandbox_capability_id(),
+            estimate.clone(),
+            input.clone(),
+            process_sandbox_trust_decision(),
+        ))
+        .await
+        .unwrap();
+
+    let approval_request_id = match blocked {
+        RuntimeCapabilityOutcome::ApprovalRequired(gate) => gate.approval_request_id,
+        other => panic!("expected approval gate, got {other:?}"),
+    };
+    approve_spawn_for_services(&services, &scope, approval_request_id, None).await;
+
+    let outcome = runtime
+        .resume_spawn_capability(RuntimeCapabilityResumeRequest::new(
+            context,
+            approval_request_id,
+            process_sandbox_capability_id(),
+            estimate,
+            input,
+            process_sandbox_trust_decision(),
+        ))
+        .await
+        .unwrap();
+
+    assert_failed_outcome(outcome, RuntimeFailureKind::Backend);
+    assert!(
+        sandbox_executor.requests().is_empty(),
+        "host resume-spawn failure must not reach the process sandbox executor"
+    );
 }
 
 #[tokio::test]
@@ -4018,8 +4605,8 @@ async fn host_runtime_services_denies_wasm_http_when_shared_egress_has_no_policy
     );
 }
 
-#[test]
-fn host_runtime_services_wasm_input_encode_releases_prepared_reservation() {
+#[tokio::test]
+async fn host_runtime_services_wasm_input_encode_releases_prepared_reservation() {
     let services = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/services.rs"),
     )
@@ -5168,6 +5755,33 @@ async fn approve_dispatch_for_services(
         .unwrap()
 }
 
+async fn approve_spawn_for_services(
+    services: &InMemoryHostRuntimeServices,
+    scope: &ResourceScope,
+    approval_request_id: ApprovalRequestId,
+    expires_at: Option<Timestamp>,
+) -> ironclaw_authorization::CapabilityLease {
+    services
+        .approval_resolver()
+        .expect("approval resolver should be configured")
+        .approve_spawn(
+            scope,
+            approval_request_id,
+            LeaseApproval {
+                issued_by: Principal::HostRuntime,
+                allowed_effects: process_sandbox_authority_effects(),
+                mounts: MountView::default(),
+                network: NetworkPolicy::default(),
+                secrets: Vec::new(),
+                resource_ceiling: None,
+                expires_at,
+                max_invocations: Some(1),
+            },
+        )
+        .await
+        .unwrap()
+}
+
 struct SentinelApprovalAuthorizer;
 
 #[async_trait]
@@ -5233,6 +5847,74 @@ impl TrustAwareCapabilityDispatchAuthorizer for ApprovalThenGrantAuthorizer {
             GrantAuthorizer::new()
                 .authorize_dispatch_with_trust(context, descriptor, estimate, trust_decision)
                 .await
+        }
+    }
+
+    async fn authorize_spawn_with_trust(
+        &self,
+        context: &ExecutionContext,
+        descriptor: &CapabilityDescriptor,
+        estimate: &ResourceEstimate,
+        trust_decision: &TrustDecision,
+    ) -> Decision {
+        if context.grants.grants.is_empty() {
+            Decision::RequireApproval {
+                request: ApprovalRequest {
+                    id: ApprovalRequestId::new(),
+                    correlation_id: context.correlation_id,
+                    requested_by: Principal::Extension(context.extension_id.clone()),
+                    action: Box::new(Action::SpawnCapability {
+                        capability: descriptor.id.clone(),
+                        estimated_resources: estimate.clone(),
+                    }),
+                    invocation_fingerprint: None,
+                    reason: "spawn approval required".to_string(),
+                    reusable_scope: None,
+                },
+            }
+        } else {
+            GrantAuthorizer::new()
+                .authorize_spawn_with_trust(context, descriptor, estimate, trust_decision)
+                .await
+        }
+    }
+}
+
+struct ApprovalThenSecretObligationAuthorizer {
+    handle: SecretHandle,
+}
+
+#[async_trait]
+impl TrustAwareCapabilityDispatchAuthorizer for ApprovalThenSecretObligationAuthorizer {
+    async fn authorize_dispatch_with_trust(
+        &self,
+        context: &ExecutionContext,
+        descriptor: &CapabilityDescriptor,
+        estimate: &ResourceEstimate,
+        _trust_decision: &TrustDecision,
+    ) -> Decision {
+        if context.grants.grants.is_empty() {
+            Decision::RequireApproval {
+                request: ApprovalRequest {
+                    id: ApprovalRequestId::new(),
+                    correlation_id: context.correlation_id,
+                    requested_by: Principal::Extension(context.extension_id.clone()),
+                    action: Box::new(Action::Dispatch {
+                        capability: descriptor.id.clone(),
+                        estimated_resources: estimate.clone(),
+                    }),
+                    invocation_fingerprint: None,
+                    reason: "approval required".to_string(),
+                    reusable_scope: None,
+                },
+            }
+        } else {
+            Decision::Allow {
+                obligations: Obligations::new(vec![Obligation::InjectSecretOnce {
+                    handle: self.handle.clone(),
+                }])
+                .unwrap(),
+            }
         }
     }
 }
@@ -5344,6 +6026,7 @@ impl RuntimeProcessPort for ProductionCandidateProcessPort {
     ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
         Ok(CommandExecutionOutput {
             output: String::new(),
+            saved_output: None,
             exit_code: 0,
             sandboxed: true,
             duration: Duration::ZERO,
@@ -5362,6 +6045,7 @@ impl SandboxCommandTransport for ProductionCandidateSandboxTransport {
     ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
         Ok(CommandExecutionOutput {
             output: String::new(),
+            saved_output: None,
             exit_code: 0,
             sandboxed: false,
             duration: Duration::ZERO,
@@ -5384,8 +6068,9 @@ impl RecordingNetworkHttpEgress {
     }
 }
 
+#[async_trait::async_trait]
 impl NetworkHttpEgress for RecordingNetworkHttpEgress {
-    fn execute(
+    async fn execute(
         &self,
         request: NetworkHttpRequest,
     ) -> Result<NetworkHttpResponse, NetworkHttpError> {
@@ -5461,8 +6146,9 @@ impl RecordingRuntimeHttpEgress {
     }
 }
 
+#[async_trait::async_trait]
 impl RuntimeHttpEgress for RecordingRuntimeHttpEgress {
-    fn execute(
+    async fn execute(
         &self,
         request: RuntimeHttpEgressRequest,
     ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
@@ -6157,6 +6843,15 @@ fn registry_with_manifest(manifest: &str) -> ExtensionRegistry {
     registry_with_manifests(&[manifest])
 }
 
+fn registry_with_host_bundled_manifest(manifest: &str) -> ExtensionRegistry {
+    let mut registry = ExtensionRegistry::new();
+    let manifest = parse_manifest_from_source(manifest, ManifestSource::HostBundled);
+    let root = VirtualPath::new(format!("/system/extensions/{}", manifest.id.as_str())).unwrap();
+    let package = ExtensionPackage::from_manifest(manifest, root).unwrap();
+    registry.insert(package).unwrap();
+    registry
+}
+
 fn registry_with_builtin_first_party_package() -> ExtensionRegistry {
     let mut registry = ExtensionRegistry::new();
     registry
@@ -6178,13 +6873,12 @@ fn registry_with_manifests(manifests: &[&str]) -> ExtensionRegistry {
 }
 
 fn parse_manifest(manifest: &str) -> ExtensionManifest {
+    parse_manifest_from_source(manifest, ManifestSource::InstalledLocal)
+}
+
+fn parse_manifest_from_source(manifest: &str, source: ManifestSource) -> ExtensionManifest {
     let manifest = legacy_capability_fixture_to_v2(manifest);
-    ExtensionManifest::parse(
-        &manifest,
-        ManifestSource::InstalledLocal,
-        &HostPortCatalog::empty(),
-    )
-    .unwrap()
+    ExtensionManifest::parse(&manifest, source, &HostPortCatalog::empty()).unwrap()
 }
 
 fn execution_context_without_grants() -> ExecutionContext {
@@ -6239,6 +6933,18 @@ fn execution_context_with_dispatch_grant_for_scope(
     capability: CapabilityId,
     scope: ResourceScope,
 ) -> ExecutionContext {
+    execution_context_with_effect_grants_for_scope(
+        capability,
+        scope,
+        vec![EffectKind::DispatchCapability, EffectKind::Network],
+    )
+}
+
+fn execution_context_with_effect_grants_for_scope(
+    capability: CapabilityId,
+    scope: ResourceScope,
+    allowed_effects: Vec<EffectKind>,
+) -> ExecutionContext {
     let context = ExecutionContext {
         invocation_id: scope.invocation_id,
         correlation_id: CorrelationId::new(),
@@ -6253,7 +6959,7 @@ fn execution_context_with_dispatch_grant_for_scope(
         extension_id: ExtensionId::new("caller").unwrap(),
         runtime: RuntimeKind::Wasm,
         trust: TrustClass::UserTrusted,
-        grants: capability_grants(capability),
+        grants: capability_grants_with_effects(capability, allowed_effects),
         mounts: MountView::default(),
         resource_scope: scope,
     };
@@ -6262,6 +6968,16 @@ fn execution_context_with_dispatch_grant_for_scope(
 }
 
 fn capability_grants(capability: CapabilityId) -> CapabilitySet {
+    capability_grants_with_effects(
+        capability,
+        vec![EffectKind::DispatchCapability, EffectKind::Network],
+    )
+}
+
+fn capability_grants_with_effects(
+    capability: CapabilityId,
+    allowed_effects: Vec<EffectKind>,
+) -> CapabilitySet {
     let mut grants = CapabilitySet::default();
     grants.grants.push(CapabilityGrant {
         id: CapabilityGrantId::new(),
@@ -6269,7 +6985,7 @@ fn capability_grants(capability: CapabilityId) -> CapabilitySet {
         grantee: Principal::Extension(ExtensionId::new("caller").unwrap()),
         issued_by: Principal::HostRuntime,
         constraints: GrantConstraints {
-            allowed_effects: vec![EffectKind::DispatchCapability, EffectKind::Network],
+            allowed_effects,
             mounts: MountView::default(),
             network: NetworkPolicy::default(),
             secrets: Vec::new(),
@@ -6308,10 +7024,14 @@ fn local_manifest_trust_policy(
 }
 
 fn trust_decision_with_dispatch_authority() -> TrustDecision {
+    trust_decision_with_authority(vec![EffectKind::DispatchCapability, EffectKind::Network])
+}
+
+fn trust_decision_with_authority(allowed_effects: Vec<EffectKind>) -> TrustDecision {
     TrustDecision {
         effective_trust: EffectiveTrustClass::user_trusted(),
         authority_ceiling: AuthorityCeiling {
-            allowed_effects: vec![EffectKind::DispatchCapability, EffectKind::Network],
+            allowed_effects,
             max_resource_ceiling: None,
         },
         provenance: TrustProvenance::Default,
@@ -6457,8 +7177,46 @@ fn process_sandbox_start(process_id: ProcessId, scope: ResourceScope) -> Process
         mounts: MountView::default(),
         estimated_resources: ResourceEstimate::default(),
         resource_reservation_id: None,
-        input: json!({"run": {"command": "echo", "args": ["ok"]}}),
+        input: process_sandbox_input(),
     }
+}
+
+fn process_sandbox_runtime_request_for_scope(scope: ResourceScope) -> RuntimeCapabilityRequest {
+    RuntimeCapabilityRequest::new(
+        execution_context_with_effect_grants_for_scope(
+            process_sandbox_capability_id(),
+            scope,
+            process_sandbox_authority_effects(),
+        ),
+        process_sandbox_capability_id(),
+        process_sandbox_estimate(),
+        process_sandbox_input(),
+        process_sandbox_trust_decision(),
+    )
+}
+
+fn process_sandbox_estimate() -> ResourceEstimate {
+    ResourceEstimate {
+        process_count: Some(1),
+        concurrency_slots: Some(1),
+        ..ResourceEstimate::default()
+    }
+}
+
+fn process_sandbox_input() -> serde_json::Value {
+    json!({"run": {"command": "echo", "args": ["ok"]}})
+}
+
+fn invalid_process_sandbox_input() -> serde_json::Value {
+    json!({"run": {"command": ""}})
+}
+
+fn process_sandbox_authority_effects() -> Vec<EffectKind> {
+    vec![EffectKind::ExecuteCode, EffectKind::SpawnProcess]
+}
+
+fn process_sandbox_trust_decision() -> TrustDecision {
+    trust_decision_with_authority(process_sandbox_authority_effects())
 }
 
 fn script_extension_id() -> ExtensionId {
@@ -6742,6 +7500,25 @@ id = "script.echo"
 description = "Echo through Script"
 effects = ["dispatch_capability"]
 default_permission = "allow"
+parameters_schema = { type = "object" }
+"#;
+
+const PROCESS_SANDBOX_MANIFEST: &str = r#"
+id = "system.process_sandbox"
+name = "Process Sandbox"
+version = "0.1.0"
+description = "System process sandbox runtime"
+trust = "system_requested"
+
+[runtime]
+kind = "system"
+service = "process_sandbox"
+
+[[capabilities]]
+id = "system.process_sandbox.run"
+description = "Run a process inside the system sandbox backend"
+effects = ["execute_code", "spawn_process"]
+default_permission = "ask"
 parameters_schema = { type = "object" }
 "#;
 

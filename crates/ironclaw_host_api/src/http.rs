@@ -5,11 +5,12 @@
 //! policy/transport with scoped secret leases; runtime crates must not perform
 //! their own outbound HTTP, DNS, private-IP checks, or credential injection.
 
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    CapabilityId, HostApiError, MountView, NetworkMethod, NetworkPolicy, ResourceScope,
+    CapabilityId, HostApiError, MountGrant, NetworkMethod, NetworkPolicy, ResourceScope,
     RuntimeKind, ScopedPath, SecretHandle,
 };
 
@@ -51,14 +52,14 @@ pub struct RuntimeHttpEgressRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeHttpSaveTarget {
     pub path: ScopedPath,
-    /// Host-derived mount authority used to parse and authorize `path`.
+    /// Host-derived write authority for `path`.
     ///
     /// This is skipped on the wire so guest/runtime-provided requests cannot
-    /// grant themselves filesystem authority by serializing a custom mount
-    /// view. Host translators that already hold an invocation mount view may
-    /// attach it before dispatching to the host egress service.
+    /// grant themselves filesystem authority by serializing a custom mount.
+    /// Host translators that already resolved the destination may attach a
+    /// narrowed single-path grant before dispatching to the host egress service.
     #[serde(skip)]
-    pub mount_view: Option<MountView>,
+    pub mount_grant: Option<MountGrant>,
 }
 
 /// One host-approved credential injection.
@@ -101,6 +102,9 @@ pub enum RuntimeCredentialTarget {
     },
     QueryParam {
         name: String,
+    },
+    PathPlaceholder {
+        placeholder: String,
     },
 }
 
@@ -148,6 +152,9 @@ impl RuntimeCredentialTarget {
                     "must not be empty or contain NUL/control characters",
                 )?;
             }
+            Self::PathPlaceholder { placeholder } => {
+                validate_runtime_credential_path_placeholder(placeholder)?;
+            }
         }
         Ok(())
     }
@@ -158,6 +165,22 @@ fn validate_runtime_credential_header_name(name: &str) -> Result<(), HostApiErro
         return Err(HostApiError::invalid_runtime_credential_target(
             "header_name",
             "must be an ASCII HTTP field-name token",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_runtime_credential_path_placeholder(placeholder: &str) -> Result<(), HostApiError> {
+    if placeholder.is_empty()
+        || placeholder == "."
+        || placeholder == ".."
+        || !placeholder
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~'))
+    {
+        return Err(HostApiError::invalid_runtime_credential_target(
+            "path_placeholder",
+            "must be a non-empty unreserved path segment other than . or ..",
         ));
     }
     Ok(())
@@ -352,21 +375,23 @@ pub fn is_sensitive_runtime_response_header(name: &str) -> bool {
             .any(|marker| normalized.contains(marker))
 }
 
+#[async_trait]
 pub trait RuntimeHttpEgress: Send + Sync {
-    fn execute(
+    async fn execute(
         &self,
         request: RuntimeHttpEgressRequest,
     ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError>;
 }
 
+#[async_trait]
 impl<T> RuntimeHttpEgress for std::sync::Arc<T>
 where
     T: RuntimeHttpEgress + ?Sized,
 {
-    fn execute(
+    async fn execute(
         &self,
         request: RuntimeHttpEgressRequest,
     ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
-        self.as_ref().execute(request)
+        self.as_ref().execute(request).await
     }
 }

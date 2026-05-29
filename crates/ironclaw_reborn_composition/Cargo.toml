@@ -57,6 +57,12 @@ postgres = [
     "ironclaw_resources/postgres",
     "ironclaw_run_state/postgres",
 ]
+# Expose hooks that production builds keep private but integration
+# tests in `tests/*.rs` need (e.g. injecting a recording/replay
+# `HostManagedModelGateway` via `RebornRuntimeInput::with_model_gateway_override`).
+# Off by default; enable with `cargo test --features test-support` (and
+# whatever feature surface the test crate also requires, e.g. `webui-v2-beta`).
+test-support = []
 
 [dependencies]
 async-trait = "0.1"
@@ -64,6 +70,8 @@ chrono = "0.4"
 deadpool-postgres = { version = "0.14", optional = true }
 futures = "0.3"
 ironclaw_auth = { path = "../ironclaw_auth" }
+ironclaw_common = { path = "../ironclaw_common" }
+ironclaw_capabilities = { path = "../ironclaw_capabilities" }
 ironclaw_approvals = { path = "../ironclaw_approvals" }
 ironclaw_authorization = { path = "../ironclaw_authorization" }
 ironclaw_event_projections = { path = "../ironclaw_event_projections" }
@@ -110,6 +118,7 @@ serde_json = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["rt"] }
+toml = "0.8"
 tracing = "0.1"
 url = "2"
 uuid = { version = "1", features = ["v4"] }

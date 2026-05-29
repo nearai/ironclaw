@@ -285,8 +285,9 @@ mod tests {
 
     struct NoopRuntimeHttpEgress;
 
+    #[async_trait]
     impl ironclaw_host_api::RuntimeHttpEgress for NoopRuntimeHttpEgress {
-        fn execute(
+        async fn execute(
             &self,
             _request: ironclaw_host_api::RuntimeHttpEgressRequest,
         ) -> Result<
@@ -305,6 +306,7 @@ mod tests {
         ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
             Ok(CommandExecutionOutput {
                 output: self.0.to_string(),
+                saved_output: None,
                 exit_code: 0,
                 sandboxed: false,
                 duration: std::time::Duration::ZERO,

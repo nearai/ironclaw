@@ -447,6 +447,7 @@ mod tests {
                 .expect("ok"),
                 messages: Vec::new(),
                 surface_version: None,
+                compaction_message_index: Vec::new(),
                 instruction_fingerprint: None,
                 identity_message_count: 0,
                 instruction_snippet_count: 0,

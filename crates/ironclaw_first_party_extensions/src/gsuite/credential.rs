@@ -3,7 +3,8 @@ use std::sync::Arc;
 use ironclaw_auth::{
     AuthProductError, AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountId,
     CredentialAccountLookupRequest, CredentialAccountSelectionRequest, CredentialAccountService,
-    CredentialAccountStatus, GOOGLE_PROVIDER_ID, ProviderScope,
+    CredentialAccountStatus, CredentialRecoveryProjection, CredentialRefreshRequest,
+    GOOGLE_PROVIDER_ID, ProviderScope,
 };
 use ironclaw_host_api::{ExtensionId, ResourceScope, SecretHandle};
 use thiserror::Error;
@@ -18,16 +19,12 @@ pub struct GoogleCredential {
 
 #[derive(Debug, Error)]
 pub enum GoogleCredentialError {
-    #[error("Google credential account is missing")]
-    Missing,
-    #[error("Google credential account requires account selection")]
-    AccountSelectionRequired,
-    #[error("Google credential account is not configured")]
-    NotConfigured,
+    #[error("Google credential recovery is required")]
+    Recovery(CredentialRecoveryProjection),
+    #[error("Google credential account is missing required scopes")]
+    MissingScopes { missing_scopes: Vec<ProviderScope> },
     #[error("Google credential account has no access secret")]
     MissingAccessSecret,
-    #[error("Google credential account is missing required scopes")]
-    MissingScopes,
     #[error(transparent)]
     Auth(#[from] AuthProductError),
     #[error(transparent)]
@@ -52,24 +49,57 @@ impl GoogleCredentialResolver {
     ) -> Result<GoogleCredential, GoogleCredentialError> {
         let auth_scope = AuthProductScope::new(scope.clone(), AuthSurface::Api);
         let provider = google_provider_id()?;
-        let selected = self
-            .accounts
-            .select_unique_configured_account(
-                CredentialAccountSelectionRequest::new(auth_scope.clone(), provider)
-                    .for_extension(requester_extension.clone()),
+        let selected_account = self
+            .recoverable_result(
+                self.accounts
+                    .select_unique_configured_account(
+                        CredentialAccountSelectionRequest::new(
+                            auth_scope.clone(),
+                            provider.clone(),
+                        )
+                        .for_extension(requester_extension.clone()),
+                    )
+                    .await,
+                scope,
+                requester_extension,
+                &provider,
             )
-            .await
-            .map_err(map_selection_error)?;
+            .await?;
+        self.resolve_account(
+            scope,
+            requester_extension,
+            selected_account.id,
+            required_scopes,
+        )
+        .await
+    }
+
+    pub async fn resolve_account(
+        &self,
+        scope: &ResourceScope,
+        requester_extension: &ExtensionId,
+        account_id: CredentialAccountId,
+        required_scopes: &[ProviderScope],
+    ) -> Result<GoogleCredential, GoogleCredentialError> {
+        let auth_scope = AuthProductScope::new(scope.clone(), AuthSurface::Api);
+        let provider = google_provider_id()?;
         let account = self
-            .accounts
-            .get_account(
-                CredentialAccountLookupRequest::new(auth_scope, selected.id)
-                    .for_extension(requester_extension.clone()),
+            .recoverable_lookup(
+                self.accounts
+                    .get_account(
+                        CredentialAccountLookupRequest::new(auth_scope, account_id)
+                            .for_extension(requester_extension.clone()),
+                    )
+                    .await,
+                scope,
+                requester_extension,
+                &provider,
             )
-            .await?
-            .ok_or(GoogleCredentialError::Missing)?;
+            .await?;
         if account.status != CredentialAccountStatus::Configured {
-            return Err(GoogleCredentialError::NotConfigured);
+            return self
+                .recovery_required(scope, requester_extension, provider)
+                .await;
         }
         let access_secret = account
             .access_secret
@@ -81,7 +111,7 @@ impl GoogleCredentialResolver {
             .cloned()
             .collect::<Vec<_>>();
         if !missing_scopes.is_empty() {
-            return Err(GoogleCredentialError::MissingScopes);
+            return Err(GoogleCredentialError::MissingScopes { missing_scopes });
         }
         Ok(GoogleCredential {
             account_id: account.id,
@@ -90,20 +120,115 @@ impl GoogleCredentialResolver {
             missing_scopes,
         })
     }
+
+    pub async fn refresh(
+        &self,
+        scope: &ResourceScope,
+        requester_extension: &ExtensionId,
+        account_id: CredentialAccountId,
+    ) -> Result<(), GoogleCredentialError> {
+        let auth_scope = AuthProductScope::new(scope.clone(), AuthSurface::Api);
+        let provider = google_provider_id()?;
+        self.recoverable_result(
+            self.accounts
+                .refresh_account(
+                    CredentialRefreshRequest::new(auth_scope, provider.clone(), account_id)
+                        .for_extension(requester_extension.clone()),
+                )
+                .await,
+            scope,
+            requester_extension,
+            &provider,
+        )
+        .await
+        .map(|_| ())
+    }
+
+    async fn recovery_required(
+        &self,
+        scope: &ResourceScope,
+        requester_extension: &ExtensionId,
+        provider: AuthProviderId,
+    ) -> Result<GoogleCredential, GoogleCredentialError> {
+        Err(self
+            .recovery_error(scope, requester_extension, provider)
+            .await)
+    }
+
+    async fn recovery_error(
+        &self,
+        scope: &ResourceScope,
+        requester_extension: &ExtensionId,
+        provider: AuthProviderId,
+    ) -> GoogleCredentialError {
+        match self
+            .project_recovery(scope, requester_extension, provider)
+            .await
+        {
+            Ok(recovery) => GoogleCredentialError::Recovery(recovery),
+            Err(error) => error,
+        }
+    }
+
+    async fn recoverable_result<T>(
+        &self,
+        result: Result<T, AuthProductError>,
+        scope: &ResourceScope,
+        requester_extension: &ExtensionId,
+        provider: &AuthProviderId,
+    ) -> Result<T, GoogleCredentialError> {
+        match result {
+            Ok(value) => Ok(value),
+            Err(
+                AuthProductError::CredentialMissing
+                | AuthProductError::CrossScopeDenied
+                | AuthProductError::AccountSelectionRequired,
+            ) => Err(self
+                .recovery_error(scope, requester_extension, provider.clone())
+                .await),
+            Err(error) => Err(GoogleCredentialError::Auth(error)),
+        }
+    }
+
+    async fn recoverable_lookup<T>(
+        &self,
+        result: Result<Option<T>, AuthProductError>,
+        scope: &ResourceScope,
+        requester_extension: &ExtensionId,
+        provider: &AuthProviderId,
+    ) -> Result<T, GoogleCredentialError> {
+        match self
+            .recoverable_result(result, scope, requester_extension, provider)
+            .await?
+        {
+            Some(value) => Ok(value),
+            None => Err(self
+                .recovery_error(scope, requester_extension, provider.clone())
+                .await),
+        }
+    }
+
+    async fn project_recovery(
+        &self,
+        scope: &ResourceScope,
+        requester_extension: &ExtensionId,
+        provider: AuthProviderId,
+    ) -> Result<CredentialRecoveryProjection, GoogleCredentialError> {
+        self.accounts
+            .project_credential_recovery(
+                ironclaw_auth::CredentialRecoveryRequest::new(
+                    AuthProductScope::new(scope.clone(), AuthSurface::Api),
+                    provider,
+                )
+                .for_extension(requester_extension.clone()),
+            )
+            .await
+            .map_err(GoogleCredentialError::Auth)
+    }
 }
 
 pub fn google_provider_id() -> Result<AuthProviderId, AuthProductError> {
     AuthProviderId::new(GOOGLE_PROVIDER_ID)
-}
-
-fn map_selection_error(error: AuthProductError) -> GoogleCredentialError {
-    match error {
-        AuthProductError::CredentialMissing => GoogleCredentialError::Missing,
-        AuthProductError::AccountSelectionRequired => {
-            GoogleCredentialError::AccountSelectionRequired
-        }
-        other => GoogleCredentialError::Auth(other),
-    }
 }
 
 #[cfg(test)]
@@ -111,8 +236,10 @@ mod tests {
     use async_trait::async_trait;
     use ironclaw_auth::{
         CredentialAccount, CredentialAccountChoiceRequest, CredentialAccountLabel,
-        CredentialAccountListPage, CredentialAccountListRequest, CredentialAccountProjection,
-        CredentialOwnership, CredentialRecoveryProjection, CredentialRecoveryRequest,
+        CredentialAccountListPage, CredentialAccountListRequest, CredentialAccountLookupRequest,
+        CredentialAccountProjection, CredentialAccountSelectionRequest, CredentialOwnership,
+        CredentialRecoveryKind, CredentialRecoveryProjection, CredentialRecoveryReason,
+        CredentialRecoveryRequest, CredentialRefreshReport, CredentialRefreshRequest,
         InMemoryAuthProductServices, NewCredentialAccount,
     };
     use ironclaw_host_api::{InvocationId, UserId};
@@ -125,23 +252,30 @@ mod tests {
     }
 
     #[test]
-    fn map_selection_error_tests() {
+    fn google_credential_error_variants_are_constructible() {
+        let recovery = CredentialRecoveryProjection::setup_required(
+            google_provider_id().unwrap(),
+            CredentialRecoveryReason::NoAccount,
+            Vec::new(),
+        );
         assert!(matches!(
-            map_selection_error(AuthProductError::CredentialMissing),
-            GoogleCredentialError::Missing
+            GoogleCredentialError::Recovery(recovery.clone()),
+            GoogleCredentialError::Recovery(_)
         ));
         assert!(matches!(
-            map_selection_error(AuthProductError::AccountSelectionRequired),
-            GoogleCredentialError::AccountSelectionRequired
+            GoogleCredentialError::MissingScopes {
+                missing_scopes: Vec::new()
+            },
+            GoogleCredentialError::MissingScopes { .. }
         ));
         assert!(matches!(
-            map_selection_error(AuthProductError::BackendUnavailable),
+            GoogleCredentialError::Auth(AuthProductError::BackendUnavailable),
             GoogleCredentialError::Auth(AuthProductError::BackendUnavailable)
         ));
     }
 
     #[tokio::test]
-    async fn resolve_returns_not_configured_when_account_status_unconfigured() {
+    async fn resolve_returns_recovery_when_account_status_is_pending_setup() {
         let scope =
             ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new())
                 .unwrap();
@@ -168,11 +302,15 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(matches!(error, GoogleCredentialError::NotConfigured));
+        let GoogleCredentialError::Recovery(recovery) = error else {
+            panic!("expected recovery error");
+        };
+        assert_eq!(recovery.kind(), CredentialRecoveryKind::SetupRequired);
+        assert_eq!(recovery.reason, CredentialRecoveryReason::PendingSetup);
     }
 
     #[tokio::test]
-    async fn resolve_returns_missing_when_selected_account_disappears() {
+    async fn resolve_returns_recovery_when_selected_account_disappears() {
         let scope =
             ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new())
                 .unwrap();
@@ -194,7 +332,11 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(matches!(error, GoogleCredentialError::Missing));
+        let GoogleCredentialError::Recovery(recovery) = error else {
+            panic!("expected recovery error");
+        };
+        assert_eq!(recovery.kind(), CredentialRecoveryKind::SetupRequired);
+        assert_eq!(recovery.reason, CredentialRecoveryReason::NoAccount);
     }
 
     #[tokio::test]
@@ -249,7 +391,11 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(matches!(error, GoogleCredentialError::MissingScopes));
+        assert!(matches!(
+            error,
+            GoogleCredentialError::MissingScopes { missing_scopes }
+            if missing_scopes == vec![ProviderScope::new("https://www.googleapis.com/auth/calendar.events").unwrap()]
+        ));
     }
 
     #[tokio::test]
@@ -313,6 +459,49 @@ mod tests {
         selected: CredentialAccountProjection,
     }
 
+    fn recovery_projection_for_account(
+        account: &CredentialAccount,
+    ) -> CredentialRecoveryProjection {
+        let provider = google_provider_id().unwrap();
+        match account.status {
+            CredentialAccountStatus::Configured => {
+                CredentialRecoveryProjection::configured(provider, account.projection())
+            }
+            CredentialAccountStatus::PendingSetup => CredentialRecoveryProjection::setup_required(
+                provider,
+                CredentialRecoveryReason::PendingSetup,
+                vec![account.projection()],
+            ),
+            CredentialAccountStatus::Missing => CredentialRecoveryProjection::setup_required(
+                provider,
+                CredentialRecoveryReason::AccountMissing,
+                vec![account.projection()],
+            ),
+            CredentialAccountStatus::Inactive => CredentialRecoveryProjection::setup_required(
+                provider,
+                CredentialRecoveryReason::AccountInactive,
+                vec![account.projection()],
+            ),
+            CredentialAccountStatus::Expired => CredentialRecoveryProjection::reauthorize_required(
+                provider,
+                CredentialRecoveryReason::AccountExpired,
+                vec![account.projection()],
+            ),
+            CredentialAccountStatus::RefreshFailed => {
+                CredentialRecoveryProjection::reauthorize_required(
+                    provider,
+                    CredentialRecoveryReason::RefreshFailed,
+                    vec![account.projection()],
+                )
+            }
+            CredentialAccountStatus::Revoked => CredentialRecoveryProjection::reauthorize_required(
+                provider,
+                CredentialRecoveryReason::AccountRevoked,
+                vec![account.projection()],
+            ),
+        }
+    }
+
     #[async_trait]
     impl CredentialAccountService for FakeCredentialAccountService {
         async fn create_account(
@@ -359,7 +548,7 @@ mod tests {
             &self,
             _request: CredentialRecoveryRequest,
         ) -> Result<CredentialRecoveryProjection, AuthProductError> {
-            unreachable!("Google credential resolver tests do not project recovery")
+            Ok(recovery_projection_for_account(&self.account))
         }
 
         async fn select_configured_account(
@@ -367,6 +556,13 @@ mod tests {
             _request: CredentialAccountChoiceRequest,
         ) -> Result<CredentialAccountProjection, AuthProductError> {
             unreachable!("Google credential resolver tests use unique selection")
+        }
+
+        async fn refresh_account(
+            &self,
+            _request: CredentialRefreshRequest,
+        ) -> Result<CredentialRefreshReport, AuthProductError> {
+            unreachable!("Google credential resolver tests do not refresh accounts")
         }
     }
 
@@ -416,7 +612,11 @@ mod tests {
             &self,
             _request: CredentialRecoveryRequest,
         ) -> Result<CredentialRecoveryProjection, AuthProductError> {
-            unreachable!("Google credential resolver tests do not project recovery")
+            Ok(CredentialRecoveryProjection::setup_required(
+                google_provider_id().unwrap(),
+                CredentialRecoveryReason::NoAccount,
+                Vec::new(),
+            ))
         }
 
         async fn select_configured_account(
@@ -424,6 +624,13 @@ mod tests {
             _request: CredentialAccountChoiceRequest,
         ) -> Result<CredentialAccountProjection, AuthProductError> {
             unreachable!("Google credential resolver tests use unique selection")
+        }
+
+        async fn refresh_account(
+            &self,
+            _request: CredentialRefreshRequest,
+        ) -> Result<CredentialRefreshReport, AuthProductError> {
+            unreachable!("Google credential resolver tests do not refresh accounts")
         }
     }
 }

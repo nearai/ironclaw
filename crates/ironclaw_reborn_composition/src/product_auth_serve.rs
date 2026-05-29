@@ -1,4 +1,4 @@
-//! Reborn-native product-auth OAuth route composition.
+//! Reborn-native product-auth route composition.
 //!
 //! This module owns only HTTP parsing, scope derivation from host-owned
 //! composition, one-way hashing of callback material, and sanitized response
@@ -8,6 +8,7 @@
 use std::{
     num::{NonZeroU32, NonZeroU64, NonZeroUsize},
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
 use axum::{
@@ -19,11 +20,11 @@ use axum::{
 };
 use chrono::{Duration as ChronoDuration, Utc};
 use ironclaw_auth::{
-    AuthContinuationRef, AuthErrorCode, AuthFlowId, AuthFlowStatus, AuthProductError,
-    AuthProductScope, AuthProviderId, AuthSessionId, AuthSurface, AuthorizationCodeHash,
-    CredentialAccountLabel, OAuthAuthorizationCode, OAuthAuthorizationUrl,
-    OAuthProviderCallbackRequest, OpaqueStateHash, PkceVerifierHash, PkceVerifierSecret,
-    ProviderScope, Timestamp,
+    AuthContinuationRef, AuthErrorCode, AuthFlowId, AuthFlowStatus, AuthGateRef, AuthInteractionId,
+    AuthProductError, AuthProductScope, AuthProviderId, AuthSessionId, AuthSurface,
+    AuthorizationCodeHash, CredentialAccountId, CredentialAccountLabel, CredentialAccountStatus,
+    OAuthAuthorizationCode, OAuthAuthorizationUrl, OAuthProviderCallbackRequest, OpaqueStateHash,
+    PkceVerifierHash, PkceVerifierSecret, ProviderScope, Timestamp, TurnRunRef,
 };
 use ironclaw_host_api::NetworkMethod;
 use ironclaw_host_api::ingress::{
@@ -33,7 +34,6 @@ use ironclaw_host_api::ingress::{
 };
 use ironclaw_host_api::{
     AgentId, InvocationId, ProjectId, ResourceScope, TenantId, ThreadId, UserId,
-    sha256_digest_token,
 };
 use ironclaw_product_workflow::WebUiAuthenticatedCaller;
 use lru::LruCache;
@@ -44,26 +44,29 @@ use uuid::Uuid;
 
 use crate::auth::RebornOAuthStartFlowRequest;
 use crate::{
-    RebornOAuthCallbackError, RebornOAuthCallbackOutcome, RebornOAuthCallbackRequest,
-    RebornOAuthCallbackResponse, RebornProductAuthServices,
+    RebornManualTokenSetupRequest, RebornManualTokenSubmitRequest, RebornOAuthCallbackError,
+    RebornOAuthCallbackOutcome, RebornOAuthCallbackRequest, RebornOAuthCallbackResponse,
+    RebornProductAuthServices,
 };
 
 pub(crate) const OAUTH_START_PATH: &str = "/api/reborn/product-auth/oauth/start";
 pub(crate) const OAUTH_CALLBACK_PATH: &str = "/api/reborn/product-auth/oauth/callback/{flow_id}";
+pub(crate) const MANUAL_TOKEN_SUBMIT_PATH: &str = "/api/reborn/product-auth/manual-token/submit";
 
 const OAUTH_START_ROUTE_ID: &str = "product_auth.oauth.start";
 const OAUTH_CALLBACK_ROUTE_ID: &str = "product_auth.oauth.callback";
+const MANUAL_TOKEN_SUBMIT_ROUTE_ID: &str = "product_auth.manual_token.submit";
 const OAUTH_PKCE_VERIFIER_CACHE_CAPACITY: NonZeroUsize = match NonZeroUsize::new(1024) {
     Some(value) => value,
     // SAFETY: 1024 is a non-zero literal cache cap.
     None => unreachable!(),
 };
-const OAUTH_START_BODY_LIMIT_BYTES: NonZeroU64 = match NonZeroU64::new(16 * 1024) {
+const PRODUCT_AUTH_MUTATION_BODY_LIMIT_BYTES: NonZeroU64 = match NonZeroU64::new(16 * 1024) {
     Some(value) => value,
     // SAFETY: 16 KiB is a non-zero literal body cap.
     None => unreachable!(),
 };
-const OAUTH_START_MAX_REQUESTS: NonZeroU32 = match NonZeroU32::new(20) {
+const PRODUCT_AUTH_MUTATION_MAX_REQUESTS: NonZeroU32 = match NonZeroU32::new(20) {
     Some(value) => value,
     // SAFETY: 20 is a non-zero literal rate limit.
     None => unreachable!(),
@@ -78,7 +81,8 @@ const OAUTH_RATE_WINDOW_SECONDS: NonZeroU32 = match NonZeroU32::new(60) {
     // SAFETY: 60 is a non-zero literal rate-limit window.
     None => unreachable!(),
 };
-const OAUTH_FLOW_MAX_TTL_SECONDS: i64 = 10 * 60;
+const PRODUCT_AUTH_FLOW_MAX_TTL_SECONDS: i64 = 10 * 60;
+const PRODUCT_AUTH_BACKEND_TIMEOUT: Duration = Duration::from_secs(30);
 const OAUTH_CALLBACK_QUERY_MAX_BYTES: usize = 16 * 1024;
 const OAUTH_CALLBACK_FIELD_MAX_BYTES: usize = 512;
 const OAUTH_CALLBACK_SCOPES_MAX_BYTES: usize = 4 * 1024;
@@ -209,6 +213,7 @@ pub(crate) fn product_auth_route_mount(state: ProductAuthRouteState) -> ProductA
     ProductAuthRouteMount {
         protected: Router::new()
             .route(OAUTH_START_PATH, post(oauth_start_handler))
+            .route(MANUAL_TOKEN_SUBMIT_PATH, post(manual_token_submit_handler))
             .with_state(state.clone()),
         public: Router::new()
             .route(OAUTH_CALLBACK_PATH, get(oauth_callback_handler))
@@ -223,13 +228,19 @@ pub(crate) fn product_auth_route_descriptors() -> Vec<IngressRouteDescriptor> {
             OAUTH_START_ROUTE_ID,
             NetworkMethod::Post,
             OAUTH_START_PATH,
-            start_policy(),
+            protected_mutation_policy(),
         ),
         descriptor(
             OAUTH_CALLBACK_ROUTE_ID,
             NetworkMethod::Get,
             OAUTH_CALLBACK_PATH,
             callback_policy(),
+        ),
+        descriptor(
+            MANUAL_TOKEN_SUBMIT_ROUTE_ID,
+            NetworkMethod::Post,
+            MANUAL_TOKEN_SUBMIT_PATH,
+            protected_mutation_policy(),
         ),
     ]
 }
@@ -244,7 +255,7 @@ fn descriptor(
         .expect("product-auth route descriptor must validate at startup") // safety: ids/patterns are crate-local literals, and policies are constructed by sibling helpers that validate their parts.
 }
 
-fn start_policy() -> IngressPolicy {
+fn protected_mutation_policy() -> IngressPolicy {
     IngressPolicy::new(IngressPolicyParts {
         listener_class: ListenerClass::LocalGateway,
         auth: IngressAuthPolicy::Required {
@@ -252,11 +263,11 @@ fn start_policy() -> IngressPolicy {
         },
         scope_source: ironclaw_host_api::IngressScopeSource::AuthenticatedCaller,
         body_limit: BodyLimitPolicy::Limited {
-            max_bytes: OAUTH_START_BODY_LIMIT_BYTES,
+            max_bytes: PRODUCT_AUTH_MUTATION_BODY_LIMIT_BYTES,
         },
         rate_limit: RateLimitPolicy::Limited {
             scope: RateLimitScope::PerCaller,
-            max_requests: OAUTH_START_MAX_REQUESTS,
+            max_requests: PRODUCT_AUTH_MUTATION_MAX_REQUESTS,
             window_seconds: OAUTH_RATE_WINDOW_SECONDS,
         },
         cors: CorsPolicy::SameOriginOnly,
@@ -303,6 +314,19 @@ struct OAuthStartRequest {
     thread_id: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct ManualTokenSubmitRequest {
+    provider: String,
+    account_label: String,
+    token: UnvalidatedRawSecretValue,
+    run_id: String,
+    gate_ref: String,
+    #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default)]
+    thread_id: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct OAuthStartResponse {
     pub(crate) flow_id: AuthFlowId,
@@ -312,6 +336,13 @@ pub(crate) struct OAuthStartResponse {
     pub(crate) expires_at: Timestamp,
     pub(crate) continuation: AuthContinuationRef,
     pub(crate) callback_scope: OAuthCallbackScopeHint,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ManualTokenSubmitResponse {
+    pub(crate) credential_ref: CredentialAccountId,
+    pub(crate) status: CredentialAccountStatus,
+    pub(crate) continuation: AuthContinuationRef,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -384,6 +415,13 @@ impl ProductAuthRouteFailure {
             AuthErrorCode::BackendUnavailable,
         )
     }
+
+    fn backend_timeout() -> Self {
+        Self::new(
+            StatusCode::GATEWAY_TIMEOUT,
+            AuthErrorCode::BackendUnavailable,
+        )
+    }
 }
 
 impl IntoResponse for ProductAuthRouteFailure {
@@ -432,7 +470,7 @@ async fn oauth_start_handler(
 ) -> Result<Json<OAuthStartResponse>, ProductAuthRouteFailure> {
     let now = Utc::now();
     if request.expires_at <= now
-        || request.expires_at > now + ChronoDuration::seconds(OAUTH_FLOW_MAX_TTL_SECONDS)
+        || request.expires_at > now + ChronoDuration::seconds(PRODUCT_AUTH_FLOW_MAX_TTL_SECONDS)
     {
         return Err(ProductAuthRouteFailure::invalid_request());
     }
@@ -482,6 +520,124 @@ async fn oauth_start_handler(
     }))
 }
 
+async fn manual_token_submit_handler(
+    State(state): State<ProductAuthRouteState>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Json(request): Json<ManualTokenSubmitRequest>,
+) -> Result<Json<ManualTokenSubmitResponse>, ProductAuthRouteFailure> {
+    let scope = scope_from_authenticated_caller_parts(
+        &caller,
+        request.thread_id.as_ref(),
+        request.session_id.as_ref(),
+    )?;
+    let provider = AuthProviderId::new(request.provider)
+        .map_err(|_| ProductAuthRouteFailure::invalid_request())?;
+    let label = CredentialAccountLabel::new(request.account_label)
+        .map_err(|_| ProductAuthRouteFailure::invalid_request())?;
+    let token = request
+        .token
+        .into_validated()
+        .map_err(|_| ProductAuthRouteFailure::invalid_request())?;
+    // This route only persists a scoped credential and returns its account id.
+    // The browser must still call WebUI v2 resolve_gate, where the turn
+    // coordinator verifies the caller, run id, and gate ref before resuming.
+    let continuation = AuthContinuationRef::TurnGateResume {
+        turn_run_ref: TurnRunRef::new(request.run_id)
+            .map_err(|_| ProductAuthRouteFailure::invalid_request())?,
+        gate_ref: AuthGateRef::new(request.gate_ref)
+            .map_err(|_| ProductAuthRouteFailure::invalid_request())?,
+    };
+    let expires_at = Utc::now() + ChronoDuration::seconds(PRODUCT_AUTH_FLOW_MAX_TTL_SECONDS);
+
+    let challenge = tokio::time::timeout(
+        PRODUCT_AUTH_BACKEND_TIMEOUT,
+        state
+            .product_auth
+            .request_manual_token_setup(RebornManualTokenSetupRequest::new(
+                scope.clone(),
+                provider,
+                label,
+                continuation,
+                expires_at,
+            )),
+    )
+    .await
+    .map_err(|_| ProductAuthRouteFailure::backend_timeout())?
+    .map_err(ProductAuthRouteFailure::from)?;
+    let submitted = match tokio::time::timeout(
+        PRODUCT_AUTH_BACKEND_TIMEOUT,
+        state
+            .product_auth
+            .submit_manual_token(RebornManualTokenSubmitRequest::new(
+                scope.clone(),
+                challenge.interaction_id,
+                token.into_secret(),
+            )),
+    )
+    .await
+    {
+        Ok(Ok(submitted)) => submitted,
+        Ok(Err(error)) => {
+            abandon_manual_token_after_submit_failure(
+                &state,
+                &scope,
+                challenge.interaction_id,
+                error.code,
+            )
+            .await;
+            return Err(ProductAuthRouteFailure::from(error));
+        }
+        Err(_) => {
+            abandon_manual_token_after_submit_failure(
+                &state,
+                &scope,
+                challenge.interaction_id,
+                AuthErrorCode::BackendUnavailable,
+            )
+            .await;
+            return Err(ProductAuthRouteFailure::backend_timeout());
+        }
+    };
+
+    Ok(Json(ManualTokenSubmitResponse {
+        credential_ref: submitted.account_id,
+        status: submitted.status,
+        continuation: submitted.continuation,
+    }))
+}
+
+async fn abandon_manual_token_after_submit_failure(
+    state: &ProductAuthRouteState,
+    scope: &AuthProductScope,
+    interaction_id: AuthInteractionId,
+    submit_error_code: AuthErrorCode,
+) {
+    match tokio::time::timeout(
+        PRODUCT_AUTH_BACKEND_TIMEOUT,
+        state
+            .product_auth
+            .abandon_manual_token(scope, interaction_id),
+    )
+    .await
+    {
+        Ok(Ok(_)) => {}
+        Ok(Err(cleanup_error)) => {
+            tracing::debug!(
+                error_code = ?submit_error_code,
+                cleanup_error_code = ?cleanup_error.code,
+                "manual-token submit failed and interaction cleanup failed"
+            );
+        }
+        Err(_) => {
+            tracing::debug!(
+                error_code = ?submit_error_code,
+                cleanup_error_code = ?AuthErrorCode::BackendUnavailable,
+                "manual-token submit failed and interaction cleanup timed out"
+            );
+        }
+    }
+}
+
 async fn oauth_callback_handler(
     State(state): State<ProductAuthRouteState>,
     Path(flow_id): Path<String>,
@@ -513,7 +669,7 @@ async fn oauth_callback_handler(
             .await
             .map_err(ProductAuthRouteFailure::from)?;
     }
-    let outcome = callback_outcome_from_query(&state, flow_id, &query)?;
+    let outcome = callback_outcome_from_query(&state, flow_id, &scope, &query)?;
 
     let response = match state
         .product_auth
@@ -543,6 +699,7 @@ async fn oauth_callback_handler(
 fn callback_outcome_from_query(
     state: &ProductAuthRouteState,
     flow_id: AuthFlowId,
+    _scope: &AuthProductScope,
     query: &OAuthCallbackQuery,
 ) -> Result<RebornOAuthCallbackOutcome, ProductAuthRouteFailure> {
     if query
@@ -560,6 +717,10 @@ fn callback_outcome_from_query(
         .as_ref()
         .ok_or_else(ProductAuthRouteFailure::malformed_callback)?;
     let pkce_verifier = state.pkce_verifier_for_callback(flow_id)?;
+    let scopes = parse_provider_scopes(query.scopes.as_deref())?;
+    if scopes.is_empty() {
+        return Err(ProductAuthRouteFailure::malformed_callback());
+    }
     let authorization_code_hash = authorization_code_hash(code.expose_secret())?;
     let pkce_verifier_hash = pkce_verifier_hash(pkce_verifier.expose_secret())?;
 
@@ -575,7 +736,7 @@ fn callback_outcome_from_query(
             pkce_verifier: PkceVerifierSecret::new(pkce_verifier)
                 .map_err(ProductAuthRouteFailure::from)?,
             pkce_verifier_hash,
-            scopes: parse_provider_scopes(query.scopes.as_deref())?,
+            scopes,
         },
     })
 }
@@ -608,16 +769,24 @@ fn scope_from_authenticated_caller(
     caller: &WebUiAuthenticatedCaller,
     request: &OAuthStartRequest,
 ) -> Result<AuthProductScope, ProductAuthRouteFailure> {
-    let thread_id = request
-        .thread_id
-        .as_ref()
+    scope_from_authenticated_caller_parts(
+        caller,
+        request.thread_id.as_ref(),
+        request.session_id.as_ref(),
+    )
+}
+
+fn scope_from_authenticated_caller_parts(
+    caller: &WebUiAuthenticatedCaller,
+    thread_id: Option<&String>,
+    session_id: Option<&String>,
+) -> Result<AuthProductScope, ProductAuthRouteFailure> {
+    let thread_id = thread_id
         .map(|value| {
             ThreadId::new(value.clone()).map_err(|_| ProductAuthRouteFailure::invalid_request())
         })
         .transpose()?;
-    let session_id = request
-        .session_id
-        .as_ref()
+    let session_id = session_id
         .map(|value| {
             AuthSessionId::new(value.clone())
                 .map_err(|_| ProductAuthRouteFailure::invalid_request())
@@ -844,11 +1013,7 @@ fn authorization_code_hash(value: &str) -> Result<AuthorizationCodeHash, Product
 }
 
 fn sha256_hex(value: &str) -> String {
-    let digest = sha256_digest_token(value.as_bytes());
-    digest
-        .strip_prefix("sha256:")
-        .unwrap_or(digest.as_str())
-        .to_string()
+    ironclaw_common::hashing::sha256_hex(value.as_bytes())
 }
 
 fn parse_provider_scopes(raw: Option<&str>) -> Result<Vec<ProviderScope>, ProductAuthRouteFailure> {
@@ -946,6 +1111,10 @@ impl RawSecretValue {
         self.0.expose_secret()
     }
 
+    fn into_secret(self) -> SecretString {
+        self.0
+    }
+
     fn clone_secret(&self) -> SecretString {
         SecretString::from(self.0.expose_secret().to_string())
     }
@@ -1004,6 +1173,19 @@ mod tests {
             None,
             None,
         )
+    }
+
+    #[test]
+    fn sha256_hex_produces_plain_lowercase_hex_without_prefix() {
+        // Regression guard for the switch off `sha256_digest_token` (which
+        // returned a "sha256:"-prefixed token): the route hashes must stay
+        // plain lowercase hex so stored state/verifier/code hashes match.
+        let hashed = sha256_hex("abc");
+        assert_eq!(
+            hashed,
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert!(!hashed.starts_with("sha256:"));
     }
 
     #[test]

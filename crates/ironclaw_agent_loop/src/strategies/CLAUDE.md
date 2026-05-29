@@ -11,6 +11,7 @@ file is one loop decision axis.
 - `batch.rs` chooses batch sequencing policy.
 - `gate.rs` handles approval/auth/resource gates.
 - `recovery.rs` handles model and capability failures.
+- `reply_admission.rs` classifies assistant replies before transcript finalization.
 - `stop.rs` decides whether the loop is done.
 - `drain.rs` decides when steering/followup inputs are drained.
 - `budget.rs` owns iteration and wall-clock limits.
@@ -39,6 +40,8 @@ file is one loop decision axis.
 ## Common mistakes
 
 - Do not create a catch-all strategy for unrelated policy.
-- Do not pass raw content into strategy decisions.
+- Do not pass raw content into strategy decisions except for
+  `reply_admission.rs`, whose whole boundary is classifying the candidate
+  assistant reply before it becomes user-visible transcript.
 - Do not smuggle host calls through strategy types.
 - Do not add public strategy exports to make an external family compile.

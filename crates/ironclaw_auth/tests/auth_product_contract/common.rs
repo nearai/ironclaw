@@ -8,13 +8,15 @@ pub use ironclaw_auth::{
     CredentialAccountProjection, CredentialAccountSelectionRequest, CredentialAccountService,
     CredentialAccountStatus, CredentialAccountUpdate, CredentialAccountUpdateBinding,
     CredentialOwnership, CredentialRecoveryKind, CredentialRecoveryProjection,
-    CredentialRecoveryReason, CredentialRecoveryRequest, CredentialSelectionInput,
-    CredentialSetupService, InMemoryAuthProductServices, LifecyclePackageRef,
-    ManualTokenSetupRequest, NewAuthFlow, NewCredentialAccount, OAuthAuthorizationCode,
-    OAuthAuthorizationUrl, OAuthCallbackInput, OAuthProviderCallbackRequest, OAuthProviderExchange,
-    OpaqueStateHash, PkceVerifierHash, PkceVerifierSecret, ProviderCallbackOutcome, ProviderScope,
-    SecretCleanupAction, SecretCleanupRequest, SecretCleanupService, SecretSubmitRequest,
-    SecretSubmitResult, TurnRunRef,
+    CredentialRecoveryReason, CredentialRecoveryRequest, CredentialRefreshRequest,
+    CredentialSelectionInput, CredentialSetupService, InMemoryAuthProductServices,
+    LifecyclePackageRef, ManualTokenSetupRequest, NewAuthFlow, NewCredentialAccount,
+    OAuthAuthorizationCode, OAuthAuthorizationUrl, OAuthCallbackInput,
+    OAuthProviderCallbackRequest, OAuthProviderExchange, OAuthProviderExchangeContext,
+    OAuthProviderRefreshRequest, OpaqueStateHash, PkceVerifierHash, PkceVerifierSecret,
+    ProviderCallbackOutcome, ProviderScope, SecretCleanupAction, SecretCleanupQuarantineReason,
+    SecretCleanupRequest, SecretCleanupService, SecretSubmitRequest, SecretSubmitResult,
+    TurnRunRef,
 };
 pub use ironclaw_host_api::{ExtensionId, InvocationId, ResourceScope, SecretHandle, UserId};
 pub use secrecy::SecretString;

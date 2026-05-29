@@ -172,6 +172,59 @@ async fn manual_token_submit_rejects_control_characters_without_consuming_intera
 }
 
 #[tokio::test]
+async fn manual_token_interaction_can_be_abandoned_after_route_submit_failure() {
+    let services = InMemoryAuthProductServices::new();
+    let owner = scope("alice");
+    let other = scope("bob");
+    let challenge = services
+        .request_secret_input(ManualTokenSetupRequest {
+            scope: owner.clone(),
+            provider: provider(),
+            label: label("manual github"),
+            continuation: AuthContinuationRef::SetupOnly,
+            update_binding: None,
+            expires_at: Utc::now() + Duration::minutes(5),
+        })
+        .await
+        .expect("manual challenge");
+    let interaction_id = match challenge {
+        AuthChallenge::ManualTokenRequired { interaction_id, .. } => interaction_id,
+        other => panic!("unexpected challenge {other:?}"),
+    };
+
+    let cross_scope = services
+        .abandon_manual_token(&other, interaction_id)
+        .await
+        .expect_err("cross-scope abandon denied");
+    assert_eq!(cross_scope, AuthProductError::CrossScopeDenied);
+
+    assert!(
+        services
+            .abandon_manual_token(&owner, interaction_id)
+            .await
+            .expect("owner can abandon pending interaction")
+    );
+    assert!(
+        !services
+            .abandon_manual_token(&owner, interaction_id)
+            .await
+            .expect("abandon is idempotent for missing interaction")
+    );
+
+    let submit = services
+        .submit_manual_token(
+            &owner,
+            SecretSubmitRequest {
+                interaction_id,
+                secret: secret("ghp_after_abandon"),
+            },
+        )
+        .await
+        .expect_err("abandoned interaction cannot be submitted");
+    assert_eq!(submit, AuthProductError::UnknownOrExpiredFlow);
+}
+
+#[tokio::test]
 async fn expired_manual_token_interaction_fails_closed() {
     let services = InMemoryAuthProductServices::new();
     let owner = scope("alice");

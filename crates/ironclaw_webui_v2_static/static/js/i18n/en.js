@@ -109,6 +109,16 @@ registerPack("en", {
   "approval.approve": "Approve",
   "approval.deny": "Deny",
   "approval.always": "Always",
+  "authGate.title": "Authentication required",
+  "authGate.tokenLabel": "Access token",
+  "authGate.tokenPlaceholder": "Paste access token",
+  "authGate.tokenRequired": "A token is required.",
+  "authGate.submit": "Use token",
+  "authGate.submitting": "Checking...",
+  "authGate.cancel": "Cancel",
+  "authGate.submitFailed": "Could not save the token.",
+  "authGate.resolveFailedAfterTokenSaved":
+    "Token saved. Could not resume the blocked run; retry to resume it.",
 
   // Error
   "error.gatewayConnection": "Unable to connect to the gateway",

@@ -10,8 +10,9 @@ use super::{
     AgentLoopExecutorError, AssistantReplyInput, BudgetInput, BudgetStep, CancelCheck,
     CapabilityInput, CheckpointInput, CheckpointKind, CheckpointStage, DefaultExecutorPipeline,
     DrainInput, ExecutorStage, ExitInput, InputStep, ModelInput, ModelStep, PendingInputAck,
-    PromptInput, PromptStep, StageContext, StopInput, StopStep, TurnCompletedStep,
-    UserFacingInputDrainMode, completed_exit,
+    PromptInput, PromptStep, ReplyAdmissionInput, ReplyAdmissionStep, StageContext, StopInput,
+    StopObservationInput, StopObservationStep, StopStep, TurnCompletedStep,
+    UserFacingInputDrainMode,
 };
 
 impl DefaultExecutorPipeline {
@@ -135,9 +136,27 @@ impl DefaultExecutorPipeline {
 
             let completed = match model_response.output {
                 ParentLoopOutput::AssistantReply(reply) => {
-                    self.assistant_reply
-                        .process(ctx, AssistantReplyInput { state, reply })
+                    match self
+                        .reply_admission
+                        .process(ctx, ReplyAdmissionInput { state, reply })
                         .await?
+                    {
+                        ReplyAdmissionStep::Accept { state, reply } => {
+                            self.assistant_reply
+                                .process(
+                                    ctx,
+                                    AssistantReplyInput {
+                                        state: *state,
+                                        reply,
+                                    },
+                                )
+                                .await?
+                        }
+                        ReplyAdmissionStep::Reject { state } => TurnCompletedStep::Continue {
+                            state,
+                            summary: crate::strategies::TurnSummary::reply_rejected(),
+                        },
+                    }
                 }
                 ParentLoopOutput::CapabilityCalls(calls) => {
                     self.capabilities
@@ -159,9 +178,62 @@ impl DefaultExecutorPipeline {
             };
             let completed_kind = summary.kind;
 
+            let (mut next_state, summary) = match self
+                .stop
+                .observe(
+                    ctx,
+                    StopObservationInput {
+                        state: next_state,
+                        summary,
+                    },
+                )
+                .await?
+            {
+                StopObservationStep::Continue { state, summary } => (*state, summary),
+                StopObservationStep::Exit(exit) => return Ok(exit),
+            };
+
+            if completed_kind == TurnEndKind::ReplyOnly {
+                debug!(
+                    iteration = next_state.iteration,
+                    "agent loop checking follow-up input after reply-only turn end"
+                );
+                match self
+                    .input
+                    .process(
+                        ctx,
+                        DrainInput {
+                            state: next_state,
+                            pending_input_ack: std::mem::take(&mut pending_input_ack),
+                            mode: UserFacingInputDrainMode::FollowUp,
+                        },
+                    )
+                    .await?
+                {
+                    InputStep::Continue {
+                        state: next,
+                        pending_input_ack: ack,
+                        drained,
+                    } => {
+                        next_state = *next;
+                        pending_input_ack = ack;
+                        if drained {
+                            debug!(
+                                iteration = next_state.iteration,
+                                "agent loop continuing after queued follow-up input"
+                            );
+                            next_state.iteration = next_state.iteration.saturating_add(1);
+                            state = next_state;
+                            continue;
+                        }
+                    }
+                    InputStep::Exit(exit) => return Ok(exit),
+                }
+            }
+
             match self
                 .stop
-                .process(
+                .decide(
                     ctx,
                     StopInput {
                         state: next_state,
@@ -190,64 +262,7 @@ impl DefaultExecutorPipeline {
                 StopStep::Exit(exit) => return Ok(exit),
             }
 
-            match completed_kind {
-                TurnEndKind::ReplyOnly => {
-                    debug!(
-                        iteration = state.iteration,
-                        "agent loop handling reply-only turn end"
-                    );
-                    match self
-                        .input
-                        .process(
-                            ctx,
-                            DrainInput {
-                                state,
-                                pending_input_ack: std::mem::take(&mut pending_input_ack),
-                                mode: UserFacingInputDrainMode::FollowUp,
-                            },
-                        )
-                        .await?
-                    {
-                        InputStep::Continue {
-                            state: next,
-                            pending_input_ack: ack,
-                            drained,
-                        } => {
-                            state = *next;
-                            pending_input_ack = ack;
-                            if drained {
-                                debug!(
-                                    iteration = state.iteration,
-                                    "agent loop continuing after queued follow-up input"
-                                );
-                                state.iteration = state.iteration.saturating_add(1);
-                                continue;
-                            }
-                        }
-                        InputStep::Exit(exit) => return Ok(exit),
-                    }
-
-                    let checked = CheckpointStage
-                        .process(
-                            ctx,
-                            CheckpointInput {
-                                state,
-                                kind: CheckpointKind::Final,
-                            },
-                        )
-                        .await?;
-                    debug!(
-                        iteration = checked.state.iteration,
-                        checkpoint_id = %checked.checkpoint_id.as_uuid(),
-                        "agent loop exiting after reply-only model output"
-                    );
-                    pending_input_ack.ack(host).await?;
-                    return completed_exit(host, checked.state, Some(checked.checkpoint_id));
-                }
-                TurnEndKind::AfterCapabilityBatch => {
-                    state.iteration = state.iteration.saturating_add(1);
-                }
-            }
+            state.iteration = state.iteration.saturating_add(1);
         }
     }
 }

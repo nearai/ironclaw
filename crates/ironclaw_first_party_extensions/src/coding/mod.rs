@@ -20,7 +20,7 @@ use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{MountView, ResourceScope, RuntimeDispatchErrorKind};
 use serde_json::Value;
 
-use state::{SharedCodingEditLocks, SharedCodingReadState};
+use state::SharedCodingEditLocks;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CodingCapabilityKind {
@@ -77,7 +77,6 @@ impl CodingCapabilityError {
 
 #[derive(Debug, Default)]
 pub struct CodingCapabilityState {
-    read_state: SharedCodingReadState,
     edit_locks: SharedCodingEditLocks,
 }
 
@@ -86,24 +85,21 @@ impl CodingCapabilityState {
         &self,
         request: &CodingCapabilityRequest<'_>,
     ) -> Result<Value, CodingCapabilityError> {
-        dispatch(request, &self.read_state, &self.edit_locks).await
+        dispatch(request, &self.edit_locks).await
     }
 }
 
 async fn dispatch(
     request: &CodingCapabilityRequest<'_>,
-    read_state: &SharedCodingReadState,
     edit_locks: &SharedCodingEditLocks,
 ) -> Result<Value, CodingCapabilityError> {
     match request.kind {
-        CodingCapabilityKind::ReadFile => file::read_file(request, read_state).await,
-        CodingCapabilityKind::WriteFile => file::write_file(request, read_state, edit_locks).await,
+        CodingCapabilityKind::ReadFile => file::read_file(request).await,
+        CodingCapabilityKind::WriteFile => file::write_file(request, edit_locks).await,
         CodingCapabilityKind::ListDir => file::list_dir(request).await,
         CodingCapabilityKind::Glob => glob_tool::glob(request).await,
         CodingCapabilityKind::Grep => grep_tool::grep(request).await,
-        CodingCapabilityKind::ApplyPatch => {
-            file::apply_patch(request, read_state, edit_locks).await
-        }
+        CodingCapabilityKind::ApplyPatch => file::apply_patch(request, edit_locks).await,
     }
 }
 

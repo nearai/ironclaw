@@ -4,26 +4,42 @@ use ironclaw_turns::{
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, CapabilityCallCandidate, CapabilityFailureKind,
         CapabilityInputRef, CapabilityOutcome, CapabilityResultMessage, LoopCancelReasonKind,
-        LoopCheckpointKind, LoopInput, LoopInputAckToken, LoopInputBatch, LoopInputCursor,
-        LoopInterruptKind, LoopProcessRef, LoopRunInfoPort, LoopSafeSummary, ParentLoopOutput,
-        ProcessHandleSummary, ProviderToolCallReplay, VisibleCapabilityRequest,
+        LoopCheckpointKind, LoopCompactionError, LoopCompactionResponse, LoopContextCompactionKind,
+        LoopContextCompactionMetadata, LoopInput, LoopInputAckToken, LoopInputBatch,
+        LoopInputCursor, LoopInterruptKind, LoopProcessRef, LoopRunInfoPort, LoopSafeSummary,
+        LoopSummaryArtifactId, ParentLoopOutput, ProcessHandleSummary, ProviderToolCallReplay,
+        VisibleCapabilityRequest,
     },
 };
 
-use crate::state::{CheckpointKind, LoopExecutionState};
-use crate::strategies::{CapabilityFilter, GateKind, GateOutcome, StopKind, TurnSummary};
+use crate::state::{CheckpointKind, IndexedMessageKind, LoopExecutionState, MessageIndexEntry};
+use crate::strategies::{
+    CapabilityFilter, DefaultCompactionStrategy, GateKind, GateOutcome, StopKind, TurnSummary,
+};
 
 use super::{
     AgentLoopExecutor, AgentLoopExecutorError, AssistantReplyInput, AssistantReplyStage, BatchStep,
     BudgetInput, BudgetStage, BudgetStep, CanonicalAgentLoopExecutor, CapabilityInput,
     CapabilityStage, DrainInput, ExecutorStage, ExitInput, ExitStage, GateInput, GateStage,
-    HostStage, InputStage, InputStep, PendingInputAck, PromptInput, PromptStage, StageContext,
-    StopInput, StopStage, StopStep, TurnCompletedStep, UserFacingInputDrainMode,
+    HostStage, InputStage, InputStep, PendingInputAck, PromptInput, PromptStage, PromptStep,
+    StageContext, StopInput, StopStage, StopStep, TurnCompletedStep, UserFacingInputDrainMode,
     consume_drainable_inputs, sanitize_result_ref_suffix, synthetic_provider_error_result_ref,
 };
 
 #[allow(dead_code)]
 fn _check(_: &dyn AgentLoopExecutor) {}
+
+fn compaction_metadata(
+    sequence: u64,
+    kind: LoopContextCompactionKind,
+    estimated_tokens: u64,
+) -> LoopContextCompactionMetadata {
+    LoopContextCompactionMetadata {
+        sequence,
+        kind,
+        estimated_tokens,
+    }
+}
 
 mod support;
 use support::*;
@@ -105,9 +121,84 @@ async fn progress_port_failure_does_not_abort_reply_only_run() {
 }
 
 #[tokio::test]
+async fn reply_only_drains_follow_up_before_stop_strategy_completes() {
+    let host = MockHost::new(vec![reply_response(), reply_response()]);
+    let run_context = host.run_context().clone();
+    let host = host.with_input_batches(vec![
+        LoopInputBatch {
+            inputs: Vec::new(),
+            input_acks: Vec::new(),
+            next_cursor: input_cursor(&run_context, "input-cursor:no-input"),
+        },
+        LoopInputBatch {
+            inputs: vec![LoopInput::FollowUp {
+                message_ref: message_ref("msg:follow-up"),
+            }],
+            input_acks: vec![input_ack(
+                &run_context,
+                "input-cursor:after-follow-up",
+                "input-ack:after-follow-up",
+            )],
+            next_cursor: input_cursor(&run_context, "input-cursor:after-follow-up"),
+        },
+    ]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("execute");
+
+    assert!(matches!(exit, LoopExit::Completed(_)));
+    assert_eq!(host.model_requests().len(), 2);
+    assert_eq!(
+        host.acked_input_tokens(),
+        vec![LoopInputAckToken::new("input-ack:after-follow-up").expect("valid")]
+    );
+    assert_eq!(
+        host.checkpoint_kinds(),
+        vec![
+            LoopCheckpointKind::BeforeModel,
+            LoopCheckpointKind::BeforeModel,
+            LoopCheckpointKind::Final,
+        ]
+    );
+    assert_eq!(final_staged_state(&host).stop_state.turns_completed, 2);
+}
+
+#[tokio::test]
+async fn reply_only_uses_configured_stop_strategy_decision() {
+    let host = MockHost::new(vec![reply_response(), reply_response()]);
+    let family = family_with_stop_after_observed_turns(2);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&family, &host, state)
+        .await
+        .expect("execute");
+
+    assert!(matches!(exit, LoopExit::Completed(_)));
+    assert_eq!(host.model_requests().len(), 2);
+    assert_eq!(
+        host.checkpoint_kinds(),
+        vec![
+            LoopCheckpointKind::BeforeModel,
+            LoopCheckpointKind::BeforeModel,
+            LoopCheckpointKind::Final,
+        ]
+    );
+    assert_eq!(final_staged_state(&host).stop_state.turns_completed, 2);
+}
+
+#[tokio::test]
 async fn budget_stage_exits_at_iteration_limit() {
     let host = MockHost::new(Vec::new());
-    let family = crate::families::default();
+    let family = family_with_compaction_strategy(DefaultCompactionStrategy {
+        deadline_ms: 1,
+        ..Default::default()
+    });
     let ctx = StageContext {
         planner: family.planner(),
         host: &host,
@@ -128,6 +219,454 @@ async fn budget_stage_exits_at_iteration_limit() {
 
     assert!(matches!(step, BudgetStep::Exit(LoopExit::Failed(_))));
     assert_eq!(host.checkpoint_kinds(), vec![LoopCheckpointKind::Final]);
+}
+
+#[tokio::test]
+async fn prompt_stage_compacts_candidate_prompt_then_rebuilds_final_bundle() {
+    let host = MockHost::new(Vec::new())
+        .with_prompt_compaction_indexes(vec![
+            vec![
+                compaction_metadata(1, LoopContextCompactionKind::User, 10),
+                compaction_metadata(2, LoopContextCompactionKind::Assistant, 10),
+            ],
+            vec![compaction_metadata(
+                2,
+                LoopContextCompactionKind::Assistant,
+                10,
+            )],
+        ])
+        .with_compaction_result(Ok(LoopCompactionResponse {
+            summary_artifact_id: LoopSummaryArtifactId::new("summary-1").unwrap(),
+            compression_ratio_ppm: 250_000,
+        }));
+    let family = family_with_compaction_strategy(DefaultCompactionStrategy {
+        deadline_ms: 1,
+        ..Default::default()
+    });
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+    state.compaction_state.force_compact_on_next_iteration = true;
+
+    let step = PromptStage
+        .process(
+            ctx,
+            PromptInput {
+                state,
+                pending_input_ack: PendingInputAck::default(),
+            },
+        )
+        .await
+        .expect("prompt stage");
+
+    let output = match step {
+        PromptStep::Prepared(output) => output,
+        PromptStep::Exit(exit) => panic!("expected prepared prompt, got {exit:?}"),
+    };
+    assert_eq!(host.prompt_requests().len(), 2);
+    assert_eq!(
+        output.state.compaction_state.last_compacted_through_seq,
+        Some(1)
+    );
+    assert!(
+        !output
+            .state
+            .compaction_state
+            .force_compact_on_next_iteration
+    );
+    assert_eq!(
+        output.state.compaction_prompt.message_index,
+        vec![MessageIndexEntry {
+            sequence: 2,
+            kind: IndexedMessageKind::Assistant,
+            estimated_tokens: 10,
+        }]
+    );
+    assert_eq!(output.state.compaction_prompt.observed_prompt_tokens, 10);
+    assert_eq!(
+        host.checkpoint_kinds(),
+        vec![LoopCheckpointKind::BeforeModel]
+    );
+    assert_eq!(
+        host.progress_event_names(),
+        vec![
+            "prompt_bundle_built",
+            "compaction_started",
+            "compaction_completed",
+            "checkpoint_written",
+            "prompt_bundle_built",
+        ]
+    );
+}
+
+#[tokio::test]
+async fn prompt_stage_compaction_index_maps_system_summary_and_other_kinds() {
+    let host = MockHost::new(Vec::new()).with_prompt_compaction_index(vec![
+        compaction_metadata(1, LoopContextCompactionKind::System, 4),
+        compaction_metadata(2, LoopContextCompactionKind::Summary, 5),
+        compaction_metadata(3, LoopContextCompactionKind::Other, 6),
+    ]);
+    let family = crate::families::default();
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let step = PromptStage
+        .process(
+            ctx,
+            PromptInput {
+                state,
+                pending_input_ack: PendingInputAck::default(),
+            },
+        )
+        .await
+        .expect("prompt stage");
+
+    let output = match step {
+        PromptStep::Prepared(output) => output,
+        PromptStep::Exit(exit) => panic!("expected prepared prompt, got {exit:?}"),
+    };
+    assert_eq!(
+        output.state.compaction_prompt.message_index,
+        vec![
+            MessageIndexEntry {
+                sequence: 1,
+                kind: IndexedMessageKind::System,
+                estimated_tokens: 4,
+            },
+            MessageIndexEntry {
+                sequence: 2,
+                kind: IndexedMessageKind::Summary,
+                estimated_tokens: 5,
+            },
+            MessageIndexEntry {
+                sequence: 3,
+                kind: IndexedMessageKind::Other,
+                estimated_tokens: 6,
+            },
+        ]
+    );
+    assert_eq!(host.prompt_requests().len(), 1);
+}
+
+#[tokio::test]
+async fn prompt_stage_cancellation_after_prompt_bundle_returns_cancelled_exit() {
+    let host = MockHost::new(Vec::new()).cancel_after_prompt_bundle(1);
+    let family = crate::families::default();
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let step = PromptStage
+        .process(
+            ctx,
+            PromptInput {
+                state,
+                pending_input_ack: PendingInputAck::default(),
+            },
+        )
+        .await
+        .expect("prompt stage");
+
+    match step {
+        PromptStep::Exit(LoopExit::Cancelled(cancelled)) => {
+            assert!(cancelled.checkpoint_id.is_some());
+        }
+        PromptStep::Prepared(_) => panic!("expected cancelled exit"),
+        PromptStep::Exit(exit) => panic!("expected cancelled exit, got {exit:?}"),
+    }
+    assert_eq!(host.prompt_requests().len(), 1);
+    assert_eq!(host.checkpoint_kinds(), vec![LoopCheckpointKind::Final]);
+    assert_eq!(
+        host.progress_event_names(),
+        vec!["prompt_bundle_built", "checkpoint_written"]
+    );
+}
+
+#[tokio::test]
+async fn prompt_stage_compaction_timeout_returns_failed_exit() {
+    let host = MockHost::new(Vec::new())
+        .with_prompt_compaction_index(vec![compaction_metadata(
+            1,
+            LoopContextCompactionKind::User,
+            10,
+        )])
+        .with_compaction_result(Ok(LoopCompactionResponse {
+            summary_artifact_id: LoopSummaryArtifactId::new("summary-1").unwrap(),
+            compression_ratio_ppm: 250_000,
+        }))
+        .with_compaction_delay(std::time::Duration::from_millis(25));
+    let family = family_with_compaction_strategy(DefaultCompactionStrategy {
+        deadline_ms: 1,
+        ..Default::default()
+    });
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+    state.compaction_state.force_compact_on_next_iteration = true;
+
+    let step = PromptStage
+        .process(
+            ctx,
+            PromptInput {
+                state,
+                pending_input_ack: PendingInputAck::default(),
+            },
+        )
+        .await
+        .expect("prompt stage");
+
+    match step {
+        PromptStep::Exit(LoopExit::Failed(failed)) => {
+            assert!(failed.checkpoint_id.is_some());
+        }
+        _ => panic!("expected failed exit"),
+    }
+    assert_eq!(host.checkpoint_kinds(), vec![LoopCheckpointKind::Final]);
+    assert_eq!(
+        host.progress_event_names(),
+        vec![
+            "prompt_bundle_built",
+            "compaction_started",
+            "compaction_failed",
+            "checkpoint_written",
+        ]
+    );
+}
+
+#[tokio::test]
+async fn prompt_stage_compaction_security_rejection_returns_failed_exit() {
+    let host = MockHost::new(Vec::new())
+        .with_prompt_compaction_index(vec![compaction_metadata(
+            1,
+            LoopContextCompactionKind::User,
+            10,
+        )])
+        .with_compaction_result(Err(LoopCompactionError::SecurityRejected {
+            safe_summary: LoopSafeSummary::new("injection detected").unwrap(),
+        }));
+    let family = family_with_compaction_strategy(DefaultCompactionStrategy {
+        deadline_ms: 100,
+        ..Default::default()
+    });
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+    state.compaction_state.force_compact_on_next_iteration = true;
+
+    let step = PromptStage
+        .process(
+            ctx,
+            PromptInput {
+                state,
+                pending_input_ack: PendingInputAck::default(),
+            },
+        )
+        .await
+        .expect("prompt stage");
+
+    match step {
+        PromptStep::Exit(LoopExit::Failed(failed)) => {
+            assert!(failed.checkpoint_id.is_some());
+        }
+        PromptStep::Prepared(_) => panic!("security rejection should end the run"),
+        PromptStep::Exit(exit) => panic!("expected failed exit, got {exit:?}"),
+    }
+    assert_eq!(host.prompt_requests().len(), 1);
+    assert_eq!(host.checkpoint_kinds(), vec![LoopCheckpointKind::Final]);
+    assert_eq!(
+        host.progress_event_names(),
+        vec![
+            "prompt_bundle_built",
+            "compaction_started",
+            "compaction_failed",
+            "checkpoint_written",
+        ]
+    );
+}
+
+#[tokio::test]
+async fn prompt_stage_compaction_cancelled_returns_cancelled_exit() {
+    let host = MockHost::new(Vec::new())
+        .with_prompt_compaction_index(vec![compaction_metadata(
+            1,
+            LoopContextCompactionKind::User,
+            10,
+        )])
+        .with_compaction_result(Err(LoopCompactionError::Cancelled));
+    let family = family_with_compaction_strategy(DefaultCompactionStrategy {
+        deadline_ms: 100,
+        ..Default::default()
+    });
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+    state.compaction_state.force_compact_on_next_iteration = true;
+
+    let step = PromptStage
+        .process(
+            ctx,
+            PromptInput {
+                state,
+                pending_input_ack: PendingInputAck::default(),
+            },
+        )
+        .await
+        .expect("prompt stage");
+
+    match step {
+        PromptStep::Exit(LoopExit::Cancelled(cancelled)) => {
+            assert!(cancelled.checkpoint_id.is_some());
+        }
+        _ => panic!("expected cancelled exit"),
+    }
+    assert_eq!(host.checkpoint_kinds(), vec![LoopCheckpointKind::Final]);
+}
+
+#[tokio::test]
+async fn prompt_stage_cancellation_during_compaction_aborts_prompt_planning() {
+    let host = MockHost::new(Vec::new())
+        .with_prompt_compaction_index(vec![compaction_metadata(
+            1,
+            LoopContextCompactionKind::User,
+            10,
+        )])
+        .with_compaction_result(Ok(LoopCompactionResponse {
+            summary_artifact_id: LoopSummaryArtifactId::new("summary-1").unwrap(),
+            compression_ratio_ppm: 250_000,
+        }))
+        .with_compaction_delay(std::time::Duration::from_millis(50));
+    let host_for_cancel = host.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        host_for_cancel.request_cancellation(LoopCancelReasonKind::UserRequested);
+    });
+    let family = family_with_compaction_strategy(DefaultCompactionStrategy {
+        deadline_ms: 500,
+        ..Default::default()
+    });
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+    state.compaction_state.force_compact_on_next_iteration = true;
+
+    let step = PromptStage
+        .process(
+            ctx,
+            PromptInput {
+                state,
+                pending_input_ack: PendingInputAck::default(),
+            },
+        )
+        .await
+        .expect("prompt stage");
+
+    assert!(matches!(step, PromptStep::Exit(LoopExit::Cancelled(_))));
+    assert_eq!(host.checkpoint_kinds(), vec![LoopCheckpointKind::Final]);
+}
+
+#[tokio::test]
+async fn prompt_stage_compaction_aborts_immediately_when_cancellation_already_set() {
+    let host = MockHost::new(Vec::new())
+        .with_prompt_compaction_index(vec![compaction_metadata(
+            1,
+            LoopContextCompactionKind::User,
+            10,
+        )])
+        .with_compaction_result(Ok(LoopCompactionResponse {
+            summary_artifact_id: LoopSummaryArtifactId::new("summary-1").unwrap(),
+            compression_ratio_ppm: 250_000,
+        }))
+        .with_compaction_delay(std::time::Duration::from_secs(1))
+        .cancel_on_compaction_start();
+    let family = family_with_compaction_strategy(DefaultCompactionStrategy {
+        deadline_ms: 5_000,
+        ..Default::default()
+    });
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+    state.compaction_state.force_compact_on_next_iteration = true;
+
+    let step = tokio::time::timeout(
+        std::time::Duration::from_millis(100),
+        PromptStage.process(
+            ctx,
+            PromptInput {
+                state,
+                pending_input_ack: PendingInputAck::default(),
+            },
+        ),
+    )
+    .await
+    .expect("already-requested cancellation should not wait for compaction")
+    .expect("prompt stage");
+
+    assert!(matches!(step, PromptStep::Exit(LoopExit::Cancelled(_))));
+    assert_eq!(host.checkpoint_kinds(), vec![LoopCheckpointKind::Final]);
+}
+
+#[tokio::test]
+async fn prompt_stage_cancellation_after_compaction_success_skips_final_bundle_rebuild() {
+    let host = MockHost::new(Vec::new())
+        .with_prompt_compaction_indexes(vec![
+            vec![compaction_metadata(1, LoopContextCompactionKind::User, 10)],
+            vec![],
+        ])
+        .with_compaction_result(Ok(LoopCompactionResponse {
+            summary_artifact_id: LoopSummaryArtifactId::new("summary-1").unwrap(),
+            compression_ratio_ppm: 250_000,
+        }))
+        .cancel_after_compaction_success();
+    let family = family_with_compaction_strategy(DefaultCompactionStrategy {
+        deadline_ms: 100,
+        ..Default::default()
+    });
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+    state.compaction_state.force_compact_on_next_iteration = true;
+
+    let step = PromptStage
+        .process(
+            ctx,
+            PromptInput {
+                state,
+                pending_input_ack: PendingInputAck::default(),
+            },
+        )
+        .await
+        .expect("prompt stage");
+
+    assert!(matches!(step, PromptStep::Exit(LoopExit::Cancelled(_))));
+    assert_eq!(host.prompt_requests().len(), 1);
+    assert_eq!(host.checkpoint_kinds(), vec![LoopCheckpointKind::Final]);
+    assert_eq!(
+        host.progress_event_names(),
+        vec![
+            "prompt_bundle_built",
+            "compaction_started",
+            "checkpoint_written",
+        ]
+    );
 }
 
 #[tokio::test]
@@ -305,6 +844,177 @@ async fn assistant_reply_stage_returns_reply_summary() {
         }
         TurnCompletedStep::Exit(exit) => panic!("expected continue, got {exit:?}"),
     }
+}
+
+#[tokio::test]
+async fn reply_admission_rejects_candidate_before_finalizing_and_continues() {
+    let result_ref = LoopResultRef::new("result:done").expect("valid");
+    let host = MockHost::new(vec![reply_response(), calls_response(), reply_response()])
+        .with_batch_outcomes(vec![ironclaw_turns::run_profile::CapabilityBatchOutcome {
+            outcomes: vec![CapabilityOutcome::Completed(CapabilityResultMessage {
+                result_ref: result_ref.clone(),
+                safe_summary: "done".to_string(),
+                terminate_hint: false,
+            })],
+            stopped_on_suspension: false,
+        }]);
+    let family = family_with_reply_admission(FixedReplyAdmissionPolicy::RejectFirst);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&family, &host, state)
+        .await
+        .expect("execute");
+
+    assert!(matches!(exit, LoopExit::Completed(_)));
+    assert_eq!(host.model_requests().len(), 3);
+    let prompt_requests = host.prompt_requests();
+    assert_eq!(prompt_requests.len(), 3);
+    assert!(prompt_requests[0].inline_messages.is_empty());
+    assert_eq!(prompt_requests[1].inline_messages.len(), 1);
+    assert_eq!(
+        prompt_requests[1].inline_messages[0].safe_body.as_str(),
+        "loop control reply rejected stop condition not met continue"
+    );
+    assert!(prompt_requests[2].inline_messages.is_empty());
+
+    let before_model_states = host
+        .staged_payloads()
+        .into_iter()
+        .filter(|request| request.kind == LoopCheckpointKind::BeforeModel)
+        .map(|request| {
+            LoopExecutionState::from_checkpoint_payload(
+                &request.payload,
+                CheckpointKind::BeforeModel,
+            )
+            .expect("checkpoint payload")
+        })
+        .collect::<Vec<_>>();
+    assert!(before_model_states.iter().any(|state| {
+        state.reply_admission_state.pending_rejection.is_some()
+            && state.reply_admission_state.pending_rejection_rendered
+    }));
+
+    let final_state = final_staged_state(&host);
+    assert_eq!(
+        final_state.assistant_refs,
+        vec![message_ref("msg:assistant")]
+    );
+    assert_eq!(
+        final_state.reply_admission_state.rejected_reply_candidates,
+        1
+    );
+    assert!(
+        final_state
+            .reply_admission_state
+            .pending_rejection
+            .is_none()
+    );
+    assert_eq!(final_state.stop_state.turns_completed, 3);
+}
+
+#[tokio::test]
+async fn reply_admission_rendered_flag_stays_false_when_context_suppresses_control_message() {
+    let result_ref = LoopResultRef::new("result:done").expect("valid");
+    let host = MockHost::new(vec![reply_response(), calls_response(), reply_response()])
+        .with_batch_outcomes(vec![ironclaw_turns::run_profile::CapabilityBatchOutcome {
+            outcomes: vec![CapabilityOutcome::Completed(CapabilityResultMessage {
+                result_ref: result_ref.clone(),
+                safe_summary: "done".to_string(),
+                terminate_hint: false,
+            })],
+            stopped_on_suspension: false,
+        }]);
+    let family =
+        family_with_reply_admission_without_inline_context(FixedReplyAdmissionPolicy::RejectFirst);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&family, &host, state)
+        .await
+        .expect("execute");
+
+    assert!(matches!(exit, LoopExit::Completed(_)));
+    assert!(
+        host.prompt_requests()
+            .iter()
+            .all(|request| request.inline_messages.is_empty())
+    );
+
+    let before_model_states = host
+        .staged_payloads()
+        .into_iter()
+        .filter(|request| request.kind == LoopCheckpointKind::BeforeModel)
+        .map(|request| {
+            LoopExecutionState::from_checkpoint_payload(
+                &request.payload,
+                CheckpointKind::BeforeModel,
+            )
+            .expect("checkpoint payload")
+        })
+        .collect::<Vec<_>>();
+    assert!(before_model_states.iter().any(|state| {
+        state.reply_admission_state.pending_rejection.is_some()
+            && !state.reply_admission_state.pending_rejection_rendered
+    }));
+}
+
+#[tokio::test]
+async fn repeated_reply_rejections_stop_as_invalid_model_output() {
+    let host = MockHost::new(vec![reply_response(), reply_response(), reply_response()]);
+    let family = family_with_reply_admission(FixedReplyAdmissionPolicy::RejectAlways);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&family, &host, state)
+        .await
+        .expect("execute");
+
+    match exit {
+        LoopExit::Failed(failed) => {
+            assert_eq!(failed.reason_kind, LoopFailureKind::InvalidModelOutput);
+        }
+        other => panic!("expected failed invalid-model-output exit, got {other:?}"),
+    }
+    assert_eq!(host.model_requests().len(), 3);
+    let final_state = final_staged_state(&host);
+    assert!(final_state.assistant_refs.is_empty());
+    assert_eq!(
+        final_state.reply_admission_state.rejected_reply_candidates,
+        3
+    );
+    assert_eq!(final_state.stop_state.trailing_rejected_replies, 3);
+}
+
+#[tokio::test]
+async fn default_reply_admission_rejects_tool_history_echo_and_continues() {
+    let host = MockHost::new(vec![
+        reply_response_with_text("Previous tool event: demo__echo was invoked."),
+        reply_response_with_text("done"),
+    ]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("execute");
+
+    assert!(matches!(exit, LoopExit::Completed(_)));
+    assert_eq!(host.model_requests().len(), 2);
+    let final_state = final_staged_state(&host);
+    assert_eq!(
+        final_state.assistant_refs,
+        vec![message_ref("msg:assistant")]
+    );
+    assert_eq!(
+        final_state.reply_admission_state.rejected_reply_candidates,
+        1
+    );
+    assert_eq!(final_state.stop_state.turns_completed, 2);
 }
 
 #[tokio::test]
@@ -980,6 +1690,13 @@ async fn model_retry_success_clears_recovery_state() {
             AgentLoopHostErrorKind::Unavailable,
             "model unavailable",
         )])
+        .with_prompt_compaction_indexes(vec![
+            vec![compaction_metadata(1, LoopContextCompactionKind::User, 10)],
+            vec![
+                compaction_metadata(2, LoopContextCompactionKind::System, 20),
+                compaction_metadata(3, LoopContextCompactionKind::Assistant, 30),
+            ],
+        ])
         .with_prompt_surface_version(Some(stale_surface_version()));
     let executor = CanonicalAgentLoopExecutor;
     let state = LoopExecutionState::initial_for_run(host.run_context());
@@ -999,7 +1716,24 @@ async fn model_retry_success_clears_recovery_state() {
         2,
         "model retry must request a fresh host-built prompt bundle"
     );
-    assert_eq!(final_staged_state(&host).recovery_state, Default::default());
+    let final_state = final_staged_state(&host);
+    assert_eq!(final_state.recovery_state, Default::default());
+    assert_eq!(
+        final_state.compaction_prompt.message_index,
+        vec![
+            MessageIndexEntry {
+                sequence: 2,
+                kind: IndexedMessageKind::System,
+                estimated_tokens: 20,
+            },
+            MessageIndexEntry {
+                sequence: 3,
+                kind: IndexedMessageKind::Assistant,
+                estimated_tokens: 30,
+            },
+        ]
+    );
+    assert_eq!(final_state.compaction_prompt.observed_prompt_tokens, 50);
 }
 
 #[tokio::test]

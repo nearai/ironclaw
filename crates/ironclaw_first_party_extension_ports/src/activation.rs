@@ -96,6 +96,17 @@ pub struct SkillActivationSelection {
     pub feedback: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillActivationObservedEvent {
+    pub run_context: LoopRunContext,
+    pub activations: Vec<SkillActivationRequest>,
+    pub feedback: Vec<String>,
+}
+
+pub trait SkillActivationObserver: std::fmt::Debug + Send + Sync {
+    fn observe_skill_activation(&self, event: SkillActivationObservedEvent);
+}
+
 /// Fully resolved activation output for one user message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkillActivationPlan {
@@ -183,6 +194,7 @@ where
     bundle_source: Arc<S>,
     config: SkillActivationSelectorConfig,
     setup_marker_source: Option<Arc<dyn SetupMarkerSource>>,
+    activation_observer: Mutex<Option<Arc<dyn SkillActivationObserver>>>,
     messages_by_run: Mutex<HashMap<SkillActivationMessageKey, SkillActivationMessage>>,
     activation_cache: Mutex<HashMap<ActivationCandidateCacheKey, CachedActivationCandidate>>,
     active_plans_by_run: Mutex<ActivePlanCache>,
@@ -208,6 +220,7 @@ where
             bundle_source,
             config,
             setup_marker_source: None,
+            activation_observer: Mutex::new(None),
             messages_by_run: Mutex::new(HashMap::new()),
             activation_cache: Mutex::new(HashMap::new()),
             active_plans_by_run: Mutex::new(ActivePlanCache::default()),
@@ -263,6 +276,17 @@ where
 
     pub(crate) fn bundle_source(&self) -> Arc<S> {
         Arc::clone(&self.bundle_source)
+    }
+
+    pub fn set_activation_observer(
+        &self,
+        observer: Arc<dyn SkillActivationObserver>,
+    ) -> Result<(), SkillActivationSelectionError> {
+        *self
+            .activation_observer
+            .lock()
+            .map_err(|_| SkillActivationSelectionError::Internal)? = Some(observer);
+        Ok(())
     }
 
     pub(crate) fn take_activation_plan_for_run(
@@ -375,6 +399,20 @@ where
                         run_context: run_context.clone(),
                     },
                 );
+        }
+        let has_activation_event =
+            !plan.selection.activations.is_empty() || !plan.selection.feedback.is_empty();
+        let activation_observer = self
+            .activation_observer
+            .lock()
+            .map_err(|_| SkillActivationSelectionError::Internal)?
+            .clone();
+        if let (true, Some(observer)) = (has_activation_event, activation_observer) {
+            observer.observe_skill_activation(SkillActivationObservedEvent {
+                run_context: run_context.clone(),
+                activations: plan.selection.activations.clone(),
+                feedback: plan.selection.feedback.clone(),
+            });
         }
         if plan.selection.activations.is_empty() {
             return Ok(Vec::new());

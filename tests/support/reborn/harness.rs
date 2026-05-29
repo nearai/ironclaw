@@ -1901,8 +1901,9 @@ impl RecordingRuntimeHttpEgress {
     }
 }
 
+#[async_trait::async_trait]
 impl RuntimeHttpEgress for RecordingRuntimeHttpEgress {
-    fn execute(
+    async fn execute(
         &self,
         request: RuntimeHttpEgressRequest,
     ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
@@ -2158,9 +2159,7 @@ impl LoopCapabilityPort for RecordingTestCapabilityPort {
                     "properties": {
                         "flavor_id": {"type": "string"},
                         "task": {"type": "string"},
-                        "handoff": {"type": "string"},
-                        "mode": {"type": "string", "enum": ["blocking", "background"]},
-                        "run_in_background": {"type": "boolean"}
+                        "handoff": {"type": "string"}
                     },
                     "required": ["flavor_id", "task"]
                 }),

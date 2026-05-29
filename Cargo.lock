@@ -4092,6 +4092,7 @@ dependencies = [
  "chrono",
  "futures",
  "ironclaw_agent_loop",
+ "ironclaw_common",
  "ironclaw_host_api",
  "ironclaw_turns",
  "serde",
@@ -4132,12 +4133,11 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "chrono",
- "hex",
+ "ironclaw_common",
  "ironclaw_host_api",
  "secrecy",
  "serde",
  "serde_json",
- "sha2 0.10.9",
  "subtle",
  "thiserror 2.0.18",
  "tokio",
@@ -4188,10 +4188,14 @@ dependencies = [
 name = "ironclaw_common"
 version = "0.4.2"
 dependencies = [
+ "base64 0.22.1",
  "chrono-tz",
  "dirs",
+ "hex",
+ "rand 0.8.6",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "thiserror 2.0.18",
  "tracing",
 ]
@@ -4387,6 +4391,7 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "blake3",
+ "futures-util",
  "glob",
  "ironclaw_auth",
  "ironclaw_filesystem",
@@ -4566,6 +4571,7 @@ dependencies = [
  "ironclaw_host_api",
  "ironclaw_host_runtime",
  "ironclaw_memory",
+ "ironclaw_process_sandbox",
  "ironclaw_resources",
  "ironclaw_safety",
  "ironclaw_skills",
@@ -4590,6 +4596,7 @@ name = "ironclaw_mcp"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "futures-util",
  "ironclaw_extensions",
  "ironclaw_host_api",
  "ironclaw_resources",
@@ -4624,6 +4631,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "ironclaw_host_api",
+ "percent-encoding",
  "reqwest",
  "thiserror 2.0.18",
  "tokio",
@@ -4871,6 +4879,7 @@ dependencies = [
  "ironclaw_approvals",
  "ironclaw_auth",
  "ironclaw_authorization",
+ "ironclaw_capabilities",
  "ironclaw_common",
  "ironclaw_event_projections",
  "ironclaw_event_streams",
@@ -4912,6 +4921,7 @@ dependencies = [
  "tokio",
  "tokio-tungstenite 0.29.0",
  "tokio-util",
+ "toml 0.8.23",
  "tower 0.5.3",
  "tower-http 0.6.11",
  "tracing",
@@ -4923,10 +4933,12 @@ dependencies = [
 name = "ironclaw_reborn_config"
 version = "0.1.0"
 dependencies = [
+ "fs4",
  "serde",
  "tempfile",
  "thiserror 2.0.18",
  "toml 0.8.23",
+ "toml_edit 0.22.27",
 ]
 
 [[package]]
@@ -4992,9 +5004,14 @@ dependencies = [
  "axum 0.8.9",
  "base64 0.22.1",
  "chrono",
+ "hex",
  "http 1.4.1",
+ "http-body-util",
  "ironclaw_host_api",
+ "ironclaw_product_workflow",
  "ironclaw_reborn_composition",
+ "ironclaw_threads",
+ "ironclaw_turns",
  "jsonwebtoken",
  "parking_lot",
  "rand 0.8.6",
@@ -5003,11 +5020,14 @@ dependencies = [
  "secrecy",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "subtle",
  "thiserror 2.0.18",
  "tokio",
+ "tower 0.5.3",
  "tracing",
  "url",
+ "urlencoding",
  "uuid",
 ]
 
@@ -5080,6 +5100,8 @@ dependencies = [
 name = "ironclaw_scripts"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "futures-util",
  "ironclaw_extensions",
  "ironclaw_host_api",
  "ironclaw_resources",
@@ -7623,7 +7645,6 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "encoding_rs",
- "futures-channel",
  "futures-core",
  "futures-util",
  "h2 0.4.14",

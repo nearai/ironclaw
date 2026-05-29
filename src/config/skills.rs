@@ -147,4 +147,55 @@ mod tests {
             }
         }
     }
+
+    /// Three-way precedence test for `regex_activation_enabled`:
+    ///   1. DB/TOML `false` overrides the default `true` (DB wins over env)
+    ///   2. Default `true` + no env var resolves to `true`
+    ///   3. Default `true` + env=`false` resolves to `false` (env path covered
+    ///      by `skills_config_reads_regex_activation_enabled_from_env`)
+    ///
+    /// The DB/TOML path requires NO env mutation, so no ENV_LOCK is needed.
+    #[test]
+    fn skills_config_regex_activation_enabled_precedence() {
+        use crate::settings::SkillsSettings;
+
+        // DB/TOML false — settings deviates from default so db_first_bool
+        // returns the settings value without consulting the env var.
+        let settings_false = Settings {
+            skills: SkillsSettings {
+                regex_activation_enabled: false,
+                ..SkillsSettings::default()
+            },
+            ..Settings::default()
+        };
+        let cfg = SkillsConfig::resolve(&settings_false).expect("resolve with db false");
+        assert!(
+            !cfg.regex_activation_enabled,
+            "DB/TOML regex_activation_enabled=false must take precedence"
+        );
+
+        // Default true + no env var: verify default is preserved.
+        // Guard against process-level env pollution by holding the lock while
+        // we ensure the key is absent.
+        {
+            let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let key = "SKILLS_REGEX_ACTIVATION_ENABLED";
+            let prior = std::env::var(key).ok();
+            // SAFETY (Rust 2024): single-threaded section guarded by ENV_LOCK.
+            unsafe { std::env::remove_var(key) };
+            let settings_default = Settings::default();
+            let cfg_default =
+                SkillsConfig::resolve(&settings_default).expect("resolve with default settings");
+            assert!(
+                cfg_default.regex_activation_enabled,
+                "default must be true when env var is absent"
+            );
+            unsafe {
+                match prior {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
 }
