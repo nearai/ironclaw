@@ -38,11 +38,14 @@ This design keeps three concepts separate:
 ## 3. Proposed Layer
 
 Add a communication resolution step inside the outbound policy boundary between
-run events and outbound delivery:
+run events and outbound delivery. This is a **policy resolver**, not a general
+rules engine: it selects candidate delivery targets from already-canonical run
+events and preferences, then hands those candidates to existing outbound
+validation.
 
 ```text
 Run event
-  FinalReplyReady | ProgressUpdate | ApprovalNeeded | RunBlocked
+  FinalReplyReady | ProgressUpdate | ApprovalNeeded | AuthRequired | RunBlocked
         |
         v
 ironclaw_outbound::CommunicationPolicyResolver
@@ -53,7 +56,7 @@ ironclaw_outbound::CommunicationPolicyResolver
         v
 CommunicationDeliveryCandidate
   target: ReplyTargetBindingRef
-  kind: final_reply | progress | approval_needed | delivery_status
+  kind: final_reply | progress | approval_needed | auth_required | delivery_status
         |
         v
 ironclaw_outbound::OutboundPolicyService
@@ -71,6 +74,12 @@ reply-target validation, delivery attempts, and sanitized failure records to
 that crate. The resolver must not live in `ironclaw_triggers`,
 `ironclaw_conversations`, or `ironclaw_approvals`. Reborn composition wires the
 resolver and store dependencies, but does not own the policy semantics.
+
+The resolver is read-only with respect to ingress and authority. It must not
+mutate `ProductInboundEnvelope`, `ExternalConversationRef`, inbound dedupe state,
+`AcceptedMessageRef`, `SourceBindingRef`, `ReplyTargetBindingRef`, pending-gate
+records, auth-flow records, approval records, leases, or turn submission
+behavior.
 
 ## 4. Resolver Input
 
@@ -95,6 +104,7 @@ enum CommunicationEventKind {
     FinalReplyReady,
     ProgressUpdate,
     ApprovalNeeded,
+    AuthRequired,
     RunBlocked,
     DeliveryStatus,
 }
@@ -127,6 +137,11 @@ This shape is a contract invariant: live user messages require source-route
 context; trigger-origin events require trigger context; message-regex triggers
 carry both because they are caused by a real product message but execute a
 stored trigger rule. Callers must not pass an under-specified request.
+
+The request intentionally does not carry `PendingGate`, pending auth IDs,
+approval request IDs, credential names, OAuth callback data, or raw product
+payloads. Those identifiers stay with their owning auth, approval, gateway, or
+product-workflow paths.
 
 ### Modality
 
@@ -240,6 +255,10 @@ ProgressUpdate:
 ApprovalNeeded:
   preference.approval_prompt_target if target supports gate prompts
   else normal run-state/event path only
+
+AuthRequired:
+  source_route.reply_target_binding_ref if target supports auth prompts
+  else normal auth-flow path only
 ```
 
 ### Triggered Job
@@ -258,6 +277,10 @@ ProgressUpdate:
 ApprovalNeeded:
   preference.approval_prompt_target only if target supports gate prompts
   else record ApprovalBlocked / RunBlocked through normal run-state/event path
+
+AuthRequired:
+  preference.approval_prompt_target only if target supports auth prompts
+  else record auth-required state through normal auth-flow path
 ```
 
 ### Webhook Trigger
@@ -284,6 +307,7 @@ DeliveryTargetCapabilities {
     final_replies: bool,
     progress: bool,
     gate_prompts: bool,
+    auth_prompts: bool,
     modalities: Vec<CommunicationModality>,
 }
 ```
@@ -307,6 +331,11 @@ Modality is a policy input:
 ## 8. Approval Delivery
 
 Approval notification and approval resolution are different contracts.
+The intended end state still supports product-channel approvals: if a user's
+default approval target is Telegram and that validated target supports gate
+prompts plus approval-resolution inbound events, the user can receive the prompt
+in Telegram, approve there, and the existing approval resolver resumes the exact
+parked invocation.
 
 On approval-needed:
 
@@ -316,6 +345,8 @@ CapabilityHost returns RequireApproval
   -> RunState marks BlockedApproval
   -> EventStream publishes approval_needed
   -> ironclaw_outbound::CommunicationPolicyResolver may notify approval_prompt_target
+  -> Product adapter renders GatePrompt if validated capabilities allow it
+  -> Product inbound receives ApprovalResolution
   -> ApprovalResolver handles approve/deny
   -> CapabilityHost resumes exact invocation using fingerprinted lease
 ```
@@ -332,12 +363,43 @@ Security rules:
   sent in approval notifications.
 - If the validated target capabilities do not include gate prompts, do not
   emulate approval with normal chat text.
+- If the target cannot produce a scoped `ApprovalResolution` inbound event,
+  notify-only delivery is allowed, but approval must still happen through a
+  supported approval surface before the invocation resumes.
 - Product examples: current Telegram v2 drops `GatePrompt` / `AuthPrompt`, while
   Web UI can surface approval state through the normal pending-gate/run-history
   path. These examples document current product behavior; the resolver consumes
   validated capabilities, not product names.
 
-## 9. Outbound Validation and Failure Semantics
+## 9. Auth Prompt Delivery
+
+Auth prompt delivery and auth flow resolution are different contracts.
+Auth-required state remains owned by the auth flow / auth interaction path. The
+communication resolver may select where an already-created, redacted
+`AuthPrompt` notification should be attempted, but it must not create, complete,
+cancel, replay, or retry auth flows.
+
+The intended end state still supports product-channel auth interaction: if the
+validated default target supports auth prompts plus auth-resolution inbound
+events, the user can start or complete the auth interaction from that product
+surface and the existing auth interaction path continues the loop.
+
+Security rules:
+
+- Auth callback handling, credential exchange, token storage, and secret
+  material stay outside communication delivery resolution.
+- The resolver must not accept credential names, OAuth state, callback payloads,
+  pending-auth IDs, or pending-gate records as inputs.
+- If the validated target capabilities do not include auth prompts, do not
+  emulate auth with normal chat text.
+- If the target cannot produce a scoped `AuthResolution` inbound event, delivery
+  is notify-only; credential exchange and resume still happen through a supported
+  auth surface.
+- Product examples such as Web UI surfacing auth state and Telegram v2 dropping
+  `AuthPrompt` are adapter behavior. The resolver consumes validated
+  capabilities, not product names.
+
+## 10. Outbound Validation and Failure Semantics
 
 Every resolved target is an outbound candidate:
 
@@ -356,14 +418,35 @@ after revocation. Users can change their defaults explicitly.
 Delivery failure records are support/audit metadata. They do not mutate
 canonical transcript state and do not mark the run failed.
 
-## 10. Security Invariants
+## 11. Inbound Non-Impact Contract
+
+Communication delivery resolution must not change inbound acceptance, replay, or
+resume semantics.
+
+- Inbound user-message binding stays in product workflow and
+  `ironclaw_conversations`. The resolver consumes canonical scope, actor, and
+  route context after inbound acceptance; it does not parse product payloads or
+  submit turns.
+- Approval and auth resume stay in their existing gateway / bridge / control
+  plane paths. A delivery target can notify a user that action is needed, but it
+  cannot approve, deny, provide credentials, clear pending gates, or resume
+  runtime work.
+- Product outbound payload shapes and adapter behavior stay unchanged. The
+  resolver selects a target candidate; product adapters still render
+  `FinalReply`, `Progress`, `GatePrompt`, `AuthPrompt`, projection updates, and
+  unsupported-payload deferrals according to their existing capabilities.
+- Delivery failures remain delivery metadata only. They do not mutate canonical
+  transcript, projection, auth, approval, pending-gate, or turn state.
+
+## 12. Security Invariants
 
 - Do not encode Web UI, Telegram, or any communication destination into
   `ExternalConversationRef`, `TurnActor`, `adapter_kind`, or trigger ingress
   identity.
 - Do not let trigger delivery override approval authority.
+- Do not let communication delivery override auth flow authority.
 - Do not use tenant/user defaults as proof that a target is still authorized.
-- Do not infer delivery or approval capabilities from channel names.
+- Do not infer delivery, approval, or auth capabilities from channel names.
 - Revalidate `ReplyTargetBindingRef` before every external push.
 - Keep ingress, execution, and outbound delivery identities separate.
 - Keep preference lookup scoped by tenant and user. Cross-tenant lookup must
@@ -372,7 +455,7 @@ canonical transcript state and do not mark the run failed.
   raw prompts, tool inputs, secrets, or channel credentials in communication
   preference records.
 
-## 11. Example Flows
+## 13. Example Flows
 
 ### Live Web UI Chat
 
@@ -408,13 +491,30 @@ Triggered run hits approval-gated tool
   -> ApprovalResolver remains the only approve/deny authority
 ```
 
-## 12. Contract Updates Needed
+### Auth Prompt Notification
+
+```text
+Auth flow records auth-required state
+  -> EventStream publishes auth_required
+  -> outbound resolver checks auth prompt target capabilities
+  -> Product adapter may render AuthPrompt if validated capabilities allow it
+  -> Auth interaction service remains the only auth completion authority
+```
+
+## 14. Contract Updates Needed
 
 - `events-projections.md`: define where communication resolution plugs into
   event/projection/outbound flow.
 - `approvals.md`: state that approval notification is separate from approval
   resolution and leases.
+- Auth product / runtime workflow contracts: state that auth prompt notification
+  is separate from auth flow creation, callback handling, credential exchange,
+  and token storage.
 - `conversation-binding.md`: keep reply-target binding semantics distinct from
   synthetic trigger ingress identity.
 - Trigger-loop spec: reference this document for default notification and
   approval delivery resolution.
+- Tests: when this moves from design to implementation, add caller-level
+  regression coverage for product inbound acceptance/replay, chat approval/gate
+  resolution, and auth token/cancel flows. Resolver unit tests alone are not
+  enough to prove inbound safety.
