@@ -18,7 +18,7 @@ where
         request: SecretCleanupRequest,
     ) -> Result<SecretCleanupReport, AuthProductError> {
         let mut report = SecretCleanupReport::default();
-        for account in self.accounts_for_scope(&request.scope).await? {
+        for account in self.accounts_for_scope(&request.scope, usize::MAX).await? {
             let owns_extension_account = account.owner_extension.as_ref()
                 == Some(&request.extension_id)
                 && account.ownership == CredentialOwnership::ExtensionOwned;
@@ -41,37 +41,41 @@ where
             if had_grant {
                 report.removed_grants.push(current.id);
             }
-            // Capture secret handles before any mutations so we can purge
-            // them from SecretStore after the account record is persisted.
-            let mut handles_to_purge: [Option<ironclaw_host_api::SecretHandle>; 2] = [None, None];
-            if owns_extension_account {
+            // Capture handles to purge before mutating the record so we can
+            // delete from SecretStore after the account write.
+            let (purge_access, purge_refresh) = if owns_extension_account {
                 match request.action {
                     SecretCleanupAction::Deactivate => {
                         current.status = CredentialAccountStatus::Inactive;
                         report.retained_accounts.push(current.id);
+                        (None, None)
                     }
                     SecretCleanupAction::Uninstall => {
-                        handles_to_purge =
-                            [current.access_secret.take(), current.refresh_secret.take()];
+                        let access = current.access_secret.take();
+                        let refresh = current.refresh_secret.take();
                         if current.status != CredentialAccountStatus::Revoked {
                             current.status = CredentialAccountStatus::Revoked;
                             report.revoked_accounts.push(current.id);
                         }
+                        (access, refresh)
                     }
                 }
-            } else if had_grant {
-                report.retained_accounts.push(current.id);
-            }
+            } else {
+                if had_grant {
+                    report.retained_accounts.push(current.id);
+                }
+                (None, None)
+            };
             current.updated_at = Utc::now();
             self.write_account(&current, CasExpectation::Version(version))
                 .await?;
-            // Purge raw secret material after the account record is safely
+            // Purge secret material after the account record is safely
             // persisted without the handles.
-            for handle in handles_to_purge.iter().flatten() {
-                let _ = self
-                    .secret_store
-                    .delete(&request.scope.resource, handle)
-                    .await;
+            if let Some(h) = &purge_access {
+                let _ = self.secret_store.delete(&request.scope.resource, h).await;
+            }
+            if let Some(h) = &purge_refresh {
+                let _ = self.secret_store.delete(&request.scope.resource, h).await;
             }
         }
         Ok(report)

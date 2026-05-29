@@ -175,14 +175,10 @@ where
         .await
     }
 
+    /// Returns credential accounts for `scope` by reading at most
+    /// `max_entries` directory entries from storage. Pass `usize::MAX` for a
+    /// full unbounded scan.
     async fn accounts_for_scope(
-        &self,
-        scope: &ironclaw_auth::AuthProductScope,
-    ) -> Result<Vec<CredentialAccount>, AuthProductError> {
-        self.accounts_for_scope_bounded(scope, usize::MAX).await
-    }
-
-    async fn accounts_for_scope_bounded(
         &self,
         scope: &ironclaw_auth::AuthProductScope,
         max_entries: usize,
