@@ -29,7 +29,7 @@ use ironclaw_turns::{
     TurnRunWakeNotifyError, TurnRunnerId, TurnScope, TurnStatus,
     runner::{
         ClaimRunRequest, ClaimedTurnRun, HeartbeatRequest, RecordModelRouteSnapshotRequest,
-        RecordRunnerFailureRequest, RelinquishRunRequest, RecoverExpiredLeasesRequest,
+        RecordRunnerFailureRequest, RecoverExpiredLeasesRequest, RelinquishRunRequest,
         TurnRunTransitionPort,
     },
 };
@@ -563,8 +563,7 @@ impl TurnRunnerWorker {
         // Errors that warrant relinquish (re-queue) rather than terminal failure.
         let relinquish = matches!(
             error,
-            DriverInvocationError::WorkerCancelled
-                | DriverInvocationError::HeartbeatStopped
+            DriverInvocationError::WorkerCancelled | DriverInvocationError::HeartbeatStopped
         );
 
         if relinquish {

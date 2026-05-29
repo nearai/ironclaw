@@ -18,8 +18,8 @@ use ironclaw_turns::{
     runner::{
         ApplyValidatedLoopExitRequest, BlockRunRequest, CancelRunCompletionRequest,
         ClaimRunRequest, ClaimedTurnRun, CompleteRunRequest, FailRunRequest, HeartbeatRequest,
-        RecordModelRouteSnapshotRequest, RecordRunnerFailureRequest, RelinquishRunRequest,
-        RecoverExpiredLeasesRequest, RecoverExpiredLeasesResponse, TurnRunTransitionPort,
+        RecordModelRouteSnapshotRequest, RecordRunnerFailureRequest, RecoverExpiredLeasesRequest,
+        RecoverExpiredLeasesResponse, RelinquishRunRequest, TurnRunTransitionPort,
         TurnRunnerOutcome,
     },
 };
@@ -314,7 +314,10 @@ impl TurnRunTransitionPort for MockTransitionPort {
             .lock()
             .expect("lock")
             .push(TransitionCall::RecordRunnerFailure);
-        self.runner_failure_requests.lock().expect("lock").push(request);
+        self.runner_failure_requests
+            .lock()
+            .expect("lock")
+            .push(request);
         self.runner_failure_result.lock().expect("lock").clone()
     }
 
@@ -1122,10 +1125,7 @@ async fn worker_records_terminal_failure_when_heartbeat_fails() {
     );
     result.unwrap().unwrap();
     assert!(port.calls().contains(&TransitionCall::Heartbeat));
-    assert!(
-        port.calls()
-            .contains(&TransitionCall::RecordRunnerFailure)
-    );
+    assert!(port.calls().contains(&TransitionCall::RecordRunnerFailure));
     assert_first_terminal_failure_matches_first_claim(&port, run_id);
 }
 
@@ -1169,15 +1169,16 @@ async fn worker_cancellation_relinquishes_run() {
     // WorkerCancelled routes through relinquish_run (re-queue) rather than
     // record_runner_failure (terminal), so the run stays available for retry.
     assert!(
-        port.calls()
-            .contains(&TransitionCall::Relinquish),
+        port.calls().contains(&TransitionCall::Relinquish),
         "WorkerCancelled should relinquish the run, not terminate it"
     );
     assert!(!port.calls().contains(&TransitionCall::RecordRunnerFailure));
     let claim_requests = port.claim_requests.lock().expect("lock");
     let relinquish_requests = port.relinquish_requests.lock().expect("lock");
     let claim = claim_requests.first().expect("claim should be issued");
-    let relinquish = relinquish_requests.first().expect("relinquish should be issued");
+    let relinquish = relinquish_requests
+        .first()
+        .expect("relinquish should be issued");
     assert_eq!(relinquish.run_id, run_id);
     assert_eq!(relinquish.runner_id, claim.runner_id);
     assert_eq!(relinquish.lease_token, claim.lease_token);
@@ -1221,10 +1222,7 @@ async fn worker_records_terminal_failure_on_driver_error() {
     cancel.cancel();
     handle.await.expect("worker task should complete");
 
-    assert!(
-        port.calls()
-            .contains(&TransitionCall::RecordRunnerFailure)
-    );
+    assert!(port.calls().contains(&TransitionCall::RecordRunnerFailure));
     assert_first_terminal_failure_matches_first_claim(&port, run_id);
 }
 
@@ -1262,10 +1260,7 @@ async fn worker_records_terminal_failure_on_driver_panic() {
     cancel.cancel();
     handle.await.expect("worker task should complete");
 
-    assert!(
-        port.calls()
-            .contains(&TransitionCall::RecordRunnerFailure)
-    );
+    assert!(port.calls().contains(&TransitionCall::RecordRunnerFailure));
 }
 
 #[tokio::test]
@@ -1305,10 +1300,7 @@ async fn worker_records_terminal_failure_on_host_factory_error() {
     cancel.cancel();
     handle.await.expect("worker task should complete");
 
-    assert!(
-        port.calls()
-            .contains(&TransitionCall::RecordRunnerFailure)
-    );
+    assert!(port.calls().contains(&TransitionCall::RecordRunnerFailure));
     assert_first_terminal_failure_matches_first_claim(&port, run_id);
 }
 
@@ -1348,10 +1340,7 @@ async fn worker_records_terminal_failure_when_driver_not_found() {
     cancel.cancel();
     handle.await.expect("worker task should complete");
 
-    assert!(
-        port.calls()
-            .contains(&TransitionCall::RecordRunnerFailure)
-    );
+    assert!(port.calls().contains(&TransitionCall::RecordRunnerFailure));
     assert_first_terminal_failure_matches_first_claim(&port, run_id);
 }
 

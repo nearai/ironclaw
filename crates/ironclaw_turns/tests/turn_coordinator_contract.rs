@@ -36,9 +36,8 @@ use ironclaw_turns::{
     runner::{
         ApplyValidatedLoopExitRequest, BlockRunRequest, CancelRunCompletionRequest,
         ClaimRunRequest, ClaimedTurnRun, CompleteRunRequest, FailRunRequest, HeartbeatRequest,
-        RecordModelRouteSnapshotRequest, RecordRunnerFailureRequest,
-        RecoverExpiredLeasesRequest, RecoverExpiredLeasesResponse, TurnRunTransitionPort,
-        TurnRunnerOutcome,
+        RecordModelRouteSnapshotRequest, RecordRunnerFailureRequest, RecoverExpiredLeasesRequest,
+        RecoverExpiredLeasesResponse, TurnRunTransitionPort, TurnRunnerOutcome,
     },
 };
 
@@ -6512,7 +6511,9 @@ impl TurnRunTransitionPort for AtomicLoopExitPort {
         &self,
         _request: ironclaw_turns::runner::RecordRunnerFailureRequest,
     ) -> Result<TurnRunState, TurnError> {
-        panic!("cancelled loop-exit application must not use a separate terminal failure transition")
+        panic!(
+            "cancelled loop-exit application must not use a separate terminal failure transition"
+        )
     }
 
     async fn apply_validated_loop_exit(
@@ -6989,7 +6990,8 @@ async fn loop_exit_application_cancels_only_after_public_cancel_request() {
 
 // M3: record_runner_failure on CancelRequested → Cancelled (not Failed)
 #[tokio::test]
-async fn lifecycle_publishing_store_publishes_record_runner_failure_as_cancelled_event_when_cancel_requested() {
+async fn lifecycle_publishing_store_publishes_record_runner_failure_as_cancelled_event_when_cancel_requested()
+ {
     let raw_store = Arc::new(InMemoryTurnStateStore::default());
     let sink = Arc::new(InMemoryTurnEventSink::default());
     let transition_port = lifecycle_publishing_store(raw_store, None, Some(sink.clone()));
@@ -7037,7 +7039,10 @@ async fn lifecycle_publishing_store_publishes_record_runner_failure_as_cancelled
         .unwrap();
     // The CancelRequested branch produces Cancelled (not Failed) and discards the failure.
     assert_eq!(state.status, TurnStatus::Cancelled);
-    assert!(state.failure.is_none(), "failure should be None on cancel branch");
+    assert!(
+        state.failure.is_none(),
+        "failure should be None on cancel branch"
+    );
     // Published event should be Cancelled, not Failed.
     assert!(
         sink.events().iter().any(|event| {
@@ -7053,9 +7058,10 @@ async fn lifecycle_publishing_store_publishes_record_runner_failure_as_cancelled
             .collect::<Vec<_>>()
     );
     assert!(
-        !sink.events().iter().any(|event| {
-            event.run_id == run_id && event.kind == TurnEventKind::Failed
-        }),
+        !sink
+            .events()
+            .iter()
+            .any(|event| { event.run_id == run_id && event.kind == TurnEventKind::Failed }),
         "should not emit a Failed event when CancelRequested"
     );
 }

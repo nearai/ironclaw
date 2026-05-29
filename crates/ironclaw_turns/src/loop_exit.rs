@@ -243,7 +243,6 @@ impl LoopExitApplier {
             })
             .await
     }
-
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -285,10 +284,9 @@ impl LoopExit {
                     ),
                 }
             }
-            Self::Blocked(_exit) => invalid_exit_decision(
-                exit_id,
-                LoopExitViolationKind::UnverifiedBlockedEvidence,
-            ),
+            Self::Blocked(_exit) => {
+                invalid_exit_decision(exit_id, LoopExitViolationKind::UnverifiedBlockedEvidence)
+            }
             Self::Cancelled(exit) => validate_cancelled_exit(exit_id, exit, policy),
             Self::Failed(exit) => validate_failed_exit(exit_id, exit, policy),
         }
@@ -750,10 +748,7 @@ fn validate_completed_exit(
     if policy.require_final_checkpoint
         && (exit.final_checkpoint_id.is_none() || !policy.final_checkpoint_verified)
     {
-        return invalid_exit_decision(
-            exit_id,
-            LoopExitViolationKind::MissingFinalCheckpoint,
-        );
+        return invalid_exit_decision(exit_id, LoopExitViolationKind::MissingFinalCheckpoint);
     }
 
     LoopExitValidationDecision::trusted(exit_id, TurnRunnerOutcome::Completed)
@@ -798,18 +793,12 @@ fn validate_cancelled_exit(
     policy: LoopExitValidationPolicy,
 ) -> LoopExitValidationDecision {
     if !policy.host_cancellation_observed {
-        return invalid_exit_decision(
-            exit_id,
-            LoopExitViolationKind::CancellationNotObserved,
-        );
+        return invalid_exit_decision(exit_id, LoopExitViolationKind::CancellationNotObserved);
     }
     if policy.require_final_checkpoint
         && (exit.checkpoint_id.is_none() || !policy.final_checkpoint_verified)
     {
-        return invalid_exit_decision(
-            exit_id,
-            LoopExitViolationKind::MissingFinalCheckpoint,
-        );
+        return invalid_exit_decision(exit_id, LoopExitViolationKind::MissingFinalCheckpoint);
     }
     LoopExitValidationDecision::trusted(exit_id, TurnRunnerOutcome::Cancelled)
 }
@@ -820,18 +809,12 @@ fn validate_failed_exit(
     policy: LoopExitValidationPolicy,
 ) -> LoopExitValidationDecision {
     if !policy.failure_evidence_verified {
-        return invalid_exit_decision(
-            exit_id,
-            LoopExitViolationKind::UnverifiedFailureEvidence,
-        );
+        return invalid_exit_decision(exit_id, LoopExitViolationKind::UnverifiedFailureEvidence);
     }
     if policy.require_final_checkpoint
         && (exit.checkpoint_id.is_none() || !policy.final_checkpoint_verified)
     {
-        return invalid_exit_decision(
-            exit_id,
-            LoopExitViolationKind::MissingFinalCheckpoint,
-        );
+        return invalid_exit_decision(exit_id, LoopExitViolationKind::MissingFinalCheckpoint);
     }
     LoopExitValidationDecision::trusted(
         exit_id,

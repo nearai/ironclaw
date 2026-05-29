@@ -28,8 +28,8 @@ use crate::{
     runner::{
         ApplyValidatedLoopExitRequest, BlockRunRequest, CancelRunCompletionRequest,
         ClaimRunRequest, ClaimedTurnRun, CompleteRunRequest, FailRunRequest, HeartbeatRequest,
-        RecordModelRouteSnapshotRequest, RecordRunnerFailureRequest, RelinquishRunRequest,
-        RecoverExpiredLeasesRequest, RecoverExpiredLeasesResponse, TurnRunTransitionPort,
+        RecordModelRouteSnapshotRequest, RecordRunnerFailureRequest, RecoverExpiredLeasesRequest,
+        RecoverExpiredLeasesResponse, RelinquishRunRequest, TurnRunTransitionPort,
         TurnRunnerOutcome,
     },
 };
@@ -2101,12 +2101,11 @@ impl Inner {
                 LoopExitMapping::RunnerOutcome(TurnRunnerOutcome::Completed) => {
                     self.complete_claimed_record(record)
                 }
-                LoopExitMapping::RunnerOutcome(TurnRunnerOutcome::Cancelled) => {
-                    self.cancel_or_fail_claimed_record(
+                LoopExitMapping::RunnerOutcome(TurnRunnerOutcome::Cancelled) => self
+                    .cancel_or_fail_claimed_record(
                         record,
                         SanitizedFailure::from_trusted_static("interrupted_unexpectedly"),
-                    )
-                }
+                    ),
                 LoopExitMapping::RunnerOutcome(TurnRunnerOutcome::Blocked {
                     checkpoint_id,
                     state_ref,
