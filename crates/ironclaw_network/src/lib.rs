@@ -26,4 +26,5 @@ pub use types::{
 };
 pub use url_target::{
     NetworkTargetUrlError, is_rfc3986_unreserved_segment, network_target_for_url,
+    percent_decode_url_component_lossy,
 };

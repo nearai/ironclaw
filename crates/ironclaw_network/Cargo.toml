@@ -7,6 +7,7 @@ publish = false
 [dependencies]
 async-trait = "0.1"
 ironclaw_host_api = { path = "../ironclaw_host_api" }
+percent-encoding = "2"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls-native-roots"] }
 thiserror = "2"
 url = "2"

@@ -1,4 +1,5 @@
 use ironclaw_host_api::{NetworkScheme, NetworkTarget};
+use std::borrow::Cow;
 use thiserror::Error;
 
 use crate::error::NetworkHttpError;
@@ -26,6 +27,14 @@ pub fn is_rfc3986_unreserved_segment(segment: &str) -> bool {
         && segment
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~'))
+}
+
+pub fn percent_decode_url_component_lossy(input: &str) -> Cow<'_, str> {
+    if !input.as_bytes().contains(&b'%') {
+        Cow::Borrowed(input)
+    } else {
+        percent_encoding::percent_decode_str(input).decode_utf8_lossy()
+    }
 }
 
 pub(crate) fn network_target_for_http_url(
@@ -71,7 +80,8 @@ pub(crate) fn default_port(scheme: NetworkScheme) -> u16 {
 
 #[cfg(test)]
 mod tests {
-    use super::is_rfc3986_unreserved_segment;
+    use super::{is_rfc3986_unreserved_segment, percent_decode_url_component_lossy};
+    use std::borrow::Cow;
 
     #[test]
     fn rfc3986_unreserved_segment_accepts_unreserved_path_parts() {
@@ -85,5 +95,21 @@ mod tests {
         for segment in ["", ".", "..", "/", "a/b", "?", "a?b", "#", "a#b", "%2f"] {
             assert!(!is_rfc3986_unreserved_segment(segment), "{segment}");
         }
+    }
+
+    #[test]
+    fn percent_decode_url_component_lossy_borrows_unencoded_component() {
+        assert!(matches!(
+            percent_decode_url_component_lossy("plain/path"),
+            Cow::Borrowed("plain/path")
+        ));
+    }
+
+    #[test]
+    fn percent_decode_url_component_lossy_decodes_encoded_component() {
+        assert_eq!(
+            percent_decode_url_component_lossy("token%20value").as_ref(),
+            "token value"
+        );
     }
 }

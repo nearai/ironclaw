@@ -2,9 +2,8 @@ use ironclaw_host_api::{
     RuntimeHttpEgressError, RuntimeHttpEgressRequest, is_sensitive_runtime_request_header,
     is_sensitive_runtime_response_header,
 };
-use ironclaw_network::NetworkHttpResponse;
+use ironclaw_network::{NetworkHttpResponse, percent_decode_url_component_lossy};
 use ironclaw_safety::{LeakDetector, http_parts_contain_manual_credentials, redact_exact_values};
-use std::borrow::Cow;
 
 pub(super) fn validate_runtime_request(
     request: &RuntimeHttpEgressRequest,
@@ -30,15 +29,40 @@ pub(super) fn validate_runtime_request(
         });
     }
 
-    leak_detector
-        .scan_http_request(&request.url, &request.headers, Some(&request.body))
-        .map_err(|_| runtime_request_leak_error())?;
-    scan_decoded_url_for_leaks(leak_detector, &request.url)?;
+    scan_runtime_url_for_leaks(leak_detector, &request.url)?;
+    scan_runtime_headers_and_body_for_leaks(leak_detector, request)?;
     Ok(())
 }
 
 fn runtime_request_contains_manual_credentials(request: &RuntimeHttpEgressRequest) -> bool {
     http_parts_contain_manual_credentials(&request.url, &request.headers)
+}
+
+fn scan_runtime_url_for_leaks(
+    detector: &LeakDetector,
+    raw_url: &str,
+) -> Result<(), RuntimeHttpEgressError> {
+    detector
+        .scan_and_clean(raw_url)
+        .map_err(|_| runtime_request_leak_error())?;
+    scan_decoded_url_for_leaks(detector, raw_url)
+}
+
+fn scan_runtime_headers_and_body_for_leaks(
+    detector: &LeakDetector,
+    request: &RuntimeHttpEgressRequest,
+) -> Result<(), RuntimeHttpEgressError> {
+    for (_name, value) in &request.headers {
+        detector
+            .scan_and_clean(value)
+            .map_err(|_| runtime_request_leak_error())?;
+    }
+
+    let body = String::from_utf8_lossy(&request.body);
+    detector
+        .scan_and_clean(&body)
+        .map_err(|_| runtime_request_leak_error())?;
+    Ok(())
 }
 
 fn scan_decoded_url_for_leaks(
@@ -75,21 +99,13 @@ fn scan_decoded_component_for_leaks(
     detector: &LeakDetector,
     component: &str,
 ) -> Result<(), RuntimeHttpEgressError> {
-    let decoded = percent_decode(component);
+    let decoded = percent_decode_url_component_lossy(component);
     if decoded.as_ref() != component {
         detector
             .scan_and_clean(decoded.as_ref())
             .map_err(|_| runtime_request_leak_error())?;
     }
     Ok(())
-}
-
-fn percent_decode(input: &str) -> Cow<'_, str> {
-    if !input.as_bytes().contains(&b'%') {
-        Cow::Borrowed(input)
-    } else {
-        percent_encoding::percent_decode_str(input).decode_utf8_lossy()
-    }
 }
 
 fn runtime_request_leak_error() -> RuntimeHttpEgressError {
