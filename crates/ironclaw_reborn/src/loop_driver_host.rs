@@ -2265,6 +2265,7 @@ mod tests {
             .checkpoint(LoopCheckpointRequest {
                 kind: LoopCheckpointKind::BeforeSideEffect,
                 state_ref,
+                gate_ref: None,
             })
             .await
             .expect("write checkpoint metadata");
@@ -2302,6 +2303,7 @@ mod tests {
             .checkpoint(LoopCheckpointRequest {
                 kind: LoopCheckpointKind::BeforeModel,
                 state_ref,
+                gate_ref: None,
             })
             .await
             .expect("write checkpoint metadata");
@@ -2337,6 +2339,7 @@ mod tests {
             .checkpoint(LoopCheckpointRequest {
                 kind: LoopCheckpointKind::BeforeModel,
                 state_ref,
+                gate_ref: None,
             })
             .await
             .expect("write checkpoint metadata");
@@ -2393,6 +2396,7 @@ mod tests {
                 schema_id: expected_schema_id.clone(),
                 schema_version: expected_schema_version,
                 kind: LoopCheckpointKind::BeforeBlock,
+                gate_ref: None,
             })
             .await
             .expect("write checkpoint metadata");

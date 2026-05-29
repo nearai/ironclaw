@@ -1708,6 +1708,11 @@ pub trait LoopTranscriptPort: Send + Sync {
 pub struct LoopCheckpointRequest {
     pub kind: LoopCheckpointKind,
     pub state_ref: LoopCheckpointStateRef,
+    /// Gate identity for `BeforeBlock` checkpoints; `None` for other kinds.
+    /// Defaults to `None` for backward-compatible deserialization of older
+    /// records that predate this field.
+    #[serde(default)]
+    pub gate_ref: Option<crate::ids::LoopGateRef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

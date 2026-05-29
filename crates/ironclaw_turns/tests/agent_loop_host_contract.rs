@@ -2118,6 +2118,7 @@ impl AgentLoopDriver for CapabilityDriver {
             .checkpoint(LoopCheckpointRequest {
                 kind: LoopCheckpointKind::BeforeBlock,
                 state_ref: state_ref.clone(),
+                gate_ref: None,
             })
             .await
             .map_err(driver_error)?;

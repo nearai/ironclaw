@@ -70,7 +70,7 @@ impl ExecutorStage<GateInput> for GateStage {
                     )
                     .await;
                 let checked = CheckpointStage
-                    .write(ctx, state, CheckpointKind::BeforeBlock)
+                    .write_before_block(ctx, state, &gate_ref)
                     .await?;
                 Ok(BatchStep::Exit(LoopExit::Blocked(LoopBlocked {
                     kind: blocked_kind(kind),
@@ -158,7 +158,7 @@ impl ExecutorStage<AwaitDependentRunGateInput> for AwaitDependentRunGateStage {
                     )
                     .await;
                 let checked = CheckpointStage
-                    .write(ctx, state, CheckpointKind::BeforeBlock)
+                    .write_before_block(ctx, state, &gate_ref)
                     .await?;
                 Ok(BatchStep::Exit(LoopExit::Blocked(LoopBlocked {
                     kind: blocked_kind(GateKind::AwaitDependentRun),

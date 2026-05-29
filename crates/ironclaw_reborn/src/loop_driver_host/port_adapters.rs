@@ -145,6 +145,7 @@ impl LoopCheckpointPort for HostManagedLoopCheckpointPort {
                 schema_id: self.run_context.checkpoint_schema_id.clone(),
                 schema_version: self.run_context.checkpoint_schema_version,
                 kind: request.kind,
+                gate_ref: request.gate_ref,
             })
             .await
             .map_err(turn_error_to_host_error)?;

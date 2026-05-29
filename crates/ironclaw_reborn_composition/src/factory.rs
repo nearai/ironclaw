@@ -3,6 +3,8 @@ use std::{
     sync::Arc,
 };
 
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+use crate::product_auth_durable::{FilesystemAuthProductServices, UnavailableAuthProviderClient};
 use ironclaw_auth::AuthProviderClient;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_authorization::FilesystemCapabilityLeaseStore;
@@ -1242,11 +1244,6 @@ async fn build_production_shaped(
         require_runtime_http_egress,
         require_wasm_credentials,
     );
-    if google_oauth_config.is_some() && product_auth_ports.is_none() {
-        return Err(RebornBuildError::InvalidConfig {
-            reason: "Google OAuth backend config requires product-auth ports".to_string(),
-        });
-    }
     #[cfg(not(any(feature = "libsql", feature = "postgres")))]
     let _ = (
         production_trust_policy,
@@ -1643,6 +1640,7 @@ where
     } = context;
     let secret_store: Arc<dyn SecretStore> = stores.secret_credentials.secret_store.clone();
     let mut first_party_registry = builtin_first_party_registry()?;
+    let product_auth_filesystem = Arc::clone(&stores.scoped_filesystem);
     let services = HostRuntimeServices::new(
         Arc::new(builtin_extension_registry()?),
         Arc::clone(&stores.filesystem),
@@ -1654,7 +1652,7 @@ where
     .with_trust_policy(production_wiring.trust_policy)
     .with_runtime_policy(production_wiring.runtime_policy)
     .with_capability_leases(stores.leases)
-    .with_secret_store(stores.secret_credentials.secret_store)
+    .with_secret_store(Arc::clone(&stores.secret_credentials.secret_store))
     .with_credential_broker(stores.secret_credentials.credential_broker)
     .try_with_host_http_egress_with_body_store(
         ironclaw_network::PolicyNetworkHttpEgress::new(
@@ -1666,14 +1664,18 @@ where
     .with_reborn_event_store_config(profile.to_event_store_profile(), stores.event_store)
     .await?
     .with_filesystem_run_state(Arc::clone(&stores.scoped_filesystem))
-    .with_filesystem_turn_state_store(stores.scoped_filesystem)
+    .with_filesystem_turn_state_store(Arc::clone(&stores.scoped_filesystem))
     .with_run_profile_resolver(planned_run_profile_resolver()?)
     .with_turn_run_wake_notifier(production_wiring.turn_run_wake_notifier);
     let product_auth_runtime_ports = require_product_auth_runtime_ports(&services)?;
     let services = attach_nearai_mcp_runtime(services)?;
     let google_provider_client = google_oauth_config
         .map(|config| {
-            google_provider_client(config, secret_store, product_auth_runtime_ports.clone())
+            google_provider_client(
+                config,
+                Arc::clone(&secret_store),
+                product_auth_runtime_ports.clone(),
+            )
         })
         .transpose()?;
     let services = apply_production_runtime_process_binding(
@@ -1683,22 +1685,32 @@ where
 
     let turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator> =
         Arc::new(services.turn_coordinator_for_production()?);
-    let product_auth = product_auth_ports.map(|ports| {
-        compose_product_auth_services(ports, turn_coordinator.clone(), google_provider_client)
-    });
-    let product_auth_ready = product_auth.is_some();
-    if let Some(product_auth) = &product_auth {
-        register_bundled_gsuite_first_party_handlers(
-            &mut first_party_registry,
-            product_auth.credential_account_service(),
-            Arc::new(ProductAuthRuntimeGsuiteCredentialStager::new(
-                product_auth_runtime_ports.clone(),
-            )),
+    let product_auth_ports = product_auth_ports.unwrap_or_else(|| {
+        let durable = Arc::new(FilesystemAuthProductServices::new(
+            product_auth_filesystem,
+            Arc::clone(&secret_store),
+        ));
+        RebornProductAuthServicePorts::from_shared_with_provider(
+            durable,
+            Arc::new(UnavailableAuthProviderClient),
         )
-        .map_err(|error| RebornBuildError::InvalidConfig {
-            reason: format!("GSuite first-party handlers are invalid: {error}"),
-        })?;
-    }
+    });
+    let product_auth = Some(compose_product_auth_services(
+        product_auth_ports,
+        turn_coordinator.clone(),
+        google_provider_client,
+    ));
+    let product_auth_ready = true;
+    register_bundled_gsuite_first_party_handlers(
+        &mut first_party_registry,
+        product_auth.as_ref().unwrap().credential_account_service(),
+        Arc::new(ProductAuthRuntimeGsuiteCredentialStager::new(
+            product_auth_runtime_ports.clone(),
+        )),
+    )
+    .map_err(|error| RebornBuildError::InvalidConfig {
+        reason: format!("GSuite first-party handlers are invalid: {error}"),
+    })?;
     let services = services.with_first_party_capabilities(Arc::new(first_party_registry));
 
     let host_runtime: Arc<dyn ironclaw_host_runtime::HostRuntime> =
