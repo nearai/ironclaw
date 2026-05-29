@@ -228,15 +228,12 @@ pub(crate) struct ProductAuthRouteMount {
     pub(crate) descriptors: Vec<IngressRouteDescriptor>,
 }
 
-// ToolDispatcher exemption (issue #4201): product-auth HTTP is a host-owned
-// auth/secret-ingress boundary. Its mutations enter `RebornProductAuthServices`
-// directly because credential setup, secure secret-submit, recovery, refresh,
-// and lifecycle cleanup are not in-turn tool calls and must not surface raw
-// secrets through the model-visible tool-dispatch path. The "everything goes
-// through tools" invariant in `docs/reborn/contracts/auth-product.md` therefore
-// explicitly exempts this surface; routes still derive scope from
-// authenticated caller context and emit only redacted projections.
+// Product-auth HTTP is a host-owned auth/secret-ingress boundary. Its
+// mutations enter `RebornProductAuthServices` directly; they are not in-turn
+// tool calls and must not surface raw secrets through the model-visible
+// tool-dispatch path. Contract: `docs/reborn/contracts/auth-product.md`.
 pub(crate) fn product_auth_route_mount(state: ProductAuthRouteState) -> ProductAuthRouteMount {
+    // dispatch-exempt: host-owned auth/secret ingress, not in-turn tool dispatch
     ProductAuthRouteMount {
         protected: Router::new()
             .route(OAUTH_START_PATH, post(oauth_start_handler))
@@ -415,7 +412,7 @@ struct ScopeFields {
 }
 
 #[derive(Deserialize)]
-struct ManualTokenSetupHttpRequest {
+struct ManualTokenSetupRequest {
     provider: String,
     account_label: String,
     #[serde(default)]
@@ -440,7 +437,7 @@ pub(crate) struct ManualTokenSetupResponse {
 }
 
 #[derive(Deserialize)]
-struct ManualTokenSecretSubmitHttpRequest {
+struct ManualTokenSecretSubmitRequest {
     interaction_id: String,
     token: UnvalidatedRawSecretValue,
     #[serde(flatten)]
@@ -448,7 +445,7 @@ struct ManualTokenSecretSubmitHttpRequest {
 }
 
 #[derive(Deserialize)]
-struct AccountsListHttpRequest {
+struct AccountsListRequest {
     provider: String,
     #[serde(default)]
     requester_extension: Option<String>,
@@ -461,7 +458,7 @@ struct AccountsListHttpRequest {
 }
 
 #[derive(Deserialize)]
-struct AccountsSelectHttpRequest {
+struct AccountsSelectRequest {
     provider: String,
     account_id: String,
     #[serde(default)]
@@ -471,7 +468,7 @@ struct AccountsSelectHttpRequest {
 }
 
 #[derive(Deserialize)]
-struct AccountsRecoveryHttpRequest {
+struct AccountsRecoveryRequest {
     provider: String,
     #[serde(default)]
     requester_extension: Option<String>,
@@ -480,7 +477,7 @@ struct AccountsRecoveryHttpRequest {
 }
 
 #[derive(Deserialize)]
-struct AccountsRefreshHttpRequest {
+struct AccountsRefreshRequest {
     provider: String,
     account_id: String,
     #[serde(default)]
@@ -490,7 +487,7 @@ struct AccountsRefreshHttpRequest {
 }
 
 #[derive(Deserialize)]
-struct LifecycleCleanupHttpRequest {
+struct LifecycleCleanupRequest {
     extension_id: String,
     action: SecretCleanupAction,
     #[serde(flatten)]
@@ -791,7 +788,7 @@ async fn abandon_manual_token_after_submit_failure(
 async fn manual_token_setup_handler(
     State(state): State<ProductAuthRouteState>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
-    Json(request): Json<ManualTokenSetupHttpRequest>,
+    Json(request): Json<ManualTokenSetupRequest>,
 ) -> Result<Json<ManualTokenSetupResponse>, ProductAuthRouteFailure> {
     let scope = scope_from_authenticated_caller_parts(&caller, &request.scope)?;
     let invocation_id = scope.resource.invocation_id;
@@ -820,13 +817,16 @@ async fn manual_token_setup_handler(
 async fn manual_token_secret_submit_handler(
     State(state): State<ProductAuthRouteState>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
-    Json(request): Json<ManualTokenSecretSubmitHttpRequest>,
+    Json(request): Json<ManualTokenSecretSubmitRequest>,
 ) -> Result<Json<ManualTokenSubmitResponse>, ProductAuthRouteFailure> {
     // Secret-submit is the secure out-of-band entry point: the raw token is
     // read straight off the dedicated body, never echoed back, and never
     // surfaced in model transcript or tool arguments. Only the redacted
     // submit projection is returned.
-    let scope = scope_from_authenticated_caller_parts(&caller, &request.scope)?;
+    // invocation_id is required: it must be the id returned by setup so the
+    // interaction service can match the pending scope.
+    let scope =
+        scope_from_authenticated_caller_parts_requiring_invocation(&caller, &request.scope)?;
     let interaction_id = parse_interaction_id(&request.interaction_id)?;
     let token = request
         .token
@@ -873,9 +873,12 @@ async fn manual_token_secret_submit_handler(
 async fn accounts_list_handler(
     State(state): State<ProductAuthRouteState>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
-    Json(request): Json<AccountsListHttpRequest>,
+    Json(request): Json<AccountsListRequest>,
 ) -> Result<Json<CredentialAccountListPage>, ProductAuthRouteFailure> {
-    let scope = scope_from_authenticated_caller_parts(&caller, &request.scope)?;
+    // invocation_id is required so the list is scoped to the caller's current
+    // interaction context; omitting it would silently yield an empty page.
+    let scope =
+        scope_from_authenticated_caller_parts_requiring_invocation(&caller, &request.scope)?;
     let provider = AuthProviderId::new(request.provider)
         .map_err(|_| ProductAuthRouteFailure::invalid_request())?;
 
@@ -902,7 +905,7 @@ async fn accounts_list_handler(
 async fn accounts_select_handler(
     State(state): State<ProductAuthRouteState>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
-    Json(request): Json<AccountsSelectHttpRequest>,
+    Json(request): Json<AccountsSelectRequest>,
 ) -> Result<Json<CredentialAccountProjection>, ProductAuthRouteFailure> {
     let scope = scope_from_authenticated_caller_parts(&caller, &request.scope)?;
     let provider = AuthProviderId::new(request.provider)
@@ -924,7 +927,7 @@ async fn accounts_select_handler(
 async fn accounts_recovery_handler(
     State(state): State<ProductAuthRouteState>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
-    Json(request): Json<AccountsRecoveryHttpRequest>,
+    Json(request): Json<AccountsRecoveryRequest>,
 ) -> Result<Json<CredentialRecoveryProjection>, ProductAuthRouteFailure> {
     let scope = scope_from_authenticated_caller_parts(&caller, &request.scope)?;
     let provider = AuthProviderId::new(request.provider)
@@ -948,7 +951,7 @@ async fn accounts_recovery_handler(
 async fn accounts_refresh_handler(
     State(state): State<ProductAuthRouteState>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
-    Json(request): Json<AccountsRefreshHttpRequest>,
+    Json(request): Json<AccountsRefreshRequest>,
 ) -> Result<Json<CredentialRefreshReport>, ProductAuthRouteFailure> {
     let scope = scope_from_authenticated_caller_parts(&caller, &request.scope)?;
     let provider = AuthProviderId::new(request.provider)
@@ -973,7 +976,7 @@ async fn accounts_refresh_handler(
 async fn lifecycle_cleanup_handler(
     State(state): State<ProductAuthRouteState>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
-    Json(request): Json<LifecycleCleanupHttpRequest>,
+    Json(request): Json<LifecycleCleanupRequest>,
 ) -> Result<Json<SecretCleanupReport>, ProductAuthRouteFailure> {
     let scope = scope_from_authenticated_caller_parts(&caller, &request.scope)?;
     let extension_id = parse_extension_id(&request.extension_id)?;
@@ -1244,6 +1247,20 @@ fn scope_from_authenticated_caller_parts(
         scope = scope.with_session_id(session_id);
     }
     Ok(scope)
+}
+
+/// Like [`scope_from_authenticated_caller_parts`] but returns `invalid_request`
+/// when `invocation_id` is absent. Use for follow-up routes where the browser
+/// MUST carry back the id minted by a prior setup/start response so the host
+/// can re-derive the matching scope without minting a fresh, unmatched one.
+fn scope_from_authenticated_caller_parts_requiring_invocation(
+    caller: &WebUiAuthenticatedCaller,
+    fields: &ScopeFields,
+) -> Result<AuthProductScope, ProductAuthRouteFailure> {
+    if fields.invocation_id.is_none() {
+        return Err(ProductAuthRouteFailure::invalid_request());
+    }
+    scope_from_authenticated_caller_parts(caller, fields)
 }
 
 fn scope_from_callback_query(

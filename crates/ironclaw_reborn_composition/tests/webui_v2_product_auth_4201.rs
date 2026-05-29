@@ -540,3 +540,159 @@ async fn lifecycle_cleanup_rejects_invalid_extension_id() {
     let body = read_body_string(response).await;
     assert!(body.contains("\"code\":\"invalid_request\""));
 }
+
+#[tokio::test]
+async fn accounts_refresh_returns_report_for_seeded_account() {
+    let fixture = build_fixture();
+    let invocation_id = InvocationId::new();
+    let account_id =
+        seed_configured_account(&fixture.shared, invocation_id, "github", "refresh-test").await;
+
+    let response = post_authenticated(
+        &fixture.app,
+        "/api/reborn/product-auth/accounts/refresh",
+        json!({
+            "provider": "github",
+            "account_id": account_id.to_string(),
+            "invocation_id": invocation_id.to_string()
+        }),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_body_string(response).await;
+    let json: Value = serde_json::from_str(&body).expect("refresh json");
+    assert_eq!(
+        json["account"]["id"].as_str(),
+        Some(account_id.to_string().as_str())
+    );
+    assert!(json["recovery"].is_object(), "recovery must be present");
+    assert!(json["refreshed"].is_boolean(), "refreshed must be present");
+    // Redacted projection must never carry secret handle names.
+    assert!(!body.contains("access_secret"));
+    assert!(!body.contains("refresh_secret"));
+}
+
+#[tokio::test]
+async fn manual_token_secret_submit_requires_invocation_id() {
+    // Omitting invocation_id means the host cannot re-derive the setup scope;
+    // the route must reject with invalid_request rather than minting a fresh
+    // invocation that will never match the pending interaction.
+    let fixture = build_fixture();
+    let raw_token = "ghp_should_not_be_echoed_invocation_required";
+
+    let response = post_authenticated(
+        &fixture.app,
+        "/api/reborn/product-auth/manual-token/secret-submit",
+        json!({
+            "interaction_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            "token": raw_token
+            // invocation_id intentionally absent
+        }),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = read_body_string(response).await;
+    assert!(body.contains("\"code\":\"invalid_request\""));
+    assert!(
+        !body.contains(raw_token),
+        "raw token must not be echoed: {body}"
+    );
+}
+
+#[tokio::test]
+async fn accounts_list_requires_invocation_id() {
+    // Omitting invocation_id would cause a fresh scope to be minted, silently
+    // returning an empty page instead of scoped results.
+    let fixture = build_fixture();
+
+    let response = post_authenticated(
+        &fixture.app,
+        "/api/reborn/product-auth/accounts/list",
+        json!({ "provider": "github" /* invocation_id absent */ }),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = read_body_string(response).await;
+    assert!(body.contains("\"code\":\"invalid_request\""));
+}
+
+#[tokio::test]
+async fn new_routes_reject_malformed_invocation_id() {
+    // All new routes that accept invocation_id must return 400 on a non-UUID
+    // value so audit tooling can confirm the validation path is live.
+    let fixture = build_fixture();
+    let cases: &[(&str, Value)] = &[
+        (
+            "/api/reborn/product-auth/manual-token/secret-submit",
+            json!({
+                "interaction_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                "token": "tok",
+                "invocation_id": "not-a-uuid"
+            }),
+        ),
+        (
+            "/api/reborn/product-auth/accounts/list",
+            json!({ "provider": "github", "invocation_id": "not-a-uuid" }),
+        ),
+        (
+            "/api/reborn/product-auth/accounts/select",
+            json!({
+                "provider": "github",
+                "account_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                "invocation_id": "not-a-uuid"
+            }),
+        ),
+        (
+            "/api/reborn/product-auth/accounts/recovery",
+            json!({ "provider": "github", "invocation_id": "not-a-uuid" }),
+        ),
+        (
+            "/api/reborn/product-auth/accounts/refresh",
+            json!({
+                "provider": "github",
+                "account_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                "invocation_id": "not-a-uuid"
+            }),
+        ),
+        (
+            "/api/reborn/product-auth/lifecycle/cleanup",
+            json!({
+                "extension_id": "ext-test",
+                "action": "deactivate",
+                "invocation_id": "not-a-uuid"
+            }),
+        ),
+    ];
+    for (path, body) in cases {
+        let response = post_authenticated(&fixture.app, path, body.clone()).await;
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "{path} must reject malformed invocation_id"
+        );
+        let body_str = read_body_string(response).await;
+        assert!(
+            body_str.contains("\"code\":\"invalid_request\""),
+            "{path} must return invalid_request for malformed invocation_id: {body_str}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn accounts_select_rejects_malformed_account_id() {
+    let fixture = build_fixture();
+
+    let response = post_authenticated(
+        &fixture.app,
+        "/api/reborn/product-auth/accounts/select",
+        json!({
+            "provider": "github",
+            "account_id": "not-a-uuid",
+            "invocation_id": InvocationId::new().to_string()
+        }),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = read_body_string(response).await;
+    assert!(body.contains("\"code\":\"invalid_request\""));
+}
