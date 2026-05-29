@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use ironclaw_event_projections::{CapabilityActivityProjection, CapabilityActivityStatus};
 use ironclaw_host_api::{
     CapabilityDisplayOutputKind, CapabilityDisplayOutputPreview, CapabilityId, InvocationId,
+    truncate_to_byte_boundary,
 };
 use ironclaw_product_adapters::{
     CAPABILITY_DISPLAY_PREVIEW_MAX_BYTES, CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES,
@@ -395,17 +396,27 @@ fn safe_path_subtitle(value: &serde_json::Value) -> Option<String> {
     safe_display_path(path)
 }
 
-fn safe_display_path(path: &str) -> Option<String> {
-    if path.is_empty()
+/// Returns `true` when the path contains characters that are inherently unsafe
+/// to display: traversals, home-dir sigils, backslashes, or control characters.
+///
+/// Both subtitle validators call this before their own path-shape checks so
+/// rejection rules stay in one place.
+fn has_unsafe_path_chars(path: &str) -> bool {
+    path.is_empty()
         || path.starts_with('~')
         || path.contains("..")
         || path.contains('\\')
         || path.chars().any(char::is_control)
-    {
+}
+
+/// Returns a safe display subtitle for input-argument paths (pending-state UI).
+///
+/// Strips the scoped-root prefix so only the workspace-relative portion is
+/// shown. Any other absolute path is rejected.
+fn safe_display_path(path: &str) -> Option<String> {
+    if has_unsafe_path_chars(path) {
         return None;
     }
-    // Strip scoped-root prefixes so the subtitle shows only the workspace-relative
-    // portion. Reject any other absolute path (e.g. /etc/passwd).
     let display = if let Some(rel) = path
         .strip_prefix("/workspace/")
         .or_else(|| path.strip_prefix("/project/"))
@@ -419,16 +430,15 @@ fn safe_display_path(path: &str) -> Option<String> {
     Some(bounded_display_text(display, CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES).text)
 }
 
+/// Returns a safe display subtitle for output-side preview subtitles.
+///
+/// Keeps the full scoped path (including the `/workspace/` or `/project/`
+/// prefix) because the renderer uses it as a file identifier. Rejects all
+/// other absolute paths.
 fn safe_preview_subtitle(subtitle: &str) -> Option<String> {
-    if subtitle.is_empty()
-        || subtitle.starts_with('~')
-        || subtitle.contains("..")
-        || subtitle.contains('\\')
-        || subtitle.chars().any(char::is_control)
-    {
+    if has_unsafe_path_chars(subtitle) {
         return None;
     }
-    // Admit /workspace/ and /project/ scoped roots; reject all other absolute paths.
     if subtitle.starts_with('/')
         && !subtitle.starts_with("/workspace/")
         && !subtitle.starts_with("/project/")
@@ -536,20 +546,8 @@ fn non_empty(text: String) -> Option<String> {
 }
 
 fn truncate_bytes(text: &str, max_bytes: usize) -> DisplayText {
-    if text.len() <= max_bytes {
-        return DisplayText {
-            text: text.to_string(),
-            truncated: false,
-        };
-    }
-    let mut end = max_bytes;
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    DisplayText {
-        text: text[..end].to_string(), // safety: end is adjusted to a UTF-8 char boundary above.
-        truncated: true,
-    }
+    let (text, truncated) = truncate_to_byte_boundary(text, max_bytes);
+    DisplayText { text, truncated }
 }
 
 pub(crate) fn sanitize_text(text: &str) -> String {

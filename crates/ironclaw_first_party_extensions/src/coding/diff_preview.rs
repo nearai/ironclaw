@@ -1,11 +1,18 @@
 use ironclaw_host_api::{
     CAPABILITY_DISPLAY_OUTPUT_PREVIEW_MAX_BYTES, CapabilityDisplayOutputKind,
-    CapabilityDisplayOutputPreview,
+    CapabilityDisplayOutputPreview, truncate_to_byte_boundary,
 };
 use similar::{ChangeTag, TextDiff};
 
 const DIFF_CONTEXT_LINES: usize = 3;
-pub(super) const DIFF_PREVIEW_DETAILED_INPUT_MAX_BYTES: usize = 256 * 1024;
+const DIFF_PREVIEW_DETAILED_INPUT_MAX_BYTES: usize = 256 * 1024;
+
+/// Returns `true` when `new_content` is large enough that a detailed diff
+/// preview will be skipped regardless of the old content. Callers (e.g.
+/// `write_file`) can use this to avoid reading the old file unnecessarily.
+pub(super) fn will_use_large_diff_path(new_content: &str) -> bool {
+    new_content.len() > DIFF_PREVIEW_DETAILED_INPUT_MAX_BYTES / 2
+}
 
 pub(super) fn file_diff_preview(
     path: &str,
@@ -70,13 +77,14 @@ pub(super) fn file_diff_preview(
         }
     }
 
-    let bounded = truncate_utf8(&output, CAPABILITY_DISPLAY_OUTPUT_PREVIEW_MAX_BYTES);
+    let (preview_text, boundary_truncated) =
+        truncate_to_byte_boundary(&output, CAPABILITY_DISPLAY_OUTPUT_PREVIEW_MAX_BYTES);
     CapabilityDisplayOutputPreview {
         output_summary: Some(format!("Edited 1 file: +{additions}/-{deletions}")),
-        output_preview: bounded.text,
+        output_preview: preview_text,
         output_kind: CapabilityDisplayOutputKind::unified_diff(),
         subtitle: Some(path.to_string()),
-        truncated: truncated || bounded.truncated,
+        truncated: truncated || boundary_truncated,
     }
 }
 
@@ -101,29 +109,6 @@ fn push_diff_line(output: &mut String, prefix: char, value: &str) {
     output.push_str(value);
     if !value.ends_with('\n') {
         output.push('\n');
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct BoundedText {
-    text: String,
-    truncated: bool,
-}
-
-fn truncate_utf8(text: &str, max_bytes: usize) -> BoundedText {
-    if text.len() <= max_bytes {
-        return BoundedText {
-            text: text.to_string(),
-            truncated: false,
-        };
-    }
-    let mut end = max_bytes;
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    BoundedText {
-        text: text[..end].to_string(),
-        truncated: true,
     }
 }
 

@@ -16,6 +16,22 @@ use crate::{
 pub const CAPABILITY_DISPLAY_OUTPUT_PREVIEW_MAX_BYTES: usize = 16 * 1024;
 pub const CAPABILITY_DISPLAY_OUTPUT_KIND_MAX_BYTES: usize = 32;
 
+/// Truncate `text` to `max_bytes` on a valid UTF-8 boundary.
+///
+/// Returns the (possibly shortened) string and a flag indicating truncation.
+/// Both `diff_preview` and the projection sanitizer use this — the canonical
+/// copy lives here so neither has to maintain its own.
+pub fn truncate_to_byte_boundary(text: &str, max_bytes: usize) -> (String, bool) {
+    if text.len() <= max_bytes {
+        return (text.to_string(), false);
+    }
+    let mut end = max_bytes;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    (text[..end].to_string(), true) // safety: end walked back to a UTF-8 char boundary.
+}
+
 /// Renderer-oriented output preview kind.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CapabilityDisplayOutputKind(String);
