@@ -48,9 +48,9 @@ use uuid::Uuid;
 
 use crate::auth::RebornOAuthStartFlowRequest;
 use crate::{
-    RebornManualTokenSetupRequest, RebornManualTokenSubmitRequest, RebornOAuthCallbackError,
-    RebornOAuthCallbackOutcome, RebornOAuthCallbackRequest, RebornOAuthCallbackResponse,
-    RebornProductAuthServices,
+    RebornAuthProductError, RebornManualTokenSetupRequest, RebornManualTokenSubmitRequest,
+    RebornOAuthCallbackError, RebornOAuthCallbackOutcome, RebornOAuthCallbackRequest,
+    RebornOAuthCallbackResponse, RebornProductAuthServices,
 };
 
 pub(crate) const OAUTH_START_PATH: &str = "/api/reborn/product-auth/oauth/start";
@@ -704,21 +704,16 @@ async fn manual_token_submit_handler(
     };
     let expires_at = Utc::now() + ChronoDuration::seconds(PRODUCT_AUTH_FLOW_MAX_TTL_SECONDS);
 
-    let challenge = tokio::time::timeout(
-        PRODUCT_AUTH_BACKEND_TIMEOUT,
-        state
-            .product_auth
-            .request_manual_token_setup(RebornManualTokenSetupRequest::new(
-                scope.clone(),
-                provider,
-                label,
-                continuation,
-                expires_at,
-            )),
-    )
-    .await
-    .map_err(|_| ProductAuthRouteFailure::backend_timeout())?
-    .map_err(ProductAuthRouteFailure::from)?;
+    let challenge = run_with_backend_timeout(state.product_auth.request_manual_token_setup(
+        RebornManualTokenSetupRequest::new(
+            scope.clone(),
+            provider,
+            label,
+            continuation,
+            expires_at,
+        ),
+    ))
+    .await?;
     let submitted = match tokio::time::timeout(
         PRODUCT_AUTH_BACKEND_TIMEOUT,
         state
@@ -808,21 +803,10 @@ async fn manual_token_setup_handler(
         manual_token_continuation(request.run_id.as_deref(), request.gate_ref.as_deref())?;
     let expires_at = Utc::now() + ChronoDuration::seconds(PRODUCT_AUTH_FLOW_MAX_TTL_SECONDS);
 
-    let challenge = tokio::time::timeout(
-        PRODUCT_AUTH_BACKEND_TIMEOUT,
-        state
-            .product_auth
-            .request_manual_token_setup(RebornManualTokenSetupRequest::new(
-                scope,
-                provider,
-                label,
-                continuation,
-                expires_at,
-            )),
-    )
-    .await
-    .map_err(|_| ProductAuthRouteFailure::backend_timeout())?
-    .map_err(ProductAuthRouteFailure::from)?;
+    let challenge = run_with_backend_timeout(state.product_auth.request_manual_token_setup(
+        RebornManualTokenSetupRequest::new(scope, provider, label, continuation, expires_at),
+    ))
+    .await?;
 
     Ok(Json(ManualTokenSetupResponse {
         interaction_id: challenge.interaction_id,
@@ -896,8 +880,8 @@ async fn accounts_list_handler(
         .map_err(|_| ProductAuthRouteFailure::invalid_request())?;
 
     let mut list_request = CredentialAccountListRequest::new(scope, provider);
-    if let Some(extension_id) = request.requester_extension.as_deref() {
-        list_request = list_request.for_extension(parse_extension_id(extension_id)?);
+    if let Some(extension_id) = parse_optional_extension(request.requester_extension.as_deref())? {
+        list_request = list_request.for_extension(extension_id);
     }
     if let Some(cursor) = request.cursor.as_deref() {
         list_request = list_request.with_cursor(parse_credential_account_id(cursor)?);
@@ -909,13 +893,8 @@ async fn accounts_list_handler(
         .validate()
         .map_err(ProductAuthRouteFailure::from)?;
 
-    let page = tokio::time::timeout(
-        PRODUCT_AUTH_BACKEND_TIMEOUT,
-        state.product_auth.list_credential_accounts(list_request),
-    )
-    .await
-    .map_err(|_| ProductAuthRouteFailure::backend_timeout())?
-    .map_err(ProductAuthRouteFailure::from)?;
+    let page =
+        run_with_backend_timeout(state.product_auth.list_credential_accounts(list_request)).await?;
 
     Ok(Json(page))
 }
@@ -931,17 +910,13 @@ async fn accounts_select_handler(
     let account_id = parse_credential_account_id(&request.account_id)?;
 
     let mut choice_request = CredentialAccountChoiceRequest::new(scope, provider, account_id);
-    if let Some(extension_id) = request.requester_extension.as_deref() {
-        choice_request = choice_request.for_extension(parse_extension_id(extension_id)?);
+    if let Some(extension_id) = parse_optional_extension(request.requester_extension.as_deref())? {
+        choice_request = choice_request.for_extension(extension_id);
     }
 
-    let projection = tokio::time::timeout(
-        PRODUCT_AUTH_BACKEND_TIMEOUT,
-        state.product_auth.select_credential_account(choice_request),
-    )
-    .await
-    .map_err(|_| ProductAuthRouteFailure::backend_timeout())?
-    .map_err(ProductAuthRouteFailure::from)?;
+    let projection =
+        run_with_backend_timeout(state.product_auth.select_credential_account(choice_request))
+            .await?;
 
     Ok(Json(projection))
 }
@@ -956,19 +931,16 @@ async fn accounts_recovery_handler(
         .map_err(|_| ProductAuthRouteFailure::invalid_request())?;
 
     let mut recovery_request = CredentialRecoveryRequest::new(scope, provider);
-    if let Some(extension_id) = request.requester_extension.as_deref() {
-        recovery_request = recovery_request.for_extension(parse_extension_id(extension_id)?);
+    if let Some(extension_id) = parse_optional_extension(request.requester_extension.as_deref())? {
+        recovery_request = recovery_request.for_extension(extension_id);
     }
 
-    let projection = tokio::time::timeout(
-        PRODUCT_AUTH_BACKEND_TIMEOUT,
+    let projection = run_with_backend_timeout(
         state
             .product_auth
             .project_credential_recovery(recovery_request),
     )
-    .await
-    .map_err(|_| ProductAuthRouteFailure::backend_timeout())?
-    .map_err(ProductAuthRouteFailure::from)?;
+    .await?;
 
     Ok(Json(projection))
 }
@@ -984,19 +956,16 @@ async fn accounts_refresh_handler(
     let account_id = parse_credential_account_id(&request.account_id)?;
 
     let mut refresh_request = CredentialRefreshRequest::new(scope, provider, account_id);
-    if let Some(extension_id) = request.requester_extension.as_deref() {
-        refresh_request = refresh_request.for_extension(parse_extension_id(extension_id)?);
+    if let Some(extension_id) = parse_optional_extension(request.requester_extension.as_deref())? {
+        refresh_request = refresh_request.for_extension(extension_id);
     }
 
-    let report = tokio::time::timeout(
-        PRODUCT_AUTH_BACKEND_TIMEOUT,
+    let report = run_with_backend_timeout(
         state
             .product_auth
             .refresh_credential_account(refresh_request),
     )
-    .await
-    .map_err(|_| ProductAuthRouteFailure::backend_timeout())?
-    .map_err(ProductAuthRouteFailure::from)?;
+    .await?;
 
     Ok(Json(report))
 }
@@ -1015,15 +984,12 @@ async fn lifecycle_cleanup_handler(
         action: request.action,
     };
 
-    let report = tokio::time::timeout(
-        PRODUCT_AUTH_BACKEND_TIMEOUT,
+    let report = run_with_backend_timeout(
         state
             .product_auth
             .cleanup_credentials_for_lifecycle(cleanup_request),
     )
-    .await
-    .map_err(|_| ProductAuthRouteFailure::backend_timeout())?
-    .map_err(ProductAuthRouteFailure::from)?;
+    .await?;
 
     Ok(Json(report))
 }
@@ -1060,6 +1026,31 @@ fn parse_credential_account_id(
 
 fn parse_extension_id(value: &str) -> Result<ExtensionId, ProductAuthRouteFailure> {
     ExtensionId::new(value.to_string()).map_err(|_| ProductAuthRouteFailure::invalid_request())
+}
+
+fn parse_optional_extension(
+    value: Option<&str>,
+) -> Result<Option<ExtensionId>, ProductAuthRouteFailure> {
+    value.map(parse_extension_id).transpose()
+}
+
+/// Await a product-auth backend call under the shared backend timeout and
+/// project both the elapsed-timeout failure and any returned auth error onto
+/// the route's sanitized failure shape.
+///
+/// Every protected product-auth route enters `RebornProductAuthServices` the
+/// same way; centralising the timeout/error wiring stops each handler from
+/// having to re-derive the same four lines and keeps the failure projection
+/// identical across routes.
+async fn run_with_backend_timeout<T, F>(future: F) -> Result<T, ProductAuthRouteFailure>
+where
+    F: std::future::Future<Output = Result<T, RebornAuthProductError>>,
+{
+    match tokio::time::timeout(PRODUCT_AUTH_BACKEND_TIMEOUT, future).await {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(error)) => Err(ProductAuthRouteFailure::from(error)),
+        Err(_) => Err(ProductAuthRouteFailure::backend_timeout()),
+    }
 }
 
 async fn oauth_callback_handler(
