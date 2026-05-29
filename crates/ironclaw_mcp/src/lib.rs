@@ -7,6 +7,7 @@
 
 use std::{
     collections::HashMap,
+    panic::AssertUnwindSafe,
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
@@ -14,6 +15,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use futures_util::FutureExt as _;
 use ironclaw_extensions::{ExtensionPackage, ExtensionRuntime};
 use ironclaw_host_api::{
     CapabilityId, ExtensionId, NetworkMethod, NetworkPolicy, ResourceEstimate, ResourceReservation,
@@ -169,23 +171,26 @@ where
         &self,
         request: McpHostHttpRequest,
     ) -> Result<McpHostHttpResponse, McpHostHttpError> {
-        self.egress
-            .execute(RuntimeHttpEgressRequest {
-                runtime: RuntimeKind::Mcp,
-                scope: request.scope,
-                capability_id: request.capability_id,
-                method: request.method,
-                url: request.url,
-                headers: request.headers,
-                body: request.body,
-                network_policy: request.network_policy,
-                credential_injections: request.credential_injections,
-                response_body_limit: request.response_body_limit,
-                save_body_to: None,
-                timeout_ms: request.timeout_ms,
-            })
-            .await
-            .map_err(mcp_http_error)
+        AssertUnwindSafe(self.egress.execute(RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::Mcp,
+            scope: request.scope,
+            capability_id: request.capability_id,
+            method: request.method,
+            url: request.url,
+            headers: request.headers,
+            body: request.body,
+            network_policy: request.network_policy,
+            credential_injections: request.credential_injections,
+            response_body_limit: request.response_body_limit,
+            save_body_to: None,
+            timeout_ms: request.timeout_ms,
+        }))
+        .catch_unwind()
+        .await
+        .map_err(|_| McpHostHttpError::Egress {
+            reason: "runtime_http_egress_panicked".to_string(),
+        })?
+        .map_err(mcp_http_error)
     }
 }
 

@@ -921,7 +921,7 @@ impl RecordingNetwork {
     }
 }
 
-#[async_trait::async_trait]
+#[async_trait]
 impl NetworkHttpEgress for RecordingNetwork {
     async fn execute(
         &self,

@@ -2,6 +2,7 @@ mod credential;
 mod pipeline;
 mod sanitize;
 
+use async_trait::async_trait;
 use ironclaw_host_api::{
     CapabilityId, NetworkPolicy, ResourceScope, RuntimeHttpEgress, RuntimeHttpEgressError,
     RuntimeHttpEgressRequest, RuntimeHttpEgressResponse,
@@ -153,7 +154,7 @@ impl<N, S> HostHttpEgressService<N, S> {
     }
 }
 
-#[async_trait::async_trait]
+#[async_trait]
 impl<N, S> RuntimeHttpEgress for HostHttpEgressService<N, S>
 where
     N: NetworkHttpEgress + Send + Sync,
