@@ -82,7 +82,7 @@ impl GsuiteExecutor {
             .resolve(request.scope, &extension, &scopes)
             .await
             .map_err(map_credential_error)?;
-        self.stage_credential(&request, &extension, credential.access_secret.clone())
+        self.stage_credential(&request, credential.access_secret.clone())
             .await?;
         let execution = capability_execution(capability, request.input)?;
         let (response, network_egress_bytes) = match execution
@@ -109,7 +109,7 @@ impl GsuiteExecutor {
                     .map_err(|error| {
                         add_network_usage(map_credential_error(error), network_egress_bytes)
                     })?;
-                self.stage_credential(&request, &extension, refreshed.access_secret.clone())
+                self.stage_credential(&request, refreshed.access_secret.clone())
                     .await
                     .map_err(|error| add_network_usage(error, network_egress_bytes))?;
                 let retry_execution = capability_execution(capability, request.input)?;
@@ -158,14 +158,12 @@ impl GsuiteExecutor {
     async fn stage_credential(
         &self,
         request: &GsuiteDispatchRequest<'_>,
-        extension_id: &ExtensionId,
         access_secret: ironclaw_host_api::SecretHandle,
     ) -> Result<(), GsuiteDispatchError> {
         self.credential_stager
             .stage(GsuiteCredentialStageRequest {
                 scope: request.scope,
                 capability_id: request.capability_id,
-                extension_id,
                 access_secret: &access_secret,
             })
             .await
@@ -269,7 +267,6 @@ impl GsuiteDispatchError {
 pub struct GsuiteCredentialStageRequest<'a> {
     pub scope: &'a ResourceScope,
     pub capability_id: &'a CapabilityId,
-    pub extension_id: &'a ExtensionId,
     pub access_secret: &'a ironclaw_host_api::SecretHandle,
 }
 

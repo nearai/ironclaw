@@ -58,7 +58,7 @@ use ironclaw_run_state::{
 use ironclaw_scripts::{ScriptError, ScriptExecutionRequest, ScriptExecutor, ScriptInvocation};
 use ironclaw_secrets::{
     CredentialAccountStore, CredentialSessionStore, InMemoryCredentialBroker, InMemorySecretStore,
-    SecretStore,
+    SecretStore, SecretStoreError,
 };
 use ironclaw_trust::{HostTrustPolicy, TrustPolicy};
 use ironclaw_turns::{
@@ -207,20 +207,11 @@ impl ProductAuthProviderRuntimePorts {
         capability_id: &CapabilityId,
         handle: &SecretHandle,
     ) -> Result<(), ProductAuthCredentialStageError> {
-        let exists = self
-            .secret_store
-            .metadata(scope, handle)
-            .await
-            .map_err(|_| ProductAuthCredentialStageError::Backend)?
-            .is_some();
-        if !exists {
-            return Err(ProductAuthCredentialStageError::AuthRequired);
-        }
         let lease = self
             .secret_store
             .lease_once(scope, handle)
             .await
-            .map_err(|_| ProductAuthCredentialStageError::Backend)?;
+            .map_err(stage_secret_error)?;
         let secret = self
             .secret_store
             .consume(scope, lease.id)
@@ -229,6 +220,14 @@ impl ProductAuthProviderRuntimePorts {
         self.secret_injection_store
             .insert(scope, capability_id, handle, secret)
             .map_err(|_| ProductAuthCredentialStageError::Backend)
+    }
+}
+
+fn stage_secret_error(error: SecretStoreError) -> ProductAuthCredentialStageError {
+    if error.is_unknown_secret() {
+        ProductAuthCredentialStageError::AuthRequired
+    } else {
+        ProductAuthCredentialStageError::Backend
     }
 }
 

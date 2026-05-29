@@ -316,6 +316,9 @@ struct McpHostHttpSessionCleanup {
 }
 
 struct PlannedMcpJsonRpc {
+    id: Option<u64>,
+    method: McpJsonRpcMethod,
+    url: String,
     policy_headers: Vec<(String, String)>,
     body: Vec<u8>,
     plan: McpHostHttpEgressPlan,
@@ -393,7 +396,7 @@ where
         params: Option<Value>,
     ) -> Result<McpJsonRpcExchange, String> {
         let planned = self.plan_json_rpc(request, id, method, params)?;
-        self.send_planned_json_rpc(request, session_key, id, method, planned)
+        self.send_planned_json_rpc(request, session_key, planned)
             .await
     }
 
@@ -425,6 +428,9 @@ where
             body: &body,
         });
         Ok(PlannedMcpJsonRpc {
+            id,
+            method,
+            url: url.to_string(),
             policy_headers,
             body,
             plan,
@@ -435,11 +441,8 @@ where
         &self,
         request: &McpClientRequest,
         session_key: &McpHostHttpSessionKey,
-        id: Option<u64>,
-        method: McpJsonRpcMethod,
         planned: PlannedMcpJsonRpc,
     ) -> Result<McpJsonRpcExchange, String> {
-        let url = request.url.as_deref().ok_or_else(request_denied)?;
         let mut headers = planned.policy_headers;
         if let Some(session_id) = self.current_session_id(session_key)? {
             headers.push(("Mcp-Session-Id".to_string(), session_id));
@@ -449,15 +452,16 @@ where
             planned.plan.response_body_limit,
             request.max_output_bytes,
         );
-        let credential_injections =
-            method.credential_injections(planned.plan.credential_injections)?;
+        let credential_injections = planned
+            .method
+            .credential_injections(planned.plan.credential_injections)?;
         let response = self
             .http
             .request(McpHostHttpRequest {
                 scope: request.scope.clone(),
                 capability_id: request.capability_id.clone(),
                 method: NetworkMethod::Post,
-                url: url.to_string(),
+                url: planned.url,
                 headers,
                 body: planned.body,
                 network_policy: planned.plan.network_policy,
@@ -478,7 +482,7 @@ where
         }
         self.capture_session_id(session_key, &response)?;
 
-        if response.status == 202 && id.is_none() {
+        if response.status == 202 && planned.id.is_none() {
             return Ok(McpJsonRpcExchange {
                 response: McpJsonRpcResponse {
                     result: None,
@@ -489,7 +493,7 @@ where
         }
 
         Ok(McpJsonRpcExchange {
-            response: parse_mcp_response(&response, id)?,
+            response: parse_mcp_response(&response, planned.id)?,
             usage,
         })
     }
@@ -601,13 +605,7 @@ where
         }
 
         let call = self
-            .send_planned_json_rpc(
-                &request,
-                &session_key,
-                Some(tool_call_id),
-                McpJsonRpcMethod::ToolsCall,
-                tool_call_plan,
-            )
+            .send_planned_json_rpc(&request, &session_key, tool_call_plan)
             .await?;
         accumulate_usage(&mut usage, call.usage);
         if call.response.error {
