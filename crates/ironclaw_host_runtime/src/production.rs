@@ -1656,6 +1656,10 @@ output_schema_ref = "schemas/test.output.json"
             dispatch_kind_to_failure(DispatchFailureKind::RuntimeMismatch),
             RuntimeFailureKind::Backend
         );
+        assert_eq!(
+            dispatch_kind_to_failure(DispatchFailureKind::AuthRequired),
+            RuntimeFailureKind::Authorization
+        );
     }
 
     #[test]

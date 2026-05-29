@@ -21,7 +21,10 @@ use ironclaw_processes::{InMemoryProcessResultStore, InMemoryProcessStore, Proce
 use ironclaw_resources::{
     InMemoryResourceGovernor, ResourceAccount, ResourceGovernor, ResourceTally,
 };
-use ironclaw_secrets::{InMemorySecretStore, SecretMaterial, SecretStore};
+use ironclaw_secrets::{
+    InMemorySecretStore, SecretLease, SecretLeaseId, SecretLeaseStatus, SecretMaterial,
+    SecretMetadata, SecretStore, SecretStoreError,
+};
 use serde_json::{Value, json};
 
 use super::{
@@ -964,4 +967,186 @@ impl NetworkHttpEgress for RecordingNetwork {
             },
         })
     }
+}
+
+/// Stage at which the failing store should inject `error`.
+#[derive(Debug, Clone, Copy)]
+enum FailingStage {
+    Lease,
+    Consume,
+}
+
+/// Test double that injects a chosen `SecretStoreError` at a chosen stage.
+struct FailingSecretStore {
+    stage: FailingStage,
+    error: Mutex<Option<SecretStoreError>>,
+}
+
+impl FailingSecretStore {
+    fn new(stage: FailingStage, error: SecretStoreError) -> Self {
+        Self {
+            stage,
+            error: Mutex::new(Some(error)),
+        }
+    }
+
+    fn take_error(&self) -> SecretStoreError {
+        self.error
+            .lock()
+            .unwrap()
+            .take()
+            .expect("FailingSecretStore error already consumed")
+    }
+}
+
+#[async_trait]
+impl SecretStore for FailingSecretStore {
+    async fn put(
+        &self,
+        _scope: ResourceScope,
+        _handle: SecretHandle,
+        _material: SecretMaterial,
+    ) -> Result<SecretMetadata, SecretStoreError> {
+        Err(SecretStoreError::StoreUnavailable {
+            reason: "failing test store does not support put".to_string(),
+        })
+    }
+
+    async fn metadata(
+        &self,
+        _scope: &ResourceScope,
+        _handle: &SecretHandle,
+    ) -> Result<Option<SecretMetadata>, SecretStoreError> {
+        Ok(None)
+    }
+
+    async fn delete(
+        &self,
+        _scope: &ResourceScope,
+        _handle: &SecretHandle,
+    ) -> Result<bool, SecretStoreError> {
+        Ok(false)
+    }
+
+    async fn lease_once(
+        &self,
+        scope: &ResourceScope,
+        _handle: &SecretHandle,
+    ) -> Result<SecretLease, SecretStoreError> {
+        match self.stage {
+            FailingStage::Lease => Err(self.take_error()),
+            FailingStage::Consume => Ok(SecretLease {
+                id: SecretLeaseId::default(),
+                scope: scope.clone(),
+                handle: SecretHandle::new("failing-handle").unwrap(),
+                status: SecretLeaseStatus::Active,
+            }),
+        }
+    }
+
+    async fn consume(
+        &self,
+        _scope: &ResourceScope,
+        _lease_id: SecretLeaseId,
+    ) -> Result<SecretMaterial, SecretStoreError> {
+        match self.stage {
+            FailingStage::Consume => Err(self.take_error()),
+            FailingStage::Lease => Err(SecretStoreError::StoreUnavailable {
+                reason: "unexpected consume after failing lease".to_string(),
+            }),
+        }
+    }
+
+    async fn revoke(
+        &self,
+        _scope: &ResourceScope,
+        lease_id: SecretLeaseId,
+    ) -> Result<SecretLease, SecretStoreError> {
+        Err(SecretStoreError::UnknownLease {
+            scope: Box::new(sample_scope()),
+            lease_id,
+        })
+    }
+
+    async fn leases_for_scope(
+        &self,
+        _scope: &ResourceScope,
+    ) -> Result<Vec<SecretLease>, SecretStoreError> {
+        Ok(Vec::new())
+    }
+}
+
+async fn stage_secret_once_with_store<S: SecretStore + 'static>(
+    store: S,
+) -> Result<(), crate::ProductAuthCredentialStageError> {
+    let services = test_services()
+        .with_secret_store(Arc::new(store))
+        .try_with_host_http_egress(RecordingNetwork::ok())
+        .expect("host HTTP egress should wire");
+    let scope = sample_scope();
+    let capability_id = sample_capability_id();
+    let handle = SecretHandle::new("never-staged").unwrap();
+    let ports = services
+        .product_auth_provider_runtime_ports()
+        .expect("runtime ports should be configured");
+    ports
+        .stage_secret_once(&scope, &capability_id, &handle)
+        .await
+}
+
+#[tokio::test]
+async fn stage_secret_once_returns_auth_required_for_unknown_handle() {
+    let scope = sample_scope();
+    let store = FailingSecretStore::new(
+        FailingStage::Lease,
+        SecretStoreError::UnknownSecret {
+            scope: Box::new(scope.clone()),
+            handle: SecretHandle::new("never-staged").unwrap(),
+        },
+    );
+    let err = stage_secret_once_with_store(store).await.unwrap_err();
+    assert_eq!(err, crate::ProductAuthCredentialStageError::AuthRequired);
+}
+
+#[tokio::test]
+async fn stage_secret_once_returns_auth_required_for_expired_secret() {
+    let store = FailingSecretStore::new(FailingStage::Lease, SecretStoreError::SecretExpired);
+    let err = stage_secret_once_with_store(store).await.unwrap_err();
+    assert_eq!(err, crate::ProductAuthCredentialStageError::AuthRequired);
+}
+
+#[tokio::test]
+async fn stage_secret_once_returns_auth_required_for_revoked_lease_on_consume() {
+    let store = FailingSecretStore::new(
+        FailingStage::Consume,
+        SecretStoreError::LeaseRevoked {
+            lease_id: SecretLeaseId::default(),
+        },
+    );
+    let err = stage_secret_once_with_store(store).await.unwrap_err();
+    assert_eq!(err, crate::ProductAuthCredentialStageError::AuthRequired);
+}
+
+#[tokio::test]
+async fn stage_secret_once_returns_auth_required_for_expired_lease_on_consume() {
+    let store = FailingSecretStore::new(
+        FailingStage::Consume,
+        SecretStoreError::LeaseExpired {
+            lease_id: SecretLeaseId::default(),
+        },
+    );
+    let err = stage_secret_once_with_store(store).await.unwrap_err();
+    assert_eq!(err, crate::ProductAuthCredentialStageError::AuthRequired);
+}
+
+#[tokio::test]
+async fn stage_secret_once_returns_backend_on_secret_store_failure() {
+    let store = FailingSecretStore::new(
+        FailingStage::Lease,
+        SecretStoreError::BackendMisconfigured {
+            reason: "vault offline".to_string(),
+        },
+    );
+    let err = stage_secret_once_with_store(store).await.unwrap_err();
+    assert_eq!(err, crate::ProductAuthCredentialStageError::Backend);
 }

@@ -135,7 +135,7 @@ fn dispatch_error_kind(error: &DispatchError) -> DispatchFailureKind {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_host_api::{ExtensionId, RuntimeDispatchErrorKind, RuntimeKind};
+    use ironclaw_host_api::{ExtensionId, RuntimeDispatchErrorKind, RuntimeKind, SecretHandle};
 
     fn cap() -> CapabilityId {
         CapabilityId::new("test.cap").unwrap()
@@ -244,6 +244,46 @@ mod tests {
                 )
             }
             other => panic!("expected Dispatch variant, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn from_dispatch_auth_required_preserves_required_secrets() {
+        let secrets = vec![
+            SecretHandle::new("google-access-token").unwrap(),
+            SecretHandle::new("google-refresh-token").unwrap(),
+        ];
+        let err = CapabilityInvocationError::from(DispatchError::AuthRequired {
+            capability: cap(),
+            required_secrets: secrets.clone(),
+        });
+        match err {
+            CapabilityInvocationError::AuthorizationRequiresAuth {
+                capability,
+                required_secrets,
+            } => {
+                assert_eq!(capability, cap());
+                assert_eq!(required_secrets, secrets);
+            }
+            other => panic!("expected AuthorizationRequiresAuth, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn from_dispatch_auth_required_preserves_empty_required_secrets() {
+        let err = CapabilityInvocationError::from(DispatchError::AuthRequired {
+            capability: cap(),
+            required_secrets: Vec::new(),
+        });
+        match err {
+            CapabilityInvocationError::AuthorizationRequiresAuth {
+                capability,
+                required_secrets,
+            } => {
+                assert_eq!(capability, cap());
+                assert!(required_secrets.is_empty());
+            }
+            other => panic!("expected AuthorizationRequiresAuth, got {other:?}"),
         }
     }
 }

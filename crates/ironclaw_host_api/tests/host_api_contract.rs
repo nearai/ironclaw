@@ -280,6 +280,24 @@ fn dispatch_errors_preserve_typed_failure_kind() {
         .failure_kind(),
         DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Guest)
     );
+    let required_secrets = vec![SecretHandle::new("google-access-token").unwrap()];
+    assert_eq!(
+        DispatchError::AuthRequired {
+            capability: CapabilityId::new("test.cap").unwrap(),
+            required_secrets: required_secrets.clone(),
+        }
+        .failure_kind(),
+        DispatchFailureKind::AuthRequired
+    );
+    // Empty required_secrets must classify the same way.
+    assert_eq!(
+        DispatchError::AuthRequired {
+            capability: CapabilityId::new("test.cap").unwrap(),
+            required_secrets: Vec::new(),
+        }
+        .failure_kind(),
+        DispatchFailureKind::AuthRequired
+    );
 }
 
 #[test]
@@ -324,6 +342,11 @@ fn dispatch_failure_kind_display_preserves_stable_literals() {
     assert_eq!(
         DispatchFailureKind::UnsupportedRuntime.as_str(),
         "UnsupportedRuntime"
+    );
+    assert_eq!(DispatchFailureKind::AuthRequired.as_str(), "AuthRequired");
+    assert_eq!(
+        DispatchFailureKind::AuthRequired.to_string(),
+        "AuthRequired"
     );
     assert_eq!(
         DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::NetworkDenied).as_str(),

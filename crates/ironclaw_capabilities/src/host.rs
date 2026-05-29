@@ -1640,6 +1640,12 @@ fn prepare_obligation_error_to_invocation(
             }
         }
         CapabilityObligationError::AuthRequired => {
+            // silent-ok: CapabilityObligationError::AuthRequired is a unit variant
+            // (see ironclaw_capabilities::obligations) and the obligation handler
+            // does not surface which staged secret was missing. The runtime auth
+            // gate accepts an empty `required_secrets` list and falls back to the
+            // generic re-auth prompt; the dispatch-side conversion in error.rs
+            // forwards the real list when DispatchError::AuthRequired is raised.
             CapabilityInvocationError::AuthorizationRequiresAuth {
                 capability: capability_id.clone(),
                 required_secrets: Vec::new(),

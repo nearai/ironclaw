@@ -242,6 +242,24 @@ impl GsuiteDispatchError {
         self.usage.as_ref()
     }
 
+    /// Project the credential dispatch reason onto a [`GsuiteAuthRequirement`]
+    /// for the host runtime auth gate.
+    ///
+    /// `GsuiteAuthRequirement` is intentionally narrow: it only carries the
+    /// `required_secrets` list the runtime needs to prompt re-auth. Richer
+    /// recovery context (provider, selected/candidate accounts, recovery
+    /// reason) is exposed separately via [`Self::reason`]; the host runtime
+    /// reads `reason()` for telemetry and surfacing user-facing recovery state,
+    /// while the auth gate only needs the secret list. That is why:
+    ///
+    /// * `Recovery(_)`, `MissingScopes { .. }`, and `MissingAccessSecret`
+    ///   return `Some(GsuiteAuthRequirement::default())` — they are auth
+    ///   required, but the specific staged secrets are unknown at this layer;
+    ///   the projection survives via `reason()`.
+    /// * `AuthRequired { required_secrets }` forwards the explicit list so the
+    ///   gate can name the missing handles.
+    /// * `BackendAuth` and `HostApi` are infrastructure failures, not
+    ///   user-actionable, and return `None`.
     pub fn auth_requirement(&self) -> Option<GsuiteAuthRequirement> {
         match self.reason.as_ref()? {
             GsuiteCredentialDispatchReason::Recovery(_)
@@ -1126,6 +1144,76 @@ mod tests {
             configured_recovery.kind(),
             RuntimeDispatchErrorKind::Backend
         );
+    }
+
+    #[test]
+    fn auth_requirement_classifies_each_credential_dispatch_reason() {
+        // Recovery -> Some(default): projection is preserved via reason(),
+        // not via the requirement struct (see auth_requirement doc-comment).
+        let recovery = GsuiteDispatchError::new(RuntimeDispatchErrorKind::Client).with_reason(
+            GsuiteCredentialDispatchReason::Recovery(
+                ironclaw_auth::CredentialRecoveryProjection::setup_required(
+                    ironclaw_auth::AuthProviderId::new("google").unwrap(),
+                    ironclaw_auth::CredentialRecoveryReason::NoAccount,
+                    Vec::new(),
+                ),
+            ),
+        );
+        assert_eq!(
+            recovery.auth_requirement(),
+            Some(GsuiteAuthRequirement::default())
+        );
+        assert!(recovery.is_auth_required());
+        assert!(recovery.reason().is_some());
+
+        // MissingScopes -> Some(default).
+        let scope =
+            ProviderScope::new("https://www.googleapis.com/auth/gmail.modify").expect("scope");
+        let missing_scopes = GsuiteDispatchError::new(RuntimeDispatchErrorKind::Client)
+            .with_reason(GsuiteCredentialDispatchReason::MissingScopes {
+                missing_scopes: vec![scope],
+            });
+        assert_eq!(
+            missing_scopes.auth_requirement(),
+            Some(GsuiteAuthRequirement::default())
+        );
+
+        // MissingAccessSecret -> Some(default).
+        let missing_access = GsuiteDispatchError::new(RuntimeDispatchErrorKind::Client)
+            .with_reason(GsuiteCredentialDispatchReason::MissingAccessSecret);
+        assert_eq!(
+            missing_access.auth_requirement(),
+            Some(GsuiteAuthRequirement::default())
+        );
+
+        // AuthRequired { required_secrets } -> Some with secrets forwarded.
+        let handle = ironclaw_host_api::SecretHandle::new("google-access-token").unwrap();
+        let auth_required = GsuiteDispatchError::new(RuntimeDispatchErrorKind::Client).with_reason(
+            GsuiteCredentialDispatchReason::AuthRequired {
+                required_secrets: vec![handle.clone()],
+            },
+        );
+        assert_eq!(
+            auth_required.auth_requirement(),
+            Some(GsuiteAuthRequirement {
+                required_secrets: vec![handle],
+            })
+        );
+
+        // BackendAuth -> None (infra failure, not user-actionable).
+        let backend_auth = GsuiteDispatchError::new(RuntimeDispatchErrorKind::Backend)
+            .with_reason(GsuiteCredentialDispatchReason::BackendAuth);
+        assert_eq!(backend_auth.auth_requirement(), None);
+        assert!(!backend_auth.is_auth_required());
+
+        // HostApi -> None.
+        let host_api = GsuiteDispatchError::new(RuntimeDispatchErrorKind::Backend)
+            .with_reason(GsuiteCredentialDispatchReason::HostApi);
+        assert_eq!(host_api.auth_requirement(), None);
+
+        // No reason at all -> None.
+        let no_reason = GsuiteDispatchError::new(RuntimeDispatchErrorKind::Client);
+        assert_eq!(no_reason.auth_requirement(), None);
     }
 
     #[test]

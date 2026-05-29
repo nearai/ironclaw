@@ -216,15 +216,21 @@ impl ProductAuthProviderRuntimePorts {
             .secret_store
             .consume(scope, lease.id)
             .await
-            .map_err(|_| ProductAuthCredentialStageError::Backend)?;
+            .map_err(stage_secret_error)?;
         self.secret_injection_store
             .insert(scope, capability_id, handle, secret)
             .map_err(|_| ProductAuthCredentialStageError::Backend)
     }
 }
 
+/// Classify a [`SecretStoreError`] for the host staging surface.
+///
+/// Unknown / expired / revoked secrets are all user-actionable re-auth
+/// conditions: they map to [`ProductAuthCredentialStageError::AuthRequired`]
+/// so the runtime auth gate fires instead of surfacing a generic backend
+/// failure. Anything else is a true backend defect.
 fn stage_secret_error(error: SecretStoreError) -> ProductAuthCredentialStageError {
-    if error.is_unknown_secret() {
+    if error.is_unknown_secret() || error.is_expired() || error.is_revoked() {
         ProductAuthCredentialStageError::AuthRequired
     } else {
         ProductAuthCredentialStageError::Backend
