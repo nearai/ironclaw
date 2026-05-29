@@ -95,6 +95,9 @@ struct NearAiMcpEgressPlanner {
 
 impl McpHostHttpEgressPlanner for NearAiMcpEgressPlanner {
     fn plan(&self, request: McpHostHttpEgressPlanRequest<'_>) -> McpHostHttpEgressPlan {
+        // This is a narrow NEAR AI MCP adapter. Do not grow this into the
+        // generic product-auth-to-MCP planner; nearai/ironclaw#4176 owns that
+        // bridge, including account selection and typed AuthRequired recovery.
         if request.provider.as_str() != NEARAI_EXTENSION_ID
             || !nearai_mcp_url_allowed(request.url, &self.endpoint)
         {
