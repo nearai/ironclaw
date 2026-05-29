@@ -294,7 +294,7 @@ fn generate_pkce_params() -> PKCEParams {
     let code_verifier = ironclaw_common::pkce::generate_code_verifier();
     let code_challenge = ironclaw_common::pkce::s256_challenge(code_verifier.as_bytes());
 
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rngs::OsRng;
     let state: String = (0..32)
         .map(|_| {
             let idx = rng.gen_range(0..STATE_CHARSET.len());

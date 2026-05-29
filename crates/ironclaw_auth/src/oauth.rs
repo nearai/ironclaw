@@ -9,7 +9,6 @@
 use std::fmt;
 
 use secrecy::{ExposeSecret, SecretString};
-use sha2::{Digest, Sha256};
 use url::Url;
 
 use crate::{
@@ -303,13 +302,13 @@ impl OAuthTokenResponse {
 }
 
 pub fn opaque_state_hash(state: &str) -> Result<OpaqueStateHash, AuthProductError> {
-    OpaqueStateHash::new(hex::encode(Sha256::digest(state.as_bytes())))
+    OpaqueStateHash::new(ironclaw_common::hashing::sha256_hex(state.as_bytes()))
 }
 
 pub fn pkce_verifier_hash(
     verifier: &PkceVerifierSecret,
 ) -> Result<PkceVerifierHash, AuthProductError> {
-    PkceVerifierHash::new(ironclaw_common::pkce::sha256_hex(
+    PkceVerifierHash::new(ironclaw_common::hashing::sha256_hex(
         verifier.expose_secret().as_bytes(),
     ))
 }
@@ -317,7 +316,9 @@ pub fn pkce_verifier_hash(
 pub fn authorization_code_hash(
     code: &OAuthAuthorizationCode,
 ) -> Result<AuthorizationCodeHash, AuthProductError> {
-    AuthorizationCodeHash::new(hex::encode(Sha256::digest(code.expose_secret().as_bytes())))
+    AuthorizationCodeHash::new(ironclaw_common::hashing::sha256_hex(
+        code.expose_secret().as_bytes(),
+    ))
 }
 
 pub fn pkce_s256_challenge(verifier: &PkceVerifierSecret) -> PkceCodeChallenge {

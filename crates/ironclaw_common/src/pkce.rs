@@ -2,11 +2,12 @@
 //!
 //! Pure protocol math: no product types, no secret wrappers, no error type.
 //! Callers expose secret material at their own boundary and pass the bytes in,
-//! keeping `expose()` scopes narrow. Outputs are a challenge or a hash — never
-//! the verifier itself — so nothing here logs or retains secret material.
+//! keeping `expose()` scopes narrow. Outputs are a challenge — never the
+//! verifier itself — so nothing here logs or retains secret material.
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use rand::Rng;
+use rand::Rng as _;
+use rand::rngs::OsRng;
 use sha2::{Digest, Sha256};
 
 /// RFC 7636 §4.1 unreserved characters: ALPHA / DIGIT / "-" / "." / "_" / "~".
@@ -18,8 +19,11 @@ const VERIFIER_CHARSET: &[u8] =
 const VERIFIER_LEN: usize = 64;
 
 /// Generate a 64-character URL-safe PKCE code verifier (RFC 7636 §4.1).
+///
+/// Draws directly from `OsRng` so the verifier's randomness is independent of
+/// thread-local state — the canonical source for security-critical secrets.
 pub fn generate_code_verifier() -> String {
-    let mut rng = rand::thread_rng();
+    let mut rng = OsRng;
     (0..VERIFIER_LEN)
         .map(|_| {
             let idx = rng.gen_range(0..VERIFIER_CHARSET.len());
@@ -32,22 +36,6 @@ pub fn generate_code_verifier() -> String {
 /// (RFC 7636 §4.2). The caller passes the verifier bytes.
 pub fn s256_challenge(verifier: &[u8]) -> String {
     URL_SAFE_NO_PAD.encode(Sha256::digest(verifier))
-}
-
-/// Lowercase hex of `SHA-256(bytes)`. Used to derive a stored verifier hash
-/// (and other opaque-value hashes) without retaining the raw input.
-pub fn sha256_hex(bytes: &[u8]) -> String {
-    hex_encode(&Sha256::digest(bytes))
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    use std::fmt::Write as _;
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        // Writing to a String is infallible.
-        let _ = write!(out, "{byte:02x}");
-    }
-    out
 }
 
 #[cfg(test)]
@@ -65,10 +53,11 @@ mod tests {
     }
 
     #[test]
-    fn sha256_hex_matches_known_vector() {
+    fn s256_challenge_of_empty_input_matches_known_constant() {
+        // base64url-nopad(SHA-256("")) — documents behavior for empty material.
         assert_eq!(
-            sha256_hex(b"abc"),
-            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+            s256_challenge(b""),
+            "47DEQpj8HBSa-_TImW-5JCeuQeRkm5NMpJWZG3hSuFU"
         );
     }
 
