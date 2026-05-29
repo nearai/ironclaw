@@ -40,7 +40,7 @@ pub use flow::{
     AuthChallenge, AuthContinuationEvent, AuthContinuationRef, AuthFlowKind, AuthFlowManager,
     AuthFlowRecord, AuthFlowRecordSource, AuthFlowStatus, CredentialAccountUpdateBinding,
     CredentialSelectionInput, NewAuthFlow, OAuthCallbackClaimRequest, OAuthCallbackFailureInput,
-    OAuthCallbackInput, ProviderCallbackOutcome,
+    OAuthCallbackInput, ProviderCallbackOutcome, credential_status_for_completed_flow,
 };
 pub use ids::{
     AuthFlowId, AuthGateRef, AuthInteractionId, AuthProviderId, AuthSessionId,
@@ -99,11 +99,11 @@ fn validate_public_text(
     Ok(value)
 }
 
-pub(crate) fn scope_matches(left: &AuthProductScope, right: &AuthProductScope) -> bool {
+pub fn scope_matches(left: &AuthProductScope, right: &AuthProductScope) -> bool {
     left == right
 }
 
-pub(crate) fn is_terminal_status(status: AuthFlowStatus) -> bool {
+pub fn is_terminal_status(status: AuthFlowStatus) -> bool {
     matches!(
         status,
         AuthFlowStatus::Completed

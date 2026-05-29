@@ -256,6 +256,6 @@ pub trait AuthFlowRecordSource: Send + Sync {
     fn flow_records_snapshot(&self) -> Vec<AuthFlowRecord>;
 }
 
-pub(crate) fn credential_status_for_completed_flow() -> CredentialAccountStatus {
+pub fn credential_status_for_completed_flow() -> CredentialAccountStatus {
     CredentialAccountStatus::Configured
 }

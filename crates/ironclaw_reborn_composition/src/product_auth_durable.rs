@@ -16,7 +16,7 @@ use serde::{Serialize, de::DeserializeOwned};
 
 use ironclaw_auth::{
     AuthFlowId, AuthFlowRecord, AuthProductError, CredentialAccount, CredentialAccountId,
-    CredentialAccountStatus, NewCredentialAccount,
+    NewCredentialAccount,
 };
 
 use self::domain::validate_new_credential_account;
@@ -175,23 +175,13 @@ where
         .await
     }
 
-    /// Returns credential accounts for `scope` by reading at most
-    /// `max_entries` directory entries from storage. Pass `usize::MAX` for a
-    /// full unbounded scan.
+    /// Returns all credential accounts for `scope`, reading records concurrently.
     async fn accounts_for_scope(
         &self,
         scope: &ironclaw_auth::AuthProductScope,
-        max_entries: usize,
     ) -> Result<Vec<CredentialAccount>, AuthProductError> {
         let root = account_root(scope)?;
-        // Use list_dir_bounded to avoid unbounded directory scans.  The caller
-        // supplies an upper bound so callers that only need a few records (e.g.
-        // select_unique_configured_account) can stop early at the storage layer.
-        let entries = match self
-            .filesystem
-            .list_dir_bounded(&scope.resource, &root, max_entries)
-            .await
-        {
+        let entries = match self.filesystem.list_dir(&scope.resource, &root).await {
             Ok(entries) => entries,
             Err(FilesystemError::NotFound { .. }) => return Ok(Vec::new()),
             Err(error) => return Err(fs_error(error)),
@@ -250,23 +240,4 @@ where
     }
 }
 
-fn scope_matches(
-    left: &ironclaw_auth::AuthProductScope,
-    right: &ironclaw_auth::AuthProductScope,
-) -> bool {
-    left == right
-}
-
-fn is_terminal_status(status: ironclaw_auth::AuthFlowStatus) -> bool {
-    matches!(
-        status,
-        ironclaw_auth::AuthFlowStatus::Completed
-            | ironclaw_auth::AuthFlowStatus::Failed
-            | ironclaw_auth::AuthFlowStatus::Expired
-            | ironclaw_auth::AuthFlowStatus::Canceled
-    )
-}
-
-fn credential_status_for_completed_flow() -> CredentialAccountStatus {
-    CredentialAccountStatus::Configured
-}
+use ironclaw_auth::{credential_status_for_completed_flow, is_terminal_status, scope_matches};

@@ -292,9 +292,28 @@ where
                     return Err(AuthProductError::TokenExchangeFailed);
                 }
                 validate_bound_update_authority(&account, binding)?;
+                // Capture previous secret handles before overwriting so we can
+                // delete orphaned material from SecretStore after a successful
+                // write.  New tokens are written first; a write failure leaves
+                // the old handles still referenced by the on-disk record.
+                let previous_access_secret = account.access_secret.clone();
+                let previous_refresh_secret = account.refresh_secret.clone();
                 update_account_from_exchange(&mut account, exchange, Utc::now());
                 self.write_account(&account, CasExpectation::Version(version))
                     .await?;
+                // Best-effort purge of replaced handles.  Failures are
+                // non-fatal: orphans in SecretStore are recoverable; errors
+                // must not propagate to the caller.
+                if let Some(h) = &previous_access_secret
+                    && previous_access_secret.as_ref() != account.access_secret.as_ref()
+                {
+                    let _ = self.secret_store.delete(&callback.scope.resource, h).await;
+                }
+                if let Some(h) = &previous_refresh_secret
+                    && previous_refresh_secret.as_ref() != account.refresh_secret.as_ref()
+                {
+                    let _ = self.secret_store.delete(&callback.scope.resource, h).await;
+                }
                 Ok(account_id)
             }
             None => {

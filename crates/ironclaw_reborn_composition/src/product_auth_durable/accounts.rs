@@ -58,7 +58,7 @@ where
         // provider/cursor/auth filters to the storage layer without a per-
         // provider directory layout, so pagination is applied in-memory here.
         let mut accounts = self
-            .accounts_for_scope(&request.scope, usize::MAX)
+            .accounts_for_scope(&request.scope)
             .await?
             .into_iter()
             .filter(|account| {
@@ -112,7 +112,7 @@ where
         request: CredentialAccountSelectionRequest,
     ) -> Result<CredentialAccountProjection, AuthProductError> {
         let configured = self
-            .accounts_for_scope(&request.scope, usize::MAX)
+            .accounts_for_scope(&request.scope)
             .await?
             .into_iter()
             .filter(|account| {
@@ -141,7 +141,7 @@ where
         request: CredentialRecoveryRequest,
     ) -> Result<CredentialRecoveryProjection, AuthProductError> {
         let mut accounts = self
-            .accounts_for_scope(&request.scope, usize::MAX)
+            .accounts_for_scope(&request.scope)
             .await?
             .into_iter()
             .filter(|account| account.provider == request.provider)

@@ -18,7 +18,7 @@ where
         request: SecretCleanupRequest,
     ) -> Result<SecretCleanupReport, AuthProductError> {
         let mut report = SecretCleanupReport::default();
-        for account in self.accounts_for_scope(&request.scope, usize::MAX).await? {
+        for account in self.accounts_for_scope(&request.scope).await? {
             let owns_extension_account = account.owner_extension.as_ref()
                 == Some(&request.extension_id)
                 && account.ownership == CredentialOwnership::ExtensionOwned;
@@ -69,8 +69,10 @@ where
             current.updated_at = Utc::now();
             self.write_account(&current, CasExpectation::Version(version))
                 .await?;
-            // Purge secret material after the account record is safely
-            // persisted without the handles.
+            // Purge secret material after the account record is safely persisted
+            // without the handles.  Best-effort: the account no longer references
+            // these handles so any leftover material becomes unreachable even if
+            // the delete call fails (e.g. transient backend outage).
             if let Some(h) = &purge_access {
                 let _ = self.secret_store.delete(&request.scope.resource, h).await;
             }
