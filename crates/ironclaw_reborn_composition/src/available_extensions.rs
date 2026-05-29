@@ -953,7 +953,7 @@ mod tests {
         let manifest_toml = nearai_mcp_manifest_toml_for_endpoint(&endpoint).unwrap();
         let manifest: Value = toml::from_str(&manifest_toml).unwrap();
 
-        assert_eq!(manifest["trust"].as_str(), Some("third_party"));
+        assert_eq!(manifest["trust"].as_str(), Some("first_party_requested"));
         assert_eq!(
             manifest["runtime"]["url"].as_str(),
             Some("https://10.0.0.12:8443/%22%0Atrust=%22system/mcp")

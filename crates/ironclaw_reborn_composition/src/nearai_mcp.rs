@@ -107,7 +107,14 @@ impl McpHostHttpEgressPlanner for NearAiMcpEgressPlanner {
             return McpHostHttpEgressPlan::default();
         };
         McpHostHttpEgressPlan {
-            network_policy: nearai_network_policy(&self.endpoint),
+            // Mirror the staged ApplyNetworkPolicy grant's deny_private_ip_ranges
+            // default. The bundled manifest's network policy always denies private
+            // IPs, so the planner must not accept endpoint-derived policies that
+            // permit them — dispatch would reject the request anyway.
+            network_policy: nearai_network_policy(
+                &self.endpoint,
+                /*deny_private_ip_ranges=*/ true,
+            ),
             credential_injections: vec![credential_injection],
             response_body_limit: Some(NEARAI_MCP_RESPONSE_BODY_LIMIT),
             timeout_ms: Some(NEARAI_MCP_TIMEOUT_MS),
@@ -127,14 +134,17 @@ fn nearai_mcp_url_allowed(url: &str, endpoint: &NearAiMcpEndpoint) -> bool {
         .is_some_and(|host| host == endpoint.host_pattern)
 }
 
-fn nearai_network_policy(endpoint: &NearAiMcpEndpoint) -> NetworkPolicy {
+fn nearai_network_policy(
+    endpoint: &NearAiMcpEndpoint,
+    deny_private_ip_ranges: bool,
+) -> NetworkPolicy {
     NetworkPolicy {
         allowed_targets: vec![NetworkTargetPattern {
             scheme: Some(NetworkScheme::Https),
             host_pattern: endpoint.host_pattern.clone(),
             port: endpoint.port,
         }],
-        deny_private_ip_ranges: endpoint.deny_private_ip_ranges,
+        deny_private_ip_ranges,
         max_egress_bytes: Some(NEARAI_MCP_NETWORK_EGRESS_LIMIT),
     }
 }
@@ -220,7 +230,7 @@ mod tests {
 
         assert_eq!(
             planner.plan(allowed).network_policy.allowed_targets,
-            nearai_network_policy(&endpoint).allowed_targets
+            nearai_network_policy(&endpoint, endpoint.deny_private_ip_ranges).allowed_targets
         );
         assert!(
             planner

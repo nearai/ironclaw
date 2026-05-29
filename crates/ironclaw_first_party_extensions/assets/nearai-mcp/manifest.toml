@@ -3,7 +3,7 @@ id = "nearai"
 name = "NEAR AI"
 version = "0.1.0"
 description = "NEAR AI MCP tools for web search and hosted agent capabilities."
-trust = "third_party"
+trust = "first_party_requested"
 
 [runtime]
 kind = "mcp"
@@ -17,7 +17,7 @@ effects = ["dispatch_capability", "network", "use_secret"]
 runtime_credentials = [
   { handle = "llm_nearai_api_key", audience = { scheme = "https", host_pattern = "*.near.ai" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
 ]
-default_permission = "allow"
+default_permission = "ask"
 visibility = "model"
 input_schema_ref = "schemas/nearai/search.input.v1.json"
 output_schema_ref = "schemas/nearai/search.output.v1.json"

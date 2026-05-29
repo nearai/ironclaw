@@ -237,10 +237,15 @@ where
         tracing::debug!("skipping NEAR AI MCP runtime because host runtime HTTP egress is absent");
         return Ok(services);
     };
-    let endpoint =
-        nearai_mcp_endpoint_from_env().map_err(|reason| RebornBuildError::InvalidConfig {
-            reason: format!("NEAR AI MCP endpoint config is invalid: {reason}"),
-        })?;
+    let endpoint = match nearai_mcp_endpoint_from_env() {
+        Ok(endpoint) => endpoint,
+        Err(reason) => {
+            tracing::debug!(
+                "skipping NEAR AI MCP runtime: {reason} (this only affects the optional NEAR AI MCP extension)"
+            );
+            return Ok(services);
+        }
+    };
     Ok(services.with_mcp_runtime(nearai_mcp_runtime(
         runtime_ports.runtime_http_egress(),
         endpoint,
