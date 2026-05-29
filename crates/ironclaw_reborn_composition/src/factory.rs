@@ -1821,7 +1821,8 @@ mod tests {
         CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind,
         ExecutionContext, ExtensionId, GrantConstraints, InvocationId, MountAlias, MountGrant,
         NetworkPolicy, NetworkTargetPattern, Principal, ResourceEstimate, ResourceScope,
-        RuntimeKind, ScopedPath, SecretHandle, TrustClass, UserId, VirtualPath,
+        RuntimeCredentialAccountProviderId, RuntimeCredentialRequirementSource, RuntimeKind,
+        ScopedPath, SecretHandle, TrustClass, UserId, VirtualPath,
     };
     use ironclaw_host_runtime::{
         RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeFailureKind,
@@ -2063,6 +2064,18 @@ mod tests {
         assert_eq!(
             search.runtime_credentials[0].handle,
             SecretHandle::new("llm_nearai_api_key").unwrap()
+        );
+        // NEAR AI MCP credential is sourced from a product-auth account so that the
+        // user-facing setup flow is the manual-token product-auth surface (shared
+        // with GitHub WASM), not an out-of-band SecretStore handle drop.
+        // The 'handle' field remains the staging slot name the MCP egress planner
+        // reads from RuntimeSecretInjectionStore after the obligation handler resolves
+        // the access secret via RuntimeCredentialAccountResolver.
+        assert_eq!(
+            search.runtime_credentials[0].source,
+            RuntimeCredentialRequirementSource::ProductAuthAccount {
+                provider: RuntimeCredentialAccountProviderId::new("nearai").unwrap(),
+            }
         );
         assert_eq!(
             search.runtime_credentials[0].audience.host_pattern,
