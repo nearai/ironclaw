@@ -51,8 +51,7 @@ async fn capability_host_blocks_auth_when_dispatch_returns_auth_required() {
     let dispatcher = AuthRequiredDispatcher;
     let run_state = InMemoryRunStateStore::new();
     let authorizer = PlainAllowAuthorizer;
-    let host = CapabilityHost::new(&registry, &dispatcher, &authorizer)
-        .with_run_state(&run_state);
+    let host = CapabilityHost::new(&registry, &dispatcher, &authorizer).with_run_state(&run_state);
     let context = execution_context(CapabilitySet::default());
     let scope = context.resource_scope.clone();
     let invocation_id = context.invocation_id;
@@ -69,7 +68,10 @@ async fn capability_host_blocks_auth_when_dispatch_returns_auth_required() {
         .unwrap_err();
 
     assert!(
-        matches!(err, CapabilityInvocationError::AuthorizationRequiresAuth { .. }),
+        matches!(
+            err,
+            CapabilityInvocationError::AuthorizationRequiresAuth { .. }
+        ),
         "expected AuthorizationRequiresAuth, got {err:?}"
     );
     let run = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
