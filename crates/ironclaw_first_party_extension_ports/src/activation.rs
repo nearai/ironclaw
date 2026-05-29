@@ -291,14 +291,36 @@ where
         skill_names: &[String],
     ) -> Result<SkillActivationPlan, SkillActivationSelectionError> {
         let candidate_set = self.load_activation_candidate_set(run_context).await?;
+        // Account for already-active skills so repeated activate calls respect max_active_skills
+        // across the merged set, not just each individual call.
+        let already_active = self
+            .active_plan(run_context)?
+            .map(|p| p.activated_bundles().len())
+            .unwrap_or(0);
+        let effective_config = SkillActivationSelectorConfig {
+            max_active_skills: self.config.max_active_skills.saturating_sub(already_active),
+            ..self.config.clone()
+        };
         let selection = select_named_skill_activations(
             skill_names,
             &candidate_set.candidates,
-            &self.config,
+            &effective_config,
             &candidate_set.satisfied_setup_markers,
         )?;
         let plan =
             self.merge_active_plan(run_context, activation_plan_for_candidates(selection))?;
+        // Refresh the captured execution plan so take_activation_plan_for_run reflects
+        // model-selected activations made after the first prompt build.
+        {
+            let capture_key = (run_context.scope.clone(), run_context.run_id);
+            let mut plans = self
+                .plans_by_run
+                .lock()
+                .map_err(|_| SkillActivationSelectionError::Internal)?;
+            if let Some(captured) = plans.get_mut(&capture_key) {
+                captured.plan = plan.clone();
+            }
+        }
         Ok(plan)
     }
 
@@ -1866,6 +1888,104 @@ mod tests {
             .expect_err("activation without bundle id should fail loudly");
 
         assert_eq!(error, SkillActivationSelectionError::Internal);
+    }
+
+    /// Regression test for the budget-bypass bug: with `max_active_skills = 1`,
+    /// activating skill A followed by a second call activating skill B must
+    /// return `ContextBudgetExceeded` rather than silently accumulating both.
+    #[tokio::test]
+    async fn repeated_activate_skills_for_run_respects_max_active_skills_budget() {
+        let source = Arc::new(StaticSkillBundleSource::new(vec![
+            (
+                SkillSourceKind::User,
+                "skill-a",
+                &skill_md("skill-a", "Skill A", &[], "SKILL_A_SENTINEL"),
+            ),
+            (
+                SkillSourceKind::User,
+                "skill-b",
+                &skill_md("skill-b", "Skill B", &[], "SKILL_B_SENTINEL"),
+            ),
+        ]));
+        let selectable = SelectableSkillContextSource::new(
+            source,
+            SkillActivationSelectorConfig {
+                max_active_skills: 1,
+                ..SkillActivationSelectorConfig::default()
+            },
+        );
+        let context = run_context().await;
+
+        // First call succeeds — one slot consumed.
+        selectable
+            .activate_skills_for_run(&context, &["skill-a".to_string()])
+            .await
+            .expect("first activation succeeds within budget");
+
+        // Second call must be rejected because the merged set would exceed max_active_skills.
+        let error = selectable
+            .activate_skills_for_run(&context, &["skill-b".to_string()])
+            .await
+            .expect_err("second activation must be rejected when budget is exhausted");
+
+        assert_eq!(error, SkillActivationSelectionError::ContextBudgetExceeded);
+    }
+
+    /// Regression test: `take_activation_plan_for_run` must reflect
+    /// model-selected activations made after the first prompt build.
+    #[tokio::test]
+    async fn take_activation_plan_for_run_reflects_model_selected_activations_after_prompt_build() {
+        let source = Arc::new(StaticSkillBundleSource::new(vec![
+            (
+                SkillSourceKind::User,
+                "alpha-helper",
+                &skill_md("alpha-helper", "Alpha helper", &["alpha"], "ALPHA_SENTINEL"),
+            ),
+            (
+                SkillSourceKind::User,
+                "beta-helper",
+                &skill_md("beta-helper", "Beta helper", &[], "BETA_SENTINEL"),
+            ),
+        ]));
+        let selectable =
+            SelectableSkillContextSource::new(source, SkillActivationSelectorConfig::default());
+        let context = run_context().await;
+
+        // Simulate the first prompt build: record a message that triggers a capture.
+        selectable
+            .record_user_message_for_execution(
+                context.scope.clone(),
+                accepted_message_ref(&context),
+                "please use alpha",
+            )
+            .expect("record message");
+        let _ = selectable
+            .load_skill_context_candidates(&context)
+            .await
+            .expect("first prompt build");
+
+        // Now the model selects an additional skill after the first build.
+        selectable
+            .activate_skills_for_run(&context, &["beta-helper".to_string()])
+            .await
+            .expect("model-selected activation succeeds");
+
+        // The captured execution plan must include the model-selected skill.
+        let plan = selectable
+            .take_activation_plan_for_run(&context.scope, context.run_id)
+            .expect("take plan")
+            .expect("plan must be present");
+        let names: Vec<_> = plan
+            .plan
+            .selection
+            .activations
+            .iter()
+            .map(|a| a.name.as_str())
+            .collect();
+        assert!(
+            names.contains(&"beta-helper"),
+            "captured plan must include model-selected beta-helper; got {names:?}"
+        );
     }
 
     #[tokio::test]

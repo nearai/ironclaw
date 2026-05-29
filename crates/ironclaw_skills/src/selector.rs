@@ -27,6 +27,11 @@ const MAX_TAG_SCORE: u32 = 15;
 /// 20 points each could yield 100 points, dominating keyword+tag scores.
 const MAX_REGEX_SCORE: u32 = 40;
 
+/// Maximum message length (in bytes) against which regex patterns are run.
+/// Messages longer than this skip regex scoring to avoid O(n) work per skill
+/// on a hot path (the regex crate is linear but the constant matters at scale).
+const MAX_REGEX_MATCH_MESSAGE_BYTES: usize = 64 * 1024;
+
 /// Result of prefiltering with score information.
 #[derive(Debug)]
 pub struct ScoredSkill<'a> {
@@ -346,7 +351,7 @@ fn score_skill(
     }
     score += tag_score.min(MAX_TAG_SCORE);
 
-    if options.regex_activation_enabled {
+    if options.regex_activation_enabled && message_original.len() <= MAX_REGEX_MATCH_MESSAGE_BYTES {
         // Regex pattern scoring using pre-compiled patterns (cached at load time), with cap
         let mut regex_score: u32 = 0;
         for re in &skill.compiled_patterns {

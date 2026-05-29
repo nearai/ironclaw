@@ -101,6 +101,11 @@ impl SkillsConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    /// Mutex that serialises tests in this module that mutate process-global
+    /// env vars.  Mirrors the `ENV_LOCK` pattern used in `config::runtime`.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     /// `db_first_bool` consults the env var only when the settings value
     /// equals the default. SkillsSettings defaults `regex_activation_enabled`
@@ -110,10 +115,9 @@ mod tests {
     /// `db_first_bool` path was previously untested.
     #[test]
     fn skills_config_reads_regex_activation_enabled_from_env() {
-        // Serialise with the other env-touching tests in the workspace.
-        // We can't reach `tests::ENV_LOCK` from here; rely on the env var
-        // being unique to this PR and on cargo's per-test thread isolation
-        // being acceptable for a single-variable toggle.
+        // Hold the lock for the duration of the test to prevent concurrent
+        // tests from observing a partial env-var mutation.
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let key = "SKILLS_REGEX_ACTIVATION_ENABLED";
         let prior = std::env::var(key).ok();
 
