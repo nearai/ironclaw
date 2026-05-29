@@ -84,19 +84,14 @@ pub struct RuntimeCredentialRequirement {
     pub required: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "type")]
 pub enum RuntimeCredentialRequirementSource {
+    #[default]
     SecretHandle,
     ProductAuthAccount {
         provider: RuntimeCredentialAccountProviderId,
     },
-}
-
-impl Default for RuntimeCredentialRequirementSource {
-    fn default() -> Self {
-        Self::SecretHandle
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

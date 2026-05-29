@@ -192,7 +192,7 @@ fn normalize_multi_inject<'a>(
     Ok(())
 }
 
-fn extract_inject_handle<'a>(obligation: &'a Obligation, kind: &ObligationKind) -> SecretHandle {
+fn extract_inject_handle(obligation: &Obligation, kind: &ObligationKind) -> SecretHandle {
     match obligation {
         Obligation::InjectSecretOnce { handle } => handle.clone(),
         Obligation::InjectCredentialAccountOnce { handle, .. } => handle.clone(),
