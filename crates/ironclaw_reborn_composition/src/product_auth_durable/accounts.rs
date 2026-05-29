@@ -53,7 +53,7 @@ where
         &self,
         request: CredentialAccountListRequest,
     ) -> Result<CredentialAccountListPage, AuthProductError> {
-        validate_account_list_request(&request)?;
+        request.validate()?;
         // accounts_for_scope reads all accounts then filters; we cannot push
         // provider/cursor/auth filters to the storage layer without a per-
         // provider directory layout, so pagination is applied in-memory here.
@@ -256,23 +256,4 @@ where
             }
         }
     }
-}
-
-fn validate_account_list_request(
-    request: &CredentialAccountListRequest,
-) -> Result<(), AuthProductError> {
-    if request.limit == 0 {
-        return Err(AuthProductError::InvalidRequest {
-            reason: "credential account list limit must be non-zero".to_string(),
-        });
-    }
-    if request.limit > CredentialAccountListRequest::MAX_LIMIT {
-        return Err(AuthProductError::InvalidRequest {
-            reason: format!(
-                "credential account list limit must be at most {}",
-                CredentialAccountListRequest::MAX_LIMIT
-            ),
-        });
-    }
-    Ok(())
 }

@@ -3,7 +3,7 @@ use std::{
     sync::{Arc, Mutex, Weak},
 };
 
-use futures::future;
+use futures::{StreamExt as _, TryStreamExt as _, stream};
 
 use chrono::Utc;
 use ironclaw_filesystem::{
@@ -186,28 +186,29 @@ where
             Err(FilesystemError::NotFound { .. }) => return Ok(Vec::new()),
             Err(error) => return Err(fs_error(error)),
         };
-        // Build read futures for all .json entries concurrently.
-        let read_futures: Vec<_> = entries
-            .into_iter()
-            .filter(|e| e.name.ends_with(".json"))
-            .map(|entry| {
-                let path = join_scoped(&root, &entry.name);
-                async move {
-                    let path = path?;
-                    self.read_record::<CredentialAccount>(&scope.resource, &path)
-                        .await
-                }
-            })
-            .collect();
-        let results = future::join_all(read_futures).await;
-        let mut accounts = Vec::with_capacity(results.len());
-        for result in results {
-            if let Some((account, _)) = result?
-                && scope_matches(scope, &account.scope)
-            {
-                accounts.push(account);
-            }
-        }
+        // Read records concurrently, capped at 16 in-flight ops to avoid
+        // exhausting file-descriptor or connection limits on large scopes.
+        const MAX_CONCURRENT_READS: usize = 16;
+        let mut accounts: Vec<CredentialAccount> = stream::iter(
+            entries
+                .into_iter()
+                .filter(|e| e.name.ends_with(".json"))
+                .map(|entry| {
+                    let path = join_scoped(&root, &entry.name);
+                    async move {
+                        let path = path?;
+                        self.read_record::<CredentialAccount>(&scope.resource, &path)
+                            .await
+                    }
+                }),
+        )
+        .buffer_unordered(MAX_CONCURRENT_READS)
+        .try_collect::<Vec<_>>()
+        .await?
+        .into_iter()
+        .flatten()
+        .filter_map(|(account, _)| scope_matches(scope, &account.scope).then_some(account))
+        .collect();
         accounts.sort_by_key(|account| account.id);
         Ok(accounts)
     }

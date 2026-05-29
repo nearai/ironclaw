@@ -286,7 +286,7 @@ impl CredentialAccountListRequest {
         self
     }
 
-    pub(crate) fn validate(&self) -> Result<(), AuthProductError> {
+    pub fn validate(&self) -> Result<(), AuthProductError> {
         if self.limit == 0 {
             return Err(AuthProductError::invalid_request(
                 "credential account list limit must be non-zero",

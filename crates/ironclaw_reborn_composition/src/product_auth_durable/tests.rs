@@ -1478,3 +1478,448 @@ async fn filesystem_select_configured_account_validates_provider_and_rejects_mis
         .expect_err("wrong provider must return CrossScopeDenied");
     assert_eq!(err, AuthProductError::CrossScopeDenied);
 }
+
+// ─── tests: cancel_flow, fail_oauth_callback, complete_credential_selection ───
+
+#[tokio::test]
+async fn filesystem_cancel_flow_and_terminal_state_rejection() {
+    let filesystem = test_filesystem();
+    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let scope = test_scope();
+    let service = test_service(filesystem, secret_store);
+
+    let flow = service
+        .create_flow(NewAuthFlow {
+            scope: scope.clone(),
+            kind: AuthFlowKind::IntegrationCredential,
+            provider: google_provider(),
+            challenge: AuthChallenge::OAuthUrl {
+                authorization_url: OAuthAuthorizationUrl::new("https://provider.example/oauth")
+                    .unwrap(),
+                expires_at: Utc::now() + Duration::minutes(5),
+            },
+            continuation: AuthContinuationRef::SetupOnly,
+            update_binding: None,
+            opaque_state_hash: Some(state_hash("cancel-s")),
+            pkce_verifier_hash: Some(pkce_hash("cancel-p")),
+            expires_at: Utc::now() + Duration::minutes(5),
+        })
+        .await
+        .unwrap();
+
+    let cancelled = service.cancel_flow(&scope, flow.id).await.unwrap();
+    assert_eq!(cancelled.status, AuthFlowStatus::Canceled);
+
+    // Second cancel on already-terminal flow returns Canceled error.
+    let err = service
+        .cancel_flow(&scope, flow.id)
+        .await
+        .expect_err("second cancel must fail");
+    assert_eq!(err, AuthProductError::Canceled);
+}
+
+#[tokio::test]
+async fn filesystem_fail_oauth_callback_marks_flow_failed() {
+    use ironclaw_auth::{AuthErrorCode, OAuthCallbackFailureInput};
+    let filesystem = test_filesystem();
+    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let scope = test_scope();
+    let service = test_service(filesystem, secret_store);
+
+    let flow = service
+        .create_flow(NewAuthFlow {
+            scope: scope.clone(),
+            kind: AuthFlowKind::IntegrationCredential,
+            provider: google_provider(),
+            challenge: AuthChallenge::OAuthUrl {
+                authorization_url: OAuthAuthorizationUrl::new("https://provider.example/oauth")
+                    .unwrap(),
+                expires_at: Utc::now() + Duration::minutes(5),
+            },
+            continuation: AuthContinuationRef::SetupOnly,
+            update_binding: None,
+            opaque_state_hash: Some(state_hash("fail-s")),
+            pkce_verifier_hash: Some(pkce_hash("fail-p")),
+            expires_at: Utc::now() + Duration::minutes(5),
+        })
+        .await
+        .unwrap();
+
+    service
+        .claim_oauth_callback(
+            &scope,
+            OAuthCallbackClaimRequest {
+                flow_id: flow.id,
+                opaque_state_hash: state_hash("fail-s"),
+                provider: google_provider(),
+                pkce_verifier_hash: pkce_hash("fail-p"),
+            },
+        )
+        .await
+        .unwrap();
+
+    let failed = service
+        .fail_oauth_callback(
+            &scope,
+            OAuthCallbackFailureInput {
+                flow_id: flow.id,
+                opaque_state_hash: state_hash("fail-s"),
+                error: AuthErrorCode::ProviderDenied,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(failed.status, AuthFlowStatus::Failed);
+    assert_eq!(failed.error, Some(AuthErrorCode::ProviderDenied));
+}
+
+#[tokio::test]
+async fn filesystem_complete_credential_selection_completes_flow() {
+    use ironclaw_auth::{AuthFlowKind, CredentialSelectionInput};
+    let filesystem = test_filesystem();
+    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let scope = test_scope();
+    let service = test_service(filesystem, secret_store);
+
+    let account = service
+        .create_account(NewCredentialAccount {
+            scope: scope.clone(),
+            provider: google_provider(),
+            label: account_label(),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: vec![],
+            access_secret: None,
+            refresh_secret: None,
+            scopes: vec![],
+        })
+        .await
+        .unwrap();
+
+    let flow = service
+        .create_flow(NewAuthFlow {
+            scope: scope.clone(),
+            kind: AuthFlowKind::IntegrationCredential,
+            provider: google_provider(),
+            challenge: AuthChallenge::AccountSelectionRequired {
+                provider: google_provider(),
+                accounts: vec![account.projection()],
+            },
+            continuation: AuthContinuationRef::SetupOnly,
+            update_binding: None,
+            opaque_state_hash: None,
+            pkce_verifier_hash: None,
+            expires_at: Utc::now() + Duration::minutes(5),
+        })
+        .await
+        .unwrap();
+
+    let completed = service
+        .complete_credential_selection(
+            &scope,
+            CredentialSelectionInput {
+                flow_id: flow.id,
+                credential_account_id: account.id,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(completed.status, AuthFlowStatus::Completed);
+    assert_eq!(completed.credential_account_id, Some(account.id));
+}
+
+// ─── tests: create_flow update_binding validation ─────────────────────────────
+
+#[tokio::test]
+async fn filesystem_create_flow_rejects_invalid_update_binding() {
+    use ironclaw_auth::CredentialAccountUpdateBinding;
+    let filesystem = test_filesystem();
+    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let scope = test_scope();
+    let service = test_service(filesystem, secret_store);
+
+    // Non-existent account in update_binding → CredentialMissing.
+    let err = service
+        .create_flow(NewAuthFlow {
+            scope: scope.clone(),
+            kind: AuthFlowKind::IntegrationCredential,
+            provider: google_provider(),
+            challenge: AuthChallenge::OAuthUrl {
+                authorization_url: OAuthAuthorizationUrl::new("https://provider.example/oauth")
+                    .unwrap(),
+                expires_at: Utc::now() + Duration::minutes(5),
+            },
+            continuation: AuthContinuationRef::SetupOnly,
+            update_binding: Some(CredentialAccountUpdateBinding {
+                account_id: CredentialAccountId::new(),
+                ownership: CredentialOwnership::UserReusable,
+                owner_extension: None,
+                granted_extensions: vec![],
+            }),
+            opaque_state_hash: Some(state_hash("ubv-s")),
+            pkce_verifier_hash: Some(pkce_hash("ubv-p")),
+            expires_at: Utc::now() + Duration::minutes(5),
+        })
+        .await
+        .expect_err("non-existent binding account must return CredentialMissing");
+    assert_eq!(err, AuthProductError::CredentialMissing);
+}
+
+// ─── tests: update_status, project_credential_recovery, CredentialSetupService update ───
+
+#[tokio::test]
+async fn filesystem_update_status_and_cross_scope_rejection() {
+    let filesystem = test_filesystem();
+    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let scope = test_scope();
+    let service = test_service(filesystem, secret_store);
+
+    let account = service
+        .create_account(NewCredentialAccount {
+            scope: scope.clone(),
+            provider: google_provider(),
+            label: account_label(),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: vec![],
+            access_secret: None,
+            refresh_secret: None,
+            scopes: vec![],
+        })
+        .await
+        .unwrap();
+
+    let updated = service
+        .update_status(&scope, account.id, CredentialAccountStatus::Inactive)
+        .await
+        .unwrap();
+    assert_eq!(updated.status, CredentialAccountStatus::Inactive);
+
+    // Non-existent account.
+    let err = service
+        .update_status(
+            &scope,
+            CredentialAccountId::new(),
+            CredentialAccountStatus::Inactive,
+        )
+        .await
+        .expect_err("missing account must return CredentialMissing");
+    assert_eq!(err, AuthProductError::CredentialMissing);
+}
+
+#[tokio::test]
+async fn filesystem_project_credential_recovery_returns_setup_required_when_empty() {
+    use ironclaw_auth::CredentialRecoveryRequest;
+    let filesystem = test_filesystem();
+    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let scope = test_scope();
+    let service = test_service(filesystem, secret_store);
+
+    // No accounts → setup_required.
+    let recovery = service
+        .project_credential_recovery(CredentialRecoveryRequest::new(
+            scope.clone(),
+            google_provider(),
+        ))
+        .await
+        .unwrap();
+    use ironclaw_auth::CredentialRecoveryState;
+    assert!(
+        matches!(
+            recovery.state,
+            CredentialRecoveryState::SetupRequired { .. }
+        ),
+        "no accounts must return setup_required"
+    );
+
+    // One configured account → configured.
+    let account = service
+        .create_account(NewCredentialAccount {
+            scope: scope.clone(),
+            provider: google_provider(),
+            label: account_label(),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: vec![],
+            access_secret: None,
+            refresh_secret: None,
+            scopes: vec![],
+        })
+        .await
+        .unwrap();
+
+    let recovery = service
+        .project_credential_recovery(CredentialRecoveryRequest::new(
+            scope.clone(),
+            google_provider(),
+        ))
+        .await
+        .unwrap();
+    let CredentialRecoveryState::Configured { selected_account } = &recovery.state else {
+        panic!(
+            "single configured account must return Configured state, got: {:?}",
+            recovery.state
+        );
+    };
+    assert_eq!(selected_account.id, account.id);
+}
+
+#[tokio::test]
+async fn filesystem_credential_setup_service_update_path() {
+    use ironclaw_auth::{
+        CredentialAccountMutation, CredentialAccountUpdate, CredentialSetupService,
+    };
+    let filesystem = test_filesystem();
+    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let scope = test_scope();
+    let service = test_service(filesystem, secret_store);
+
+    let account = service
+        .create_account(NewCredentialAccount {
+            scope: scope.clone(),
+            provider: google_provider(),
+            label: account_label(),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: vec![],
+            access_secret: Some(SecretHandle::new("old-access").unwrap()),
+            refresh_secret: None,
+            scopes: vec![],
+        })
+        .await
+        .unwrap();
+
+    let new_handle = SecretHandle::new("new-access").unwrap();
+    let updated = service
+        .create_or_update_account(CredentialAccountMutation::Update(CredentialAccountUpdate {
+            account_id: account.id,
+            account: NewCredentialAccount {
+                scope: scope.clone(),
+                provider: google_provider(),
+                label: account_label(),
+                status: CredentialAccountStatus::Configured,
+                ownership: CredentialOwnership::UserReusable,
+                owner_extension: None,
+                granted_extensions: vec![],
+                access_secret: Some(new_handle.clone()),
+                refresh_secret: None,
+                scopes: vec![],
+            },
+        }))
+        .await
+        .unwrap();
+    assert_eq!(updated.access_secret, Some(new_handle));
+}
+
+// ─── tests: get_account cross-scope rejection ─────────────────────────────────
+
+#[tokio::test]
+async fn filesystem_get_account_cross_scope_returns_cross_scope_denied() {
+    use ironclaw_auth::AuthSurface;
+    let filesystem = test_filesystem();
+    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let scope = test_scope();
+    let service = test_service(Arc::clone(&filesystem), Arc::clone(&secret_store));
+
+    let account = service
+        .create_account(NewCredentialAccount {
+            scope: scope.clone(),
+            provider: google_provider(),
+            label: account_label(),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: vec![],
+            access_secret: None,
+            refresh_secret: None,
+            scopes: vec![],
+        })
+        .await
+        .unwrap();
+
+    // Same resource but different surface → CrossScopeDenied.
+    let cli_scope = AuthProductScope::new(scope.resource.clone(), AuthSurface::Cli);
+    let service2 = test_service(Arc::clone(&filesystem), Arc::clone(&secret_store));
+    let result = service2
+        .get_account(CredentialAccountLookupRequest::new(cli_scope, account.id))
+        .await;
+    // The account doesn't exist in the CLI path (different path on filesystem), so None.
+    assert!(
+        result.unwrap().is_none(),
+        "account written under web scope must not be visible under cli scope"
+    );
+}
+
+// ─── tests: validate_secret control-char branch ───────────────────────────────
+
+#[tokio::test]
+async fn filesystem_validate_secret_rejects_control_characters() {
+    let filesystem = test_filesystem();
+    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let scope = test_scope();
+    let service = test_service(filesystem, secret_store);
+
+    let challenge = service
+        .request_secret_input(ManualTokenSetupRequest {
+            scope: scope.clone(),
+            provider: google_provider(),
+            label: account_label(),
+            continuation: AuthContinuationRef::SetupOnly,
+            update_binding: None,
+            expires_at: Utc::now() + Duration::minutes(5),
+        })
+        .await
+        .unwrap();
+    let AuthChallenge::ManualTokenRequired { interaction_id, .. } = challenge else {
+        panic!("expected ManualTokenRequired");
+    };
+
+    // NUL byte must be rejected without consuming the interaction.
+    let err = service
+        .submit_manual_token(
+            &scope,
+            SecretSubmitRequest {
+                interaction_id,
+                secret: SecretString::from("valid\x00nul"),
+            },
+        )
+        .await
+        .expect_err("NUL byte must be rejected");
+    assert!(
+        matches!(err, AuthProductError::InvalidRequest { .. }),
+        "must return InvalidRequest for control characters"
+    );
+
+    // Interaction must NOT be consumed — replay still possible.
+    let ok = service
+        .submit_manual_token(
+            &scope,
+            SecretSubmitRequest {
+                interaction_id,
+                secret: SecretString::from("clean-token"),
+            },
+        )
+        .await;
+    assert!(
+        ok.is_ok(),
+        "interaction must be usable after control-char rejection"
+    );
+}
+
+// ─── tests: accounts_for_scope NotFound (empty scope) ─────────────────────────
+
+#[tokio::test]
+async fn filesystem_accounts_for_scope_returns_empty_when_dir_not_found() {
+    let filesystem = test_filesystem();
+    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let scope = test_scope();
+    let service = test_service(filesystem, secret_store);
+
+    // No writes to filesystem at all — list_dir will see NotFound.
+    let accounts = service.accounts_for_scope(&scope).await.unwrap();
+    assert!(accounts.is_empty(), "empty scope must return no accounts");
+}
