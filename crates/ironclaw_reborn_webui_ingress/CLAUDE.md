@@ -22,7 +22,8 @@ v1 secrets / settings / DB.
 | `OidcAuthenticator` | OIDC bearer-token verifier (JWKS + standard claims) |
 | `webui_v2_auth_router(config) -> PublicRouteMount` | OAuth login router + route descriptors. The descriptors travel with the router so composition can fold them into the descriptor-driven per-route rate-limit / body-limit middleware — same machinery the v2 facade and product-auth callback already use, no side door. |
 | `PublicRouteMount` | `{ router, descriptors }` pair handed to `WebuiServeConfig::with_public_route_mount` |
-| `OAuthProvider` trait (in `auth/provider.rs`) | Extension point for per-provider URL / code-exchange logic. Deliberately lives in its own module so future GitHub / NEAR providers do not depend on the Google module. `GoogleProvider` ships today. |
+| `OAuthProvider` trait (in `auth/provider.rs`) | Extension point for per-provider URL / code-exchange logic. Deliberately lives in its own module so each provider does not depend on the others. `GoogleProvider` and `GitHubProvider` ship today. |
+| `GitHubProvider` (in `auth/github.rs`) | GitHub OAuth App provider (scopes `read:user user:email`, no PKCE, verified-email preference). Built from `GitHubOAuthConfig`. |
 | `OAuthRouterConfig` | Tenant + `SessionStore` + `UserDirectory` + provider list + base URL |
 | `UserDirectory` trait | Host-supplied mapping from `(provider, OAuthUserProfile)` to `UserId` |
 | `EmailUserDirectory` | Local-dev default impl (verified email → `UserId`); gated on `dev-in-memory-session` |
@@ -86,9 +87,15 @@ pub trait OAuthProvider: Send + Sync + 'static {
   claim check, audience+issuer validation; signature verification
   is disabled because the `id_token` arrived over TLS directly
   from Google).
-- GitHub will plug in without trait changes (it ignores the PKCE
-  challenge — the trait still requires the parameter, the impl
-  ignores it).
+- `GitHubProvider` ships today. It uses GitHub's
+  OAuth App flow with scopes `read:user user:email`, ignores the
+  PKCE challenge the router computes (GitHub does not support PKCE —
+  CSRF is the `state` param only), and after the token exchange
+  reads `/user` + `/user/emails`, preferring the primary verified
+  email, then any verified email, then the unverified profile email
+  flagged `email_verified = false` so the `UserDirectory` fails
+  closed. Built from `GitHubOAuthConfig` (client id + secret); no
+  hosted-domain analogue.
 - NEAR wallet login does NOT fit OAuth code flow and will get its
   own pair of endpoints (`/auth/near/challenge` +
   `/auth/near/verify`) plus its own sub-module under `auth/near/`.
@@ -100,7 +107,7 @@ pub trait OAuthProvider: Send + Sync + 'static {
 - **Pending-flow store** is process-local, bounded (1024 entries +
   5-min TTL), and single-use on `take`. A replayed callback cannot
   re-use a state token; cross-provider replay (state minted for
-  Google arriving on a future GitHub callback) fails closed.
+  Google arriving on the GitHub callback) fails closed.
 - **Session exchange tickets** are process-local, bounded (1024
   entries + 60-sec TTL), and single-use on `take`. The OAuth
   callback puts only the ticket in the redirect `Location`; the SPA
@@ -150,6 +157,12 @@ pub trait OAuthProvider: Send + Sync + 'static {
   `webui_v2_auth_router` covering provider discovery, login
   redirect, callback success, state replay, open-redirect bypass,
   provider error, hd denial, ticket exchange, logout revocation.
+- `tests/github_oauth_routes.rs` — caller-level tests driving the
+  REAL `GitHubProvider` against a local mock GitHub token/user/emails
+  server: discovery, login redirect (state + scope, no PKCE),
+  callback success minting a session for the primary verified email,
+  ticket exchange + single-use replay, provider-error and
+  exchange-failure redirects, and logout revocation.
 - `tests/session_round_trip.rs` — end-to-end test composing
   `webui_v2_app` with `SessionAuthenticator` + the OAuth router;
   drives an OAuth callback, exchanges the resulting ticket, uses the bearer on

@@ -7,10 +7,10 @@
 //! dispatch by `provider.name()` and never depend on a concrete
 //! implementation.
 //!
-//! Today's only impl is [`crate::auth::GoogleProvider`]. GitHub and
-//! NEAR (the latter via a different sub-router, since wallet login
-//! does not fit OAuth code flow) plug in here without touching the
-//! routes or the session machinery.
+//! Today's impls are [`crate::auth::GoogleProvider`] and
+//! [`crate::auth::GitHubProvider`]. NEAR (via a different sub-router,
+//! since wallet login does not fit OAuth code flow) plugs in here
+//! without touching the routes or the session machinery.
 
 use async_trait::async_trait;
 
