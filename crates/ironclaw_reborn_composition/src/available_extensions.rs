@@ -19,6 +19,8 @@ const GMAIL_MANIFEST: &str =
     include_str!("../../ironclaw_first_party_extensions/assets/gmail/manifest.toml");
 const WEB_ACCESS_MANIFEST: &str =
     include_str!("../../ironclaw_first_party_extensions/assets/web-access/manifest.toml");
+const NEARAI_MCP_MANIFEST: &str =
+    include_str!("../../ironclaw_first_party_extensions/assets/nearai-mcp/manifest.toml");
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct AvailableExtensionAsset {
@@ -70,6 +72,7 @@ impl AvailableExtensionCatalog {
         Ok(Self::from_packages(vec![
             github_package()?,
             web_access_package()?,
+            nearai_mcp_package()?,
             google_calendar_package()?,
             gmail_package()?,
         ]))
@@ -153,6 +156,13 @@ fn web_access_package() -> Result<AvailableExtensionPackage, ProductWorkflowErro
         "Web Access",
         WEB_ACCESS_MANIFEST,
         web_access_assets(),
+fn nearai_mcp_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
+    let manifest = nearai_mcp_manifest_toml();
+    bundled_extension_package(
+        "nearai",
+        "NEAR AI MCP",
+        &manifest,
+        nearai_mcp_assets(&manifest),
     )
 }
 
@@ -179,6 +189,19 @@ pub(crate) fn gmail_manifest_digest() -> String {
 
 pub(crate) fn web_access_manifest_digest() -> String {
     sha256_digest_token(WEB_ACCESS_MANIFEST.as_bytes())
+pub(crate) fn nearai_mcp_manifest_toml() -> String {
+    NEARAI_MCP_MANIFEST.replace("https://private.near.ai/mcp", &nearai_mcp_url_from_env())
+}
+
+fn nearai_mcp_url_from_env() -> String {
+    let configured_base = std::env::var("NEARAI_BASE_URL")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let base = configured_base.unwrap_or_else(|| "https://private.near.ai".to_string());
+    let base = base.trim_end_matches('/');
+    let base = base.strip_suffix("/v1").unwrap_or(base);
+    format!("{base}/mcp")
 }
 
 fn bundled_extension_package(
@@ -321,6 +344,25 @@ fn web_access_assets() -> Vec<AvailableExtensionAsset> {
             "prompts/web-access/get_content.md",
             include_bytes!(
                 "../../ironclaw_first_party_extensions/assets/web-access/prompts/web-access/get_content.md"
+fn nearai_mcp_assets(manifest: &str) -> Vec<AvailableExtensionAsset> {
+    vec![
+        bytes_asset("manifest.toml", manifest.as_bytes()),
+        bytes_asset(
+            "schemas/nearai/search.input.v1.json",
+            include_bytes!(
+                "../../ironclaw_first_party_extensions/assets/nearai-mcp/schemas/nearai/search.input.v1.json"
+            ),
+        ),
+        bytes_asset(
+            "schemas/nearai/search.output.v1.json",
+            include_bytes!(
+                "../../ironclaw_first_party_extensions/assets/nearai-mcp/schemas/nearai/search.output.v1.json"
+            ),
+        ),
+        bytes_asset(
+            "prompts/nearai/search.md",
+            include_bytes!(
+                "../../ironclaw_first_party_extensions/assets/nearai-mcp/prompts/nearai/search.md"
             ),
         ),
     ]
@@ -822,6 +864,7 @@ mod tests {
         let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
 
         for extension_id in ["web-access", "google-calendar", "gmail"] {
+        for extension_id in ["nearai", "google-calendar", "gmail"] {
             let package_ref =
                 LifecyclePackageRef::new(LifecyclePackageKind::Extension, extension_id).unwrap();
             let package = catalog.resolve(&package_ref).unwrap();
