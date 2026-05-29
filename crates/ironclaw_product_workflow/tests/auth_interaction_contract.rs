@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use chrono::{Duration, Utc};
 use ironclaw_auth::{
     AuthChallenge, AuthContinuationRef, AuthFlowId, AuthFlowKind, AuthFlowManager, AuthFlowRecord,
-    AuthFlowStatus, AuthGateRef, AuthProductError, AuthProductScope, AuthSurface,
+    AuthFlowStatus, AuthGateRef, AuthProductError, AuthProductScope, AuthSurface, Timestamp,
     CredentialAccountId, CredentialAccountLabel, CredentialAccountProjection,
     CredentialAccountStatus, CredentialAccountUpdateBinding, CredentialOwnership,
     CredentialSelectionInput, NewAuthFlow, OAuthAuthorizationUrl, OAuthCallbackClaimRequest,
@@ -161,6 +161,15 @@ impl AuthFlowManager for RecordingFlowManager {
         &self,
         _scope: &AuthProductScope,
         _input: OAuthCallbackFailureInput,
+    ) -> Result<AuthFlowRecord, AuthProductError> {
+        Err(AuthProductError::BackendUnavailable)
+    }
+
+    async fn mark_continuation_dispatched(
+        &self,
+        _scope: &AuthProductScope,
+        _flow_id: AuthFlowId,
+        _emitted_at: Timestamp,
     ) -> Result<AuthFlowRecord, AuthProductError> {
         Err(AuthProductError::BackendUnavailable)
     }
@@ -1033,6 +1042,7 @@ fn auth_flow(
         pkce_verifier_hash: None,
         authorization_code_hash: None,
         error: None,
+        continuation_emitted_at: None,
         created_at: now,
         updated_at: now,
         expires_at: now + Duration::minutes(10),

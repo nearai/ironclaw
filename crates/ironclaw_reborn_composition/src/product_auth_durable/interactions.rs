@@ -83,6 +83,11 @@ where
             return Err(AuthProductError::UnknownOrExpiredFlow);
         }
         let continuation = pending.continuation.clone();
+        let account = self
+            .create_or_update_manual_token_account(&pending, request.secret)
+            .await?;
+        // Account write succeeded — mark interaction consumed so retries
+        // get UnknownOrExpiredFlow instead of racing a second account write.
         pending.consumed_at = Some(now);
         self.write_record(
             &scope.resource,
@@ -91,9 +96,6 @@ where
             CasExpectation::Version(version),
         )
         .await?;
-        let account = self
-            .create_or_update_manual_token_account(&pending, request.secret)
-            .await?;
         Ok(SecretSubmitResult {
             account_id: account.id,
             status: account.status,
@@ -235,10 +237,16 @@ struct StoredManualTokenInteraction {
 }
 
 fn validate_secret(request: &SecretSubmitRequest) -> Result<(), AuthProductError> {
+    const MAX_SECRET_LEN: usize = 65536;
     let exposed = request.secret.expose_secret();
     if exposed.trim().is_empty() {
         return Err(AuthProductError::InvalidRequest {
             reason: "secret value must not be empty".to_string(),
+        });
+    }
+    if exposed.len() > MAX_SECRET_LEN {
+        return Err(AuthProductError::InvalidRequest {
+            reason: format!("secret value exceeds maximum length of {MAX_SECRET_LEN} bytes"),
         });
     }
     if exposed.chars().any(|c| c == '\0' || c.is_control()) {
