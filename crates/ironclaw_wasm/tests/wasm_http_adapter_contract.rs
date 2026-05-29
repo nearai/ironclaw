@@ -105,6 +105,38 @@ async fn wasm_runtime_http_adapter_works_inside_current_thread_runtime() {
     assert_eq!(egress.requests.lock().unwrap().len(), 1);
 }
 
+#[test]
+fn wasm_runtime_http_adapter_reuses_worker_runtime_without_active_tokio_runtime() {
+    let egress = RecordingRuntimeEgress::ok(RuntimeHttpEgressResponse {
+        status: 204,
+        headers: Vec::new(),
+        body: Vec::new(),
+        saved_body: None,
+        request_bytes: 0,
+        response_bytes: 0,
+        redaction_applied: false,
+    });
+    let adapter = WasmRuntimeHttpAdapter::new(
+        Arc::new(egress.clone()),
+        sample_scope(),
+        sample_capability_id(),
+        sample_policy(),
+    );
+
+    let response = adapter
+        .request(WasmHttpRequest {
+            method: "GET".to_string(),
+            url: "https://wasm-api.example.test/no-runtime".to_string(),
+            headers_json: "{}".to_string(),
+            body: None,
+            timeout_ms: None,
+        })
+        .expect("sync callers should use the shared WASM HTTP runtime");
+
+    assert_eq!(response.status, 204);
+    assert_eq!(egress.requests.lock().unwrap().len(), 1);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn wasm_runtime_http_adapter_strips_sensitive_response_headers() {
     let egress = RecordingRuntimeEgress::ok(RuntimeHttpEgressResponse {

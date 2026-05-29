@@ -1,6 +1,5 @@
-use std::{panic::AssertUnwindSafe, path::PathBuf};
+use std::path::PathBuf;
 
-use futures_util::FutureExt as _;
 use ironclaw_host_api::{
     NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern, ResourceUsage,
     RuntimeDispatchErrorKind, RuntimeHttpEgressError, RuntimeHttpEgressReasonCode,
@@ -124,15 +123,16 @@ pub(super) async fn fetch_url_response(
         save_body_to: None,
         timeout_ms: Some(SKILL_URL_FETCH_TIMEOUT_MS),
     };
-    let response = AssertUnwindSafe(egress.execute(http_request))
-        .catch_unwind()
-        .await
-        .map_err(|_| {
-            tracing::error!("skill URL HTTP egress future panicked");
+    let response = super::run_egress_catching_panic(
+        egress.execute(http_request),
+        "skill URL HTTP egress future panicked",
+        || {
             FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::Backend)
                 .with_usage(usage.clone())
-        })?
-        .map_err(|error| skill_url_fetch_error(error, usage))?;
+        },
+    )
+    .await?
+    .map_err(|error| skill_url_fetch_error(error, usage))?;
     usage.network_egress_bytes = usage
         .network_egress_bytes
         .saturating_add(response.request_bytes);

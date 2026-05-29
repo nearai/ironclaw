@@ -4391,6 +4391,7 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "blake3",
+ "futures-util",
  "glob",
  "ironclaw_auth",
  "ironclaw_filesystem",

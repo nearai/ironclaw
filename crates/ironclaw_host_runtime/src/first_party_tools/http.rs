@@ -1,7 +1,4 @@
-use std::panic::AssertUnwindSafe;
-
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
-use futures_util::FutureExt as _;
 use ironclaw_extensions::{CapabilityManifest, ExtensionError};
 use ironclaw_host_api::{
     EffectKind, MountAlias, MountGrant, MountPermissions, MountView, NetworkMethod, NetworkPolicy,
@@ -202,14 +199,13 @@ pub(super) async fn dispatch(
         save_body_to,
         timeout_ms: Some(timeout_ms),
     };
-    let response = AssertUnwindSafe(egress.execute(http_request))
-        .catch_unwind()
-        .await
-        .map_err(|_| {
-            tracing::error!("first-party HTTP egress future panicked");
-            FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::Backend)
-        })?
-        .map_err(http_error)?;
+    let response = super::run_egress_catching_panic(
+        egress.execute(http_request),
+        "first-party HTTP egress future panicked",
+        || FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::Backend),
+    )
+    .await?
+    .map_err(http_error)?;
     let mut output = Map::new();
     output.insert("status".to_string(), json!(response.status));
     output.insert("headers".to_string(), response_headers(response.headers));

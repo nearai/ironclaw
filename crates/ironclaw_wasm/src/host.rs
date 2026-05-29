@@ -14,6 +14,18 @@ use tokio::runtime::{Handle, RuntimeFlavor};
 
 use crate::WasmHostError;
 
+static WASM_HTTP_EGRESS_RUNTIME: LazyLock<Result<tokio::runtime::Runtime, WasmHostError>> =
+    LazyLock::new(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .thread_name("wasm-http-egress")
+            .enable_all()
+            .build()
+            .map_err(|error| {
+                WasmHostError::Failed(format!("WASM HTTP runtime unavailable: {error}"))
+            })
+    });
+
 /// HTTP request shape exposed through the WIT `host.http-request` import.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WasmHttpRequest {
@@ -388,17 +400,6 @@ fn run_runtime_http_egress_on_worker<F>(
 where
     F: Future<Output = Result<RuntimeHttpEgressResponse, WasmHostError>> + Send + 'static,
 {
-    static WASM_HTTP_EGRESS_RUNTIME: LazyLock<Result<tokio::runtime::Runtime, WasmHostError>> =
-        LazyLock::new(|| {
-            tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(1)
-                .thread_name("wasm-http-egress")
-                .enable_all()
-                .build()
-                .map_err(|error| {
-                    WasmHostError::Failed(format!("WASM HTTP runtime unavailable: {error}"))
-                })
-        });
     let runtime = WASM_HTTP_EGRESS_RUNTIME
         .as_ref()
         .map_err(|error| error.clone())?;
@@ -415,11 +416,10 @@ fn run_runtime_http_egress_future<F>(future: F) -> Result<RuntimeHttpEgressRespo
 where
     F: Future<Output = Result<RuntimeHttpEgressResponse, WasmHostError>>,
 {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|error| WasmHostError::Failed(format!("WASM HTTP runtime unavailable: {error}")))?
-        .block_on(future)
+    let runtime = WASM_HTTP_EGRESS_RUNTIME
+        .as_ref()
+        .map_err(|error| error.clone())?;
+    runtime.block_on(future)
 }
 
 fn wasm_network_method(method: &str) -> Result<NetworkMethod, WasmHostError> {
