@@ -170,6 +170,52 @@ state while durable flow records store only hashes. Single-instance or sticky
 callback deployments are supported. Multi-replica/restart-surviving deployments
 must add a host-owned encrypted verifier store before claiming HA safety.
 
+### Broker Projection (#4238)
+
+Product-auth is the source of truth for credential accounts. The runtime
+credential broker (`ironclaw_secrets::CredentialAccountStore`) maintains an
+independent view consumed on every extension HTTP call to issue
+`CredentialSessionRequest`s. To prevent drift between the two views,
+`FilesystemAuthProductServices` projects every successful `write_account` into
+the broker store through a `BrokerAccountProjector` seam owned by
+`ironclaw_reborn_composition`.
+
+Direction is **one-way**: product-auth → broker only. The broker never writes
+back into product-auth.
+
+Projection is **best-effort**: failures are logged at `warn` and do **not**
+block or roll back the product-auth write. Rationale: product-auth is the
+durable source of truth; a transient broker write failure must not leave a
+user stuck mid-OAuth. Drift is observable via the warn logs and recoverable
+by re-running projection or by an eventual reconciler.
+
+Status is mapped on the way in:
+
+| Product-auth status | Broker status |
+| --- | --- |
+| `Configured` | `Active` |
+| `Expired`, `RefreshFailed` | `Expired` |
+| `Revoked` | `Revoked` |
+| `Inactive`, `Missing`, `PendingSetup` | (not projected — not yet usable) |
+
+Known gaps tracked under #4238:
+
+* `allowed_targets` is projected empty until product-auth carries a network
+  policy source. Projected broker accounts are visible via
+  `accounts_for_scope` but **cannot satisfy session requests** —
+  `CredentialTargetPolicy::matches()` rejects an empty target list. Existing
+  broker-populating paths remain authoritative for accounts that need to
+  serve runtime injection today.
+* `provider_or_extension_id` is one-slot in the broker; the projection picks
+  `owner_extension` when set, otherwise maps `AuthProviderId` through
+  `ExtensionId::new`. Grant changes for non-owner extensions are not
+  reflected in the projected broker row; a multi-extension shape is the
+  follow-up.
+* `SecretCleanupAction::Uninstall` projects the resulting `Revoked` status
+  (rather than removing the broker row) because `CredentialAccountStore`
+  exposes no `delete_account` method. A revoked broker account cannot issue
+  sessions, which matches the UX intent; the row remains visible for audit.
+
 ---
 
 ## Auth Flows
