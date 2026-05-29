@@ -274,6 +274,16 @@ impl Agent {
         let force_text_at = max_tool_iterations;
         let nudge_at = max_tool_iterations.saturating_sub(1);
 
+        // Install a fresh cancellation token on the thread so `Thread::interrupt()`
+        // can tear down the in-flight HTTP connection immediately.
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+        {
+            let mut sess = session.lock().await;
+            if let Some(thread) = sess.threads.get_mut(&thread_id) {
+                thread.cancel_token = Some(cancel_token.clone());
+            }
+        }
+
         let delegate = ChatDelegate {
             agent: self,
             tenant,
@@ -289,6 +299,7 @@ impl Agent {
             user_tz,
             turn_usage: std::sync::Mutex::new(TurnUsageSummary::default()),
             cached_admin_tool_policy: tokio::sync::OnceCell::new(),
+            cancel_token,
         };
 
         // If /skill-name mentions were expanded, rewrite the last user message
@@ -403,6 +414,8 @@ struct ChatDelegate<'a> {
     user_tz: chrono_tz::Tz,
     turn_usage: std::sync::Mutex<TurnUsageSummary>,
     cached_admin_tool_policy: crate::tools::permissions::AdminToolPolicyCache,
+    /// Cancellation token shared with the thread; fired by `Thread::interrupt()`.
+    cancel_token: tokio_util::sync::CancellationToken,
 }
 
 impl ChatDelegate<'_> {
@@ -628,7 +641,21 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
         }
 
         let llm_call_start = std::time::Instant::now();
-        let output = match reasoning.respond_with_tools(reason_ctx).await {
+        // Race the LLM call against the cancellation token. When the user sends
+        // `/interrupt`, `Thread::interrupt()` cancels the token which causes this
+        // select! to drop the reqwest future, tearing down the TCP connection
+        // immediately instead of waiting for the full response.
+        let llm_result = tokio::select! {
+            result = reasoning.respond_with_tools(reason_ctx) => result,
+            _ = self.cancel_token.cancelled() => {
+                return Err(crate::error::LlmError::RequestFailed {
+                    provider: "agent".to_string(),
+                    reason: "interrupted".to_string(),
+                }
+                .into());
+            }
+        };
+        let output = match llm_result {
             Ok(output) => output,
             Err(crate::error::LlmError::ContextLengthExceeded { used, limit }) => {
                 tracing::warn!(

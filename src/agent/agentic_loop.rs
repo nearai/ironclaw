@@ -36,6 +36,7 @@ pub enum TextAction {
 }
 
 /// Final outcome of the agentic loop.
+#[derive(Debug)]
 pub enum LoopOutcome {
     /// Completed with a text response.
     Response(String),
@@ -238,8 +239,18 @@ pub async fn run_agentic_loop(
             return Ok(outcome);
         }
 
-        // Call LLM
-        let output = delegate.call_llm(reasoning, reason_ctx, iteration).await?;
+        // Call LLM — if the call fails while an interrupt is pending, stop cleanly
+        // instead of propagating the error (the reqwest future was cancelled and the
+        // connection was torn down; this is the expected path for `/interrupt`).
+        let output = match delegate.call_llm(reasoning, reason_ctx, iteration).await {
+            Ok(output) => output,
+            Err(e) => {
+                if matches!(delegate.check_signals().await, LoopSignal::Stop) {
+                    return Ok(LoopOutcome::Stopped);
+                }
+                return Err(e);
+            }
+        };
 
         match &output.result {
             RespondResult::Text(text) => {
@@ -1264,5 +1275,93 @@ mod tests {
             !ctx.force_text,
             "force_text should not be set when streak was reset"
         );
+    }
+
+    /// Regression test for Patch #6 — interruptible API calls.
+    ///
+    /// When `call_llm` returns an error AND `check_signals` returns `Stop`
+    /// (i.e. the thread was interrupted while the LLM call was in flight),
+    /// the loop must return `LoopOutcome::Stopped` rather than propagating
+    /// the error.
+    #[tokio::test]
+    async fn test_interrupted_llm_call_stops_cleanly() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        struct InterruptedDelegate {
+            signal_calls: AtomicU32,
+        }
+
+        #[async_trait::async_trait]
+        impl LoopDelegate for InterruptedDelegate {
+            async fn check_signals(&self) -> LoopSignal {
+                // First call: loop starts normally. Second call (after the error):
+                // thread was interrupted, signal Stop.
+                let n = self.signal_calls.fetch_add(1, Ordering::SeqCst);
+                if n == 0 {
+                    LoopSignal::Continue
+                } else {
+                    LoopSignal::Stop
+                }
+            }
+
+            async fn before_llm_call(
+                &self,
+                _reason_ctx: &mut ReasoningContext,
+                _iteration: usize,
+            ) -> Option<LoopOutcome> {
+                None
+            }
+
+            async fn call_llm(
+                &self,
+                _reasoning: &Reasoning,
+                _reason_ctx: &mut ReasoningContext,
+                _iteration: usize,
+            ) -> Result<ironclaw_llm::RespondOutput, crate::error::Error> {
+                Err(crate::error::LlmError::RequestFailed {
+                    provider: "agent".to_string(),
+                    reason: "interrupted".to_string(),
+                }
+                .into())
+            }
+
+            async fn handle_text_response(
+                &self,
+                _text: &str,
+                _metadata: ResponseMetadata,
+                _reason_ctx: &mut ReasoningContext,
+            ) -> TextAction {
+                // Never reached — call_llm errors before a text response arrives
+                TextAction::Continue
+            }
+
+            async fn execute_tool_calls(
+                &self,
+                _tool_calls: Vec<ironclaw_llm::ToolCall>,
+                _content: Option<String>,
+                _reason_ctx: &mut ReasoningContext,
+                _reasoning: Option<String>,
+            ) -> Result<Option<LoopOutcome>, crate::error::Error> {
+                Ok(None)
+            }
+        }
+
+        let delegate = InterruptedDelegate {
+            signal_calls: AtomicU32::new(0),
+        };
+        let reasoning = stub_reasoning();
+        let mut ctx = ReasoningContext::new();
+        let config = AgenticLoopConfig::default();
+
+        let outcome = run_agentic_loop(&delegate, &reasoning, &mut ctx, &config)
+            .await
+            .unwrap();
+
+        assert!(
+            matches!(outcome, LoopOutcome::Stopped),
+            "interrupted LLM call should produce Stopped, got {outcome:?}"
+        );
+        // check_signals is called twice: once before call_llm, once inside the error handler
+        assert_eq!(delegate.signal_calls.load(Ordering::SeqCst), 2);
     }
 }

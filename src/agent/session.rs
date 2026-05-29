@@ -310,6 +310,11 @@ pub struct Thread {
     /// Channel that created this thread (for approval authorization).
     #[serde(default)]
     pub source_channel: Option<String>,
+    /// Cancellation token for the in-flight LLM call, if any.
+    /// Created by the dispatcher at turn start; cancelled by `interrupt()`.
+    /// Not serialized — recreated each turn.
+    #[serde(skip)]
+    pub cancel_token: Option<tokio_util::sync::CancellationToken>,
 }
 
 /// Maximum number of messages that can be queued while a thread is processing.
@@ -359,6 +364,7 @@ impl Thread {
             pending_auth: None,
             pending_messages: VecDeque::new(),
             source_channel: source_channel.map(String::from),
+            cancel_token: None,
         }
     }
 
@@ -377,6 +383,7 @@ impl Thread {
             pending_auth: None,
             pending_messages: VecDeque::new(),
             source_channel: source_channel.map(String::from),
+            cancel_token: None,
         }
     }
 
@@ -491,7 +498,13 @@ impl Thread {
     }
 
     /// Interrupt the current turn and discard any queued messages.
+    ///
+    /// Cancels the in-flight LLM cancellation token first so the HTTP connection
+    /// is torn down immediately rather than waiting for the response to complete.
     pub fn interrupt(&mut self) {
+        if let Some(token) = self.cancel_token.take() {
+            token.cancel();
+        }
         if let Some(turn) = self.turns.last_mut() {
             turn.conclude(TurnOutcome::Interrupted);
         }
