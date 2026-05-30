@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{CommunicationModality, OutboundError};
 
+/// Tenant/user lookup key for outbound-owned communication preferences.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct CommunicationPreferenceKey {
     pub tenant_id: TenantId,
@@ -40,6 +41,7 @@ impl CommunicationPreferenceRecord {
     }
 }
 
+/// Store for durable tenant/user communication delivery preferences.
 #[async_trait]
 pub trait CommunicationPreferenceRepository: Send + Sync {
     async fn put_communication_preference(

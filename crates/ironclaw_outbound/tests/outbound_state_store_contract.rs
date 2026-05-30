@@ -4,8 +4,8 @@ use async_trait::async_trait;
 use ironclaw_event_projections::{ProjectionCursor, ProjectionScope};
 use ironclaw_events::{EventCursor, EventStreamKey, ReadScope};
 use ironclaw_filesystem::{
-    BackendCapabilities, CasExpectation, DirEntry, Entry, FileStat, FilesystemError, Filter,
-    InMemoryBackend, IndexSpec, Page, RecordVersion, RootFilesystem, ScopedFilesystem,
+    BackendCapabilities, CasExpectation, ContentType, DirEntry, Entry, FileStat, FilesystemError,
+    Filter, InMemoryBackend, IndexSpec, Page, RecordVersion, RootFilesystem, ScopedFilesystem,
     VersionedEntry,
 };
 use ironclaw_host_api::{
@@ -15,6 +15,8 @@ use ironclaw_host_api::{
 use ironclaw_outbound::*;
 use ironclaw_turns::{ReplyTargetBindingRef, TurnActor, TurnRunId, TurnScope};
 use tokio::sync::Mutex;
+
+const TEST_OUTBOUND_ROOT: &str = "/engine/tenants/test/users/test/outbound";
 
 /// Build a `ScopedFilesystem<F>` with full read/write/list/delete permissions
 /// on the `/outbound` alias, mapped to a distinct tenant-scoped
@@ -37,16 +39,14 @@ fn build_scoped_fs<F: RootFilesystem>(
 fn build_outbound_store_for_backend(
     backend: Arc<InMemoryBackend>,
 ) -> FilesystemOutboundStateStore<InMemoryBackend> {
-    FilesystemOutboundStateStore::new(build_scoped_fs(
-        backend,
-        "/engine/tenants/test/users/test/outbound",
-    ))
+    FilesystemOutboundStateStore::new(build_scoped_fs(backend, TEST_OUTBOUND_ROOT))
 }
 
 #[tokio::test]
 async fn in_memory_defaults_policy_progress_opt_in_and_subscription_scope() {
     let store = InMemoryOutboundStateStore::default();
     communication_preferences_are_tenant_user_scoped(&store).await;
+    communication_preferences_reject_empty_updated_by(&store).await;
     durable_policy_subscription_delivery_flow(&store).await;
     subscription_cursor_rejects_mismatched_scope(&store).await;
     subscription_ids_are_scoped_not_global(&store).await;
@@ -64,8 +64,10 @@ async fn filesystem_store_satisfies_outbound_contract_on_in_memory_backend() {
     // this would be a libSQL- or Postgres-backed RootFilesystem, or an
     // HSM-decorated mount, with no consumer-side code change.
     let backend = std::sync::Arc::new(ironclaw_filesystem::InMemoryBackend::new());
-    let store = build_outbound_store_for_backend(backend);
+    let store = build_outbound_store_for_backend(Arc::clone(&backend));
     communication_preferences_are_tenant_user_scoped(&store).await;
+    communication_preferences_reject_empty_updated_by(&store).await;
+    filesystem_store_rejects_mismatched_communication_preference_identity(&backend, &store).await;
     durable_policy_subscription_delivery_flow(&store).await;
     subscription_cursor_rejects_mismatched_scope(&store).await;
     subscription_ids_are_scoped_not_global(&store).await;
@@ -100,6 +102,7 @@ where
         updated_at: now(),
         updated_by: updated_by.clone(),
     };
+    assert_eq!(record.key(), key);
 
     store
         .put_communication_preference(record.clone())
@@ -162,6 +165,62 @@ where
         thread_policy.targets.is_empty(),
         "user communication preferences must not mutate thread notification policy"
     );
+}
+
+async fn communication_preferences_reject_empty_updated_by<S>(store: &S)
+where
+    S: CommunicationPreferenceRepository + OutboundStateStore,
+{
+    let result = store
+        .put_communication_preference(CommunicationPreferenceRecord {
+            tenant_id: TenantId::new("tenant-outbound-validation").unwrap(),
+            user_id: UserId::new("user-outbound-validation").unwrap(),
+            final_reply_target: Some(reply_ref("reply-pref-validation")),
+            progress_target: None,
+            approval_prompt_target: None,
+            auth_prompt_target: None,
+            default_modality: Some(CommunicationModality::Text),
+            updated_at: now(),
+            updated_by: UserId::from_trusted(String::new()),
+        })
+        .await;
+    assert!(matches!(result, Err(OutboundError::InvalidRequest { .. })));
+}
+
+async fn filesystem_store_rejects_mismatched_communication_preference_identity(
+    backend: &Arc<InMemoryBackend>,
+    store: &FilesystemOutboundStateStore<InMemoryBackend>,
+) {
+    let tenant_id = TenantId::new("tenant-outbound-corrupt").unwrap();
+    let user_id = UserId::new("user-outbound-corrupt").unwrap();
+    let key = CommunicationPreferenceKey::new(tenant_id.clone(), user_id.clone());
+    let mut record = CommunicationPreferenceRecord {
+        tenant_id: tenant_id.clone(),
+        user_id: user_id.clone(),
+        final_reply_target: Some(reply_ref("reply-pref-corrupt")),
+        progress_target: None,
+        approval_prompt_target: None,
+        auth_prompt_target: None,
+        default_modality: Some(CommunicationModality::Text),
+        updated_at: now(),
+        updated_by: UserId::new("tenant-admin-outbound-corrupt").unwrap(),
+    };
+    store
+        .put_communication_preference(record.clone())
+        .await
+        .unwrap();
+
+    record.user_id = UserId::new("user-outbound-corrupt-other").unwrap();
+    let path = communication_preference_virtual_path(&tenant_id, &user_id);
+    let entry =
+        Entry::bytes(serde_json::to_vec(&record).unwrap()).with_content_type(ContentType::json());
+    backend
+        .put(&path, entry, CasExpectation::Any)
+        .await
+        .unwrap();
+
+    let result = store.load_communication_preference(key).await;
+    assert!(matches!(result, Err(OutboundError::Backend)));
 }
 
 async fn durable_policy_subscription_delivery_flow(store: &impl OutboundStateStore) {
@@ -762,6 +821,13 @@ fn reply_ref(value: &str) -> ReplyTargetBindingRef {
 
 fn now() -> ironclaw_host_api::Timestamp {
     chrono::Utc::now()
+}
+
+fn communication_preference_virtual_path(tenant_id: &TenantId, user_id: &UserId) -> VirtualPath {
+    VirtualPath::new(format!(
+        "{TEST_OUTBOUND_ROOT}/communication-preferences/{tenant_id}/{user_id}.json"
+    ))
+    .unwrap()
 }
 
 // ── F4 — CAS retry / drain / backwards-race regression tests ─────────────
