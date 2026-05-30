@@ -50,6 +50,10 @@ projection update
   `ironclaw_product_adapters::auth` (which take a crate-private
   `HostAuthSeal`) can construct one. WASM components and downstream adapters
   cannot fabricate verification.
+- Product adapters cannot construct host-trusted trigger ingress markers or
+  witnesses. Trigger and scheduler fires use the host-trusted ingress seam in
+  `ironclaw_conversations`, not a public adapter payload or a reserved string
+  in adapter-controlled DTOs.
 - `ProtocolHttpEgress` is the only network capability. Adapters declare
   egress hosts up front (`DeclaredEgressHost`) and address credentials via
   opaque handles (`EgressCredentialHandle`). The host resolves credential
@@ -82,6 +86,11 @@ projection update
 - `received_at: DateTime<Utc>`
 - `payload: ProductInboundPayload` — UserMessage / Command /
   ApprovalResolution / AuthResolution / SubscriptionRequest / NoOp.
+
+`ProductInboundEnvelope` does not model host-internal trigger or scheduler
+ingress. Synthetic trusted ingress is handled directly by
+`InboundTurnService::handle_inbound_turn_with_trusted_scope(...)` on the host
+side and is not constructible by product adapters.
 
 `ProductInboundAck` outcomes:
 

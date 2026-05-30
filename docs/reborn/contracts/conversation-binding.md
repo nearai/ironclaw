@@ -9,6 +9,7 @@
 ## 1. Purpose
 
 Conversation binding is the adapter-safe ingress boundary between external product surfaces and `ironclaw_turns::TurnCoordinator`.
+It also defines the host-trusted ingress seam used by scheduler and trigger fires.
 
 Adapters pass structured external actor/conversation refs to this boundary. The boundary returns canonical Reborn refs:
 
@@ -30,7 +31,7 @@ Reply-target binding is separate from external ingress identity. This contract b
 | --- | --- | --- |
 | `ConversationBindingService` | Pairing/authenticated actor resolution, external conversation binding lookup/creation keyed by stable conversation identity, explicit conversation-to-thread links, source/reply target binding refs, reply-target validation with adapter installation and external routing data | Raw transcript content, run lifecycle, product payload parsing |
 | `SessionThreadService` | Accepted inbound message refs, external event idempotency, message-to-thread/source/reply refs | Durable transcript schema details owned by #3204, turn/run locks |
-| `InboundTurnService` | Facade composition: resolve binding, accept message, submit canonical turn | Adapter protocol parsing, assistant egress fanout |
+| `InboundTurnService` | Facade composition: resolve binding, accept message, submit canonical turn; untrusted and host-trusted ingress entry points | Adapter protocol parsing, assistant egress fanout |
 | `TurnCoordinator` | Turn/run admission and lifecycle after accepted message refs exist | External actor/conversation parsing, raw message storage |
 
 ---
@@ -71,6 +72,8 @@ This is not the final durable transcript store. The conversation contract stores
 18. Public serialized external refs must enforce the same invariants as constructors. Deserialization cannot bypass empty/control-character/oversized ref validation.
 19. Public external route components may be up to 512 bytes for adapter compatibility. Durable PostgreSQL/libSQL implementations must not rely on a raw wide composite btree key for `(tenant, adapter_kind, installation, space, conversation, thread)` uniqueness; use typed rows plus a collision-resistant digest/indirection key derived from length-prefixed components.
 20. Message content crosses this boundary as a content ref. Raw user text is owned by the transcript/content storage boundary, not turn state.
+21. Host-trusted ingress is a host-only boundary for schedulers and trigger fires. `InboundTurnService::handle_inbound_turn_with_trusted_scope(request, trusted_agent_id, trusted_project_id)` must perform the same replay lookup as `handle_inbound_turn()` first, before any new binding creation or trusted-scope application, so duplicate scheduled-slot retries hit the existing inbound idempotency record instead of minting a second turn.
+22. Host-trusted ingress requests are minted only by host-owned services from durable host state. Product adapters cannot construct the trusted ingress marker or witness. Trusted trigger ingress details live in [`triggers.md`](triggers.md); this contract owns only the generic replay-first trusted-scope facade. No delivery target data belongs in `ExternalConversationRef`, `TurnActor`, `adapter_kind`, or any trusted ingress identity.
 
 ---
 
@@ -87,3 +90,7 @@ Run:
 ```bash
 cargo test -p ironclaw_conversations --test inbound_contract
 ```
+
+Trusted ingress implementations must add a caller-level regression proving that
+a duplicate trusted trigger fire performs replay before binding creation and
+reuses the original accepted message and turn submission.
