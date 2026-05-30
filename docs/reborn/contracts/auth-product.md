@@ -92,6 +92,11 @@ Only non-terminal auth-flow states are listed as pending interactions. Terminal
 states such as `failed`, `completed`, `expired`, and `canceled` must not be
 rendered as actionable auth gates.
 
+Auth prompt notification is separate from auth-flow creation, callback
+completion, credential exchange, and token storage. The auth flow contracts own
+the state machine and secret handling; outbound delivery only decides where an
+already-created auth prompt may be attempted.
+
 Legacy web/CLI/channel auth UX may remain behavior-compatible during
 migration, but Reborn paths should enter through `ProductWorkflow` or the
 WebUI-facing `RebornServicesApi` facade. They must not call V1 pending maps,
