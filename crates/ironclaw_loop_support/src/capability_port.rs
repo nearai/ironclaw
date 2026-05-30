@@ -3279,6 +3279,52 @@ mod tests {
         assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
     }
 
+    /// Regression: `capability_info` previously used `as_runtime()` for
+    /// surface lookup, which excluded synthetic capabilities. A model calling
+    /// `capability_info { name: "capability_info" }` (to introspect the tool
+    /// itself before using it) got `target is not on the visible surface` →
+    /// `InvalidInvocation` → terminal run failure instead of a helpful schema
+    /// response.
+    #[tokio::test]
+    async fn capability_info_can_describe_itself() {
+        let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
+        let provider_id = ExtensionId::new("demo").expect("valid provider id");
+        let context = execution_context("thread-capability-info-self-lookup");
+        let run_context = loop_run_context(&context).await;
+        let runtime = Arc::new(RecordingHostRuntime::new(vec![visible_capability(
+            capability_id,
+            provider_id,
+        )]));
+        let port = HostRuntimeLoopCapabilityPortFactory::new(
+            runtime,
+            visible_request(context),
+            dummy_input_resolver(),
+            dummy_result_writer(),
+            dummy_milestone_sink(),
+        )
+        .port_for_run_context(run_context);
+        port.visible_capabilities(VisibleCapabilityRequest {})
+            .await
+            .expect("visible capabilities load");
+
+        // Query by provider tool name
+        let mut call = provider_tool_call();
+        call.name = capability_info::TOOL_NAME.to_string();
+        call.arguments = serde_json::json!({ "name": capability_info::TOOL_NAME });
+        port.register_provider_tool_call(call)
+            .await
+            .expect("capability_info should be able to describe itself by tool name");
+
+        // Query by canonical capability id
+        let mut call2 = provider_tool_call();
+        call2.id = "call_2".to_string();
+        call2.name = capability_info::TOOL_NAME.to_string();
+        call2.arguments = serde_json::json!({ "name": capability_info::CAPABILITY_ID });
+        port.register_provider_tool_call(call2)
+            .await
+            .expect("capability_info should be able to describe itself by capability id");
+    }
+
     #[tokio::test]
     async fn capability_info_returns_names_and_summary_details() {
         let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");

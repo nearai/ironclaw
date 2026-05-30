@@ -22,6 +22,8 @@ pub(super) struct RuntimeSurfaceCapabilitySnapshot {
 #[derive(Clone)]
 pub(super) struct SyntheticSurfaceCapabilitySnapshot {
     provider_tool_name: String,
+    safe_description: String,
+    parameters_schema: serde_json::Value,
     kind: SyntheticCapabilityKind,
 }
 
@@ -65,6 +67,8 @@ impl SurfaceSnapshot {
             capability_id,
             SurfaceCapabilitySnapshot::Synthetic(SyntheticSurfaceCapabilitySnapshot {
                 provider_tool_name: capability_info::TOOL_NAME.to_string(),
+                safe_description: capability_info::tool_definition()?.description,
+                parameters_schema: capability_info::schema(),
                 kind: SyntheticCapabilityKind::CapabilityInfo,
             }),
         );
@@ -72,22 +76,13 @@ impl SurfaceSnapshot {
     }
 
     pub(super) fn capability_info(&self, requested: &str) -> Option<CapabilityInfoEntry<'_>> {
-        if let Some(capability_id) = self.provider_names.get(requested)
-            && let Some(capability) = self
-                .capabilities
-                .get(capability_id)
-                .and_then(SurfaceCapabilitySnapshot::as_runtime)
-        {
+        if let Some(capability_id) = self.provider_names.get(requested) {
+            let capability = self.capabilities.get(capability_id)?;
             return Some(capability.capability_info(capability_id));
         }
         let requested_id = CapabilityId::new(requested).ok()?;
         self.capabilities
             .get_key_value(&requested_id)
-            .and_then(|(capability_id, capability)| {
-                capability
-                    .as_runtime()
-                    .map(|capability| (capability_id, capability))
-            })
             .map(|(capability_id, capability)| capability.capability_info(capability_id))
     }
 
@@ -138,11 +133,26 @@ impl RuntimeSurfaceCapabilitySnapshot {
     }
 }
 
+impl SyntheticSurfaceCapabilitySnapshot {
+    fn capability_info<'a>(&'a self, capability_id: &'a CapabilityId) -> CapabilityInfoEntry<'a> {
+        CapabilityInfoEntry {
+            capability_id,
+            provider_tool_name: &self.provider_tool_name,
+            safe_description: &self.safe_description,
+            parameters_schema: &self.parameters_schema,
+            // Synthetic capabilities are built into the loop itself; they have
+            // no external runtime and carry no side-effect declarations.
+            runtime: RuntimeKind::System,
+            effects: &[],
+        }
+    }
+}
+
 impl SurfaceCapabilitySnapshot {
-    fn as_runtime(&self) -> Option<&RuntimeSurfaceCapabilitySnapshot> {
+    fn capability_info<'a>(&'a self, capability_id: &'a CapabilityId) -> CapabilityInfoEntry<'a> {
         match self {
-            Self::Runtime(capability) => Some(capability.as_ref()),
-            Self::Synthetic(_) => None,
+            Self::Runtime(c) => c.capability_info(capability_id),
+            Self::Synthetic(c) => c.capability_info(capability_id),
         }
     }
 
