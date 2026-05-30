@@ -21,12 +21,12 @@ use ironclaw_first_party_extension_ports::SkillActivationObserver;
 use ironclaw_host_api::UserId;
 use ironclaw_outbound::InMemoryOutboundStateStore;
 use ironclaw_product_adapters::{
-    AdapterInstallationId, CapabilityActivityStatusView, CapabilityActivityView,
-    CapabilityActivityViewInput, ExternalActorRef, ExternalConversationRef, ProductAdapterError,
-    ProductAdapterId, ProductOutboundEnvelope, ProductOutboundPayload, ProductOutboundTarget,
-    ProductProjectionItem, ProductProjectionState, ProductWorkflowRejectionKind,
-    ProjectionCursor as ProductProjectionCursor, ProjectionStream, ProjectionSubscriptionRequest,
-    RedactedString,
+    AdapterInstallationId, AuthPromptChallengeKind, CapabilityActivityStatusView,
+    CapabilityActivityView, CapabilityActivityViewInput, ExternalActorRef, ExternalConversationRef,
+    ProductAdapterError, ProductAdapterId, ProductOutboundEnvelope, ProductOutboundPayload,
+    ProductOutboundTarget, ProductProjectionItem, ProductProjectionState,
+    ProductWorkflowRejectionKind, ProjectionCursor as ProductProjectionCursor, ProjectionStream,
+    ProjectionSubscriptionRequest, RedactedString,
 };
 use ironclaw_turns::{
     ReplyTargetBindingRef, TurnActor, TurnCoordinator, TurnEventProjectionCursor,
@@ -47,6 +47,34 @@ use runtime_replay::{
 };
 use turn_events::{TurnEventBridge, TurnEventPayload};
 
+// ── Auth challenge projection ────────────────────────────────────────────────
+
+/// Redacted view of a pending auth challenge used exclusively for WebUI
+/// projection enrichment. Contains only data safe to surface over the wire.
+/// No raw secrets, PKCE verifiers, state hashes, or tokens.
+#[derive(Debug, Clone)]
+pub struct AuthChallengeView {
+    pub kind: AuthPromptChallengeKind,
+    pub provider: String,
+    pub account_label: Option<String>,
+    pub authorization_url: Option<String>,
+    pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// Narrow read-only interface used by the turn-event projection layer to
+/// enrich `AuthPromptView` with challenge metadata. Implemented by
+/// `RebornProductAuthServices` when a `flow_record_source` is wired in.
+///
+/// Only one method: look up by gate_ref string. Gate refs are UUIDs so
+/// collision risk across scopes is negligible.
+#[async_trait]
+pub trait AuthChallengeProvider: Send + Sync {
+    /// Return the projection-safe challenge view for the given gate ref, or
+    /// `None` if the auth flow cannot be found (already consumed, not yet
+    /// created, or record source unavailable).
+    async fn challenge_for_gate(&self, gate_ref: &str) -> Option<AuthChallengeView>;
+}
+
 pub(crate) use display_preview::{CapabilityDisplayPreviewResult, CapabilityDisplayPreviewStore};
 #[cfg(test)]
 pub(crate) use display_preview::{SANITIZE_JSON_MAX_DEPTH, sanitize_json_value, sanitize_text};
@@ -63,6 +91,7 @@ pub(crate) struct RebornProjectionServices {
     turn_events: TurnEventBridge,
     display_previews: Arc<dyn CapabilityDisplayPreviewSource>,
     webui_reply_target_binding_ref: ReplyTargetBindingRef,
+    auth_challenges: Option<Arc<dyn AuthChallengeProvider>>,
 }
 
 impl RebornProjectionServices {
@@ -72,6 +101,18 @@ impl RebornProjectionServices {
         turn_coordinator: Arc<dyn TurnCoordinator>,
     ) -> Self {
         self.turn_events = TurnEventBridge::enabled(turn_event_source, turn_coordinator);
+        self
+    }
+
+    /// Wire in an auth challenge provider so `auth_required` SSE events carry
+    /// `challenge_kind`, `provider`, `account_label`, and `authorization_url`.
+    /// Optional: when absent the `AuthPromptView` omits those fields (backward
+    /// compatible — legacy consumers deserialise them as `None`).
+    pub(crate) fn with_auth_challenges(
+        mut self,
+        provider: Arc<dyn AuthChallengeProvider>,
+    ) -> Self {
+        self.auth_challenges = Some(provider);
         self
     }
 
@@ -87,6 +128,7 @@ impl RebornProjectionServices {
         Arc::new(WebuiRuntimeProjectionStream {
             manager: Arc::clone(&self.event_stream_manager),
             turn_events: self.turn_events.clone(),
+            auth_challenges: self.auth_challenges.clone(),
             display_previews: Arc::clone(&self.display_previews),
             reply_target_binding_ref: self.webui_reply_target_binding_ref.clone(),
         })
@@ -139,6 +181,7 @@ pub(crate) fn build_reborn_projection_services(
         turn_events: TurnEventBridge::default(),
         display_previews: Arc::new(NoopCapabilityDisplayPreviewSource),
         webui_reply_target_binding_ref,
+        auth_challenges: None,
     }
 }
 
@@ -151,6 +194,7 @@ pub(crate) fn build_reborn_projection_services(
 struct WebuiRuntimeProjectionStream {
     manager: Arc<EventStreamManager>,
     turn_events: TurnEventBridge,
+    auth_challenges: Option<Arc<dyn AuthChallengeProvider>>,
     display_previews: Arc<dyn CapabilityDisplayPreviewSource>,
     reply_target_binding_ref: ReplyTargetBindingRef,
 }
@@ -214,7 +258,12 @@ impl ProjectionStream for WebuiRuntimeProjectionStream {
         let turn_after = batch.cursor().turn.clone();
         let turn_drain = self
             .turn_events
-            .drain(&request.actor.user_id, &request.scope, turn_after)
+            .drain(
+                &request.actor.user_id,
+                &request.scope,
+                turn_after,
+                self.auth_challenges.as_deref(),
+            )
             .await?;
         for TurnEventPayload {
             cursor: turn_cursor,

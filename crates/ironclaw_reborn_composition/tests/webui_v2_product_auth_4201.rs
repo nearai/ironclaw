@@ -696,3 +696,145 @@ async fn accounts_select_rejects_malformed_account_id() {
     let body = read_body_string(response).await;
     assert!(body.contains("\"code\":\"invalid_request\""));
 }
+
+
+// ── Wire-shape enrichment tests (issue #4112) ────────────────────────────────
+
+#[test]
+fn auth_prompt_view_serialises_optional_fields_when_present() {
+    use ironclaw_product_adapters::{AuthPromptChallengeKind, AuthPromptView};
+    use ironclaw_turns::TurnRunId;
+
+    let view = AuthPromptView {
+        turn_run_id: TurnRunId::new(),
+        auth_request_ref: "gate-ref-001".to_string(),
+        headline: "Authentication required".to_string(),
+        body: "Authenticate to continue.".to_string(),
+        challenge_kind: Some(AuthPromptChallengeKind::OAuthUrl),
+        provider: Some("google".to_string()),
+        account_label: Some("work@example.com".to_string()),
+        authorization_url: Some("https://accounts.google.com/o/oauth2/auth?scope=calendar".to_string()),
+        expires_at: Some(chrono::DateTime::parse_from_rfc3339("2030-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc)),
+    };
+    let json = serde_json::to_value(&view).expect("serialise");
+    assert_eq!(json["challenge_kind"], "oauth_url");
+    assert_eq!(json["provider"], "google");
+    assert_eq!(json["account_label"], "work@example.com");
+    assert!(json["authorization_url"].as_str().unwrap().starts_with("https://"));
+    assert!(json["expires_at"].is_string());
+}
+
+#[test]
+fn auth_prompt_view_omits_optional_fields_when_absent() {
+    use ironclaw_product_adapters::AuthPromptView;
+    use ironclaw_turns::TurnRunId;
+
+    let view = AuthPromptView {
+        turn_run_id: TurnRunId::new(),
+        auth_request_ref: "gate-ref-002".to_string(),
+        headline: "Authentication required".to_string(),
+        body: "Authenticate to continue.".to_string(),
+        challenge_kind: None,
+        provider: None,
+        account_label: None,
+        authorization_url: None,
+        expires_at: None,
+    };
+    let json = serde_json::to_value(&view).expect("serialise");
+    assert!(json.get("challenge_kind").is_none(), "challenge_kind should be absent when None");
+    assert!(json.get("provider").is_none(), "provider should be absent when None");
+    assert!(json.get("account_label").is_none(), "account_label should be absent when None");
+    assert!(json.get("authorization_url").is_none(), "authorization_url should be absent when None");
+    assert!(json.get("expires_at").is_none(), "expires_at should be absent when None");
+}
+
+#[test]
+fn auth_prompt_view_deserialises_without_optional_fields() {
+    // Simulate a legacy serialised row (no new fields) — must round-trip as None.
+    use ironclaw_product_adapters::AuthPromptView;
+
+    let legacy_json = r#"{
+        "turn_run_id": "11111111-1111-1111-1111-111111111111",
+        "auth_request_ref": "gate-legacy",
+        "headline": "Auth required",
+        "body": "Authenticate."
+    }"#;
+    let view: AuthPromptView = serde_json::from_str(legacy_json).expect("deserialise legacy");
+    assert!(view.challenge_kind.is_none());
+    assert!(view.provider.is_none());
+    assert!(view.account_label.is_none());
+    assert!(view.authorization_url.is_none());
+    assert!(view.expires_at.is_none());
+}
+
+#[tokio::test]
+async fn challenge_for_gate_returns_oauth_url_view_for_seeded_flow() {
+    use chrono::Utc;
+    use ironclaw_auth::{
+        AuthChallenge, AuthContinuationRef, AuthFlowKind, AuthFlowManager, AuthGateRef,
+        AuthProductScope, AuthSurface, InMemoryAuthProductServices, NewAuthFlow,
+        OAuthAuthorizationUrl, TurnRunRef,
+    };
+    use ironclaw_auth::AuthProviderId;
+    use ironclaw_product_adapters::AuthPromptChallengeKind;
+    use std::sync::Arc;
+
+    let shared = Arc::new(InMemoryAuthProductServices::new());
+    let product_auth = Arc::new(
+        RebornProductAuthServices::from_shared(
+            shared.clone(),
+            Arc::new(NoopAuthDispatcher::default()),
+        )
+        .with_flow_record_source(shared.clone()),
+    );
+
+    let gate_ref_str = "aaaabbbb-cccc-dddd-eeee-111111111111";
+    let auth_url = OAuthAuthorizationUrl::new(
+        "https://accounts.google.com/o/oauth2/auth?scope=calendar".to_string(),
+    )
+    .unwrap();
+    let expires_at = Utc::now() + chrono::Duration::hours(1);
+
+    shared
+        .create_flow(NewAuthFlow {
+            scope: caller_scope_with_invocation(InvocationId::new()),
+            kind: AuthFlowKind::IntegrationCredential,
+            provider: AuthProviderId::new("google".to_string()).unwrap(),
+            challenge: AuthChallenge::OAuthUrl {
+                authorization_url: auth_url,
+                expires_at,
+            },
+            continuation: AuthContinuationRef::TurnGateResume {
+                turn_run_ref: TurnRunRef::new("22222222-2222-2222-2222-222222222222").unwrap(),
+                gate_ref: AuthGateRef::new(gate_ref_str.to_string()).unwrap(),
+            },
+            update_binding: None,
+            opaque_state_hash: None,
+            pkce_verifier_hash: None,
+            expires_at,
+        })
+        .await
+        .expect("create flow");
+
+    let provider = product_auth.as_auth_challenge_provider().expect("provider");
+    let view = provider.challenge_for_gate(gate_ref_str).await.expect("found");
+    assert!(matches!(view.kind, AuthPromptChallengeKind::OAuthUrl));
+    assert_eq!(view.provider, "google");
+    assert!(view.authorization_url.as_deref().unwrap().contains("accounts.google.com"));
+    assert!(view.account_label.is_none());
+}
+
+#[test]
+fn auth_challenge_provider_absent_when_no_flow_record_source() {
+    let shared = Arc::new(InMemoryAuthProductServices::new());
+    let product_auth = Arc::new(RebornProductAuthServices::from_shared(
+        shared,
+        Arc::new(NoopAuthDispatcher::default()),
+    ));
+    assert!(
+        product_auth.as_auth_challenge_provider().is_none(),
+        "no flow_record_source → no AuthChallengeProvider"
+    );
+}

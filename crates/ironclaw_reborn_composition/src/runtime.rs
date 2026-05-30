@@ -1117,6 +1117,18 @@ pub async fn build_reborn_runtime(
     let projection_services = projection_services
         .with_turn_events(turn_event_source, Arc::clone(&planned_turn_coordinator))
         .with_display_previews(Arc::clone(&local_dev_capabilities.display_previews));
+    // Wire auth-challenge enrichment when the product-auth bundle exposes a
+    // flow record source (local-dev / test mode). Production deployments without
+    // a wired flow_record_source fall back to the plain 4-field AuthPromptView.
+    let projection_services = if let Some(provider) = services
+        .product_auth
+        .as_ref()
+        .and_then(|pa| pa.as_auth_challenge_provider())
+    {
+        projection_services.with_auth_challenges(provider)
+    } else {
+        projection_services
+    };
     services.turn_coordinator = Some(Arc::clone(&planned_turn_coordinator));
 
     let worker_cancel = CancellationToken::new();

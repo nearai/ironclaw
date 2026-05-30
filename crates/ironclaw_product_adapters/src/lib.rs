@@ -50,7 +50,7 @@ pub use inbound::{
     TrustedInboundContext, UserMessagePayload, parse_product_slash_command,
 };
 pub use outbound::{
-    AuthPromptView, CAPABILITY_DISPLAY_KIND_MAX_BYTES, CAPABILITY_DISPLAY_PREVIEW_MAX_BYTES,
+    AuthPromptChallengeKind, AuthPromptView, CAPABILITY_DISPLAY_KIND_MAX_BYTES, CAPABILITY_DISPLAY_PREVIEW_MAX_BYTES,
     CAPABILITY_DISPLAY_RESULT_REF_MAX_BYTES, CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES,
     CapabilityActivityStatusView, CapabilityActivityView, CapabilityActivityViewInput,
     CapabilityDisplayPreviewView, CapabilityDisplayPreviewViewInput, FinalReplyView,

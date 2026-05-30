@@ -17,9 +17,12 @@ use ironclaw_auth::{
     ProviderBackedCredentialAccountService, ProviderCallbackOutcome, SecretCleanupReport,
     SecretCleanupRequest, SecretCleanupService, SecretSubmitRequest, Timestamp,
 };
+use ironclaw_product_adapters::AuthPromptChallengeKind;
 use ironclaw_product_workflow::ProductAuthTurnGateResumeDispatcher;
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
+
+use crate::projection::{AuthChallengeProvider, AuthChallengeView};
 
 /// Dispatches a typed continuation event once an OAuth callback flow has
 /// completed.
@@ -538,10 +541,90 @@ impl RebornProductAuthServices {
 
     /// Enable WebUI/local-dev auth interaction read models from a scoped
     /// auth-flow projection source.
-    pub(crate) fn with_flow_record_source(mut self, source: Arc<dyn AuthFlowRecordSource>) -> Self {
+    /// Enable WebUI/local-dev auth-flow projection source. Public so
+    /// integration-test harnesses outside the crate can wire the fake.
+    pub fn with_flow_record_source(mut self, source: Arc<dyn AuthFlowRecordSource>) -> Self {
         self.flow_record_source = Some(source);
         self
     }
+
+    /// Expose this service as an `Arc<dyn AuthChallengeProvider>` so the
+    /// projection layer can enrich `AuthPromptView` SSE frames with
+    /// `challenge_kind`, `provider`, `account_label`, and `authorization_url`.
+    ///
+    /// Returns `None` when no `flow_record_source` is configured (meaning this
+    /// bundle was built without the in-memory projection source, e.g. in
+    /// production deployments that use durable DB backends not yet wired to
+    /// `AuthFlowRecordSource`). The WebUI prompt falls back to the plain
+    /// 4-field view in that case, which is backward-compatible.
+    pub fn as_auth_challenge_provider(
+        self: &Arc<Self>,
+    ) -> Option<Arc<dyn AuthChallengeProvider>> {
+        if self.flow_record_source.is_some() {
+            Some(Arc::clone(self) as Arc<dyn AuthChallengeProvider>)
+        } else {
+            None
+        }
+    }
+}
+
+#[async_trait]
+impl AuthChallengeProvider for RebornProductAuthServices {
+    async fn challenge_for_gate(&self, gate_ref: &str) -> Option<AuthChallengeView> {
+        let source = self.flow_record_source.as_ref()?;
+        // Search all flow records for one whose TurnGateResume continuation
+        // matches this gate_ref. Gate refs are UUIDs, so the scan is O(n)
+        // over a typically small in-memory set; no index needed.
+        let flow = source
+            .flow_records_snapshot()
+            .into_iter()
+            .find(|flow| matches!(
+                &flow.continuation,
+                ironclaw_auth::AuthContinuationRef::TurnGateResume { gate_ref: g, .. }
+                    if g.as_str() == gate_ref
+            ))?;
+        let challenge = flow.challenge.as_ref()?;
+        Some(auth_challenge_to_view(challenge, &flow))
+    }
+}
+
+fn auth_challenge_to_view(
+    challenge: &ironclaw_auth::AuthChallenge,
+    flow: &ironclaw_auth::AuthFlowRecord,
+) -> AuthChallengeView {
+    match challenge {
+        ironclaw_auth::AuthChallenge::OAuthUrl {
+            authorization_url,
+            expires_at,
+        } => AuthChallengeView {
+            kind: AuthPromptChallengeKind::OAuthUrl,
+            provider: flow.provider.as_str().to_string(),
+            account_label: None,
+            authorization_url: Some(authorization_url.as_str().to_string()),
+            expires_at: Some(*expires_at),
+        },
+        ironclaw_auth::AuthChallenge::ManualTokenRequired {
+            label, expires_at, ..
+        } => AuthChallengeView {
+            kind: AuthPromptChallengeKind::ManualToken,
+            provider: flow.provider.as_str().to_string(),
+            account_label: Some(label.as_str().to_string()),
+            authorization_url: None,
+            expires_at: Some(*expires_at),
+        },
+        ironclaw_auth::AuthChallenge::AccountSelectionRequired { .. }
+        | ironclaw_auth::AuthChallenge::ReauthorizeRequired { .. }
+        | ironclaw_auth::AuthChallenge::SetupRequired { .. } => AuthChallengeView {
+            kind: AuthPromptChallengeKind::Other,
+            provider: flow.provider.as_str().to_string(),
+            account_label: None,
+            authorization_url: None,
+            expires_at: None,
+        },
+    }
+}
+
+impl RebornProductAuthServices {
 
     /// Refresh a credential account through the injected product-auth port.
     ///

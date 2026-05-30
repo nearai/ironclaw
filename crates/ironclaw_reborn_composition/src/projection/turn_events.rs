@@ -2,14 +2,17 @@ use std::sync::Arc;
 
 use futures::{StreamExt, stream};
 use ironclaw_product_adapters::{
-    AuthPromptView, GatePromptView, ProductAdapterError, ProductOutboundPayload,
-    ProductProjectionItem, ProductProjectionState, ProductWorkflowRejectionKind, RedactedString,
+    AuthPromptView, GatePromptView, ProductAdapterError,
+    ProductOutboundPayload, ProductProjectionItem, ProductProjectionState,
+    ProductWorkflowRejectionKind, RedactedString,
 };
 use ironclaw_turns::{
     GetRunStateRequest, TurnCoordinator, TurnError, TurnEventKind, TurnEventProjectionCursor,
     TurnEventProjectionError, TurnEventProjectionRequest, TurnEventProjectionService,
     TurnEventProjectionSource, TurnLifecycleEvent, TurnScope, TurnStatus,
 };
+
+use crate::projection::AuthChallengeProvider;
 
 pub(super) const WEBUI_TURN_EVENT_PAGE_LIMIT: usize = 256;
 
@@ -49,6 +52,7 @@ impl TurnEventBridge {
         caller_user_id: &ironclaw_host_api::UserId,
         scope: &TurnScope,
         after: Option<TurnEventProjectionCursor>,
+        auth_challenges: Option<&dyn AuthChallengeProvider>,
     ) -> Result<TurnEventDrain, ProductAdapterError> {
         let Self::Enabled {
             service,
@@ -85,8 +89,14 @@ impl TurnEventBridge {
                 Err(error) => return Err(map_turn_event_projection_error(error)),
             };
             next_cursor = Some(page.next_cursor.clone());
-            payloads
-                .extend(turn_event_payloads_for_page(coordinator.as_ref(), page.entries).await?);
+            payloads.extend(
+                turn_event_payloads_for_page(
+                    coordinator.as_ref(),
+                    auth_challenges,
+                    page.entries,
+                )
+                .await?,
+            );
             if !page.truncated || after_cursor.as_ref() == Some(&page.next_cursor) {
                 break;
             }
@@ -101,15 +111,25 @@ impl TurnEventBridge {
 
 async fn turn_event_payloads_for_page(
     coordinator: &dyn TurnCoordinator,
+    auth_challenges: Option<&dyn AuthChallengeProvider>,
     events: Vec<TurnLifecycleEvent>,
 ) -> Result<Vec<TurnEventPayload>, ProductAdapterError> {
-    stream::iter(events)
-        .map(|event| async move {
+    // `auth_challenges` is not `Sync`-constrained to `Arc`, so we cannot move
+    // it into the async closure below — collect into futures sequentially then
+    // drive them with `buffered`. The provider impl is in-memory; latency is
+    // negligible.
+    let futures: Vec<_> = events
+        .into_iter()
+        .map(|event| {
             let cursor = TurnEventProjectionCursor::for_scope(event.scope.clone(), event.cursor);
-            turn_event_payload(coordinator, &event)
-                .await
-                .map(|payload| payload.map(|payload| TurnEventPayload { cursor, payload }))
+            async move {
+                turn_event_payload(coordinator, auth_challenges, &event)
+                    .await
+                    .map(|payload| payload.map(|payload| TurnEventPayload { cursor, payload }))
+            }
         })
+        .collect();
+    stream::iter(futures)
         .buffered(16)
         .collect::<Vec<_>>()
         .await
@@ -120,10 +140,12 @@ async fn turn_event_payloads_for_page(
 
 async fn turn_event_payload(
     coordinator: &dyn TurnCoordinator,
+    auth_challenges: Option<&dyn AuthChallengeProvider>,
     event: &TurnLifecycleEvent,
 ) -> Result<Option<ProductOutboundPayload>, ProductAdapterError> {
     if matches!(event.kind, TurnEventKind::Blocked)
-        && let Some(prompt) = blocked_prompt_payload(coordinator, event).await?
+        && let Some(prompt) =
+            blocked_prompt_payload(coordinator, auth_challenges, event).await?
     {
         return Ok(Some(prompt));
     }
@@ -137,6 +159,7 @@ async fn turn_event_payload(
 
 async fn blocked_prompt_payload(
     coordinator: &dyn TurnCoordinator,
+    auth_challenges: Option<&dyn AuthChallengeProvider>,
     event: &TurnLifecycleEvent,
 ) -> Result<Option<ProductOutboundPayload>, ProductAdapterError> {
     let state = match coordinator
@@ -165,20 +188,37 @@ async fn blocked_prompt_payload(
     let Some(gate_ref) = state.gate_ref else {
         return Ok(None);
     };
-    let gate_ref = gate_ref.as_str().to_string();
+    let gate_ref_str = gate_ref.as_str().to_string();
     match event.status {
-        TurnStatus::BlockedAuth => Ok(Some(ProductOutboundPayload::AuthPrompt(AuthPromptView {
-            turn_run_id: event.run_id,
-            auth_request_ref: gate_ref,
-            headline: "Authentication required".to_string(),
-            body: event
-                .sanitized_reason
-                .clone()
-                .unwrap_or_else(|| "Authenticate to continue this run.".to_string()),
-        }))),
-        TurnStatus::BlockedApproval => Ok(Some(gate_prompt(event, gate_ref, "Approval required"))),
+        TurnStatus::BlockedAuth => {
+            // Enrich the prompt with auth-flow metadata when the provider is
+            // available. Missing = backward-compatible (fields omitted as None).
+            let challenge = match auth_challenges {
+                Some(provider) => provider.challenge_for_gate(&gate_ref_str).await,
+                None => None,
+            };
+            Ok(Some(ProductOutboundPayload::AuthPrompt(AuthPromptView {
+                turn_run_id: event.run_id,
+                auth_request_ref: gate_ref_str,
+                headline: "Authentication required".to_string(),
+                body: event
+                    .sanitized_reason
+                    .clone()
+                    .unwrap_or_else(|| "Authenticate to continue this run.".to_string()),
+                challenge_kind: challenge.as_ref().map(|c| c.kind),
+                provider: challenge.as_ref().map(|c| c.provider.clone()),
+                account_label: challenge.as_ref().and_then(|c| c.account_label.clone()),
+                authorization_url: challenge
+                    .as_ref()
+                    .and_then(|c| c.authorization_url.clone()),
+                expires_at: challenge.as_ref().and_then(|c| c.expires_at),
+            })))
+        }
+        TurnStatus::BlockedApproval => {
+            Ok(Some(gate_prompt(event, gate_ref_str, "Approval required")))
+        }
         TurnStatus::BlockedResource => {
-            Ok(Some(gate_prompt(event, gate_ref, "Resource unavailable")))
+            Ok(Some(gate_prompt(event, gate_ref_str, "Resource unavailable")))
         }
         _ => Ok(None),
     }
