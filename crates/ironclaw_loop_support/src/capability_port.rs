@@ -1186,6 +1186,17 @@ fn normalize_provider_value(
     schema: &serde_json::Value,
     label: &'static str,
 ) -> Result<serde_json::Value, AgentLoopHostError> {
+    // `oneOf` / `anyOf`: pick the variant whose declared `type` matches the
+    // value's shape, after attempting to coerce stringified containers. This
+    // lets schemas like `{ oneOf: [{type:object}, {type:array}] }` accept both
+    // a real array and a stringified array (e.g. an LLM that double-encoded
+    // the argument). Without this, the variant-less top-level schema slips
+    // through the type-matched branches below as a no-op and the stringified
+    // container is forwarded raw to the tool.
+    if let Some(variants) = schema_variants(schema) {
+        return normalize_one_of_variants(value, variants, label);
+    }
+
     if schema_type_matches(schema, "object") {
         let object_value = coerce_json_string(value, label)?;
         let Some(object) = object_value.as_object() else {
@@ -1243,6 +1254,43 @@ fn normalize_provider_value(
     }
 
     Ok(value.clone())
+}
+
+fn schema_variants(schema: &serde_json::Value) -> Option<&Vec<serde_json::Value>> {
+    schema
+        .get("oneOf")
+        .or_else(|| schema.get("anyOf"))
+        .and_then(serde_json::Value::as_array)
+}
+
+fn normalize_one_of_variants(
+    value: &serde_json::Value,
+    variants: &[serde_json::Value],
+    label: &'static str,
+) -> Result<serde_json::Value, AgentLoopHostError> {
+    // Coerce stringified containers up front so we match by parsed shape.
+    let candidate = coerce_json_string(value, label)?;
+    let shape = value_shape(&candidate);
+    for variant in variants {
+        if schema_type_matches(variant, shape) {
+            return normalize_provider_value(&candidate, variant, label);
+        }
+    }
+    // No declared variant matches the value's shape; leave the original value
+    // alone so the tool's own input validation can produce a precise error.
+    Ok(value.clone())
+}
+
+fn value_shape(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Object(_) => "object",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Number(number) if number.is_i64() || number.is_u64() => "integer",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::Bool(_) => "boolean",
+        serde_json::Value::Null => "null",
+    }
 }
 
 fn schema_type_matches(schema: &serde_json::Value, expected: &str) -> bool {
@@ -2394,6 +2442,130 @@ mod tests {
         .expect_err("stringified object should not satisfy array schema without items");
 
         assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+    }
+
+    /// Regression: schemas like `headers` in `builtin.http` declare
+    /// `{ oneOf: [{type:object}, {type:array}] }` and have no top-level
+    /// `type`. Without `oneOf` handling, the normalizer's type-matched
+    /// branches never fire and a stringified array is forwarded raw to the
+    /// tool, which then rejects it with `InputEncode`.
+    #[test]
+    fn provider_argument_normalization_coerces_stringified_array_into_oneof_variant() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "headers": {
+                    "oneOf": [
+                        { "type": "object", "additionalProperties": { "type": "string" } },
+                        {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "name": { "type": "string" },
+                                    "value": { "type": "string" }
+                                },
+                                "required": ["name", "value"]
+                            }
+                        }
+                    ]
+                }
+            }
+        });
+
+        let normalized = normalize_provider_arguments(
+            &serde_json::json!({
+                "headers": "[{\"name\":\"User-Agent\",\"value\":\"IronClaw/1.0\"}]"
+            }),
+            &schema,
+            "provider arguments",
+        )
+        .expect("oneOf array variant should accept stringified array");
+
+        assert_eq!(
+            normalized,
+            serde_json::json!({
+                "headers": [{ "name": "User-Agent", "value": "IronClaw/1.0" }]
+            })
+        );
+    }
+
+    #[test]
+    fn provider_argument_normalization_coerces_stringified_object_into_oneof_variant() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "headers": {
+                    "oneOf": [
+                        { "type": "object", "additionalProperties": { "type": "string" } },
+                        { "type": "array", "items": { "type": "object" } }
+                    ]
+                }
+            }
+        });
+
+        let normalized = normalize_provider_arguments(
+            &serde_json::json!({
+                "headers": "{\"User-Agent\":\"IronClaw/1.0\"}"
+            }),
+            &schema,
+            "provider arguments",
+        )
+        .expect("oneOf object variant should accept stringified object");
+
+        assert_eq!(
+            normalized,
+            serde_json::json!({
+                "headers": { "User-Agent": "IronClaw/1.0" }
+            })
+        );
+    }
+
+    #[test]
+    fn provider_argument_normalization_passes_through_oneof_when_value_already_matches_variant() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "headers": {
+                    "oneOf": [
+                        { "type": "object", "additionalProperties": { "type": "string" } },
+                        { "type": "array", "items": { "type": "object" } }
+                    ]
+                }
+            }
+        });
+
+        let input = serde_json::json!({
+            "headers": [{ "name": "X", "value": "y" }]
+        });
+        let normalized = normalize_provider_arguments(&input, &schema, "provider arguments")
+            .expect("real array value should pass oneOf normalization unchanged");
+
+        assert_eq!(normalized, input);
+    }
+
+    #[test]
+    fn provider_argument_normalization_anyof_behaves_like_oneof() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "payload": {
+                    "anyOf": [
+                        { "type": "object" },
+                        { "type": "array", "items": { "type": "string" } }
+                    ]
+                }
+            }
+        });
+
+        let normalized = normalize_provider_arguments(
+            &serde_json::json!({ "payload": "[\"a\",\"b\"]" }),
+            &schema,
+            "provider arguments",
+        )
+        .expect("anyOf array variant should accept stringified array");
+
+        assert_eq!(normalized, serde_json::json!({ "payload": ["a", "b"] }));
     }
 
     fn provider_tool_call() -> ProviderToolCall {
