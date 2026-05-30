@@ -1,8 +1,11 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+/// Maximum length for bounded references, measured in bytes.
 const MAX_BOUNDED_REF_LEN: usize = 256;
 
+/// Validates that a bounded reference is non-empty, fits within the maximum
+/// length in bytes, and contains no control characters.
 fn validate_bounded_ref(kind: &'static str, value: &str) -> Result<(), String> {
     if value.is_empty() {
         return Err(format!("{kind} must not be empty"));

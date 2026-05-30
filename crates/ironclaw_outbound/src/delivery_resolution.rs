@@ -1,7 +1,4 @@
 use crate::ids::{TriggerFireSlot, TriggerOriginRef};
-use ironclaw_conversations::{
-    AdapterInstallationId, AdapterKind, ExternalActorRef, ExternalConversationRef,
-};
 use ironclaw_turns::{ReplyTargetBindingRef, TurnActor, TurnScope};
 use serde::{Deserialize, Serialize};
 
@@ -96,7 +93,7 @@ pub enum SystemEventReasonCode {
 }
 
 impl SystemEventReasonCode {
-    pub const fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Generic => "generic",
             Self::Trigger => "trigger",
@@ -155,10 +152,7 @@ pub enum RunNotificationOrigin {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SourceRouteContext {
-    pub adapter_kind: AdapterKind,
-    pub adapter_installation_id: AdapterInstallationId,
-    pub external_actor_ref: ExternalActorRef,
-    pub external_conversation_ref: ExternalConversationRef,
+    /// Canonical outbound target binding for the source route.
     pub reply_target_binding_ref: ReplyTargetBindingRef,
 }
 
@@ -294,6 +288,34 @@ mod tests {
     }
 
     #[test]
+    fn run_notification_event_kind_delivery_kind_maps_all_variants() {
+        assert_eq!(
+            RunNotificationEventKind::FinalReplyReady.delivery_kind(),
+            CommunicationDeliveryKind::FinalReply
+        );
+        assert_eq!(
+            RunNotificationEventKind::ProgressUpdate.delivery_kind(),
+            CommunicationDeliveryKind::ProgressUpdate
+        );
+        assert_eq!(
+            RunNotificationEventKind::ApprovalNeeded.delivery_kind(),
+            CommunicationDeliveryKind::ApprovalPrompt
+        );
+        assert_eq!(
+            RunNotificationEventKind::AuthRequired.delivery_kind(),
+            CommunicationDeliveryKind::AuthPrompt
+        );
+        assert_eq!(
+            RunNotificationEventKind::RunBlocked.delivery_kind(),
+            CommunicationDeliveryKind::ApprovalPrompt
+        );
+        assert_eq!(
+            RunNotificationEventKind::DeliveryStatus.delivery_kind(),
+            CommunicationDeliveryKind::DeliveryStatus
+        );
+    }
+
+    #[test]
     fn outbound_translation_enums_round_trip_all_variants() {
         for value in [
             CommunicationDeliveryKind::FinalReply,
@@ -374,6 +396,21 @@ mod tests {
         let decoded: DeliveryTargetCapabilities =
             from_str(&json).expect("deserialize capabilities");
         assert_eq!(decoded, capabilities);
+    }
+
+    #[test]
+    fn delivery_target_capabilities_default_is_all_false_and_empty_modalities() {
+        let capabilities = DeliveryTargetCapabilities::default();
+
+        assert!(!capabilities.final_replies);
+        assert!(!capabilities.progress);
+        assert!(!capabilities.gate_prompts);
+        assert!(!capabilities.auth_prompts);
+        assert!(capabilities.modalities.is_empty());
+    }
+
+    #[test]
+    fn system_event_reason_code_rejects_unknown_variants() {
         assert_json_round_trip(SystemEventReasonCode::Generic);
         assert!(from_str::<SystemEventReasonCode>("\"backend_failure\"").is_err());
     }
@@ -401,18 +438,6 @@ mod tests {
 
     fn source_route_context() -> SourceRouteContext {
         SourceRouteContext {
-            adapter_kind: AdapterKind::new("telegram").expect("valid adapter kind"),
-            adapter_installation_id: AdapterInstallationId::new("install-alpha")
-                .expect("valid installation id"),
-            external_actor_ref: ExternalActorRef::new("user", "alice")
-                .expect("valid external actor"),
-            external_conversation_ref: ExternalConversationRef::new(
-                Some("space-alpha"),
-                "conversation-alpha",
-                Some("topic-alpha"),
-                Some("message-alpha"),
-            )
-            .expect("valid conversation ref"),
             reply_target_binding_ref: reply_ref("reply:source-route"),
         }
     }
