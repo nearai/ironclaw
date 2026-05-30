@@ -1471,6 +1471,39 @@ async fn trusted_inbound_uses_trusted_binding_resolution_and_replays_duplicate_s
 }
 
 #[tokio::test]
+async fn trusted_inbound_propagates_binding_resolution_failure_without_accepting_or_submitting() {
+    let services = InMemoryConversationServices::default();
+    let binding = RejectingTrustedBindingService::new();
+    let coordinator = Arc::new(RecordingTurnCoordinator::default());
+    let inbound = InboundTurnService::new(binding.clone(), services.clone(), coordinator.clone());
+    let request = inbound_request(
+        telegram(),
+        external_actor("telegram-user-1"),
+        external_conversation("trusted-chat-reject", None),
+        "trusted-event-reject",
+    );
+    let trusted_agent = AgentId::new("trusted-agent").unwrap();
+    let trusted_project = ProjectId::new("trusted-project").unwrap();
+
+    let err = inbound
+        .handle_inbound_turn_with_trusted_scope(
+            request,
+            Some(trusted_agent.clone()),
+            Some(trusted_project.clone()),
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(err, InboundTurnError::BindingRequired { .. }));
+    assert_eq!(
+        binding.trusted_scopes(),
+        vec![(Some(trusted_agent), Some(trusted_project))]
+    );
+    assert!(services.accepted_messages().await.is_empty());
+    assert!(coordinator.submissions().is_empty());
+}
+
+#[tokio::test]
 async fn direct_route_rejects_borrowed_owner_actor_key() {
     let services = InMemoryConversationServices::default();
     services
@@ -2888,6 +2921,70 @@ impl ConversationBindingService for TrustedOnlyBindingService {
         request: ValidateReplyTargetRequest,
     ) -> Result<ReplyTargetBinding, InboundTurnError> {
         self.inner.validate_reply_target(request).await
+    }
+}
+
+#[derive(Clone)]
+struct RejectingTrustedBindingService {
+    trusted_scopes: Arc<Mutex<Vec<(Option<AgentId>, Option<ProjectId>)>>>,
+}
+
+impl RejectingTrustedBindingService {
+    fn new() -> Self {
+        Self {
+            trusted_scopes: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn trusted_scopes(&self) -> Vec<(Option<AgentId>, Option<ProjectId>)> {
+        self.trusted_scopes.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl ConversationBindingService for RejectingTrustedBindingService {
+    async fn resolve_or_create_binding(
+        &self,
+        _request: ironclaw_conversations::ResolveConversationRequest,
+    ) -> Result<ConversationBindingResolution, InboundTurnError> {
+        panic!("trusted inbound must call resolve_or_create_binding_with_trusted_scope")
+    }
+
+    async fn resolve_or_create_binding_with_trusted_scope(
+        &self,
+        _request: ironclaw_conversations::ResolveConversationRequest,
+        trusted_agent_id: Option<AgentId>,
+        trusted_project_id: Option<ProjectId>,
+    ) -> Result<ConversationBindingResolution, InboundTurnError> {
+        self.trusted_scopes
+            .lock()
+            .unwrap()
+            .push((trusted_agent_id, trusted_project_id));
+        Err(InboundTurnError::BindingRequired {
+            adapter_kind: "trusted".to_string(),
+            external_actor_id: "trusted".to_string(),
+        })
+    }
+
+    async fn lookup_binding(
+        &self,
+        _request: ironclaw_conversations::ResolveConversationRequest,
+    ) -> Result<ConversationBindingResolution, InboundTurnError> {
+        unimplemented!("not used by inbound facade tests")
+    }
+
+    async fn link_conversation_to_thread(
+        &self,
+        _request: LinkConversationRequest,
+    ) -> Result<LinkedConversationBinding, InboundTurnError> {
+        unimplemented!("not used by inbound facade tests")
+    }
+
+    async fn validate_reply_target(
+        &self,
+        _request: ValidateReplyTargetRequest,
+    ) -> Result<ReplyTargetBinding, InboundTurnError> {
+        unimplemented!("not used by inbound facade tests")
     }
 }
 
