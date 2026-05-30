@@ -360,12 +360,20 @@ fn format_turns_for_storage(turns: &[crate::agent::session::Turn]) -> String {
 /// produced by an older version or a model that ignored the format).
 fn extract_critical_context(summary: &str) -> Option<String> {
     const MARKER: &str = "## Critical Context";
+    const PLACEHOLDERS: &[&str] = &["none", "n/a", "na", "-", "—", "null"];
     let start = summary.find(MARKER)?;
     let after_heading = &summary[start + MARKER.len()..];
     // Content ends at the next `## ` section header or at end-of-string.
     let end = after_heading.find("\n## ").unwrap_or(after_heading.len());
     let text = after_heading[..end].trim().to_string();
-    if text.is_empty() { None } else { Some(text) }
+    if text.is_empty() {
+        return None;
+    }
+    // Discard entries that are just template placeholders the LLM filled in literally.
+    if PLACEHOLDERS.iter().any(|p| text.to_ascii_lowercase() == *p) {
+        return None;
+    }
+    Some(text)
 }
 
 #[cfg(test)]
