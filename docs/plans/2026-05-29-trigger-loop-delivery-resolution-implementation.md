@@ -128,7 +128,7 @@ Delivery track
              ├─> PR 4 Communication Preferences Store
              └───────────────┐
   PR 4 ──────────────────────┴─> PR 5 Outbound Resolution Engine
-                                     └─> PR 6 Outbound Validation Bridge
+                                     └─> PR 6 Outbound Validation Integration
                                           └─> PR 7 Product Outbound Orchestration
 
 Trigger execution track
@@ -318,7 +318,7 @@ the selected target is missing or revoked, P0 fails closed; no implicit fallback
 
 Expected size: less than 900 lines.
 
-### PR 6 — Outbound Validation Bridge
+### PR 6 — Outbound Validation Integration
 
 Connect resolved candidates to existing outbound validation without touching
 adapter transport rendering:
@@ -337,7 +337,7 @@ Expected size: less than 1000 lines.
 ### PR 7 — Product Outbound Orchestration
 
 Wire the host/composition-side outbound orchestration point for a named real
-adapter path. Do not treat the current WebUI projection bridge as the outbound
+adapter path. Do not treat the current WebUI projection path as the outbound
 orchestration path unless this PR explicitly refactors it to enter
 `ironclaw_outbound`.
 
@@ -348,7 +348,7 @@ orchestration path unless this PR explicitly refactors it to enter
 - Name the concrete first path being wired and keep adapter-specific behavior
   behind adapter capability/validation boundaries.
 - Keep WebUI projection envelopes separate from product outbound delivery
-  unless the PR deliberately routes that bridge through the same outbound
+  unless the PR deliberately routes that path through the same outbound
   policy service.
 
 Expected size: less than 1000 lines; split if this touches both composition
@@ -572,7 +572,7 @@ Only after delivery-resolution PRs are merged and a concrete adapter path is
 ready, connect trigger-origin final reply delivery:
 
 - name the first real adapter path and readiness gate. Do not use the WebUI
-  projection bridge as a stand-in unless it is explicitly routed through
+  projection path as a stand-in unless it is explicitly routed through
   `ironclaw_outbound`.
 - construct `RunNotificationOrigin::Triggered`.
 - construct `RunNotificationOrigin::TriggeredFromSourceRoute` when a trigger
