@@ -469,7 +469,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
 
         // Nudge the agent to save important context to memory when several
         // consecutive iterations have passed without a `memory_write` call.
-        if self.turns_since_memory_write.load(Ordering::Relaxed) >= MEMORY_NUDGE_THRESHOLD {
+        if self.turns_since_memory_write.load(Ordering::Relaxed) == MEMORY_NUDGE_THRESHOLD {
             reason_ctx.messages.push(ChatMessage::system(
                 "Reminder: you have not used `memory_write` recently. \
                  If you have discovered important facts, made key decisions, or \
