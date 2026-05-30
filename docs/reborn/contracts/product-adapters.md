@@ -88,8 +88,8 @@ projection update
   ApprovalResolution / AuthResolution / SubscriptionRequest / NoOp.
 
 `ProductInboundEnvelope` does not model host-internal trigger or scheduler
-ingress. Synthetic trusted ingress is handled by the planned
-`InboundTurnService::handle_inbound_turn_with_trusted_scope(...)` host-side
+ingress. Synthetic trusted ingress is handled by the host-side
+`InboundTurnService::handle_inbound_turn_with_trusted_scope(TrustedInboundTurnRequest)`
 facade and is not constructible by product adapters.
 
 `ProductInboundAck` outcomes:

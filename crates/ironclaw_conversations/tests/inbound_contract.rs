@@ -10,7 +10,7 @@ use ironclaw_conversations::{
     InMemoryConversationServices, InboundMessageContentRef, InboundTurnError, InboundTurnRequest,
     InboundTurnService, LinkConversationRequest, LinkedConversationBinding,
     MessageIdempotencyStatus, ReplyTargetBinding, SessionThreadService, ThreadAccessDecision,
-    ValidateReplyTargetRequest,
+    TrustedInboundTurnRequest, ValidateReplyTargetRequest,
 };
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_turns::{
@@ -1427,37 +1427,31 @@ async fn trusted_inbound_uses_trusted_binding_resolution_and_replays_duplicate_s
     let binding = TrustedOnlyBindingService::new(services.clone());
     let coordinator = Arc::new(RecordingTurnCoordinator::default());
     let inbound = InboundTurnService::new(binding.clone(), services.clone(), coordinator.clone());
-    let request = inbound_request(
+    let request = trusted_inbound_request(
         telegram(),
         external_actor("telegram-user-1"),
         external_conversation("trusted-chat-1", None),
         "trusted-event-1",
     );
-    let trusted_agent = AgentId::new("trusted-agent").unwrap();
-    let trusted_project = ProjectId::new("trusted-project").unwrap();
 
     let first = inbound
-        .handle_inbound_turn_with_trusted_scope(
-            request.clone(),
-            Some(trusted_agent.clone()),
-            Some(trusted_project.clone()),
-        )
+        .handle_inbound_turn_with_trusted_scope(request.clone())
         .await
         .unwrap();
     let duplicate = inbound
-        .handle_inbound_turn_with_trusted_scope(
-            request,
-            Some(trusted_agent.clone()),
-            Some(trusted_project.clone()),
-        )
+        .handle_inbound_turn_with_trusted_scope(request)
         .await
         .unwrap();
 
     assert_eq!(binding.trusted_calls(), 1);
     assert_eq!(
         binding.trusted_scopes(),
-        vec![(Some(trusted_agent), Some(trusted_project))]
+        vec![(Some(agent()), Some(project()))]
     );
+    let resolve_requests = binding.resolve_requests();
+    assert_eq!(resolve_requests.len(), 1);
+    assert_eq!(resolve_requests[0].requested_agent_id, None);
+    assert_eq!(resolve_requests[0].requested_project_id, None);
     assert_eq!(coordinator.submissions().len(), 1);
     assert_eq!(duplicate.turn_submission, first.turn_submission);
     assert_eq!(
@@ -1476,29 +1470,27 @@ async fn trusted_inbound_propagates_binding_resolution_failure_without_accepting
     let binding = RejectingTrustedBindingService::new();
     let coordinator = Arc::new(RecordingTurnCoordinator::default());
     let inbound = InboundTurnService::new(binding.clone(), services.clone(), coordinator.clone());
-    let request = inbound_request(
+    let request = trusted_inbound_request(
         telegram(),
         external_actor("telegram-user-1"),
         external_conversation("trusted-chat-reject", None),
         "trusted-event-reject",
     );
-    let trusted_agent = AgentId::new("trusted-agent").unwrap();
-    let trusted_project = ProjectId::new("trusted-project").unwrap();
 
     let err = inbound
-        .handle_inbound_turn_with_trusted_scope(
-            request,
-            Some(trusted_agent.clone()),
-            Some(trusted_project.clone()),
-        )
+        .handle_inbound_turn_with_trusted_scope(request)
         .await
         .unwrap_err();
 
     assert!(matches!(err, InboundTurnError::BindingRequired { .. }));
     assert_eq!(
         binding.trusted_scopes(),
-        vec![(Some(trusted_agent), Some(trusted_project))]
+        vec![(Some(agent()), Some(project()))]
     );
+    let resolve_requests = binding.resolve_requests();
+    assert_eq!(resolve_requests.len(), 1);
+    assert_eq!(resolve_requests[0].requested_agent_id, None);
+    assert_eq!(resolve_requests[0].requested_project_id, None);
     assert!(services.accepted_messages().await.is_empty());
     assert!(coordinator.submissions().is_empty());
 }
@@ -2621,6 +2613,25 @@ fn inbound_request(
     }
 }
 
+fn trusted_inbound_request(
+    adapter_kind: AdapterKind,
+    external_actor_ref: ExternalActorRef,
+    external_conversation_ref: ExternalConversationRef,
+    external_event_id: &str,
+) -> TrustedInboundTurnRequest {
+    TrustedInboundTurnRequest::new(
+        inbound_request(
+            adapter_kind,
+            external_actor_ref,
+            external_conversation_ref,
+            external_event_id,
+        ),
+        user("trigger-creator"),
+        Some(agent()),
+        Some(project()),
+    )
+}
+
 fn resolve_request(
     adapter_kind: AdapterKind,
     external_actor_ref: ExternalActorRef,
@@ -2854,6 +2865,7 @@ impl ConversationBindingService for DriftBindingService {
 #[derive(Clone)]
 struct TrustedOnlyBindingService {
     inner: InMemoryConversationServices,
+    resolve_requests: Arc<Mutex<Vec<ironclaw_conversations::ResolveConversationRequest>>>,
     trusted_scopes: Arc<Mutex<Vec<(Option<AgentId>, Option<ProjectId>)>>>,
 }
 
@@ -2861,12 +2873,17 @@ impl TrustedOnlyBindingService {
     fn new(inner: InMemoryConversationServices) -> Self {
         Self {
             inner,
+            resolve_requests: Arc::new(Mutex::new(Vec::new())),
             trusted_scopes: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
     fn trusted_calls(&self) -> usize {
         self.trusted_scopes.lock().unwrap().len()
+    }
+
+    fn resolve_requests(&self) -> Vec<ironclaw_conversations::ResolveConversationRequest> {
+        self.resolve_requests.lock().unwrap().clone()
     }
 
     fn trusted_scopes(&self) -> Vec<(Option<AgentId>, Option<ProjectId>)> {
@@ -2889,6 +2906,7 @@ impl ConversationBindingService for TrustedOnlyBindingService {
         trusted_agent_id: Option<AgentId>,
         trusted_project_id: Option<ProjectId>,
     ) -> Result<ConversationBindingResolution, InboundTurnError> {
+        self.resolve_requests.lock().unwrap().push(request.clone());
         self.trusted_scopes
             .lock()
             .unwrap()
@@ -2926,18 +2944,24 @@ impl ConversationBindingService for TrustedOnlyBindingService {
 
 #[derive(Clone)]
 struct RejectingTrustedBindingService {
+    resolve_requests: Arc<Mutex<Vec<ironclaw_conversations::ResolveConversationRequest>>>,
     trusted_scopes: Arc<Mutex<Vec<(Option<AgentId>, Option<ProjectId>)>>>,
 }
 
 impl RejectingTrustedBindingService {
     fn new() -> Self {
         Self {
+            resolve_requests: Arc::new(Mutex::new(Vec::new())),
             trusted_scopes: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
     fn trusted_scopes(&self) -> Vec<(Option<AgentId>, Option<ProjectId>)> {
         self.trusted_scopes.lock().unwrap().clone()
+    }
+
+    fn resolve_requests(&self) -> Vec<ironclaw_conversations::ResolveConversationRequest> {
+        self.resolve_requests.lock().unwrap().clone()
     }
 }
 
@@ -2952,10 +2976,11 @@ impl ConversationBindingService for RejectingTrustedBindingService {
 
     async fn resolve_or_create_binding_with_trusted_scope(
         &self,
-        _request: ironclaw_conversations::ResolveConversationRequest,
+        request: ironclaw_conversations::ResolveConversationRequest,
         trusted_agent_id: Option<AgentId>,
         trusted_project_id: Option<ProjectId>,
     ) -> Result<ConversationBindingResolution, InboundTurnError> {
+        self.resolve_requests.lock().unwrap().push(request);
         self.trusted_scopes
             .lock()
             .unwrap()

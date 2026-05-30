@@ -166,6 +166,63 @@ pub struct InboundTurnRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrustedInboundTurnRequest {
+    pub(crate) tenant_id: TenantId,
+    pub(crate) adapter_kind: AdapterKind,
+    pub(crate) adapter_installation_id: AdapterInstallationId,
+    pub(crate) external_actor_ref: ExternalActorRef,
+    pub(crate) external_conversation_ref: ExternalConversationRef,
+    pub(crate) external_event_id: ExternalEventId,
+    pub(crate) route_kind: ConversationRouteKind,
+    pub(crate) content_ref: InboundMessageContentRef,
+    pub(crate) creator_user_id: UserId,
+    pub(crate) trusted_agent_id: Option<AgentId>,
+    pub(crate) trusted_project_id: Option<ProjectId>,
+    pub(crate) received_at: DateTime<Utc>,
+    pub(crate) requested_run_profile: Option<RunProfileRequest>,
+}
+
+impl TrustedInboundTurnRequest {
+    pub fn new(
+        request: InboundTurnRequest,
+        creator_user_id: UserId,
+        trusted_agent_id: Option<AgentId>,
+        trusted_project_id: Option<ProjectId>,
+    ) -> Self {
+        let InboundTurnRequest {
+            tenant_id,
+            adapter_kind,
+            adapter_installation_id,
+            external_actor_ref,
+            external_conversation_ref,
+            external_event_id,
+            route_kind,
+            content_ref,
+            requested_agent_id: _,
+            requested_project_id: _,
+            received_at,
+            requested_run_profile,
+        } = request;
+
+        Self {
+            tenant_id,
+            adapter_kind,
+            adapter_installation_id,
+            external_actor_ref,
+            external_conversation_ref,
+            external_event_id,
+            route_kind,
+            content_ref,
+            creator_user_id,
+            trusted_agent_id,
+            trusted_project_id,
+            received_at,
+            requested_run_profile,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InboundTurnResponse {
     pub resolution: ConversationBindingResolution,
     pub accepted_message: AcceptedInboundMessage,

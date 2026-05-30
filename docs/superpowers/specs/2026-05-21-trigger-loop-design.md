@@ -104,15 +104,14 @@ the one contract-sensitive piece of the design.
   `ConversationBindingService::resolve_or_create_binding_with_trusted_scope(request, trusted_agent_id, trusted_project_id)`
   (`crates/ironclaw_conversations/src/traits.rs:26`). Trusted scope must come
   from host configuration and is persisted on first bind.
-- `InboundTurnService` does **not** currently expose a trusted variant.
+- `InboundTurnService` exposes a trusted variant that accepts a host-owned
+  `TrustedInboundTurnRequest`.
 
 **Required contract extension.** Add a facade method to `ironclaw_conversations`:
 
 ```
 InboundTurnService::handle_inbound_turn_with_trusted_scope(
-    request: InboundTurnRequest,
-    trusted_agent_id: Option<AgentId>,
-    trusted_project_id: Option<ProjectId>,
+    request: TrustedInboundTurnRequest,
 ) -> Result<InboundTurnResponse, InboundTurnError>
 ```
 
@@ -303,7 +302,7 @@ for a long-lived Reborn background worker. Loop:
       content-store semantics; prefer content-addressed storage.
    b. Build the synthetic `InboundTurnRequest` (§5.5) with
       `identity.route_thread_id` and `identity.external_event_id`.
-   c. Call `handle_inbound_turn_with_trusted_scope(req, agent_id, project_id)`.
+   c. Call `handle_inbound_turn_with_trusted_scope(trusted_req)`.
 4. On submit success: set `last_run_at`,
    `last_fired_slot = identity.fire_slot`,
    `last_status = Ok` (= "submitted to turn queue"), recompute `next_run_at =
