@@ -355,9 +355,7 @@ mod tests {
             assert_json_round_trip(value);
         }
 
-        for value in [TriggerSourceKind::Schedule] {
-            assert_json_round_trip(value);
-        }
+        assert_json_round_trip(TriggerSourceKind::Schedule);
 
         for value in [
             SystemEventReasonCode::Generic,
