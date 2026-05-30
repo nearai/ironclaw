@@ -31,58 +31,22 @@ import pytest
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from helpers import AUTH_TOKEN, api_get, api_post, wait_for_ready
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "fixtures"))
-from mock_notion_mcp import start_mock_notion_mcp
-from mock_oauth_idp import start_mock_oauth_idp
+from helpers import (
+    AUTH_TOKEN,
+    api_get,
+    api_post,
+    forward_coverage_env,
+    stop_process,
+    wait_for_ready,
+)
+from fixtures.mock_notion_mcp import start_mock_notion_mcp
+from fixtures.mock_oauth_idp import start_mock_oauth_idp
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
 ROOT = Path(__file__).resolve().parent.parent.parent.parent
-
-
-def _forward_coverage_env(env: dict) -> None:
-    for key in os.environ:
-        if key.startswith(
-            ("CARGO_LLVM_COV", "LLVM_", "CARGO_ENCODED_RUSTFLAGS", "CARGO_INCREMENTAL")
-        ):
-            env[key] = os.environ[key]
-
-
-async def _stop_process(proc, sig=signal.SIGINT, timeout: float = 5):
-    async def _drain():
-        try:
-            await asyncio.wait_for(proc.communicate(), timeout=1)
-        except (asyncio.TimeoutError, ValueError):
-            pass
-
-    try:
-        proc.send_signal(sig)
-    except ProcessLookupError:
-        await _drain()
-        return
-    try:
-        await asyncio.wait_for(proc.wait(), timeout=timeout)
-    except asyncio.TimeoutError:
-        proc.kill()
-        await proc.wait()
-    await _drain()
-
-
-async def _wait_for_pending_auth(
-    base_url: str, thread_id: str, *, timeout: float = 45.0
-) -> dict:
-    for _ in range(int(timeout * 2)):
-        r = await api_get(base_url, f"/api/chat/history?thread_id={thread_id}", timeout=15)
-        if r.status_code == 200:
-            gate = r.json().get("pending_gate")
-            if isinstance(gate, dict) and gate.get("request_id"):
-                return gate
-        await asyncio.sleep(0.5)
-    raise AssertionError(f"Timed out waiting for pending auth gate in thread {thread_id}")
 
 
 # ---------------------------------------------------------------------------
@@ -159,7 +123,7 @@ async def v2_notion_server(ironclaw_binary, mock_llm_server, mock_notion, mock_n
         "ONBOARD_COMPLETED": "true",
         "IRONCLAW_DISABLE_OS_KEYCHAIN": "1",
     }
-    _forward_coverage_env(env)
+    forward_coverage_env(env)
 
     proc = await asyncio.create_subprocess_exec(
         ironclaw_binary, "--no-onboard",
@@ -174,13 +138,13 @@ async def v2_notion_server(ironclaw_binary, mock_llm_server, mock_notion, mock_n
         yield base_url
     except TimeoutError:
         if proc.returncode is None:
-            await _stop_process(proc, timeout=2)
+            await stop_process(proc, timeout=2)
         pytest.fail(f"v2_notion_server failed to start on port {port}")
     finally:
         if proc.returncode is None:
-            await _stop_process(proc, sig=signal.SIGINT, timeout=10)
+            await stop_process(proc, sig=signal.SIGINT, timeout=10)
             if proc.returncode is None:
-                await _stop_process(proc, sig=signal.SIGTERM, timeout=5)
+                await stop_process(proc, sig=signal.SIGTERM, timeout=5)
 
 
 # ---------------------------------------------------------------------------

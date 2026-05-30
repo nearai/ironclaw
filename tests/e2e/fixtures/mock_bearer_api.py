@@ -36,6 +36,9 @@ from aiohttp import web
 @dataclass
 class MockBearerApiHandle:
     base_url: str
+    # _mock_host is set by test fixtures that need to advertise the host
+    # portion of base_url to external components (e.g. skill config writers).
+    _mock_host: str | None = field(default=None, repr=False)
     received_tokens: list[str] = field(default_factory=list)
     require_auth: bool = True
 
@@ -107,11 +110,11 @@ async def start_mock_bearer_api(*, port: int = 0) -> AsyncIterator[MockBearerApi
 
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, "127.0.0.1", port)
-    await site.start()
-    actual_port = site._server.sockets[0].getsockname()[1]
-    handle.base_url = f"http://127.0.0.1:{actual_port}"
     try:
+        site = web.TCPSite(runner, "127.0.0.1", port)
+        await site.start()
+        actual_port = site._server.sockets[0].getsockname()[1]
+        handle.base_url = f"http://127.0.0.1:{actual_port}"
         yield handle
     finally:
         await runner.cleanup()

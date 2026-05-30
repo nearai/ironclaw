@@ -39,10 +39,16 @@ import pytest
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from helpers import AUTH_TOKEN, api_get, api_post, wait_for_ready
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "fixtures"))
-from mock_bearer_api import start_mock_bearer_api
+from helpers import (
+    AUTH_TOKEN,
+    api_get,
+    api_post,
+    forward_coverage_env,
+    stop_process,
+    wait_for_pending_auth_gate,
+    wait_for_ready,
+)
+from fixtures.mock_bearer_api import start_mock_bearer_api
 
 
 # ---------------------------------------------------------------------------
@@ -58,35 +64,9 @@ _GITHUB_PAT_RE = re.compile(
     re.IGNORECASE,
 )
 
+# FAKE_PAT uses the ghp_ prefix to match the leak-detector regex intentionally.
+# It is not a real token: it fails GitHub's checksum validation and cannot be used.
 FAKE_PAT = "ghp_fake4112PAT_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-
-
-def _forward_coverage_env(env: dict) -> None:
-    for key in os.environ:
-        if key.startswith(
-            ("CARGO_LLVM_COV", "LLVM_", "CARGO_ENCODED_RUSTFLAGS", "CARGO_INCREMENTAL")
-        ):
-            env[key] = os.environ[key]
-
-
-async def _stop_process(proc, sig=signal.SIGINT, timeout: float = 5):
-    async def _drain():
-        try:
-            await asyncio.wait_for(proc.communicate(), timeout=1)
-        except (asyncio.TimeoutError, ValueError):
-            pass
-
-    try:
-        proc.send_signal(sig)
-    except ProcessLookupError:
-        await _drain()
-        return
-    try:
-        await asyncio.wait_for(proc.wait(), timeout=timeout)
-    except asyncio.TimeoutError:
-        proc.kill()
-        await proc.wait()
-    await _drain()
 
 
 def _write_github_skill(skills_dir: str, mock_api_host: str) -> None:
@@ -136,14 +116,16 @@ async def mock_bearer(mock_llm_server):
     """Start a mock Bearer-auth GitHub API server."""
     async for handle in start_mock_bearer_api():
         # Tell the mock LLM to generate tool calls pointing at this server.
-        mock_host = urlparse(handle.base_url).netloc
+        handle._mock_host = urlparse(handle.base_url).netloc
         async with httpx.AsyncClient() as client:
-            await client.post(
+            resp = await client.post(
                 f"{mock_llm_server}/__mock/set_github_api_url",
                 json={"url": handle.base_url},
                 timeout=5,
             )
-        handle._mock_host = mock_host
+            if resp.status_code not in (200, 404):
+                # 404 = endpoint not supported by this mock LLM build; safe to ignore.
+                resp.raise_for_status()
         yield handle
 
 
@@ -193,7 +175,7 @@ async def v2_pat_server(ironclaw_binary, mock_llm_server, mock_bearer, tmp_path_
         "ONBOARD_COMPLETED": "true",
         "IRONCLAW_DISABLE_OS_KEYCHAIN": "1",
     }
-    _forward_coverage_env(env)
+    forward_coverage_env(env)
 
     proc = await asyncio.create_subprocess_exec(
         ironclaw_binary, "--no-onboard",
@@ -208,35 +190,18 @@ async def v2_pat_server(ironclaw_binary, mock_llm_server, mock_bearer, tmp_path_
         yield base_url
     except TimeoutError:
         if proc.returncode is None:
-            await _stop_process(proc, timeout=2)
+            await stop_process(proc, timeout=2)
         pytest.fail(f"v2_pat_server failed to start on port {port}")
     finally:
         if proc.returncode is None:
-            await _stop_process(proc, sig=signal.SIGINT, timeout=10)
+            await stop_process(proc, sig=signal.SIGINT, timeout=10)
             if proc.returncode is None:
-                await _stop_process(proc, sig=signal.SIGTERM, timeout=5)
+                await stop_process(proc, sig=signal.SIGTERM, timeout=5)
 
 
 # ---------------------------------------------------------------------------
 # Test helpers
 # ---------------------------------------------------------------------------
-
-async def _wait_for_pending_auth(base_url: str, thread_id: str, *, timeout: float = 45.0) -> dict:
-    """Poll /api/chat/history until a pending auth gate appears. Returns the gate."""
-    for _ in range(int(timeout * 2)):
-        r = await api_get(base_url, f"/api/chat/history?thread_id={thread_id}", timeout=15)
-        if r.status_code == 200:
-            h = r.json()
-            gate = h.get("pending_gate")
-            if isinstance(gate, dict) and gate.get("request_id"):
-                resume = gate.get("resume_kind") or {}
-                if resume.get("kind") == "authentication" or gate.get("gate_name") in (
-                    "auth", "authentication"
-                ):
-                    return gate
-        await asyncio.sleep(0.5)
-    raise AssertionError(f"Timed out waiting for pending auth gate in thread {thread_id}")
-
 
 async def _send_message(base_url: str, thread_id: str, content: str) -> None:
     r = await api_post(
@@ -273,7 +238,7 @@ class TestGitHubPatFlow:
         thread_id = r.json()["id"]
 
         await _send_message(v2_pat_server, thread_id, "list github issues in owner/repo")
-        gate = await _wait_for_pending_auth(v2_pat_server, thread_id)
+        gate = await wait_for_pending_auth_gate(v2_pat_server, thread_id)
 
         assert gate.get("request_id"), "gate must have a request_id"
         resume = gate.get("resume_kind") or {}
@@ -309,7 +274,7 @@ class TestGitHubPatFlow:
         thread_id = r.json()["id"]
 
         await _send_message(v2_pat_server, thread_id, "list github issues in owner/repo")
-        await _wait_for_pending_auth(v2_pat_server, thread_id)
+        await wait_for_pending_auth_gate(v2_pat_server, thread_id)
 
         # Submit the PAT via the legacy gate resolve endpoint (V1 path).
         history_r = await api_get(
@@ -337,7 +302,7 @@ class TestGitHubPatFlow:
         thread_id = r.json()["id"]
 
         await _send_message(v2_pat_server, thread_id, "list github issues in owner/repo")
-        gate = await _wait_for_pending_auth(v2_pat_server, thread_id)
+        gate = await wait_for_pending_auth_gate(v2_pat_server, thread_id)
         request_id = gate.get("request_id", "")
         if request_id:
             await _resolve_auth_gate(v2_pat_server, thread_id, request_id, FAKE_PAT)
@@ -364,7 +329,7 @@ class TestGitHubPatWireShape:
         r = await api_post(v2_pat_server, "/api/chat/thread/new", timeout=15)
         thread_id = r.json()["id"]
         await _send_message(v2_pat_server, thread_id, "list github issues in owner/repo")
-        gate = await _wait_for_pending_auth(v2_pat_server, thread_id)
+        gate = await wait_for_pending_auth_gate(v2_pat_server, thread_id)
 
         auth_url = gate.get("auth_url")
         gate_ref = gate.get("request_id", "")

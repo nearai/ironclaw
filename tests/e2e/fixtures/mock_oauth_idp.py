@@ -133,9 +133,16 @@ async def start_mock_oauth_idp(*, port: int = 0) -> AsyncIterator[MockOAuthIdpHa
             if pending is None:
                 return web.json_response({"error": "invalid_grant"}, status=400)
 
-            # PKCE verification (S256)
+            # PKCE verification (S256).
+            # If a challenge was registered it MUST be verified — reject when
+            # the verifier is absent rather than silently skipping the check.
             expected_challenge = pending.get("code_challenge")
-            if expected_challenge and code_verifier:
+            if expected_challenge:
+                if not code_verifier:
+                    return web.json_response(
+                        {"error": "invalid_grant", "error_description": "PKCE verifier missing"},
+                        status=400,
+                    )
                 digest = hashlib.sha256(code_verifier.encode()).digest()
                 computed = base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
                 if computed != expected_challenge:
@@ -159,7 +166,9 @@ async def start_mock_oauth_idp(*, port: int = 0) -> AsyncIterator[MockOAuthIdpHa
 
         if grant_type == "refresh_token":
             refresh_token = body.get("refresh_token", "")
-            if not refresh_token.startswith("fake_refresh_"):
+            # Validate against the set of tokens we actually issued, not just
+            # the prefix — prevents fabricated tokens from silently succeeding.
+            if refresh_token not in handle.issued_refresh_tokens:
                 return web.json_response({"error": "invalid_grant"}, status=400)
             new_access = f"fake_access_{secrets.token_urlsafe(16)}"
             handle.issued_tokens.append(new_access)
@@ -189,11 +198,11 @@ async def start_mock_oauth_idp(*, port: int = 0) -> AsyncIterator[MockOAuthIdpHa
 
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, "127.0.0.1", port)
-    await site.start()
-    actual_port = site._server.sockets[0].getsockname()[1]
-    handle.base_url = f"http://127.0.0.1:{actual_port}"
     try:
+        site = web.TCPSite(runner, "127.0.0.1", port)
+        await site.start()
+        actual_port = site._server.sockets[0].getsockname()[1]
+        handle.base_url = f"http://127.0.0.1:{actual_port}"
         yield handle
     finally:
         await runner.cleanup()

@@ -142,11 +142,11 @@ async def start_mock_notion_mcp(*, port: int = 0) -> AsyncIterator[MockNotionMcp
 
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, "127.0.0.1", port)
-    await site.start()
-    actual_port = site._server.sockets[0].getsockname()[1]
-    handle.base_url = f"http://127.0.0.1:{actual_port}"
     try:
+        site = web.TCPSite(runner, "127.0.0.1", port)
+        await site.start()
+        actual_port = site._server.sockets[0].getsockname()[1]
+        handle.base_url = f"http://127.0.0.1:{actual_port}"
         yield handle
     finally:
         await runner.cleanup()

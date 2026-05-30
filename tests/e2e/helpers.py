@@ -3,7 +3,9 @@
 import asyncio
 import hashlib
 import hmac
+import os
 import re
+import signal
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -494,3 +496,66 @@ def signed_http_webhook_headers(body: bytes) -> dict[str, str]:
         "Content-Type": "application/json",
         "X-Hub-Signature-256": f"sha256={digest}",
     }
+
+
+# ---------------------------------------------------------------------------
+# Process helpers (shared across v2 auth E2E scenario files)
+# ---------------------------------------------------------------------------
+
+def forward_coverage_env(env: dict) -> None:
+    """Copy LLVM coverage env vars into *env* so coverage data is collected."""
+    for key in os.environ:
+        if key.startswith(
+            ("CARGO_LLVM_COV", "LLVM_", "CARGO_ENCODED_RUSTFLAGS", "CARGO_INCREMENTAL")
+        ):
+            env[key] = os.environ[key]
+
+
+async def stop_process(proc, sig: int = signal.SIGINT, timeout: float = 5) -> None:
+    """Gracefully stop *proc*, escalating to SIGKILL on timeout."""
+    async def _drain() -> None:
+        try:
+            await asyncio.wait_for(proc.communicate(), timeout=1)
+        except (asyncio.TimeoutError, ValueError):
+            pass
+
+    try:
+        proc.send_signal(sig)
+    except ProcessLookupError:
+        await _drain()
+        return
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=timeout)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+    await _drain()
+
+
+async def wait_for_pending_auth_gate(
+    base_url: str,
+    thread_id: str,
+    *,
+    timeout: float = 45.0,
+) -> dict:
+    """Poll /api/chat/history until a pending *authentication* gate appears.
+
+    Returns the gate dict.  Raises ``AssertionError`` on timeout.
+    The gate kind is validated so that approval / confirmation gates do not
+    satisfy the check and produce false positives.
+    """
+    for _ in range(int(timeout * 2)):
+        r = await api_get(base_url, f"/api/chat/history?thread_id={thread_id}", timeout=15)
+        if r.status_code == 200:
+            gate = r.json().get("pending_gate")
+            if isinstance(gate, dict) and gate.get("request_id"):
+                resume = gate.get("resume_kind") or {}
+                if (
+                    resume.get("kind") == "authentication"
+                    or gate.get("gate_name") in ("auth", "authentication")
+                ):
+                    return gate
+        await asyncio.sleep(0.5)
+    raise AssertionError(
+        f"Timed out waiting for pending auth gate in thread {thread_id}"
+    )

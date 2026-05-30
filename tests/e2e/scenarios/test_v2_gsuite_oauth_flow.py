@@ -34,11 +34,17 @@ import pytest
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from helpers import AUTH_TOKEN, api_get, api_post, wait_for_ready
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "fixtures"))
-from mock_oauth_idp import start_mock_oauth_idp
-from mock_bearer_api import start_mock_bearer_api
+from helpers import (
+    AUTH_TOKEN,
+    api_get,
+    api_post,
+    forward_coverage_env,
+    stop_process,
+    wait_for_pending_auth_gate,
+    wait_for_ready,
+)
+from fixtures.mock_oauth_idp import start_mock_oauth_idp
+from fixtures.mock_bearer_api import start_mock_bearer_api
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -52,34 +58,6 @@ _OAUTH_SECRET_RE = re.compile(
     r"|fake_refresh_[A-Za-z0-9\-_]+"
     r"|fake_code_[A-Za-z0-9\-_]+"
 )
-
-
-def _forward_coverage_env(env: dict) -> None:
-    for key in os.environ:
-        if key.startswith(
-            ("CARGO_LLVM_COV", "LLVM_", "CARGO_ENCODED_RUSTFLAGS", "CARGO_INCREMENTAL")
-        ):
-            env[key] = os.environ[key]
-
-
-async def _stop_process(proc, sig=signal.SIGINT, timeout: float = 5):
-    async def _drain():
-        try:
-            await asyncio.wait_for(proc.communicate(), timeout=1)
-        except (asyncio.TimeoutError, ValueError):
-            pass
-
-    try:
-        proc.send_signal(sig)
-    except ProcessLookupError:
-        await _drain()
-        return
-    try:
-        await asyncio.wait_for(proc.wait(), timeout=timeout)
-    except asyncio.TimeoutError:
-        proc.kill()
-        await proc.wait()
-    await _drain()
 
 
 def _write_gmail_skill(skills_dir: str, mock_api_host: str, mock_idp_token_url: str) -> None:
@@ -110,19 +88,6 @@ credentials:
 You can read and send Gmail using the `http` tool.
 """
     Path(os.path.join(skill_dir, "SKILL.md")).write_text(content)
-
-
-async def _wait_for_pending_auth(
-    base_url: str, thread_id: str, *, timeout: float = 45.0
-) -> dict:
-    for _ in range(int(timeout * 2)):
-        r = await api_get(base_url, f"/api/chat/history?thread_id={thread_id}", timeout=15)
-        if r.status_code == 200:
-            gate = r.json().get("pending_gate")
-            if isinstance(gate, dict) and gate.get("request_id"):
-                return gate
-        await asyncio.sleep(0.5)
-    raise AssertionError(f"Timed out waiting for pending auth gate in thread {thread_id}")
 
 
 # ---------------------------------------------------------------------------
@@ -205,7 +170,7 @@ async def v2_gsuite_server(ironclaw_binary, mock_llm_server, mock_idp, mock_goog
         "ONBOARD_COMPLETED": "true",
         "IRONCLAW_DISABLE_OS_KEYCHAIN": "1",
     }
-    _forward_coverage_env(env)
+    forward_coverage_env(env)
 
     proc = await asyncio.create_subprocess_exec(
         ironclaw_binary, "--no-onboard",
@@ -220,13 +185,13 @@ async def v2_gsuite_server(ironclaw_binary, mock_llm_server, mock_idp, mock_goog
         yield base_url
     except TimeoutError:
         if proc.returncode is None:
-            await _stop_process(proc, timeout=2)
+            await stop_process(proc, timeout=2)
         pytest.fail(f"v2_gsuite_server failed to start on port {port}")
     finally:
         if proc.returncode is None:
-            await _stop_process(proc, sig=signal.SIGINT, timeout=10)
+            await stop_process(proc, sig=signal.SIGINT, timeout=10)
             if proc.returncode is None:
-                await _stop_process(proc, sig=signal.SIGTERM, timeout=5)
+                await stop_process(proc, sig=signal.SIGTERM, timeout=5)
 
 
 # ---------------------------------------------------------------------------
@@ -283,7 +248,7 @@ class TestGSuiteOAuthWireShape:
             json={"content": "summarize my last 3 emails", "thread_id": thread_id},
             timeout=15,
         )
-        gate = await _wait_for_pending_auth(v2_gsuite_server, thread_id)
+        gate = await wait_for_pending_auth_gate(v2_gsuite_server, thread_id)
         assert gate.get("request_id"), "gate must have a request_id"
         # The auth URL should be present for an OAuth challenge.
         auth_url = gate.get("auth_url") or ""
@@ -382,7 +347,7 @@ class TestGSuiteOAuthWireShape:
             json={"content": "summarize my last 3 emails", "thread_id": thread_id},
             timeout=15,
         )
-        await _wait_for_pending_auth(v2_gsuite_server, thread_id)
+        await wait_for_pending_auth_gate(v2_gsuite_server, thread_id)
 
         history_r = await api_get(
             v2_gsuite_server, f"/api/chat/history?thread_id={thread_id}", timeout=15
@@ -394,9 +359,18 @@ class TestGSuiteOAuthWireShape:
             f"(first 500): {history_text[:500]}"
         )
 
-    async def test_per_user_auth_isolation(self, v2_gsuite_server):
-        """Two users each get their own auth gate; no cross-user credential leak."""
-        # Thread A — user 1 (default AUTH_TOKEN)
+    async def test_per_thread_auth_isolation(self, v2_gsuite_server):
+        """Concurrent threads for the same user get independent auth gates.
+
+        This verifies per-thread isolation: two threads belonging to the
+        same user each receive their own ``request_id`` so resolving one
+        gate does not accidentally resume the other thread.
+
+        Note: cross-user (multi-tenant) isolation is out of scope for this
+        fixture because the server is started with a single GATEWAY_USER_ID.
+        Cross-user isolation is covered by the owner-scope E2E tests.
+        """
+        # Thread A
         r_a = await api_post(v2_gsuite_server, "/api/chat/thread/new", timeout=15)
         thread_a = r_a.json()["id"]
         await api_post(
@@ -405,9 +379,9 @@ class TestGSuiteOAuthWireShape:
             json={"content": "list my gmail", "thread_id": thread_a},
             timeout=15,
         )
-        gate_a = await _wait_for_pending_auth(v2_gsuite_server, thread_a)
+        gate_a = await wait_for_pending_auth_gate(v2_gsuite_server, thread_a)
 
-        # Thread B — same user, different thread; gate should be independent.
+        # Thread B — same user, different thread; gate must be independent.
         r_b = await api_post(v2_gsuite_server, "/api/chat/thread/new", timeout=15)
         thread_b = r_b.json()["id"]
         await api_post(
@@ -416,11 +390,11 @@ class TestGSuiteOAuthWireShape:
             json={"content": "list my gmail", "thread_id": thread_b},
             timeout=15,
         )
-        gate_b = await _wait_for_pending_auth(v2_gsuite_server, thread_b)
+        gate_b = await wait_for_pending_auth_gate(v2_gsuite_server, thread_b)
 
-        # Each thread must have its own distinct gate_request_id.
+        # Each thread must have its own distinct gate request_id.
         assert gate_a["request_id"] != gate_b["request_id"], (
-            "different threads must have independent auth gates"
+            "concurrent threads must have independent auth gates"
         )
 
 
