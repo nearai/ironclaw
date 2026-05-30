@@ -11,7 +11,7 @@ use crate::{
     InboundMessageContentRef,
 };
 
-#[cfg(test)]
+#[allow(dead_code)]
 pub(crate) mod trusted_ingress {
     use core::marker::PhantomData;
 
@@ -23,7 +23,9 @@ pub(crate) mod trusted_ingress {
 
     /// Sealed host-only token proving the caller already crossed the host
     /// ingress boundary. Only crate-local host code can mint it, so product
-    /// adapters cannot fabricate trusted scope on their own.
+    /// adapters cannot fabricate trusted scope on their own. A later
+    /// host-owned shim in this crate can mint the token without widening the
+    /// public API.
     pub(crate) trait TrustedIngressToken: sealed::Sealed {}
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,7 +40,7 @@ pub(crate) mod trusted_ingress {
     }
 }
 
-#[cfg(test)]
+#[allow(dead_code)]
 mod private {
     pub(crate) struct TrustedIngressSeal;
 }
@@ -204,8 +206,12 @@ pub struct TrustedInboundTurnRequest {
     trusted_project_id: Option<ProjectId>,
 }
 
+#[allow(dead_code)]
 impl TrustedInboundTurnRequest {
-    #[cfg(test)]
+    /// Crate-local constructor for host-owned trusted ingress.
+    /// The sealed token keeps external adapters from minting trusted scope,
+    /// while still letting this crate add a future host shim without changing
+    /// the public API.
     pub(crate) fn new(
         _witness: impl trusted_ingress::TrustedIngressToken,
         request: InboundTurnRequest,

@@ -91,8 +91,8 @@ where
                 .await;
         }
 
-        let (requested_agent_id, requested_project_id) =
-            binding_policy.requested_scope(requested_agent_id, requested_project_id);
+        let (requested_agent_id, requested_project_id, binding_dispatch) =
+            binding_policy.into_resolution_parts(requested_agent_id, requested_project_id);
         let resolve_request = ResolveConversationRequest {
             tenant_id: tenant_id.clone(),
             adapter_kind: adapter_kind.clone(),
@@ -104,13 +104,13 @@ where
             requested_agent_id,
             requested_project_id,
         };
-        let resolution = match binding_policy {
-            BindingResolutionPolicy::Untrusted => {
+        let resolution = match binding_dispatch {
+            BindingResolutionDispatch::Untrusted => {
                 self.binding_service
                     .resolve_or_create_binding(resolve_request)
                     .await?
             }
-            BindingResolutionPolicy::Trusted {
+            BindingResolutionDispatch::Trusted {
                 trusted_agent_id,
                 trusted_project_id,
             } => {
@@ -222,18 +222,41 @@ enum BindingResolutionPolicy {
     },
 }
 
+enum BindingResolutionDispatch {
+    Untrusted,
+    Trusted {
+        trusted_agent_id: Option<ironclaw_host_api::AgentId>,
+        trusted_project_id: Option<ironclaw_host_api::ProjectId>,
+    },
+}
+
 impl BindingResolutionPolicy {
-    fn requested_scope(
-        &self,
+    fn into_resolution_parts(
+        self,
         requested_agent_id: Option<ironclaw_host_api::AgentId>,
         requested_project_id: Option<ironclaw_host_api::ProjectId>,
     ) -> (
         Option<ironclaw_host_api::AgentId>,
         Option<ironclaw_host_api::ProjectId>,
+        BindingResolutionDispatch,
     ) {
         match self {
-            Self::Untrusted => (requested_agent_id, requested_project_id),
-            Self::Trusted { .. } => (None, None),
+            Self::Untrusted => (
+                requested_agent_id,
+                requested_project_id,
+                BindingResolutionDispatch::Untrusted,
+            ),
+            Self::Trusted {
+                trusted_agent_id,
+                trusted_project_id,
+            } => (
+                None,
+                None,
+                BindingResolutionDispatch::Trusted {
+                    trusted_agent_id,
+                    trusted_project_id,
+                },
+            ),
         }
     }
 }
@@ -276,6 +299,59 @@ mod tests {
         LinkConversationRequest, LinkedConversationBinding, MessageIdempotencyStatus,
         ReplyTargetBinding, TrustedInboundTurnRequest, ValidateReplyTargetRequest,
     };
+
+    #[tokio::test]
+    async fn trusted_inbound_with_real_services_creates_binding_records_message_and_replays_submission()
+     {
+        let services = InMemoryConversationServices::default();
+        services
+            .pair_external_actor(
+                tenant(),
+                telegram(),
+                default_installation(),
+                external_actor("telegram-user-1"),
+                user("alice"),
+            )
+            .await;
+        let coordinator = Arc::new(RecordingTurnCoordinator::default());
+        let inbound =
+            InboundTurnService::new(services.clone(), services.clone(), coordinator.clone());
+        let request = trusted_inbound_request(
+            telegram(),
+            external_actor("telegram-user-1"),
+            external_conversation("trusted-chat-1", None),
+            "trusted-event-1",
+            Some(agent()),
+            Some(project()),
+        );
+
+        let first = inbound
+            .handle_inbound_turn_with_trusted_scope(request.clone())
+            .await
+            .unwrap();
+        let duplicate = inbound
+            .handle_inbound_turn_with_trusted_scope(request)
+            .await
+            .unwrap();
+
+        assert_eq!(first.resolution.turn_scope.agent_id, Some(agent()));
+        assert_eq!(first.resolution.turn_scope.project_id, Some(project()));
+        assert_eq!(
+            first.accepted_message.idempotency,
+            MessageIdempotencyStatus::Inserted
+        );
+        assert_eq!(duplicate.turn_submission, first.turn_submission);
+        assert_eq!(
+            duplicate.accepted_message.message_ref,
+            first.accepted_message.message_ref
+        );
+        assert_eq!(
+            duplicate.accepted_message.idempotency,
+            MessageIdempotencyStatus::Duplicate
+        );
+        assert_eq!(services.accepted_messages().await.len(), 1);
+        assert_eq!(coordinator.submissions().len(), 1);
+    }
 
     #[tokio::test]
     async fn trusted_inbound_uses_trusted_binding_resolution_and_replays_duplicate_submission() {
