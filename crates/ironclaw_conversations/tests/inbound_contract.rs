@@ -1413,6 +1413,64 @@ async fn duplicate_external_event_replays_message_and_does_not_submit_duplicate_
 }
 
 #[tokio::test]
+async fn trusted_inbound_uses_trusted_binding_resolution_and_replays_duplicate_submission() {
+    let services = InMemoryConversationServices::default();
+    services
+        .pair_external_actor(
+            tenant(),
+            telegram(),
+            default_installation(),
+            external_actor("telegram-user-1"),
+            user("alice"),
+        )
+        .await;
+    let binding = TrustedOnlyBindingService::new(services.clone());
+    let coordinator = Arc::new(RecordingTurnCoordinator::default());
+    let inbound = InboundTurnService::new(binding.clone(), services.clone(), coordinator.clone());
+    let request = inbound_request(
+        telegram(),
+        external_actor("telegram-user-1"),
+        external_conversation("trusted-chat-1", None),
+        "trusted-event-1",
+    );
+    let trusted_agent = AgentId::new("trusted-agent").unwrap();
+    let trusted_project = ProjectId::new("trusted-project").unwrap();
+
+    let first = inbound
+        .handle_inbound_turn_with_trusted_scope(
+            request.clone(),
+            Some(trusted_agent.clone()),
+            Some(trusted_project.clone()),
+        )
+        .await
+        .unwrap();
+    let duplicate = inbound
+        .handle_inbound_turn_with_trusted_scope(
+            request,
+            Some(trusted_agent.clone()),
+            Some(trusted_project.clone()),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(binding.trusted_calls(), 1);
+    assert_eq!(
+        binding.trusted_scopes(),
+        vec![(Some(trusted_agent), Some(trusted_project))]
+    );
+    assert_eq!(coordinator.submissions().len(), 1);
+    assert_eq!(duplicate.turn_submission, first.turn_submission);
+    assert_eq!(
+        duplicate.accepted_message.message_ref,
+        first.accepted_message.message_ref
+    );
+    assert_eq!(
+        duplicate.accepted_message.idempotency,
+        MessageIdempotencyStatus::Duplicate
+    );
+}
+
+#[tokio::test]
 async fn direct_route_rejects_borrowed_owner_actor_key() {
     let services = InMemoryConversationServices::default();
     services
@@ -2757,6 +2815,79 @@ impl ConversationBindingService for DriftBindingService {
         _request: ValidateReplyTargetRequest,
     ) -> Result<ReplyTargetBinding, InboundTurnError> {
         unimplemented!("not used by inbound facade tests")
+    }
+}
+
+#[derive(Clone)]
+struct TrustedOnlyBindingService {
+    inner: InMemoryConversationServices,
+    trusted_scopes: Arc<Mutex<Vec<(Option<AgentId>, Option<ProjectId>)>>>,
+}
+
+impl TrustedOnlyBindingService {
+    fn new(inner: InMemoryConversationServices) -> Self {
+        Self {
+            inner,
+            trusted_scopes: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn trusted_calls(&self) -> usize {
+        self.trusted_scopes.lock().unwrap().len()
+    }
+
+    fn trusted_scopes(&self) -> Vec<(Option<AgentId>, Option<ProjectId>)> {
+        self.trusted_scopes.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl ConversationBindingService for TrustedOnlyBindingService {
+    async fn resolve_or_create_binding(
+        &self,
+        _request: ironclaw_conversations::ResolveConversationRequest,
+    ) -> Result<ConversationBindingResolution, InboundTurnError> {
+        panic!("trusted inbound must call resolve_or_create_binding_with_trusted_scope")
+    }
+
+    async fn resolve_or_create_binding_with_trusted_scope(
+        &self,
+        request: ironclaw_conversations::ResolveConversationRequest,
+        trusted_agent_id: Option<AgentId>,
+        trusted_project_id: Option<ProjectId>,
+    ) -> Result<ConversationBindingResolution, InboundTurnError> {
+        self.trusted_scopes
+            .lock()
+            .unwrap()
+            .push((trusted_agent_id.clone(), trusted_project_id.clone()));
+        self.inner
+            .resolve_or_create_binding_with_trusted_scope(
+                request,
+                trusted_agent_id,
+                trusted_project_id,
+            )
+            .await
+    }
+
+    async fn lookup_binding(
+        &self,
+        request: ironclaw_conversations::ResolveConversationRequest,
+    ) -> Result<ConversationBindingResolution, InboundTurnError> {
+        self.inner.lookup_binding(request).await
+    }
+
+    async fn link_conversation_to_thread(
+        &self,
+        request: LinkConversationRequest,
+    ) -> Result<LinkedConversationBinding, InboundTurnError> {
+        self.inner.link_conversation_to_thread(request).await
+    }
+
+    async fn validate_reply_target(
+        &self,
+        request: ValidateReplyTargetRequest,
+    ) -> Result<ReplyTargetBinding, InboundTurnError> {
+        self.inner.validate_reply_target(request).await
     }
 }
 
