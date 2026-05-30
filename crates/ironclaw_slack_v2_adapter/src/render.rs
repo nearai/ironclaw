@@ -23,12 +23,12 @@ pub enum SlackRenderError {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SlackReplyTarget {
-    pub channel: String,
-    pub thread_ts: Option<String>,
+pub(crate) struct SlackReplyTarget {
+    pub(crate) channel: String,
+    pub(crate) thread_ts: Option<String>,
 }
 
-pub fn slack_reply_target(
+pub(crate) fn slack_reply_target(
     target: &ProductOutboundTarget,
 ) -> Result<SlackReplyTarget, SlackRenderError> {
     let channel = target.external_conversation_ref.conversation_id();
@@ -83,11 +83,11 @@ fn build_egress_request(
     body: Vec<u8>,
     credential_handle: EgressCredentialHandle,
 ) -> EgressRequest {
-    let host = DeclaredEgressHost::new(SLACK_API_HOST).expect("static Slack host valid"); // safety: compile-time const "slack.com" satisfies DeclaredEgressHost validation
+    let host = DeclaredEgressHost::new(SLACK_API_HOST).expect("static Slack host valid"); // INVARIANT: compile-time const "slack.com" satisfies DeclaredEgressHost validation
     let method = EgressMethod::post();
-    let egress_path = EgressPath::new(path).expect("static Slack API path valid"); // safety: only static origin-form Slack Web API paths are passed here
+    let egress_path = EgressPath::new(path).expect("static Slack API path valid"); // INVARIANT: only static origin-form Slack Web API paths are passed here
     let content_type = EgressHeader::new("content-type", "application/json")
-        .expect("static content-type header valid"); // safety: static name/value satisfies EgressHeader validation
+        .expect("static content-type header valid"); // INVARIANT: static name/value satisfies EgressHeader validation
     EgressRequest::new(host, method, egress_path)
         .with_header(content_type)
         .with_body(body)
