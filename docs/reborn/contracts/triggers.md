@@ -167,7 +167,7 @@ The skip policy is per-trigger, not global. Other triggers may continue to fire 
 A trigger fire is synthetic inbound, not a parallel agent loop.
 
 - The fire must enter the normal Reborn inbound/turn pipeline.
-- The trusted facade is `InboundTurnService::handle_inbound_turn_with_trusted_scope(TrustedInboundTurnRequest)`.
+- The trusted facade is `InboundTurnService::handle_inbound_turn_with_trusted_scope(TrustedInboundTurnRequest)`. PR 8 seals the trusted request constructor locally in `ironclaw_conversations`; a later trigger-worker/composition PR will add the host-owned construction shim once that caller exists.
 - Binding resolution for trigger fires must use the trusted-scope path from `conversation-binding.md`.
 - The host-trusted ingress marker and witness used for trigger submission must be type-sealed and unconstructible by product adapters.
 - The host mints the trusted trigger ingress request from `TriggerRecord` state:

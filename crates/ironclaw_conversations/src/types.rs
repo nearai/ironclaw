@@ -11,8 +11,8 @@ use crate::{
     InboundMessageContentRef,
 };
 
-#[doc(hidden)]
-pub mod trusted_ingress {
+#[cfg(test)]
+pub(crate) mod trusted_ingress {
     use core::marker::PhantomData;
 
     use super::private;
@@ -21,8 +21,10 @@ pub mod trusted_ingress {
         pub trait Sealed {}
     }
 
-    /// Sealed host-only token that marks a trusted ingress as minted by the host boundary.
-    pub trait TrustedIngressToken: sealed::Sealed {}
+    /// Sealed host-only token proving the caller already crossed the host
+    /// ingress boundary. Only crate-local host code can mint it, so product
+    /// adapters cannot fabricate trusted scope on their own.
+    pub(crate) trait TrustedIngressToken: sealed::Sealed {}
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     struct TrustedIngressWitness(PhantomData<private::TrustedIngressSeal>);
@@ -31,11 +33,12 @@ pub mod trusted_ingress {
 
     impl TrustedIngressToken for TrustedIngressWitness {}
 
-    pub fn mint() -> impl TrustedIngressToken {
+    pub(crate) fn mint() -> impl TrustedIngressToken {
         TrustedIngressWitness(PhantomData)
     }
 }
 
+#[cfg(test)]
 mod private {
     pub(crate) struct TrustedIngressSeal;
 }
@@ -202,7 +205,8 @@ pub struct TrustedInboundTurnRequest {
 }
 
 impl TrustedInboundTurnRequest {
-    pub fn new(
+    #[cfg(test)]
+    pub(crate) fn new(
         _witness: impl trusted_ingress::TrustedIngressToken,
         request: InboundTurnRequest,
         trusted_agent_id: Option<AgentId>,
