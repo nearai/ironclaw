@@ -479,11 +479,14 @@ mod tests {
         ProjectId::new("project").unwrap()
     }
 
+    type TrustedScopeRecord = (Option<AgentId>, Option<ProjectId>);
+    type TrustedScopeRecords = Arc<Mutex<Vec<TrustedScopeRecord>>>;
+
     #[derive(Clone)]
     struct TrustedOnlyBindingService {
         inner: InMemoryConversationServices,
         resolve_requests: Arc<Mutex<Vec<crate::ResolveConversationRequest>>>,
-        trusted_scopes: Arc<Mutex<Vec<(Option<AgentId>, Option<ProjectId>)>>>,
+        trusted_scopes: TrustedScopeRecords,
     }
 
     impl TrustedOnlyBindingService {
@@ -562,7 +565,7 @@ mod tests {
     #[derive(Clone)]
     struct RejectingTrustedBindingService {
         resolve_requests: Arc<Mutex<Vec<crate::ResolveConversationRequest>>>,
-        trusted_scopes: Arc<Mutex<Vec<(Option<AgentId>, Option<ProjectId>)>>>,
+        trusted_scopes: TrustedScopeRecords,
     }
 
     impl RejectingTrustedBindingService {
