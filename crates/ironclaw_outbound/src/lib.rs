@@ -5,6 +5,7 @@
 //! status. It never owns transport delivery, transcript content, projection
 //! payloads, prompts, tool I/O, secrets, host paths, or backend detail strings.
 
+mod communication_preferences;
 mod delivery_resolution;
 mod error;
 mod filesystem_store;
@@ -15,6 +16,9 @@ mod store;
 mod types;
 mod validation;
 
+pub use communication_preferences::{
+    CommunicationPreferenceKey, CommunicationPreferenceRecord, CommunicationPreferenceRepository,
+};
 pub use delivery_resolution::{
     CommunicationDeliveryCandidate, CommunicationDeliveryIntent, CommunicationDeliveryKind,
     CommunicationDeliveryResolutionRequest, CommunicationModality, DeliveryTargetCapabilities,

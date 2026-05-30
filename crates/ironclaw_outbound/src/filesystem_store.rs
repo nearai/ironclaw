@@ -26,6 +26,9 @@
 //!   `delivery_id`. An indexed `scope` projection allows
 //!   `list_delivery_attempts(scope)` to filter within the tenant-scoped
 //!   subtree without materializing every row.
+//! - `/outbound/communication-preferences/<tenant-user-key>.json` — tenant/user
+//!   communication preference row. Reply-target refs remain candidates and do
+//!   not grant send authority.
 
 use std::sync::Arc;
 
@@ -35,18 +38,20 @@ use ironclaw_filesystem::{
     CasExpectation, ContentType, Entry, FilesystemError, Filter, IndexKey, IndexKind, IndexName,
     IndexSpec, IndexValue, Page, RootFilesystem, ScopedFilesystem, VersionedEntry,
 };
-use ironclaw_host_api::{ResourceScope, ScopedPath, TenantId, ThreadId};
+use ironclaw_host_api::{ResourceScope, ScopedPath, TenantId, ThreadId, UserId};
 use ironclaw_turns::{TurnActor, TurnScope};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
+use crate::communication_preferences::validate_communication_preference;
 use crate::validation::{
     validate_advance_request, validate_delivery_attempt, validate_delivery_identity,
     validate_delivery_status_request, validate_policy, validate_subscription_identity,
     validate_subscription_record, validate_subscription_request,
 };
 use crate::{
-    AdvanceSubscriptionCursorRequest, LoadSubscriptionCursorRequest, OutboundDeliveryAttempt,
+    AdvanceSubscriptionCursorRequest, CommunicationPreferenceKey, CommunicationPreferenceRecord,
+    CommunicationPreferenceRepository, LoadSubscriptionCursorRequest, OutboundDeliveryAttempt,
     OutboundDeliveryId, OutboundError, OutboundStateStore, ProjectionSubscriptionId,
     ProjectionSubscriptionRecord, ThreadNotificationPolicy, UpdateDeliveryStatusRequest,
 };
@@ -80,6 +85,7 @@ const TENANT_ID_INDEX_KEY: &str = "tenant_id";
 const TENANT_ID_INDEX_NAME: &str = "outbound_by_tenant";
 const POLICIES_ROOT: &str = "/outbound/policies";
 const SUBSCRIPTIONS_ROOT: &str = "/outbound/subscriptions";
+const COMMUNICATION_PREFERENCES_ROOT: &str = "/outbound/communication-preferences";
 
 /// Filesystem-backed outbound store. Construct with a [`ScopedFilesystem`]
 /// over any [`RootFilesystem`] implementation (libSQL, Postgres, in-memory,
@@ -226,6 +232,50 @@ where
             .get_versioned_json::<T>(scope, path)
             .await?
             .map(|(value, _)| value))
+    }
+}
+
+#[async_trait]
+impl<F> CommunicationPreferenceRepository for FilesystemOutboundStateStore<F>
+where
+    F: RootFilesystem,
+{
+    async fn put_communication_preference(
+        &self,
+        record: CommunicationPreferenceRecord,
+    ) -> Result<(), OutboundError> {
+        validate_communication_preference(&record)?;
+        let path = communication_preference_path(&record.tenant_id, &record.user_id)?;
+        let resource_scope =
+            communication_preference_resource_scope(&record.tenant_id, &record.user_id);
+        self.ensure_tenant_id_index(&resource_scope, &communication_preferences_root()?)
+            .await?;
+        self.put_json(
+            &resource_scope,
+            &path,
+            &record,
+            &record.tenant_id,
+            CasExpectation::Any,
+        )
+        .await
+    }
+
+    async fn load_communication_preference(
+        &self,
+        key: CommunicationPreferenceKey,
+    ) -> Result<Option<CommunicationPreferenceRecord>, OutboundError> {
+        let path = communication_preference_path(&key.tenant_id, &key.user_id)?;
+        let resource_scope = communication_preference_resource_scope(&key.tenant_id, &key.user_id);
+        let Some(record) = self
+            .get_json::<CommunicationPreferenceRecord>(&resource_scope, &path)
+            .await?
+        else {
+            return Ok(None);
+        };
+        if record.tenant_id != key.tenant_id || record.user_id != key.user_id {
+            return Err(OutboundError::Backend);
+        }
+        Ok(Some(record))
     }
 }
 
@@ -533,6 +583,34 @@ fn delivery_path(delivery_id: &OutboundDeliveryId) -> Result<ScopedPath, Outboun
         .map_err(|_| OutboundError::Backend)
 }
 
+fn communication_preference_path(
+    tenant_id: &TenantId,
+    user_id: &UserId,
+) -> Result<ScopedPath, OutboundError> {
+    #[derive(Serialize)]
+    struct PreferenceIdentity<'a> {
+        tenant_id: &'a TenantId,
+        user_id: &'a UserId,
+    }
+    let identity = PreferenceIdentity { tenant_id, user_id };
+    let serialized = serde_json::to_string(&identity).map_err(|_| OutboundError::Serialization)?;
+    let mut hasher = Sha256::new();
+    hasher.update(serialized.as_bytes());
+    let digest = hex::encode(hasher.finalize());
+    ScopedPath::new(format!("/outbound/communication-preferences/{digest}.json"))
+        .map_err(|_| OutboundError::Backend)
+}
+
+fn communication_preference_resource_scope(
+    tenant_id: &TenantId,
+    user_id: &UserId,
+) -> ResourceScope {
+    let mut scope = ResourceScope::system();
+    scope.tenant_id = tenant_id.clone();
+    scope.user_id = user_id.clone();
+    scope
+}
+
 fn deliveries_root() -> Result<ScopedPath, OutboundError> {
     ScopedPath::new(DELIVERIES_ROOT).map_err(|_| OutboundError::Backend)
 }
@@ -543,6 +621,10 @@ fn policies_root() -> Result<ScopedPath, OutboundError> {
 
 fn subscriptions_root() -> Result<ScopedPath, OutboundError> {
     ScopedPath::new(SUBSCRIPTIONS_ROOT).map_err(|_| OutboundError::Backend)
+}
+
+fn communication_preferences_root() -> Result<ScopedPath, OutboundError> {
+    ScopedPath::new(COMMUNICATION_PREFERENCES_ROOT).map_err(|_| OutboundError::Backend)
 }
 
 fn tenant_id_index_key() -> IndexKey {

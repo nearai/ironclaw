@@ -46,6 +46,7 @@ fn build_outbound_store_for_backend(
 #[tokio::test]
 async fn in_memory_defaults_policy_progress_opt_in_and_subscription_scope() {
     let store = InMemoryOutboundStateStore::default();
+    communication_preferences_are_tenant_user_scoped(&store).await;
     durable_policy_subscription_delivery_flow(&store).await;
     subscription_cursor_rejects_mismatched_scope(&store).await;
     subscription_ids_are_scoped_not_global(&store).await;
@@ -64,6 +65,7 @@ async fn filesystem_store_satisfies_outbound_contract_on_in_memory_backend() {
     // HSM-decorated mount, with no consumer-side code change.
     let backend = std::sync::Arc::new(ironclaw_filesystem::InMemoryBackend::new());
     let store = build_outbound_store_for_backend(backend);
+    communication_preferences_are_tenant_user_scoped(&store).await;
     durable_policy_subscription_delivery_flow(&store).await;
     subscription_cursor_rejects_mismatched_scope(&store).await;
     subscription_ids_are_scoped_not_global(&store).await;
@@ -78,6 +80,89 @@ async fn filesystem_store_satisfies_outbound_contract_on_in_memory_backend() {
 // them; durability across reopen is now a property of the
 // `RootFilesystem` backend, not of an outbound-specific persistence
 // implementation.
+
+async fn communication_preferences_are_tenant_user_scoped<S>(store: &S)
+where
+    S: CommunicationPreferenceRepository + OutboundStateStore,
+{
+    let tenant_id = TenantId::new("tenant-outbound").unwrap();
+    let user_id = UserId::new("user-outbound").unwrap();
+    let updated_by = UserId::new("tenant-admin-outbound").unwrap();
+    let key = CommunicationPreferenceKey::new(tenant_id.clone(), user_id.clone());
+    let record = CommunicationPreferenceRecord {
+        tenant_id: tenant_id.clone(),
+        user_id: user_id.clone(),
+        final_reply_target: Some(reply_ref("reply-pref-final")),
+        progress_target: Some(reply_ref("reply-pref-progress")),
+        approval_prompt_target: Some(reply_ref("reply-pref-approval")),
+        auth_prompt_target: Some(reply_ref("reply-pref-auth")),
+        default_modality: Some(CommunicationModality::Text),
+        updated_at: now(),
+        updated_by: updated_by.clone(),
+    };
+
+    store
+        .put_communication_preference(record.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .load_communication_preference(key.clone())
+            .await
+            .unwrap(),
+        Some(record.clone())
+    );
+
+    let sibling_user_key = CommunicationPreferenceKey::new(
+        tenant_id.clone(),
+        UserId::new("user-outbound-sibling").unwrap(),
+    );
+    assert!(
+        store
+            .load_communication_preference(sibling_user_key)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    let sibling_tenant_key =
+        CommunicationPreferenceKey::new(TenantId::new("tenant-outbound-sibling").unwrap(), user_id);
+    assert!(
+        store
+            .load_communication_preference(sibling_tenant_key)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    let updated = CommunicationPreferenceRecord {
+        final_reply_target: Some(reply_ref("reply-pref-final-updated")),
+        progress_target: None,
+        approval_prompt_target: Some(reply_ref("reply-pref-approval")),
+        auth_prompt_target: None,
+        default_modality: Some(CommunicationModality::Voice),
+        updated_at: now(),
+        updated_by,
+        ..record
+    };
+    store
+        .put_communication_preference(updated.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        store.load_communication_preference(key).await.unwrap(),
+        Some(updated)
+    );
+
+    let thread_policy = store
+        .load_thread_notification_policy(turn_scope())
+        .await
+        .unwrap();
+    assert!(
+        thread_policy.targets.is_empty(),
+        "user communication preferences must not mutate thread notification policy"
+    );
+}
 
 async fn durable_policy_subscription_delivery_flow(store: &impl OutboundStateStore) {
     let scope = turn_scope();
