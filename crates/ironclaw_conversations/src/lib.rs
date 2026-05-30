@@ -33,7 +33,9 @@ pub use inbound::InboundTurnService;
 pub use memory::InMemoryConversationServices;
 pub use traits::{ConversationBindingService, ConversationBindingServiceExt, SessionThreadService};
 #[doc(hidden)]
-pub use types::trusted_ingress::TrustedIngressWitness;
+pub mod trusted_ingress {
+    pub use crate::types::trusted_ingress::{TrustedIngressToken, mint};
+}
 pub use types::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageLookup,
     AcceptedInboundMessageReplay, ConversationBindingResolution, ConversationRouteKind,

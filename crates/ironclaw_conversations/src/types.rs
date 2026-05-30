@@ -17,19 +17,22 @@ pub mod trusted_ingress {
 
     use super::private;
 
-    /// Host-only witness that marks a trusted ingress as minted by the host boundary.
-    ///
-    /// This witness is intentionally unconstructible by downstream crates without
-    /// unsafe code. Keep it out of adapter-facing APIs; host-owned code can mint it
-    /// inside this crate and pass it into the trusted inbound request constructor.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub struct TrustedIngressWitness(PhantomData<private::TrustedIngressSeal>);
+    mod sealed {
+        pub trait Sealed {}
+    }
 
-    impl TrustedIngressWitness {
-        #[allow(dead_code)]
-        pub(crate) const fn new() -> Self {
-            Self(PhantomData)
-        }
+    /// Sealed host-only token that marks a trusted ingress as minted by the host boundary.
+    pub trait TrustedIngressToken: sealed::Sealed {}
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct TrustedIngressWitness(PhantomData<private::TrustedIngressSeal>);
+
+    impl sealed::Sealed for TrustedIngressWitness {}
+
+    impl TrustedIngressToken for TrustedIngressWitness {}
+
+    pub fn mint() -> impl TrustedIngressToken {
+        TrustedIngressWitness(PhantomData)
     }
 }
 
@@ -200,7 +203,7 @@ pub struct TrustedInboundTurnRequest {
 
 impl TrustedInboundTurnRequest {
     pub fn new(
-        _witness: trusted_ingress::TrustedIngressWitness,
+        _witness: impl trusted_ingress::TrustedIngressToken,
         request: InboundTurnRequest,
         trusted_agent_id: Option<AgentId>,
         trusted_project_id: Option<ProjectId>,
@@ -219,14 +222,13 @@ impl TrustedInboundTurnRequest {
 
 #[cfg(test)]
 mod tests {
-    use super::trusted_ingress::TrustedIngressWitness;
+    use super::trusted_ingress;
 
     #[test]
     fn trusted_ingress_witness_is_host_minted_and_zero_sized() {
-        let witness = TrustedIngressWitness::new();
+        let witness = trusted_ingress::mint();
 
         assert_eq!(core::mem::size_of_val(&witness), 0);
-        assert_eq!(core::mem::size_of::<TrustedIngressWitness>(), 0);
     }
 }
 

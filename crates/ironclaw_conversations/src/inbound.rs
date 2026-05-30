@@ -34,8 +34,7 @@ where
         &self,
         request: InboundTurnRequest,
     ) -> Result<InboundTurnResponse, InboundTurnError> {
-        let (request, binding_policy) = NormalizedInboundTurnRequest::from_untrusted(request);
-        self.handle_normalized_inbound_turn(request, binding_policy)
+        self.handle_inbound_turn_inner(request, BindingResolutionPolicy::Untrusted)
             .await
     }
 
@@ -44,21 +43,44 @@ where
         request: TrustedInboundTurnRequest,
     ) -> Result<InboundTurnResponse, InboundTurnError> {
         let (request, trusted_agent_id, trusted_project_id) = request.into_parts();
-        let (request, binding_policy) = NormalizedInboundTurnRequest::from_trusted(
+        self.handle_inbound_turn_inner(
             request,
-            trusted_agent_id,
-            trusted_project_id,
-        );
-        self.handle_normalized_inbound_turn(request, binding_policy)
-            .await
+            BindingResolutionPolicy::Trusted {
+                trusted_agent_id,
+                trusted_project_id,
+            },
+        )
+        .await
     }
 
-    async fn handle_normalized_inbound_turn(
+    async fn handle_inbound_turn_inner(
         &self,
-        request: NormalizedInboundTurnRequest,
+        request: InboundTurnRequest,
         binding_policy: BindingResolutionPolicy,
     ) -> Result<InboundTurnResponse, InboundTurnError> {
-        let replay_lookup = request.replay_lookup();
+        let InboundTurnRequest {
+            tenant_id,
+            adapter_kind,
+            adapter_installation_id,
+            external_actor_ref,
+            external_conversation_ref,
+            external_event_id,
+            route_kind,
+            content_ref,
+            requested_agent_id,
+            requested_project_id,
+            received_at,
+            requested_run_profile,
+        } = request;
+
+        let replay_lookup = AcceptedInboundMessageLookup {
+            tenant_id: tenant_id.clone(),
+            adapter_kind: adapter_kind.clone(),
+            adapter_installation_id: adapter_installation_id.clone(),
+            external_actor_ref: external_actor_ref.clone(),
+            external_conversation_ref: external_conversation_ref.clone(),
+            external_event_id: external_event_id.clone(),
+        };
         if let Some(replay) = self
             .session_thread_service
             .replay_accepted_inbound_message(replay_lookup)
@@ -69,20 +91,19 @@ where
                 .await;
         }
 
-        let resolve_request = request.resolve_request(&binding_policy);
-        let NormalizedInboundTurnRequest {
-            tenant_id: _,
-            adapter_kind,
-            adapter_installation_id,
-            external_actor_ref,
-            external_conversation_ref,
-            external_event_id,
+        let (requested_agent_id, requested_project_id) =
+            binding_policy.requested_scope(requested_agent_id, requested_project_id);
+        let resolve_request = ResolveConversationRequest {
+            tenant_id: tenant_id.clone(),
+            adapter_kind: adapter_kind.clone(),
+            adapter_installation_id: adapter_installation_id.clone(),
+            external_actor_ref: external_actor_ref.clone(),
+            external_conversation_ref: external_conversation_ref.clone(),
+            external_event_id: external_event_id.clone(),
             route_kind,
-            content_ref,
-            received_at,
-            requested_run_profile,
-            ..
-        } = request;
+            requested_agent_id,
+            requested_project_id,
+        };
         let resolution = match binding_policy {
             BindingResolutionPolicy::Untrusted => {
                 self.binding_service
@@ -213,103 +234,6 @@ impl BindingResolutionPolicy {
         match self {
             Self::Untrusted => (requested_agent_id, requested_project_id),
             Self::Trusted { .. } => (None, None),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct NormalizedInboundTurnRequest {
-    tenant_id: ironclaw_host_api::TenantId,
-    adapter_kind: crate::AdapterKind,
-    adapter_installation_id: crate::AdapterInstallationId,
-    external_actor_ref: crate::ExternalActorRef,
-    external_conversation_ref: crate::ExternalConversationRef,
-    external_event_id: crate::ExternalEventId,
-    route_kind: crate::ConversationRouteKind,
-    content_ref: crate::InboundMessageContentRef,
-    requested_agent_id: Option<ironclaw_host_api::AgentId>,
-    requested_project_id: Option<ironclaw_host_api::ProjectId>,
-    received_at: chrono::DateTime<chrono::Utc>,
-    requested_run_profile: Option<ironclaw_turns::RunProfileRequest>,
-}
-
-impl NormalizedInboundTurnRequest {
-    fn from_untrusted(request: InboundTurnRequest) -> (Self, BindingResolutionPolicy) {
-        (
-            Self {
-                tenant_id: request.tenant_id,
-                adapter_kind: request.adapter_kind,
-                adapter_installation_id: request.adapter_installation_id,
-                external_actor_ref: request.external_actor_ref,
-                external_conversation_ref: request.external_conversation_ref,
-                external_event_id: request.external_event_id,
-                route_kind: request.route_kind,
-                content_ref: request.content_ref,
-                requested_agent_id: request.requested_agent_id,
-                requested_project_id: request.requested_project_id,
-                received_at: request.received_at,
-                requested_run_profile: request.requested_run_profile,
-            },
-            BindingResolutionPolicy::Untrusted,
-        )
-    }
-
-    fn from_trusted(
-        request: InboundTurnRequest,
-        trusted_agent_id: Option<ironclaw_host_api::AgentId>,
-        trusted_project_id: Option<ironclaw_host_api::ProjectId>,
-    ) -> (Self, BindingResolutionPolicy) {
-        (
-            Self {
-                tenant_id: request.tenant_id,
-                adapter_kind: request.adapter_kind,
-                adapter_installation_id: request.adapter_installation_id,
-                external_actor_ref: request.external_actor_ref,
-                external_conversation_ref: request.external_conversation_ref,
-                external_event_id: request.external_event_id,
-                route_kind: request.route_kind,
-                content_ref: request.content_ref,
-                requested_agent_id: None,
-                requested_project_id: None,
-                received_at: request.received_at,
-                requested_run_profile: request.requested_run_profile,
-            },
-            BindingResolutionPolicy::Trusted {
-                trusted_agent_id,
-                trusted_project_id,
-            },
-        )
-    }
-
-    fn replay_lookup(&self) -> AcceptedInboundMessageLookup {
-        AcceptedInboundMessageLookup {
-            tenant_id: self.tenant_id.clone(),
-            adapter_kind: self.adapter_kind.clone(),
-            adapter_installation_id: self.adapter_installation_id.clone(),
-            external_actor_ref: self.external_actor_ref.clone(),
-            external_conversation_ref: self.external_conversation_ref.clone(),
-            external_event_id: self.external_event_id.clone(),
-        }
-    }
-
-    fn resolve_request(
-        &self,
-        binding_policy: &BindingResolutionPolicy,
-    ) -> ResolveConversationRequest {
-        let (requested_agent_id, requested_project_id) = binding_policy.requested_scope(
-            self.requested_agent_id.clone(),
-            self.requested_project_id.clone(),
-        );
-        ResolveConversationRequest {
-            tenant_id: self.tenant_id.clone(),
-            adapter_kind: self.adapter_kind.clone(),
-            adapter_installation_id: self.adapter_installation_id.clone(),
-            external_actor_ref: self.external_actor_ref.clone(),
-            external_conversation_ref: self.external_conversation_ref.clone(),
-            external_event_id: self.external_event_id.clone(),
-            route_kind: self.route_kind,
-            requested_agent_id,
-            requested_project_id,
         }
     }
 }

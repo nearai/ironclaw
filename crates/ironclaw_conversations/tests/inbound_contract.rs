@@ -2,6 +2,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
+use ironclaw_conversations::trusted_ingress;
 use ironclaw_conversations::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageLookup,
     AcceptedInboundMessageReplay, AdapterInstallationId, AdapterKind,
@@ -10,7 +11,7 @@ use ironclaw_conversations::{
     InMemoryConversationServices, InboundMessageContentRef, InboundTurnError, InboundTurnRequest,
     InboundTurnService, LinkConversationRequest, LinkedConversationBinding,
     MessageIdempotencyStatus, ReplyTargetBinding, SessionThreadService, ThreadAccessDecision,
-    TrustedInboundTurnRequest, TrustedIngressWitness, ValidateReplyTargetRequest,
+    TrustedInboundTurnRequest, ValidateReplyTargetRequest,
 };
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_turns::{
@@ -2620,7 +2621,7 @@ fn trusted_inbound_request(
     external_event_id: &str,
 ) -> TrustedInboundTurnRequest {
     TrustedInboundTurnRequest::new(
-        trusted_ingress_witness(),
+        trusted_ingress::mint(),
         inbound_request(
             adapter_kind,
             external_actor_ref,
@@ -2630,12 +2631,6 @@ fn trusted_inbound_request(
         Some(agent()),
         Some(project()),
     )
-}
-
-fn trusted_ingress_witness() -> TrustedIngressWitness {
-    // SAFETY: the witness is a sealed zero-sized marker; tests use a local mint
-    // helper so the public API remains host-only for production code.
-    unsafe { std::mem::MaybeUninit::zeroed().assume_init() }
 }
 
 fn resolve_request(
