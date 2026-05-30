@@ -1,0 +1,22 @@
+[package]
+name = "ironclaw_triggers"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+description = "Scheduled trigger domain and source-provider contracts for IronClaw Reborn"
+publish = false
+
+[dependencies]
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+cron = "0.13"
+hex = "0.4"
+ironclaw_host_api = { path = "../ironclaw_host_api" }
+serde = { version = "1", features = ["derive"] }
+sha2 = "0.10"
+thiserror = "2"
+ulid = { version = "1", features = ["serde"] }
+
+[dev-dependencies]
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt"] }
