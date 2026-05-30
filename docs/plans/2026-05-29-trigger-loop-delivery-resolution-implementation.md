@@ -361,11 +361,13 @@ Implement the planned
 `ironclaw_conversations` after PR 2:
 
 - Add a typed trusted request shape that bundles the ordinary inbound request
-  with host-owned `tenant_id`, `creator_user_id`, `agent_id`, and `project_id`
-  authority.
-- Add `ironclaw_conversations::trusted_ingress` sealed marker/witness types and
-  constructors. Host composition can construct them for scheduled triggers;
-  product adapters cannot model or construct them.
+  with host-owned `agent_id` and `project_id` authority. Adapter-supplied
+  requested scope hints are cleared before trusted binding resolution.
+- Add `ironclaw_conversations` sealed trusted-ingress marker/witness types, but
+  do not expose production minting publicly in this PR. PR 8 seals and tests
+  the facade locally; the later trigger worker/composition integration PR owns
+  the host-owned construction shim for scheduled triggers. Product adapters
+  cannot model, mint, or construct trusted ingress.
 - Trigger fires call only this `ironclaw_conversations` facade. They must not
   pass through `ironclaw_product_workflow::InboundTurnService`, which remains
   adapter-facing.
