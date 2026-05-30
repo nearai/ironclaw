@@ -1,12 +1,12 @@
 # Reborn Contract - Communication Delivery Resolution
 
-- **Status:** Contract draft
-- **Date:** 2026-05-29
-- **Depends on:** [`events-projections.md`](events-projections.md), [`conversation-binding.md`](conversation-binding.md), [`approvals.md`](approvals.md), [`auth-product.md`](auth-product.md), [`run-state.md`](run-state.md)
+**Status:** Contract draft
+**Date:** 2026-05-29
+**Depends on:** [`events-projections.md`](events-projections.md), [`conversation-binding.md`](conversation-binding.md), [`approvals.md`](approvals.md), [`auth-product.md`](auth-product.md), [`run-state.md`](run-state.md)
 
 ---
 
-## Purpose
+## 1. Purpose
 
 Communication delivery resolution decides which outbound target should be tried
 for a user-visible communication event after Reborn has already determined that
@@ -33,7 +33,7 @@ product surface.
 
 ---
 
-## Ownership
+## 2. Ownership
 
 | Component | Owns | Does not own |
 | --- | --- | --- |
@@ -49,7 +49,7 @@ language or inject product-specific behavior into the contract.
 
 ---
 
-## Contract Invariants
+## 3. Contract Invariants
 
 1. Outbound candidate selection returns a `CommunicationDeliveryCandidate` only.
 2. The candidate is not authority. It still must pass
@@ -70,23 +70,36 @@ language or inject product-specific behavior into the contract.
 
 ---
 
-## Resolution Input
+## 4. Resolution Input
 
 The outbound service uses one typed resolution envelope so callers cannot smuggle
 unrelated auth, approval, or transport fields into the request while the
 implementation still has one public outbound API surface.
 
 ```rust
-CommunicationDeliveryResolutionRequest {
+pub struct CommunicationDeliveryResolutionRequest {
     scope: TurnScope,
     actor: TurnActor,
-    intent: CommunicationDeliveryIntent,
+    delivery_kind: CommunicationDeliveryKind,
     modality: CommunicationModality,
+    intent: CommunicationDeliveryIntent,
 }
 
-enum CommunicationDeliveryIntent {
+pub enum CommunicationDeliveryKind {
+    FinalReply,
+    ProgressUpdate,
+    DeliveryStatus,
+    ApprovalPrompt,
+    AuthPrompt,
+}
+
+pub enum CommunicationDeliveryIntent {
     RequestedOutbound(RequestedOutboundContext),
     RunNotification(RunNotificationContext),
+}
+
+pub struct RequestedOutboundContext {
+    target: ReplyTargetBindingRef,
 }
 ```
 
@@ -94,13 +107,19 @@ Requested outbound is explicit command intent. Run notification is lifecycle
 policy for final replies, progress updates, approval prompts, auth prompts, and
 delivery-status notices.
 
+`RequestedOutboundContext.target` is a typed reply-target binding candidate,
+not a raw channel, adapter string, product-specific conversation id, or
+transport address. It is still only a candidate and must pass
+`OutboundPolicyService` validation for the current scope, actor, delivery kind,
+and modality before any send.
+
 ```rust
-RunNotificationContext {
+pub struct RunNotificationContext {
     event_kind: RunNotificationEventKind,
     origin: RunNotificationOrigin,
 }
 
-RunNotificationOrigin {
+pub enum RunNotificationOrigin {
     LiveSourceRoute { source_route: SourceRouteContext },
     Triggered { trigger: TriggerCommunicationContext },
     TriggeredFromSourceRoute {
@@ -123,23 +142,61 @@ has been selected and validated.
 
 ---
 
-## P0 Rule Order
+## 5. Preference Fields
+
+User communication preferences are owned by an
+`ironclaw_outbound::CommunicationPreferenceRepository` backed by a dedicated
+typed tenant/user database table. They are not stored in the generic JSON
+settings store and are not profile/tone preferences.
+
+The V1 preference row is keyed by `(tenant_id, user_id)` and may contain these
+optional `ReplyTargetBindingRef` candidate fields:
+
+- `final_reply_target`: default target for ordinary run results when no live
+  source route applies;
+- `progress_target`: target for progress updates when the live source route is
+  absent or cannot validate for progress;
+- `approval_prompt_target`: exact-owner target for approval prompts;
+- `auth_prompt_target`: exact-owner target for auth prompts;
+- `default_modality`: preferred modality when a caller does not specify a more
+  specific supported modality.
+
+Preference fields are candidates only. The outbound service must revalidate
+tenant ownership, exact owner where required, target capability, delivery kind,
+and modality before recording a delivery attempt.
+
+---
+
+## 6. P0 Rule Order
 
 The first matching rule yields the only candidate.
 
-1. **Explicit requested outbound wins.** If a caller explicitly requests an
-   outbound target, the resolver returns that target as the candidate.
-2. **Authority-bearing prompts use exact-owner prompt targets.** Approval and
-   auth prompts use `approval_prompt_target` / `auth_prompt_target` preferences
-   only when outbound validation confirms the target supports gate/auth prompts
-   and belongs to the exact owner. Shared/group widening is forbidden for these
-   payloads.
+1. **Authority-bearing prompts use exact-owner prompt targets.** Approval and
+   auth prompts use `approval_prompt_target` / `auth_prompt_target`
+   preferences only when outbound validation confirms the target supports the
+   requested prompt kind and belongs to the exact owner. Shared/group widening
+   is forbidden for these payloads. `RequestedOutbound` cannot choose an
+   independent approval/auth prompt target; if present for these delivery
+   kinds, it may only narrow to the same exact-owner prompt target after
+   validation.
+2. **Explicit requested outbound wins for non-authority delivery.** If a caller
+   explicitly requests an outbound target for a non-approval and non-auth
+   delivery kind, the resolver returns that typed target as the candidate.
 3. **Live source route wins for ordinary run notifications.** If the run
    descended from a real inbound product message, final replies and supported
    progress/status updates prefer the live source route's reply target.
-4. **Triggered preferred target wins for ordinary trigger results.** If the run
-   descended from a trigger and has no live source route, final replies prefer
-   the creator user's configured outbound target.
+4. **Triggered-from-source-route uses the live source route.** If the run
+   descended from both a trigger and a live source route, ordinary final
+   replies, progress updates, and delivery-status notices prefer the live
+   source route over the trigger creator's preferred target.
+5. **Triggered preferred target wins for ordinary trigger results without a
+   live source route.** If the run descended from a trigger and has no live
+   source route, final replies prefer the creator user's configured
+   `final_reply_target`.
+6. **System events have no implicit external target in P0.** `SystemEvent`
+   origins require `RequestedOutbound` for external delivery. Without an
+   explicit requested target, the event is recorded as delivery metadata only
+   and no external send is attempted.
 
 Delivery-status notifications follow the same origin rule as the delivery they
 describe. Progress updates use the source route when that route validates for
@@ -153,7 +210,7 @@ an automatic hop to some other channel.
 
 ---
 
-## Validation Boundary
+## 7. Validation Boundary
 
 Validation and delivery-attempt recording remain in `ironclaw_outbound`.
 
@@ -176,7 +233,7 @@ modality and notification kind.
 
 ---
 
-## Trigger Delivery Boundary
+## 8. Trigger Delivery Boundary
 
 Trigger loops are not blocked on outbound delivery resolution. A trigger can
 fire, execute, and persist its run even if no external delivery path is
@@ -188,7 +245,7 @@ trigger domain; outbound destination choice stays in `ironclaw_outbound`.
 
 ---
 
-## Non-Goals
+## 9. Non-Goals
 
 This contract does not define:
 
