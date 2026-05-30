@@ -5,6 +5,7 @@
 //! status. It never owns transport delivery, transcript content, projection
 //! payloads, prompts, tool I/O, secrets, host paths, or backend detail strings.
 
+mod delivery_resolution;
 mod error;
 mod filesystem_store;
 mod ids;
@@ -14,10 +15,18 @@ mod store;
 mod types;
 mod validation;
 
+pub use delivery_resolution::{
+    CommunicationDeliveryCandidate, CommunicationDeliveryIntent, CommunicationDeliveryKind,
+    CommunicationDeliveryResolutionRequest, CommunicationModality, DeliveryTargetCapabilities,
+    RequestedOutboundContext, RequestedOutboundKind, RunNotificationContext,
+    RunNotificationEventKind, RunNotificationOrigin, SourceRouteContext, SystemEventReasonCode,
+    TriggerCommunicationContext, TriggerSourceKind,
+};
 pub use error::OutboundError;
 pub use filesystem_store::FilesystemOutboundStateStore;
 pub use ids::{
-    OutboundDeliveryId, ProjectionSubscriptionId, ProjectionUpdateRef, TriggerFireSlot, TriggerId,
+    OutboundDeliveryId, ProjectionSubscriptionId, ProjectionUpdateRef, TriggerFireSlot,
+    TriggerOriginRef,
 };
 pub use memory::InMemoryOutboundStateStore;
 pub use service::{
@@ -25,16 +34,11 @@ pub use service::{
 };
 pub use store::OutboundStateStore;
 pub use types::{
-    AdvanceSubscriptionCursorRequest, CommunicationDeliveryCandidate, CommunicationDeliveryIntent,
-    CommunicationDeliveryKind, CommunicationDeliveryResolutionRequest, CommunicationModality,
-    DeliveryFailureKind, DeliveryTargetCapabilities, LoadSubscriptionCursorRequest,
+    AdvanceSubscriptionCursorRequest, DeliveryFailureKind, LoadSubscriptionCursorRequest,
     OutboundDeliveryAttempt, OutboundDeliveryDecision, OutboundDeliveryStatus,
     OutboundPushCandidate, OutboundPushKind, OutboundPushPlan, OutboundPushTargetRequest,
     PrepareOutboundDeliveryRequest, ProjectionSubscriptionRecord, ProjectionSubscriptionRequest,
-    ReplyTargetBindingClaim, ReplyTargetValidationRequest, RequestedOutboundContext,
-    RequestedOutboundKind, RunNotificationContext, RunNotificationEventKind, RunNotificationOrigin,
-    SourceRouteContext, SystemEventReasonCode, ThreadNotificationPolicy, ThreadNotificationTarget,
-    ThreadProjectionAccessClaim, ThreadProjectionAccessGrant, ThreadProjectionAccessRequest,
-    TriggerCommunicationContext, TriggerSourceKind, UpdateDeliveryStatusRequest,
-    ValidatedReplyTargetBinding,
+    ReplyTargetBindingClaim, ReplyTargetValidationRequest, ThreadNotificationPolicy,
+    ThreadNotificationTarget, ThreadProjectionAccessClaim, ThreadProjectionAccessGrant,
+    ThreadProjectionAccessRequest, UpdateDeliveryStatusRequest, ValidatedReplyTargetBinding,
 };

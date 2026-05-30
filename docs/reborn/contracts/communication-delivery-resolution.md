@@ -80,7 +80,6 @@ implementation still has one public outbound API surface.
 pub struct CommunicationDeliveryResolutionRequest {
     scope: TurnScope,
     actor: TurnActor,
-    delivery_kind: CommunicationDeliveryKind,
     modality: CommunicationModality,
     intent: CommunicationDeliveryIntent,
 }
@@ -118,8 +117,10 @@ not a raw channel, adapter string, product-specific conversation id, or
 transport address. `RequestedOutboundKind` is intentionally narrower than the
 run-notification delivery kinds and excludes approval/auth prompt payloads.
 The requested outbound target is still only a candidate and must pass
-`OutboundPolicyService` validation for the current scope, actor, delivery kind,
-and modality before any send.
+`OutboundPolicyService` validation for the current scope, actor, derived
+delivery kind, and modality before any send. `CommunicationDeliveryResolutionRequest`
+derives its delivery kind from `intent`; callers must not provide a separate
+top-level kind that could contradict the request branch.
 
 ```rust
 pub struct RunNotificationContext {
@@ -140,7 +141,9 @@ pub enum RunNotificationOrigin {
 
 `SourceRouteContext` carries the validated reply target for a live inbound
 conversation. `TriggerCommunicationContext` identifies the trigger fire without
-turning that trigger into a communication destination.
+turning that trigger into a communication destination. The trigger reference is
+an outbound-local correlation value; the canonical trigger identity belongs to
+the future `ironclaw_triggers::TriggerId` in PR 9.
 
 `SystemEventReasonCode` is a stable, redacted enum/code. Human-readable backend
 details, raw tool input, prompt material, OAuth state, approval payloads, and
