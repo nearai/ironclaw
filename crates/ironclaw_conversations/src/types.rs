@@ -11,6 +11,32 @@ use crate::{
     InboundMessageContentRef,
 };
 
+#[doc(hidden)]
+pub mod trusted_ingress {
+    use core::marker::PhantomData;
+
+    use super::private;
+
+    /// Host-only witness that marks a trusted ingress as minted by the host boundary.
+    ///
+    /// This witness is intentionally unconstructible by downstream crates without
+    /// unsafe code. Keep it out of adapter-facing APIs; host-owned code can mint it
+    /// inside this crate and pass it into the trusted inbound request constructor.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct TrustedIngressWitness(PhantomData<private::TrustedIngressSeal>);
+
+    impl TrustedIngressWitness {
+        #[allow(dead_code)]
+        pub(crate) const fn new() -> Self {
+            Self(PhantomData)
+        }
+    }
+}
+
+mod private {
+    pub(crate) struct TrustedIngressSeal;
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConversationRouteKind {
@@ -165,60 +191,42 @@ pub struct InboundTurnRequest {
     pub requested_run_profile: Option<RunProfileRequest>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrustedInboundTurnRequest {
-    pub(crate) tenant_id: TenantId,
-    pub(crate) adapter_kind: AdapterKind,
-    pub(crate) adapter_installation_id: AdapterInstallationId,
-    pub(crate) external_actor_ref: ExternalActorRef,
-    pub(crate) external_conversation_ref: ExternalConversationRef,
-    pub(crate) external_event_id: ExternalEventId,
-    pub(crate) route_kind: ConversationRouteKind,
-    pub(crate) content_ref: InboundMessageContentRef,
-    pub(crate) creator_user_id: UserId,
-    pub(crate) trusted_agent_id: Option<AgentId>,
-    pub(crate) trusted_project_id: Option<ProjectId>,
-    pub(crate) received_at: DateTime<Utc>,
-    pub(crate) requested_run_profile: Option<RunProfileRequest>,
+    request: InboundTurnRequest,
+    trusted_agent_id: Option<AgentId>,
+    trusted_project_id: Option<ProjectId>,
 }
 
 impl TrustedInboundTurnRequest {
     pub fn new(
+        _witness: trusted_ingress::TrustedIngressWitness,
         request: InboundTurnRequest,
-        creator_user_id: UserId,
         trusted_agent_id: Option<AgentId>,
         trusted_project_id: Option<ProjectId>,
     ) -> Self {
-        let InboundTurnRequest {
-            tenant_id,
-            adapter_kind,
-            adapter_installation_id,
-            external_actor_ref,
-            external_conversation_ref,
-            external_event_id,
-            route_kind,
-            content_ref,
-            requested_agent_id: _,
-            requested_project_id: _,
-            received_at,
-            requested_run_profile,
-        } = request;
-
         Self {
-            tenant_id,
-            adapter_kind,
-            adapter_installation_id,
-            external_actor_ref,
-            external_conversation_ref,
-            external_event_id,
-            route_kind,
-            content_ref,
-            creator_user_id,
+            request,
             trusted_agent_id,
             trusted_project_id,
-            received_at,
-            requested_run_profile,
         }
+    }
+
+    pub(crate) fn into_parts(self) -> (InboundTurnRequest, Option<AgentId>, Option<ProjectId>) {
+        (self.request, self.trusted_agent_id, self.trusted_project_id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::trusted_ingress::TrustedIngressWitness;
+
+    #[test]
+    fn trusted_ingress_witness_is_host_minted_and_zero_sized() {
+        let witness = TrustedIngressWitness::new();
+
+        assert_eq!(core::mem::size_of_val(&witness), 0);
+        assert_eq!(core::mem::size_of::<TrustedIngressWitness>(), 0);
     }
 }
 

@@ -32,6 +32,8 @@ pub use ids::{
 pub use inbound::InboundTurnService;
 pub use memory::InMemoryConversationServices;
 pub use traits::{ConversationBindingService, ConversationBindingServiceExt, SessionThreadService};
+#[doc(hidden)]
+pub use types::trusted_ingress::TrustedIngressWitness;
 pub use types::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageLookup,
     AcceptedInboundMessageReplay, ConversationBindingResolution, ConversationRouteKind,

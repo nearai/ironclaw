@@ -1,4 +1,4 @@
-use std::{future::Future, sync::Arc};
+use std::sync::Arc;
 
 use ironclaw_turns::{AdmissionRejectionReason, SubmitTurnRequest, TurnCoordinator, TurnError};
 
@@ -34,48 +34,34 @@ where
         &self,
         request: InboundTurnRequest,
     ) -> Result<InboundTurnResponse, InboundTurnError> {
-        self.handle_inbound_turn_with_binding_resolver(request, |request| {
-            self.binding_service.resolve_or_create_binding(request)
-        })
-        .await
+        let (request, binding_policy) = NormalizedInboundTurnRequest::from_untrusted(request);
+        self.handle_normalized_inbound_turn(request, binding_policy)
+            .await
     }
 
     pub async fn handle_inbound_turn_with_trusted_scope(
         &self,
         request: TrustedInboundTurnRequest,
     ) -> Result<InboundTurnResponse, InboundTurnError> {
-        let trusted_agent_id = request.trusted_agent_id.clone();
-        let trusted_project_id = request.trusted_project_id.clone();
-        self.handle_trusted_inbound_turn_with_binding_resolver(request, move |request| {
-            self.binding_service
-                .resolve_or_create_binding_with_trusted_scope(
-                    request,
-                    trusted_agent_id.clone(),
-                    trusted_project_id.clone(),
-                )
-        })
-        .await
+        let (request, trusted_agent_id, trusted_project_id) = request.into_parts();
+        let (request, binding_policy) = NormalizedInboundTurnRequest::from_trusted(
+            request,
+            trusted_agent_id,
+            trusted_project_id,
+        );
+        self.handle_normalized_inbound_turn(request, binding_policy)
+            .await
     }
 
-    async fn handle_inbound_turn_with_binding_resolver<F, Fut>(
+    async fn handle_normalized_inbound_turn(
         &self,
-        request: InboundTurnRequest,
-        resolve_binding: F,
-    ) -> Result<InboundTurnResponse, InboundTurnError>
-    where
-        F: FnOnce(ResolveConversationRequest) -> Fut,
-        Fut: Future<Output = Result<ConversationBindingResolution, InboundTurnError>>,
-    {
+        request: NormalizedInboundTurnRequest,
+        binding_policy: BindingResolutionPolicy,
+    ) -> Result<InboundTurnResponse, InboundTurnError> {
+        let replay_lookup = request.replay_lookup();
         if let Some(replay) = self
             .session_thread_service
-            .replay_accepted_inbound_message(AcceptedInboundMessageLookup {
-                tenant_id: request.tenant_id.clone(),
-                adapter_kind: request.adapter_kind.clone(),
-                adapter_installation_id: request.adapter_installation_id.clone(),
-                external_actor_ref: request.external_actor_ref.clone(),
-                external_conversation_ref: request.external_conversation_ref.clone(),
-                external_event_id: request.external_event_id.clone(),
-            })
+            .replay_accepted_inbound_message(replay_lookup)
             .await?
         {
             return self
@@ -83,52 +69,9 @@ where
                 .await;
         }
 
-        let resolution = resolve_binding(ResolveConversationRequest {
-            tenant_id: request.tenant_id.clone(),
-            adapter_kind: request.adapter_kind.clone(),
-            adapter_installation_id: request.adapter_installation_id.clone(),
-            external_actor_ref: request.external_actor_ref.clone(),
-            external_conversation_ref: request.external_conversation_ref.clone(),
-            external_event_id: request.external_event_id.clone(),
-            route_kind: request.route_kind,
-            requested_agent_id: request.requested_agent_id,
-            requested_project_id: request.requested_project_id,
-        })
-        .await?;
-        let accepted_message = self
-            .session_thread_service
-            .accept_inbound_message(AcceptInboundMessageRequest {
-                tenant_id: resolution.tenant_id.clone(),
-                thread_id: resolution.turn_scope.thread_id.clone(),
-                actor: resolution.actor.clone(),
-                adapter_kind: request.adapter_kind,
-                adapter_installation_id: request.adapter_installation_id,
-                external_actor_ref: request.external_actor_ref,
-                source_binding_ref: resolution.source_binding_ref.clone(),
-                reply_target_binding_ref: resolution.reply_target_binding_ref.clone(),
-                external_conversation_ref: request.external_conversation_ref,
-                external_event_id: request.external_event_id,
-                route_kind: request.route_kind,
-                content_ref: request.content_ref,
-                received_at: request.received_at,
-                requested_run_profile: request.requested_run_profile,
-            })
-            .await?;
-
-        self.submit_or_replay(resolution, accepted_message).await
-    }
-
-    async fn handle_trusted_inbound_turn_with_binding_resolver<F, Fut>(
-        &self,
-        request: TrustedInboundTurnRequest,
-        resolve_binding: F,
-    ) -> Result<InboundTurnResponse, InboundTurnError>
-    where
-        F: FnOnce(ResolveConversationRequest) -> Fut,
-        Fut: Future<Output = Result<ConversationBindingResolution, InboundTurnError>>,
-    {
-        let TrustedInboundTurnRequest {
-            tenant_id,
+        let resolve_request = request.resolve_request(&binding_policy);
+        let NormalizedInboundTurnRequest {
+            tenant_id: _,
             adapter_kind,
             adapter_installation_id,
             external_actor_ref,
@@ -136,44 +79,29 @@ where
             external_event_id,
             route_kind,
             content_ref,
-            creator_user_id,
-            trusted_agent_id: _,
-            trusted_project_id: _,
             received_at,
             requested_run_profile,
+            ..
         } = request;
-
-        let _ = creator_user_id;
-
-        if let Some(replay) = self
-            .session_thread_service
-            .replay_accepted_inbound_message(AcceptedInboundMessageLookup {
-                tenant_id: tenant_id.clone(),
-                adapter_kind: adapter_kind.clone(),
-                adapter_installation_id: adapter_installation_id.clone(),
-                external_actor_ref: external_actor_ref.clone(),
-                external_conversation_ref: external_conversation_ref.clone(),
-                external_event_id: external_event_id.clone(),
-            })
-            .await?
-        {
-            return self
-                .submit_or_replay(replay.resolution, replay.accepted_message)
-                .await;
-        }
-
-        let resolution = resolve_binding(ResolveConversationRequest {
-            tenant_id: tenant_id.clone(),
-            adapter_kind: adapter_kind.clone(),
-            adapter_installation_id: adapter_installation_id.clone(),
-            external_actor_ref: external_actor_ref.clone(),
-            external_conversation_ref: external_conversation_ref.clone(),
-            external_event_id: external_event_id.clone(),
-            route_kind,
-            requested_agent_id: None,
-            requested_project_id: None,
-        })
-        .await?;
+        let resolution = match binding_policy {
+            BindingResolutionPolicy::Untrusted => {
+                self.binding_service
+                    .resolve_or_create_binding(resolve_request)
+                    .await?
+            }
+            BindingResolutionPolicy::Trusted {
+                trusted_agent_id,
+                trusted_project_id,
+            } => {
+                self.binding_service
+                    .resolve_or_create_binding_with_trusted_scope(
+                        resolve_request,
+                        trusted_agent_id,
+                        trusted_project_id,
+                    )
+                    .await?
+            }
+        };
         let accepted_message = self
             .session_thread_service
             .accept_inbound_message(AcceptInboundMessageRequest {
@@ -261,6 +189,128 @@ where
             accepted_message,
             turn_submission: Some(turn_submission),
         })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum BindingResolutionPolicy {
+    Untrusted,
+    Trusted {
+        trusted_agent_id: Option<ironclaw_host_api::AgentId>,
+        trusted_project_id: Option<ironclaw_host_api::ProjectId>,
+    },
+}
+
+impl BindingResolutionPolicy {
+    fn requested_scope(
+        &self,
+        requested_agent_id: Option<ironclaw_host_api::AgentId>,
+        requested_project_id: Option<ironclaw_host_api::ProjectId>,
+    ) -> (
+        Option<ironclaw_host_api::AgentId>,
+        Option<ironclaw_host_api::ProjectId>,
+    ) {
+        match self {
+            Self::Untrusted => (requested_agent_id, requested_project_id),
+            Self::Trusted { .. } => (None, None),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NormalizedInboundTurnRequest {
+    tenant_id: ironclaw_host_api::TenantId,
+    adapter_kind: crate::AdapterKind,
+    adapter_installation_id: crate::AdapterInstallationId,
+    external_actor_ref: crate::ExternalActorRef,
+    external_conversation_ref: crate::ExternalConversationRef,
+    external_event_id: crate::ExternalEventId,
+    route_kind: crate::ConversationRouteKind,
+    content_ref: crate::InboundMessageContentRef,
+    requested_agent_id: Option<ironclaw_host_api::AgentId>,
+    requested_project_id: Option<ironclaw_host_api::ProjectId>,
+    received_at: chrono::DateTime<chrono::Utc>,
+    requested_run_profile: Option<ironclaw_turns::RunProfileRequest>,
+}
+
+impl NormalizedInboundTurnRequest {
+    fn from_untrusted(request: InboundTurnRequest) -> (Self, BindingResolutionPolicy) {
+        (
+            Self {
+                tenant_id: request.tenant_id,
+                adapter_kind: request.adapter_kind,
+                adapter_installation_id: request.adapter_installation_id,
+                external_actor_ref: request.external_actor_ref,
+                external_conversation_ref: request.external_conversation_ref,
+                external_event_id: request.external_event_id,
+                route_kind: request.route_kind,
+                content_ref: request.content_ref,
+                requested_agent_id: request.requested_agent_id,
+                requested_project_id: request.requested_project_id,
+                received_at: request.received_at,
+                requested_run_profile: request.requested_run_profile,
+            },
+            BindingResolutionPolicy::Untrusted,
+        )
+    }
+
+    fn from_trusted(
+        request: InboundTurnRequest,
+        trusted_agent_id: Option<ironclaw_host_api::AgentId>,
+        trusted_project_id: Option<ironclaw_host_api::ProjectId>,
+    ) -> (Self, BindingResolutionPolicy) {
+        (
+            Self {
+                tenant_id: request.tenant_id,
+                adapter_kind: request.adapter_kind,
+                adapter_installation_id: request.adapter_installation_id,
+                external_actor_ref: request.external_actor_ref,
+                external_conversation_ref: request.external_conversation_ref,
+                external_event_id: request.external_event_id,
+                route_kind: request.route_kind,
+                content_ref: request.content_ref,
+                requested_agent_id: None,
+                requested_project_id: None,
+                received_at: request.received_at,
+                requested_run_profile: request.requested_run_profile,
+            },
+            BindingResolutionPolicy::Trusted {
+                trusted_agent_id,
+                trusted_project_id,
+            },
+        )
+    }
+
+    fn replay_lookup(&self) -> AcceptedInboundMessageLookup {
+        AcceptedInboundMessageLookup {
+            tenant_id: self.tenant_id.clone(),
+            adapter_kind: self.adapter_kind.clone(),
+            adapter_installation_id: self.adapter_installation_id.clone(),
+            external_actor_ref: self.external_actor_ref.clone(),
+            external_conversation_ref: self.external_conversation_ref.clone(),
+            external_event_id: self.external_event_id.clone(),
+        }
+    }
+
+    fn resolve_request(
+        &self,
+        binding_policy: &BindingResolutionPolicy,
+    ) -> ResolveConversationRequest {
+        let (requested_agent_id, requested_project_id) = binding_policy.requested_scope(
+            self.requested_agent_id.clone(),
+            self.requested_project_id.clone(),
+        );
+        ResolveConversationRequest {
+            tenant_id: self.tenant_id.clone(),
+            adapter_kind: self.adapter_kind.clone(),
+            adapter_installation_id: self.adapter_installation_id.clone(),
+            external_actor_ref: self.external_actor_ref.clone(),
+            external_conversation_ref: self.external_conversation_ref.clone(),
+            external_event_id: self.external_event_id.clone(),
+            route_kind: self.route_kind,
+            requested_agent_id,
+            requested_project_id,
+        }
     }
 }
 

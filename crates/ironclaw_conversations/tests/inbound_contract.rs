@@ -10,7 +10,7 @@ use ironclaw_conversations::{
     InMemoryConversationServices, InboundMessageContentRef, InboundTurnError, InboundTurnRequest,
     InboundTurnService, LinkConversationRequest, LinkedConversationBinding,
     MessageIdempotencyStatus, ReplyTargetBinding, SessionThreadService, ThreadAccessDecision,
-    TrustedInboundTurnRequest, ValidateReplyTargetRequest,
+    TrustedInboundTurnRequest, TrustedIngressWitness, ValidateReplyTargetRequest,
 };
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_turns::{
@@ -2620,16 +2620,22 @@ fn trusted_inbound_request(
     external_event_id: &str,
 ) -> TrustedInboundTurnRequest {
     TrustedInboundTurnRequest::new(
+        trusted_ingress_witness(),
         inbound_request(
             adapter_kind,
             external_actor_ref,
             external_conversation_ref,
             external_event_id,
         ),
-        user("trigger-creator"),
         Some(agent()),
         Some(project()),
     )
+}
+
+fn trusted_ingress_witness() -> TrustedIngressWitness {
+    // SAFETY: the witness is a sealed zero-sized marker; tests use a local mint
+    // helper so the public API remains host-only for production code.
+    unsafe { std::mem::MaybeUninit::zeroed().assume_init() }
 }
 
 fn resolve_request(
