@@ -6,8 +6,10 @@ use ironclaw_auth::{
     AuthChallenge, AuthContinuationEvent, AuthContinuationRef, AuthErrorCode, AuthFlowId,
     AuthFlowKind, AuthFlowManager, AuthFlowRecord, AuthFlowRecordSource, AuthFlowStatus,
     AuthInteractionId, AuthInteractionService, AuthProductError, AuthProductScope,
-    AuthProviderClient, AuthProviderId, CredentialAccountId, CredentialAccountLabel,
-    CredentialAccountService, CredentialAccountStatus, CredentialAccountUpdateBinding,
+    AuthProviderClient, AuthProviderId, CredentialAccountChoiceRequest, CredentialAccountId,
+    CredentialAccountLabel, CredentialAccountListPage, CredentialAccountListRequest,
+    CredentialAccountProjection, CredentialAccountService, CredentialAccountStatus,
+    CredentialAccountUpdateBinding, CredentialRecoveryProjection, CredentialRecoveryRequest,
     CredentialRefreshReport, CredentialRefreshRequest, CredentialSetupService,
     InMemoryAuthProductServices, ManualTokenSetupRequest, NewAuthFlow, OAuthAuthorizationUrl,
     OAuthCallbackClaimRequest, OAuthCallbackFailureInput, OAuthCallbackInput,
@@ -556,6 +558,51 @@ impl RebornProductAuthServices {
     ) -> Result<CredentialRefreshReport, RebornCredentialLifecycleError> {
         self.credential_account_service
             .refresh_account(request)
+            .await
+            .map_err(RebornCredentialLifecycleError::from)
+    }
+
+    /// List redacted credential account projections through the injected
+    /// account port.
+    ///
+    /// Routes/CLIs/extensions enter here so they never bypass the account
+    /// port's grant filtering, status redaction, or extension-scoped
+    /// visibility rules.
+    pub async fn list_credential_accounts(
+        &self,
+        request: CredentialAccountListRequest,
+    ) -> Result<CredentialAccountListPage, RebornCredentialLifecycleError> {
+        self.credential_account_service
+            .list_accounts(request)
+            .await
+            .map_err(RebornCredentialLifecycleError::from)
+    }
+
+    /// Select a single configured credential account through the injected
+    /// account port.
+    ///
+    /// The selection is validated by the underlying port; this facade does
+    /// not reconstruct selection authority locally.
+    pub async fn select_credential_account(
+        &self,
+        request: CredentialAccountChoiceRequest,
+    ) -> Result<CredentialAccountProjection, RebornCredentialLifecycleError> {
+        self.credential_account_service
+            .select_configured_account(request)
+            .await
+            .map_err(RebornCredentialLifecycleError::from)
+    }
+
+    /// Project the stable credential recovery state for a provider through
+    /// the injected account port. The projection drives WebUI/CLI/API
+    /// recovery, refresh, and reauthorize prompts without exposing backend
+    /// errors or secret handles.
+    pub async fn project_credential_recovery(
+        &self,
+        request: CredentialRecoveryRequest,
+    ) -> Result<CredentialRecoveryProjection, RebornCredentialLifecycleError> {
+        self.credential_account_service
+            .project_credential_recovery(request)
             .await
             .map_err(RebornCredentialLifecycleError::from)
     }

@@ -17,6 +17,14 @@ workflow from something other than a live human message. V1 delivers
 mail." Webhook and message-regex triggers are planned fast-follow work and the
 architecture must not preclude them.
 
+**P0 implementation goal:** ship cron-backed scheduled trigger events first. P0
+proves that a stored schedule can fire, enter the Reborn inbound/turn pipeline
+as a synthetic inbound message, run in a new dedicated thread, and persist the
+resulting thread. Fixed interval and one-shot schedules may share the same
+schedule-provider implementation if they are cheap, but cron scheduled events
+are the first acceptance target. Webhook, message-regex, and system-event
+sources are not P0.
+
 A trigger fire is treated as exactly what it is: a **synthetic inbound
 message**. Instead of building a parallel execution engine, a fire fans into
 the Reborn inbound pipeline (`InboundTurnService → TurnCoordinator →
@@ -36,7 +44,9 @@ cron is an external transport.
 
 ### In V1
 
-- Schedule trigger source: cron expression, fixed interval, one-shot timestamp.
+- Schedule trigger source: cron expression first; fixed interval and one-shot
+  timestamp may ride along in the same provider if they do not expand the P0
+  surface.
 - `trigger_create` / `trigger_list` / `trigger_remove` capabilities, invoked
   through the Reborn capability/dispatch surface.
 - Typed `TriggerRepository` with PostgreSQL + libSQL parity.
@@ -50,10 +60,11 @@ cron is an external transport.
 
 ### Acceptance criterion
 
-Cron triggers only. Webhook and regex sources are explicitly **not** acceptance
-criteria for V1. If Reborn outbound is not ready at implementation time,
-delivery (§6) drops to fast-follow and V1 acceptance is: a trigger fires on
-schedule, runs a turn in a new dedicated thread, and the thread persists.
+P0/V1 acceptance is cron-triggered events only. Webhook and regex sources are
+explicitly **not** acceptance criteria for V1. If Reborn outbound is not ready
+at implementation time, delivery (§6) drops to fast-follow and V1 acceptance is:
+a cron trigger fires on schedule, runs a turn in a new dedicated thread, and the
+thread persists.
 
 ### Deferred (fast-follow — architecture must leave room, no implementation in V1)
 

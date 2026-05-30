@@ -82,10 +82,11 @@ Inbound order (outer → inner → handler):
    `BodyLimitPolicy` from `ironclaw_webui_v2::webui_v2_routes()` and,
    when present, product-auth route descriptors at composition time and
    enforces it before auth runs (so an oversized payload never spends a
-   bearer-validation step). Today: `create_thread` and product-auth
-   OAuth start 16 KiB, `send_message` 1 MiB, `cancel_run` and
-   `resolve_gate` 4 KiB, `get_timeline`, `stream_events`, and
-   product-auth OAuth callback `NoBody`.
+   bearer-validation step). Today: `create_thread`, product-auth OAuth
+   start, manual-token setup/secret-submit, accounts list/select/recovery/
+   refresh, and lifecycle cleanup — all 16 KiB; `send_message` 1 MiB;
+   `cancel_run` and `resolve_gate` 4 KiB; `get_timeline`,
+   `stream_events`, and product-auth OAuth callback `NoBody`.
    `BodyLimitPolicy` is an exhaustive `match`, so a new variant added
    upstream fails the build rather than silently disabling
    enforcement.
