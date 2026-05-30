@@ -92,8 +92,7 @@ use crate::{
 use crate::{
     available_extensions::{
         AvailableExtensionCatalog, gmail_manifest_digest, google_calendar_manifest_digest,
-        notion_mcp_manifest_digest,
-        web_access_manifest_digest,
+        notion_mcp_manifest_digest, web_access_manifest_digest,
     },
     extension_installation_store::FilesystemExtensionInstallationStore,
     extension_lifecycle::{
@@ -535,7 +534,6 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     .with_approval_requests(Arc::clone(&store_graph.approval_requests))
     .with_capability_leases(Arc::clone(&store_graph.capability_leases))
     .with_turn_state_and_transition_port(Arc::clone(&store_graph.turn_state));
-    services = attach_nearai_mcp_runtime(services)?;
     let local_dev_process_port = local_dev_process_port_for_policy(
         &runtime_policy,
         &workspace_root,
@@ -1919,8 +1917,7 @@ mod tests {
         assert!(services.product_auth_provider_runtime_ports().is_none());
 
         // attach_hosted_mcp_runtime must succeed (soft-skip) rather than error.
-        let services =
-            attach_hosted_mcp_runtime(services).expect("soft-disable must not error");
+        let services = attach_hosted_mcp_runtime(services).expect("soft-disable must not error");
 
         // Runtime ports still absent — no egress was added by the attachment.
         assert!(services.product_auth_provider_runtime_ports().is_none());

@@ -31,11 +31,7 @@ impl McpExecutorRouter {
 
     /// Register an executor for `provider`. Overwrites any previous executor
     /// for the same provider id.
-    pub(crate) fn insert(
-        &mut self,
-        provider: impl Into<String>,
-        executor: Arc<dyn McpExecutor>,
-    ) {
+    pub(crate) fn insert(&mut self, provider: impl Into<String>, executor: Arc<dyn McpExecutor>) {
         self.by_provider.insert(provider.into(), executor);
     }
 
@@ -73,7 +69,9 @@ mod tests {
         CapabilityId, CapabilityProfileSchemaRef, ExtensionId, InvocationId, PermissionMode,
         ProjectId, ResourceEstimate, ResourceScope, TenantId, TrustClass, UserId, VirtualPath,
     };
-    use ironclaw_mcp::{McpError, McpExecutionRequest, McpExecutionResult, McpExecutor, McpInvocation};
+    use ironclaw_mcp::{
+        McpError, McpExecutionRequest, McpExecutionResult, McpExecutor, McpInvocation,
+    };
     use ironclaw_resources::{InMemoryResourceGovernor, ResourceGovernor};
 
     use super::*;

@@ -304,7 +304,10 @@ mod tests {
             host_pattern: NOTION_MCP_HOST,
             path: NOTION_MCP_PATH,
         };
-        assert!(hosted_mcp_url_allowed("https://mcp.notion.com/mcp", &endpoint));
+        assert!(hosted_mcp_url_allowed(
+            "https://mcp.notion.com/mcp",
+            &endpoint
+        ));
     }
 
     #[test]
@@ -313,7 +316,10 @@ mod tests {
             host_pattern: NOTION_MCP_HOST,
             path: NOTION_MCP_PATH,
         };
-        assert!(!hosted_mcp_url_allowed("http://mcp.notion.com/mcp", &endpoint));
+        assert!(!hosted_mcp_url_allowed(
+            "http://mcp.notion.com/mcp",
+            &endpoint
+        ));
     }
 
     #[test]
@@ -346,7 +352,10 @@ mod tests {
             host_pattern: NOTION_MCP_HOST,
             path: NOTION_MCP_PATH,
         };
-        assert!(hosted_mcp_url_allowed("https://mcp.notion.com/mcp/", &endpoint));
+        assert!(hosted_mcp_url_allowed(
+            "https://mcp.notion.com/mcp/",
+            &endpoint
+        ));
     }
 
     // ── helpers ───────────────────────────────────────────────────────────
