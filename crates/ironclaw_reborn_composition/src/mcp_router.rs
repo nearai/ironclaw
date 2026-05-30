@@ -109,7 +109,7 @@ mod tests {
                 },
                 host_apis: Vec::new(),
                 capabilities: vec![ironclaw_extensions::CapabilityManifest {
-                    id: CapabilityId::new(&format!("{provider}.search")).unwrap(),
+                    id: CapabilityId::new(format!("{provider}.search")).unwrap(),
                     implements: Vec::new(),
                     description: String::new(),
                     effects: Vec::new(),
@@ -129,7 +129,7 @@ mod tests {
                     resource_profile: None,
                 }],
             },
-            VirtualPath::new(&format!("/system/extensions/{provider}")).unwrap(),
+            VirtualPath::new(format!("/system/extensions/{provider}")).unwrap(),
         )
         .unwrap()
     }
