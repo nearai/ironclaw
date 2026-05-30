@@ -30,7 +30,6 @@ import os
 import re
 import signal
 import socket
-import tempfile
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -51,8 +50,6 @@ from mock_bearer_api import start_mock_bearer_api
 # ---------------------------------------------------------------------------
 
 ROOT = Path(__file__).resolve().parent.parent.parent.parent
-_DB_TMPDIR = tempfile.TemporaryDirectory(prefix="ironclaw-4112-pat-e2e-")
-_HOME_TMPDIR = tempfile.TemporaryDirectory(prefix="ironclaw-4112-pat-home-")
 
 # GitHub PAT pattern used in ironclaw_safety::leak_detector (line 1190).
 # Any string matching this should NEVER appear in SSE frames or history.
@@ -120,34 +117,6 @@ List and create issues using the GitHub REST API.
     Path(os.path.join(skill_dir, "SKILL.md")).write_text(content)
 
 
-async def _collect_sse_frames(base_url: str, thread_id: str, *, timeout: float = 30.0) -> list[dict]:
-    """Stream SSE events from the gateway until final_reply or timeout."""
-    frames: list[dict] = []
-    deadline = asyncio.get_event_loop().time() + timeout
-    try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(timeout)) as client:
-            url = f"{base_url}/api/chat/events?thread_id={thread_id}"
-            headers = {"Authorization": f"Bearer {AUTH_TOKEN}"}
-            async with client.stream("GET", url, headers=headers) as resp:
-                if resp.status_code != 200:
-                    return frames
-                async for line in resp.aiter_lines():
-                    if asyncio.get_event_loop().time() > deadline:
-                        break
-                    if not line.startswith("data:"):
-                        continue
-                    try:
-                        data = json.loads(line[5:].strip())
-                        frames.append(data)
-                        event_type = data.get("type", "")
-                        if event_type in ("final_reply", "failed", "cancelled"):
-                            break
-                    except json.JSONDecodeError:
-                        pass
-    except (httpx.ReadTimeout, httpx.RemoteProtocolError):
-        pass
-    return frames
-
 
 def _assert_no_pat_in_text(text: str, *, context: str = "") -> None:
     """Assert the GitHub PAT regex matches nothing in text."""
@@ -179,9 +148,10 @@ async def mock_bearer(mock_llm_server):
 
 
 @pytest.fixture(scope="module")
-async def v2_pat_server(ironclaw_binary, mock_llm_server, mock_bearer):
+async def v2_pat_server(ironclaw_binary, mock_llm_server, mock_bearer, tmp_path_factory):
     """Start ironclaw with ENGINE_V2=true for GitHub PAT E2E tests."""
-    home_dir = _HOME_TMPDIR.name
+    home_dir = str(tmp_path_factory.mktemp("pat-home"))
+    db_dir = str(tmp_path_factory.mktemp("pat-db"))
     skills_dir = os.path.join(home_dir, ".ironclaw", "skills")
     os.makedirs(skills_dir, exist_ok=True)
     _write_github_skill(skills_dir, mock_bearer._mock_host)
@@ -213,7 +183,7 @@ async def v2_pat_server(ironclaw_binary, mock_llm_server, mock_bearer):
         "LLM_API_KEY": "mock-api-key",
         "LLM_MODEL": "mock-model",
         "DATABASE_BACKEND": "libsql",
-        "LIBSQL_PATH": os.path.join(_DB_TMPDIR.name, "pat-e2e.db"),
+        "LIBSQL_PATH": os.path.join(db_dir, "pat-e2e.db"),
         "SANDBOX_ENABLED": "false",
         "SKILLS_ENABLED": "true",
         "ROUTINES_ENABLED": "false",
@@ -228,8 +198,8 @@ async def v2_pat_server(ironclaw_binary, mock_llm_server, mock_bearer):
     proc = await asyncio.create_subprocess_exec(
         ironclaw_binary, "--no-onboard",
         stdin=asyncio.subprocess.DEVNULL,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
         env=env,
     )
     base_url = f"http://127.0.0.1:{port}"
@@ -287,19 +257,6 @@ async def _resolve_auth_gate(base_url: str, thread_id: str, request_id: str, tok
         timeout=15,
     )
     r.raise_for_status()
-
-
-async def _wait_for_response(base_url: str, thread_id: str, *, timeout: float = 45.0) -> str:
-    for _ in range(int(timeout * 2)):
-        r = await api_get(base_url, f"/api/chat/history?thread_id={thread_id}", timeout=15)
-        if r.status_code == 200:
-            turns = r.json().get("turns", [])
-            if turns:
-                last = turns[-1].get("response", "")
-                if last:
-                    return last
-        await asyncio.sleep(0.5)
-    raise AssertionError(f"Timed out waiting for assistant response in thread {thread_id}")
 
 
 # ---------------------------------------------------------------------------

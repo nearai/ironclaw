@@ -22,9 +22,8 @@ import json
 import os
 import signal
 import socket
-import tempfile
 from pathlib import Path
-from urllib.parse import urlencode, urlparse
+from urllib.parse import urlparse
 
 import httpx
 import pytest
@@ -43,8 +42,6 @@ from mock_oauth_idp import start_mock_oauth_idp
 # ---------------------------------------------------------------------------
 
 ROOT = Path(__file__).resolve().parent.parent.parent.parent
-_DB_TMPDIR = tempfile.TemporaryDirectory(prefix="ironclaw-4112-notion-e2e-")
-_HOME_TMPDIR = tempfile.TemporaryDirectory(prefix="ironclaw-4112-notion-home-")
 
 
 def _forward_coverage_env(env: dict) -> None:
@@ -110,9 +107,10 @@ async def mock_notion_idp(mock_notion):
 
 
 @pytest.fixture(scope="module")
-async def v2_notion_server(ironclaw_binary, mock_llm_server, mock_notion, mock_notion_idp):
+async def v2_notion_server(ironclaw_binary, mock_llm_server, mock_notion, mock_notion_idp, tmp_path_factory):
     """Start ironclaw for Notion MCP OAuth E2E tests."""
-    home_dir = _HOME_TMPDIR.name
+    home_dir = str(tmp_path_factory.mktemp("notion-home"))
+    db_dir = str(tmp_path_factory.mktemp("notion-db"))
     config_dir = os.path.join(home_dir, ".ironclaw")
     os.makedirs(config_dir, exist_ok=True)
 
@@ -150,7 +148,7 @@ async def v2_notion_server(ironclaw_binary, mock_llm_server, mock_notion, mock_n
         "LLM_API_KEY": "mock-api-key",
         "LLM_MODEL": "mock-model",
         "DATABASE_BACKEND": "libsql",
-        "LIBSQL_PATH": os.path.join(_DB_TMPDIR.name, "notion-e2e.db"),
+        "LIBSQL_PATH": os.path.join(db_dir, "notion-e2e.db"),
         "SANDBOX_ENABLED": "false",
         "SKILLS_ENABLED": "false",
         "MCP_ENABLED": "true",
@@ -166,8 +164,8 @@ async def v2_notion_server(ironclaw_binary, mock_llm_server, mock_notion, mock_n
     proc = await asyncio.create_subprocess_exec(
         ironclaw_binary, "--no-onboard",
         stdin=asyncio.subprocess.DEVNULL,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
         env=env,
     )
     base_url = f"http://127.0.0.1:{port}"

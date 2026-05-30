@@ -25,7 +25,6 @@ import os
 import re
 import signal
 import socket
-import tempfile
 from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlparse
 
@@ -46,8 +45,6 @@ from mock_bearer_api import start_mock_bearer_api
 # ---------------------------------------------------------------------------
 
 ROOT = Path(__file__).resolve().parent.parent.parent.parent
-_DB_TMPDIR = tempfile.TemporaryDirectory(prefix="ironclaw-4112-gsuite-e2e-")
-_HOME_TMPDIR = tempfile.TemporaryDirectory(prefix="ironclaw-4112-gsuite-home-")
 
 # Patterns that must never appear in SSE / history.
 _OAUTH_SECRET_RE = re.compile(
@@ -147,9 +144,10 @@ async def mock_google_api():
 
 
 @pytest.fixture(scope="module")
-async def v2_gsuite_server(ironclaw_binary, mock_llm_server, mock_idp, mock_google_api):
+async def v2_gsuite_server(ironclaw_binary, mock_llm_server, mock_idp, mock_google_api, tmp_path_factory):
     """Start ironclaw for GSuite OAuth E2E tests."""
-    home_dir = _HOME_TMPDIR.name
+    home_dir = str(tmp_path_factory.mktemp("gsuite-home"))
+    db_dir = str(tmp_path_factory.mktemp("gsuite-db"))
     skills_dir = os.path.join(home_dir, ".ironclaw", "skills")
     os.makedirs(skills_dir, exist_ok=True)
     mock_api_host = urlparse(mock_google_api.base_url).netloc
@@ -197,7 +195,7 @@ async def v2_gsuite_server(ironclaw_binary, mock_llm_server, mock_idp, mock_goog
         "LLM_API_KEY": "mock-api-key",
         "LLM_MODEL": "mock-model",
         "DATABASE_BACKEND": "libsql",
-        "LIBSQL_PATH": os.path.join(_DB_TMPDIR.name, "gsuite-e2e.db"),
+        "LIBSQL_PATH": os.path.join(db_dir, "gsuite-e2e.db"),
         "SANDBOX_ENABLED": "false",
         "SKILLS_ENABLED": "true",
         "ROUTINES_ENABLED": "false",
@@ -212,8 +210,8 @@ async def v2_gsuite_server(ironclaw_binary, mock_llm_server, mock_idp, mock_goog
     proc = await asyncio.create_subprocess_exec(
         ironclaw_binary, "--no-onboard",
         stdin=asyncio.subprocess.DEVNULL,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
         env=env,
     )
     base_url = f"http://127.0.0.1:{port}"
