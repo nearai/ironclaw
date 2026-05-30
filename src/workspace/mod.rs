@@ -216,6 +216,16 @@ fn is_safe_to_inject(path: &str, content: &str) -> bool {
         );
         return false;
     }
+    // Log lower-severity matches for observability without blocking injection.
+    for w in warnings.iter().filter(|w| w.severity < Severity::High) {
+        tracing::debug!(
+            target: "ironclaw::safety",
+            file = %path,
+            severity = ?w.severity,
+            pattern = %w.pattern,
+            "identity file: low/medium severity injection pattern noted at load time",
+        );
+    }
     true
 }
 
