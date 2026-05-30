@@ -55,9 +55,11 @@ through trusted ingress, runs in a dedicated thread, and persists the result.
 These decisions are now locked for the first implementation pass; the two doc
 PRs should record them as contract language.
 
-1. PR 1 and PR 2 are parallel contract tracks. If we choose a single first PR,
-   prioritize PR 2 because trusted ingress is the hard prerequisite for trigger
-   execution.
+1. PR 1 and PR 2 are parallel contract tracks, but PR 2 is the sole owner of
+   trusted-ingress semantics and trigger-boundary changes in
+   `conversation-binding.md`. PR 1 stays outbound/reply-target only. If we
+   choose a single first PR, prioritize PR 2 because trusted ingress is the hard
+   prerequisite for trigger execution.
 2. Trigger fires need a host-internal ingress representation that product
    adapters cannot construct. The contract must define deterministic
    `adapter_kind`, `external_actor_ref`, `external_conversation_ref`, and
@@ -83,11 +85,14 @@ PRs should record them as contract language.
    adapters, or transcript internals directly.
 8. V1 active-run back-pressure is required:
    `max_concurrent_fires_per_trigger = 1`. A trigger skips a tick while its
-   previous fire is still active.
+   previous fire is still active. This is enforced by an atomic repository
+   claim/lease plus turn-state lookup, not by `last_status` or an in-memory
+   poller counter.
 9. `trigger_create`, `trigger_list`, and `trigger_remove` are required
-   user-facing first-party capabilities, registered through the
-   composition-owned first-party registry and available in local-dev and
-   production.
+   user-facing first-party capabilities, registered first in
+   `ironclaw_host_runtime::first_party_tools` and then consumed by composition.
+   The host-runtime package, handlers, and registry entries must stay in
+   lockstep.
 10. Trigger poll settings are composition-owned, and V1 schedules must reject
     sub-minute cadence. No trigger may fire more frequently than once per
     minute.
@@ -98,6 +103,13 @@ PRs should record them as contract language.
     policy. Approval/auth prompt delivery must resolve through exact-owner
     prompt targets first; requested outbound may only apply to ordinary
     non-authority delivery or narrow to the same exact-owner prompt target.
+13. Trigger fires bypass `ironclaw_product_workflow` ingress entirely. Product
+    workflow remains adapter-facing; scheduled triggers enter only through the
+    planned `ironclaw_conversations::InboundTurnService` trusted facade.
+14. The sealed host-trusted ingress marker and witness are owned by
+    `ironclaw_conversations::trusted_ingress`; host composition constructs them
+    for trigger submission. Product adapters must not receive constructors or
+    model them in product payload DTOs.
 
 ## Dependency DAG
 
@@ -121,17 +133,18 @@ Delivery track
 
 Trigger execution track
   PR 2 ─> PR 8 Trusted Inbound Facade ─> PR 9 ironclaw_triggers Crate Skeleton
-                                           └─> PR 10 Trigger Persistence, Backend 1
-                                                └─> PR 11 Trigger Persistence, Backend 2 and Parity
-                                                     └─> PR 12 Atomic Fire Claim and Active-Run Lease
-                                                          └─> PR 13 Materialization and Turn-State Seams
-                                                               └─> PR 14 Trigger Poller Core
-                                                                    └─> PR 15 Poller Caller-Level Harness
-                                                                         ├─> PR 16 trigger_* First-Party Capabilities
-                                                                         └─> PR 17 Trigger Composition and Worker Lifecycle
+                                           └─> PR 10 Trigger Persistence Model and Backend 1
+                                                └─> PR 11 Trigger Persistence Backend 2 and Parity
+                                                     └─> PR 12 Atomic Fire Claim API
+                                                          └─> PR 13 Atomic Claim Backend Implementations
+                                                               └─> PR 14 Materialization and Turn-State Seams
+                                                                    └─> PR 15 Trigger Poller Core
+                                                                         └─> PR 16 Poller Caller-Level Harness
+                                                                              ├─> PR 17 trigger_* First-Party Capabilities
+                                                                              └─> PR 18 Trigger Worker Config and Lifecycle
 
 External trigger result delivery
-  PR 7 + PR 17 + named adapter readiness ─> PR 18 Trigger Delivery Integration Fast-Follow
+  PR 7 + PR 18 + named adapter readiness ─> PR 19 Trigger Delivery Integration Fast-Follow
 ```
 
 Parallelization notes:
@@ -143,27 +156,28 @@ Parallelization notes:
 - After PR 2 merges, PR 8 can proceed without waiting for delivery work.
 - PR 4 and PR 8 can run in parallel because they touch different crates and
   solve different prerequisites.
-- PR 5/6/7 are delivery-only. They do not block PR 9 through PR 17 unless the
+- PR 5/6/7 are delivery-only. They do not block PR 9 through PR 18 unless the
   chosen milestone is "trigger result is pushed externally" rather than
   "trigger event fires and creates a persisted thread."
 - PR 10 and PR 11 are serial if PR 11 is the parity backend, but they can be
   reversed if backend ownership prefers implementing libSQL first or PostgreSQL
   first.
-- PR 12 must land after both persistence backends because atomic claim/lease
-  semantics need PostgreSQL/libSQL parity before the poller depends on them.
-- PR 16 and PR 17 can start from the same post-PR15 baseline, but they should
+- PR 12 and PR 13 must land after both persistence backends because atomic
+  claim/lease semantics need PostgreSQL/libSQL parity before the poller depends
+  on them.
+- PR 17 and PR 18 can start from the same post-PR16 baseline, but they should
   merge carefully because both need repository/config wiring from composition.
-- PR 18 should remain fast-follow until PR 7 is merged and a concrete outbound
+- PR 19 should remain fast-follow until PR 7 is merged and a concrete outbound
   adapter path is declared ready.
 
 Milestone gates:
 
 - **Trigger event MVP:** PR 2, PR 8, PR 9, PR 10, PR 11, PR 12, PR 13, PR 14,
-  PR 15, and PR 17. PR 16 is required if the MVP includes user-facing `trigger_*`
+  PR 15, PR 16, and PR 18. PR 17 is required if the MVP includes user-facing `trigger_*`
   management rather than seeded/test-created triggers.
-- **User-managed trigger MVP:** Trigger event MVP plus PR 16.
+- **User-managed trigger MVP:** Trigger event MVP plus PR 17.
 - **Externally delivered trigger result:** User-managed trigger MVP plus PR 1,
-  PR 3, PR 4, PR 5, PR 6, PR 7, and PR 18.
+  PR 3, PR 4, PR 5, PR 6, PR 7, and PR 19.
 
 ## PR Sequence
 
@@ -179,8 +193,10 @@ Promote the delivery-resolution design into Reborn contracts before code:
 - Update auth/product runtime contracts to state that auth prompt notification
   is separate from auth-flow creation, callback handling, credential exchange,
   and token storage.
-- Update `conversation-binding.md` to keep reply-target binding semantics
-  distinct from synthetic trigger ingress identity.
+- Update `conversation-binding.md` only for reply-target binding semantics that
+  are needed by outbound delivery; all trusted-ingress semantics belong to PR 2.
+- Update `runtime-workflows.md` where needed so approval/auth prompt delivery
+  ownership is reflected in the runtime interaction loop contracts.
 - Define the typed resolution envelope, preference fields, and deterministic P0
   order before implementation so PR 3 and PR 5 do not reinterpret prompt
   authority, trigger/source-route precedence, or system-event behavior.
@@ -199,11 +215,12 @@ Ratify trigger-specific contract changes before code:
   `external_event_id`, route kind, actor, content ref, and scope flow.
 - Specify that host-internal ingress values are type-sealed or otherwise
   unconstructible by product adapters, not merely conventional reserved strings.
-- Add a trigger-system contract covering `TriggerRecord`,
+- Update and promote `docs/reborn/contracts/triggers.md` as the only
+  trigger-system contract source of truth, covering `TriggerRecord`,
   `TriggerSourceProvider`, `TriggerFireIdentity`, poller semantics,
   deterministic-slot idempotency, and scope rules.
-- Decide whether post-run `ApprovalBlocked` / `TimedOut` status updates are V1
-  or fast-follow.
+- State that post-run `ApprovalBlocked` / `TimedOut` status updates are
+  fast-follow in V1.
 - State the V1 schedule granularity rule: cron and other schedule providers
   must reject schedules that can fire more frequently than once per minute.
 
@@ -256,9 +273,26 @@ operator/user-settings shaped and not tenant/user typed delivery policy.
 Imitate the DB store pattern where useful, but keep communication preferences a
 typed outbound-owned repository.
 
+The repository, DTOs, and backend/migration code live under the
+`ironclaw_outbound` ownership boundary, not `src/db` generic settings. Backend
+integration may reuse workspace migration conventions, but schema ownership and
+tests belong with the outbound crate/module that owns communication policy.
+
+Existing `ThreadNotificationPolicy` remains thread-scoped push policy for
+projection subscriptions and legacy thread notifications. Tenant/user
+communication preferences are a separate candidate-source layer. PR 5 must
+define precedence explicitly: authority-bearing prompt preferences are
+consulted first; explicit requested outbound and source-route rules follow the
+delivery-resolution contract; thread policy can suppress push attempts for
+ordinary progress/final reply notifications but must not grant authority or
+retarget approval/auth prompts.
+
 The repository fields should map directly to the delivery contract names:
 `final_reply_target`, `progress_target`, `approval_prompt_target`,
 `auth_prompt_target`, and `default_modality`.
+`final_reply_target` is the canonical schema/DTO name; any plural
+`final_replies_target` wording in older specs should be treated as legacy
+terminology and normalized before implementation.
 
 Expected size: less than 1000 lines. If PostgreSQL + libSQL parity pushes past
 the line budget, split this into model/trait + first backend, then second
@@ -302,8 +336,10 @@ Expected size: less than 1000 lines.
 
 ### PR 7 — Product Outbound Orchestration
 
-Wire the host/composition-side outbound orchestration point that currently
-builds product outbound envelopes:
+Wire the host/composition-side outbound orchestration point for a named real
+adapter path. Do not treat the current WebUI projection bridge as the outbound
+orchestration path unless this PR explicitly refactors it to enter
+`ironclaw_outbound`.
 
 - Own the sequence
   `resolve candidate -> prepare delivery attempt -> adapter render_outbound`.
@@ -311,6 +347,9 @@ builds product outbound envelopes:
   lookup.
 - Name the concrete first path being wired and keep adapter-specific behavior
   behind adapter capability/validation boundaries.
+- Keep WebUI projection envelopes separate from product outbound delivery
+  unless the PR deliberately routes that bridge through the same outbound
+  policy service.
 
 Expected size: less than 1000 lines; split if this touches both composition
 and adapter call sites heavily.
@@ -324,6 +363,12 @@ Implement the planned
 - Add a typed trusted request shape that bundles the ordinary inbound request
   with host-owned `tenant_id`, `creator_user_id`, `agent_id`, and `project_id`
   authority.
+- Add `ironclaw_conversations::trusted_ingress` sealed marker/witness types and
+  constructors. Host composition can construct them for scheduled triggers;
+  product adapters cannot model or construct them.
+- Trigger fires call only this `ironclaw_conversations` facade. They must not
+  pass through `ironclaw_product_workflow::InboundTurnService`, which remains
+  adapter-facing.
 - Keep replay lookup first, exactly like `handle_inbound_turn`, so duplicate
   scheduled-slot retries hit existing inbound idempotency.
 - Route fresh binding resolution through
@@ -365,10 +410,12 @@ use raw string concatenation.
 
 Expected size: less than 1000 lines.
 
-### PR 10 — Trigger Persistence, Backend 1
+### PR 10 — Trigger Persistence Model and Backend 1
 
 Add the first durable `TriggerRepository` backend:
 
+- repository trait methods for create/list/remove, due-trigger lookup, and
+  submit-result bookkeeping, but not the atomic claim API yet
 - migrations/schema for one chosen backend
 - composite poller index on `(tenant_id, enabled, state, next_run_at)`
 - `active_fire_slot` and `active_run_ref` persistence fields separate from
@@ -390,16 +437,32 @@ Add the second required backend and parity coverage:
 
 Expected size: less than 1000 lines.
 
-### PR 12 — Atomic Fire Claim and Active-Run Lease
+### PR 12 — Atomic Fire Claim API
 
-Add the repository-level claim/lease seam that makes
+Add the backend-agnostic repository claim/lease API that makes
 `max_concurrent_fires_per_trigger = 1` enforceable across concurrent pollers:
 
-- atomic `claim_due_fire`-style operation that covers due-row read, trigger
-  state check, active-fire check, and claim write in one database transaction or
-  equivalent backend primitive.
-- claim writes `active_fire_slot` / `active_run_ref` only after a fire is
-  accepted/submitted, and never uses `last_status` as the in-flight sentinel.
+- `claim_due_fire`-style request/response types and trait method.
+- claim operation contract covers due-row read, trigger state check,
+  active-fire check, and claim write in one database transaction or equivalent
+  backend primitive.
+- explicit submit-result update methods for accepted, replayed, retryable
+  failed, and permanent failed outcomes.
+- write-order contract for `last_run_at`, `last_fired_slot`, `last_status`,
+  `next_run_at`, `active_fire_slot`, and `active_run_ref`.
+- active-fire claim never uses `last_status` as the in-flight sentinel.
+
+Expected size: less than 600 lines.
+
+### PR 13 — Atomic Claim Backend Implementations
+
+Implement the atomic claim API for both durable backends:
+
+- PostgreSQL implementation with transaction/row-lock or compare-and-swap
+  semantics.
+- libSQL implementation with equivalent transaction/compare-and-swap semantics.
+- in-memory implementation only for tests; it is not proof of the durable
+  invariant.
 - retryable submit failure keeps `last_fired_slot` unchanged, leaves active
   claim unset, and keeps `next_run_at` at or before the failed slot's scheduled
   time.
@@ -409,24 +472,26 @@ Add the repository-level claim/lease seam that makes
 - PostgreSQL/libSQL parity tests for concurrent claim attempts and retryable
   failure bookkeeping.
 
-Expected size: less than 1000 lines; split backend-specific claim
-implementation if needed.
+Expected size: less than 1000 lines; split by backend if implementation or
+tests exceed the line budget.
 
-### PR 13 — Trigger Materialization and Turn-State Seams
+### PR 14 — Trigger Materialization and Turn-State Seams
 
 Add the narrow ports/helpers the poller needs before the worker implementation:
 
-- deterministic trigger prompt materialization into the inbound content-ref
-  model without letting `ironclaw_triggers` reach into composition or product
-  adapters.
-- turn-state lookup/clear seam for the active-fire claim. V1 policy is exactly
-  one active fire per trigger; later concurrency can be an explicit config
-  expansion.
+- `ironclaw_triggers` owns the prompt-materialization port trait and asks for an
+  inbound content ref. Composition provides the adapter from trigger prompt data
+  to the conversation/thread content-ref boundary.
+- `ironclaw_triggers` owns the active-fire clear request type, but the concrete
+  turn-state lookup adapter is supplied by composition over `ironclaw_turns` /
+  turn-persistence APIs. It is not a trigger-local counter.
+- V1 policy is exactly one active fire per trigger; later concurrency can be an
+  explicit config expansion.
 - tests for both seams at the owning crate boundary.
 
 Expected size: less than 800 lines.
 
-### PR 14 — Trigger Poller Core
+### PR 15 — Trigger Poller Core
 
 Implement `TriggerPollerWorker` core logic:
 
@@ -439,12 +504,11 @@ Implement `TriggerPollerWorker` core logic:
 - persist synchronous submit status and next-run bookkeeping
 - preserve replay safety across crash retry or dual poller attempts
 
-Keep post-run async statuses fast-follow unless PR 2 explicitly chooses to wire
-the lifecycle observer in V1.
+Keep post-run async statuses fast-follow.
 
 Expected size: less than 1000 lines.
 
-### PR 15 — Trigger Poller Caller-Level Harness
+### PR 16 — Trigger Poller Caller-Level Harness
 
 Add the heavier caller-level tests separately from the worker core:
 
@@ -462,17 +526,20 @@ Add the heavier caller-level tests separately from the worker core:
 
 Expected size: less than 1000 lines; split further if the harness grows.
 
-### PR 16 — `trigger_*` First-Party Capabilities
+### PR 17 — `trigger_*` First-Party Capabilities
 
-Expose trigger management through the composition-owned first-party capability
-registry, not local-dev synthetic capabilities:
+Expose trigger management through the host-runtime first-party capability
+registry first, not local-dev synthetic capabilities:
 
 - `trigger_create`
 - `trigger_list`
 - `trigger_remove`
-- package/registry declarations
-- production wiring checks
-- tests that capability IDs are present in both package manifest and registry
+- package declarations in `ironclaw_host_runtime::first_party_tools`
+- handler registration in `ironclaw_host_runtime::first_party_tools`
+- `FirstPartyCapabilityRegistry` entries in `ironclaw_host_runtime`
+- production composition wiring that injects the trigger repository dependency
+- tests that capability IDs are present in package manifest, handlers, and
+  registry
 
 Scope must be stamped from invocation context and rechecked on list/remove.
 Repository access must be injected through an explicit composition-owned seam;
@@ -480,14 +547,18 @@ do not assume `InvocationServices` already carries a trigger repository.
 
 Expected size: less than 1000 lines.
 
-### PR 17 — Trigger Composition and Worker Lifecycle
+### PR 18 — Trigger Worker Config and Lifecycle
 
 Wire the trigger poller into Reborn composition:
 
-- config ownership for poll interval, fires per tick, and per-trigger active-run
-  cap. V1 default and maximum for per-trigger active fires is 1.
-- second background-worker handle or a background-task bundle
-- startup/shutdown behavior alongside `TurnRunnerWorker`
+- a dedicated `TriggerPollerWorkerConfig` or equivalent composition-owned type
+  for poll interval, fires per tick, and per-trigger active-run cap. Do not
+  reuse `RebornRuntimeInput::PollSettings`, which is request-completion polling.
+- background task bundle or worker-supervisor type that owns both turn-runner
+  and trigger-poller handles, cancellation, await/shutdown ordering, and panic
+  or early-exit reporting.
+- readiness semantics for whether a disabled trigger poller is allowed and
+  whether a failed trigger worker marks Reborn runtime readiness degraded.
 - architecture tests for `ironclaw_triggers` dependency edges
 - current architecture map update
 - `FEATURE_PARITY.md` update with a distinct Reborn trigger-loop note rather
@@ -495,12 +566,14 @@ Wire the trigger poller into Reborn composition:
 
 Expected size: less than 1000 lines; split into config and lifecycle if needed.
 
-### PR 18 — Trigger Delivery Integration Fast-Follow
+### PR 19 — Trigger Delivery Integration Fast-Follow
 
 Only after delivery-resolution PRs are merged and a concrete adapter path is
 ready, connect trigger-origin final reply delivery:
 
-- name the first adapter path and readiness gate.
+- name the first real adapter path and readiness gate. Do not use the WebUI
+  projection bridge as a stand-in unless it is explicitly routed through
+  `ironclaw_outbound`.
 - construct `RunNotificationOrigin::Triggered`.
 - construct `RunNotificationOrigin::TriggeredFromSourceRoute` when a trigger
   run also has a live source route, and verify live source route precedence.
@@ -533,3 +606,10 @@ Reborn code. Their main findings are incorporated above:
 - Communication preferences should be DB-backed from day one as a typed
   tenant/user repository, not stored in legacy profile/TOML config or generic
   JSON settings.
+- Trigger fires bypass product-workflow ingress and use only the conversations
+  trusted inbound facade.
+- Atomic fire claim APIs, durable backend implementations, and poller harnesses
+  are separate slices to keep the line budget realistic.
+- Trigger worker configuration must be distinct from request-completion
+  `PollSettings`, and worker supervision needs explicit shutdown/readiness
+  semantics.
