@@ -52,6 +52,44 @@ const GITHUB_EXCHANGE_BUDGET: Duration = Duration::from_secs(20);
 /// misbehavior rather than allocated and scanned.
 const MAX_GITHUB_EMAILS: usize = 100;
 
+/// Defensive cap on any single GitHub JSON response body. Real
+/// responses are a few KB; anything past this is treated as a hostile
+/// or misconfigured endpoint (a non-HTTPS / overridden `*_endpoint`
+/// pointing at an attacker) and rejected before serde allocates the
+/// parsed structure.
+const MAX_RESPONSE_BYTES: usize = 256 * 1024;
+
+/// Read a response body, rejecting anything over [`MAX_RESPONSE_BYTES`]
+/// before it is handed to serde. Returns the raw bytes on success or a
+/// human error string the caller maps to the right [`OAuthError`]
+/// variant. (`reqwest` has no built-in body cap, so this is the guard.)
+async fn read_capped_body(resp: reqwest::Response) -> Result<Vec<u8>, String> {
+    let bytes = resp.bytes().await.map_err(|err| err.to_string())?;
+    if bytes.len() > MAX_RESPONSE_BYTES {
+        return Err(format!(
+            "GitHub response exceeds the {MAX_RESPONSE_BYTES}-byte limit"
+        ));
+    }
+    Ok(bytes.to_vec())
+}
+
+/// GitHub's real OAuth error codes are lowercase ASCII + underscore
+/// (`bad_verification_code`, `redirect_uri_mismatch`, …). The value is
+/// attacker-influenceable (a hostile token endpoint could return
+/// arbitrary bytes), so anything off that grammar — or implausibly
+/// long — is redacted before it reaches a log line or error string,
+/// preventing newline / ANSI log injection.
+fn sanitize_error_code(error: &str) -> &str {
+    if !error.is_empty()
+        && error.len() <= 64
+        && error.chars().all(|c| c.is_ascii_lowercase() || c == '_')
+    {
+        error
+    } else {
+        "<redacted_invalid_error_code>"
+    }
+}
+
 /// GitHub OAuth provider.
 pub struct GitHubProvider {
     /// Cached provider name. Constructed once at provider build time
@@ -145,11 +183,14 @@ impl GitHubProvider {
         })
     }
 
-    /// Test-only: shrink the overall exchange budget so the timeout
-    /// branch can be exercised against a blackhole endpoint without a
-    /// 20-second wait.
-    #[cfg(test)]
-    fn with_exchange_budget(mut self, budget: Duration) -> Self {
+    /// Test / dev-only: shrink the overall exchange budget so the
+    /// timeout branch can be exercised against a blackhole endpoint
+    /// without a 20-second wait. Gated like [`Self::with_endpoints`]
+    /// (the `dev-in-memory-session` feature) rather than `#[cfg(test)]`
+    /// so caller-level tests in `tests/` — a separate crate that cannot
+    /// see `#[cfg(test)]` items — can reach it too.
+    #[cfg(any(test, feature = "dev-in-memory-session"))]
+    pub fn with_exchange_budget(mut self, budget: Duration) -> Self {
         self.exchange_budget = budget;
         self
     }
@@ -298,25 +339,31 @@ impl GitHubProvider {
             )));
         }
 
-        let token: GitHubTokenResponse = resp
-            .json()
+        let body = read_capped_body(resp)
             .await
+            .map_err(OAuthError::CodeExchange)?;
+        let token: GitHubTokenResponse = serde_json::from_slice(&body)
             .map_err(|err| OAuthError::CodeExchange(err.to_string()))?;
         // GitHub signals failure in the 200 body, not via status.
         if let Some(error) = token.error {
-            // Only the opaque error code is logged; GitHub's
+            // Only the sanitized opaque error code is logged; GitHub's
             // human-readable `error_description` can carry
             // user-identifiable context and is never deserialized.
+            let safe_error = sanitize_error_code(&error);
             tracing::debug!(
-                error = %error,
+                error = %safe_error,
                 "github token endpoint returned an error in the response body"
             );
             return Err(OAuthError::CodeExchange(format!(
-                "GitHub token endpoint returned error: {error}"
+                "GitHub token endpoint returned error: {safe_error}"
             )));
         }
         token
             .access_token
+            // An empty-string token is as useless as a missing one —
+            // treat it as missing rather than letting `Some("")` slip
+            // through and surface later as a misleading 401 ProfileFetch.
+            .filter(|t| !t.is_empty())
             .map(SecretString::from)
             .ok_or_else(|| OAuthError::CodeExchange("GitHub did not return an access_token".into()))
     }
@@ -337,9 +384,10 @@ impl GitHubProvider {
                 resp.status()
             )));
         }
-        resp.json()
+        let body = read_capped_body(resp)
             .await
-            .map_err(|err| OAuthError::ProfileFetch(err.to_string()))
+            .map_err(OAuthError::ProfileFetch)?;
+        serde_json::from_slice(&body).map_err(|err| OAuthError::ProfileFetch(err.to_string()))
     }
 
     /// Step 2b: fetch the user's verified emails. Rejects an
@@ -363,9 +411,10 @@ impl GitHubProvider {
                 resp.status()
             )));
         }
-        let emails: Vec<GitHubEmail> = resp
-            .json()
+        let body = read_capped_body(resp)
             .await
+            .map_err(OAuthError::ProfileFetch)?;
+        let emails: Vec<GitHubEmail> = serde_json::from_slice(&body)
             .map_err(|err| OAuthError::ProfileFetch(err.to_string()))?;
         if emails.len() > MAX_GITHUB_EMAILS {
             return Err(OAuthError::ProfileFetch(format!(
@@ -670,6 +719,29 @@ mod tests {
         assert!(
             matches!(&err, OAuthError::ProfileFetch(msg) if msg.contains("500")),
             "expected ProfileFetch for emails endpoint failure, got {err:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn exchange_code_rejects_implausible_email_count() {
+        let mut mock = MockGitHub::success();
+        // One past the cap. The count guard does not inspect content,
+        // so a single repeated literal is enough to exercise it.
+        mock.emails = vec![
+            MockEmail {
+                email: "x@example.com",
+                verified: false,
+                primary: false,
+            };
+            MAX_GITHUB_EMAILS + 1
+        ];
+        let (addr, _server) = spawn_mock(mock).await;
+        let err = exchange(addr)
+            .await
+            .expect_err("must reject an implausible email count");
+        assert!(
+            matches!(&err, OAuthError::ProfileFetch(msg) if msg.contains("implausible")),
+            "expected ProfileFetch for implausible email count, got {err:?}",
         );
     }
 
