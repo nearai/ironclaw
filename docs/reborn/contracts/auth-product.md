@@ -434,7 +434,7 @@ pretending cleanup succeeded.
 
 The Reborn composition mounts host-owned HTTP routes that enter
 `RebornProductAuthServices` (see
-`crates/ironclaw_reborn_composition/src/product_auth_serve.rs`). All mutation
+`crates/ironclaw_reborn_composition/src/product_auth_serve/mod.rs`). All mutation
 routes share the same `LocalGateway` + `BearerToken` + per-caller body and
 rate-limit posture as the original `oauth/start` route and derive
 `AuthProductScope` from the authenticated caller, never from caller-supplied

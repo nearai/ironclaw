@@ -109,10 +109,10 @@ async fn turn_event_payloads_for_page(
     auth_challenges: Option<&dyn AuthChallengeProvider>,
     events: Vec<TurnLifecycleEvent>,
 ) -> Result<Vec<TurnEventPayload>, ProductAdapterError> {
-    // `auth_challenges` is not `Sync`-constrained to `Arc`, so we cannot move
-    // it into the async closure below — collect into futures sequentially then
-    // drive them with `buffered`. The provider impl is in-memory; latency is
-    // negligible.
+    // Capturing `Option<&dyn AuthChallengeProvider>` in `async move` fails because
+    // the future's lifetime would exceed the stack borrow — collect futures while
+    // the borrow is still live in the caller's frame. The provider impl is
+    // in-memory; latency is negligible.
     let futures: Vec<_> = events
         .into_iter()
         .map(|event| {

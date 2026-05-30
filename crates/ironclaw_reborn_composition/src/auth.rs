@@ -564,6 +564,7 @@ impl RebornProductAuthServices {
     /// production deployments that use durable DB backends not yet wired to
     /// `AuthFlowRecordSource`). The WebUI prompt falls back to the plain
     /// 4-field view in that case, which is backward-compatible.
+    #[doc(hidden)]
     pub fn as_auth_challenge_provider(self: &Arc<Self>) -> Option<Arc<dyn AuthChallengeProvider>> {
         if self.flow_record_source.is_some() {
             Some(Arc::clone(self) as Arc<dyn AuthChallengeProvider>)
@@ -571,95 +572,7 @@ impl RebornProductAuthServices {
             None
         }
     }
-}
 
-#[async_trait]
-impl AuthChallengeProvider for RebornProductAuthServices {
-    async fn challenge_for_gate(
-        &self,
-        scope: &TurnScope,
-        gate_ref: &str,
-    ) -> Option<AuthChallengeView> {
-        let source = self.flow_record_source.as_ref()?;
-        // Snapshot once; filter by scope ownership before matching gate_ref.
-        // gate_ref alone is not sufficient because the in-memory store holds
-        // records for all users — always verify tenant/agent/project/thread.
-        let snapshot = source.flow_records_snapshot();
-        let flow = snapshot
-            .into_iter()
-            .filter(|flow| !ironclaw_auth::is_terminal_status(flow.status))
-            .filter(|flow| flow_scope_matches_turn_scope(flow, scope))
-            .find(|flow| {
-                matches!(
-                    &flow.continuation,
-                    ironclaw_auth::AuthContinuationRef::TurnGateResume { gate_ref: g, .. }
-                        if g.as_str() == gate_ref
-                )
-            })?;
-        let challenge = flow.challenge.as_ref()?;
-        Some(auth_challenge_to_view(challenge, &flow))
-    }
-}
-
-/// Verify that an auth flow record belongs to the same
-/// tenant/agent/project/thread as the caller's `TurnScope`.
-///
-/// `user_id` is intentionally excluded: the public turn-event projection
-/// strips `owner_user_id` before reaching this layer, and the gate_ref UUID
-/// provides sufficient uniqueness within the remaining scope.
-///
-/// `thread_id` check is permissive when the flow record carries `None`
-/// (pre-thread or test flows): if the flow has a thread_id it must match.
-fn flow_scope_matches_turn_scope(flow: &ironclaw_auth::AuthFlowRecord, scope: &TurnScope) -> bool {
-    let resource = &flow.scope.resource;
-    resource.tenant_id == scope.tenant_id
-        && resource.agent_id.as_ref() == scope.agent_id.as_ref()
-        && resource.project_id.as_ref() == scope.project_id.as_ref()
-        // If the flow has no thread_id (pre-thread or test flow), accept it.
-        // If it does have one, it must match the caller's thread.
-        && resource
-            .thread_id
-            .as_ref()
-            .is_none_or(|t| t == &scope.thread_id)
-}
-
-fn auth_challenge_to_view(
-    challenge: &ironclaw_auth::AuthChallenge,
-    flow: &ironclaw_auth::AuthFlowRecord,
-) -> AuthChallengeView {
-    match challenge {
-        ironclaw_auth::AuthChallenge::OAuthUrl {
-            authorization_url,
-            expires_at,
-        } => AuthChallengeView {
-            kind: AuthPromptChallengeKind::OAuthUrl,
-            provider: flow.provider.as_str().to_string(),
-            account_label: None,
-            authorization_url: Some(authorization_url.as_str().to_string()),
-            expires_at: Some(*expires_at),
-        },
-        ironclaw_auth::AuthChallenge::ManualTokenRequired {
-            label, expires_at, ..
-        } => AuthChallengeView {
-            kind: AuthPromptChallengeKind::ManualToken,
-            provider: flow.provider.as_str().to_string(),
-            account_label: Some(label.as_str().to_string()),
-            authorization_url: None,
-            expires_at: Some(*expires_at),
-        },
-        ironclaw_auth::AuthChallenge::AccountSelectionRequired { .. }
-        | ironclaw_auth::AuthChallenge::ReauthorizeRequired { .. }
-        | ironclaw_auth::AuthChallenge::SetupRequired { .. } => AuthChallengeView {
-            kind: AuthPromptChallengeKind::Other,
-            provider: flow.provider.as_str().to_string(),
-            account_label: None,
-            authorization_url: None,
-            expires_at: None,
-        },
-    }
-}
-
-impl RebornProductAuthServices {
     /// Refresh a credential account through the injected product-auth port.
     ///
     /// Concrete account services own the durable account update and provider
@@ -1014,6 +927,93 @@ impl RebornProductAuthServices {
         RebornProductAuthServicePorts::from_shared(services.clone())
             .into_services(continuation_dispatcher)
             .with_flow_record_source(services)
+    }
+}
+
+/// Verify that an auth flow record belongs to the same
+/// tenant/agent/project/thread as the caller's `TurnScope`.
+///
+/// `user_id` is intentionally excluded: the public turn-event projection
+/// strips `owner_user_id` before reaching this layer, and the gate_ref UUID
+/// provides sufficient uniqueness within the remaining scope.
+///
+/// `thread_id` is fail-closed: a flow with no `thread_id` does not match a
+/// thread-scoped request. Pre-thread or test flows should be stored with a
+/// `thread_id` once a real turn is in progress; a flow missing one must not
+/// leak into an unrelated thread's gate.
+fn flow_scope_matches_turn_scope(flow: &ironclaw_auth::AuthFlowRecord, scope: &TurnScope) -> bool {
+    let resource = &flow.scope.resource;
+    resource.tenant_id == scope.tenant_id
+        && resource.agent_id.as_ref() == scope.agent_id.as_ref()
+        && resource.project_id.as_ref() == scope.project_id.as_ref()
+        // Fail-closed: a flow with no thread_id cannot match a thread-scoped request.
+        && match (&resource.thread_id, &scope.thread_id) {
+            (None, _) => false,
+            (Some(t), s) => t == s,
+        }
+}
+
+fn auth_challenge_to_view(
+    challenge: &ironclaw_auth::AuthChallenge,
+    flow: &ironclaw_auth::AuthFlowRecord,
+) -> AuthChallengeView {
+    match challenge {
+        ironclaw_auth::AuthChallenge::OAuthUrl {
+            authorization_url,
+            expires_at,
+        } => AuthChallengeView {
+            kind: AuthPromptChallengeKind::OAuthUrl,
+            provider: flow.provider.as_str().to_string(),
+            account_label: None,
+            authorization_url: Some(authorization_url.as_str().to_string()),
+            expires_at: Some(*expires_at),
+        },
+        ironclaw_auth::AuthChallenge::ManualTokenRequired {
+            label, expires_at, ..
+        } => AuthChallengeView {
+            kind: AuthPromptChallengeKind::ManualToken,
+            provider: flow.provider.as_str().to_string(),
+            account_label: Some(label.as_str().to_string()),
+            authorization_url: None,
+            expires_at: Some(*expires_at),
+        },
+        ironclaw_auth::AuthChallenge::AccountSelectionRequired { .. }
+        | ironclaw_auth::AuthChallenge::ReauthorizeRequired { .. }
+        | ironclaw_auth::AuthChallenge::SetupRequired { .. } => AuthChallengeView {
+            kind: AuthPromptChallengeKind::Other,
+            provider: flow.provider.as_str().to_string(),
+            account_label: None,
+            authorization_url: None,
+            expires_at: None,
+        },
+    }
+}
+
+#[async_trait]
+impl AuthChallengeProvider for RebornProductAuthServices {
+    async fn challenge_for_gate(
+        &self,
+        scope: &TurnScope,
+        gate_ref: &str,
+    ) -> Option<AuthChallengeView> {
+        let source = self.flow_record_source.as_ref()?;
+        // Snapshot once; filter by scope ownership before matching gate_ref.
+        // gate_ref alone is not sufficient because the in-memory store holds
+        // records for all users — always verify tenant/agent/project/thread.
+        let snapshot = source.flow_records_snapshot();
+        let flow = snapshot
+            .into_iter()
+            .filter(|flow| !ironclaw_auth::is_terminal_status(flow.status))
+            .filter(|flow| flow_scope_matches_turn_scope(flow, scope))
+            .find(|flow| {
+                matches!(
+                    &flow.continuation,
+                    ironclaw_auth::AuthContinuationRef::TurnGateResume { gate_ref: g, .. }
+                        if g.as_str() == gate_ref
+                )
+            })?;
+        let challenge = flow.challenge.as_ref()?;
+        Some(auth_challenge_to_view(challenge, &flow))
     }
 }
 

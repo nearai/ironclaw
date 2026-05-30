@@ -199,6 +199,24 @@ fn caller_scope_with_invocation(invocation_id: InvocationId) -> AuthProductScope
     )
 }
 
+fn caller_scope_with_invocation_and_thread(
+    invocation_id: InvocationId,
+    thread_id: ironclaw_host_api::ThreadId,
+) -> AuthProductScope {
+    AuthProductScope::new(
+        ResourceScope {
+            tenant_id: TenantId::new(TENANT).expect("tenant"),
+            user_id: UserId::new(USER).expect("user"),
+            agent_id: Some(AgentId::new(AGENT).expect("agent")),
+            project_id: Some(ProjectId::new(PROJECT).expect("project")),
+            mission_id: None,
+            thread_id: Some(thread_id),
+            invocation_id,
+        },
+        AuthSurface::Callback,
+    )
+}
+
 async fn seed_configured_account(
     shared: &InMemoryAuthProductServices,
     invocation_id: InvocationId,
@@ -440,10 +458,11 @@ async fn accounts_list_returns_only_seeded_provider_accounts() {
 #[tokio::test]
 async fn accounts_list_invalid_limit_is_sanitized() {
     let fixture = build_fixture();
+    let invocation_id = InvocationId::new();
     let response = post_authenticated(
         &fixture.app,
         "/api/reborn/product-auth/accounts/list",
-        json!({ "provider": "github", "limit": 0 }),
+        json!({ "provider": "github", "limit": 0, "invocation_id": invocation_id.to_string() }),
     )
     .await;
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
@@ -820,9 +839,15 @@ async fn challenge_for_gate_returns_oauth_url_view_for_seeded_flow() {
     .unwrap();
     let expires_at = Utc::now() + chrono::Duration::hours(1);
 
+    use ironclaw_host_api::ThreadId;
+    use ironclaw_turns::TurnScope;
+    let thread_id = ThreadId::new("thread-4112".to_string()).expect("thread id");
+
     shared
         .create_flow(NewAuthFlow {
-            scope: caller_scope_with_invocation(InvocationId::new()),
+            // Flow must carry the same thread_id as the TurnScope — thread_id matching
+            // is fail-closed: a flow with None thread_id does not match any scoped request.
+            scope: caller_scope_with_invocation_and_thread(InvocationId::new(), thread_id.clone()),
             kind: AuthFlowKind::IntegrationCredential,
             provider: AuthProviderId::new("google".to_string()).unwrap(),
             challenge: AuthChallenge::OAuthUrl {
@@ -842,14 +867,12 @@ async fn challenge_for_gate_returns_oauth_url_view_for_seeded_flow() {
         .expect("create flow");
 
     let provider = product_auth.as_auth_challenge_provider().expect("provider");
-    // Build a TurnScope matching the flow's tenant/agent/project (thread_id None in flow → permissive match).
-    use ironclaw_host_api::ThreadId;
-    use ironclaw_turns::TurnScope;
+    // Build a TurnScope matching the flow's tenant/agent/project/thread.
     let turn_scope = TurnScope::new(
         TenantId::new(TENANT).expect("tenant"),
         Some(AgentId::new(AGENT).expect("agent")),
         Some(ProjectId::new(PROJECT).expect("project")),
-        ThreadId::new("thread-4112".to_string()).expect("thread id"),
+        thread_id,
     );
     let view = provider
         .challenge_for_gate(&turn_scope, gate_ref_str)
@@ -1018,6 +1041,141 @@ async fn challenge_for_gate_wrong_tenant_returns_none() {
         result.is_none(),
         "different-tenant caller must not receive another tenant's challenge"
     );
+}
+
+#[tokio::test]
+async fn challenge_for_gate_returns_manual_token_view_for_seeded_flow() {
+    // Covers the ManualTokenRequired arm of auth_challenge_to_view.
+    use chrono::Utc;
+    use ironclaw_auth::AuthProviderId;
+    use ironclaw_auth::{
+        AuthChallenge, AuthContinuationRef, AuthFlowKind, AuthFlowManager, AuthGateRef,
+        AuthInteractionId, CredentialAccountLabel, InMemoryAuthProductServices, NewAuthFlow,
+        TurnRunRef,
+    };
+    use ironclaw_host_api::ThreadId;
+    use ironclaw_product_adapters::AuthPromptChallengeKind;
+    use ironclaw_turns::TurnScope;
+    use std::sync::Arc;
+
+    let shared = Arc::new(InMemoryAuthProductServices::new());
+    let product_auth = Arc::new(
+        RebornProductAuthServices::from_shared(
+            shared.clone(),
+            Arc::new(NoopAuthDispatcher::default()),
+        )
+        .with_flow_record_source(shared.clone()),
+    );
+
+    let gate_ref_str = "dddddddd-eeee-ffff-aaaa-444444444444";
+    let expires_at = Utc::now() + chrono::Duration::hours(1);
+    let thread_id = ThreadId::new("thread-manual-token".to_string()).expect("thread id");
+
+    shared
+        .create_flow(NewAuthFlow {
+            scope: caller_scope_with_invocation_and_thread(InvocationId::new(), thread_id.clone()),
+            kind: AuthFlowKind::IntegrationCredential,
+            provider: AuthProviderId::new("slack".to_string()).unwrap(),
+            challenge: AuthChallenge::ManualTokenRequired {
+                interaction_id: AuthInteractionId::new(),
+                provider: AuthProviderId::new("slack".to_string()).unwrap(),
+                label: CredentialAccountLabel::new("work slack token".to_string()).unwrap(),
+                expires_at,
+            },
+            continuation: AuthContinuationRef::TurnGateResume {
+                turn_run_ref: TurnRunRef::new("55555555-5555-5555-5555-555555555555").unwrap(),
+                gate_ref: AuthGateRef::new(gate_ref_str.to_string()).unwrap(),
+            },
+            update_binding: None,
+            opaque_state_hash: None,
+            pkce_verifier_hash: None,
+            expires_at,
+        })
+        .await
+        .expect("create flow");
+
+    let provider = product_auth.as_auth_challenge_provider().expect("provider");
+    let turn_scope = TurnScope::new(
+        TenantId::new(TENANT).expect("tenant"),
+        Some(AgentId::new(AGENT).expect("agent")),
+        Some(ProjectId::new(PROJECT).expect("project")),
+        thread_id,
+    );
+    let view = provider
+        .challenge_for_gate(&turn_scope, gate_ref_str)
+        .await
+        .expect("found");
+    assert!(matches!(view.kind, AuthPromptChallengeKind::ManualToken));
+    assert_eq!(view.provider, "slack");
+    assert_eq!(view.account_label.as_deref(), Some("work slack token"));
+    assert!(view.authorization_url.is_none());
+}
+
+#[tokio::test]
+async fn challenge_for_gate_returns_other_kind_view_for_setup_required_flow() {
+    // Covers the AccountSelectionRequired / ReauthorizeRequired / SetupRequired
+    // arms of auth_challenge_to_view (all map to AuthPromptChallengeKind::Other).
+    use chrono::Utc;
+    use ironclaw_auth::AuthProviderId;
+    use ironclaw_auth::{
+        AuthChallenge, AuthContinuationRef, AuthFlowKind, AuthFlowManager, AuthGateRef,
+        InMemoryAuthProductServices, NewAuthFlow, TurnRunRef,
+    };
+    use ironclaw_host_api::ThreadId;
+    use ironclaw_product_adapters::AuthPromptChallengeKind;
+    use ironclaw_turns::TurnScope;
+    use std::sync::Arc;
+
+    let shared = Arc::new(InMemoryAuthProductServices::new());
+    let product_auth = Arc::new(
+        RebornProductAuthServices::from_shared(
+            shared.clone(),
+            Arc::new(NoopAuthDispatcher::default()),
+        )
+        .with_flow_record_source(shared.clone()),
+    );
+
+    let gate_ref_str = "eeeeeeee-ffff-aaaa-bbbb-555555555555";
+    let expires_at = Utc::now() + chrono::Duration::hours(1);
+    let thread_id = ThreadId::new("thread-setup-required".to_string()).expect("thread id");
+
+    shared
+        .create_flow(NewAuthFlow {
+            scope: caller_scope_with_invocation_and_thread(InvocationId::new(), thread_id.clone()),
+            kind: AuthFlowKind::IntegrationCredential,
+            provider: AuthProviderId::new("github".to_string()).unwrap(),
+            challenge: AuthChallenge::SetupRequired {
+                provider: AuthProviderId::new("github".to_string()).unwrap(),
+                message: "GitHub app not installed".to_string(),
+            },
+            continuation: AuthContinuationRef::TurnGateResume {
+                turn_run_ref: TurnRunRef::new("66666666-6666-6666-6666-666666666666").unwrap(),
+                gate_ref: AuthGateRef::new(gate_ref_str.to_string()).unwrap(),
+            },
+            update_binding: None,
+            opaque_state_hash: None,
+            pkce_verifier_hash: None,
+            expires_at,
+        })
+        .await
+        .expect("create flow");
+
+    let provider = product_auth.as_auth_challenge_provider().expect("provider");
+    let turn_scope = TurnScope::new(
+        TenantId::new(TENANT).expect("tenant"),
+        Some(AgentId::new(AGENT).expect("agent")),
+        Some(ProjectId::new(PROJECT).expect("project")),
+        thread_id,
+    );
+    let view = provider
+        .challenge_for_gate(&turn_scope, gate_ref_str)
+        .await
+        .expect("found");
+    assert!(matches!(view.kind, AuthPromptChallengeKind::Other));
+    assert_eq!(view.provider, "github");
+    assert!(view.account_label.is_none());
+    assert!(view.authorization_url.is_none());
+    assert!(view.expires_at.is_none());
 }
 
 #[tokio::test]
