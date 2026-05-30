@@ -4,6 +4,10 @@
 //! composition, one-way hashing of callback material, and sanitized response
 //! rendering. It deliberately delegates durable flow state, provider exchange,
 //! credential mutation, and continuation dispatch to [`RebornProductAuthServices`].
+//
+// arch-exempt: large_file, product-auth HTTP surface (9 mutation routes + OAuth
+// callback + helpers) has no smaller home until a dedicated product_auth_serve/
+// submodule split is tracked, plan #4201-decomp
 
 use std::{
     num::{NonZeroU32, NonZeroU64, NonZeroUsize},
@@ -49,8 +53,8 @@ use uuid::Uuid;
 use crate::auth::RebornOAuthStartFlowRequest;
 use crate::{
     RebornAuthProductError, RebornManualTokenSetupRequest, RebornManualTokenSubmitRequest,
-    RebornOAuthCallbackError, RebornOAuthCallbackOutcome, RebornOAuthCallbackRequest,
-    RebornOAuthCallbackResponse, RebornProductAuthServices,
+    RebornManualTokenSubmitResponse, RebornOAuthCallbackError, RebornOAuthCallbackOutcome,
+    RebornOAuthCallbackRequest, RebornOAuthCallbackResponse, RebornProductAuthServices,
 };
 
 pub(crate) const OAUTH_START_PATH: &str = "/api/reborn/product-auth/oauth/start";
@@ -232,8 +236,8 @@ pub(crate) struct ProductAuthRouteMount {
 // mutations enter `RebornProductAuthServices` directly; they are not in-turn
 // tool calls and must not surface raw secrets through the model-visible
 // tool-dispatch path. Contract: `docs/reborn/contracts/auth-product.md`.
+// dispatch-exempt: host-owned auth/secret ingress, not in-turn tool dispatch
 pub(crate) fn product_auth_route_mount(state: ProductAuthRouteState) -> ProductAuthRouteMount {
-    // dispatch-exempt: host-owned auth/secret ingress, not in-turn tool dispatch
     ProductAuthRouteMount {
         protected: Router::new()
             .route(OAUTH_START_PATH, post(oauth_start_handler))
@@ -398,9 +402,12 @@ pub(crate) struct ManualTokenSubmitResponse {
 ///
 /// `invocation_id` is round-tripped from a prior start/setup response so the
 /// host can re-derive the same `AuthProductScope` across follow-up calls
-/// (mirroring the OAuth start/callback pattern). All three fields are
-/// optional: routes default to a fresh scope when the browser has no prior
-/// invocation to carry forward.
+/// (mirroring the OAuth start/callback pattern). Routes that are follow-ups to
+/// an established interaction — `secret-submit`, `accounts/list`,
+/// `accounts/select`, `accounts/recovery`, and `accounts/refresh` — require
+/// `invocation_id` via [`scope_from_authenticated_caller_parts_requiring_invocation`].
+/// Setup-phase routes (`manual-token/setup`, OAuth start) accept a fresh scope
+/// when the field is absent.
 #[derive(Default, Deserialize)]
 struct ScopeFields {
     #[serde(default)]
@@ -624,7 +631,14 @@ async fn oauth_start_handler(
         return Err(ProductAuthRouteFailure::invalid_request());
     }
 
-    let scope = scope_from_authenticated_caller(&caller, &request)?;
+    let scope = scope_from_authenticated_caller_parts(
+        &caller,
+        &ScopeFields {
+            session_id: request.session_id.clone(),
+            thread_id: request.thread_id.clone(),
+            invocation_id: None,
+        },
+    )?;
     let provider = AuthProviderId::new(request.provider).map_err(|_| {
         ProductAuthRouteFailure::new(StatusCode::BAD_REQUEST, AuthErrorCode::InvalidRequest)
     })?;
@@ -711,40 +725,15 @@ async fn manual_token_submit_handler(
         ),
     ))
     .await?;
-    let submitted = match tokio::time::timeout(
-        PRODUCT_AUTH_BACKEND_TIMEOUT,
-        state
-            .product_auth
-            .submit_manual_token(RebornManualTokenSubmitRequest::new(
-                scope.clone(),
-                challenge.interaction_id,
-                token.into_secret(),
-            )),
+    // submit_manual_token uses inline timeout (not run_with_backend_timeout) because
+    // it needs to call abandon_manual_token on failure — see submit_manual_token_with_abandon.
+    let submitted = submit_manual_token_with_abandon(
+        &state,
+        &scope,
+        challenge.interaction_id,
+        token.into_secret(),
     )
-    .await
-    {
-        Ok(Ok(submitted)) => submitted,
-        Ok(Err(error)) => {
-            abandon_manual_token_after_submit_failure(
-                &state,
-                &scope,
-                challenge.interaction_id,
-                error.code,
-            )
-            .await;
-            return Err(ProductAuthRouteFailure::from(error));
-        }
-        Err(_) => {
-            abandon_manual_token_after_submit_failure(
-                &state,
-                &scope,
-                challenge.interaction_id,
-                AuthErrorCode::BackendUnavailable,
-            )
-            .await;
-            return Err(ProductAuthRouteFailure::backend_timeout());
-        }
-    };
+    .await?;
 
     Ok(Json(ManualTokenSubmitResponse {
         credential_ref: submitted.account_id,
@@ -769,18 +758,66 @@ async fn abandon_manual_token_after_submit_failure(
     {
         Ok(Ok(_)) => {}
         Ok(Err(cleanup_error)) => {
-            tracing::debug!(
+            tracing::warn!(
                 error_code = ?submit_error_code,
                 cleanup_error_code = ?cleanup_error.code,
-                "manual-token submit failed and interaction cleanup failed"
+                "manual-token submit failed and interaction cleanup failed — interaction may be orphaned until TTL"
             );
         }
         Err(_) => {
-            tracing::debug!(
+            tracing::warn!(
                 error_code = ?submit_error_code,
                 cleanup_error_code = ?AuthErrorCode::BackendUnavailable,
-                "manual-token submit failed and interaction cleanup timed out"
+                "manual-token submit failed and interaction cleanup timed out — interaction may be orphaned until TTL"
             );
+        }
+    }
+}
+
+/// Submit a manual token and, on any failure, abandon the pending interaction
+/// before returning the error so the interaction slot is released promptly.
+///
+/// Uses a dedicated `tokio::time::timeout` instead of `run_with_backend_timeout`
+/// because it needs access to `scope` and `interaction_id` for the cleanup call
+/// — the generic timeout helper returns early on failure without them.
+///
+/// Note: cumulative per-request timeout is up to 2× `PRODUCT_AUTH_BACKEND_TIMEOUT`
+/// (submit + abandon). Detaching the abandon via `tokio::spawn` is deferred until
+/// the existing caller-level test for synchronous abandon can be updated
+/// (#4201-decomp).
+async fn submit_manual_token_with_abandon(
+    state: &ProductAuthRouteState,
+    scope: &AuthProductScope,
+    interaction_id: AuthInteractionId,
+    secret: SecretString,
+) -> Result<RebornManualTokenSubmitResponse, ProductAuthRouteFailure> {
+    match tokio::time::timeout(
+        PRODUCT_AUTH_BACKEND_TIMEOUT,
+        state
+            .product_auth
+            .submit_manual_token(RebornManualTokenSubmitRequest::new(
+                scope.clone(),
+                interaction_id,
+                secret,
+            )),
+    )
+    .await
+    {
+        Ok(Ok(submitted)) => Ok(submitted),
+        Ok(Err(error)) => {
+            let code = error.code;
+            abandon_manual_token_after_submit_failure(state, scope, interaction_id, code).await;
+            Err(ProductAuthRouteFailure::from(error))
+        }
+        Err(_) => {
+            abandon_manual_token_after_submit_failure(
+                state,
+                scope,
+                interaction_id,
+                AuthErrorCode::BackendUnavailable,
+            )
+            .await;
+            Err(ProductAuthRouteFailure::backend_timeout())
         }
     }
 }
@@ -828,40 +865,26 @@ async fn manual_token_secret_submit_handler(
     let scope =
         scope_from_authenticated_caller_parts_requiring_invocation(&caller, &request.scope)?;
     let interaction_id = parse_interaction_id(&request.interaction_id)?;
-    let token = request
-        .token
-        .into_validated()
-        .map_err(|_| ProductAuthRouteFailure::invalid_request())?;
-
-    let submitted = match tokio::time::timeout(
-        PRODUCT_AUTH_BACKEND_TIMEOUT,
-        state
-            .product_auth
-            .submit_manual_token(RebornManualTokenSubmitRequest::new(
-                scope.clone(),
-                interaction_id,
-                token.into_secret(),
-            )),
-    )
-    .await
-    {
-        Ok(Ok(submitted)) => submitted,
-        Ok(Err(error)) => {
-            abandon_manual_token_after_submit_failure(&state, &scope, interaction_id, error.code)
-                .await;
-            return Err(ProductAuthRouteFailure::from(error));
-        }
+    // If token validation fails, the interaction created by the prior setup call
+    // would be orphaned until TTL. Abandon it synchronously so the slot is
+    // released promptly even though the client receives an invalid_request.
+    let token = match request.token.into_validated() {
+        Ok(t) => t,
         Err(_) => {
             abandon_manual_token_after_submit_failure(
                 &state,
                 &scope,
                 interaction_id,
-                AuthErrorCode::BackendUnavailable,
+                AuthErrorCode::InvalidRequest,
             )
             .await;
-            return Err(ProductAuthRouteFailure::backend_timeout());
+            return Err(ProductAuthRouteFailure::invalid_request());
         }
     };
+
+    let submitted =
+        submit_manual_token_with_abandon(&state, &scope, interaction_id, token.into_secret())
+            .await?;
 
     Ok(Json(ManualTokenSubmitResponse {
         credential_ref: submitted.account_id,
@@ -907,7 +930,10 @@ async fn accounts_select_handler(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Json(request): Json<AccountsSelectRequest>,
 ) -> Result<Json<CredentialAccountProjection>, ProductAuthRouteFailure> {
-    let scope = scope_from_authenticated_caller_parts(&caller, &request.scope)?;
+    // invocation_id is required to match the scope used for the preceding
+    // accounts/list call so that select binds the choice to the same context.
+    let scope =
+        scope_from_authenticated_caller_parts_requiring_invocation(&caller, &request.scope)?;
     let provider = AuthProviderId::new(request.provider)
         .map_err(|_| ProductAuthRouteFailure::invalid_request())?;
     let account_id = parse_credential_account_id(&request.account_id)?;
@@ -929,7 +955,10 @@ async fn accounts_recovery_handler(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Json(request): Json<AccountsRecoveryRequest>,
 ) -> Result<Json<CredentialRecoveryProjection>, ProductAuthRouteFailure> {
-    let scope = scope_from_authenticated_caller_parts(&caller, &request.scope)?;
+    // invocation_id is required to keep recovery/refresh on the same scope as
+    // the preceding list/select calls.
+    let scope =
+        scope_from_authenticated_caller_parts_requiring_invocation(&caller, &request.scope)?;
     let provider = AuthProviderId::new(request.provider)
         .map_err(|_| ProductAuthRouteFailure::invalid_request())?;
 
@@ -953,7 +982,10 @@ async fn accounts_refresh_handler(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Json(request): Json<AccountsRefreshRequest>,
 ) -> Result<Json<CredentialRefreshReport>, ProductAuthRouteFailure> {
-    let scope = scope_from_authenticated_caller_parts(&caller, &request.scope)?;
+    // invocation_id is required to match the scope used for list/select so the
+    // refresh target resolves in the same interaction context.
+    let scope =
+        scope_from_authenticated_caller_parts_requiring_invocation(&caller, &request.scope)?;
     let provider = AuthProviderId::new(request.provider)
         .map_err(|_| ProductAuthRouteFailure::invalid_request())?;
     let account_id = parse_credential_account_id(&request.account_id)?;
@@ -1041,10 +1073,10 @@ fn parse_optional_extension(
 /// project both the elapsed-timeout failure and any returned auth error onto
 /// the route's sanitized failure shape.
 ///
-/// Every protected product-auth route enters `RebornProductAuthServices` the
-/// same way; centralising the timeout/error wiring stops each handler from
-/// having to re-derive the same four lines and keeps the failure projection
-/// identical across routes.
+/// Every protected product-auth route except the two manual-token submit
+/// handlers uses this helper. Those handlers use a raw `tokio::time::timeout`
+/// instead because they need to call `abandon_manual_token_after_submit_failure`
+/// on error — see [`submit_manual_token_with_abandon`].
 async fn run_with_backend_timeout<T, F>(future: F) -> Result<T, ProductAuthRouteFailure>
 where
     F: std::future::Future<Output = Result<T, RebornAuthProductError>>,
@@ -1183,20 +1215,6 @@ fn should_forget_pkce_verifier(code: AuthErrorCode) -> bool {
     )
 }
 
-fn scope_from_authenticated_caller(
-    caller: &WebUiAuthenticatedCaller,
-    request: &OAuthStartRequest,
-) -> Result<AuthProductScope, ProductAuthRouteFailure> {
-    scope_from_authenticated_caller_parts(
-        caller,
-        &ScopeFields {
-            session_id: request.session_id.clone(),
-            thread_id: request.thread_id.clone(),
-            invocation_id: None,
-        },
-    )
-}
-
 /// Derive an `AuthProductScope` from the authenticated caller plus the
 /// caller-supplied scope fields shared by every product-auth route body.
 ///
@@ -1250,9 +1268,11 @@ fn scope_from_authenticated_caller_parts(
 }
 
 /// Like [`scope_from_authenticated_caller_parts`] but returns `invalid_request`
-/// when `invocation_id` is absent. Use for follow-up routes where the browser
-/// MUST carry back the id minted by a prior setup/start response so the host
-/// can re-derive the matching scope without minting a fresh, unmatched one.
+/// when `invocation_id` is absent. Used by all follow-up routes
+/// (`secret-submit`, `accounts/list`, `accounts/select`, `accounts/recovery`,
+/// `accounts/refresh`) where the browser MUST carry back the id minted by a
+/// prior setup/start response so the host re-derives the same scope across the
+/// interaction lifecycle.
 fn scope_from_authenticated_caller_parts_requiring_invocation(
     caller: &WebUiAuthenticatedCaller,
     fields: &ScopeFields,

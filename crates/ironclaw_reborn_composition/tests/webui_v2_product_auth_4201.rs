@@ -18,7 +18,7 @@ use ironclaw_auth::{
     CredentialAccountStatus, CredentialOwnership, InMemoryAuthProductServices,
     NewCredentialAccount,
 };
-use ironclaw_auth::{AuthProviderId, CredentialAccountService};
+use ironclaw_auth::{AuthProviderId, CredentialAccountId, CredentialAccountService};
 use ironclaw_host_api::{AgentId, InvocationId, ProjectId, ResourceScope, TenantId, UserId};
 use ironclaw_product_workflow::{
     ExtensionName, RebornCancelRunResponse, RebornCreateThreadResponse, RebornGetRunStateRequest,
@@ -480,11 +480,12 @@ async fn accounts_select_returns_redacted_projection() {
 #[tokio::test]
 async fn accounts_recovery_projects_setup_required_when_no_account_exists() {
     let fixture = build_fixture();
+    let invocation_id = InvocationId::new();
 
     let response = post_authenticated(
         &fixture.app,
         "/api/reborn/product-auth/accounts/recovery",
-        json!({ "provider": "github" }),
+        json!({ "provider": "github", "invocation_id": invocation_id.to_string() }),
     )
     .await;
     assert_eq!(response.status(), StatusCode::OK);
@@ -695,4 +696,259 @@ async fn accounts_select_rejects_malformed_account_id() {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let body = read_body_string(response).await;
     assert!(body.contains("\"code\":\"invalid_request\""));
+}
+
+// --- finding t1: body-limit enforcement ---
+
+#[tokio::test]
+async fn new_product_auth_routes_enforce_body_limit() {
+    // PROTECTED_MUTATION policy sets BodyLimitPolicy::Limited{16 KiB}.
+    // Any route receiving a body that exceeds this cap must be rejected
+    // with 413 before auth or the handler runs.
+    let fixture = build_fixture();
+    // Construct a JSON payload that exceeds 16 KiB.
+    let padding = "x".repeat(16 * 1024 + 1);
+    let oversized_body = format!("{{\"provider\":\"github\",\"padding\":\"{padding}\"}}");
+    assert!(oversized_body.len() > 16 * 1024);
+
+    let response = fixture
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/reborn/product-auth/manual-token/setup")
+                .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(oversized_body))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(
+        response.status(),
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "oversized body must be rejected before the handler"
+    );
+    let body = read_body_string(response).await;
+    assert!(
+        body.contains("body limit"),
+        "413 body should reference the body limit, got: {body}"
+    );
+}
+
+// --- finding t2: rate-limit enforcement ---
+
+#[tokio::test]
+async fn new_product_auth_routes_enforce_per_caller_rate_limit() {
+    // PROTECTED_MUTATION declares RateLimitPolicy::Limited{PerCaller, 20 req/60s}.
+    // Send 20 requests from the same bearer token and confirm the 21st returns 429.
+    let fixture = build_fixture();
+    let invocation_id = InvocationId::new();
+    let body = json!({
+        "provider": "github",
+        "invocation_id": invocation_id.to_string()
+    })
+    .to_string();
+
+    let make_request = || {
+        Request::builder()
+            .method(Method::POST)
+            .uri("/api/reborn/product-auth/accounts/recovery")
+            .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.clone()))
+            .expect("request")
+    };
+
+    for i in 0..20 {
+        let response = fixture
+            .app
+            .clone()
+            .oneshot(make_request())
+            .await
+            .expect("oneshot");
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "request {i} should be within the per-caller rate-limit budget"
+        );
+    }
+
+    let response = fixture
+        .app
+        .clone()
+        .oneshot(make_request())
+        .await
+        .expect("oneshot");
+    assert_eq!(
+        response.status(),
+        StatusCode::TOO_MANY_REQUESTS,
+        "21st request must exceed the per-caller rate-limit window"
+    );
+    let body_str = read_body_string(response).await;
+    assert!(
+        body_str.contains("Rate limit exceeded") || body_str.contains("rate limit"),
+        "429 body should explain the limit, got: {body_str}"
+    );
+}
+
+// --- finding t3: accounts_refresh error path ---
+
+#[tokio::test]
+async fn accounts_refresh_returns_error_for_unknown_account_id() {
+    // Refreshing a syntactically valid but unseeded account_id must return
+    // a sanitized error (not 500, no secret-handle leakage).
+    let fixture = build_fixture();
+    let invocation_id = InvocationId::new();
+    let unknown_id = CredentialAccountId::from_uuid(uuid::Uuid::new_v4());
+
+    let response = post_authenticated(
+        &fixture.app,
+        "/api/reborn/product-auth/accounts/refresh",
+        json!({
+            "provider": "github",
+            "account_id": unknown_id.to_string(),
+            "invocation_id": invocation_id.to_string()
+        }),
+    )
+    .await;
+    // Backend returns CredentialMissing which projects to 409 CONFLICT.
+    assert_eq!(
+        response.status(),
+        StatusCode::CONFLICT,
+        "unknown account_id must produce a sanitized error, not 500"
+    );
+    let body = read_body_string(response).await;
+    assert!(!body.contains("access_secret"), "no secret leakage: {body}");
+    assert!(
+        !body.contains("refresh_secret"),
+        "no secret leakage: {body}"
+    );
+}
+
+// --- finding t4: accounts_recovery existing-account projection ---
+
+#[tokio::test]
+async fn accounts_recovery_projects_configured_for_existing_account() {
+    // With a seeded Configured account the recovery projection must not be
+    // setup_required; it should project a non-empty configured or selection
+    // state, and the response must never carry secret handles.
+    let fixture = build_fixture();
+    let invocation_id = InvocationId::new();
+    let _account_id =
+        seed_configured_account(&fixture.shared, invocation_id, "github", "work github").await;
+
+    let response = post_authenticated(
+        &fixture.app,
+        "/api/reborn/product-auth/accounts/recovery",
+        json!({
+            "provider": "github",
+            "invocation_id": invocation_id.to_string()
+        }),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_body_string(response).await;
+    let json: Value = serde_json::from_str(&body).expect("recovery json");
+    assert_ne!(
+        json["kind"].as_str(),
+        Some("setup_required"),
+        "seeded account must not project setup_required: {body}"
+    );
+    assert!(!body.contains("access_secret"), "no secret leakage: {body}");
+    assert!(
+        !body.contains("refresh_secret"),
+        "no secret leakage: {body}"
+    );
+}
+
+// --- finding t5: manual_token_setup validation error paths ---
+
+#[tokio::test]
+async fn manual_token_setup_rejects_empty_provider_and_label() {
+    let fixture = build_fixture();
+    let cases = [
+        // empty provider
+        json!({ "provider": "", "account_label": "my-account" }),
+        // empty account_label
+        json!({ "provider": "github", "account_label": "" }),
+    ];
+    for body in cases {
+        let response = post_authenticated(
+            &fixture.app,
+            "/api/reborn/product-auth/manual-token/setup",
+            body,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body_str = read_body_string(response).await;
+        assert!(
+            body_str.contains("\"code\":\"invalid_request\""),
+            "empty provider/label must return invalid_request, got: {body_str}"
+        );
+    }
+}
+
+// --- finding t6: accounts_refresh malformed account_id ---
+
+#[tokio::test]
+async fn accounts_refresh_rejects_malformed_account_id() {
+    let fixture = build_fixture();
+
+    let response = post_authenticated(
+        &fixture.app,
+        "/api/reborn/product-auth/accounts/refresh",
+        json!({
+            "provider": "github",
+            "account_id": "not-a-uuid",
+            "invocation_id": InvocationId::new().to_string()
+        }),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = read_body_string(response).await;
+    assert!(body.contains("\"code\":\"invalid_request\""));
+}
+
+// --- finding b1 regression: select/recovery/refresh require invocation_id ---
+
+#[tokio::test]
+async fn follow_up_routes_require_invocation_id() {
+    // accounts/select, accounts/recovery, and accounts/refresh are follow-up
+    // routes and must reject requests that omit invocation_id (same as
+    // accounts/list and secret-submit) so all five routes share the same scope
+    // derivation contract.
+    let fixture = build_fixture();
+    let invocation_id = InvocationId::new();
+    let account_id =
+        seed_configured_account(&fixture.shared, invocation_id, "github", "work github").await;
+
+    let cases: &[(&str, Value)] = &[
+        (
+            "/api/reborn/product-auth/accounts/select",
+            json!({ "provider": "github", "account_id": account_id.to_string() /* no invocation_id */ }),
+        ),
+        (
+            "/api/reborn/product-auth/accounts/recovery",
+            json!({ "provider": "github" /* no invocation_id */ }),
+        ),
+        (
+            "/api/reborn/product-auth/accounts/refresh",
+            json!({ "provider": "github", "account_id": account_id.to_string() /* no invocation_id */ }),
+        ),
+    ];
+    for (path, body) in cases {
+        let response = post_authenticated(&fixture.app, path, body.clone()).await;
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "{path} must reject missing invocation_id"
+        );
+        let body_str = read_body_string(response).await;
+        assert!(
+            body_str.contains("\"code\":\"invalid_request\""),
+            "{path}: expected invalid_request, got: {body_str}"
+        );
+    }
 }
