@@ -28,8 +28,6 @@ import asyncio
 import json
 import os
 import re
-import signal
-import socket
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -41,9 +39,11 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from helpers import (
     AUTH_TOKEN,
+    _forward_coverage_env,
+    _reserve_loopback_port,
+    _start_engine_v2_server,
     api_get,
     api_post,
-    forward_coverage_env,
     stop_process,
     wait_for_pending_auth_gate,
     wait_for_ready,
@@ -115,8 +115,6 @@ def _assert_no_pat_in_text(text: str, *, context: str = "") -> None:
 async def mock_bearer(mock_llm_server):
     """Start a mock Bearer-auth GitHub API server."""
     async for handle in start_mock_bearer_api():
-        # Tell the mock LLM to generate tool calls pointing at this server.
-        handle._mock_host = urlparse(handle.base_url).netloc
         async with httpx.AsyncClient() as client:
             resp = await client.post(
                 f"{mock_llm_server}/__mock/set_github_api_url",
@@ -129,6 +127,13 @@ async def mock_bearer(mock_llm_server):
         yield handle
 
 
+@pytest.fixture(autouse=True)
+def _reset_mock_bearer(mock_bearer):
+    """Reset mock state between tests so dirty state from a failure doesn't bleed."""
+    yield
+    mock_bearer.reset()
+
+
 @pytest.fixture(scope="module")
 async def v2_pat_server(ironclaw_binary, mock_llm_server, mock_bearer, tmp_path_factory):
     """Start ironclaw with ENGINE_V2=true for GitHub PAT E2E tests."""
@@ -138,65 +143,18 @@ async def v2_pat_server(ironclaw_binary, mock_llm_server, mock_bearer, tmp_path_
     os.makedirs(skills_dir, exist_ok=True)
     _write_github_skill(skills_dir, mock_bearer._mock_host)
 
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.bind(("127.0.0.1", 0))
-    port = s.getsockname()[1]
-    s.close()
-
-    env = {
-        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-        "HOME": home_dir,
-        "IRONCLAW_BASE_DIR": os.path.join(home_dir, ".ironclaw"),
-        "RUST_LOG": "ironclaw=debug",
-        "RUST_BACKTRACE": "1",
-        "ENGINE_V2": "true",
-        "AGENT_AUTO_APPROVE_TOOLS": "true",
-        "HTTP_ALLOW_LOCALHOST": "true",
-        "SECRETS_MASTER_KEY": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-        "GATEWAY_ENABLED": "true",
-        "GATEWAY_HOST": "127.0.0.1",
-        "GATEWAY_PORT": str(port),
-        "GATEWAY_AUTH_TOKEN": AUTH_TOKEN,
-        "GATEWAY_USER_ID": "e2e-4112-pat",
-        "IRONCLAW_OWNER_ID": "e2e-4112-pat",
-        "CLI_ENABLED": "false",
-        "LLM_BACKEND": "openai_compatible",
-        "LLM_BASE_URL": mock_llm_server,
-        "LLM_API_KEY": "mock-api-key",
-        "LLM_MODEL": "mock-model",
-        "DATABASE_BACKEND": "libsql",
-        "LIBSQL_PATH": os.path.join(db_dir, "pat-e2e.db"),
-        "SANDBOX_ENABLED": "false",
-        "SKILLS_ENABLED": "true",
-        "ROUTINES_ENABLED": "false",
-        "HEARTBEAT_ENABLED": "false",
-        "EMBEDDING_ENABLED": "false",
-        "WASM_ENABLED": "false",
-        "ONBOARD_COMPLETED": "true",
-        "IRONCLAW_DISABLE_OS_KEYCHAIN": "1",
-    }
-    forward_coverage_env(env)
-
-    proc = await asyncio.create_subprocess_exec(
-        ironclaw_binary, "--no-onboard",
-        stdin=asyncio.subprocess.DEVNULL,
-        stdout=asyncio.subprocess.DEVNULL,
-        stderr=asyncio.subprocess.DEVNULL,
-        env=env,
-    )
-    base_url = f"http://127.0.0.1:{port}"
-    try:
-        await wait_for_ready(f"{base_url}/api/health", timeout=60)
+    sock, port = _reserve_loopback_port()
+    async with _start_engine_v2_server(
+        ironclaw_binary,
+        mock_llm_server=mock_llm_server,
+        port=port,
+        home_dir=home_dir,
+        db_path=os.path.join(db_dir, "pat-e2e.db"),
+        user_id="e2e-4112-pat",
+        label="v2_pat_server",
+    ) as base_url:
+        sock.close()
         yield base_url
-    except TimeoutError:
-        if proc.returncode is None:
-            await stop_process(proc, timeout=2)
-        pytest.fail(f"v2_pat_server failed to start on port {port}")
-    finally:
-        if proc.returncode is None:
-            await stop_process(proc, sig=signal.SIGINT, timeout=10)
-            if proc.returncode is None:
-                await stop_process(proc, sig=signal.SIGTERM, timeout=5)
 
 
 # ---------------------------------------------------------------------------

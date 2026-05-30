@@ -23,8 +23,6 @@ import asyncio
 import json
 import os
 import re
-import signal
-import socket
 from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlparse
 
@@ -36,9 +34,11 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from helpers import (
     AUTH_TOKEN,
+    _forward_coverage_env,
+    _reserve_loopback_port,
+    _start_engine_v2_server,
     api_get,
     api_post,
-    forward_coverage_env,
     stop_process,
     wait_for_pending_auth_gate,
     wait_for_ready,
@@ -108,6 +108,14 @@ async def mock_google_api():
         yield handle
 
 
+@pytest.fixture(autouse=True)
+def _reset_mocks(mock_idp, mock_google_api):
+    """Reset mock state between tests so dirty state from a failure doesn't bleed."""
+    yield
+    mock_idp.reset()
+    mock_google_api.reset()
+
+
 @pytest.fixture(scope="module")
 async def v2_gsuite_server(ironclaw_binary, mock_llm_server, mock_idp, mock_google_api, tmp_path_factory):
     """Start ironclaw for GSuite OAuth E2E tests."""
@@ -118,80 +126,32 @@ async def v2_gsuite_server(ironclaw_binary, mock_llm_server, mock_idp, mock_goog
     mock_api_host = urlparse(mock_google_api.base_url).netloc
     _write_gmail_skill(skills_dir, mock_api_host, mock_idp.token_url)
 
-    # Tell mock LLM to generate Google API tool calls.
     async with httpx.AsyncClient() as client:
-        try:
-            await client.post(
-                f"{mock_llm_server}/__mock/set_github_api_url",
-                json={"url": mock_google_api.base_url},
-                timeout=5,
-            )
-        except httpx.RequestError:
-            pass  # Not all mock LLM builds support this; ignore.
+        resp = await client.post(
+            f"{mock_llm_server}/__mock/set_github_api_url",
+            json={"url": mock_google_api.base_url},
+            timeout=5,
+        )
+        if resp.status_code not in (200, 404):
+            resp.raise_for_status()
 
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.bind(("127.0.0.1", 0))
-    port = s.getsockname()[1]
-    s.close()
-
-    env = {
-        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-        "HOME": home_dir,
-        "IRONCLAW_BASE_DIR": os.path.join(home_dir, ".ironclaw"),
-        "RUST_LOG": "ironclaw=debug",
-        "RUST_BACKTRACE": "1",
-        "ENGINE_V2": "true",
-        "AGENT_AUTO_APPROVE_TOOLS": "true",
-        "HTTP_ALLOW_LOCALHOST": "true",
-        "SECRETS_MASTER_KEY": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-        "GATEWAY_ENABLED": "true",
-        "GATEWAY_HOST": "127.0.0.1",
-        "GATEWAY_PORT": str(port),
-        "GATEWAY_AUTH_TOKEN": AUTH_TOKEN,
-        "GATEWAY_USER_ID": "e2e-4112-gsuite",
-        "IRONCLAW_OWNER_ID": "e2e-4112-gsuite",
-        # Override Google OAuth endpoints to point at the mock IDP.
-        "GOOGLE_OAUTH_AUTHORIZE_URL": mock_idp.authorize_url,
-        "GOOGLE_OAUTH_TOKEN_URL": mock_idp.token_url,
-        "GOOGLE_OAUTH_CLIENT_ID": "test-google-client",
-        "CLI_ENABLED": "false",
-        "LLM_BACKEND": "openai_compatible",
-        "LLM_BASE_URL": mock_llm_server,
-        "LLM_API_KEY": "mock-api-key",
-        "LLM_MODEL": "mock-model",
-        "DATABASE_BACKEND": "libsql",
-        "LIBSQL_PATH": os.path.join(db_dir, "gsuite-e2e.db"),
-        "SANDBOX_ENABLED": "false",
-        "SKILLS_ENABLED": "true",
-        "ROUTINES_ENABLED": "false",
-        "HEARTBEAT_ENABLED": "false",
-        "EMBEDDING_ENABLED": "false",
-        "WASM_ENABLED": "false",
-        "ONBOARD_COMPLETED": "true",
-        "IRONCLAW_DISABLE_OS_KEYCHAIN": "1",
-    }
-    forward_coverage_env(env)
-
-    proc = await asyncio.create_subprocess_exec(
-        ironclaw_binary, "--no-onboard",
-        stdin=asyncio.subprocess.DEVNULL,
-        stdout=asyncio.subprocess.DEVNULL,
-        stderr=asyncio.subprocess.DEVNULL,
-        env=env,
-    )
-    base_url = f"http://127.0.0.1:{port}"
-    try:
-        await wait_for_ready(f"{base_url}/api/health", timeout=60)
+    sock, port = _reserve_loopback_port()
+    async with _start_engine_v2_server(
+        ironclaw_binary,
+        mock_llm_server=mock_llm_server,
+        port=port,
+        home_dir=home_dir,
+        db_path=os.path.join(db_dir, "gsuite-e2e.db"),
+        user_id="e2e-4112-gsuite",
+        label="v2_gsuite_server",
+        env_overrides={
+            "GOOGLE_OAUTH_AUTHORIZE_URL": mock_idp.authorize_url,
+            "GOOGLE_OAUTH_TOKEN_URL": mock_idp.token_url,
+            "GOOGLE_OAUTH_CLIENT_ID": "test-google-client",
+        },
+    ) as base_url:
+        sock.close()
         yield base_url
-    except TimeoutError:
-        if proc.returncode is None:
-            await stop_process(proc, timeout=2)
-        pytest.fail(f"v2_gsuite_server failed to start on port {port}")
-    finally:
-        if proc.returncode is None:
-            await stop_process(proc, sig=signal.SIGINT, timeout=10)
-            if proc.returncode is None:
-                await stop_process(proc, sig=signal.SIGTERM, timeout=5)
 
 
 # ---------------------------------------------------------------------------
@@ -368,7 +328,8 @@ class TestGSuiteOAuthWireShape:
 
         Note: cross-user (multi-tenant) isolation is out of scope for this
         fixture because the server is started with a single GATEWAY_USER_ID.
-        Cross-user isolation is covered by the owner-scope E2E tests.
+        Cross-user isolation requires a separate test in test_ownership_model.py
+        that sends user-B’s token against user-A’s pending gate and asserts 403.
         """
         # Thread A
         r_a = await api_post(v2_gsuite_server, "/api/chat/thread/new", timeout=15)

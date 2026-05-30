@@ -6,9 +6,13 @@ import hmac
 import os
 import re
 import signal
+import socket
 import time
 import uuid
 from contextlib import asynccontextmanager
+from typing import AsyncIterator
+
+import pytest
 
 import aiohttp
 import httpx
@@ -502,7 +506,7 @@ def signed_http_webhook_headers(body: bytes) -> dict[str, str]:
 # Process helpers (shared across v2 auth E2E scenario files)
 # ---------------------------------------------------------------------------
 
-def forward_coverage_env(env: dict) -> None:
+def _forward_coverage_env(env: dict) -> None:
     """Copy LLVM coverage env vars into *env* so coverage data is collected."""
     for key in os.environ:
         if key.startswith(
@@ -516,7 +520,15 @@ async def stop_process(proc, sig: int = signal.SIGINT, timeout: float = 5) -> No
     async def _drain() -> None:
         try:
             await asyncio.wait_for(proc.communicate(), timeout=1)
-        except (asyncio.TimeoutError, ValueError):
+        except asyncio.TimeoutError:
+            # Release transports now rather than waiting for GC.
+            for pipe in (proc.stdout, proc.stderr):
+                if pipe is not None:
+                    try:
+                        pipe.feed_eof()
+                    except Exception:
+                        pass
+        except ValueError:
             pass
 
     try:
@@ -544,12 +556,15 @@ async def wait_for_pending_auth_gate(
     The gate kind is validated so that approval / confirmation gates do not
     satisfy the check and produce false positives.
     """
-    for _ in range(int(timeout * 2)):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
         r = await api_get(base_url, f"/api/chat/history?thread_id={thread_id}", timeout=15)
         if r.status_code == 200:
             gate = r.json().get("pending_gate")
             if isinstance(gate, dict) and gate.get("request_id"):
-                resume = gate.get("resume_kind") or {}
+                resume = gate.get("resume_kind")
+                if not isinstance(resume, dict):
+                    resume = {}
                 if (
                     resume.get("kind") == "authentication"
                     or gate.get("gate_name") in ("auth", "authentication")
@@ -559,3 +574,95 @@ async def wait_for_pending_auth_gate(
     raise AssertionError(
         f"Timed out waiting for pending auth gate in thread {thread_id}"
     )
+
+
+def _reserve_loopback_port() -> tuple[socket.socket, int]:
+    """Bind a loopback socket and hold it open to minimise the TOCTOU window.
+
+    The caller MUST close the returned socket after the subprocess has started
+    (i.e. after ``wait_for_ready`` confirms the process is up).
+    """
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind(("127.0.0.1", 0))
+    return sock, sock.getsockname()[1]
+
+
+_ENGINE_V2_BASE_ENV = {
+    "RUST_LOG": "ironclaw=debug",
+    "RUST_BACKTRACE": "1",
+    "ENGINE_V2": "true",
+    "AGENT_AUTO_APPROVE_TOOLS": "true",
+    "HTTP_ALLOW_LOCALHOST": "true",
+    "SECRETS_MASTER_KEY": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "GATEWAY_ENABLED": "true",
+    "GATEWAY_HOST": "127.0.0.1",
+    "GATEWAY_AUTH_TOKEN": AUTH_TOKEN,
+    "CLI_ENABLED": "false",
+    "LLM_BACKEND": "openai_compatible",
+    "LLM_API_KEY": "mock-api-key",
+    "LLM_MODEL": "mock-model",
+    "DATABASE_BACKEND": "libsql",
+    "SANDBOX_ENABLED": "false",
+    "SKILLS_ENABLED": "true",
+    "ROUTINES_ENABLED": "false",
+    "HEARTBEAT_ENABLED": "false",
+    "EMBEDDING_ENABLED": "false",
+    "WASM_ENABLED": "false",
+    "ONBOARD_COMPLETED": "true",
+    "IRONCLAW_DISABLE_OS_KEYCHAIN": "1",
+}
+
+
+@asynccontextmanager
+async def _start_engine_v2_server(
+    ironclaw_binary: str,
+    *,
+    mock_llm_server: str,
+    port: int,
+    home_dir: str,
+    db_path: str,
+    user_id: str,
+    label: str,
+    env_overrides: dict[str, str] | None = None,
+) -> AsyncIterator[str]:
+    """Start an ENGINE_V2 ironclaw process and yield its base URL.
+
+    Centralises the subprocess-lifecycle boilerplate shared across all three
+    v2 auth E2E server fixtures.
+    """
+    env: dict[str, str] = {
+        **_ENGINE_V2_BASE_ENV,
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "HOME": home_dir,
+        "IRONCLAW_BASE_DIR": os.path.join(home_dir, ".ironclaw"),
+        "GATEWAY_PORT": str(port),
+        "GATEWAY_USER_ID": user_id,
+        "IRONCLAW_OWNER_ID": user_id,
+        "LLM_BASE_URL": mock_llm_server,
+        "LIBSQL_PATH": db_path,
+    }
+    if env_overrides:
+        env.update(env_overrides)
+    _forward_coverage_env(env)
+
+    proc = await asyncio.create_subprocess_exec(
+        ironclaw_binary, "--no-onboard",
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
+        env=env,
+    )
+    base_url = f"http://127.0.0.1:{port}"
+    try:
+        await wait_for_ready(f"{base_url}/api/health", timeout=60)
+        yield base_url
+    except TimeoutError:
+        if proc.returncode is None:
+            await stop_process(proc, timeout=2)
+        pytest.fail(f"{label} failed to start on port {port}")
+    finally:
+        if proc.returncode is None:
+            await stop_process(proc, sig=signal.SIGINT, timeout=10)
+            if proc.returncode is None:
+                await stop_process(proc, sig=signal.SIGTERM, timeout=5)

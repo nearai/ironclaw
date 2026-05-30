@@ -20,8 +20,6 @@ exercised in ``crates/ironclaw_reborn_composition`` Rust integration tests.
 import asyncio
 import json
 import os
-import signal
-import socket
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -33,9 +31,11 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from helpers import (
     AUTH_TOKEN,
+    _forward_coverage_env,
+    _reserve_loopback_port,
+    _start_engine_v2_server,
     api_get,
     api_post,
-    forward_coverage_env,
     stop_process,
     wait_for_ready,
 )
@@ -70,6 +70,14 @@ async def mock_notion_idp(mock_notion):
         yield handle
 
 
+@pytest.fixture(autouse=True)
+def _reset_mocks(mock_notion, mock_notion_idp):
+    """Reset mock state between tests so dirty state from a failure doesn't bleed."""
+    yield
+    mock_notion.reset()
+    mock_notion_idp.reset()
+
+
 @pytest.fixture(scope="module")
 async def v2_notion_server(ironclaw_binary, mock_llm_server, mock_notion, mock_notion_idp, tmp_path_factory):
     """Start ironclaw for Notion MCP OAuth E2E tests."""
@@ -85,66 +93,23 @@ async def v2_notion_server(ironclaw_binary, mock_llm_server, mock_notion, mock_n
     )
     Path(os.path.join(config_dir, "config.toml")).write_text(config_toml)
 
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.bind(("127.0.0.1", 0))
-    port = s.getsockname()[1]
-    s.close()
-
-    env = {
-        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-        "HOME": home_dir,
-        "IRONCLAW_BASE_DIR": config_dir,
-        "RUST_LOG": "ironclaw=debug",
-        "RUST_BACKTRACE": "1",
-        "ENGINE_V2": "true",
-        "AGENT_AUTO_APPROVE_TOOLS": "true",
-        "HTTP_ALLOW_LOCALHOST": "true",
-        "SECRETS_MASTER_KEY": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-        "GATEWAY_ENABLED": "true",
-        "GATEWAY_HOST": "127.0.0.1",
-        "GATEWAY_PORT": str(port),
-        "GATEWAY_AUTH_TOKEN": AUTH_TOKEN,
-        "GATEWAY_USER_ID": "e2e-4112-notion",
-        "IRONCLAW_OWNER_ID": "e2e-4112-notion",
-        "CLI_ENABLED": "false",
-        "LLM_BACKEND": "openai_compatible",
-        "LLM_BASE_URL": mock_llm_server,
-        "LLM_API_KEY": "mock-api-key",
-        "LLM_MODEL": "mock-model",
-        "DATABASE_BACKEND": "libsql",
-        "LIBSQL_PATH": os.path.join(db_dir, "notion-e2e.db"),
-        "SANDBOX_ENABLED": "false",
-        "SKILLS_ENABLED": "false",
-        "MCP_ENABLED": "true",
-        "ROUTINES_ENABLED": "false",
-        "HEARTBEAT_ENABLED": "false",
-        "EMBEDDING_ENABLED": "false",
-        "WASM_ENABLED": "false",
-        "ONBOARD_COMPLETED": "true",
-        "IRONCLAW_DISABLE_OS_KEYCHAIN": "1",
-    }
-    forward_coverage_env(env)
-
-    proc = await asyncio.create_subprocess_exec(
-        ironclaw_binary, "--no-onboard",
-        stdin=asyncio.subprocess.DEVNULL,
-        stdout=asyncio.subprocess.DEVNULL,
-        stderr=asyncio.subprocess.DEVNULL,
-        env=env,
-    )
-    base_url = f"http://127.0.0.1:{port}"
-    try:
-        await wait_for_ready(f"{base_url}/api/health", timeout=60)
+    sock, port = _reserve_loopback_port()
+    async with _start_engine_v2_server(
+        ironclaw_binary,
+        mock_llm_server=mock_llm_server,
+        port=port,
+        home_dir=home_dir,
+        db_path=os.path.join(db_dir, "notion-e2e.db"),
+        user_id="e2e-4112-notion",
+        label="v2_notion_server",
+        env_overrides={
+            "IRONCLAW_BASE_DIR": config_dir,
+            "SKILLS_ENABLED": "false",
+            "MCP_ENABLED": "true",
+        },
+    ) as base_url:
+        sock.close()
         yield base_url
-    except TimeoutError:
-        if proc.returncode is None:
-            await stop_process(proc, timeout=2)
-        pytest.fail(f"v2_notion_server failed to start on port {port}")
-    finally:
-        if proc.returncode is None:
-            await stop_process(proc, sig=signal.SIGINT, timeout=10)
-            if proc.returncode is None:
-                await stop_process(proc, sig=signal.SIGTERM, timeout=5)
 
 
 # ---------------------------------------------------------------------------

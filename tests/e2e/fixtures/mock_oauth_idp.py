@@ -13,8 +13,6 @@ Usage
 -----
 The fixture is module-scoped. Import and use in your test file::
 
-    import sys, os
-    sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
     from fixtures.mock_oauth_idp import start_mock_oauth_idp
 
     @pytest.fixture(scope="module")
@@ -48,7 +46,8 @@ class MockOAuthIdpHandle:
     base_url: str
     received_codes: list[str] = field(default_factory=list)
     issued_tokens: list[str] = field(default_factory=list)
-    issued_refresh_tokens: list[str] = field(default_factory=list)
+    # Maps refresh_token → client_id for RFC 6749 §10.4 binding validation.
+    issued_refresh_tokens: dict[str, str] = field(default_factory=dict)
     _pending_codes: dict[str, dict] = field(default_factory=dict)
 
     @property
@@ -133,9 +132,14 @@ async def start_mock_oauth_idp(*, port: int = 0) -> AsyncIterator[MockOAuthIdpHa
             if pending is None:
                 return web.json_response({"error": "invalid_grant"}, status=400)
 
-            # PKCE verification (S256).
-            # If a challenge was registered it MUST be verified — reject when
-            # the verifier is absent rather than silently skipping the check.
+            # RFC 6749 §4.1.3 — redirect_uri must match the one from /authorize.
+            if pending["redirect_uri"] and redirect_uri != pending["redirect_uri"]:
+                return web.json_response(
+                    {"error": "invalid_grant", "error_description": "redirect_uri mismatch"},
+                    status=400,
+                )
+
+            # PKCE S256: verifier required when challenge was registered.
             expected_challenge = pending.get("code_challenge")
             if expected_challenge:
                 if not code_verifier:
@@ -154,8 +158,9 @@ async def start_mock_oauth_idp(*, port: int = 0) -> AsyncIterator[MockOAuthIdpHa
             handle.received_codes.append(code)
             access_token = f"fake_access_{secrets.token_urlsafe(16)}"
             refresh_token = f"fake_refresh_{secrets.token_urlsafe(16)}"
+            client_id = body.get("client_id", "")
             handle.issued_tokens.append(access_token)
-            handle.issued_refresh_tokens.append(refresh_token)
+            handle.issued_refresh_tokens[refresh_token] = client_id
             return web.json_response({
                 "access_token": access_token,
                 "refresh_token": refresh_token,
@@ -166,9 +171,8 @@ async def start_mock_oauth_idp(*, port: int = 0) -> AsyncIterator[MockOAuthIdpHa
 
         if grant_type == "refresh_token":
             refresh_token = body.get("refresh_token", "")
-            # Validate against the set of tokens we actually issued, not just
-            # the prefix — prevents fabricated tokens from silently succeeding.
-            if refresh_token not in handle.issued_refresh_tokens:
+            stored_client = handle.issued_refresh_tokens.get(refresh_token)
+            if stored_client is None or stored_client != body.get("client_id", ""):
                 return web.json_response({"error": "invalid_grant"}, status=400)
             new_access = f"fake_access_{secrets.token_urlsafe(16)}"
             handle.issued_tokens.append(new_access)

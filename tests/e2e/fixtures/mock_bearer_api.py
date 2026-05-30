@@ -15,8 +15,6 @@ POST /__mock/set-require-auth       — toggle auth requirement (default: true)
 Usage
 -----
 ::
-    import sys, os
-    sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
     from fixtures.mock_bearer_api import start_mock_bearer_api
 
     @pytest.fixture(scope="module")
@@ -114,7 +112,9 @@ async def start_mock_bearer_api(*, port: int = 0) -> AsyncIterator[MockBearerApi
         site = web.TCPSite(runner, "127.0.0.1", port)
         await site.start()
         actual_port = site._server.sockets[0].getsockname()[1]
+        from urllib.parse import urlparse
         handle.base_url = f"http://127.0.0.1:{actual_port}"
+        handle._mock_host = urlparse(handle.base_url).netloc
         yield handle
     finally:
         await runner.cleanup()
