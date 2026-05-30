@@ -231,15 +231,14 @@ impl SyntheticSurfaceCapabilitySnapshot {
         match self.kind {
             SyntheticCapabilityKind::CapabilityInfo => {
                 debug_assert!(capability_info::is_capability_id(capability_id));
-                let definition = capability_info::tool_definition()?;
                 Ok(CapabilityDescriptorView {
                     capability_id: capability_id.clone(),
                     provider: None,
                     runtime: RuntimeKind::System,
                     safe_name: self.provider_tool_name.clone(),
-                    safe_description: definition.description,
+                    safe_description: self.safe_description.clone(),
                     concurrency_hint: ConcurrencyHint::SafeForParallel,
-                    parameters_schema: definition.parameters,
+                    parameters_schema: self.parameters_schema.clone(),
                 })
             }
         }
@@ -252,9 +251,12 @@ impl SyntheticSurfaceCapabilitySnapshot {
         match self.kind {
             SyntheticCapabilityKind::CapabilityInfo => {
                 debug_assert!(capability_info::is_capability_id(capability_id));
-                let mut definition = capability_info::tool_definition()?;
-                definition.name = self.provider_tool_name.clone();
-                Ok(definition)
+                Ok(ProviderToolDefinition {
+                    capability_id: capability_id.clone(),
+                    name: self.provider_tool_name.clone(),
+                    description: self.safe_description.clone(),
+                    parameters: self.parameters_schema.clone(),
+                })
             }
         }
     }
@@ -269,7 +271,7 @@ impl SyntheticSurfaceCapabilitySnapshot {
             SyntheticCapabilityKind::CapabilityInfo => {
                 let normalized_arguments = super::normalize_provider_arguments(
                     &tool_call.arguments,
-                    &capability_info::schema(),
+                    &self.parameters_schema,
                     "provider arguments",
                 )?;
                 super::validate_provider_arguments(&normalized_arguments)?;
