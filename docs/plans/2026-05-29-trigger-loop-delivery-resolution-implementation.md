@@ -63,10 +63,11 @@ PRs should record them as contract language.
    `adapter_kind`, `external_actor_ref`, `external_conversation_ref`, and
    `external_event_id` values, but not rely on a raw reserved string alone for
    trust.
-3. Trusted trigger scope flows through
-   `handle_inbound_turn_with_trusted_scope` parameters. Synthetic trigger
-   requests should not carry normal untrusted requested scope hints as the
-   authority source.
+3. Trusted trigger scope flows through a planned typed
+   `handle_inbound_turn_with_trusted_scope` request bundling host-owned
+   `tenant_id`, `creator_user_id`, `agent_id`, and `project_id` authority.
+   Synthetic trigger requests should not carry normal untrusted requested scope
+   hints as the authority source.
 4. V1 `TriggerRunStatus` stays synchronous: `Ok` means submitted, `Error` means
    submission failed. `ApprovalBlocked` and `TimedOut` are fast-follow unless a
    later PR explicitly wires turn-lifecycle observation.
@@ -122,14 +123,15 @@ Trigger execution track
   PR 2 ─> PR 8 Trusted Inbound Facade ─> PR 9 ironclaw_triggers Crate Skeleton
                                            └─> PR 10 Trigger Persistence, Backend 1
                                                 └─> PR 11 Trigger Persistence, Backend 2 and Parity
-                                                     └─> PR 12 Materialization and Back-Pressure Seams
-                                                          └─> PR 13 Trigger Poller Core
-                                                               └─> PR 14 Poller Caller-Level Harness
-                                                                    ├─> PR 15 trigger_* First-Party Capabilities
-                                                                    └─> PR 16 Trigger Composition and Worker Lifecycle
+                                                     └─> PR 12 Atomic Fire Claim and Active-Run Lease
+                                                          └─> PR 13 Materialization and Turn-State Seams
+                                                               └─> PR 14 Trigger Poller Core
+                                                                    └─> PR 15 Poller Caller-Level Harness
+                                                                         ├─> PR 16 trigger_* First-Party Capabilities
+                                                                         └─> PR 17 Trigger Composition and Worker Lifecycle
 
 External trigger result delivery
-  PR 7 + PR 16 + named adapter readiness ─> PR 17 Trigger Delivery Integration Fast-Follow
+  PR 7 + PR 17 + named adapter readiness ─> PR 18 Trigger Delivery Integration Fast-Follow
 ```
 
 Parallelization notes:
@@ -141,25 +143,27 @@ Parallelization notes:
 - After PR 2 merges, PR 8 can proceed without waiting for delivery work.
 - PR 4 and PR 8 can run in parallel because they touch different crates and
   solve different prerequisites.
-- PR 5/6/7 are delivery-only. They do not block PR 9 through PR 16 unless the
+- PR 5/6/7 are delivery-only. They do not block PR 9 through PR 17 unless the
   chosen milestone is "trigger result is pushed externally" rather than
   "trigger event fires and creates a persisted thread."
 - PR 10 and PR 11 are serial if PR 11 is the parity backend, but they can be
   reversed if backend ownership prefers implementing libSQL first or PostgreSQL
   first.
-- PR 15 and PR 16 can start from the same post-PR14 baseline, but they should
+- PR 12 must land after both persistence backends because atomic claim/lease
+  semantics need PostgreSQL/libSQL parity before the poller depends on them.
+- PR 16 and PR 17 can start from the same post-PR15 baseline, but they should
   merge carefully because both need repository/config wiring from composition.
-- PR 17 should remain fast-follow until PR 7 is merged and a concrete outbound
+- PR 18 should remain fast-follow until PR 7 is merged and a concrete outbound
   adapter path is declared ready.
 
 Milestone gates:
 
 - **Trigger event MVP:** PR 2, PR 8, PR 9, PR 10, PR 11, PR 12, PR 13, PR 14,
-  and PR 16. PR 15 is required if the MVP includes user-facing `trigger_*`
+  PR 15, and PR 17. PR 16 is required if the MVP includes user-facing `trigger_*`
   management rather than seeded/test-created triggers.
-- **User-managed trigger MVP:** Trigger event MVP plus PR 15.
+- **User-managed trigger MVP:** Trigger event MVP plus PR 16.
 - **Externally delivered trigger result:** User-managed trigger MVP plus PR 1,
-  PR 3, PR 4, PR 5, PR 6, PR 7, and PR 17.
+  PR 3, PR 4, PR 5, PR 6, PR 7, and PR 18.
 
 ## PR Sequence
 
@@ -188,7 +192,8 @@ Expected size: docs only.
 Ratify trigger-specific contract changes before code:
 
 - Add host-trusted inbound ingress semantics to `conversation-binding.md`.
-- Define `InboundTurnService::handle_inbound_turn_with_trusted_scope`.
+- Define planned `InboundTurnService::handle_inbound_turn_with_trusted_scope`
+  and its typed trusted request.
 - Define every synthetic `InboundTurnRequest` field used by trigger fires:
   `adapter_kind`, `external_actor_ref`, `external_conversation_ref`,
   `external_event_id`, route kind, actor, content ref, and scope flow.
@@ -312,9 +317,13 @@ and adapter call sites heavily.
 
 ### PR 8 — Trusted Inbound Facade
 
-Implement `InboundTurnService::handle_inbound_turn_with_trusted_scope` in
+Implement the planned
+`InboundTurnService::handle_inbound_turn_with_trusted_scope` facade in
 `ironclaw_conversations` after PR 2:
 
+- Add a typed trusted request shape that bundles the ordinary inbound request
+  with host-owned `tenant_id`, `creator_user_id`, `agent_id`, and `project_id`
+  authority.
 - Keep replay lookup first, exactly like `handle_inbound_turn`, so duplicate
   scheduled-slot retries hit existing inbound idempotency.
 - Route fresh binding resolution through
@@ -350,6 +359,9 @@ Add the trigger crate with domain and in-memory behavior:
 Include unit tests for schedule validation, serde, and deterministic fire
 identity. Include tests proving expressions with sub-minute cadence are
 rejected. The workspace already has `cron = "0.13"` available.
+Identity derivation must use the contract's length-prefixed, domain-separated,
+collision-resistant digest over `(tenant_id, trigger_id, fire_slot)`; do not
+use raw string concatenation.
 
 Expected size: less than 1000 lines.
 
@@ -359,6 +371,8 @@ Add the first durable `TriggerRepository` backend:
 
 - migrations/schema for one chosen backend
 - composite poller index on `(tenant_id, enabled, state, next_run_at)`
+- `active_fire_slot` and `active_run_ref` persistence fields separate from
+  `last_status`
 - due-trigger query with limit
 - scoped list/remove behavior
 - backend-specific tests
@@ -371,32 +385,55 @@ Add the second required backend and parity coverage:
 
 - migrations/schema for the second backend
 - shared parity tests across both backends
+- parity for active-fire fields and retryable `next_run_at` behavior
 - any schema compatibility fixes from PR 10
 
 Expected size: less than 1000 lines.
 
-### PR 12 — Trigger Materialization and Back-Pressure Seams
+### PR 12 — Atomic Fire Claim and Active-Run Lease
+
+Add the repository-level claim/lease seam that makes
+`max_concurrent_fires_per_trigger = 1` enforceable across concurrent pollers:
+
+- atomic `claim_due_fire`-style operation that covers due-row read, trigger
+  state check, active-fire check, and claim write in one database transaction or
+  equivalent backend primitive.
+- claim writes `active_fire_slot` / `active_run_ref` only after a fire is
+  accepted/submitted, and never uses `last_status` as the in-flight sentinel.
+- retryable submit failure keeps `last_fired_slot` unchanged, leaves active
+  claim unset, and keeps `next_run_at` at or before the failed slot's scheduled
+  time.
+- duplicate replay for the same fire identity returns the original accepted
+  message and turn submission; terminal run failure does not mint a second V1
+  turn for the same fire slot.
+- PostgreSQL/libSQL parity tests for concurrent claim attempts and retryable
+  failure bookkeeping.
+
+Expected size: less than 1000 lines; split backend-specific claim
+implementation if needed.
+
+### PR 13 — Trigger Materialization and Turn-State Seams
 
 Add the narrow ports/helpers the poller needs before the worker implementation:
 
 - deterministic trigger prompt materialization into the inbound content-ref
   model without letting `ironclaw_triggers` reach into composition or product
   adapters.
-- active-run counting/back-pressure seam for threads belonging to a trigger.
-  V1 policy is exactly one active fire per trigger; later concurrency can be an
-  explicit config expansion.
+- turn-state lookup/clear seam for the active-fire claim. V1 policy is exactly
+  one active fire per trigger; later concurrency can be an explicit config
+  expansion.
 - tests for both seams at the owning crate boundary.
 
 Expected size: less than 800 lines.
 
-### PR 13 — Trigger Poller Core
+### PR 14 — Trigger Poller Core
 
 Implement `TriggerPollerWorker` core logic:
 
 - poll due schedule triggers
 - cap fires per tick
-- apply per-trigger active-run back-pressure with
-  `max_concurrent_fires_per_trigger = 1`
+- apply per-trigger active-run back-pressure by using the repository atomic
+  fire-claim seam, not an in-memory `last_status` check
 - construct deterministic synthetic `InboundTurnRequest`
 - call `handle_inbound_turn_with_trusted_scope`
 - persist synchronous submit status and next-run bookkeeping
@@ -407,7 +444,7 @@ the lifecycle observer in V1.
 
 Expected size: less than 1000 lines.
 
-### PR 14 — Trigger Poller Caller-Level Harness
+### PR 15 — Trigger Poller Caller-Level Harness
 
 Add the heavier caller-level tests separately from the worker core:
 
@@ -418,10 +455,14 @@ Add the heavier caller-level tests separately from the worker core:
 - active-run back-pressure behavior
 - proof that a second due fire is skipped while one fire for the same trigger
   is active
+- concurrent poller claim attempts cannot both submit the same trigger/slot
+- retryable submit failure leaves `next_run_at` retryable
+- terminal run failure for an already accepted/submitted slot does not mint a
+  second V1 turn for the same fire identity
 
 Expected size: less than 1000 lines; split further if the harness grows.
 
-### PR 15 — `trigger_*` First-Party Capabilities
+### PR 16 — `trigger_*` First-Party Capabilities
 
 Expose trigger management through the composition-owned first-party capability
 registry, not local-dev synthetic capabilities:
@@ -439,7 +480,7 @@ do not assume `InvocationServices` already carries a trigger repository.
 
 Expected size: less than 1000 lines.
 
-### PR 16 — Trigger Composition and Worker Lifecycle
+### PR 17 — Trigger Composition and Worker Lifecycle
 
 Wire the trigger poller into Reborn composition:
 
@@ -454,7 +495,7 @@ Wire the trigger poller into Reborn composition:
 
 Expected size: less than 1000 lines; split into config and lifecycle if needed.
 
-### PR 17 — Trigger Delivery Integration Fast-Follow
+### PR 18 — Trigger Delivery Integration Fast-Follow
 
 Only after delivery-resolution PRs are merged and a concrete adapter path is
 ready, connect trigger-origin final reply delivery:
