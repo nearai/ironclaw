@@ -13,6 +13,8 @@
  *   by this component. The server supplies only an opaque IDP URL.
  * - window.open is called with `noopener,noreferrer` to prevent the popup
  *   from accessing this window's context.
+ * - The URL is validated to start with "https://" before opening to reject
+ *   non-HTTPS schemes (javascript:, data:, custom protocol handlers).
  */
 import { React, html } from "../../../lib/html.js";
 import { useT } from "../../../lib/i18n.js";
@@ -25,10 +27,13 @@ export function AuthOauthCard({ gate, onCancel }) {
 
   const providerLabel = gate.provider
     ? gate.provider.charAt(0).toUpperCase() + gate.provider.slice(1)
-    : "the provider";
+    : t("authGate.oauthProviderFallback");
 
   const openAuth = React.useCallback(() => {
-    if (!gate.authorizationUrl) return;
+    // Guard: reject missing or non-HTTPS URLs before window.open so that
+    // custom protocol handlers (javascript:, tel:, ms-msdt:, slack:) are
+    // never opened even if a future code path writes an unexpected scheme.
+    if (!gate.authorizationUrl?.startsWith("https://")) return;
     // Must be called synchronously in a click handler to be treated as a
     // user-gesture popup by the browser (not blocked by popup blockers).
     window.open(gate.authorizationUrl, "_blank", "noopener,noreferrer");
@@ -67,7 +72,7 @@ export function AuthOauthCard({ gate, onCancel }) {
         <${Button}
           type="button"
           variant="primary"
-          disabled=${!gate.authorizationUrl}
+          disabled=${!gate.authorizationUrl?.startsWith("https://")}
           onClick=${openAuth}
         >
           ${openLabel}

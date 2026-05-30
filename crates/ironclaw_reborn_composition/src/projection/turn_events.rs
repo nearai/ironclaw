@@ -2,9 +2,8 @@ use std::sync::Arc;
 
 use futures::{StreamExt, stream};
 use ironclaw_product_adapters::{
-    AuthPromptView, GatePromptView, ProductAdapterError,
-    ProductOutboundPayload, ProductProjectionItem, ProductProjectionState,
-    ProductWorkflowRejectionKind, RedactedString,
+    AuthPromptView, GatePromptView, ProductAdapterError, ProductOutboundPayload,
+    ProductProjectionItem, ProductProjectionState, ProductWorkflowRejectionKind, RedactedString,
 };
 use ironclaw_turns::{
     GetRunStateRequest, TurnCoordinator, TurnError, TurnEventKind, TurnEventProjectionCursor,
@@ -90,12 +89,8 @@ impl TurnEventBridge {
             };
             next_cursor = Some(page.next_cursor.clone());
             payloads.extend(
-                turn_event_payloads_for_page(
-                    coordinator.as_ref(),
-                    auth_challenges,
-                    page.entries,
-                )
-                .await?,
+                turn_event_payloads_for_page(coordinator.as_ref(), auth_challenges, page.entries)
+                    .await?,
             );
             if !page.truncated || after_cursor.as_ref() == Some(&page.next_cursor) {
                 break;
@@ -144,8 +139,7 @@ async fn turn_event_payload(
     event: &TurnLifecycleEvent,
 ) -> Result<Option<ProductOutboundPayload>, ProductAdapterError> {
     if matches!(event.kind, TurnEventKind::Blocked)
-        && let Some(prompt) =
-            blocked_prompt_payload(coordinator, auth_challenges, event).await?
+        && let Some(prompt) = blocked_prompt_payload(coordinator, auth_challenges, event).await?
     {
         return Ok(Some(prompt));
     }
@@ -194,10 +188,14 @@ async fn blocked_prompt_payload(
             // Enrich the prompt with auth-flow metadata when the provider is
             // available. Missing = backward-compatible (fields omitted as None).
             let challenge = match auth_challenges {
-                Some(provider) => provider.challenge_for_gate(&gate_ref_str).await,
+                Some(provider) => {
+                    provider
+                        .challenge_for_gate(&event.scope, &gate_ref_str)
+                        .await
+                }
                 None => None,
             };
-            Ok(Some(ProductOutboundPayload::AuthPrompt(AuthPromptView {
+            let base_view = AuthPromptView {
                 turn_run_id: event.run_id,
                 auth_request_ref: gate_ref_str,
                 headline: "Authentication required".to_string(),
@@ -205,21 +203,26 @@ async fn blocked_prompt_payload(
                     .sanitized_reason
                     .clone()
                     .unwrap_or_else(|| "Authenticate to continue this run.".to_string()),
-                challenge_kind: challenge.as_ref().map(|c| c.kind),
-                provider: challenge.as_ref().map(|c| c.provider.clone()),
-                account_label: challenge.as_ref().and_then(|c| c.account_label.clone()),
-                authorization_url: challenge
-                    .as_ref()
-                    .and_then(|c| c.authorization_url.clone()),
-                expires_at: challenge.as_ref().and_then(|c| c.expires_at),
-            })))
+                challenge_kind: None,
+                provider: None,
+                account_label: None,
+                authorization_url: None,
+                expires_at: None,
+            };
+            let view = match challenge {
+                Some(c) => c.enrich(base_view),
+                None => base_view,
+            };
+            Ok(Some(ProductOutboundPayload::AuthPrompt(view)))
         }
         TurnStatus::BlockedApproval => {
             Ok(Some(gate_prompt(event, gate_ref_str, "Approval required")))
         }
-        TurnStatus::BlockedResource => {
-            Ok(Some(gate_prompt(event, gate_ref_str, "Resource unavailable")))
-        }
+        TurnStatus::BlockedResource => Ok(Some(gate_prompt(
+            event,
+            gate_ref_str,
+            "Resource unavailable",
+        ))),
         // Non-blocked statuses: no prompt payload. Exhaustive match so a new
         // TurnStatus variant forces a compile error and an explicit decision.
         TurnStatus::Queued

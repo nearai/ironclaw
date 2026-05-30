@@ -61,18 +61,41 @@ pub struct AuthChallengeView {
     pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
+impl AuthChallengeView {
+    /// Apply the view's enrichment fields onto a partially-constructed
+    /// `AuthPromptView`, removing the 5-field manual mapping at call sites.
+    ///
+    /// Caller constructs the 4 mandatory fields; this method fills the 5
+    /// optional enrichment fields from `self`.
+    pub(crate) fn enrich(
+        self,
+        mut view: ironclaw_product_adapters::AuthPromptView,
+    ) -> ironclaw_product_adapters::AuthPromptView {
+        view.challenge_kind = Some(self.kind);
+        view.provider = Some(self.provider);
+        view.account_label = self.account_label;
+        view.authorization_url = self.authorization_url;
+        view.expires_at = self.expires_at;
+        view
+    }
+}
+
 /// Narrow read-only interface used by the turn-event projection layer to
 /// enrich `AuthPromptView` with challenge metadata. Implemented by
 /// `RebornProductAuthServices` when a `flow_record_source` is wired in.
 ///
-/// Only one method: look up by gate_ref string. Gate refs are UUIDs so
-/// collision risk across scopes is negligible.
+/// `scope` is passed to scope-filter results to the owning tenant/agent/project/thread;
+/// implementations MUST NOT return records whose `scope.resource` does not match.
 #[async_trait]
 pub trait AuthChallengeProvider: Send + Sync {
-    /// Return the projection-safe challenge view for the given gate ref, or
-    /// `None` if the auth flow cannot be found (already consumed, not yet
-    /// created, or record source unavailable).
-    async fn challenge_for_gate(&self, gate_ref: &str) -> Option<AuthChallengeView>;
+    /// Return the projection-safe challenge view for the given gate ref and
+    /// caller scope, or `None` if the auth flow cannot be found (already
+    /// consumed, not yet created, wrong scope, or record source unavailable).
+    async fn challenge_for_gate(
+        &self,
+        scope: &TurnScope,
+        gate_ref: &str,
+    ) -> Option<AuthChallengeView>;
 }
 
 pub(crate) use display_preview::{CapabilityDisplayPreviewResult, CapabilityDisplayPreviewStore};
@@ -108,10 +131,7 @@ impl RebornProjectionServices {
     /// `challenge_kind`, `provider`, `account_label`, and `authorization_url`.
     /// Optional: when absent the `AuthPromptView` omits those fields (backward
     /// compatible — legacy consumers deserialise them as `None`).
-    pub(crate) fn with_auth_challenges(
-        mut self,
-        provider: Arc<dyn AuthChallengeProvider>,
-    ) -> Self {
+    pub(crate) fn with_auth_challenges(mut self, provider: Arc<dyn AuthChallengeProvider>) -> Self {
         self.auth_challenges = Some(provider);
         self
     }

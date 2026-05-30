@@ -48,6 +48,9 @@ mod product_live_adapters;
 mod production_runtime_policy;
 mod profile;
 mod projection;
+// Exported for integration-test harness wiring only — not stable public API.
+// Downstream crates should not depend on these types directly.
+#[doc(hidden)]
 pub use projection::{AuthChallengeProvider, AuthChallengeView};
 #[cfg(feature = "root-llm-provider")]
 mod provider_admin;

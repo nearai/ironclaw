@@ -480,11 +480,12 @@ async fn accounts_select_returns_redacted_projection() {
 #[tokio::test]
 async fn accounts_recovery_projects_setup_required_when_no_account_exists() {
     let fixture = build_fixture();
+    let invocation_id = InvocationId::new();
 
     let response = post_authenticated(
         &fixture.app,
         "/api/reborn/product-auth/accounts/recovery",
-        json!({ "provider": "github" }),
+        json!({ "provider": "github", "invocation_id": invocation_id.to_string() }),
     )
     .await;
     assert_eq!(response.status(), StatusCode::OK);
@@ -697,7 +698,6 @@ async fn accounts_select_rejects_malformed_account_id() {
     assert!(body.contains("\"code\":\"invalid_request\""));
 }
 
-
 // ── Wire-shape enrichment tests (issue #4112) ────────────────────────────────
 
 #[test]
@@ -713,16 +713,25 @@ fn auth_prompt_view_serialises_optional_fields_when_present() {
         challenge_kind: Some(AuthPromptChallengeKind::OAuthUrl),
         provider: Some("google".to_string()),
         account_label: Some("work@example.com".to_string()),
-        authorization_url: Some("https://accounts.google.com/o/oauth2/auth?scope=calendar".to_string()),
-        expires_at: Some(chrono::DateTime::parse_from_rfc3339("2030-01-01T00:00:00Z")
-            .unwrap()
-            .with_timezone(&chrono::Utc)),
+        authorization_url: Some(
+            "https://accounts.google.com/o/oauth2/auth?scope=calendar".to_string(),
+        ),
+        expires_at: Some(
+            chrono::DateTime::parse_from_rfc3339("2030-01-01T00:00:00Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+        ),
     };
     let json = serde_json::to_value(&view).expect("serialise");
     assert_eq!(json["challenge_kind"], "oauth_url");
     assert_eq!(json["provider"], "google");
     assert_eq!(json["account_label"], "work@example.com");
-    assert!(json["authorization_url"].as_str().unwrap().starts_with("https://"));
+    assert!(
+        json["authorization_url"]
+            .as_str()
+            .unwrap()
+            .starts_with("https://")
+    );
     assert!(json["expires_at"].is_string());
 }
 
@@ -743,11 +752,26 @@ fn auth_prompt_view_omits_optional_fields_when_absent() {
         expires_at: None,
     };
     let json = serde_json::to_value(&view).expect("serialise");
-    assert!(json.get("challenge_kind").is_none(), "challenge_kind should be absent when None");
-    assert!(json.get("provider").is_none(), "provider should be absent when None");
-    assert!(json.get("account_label").is_none(), "account_label should be absent when None");
-    assert!(json.get("authorization_url").is_none(), "authorization_url should be absent when None");
-    assert!(json.get("expires_at").is_none(), "expires_at should be absent when None");
+    assert!(
+        json.get("challenge_kind").is_none(),
+        "challenge_kind should be absent when None"
+    );
+    assert!(
+        json.get("provider").is_none(),
+        "provider should be absent when None"
+    );
+    assert!(
+        json.get("account_label").is_none(),
+        "account_label should be absent when None"
+    );
+    assert!(
+        json.get("authorization_url").is_none(),
+        "authorization_url should be absent when None"
+    );
+    assert!(
+        json.get("expires_at").is_none(),
+        "expires_at should be absent when None"
+    );
 }
 
 #[test]
@@ -772,12 +796,11 @@ fn auth_prompt_view_deserialises_without_optional_fields() {
 #[tokio::test]
 async fn challenge_for_gate_returns_oauth_url_view_for_seeded_flow() {
     use chrono::Utc;
+    use ironclaw_auth::AuthProviderId;
     use ironclaw_auth::{
         AuthChallenge, AuthContinuationRef, AuthFlowKind, AuthFlowManager, AuthGateRef,
-        AuthProductScope, AuthSurface, InMemoryAuthProductServices, NewAuthFlow,
-        OAuthAuthorizationUrl, TurnRunRef,
+        InMemoryAuthProductServices, NewAuthFlow, OAuthAuthorizationUrl, TurnRunRef,
     };
-    use ironclaw_auth::AuthProviderId;
     use ironclaw_product_adapters::AuthPromptChallengeKind;
     use std::sync::Arc;
 
@@ -819,10 +842,27 @@ async fn challenge_for_gate_returns_oauth_url_view_for_seeded_flow() {
         .expect("create flow");
 
     let provider = product_auth.as_auth_challenge_provider().expect("provider");
-    let view = provider.challenge_for_gate(gate_ref_str).await.expect("found");
+    // Build a TurnScope matching the flow's tenant/agent/project (thread_id None in flow → permissive match).
+    use ironclaw_host_api::ThreadId;
+    use ironclaw_turns::TurnScope;
+    let turn_scope = TurnScope::new(
+        TenantId::new(TENANT).expect("tenant"),
+        Some(AgentId::new(AGENT).expect("agent")),
+        Some(ProjectId::new(PROJECT).expect("project")),
+        ThreadId::new("thread-4112".to_string()).expect("thread id"),
+    );
+    let view = provider
+        .challenge_for_gate(&turn_scope, gate_ref_str)
+        .await
+        .expect("found");
     assert!(matches!(view.kind, AuthPromptChallengeKind::OAuthUrl));
     assert_eq!(view.provider, "google");
-    assert!(view.authorization_url.as_deref().unwrap().contains("accounts.google.com"));
+    assert!(
+        view.authorization_url
+            .as_deref()
+            .unwrap()
+            .contains("accounts.google.com")
+    );
     assert!(view.account_label.is_none());
 }
 
@@ -837,4 +877,192 @@ fn auth_challenge_provider_absent_when_no_flow_record_source() {
         product_auth.as_auth_challenge_provider().is_none(),
         "no flow_record_source → no AuthChallengeProvider"
     );
+}
+
+// ── Security fix tests (issue #4257 review) ──────────────────────────────────
+
+#[tokio::test]
+async fn challenge_for_gate_cancelled_flow_returns_none() {
+    // Fix #1/#2: verify that terminal-status flows are not surfaced.
+    use chrono::Utc;
+    use ironclaw_auth::AuthProviderId;
+    use ironclaw_auth::{
+        AuthChallenge, AuthContinuationRef, AuthFlowKind, AuthFlowManager, AuthGateRef,
+        InMemoryAuthProductServices, NewAuthFlow, OAuthAuthorizationUrl, TurnRunRef,
+    };
+    use ironclaw_host_api::ThreadId;
+    use ironclaw_turns::TurnScope;
+    use std::sync::Arc;
+
+    let shared = Arc::new(InMemoryAuthProductServices::new());
+    let product_auth = Arc::new(
+        RebornProductAuthServices::from_shared(
+            shared.clone(),
+            Arc::new(NoopAuthDispatcher::default()),
+        )
+        .with_flow_record_source(shared.clone()),
+    );
+
+    let gate_ref_str = "bbbbbbbb-cccc-dddd-eeee-222222222222";
+    let auth_url =
+        OAuthAuthorizationUrl::new("https://accounts.google.com/o/oauth2/auth".to_string())
+            .unwrap();
+    let expires_at = Utc::now() + chrono::Duration::hours(1);
+    let scope = caller_scope_with_invocation(InvocationId::new());
+
+    let flow = shared
+        .create_flow(NewAuthFlow {
+            scope: scope.clone(),
+            kind: AuthFlowKind::IntegrationCredential,
+            provider: AuthProviderId::new("google".to_string()).unwrap(),
+            challenge: AuthChallenge::OAuthUrl {
+                authorization_url: auth_url,
+                expires_at,
+            },
+            continuation: AuthContinuationRef::TurnGateResume {
+                turn_run_ref: TurnRunRef::new("33333333-3333-3333-3333-333333333333").unwrap(),
+                gate_ref: AuthGateRef::new(gate_ref_str.to_string()).unwrap(),
+            },
+            update_binding: None,
+            opaque_state_hash: None,
+            pkce_verifier_hash: None,
+            expires_at,
+        })
+        .await
+        .expect("create flow");
+
+    // Cancel the flow — it becomes terminal.
+    shared
+        .cancel_flow(&scope, flow.id)
+        .await
+        .expect("cancel flow");
+
+    let provider = product_auth.as_auth_challenge_provider().expect("provider");
+    let turn_scope = TurnScope::new(
+        TenantId::new(TENANT).expect("tenant"),
+        Some(AgentId::new(AGENT).expect("agent")),
+        Some(ProjectId::new(PROJECT).expect("project")),
+        ThreadId::new("thread-4112b".to_string()).expect("thread id"),
+    );
+    let result = provider.challenge_for_gate(&turn_scope, gate_ref_str).await;
+    assert!(
+        result.is_none(),
+        "cancelled flow must not be surfaced by challenge_for_gate"
+    );
+}
+
+#[tokio::test]
+async fn challenge_for_gate_wrong_tenant_returns_none() {
+    // Fix #1: verify that a flow from a different tenant cannot be retrieved
+    // by a caller with a different scope, even with the correct gate_ref UUID.
+    use chrono::Utc;
+    use ironclaw_auth::AuthProviderId;
+    use ironclaw_auth::{
+        AuthChallenge, AuthContinuationRef, AuthFlowKind, AuthFlowManager, AuthGateRef,
+        InMemoryAuthProductServices, NewAuthFlow, OAuthAuthorizationUrl, TurnRunRef,
+    };
+    use ironclaw_host_api::ThreadId;
+    use ironclaw_turns::TurnScope;
+    use std::sync::Arc;
+
+    let shared = Arc::new(InMemoryAuthProductServices::new());
+    let product_auth = Arc::new(
+        RebornProductAuthServices::from_shared(
+            shared.clone(),
+            Arc::new(NoopAuthDispatcher::default()),
+        )
+        .with_flow_record_source(shared.clone()),
+    );
+
+    let gate_ref_str = "cccccccc-dddd-eeee-ffff-333333333333";
+    let auth_url =
+        OAuthAuthorizationUrl::new("https://accounts.google.com/o/oauth2/auth".to_string())
+            .unwrap();
+    let expires_at = Utc::now() + chrono::Duration::hours(1);
+
+    // Create the flow under TENANT (the test tenant).
+    shared
+        .create_flow(NewAuthFlow {
+            scope: caller_scope_with_invocation(InvocationId::new()),
+            kind: AuthFlowKind::IntegrationCredential,
+            provider: AuthProviderId::new("google".to_string()).unwrap(),
+            challenge: AuthChallenge::OAuthUrl {
+                authorization_url: auth_url,
+                expires_at,
+            },
+            continuation: AuthContinuationRef::TurnGateResume {
+                turn_run_ref: TurnRunRef::new("44444444-4444-4444-4444-444444444444").unwrap(),
+                gate_ref: AuthGateRef::new(gate_ref_str.to_string()).unwrap(),
+            },
+            update_binding: None,
+            opaque_state_hash: None,
+            pkce_verifier_hash: None,
+            expires_at,
+        })
+        .await
+        .expect("create flow");
+
+    let provider = product_auth.as_auth_challenge_provider().expect("provider");
+
+    // Query with a DIFFERENT tenant — must return None even with same gate_ref.
+    let other_turn_scope = TurnScope::new(
+        TenantId::new("other-tenant-4257").expect("tenant"),
+        Some(AgentId::new(AGENT).expect("agent")),
+        Some(ProjectId::new(PROJECT).expect("project")),
+        ThreadId::new("thread-other".to_string()).expect("thread id"),
+    );
+    let result = provider
+        .challenge_for_gate(&other_turn_scope, gate_ref_str)
+        .await;
+    assert!(
+        result.is_none(),
+        "different-tenant caller must not receive another tenant's challenge"
+    );
+}
+
+#[tokio::test]
+async fn accounts_select_requires_invocation_id() {
+    // Fix #4: accounts_select must reject requests without invocation_id.
+    let fixture = build_fixture();
+    let invocation_id = InvocationId::new();
+    let account_id =
+        seed_configured_account(&fixture.shared, invocation_id, "github", "work github").await;
+
+    let response = post_authenticated(
+        &fixture.app,
+        "/api/reborn/product-auth/accounts/select",
+        json!({
+            "provider": "github",
+            "account_id": account_id.to_string()
+            // invocation_id intentionally absent
+        }),
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "accounts/select must require invocation_id"
+    );
+    let body = read_body_string(response).await;
+    assert!(body.contains("\"code\":\"invalid_request\""));
+}
+
+#[tokio::test]
+async fn accounts_recovery_requires_invocation_id() {
+    // Fix #4: accounts_recovery must reject requests without invocation_id.
+    let fixture = build_fixture();
+
+    let response = post_authenticated(
+        &fixture.app,
+        "/api/reborn/product-auth/accounts/recovery",
+        json!({ "provider": "github" /* invocation_id absent */ }),
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "accounts/recovery must require invocation_id"
+    );
+    let body = read_body_string(response).await;
+    assert!(body.contains("\"code\":\"invalid_request\""));
 }
