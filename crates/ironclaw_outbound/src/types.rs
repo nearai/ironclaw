@@ -1,3 +1,7 @@
+use crate::ids::{TriggerFireSlot, TriggerId};
+use ironclaw_conversations::{
+    AdapterInstallationId, AdapterKind, ExternalActorRef, ExternalConversationRef,
+};
 use ironclaw_event_projections::{ProjectionCursor, ProjectionScope};
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, Timestamp};
 use ironclaw_turns::{ReplyTargetBindingRef, TurnActor, TurnRunId, TurnScope};
@@ -73,6 +77,165 @@ pub struct OutboundPushCandidate {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OutboundPushPlan {
     pub candidates: Vec<OutboundPushCandidate>,
+}
+
+/// Delivery resolution target categories used by the outbound resolver.
+///
+/// Translation note: these domain kinds lower into the existing
+/// `OutboundPushKind`/`PrepareOutboundDeliveryRequest` path at the outbound
+/// policy boundary. `ApprovalPrompt` and `AuthPrompt` stay on the
+/// run-notification side.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CommunicationDeliveryKind {
+    FinalReply,
+    ProgressUpdate,
+    DeliveryStatus,
+    ApprovalPrompt,
+    AuthPrompt,
+}
+
+/// Narrow intent for explicitly requested outbound delivery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RequestedOutboundKind {
+    ProductMessage,
+    DeliveryStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommunicationDeliveryResolutionRequest {
+    pub scope: TurnScope,
+    pub actor: TurnActor,
+    pub delivery_kind: CommunicationDeliveryKind,
+    pub modality: CommunicationModality,
+    pub intent: CommunicationDeliveryIntent,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CommunicationDeliveryIntent {
+    RequestedOutbound(RequestedOutboundContext),
+    RunNotification(RunNotificationContext),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RequestedOutboundContext {
+    pub requested_target: ReplyTargetBindingRef,
+    pub requested_kind: RequestedOutboundKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunNotificationContext {
+    pub event_kind: RunNotificationEventKind,
+    pub origin: RunNotificationOrigin,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SystemEventReasonCode {
+    Generic,
+    Trigger,
+    Tool,
+    Operator,
+}
+
+impl SystemEventReasonCode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Generic => "generic",
+            Self::Trigger => "trigger",
+            Self::Tool => "tool",
+            Self::Operator => "operator",
+        }
+    }
+}
+
+impl std::fmt::Display for SystemEventReasonCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunNotificationEventKind {
+    FinalReplyReady,
+    ProgressUpdate,
+    ApprovalNeeded,
+    AuthRequired,
+    RunBlocked,
+    DeliveryStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunNotificationOrigin {
+    LiveSourceRoute {
+        source_route: SourceRouteContext,
+    },
+    Triggered {
+        trigger: TriggerCommunicationContext,
+    },
+    TriggeredFromSourceRoute {
+        trigger: TriggerCommunicationContext,
+        source_route: SourceRouteContext,
+    },
+    SystemEvent {
+        reason: SystemEventReasonCode,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceRouteContext {
+    pub adapter_kind: AdapterKind,
+    pub adapter_installation_id: AdapterInstallationId,
+    pub external_actor_ref: ExternalActorRef,
+    pub external_conversation_ref: ExternalConversationRef,
+    pub reply_target_binding_ref: ReplyTargetBindingRef,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TriggerCommunicationContext {
+    pub trigger_id: TriggerId,
+    pub trigger_source_kind: TriggerSourceKind,
+    pub fire_slot: TriggerFireSlot,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TriggerSourceKind {
+    Schedule,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CommunicationModality {
+    Text,
+    Voice,
+    Image,
+    Mixed,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct DeliveryTargetCapabilities {
+    pub final_replies: bool,
+    pub progress: bool,
+    pub gate_prompts: bool,
+    pub auth_prompts: bool,
+    pub modalities: Vec<CommunicationModality>,
+}
+
+/// Candidate produced by the outbound resolution step.
+///
+/// The candidate is still only a target choice. It lowers into the existing
+/// `OutboundPushCandidate` / `PrepareOutboundDeliveryRequest` boundary, where
+/// target validation and delivery-attempt recording still live.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommunicationDeliveryCandidate {
+    pub target: ReplyTargetBindingRef,
+    pub kind: CommunicationDeliveryKind,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -305,4 +468,194 @@ pub struct UpdateDeliveryStatusRequest {
     pub status: OutboundDeliveryStatus,
     pub updated_at: Timestamp,
     pub failure_kind: Option<DeliveryFailureKind>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
+    use serde::de::DeserializeOwned;
+    use serde_json::{from_str, to_string};
+
+    #[test]
+    fn communication_delivery_resolution_request_round_trips_requested_outbound() {
+        let request = CommunicationDeliveryResolutionRequest {
+            scope: scope(),
+            actor: actor(),
+            delivery_kind: CommunicationDeliveryKind::FinalReply,
+            modality: CommunicationModality::Mixed,
+            intent: CommunicationDeliveryIntent::RequestedOutbound(RequestedOutboundContext {
+                requested_target: reply_ref("reply:requested"),
+                requested_kind: RequestedOutboundKind::ProductMessage,
+            }),
+        };
+
+        let json = to_string(&request).expect("serialize requested outbound request");
+        let decoded: CommunicationDeliveryResolutionRequest =
+            from_str(&json).expect("deserialize requested outbound request");
+        assert_eq!(decoded, request);
+    }
+
+    #[test]
+    fn communication_delivery_resolution_request_round_trips_run_notification() {
+        let request = CommunicationDeliveryResolutionRequest {
+            scope: scope(),
+            actor: actor(),
+            delivery_kind: CommunicationDeliveryKind::ApprovalPrompt,
+            modality: CommunicationModality::Text,
+            intent: CommunicationDeliveryIntent::RunNotification(RunNotificationContext {
+                event_kind: RunNotificationEventKind::RunBlocked,
+                origin: RunNotificationOrigin::TriggeredFromSourceRoute {
+                    trigger: trigger_context(),
+                    source_route: source_route_context(),
+                },
+            }),
+        };
+
+        let json = to_string(&request).expect("serialize run notification request");
+        let decoded: CommunicationDeliveryResolutionRequest =
+            from_str(&json).expect("deserialize run notification request");
+        assert_eq!(decoded, request);
+    }
+
+    #[test]
+    fn outbound_translation_enums_round_trip_all_variants() {
+        for value in [
+            CommunicationDeliveryKind::FinalReply,
+            CommunicationDeliveryKind::ProgressUpdate,
+            CommunicationDeliveryKind::DeliveryStatus,
+            CommunicationDeliveryKind::ApprovalPrompt,
+            CommunicationDeliveryKind::AuthPrompt,
+        ] {
+            assert_json_round_trip(value);
+        }
+
+        for value in [
+            RequestedOutboundKind::ProductMessage,
+            RequestedOutboundKind::DeliveryStatus,
+        ] {
+            assert_json_round_trip(value);
+        }
+
+        for value in [
+            RunNotificationEventKind::FinalReplyReady,
+            RunNotificationEventKind::ProgressUpdate,
+            RunNotificationEventKind::ApprovalNeeded,
+            RunNotificationEventKind::AuthRequired,
+            RunNotificationEventKind::RunBlocked,
+            RunNotificationEventKind::DeliveryStatus,
+        ] {
+            assert_json_round_trip(value);
+        }
+
+        for value in [
+            CommunicationModality::Text,
+            CommunicationModality::Voice,
+            CommunicationModality::Image,
+            CommunicationModality::Mixed,
+            CommunicationModality::Unknown,
+        ] {
+            assert_json_round_trip(value);
+        }
+
+        for value in [TriggerSourceKind::Schedule] {
+            assert_json_round_trip(value);
+        }
+
+        for value in [
+            SystemEventReasonCode::Generic,
+            SystemEventReasonCode::Trigger,
+            SystemEventReasonCode::Tool,
+            SystemEventReasonCode::Operator,
+        ] {
+            assert_json_round_trip(value);
+        }
+    }
+
+    #[test]
+    fn communication_delivery_candidate_round_trips() {
+        let candidate = CommunicationDeliveryCandidate {
+            target: reply_ref("reply:candidate"),
+            kind: CommunicationDeliveryKind::DeliveryStatus,
+        };
+
+        let json = to_string(&candidate).expect("serialize delivery candidate");
+        let decoded: CommunicationDeliveryCandidate =
+            from_str(&json).expect("deserialize delivery candidate");
+        assert_eq!(decoded, candidate);
+    }
+
+    #[test]
+    fn delivery_target_capabilities_round_trip() {
+        let capabilities = DeliveryTargetCapabilities {
+            final_replies: true,
+            progress: true,
+            gate_prompts: false,
+            auth_prompts: true,
+            modalities: vec![CommunicationModality::Text, CommunicationModality::Mixed],
+        };
+
+        let json = to_string(&capabilities).expect("serialize capabilities");
+        let decoded: DeliveryTargetCapabilities =
+            from_str(&json).expect("deserialize capabilities");
+        assert_eq!(decoded, capabilities);
+        assert_json_round_trip(SystemEventReasonCode::Generic);
+        assert!(from_str::<SystemEventReasonCode>("\"backend_failure\"").is_err());
+    }
+
+    fn scope() -> TurnScope {
+        TurnScope::new(
+            TenantId::new("tenant-a").expect("valid tenant"),
+            Some(AgentId::new("agent-a").expect("valid agent")),
+            Some(ProjectId::new("project-a").expect("valid project")),
+            thread_id("thread-a"),
+        )
+    }
+
+    fn actor() -> TurnActor {
+        TurnActor::new(UserId::new("user-a").expect("valid user"))
+    }
+
+    fn thread_id(value: &str) -> ThreadId {
+        ThreadId::new(value).expect("valid thread")
+    }
+
+    fn reply_ref(value: &str) -> ReplyTargetBindingRef {
+        ReplyTargetBindingRef::new(value).expect("valid reply target")
+    }
+
+    fn source_route_context() -> SourceRouteContext {
+        SourceRouteContext {
+            adapter_kind: AdapterKind::new("telegram").expect("valid adapter kind"),
+            adapter_installation_id: AdapterInstallationId::new("install-alpha")
+                .expect("valid installation id"),
+            external_actor_ref: ExternalActorRef::new("user", "alice")
+                .expect("valid external actor"),
+            external_conversation_ref: ExternalConversationRef::new(
+                Some("space-alpha"),
+                "conversation-alpha",
+                Some("topic-alpha"),
+                Some("message-alpha"),
+            )
+            .expect("valid conversation ref"),
+            reply_target_binding_ref: reply_ref("reply:source-route"),
+        }
+    }
+
+    fn trigger_context() -> TriggerCommunicationContext {
+        TriggerCommunicationContext {
+            trigger_id: TriggerId::new("trigger:daily").expect("valid trigger id"),
+            trigger_source_kind: TriggerSourceKind::Schedule,
+            fire_slot: TriggerFireSlot::new("2026-05-29T09:00:00Z").expect("valid fire slot"),
+        }
+    }
+
+    fn assert_json_round_trip<T>(value: T)
+    where
+        T: Serialize + DeserializeOwned + PartialEq + std::fmt::Debug,
+    {
+        let json = to_string(&value).expect("serialize value");
+        let decoded: T = from_str(&json).expect("deserialize value");
+        assert_eq!(decoded, value);
+    }
 }

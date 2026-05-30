@@ -99,7 +99,13 @@ pub enum CommunicationDeliveryIntent {
 }
 
 pub struct RequestedOutboundContext {
-    target: ReplyTargetBindingRef,
+    requested_target: ReplyTargetBindingRef,
+    requested_kind: RequestedOutboundKind,
+}
+
+pub enum RequestedOutboundKind {
+    ProductMessage,
+    DeliveryStatus,
 }
 ```
 
@@ -107,9 +113,11 @@ Requested outbound is explicit command intent. Run notification is lifecycle
 policy for final replies, progress updates, approval prompts, auth prompts, and
 delivery-status notices.
 
-`RequestedOutboundContext.target` is a typed reply-target binding candidate,
+`RequestedOutboundContext.requested_target` is a typed reply-target binding candidate,
 not a raw channel, adapter string, product-specific conversation id, or
-transport address. It is still only a candidate and must pass
+transport address. `RequestedOutboundKind` is intentionally narrower than the
+run-notification delivery kinds and excludes approval/auth prompt payloads.
+The requested outbound target is still only a candidate and must pass
 `OutboundPolicyService` validation for the current scope, actor, delivery kind,
 and modality before any send.
 

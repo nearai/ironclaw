@@ -16,18 +16,25 @@ mod validation;
 
 pub use error::OutboundError;
 pub use filesystem_store::FilesystemOutboundStateStore;
-pub use ids::{OutboundDeliveryId, ProjectionSubscriptionId, ProjectionUpdateRef};
+pub use ids::{
+    OutboundDeliveryId, ProjectionSubscriptionId, ProjectionUpdateRef, TriggerFireSlot, TriggerId,
+};
 pub use memory::InMemoryOutboundStateStore;
 pub use service::{
     OutboundPolicyService, ReplyTargetBindingValidator, ThreadProjectionAccessPolicy,
 };
 pub use store::OutboundStateStore;
 pub use types::{
-    AdvanceSubscriptionCursorRequest, DeliveryFailureKind, LoadSubscriptionCursorRequest,
+    AdvanceSubscriptionCursorRequest, CommunicationDeliveryCandidate, CommunicationDeliveryIntent,
+    CommunicationDeliveryKind, CommunicationDeliveryResolutionRequest, CommunicationModality,
+    DeliveryFailureKind, DeliveryTargetCapabilities, LoadSubscriptionCursorRequest,
     OutboundDeliveryAttempt, OutboundDeliveryDecision, OutboundDeliveryStatus,
     OutboundPushCandidate, OutboundPushKind, OutboundPushPlan, OutboundPushTargetRequest,
     PrepareOutboundDeliveryRequest, ProjectionSubscriptionRecord, ProjectionSubscriptionRequest,
-    ReplyTargetBindingClaim, ReplyTargetValidationRequest, ThreadNotificationPolicy,
-    ThreadNotificationTarget, ThreadProjectionAccessClaim, ThreadProjectionAccessGrant,
-    ThreadProjectionAccessRequest, UpdateDeliveryStatusRequest, ValidatedReplyTargetBinding,
+    ReplyTargetBindingClaim, ReplyTargetValidationRequest, RequestedOutboundContext,
+    RequestedOutboundKind, RunNotificationContext, RunNotificationEventKind, RunNotificationOrigin,
+    SourceRouteContext, SystemEventReasonCode, ThreadNotificationPolicy, ThreadNotificationTarget,
+    ThreadProjectionAccessClaim, ThreadProjectionAccessGrant, ThreadProjectionAccessRequest,
+    TriggerCommunicationContext, TriggerSourceKind, UpdateDeliveryStatusRequest,
+    ValidatedReplyTargetBinding,
 };
