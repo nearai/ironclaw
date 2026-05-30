@@ -371,6 +371,8 @@ impl ContainerDelegate {
 
 #[async_trait]
 impl LoopDelegate for ContainerDelegate {
+    fn is_interrupted(&self) -> bool { false }
+
     async fn check_signals(&self) -> LoopSignal {
         // Container runtime has no stop signals — the orchestrator manages lifecycle.
         LoopSignal::Continue

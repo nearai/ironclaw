@@ -451,6 +451,10 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
         LoopSignal::Continue
     }
 
+    fn is_interrupted(&self) -> bool {
+        self.cancel_token.is_cancelled()
+    }
+
     async fn before_llm_call(
         &self,
         reason_ctx: &mut ReasoningContext,

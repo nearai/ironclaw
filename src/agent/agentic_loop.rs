@@ -89,6 +89,11 @@ pub trait LoopDelegate: Send + Sync {
     /// (cancellation, user messages, stop requests).
     async fn check_signals(&self) -> LoopSignal;
 
+    /// Non-destructive peek: returns `true` if a stop/interrupt signal is
+    /// already pending without consuming it. Used in error handlers where
+    /// calling `check_signals` would race with or double-consume the signal.
+    fn is_interrupted(&self) -> bool;
+
     /// Called before the LLM call. Allows the delegate to refresh tool
     /// definitions, enforce cost guards, or inject messages.
     /// Return `Some(outcome)` to break the loop early.
@@ -245,7 +250,7 @@ pub async fn run_agentic_loop(
         let output = match delegate.call_llm(reasoning, reason_ctx, iteration).await {
             Ok(output) => output,
             Err(e) => {
-                if matches!(delegate.check_signals().await, LoopSignal::Stop) {
+                if delegate.is_interrupted() {
                     return Ok(LoopOutcome::Stopped);
                 }
                 return Err(e);
@@ -500,6 +505,7 @@ mod tests {
             let mut sig = self.signal.lock().await;
             std::mem::replace(&mut *sig, LoopSignal::Continue)
         }
+        fn is_interrupted(&self) -> bool { false }
 
         async fn before_llm_call(
             &self,
@@ -663,6 +669,7 @@ mod tests {
             async fn check_signals(&self) -> LoopSignal {
                 LoopSignal::Continue
             }
+            fn is_interrupted(&self) -> bool { false }
 
             async fn before_llm_call(
                 &self,
@@ -737,6 +744,7 @@ mod tests {
             async fn check_signals(&self) -> LoopSignal {
                 LoopSignal::Continue
             }
+            fn is_interrupted(&self) -> bool { false }
             async fn before_llm_call(
                 &self,
                 _: &mut ReasoningContext,
@@ -1187,6 +1195,7 @@ mod tests {
             async fn check_signals(&self) -> LoopSignal {
                 LoopSignal::Continue
             }
+            fn is_interrupted(&self) -> bool { false }
             async fn before_llm_call(
                 &self,
                 _: &mut ReasoningContext,
@@ -1302,6 +1311,9 @@ mod tests {
                 } else {
                     LoopSignal::Stop
                 }
+            }
+            fn is_interrupted(&self) -> bool {
+                self.signal_calls.load(Ordering::SeqCst) > 0
             }
 
             async fn before_llm_call(
