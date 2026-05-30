@@ -1269,10 +1269,19 @@ fn normalize_one_of_variants(
     label: &'static str,
 ) -> Result<serde_json::Value, AgentLoopHostError> {
     // Coerce stringified containers up front so we match by parsed shape.
-    let candidate = coerce_json_string(value, label)?;
+    // Coerce stringified containers up front so we match by parsed shape.
+    // Use `unwrap_or_else` rather than `?` so that an unparseable string
+    // (e.g. a plain string that starts with `{` or `[` but is not valid
+    // JSON) can still fall through to a `string` variant in the schema
+    // instead of producing a false-positive `InvalidInvocation` error.
+    let candidate = coerce_json_string(value, label).unwrap_or_else(|_| value.clone());
     let shape = value_shape(&candidate);
     for variant in variants {
-        if schema_type_matches(variant, shape) {
+        // In JSON Schema every `integer` is also a valid `number`, so allow
+        // integer-shaped values to match `number` variants as well.
+        if schema_type_matches(variant, shape)
+            || (shape == "integer" && schema_type_matches(variant, "number"))
+        {
             return normalize_provider_value(&candidate, variant, label);
         }
     }
@@ -2566,6 +2575,65 @@ mod tests {
         .expect("anyOf array variant should accept stringified array");
 
         assert_eq!(normalized, serde_json::json!({ "payload": ["a", "b"] }));
+    }
+
+    /// Regression for Gemini review comment: a plain string that starts with
+    /// `{` or `[` but is not valid JSON must not cause an `InvalidInvocation`
+    /// error when a `string` variant is available. The coercion attempt should
+    /// fail gracefully and fall through to the string branch.
+    #[test]
+    fn provider_argument_normalization_oneof_string_variant_accepts_non_json_string() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "query": {
+                    "oneOf": [
+                        { "type": "object" },
+                        { "type": "string" }
+                    ]
+                }
+            }
+        });
+
+        // Looks like JSON but is malformed — must not error; string variant matches.
+        let normalized = normalize_provider_arguments(
+            &serde_json::json!({ "query": "{not valid json" }),
+            &schema,
+            "provider arguments",
+        )
+        .expect("malformed JSON-like string should fall through to the string variant");
+
+        assert_eq!(
+            normalized,
+            serde_json::json!({ "query": "{not valid json" })
+        );
+    }
+
+    /// Regression for Gemini review comment: JSON Schema treats every integer
+    /// as a valid number, so an integer-shaped value must match a `number`
+    /// variant in a `oneOf`/`anyOf` schema.
+    #[test]
+    fn provider_argument_normalization_oneof_integer_matches_number_variant() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "value": {
+                    "oneOf": [
+                        { "type": "string" },
+                        { "type": "number" }
+                    ]
+                }
+            }
+        });
+
+        let normalized = normalize_provider_arguments(
+            &serde_json::json!({ "value": 42 }),
+            &schema,
+            "provider arguments",
+        )
+        .expect("integer value should match the number variant");
+
+        assert_eq!(normalized, serde_json::json!({ "value": 42 }));
     }
 
     fn provider_tool_call() -> ProviderToolCall {
