@@ -1,26 +1,26 @@
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
-use futures::{StreamExt, stream};
-use ironclaw_loop_support::{
-    HostManagedModelGateway, HostManagedModelMessage, HostManagedModelMessageRole,
-    HostManagedModelRequest,
-};
 use ironclaw_product_adapters::{
     AuthPromptView, GatePromptView, ProductAdapterError, ProductOutboundPayload,
     ProductProjectionItem, ProductProjectionState, ProductWorkflowRejectionKind, RedactedString,
 };
 use ironclaw_turns::{
-    GetRunStateRequest, LoopMessageRef, TurnCoordinator, TurnError, TurnEventKind,
-    TurnEventProjectionCursor, TurnEventProjectionError, TurnEventProjectionRequest,
-    TurnEventProjectionService, TurnEventProjectionSource, TurnLifecycleEvent, TurnRunState,
-    TurnScope, TurnStatus,
-    run_profile::{ModelProfileId, ParentLoopOutput, sanitize_model_visible_text},
+    GetRunStateRequest, TurnCoordinator, TurnError, TurnEventKind, TurnEventProjectionCursor,
+    TurnEventProjectionError, TurnEventProjectionRequest, TurnEventProjectionService,
+    TurnEventProjectionSource, TurnLifecycleEvent, TurnRunId, TurnRunState, TurnScope, TurnStatus,
+    run_profile::{
+        SystemInferenceIdentity, SystemInferencePort, SystemInferenceRequest,
+        SystemInferenceTaskId, SystemPromptId, SystemPromptSource, SystemTaskKind,
+        sanitize_model_visible_text,
+    },
 };
+use tokio::sync::Mutex;
 
 pub(super) const WEBUI_TURN_EVENT_PAGE_LIMIT: usize = 256;
 const FAILURE_EXPLANATION_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1500);
 const FAILURE_EXPLANATION_MAX_BYTES: usize = 512;
+const FAILURE_EXPLANATION_MAX_INPUT_TOKENS: u64 = 512;
 
 pub(super) struct TurnEventPayload {
     pub(super) cursor: TurnEventProjectionCursor,
@@ -55,16 +55,17 @@ pub(super) enum TurnEventBridge {
         service: Arc<TurnEventProjectionService<dyn TurnEventProjectionSource>>,
         coordinator: Arc<dyn TurnCoordinator>,
         failure_explainer: Arc<dyn FailureExplanationProvider>,
+        failure_explanation_cache: Arc<Mutex<HashMap<FailureExplanationCacheKey, String>>>,
     },
 }
 
 pub(crate) struct ModelFailureExplanationProvider {
-    model_gateway: Arc<dyn HostManagedModelGateway>,
+    system_inference: Arc<dyn SystemInferencePort>,
 }
 
 impl ModelFailureExplanationProvider {
-    pub(crate) fn new(model_gateway: Arc<dyn HostManagedModelGateway>) -> Self {
-        Self { model_gateway }
+    pub(crate) fn new(system_inference: Arc<dyn SystemInferencePort>) -> Self {
+        Self { system_inference }
     }
 }
 
@@ -77,6 +78,7 @@ impl TurnEventBridge {
             service: Arc::new(TurnEventProjectionService::new(source)),
             coordinator,
             failure_explainer: Arc::new(NoopFailureExplanationProvider),
+            failure_explanation_cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -103,6 +105,7 @@ impl TurnEventBridge {
             service,
             coordinator,
             failure_explainer,
+            failure_explanation_cache,
         } = self
         else {
             return Ok(TurnEventDrain {
@@ -139,6 +142,7 @@ impl TurnEventBridge {
                 turn_event_payloads_for_page(
                     coordinator.as_ref(),
                     failure_explainer.as_ref(),
+                    failure_explanation_cache,
                     page.entries,
                 )
                 .await?,
@@ -158,26 +162,30 @@ impl TurnEventBridge {
 async fn turn_event_payloads_for_page(
     coordinator: &dyn TurnCoordinator,
     failure_explainer: &dyn FailureExplanationProvider,
+    failure_explanation_cache: &Arc<Mutex<HashMap<FailureExplanationCacheKey, String>>>,
     events: Vec<TurnLifecycleEvent>,
 ) -> Result<Vec<TurnEventPayload>, ProductAdapterError> {
-    stream::iter(events)
-        .map(|event| async move {
-            let cursor = TurnEventProjectionCursor::for_scope(event.scope.clone(), event.cursor);
-            turn_event_payload(coordinator, failure_explainer, &event)
-                .await
-                .map(|payload| payload.map(|payload| TurnEventPayload { cursor, payload }))
-        })
-        .buffered(16)
-        .collect::<Vec<_>>()
-        .await
-        .into_iter()
-        .filter_map(Result::transpose)
-        .collect()
+    let mut payloads = Vec::new();
+    for event in events {
+        let cursor = TurnEventProjectionCursor::for_scope(event.scope.clone(), event.cursor);
+        if let Some(payload) = turn_event_payload(
+            coordinator,
+            failure_explainer,
+            failure_explanation_cache,
+            &event,
+        )
+        .await?
+        {
+            payloads.push(TurnEventPayload { cursor, payload });
+        }
+    }
+    Ok(payloads)
 }
 
 async fn turn_event_payload(
     coordinator: &dyn TurnCoordinator,
     failure_explainer: &dyn FailureExplanationProvider,
+    failure_explanation_cache: &Arc<Mutex<HashMap<FailureExplanationCacheKey, String>>>,
     event: &TurnLifecycleEvent,
 ) -> Result<Option<ProductOutboundPayload>, ProductAdapterError> {
     if matches!(event.kind, TurnEventKind::Blocked)
@@ -186,8 +194,13 @@ async fn turn_event_payload(
         return Ok(Some(prompt));
     }
     if projects_run_status(&event.kind) {
-        let failure_details =
-            failure_details_for_turn_event(coordinator, failure_explainer, event).await;
+        let failure_details = failure_details_for_turn_event(
+            coordinator,
+            failure_explainer,
+            failure_explanation_cache,
+            event,
+        )
+        .await;
         return Ok(Some(ProductOutboundPayload::ProjectionUpdate {
             state: turn_event_projection_state(event, failure_details)?,
         }));
@@ -205,13 +218,13 @@ impl FailureExplanationProvider for NoopFailureExplanationProvider {
 #[async_trait]
 impl FailureExplanationProvider for ModelFailureExplanationProvider {
     async fn explain_failure(&self, input: FailureExplanationInput) -> Option<String> {
-        let request = match failure_explanation_model_request(&input) {
+        let request = match failure_explanation_request(&input) {
             Some(request) => request,
             None => return None,
         };
         let response = match tokio::time::timeout(
             FAILURE_EXPLANATION_TIMEOUT,
-            self.model_gateway.stream_model(request),
+            self.system_inference.call_system_inference(request),
         )
         .await
         {
@@ -234,10 +247,7 @@ impl FailureExplanationProvider for ModelFailureExplanationProvider {
                 return None;
             }
         };
-        match response.output {
-            ParentLoopOutput::AssistantReply(reply) => bounded_failure_explanation(&reply.content),
-            ParentLoopOutput::CapabilityCalls(_) => None,
-        }
+        bounded_failure_explanation(&response.output_text)
     }
 }
 
@@ -342,16 +352,69 @@ struct FailureProjectionDetails {
     summary: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(super) struct FailureExplanationCacheKey {
+    run_id: TurnRunId,
+    category: String,
+}
+
 async fn failure_details_for_turn_event(
     coordinator: &dyn TurnCoordinator,
     failure_explainer: &dyn FailureExplanationProvider,
+    failure_explanation_cache: &Arc<Mutex<HashMap<FailureExplanationCacheKey, String>>>,
     event: &TurnLifecycleEvent,
 ) -> FailureProjectionDetails {
     let Some(category) = failure_category_for_turn_event(event) else {
         return FailureProjectionDetails::default();
     };
     let fallback_summary = failure_summary_for_category(&category).to_string();
-    let summary = match coordinator
+    let cache_key = FailureExplanationCacheKey {
+        run_id: event.run_id,
+        category: category.clone(),
+    };
+    let summary = cached_failure_summary(failure_explanation_cache, cache_key, || async {
+        failure_summary_for_turn_event(
+            coordinator,
+            failure_explainer,
+            event,
+            &category,
+            fallback_summary,
+        )
+        .await
+    })
+    .await;
+    FailureProjectionDetails {
+        category: Some(category),
+        summary: Some(summary),
+    }
+}
+
+async fn cached_failure_summary<F, Fut>(
+    cache: &Arc<Mutex<HashMap<FailureExplanationCacheKey, String>>>,
+    key: FailureExplanationCacheKey,
+    compute: F,
+) -> String
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = String>,
+{
+    let mut cache = cache.lock().await;
+    if let Some(summary) = cache.get(&key) {
+        return summary.clone();
+    }
+    let summary = compute().await;
+    cache.insert(key, summary.clone());
+    summary
+}
+
+async fn failure_summary_for_turn_event(
+    coordinator: &dyn TurnCoordinator,
+    failure_explainer: &dyn FailureExplanationProvider,
+    event: &TurnLifecycleEvent,
+    category: &str,
+    fallback_summary: String,
+) -> String {
+    match coordinator
         .get_run_state(GetRunStateRequest {
             scope: event.scope.clone(),
             run_id: event.run_id,
@@ -361,7 +424,7 @@ async fn failure_details_for_turn_event(
         Ok(state) => failure_explainer
             .explain_failure(FailureExplanationInput {
                 state,
-                failure_category: category.clone(),
+                failure_category: category.to_string(),
                 fallback_summary: fallback_summary.clone(),
             })
             .await
@@ -375,10 +438,6 @@ async fn failure_details_for_turn_event(
             );
             fallback_summary
         }
-    };
-    FailureProjectionDetails {
-        category: Some(category),
-        summary: Some(summary),
     }
 }
 
@@ -417,41 +476,26 @@ fn failure_summary_for_category(category: &str) -> &'static str {
     }
 }
 
-fn failure_explanation_model_request(
-    input: &FailureExplanationInput,
-) -> Option<HostManagedModelRequest> {
-    let model_profile_id = ModelProfileId::new("interactive_model").ok()?;
-    Some(HostManagedModelRequest {
-        model_profile_id,
-        messages: vec![
-            HostManagedModelMessage {
-                role: HostManagedModelMessageRole::System,
-                content: failure_explanation_system_prompt().to_string(),
-                content_ref: LoopMessageRef::new("msg:failure-explanation.system").ok()?,
-                tool_result_provider_call: None,
-                tool_result_content: None,
+fn failure_explanation_request(input: &FailureExplanationInput) -> Option<SystemInferenceRequest> {
+    Some(SystemInferenceRequest {
+        task_id: SystemInferenceTaskId::new(),
+        identity: SystemInferenceIdentity {
+            task_kind: SystemTaskKind::FailureExplanation,
+            prompt_source: SystemPromptSource::Static {
+                prompt_id: SystemPromptId::new("failure_explanation").ok()?,
             },
-            HostManagedModelMessage {
-                role: HostManagedModelMessageRole::User,
-                content: failure_explanation_user_prompt(input),
-                content_ref: LoopMessageRef::new(format!(
-                    "msg:failure-explanation.user.{}",
-                    input.state.run_id
-                ))
-                .ok()?,
-                tool_result_provider_call: None,
-                tool_result_content: None,
-            },
-        ],
-        surface_version: None,
-        resolved_model_route: input.state.resolved_model_route.clone(),
-        run_id: input.state.run_id,
-        turn_id: input.state.turn_id,
+            system_prompt: failure_explanation_system_prompt().to_string(),
+        },
+        input_text: failure_explanation_user_prompt(input),
+        max_input_tokens: FAILURE_EXPLANATION_MAX_INPUT_TOKENS,
+        deadline_ms: FAILURE_EXPLANATION_TIMEOUT
+            .as_millis()
+            .min(u128::from(u64::MAX)) as u64,
     })
 }
 
 fn failure_explanation_system_prompt() -> &'static str {
-    "Explain a failed agent run to an end user. Use only the sanitized facts provided. Write one concise sentence under 240 characters. Do not mention internal IDs, stack traces, hidden policy, or secrets. Do not invent details."
+    include_str!("../../../ironclaw_loop_support/prompts/failure_explanation.md")
 }
 
 fn failure_explanation_user_prompt(input: &FailureExplanationInput) -> String {

@@ -87,10 +87,10 @@ impl RebornProjectionServices {
 
     pub(crate) fn with_model_failure_explainer(
         self,
-        model_gateway: Arc<dyn ironclaw_loop_support::HostManagedModelGateway>,
+        system_inference: Arc<dyn ironclaw_turns::run_profile::SystemInferencePort>,
     ) -> Self {
         self.with_failure_explainer(Arc::new(ModelFailureExplanationProvider::new(
-            model_gateway,
+            system_inference,
         )))
     }
 

@@ -248,17 +248,27 @@ function applyProjectionItems({
           // bubble instead of stacking.
           const messageId = `err-${runId || "unknown"}`;
           setMessages((prev) => {
-            if (prev.some((m) => m.id === messageId)) return prev;
+            const existing = prev.findIndex((m) => m.id === messageId);
+            const content = failureMessageForRunStatus({
+              status,
+              failureCategory,
+              failureSummary,
+            });
+            if (existing >= 0) {
+              if (!failureSummary || prev[existing].content === content) return prev;
+              const next = [...prev];
+              next[existing] = {
+                ...next[existing],
+                content,
+              };
+              return next;
+            }
             return [
               ...prev,
               {
                 id: messageId,
                 role: "error",
-                content: failureMessageForRunStatus({
-                  status,
-                  failureCategory,
-                  failureSummary,
-                }),
+                content,
                 timestamp: new Date().toISOString(),
               },
             ];

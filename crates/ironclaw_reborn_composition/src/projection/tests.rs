@@ -1,5 +1,6 @@
 use super::turn_events::{
-    FailureExplanationInput, FailureExplanationProvider, WEBUI_TURN_EVENT_PAGE_LIMIT,
+    FailureExplanationInput, FailureExplanationProvider, ModelFailureExplanationProvider,
+    WEBUI_TURN_EVENT_PAGE_LIMIT,
 };
 use super::*;
 
@@ -22,7 +23,13 @@ use ironclaw_turns::{
     RunProfileVersion, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse,
     TurnBlockedGateKind, TurnBlockedGateMetadata, TurnError, TurnEventKind, TurnEventPage,
     TurnLifecycleEvent, TurnRunState, TurnStatus,
+    run_profile::{
+        LoopSafeSummary, SystemInferenceError, SystemInferencePort, SystemInferenceRequest,
+        SystemInferenceResponse, SystemInferenceTaskId, SystemTaskKind,
+    },
 };
+use std::sync::atomic::{AtomicUsize, Ordering};
+use tokio::sync::Mutex;
 
 mod cursor_validation;
 mod display_preview;
@@ -147,6 +154,35 @@ impl FailureExplanationProvider for FakeFailureExplainer {
             "fallback summary should be available to the explainer"
         );
         Some(self.explanation.clone())
+    }
+}
+
+struct CountingFailureExplainer {
+    explanation: String,
+    calls: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl FailureExplanationProvider for CountingFailureExplainer {
+    async fn explain_failure(&self, _input: FailureExplanationInput) -> Option<String> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Some(self.explanation.clone())
+    }
+}
+
+struct RecordingFailureGateway {
+    response: Mutex<Result<SystemInferenceResponse, SystemInferenceError>>,
+    requests: Mutex<Vec<SystemInferenceRequest>>,
+}
+
+#[async_trait]
+impl SystemInferencePort for RecordingFailureGateway {
+    async fn call_system_inference(
+        &self,
+        request: SystemInferenceRequest,
+    ) -> Result<SystemInferenceResponse, SystemInferenceError> {
+        self.requests.lock().await.push(request);
+        self.response.lock().await.clone()
     }
 }
 

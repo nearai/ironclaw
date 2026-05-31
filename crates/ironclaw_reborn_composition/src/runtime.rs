@@ -43,7 +43,8 @@ use ironclaw_host_api::{
 };
 use ironclaw_loop_support::{
     CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
-    FilesystemSkillBundleSource, HostSkillContextSource, JsonSpawnSubagentInputCodec,
+    FilesystemSkillBundleSource, GuardedSystemInferencePort, HostSkillContextSource,
+    JsonSpawnSubagentInputCodec, ModelGatewayBackedSystemInferencePort,
 };
 use ironclaw_product_adapters::ProjectionStream;
 use ironclaw_product_workflow::{
@@ -76,9 +77,9 @@ use ironclaw_turns::{
     AcceptedMessageRef, CancelRunRequest, CancelRunResponse, GetRunStateRequest, IdempotencyKey,
     ReplyTargetBindingRef, RunProfileResolutionRequest, SanitizedCancelReason, SourceBindingRef,
     SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError,
-    TurnEventProjectionSource, TurnPersistenceSnapshot, TurnRunId, TurnRunRecord, TurnScope,
-    TurnStatus,
-    run_profile::{LoopHostMilestoneSink, LoopRunContext},
+    TurnEventProjectionSource, TurnId, TurnPersistenceSnapshot, TurnRunId, TurnRunRecord,
+    TurnScope, TurnStatus,
+    run_profile::{LoopHostMilestoneSink, LoopRunContext, NoOpBudgetAccountant, NoOpPolicyGuard},
 };
 
 use crate::default_system_prompt::DefaultSystemPromptIdentitySource;
@@ -1081,6 +1082,35 @@ pub async fn build_reborn_runtime(
             reason: format!("could not resolve default run profile: {error}"),
         })?;
     let default_run_profile_id = default_resolved_run_profile.profile_id.as_str().to_string();
+    let failure_explanation_thread_id =
+        ThreadId::new("failure-explanation-system").map_err(|reason| {
+            RebornRuntimeError::InvalidArgument {
+                reason: format!("failure explanation thread id: {reason}"),
+            }
+        })?;
+    let failure_explanation_context = LoopRunContext::new(
+        TurnScope::new(
+            thread_scope.tenant_id.clone(),
+            Some(thread_scope.agent_id.clone()),
+            thread_scope.project_id.clone(),
+            failure_explanation_thread_id,
+        ),
+        TurnId::new(),
+        TurnRunId::new(),
+        default_resolved_run_profile,
+    );
+    let direct_failure_explanation_inference =
+        Arc::new(ModelGatewayBackedSystemInferencePort::new(
+            Arc::clone(&model_gateway),
+            failure_explanation_context.clone(),
+        ));
+    let failure_explanation_inference: Arc<dyn ironclaw_turns::run_profile::SystemInferencePort> =
+        Arc::new(GuardedSystemInferencePort::new(
+            direct_failure_explanation_inference,
+            failure_explanation_context,
+            Arc::new(NoOpBudgetAccountant),
+            Arc::new(NoOpPolicyGuard),
+        ));
     let planned_turn_coordinator: Arc<dyn TurnCoordinator> = composition.coordinator.clone();
     let approval_turn_runs = Arc::new(LocalDevApprovalTurnRunLocator::new(Arc::clone(
         &turn_state_store,
@@ -1116,7 +1146,7 @@ pub async fn build_reborn_runtime(
     let turn_event_source: Arc<dyn TurnEventProjectionSource> = turn_state_store.clone();
     let projection_services = projection_services
         .with_turn_events(turn_event_source, Arc::clone(&planned_turn_coordinator))
-        .with_model_failure_explainer(Arc::clone(&model_gateway))
+        .with_model_failure_explainer(failure_explanation_inference)
         .with_display_previews(Arc::clone(&local_dev_capabilities.display_previews));
     services.turn_coordinator = Some(Arc::clone(&planned_turn_coordinator));
 

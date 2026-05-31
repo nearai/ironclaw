@@ -1044,6 +1044,35 @@ mod tests {
     }
 
     #[test]
+    fn projection_state_rejects_oversized_run_status_failure_details() {
+        let oversized_category = serde_json::json!({
+            "thread_id": "thread-1",
+            "items": [{
+                "run_status": {
+                    "run_id": TurnRunId::new(),
+                    "status": "failed",
+                    "failure_category": "x".repeat(PROJECTION_ITEM_ID_MAX_BYTES + 1),
+                    "failure_summary": "The run failed."
+                }
+            }]
+        });
+        assert!(serde_json::from_value::<ProductProjectionState>(oversized_category).is_err());
+
+        let oversized_summary = serde_json::json!({
+            "thread_id": "thread-1",
+            "items": [{
+                "run_status": {
+                    "run_id": TurnRunId::new(),
+                    "status": "failed",
+                    "failure_category": "driver_failed",
+                    "failure_summary": "x".repeat(PROJECTION_TEXT_MAX_BYTES + 1)
+                }
+            }]
+        });
+        assert!(serde_json::from_value::<ProductProjectionState>(oversized_summary).is_err());
+    }
+
+    #[test]
     fn final_reply_serializes_with_plaintext() {
         let view = FinalReplyView {
             turn_run_id: TurnRunId::new(),
