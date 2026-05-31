@@ -95,9 +95,17 @@ struct NearAiMcpEgressPlanner {
 
 impl McpHostHttpEgressPlanner for NearAiMcpEgressPlanner {
     fn plan(&self, request: McpHostHttpEgressPlanRequest<'_>) -> McpHostHttpEgressPlan {
-        // This is a narrow NEAR AI MCP adapter. Do not grow this into the
-        // generic product-auth-to-MCP planner; nearai/ironclaw#4176 owns that
-        // bridge, including account selection and typed AuthRequired recovery.
+        // This is a narrow NEAR AI MCP adapter. Do not grow this into a generic
+        // product-auth-to-MCP planner. Account selection and typed AuthRequired
+        // recovery happen upstream: the bundled manifest declares the credential
+        // with `source = product_auth_account(provider = "nearai")`, so the
+        // authorization layer emits `Obligation::InjectCredentialAccountOnce`
+        // before this planner runs. The obligation handler resolves the
+        // configured nearai product-auth account via
+        // `RuntimeCredentialAccountResolver`, stages the access secret into
+        // `RuntimeSecretInjectionStore` under the `llm_nearai_api_key` slot, and
+        // this planner only references that slot via the `StagedObligation`
+        // source. Closes the MCP slice of nearai/ironclaw#4176.
         if request.provider.as_str() != NEARAI_EXTENSION_ID
             || !nearai_mcp_url_allowed(request.url, &self.endpoint)
         {

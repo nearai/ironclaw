@@ -8,14 +8,15 @@ use ironclaw_auth::{
     AuthInteractionId, AuthInteractionService, AuthProductError, AuthProductScope,
     AuthProviderClient, AuthProviderId, CredentialAccountChoiceRequest, CredentialAccountId,
     CredentialAccountLabel, CredentialAccountListPage, CredentialAccountListRequest,
-    CredentialAccountProjection, CredentialAccountService, CredentialAccountStatus,
-    CredentialAccountUpdateBinding, CredentialRecoveryProjection, CredentialRecoveryRequest,
-    CredentialRefreshReport, CredentialRefreshRequest, CredentialSetupService,
-    InMemoryAuthProductServices, ManualTokenSetupRequest, NewAuthFlow, OAuthAuthorizationUrl,
-    OAuthCallbackClaimRequest, OAuthCallbackFailureInput, OAuthCallbackInput,
-    OAuthProviderCallbackRequest, OAuthProviderExchangeContext, OpaqueStateHash, PkceVerifierHash,
-    ProviderBackedCredentialAccountService, ProviderCallbackOutcome, SecretCleanupReport,
-    SecretCleanupRequest, SecretCleanupService, SecretSubmitRequest, Timestamp,
+    CredentialAccountLookupRequest, CredentialAccountProjection, CredentialAccountService,
+    CredentialAccountStatus, CredentialAccountUpdateBinding, CredentialRecoveryProjection,
+    CredentialRecoveryRequest, CredentialRefreshReport, CredentialRefreshRequest,
+    CredentialSetupService, InMemoryAuthProductServices, ManualTokenSetupRequest, NewAuthFlow,
+    OAuthAuthorizationUrl, OAuthCallbackClaimRequest, OAuthCallbackFailureInput,
+    OAuthCallbackInput, OAuthProviderCallbackRequest, OAuthProviderExchangeContext,
+    OpaqueStateHash, PkceVerifierHash, ProviderBackedCredentialAccountService,
+    ProviderCallbackOutcome, SecretCleanupReport, SecretCleanupRequest, SecretCleanupService,
+    SecretSubmitRequest, Timestamp,
 };
 use ironclaw_product_adapters::AuthPromptChallengeKind;
 use ironclaw_product_workflow::ProductAuthTurnGateResumeDispatcher;
@@ -340,6 +341,10 @@ impl RebornProductAuthServicePorts {
         )
     }
 
+    pub fn credential_account_service(&self) -> Arc<dyn CredentialAccountService> {
+        self.credential_account_service.clone()
+    }
+
     pub(crate) fn into_services(
         self,
         continuation_dispatcher: Arc<dyn RebornAuthContinuationDispatcher>,
@@ -606,13 +611,37 @@ impl RebornProductAuthServices {
 
     /// Select a single configured credential account through the injected
     /// account port.
-    ///
-    /// The selection is validated by the underlying port; this facade does
-    /// not reconstruct selection authority locally.
     pub async fn select_credential_account(
         &self,
         request: CredentialAccountChoiceRequest,
     ) -> Result<CredentialAccountProjection, RebornCredentialLifecycleError> {
+        let mut lookup_request =
+            CredentialAccountLookupRequest::new(request.scope.clone(), request.account_id);
+        if let Some(extension_id) = request.requester_extension.clone() {
+            lookup_request = lookup_request.for_extension(extension_id);
+        }
+        let account = self
+            .credential_account_service
+            .get_account(lookup_request)
+            .await
+            .map_err(RebornCredentialLifecycleError::from)?
+            .ok_or(RebornCredentialLifecycleError {
+                code: AuthErrorCode::CredentialMissing,
+                retryable: false,
+            })?;
+        if account.provider != request.provider {
+            return Err(RebornCredentialLifecycleError {
+                code: AuthErrorCode::CrossScopeDenied,
+                retryable: false,
+            });
+        }
+        if account.status != CredentialAccountStatus::Configured {
+            return Err(RebornCredentialLifecycleError {
+                code: AuthErrorCode::CredentialMissing,
+                retryable: false,
+            });
+        }
+
         self.credential_account_service
             .select_configured_account(request)
             .await

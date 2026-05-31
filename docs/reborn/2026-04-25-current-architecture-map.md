@@ -33,6 +33,7 @@ docs/reborn/contracts/settings-config.md
 docs/reborn/contracts/turns-agent-loop.md
 docs/reborn/contracts/turn-persistence.md
 docs/reborn/contracts/conversation-binding.md
+docs/reborn/contracts/triggers.md
 docs/reborn/contracts/migration-compatibility.md
 ```
 
@@ -43,6 +44,11 @@ https://github.com/nearai/ironclaw/issues/2987
 ```
 
 These docs record the delegation-ready system decisions: kernel as security perimeter, loops/userland running on the kernel surface, first-class optional `AgentId`, hybrid storage placement, typed repositories for structured state, split memory services over shared backends, durable event streams with replay cursors, all built-in obligations for V1, all three runtime lanes as first-class, and schema reuse where viable.
+
+Trigger system status: `[planned]`. The contract is frozen in
+`docs/reborn/contracts/triggers.md`; the `ironclaw_triggers` crate, durable
+repositories, poller, and first-party `trigger_*` capabilities are planned
+follow-up slices.
 
 ---
 

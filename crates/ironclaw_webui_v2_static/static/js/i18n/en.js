@@ -123,6 +123,7 @@ registerPack("en", {
   "authGate.oauthWaiting": "Waiting for authorization to complete\u2026 You can close the popup tab once you\u2019ve approved access.",
   "authGate.expiresAt": "Expires",
   "authGate.oauthProviderFallback": "the provider",
+  "authGate.unsupportedChallenge": "Open settings to complete this authentication step.",
   "authGate.submitFailed": "Could not save the token.",
   "authGate.resolveFailedAfterTokenSaved":
     "Token saved. Could not resume the blocked run; retry to resume it.",

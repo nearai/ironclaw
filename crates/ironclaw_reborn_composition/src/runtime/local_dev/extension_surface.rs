@@ -180,6 +180,7 @@ mod tests {
             effects: vec![EffectKind::DispatchCapability, EffectKind::Network],
             runtime_credentials: vec![ironclaw_host_api::RuntimeCredentialRequirement {
                 handle: ironclaw_host_api::SecretHandle::new("exa_mcp_token").unwrap(),
+                source: ironclaw_host_api::RuntimeCredentialRequirementSource::SecretHandle,
                 audience: NetworkTargetPattern {
                     scheme: Some(NetworkScheme::Https),
                     host_pattern: EXA_MCP_HOST.to_string(),

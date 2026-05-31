@@ -39,8 +39,11 @@ mod llm_catalog;
 mod local_dev_capability_policy;
 mod local_dev_mounts;
 mod local_runtime_profile;
+mod mcp;
+mod mcp_router;
 mod nearai_mcp;
 mod product_auth_durable;
+mod product_auth_runtime_credentials;
 #[cfg(feature = "webui-v2-beta")]
 mod product_auth_serve;
 mod product_live_adapters;

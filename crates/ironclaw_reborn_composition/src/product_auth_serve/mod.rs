@@ -54,8 +54,8 @@ use uuid::Uuid;
 use crate::auth::RebornOAuthStartFlowRequest;
 use crate::{
     RebornAuthProductError, RebornManualTokenSetupRequest, RebornManualTokenSubmitRequest,
-    RebornOAuthCallbackError, RebornOAuthCallbackOutcome, RebornOAuthCallbackRequest,
-    RebornOAuthCallbackResponse, RebornProductAuthServices,
+    RebornManualTokenSubmitResponse, RebornOAuthCallbackError, RebornOAuthCallbackOutcome,
+    RebornOAuthCallbackRequest, RebornOAuthCallbackResponse, RebornProductAuthServices,
 };
 
 pub(crate) const OAUTH_START_PATH: &str = "/api/reborn/product-auth/oauth/start";
@@ -246,8 +246,8 @@ pub(crate) struct ProductAuthRouteMount {
 // mutations enter `RebornProductAuthServices` directly; they are not in-turn
 // tool calls and must not surface raw secrets through the model-visible
 // tool-dispatch path. Contract: `docs/reborn/contracts/auth-product.md`.
+// dispatch-exempt: host-owned auth/secret ingress, not in-turn tool dispatch
 pub(crate) fn product_auth_route_mount(state: ProductAuthRouteState) -> ProductAuthRouteMount {
-    // dispatch-exempt: host-owned auth/secret ingress, not in-turn tool dispatch
     ProductAuthRouteMount {
         protected: Router::new()
             .route(OAUTH_START_PATH, post(oauth::oauth_start_handler))

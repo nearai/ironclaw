@@ -12,7 +12,7 @@ use ironclaw_run_state::{
 use tracing::{debug, warn};
 
 use crate::helpers::{
-    CapabilityActionKind, apply_run_state_transition_if_configured,
+    CapabilityActionKind, CapabilityRunStateTransition, apply_run_state_transition_if_configured,
     approval_not_approved_error_kind, capability_lease_error_kind,
     claim_error_may_be_concurrent_resume, complete_run_after_side_effect, fail_run_if_configured,
     invocation_fingerprint_for_kind, matching_approval_lease, resume_context_mismatch_kind,
@@ -1685,5 +1685,12 @@ fn completion_obligation_error_to_invocation(
 }
 
 fn obligation_invocation_error_kind(error: &CapabilityInvocationError) -> &'static str {
-    error.run_state_transition().error_kind()
+    // `run_state_transition` returns `None` for `CapabilityInvocationError::Dispatch`
+    // because PR #4236 handles those failures via the disposition policy on the
+    // outcome path. The obligation call sites only see this function for
+    // diagnostic logging; fall back to a stable "Dispatch" label in that case.
+    error
+        .run_state_transition()
+        .map(CapabilityRunStateTransition::error_kind)
+        .unwrap_or("Dispatch")
 }

@@ -8,12 +8,13 @@ use ironclaw_turns::{TurnActor, TurnScope};
 use serde::Serialize;
 
 use crate::validation::{
-    validate_advance_request, validate_delivery_attempt, validate_delivery_identity,
-    validate_delivery_status_request, validate_policy, validate_subscription_identity,
-    validate_subscription_record, validate_subscription_request,
+    validate_advance_request, validate_communication_preference, validate_delivery_attempt,
+    validate_delivery_identity, validate_delivery_status_request, validate_policy,
+    validate_subscription_identity, validate_subscription_record, validate_subscription_request,
 };
 use crate::{
-    AdvanceSubscriptionCursorRequest, LoadSubscriptionCursorRequest, OutboundDeliveryAttempt,
+    AdvanceSubscriptionCursorRequest, CommunicationPreferenceKey, CommunicationPreferenceRecord,
+    CommunicationPreferenceRepository, LoadSubscriptionCursorRequest, OutboundDeliveryAttempt,
     OutboundDeliveryId, OutboundError, OutboundStateStore, ProjectionSubscriptionId,
     ProjectionSubscriptionRecord, ThreadNotificationPolicy, UpdateDeliveryStatusRequest,
 };
@@ -25,6 +26,7 @@ pub struct InMemoryOutboundStateStore {
 
 #[derive(Default)]
 struct InMemoryOutboundState {
+    communication_preferences: HashMap<CommunicationPreferenceKey, CommunicationPreferenceRecord>,
     policies: HashMap<ThreadScopeKey, ThreadNotificationPolicy>,
     subscriptions: HashMap<ProjectionSubscriptionKey, ProjectionSubscriptionRecord>,
     deliveries: HashMap<OutboundDeliveryId, OutboundDeliveryAttempt>,
@@ -84,6 +86,27 @@ impl ProjectionSubscriptionKey {
         })
         .map(Self)
         .map_err(|_| OutboundError::Serialization)
+    }
+}
+
+#[async_trait]
+impl CommunicationPreferenceRepository for InMemoryOutboundStateStore {
+    async fn put_communication_preference(
+        &self,
+        record: CommunicationPreferenceRecord,
+    ) -> Result<(), OutboundError> {
+        validate_communication_preference(&record)?;
+        let mut state = self.lock_state()?;
+        state.communication_preferences.insert(record.key(), record);
+        Ok(())
+    }
+
+    async fn load_communication_preference(
+        &self,
+        key: CommunicationPreferenceKey,
+    ) -> Result<Option<CommunicationPreferenceRecord>, OutboundError> {
+        let state = self.lock_state()?;
+        Ok(state.communication_preferences.get(&key).cloned())
     }
 }
 

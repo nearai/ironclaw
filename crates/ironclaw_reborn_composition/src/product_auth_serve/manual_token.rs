@@ -44,40 +44,13 @@ pub(super) async fn manual_token_submit_handler(
         ),
     ))
     .await?;
-    let submitted = match tokio::time::timeout(
-        PRODUCT_AUTH_BACKEND_TIMEOUT,
-        state
-            .product_auth
-            .submit_manual_token(RebornManualTokenSubmitRequest::new(
-                scope.clone(),
-                challenge.interaction_id,
-                token.into_secret(),
-            )),
+    let submitted = submit_manual_token_with_abandon(
+        &state,
+        &scope,
+        challenge.interaction_id,
+        token.into_secret(),
     )
-    .await
-    {
-        Ok(Ok(submitted)) => submitted,
-        Ok(Err(error)) => {
-            abandon_manual_token_after_submit_failure(
-                &state,
-                &scope,
-                challenge.interaction_id,
-                error.code,
-            )
-            .await;
-            return Err(ProductAuthRouteFailure::from(error));
-        }
-        Err(_) => {
-            abandon_manual_token_after_submit_failure(
-                &state,
-                &scope,
-                challenge.interaction_id,
-                AuthErrorCode::BackendUnavailable,
-            )
-            .await;
-            return Err(ProductAuthRouteFailure::backend_timeout());
-        }
-    };
+    .await?;
 
     Ok(Json(ManualTokenSubmitResponse {
         credential_ref: submitted.account_id,
@@ -114,6 +87,45 @@ pub(super) async fn abandon_manual_token_after_submit_failure(
                 cleanup_error_code = ?AuthErrorCode::BackendUnavailable,
                 "manual-token submit failed and interaction cleanup timed out"
             );
+        }
+    }
+}
+
+/// Submit a manual token and abandon the pending interaction on any submit
+/// failure so failed setup attempts do not leave an active challenge behind.
+pub(super) async fn submit_manual_token_with_abandon(
+    state: &ProductAuthRouteState,
+    scope: &AuthProductScope,
+    interaction_id: AuthInteractionId,
+    secret: SecretString,
+) -> Result<RebornManualTokenSubmitResponse, ProductAuthRouteFailure> {
+    match tokio::time::timeout(
+        PRODUCT_AUTH_BACKEND_TIMEOUT,
+        state
+            .product_auth
+            .submit_manual_token(RebornManualTokenSubmitRequest::new(
+                scope.clone(),
+                interaction_id,
+                secret,
+            )),
+    )
+    .await
+    {
+        Ok(Ok(submitted)) => Ok(submitted),
+        Ok(Err(error)) => {
+            let code = error.code;
+            abandon_manual_token_after_submit_failure(state, scope, interaction_id, code).await;
+            Err(ProductAuthRouteFailure::from(error))
+        }
+        Err(_) => {
+            abandon_manual_token_after_submit_failure(
+                state,
+                scope,
+                interaction_id,
+                AuthErrorCode::BackendUnavailable,
+            )
+            .await;
+            Err(ProductAuthRouteFailure::backend_timeout())
         }
     }
 }
@@ -166,35 +178,9 @@ pub(super) async fn manual_token_secret_submit_handler(
         .into_validated()
         .map_err(|_| ProductAuthRouteFailure::invalid_request())?;
 
-    let submitted = match tokio::time::timeout(
-        PRODUCT_AUTH_BACKEND_TIMEOUT,
-        state
-            .product_auth
-            .submit_manual_token(RebornManualTokenSubmitRequest::new(
-                scope.clone(),
-                interaction_id,
-                token.into_secret(),
-            )),
-    )
-    .await
-    {
-        Ok(Ok(submitted)) => submitted,
-        Ok(Err(error)) => {
-            abandon_manual_token_after_submit_failure(&state, &scope, interaction_id, error.code)
-                .await;
-            return Err(ProductAuthRouteFailure::from(error));
-        }
-        Err(_) => {
-            abandon_manual_token_after_submit_failure(
-                &state,
-                &scope,
-                interaction_id,
-                AuthErrorCode::BackendUnavailable,
-            )
-            .await;
-            return Err(ProductAuthRouteFailure::backend_timeout());
-        }
-    };
+    let submitted =
+        submit_manual_token_with_abandon(&state, &scope, interaction_id, token.into_secret())
+            .await?;
 
     Ok(Json(ManualTokenSubmitResponse {
         credential_ref: submitted.account_id,

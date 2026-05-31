@@ -1615,6 +1615,7 @@ fn obligation_status_label(kind: ObligationKind) -> &'static str {
         ObligationKind::UseScopedMounts => "use_scoped_mounts",
         ObligationKind::ApplyNetworkPolicy => "apply_network_policy",
         ObligationKind::InjectSecretOnce => "inject_secret_once",
+        ObligationKind::InjectCredentialAccountOnce => "inject_credential_account_once",
         ObligationKind::AuditBefore => "audit_before",
         ObligationKind::RedactOutput => "redact_output",
         ObligationKind::EnforceResourceCeiling => "enforce_resource_ceiling",
