@@ -402,6 +402,7 @@ pub struct Agent {
     pub(super) context_monitor: ContextMonitor,
     pub(super) heartbeat_config: Option<HeartbeatConfig>,
     pub(super) hygiene_config: Option<crate::config::HygieneConfig>,
+    pub(super) snapshot_config: Option<crate::config::SnapshotConfig>,
     pub(super) routine_config: Option<RoutineConfig>,
     /// Shared routine-engine slot used for internal event matching and for exposing
     /// the engine to gateway/manual trigger entry points.
@@ -436,6 +437,7 @@ impl Agent {
         channels: Arc<ChannelManager>,
         heartbeat_config: Option<HeartbeatConfig>,
         hygiene_config: Option<crate::config::HygieneConfig>,
+        snapshot_config: Option<crate::config::SnapshotConfig>,
         routine_config: Option<RoutineConfig>,
         context_manager: Option<Arc<ContextManager>>,
         session_manager: Option<Arc<SessionManager>>,
@@ -479,6 +481,7 @@ impl Agent {
             context_monitor: ContextMonitor::new(),
             heartbeat_config,
             hygiene_config,
+            snapshot_config,
             routine_config,
             routine_engine_slot: Arc::new(tokio::sync::RwLock::new(None)),
             mission_manager_slot: Arc::new(tokio::sync::RwLock::new(None)),
@@ -1122,11 +1125,15 @@ impl Agent {
                         .map(|h| h.to_workspace_config())
                         .unwrap_or_default();
 
+                    let snapshot_config =
+                        self.snapshot_config.as_ref().cloned().unwrap_or_default();
+
                     if config.multi_tenant {
                         if let Some(system) = self.system_store() {
                             Some(spawn_multi_user_heartbeat(
                                 config,
                                 hygiene,
+                                snapshot_config,
                                 self.cheap_llm().clone(),
                                 Some(notify_tx),
                                 system,
@@ -1136,9 +1143,11 @@ impl Agent {
                             None
                         }
                     } else {
+                        let snapshot = snapshot_config.to_workspace_config(workspace.user_id());
                         Some(spawn_heartbeat(
                             config,
                             hygiene,
+                            snapshot,
                             workspace.clone(),
                             self.cheap_llm().clone(),
                             Some(notify_tx),
@@ -2501,6 +2510,7 @@ mod tests {
             },
             deps,
             Arc::new(crate::channels::ChannelManager::new()),
+            None,
             None,
             None,
             None,
