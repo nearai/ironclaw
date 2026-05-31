@@ -759,6 +759,64 @@ fn expand_tilde(token: &str) -> PathBuf {
     PathBuf::from(token)
 }
 
+/// Resolve a requested working directory, handling missing or broken paths.
+///
+/// Sandbox-aware: when a sandbox is wired up, falling back to
+/// `std::env::current_dir()` would cause the container to bind-mount the host
+/// process cwd as `/workspace` (see `src/sandbox/container.rs`), silently
+/// exposing host state the caller never requested. In that case, refuse.
+///
+/// Without a sandbox, fall back to the process cwd with a warn log so
+/// autonomous routines keep working when a stale workdir is configured.
+/// Broken symlinks get a distinct diagnosis so misconfiguration stays visible
+/// instead of blending into the "path does not exist" category.
+fn resolve_workdir(requested: PathBuf, sandboxed: bool) -> Result<PathBuf, ToolError> {
+    if requested.is_dir() {
+        return Ok(requested);
+    }
+
+    // Classify why `requested` isn't a usable directory. `fs::metadata` follows
+    // symlinks, so its error distinguishes a missing path from a permission
+    // problem; `fs::symlink_metadata` then disambiguates a genuine missing
+    // path from a symlink whose target is missing. Without this split,
+    // `symlink_metadata` would mislabel a valid symlink-to-file as "broken"
+    // and `Err(_) => "does not exist"` would mislabel `PermissionDenied`.
+    let diagnosis = match std::fs::metadata(&requested) {
+        Ok(_) => "exists but is not a directory",
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            let is_dangling_symlink = matches!(
+                std::fs::symlink_metadata(&requested),
+                Ok(meta) if meta.file_type().is_symlink()
+            );
+            if is_dangling_symlink {
+                "broken symlink"
+            } else {
+                "does not exist"
+            }
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => "permission denied",
+        Err(_) => "unreadable",
+    };
+
+    if sandboxed {
+        return Err(ToolError::ExecutionFailed(format!(
+            "requested working directory {diagnosis}: {}",
+            requested.display()
+        )));
+    }
+
+    // silent-ok: fallback cwd resolution — any usable path is better than
+    // returning `ExecutionFailed` here; the warn log below records the attempt.
+    let fallback = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    tracing::warn!(
+        requested = %requested.display(),
+        fallback = %fallback.display(),
+        diagnosis,
+        "requested working directory {diagnosis}, falling back to process cwd"
+    );
+    Ok(fallback)
+}
+
 impl std::fmt::Debug for ShellTool {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ShellTool")
@@ -1006,11 +1064,21 @@ impl ShellTool {
             return Err(ToolError::NotAuthorized(reason));
         }
 
-        // Determine working directory
-        let cwd = workdir
+        // Determine working directory. A missing path is handled by
+        // `resolve_workdir` differently depending on whether a sandbox is wired
+        // up — falling back to the process cwd would be silently bind-mounted
+        // as /workspace under a sandbox.
+        let sandboxed = self
+            .sandbox
+            .as_ref()
+            .is_some_and(|s| s.is_initialized() || s.config().enabled);
+        let cwd = match workdir
             .map(PathBuf::from)
             .or_else(|| self.working_dir.clone())
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        {
+            Some(requested) => resolve_workdir(requested, sandboxed)?,
+            None => std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        };
 
         // Determine timeout
         let timeout_duration = timeout.map(Duration::from_secs).unwrap_or(self.timeout);
@@ -2043,5 +2111,156 @@ mod tests {
     fn sensitive_file_access_blocks_flag_equals_path() {
         // --file=/home/user/.env should be caught even though the token starts with -
         assert!(check_sensitive_file_access("grep --file=/home/user/.env pattern").is_some());
+    }
+
+    // ── Workdir fallback tests (issue #1949) ────────────────────────────
+
+    #[tokio::test]
+    async fn nonexistent_workdir_falls_back_to_cwd_when_unsandboxed() {
+        let tool = ShellTool::new();
+        let ctx = JobContext::default();
+
+        // Create then drop a tempdir to guarantee a path that does not exist.
+        let tmp = TempDir::new().expect("create temp dir");
+        let gone = tmp.path().to_path_buf();
+        drop(tmp);
+
+        let output = tool
+            .execute(
+                serde_json::json!({
+                    "command": "pwd",
+                    "workdir": gone.to_str().unwrap(),
+                }),
+                &ctx,
+            )
+            .await
+            .expect("should succeed with fallback workdir");
+
+        let text = output.result.get("output").unwrap().as_str().unwrap();
+        // Canonicalize both sides: on systems where the process cwd traverses
+        // symlinks (e.g. macOS /tmp is a symlink to /private/tmp), `pwd` and
+        // `env::current_dir()` can disagree on the logical path while naming
+        // the same directory.
+        let actual = PathBuf::from(text.trim())
+            .canonicalize()
+            .expect("pwd output should canonicalize");
+        let expected = std::env::current_dir()
+            .expect("process cwd")
+            .canonicalize()
+            .expect("process cwd should canonicalize");
+        // Positive invariant: the command ran in the fallback cwd, not the
+        // missing one.
+        assert_eq!(actual, expected);
+        assert_eq!(output.result.get("exit_code").unwrap().as_i64().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn nonexistent_workdir_errors_when_sandboxed() {
+        use crate::sandbox::SandboxConfig;
+
+        // A SandboxManager with `enabled: true` trips the `sandboxed` check in
+        // execute_command without requiring a live Docker daemon, because the
+        // new workdir logic errors out *before* reaching execute_sandboxed.
+        let sandbox = std::sync::Arc::new(SandboxManager::new(SandboxConfig {
+            enabled: true,
+            ..SandboxConfig::default()
+        }));
+        let tool = ShellTool::new().with_sandbox(sandbox);
+        let ctx = JobContext::default();
+
+        let tmp = TempDir::new().expect("create temp dir");
+        let gone = tmp.path().to_path_buf();
+        drop(tmp);
+
+        let err = tool
+            .execute(
+                serde_json::json!({
+                    "command": "pwd",
+                    "workdir": gone.to_str().unwrap(),
+                }),
+                &ctx,
+            )
+            .await
+            .expect_err("sandboxed exec with missing workdir must fail closed");
+
+        match err {
+            ToolError::ExecutionFailed(msg) => {
+                assert!(msg.contains("working directory"), "got: {msg}");
+                assert!(
+                    msg.contains(gone.to_str().unwrap()),
+                    "error should name the requested path: {msg}"
+                );
+            }
+            other => panic!("expected ExecutionFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_workdir_reports_broken_symlink_distinctly() {
+        #[cfg(unix)]
+        {
+            let tmp = TempDir::new().expect("create temp dir");
+            let target = tmp.path().join("missing");
+            let link = tmp.path().join("link");
+            std::os::unix::fs::symlink(&target, &link).expect("create symlink");
+
+            // Sandboxed: surface the broken-symlink diagnosis in the error.
+            let err = resolve_workdir(link.clone(), true).expect_err("must fail closed");
+            match err {
+                ToolError::ExecutionFailed(msg) => {
+                    assert!(
+                        msg.contains("broken symlink"),
+                        "expected 'broken symlink' diagnosis, got: {msg}"
+                    );
+                }
+                other => panic!("expected ExecutionFailed, got {other:?}"),
+            }
+
+            // Unsandboxed: fall back without error (warn log is behavioural).
+            let fallback = resolve_workdir(link, false).expect("unsandboxed falls back");
+            assert!(fallback.is_dir());
+        }
+    }
+
+    #[test]
+    fn resolve_workdir_accepts_valid_symlink_to_dir() {
+        #[cfg(unix)]
+        {
+            let tmp = TempDir::new().expect("create temp dir");
+            let real_dir = tmp.path().join("real");
+            std::fs::create_dir(&real_dir).expect("create real dir");
+            let link = tmp.path().join("link");
+            std::os::unix::fs::symlink(&real_dir, &link).expect("create symlink");
+
+            // A valid symlink to a directory must NOT be labelled as
+            // "broken symlink" — is_dir() follows symlinks and returns true.
+            let resolved = resolve_workdir(link.clone(), true).expect("valid symlink resolves");
+            assert_eq!(resolved, link);
+        }
+    }
+
+    #[test]
+    fn resolve_workdir_does_not_mislabel_file_as_broken_symlink() {
+        // A plain regular file used to be caught by the old symlink_metadata
+        // branch. The new metadata-first logic must correctly diagnose
+        // "exists but is not a directory".
+        let tmp = TempDir::new().expect("create temp dir");
+        let file_path = tmp.path().join("plain.txt");
+        std::fs::write(&file_path, b"hi").expect("write file");
+
+        let err = resolve_workdir(file_path.clone(), true).expect_err("must fail closed");
+        match err {
+            ToolError::ExecutionFailed(msg) => {
+                assert!(
+                    msg.contains("not a directory"),
+                    "expected 'not a directory' diagnosis, got: {msg}"
+                );
+                assert!(
+                    !msg.contains("broken symlink"),
+                    "regular file must not be diagnosed as symlink: {msg}"
+                );
+            }
+            other => panic!("expected ExecutionFailed, got {other:?}"),
+        }
     }
 }
