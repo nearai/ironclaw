@@ -19,7 +19,7 @@ libsql = ["dep:libsql"]
 async-trait = "0.1"
 deadpool-postgres = { version = "0.14", optional = true }
 ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
-libsql = { version = "0.6", optional = true, default-features = false, features = ["core", "replication", "remote", "tls"] }
+libsql = { version = "0.9", optional = true, default-features = false, features = ["core", "replication", "remote", "tls"] }
 thiserror = "2"
 tokio = { version = "1", features = ["fs", "io-util"] }
 tokio-postgres = { version = "0.7", optional = true }
