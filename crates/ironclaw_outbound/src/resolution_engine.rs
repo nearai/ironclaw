@@ -209,6 +209,7 @@ fn missing_preference_error(kind: PreferenceTargetKind) -> OutboundError {
 
 #[cfg(test)]
 mod tests {
+    use async_trait::async_trait;
     use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
     use ironclaw_turns::{ReplyTargetBindingRef, TurnActor, TurnScope};
 
@@ -218,6 +219,25 @@ mod tests {
         RequestedOutboundKind, RunNotificationEventKind, SourceRouteContext, SystemEventReasonCode,
         TriggerCommunicationContext, TriggerFireSlot, TriggerOriginRef, TriggerSourceKind,
     };
+
+    struct BackendErrorPreferenceRepository;
+
+    #[async_trait]
+    impl CommunicationPreferenceRepository for BackendErrorPreferenceRepository {
+        async fn put_communication_preference(
+            &self,
+            _record: CommunicationPreferenceRecord,
+        ) -> Result<(), OutboundError> {
+            Ok(())
+        }
+
+        async fn load_communication_preference(
+            &self,
+            _key: CommunicationPreferenceKey,
+        ) -> Result<Option<CommunicationPreferenceRecord>, OutboundError> {
+            Err(OutboundError::Backend)
+        }
+    }
 
     #[tokio::test]
     async fn requested_outbound_prefers_the_explicit_target() {
@@ -243,6 +263,52 @@ mod tests {
 
         assert_eq!(candidate.target, reply_ref("reply:requested"));
         assert_eq!(candidate.kind, CommunicationDeliveryKind::FinalReply);
+    }
+
+    #[tokio::test]
+    async fn requested_outbound_delivery_status_preserves_the_explicit_target() {
+        let store = InMemoryOutboundStateStore::default();
+        let engine = OutboundResolutionEngine::new(&store);
+        let request = requested_request_with_kind(
+            "reply:delivery-status",
+            RequestedOutboundKind::DeliveryStatus,
+        );
+
+        store
+            .put_communication_preference(preference_record(
+                Some("reply:preferred"),
+                Some("reply:preferred-progress"),
+                Some("reply:preferred-approval"),
+                Some("reply:preferred-auth"),
+            ))
+            .await
+            .expect("seed preference");
+
+        let candidate = engine
+            .resolve(&request)
+            .await
+            .expect("requested delivery status resolves");
+        let candidate = expect_candidate(candidate);
+
+        assert_eq!(candidate.target, reply_ref("reply:delivery-status"));
+        assert_eq!(candidate.kind, CommunicationDeliveryKind::DeliveryStatus);
+    }
+
+    #[tokio::test]
+    async fn triggered_preference_load_backend_error_is_propagated() {
+        let engine = OutboundResolutionEngine::new(&BackendErrorPreferenceRepository);
+
+        let error = engine
+            .resolve(&run_notification_request(
+                RunNotificationEventKind::FinalReplyReady,
+                RunNotificationOrigin::Triggered {
+                    trigger: trigger_context(),
+                },
+            ))
+            .await
+            .expect_err("backend failure must propagate");
+
+        assert!(matches!(error, OutboundError::Backend));
     }
 
     #[tokio::test]
@@ -278,6 +344,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn live_source_route_approval_needed_uses_the_approval_prompt_preference() {
+        let store = InMemoryOutboundStateStore::default();
+        let engine = OutboundResolutionEngine::new(&store);
+
+        store
+            .put_communication_preference(preference_record(
+                Some("reply:final"),
+                Some("reply:progress"),
+                Some("reply:approval"),
+                Some("reply:auth"),
+            ))
+            .await
+            .expect("seed preference");
+
+        assert_resolves_to(
+            &engine,
+            RunNotificationEventKind::ApprovalNeeded,
+            RunNotificationOrigin::LiveSourceRoute {
+                source_route: SourceRouteContext {
+                    reply_target_binding_ref: reply_ref("reply:source-route"),
+                },
+            },
+            "reply:approval",
+            CommunicationDeliveryKind::ApprovalPrompt,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn live_source_route_auth_required_uses_the_auth_prompt_preference() {
+        let store = InMemoryOutboundStateStore::default();
+        let engine = OutboundResolutionEngine::new(&store);
+
+        store
+            .put_communication_preference(preference_record(
+                Some("reply:final"),
+                Some("reply:progress"),
+                Some("reply:approval"),
+                Some("reply:auth"),
+            ))
+            .await
+            .expect("seed preference");
+
+        assert_resolves_to(
+            &engine,
+            RunNotificationEventKind::AuthRequired,
+            RunNotificationOrigin::LiveSourceRoute {
+                source_route: SourceRouteContext {
+                    reply_target_binding_ref: reply_ref("reply:source-route"),
+                },
+            },
+            "reply:auth",
+            CommunicationDeliveryKind::AuthPrompt,
+        )
+        .await;
+    }
+
+    #[tokio::test]
     async fn triggered_final_reply_uses_the_creator_users_preferred_target() {
         let store = InMemoryOutboundStateStore::default();
         let engine = OutboundResolutionEngine::new(&store);
@@ -305,6 +429,66 @@ mod tests {
 
         assert_eq!(candidate.target, reply_ref("reply:triggered-default"));
         assert_eq!(candidate.kind, CommunicationDeliveryKind::FinalReply);
+    }
+
+    #[tokio::test]
+    async fn triggered_from_source_route_approval_needed_uses_the_approval_prompt_preference() {
+        let store = InMemoryOutboundStateStore::default();
+        let engine = OutboundResolutionEngine::new(&store);
+
+        store
+            .put_communication_preference(preference_record(
+                Some("reply:final"),
+                Some("reply:progress"),
+                Some("reply:approval"),
+                Some("reply:auth"),
+            ))
+            .await
+            .expect("seed preference");
+
+        assert_resolves_to(
+            &engine,
+            RunNotificationEventKind::ApprovalNeeded,
+            RunNotificationOrigin::TriggeredFromSourceRoute {
+                trigger: trigger_context(),
+                source_route: SourceRouteContext {
+                    reply_target_binding_ref: reply_ref("reply:source-route"),
+                },
+            },
+            "reply:approval",
+            CommunicationDeliveryKind::ApprovalPrompt,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn triggered_from_source_route_auth_required_uses_the_auth_prompt_preference() {
+        let store = InMemoryOutboundStateStore::default();
+        let engine = OutboundResolutionEngine::new(&store);
+
+        store
+            .put_communication_preference(preference_record(
+                Some("reply:final"),
+                Some("reply:progress"),
+                Some("reply:approval"),
+                Some("reply:auth"),
+            ))
+            .await
+            .expect("seed preference");
+
+        assert_resolves_to(
+            &engine,
+            RunNotificationEventKind::AuthRequired,
+            RunNotificationOrigin::TriggeredFromSourceRoute {
+                trigger: trigger_context(),
+                source_route: SourceRouteContext {
+                    reply_target_binding_ref: reply_ref("reply:source-route"),
+                },
+            },
+            "reply:auth",
+            CommunicationDeliveryKind::AuthPrompt,
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -453,13 +637,20 @@ mod tests {
     }
 
     fn requested_request(requested_target: &str) -> CommunicationDeliveryResolutionRequest {
+        requested_request_with_kind(requested_target, RequestedOutboundKind::ProductMessage)
+    }
+
+    fn requested_request_with_kind(
+        requested_target: &str,
+        requested_kind: RequestedOutboundKind,
+    ) -> CommunicationDeliveryResolutionRequest {
         CommunicationDeliveryResolutionRequest {
             scope: scope(),
             actor: actor("user-a"),
             modality: CommunicationModality::Text,
             intent: CommunicationDeliveryIntent::RequestedOutbound(RequestedOutboundContext {
                 requested_target: reply_ref(requested_target),
-                requested_kind: RequestedOutboundKind::ProductMessage,
+                requested_kind,
             }),
         }
     }
