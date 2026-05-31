@@ -35,6 +35,7 @@ use tokio::sync::Mutex;
 
 mod cursor_validation;
 mod display_preview;
+mod failure_explanation;
 mod runtime_stream;
 mod turn_stream;
 
@@ -146,10 +147,6 @@ struct FakeFailureExplainer {
 
 #[async_trait]
 impl FailureExplanationProvider for FakeFailureExplainer {
-    fn needs_run_state(&self) -> bool {
-        true
-    }
-
     async fn explain_failure(&self, input: FailureExplanationInput) -> Option<String> {
         assert!(
             !input.failure_category.is_empty(),
@@ -170,10 +167,6 @@ struct CountingFailureExplainer {
 
 #[async_trait]
 impl FailureExplanationProvider for CountingFailureExplainer {
-    fn needs_run_state(&self) -> bool {
-        true
-    }
-
     async fn explain_failure(&self, _input: FailureExplanationInput) -> Option<String> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Some(self.explanation.clone())
@@ -247,39 +240,6 @@ impl TurnCoordinator for FakeTurnCoordinator {
         } else {
             Err(TurnError::ScopeNotFound)
         }
-    }
-}
-
-struct FailingTurnCoordinator;
-
-#[async_trait]
-impl TurnCoordinator for FailingTurnCoordinator {
-    async fn prepare_turn(&self, _scope: TurnScope) -> Result<TurnRunId, TurnError> {
-        Ok(TurnRunId::new())
-    }
-
-    async fn submit_turn(
-        &self,
-        _request: SubmitTurnRequest,
-    ) -> Result<SubmitTurnResponse, TurnError> {
-        unreachable!("projection tests only read run state")
-    }
-
-    async fn resume_turn(
-        &self,
-        _request: ResumeTurnRequest,
-    ) -> Result<ResumeTurnResponse, TurnError> {
-        unreachable!("projection tests only read run state")
-    }
-
-    async fn cancel_run(&self, _request: CancelRunRequest) -> Result<CancelRunResponse, TurnError> {
-        unreachable!("projection tests only read run state")
-    }
-
-    async fn get_run_state(&self, _request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
-        Err(TurnError::Unavailable {
-            reason: "state unavailable".to_string(),
-        })
     }
 }
 

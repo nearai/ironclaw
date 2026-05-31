@@ -1,6 +1,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
+use futures::{StreamExt, stream};
 use ironclaw_product_adapters::{
     AuthPromptView, GatePromptView, ProductAdapterError, ProductOutboundPayload,
     ProductProjectionItem, ProductProjectionState, ProductWorkflowRejectionKind, RedactedString,
@@ -8,7 +9,7 @@ use ironclaw_product_adapters::{
 use ironclaw_turns::{
     GetRunStateRequest, TurnCoordinator, TurnError, TurnEventKind, TurnEventProjectionCursor,
     TurnEventProjectionError, TurnEventProjectionRequest, TurnEventProjectionService,
-    TurnEventProjectionSource, TurnLifecycleEvent, TurnRunId, TurnRunState, TurnScope, TurnStatus,
+    TurnEventProjectionSource, TurnLifecycleEvent, TurnRunId, TurnScope, TurnStatus,
     run_profile::{
         SystemInferenceIdentity, SystemInferencePort, SystemInferenceRequest,
         SystemInferenceTaskId, SystemPromptId, SystemPromptSource, SystemTaskKind,
@@ -31,17 +32,12 @@ pub(super) struct TurnEventPayload {
 
 #[derive(Debug, Clone)]
 pub(crate) struct FailureExplanationInput {
-    pub(crate) state: TurnRunState,
     pub(crate) failure_category: String,
     pub(crate) fallback_summary: String,
 }
 
 #[async_trait]
 pub(crate) trait FailureExplanationProvider: Send + Sync {
-    fn needs_run_state(&self) -> bool {
-        false
-    }
-
     async fn explain_failure(&self, input: FailureExplanationInput) -> Option<String>;
 }
 
@@ -176,23 +172,28 @@ async fn turn_event_payloads_for_page(
     auth_challenges: Option<&dyn AuthChallengeProvider>,
     events: Vec<TurnLifecycleEvent>,
 ) -> Result<Vec<TurnEventPayload>, ProductAdapterError> {
-    let mut payloads = Vec::new();
-    for event in events {
+    let futures = events.into_iter().map(|event| {
         let cursor = TurnEventProjectionCursor::for_scope(event.scope.clone(), event.cursor);
-        if let Some(payload) = turn_event_payload(
-            caller_user_id,
-            coordinator,
-            failure_explainer,
-            failure_explanation_cache,
-            auth_challenges,
-            &event,
-        )
-        .await?
-        {
-            payloads.push(TurnEventPayload { cursor, payload });
+        async move {
+            turn_event_payload(
+                caller_user_id,
+                coordinator,
+                failure_explainer,
+                failure_explanation_cache,
+                auth_challenges,
+                &event,
+            )
+            .await
+            .map(|payload| payload.map(|payload| TurnEventPayload { cursor, payload }))
         }
-    }
-    Ok(payloads)
+    });
+    stream::iter(futures)
+        .buffered(16)
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .filter_map(Result::transpose)
+        .collect()
 }
 
 async fn turn_event_payload(
@@ -210,13 +211,9 @@ async fn turn_event_payload(
         return Ok(Some(prompt));
     }
     if projects_run_status(&event.kind) {
-        let failure_details = failure_details_for_turn_event(
-            coordinator,
-            failure_explainer,
-            failure_explanation_cache,
-            event,
-        )
-        .await;
+        let failure_details =
+            failure_details_for_turn_event(failure_explainer, failure_explanation_cache, event)
+                .await;
         return Ok(Some(ProductOutboundPayload::ProjectionUpdate {
             state: turn_event_projection_state(event, failure_details)?,
         }));
@@ -233,10 +230,6 @@ impl FailureExplanationProvider for NoopFailureExplanationProvider {
 
 #[async_trait]
 impl FailureExplanationProvider for ModelFailureExplanationProvider {
-    fn needs_run_state(&self) -> bool {
-        true
-    }
-
     async fn explain_failure(&self, input: FailureExplanationInput) -> Option<String> {
         let request = match failure_explanation_request(&input) {
             Some(request) => request,
@@ -252,7 +245,6 @@ impl FailureExplanationProvider for ModelFailureExplanationProvider {
             Ok(Err(error)) => {
                 tracing::debug!(
                     error = %error,
-                    run_id = %input.state.run_id,
                     failure_category = %input.failure_category,
                     "failed run explanation model call failed"
                 );
@@ -260,7 +252,6 @@ impl FailureExplanationProvider for ModelFailureExplanationProvider {
             }
             Err(_) => {
                 tracing::debug!(
-                    run_id = %input.state.run_id,
                     failure_category = %input.failure_category,
                     "failed run explanation model call timed out"
                 );
@@ -421,7 +412,6 @@ pub(super) struct FailureExplanationCacheKey {
 }
 
 async fn failure_details_for_turn_event(
-    coordinator: &dyn TurnCoordinator,
     failure_explainer: &dyn FailureExplanationProvider,
     failure_explanation_cache: &Arc<Mutex<HashMap<FailureExplanationCacheKey, String>>>,
     event: &TurnLifecycleEvent,
@@ -435,14 +425,7 @@ async fn failure_details_for_turn_event(
         category: category.clone(),
     };
     let summary = cached_failure_summary(failure_explanation_cache, cache_key, || async {
-        failure_summary_for_turn_event(
-            coordinator,
-            failure_explainer,
-            event,
-            &category,
-            fallback_summary,
-        )
-        .await
+        failure_summary_for_turn_event(failure_explainer, &category, fallback_summary).await
     })
     .await;
     FailureProjectionDetails {
@@ -460,50 +443,26 @@ where
     F: FnOnce() -> Fut,
     Fut: std::future::Future<Output = String>,
 {
-    let mut cache = cache.lock().await;
-    if let Some(summary) = cache.get(&key) {
-        return summary.clone();
+    if let Some(summary) = cache.lock().await.get(&key).cloned() {
+        return summary;
     }
     let summary = compute().await;
-    cache.insert(key, summary.clone());
+    cache.lock().await.insert(key, summary.clone());
     summary
 }
 
 async fn failure_summary_for_turn_event(
-    coordinator: &dyn TurnCoordinator,
     failure_explainer: &dyn FailureExplanationProvider,
-    event: &TurnLifecycleEvent,
     category: &str,
     fallback_summary: String,
 ) -> String {
-    if !failure_explainer.needs_run_state() {
-        return fallback_summary;
-    }
-    match coordinator
-        .get_run_state(GetRunStateRequest {
-            scope: event.scope.clone(),
-            run_id: event.run_id,
+    failure_explainer
+        .explain_failure(FailureExplanationInput {
+            failure_category: category.to_string(),
+            fallback_summary: fallback_summary.clone(),
         })
         .await
-    {
-        Ok(state) => failure_explainer
-            .explain_failure(FailureExplanationInput {
-                state,
-                failure_category: category.to_string(),
-                fallback_summary: fallback_summary.clone(),
-            })
-            .await
-            .unwrap_or(fallback_summary),
-        Err(error) => {
-            tracing::debug!(
-                error = %error,
-                run_id = %event.run_id,
-                failure_category = %category,
-                "failed run explanation skipped because run state could not be loaded"
-            );
-            fallback_summary
-        }
-    }
+        .unwrap_or(fallback_summary)
 }
 
 fn failure_category_for_turn_event(event: &TurnLifecycleEvent) -> Option<String> {

@@ -43,8 +43,8 @@ use ironclaw_host_api::{
 };
 use ironclaw_loop_support::{
     CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
-    FilesystemSkillBundleSource, GuardedSystemInferencePort, HostSkillContextSource,
-    JsonSpawnSubagentInputCodec, ModelGatewayBackedSystemInferencePort,
+    FilesystemSkillBundleSource, HostSkillContextSource, JsonSpawnSubagentInputCodec,
+    ModelGatewayBackedSystemInferencePort,
 };
 use ironclaw_product_adapters::ProjectionStream;
 use ironclaw_product_workflow::{
@@ -79,7 +79,7 @@ use ironclaw_turns::{
     SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError,
     TurnEventProjectionSource, TurnId, TurnPersistenceSnapshot, TurnRunId, TurnRunRecord,
     TurnScope, TurnStatus,
-    run_profile::{LoopHostMilestoneSink, LoopRunContext, NoOpBudgetAccountant, NoOpPolicyGuard},
+    run_profile::{LoopHostMilestoneSink, LoopRunContext},
 };
 
 use crate::default_system_prompt::DefaultSystemPromptIdentitySource;
@@ -1099,17 +1099,10 @@ pub async fn build_reborn_runtime(
         TurnRunId::new(),
         default_resolved_run_profile,
     );
-    let direct_failure_explanation_inference =
+    let failure_explanation_inference: Arc<dyn ironclaw_turns::run_profile::SystemInferencePort> =
         Arc::new(ModelGatewayBackedSystemInferencePort::new(
             Arc::clone(&model_gateway),
-            failure_explanation_context.clone(),
-        ));
-    let failure_explanation_inference: Arc<dyn ironclaw_turns::run_profile::SystemInferencePort> =
-        Arc::new(GuardedSystemInferencePort::new(
-            direct_failure_explanation_inference,
             failure_explanation_context,
-            Arc::new(NoOpBudgetAccountant),
-            Arc::new(NoOpPolicyGuard),
         ));
     let planned_turn_coordinator: Arc<dyn TurnCoordinator> = composition.coordinator.clone();
     let approval_turn_runs = Arc::new(LocalDevApprovalTurnRunLocator::new(Arc::clone(
