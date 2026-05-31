@@ -541,12 +541,63 @@ fn handle_slack_event(event: SlackEvent, team_id: Option<String>, _event_id: Opt
                 if !check_sender_permission(&user, &channel, false) {
                     return;
                 }
+
+                let thread_ts = event.thread_ts.unwrap_or_else(|| ts.clone());
+
+                // Check if this is a re-engagement in an expired thread.
+                let was_active =
+                    is_active_slack_thread(team_id.as_deref(), &channel, &thread_ts);
+
+                // Always (re-)activate the thread on @mention so follow-up
+                // messages without @mention are picked up.
+                if let Err(e) =
+                    remember_active_slack_thread(team_id.as_deref(), &channel, &thread_ts)
+                {
+                    channel_host::log(
+                        channel_host::LogLevel::Warn,
+                        &format!("Failed to track active thread: {e}"),
+                    );
+                }
+
+                // If re-engaging an expired thread, fetch history from Slack
+                // so the agent has context about the prior conversation.
+                let final_text = if !was_active && thread_ts != ts {
+                    // thread_ts != ts means this is a reply in an existing thread
+                    match fetch_thread_replies(&channel, &thread_ts) {
+                        Ok(replies) if !replies.is_empty() => {
+                            // Filter out the current message to avoid duplicating it,
+                            // as conversations.replies includes the triggering message.
+                            let prior_replies: Vec<_> = replies
+                                .into_iter()
+                                .filter(|reply| reply.ts.as_deref() != Some(&ts))
+                                .collect();
+
+                            if prior_replies.is_empty() {
+                                text
+                            } else {
+                                let context = format_thread_context(&prior_replies);
+                                format!("{context}{text}")
+                            }
+                        }
+                        Ok(_) => text,
+                        Err(e) => {
+                            channel_host::log(
+                                channel_host::LogLevel::Warn,
+                                &format!("Failed to fetch thread replies: {e}"),
+                            );
+                            text
+                        }
+                    }
+                } else {
+                    text
+                };
+
                 let attachments = prepare_inbound_attachments(&event.files);
                 emit_message(
                     user,
-                    text,
+                    final_text,
                     channel,
-                    event.thread_ts.or(Some(ts)),
+                    Some(thread_ts),
                     team_id,
                     attachments,
                 );
@@ -840,6 +891,81 @@ fn prune_active_threads(active_threads: &mut ActiveThreads, now_millis: u64) -> 
     }
 
     changed
+}
+
+// ============================================================================
+// Slack Thread History Fetch
+// ============================================================================
+
+/// A single message from `conversations.replies`.
+#[derive(Debug, Deserialize)]
+struct SlackThreadMessage {
+    user: Option<String>,
+    text: Option<String>,
+    #[allow(dead_code)]
+    ts: Option<String>,
+    bot_id: Option<String>,
+}
+
+/// Response from `conversations.replies`.
+#[derive(Debug, Deserialize)]
+struct ConversationsRepliesResponse {
+    ok: bool,
+    messages: Option<Vec<SlackThreadMessage>>,
+    error: Option<String>,
+}
+
+/// Fetch recent replies in a Slack thread via the `conversations.replies` API.
+/// Returns up to `limit` messages (default 20). The bot token is injected
+/// automatically by the host credential system.
+fn fetch_thread_replies(channel: &str, thread_ts: &str) -> Result<Vec<SlackThreadMessage>, String> {
+    let url = format!(
+        "https://slack.com/api/conversations.replies?channel={}&ts={}&limit=20&inclusive=true",
+        channel, thread_ts
+    );
+    let headers = serde_json::json!({});
+    let result =
+        channel_host::http_request("GET", &url, &headers.to_string(), None, Some(2000));
+
+    let response = result.map_err(|e| format!("conversations.replies failed: {e}"))?;
+    if response.status != 200 {
+        let body_str = String::from_utf8_lossy(&response.body);
+        return Err(format!(
+            "conversations.replies returned {}: {}",
+            response.status, body_str
+        ));
+    }
+
+    let parsed: ConversationsRepliesResponse = serde_json::from_slice(&response.body)
+        .map_err(|e| format!("Failed to parse conversations.replies: {e}"))?;
+
+    if !parsed.ok {
+        return Err(format!(
+            "conversations.replies error: {}",
+            parsed.error.unwrap_or_default()
+        ));
+    }
+
+    Ok(parsed.messages.unwrap_or_default())
+}
+
+/// Format thread history as a text preamble for the agent.
+fn format_thread_context(replies: &[SlackThreadMessage]) -> String {
+    let mut context = String::from(
+        "[Thread context — prior messages in this Slack thread before re-engagement]\n",
+    );
+    for msg in replies {
+        let user = msg.user.as_deref().unwrap_or("unknown");
+        let text = msg.text.as_deref().unwrap_or("");
+        let role = if msg.bot_id.is_some() {
+            "assistant"
+        } else {
+            "user"
+        };
+        context.push_str(&format!("[{role} ({user})]: {text}\n"));
+    }
+    context.push_str("[End thread context]\n\n");
+    context
 }
 
 // ============================================================================

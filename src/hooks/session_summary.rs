@@ -267,6 +267,15 @@ mod tests {
             unimplemented!()
         }
 
+        async fn find_conversation_by_scope(
+            &self,
+            _user_id: &str,
+            _channel: &str,
+            _thread_id: &str,
+        ) -> Result<Option<Uuid>, crate::error::DatabaseError> {
+            unimplemented!()
+        }
+
         async fn list_conversations_with_preview(
             &self,
             _user_id: &str,
