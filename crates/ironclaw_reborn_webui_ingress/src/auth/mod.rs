@@ -27,6 +27,7 @@ mod google;
 mod pending;
 mod profile;
 mod provider;
+mod provider_http;
 mod provider_name;
 mod routes;
 mod user_directory;

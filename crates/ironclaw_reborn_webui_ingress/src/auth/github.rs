@@ -26,6 +26,7 @@ use super::config::GitHubOAuthConfig;
 use super::error::{OAuthError, ProviderInitError};
 use super::profile::OAuthUserProfile;
 use super::provider::OAuthProvider;
+use super::provider_http::{read_capped_body, sanitize_error_code};
 use super::provider_name::OAuthProviderName;
 
 const GITHUB_AUTH_URL: &str = "https://github.com/login/oauth/authorize";
@@ -51,44 +52,6 @@ const GITHUB_EXCHANGE_BUDGET: Duration = Duration::from_secs(20);
 /// handful of addresses; anything past this is treated as abuse /
 /// misbehavior rather than allocated and scanned.
 const MAX_GITHUB_EMAILS: usize = 100;
-
-/// Defensive cap on any single GitHub JSON response body. Real
-/// responses are a few KB; anything past this is treated as a hostile
-/// or misconfigured endpoint (a non-HTTPS / overridden `*_endpoint`
-/// pointing at an attacker) and rejected before serde allocates the
-/// parsed structure.
-const MAX_RESPONSE_BYTES: usize = 256 * 1024;
-
-/// Read a response body, rejecting anything over [`MAX_RESPONSE_BYTES`]
-/// before it is handed to serde. Returns the raw bytes on success or a
-/// human error string the caller maps to the right [`OAuthError`]
-/// variant. (`reqwest` has no built-in body cap, so this is the guard.)
-async fn read_capped_body(resp: reqwest::Response) -> Result<Vec<u8>, String> {
-    let bytes = resp.bytes().await.map_err(|err| err.to_string())?;
-    if bytes.len() > MAX_RESPONSE_BYTES {
-        return Err(format!(
-            "GitHub response exceeds the {MAX_RESPONSE_BYTES}-byte limit"
-        ));
-    }
-    Ok(bytes.to_vec())
-}
-
-/// GitHub's real OAuth error codes are lowercase ASCII + underscore
-/// (`bad_verification_code`, `redirect_uri_mismatch`, …). The value is
-/// attacker-influenceable (a hostile token endpoint could return
-/// arbitrary bytes), so anything off that grammar — or implausibly
-/// long — is redacted before it reaches a log line or error string,
-/// preventing newline / ANSI log injection.
-fn sanitize_error_code(error: &str) -> &str {
-    if !error.is_empty()
-        && error.len() <= 64
-        && error.chars().all(|c| c.is_ascii_lowercase() || c == '_')
-    {
-        error
-    } else {
-        "<redacted_invalid_error_code>"
-    }
-}
 
 /// GitHub OAuth provider.
 pub struct GitHubProvider {
@@ -344,8 +307,11 @@ impl GitHubProvider {
             .map_err(OAuthError::CodeExchange)?;
         let token: GitHubTokenResponse = serde_json::from_slice(&body)
             .map_err(|err| OAuthError::CodeExchange(err.to_string()))?;
-        // GitHub signals failure in the 200 body, not via status.
-        if let Some(error) = token.error {
+        // GitHub signals failure in the 200 body, not via status. An
+        // empty `error` string is not a real failure — filter it out so
+        // `{"error":"","access_token":"…"}` from a proxy/middleware does
+        // not reject an otherwise-valid token.
+        if let Some(error) = token.error.filter(|e| !e.is_empty()) {
             // Only the sanitized opaque error code is logged; GitHub's
             // human-readable `error_description` can carry
             // user-identifiable context and is never deserialized.
@@ -529,6 +495,20 @@ mod tests {
         }
     }
 
+    /// Bind an ephemeral loopback port, serve `router`, and return the
+    /// address plus a drop guard that aborts the server. Shared by the
+    /// full-mock and blackhole spawns below.
+    async fn spawn_server(router: axum::Router) -> (SocketAddr, AbortOnDrop) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+        let handle = tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        (addr, AbortOnDrop(handle))
+    }
+
     async fn spawn_mock(mock: MockGitHub) -> (SocketAddr, AbortOnDrop) {
         let token_mock = mock.clone();
         let user_mock = mock.clone();
@@ -563,14 +543,7 @@ mod tests {
                 }),
             );
 
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind");
-        let addr = listener.local_addr().expect("local_addr");
-        let handle = tokio::spawn(async move {
-            let _ = axum::serve(listener, router).await;
-        });
-        (addr, AbortOnDrop(handle))
+        spawn_server(router).await
     }
 
     use axum::response::IntoResponse;
@@ -699,6 +672,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn exchange_code_rejects_oversized_token_response() {
+        use super::super::provider_http::MAX_RESPONSE_BYTES;
+        let mut mock = MockGitHub::success();
+        // A body past the shared cap must be rejected by
+        // `read_capped_body` before serde parses anything.
+        mock.token_body = "x".repeat(MAX_RESPONSE_BYTES + 1);
+        let (addr, _server) = spawn_mock(mock).await;
+        let err = exchange(addr)
+            .await
+            .expect_err("must reject an oversized response body");
+        assert!(
+            matches!(&err, OAuthError::CodeExchange(msg) if msg.contains("exceeds")),
+            "expected CodeExchange for oversized body, got {err:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn exchange_code_rejects_empty_string_access_token() {
+        let mut mock = MockGitHub::success();
+        // `Some("")` must be treated as a missing token, not sent as a
+        // `Bearer ` header that surfaces later as a misleading 401.
+        mock.token_body = r#"{"access_token":"","token_type":"bearer"}"#.to_string();
+        let (addr, _server) = spawn_mock(mock).await;
+        let err = exchange(addr)
+            .await
+            .expect_err("empty access_token must be rejected");
+        assert!(
+            matches!(&err, OAuthError::CodeExchange(msg) if msg.contains("access_token")),
+            "expected CodeExchange for empty access_token, got {err:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn exchange_code_ignores_empty_error_field_with_valid_token() {
+        let mut mock = MockGitHub::success();
+        // An empty `error` string from a proxy/middleware must NOT fail
+        // an otherwise-valid token exchange.
+        mock.token_body =
+            r#"{"error":"","access_token":"gho_valid","token_type":"bearer"}"#.to_string();
+        let (addr, _server) = spawn_mock(mock).await;
+        let profile = exchange(addr)
+            .await
+            .expect("empty error must not reject a valid token");
+        assert_eq!(profile.provider_user_id, "4242");
+    }
+
+    #[tokio::test]
     async fn exchange_code_rejects_user_endpoint_failure() {
         let mut mock = MockGitHub::success();
         mock.user_status = StatusCode::UNAUTHORIZED;
@@ -808,14 +828,7 @@ mod tests {
             "/token",
             post(|_: Form<HashMap<String, String>>| blackhole()),
         );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind");
-        let addr = listener.local_addr().expect("local_addr");
-        let handle = tokio::spawn(async move {
-            let _ = axum::serve(listener, router).await;
-        });
-        (addr, AbortOnDrop(handle))
+        spawn_server(router).await
     }
 
     #[tokio::test]
