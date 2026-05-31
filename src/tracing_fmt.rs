@@ -189,6 +189,8 @@ mod tests {
 
     use crate::tracing_fmt::{EventBuffer, TruncatingStderr, utf8_floor};
 
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
     use std::io::Write;
 
     /// Helper: create an EventBuffer that captures output to a shared Vec
@@ -353,5 +355,31 @@ mod tests {
         // Should back up to byte 2 (just "AB"), since bytes 2..5 are all part of 𝄞
         assert!(s.starts_with("AB"), "expected 'AB', got: {}", s);
         assert!(s.contains("...["), "should be truncated, got: {}", s);
+    }
+
+    #[test]
+    fn test_from_env_valid_number() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe { std::env::set_var("IRONCLAW_LOG_MAX_BYTES", "2000") };
+        let writer = TruncatingStderr::from_env();
+        unsafe { std::env::remove_var("IRONCLAW_LOG_MAX_BYTES") };
+        assert_eq!(writer.max_bytes, 2000);
+    }
+
+    #[test]
+    fn test_from_env_invalid_value_falls_back_to_default() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe { std::env::set_var("IRONCLAW_LOG_MAX_BYTES", "not_a_number") };
+        let writer = TruncatingStderr::from_env();
+        unsafe { std::env::remove_var("IRONCLAW_LOG_MAX_BYTES") };
+        assert_eq!(writer.max_bytes, 500);
+    }
+
+    #[test]
+    fn test_from_env_unset_falls_back_to_default() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe { std::env::remove_var("IRONCLAW_LOG_MAX_BYTES") };
+        let writer = TruncatingStderr::from_env();
+        assert_eq!(writer.max_bytes, 500);
     }
 }
