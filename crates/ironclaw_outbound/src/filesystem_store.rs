@@ -26,9 +26,9 @@
 //!   `delivery_id`. An indexed `scope` projection allows
 //!   `list_delivery_attempts(scope)` to filter within the tenant-scoped
 //!   subtree without materializing every row.
-//! - `/outbound/communication-preferences/<tenant>/<user>.json` — tenant/user
-//!   communication preference row. Reply-target refs remain candidates and do
-//!   not grant send authority.
+//! - `/outbound/communication-preferences/<sha256(key)>.json` — tenant/user
+//!   communication preference row keyed by a hashed `CommunicationPreferenceKey`.
+//!   Reply-target refs remain candidates and do not grant send authority.
 
 use std::sync::Arc;
 
@@ -43,11 +43,10 @@ use ironclaw_turns::{TurnActor, TurnScope};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-use crate::communication_preferences::validate_communication_preference;
 use crate::validation::{
-    validate_advance_request, validate_delivery_attempt, validate_delivery_identity,
-    validate_delivery_status_request, validate_policy, validate_subscription_identity,
-    validate_subscription_record, validate_subscription_request,
+    validate_advance_request, validate_communication_preference, validate_delivery_attempt,
+    validate_delivery_identity, validate_delivery_status_request, validate_policy,
+    validate_subscription_identity, validate_subscription_record, validate_subscription_request,
 };
 use crate::{
     AdvanceSubscriptionCursorRequest, CommunicationPreferenceKey, CommunicationPreferenceRecord,
@@ -74,6 +73,7 @@ const MAX_CAS_RETRIES: usize = 5;
 const DELIVERY_SCOPE_INDEX_KEY: &str = "scope";
 const DELIVERY_SCOPE_INDEX_NAME: &str = "outbound_delivery_scope";
 const DELIVERIES_ROOT: &str = "/outbound/deliveries";
+const COMMUNICATION_PREFERENCES_ROOT: &str = "/outbound/communication-preferences";
 
 /// Indexed projection key for the tenant id, written alongside every
 /// outbound write as a defense-in-depth measure beyond path-prefix
@@ -244,24 +244,43 @@ where
         record: CommunicationPreferenceRecord,
     ) -> Result<(), OutboundError> {
         validate_communication_preference(&record)?;
-        let path = communication_preference_path(&record.tenant_id, &record.user_id)?;
-        let resource_scope =
-            communication_preference_resource_scope(&record.tenant_id, &record.user_id);
-        self.put_json(
-            &resource_scope,
-            &path,
-            &record,
-            &record.tenant_id,
-            CasExpectation::Any,
-        )
-        .await
+        let key = record.key();
+        let path = communication_preference_path(&key)?;
+        let resource_scope = communication_preference_resource_scope(&key.tenant_id, &key.user_id);
+        self.ensure_tenant_id_index(&resource_scope, &communication_preferences_root()?)
+            .await?;
+        for _ in 0..MAX_CAS_RETRIES {
+            let (cas, existing) = match self
+                .get_versioned_json::<CommunicationPreferenceRecord>(&resource_scope, &path)
+                .await?
+            {
+                Some((existing, versioned)) => {
+                    (CasExpectation::Version(versioned.version), Some(existing))
+                }
+                None => (CasExpectation::Absent, None),
+            };
+            if let Some(existing) = existing.as_ref()
+                && existing.key() != key
+            {
+                return Err(OutboundError::Backend);
+            }
+            match self
+                .put_json(&resource_scope, &path, &record, &record.tenant_id, cas)
+                .await
+            {
+                Ok(()) => return Ok(()),
+                Err(OutboundError::CasConflict) => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        Err(OutboundError::Backend)
     }
 
     async fn load_communication_preference(
         &self,
         key: CommunicationPreferenceKey,
     ) -> Result<Option<CommunicationPreferenceRecord>, OutboundError> {
-        let path = communication_preference_path(&key.tenant_id, &key.user_id)?;
+        let path = communication_preference_path(&key)?;
         let resource_scope = communication_preference_resource_scope(&key.tenant_id, &key.user_id);
         let Some(record) = self
             .get_json::<CommunicationPreferenceRecord>(&resource_scope, &path)
@@ -581,13 +600,14 @@ fn delivery_path(delivery_id: &OutboundDeliveryId) -> Result<ScopedPath, Outboun
 }
 
 fn communication_preference_path(
-    tenant_id: &TenantId,
-    user_id: &UserId,
+    key: &CommunicationPreferenceKey,
 ) -> Result<ScopedPath, OutboundError> {
-    ScopedPath::new(format!(
-        "/outbound/communication-preferences/{tenant_id}/{user_id}.json"
-    ))
-    .map_err(|_| OutboundError::Backend)
+    let serialized = serde_json::to_string(key).map_err(|_| OutboundError::Serialization)?;
+    let mut hasher = Sha256::new();
+    hasher.update(serialized.as_bytes());
+    let digest = hex::encode(hasher.finalize());
+    ScopedPath::new(format!("{COMMUNICATION_PREFERENCES_ROOT}/{digest}.json"))
+        .map_err(|_| OutboundError::Backend)
 }
 
 fn communication_preference_resource_scope(
@@ -602,6 +622,10 @@ fn communication_preference_resource_scope(
 
 fn deliveries_root() -> Result<ScopedPath, OutboundError> {
     ScopedPath::new(DELIVERIES_ROOT).map_err(|_| OutboundError::Backend)
+}
+
+fn communication_preferences_root() -> Result<ScopedPath, OutboundError> {
+    ScopedPath::new(COMMUNICATION_PREFERENCES_ROOT).map_err(|_| OutboundError::Backend)
 }
 
 fn policies_root() -> Result<ScopedPath, OutboundError> {

@@ -3,15 +3,14 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 use ironclaw_event_projections::{ProjectionCursor, ProjectionScope};
-use ironclaw_host_api::{TenantId, ThreadId, UserId};
+use ironclaw_host_api::ThreadId;
 use ironclaw_turns::{TurnActor, TurnScope};
 use serde::Serialize;
 
-use crate::communication_preferences::validate_communication_preference;
 use crate::validation::{
-    validate_advance_request, validate_delivery_attempt, validate_delivery_identity,
-    validate_delivery_status_request, validate_policy, validate_subscription_identity,
-    validate_subscription_record, validate_subscription_request,
+    validate_advance_request, validate_communication_preference, validate_delivery_attempt,
+    validate_delivery_identity, validate_delivery_status_request, validate_policy,
+    validate_subscription_identity, validate_subscription_record, validate_subscription_request,
 };
 use crate::{
     AdvanceSubscriptionCursorRequest, CommunicationPreferenceKey, CommunicationPreferenceRecord,
@@ -27,17 +26,10 @@ pub struct InMemoryOutboundStateStore {
 
 #[derive(Default)]
 struct InMemoryOutboundState {
-    communication_preferences:
-        HashMap<CommunicationPreferenceMemoryKey, CommunicationPreferenceRecord>,
+    communication_preferences: HashMap<CommunicationPreferenceKey, CommunicationPreferenceRecord>,
     policies: HashMap<ThreadScopeKey, ThreadNotificationPolicy>,
     subscriptions: HashMap<ProjectionSubscriptionKey, ProjectionSubscriptionRecord>,
     deliveries: HashMap<OutboundDeliveryId, OutboundDeliveryAttempt>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct CommunicationPreferenceMemoryKey {
-    tenant_id: String,
-    user_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -50,23 +42,6 @@ struct ThreadScopeKey {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct ProjectionSubscriptionKey(String);
-
-impl CommunicationPreferenceMemoryKey {
-    fn new(tenant_id: &TenantId, user_id: &UserId) -> Self {
-        Self {
-            tenant_id: tenant_id.to_string(),
-            user_id: user_id.to_string(),
-        }
-    }
-
-    fn from_key(key: &CommunicationPreferenceKey) -> Self {
-        Self::new(&key.tenant_id, &key.user_id)
-    }
-
-    fn from_record(record: &CommunicationPreferenceRecord) -> Self {
-        Self::new(&record.tenant_id, &record.user_id)
-    }
-}
 
 impl ThreadScopeKey {
     fn new(scope: &TurnScope) -> Self {
@@ -122,10 +97,7 @@ impl CommunicationPreferenceRepository for InMemoryOutboundStateStore {
     ) -> Result<(), OutboundError> {
         validate_communication_preference(&record)?;
         let mut state = self.lock_state()?;
-        state.communication_preferences.insert(
-            CommunicationPreferenceMemoryKey::from_record(&record),
-            record,
-        );
+        state.communication_preferences.insert(record.key(), record);
         Ok(())
     }
 
@@ -134,10 +106,7 @@ impl CommunicationPreferenceRepository for InMemoryOutboundStateStore {
         key: CommunicationPreferenceKey,
     ) -> Result<Option<CommunicationPreferenceRecord>, OutboundError> {
         let state = self.lock_state()?;
-        Ok(state
-            .communication_preferences
-            .get(&CommunicationPreferenceMemoryKey::from_key(&key))
-            .cloned())
+        Ok(state.communication_preferences.get(&key).cloned())
     }
 }
 

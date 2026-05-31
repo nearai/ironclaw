@@ -14,6 +14,7 @@ use ironclaw_host_api::{
 };
 use ironclaw_outbound::*;
 use ironclaw_turns::{ReplyTargetBindingRef, TurnActor, TurnRunId, TurnScope};
+use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 
 const TEST_OUTBOUND_ROOT: &str = "/engine/tenants/test/users/test/outbound";
@@ -67,6 +68,7 @@ async fn filesystem_store_satisfies_outbound_contract_on_in_memory_backend() {
     let store = build_outbound_store_for_backend(Arc::clone(&backend));
     communication_preferences_are_tenant_user_scoped(&store).await;
     communication_preferences_reject_empty_updated_by(&store).await;
+    filesystem_store_retries_communication_preference_put_through_cas_conflict(&backend).await;
     filesystem_store_rejects_mismatched_communication_preference_identity(&backend, &store).await;
     durable_policy_subscription_delivery_flow(&store).await;
     subscription_cursor_rejects_mismatched_scope(&store).await;
@@ -219,8 +221,74 @@ async fn filesystem_store_rejects_mismatched_communication_preference_identity(
         .await
         .unwrap();
 
+    let result = store.load_communication_preference(key.clone()).await;
+    assert!(matches!(result, Err(OutboundError::Backend)));
+
+    let tenant_mismatch_record = CommunicationPreferenceRecord {
+        tenant_id: TenantId::new("tenant-outbound-corrupt-other").unwrap(),
+        user_id: user_id.clone(),
+        final_reply_target: Some(reply_ref("reply-pref-corrupt-tenant")),
+        progress_target: None,
+        approval_prompt_target: None,
+        auth_prompt_target: None,
+        default_modality: Some(CommunicationModality::Text),
+        updated_at: now(),
+        updated_by: UserId::new("tenant-admin-outbound-corrupt-tenant").unwrap(),
+    };
+    let tenant_mismatch_path = communication_preference_virtual_path(&tenant_id, &user_id);
+    let tenant_mismatch_entry = Entry::bytes(serde_json::to_vec(&tenant_mismatch_record).unwrap())
+        .with_content_type(ContentType::json());
+    backend
+        .put(
+            &tenant_mismatch_path,
+            tenant_mismatch_entry,
+            CasExpectation::Any,
+        )
+        .await
+        .unwrap();
+
     let result = store.load_communication_preference(key).await;
     assert!(matches!(result, Err(OutboundError::Backend)));
+}
+
+async fn filesystem_store_retries_communication_preference_put_through_cas_conflict(
+    backend: &Arc<InMemoryBackend>,
+) {
+    let racing = Arc::new(VersionRacingBackend::new(Arc::clone(backend)));
+    let store =
+        FilesystemOutboundStateStore::new(build_scoped_fs(Arc::clone(&racing), TEST_OUTBOUND_ROOT));
+    let tenant_id = TenantId::new("tenant-outbound-cas").unwrap();
+    let user_id = UserId::new("user-outbound-cas").unwrap();
+    racing
+        .arm(
+            &format!("{TEST_OUTBOUND_ROOT}/communication-preferences/"),
+            1,
+        )
+        .await;
+
+    let record = CommunicationPreferenceRecord {
+        tenant_id: tenant_id.clone(),
+        user_id: user_id.clone(),
+        final_reply_target: Some(reply_ref("reply-pref-cas")),
+        progress_target: Some(reply_ref("reply-pref-cas-progress")),
+        approval_prompt_target: None,
+        auth_prompt_target: None,
+        default_modality: Some(CommunicationModality::Text),
+        updated_at: now(),
+        updated_by: UserId::new("tenant-admin-outbound-cas").unwrap(),
+    };
+    store
+        .put_communication_preference(record.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .load_communication_preference(CommunicationPreferenceKey::new(tenant_id, user_id))
+            .await
+            .unwrap(),
+        Some(record)
+    );
+    assert_eq!(racing.injected_count().await, 1);
 }
 
 async fn durable_policy_subscription_delivery_flow(store: &impl OutboundStateStore) {
@@ -824,8 +892,13 @@ fn now() -> ironclaw_host_api::Timestamp {
 }
 
 fn communication_preference_virtual_path(tenant_id: &TenantId, user_id: &UserId) -> VirtualPath {
+    let key = CommunicationPreferenceKey::new(tenant_id.clone(), user_id.clone());
+    let serialized = serde_json::to_string(&key).unwrap();
+    let mut hasher = Sha256::new();
+    hasher.update(serialized.as_bytes());
+    let digest = hex::encode(hasher.finalize());
     VirtualPath::new(format!(
-        "{TEST_OUTBOUND_ROOT}/communication-preferences/{tenant_id}/{user_id}.json"
+        "{TEST_OUTBOUND_ROOT}/communication-preferences/{digest}.json"
     ))
     .unwrap()
 }

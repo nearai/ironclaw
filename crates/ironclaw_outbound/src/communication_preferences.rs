@@ -54,14 +54,3 @@ pub trait CommunicationPreferenceRepository: Send + Sync {
         key: CommunicationPreferenceKey,
     ) -> Result<Option<CommunicationPreferenceRecord>, OutboundError>;
 }
-
-pub(crate) fn validate_communication_preference(
-    record: &CommunicationPreferenceRecord,
-) -> Result<(), OutboundError> {
-    if record.updated_by.as_str().is_empty() {
-        return Err(OutboundError::InvalidRequest {
-            reason: "communication preference updater is required",
-        });
-    }
-    Ok(())
-}
