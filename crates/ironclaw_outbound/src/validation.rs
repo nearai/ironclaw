@@ -175,6 +175,16 @@ pub(crate) fn validate_delivery_identity(
 pub(crate) fn validate_communication_preference(
     record: &CommunicationPreferenceRecord,
 ) -> Result<(), OutboundError> {
+    if record.tenant_id.as_str().is_empty() {
+        return Err(OutboundError::InvalidRequest {
+            reason: "communication preference tenant is required",
+        });
+    }
+    if record.user_id.as_str().is_empty() {
+        return Err(OutboundError::InvalidRequest {
+            reason: "communication preference user is required",
+        });
+    }
     if record.updated_by.as_str().is_empty() {
         return Err(OutboundError::InvalidRequest {
             reason: "communication preference updater is required",

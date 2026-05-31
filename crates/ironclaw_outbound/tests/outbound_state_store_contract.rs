@@ -14,7 +14,6 @@ use ironclaw_host_api::{
 };
 use ironclaw_outbound::*;
 use ironclaw_turns::{ReplyTargetBindingRef, TurnActor, TurnRunId, TurnScope};
-use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 
 const TEST_OUTBOUND_ROOT: &str = "/engine/tenants/test/users/test/outbound";
@@ -173,19 +172,31 @@ async fn communication_preferences_reject_empty_updated_by<S>(store: &S)
 where
     S: CommunicationPreferenceRepository + OutboundStateStore,
 {
-    let result = store
-        .put_communication_preference(CommunicationPreferenceRecord {
-            tenant_id: TenantId::new("tenant-outbound-validation").unwrap(),
-            user_id: UserId::new("user-outbound-validation").unwrap(),
-            final_reply_target: Some(reply_ref("reply-pref-validation")),
-            progress_target: None,
-            approval_prompt_target: None,
-            auth_prompt_target: None,
-            default_modality: Some(CommunicationModality::Text),
-            updated_at: now(),
-            updated_by: UserId::from_trusted(String::new()),
-        })
-        .await;
+    let valid_record = CommunicationPreferenceRecord {
+        tenant_id: TenantId::new("tenant-outbound-validation").unwrap(),
+        user_id: UserId::new("user-outbound-validation").unwrap(),
+        final_reply_target: Some(reply_ref("reply-pref-validation")),
+        progress_target: None,
+        approval_prompt_target: None,
+        auth_prompt_target: None,
+        default_modality: Some(CommunicationModality::Text),
+        updated_at: now(),
+        updated_by: UserId::new("user-outbound-validation-updater").unwrap(),
+    };
+
+    let mut missing_updater = valid_record.clone();
+    missing_updater.updated_by = UserId::from_trusted(String::new());
+    let result = store.put_communication_preference(missing_updater).await;
+    assert!(matches!(result, Err(OutboundError::InvalidRequest { .. })));
+
+    let mut missing_tenant = valid_record.clone();
+    missing_tenant.tenant_id = TenantId::from_trusted(String::new());
+    let result = store.put_communication_preference(missing_tenant).await;
+    assert!(matches!(result, Err(OutboundError::InvalidRequest { .. })));
+
+    let mut missing_user = valid_record;
+    missing_user.user_id = UserId::from_trusted(String::new());
+    let result = store.put_communication_preference(missing_user).await;
     assert!(matches!(result, Err(OutboundError::InvalidRequest { .. })));
 }
 
@@ -195,8 +206,7 @@ async fn filesystem_store_rejects_mismatched_communication_preference_identity(
 ) {
     let tenant_id = TenantId::new("tenant-outbound-corrupt").unwrap();
     let user_id = UserId::new("user-outbound-corrupt").unwrap();
-    let key = CommunicationPreferenceKey::new(tenant_id.clone(), user_id.clone());
-    let mut record = CommunicationPreferenceRecord {
+    let record = CommunicationPreferenceRecord {
         tenant_id: tenant_id.clone(),
         user_id: user_id.clone(),
         final_reply_target: Some(reply_ref("reply-pref-corrupt")),
@@ -207,15 +217,12 @@ async fn filesystem_store_rejects_mismatched_communication_preference_identity(
         updated_at: now(),
         updated_by: UserId::new("tenant-admin-outbound-corrupt").unwrap(),
     };
-    store
-        .put_communication_preference(record.clone())
-        .await
-        .unwrap();
+    let (key, path) = put_preference_and_find_virtual_path(backend, store, record.clone()).await;
 
-    record.user_id = UserId::new("user-outbound-corrupt-other").unwrap();
-    let path = communication_preference_virtual_path(&tenant_id, &user_id);
-    let entry =
-        Entry::bytes(serde_json::to_vec(&record).unwrap()).with_content_type(ContentType::json());
+    let mut user_mismatch_record = record;
+    user_mismatch_record.user_id = UserId::new("user-outbound-corrupt-other").unwrap();
+    let entry = Entry::bytes(serde_json::to_vec(&user_mismatch_record).unwrap())
+        .with_content_type(ContentType::json());
     backend
         .put(&path, entry, CasExpectation::Any)
         .await
@@ -224,9 +231,24 @@ async fn filesystem_store_rejects_mismatched_communication_preference_identity(
     let result = store.load_communication_preference(key.clone()).await;
     assert!(matches!(result, Err(OutboundError::Backend)));
 
+    let tenant_mismatch_tenant_id = TenantId::new("tenant-outbound-corrupt-tenant").unwrap();
+    let tenant_mismatch_user_id = UserId::new("user-outbound-corrupt-tenant").unwrap();
+    let tenant_mismatch_seed = CommunicationPreferenceRecord {
+        tenant_id: tenant_mismatch_tenant_id,
+        user_id: tenant_mismatch_user_id.clone(),
+        final_reply_target: Some(reply_ref("reply-pref-corrupt-tenant-seed")),
+        progress_target: None,
+        approval_prompt_target: None,
+        auth_prompt_target: None,
+        default_modality: Some(CommunicationModality::Text),
+        updated_at: now(),
+        updated_by: UserId::new("tenant-admin-outbound-corrupt-tenant-seed").unwrap(),
+    };
+    let (tenant_mismatch_key, tenant_mismatch_path) =
+        put_preference_and_find_virtual_path(backend, store, tenant_mismatch_seed).await;
     let tenant_mismatch_record = CommunicationPreferenceRecord {
         tenant_id: TenantId::new("tenant-outbound-corrupt-other").unwrap(),
-        user_id: user_id.clone(),
+        user_id: tenant_mismatch_user_id,
         final_reply_target: Some(reply_ref("reply-pref-corrupt-tenant")),
         progress_target: None,
         approval_prompt_target: None,
@@ -235,7 +257,6 @@ async fn filesystem_store_rejects_mismatched_communication_preference_identity(
         updated_at: now(),
         updated_by: UserId::new("tenant-admin-outbound-corrupt-tenant").unwrap(),
     };
-    let tenant_mismatch_path = communication_preference_virtual_path(&tenant_id, &user_id);
     let tenant_mismatch_entry = Entry::bytes(serde_json::to_vec(&tenant_mismatch_record).unwrap())
         .with_content_type(ContentType::json());
     backend
@@ -247,7 +268,9 @@ async fn filesystem_store_rejects_mismatched_communication_preference_identity(
         .await
         .unwrap();
 
-    let result = store.load_communication_preference(key).await;
+    let result = store
+        .load_communication_preference(tenant_mismatch_key)
+        .await;
     assert!(matches!(result, Err(OutboundError::Backend)));
 }
 
@@ -891,16 +914,36 @@ fn now() -> ironclaw_host_api::Timestamp {
     chrono::Utc::now()
 }
 
-fn communication_preference_virtual_path(tenant_id: &TenantId, user_id: &UserId) -> VirtualPath {
-    let key = CommunicationPreferenceKey::new(tenant_id.clone(), user_id.clone());
-    let serialized = serde_json::to_string(&key).unwrap();
-    let mut hasher = Sha256::new();
-    hasher.update(serialized.as_bytes());
-    let digest = hex::encode(hasher.finalize());
-    VirtualPath::new(format!(
-        "{TEST_OUTBOUND_ROOT}/communication-preferences/{digest}.json"
-    ))
-    .unwrap()
+async fn put_preference_and_find_virtual_path(
+    backend: &Arc<InMemoryBackend>,
+    store: &FilesystemOutboundStateStore<InMemoryBackend>,
+    record: CommunicationPreferenceRecord,
+) -> (CommunicationPreferenceKey, VirtualPath) {
+    let before = communication_preference_virtual_paths(backend).await;
+    let key = record.key();
+    store.put_communication_preference(record).await.unwrap();
+    let mut added = communication_preference_virtual_paths(backend)
+        .await
+        .into_iter()
+        .filter(|path| !before.contains(path))
+        .collect::<Vec<_>>();
+    assert_eq!(added.len(), 1);
+    (key, added.remove(0))
+}
+
+async fn communication_preference_virtual_paths(
+    backend: &Arc<InMemoryBackend>,
+) -> Vec<VirtualPath> {
+    let root = VirtualPath::new(format!("{TEST_OUTBOUND_ROOT}/communication-preferences")).unwrap();
+    let mut paths = backend
+        .list_dir(&root)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|entry| entry.path)
+        .collect::<Vec<_>>();
+    paths.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+    paths
 }
 
 // ── F4 — CAS retry / drain / backwards-race regression tests ─────────────

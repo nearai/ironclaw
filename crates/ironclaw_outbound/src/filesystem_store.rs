@@ -26,7 +26,7 @@
 //!   `delivery_id`. An indexed `scope` projection allows
 //!   `list_delivery_attempts(scope)` to filter within the tenant-scoped
 //!   subtree without materializing every row.
-//! - `/outbound/communication-preferences/<sha256(key)>.json` — tenant/user
+//! - `/outbound/communication-preferences/<sha256(v1-length-prefixed-key)>.json` — tenant/user
 //!   communication preference row keyed by a hashed `CommunicationPreferenceKey`.
 //!   Reply-target refs remain candidates and do not grant send authority.
 
@@ -247,8 +247,6 @@ where
         let key = record.key();
         let path = communication_preference_path(&key)?;
         let resource_scope = communication_preference_resource_scope(&key.tenant_id, &key.user_id);
-        self.ensure_tenant_id_index(&resource_scope, &communication_preferences_root()?)
-            .await?;
         for _ in 0..MAX_CAS_RETRIES {
             let (cas, existing) = match self
                 .get_versioned_json::<CommunicationPreferenceRecord>(&resource_scope, &path)
@@ -264,6 +262,8 @@ where
             {
                 return Err(OutboundError::Backend);
             }
+            self.ensure_tenant_id_index(&resource_scope, &communication_preferences_root()?)
+                .await?;
             match self
                 .put_json(&resource_scope, &path, &record, &record.tenant_id, cas)
                 .await
@@ -602,9 +602,17 @@ fn delivery_path(delivery_id: &OutboundDeliveryId) -> Result<ScopedPath, Outboun
 fn communication_preference_path(
     key: &CommunicationPreferenceKey,
 ) -> Result<ScopedPath, OutboundError> {
-    let serialized = serde_json::to_string(key).map_err(|_| OutboundError::Serialization)?;
     let mut hasher = Sha256::new();
-    hasher.update(serialized.as_bytes());
+    let tenant = key.tenant_id.as_str();
+    let user = key.user_id.as_str();
+    hasher.update(b"v1:");
+    hasher.update(tenant.len().to_string().as_bytes());
+    hasher.update(b":");
+    hasher.update(tenant.as_bytes());
+    hasher.update(b":");
+    hasher.update(user.len().to_string().as_bytes());
+    hasher.update(b":");
+    hasher.update(user.as_bytes());
     let digest = hex::encode(hasher.finalize());
     ScopedPath::new(format!("{COMMUNICATION_PREFERENCES_ROOT}/{digest}.json"))
         .map_err(|_| OutboundError::Backend)
