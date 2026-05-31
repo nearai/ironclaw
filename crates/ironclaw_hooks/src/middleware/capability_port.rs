@@ -504,6 +504,7 @@ impl HookedLoopCapabilityPort {
                 match self.gate_ref_factory.mint_auth_ref(reason.as_str()).await {
                     Ok(gate_ref) => Some(CapabilityOutcome::AuthRequired {
                         gate_ref,
+                        credential_requirements: Vec::new(),
                         safe_summary: reason.as_str().to_string(),
                     }),
                     Err(_) => Some(fail_closed_gate_ref_unavailable(reason.as_str())),

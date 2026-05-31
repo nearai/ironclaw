@@ -234,6 +234,7 @@ async fn submit_and_block_auth_run(
                 .expect("checkpoint ref"),
             reason: BlockedReason::Auth {
                 gate_ref: gate_ref.clone(),
+                credential_requirements: Vec::new(),
             },
         })
         .await

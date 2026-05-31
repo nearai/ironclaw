@@ -27,7 +27,8 @@
 use async_trait::async_trait;
 use ironclaw_host_api::{
     ApprovalRequestId, CapabilityId, CorrelationId, ExecutionContext, ExtensionId, ProcessId,
-    ResourceEstimate, ResourceScope, ResourceUsage, RuntimeKind, SecretHandle,
+    ResourceEstimate, ResourceScope, ResourceUsage, RuntimeCredentialAuthRequirement, RuntimeKind,
+    SecretHandle,
     runtime_policy::{DeploymentMode, EffectiveRuntimePolicy, RuntimeProfile},
 };
 use ironclaw_trust::TrustDecision;
@@ -480,6 +481,7 @@ pub struct RuntimeAuthGate {
     pub capability_id: CapabilityId,
     pub reason: RuntimeBlockedReason,
     pub required_secrets: Vec<SecretHandle>,
+    pub credential_requirements: Vec<RuntimeCredentialAuthRequirement>,
 }
 
 /// Resource suspension state.

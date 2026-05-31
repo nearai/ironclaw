@@ -21,7 +21,8 @@ use ironclaw_host_api::{
     CapabilityDispatchResult, CapabilityId, CredentialStageError, DecisionSummary, EffectKind,
     ExtensionId, MountView, NetworkPolicy, Obligation, ProcessId, ResourceCeiling,
     ResourceEstimate, ResourceReservation, ResourceScope, ResourceUsage,
-    RuntimeCredentialAccountProviderId, RuntimeHttpEgress, SandboxQuota, SecretHandle,
+    RuntimeCredentialAccountProviderId, RuntimeCredentialAuthRequirement, RuntimeHttpEgress,
+    SandboxQuota, SecretHandle,
 };
 use ironclaw_network::NetworkHttpEgress;
 use ironclaw_processes::{ProcessError, ProcessRecord, ProcessStart, ProcessStore};
@@ -1182,7 +1183,9 @@ impl BuiltinObligationHandler {
                 .map_err(|_| secret_obligation_failed())?
                 .is_some();
             if !exists {
-                return Err(CapabilityObligationError::AuthRequired);
+                return Err(CapabilityObligationError::AuthRequired {
+                    credential_requirements: Vec::new(),
+                });
             }
         }
         Ok(())
@@ -1255,7 +1258,9 @@ impl BuiltinObligationHandler {
                     requester_extension: obligation.requester_extension,
                 })
                 .await
-                .map_err(credential_stage_error_to_obligation_error)?;
+                .map_err(|error| {
+                    credential_stage_error_to_obligation_error(error, Some(&obligation))
+                })?;
             // Retrieve and stage the resolved credential under the obligation's injection handle.
             // The access_secret names the material in the secret store; obligation.handle is
             // the slot name the WASM guest expects.
@@ -1268,7 +1273,9 @@ impl BuiltinObligationHandler {
                 obligation.handle,
             )
             .await
-            .map_err(credential_stage_error_to_obligation_error)?;
+            .map_err(|error| {
+                credential_stage_error_to_obligation_error(error, Some(&obligation))
+            })?;
         }
 
         Ok(())
@@ -1718,9 +1725,19 @@ fn staged_secret_injection_handles(obligations: &[Obligation]) -> Vec<SecretHand
 /// the same AuthRequired/Backend semantics.
 fn credential_stage_error_to_obligation_error(
     error: CredentialStageError,
+    credential_obligation: Option<&CredentialAccountInjectionObligation<'_>>,
 ) -> CapabilityObligationError {
     match error {
-        CredentialStageError::AuthRequired => CapabilityObligationError::AuthRequired,
+        CredentialStageError::AuthRequired => CapabilityObligationError::AuthRequired {
+            credential_requirements: credential_obligation
+                .map(|obligation| {
+                    vec![RuntimeCredentialAuthRequirement {
+                        provider: obligation.provider.clone(),
+                        requester_extension: obligation.requester_extension.clone(),
+                    }]
+                })
+                .unwrap_or_default(),
+        },
         CredentialStageError::Backend => secret_obligation_failed(),
     }
 }

@@ -529,7 +529,7 @@ five new optional fields added in #4112 for WebUI v2 OAuth/PAT rendering:
 
 | Field | Type | Present when |
 |---|---|---|
-| `challenge_kind` | `"oauth_url" \| "manual_token" \| "other"` | Projection finds a matching auth-flow record |
+| `challenge_kind` | `"oauth_url" \| "manual_token" \| "other"` | Projection finds a matching auth-flow record, or a blocked turn carries exactly one runtime credential auth requirement |
 | `provider` | `string` | Same as above |
 | `account_label` | `string \| null` | `ManualToken` challenge only |
 | `authorization_url` | `string \| null` | `OAuthUrl` challenge only |
@@ -539,6 +539,12 @@ All fields are `#[serde(default, skip_serializing_if = "Option::is_none")]`.
 **Existing serialised rows without these fields round-trip safely** — they
 deserialise as `None` on both ends. V1 channels that persist or replay
 `AuthPromptView` are unaffected.
+
+When no auth-flow record exists, WebUI v2 projection may still render a
+manual-token prompt from a single host-runtime credential auth requirement. That
+fallback exposes only the provider id and account label needed to route secure
+manual-token submit; raw token values still cross only the dedicated
+secret-submit route.
 
 ### Redaction invariant
 

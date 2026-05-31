@@ -1,6 +1,7 @@
 use std::{collections::HashSet, hash::Hash, sync::Arc};
 
 use async_trait::async_trait;
+use ironclaw_host_api::RuntimeCredentialAuthRequirement;
 use serde::{Deserialize, Serialize, de};
 
 use crate::{
@@ -269,7 +270,10 @@ impl LoopExit {
         match self {
             Self::Completed(exit) => validate_completed_exit(exit_id, exit, policy),
             Self::Blocked(exit) if policy.blocked_evidence_verified => {
-                match exit.kind.to_blocked_reason(exit.gate_ref) {
+                match exit
+                    .kind
+                    .to_blocked_reason(exit.gate_ref, exit.credential_requirements)
+                {
                     Ok(reason) => LoopExitValidationDecision::trusted(
                         exit_id,
                         TurnRunnerOutcome::Blocked {
@@ -351,6 +355,8 @@ pub enum LoopCompletionKind {
 pub struct LoopBlocked {
     pub kind: LoopBlockedKind,
     pub gate_ref: LoopGateRef,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub credential_requirements: Vec<RuntimeCredentialAuthRequirement>,
     pub checkpoint_id: TurnCheckpointId,
     pub state_ref: LoopCheckpointStateRef,
     pub exit_id: LoopExitId,
@@ -367,11 +373,18 @@ pub enum LoopBlockedKind {
 }
 
 impl LoopBlockedKind {
-    fn to_blocked_reason(self, gate_ref: LoopGateRef) -> Result<BlockedReason, ()> {
+    fn to_blocked_reason(
+        self,
+        gate_ref: LoopGateRef,
+        credential_requirements: Vec<RuntimeCredentialAuthRequirement>,
+    ) -> Result<BlockedReason, ()> {
         let gate_ref = GateRef::new(gate_ref.as_str()).map_err(|_| ())?;
         Ok(match self {
             Self::Approval => BlockedReason::Approval { gate_ref },
-            Self::Auth => BlockedReason::Auth { gate_ref },
+            Self::Auth => BlockedReason::Auth {
+                gate_ref,
+                credential_requirements,
+            },
             Self::Resource => BlockedReason::Resource { gate_ref },
             Self::AwaitDependentRun => BlockedReason::AwaitDependentRun { gate_ref },
         })

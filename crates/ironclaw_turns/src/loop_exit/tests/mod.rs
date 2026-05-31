@@ -25,7 +25,7 @@ fn policy_denied_failure_kind_serializes_as_snake_case() {
 fn await_dependent_run_blocked_kind_maps_to_dependent_run_reason() {
     let gate_ref = LoopGateRef::new("gate:dependent-run").unwrap();
     let reason = LoopBlockedKind::AwaitDependentRun
-        .to_blocked_reason(gate_ref.clone())
+        .to_blocked_reason(gate_ref.clone(), Vec::new())
         .unwrap();
 
     assert_eq!(
@@ -339,6 +339,7 @@ fn blocked_exit_maps_to_block_run_outcome_with_verified_checkpoint_and_gate_ref(
     let decision = LoopExit::Blocked(LoopBlocked {
         kind: LoopBlockedKind::Approval,
         gate_ref: loop_gate_ref,
+        credential_requirements: Vec::new(),
         checkpoint_id,
         state_ref: state_ref.clone(),
         exit_id: exit_id("exit:blocked"),
@@ -370,6 +371,7 @@ fn blocked_exit_requires_host_verified_gate_and_checkpoint_before_trusted_mappin
     let decision = LoopExit::Blocked(LoopBlocked {
         kind: LoopBlockedKind::Approval,
         gate_ref: loop_gate_ref("gate:approval-gate"),
+        credential_requirements: Vec::new(),
         checkpoint_id: TurnCheckpointId::new(),
         state_ref: checkpoint_state_ref(),
         exit_id: exit_id("exit:unverified-blocked"),
@@ -744,6 +746,7 @@ fn blocked_variants_map_to_correct_blocked_reason() {
         let decision = LoopExit::Blocked(LoopBlocked {
             kind,
             gate_ref: lg,
+            credential_requirements: Vec::new(),
             checkpoint_id,
             state_ref: state_ref.clone(),
             exit_id: exit_id("exit:blocked-variant"),
@@ -755,7 +758,10 @@ fn blocked_variants_map_to_correct_blocked_reason() {
 
         let expected_reason = match kind {
             LoopBlockedKind::Approval => BlockedReason::Approval { gate_ref },
-            LoopBlockedKind::Auth => BlockedReason::Auth { gate_ref },
+            LoopBlockedKind::Auth => BlockedReason::Auth {
+                gate_ref,
+                credential_requirements: Vec::new(),
+            },
             LoopBlockedKind::Resource => BlockedReason::Resource { gate_ref },
             LoopBlockedKind::AwaitDependentRun => BlockedReason::AwaitDependentRun { gate_ref },
         };

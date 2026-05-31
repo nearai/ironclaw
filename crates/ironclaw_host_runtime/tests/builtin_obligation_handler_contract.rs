@@ -1344,9 +1344,17 @@ async fn inject_credential_account_once_fails_when_resolver_returns_auth_require
         .await
         .unwrap_err();
 
-    assert!(
-        matches!(err, CapabilityObligationError::AuthRequired),
-        "expected AuthRequired, got {err:?}"
+    let CapabilityObligationError::AuthRequired {
+        credential_requirements,
+    } = err
+    else {
+        panic!("expected AuthRequired, got {err:?}");
+    };
+    assert_eq!(credential_requirements.len(), 1);
+    assert_eq!(credential_requirements[0].provider.as_str(), "github");
+    assert_eq!(
+        credential_requirements[0].requester_extension.as_str(),
+        "github"
     );
 }
 
@@ -1436,10 +1444,14 @@ async fn inject_credential_account_once_maps_unknown_resolved_secret_to_auth_req
         .await
         .unwrap_err();
 
-    assert!(
-        matches!(err, CapabilityObligationError::AuthRequired),
-        "expected AuthRequired when resolved handle not in store, got {err:?}"
-    );
+    let CapabilityObligationError::AuthRequired {
+        credential_requirements,
+    } = err
+    else {
+        panic!("expected AuthRequired when resolved handle not in store, got {err:?}");
+    };
+    assert_eq!(credential_requirements.len(), 1);
+    assert_eq!(credential_requirements[0].provider.as_str(), "github");
 }
 
 const ECHO_MANIFEST: &str = r#"

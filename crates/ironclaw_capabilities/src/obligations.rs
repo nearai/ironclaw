@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use ironclaw_host_api::{
     CapabilityDispatchResult, CapabilityId, ExecutionContext, MountView, Obligation,
-    ResourceEstimate, ResourceReservation,
+    ResourceEstimate, ResourceReservation, RuntimeCredentialAuthRequirement,
 };
 use thiserror::Error;
 
@@ -79,7 +79,9 @@ pub enum CapabilityObligationError {
     #[error("unsupported authorization obligations: {count} item(s)", count = obligations.len())]
     Unsupported { obligations: Vec<Obligation> },
     #[error("authorization requires authentication")]
-    AuthRequired,
+    AuthRequired {
+        credential_requirements: Vec<RuntimeCredentialAuthRequirement>,
+    },
     #[error("authorization obligation failed: {kind}")]
     Failed {
         kind: CapabilityObligationFailureKind,

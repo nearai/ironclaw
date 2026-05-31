@@ -1452,6 +1452,7 @@ async fn gate_stage_skips_and_continues_records_skipped_summary() {
                 call,
                 kind: GateKind::Auth,
                 gate_ref,
+                credential_requirements: Vec::new(),
             },
         )
         .await
@@ -1494,6 +1495,7 @@ async fn gate_stage_aborts_returns_failed_exit() {
                 call,
                 kind: GateKind::Auth,
                 gate_ref,
+                credential_requirements: Vec::new(),
             },
         )
         .await

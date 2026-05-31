@@ -2,8 +2,9 @@ use std::sync::Arc;
 
 use futures::{StreamExt, stream};
 use ironclaw_product_adapters::{
-    AuthPromptView, GatePromptView, ProductAdapterError, ProductOutboundPayload,
-    ProductProjectionItem, ProductProjectionState, ProductWorkflowRejectionKind, RedactedString,
+    AuthPromptChallengeKind, AuthPromptView, GatePromptView, ProductAdapterError,
+    ProductOutboundPayload, ProductProjectionItem, ProductProjectionState,
+    ProductWorkflowRejectionKind, RedactedString,
 };
 use ironclaw_turns::{
     GetRunStateRequest, TurnCoordinator, TurnError, TurnEventKind, TurnEventProjectionCursor,
@@ -188,7 +189,7 @@ async fn blocked_prompt_payload(
     if state.status != event.status || state.event_cursor != event.cursor {
         return Ok(None);
     }
-    let Some(gate_ref) = state.gate_ref else {
+    let Some(gate_ref) = state.gate_ref.as_ref() else {
         return Ok(None);
     };
     let gate_ref_str = gate_ref.as_str().to_string();
@@ -225,7 +226,7 @@ async fn blocked_prompt_payload(
             };
             let view = match challenge {
                 Some(c) => c.enrich(base_view),
-                None => base_view,
+                None => auth_prompt_from_credential_requirement(base_view, &state),
             };
             Ok(Some(ProductOutboundPayload::AuthPrompt(view)))
         }
@@ -248,6 +249,20 @@ async fn blocked_prompt_payload(
         | TurnStatus::Cancelled
         | TurnStatus::Failed => Ok(None),
     }
+}
+
+fn auth_prompt_from_credential_requirement(
+    mut view: AuthPromptView,
+    state: &ironclaw_turns::TurnRunState,
+) -> AuthPromptView {
+    let [requirement] = state.credential_requirements.as_slice() else {
+        return view;
+    };
+    let provider = requirement.provider.as_str().to_string();
+    view.challenge_kind = Some(AuthPromptChallengeKind::ManualToken);
+    view.provider = Some(provider.clone());
+    view.account_label = Some(provider);
+    view
 }
 
 fn gate_prompt(

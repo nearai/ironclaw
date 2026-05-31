@@ -8,7 +8,8 @@ use ironclaw_event_projections::{
 };
 use ironclaw_events::{InMemoryDurableEventLog, RuntimeEvent};
 use ironclaw_host_api::{
-    AgentId, CapabilityId, ExtensionId, InvocationId, ResourceScope, RuntimeKind, TenantId,
+    AgentId, CapabilityId, ExtensionId, InvocationId, ResourceScope,
+    RuntimeCredentialAccountProviderId, RuntimeCredentialAuthRequirement, RuntimeKind, TenantId,
     ThreadId, UserId,
 };
 use ironclaw_product_adapters::{
@@ -222,6 +223,7 @@ fn turn_run_state(
         received_at: chrono::Utc::now(),
         checkpoint_id: None,
         gate_ref: Some(GateRef::new("gate:auth-required").unwrap()),
+        credential_requirements: Vec::new(),
         failure: None,
         event_cursor: cursor,
     }

@@ -9,7 +9,8 @@ use std::{
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    ApprovalRequestId, CapabilityId, ExtensionId, ProcessId, ResourceEstimate, RuntimeKind,
+    ApprovalRequestId, CapabilityId, ExtensionId, ProcessId, ResourceEstimate,
+    RuntimeCredentialAccountProviderId, RuntimeCredentialAuthRequirement, RuntimeKind,
 };
 use ironclaw_host_runtime::{
     CancelRuntimeWorkOutcome, CancelRuntimeWorkRequest, HostRuntime, HostRuntimeError,
@@ -297,6 +298,7 @@ async fn runtime_capability_suspension_outcomes_do_not_emit_terminal_lifecycle_m
             capability_id: capability_id.clone(),
             reason: RuntimeBlockedReason::AuthRequired,
             required_secrets: Vec::new(),
+            credential_requirements: Vec::new(),
         }),
         RuntimeCapabilityOutcome::ResourceBlocked(RuntimeResourceGate {
             gate_id: RuntimeGateId::new(),
@@ -344,6 +346,51 @@ async fn runtime_capability_suspension_outcomes_do_not_emit_terminal_lifecycle_m
             } if actual == &capability_id
         ));
     }
+}
+
+#[tokio::test]
+async fn runtime_auth_gate_forwards_credential_requirements() {
+    let capability_id = CapabilityId::new("demo.echo").expect("capability id");
+    let provider_id = ExtensionId::new("demo").expect("provider id");
+    let requirement = RuntimeCredentialAuthRequirement {
+        provider: RuntimeCredentialAccountProviderId::new("github").unwrap(),
+        requester_extension: provider_id.clone(),
+    };
+    let port = runtime_capability_port(
+        &capability_id,
+        &provider_id,
+        Arc::new(QueuedHostRuntime::new(
+            vec![visible_capability(
+                capability_id.clone(),
+                provider_id.clone(),
+            )],
+            vec![Ok(RuntimeCapabilityOutcome::AuthRequired(
+                RuntimeAuthGate {
+                    gate_id: RuntimeGateId::new(),
+                    capability_id: capability_id.clone(),
+                    reason: RuntimeBlockedReason::AuthRequired,
+                    required_secrets: Vec::new(),
+                    credential_requirements: vec![requirement.clone()],
+                },
+            ))],
+        )),
+        Arc::new(RecordingResultWriter::default()),
+        Arc::new(ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink::default()),
+        "thread-runtime-auth-requirement",
+    )
+    .await;
+
+    let outcome = invoke_visible_runtime_capability(&port)
+        .await
+        .expect("auth gate is a suspension outcome");
+
+    assert!(matches!(
+        outcome,
+        CapabilityOutcome::AuthRequired {
+            credential_requirements,
+            ..
+        } if credential_requirements == vec![requirement]
+    ));
 }
 
 #[tokio::test]

@@ -1761,6 +1761,7 @@ async fn runtime_outcome_to_loop(
         },
         RuntimeCapabilityOutcome::AuthRequired(gate) => CapabilityOutcome::AuthRequired {
             gate_ref: loop_gate_ref("auth", gate.gate_id.to_string())?,
+            credential_requirements: gate.credential_requirements,
             safe_summary: blocked_summary(gate.reason).to_string(),
         },
         RuntimeCapabilityOutcome::ResourceBlocked(gate) => CapabilityOutcome::ResourceBlocked {

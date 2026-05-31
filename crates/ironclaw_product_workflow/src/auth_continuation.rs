@@ -623,6 +623,7 @@ mod tests {
                 state_ref: LoopCheckpointStateRef::new("checkpoint:auth-real").unwrap(),
                 reason: BlockedReason::Auth {
                     gate_ref: GateRef::new("gate:auth-real").unwrap(),
+                    credential_requirements: Vec::new(),
                 },
             })
             .await
