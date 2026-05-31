@@ -53,9 +53,9 @@ use uuid::Uuid;
 
 use crate::auth::RebornOAuthStartFlowRequest;
 use crate::{
-    RebornAuthProductError, RebornManualTokenSetupRequest, RebornManualTokenSubmitRequest,
-    RebornManualTokenSubmitResponse, RebornOAuthCallbackError, RebornOAuthCallbackOutcome,
-    RebornOAuthCallbackRequest, RebornOAuthCallbackResponse, RebornProductAuthServices,
+    RebornManualTokenSetupRequest, RebornManualTokenSubmitRequest, RebornManualTokenSubmitResponse,
+    RebornOAuthCallbackError, RebornOAuthCallbackOutcome, RebornOAuthCallbackRequest,
+    RebornOAuthCallbackResponse, RebornProductAuthServices,
 };
 
 pub(crate) const OAUTH_START_PATH: &str = "/api/reborn/product-auth/oauth/start";
@@ -1118,13 +1118,16 @@ pub(super) fn parse_optional_extension(
 /// same way; centralising the timeout/error wiring stops each handler from
 /// having to re-derive the same four lines and keeps the failure projection
 /// identical across routes.
-pub(super) async fn run_with_backend_timeout<T, F>(future: F) -> Result<T, ProductAuthRouteFailure>
+pub(super) async fn run_with_backend_timeout<T, E, F>(
+    future: F,
+) -> Result<T, ProductAuthRouteFailure>
 where
-    F: std::future::Future<Output = Result<T, RebornAuthProductError>>,
+    F: std::future::Future<Output = Result<T, E>>,
+    ProductAuthRouteFailure: From<E>,
 {
     match tokio::time::timeout(PRODUCT_AUTH_BACKEND_TIMEOUT, future).await {
         Ok(Ok(value)) => Ok(value),
-        Ok(Err(error)) => Err(ProductAuthRouteFailure::from(error)),
+        Ok(Err(error)) => Err(error.into()),
         Err(_) => Err(ProductAuthRouteFailure::backend_timeout()),
     }
 }

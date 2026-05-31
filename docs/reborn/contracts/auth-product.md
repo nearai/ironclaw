@@ -557,7 +557,9 @@ token, `interaction_id`.
 
 `chat.js` dispatches by `challengeKind`:
 - `"oauth_url"` → `AuthOauthCard` (new in #4112; opens IDP URL in a new tab)
-- anything else → `AuthTokenCard` (existing manual-token form)
+- `"manual_token"` → `AuthTokenCard` (existing manual-token form; also used for
+  legacy prompts that omit `challenge_kind`)
+- `"other"` or any explicit unknown value → `AuthGenericCard`
 
 ### Wire-shape tests
 
@@ -567,5 +569,6 @@ covers:
 - Omission of all new fields when absent (backward-compat check).
 - Round-trip deserialisation of legacy rows without any new fields.
 - `challenge_for_gate` returns an `AuthChallengeView` for a seeded OAuth flow.
-- `challenge_for_gate` returns `None` for an unknown gate ref.
+- `challenge_for_gate` returns `None` for mismatched owner/scope/run/gate refs
+  or terminal flows.
 - `as_auth_challenge_provider` returns `None` when no flow record source.

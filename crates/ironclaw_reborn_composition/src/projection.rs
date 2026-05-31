@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::{StreamExt, stream};
+use ironclaw_auth::{AuthProviderId, CredentialAccountLabel, OAuthAuthorizationUrl};
 #[cfg(test)]
 use ironclaw_event_projections::CapabilityActivityProjection;
 use ironclaw_event_projections::{
@@ -55,9 +56,9 @@ use turn_events::{TurnEventBridge, TurnEventPayload};
 #[derive(Debug, Clone)]
 pub struct AuthChallengeView {
     pub kind: AuthPromptChallengeKind,
-    pub provider: String,
-    pub account_label: Option<String>,
-    pub authorization_url: Option<String>,
+    pub provider: AuthProviderId,
+    pub account_label: Option<CredentialAccountLabel>,
+    pub authorization_url: Option<OAuthAuthorizationUrl>,
     pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
@@ -72,9 +73,9 @@ impl AuthChallengeView {
         mut view: ironclaw_product_adapters::AuthPromptView,
     ) -> ironclaw_product_adapters::AuthPromptView {
         view.challenge_kind = Some(self.kind);
-        view.provider = Some(self.provider);
-        view.account_label = self.account_label;
-        view.authorization_url = self.authorization_url;
+        view.provider = Some(self.provider.as_str().to_string());
+        view.account_label = self.account_label.map(|label| label.as_str().to_string());
+        view.authorization_url = self.authorization_url.map(|url| url.as_str().to_string());
         view.expires_at = self.expires_at;
         view
     }
@@ -84,8 +85,8 @@ impl AuthChallengeView {
 /// enrich `AuthPromptView` with challenge metadata. Implemented by
 /// `RebornProductAuthServices` when a `flow_record_source` is wired in.
 ///
-/// `scope` is passed to scope-filter results to the owning tenant/agent/project/thread;
-/// implementations MUST NOT return records whose `scope.resource` does not match.
+/// Implementations MUST verify caller user, run id, gate ref, and
+/// tenant/agent/project/thread before returning a record.
 #[async_trait]
 pub trait AuthChallengeProvider: Send + Sync {
     /// Return the projection-safe challenge view for the given gate ref and
@@ -94,6 +95,8 @@ pub trait AuthChallengeProvider: Send + Sync {
     async fn challenge_for_gate(
         &self,
         scope: &TurnScope,
+        owner_user_id: &UserId,
+        run_id: TurnRunId,
         gate_ref: &str,
     ) -> Option<AuthChallengeView>;
 }

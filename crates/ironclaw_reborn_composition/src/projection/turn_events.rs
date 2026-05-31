@@ -89,8 +89,13 @@ impl TurnEventBridge {
             };
             next_cursor = Some(page.next_cursor.clone());
             payloads.extend(
-                turn_event_payloads_for_page(coordinator.as_ref(), auth_challenges, page.entries)
-                    .await?,
+                turn_event_payloads_for_page(
+                    caller_user_id,
+                    coordinator.as_ref(),
+                    auth_challenges,
+                    page.entries,
+                )
+                .await?,
             );
             if !page.truncated || after_cursor.as_ref() == Some(&page.next_cursor) {
                 break;
@@ -105,6 +110,7 @@ impl TurnEventBridge {
 }
 
 async fn turn_event_payloads_for_page(
+    caller_user_id: &ironclaw_host_api::UserId,
     coordinator: &dyn TurnCoordinator,
     auth_challenges: Option<&dyn AuthChallengeProvider>,
     events: Vec<TurnLifecycleEvent>,
@@ -118,7 +124,7 @@ async fn turn_event_payloads_for_page(
         .map(|event| {
             let cursor = TurnEventProjectionCursor::for_scope(event.scope.clone(), event.cursor);
             async move {
-                turn_event_payload(coordinator, auth_challenges, &event)
+                turn_event_payload(caller_user_id, coordinator, auth_challenges, &event)
                     .await
                     .map(|payload| payload.map(|payload| TurnEventPayload { cursor, payload }))
             }
@@ -134,12 +140,14 @@ async fn turn_event_payloads_for_page(
 }
 
 async fn turn_event_payload(
+    caller_user_id: &ironclaw_host_api::UserId,
     coordinator: &dyn TurnCoordinator,
     auth_challenges: Option<&dyn AuthChallengeProvider>,
     event: &TurnLifecycleEvent,
 ) -> Result<Option<ProductOutboundPayload>, ProductAdapterError> {
     if matches!(event.kind, TurnEventKind::Blocked)
-        && let Some(prompt) = blocked_prompt_payload(coordinator, auth_challenges, event).await?
+        && let Some(prompt) =
+            blocked_prompt_payload(caller_user_id, coordinator, auth_challenges, event).await?
     {
         return Ok(Some(prompt));
     }
@@ -152,6 +160,7 @@ async fn turn_event_payload(
 }
 
 async fn blocked_prompt_payload(
+    caller_user_id: &ironclaw_host_api::UserId,
     coordinator: &dyn TurnCoordinator,
     auth_challenges: Option<&dyn AuthChallengeProvider>,
     event: &TurnLifecycleEvent,
@@ -190,7 +199,12 @@ async fn blocked_prompt_payload(
             let challenge = match auth_challenges {
                 Some(provider) => {
                     provider
-                        .challenge_for_gate(&event.scope, &gate_ref_str)
+                        .challenge_for_gate(
+                            &event.scope,
+                            caller_user_id,
+                            event.run_id,
+                            &gate_ref_str,
+                        )
                         .await
                 }
                 None => None,

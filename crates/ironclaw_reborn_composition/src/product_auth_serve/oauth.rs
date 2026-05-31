@@ -32,19 +32,20 @@ pub(super) async fn oauth_start_handler(
     let pkce_verifier = pkce_verifier_value.clone_secret();
     state.ensure_pkce_verifier_capacity()?;
 
-    let flow = state
-        .product_auth
-        .start_setup_oauth_flow(RebornOAuthStartFlowRequest {
-            scope: scope.clone(),
-            provider: provider.clone(),
-            authorization_url: OAuthAuthorizationUrl::new(authorization_endpoint.to_string())
-                .map_err(ProductAuthRouteFailure::from)?,
-            opaque_state_hash,
-            pkce_verifier_hash,
-            expires_at: request.expires_at,
-        })
-        .await
-        .map_err(ProductAuthRouteFailure::from)?;
+    let flow = run_with_backend_timeout(
+        state
+            .product_auth
+            .start_setup_oauth_flow(RebornOAuthStartFlowRequest {
+                scope: scope.clone(),
+                provider: provider.clone(),
+                authorization_url: OAuthAuthorizationUrl::new(authorization_endpoint.to_string())
+                    .map_err(ProductAuthRouteFailure::from)?,
+                opaque_state_hash,
+                pkce_verifier_hash,
+                expires_at: request.expires_at,
+            }),
+    )
+    .await?;
     state.store_pkce_verifier(flow.id, pkce_verifier, flow.expires_at)?;
     let authorization_url = compose_authorization_url(authorization_endpoint, flow.id, &scope)?;
 
@@ -84,33 +85,34 @@ pub(super) async fn oauth_callback_handler(
     )?;
 
     if is_authorized_callback_candidate(&query) {
-        state
-            .product_auth
-            .ensure_oauth_callback_flow_known(&scope, flow_id)
-            .await
-            .map_err(ProductAuthRouteFailure::from)?;
+        run_with_backend_timeout(
+            state
+                .product_auth
+                .ensure_oauth_callback_flow_known(&scope, flow_id),
+        )
+        .await?;
     }
     let outcome = callback_outcome_from_query(&state, flow_id, &scope, &query)?;
 
-    let response = match state
-        .product_auth
-        .handle_oauth_callback(RebornOAuthCallbackRequest {
+    let response = match run_with_backend_timeout(state.product_auth.handle_oauth_callback(
+        RebornOAuthCallbackRequest {
             scope,
             flow_id,
             opaque_state_hash: state_hash,
             outcome,
-        })
-        .await
+        },
+    ))
+    .await
     {
         Ok(response) => {
             state.remove_pkce_verifier(flow_id);
             response
         }
         Err(error) => {
-            if should_forget_pkce_verifier(error.code) {
+            if should_forget_pkce_verifier(error.body.code) {
                 state.remove_pkce_verifier(flow_id);
             }
-            return Err(ProductAuthRouteFailure::from(error));
+            return Err(error);
         }
     };
 

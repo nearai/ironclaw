@@ -1123,8 +1123,9 @@ async fn challenge_for_gate_returns_oauth_url_view_for_seeded_flow() {
     let expires_at = Utc::now() + chrono::Duration::hours(1);
 
     use ironclaw_host_api::ThreadId;
-    use ironclaw_turns::TurnScope;
+    use ironclaw_turns::{TurnRunId, TurnScope};
     let thread_id = ThreadId::new("thread-4112".to_string()).expect("thread id");
+    let turn_run_id = TurnRunId::new();
 
     shared
         .create_flow(NewAuthFlow {
@@ -1138,7 +1139,7 @@ async fn challenge_for_gate_returns_oauth_url_view_for_seeded_flow() {
                 expires_at,
             },
             continuation: AuthContinuationRef::TurnGateResume {
-                turn_run_ref: TurnRunRef::new("22222222-2222-2222-2222-222222222222").unwrap(),
+                turn_run_ref: TurnRunRef::new(turn_run_id.to_string()).unwrap(),
                 gate_ref: AuthGateRef::new(gate_ref_str.to_string()).unwrap(),
             },
             update_binding: None,
@@ -1158,18 +1159,48 @@ async fn challenge_for_gate_returns_oauth_url_view_for_seeded_flow() {
         thread_id,
     );
     let view = provider
-        .challenge_for_gate(&turn_scope, gate_ref_str)
+        .challenge_for_gate(
+            &turn_scope,
+            &UserId::new(USER).expect("user"),
+            turn_run_id,
+            gate_ref_str,
+        )
         .await
         .expect("found");
     assert!(matches!(view.kind, AuthPromptChallengeKind::OAuthUrl));
-    assert_eq!(view.provider, "google");
+    assert_eq!(view.provider.as_str(), "google");
     assert!(
         view.authorization_url
-            .as_deref()
+            .as_ref()
+            .map(|url| url.as_str())
             .unwrap()
             .contains("accounts.google.com")
     );
     assert!(view.account_label.is_none());
+    assert!(
+        provider
+            .challenge_for_gate(
+                &turn_scope,
+                &UserId::new("other-user-4201").expect("user"),
+                turn_run_id,
+                gate_ref_str,
+            )
+            .await
+            .is_none(),
+        "challenge lookup must reject the wrong owner user"
+    );
+    assert!(
+        provider
+            .challenge_for_gate(
+                &turn_scope,
+                &UserId::new(USER).expect("user"),
+                TurnRunId::new(),
+                gate_ref_str,
+            )
+            .await
+            .is_none(),
+        "challenge lookup must reject the wrong turn run"
+    );
 }
 
 #[test]
@@ -1197,7 +1228,7 @@ async fn challenge_for_gate_cancelled_flow_returns_none() {
         InMemoryAuthProductServices, NewAuthFlow, OAuthAuthorizationUrl, TurnRunRef,
     };
     use ironclaw_host_api::ThreadId;
-    use ironclaw_turns::TurnScope;
+    use ironclaw_turns::{TurnRunId, TurnScope};
     use std::sync::Arc;
 
     let shared = Arc::new(InMemoryAuthProductServices::new());
@@ -1215,6 +1246,7 @@ async fn challenge_for_gate_cancelled_flow_returns_none() {
             .unwrap();
     let expires_at = Utc::now() + chrono::Duration::hours(1);
     let scope = caller_scope_with_invocation(InvocationId::new());
+    let turn_run_id = TurnRunId::new();
 
     let flow = shared
         .create_flow(NewAuthFlow {
@@ -1226,7 +1258,7 @@ async fn challenge_for_gate_cancelled_flow_returns_none() {
                 expires_at,
             },
             continuation: AuthContinuationRef::TurnGateResume {
-                turn_run_ref: TurnRunRef::new("33333333-3333-3333-3333-333333333333").unwrap(),
+                turn_run_ref: TurnRunRef::new(turn_run_id.to_string()).unwrap(),
                 gate_ref: AuthGateRef::new(gate_ref_str.to_string()).unwrap(),
             },
             update_binding: None,
@@ -1250,7 +1282,14 @@ async fn challenge_for_gate_cancelled_flow_returns_none() {
         Some(ProjectId::new(PROJECT).expect("project")),
         ThreadId::new("thread-4112b".to_string()).expect("thread id"),
     );
-    let result = provider.challenge_for_gate(&turn_scope, gate_ref_str).await;
+    let result = provider
+        .challenge_for_gate(
+            &turn_scope,
+            &UserId::new(USER).expect("user"),
+            turn_run_id,
+            gate_ref_str,
+        )
+        .await;
     assert!(
         result.is_none(),
         "cancelled flow must not be surfaced by challenge_for_gate"
@@ -1266,7 +1305,7 @@ async fn challenge_for_gate_threadless_flow_returns_none_for_thread_scope() {
         InMemoryAuthProductServices, NewAuthFlow, OAuthAuthorizationUrl, TurnRunRef,
     };
     use ironclaw_host_api::ThreadId;
-    use ironclaw_turns::TurnScope;
+    use ironclaw_turns::{TurnRunId, TurnScope};
     use std::sync::Arc;
 
     let shared = Arc::new(InMemoryAuthProductServices::new());
@@ -1280,6 +1319,7 @@ async fn challenge_for_gate_threadless_flow_returns_none_for_thread_scope() {
 
     let gate_ref_str = "bbbbbbbb-cccc-dddd-eeee-222222222223";
     let expires_at = Utc::now() + chrono::Duration::hours(1);
+    let turn_run_id = TurnRunId::new();
     shared
         .create_flow(NewAuthFlow {
             scope: caller_scope_with_invocation(InvocationId::new()),
@@ -1293,7 +1333,7 @@ async fn challenge_for_gate_threadless_flow_returns_none_for_thread_scope() {
                 expires_at,
             },
             continuation: AuthContinuationRef::TurnGateResume {
-                turn_run_ref: TurnRunRef::new("33333333-3333-3333-3333-333333333334").unwrap(),
+                turn_run_ref: TurnRunRef::new(turn_run_id.to_string()).unwrap(),
                 gate_ref: AuthGateRef::new(gate_ref_str.to_string()).unwrap(),
             },
             update_binding: None,
@@ -1311,7 +1351,14 @@ async fn challenge_for_gate_threadless_flow_returns_none_for_thread_scope() {
         Some(ProjectId::new(PROJECT).expect("project")),
         ThreadId::new("thread-4112c".to_string()).expect("thread id"),
     );
-    let result = provider.challenge_for_gate(&turn_scope, gate_ref_str).await;
+    let result = provider
+        .challenge_for_gate(
+            &turn_scope,
+            &UserId::new(USER).expect("user"),
+            turn_run_id,
+            gate_ref_str,
+        )
+        .await;
     assert!(
         result.is_none(),
         "thread-scoped lookup must reject matching flows that lack thread_id"
@@ -1329,7 +1376,7 @@ async fn challenge_for_gate_wrong_tenant_returns_none() {
         InMemoryAuthProductServices, NewAuthFlow, OAuthAuthorizationUrl, TurnRunRef,
     };
     use ironclaw_host_api::ThreadId;
-    use ironclaw_turns::TurnScope;
+    use ironclaw_turns::{TurnRunId, TurnScope};
     use std::sync::Arc;
 
     let shared = Arc::new(InMemoryAuthProductServices::new());
@@ -1346,6 +1393,7 @@ async fn challenge_for_gate_wrong_tenant_returns_none() {
         OAuthAuthorizationUrl::new("https://accounts.google.com/o/oauth2/auth".to_string())
             .unwrap();
     let expires_at = Utc::now() + chrono::Duration::hours(1);
+    let turn_run_id = TurnRunId::new();
 
     // Create the flow under TENANT (the test tenant).
     shared
@@ -1358,7 +1406,7 @@ async fn challenge_for_gate_wrong_tenant_returns_none() {
                 expires_at,
             },
             continuation: AuthContinuationRef::TurnGateResume {
-                turn_run_ref: TurnRunRef::new("44444444-4444-4444-4444-444444444444").unwrap(),
+                turn_run_ref: TurnRunRef::new(turn_run_id.to_string()).unwrap(),
                 gate_ref: AuthGateRef::new(gate_ref_str.to_string()).unwrap(),
             },
             update_binding: None,
@@ -1379,7 +1427,12 @@ async fn challenge_for_gate_wrong_tenant_returns_none() {
         ThreadId::new("thread-other".to_string()).expect("thread id"),
     );
     let result = provider
-        .challenge_for_gate(&other_turn_scope, gate_ref_str)
+        .challenge_for_gate(
+            &other_turn_scope,
+            &UserId::new(USER).expect("user"),
+            turn_run_id,
+            gate_ref_str,
+        )
         .await;
     assert!(
         result.is_none(),
@@ -1399,7 +1452,7 @@ async fn challenge_for_gate_returns_manual_token_view_for_seeded_flow() {
     };
     use ironclaw_host_api::ThreadId;
     use ironclaw_product_adapters::AuthPromptChallengeKind;
-    use ironclaw_turns::TurnScope;
+    use ironclaw_turns::{TurnRunId, TurnScope};
     use std::sync::Arc;
 
     let shared = Arc::new(InMemoryAuthProductServices::new());
@@ -1414,6 +1467,7 @@ async fn challenge_for_gate_returns_manual_token_view_for_seeded_flow() {
     let gate_ref_str = "dddddddd-eeee-ffff-aaaa-444444444444";
     let expires_at = Utc::now() + chrono::Duration::hours(1);
     let thread_id = ThreadId::new("thread-manual-token".to_string()).expect("thread id");
+    let turn_run_id = TurnRunId::new();
 
     shared
         .create_flow(NewAuthFlow {
@@ -1427,7 +1481,7 @@ async fn challenge_for_gate_returns_manual_token_view_for_seeded_flow() {
                 expires_at,
             },
             continuation: AuthContinuationRef::TurnGateResume {
-                turn_run_ref: TurnRunRef::new("55555555-5555-5555-5555-555555555555").unwrap(),
+                turn_run_ref: TurnRunRef::new(turn_run_id.to_string()).unwrap(),
                 gate_ref: AuthGateRef::new(gate_ref_str.to_string()).unwrap(),
             },
             update_binding: None,
@@ -1446,12 +1500,20 @@ async fn challenge_for_gate_returns_manual_token_view_for_seeded_flow() {
         thread_id,
     );
     let view = provider
-        .challenge_for_gate(&turn_scope, gate_ref_str)
+        .challenge_for_gate(
+            &turn_scope,
+            &UserId::new(USER).expect("user"),
+            turn_run_id,
+            gate_ref_str,
+        )
         .await
         .expect("found");
     assert!(matches!(view.kind, AuthPromptChallengeKind::ManualToken));
-    assert_eq!(view.provider, "slack");
-    assert_eq!(view.account_label.as_deref(), Some("work slack token"));
+    assert_eq!(view.provider.as_str(), "slack");
+    assert_eq!(
+        view.account_label.as_ref().map(|label| label.as_str()),
+        Some("work slack token")
+    );
     assert!(view.authorization_url.is_none());
 }
 
@@ -1467,7 +1529,7 @@ async fn challenge_for_gate_returns_other_kind_view_for_setup_required_flow() {
     };
     use ironclaw_host_api::ThreadId;
     use ironclaw_product_adapters::AuthPromptChallengeKind;
-    use ironclaw_turns::TurnScope;
+    use ironclaw_turns::{TurnRunId, TurnScope};
     use std::sync::Arc;
 
     let shared = Arc::new(InMemoryAuthProductServices::new());
@@ -1482,6 +1544,7 @@ async fn challenge_for_gate_returns_other_kind_view_for_setup_required_flow() {
     let gate_ref_str = "eeeeeeee-ffff-aaaa-bbbb-555555555555";
     let expires_at = Utc::now() + chrono::Duration::hours(1);
     let thread_id = ThreadId::new("thread-setup-required".to_string()).expect("thread id");
+    let turn_run_id = TurnRunId::new();
 
     shared
         .create_flow(NewAuthFlow {
@@ -1493,7 +1556,7 @@ async fn challenge_for_gate_returns_other_kind_view_for_setup_required_flow() {
                 message: "GitHub app not installed".to_string(),
             },
             continuation: AuthContinuationRef::TurnGateResume {
-                turn_run_ref: TurnRunRef::new("66666666-6666-6666-6666-666666666666").unwrap(),
+                turn_run_ref: TurnRunRef::new(turn_run_id.to_string()).unwrap(),
                 gate_ref: AuthGateRef::new(gate_ref_str.to_string()).unwrap(),
             },
             update_binding: None,
@@ -1512,11 +1575,16 @@ async fn challenge_for_gate_returns_other_kind_view_for_setup_required_flow() {
         thread_id,
     );
     let view = provider
-        .challenge_for_gate(&turn_scope, gate_ref_str)
+        .challenge_for_gate(
+            &turn_scope,
+            &UserId::new(USER).expect("user"),
+            turn_run_id,
+            gate_ref_str,
+        )
         .await
         .expect("found");
     assert!(matches!(view.kind, AuthPromptChallengeKind::Other));
-    assert_eq!(view.provider, "github");
+    assert_eq!(view.provider.as_str(), "github");
     assert!(view.account_label.is_none());
     assert!(view.authorization_url.is_none());
     assert!(view.expires_at.is_none());

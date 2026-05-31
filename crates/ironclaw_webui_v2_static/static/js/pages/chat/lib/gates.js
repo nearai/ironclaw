@@ -19,11 +19,10 @@ export function gateFromEvent(eventType, prompt) {
   if (eventType === "auth_required") {
     return {
       kind: "auth_required",
-      // challenge_kind is populated by the Rust projection layer when an
-      // auth-flow record exists for this gate (issue #4112). Missing or
-      // unknown challenge kinds render a neutral auth card instead of implying
-      // that a manual token is expected.
-      challengeKind: prompt.challenge_kind || null,
+      // Legacy auth_required prompts predate challenge_kind and are manual
+      // token prompts. Explicit unknown/other challenge kinds still route to
+      // the neutral auth card in chat.js.
+      challengeKind: prompt.challenge_kind || "manual_token",
       runId: prompt.turn_run_id,
       // AuthPromptView carries `auth_request_ref`, but v2's resolve
       // path is `/runs/{run_id}/gates/{gate_ref}/resolve` — auth

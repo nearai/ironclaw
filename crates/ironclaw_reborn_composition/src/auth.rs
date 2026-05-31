@@ -23,7 +23,8 @@ use ironclaw_product_workflow::ProductAuthTurnGateResumeDispatcher;
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 
-use ironclaw_turns::TurnScope;
+use ironclaw_host_api::UserId;
+use ironclaw_turns::{TurnRunId, TurnScope};
 
 use crate::projection::{AuthChallengeProvider, AuthChallengeView};
 
@@ -959,20 +960,21 @@ impl RebornProductAuthServices {
     }
 }
 
-/// Verify that an auth flow record belongs to the same
+/// Verify that an auth flow record belongs to the same user and
 /// tenant/agent/project/thread as the caller's `TurnScope`.
-///
-/// `user_id` is intentionally excluded: the public turn-event projection
-/// strips `owner_user_id` before reaching this layer, and the gate_ref UUID
-/// provides sufficient uniqueness within the remaining scope.
 ///
 /// `thread_id` is fail-closed: a flow with no `thread_id` does not match a
 /// thread-scoped request. Pre-thread or test flows should be stored with a
 /// `thread_id` once a real turn is in progress; a flow missing one must not
 /// leak into an unrelated thread's gate.
-fn flow_scope_matches_turn_scope(flow: &ironclaw_auth::AuthFlowRecord, scope: &TurnScope) -> bool {
+fn flow_scope_matches_turn_scope(
+    flow: &ironclaw_auth::AuthFlowRecord,
+    scope: &TurnScope,
+    owner_user_id: &UserId,
+) -> bool {
     let resource = &flow.scope.resource;
     resource.tenant_id == scope.tenant_id
+        && resource.user_id == *owner_user_id
         && resource.agent_id.as_ref() == scope.agent_id.as_ref()
         && resource.project_id.as_ref() == scope.project_id.as_ref()
         // Fail-closed: a flow with no thread_id cannot match a thread-scoped request.
@@ -980,6 +982,20 @@ fn flow_scope_matches_turn_scope(flow: &ironclaw_auth::AuthFlowRecord, scope: &T
             (None, _) => false,
             (Some(t), s) => t == s,
         }
+}
+
+fn flow_matches_turn_gate(
+    flow: &ironclaw_auth::AuthFlowRecord,
+    run_id: &str,
+    gate_ref: &str,
+) -> bool {
+    matches!(
+        &flow.continuation,
+        ironclaw_auth::AuthContinuationRef::TurnGateResume {
+            turn_run_ref,
+            gate_ref: g,
+        } if turn_run_ref.as_str() == run_id && g.as_str() == gate_ref
+    )
 }
 
 fn auth_challenge_to_view(
@@ -992,17 +1008,17 @@ fn auth_challenge_to_view(
             expires_at,
         } => AuthChallengeView {
             kind: AuthPromptChallengeKind::OAuthUrl,
-            provider: flow.provider.as_str().to_string(),
+            provider: flow.provider.clone(),
             account_label: None,
-            authorization_url: Some(authorization_url.as_str().to_string()),
+            authorization_url: Some(authorization_url.clone()),
             expires_at: Some(*expires_at),
         },
         ironclaw_auth::AuthChallenge::ManualTokenRequired {
             label, expires_at, ..
         } => AuthChallengeView {
             kind: AuthPromptChallengeKind::ManualToken,
-            provider: flow.provider.as_str().to_string(),
-            account_label: Some(label.as_str().to_string()),
+            provider: flow.provider.clone(),
+            account_label: Some(label.clone()),
             authorization_url: None,
             expires_at: Some(*expires_at),
         },
@@ -1010,7 +1026,7 @@ fn auth_challenge_to_view(
         | ironclaw_auth::AuthChallenge::ReauthorizeRequired { .. }
         | ironclaw_auth::AuthChallenge::SetupRequired { .. } => AuthChallengeView {
             kind: AuthPromptChallengeKind::Other,
-            provider: flow.provider.as_str().to_string(),
+            provider: flow.provider.clone(),
             account_label: None,
             authorization_url: None,
             expires_at: None,
@@ -1023,24 +1039,20 @@ impl AuthChallengeProvider for RebornProductAuthServices {
     async fn challenge_for_gate(
         &self,
         scope: &TurnScope,
+        owner_user_id: &UserId,
+        run_id: TurnRunId,
         gate_ref: &str,
     ) -> Option<AuthChallengeView> {
         let source = self.flow_record_source.as_ref()?;
-        // Snapshot once; filter by scope ownership before matching gate_ref.
-        // gate_ref alone is not sufficient because the in-memory store holds
-        // records for all users — always verify tenant/agent/project/thread.
-        let snapshot = source.flow_records_snapshot();
-        let flow = snapshot
-            .into_iter()
-            .filter(|flow| !ironclaw_auth::is_terminal_status(flow.status))
-            .filter(|flow| flow_scope_matches_turn_scope(flow, scope))
-            .find(|flow| {
-                matches!(
-                    &flow.continuation,
-                    ironclaw_auth::AuthContinuationRef::TurnGateResume { gate_ref: g, .. }
-                        if g.as_str() == gate_ref
-                )
-            })?;
+        // The flow store is process-wide; always verify user, turn scope,
+        // run id, and gate ref before exposing challenge metadata.
+        let run_id = run_id.to_string();
+        let mut matches_challenge = |flow: &ironclaw_auth::AuthFlowRecord| {
+            !ironclaw_auth::is_terminal_status(flow.status)
+                && flow_scope_matches_turn_scope(flow, scope, owner_user_id)
+                && flow_matches_turn_gate(flow, &run_id, gate_ref)
+        };
+        let flow = source.flow_record_matching(&mut matches_challenge)?;
         let challenge = flow.challenge.as_ref()?;
         Some(auth_challenge_to_view(challenge, &flow))
     }

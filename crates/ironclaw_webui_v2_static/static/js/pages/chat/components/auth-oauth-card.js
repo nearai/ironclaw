@@ -78,10 +78,17 @@ export function AuthOauthCard({ gate, onCancel }) {
 
       <div className="flex flex-wrap gap-2">
         <${Button}
-          type="button"
+          as="a"
+          href=${hasHttpsAuthorizationUrl ? gate.authorizationUrl : undefined}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="auth-oauth"
           variant="primary"
           disabled=${!hasHttpsAuthorizationUrl}
-          onClick=${openAuth}
+          onClick=${(event) => {
+            event.preventDefault();
+            openAuth();
+          }}
         >
           ${openLabel}
         <//>
