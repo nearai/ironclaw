@@ -21,6 +21,9 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use ulid::Ulid;
 
+#[cfg(feature = "libsql")]
+mod libsql;
+
 const MIN_FIRE_CADENCE: Duration = Duration::from_secs(60);
 const MAX_DUE_TRIGGER_POLL_LIMIT: usize = 128;
 const IDENTITY_VERSION_LABEL: &str = "ironclaw.trigger-fire.v1";
@@ -393,12 +396,23 @@ pub trait TriggerRepository: Send + Sync {
         trigger_id: TriggerId,
     ) -> Result<Option<TriggerRecord>, TriggerError>;
 
+    /// Lists due triggers across all tenants for the trusted poller path.
+    ///
+    /// # Safety / Authorization
+    ///
+    /// This is a global query and must not be used for tenant-scoped or
+    /// user-facing list operations. Callers must preserve each returned
+    /// record's tenant/user authority when materializing a fire.
     async fn list_due_triggers(
         &self,
         now: Timestamp,
         limit: usize,
     ) -> Result<Vec<TriggerRecord>, TriggerError>;
 }
+
+#[cfg(feature = "libsql")]
+/// Feature-gated durable repository constructor for composition/test wiring.
+pub use libsql::LibSqlTriggerRepository;
 
 #[derive(Clone, Default)]
 pub struct InMemoryTriggerRepository {
@@ -484,15 +498,24 @@ impl TriggerRepository for InMemoryTriggerRepository {
             state
                 .iter()
                 .filter(|(_, record)| record.is_due_at(now))
-                .map(|(key, record)| (record.next_run_at, record.trigger_id, key.clone()))
+                .map(|(key, record)| {
+                    (
+                        record.next_run_at,
+                        record.tenant_id.clone(),
+                        record.trigger_id,
+                        key.clone(),
+                    )
+                })
                 .collect::<Vec<_>>()
         };
-        keys.sort_by_key(|(next_run_at, trigger_id, _)| (*next_run_at, *trigger_id));
+        keys.sort_by_key(|(next_run_at, tenant_id, trigger_id, _)| {
+            (*next_run_at, tenant_id.clone(), *trigger_id)
+        });
         keys.truncate(limit);
         let state = self.lock_state()?;
         Ok(keys
             .into_iter()
-            .filter_map(|(_, _, key)| state.get(&key).cloned())
+            .filter_map(|(_, _, _, key)| state.get(&key).cloned())
             .collect())
     }
 }
@@ -1024,6 +1047,53 @@ mod tests {
             .expect("list due");
         assert_eq!(due_records.len(), 1);
         assert_eq!(due_records[0].trigger_id, first.trigger_id);
+    }
+
+    #[tokio::test]
+    async fn in_memory_repository_list_due_triggers_orders_same_slot_by_tenant_then_trigger_id() {
+        let repo = InMemoryTriggerRepository::default();
+        let due_slot = ts(1_704_067_200);
+        let tenant_a_high = sample_record(
+            TriggerId::parse("01J00000000000000000000000").expect("ulid"),
+            tenant("tenant-a"),
+            due_slot,
+        );
+        let tenant_b_low = sample_record(
+            TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid"),
+            tenant("tenant-b"),
+            due_slot,
+        );
+        let tenant_a_low = sample_record(
+            TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZY").expect("ulid"),
+            tenant("tenant-a"),
+            due_slot,
+        );
+        repo.upsert_trigger(tenant_b_low.clone())
+            .await
+            .expect("insert tenant b");
+        repo.upsert_trigger(tenant_a_high.clone())
+            .await
+            .expect("insert tenant a high");
+        repo.upsert_trigger(tenant_a_low.clone())
+            .await
+            .expect("insert tenant a low");
+
+        let due_records = repo
+            .list_due_triggers(due_slot, 10)
+            .await
+            .expect("list due");
+
+        assert_eq!(
+            due_records
+                .iter()
+                .map(|record| (record.tenant_id.clone(), record.trigger_id))
+                .collect::<Vec<_>>(),
+            vec![
+                (tenant_a_low.tenant_id.clone(), tenant_a_low.trigger_id),
+                (tenant_a_high.tenant_id.clone(), tenant_a_high.trigger_id),
+                (tenant_b_low.tenant_id.clone(), tenant_b_low.trigger_id),
+            ]
+        );
     }
 
     #[tokio::test]
