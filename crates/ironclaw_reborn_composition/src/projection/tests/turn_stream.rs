@@ -208,8 +208,75 @@ async fn webui_event_stream_projects_blocked_dependent_run_status() {
         ProductOutboundPayload::ProjectionUpdate { state } => state.items.iter().any(|item| {
             matches!(
                 item,
-                ProductProjectionItem::RunStatus { run_id, status }
+                ProductProjectionItem::RunStatus { run_id, status, .. }
                     if *run_id == turn_run && status == "blocked_dependent_run"
+            )
+        }),
+        _ => false,
+    }));
+}
+
+#[tokio::test]
+async fn webui_event_stream_projects_failed_run_failure_summary() {
+    let tenant_id = TenantId::new("webui-events-tenant").unwrap();
+    let user_id = UserId::new("webui-events-user").unwrap();
+    let agent_id = AgentId::new("webui-events-agent").unwrap();
+    let thread_id = ThreadId::new("webui-events-failed-thread").unwrap();
+    let turn_run = TurnRunId::new();
+    let scope = TurnScope::new(
+        tenant_id.clone(),
+        Some(agent_id.clone()),
+        None,
+        thread_id.clone(),
+    );
+    let event_log_dyn: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
+    let actor = TurnActor::new(user_id.clone());
+    let services = build_reborn_projection_services(
+        event_log_dyn,
+        ReplyTargetBindingRef::new("webui-events-reply").unwrap(),
+    )
+    .with_turn_events(
+        Arc::new(FakeTurnEventSource {
+            events: vec![TurnLifecycleEvent {
+                cursor: TurnEventCursor(1),
+                scope: scope.clone(),
+                occurred_at: Some(chrono::Utc::now()),
+                owner_user_id: Some(user_id.clone()),
+                run_id: turn_run,
+                status: TurnStatus::Failed,
+                kind: TurnEventKind::Failed,
+                blocked_gate: None,
+                sanitized_reason: Some("lease_expired".to_string()),
+            }],
+        }),
+        Arc::new(FakeTurnCoordinator {
+            state: turn_run_state(&scope, &user_id, turn_run, TurnEventCursor(1)),
+        }),
+    );
+
+    let events = services
+        .webui_event_stream()
+        .drain(ProjectionSubscriptionRequest {
+            actor,
+            scope,
+            after_cursor: None,
+        })
+        .await
+        .unwrap();
+
+    assert!(events.iter().any(|event| match event.payload() {
+        ProductOutboundPayload::ProjectionUpdate { state } => state.items.iter().any(|item| {
+            matches!(
+                item,
+                ProductProjectionItem::RunStatus {
+                    run_id,
+                    status,
+                    failure_category: Some(category),
+                    failure_summary: Some(summary),
+                } if *run_id == turn_run
+                    && status == "failed"
+                    && category == "lease_expired"
+                    && summary == "The run failed because its runner lease expired."
             )
         }),
         _ => false,

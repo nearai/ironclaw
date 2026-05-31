@@ -3019,7 +3019,11 @@ mod tests {
                             | ProductOutboundPayload::ProjectionUpdate { state }
                             if state.items.iter().any(|item| matches!(
                                 item,
-                                ProductProjectionItem::RunStatus { run_id: seen, status }
+                                ProductProjectionItem::RunStatus {
+                                    run_id: seen,
+                                    status,
+                                    ..
+                                }
                                     if *seen == run_id && status == "completed"
                             ))
                     )

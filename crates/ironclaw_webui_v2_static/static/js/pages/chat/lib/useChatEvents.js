@@ -210,7 +210,12 @@ function applyProjectionItems({
   let activeRunId = latestRunIdRef?.current ?? null;
   for (const item of items) {
     if (item.run_status) {
-      const { run_id: runId, status } = item.run_status;
+      const {
+        run_id: runId,
+        status,
+        failure_category: failureCategory,
+        failure_summary: failureSummary,
+      } = item.run_status;
       if (runId) {
         activeRunId = runId;
         setActiveRun?.((current) =>
@@ -249,10 +254,11 @@ function applyProjectionItems({
               {
                 id: messageId,
                 role: "error",
-                content:
-                  status === "recovery_required"
-                    ? "The run is awaiting recovery — backend reported `recovery_required`."
-                    : "The run failed before producing a reply.",
+                content: failureMessageForRunStatus({
+                  status,
+                  failureCategory,
+                  failureSummary,
+                }),
                 timestamp: new Date().toISOString(),
               },
             ];
@@ -338,6 +344,22 @@ function applyProjectionItems({
   if (latestRunIdRef && activeRunId) {
     latestRunIdRef.current = activeRunId;
   }
+}
+
+function failureMessageForRunStatus({
+  status,
+  failureCategory,
+  failureSummary,
+}) {
+  if (typeof failureSummary === "string" && failureSummary.trim()) {
+    return failureSummary.trim();
+  }
+  if (typeof failureCategory === "string" && failureCategory.trim()) {
+    return `The run failed: ${failureCategory.trim().replaceAll("_", " ")}.`;
+  }
+  return status === "recovery_required"
+    ? "The run is awaiting recovery — backend reported `recovery_required`."
+    : "The run failed before producing a reply.";
 }
 
 function upsertToolFromPreview(setMessages, invocationId, card) {

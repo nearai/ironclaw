@@ -60,7 +60,7 @@ fn contains_run_status(
         | ProductOutboundPayload::ProjectionUpdate { state } => state.items.iter().any(|item| {
             matches!(
                 item,
-                ProductProjectionItem::RunStatus { run_id, status }
+                ProductProjectionItem::RunStatus { run_id, status, .. }
                     if *run_id == expected_run_id && status == expected_status
             )
         }),

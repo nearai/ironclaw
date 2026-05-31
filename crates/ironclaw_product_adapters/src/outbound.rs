@@ -563,6 +563,10 @@ pub enum ProductProjectionItem {
     RunStatus {
         run_id: TurnRunId,
         status: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        failure_category: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        failure_summary: Option<String>,
     },
     Gate {
         gate_ref: String,
@@ -591,11 +595,33 @@ impl ProductProjectionItem {
                     PROJECTION_WORK_SUMMARY_MAX_BYTES,
                 )
             }
-            Self::RunStatus { status, .. } => validate_bounded_text(
-                "projection_run_status",
+            Self::RunStatus {
                 status,
-                PROJECTION_ITEM_ID_MAX_BYTES,
-            ),
+                failure_category,
+                failure_summary,
+                ..
+            } => {
+                validate_bounded_text(
+                    "projection_run_status",
+                    status,
+                    PROJECTION_ITEM_ID_MAX_BYTES,
+                )?;
+                if let Some(category) = failure_category {
+                    validate_bounded_text(
+                        "projection_failure_category",
+                        category,
+                        PROJECTION_ITEM_ID_MAX_BYTES,
+                    )?;
+                }
+                if let Some(summary) = failure_summary {
+                    validate_bounded_text(
+                        "projection_failure_summary",
+                        summary,
+                        PROJECTION_TEXT_MAX_BYTES,
+                    )?;
+                }
+                Ok(())
+            }
             Self::Gate { gate_ref, headline } => {
                 validate_bounded_text(
                     "projection_gate_ref",
@@ -672,6 +698,10 @@ impl<'de> Deserialize<'de> for ProductProjectionItem {
             RunStatus {
                 run_id: TurnRunId,
                 status: String,
+                #[serde(default)]
+                failure_category: Option<String>,
+                #[serde(default)]
+                failure_summary: Option<String>,
             },
             Gate {
                 gate_ref: String,
@@ -698,9 +728,17 @@ impl<'de> Deserialize<'de> for ProductProjectionItem {
                 phase,
                 body,
             },
-            Wire::RunStatus { run_id, status } => {
-                ProductProjectionItem::RunStatus { run_id, status }
-            }
+            Wire::RunStatus {
+                run_id,
+                status,
+                failure_category,
+                failure_summary,
+            } => ProductProjectionItem::RunStatus {
+                run_id,
+                status,
+                failure_category,
+                failure_summary,
+            },
             Wire::Gate { gate_ref, headline } => ProductProjectionItem::Gate { gate_ref, headline },
             Wire::SkillActivation {
                 id,
@@ -908,6 +946,61 @@ mod tests {
         let decoded: ProductProjectionState =
             serde_json::from_value(value).expect("deserialize work summary projection");
         assert_eq!(decoded, state);
+    }
+
+    #[test]
+    fn projection_state_round_trips_run_status_failure_details() {
+        let run_id = TurnRunId::new();
+        let state = ProductProjectionState::new(
+            "thread-1",
+            vec![ProductProjectionItem::RunStatus {
+                run_id,
+                status: "failed".to_string(),
+                failure_category: Some("lease_expired".to_string()),
+                failure_summary: Some(
+                    "The run failed because its runner lease expired.".to_string(),
+                ),
+            }],
+        )
+        .expect("valid run status projection");
+        let value = serde_json::to_value(&state).expect("serialize");
+        assert_eq!(
+            value["items"][0]["run_status"]["failure_category"],
+            "lease_expired"
+        );
+        assert_eq!(
+            value["items"][0]["run_status"]["failure_summary"],
+            "The run failed because its runner lease expired."
+        );
+        let decoded: ProductProjectionState =
+            serde_json::from_value(value).expect("deserialize run status projection");
+        assert_eq!(decoded, state);
+    }
+
+    #[test]
+    fn projection_state_accepts_legacy_run_status_without_failure_details() {
+        let run_id = TurnRunId::new();
+        let json = serde_json::json!({
+            "thread_id": "thread-1",
+            "items": [{
+                "run_status": {
+                    "run_id": run_id,
+                    "status": "failed"
+                }
+            }]
+        });
+
+        let decoded: ProductProjectionState =
+            serde_json::from_value(json).expect("deserialize legacy run status projection");
+        assert_eq!(
+            decoded.items,
+            vec![ProductProjectionItem::RunStatus {
+                run_id,
+                status: "failed".to_string(),
+                failure_category: None,
+                failure_summary: None,
+            }]
+        );
     }
 
     #[test]

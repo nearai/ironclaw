@@ -879,12 +879,42 @@ fn run_status_projection_state(
         .map(|run| ProductProjectionItem::RunStatus {
             run_id: TurnRunId::from_uuid(run.invocation_id.as_uuid()),
             status: run_status_wire(run.status).to_string(),
+            failure_category: run_failure_category(&run),
+            failure_summary: run_failure_summary(&run),
         })
         .collect::<Vec<_>>();
     if items.is_empty() {
         return Ok(None);
     }
     ProductProjectionState::new(scope.thread_id.to_string(), items).map(Some)
+}
+
+fn run_failure_category(run: &RunStatusProjection) -> Option<String> {
+    matches!(
+        run.status,
+        RunProjectionStatus::Failed | RunProjectionStatus::Killed
+    )
+    .then(|| run.error_kind.clone())
+    .flatten()
+}
+
+fn run_failure_summary(run: &RunStatusProjection) -> Option<String> {
+    run_failure_category(run)
+        .as_deref()
+        .map(runtime_failure_summary_for_category)
+        .map(str::to_string)
+}
+
+fn runtime_failure_summary_for_category(category: &str) -> &'static str {
+    match category {
+        "model_failed" => "The run failed while waiting for the model.",
+        "dispatch_failed" => "The run failed while executing a capability.",
+        "process_failed" => "The run failed while executing a runtime process.",
+        "process_killed" => "The run stopped because its runtime process was killed.",
+        "hook_failed" => "The run failed while evaluating a runtime hook.",
+        "unknown" | "unclassified" => "The run failed for an unknown reason.",
+        _ => "The run failed before producing a reply.",
+    }
 }
 
 fn capability_activity_status_wire(

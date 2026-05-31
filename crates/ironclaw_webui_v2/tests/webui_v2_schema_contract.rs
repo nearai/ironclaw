@@ -140,6 +140,8 @@ fn projection_state() -> ProductProjectionState {
             ProductProjectionItem::RunStatus {
                 run_id: run_id(),
                 status: "running".to_string(),
+                failure_category: None,
+                failure_summary: None,
             },
             ProductProjectionItem::WorkSummary {
                 id: "work-summary-1".to_string(),

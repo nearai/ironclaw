@@ -223,8 +223,52 @@ fn turn_event_projection_state(
         vec![ProductProjectionItem::RunStatus {
             run_id: event.run_id,
             status: turn_status_wire(event.status).to_string(),
+            failure_category: failure_category_for_turn_event(event),
+            failure_summary: failure_summary_for_turn_event(event),
         }],
     )
+}
+
+fn failure_category_for_turn_event(event: &TurnLifecycleEvent) -> Option<String> {
+    matches!(
+        event.status,
+        TurnStatus::Failed | TurnStatus::RecoveryRequired
+    )
+    .then(|| event.sanitized_reason.clone())
+    .flatten()
+}
+
+fn failure_summary_for_turn_event(event: &TurnLifecycleEvent) -> Option<String> {
+    failure_category_for_turn_event(event)
+        .as_deref()
+        .map(failure_summary_for_category)
+        .map(str::to_string)
+}
+
+fn failure_summary_for_category(category: &str) -> &'static str {
+    match category {
+        "driver_not_found" => {
+            "The run failed because the configured execution driver was not available."
+        }
+        "driver_unavailable" => {
+            "The run failed because the execution driver was temporarily unavailable."
+        }
+        "driver_failed" => "The run failed because the execution driver reported an error.",
+        "driver_invalid_request" => {
+            "The run failed because the execution driver rejected the request."
+        }
+        "driver_panic" => "The run failed because the execution driver stopped unexpectedly.",
+        "host_creation_failed" => "The run failed while preparing the runtime host.",
+        "route_snapshot_persistence_failed" => {
+            "The run failed while saving the selected model route."
+        }
+        "heartbeat_failed" => "The run failed after the runner heartbeat could not be recorded.",
+        "exit_application_failed" => "The run failed while recording its final result.",
+        "lease_expired" => "The run failed because its runner lease expired.",
+        "interrupted_unexpectedly" => "The run stopped before it could complete cleanly.",
+        "unknown_failure" => "The run failed for an unknown reason.",
+        _ => "The run failed before producing a reply.",
+    }
 }
 
 fn turn_status_wire(status: TurnStatus) -> &'static str {
