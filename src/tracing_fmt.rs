@@ -58,6 +58,16 @@ pub struct TruncatingStderr {
 
 impl Default for TruncatingStderr {
     fn default() -> Self {
+        Self {
+            max_bytes: TERMINAL_MAX_EVENT_BYTES,
+        }
+    }
+}
+
+impl TruncatingStderr {
+    /// Construct from `IRONCLAW_LOG_MAX_BYTES`, falling back to the default if
+    /// the variable is unset or unparseable.
+    pub fn from_env() -> Self {
         let max_bytes = std::env::var("IRONCLAW_LOG_MAX_BYTES")
             .ok()
             .and_then(|v| match v.parse::<usize>() {
@@ -73,9 +83,7 @@ impl Default for TruncatingStderr {
             .unwrap_or(TERMINAL_MAX_EVENT_BYTES);
         Self { max_bytes }
     }
-}
 
-impl TruncatingStderr {
     #[cfg(test)]
     fn with_max_bytes(max_bytes: usize) -> Self {
         Self { max_bytes }

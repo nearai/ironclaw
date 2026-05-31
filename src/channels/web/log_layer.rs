@@ -219,7 +219,7 @@ pub fn init_tracing(
         Some(
             tracing_subscriber::fmt::layer()
                 .with_target(false)
-                .with_writer(crate::tracing_fmt::TruncatingStderr::default()),
+                .with_writer(crate::tracing_fmt::TruncatingStderr::from_env()),
         )
     };
 
