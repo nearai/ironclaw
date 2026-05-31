@@ -13,7 +13,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use chrono::{DateTime, SecondsFormat, Utc};
+use chrono::{SecondsFormat, Utc};
 use cron::Schedule;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, Timestamp, UserId};
 use serde::{Deserialize, Serialize};
@@ -22,6 +22,7 @@ use thiserror::Error;
 use ulid::Ulid;
 
 const MIN_FIRE_CADENCE: Duration = Duration::from_secs(60);
+const MAX_DUE_TRIGGER_POLL_LIMIT: usize = 128;
 const IDENTITY_VERSION_LABEL: &str = "ironclaw.trigger-fire.v1";
 const ROUTE_THREAD_DOMAIN: &str = "route-thread";
 const EXTERNAL_EVENT_DOMAIN: &str = "external-event";
@@ -30,6 +31,10 @@ const EXTERNAL_EVENT_DOMAIN: &str = "external-event";
 pub enum TriggerError {
     #[error("invalid trigger id: {reason}")]
     InvalidTriggerId { reason: String },
+    #[error("invalid fire identity component {label}: {reason}")]
+    InvalidFireIdentityComponent { label: String, reason: String },
+    #[error("invalid trigger record: {reason}")]
+    InvalidRecord { reason: String },
     #[error("invalid schedule: {reason}")]
     InvalidSchedule { reason: String },
     #[error("trigger repository backend unavailable")]
@@ -213,12 +218,12 @@ pub struct TriggerRecord {
 impl TriggerRecord {
     pub fn validate(&self) -> Result<(), TriggerError> {
         if self.name.trim().is_empty() {
-            return Err(TriggerError::InvalidSchedule {
+            return Err(TriggerError::InvalidRecord {
                 reason: "trigger name must not be empty".to_string(),
             });
         }
         if self.prompt.trim().is_empty() {
-            return Err(TriggerError::InvalidSchedule {
+            return Err(TriggerError::InvalidRecord {
                 reason: "trigger prompt must not be empty".to_string(),
             });
         }
@@ -439,16 +444,20 @@ impl TriggerRepository for InMemoryTriggerRepository {
     }
 
     async fn list_triggers(&self, tenant_id: TenantId) -> Result<Vec<TriggerRecord>, TriggerError> {
-        let mut records = {
+        let mut keys = {
             let state = self.lock_state()?;
             state
-                .values()
-                .filter(|record| record.tenant_id == tenant_id)
-                .cloned()
+                .iter()
+                .filter(|(_, record)| record.tenant_id == tenant_id)
+                .map(|(key, record)| (record.created_at, record.trigger_id, key.clone()))
                 .collect::<Vec<_>>()
         };
-        records.sort_by_key(|record| (record.created_at, record.trigger_id));
-        Ok(records)
+        keys.sort_by_key(|(created_at, trigger_id, _)| (*created_at, *trigger_id));
+        let state = self.lock_state()?;
+        Ok(keys
+            .into_iter()
+            .filter_map(|(_, _, key)| state.get(&key).cloned())
+            .collect())
     }
 
     async fn remove_trigger(
@@ -469,17 +478,22 @@ impl TriggerRepository for InMemoryTriggerRepository {
         if limit == 0 {
             return Ok(Vec::new());
         }
-        let mut records = {
+        let limit = limit.min(MAX_DUE_TRIGGER_POLL_LIMIT);
+        let mut keys = {
             let state = self.lock_state()?;
             state
-                .values()
-                .filter(|record| record.is_due_at(now))
-                .cloned()
+                .iter()
+                .filter(|(_, record)| record.is_due_at(now))
+                .map(|(key, record)| (record.next_run_at, record.trigger_id, key.clone()))
                 .collect::<Vec<_>>()
         };
-        records.sort_by_key(|record| (record.next_run_at, record.trigger_id));
-        records.truncate(limit);
-        Ok(records)
+        keys.sort_by_key(|(next_run_at, trigger_id, _)| (*next_run_at, *trigger_id));
+        keys.truncate(limit);
+        let state = self.lock_state()?;
+        Ok(keys
+            .into_iter()
+            .filter_map(|(_, _, key)| state.get(&key).cloned())
+            .collect())
     }
 }
 
@@ -537,35 +551,18 @@ fn reject_sub_minute_seconds_field(field: &str) -> Result<(), TriggerError> {
 }
 
 fn reject_sub_minute_cadence(schedule: &Schedule) -> Result<(), TriggerError> {
-    let probes = [0_i64, 15, 30, 45]
-        .into_iter()
-        .map(|offset_seconds| {
-            DateTime::from_timestamp(1_704_067_200 + offset_seconds, 0).ok_or_else(|| {
-                TriggerError::InvalidSchedule {
-                    reason: "failed to build cadence validation timestamp".to_string(),
-                }
-            })
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let mut found_fire = false;
-    for probe in probes {
-        let mut upcoming = schedule.after(&probe);
-        let Some(first) = upcoming.next() else {
-            continue;
-        };
-        found_fire = true;
-        let Some(second) = upcoming.next() else {
-            continue;
-        };
-        if (second - first).num_seconds() < MIN_FIRE_CADENCE.as_secs() as i64 {
-            return Err(TriggerError::InvalidSchedule {
-                reason: "schedule can fire more frequently than once per minute".to_string(),
-            });
-        }
-    }
-    if !found_fire {
+    let mut upcoming = schedule.upcoming(Utc);
+    let Some(first) = upcoming.next() else {
         return Err(TriggerError::InvalidSchedule {
             reason: "cron expression has no upcoming fire time".to_string(),
+        });
+    };
+    let Some(second) = upcoming.next() else {
+        return Ok(());
+    };
+    if (second - first).num_seconds() < MIN_FIRE_CADENCE.as_secs() as i64 {
+        return Err(TriggerError::InvalidSchedule {
+            reason: "schedule can fire more frequently than once per minute".to_string(),
         });
     }
     Ok(())
@@ -579,8 +576,9 @@ fn validate_lower_hex_identifier(label: &str, value: String) -> Result<String, T
     {
         return Ok(value);
     }
-    Err(TriggerError::InvalidTriggerId {
-        reason: format!("{label} must be 64 lowercase hex characters"),
+    Err(TriggerError::InvalidFireIdentityComponent {
+        label: label.to_string(),
+        reason: "must be 64 lowercase hex characters".to_string(),
     })
 }
 
@@ -710,6 +708,14 @@ mod tests {
             from_value::<TriggerExternalEventId>(json!(event_value)).unwrap(),
             event
         );
+        assert!(matches!(
+            TriggerRouteThreadId::new("route-1"),
+            Err(TriggerError::InvalidFireIdentityComponent { .. })
+        ));
+        assert!(matches!(
+            TriggerExternalEventId::new("event-1"),
+            Err(TriggerError::InvalidFireIdentityComponent { .. })
+        ));
     }
 
     #[test]
@@ -733,6 +739,11 @@ mod tests {
         for expression in ["0 0 * * * *", "00 0 * * * *"] {
             TriggerSchedule::cron(expression).expect("zero seconds accepted");
         }
+    }
+
+    #[test]
+    fn cron_schedule_accepts_far_future_recurring_dates() {
+        TriggerSchedule::cron("0 8 31 12 *").expect("annual schedule accepted");
     }
 
     #[test]
@@ -955,7 +966,7 @@ mod tests {
         record.name.clear();
         assert!(matches!(
             repo.upsert_trigger(record).await,
-            Err(TriggerError::InvalidSchedule { .. })
+            Err(TriggerError::InvalidRecord { .. })
         ));
 
         let mut record = sample_record(
@@ -966,7 +977,7 @@ mod tests {
         record.prompt.clear();
         assert!(matches!(
             repo.upsert_trigger(record).await,
-            Err(TriggerError::InvalidSchedule { .. })
+            Err(TriggerError::InvalidRecord { .. })
         ));
     }
 
@@ -1013,6 +1024,26 @@ mod tests {
             .expect("list due");
         assert_eq!(due_records.len(), 1);
         assert_eq!(due_records[0].trigger_id, first.trigger_id);
+    }
+
+    #[tokio::test]
+    async fn in_memory_repository_list_due_triggers_clamps_large_limit() {
+        let repo = InMemoryTriggerRepository::default();
+        for _ in 0..=MAX_DUE_TRIGGER_POLL_LIMIT {
+            repo.upsert_trigger(sample_record(
+                TriggerId::new(),
+                tenant("tenant-a"),
+                ts(1_704_067_200),
+            ))
+            .await
+            .expect("insert due");
+        }
+
+        let due_records = repo
+            .list_due_triggers(ts(1_704_067_200), MAX_DUE_TRIGGER_POLL_LIMIT + 10)
+            .await
+            .expect("list due");
+        assert_eq!(due_records.len(), MAX_DUE_TRIGGER_POLL_LIMIT);
     }
 
     #[test]
