@@ -190,6 +190,91 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn routines_create_endpoint_creates_routines() {
+        let mock = MockOpenAiServerBuilder::new()
+            .with_default_response(MockOpenAiResponse::Text("ack".to_string()))
+            .start()
+            .await;
+
+        let harness =
+            GatewayWorkflowHarness::start_openai_compatible(&mock.openai_base_url(), "mock-model")
+                .await;
+
+        let created = harness
+            .client
+            .post(format!("{}/api/routines", harness.base_url()))
+            .bearer_auth(&harness.auth_token)
+            .json(&serde_json::json!({
+                "name": "wf-api-manual-create",
+                "description": "Created through the gateway API",
+                "prompt": "Check the system status.",
+                "request": { "kind": "manual" },
+                "execution": { "mode": "lightweight", "use_tools": false }
+            }))
+            .send()
+            .await
+            .expect("create routine request failed");
+        assert_eq!(created.status(), reqwest::StatusCode::CREATED);
+        let created = created
+            .json::<serde_json::Value>()
+            .await
+            .expect("invalid create response");
+        assert_eq!(created["name"].as_str(), Some("wf-api-manual-create"));
+        assert_eq!(created["trigger_type"].as_str(), Some("manual"));
+        assert_eq!(created["enabled"].as_bool(), Some(true));
+        assert_eq!(created["verification_status"].as_str(), Some("unverified"));
+
+        let listed = harness
+            .routine_by_name("wf-api-manual-create")
+            .await
+            .expect("created routine should be listed");
+        assert_eq!(listed["id"], created["id"]);
+
+        let disabled_cron = harness
+            .client
+            .post(format!("{}/api/routines", harness.base_url()))
+            .bearer_auth(&harness.auth_token)
+            .json(&serde_json::json!({
+                "name": "wf-api-disabled-cron-create",
+                "prompt": "Prepare a report.",
+                "request": {
+                    "kind": "cron",
+                    "schedule": "0 */5 * * * *",
+                    "timezone": "UTC"
+                },
+                "enabled": false
+            }))
+            .send()
+            .await
+            .expect("create disabled cron request failed");
+        assert_eq!(disabled_cron.status(), reqwest::StatusCode::CREATED);
+        let disabled_cron = disabled_cron
+            .json::<serde_json::Value>()
+            .await
+            .expect("invalid disabled cron response");
+        assert_eq!(disabled_cron["trigger_type"].as_str(), Some("cron"));
+        assert_eq!(disabled_cron["enabled"].as_bool(), Some(false));
+        assert!(disabled_cron["next_fire_at"].is_null());
+
+        let invalid_cron = harness
+            .client
+            .post(format!("{}/api/routines", harness.base_url()))
+            .bearer_auth(&harness.auth_token)
+            .json(&serde_json::json!({
+                "name": "wf-api-invalid-cron",
+                "prompt": "This should fail.",
+                "request": { "kind": "cron", "schedule": "not a cron" }
+            }))
+            .send()
+            .await
+            .expect("invalid cron request failed");
+        assert_eq!(invalid_cron.status(), reqwest::StatusCode::BAD_REQUEST);
+
+        harness.shutdown().await;
+        mock.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn routines_toggle_reenable_cron_recomputes_next_fire_at() {
         let mock = MockOpenAiServerBuilder::new()
             .with_rule(MockOpenAiRule::on_user_contains(

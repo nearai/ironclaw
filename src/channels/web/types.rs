@@ -966,6 +966,23 @@ impl WsServerMessage {
 
 // --- Routines ---
 
+#[derive(Debug, Deserialize)]
+pub struct CreateRoutineRequest {
+    pub name: String,
+    pub prompt: String,
+    pub request: serde_json::Value,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub execution: Option<serde_json::Value>,
+    #[serde(default)]
+    pub delivery: Option<serde_json::Value>,
+    #[serde(default)]
+    pub advanced: Option<serde_json::Value>,
+    #[serde(default)]
+    pub enabled: Option<bool>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct RoutineInfo {
     pub id: Uuid,
