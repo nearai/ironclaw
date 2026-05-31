@@ -747,6 +747,11 @@ impl HostRuntimeLoopCapabilityPort {
             match capability.output(&input, |requested| snapshot.capability_info(requested)) {
                 Ok(output) => output,
                 Err(error) if error.kind == AgentLoopHostErrorKind::InvalidInvocation => {
+                    // Synthetic capability InvalidInvocation errors are model-side input failures
+                    // such as bad arguments or an unknown capability_info target. Keep those
+                    // model-visible so the driver can retry instead of terminalizing the host.
+                    // INVARIANT: synthetic capabilities must not use InvalidInvocation for
+                    // internal or host-fatal conditions.
                     return Ok(CapabilityOutcome::Failed(CapabilityFailure {
                         error_kind: CapabilityFailureKind::InvalidInput,
                         safe_summary: error.safe_summary,
@@ -3162,6 +3167,14 @@ mod tests {
             .register_provider_tool_call(call)
             .await
             .expect("capability_info call should register by provider tool name");
+        assert_eq!(
+            candidate.effective_capability_ids,
+            vec![
+                CapabilityId::new(capability_info::CAPABILITY_ID).expect("synthetic id"),
+                capability_id.clone(),
+            ],
+            "known target should include both capability_info and target ids"
+        );
         port.invoke_capability(CapabilityInvocation {
             surface_version: surface.version,
             capability_id: candidate.capability_id,

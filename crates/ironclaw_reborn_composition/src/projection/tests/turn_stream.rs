@@ -502,6 +502,160 @@ async fn webui_event_stream_projects_recovery_required_failure_summary() {
 }
 
 #[tokio::test]
+async fn failure_details_returns_fallback_when_coordinator_errors() {
+    let tenant_id = TenantId::new("webui-events-tenant").unwrap();
+    let user_id = UserId::new("webui-events-user").unwrap();
+    let agent_id = AgentId::new("webui-events-agent").unwrap();
+    let thread_id = ThreadId::new("webui-events-coordinator-fallback-thread").unwrap();
+    let turn_run = TurnRunId::new();
+    let scope = TurnScope::new(
+        tenant_id.clone(),
+        Some(agent_id.clone()),
+        None,
+        thread_id.clone(),
+    );
+    let event_log_dyn: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
+    let actor = TurnActor::new(user_id.clone());
+    let gateway = Arc::new(RecordingFailureGateway {
+        response: Mutex::new(Ok(SystemInferenceResponse {
+            task_id: SystemInferenceTaskId::new(),
+            output_text: "This should not be used.".to_string(),
+            elapsed_ms: 1,
+        })),
+        requests: Mutex::new(Vec::new()),
+    });
+    let services = build_reborn_projection_services(
+        event_log_dyn,
+        ReplyTargetBindingRef::new("webui-events-reply").unwrap(),
+    )
+    .with_turn_events(
+        Arc::new(FakeTurnEventSource {
+            events: vec![TurnLifecycleEvent {
+                cursor: TurnEventCursor(1),
+                scope: scope.clone(),
+                occurred_at: Some(chrono::Utc::now()),
+                owner_user_id: Some(user_id.clone()),
+                run_id: turn_run,
+                status: TurnStatus::Failed,
+                kind: TurnEventKind::Failed,
+                blocked_gate: None,
+                sanitized_reason: Some("driver_unavailable".to_string()),
+            }],
+        }),
+        Arc::new(FailingTurnCoordinator),
+    )
+    .with_failure_explainer(Arc::new(ModelFailureExplanationProvider::new(
+        gateway.clone(),
+    )));
+
+    let events = services
+        .webui_event_stream()
+        .drain(ProjectionSubscriptionRequest {
+            actor,
+            scope,
+            after_cursor: None,
+        })
+        .await
+        .unwrap();
+
+    assert!(events.iter().any(|event| match event.payload() {
+        ProductOutboundPayload::ProjectionUpdate { state } => state.items.iter().any(|item| {
+            matches!(
+                item,
+                ProductProjectionItem::RunStatus {
+                    run_id,
+                    failure_summary: Some(summary),
+                    ..
+                } if *run_id == turn_run
+                    && summary == "The run failed because the execution driver was temporarily unavailable."
+            )
+        }),
+        _ => false,
+    }));
+    assert_eq!(gateway.requests.lock().await.len(), 0);
+}
+
+#[tokio::test]
+async fn failure_details_returns_fallback_when_model_gateway_times_out() {
+    let tenant_id = TenantId::new("webui-events-tenant").unwrap();
+    let user_id = UserId::new("webui-events-user").unwrap();
+    let agent_id = AgentId::new("webui-events-agent").unwrap();
+    let thread_id = ThreadId::new("webui-events-timeout-fallback-thread").unwrap();
+    let turn_run = TurnRunId::new();
+    let scope = TurnScope::new(
+        tenant_id.clone(),
+        Some(agent_id.clone()),
+        None,
+        thread_id.clone(),
+    );
+    let event_log_dyn: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
+    let actor = TurnActor::new(user_id.clone());
+    let services = build_reborn_projection_services(
+        event_log_dyn,
+        ReplyTargetBindingRef::new("webui-events-reply").unwrap(),
+    )
+    .with_turn_events(
+        Arc::new(FakeTurnEventSource {
+            events: vec![TurnLifecycleEvent {
+                cursor: TurnEventCursor(1),
+                scope: scope.clone(),
+                occurred_at: Some(chrono::Utc::now()),
+                owner_user_id: Some(user_id.clone()),
+                run_id: turn_run,
+                status: TurnStatus::Failed,
+                kind: TurnEventKind::Failed,
+                blocked_gate: None,
+                sanitized_reason: Some("driver_panic".to_string()),
+            }],
+        }),
+        Arc::new(FakeTurnCoordinator {
+            state: TurnRunState {
+                status: TurnStatus::Failed,
+                ..turn_run_state(&scope, &user_id, turn_run, TurnEventCursor(1))
+            },
+        }),
+    )
+    .with_failure_explainer(Arc::new(ModelFailureExplanationProvider::new(Arc::new(
+        SlowSystemInference,
+    ))));
+
+    let events = services
+        .webui_event_stream()
+        .drain(ProjectionSubscriptionRequest {
+            actor,
+            scope,
+            after_cursor: None,
+        })
+        .await
+        .unwrap();
+
+    assert!(events.iter().any(|event| match event.payload() {
+        ProductOutboundPayload::ProjectionUpdate { state } => state.items.iter().any(|item| {
+            matches!(
+                item,
+                ProductProjectionItem::RunStatus {
+                    run_id,
+                    failure_summary: Some(summary),
+                    ..
+                } if *run_id == turn_run
+                    && summary == "The run failed because the execution driver stopped unexpectedly."
+            )
+        }),
+        _ => false,
+    }));
+}
+
+#[test]
+fn bounded_failure_explanation_truncates_at_utf8_boundary() {
+    let input = "é".repeat(300);
+    let output = bounded_failure_explanation(&input).expect("bounded explanation");
+
+    assert!(output.len() <= 512);
+    assert!(output.is_char_boundary(output.len()));
+    assert!(output.chars().all(|character| character == 'é'));
+}
+
+#[tokio::test]
 async fn model_failure_explainer_returns_bounded_assistant_reply() {
     let gateway = Arc::new(RecordingFailureGateway {
         response: Mutex::new(Ok(SystemInferenceResponse {

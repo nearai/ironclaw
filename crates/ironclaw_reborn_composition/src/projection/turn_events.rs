@@ -36,6 +36,10 @@ pub(crate) struct FailureExplanationInput {
 
 #[async_trait]
 pub(crate) trait FailureExplanationProvider: Send + Sync {
+    fn needs_run_state(&self) -> bool {
+        false
+    }
+
     async fn explain_failure(&self, input: FailureExplanationInput) -> Option<String>;
 }
 
@@ -217,6 +221,10 @@ impl FailureExplanationProvider for NoopFailureExplanationProvider {
 
 #[async_trait]
 impl FailureExplanationProvider for ModelFailureExplanationProvider {
+    fn needs_run_state(&self) -> bool {
+        true
+    }
+
     async fn explain_failure(&self, input: FailureExplanationInput) -> Option<String> {
         let request = match failure_explanation_request(&input) {
             Some(request) => request,
@@ -414,6 +422,9 @@ async fn failure_summary_for_turn_event(
     category: &str,
     fallback_summary: String,
 ) -> String {
+    if !failure_explainer.needs_run_state() {
+        return fallback_summary;
+    }
     match coordinator
         .get_run_state(GetRunStateRequest {
             scope: event.scope.clone(),
@@ -500,14 +511,13 @@ fn failure_explanation_system_prompt() -> &'static str {
 
 fn failure_explanation_user_prompt(input: &FailureExplanationInput) -> String {
     format!(
-        "status: failed\nfailure_category: {}\nfallback_summary: {}\nrun_profile: {}\n",
+        "status: failed\nfailure_category: {}\nfallback_summary: {}\n",
         sanitize_model_visible_text(&input.failure_category),
         sanitize_model_visible_text(&input.fallback_summary),
-        sanitize_model_visible_text(input.state.resolved_run_profile_id.as_str()),
     )
 }
 
-fn bounded_failure_explanation(content: &str) -> Option<String> {
+pub(super) fn bounded_failure_explanation(content: &str) -> Option<String> {
     let sanitized = sanitize_model_visible_text(content).trim().to_string();
     if sanitized.is_empty() {
         return None;

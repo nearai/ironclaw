@@ -276,7 +276,8 @@ impl SyntheticSurfaceCapabilitySnapshot {
                 )?;
                 super::validate_provider_arguments(&normalized_arguments)?;
                 let request = capability_info::CapabilityInfoRequest::parse(&normalized_arguments)?;
-                let mut effective_capability_ids = vec![capability_id.clone()];
+                let mut effective_capability_ids = Vec::with_capacity(2);
+                effective_capability_ids.push(capability_id.clone());
                 if let Some(target) = snapshot.capability_info(request.requested_name()) {
                     effective_capability_ids.push(target.capability_id.clone());
                 }

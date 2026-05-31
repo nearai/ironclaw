@@ -563,8 +563,12 @@ pub enum ProductProjectionItem {
     RunStatus {
         run_id: TurnRunId,
         status: String,
+        /// Sanitized, opaque product category. Projection sources may use
+        /// different internal namespaces; clients should not parse this for
+        /// user-facing copy and should prefer `failure_summary` when present.
         #[serde(skip_serializing_if = "Option::is_none")]
         failure_category: Option<String>,
+        /// User-facing sanitized explanation for terminal failure states.
         #[serde(skip_serializing_if = "Option::is_none")]
         failure_summary: Option<String>,
     },

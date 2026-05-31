@@ -909,6 +909,11 @@ fn run_status_projection_state(
 }
 
 fn run_failure_category(run: &RunStatusProjection) -> Option<String> {
+    // Runtime replay categories intentionally use the event-projection namespace
+    // (model_failed, dispatch_failed, process_killed, ...), while turn lifecycle
+    // events use runner/driver failure reasons (lease_expired, driver_failed, ...).
+    // Both are sanitized product categories; clients must treat the field as an
+    // opaque category and prefer failure_summary for user-facing copy.
     matches!(
         run.status,
         RunProjectionStatus::Failed | RunProjectionStatus::Killed

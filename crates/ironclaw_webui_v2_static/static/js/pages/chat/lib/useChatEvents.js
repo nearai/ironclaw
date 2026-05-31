@@ -5,6 +5,7 @@ import {
   toolCardFromActivity,
   toolCardFromPreview,
 } from "./history-messages.js";
+import { failureMessageForRunStatus } from "./failureMessages.js";
 
 // Handler factory for v2 `WebChatV2EventFrame` events.
 //
@@ -354,22 +355,6 @@ function applyProjectionItems({
   if (latestRunIdRef && activeRunId) {
     latestRunIdRef.current = activeRunId;
   }
-}
-
-function failureMessageForRunStatus({
-  status,
-  failureCategory,
-  failureSummary,
-}) {
-  if (typeof failureSummary === "string" && failureSummary.trim()) {
-    return failureSummary.trim();
-  }
-  if (typeof failureCategory === "string" && failureCategory.trim()) {
-    return `The run failed: ${failureCategory.trim().replaceAll("_", " ")}.`;
-  }
-  return status === "recovery_required"
-    ? "The run is awaiting recovery — backend reported `recovery_required`."
-    : "The run failed before producing a reply.";
 }
 
 function upsertToolFromPreview(setMessages, invocationId, card) {

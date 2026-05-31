@@ -1,6 +1,6 @@
 use super::turn_events::{
     FailureExplanationInput, FailureExplanationProvider, ModelFailureExplanationProvider,
-    WEBUI_TURN_EVENT_PAGE_LIMIT,
+    WEBUI_TURN_EVENT_PAGE_LIMIT, bounded_failure_explanation,
 };
 use super::*;
 
@@ -29,6 +29,7 @@ use ironclaw_turns::{
     },
 };
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 use tokio::sync::Mutex;
 
 mod cursor_validation;
@@ -144,6 +145,10 @@ struct FakeFailureExplainer {
 
 #[async_trait]
 impl FailureExplanationProvider for FakeFailureExplainer {
+    fn needs_run_state(&self) -> bool {
+        true
+    }
+
     async fn explain_failure(&self, input: FailureExplanationInput) -> Option<String> {
         assert!(
             !input.failure_category.is_empty(),
@@ -164,6 +169,10 @@ struct CountingFailureExplainer {
 
 #[async_trait]
 impl FailureExplanationProvider for CountingFailureExplainer {
+    fn needs_run_state(&self) -> bool {
+        true
+    }
+
     async fn explain_failure(&self, _input: FailureExplanationInput) -> Option<String> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Some(self.explanation.clone())
@@ -183,6 +192,23 @@ impl SystemInferencePort for RecordingFailureGateway {
     ) -> Result<SystemInferenceResponse, SystemInferenceError> {
         self.requests.lock().await.push(request);
         self.response.lock().await.clone()
+    }
+}
+
+struct SlowSystemInference;
+
+#[async_trait]
+impl SystemInferencePort for SlowSystemInference {
+    async fn call_system_inference(
+        &self,
+        request: SystemInferenceRequest,
+    ) -> Result<SystemInferenceResponse, SystemInferenceError> {
+        tokio::time::sleep(Duration::from_millis(2000)).await;
+        Ok(SystemInferenceResponse {
+            task_id: request.task_id,
+            output_text: "too late".to_string(),
+            elapsed_ms: 2000,
+        })
     }
 }
 
@@ -220,6 +246,39 @@ impl TurnCoordinator for FakeTurnCoordinator {
         } else {
             Err(TurnError::ScopeNotFound)
         }
+    }
+}
+
+struct FailingTurnCoordinator;
+
+#[async_trait]
+impl TurnCoordinator for FailingTurnCoordinator {
+    async fn prepare_turn(&self, _scope: TurnScope) -> Result<TurnRunId, TurnError> {
+        Ok(TurnRunId::new())
+    }
+
+    async fn submit_turn(
+        &self,
+        _request: SubmitTurnRequest,
+    ) -> Result<SubmitTurnResponse, TurnError> {
+        unreachable!("projection tests only read run state")
+    }
+
+    async fn resume_turn(
+        &self,
+        _request: ResumeTurnRequest,
+    ) -> Result<ResumeTurnResponse, TurnError> {
+        unreachable!("projection tests only read run state")
+    }
+
+    async fn cancel_run(&self, _request: CancelRunRequest) -> Result<CancelRunResponse, TurnError> {
+        unreachable!("projection tests only read run state")
+    }
+
+    async fn get_run_state(&self, _request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
+        Err(TurnError::Unavailable {
+            reason: "state unavailable".to_string(),
+        })
     }
 }
 
