@@ -138,6 +138,7 @@ pub struct TriggerRecord {
     pub name: String,
     pub source: TriggerSourceKind,
     pub schedule: TriggerSchedule,
+    pub completion_policy: TriggerCompletionPolicy,
     pub prompt: String,
     pub enabled: bool,
     pub state: TriggerState,
@@ -173,8 +174,6 @@ impl TriggerRecord {
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum TriggerSchedule {
     Cron { expression: String },
-    Interval { seconds: u64 },
-    Once { run_at: Timestamp },
 }
 
 impl TriggerSchedule {
@@ -186,31 +185,12 @@ impl TriggerSchedule {
         Ok(schedule)
     }
 
-    pub fn interval(seconds: u64) -> Result<Self, TriggerError> {
-        let schedule = Self::Interval { seconds };
-        schedule.validate()?;
-        Ok(schedule)
-    }
-
-    pub fn once(run_at: Timestamp) -> Self {
-        Self::Once { run_at }
-    }
-
     pub fn validate(&self) -> Result<(), TriggerError> {
         match self {
             Self::Cron { expression } => {
                 parse_cron_schedule(expression)?;
                 Ok(())
             }
-            Self::Interval { seconds } => {
-                if *seconds < MIN_FIRE_CADENCE.as_secs() {
-                    return Err(TriggerError::InvalidSchedule {
-                        reason: "interval schedules must be at least 60 seconds".to_string(),
-                    });
-                }
-                Ok(())
-            }
-            Self::Once { .. } => Ok(()),
         }
     }
 
@@ -218,10 +198,6 @@ impl TriggerSchedule {
         self.validate()?;
         match self {
             Self::Cron { expression } => Ok(parse_cron_schedule(expression)?.after(&after).next()),
-            Self::Interval { seconds } => Ok(after
-                .checked_add_signed(chrono::Duration::seconds(*seconds as i64))
-                .map(|slot| slot.with_timezone(&Utc))),
-            Self::Once { run_at } => Ok((*run_at > after).then_some(*run_at)),
         }
     }
 }
@@ -238,6 +214,13 @@ pub enum TriggerState {
     Scheduled,
     Paused,
     Completed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TriggerCompletionPolicy {
+    Recurring,
+    CompleteAfterFirstFire,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -574,6 +557,7 @@ mod tests {
             name: "daily summary".to_string(),
             source: TriggerSourceKind::Schedule,
             schedule: TriggerSchedule::cron("0 8 * * *").expect("valid cron"),
+            completion_policy: TriggerCompletionPolicy::Recurring,
             prompt: "summarize unread mail".to_string(),
             enabled: true,
             state: TriggerState::Scheduled,
@@ -629,16 +613,6 @@ mod tests {
     }
 
     #[test]
-    fn interval_schedule_rejects_sub_minute_cadence() {
-        let error = TriggerSchedule::interval(59).expect_err("sub-minute interval rejected");
-        assert!(
-            error.to_string().contains("at least 60 seconds"),
-            "unexpected error: {error}"
-        );
-        TriggerSchedule::interval(60).expect("one-minute interval is valid");
-    }
-
-    #[test]
     fn trigger_enums_serialize_as_snake_case() {
         assert_eq!(
             to_value(TriggerSourceKind::Schedule).unwrap(),
@@ -647,6 +621,10 @@ mod tests {
         assert_eq!(
             to_value(TriggerState::Scheduled).unwrap(),
             json!("scheduled")
+        );
+        assert_eq!(
+            to_value(TriggerCompletionPolicy::CompleteAfterFirstFire).unwrap(),
+            json!("complete_after_first_fire")
         );
         assert_eq!(
             to_value(TriggerRunStatus::ApprovalBlocked).unwrap(),
