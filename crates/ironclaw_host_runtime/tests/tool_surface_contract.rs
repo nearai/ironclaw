@@ -22,10 +22,11 @@ use ironclaw_filesystem::{
 };
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
-    CapabilitySurfacePolicy, CapabilitySurfaceVersion, DefaultHostRuntime, HostRuntime,
-    MAX_HOT_PROMPT_BYTES, MAX_HOT_SCHEMA_BYTES, RuntimeCapabilityOutcome, RuntimeCapabilityRequest,
-    RuntimeFailureKind, SurfaceKind, VisibleCapabilityAccess, VisibleCapabilityRequest,
-    VisibleCapabilitySurface, builtin_first_party_package, publish_hot_capability_catalog,
+    CapabilitySurfacePolicy, CapabilitySurfaceVersion, DefaultHostRuntime, HTTP_CAPABILITY_ID,
+    HostRuntime, MAX_HOT_PROMPT_BYTES, MAX_HOT_SCHEMA_BYTES, RuntimeCapabilityOutcome,
+    RuntimeCapabilityRequest, RuntimeFailureKind, SurfaceKind, VisibleCapabilityAccess,
+    VisibleCapabilityRequest, VisibleCapabilitySurface, builtin_first_party_package,
+    publish_hot_capability_catalog,
 };
 use ironclaw_trust::{
     AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
@@ -541,6 +542,44 @@ async fn visible_surface_resolves_builtin_first_party_input_schema_refs() {
     assert_schema_has_property(&surface, "builtin.skill_install", "content");
     assert_schema_has_property(&surface, "builtin.skill_install", "url");
     assert_schema_has_property(&surface, "builtin.skill_install", "name");
+
+    let http_schema = &surface
+        .capabilities
+        .iter()
+        .find(|capability| capability.descriptor.id == capability_id(HTTP_CAPABILITY_ID))
+        .expect("builtin.http should be visible")
+        .descriptor
+        .parameters_schema;
+    assert!(
+        http_schema.get("not").is_none(),
+        "builtin.http should not use top-level `not`; provider schema shaping flattens it"
+    );
+    let http_validator = jsonschema::validator_for(http_schema).expect("http schema is valid");
+    http_validator
+        .validate(&json!({
+            "method": "post",
+            "url": "https://api.example.test/v1/items",
+            "headers": {
+                "content-type": "application/json"
+            },
+            "body": {"ok": true}
+        }))
+        .expect("http schema should accept valid JSON request bodies");
+    for input in [
+        json!({
+            "url": "https://api.example.test/v1/items",
+            "headers": {"x-request-id": 123}
+        }),
+        json!({
+            "url": "https://api.example.test/v1/items",
+            "headers": [{"name": "x-request-id"}]
+        }),
+    ] {
+        assert!(
+            http_validator.validate(&input).is_err(),
+            "http schema should reject handler-invalid header input: {input}"
+        );
+    }
 
     let skill_install_schema = &surface
         .capabilities

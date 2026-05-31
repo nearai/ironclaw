@@ -9,6 +9,7 @@ ironclaw_host_api = { path = "../ironclaw_host_api" }
 ironclaw_wasm_limiter = { path = "../ironclaw_wasm_limiter" }
 serde_json = "1"
 thiserror = "2"
+tokio = { version = "1", features = ["rt", "rt-multi-thread"] }
 tracing = "0.1"
 wasmtime = { version = "44.0.2", features = ["component-model"] }
 wasmtime-wasi = "44.0.2"
@@ -21,7 +22,7 @@ ironclaw_extensions = { path = "../ironclaw_extensions" }
 ironclaw_filesystem = { path = "../ironclaw_filesystem" }
 ironclaw_resources = { path = "../ironclaw_resources" }
 tempfile = "3"
-tokio = { version = "1", features = ["macros", "rt"] }
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
 wat = "1.245.1"
 wit-component = "0.245.1"
 wit-parser = "0.245.1"

@@ -16,9 +16,11 @@ use crate::{
 };
 
 use super::{
+    compaction::{CompactionInitiator, LoopCompactionPort},
     instruction_bundle::InstructionBundleFingerprint,
     refs::{CheckpointSchemaId, LoopDriverId, ModelProfileId},
     snapshot::ResolvedRunProfile,
+    system_inference::SystemInferenceTaskId,
 };
 
 const FORBIDDEN_MODEL_ROUTE_MARKERS: &[&str] = &[
@@ -706,6 +708,24 @@ pub struct LoopContextMessage {
     pub message_ref: Option<LoopMessageRef>,
     pub role: String,
     pub safe_summary: String,
+    pub compaction: Option<LoopContextCompactionMetadata>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LoopContextCompactionMetadata {
+    pub sequence: u64,
+    pub kind: LoopContextCompactionKind,
+    pub estimated_tokens: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LoopContextCompactionKind {
+    User,
+    Assistant,
+    System,
+    Summary,
+    Other,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -954,6 +974,8 @@ pub struct LoopPromptBundle {
     pub bundle_ref: LoopPromptBundleRef,
     pub messages: Vec<LoopModelMessage>,
     pub surface_version: Option<CapabilitySurfaceVersion>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub compaction_message_index: Vec<LoopContextCompactionMetadata>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instruction_fingerprint: Option<InstructionBundleFingerprint>,
     #[serde(default)]
@@ -1686,6 +1708,11 @@ pub trait LoopTranscriptPort: Send + Sync {
 pub struct LoopCheckpointRequest {
     pub kind: LoopCheckpointKind,
     pub state_ref: LoopCheckpointStateRef,
+    /// Gate identity for `BeforeBlock` checkpoints; `None` for other kinds.
+    /// Defaults to `None` for backward-compatible deserialization of older
+    /// records that predate this field.
+    #[serde(default)]
+    pub gate_ref: Option<crate::ids::LoopGateRef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1786,6 +1813,7 @@ pub trait LoopCheckpointPort: Send + Sync {
     }
 }
 
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LoopProgressEvent {
@@ -1825,6 +1853,36 @@ pub enum LoopProgressEvent {
         iteration: u32,
         kind: LoopCheckpointKind,
     },
+    CompactionStarted {
+        task_id: SystemInferenceTaskId,
+        initiator: CompactionInitiator,
+    },
+    CompactionCompleted {
+        task_id: SystemInferenceTaskId,
+        compression_ratio_ppm: u32,
+    },
+    CompactionFailed {
+        task_id: SystemInferenceTaskId,
+        reason_kind: LoopSafeSummary,
+    },
+    CompactionLeakDetected {
+        task_id: SystemInferenceTaskId,
+        reason_kind: LoopSafeSummary,
+    },
+    GoalRefreshStarted {
+        task_id: SystemInferenceTaskId,
+    },
+    GoalRefreshCompleted {
+        task_id: SystemInferenceTaskId,
+    },
+    GoalRefreshFailed {
+        task_id: SystemInferenceTaskId,
+        reason_kind: LoopSafeSummary,
+    },
+    GoalRefreshLeakDetected {
+        task_id: SystemInferenceTaskId,
+        reason_kind: LoopSafeSummary,
+    },
 }
 
 impl LoopProgressEvent {
@@ -1847,6 +1905,14 @@ impl LoopProgressEvent {
             Self::CapabilityBatchCompleted { .. } => "capability_batch_completed",
             Self::GateBlocked { .. } => "gate_blocked",
             Self::CheckpointWritten { .. } => "checkpoint_written",
+            Self::CompactionStarted { .. } => "compaction_started",
+            Self::CompactionCompleted { .. } => "compaction_completed",
+            Self::CompactionFailed { .. } => "compaction_failed",
+            Self::CompactionLeakDetected { .. } => "compaction_leak_detected",
+            Self::GoalRefreshStarted { .. } => "goal_refresh_started",
+            Self::GoalRefreshCompleted { .. } => "goal_refresh_completed",
+            Self::GoalRefreshFailed { .. } => "goal_refresh_failed",
+            Self::GoalRefreshLeakDetected { .. } => "goal_refresh_leak_detected",
         }
     }
 }
@@ -1901,20 +1967,22 @@ pub trait LoopProgressPort: Send + Sync {
 /// intentionally synchronous and non-blocking: implementations should expose a
 /// cheap snapshot, usually backed by an atomic flag plus immutable signal data.
 ///
-/// **Cancellation is cooperative and boundary-observation only — it is not
-/// preempted across in-flight host calls.** `build_prompt_bundle`,
-/// `stream_model`, and `invoke_capability` are awaited to completion before
-/// the next observation point is reached. A stuck model stream or long-running
-/// capability call will not observe cancellation until control returns to the
-/// executor. Implementations of those host methods that need finer-grained
-/// cancellation must integrate their own abort signal internally; this port
-/// only covers the between-call boundaries that the executor controls.
+/// Cancellation is cooperative. Most executor stages observe it only at
+/// explicit boundaries via [`LoopCancellationPort::observe_cancellation`].
+/// Executor-owned waits that can safely race host work, such as prompt
+/// compaction, may also wait on
+/// [`LoopCancellationPort::cancellation_requested`] to avoid timer polling.
+#[async_trait]
 pub trait LoopCancellationPort: Send + Sync {
     /// Returns `Some(signal)` once cancellation has been requested for this run.
     ///
     /// Implementations must be idempotent across reads. After the request fires,
     /// repeated calls must keep returning the same signal.
     fn observe_cancellation(&self) -> Option<LoopCancellationSignal>;
+
+    /// Waits until cancellation has been requested for this run and returns the
+    /// same stable signal reported by [`Self::observe_cancellation`].
+    async fn cancellation_requested(&self) -> LoopCancellationSignal;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1933,6 +2001,7 @@ pub trait AgentLoopDriverHost:
     + LoopTranscriptPort
     + LoopCheckpointPort
     + LoopProgressPort
+    + LoopCompactionPort
     + LoopCancellationPort
     + Send
     + Sync
@@ -1949,6 +2018,7 @@ impl<T> AgentLoopDriverHost for T where
         + LoopTranscriptPort
         + LoopCheckpointPort
         + LoopProgressPort
+        + LoopCompactionPort
         + LoopCancellationPort
         + Send
         + Sync

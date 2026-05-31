@@ -149,9 +149,8 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
         "schemas/builtin/extension_search.input.v1.json" => json!({
             "type": "object",
             "properties": {
-                "query": { "type": "string", "description": "Search query for locally available Reborn extensions" }
+                "query": { "type": "string", "description": "Optional search query for locally available Reborn extensions. Omit to list all extensions." }
             },
-            "required": ["query"],
             "additionalProperties": false
         }),
         "schemas/builtin/extension_install.input.v1.json"
@@ -212,9 +211,30 @@ fn http_schema(require_save_to: bool) -> Value {
             "description": "HTTP method. Defaults to get."
         },
         "headers": {
-            "description": "HTTP headers as an object or array of {name,value} entries"
+            "description": "HTTP headers as an object or array of {name,value} entries",
+            "oneOf": [
+                {
+                    "type": "object",
+                    "additionalProperties": { "type": "string" }
+                },
+                {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": { "type": "string" },
+                            "value": { "type": "string" }
+                        },
+                        "required": ["name", "value"],
+                        "additionalProperties": false
+                    }
+                }
+            ]
         },
-        "body": { "description": "String or JSON request body" },
+        "body": {
+            "description": "String or JSON request body",
+            "type": ["string", "object", "array", "number", "boolean", "null"]
+        },
         "body_base64": { "type": "string", "description": "Base64-encoded request body" },
         "response_body_limit": {
             "type": "integer",

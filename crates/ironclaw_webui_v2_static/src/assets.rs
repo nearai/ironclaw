@@ -26,6 +26,10 @@ pub(crate) fn lookup(path: &str) -> Option<&'static Asset> {
 mod tests {
     use super::*;
 
+    fn asset_text(path: &str) -> &'static str {
+        std::str::from_utf8(lookup(path).expect("asset exists").bytes).expect("asset is utf-8")
+    }
+
     #[test]
     fn lookup_returns_none_for_unknown_path() {
         // Direct coverage of the `None` arm. The router-level tests
@@ -38,5 +42,37 @@ mod tests {
         assert!(lookup("nonexistent.js").is_none());
         assert!(lookup("../etc/passwd").is_none());
         assert!(lookup("").is_none());
+    }
+
+    #[test]
+    fn chat_auth_gate_assets_submit_manual_token_then_resolve_gate() {
+        let auth_card = asset_text("js/pages/chat/components/auth-token-card.js");
+        assert!(auth_card.contains("await onSubmit(value);"));
+        assert!(auth_card.contains("setToken(\"\");"));
+        assert!(auth_card.contains("t(\"authGate.submitFailed\")"));
+        assert!(auth_card.contains("authGate.resolveFailedAfterTokenSaved"));
+        assert!(!auth_card.contains("err?.message"));
+
+        let api = asset_text("js/lib/api.js");
+        assert!(api.contains("/api/reborn/product-auth/manual-token/submit"));
+        assert!(api.contains("signal,"));
+        assert!(api.contains("account_label: accountLabel"));
+        assert!(api.contains("gate_ref: gateRef"));
+
+        let use_chat = asset_text("js/pages/chat/hooks/useChat.js");
+        assert!(use_chat.contains("AUTH_TOKEN_FLOW_TIMEOUT_MS"));
+        assert!(use_chat.contains("authTokenSubmitRef"));
+        assert!(use_chat.contains("submitManualToken({"));
+        assert!(use_chat.contains("authTokenSubmitRef.current.credentialRef"));
+        assert!(use_chat.contains("authTokenSubmitRef.current.inFlight"));
+        assert!(use_chat.contains("throw new Error(\"auth gate is no longer pending\")"));
+        assert!(
+            use_chat
+                .contains("throw new Error(\"auth gate is missing required credential metadata\")")
+        );
+        assert!(use_chat.contains("resolveGateRequest({"));
+        assert!(use_chat.contains("resolution: \"credential_provided\""));
+        assert!(use_chat.contains("credentialRef"));
+        assert!(use_chat.contains("safeAuthGateCode"));
     }
 }

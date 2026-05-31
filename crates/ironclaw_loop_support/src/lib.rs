@@ -19,6 +19,7 @@ mod capability_allow_set;
 mod capability_info;
 mod capability_port;
 mod capability_surface_filter;
+mod compaction_task;
 mod filesystem_checkpoint_state;
 mod filesystem_skill_bundle_source;
 pub mod identity_context;
@@ -29,6 +30,8 @@ mod skill_bundle_source;
 mod skill_context;
 mod subagent_prompt_port;
 mod subagent_spawn_port;
+mod system_inference;
+mod token_estimator;
 mod turn_event_publisher;
 
 pub use budget_accountant::{
@@ -51,6 +54,9 @@ pub use capability_port::{
 };
 pub use capability_surface_filter::{
     CapabilitySurfaceProfileFilter, CapabilitySurfaceVisibleFilter,
+};
+pub use compaction_task::{
+    HostManagedLoopCompactionPort, default_host_managed_loop_compaction_port,
 };
 pub use filesystem_checkpoint_state::FilesystemCheckpointStateStore;
 pub use filesystem_skill_bundle_source::{FilesystemSkillBundleRoot, FilesystemSkillBundleSource};
@@ -87,6 +93,10 @@ pub use subagent_spawn_port::{
     SubagentSpawnDeps, SubagentSpawnGoalStore, SubagentSpawnLimits, SubagentThreadKind,
     SubagentThreadMetadata,
 };
+pub use system_inference::{GuardedSystemInferencePort, ModelGatewayBackedSystemInferencePort};
+pub use token_estimator::{
+    CHARS_PER_TOKEN_DEFAULT, EstimatedTokenCount, estimate_tokens_from_chars,
+};
 pub use turn_event_publisher::EventPublishingTurnRunTransitionPort;
 
 use tokio::sync::{Mutex, OnceCell};
@@ -107,14 +117,14 @@ use ironclaw_turns::{
         BeginAssistantDraft, CapabilityBatchInvocation, CapabilityBatchOutcome, CapabilityDenied,
         CapabilityDeniedReasonKind, CapabilityInvocation, CapabilityOutcome,
         CapabilitySurfaceVersion, FinalizeAssistantMessage, InstructionMaterializationStore,
-        LoopCapabilityPort, LoopContextBundle, LoopContextMessage, LoopContextPort,
-        LoopContextRequest, LoopDriverNoteKind, LoopHostMilestoneEmitter, LoopHostMilestoneSink,
-        LoopInputCursor, LoopModelBudgetAccountant, LoopModelMessage, LoopModelPort,
-        LoopModelRequest, LoopModelResponse, LoopPromptBundleAuthority, LoopRunContext,
-        LoopRunInfoPort, LoopSafeSummary, LoopTranscriptPort, ModelCallOutcome, ModelStreamChunk,
-        ParentLoopOutput, PromptMode, UpdateAssistantDraft, VisibleCapabilityRequest,
-        VisibleCapabilitySurface, sanitize_model_visible_text,
-        sort_instruction_snippets_for_prompt,
+        LoopCapabilityPort, LoopContextBundle, LoopContextCompactionKind,
+        LoopContextCompactionMetadata, LoopContextMessage, LoopContextPort, LoopContextRequest,
+        LoopDriverNoteKind, LoopHostMilestoneEmitter, LoopHostMilestoneSink, LoopInputCursor,
+        LoopModelBudgetAccountant, LoopModelMessage, LoopModelPort, LoopModelRequest,
+        LoopModelResponse, LoopPromptBundleAuthority, LoopRunContext, LoopRunInfoPort,
+        LoopSafeSummary, LoopTranscriptPort, ModelCallOutcome, ModelStreamChunk, ParentLoopOutput,
+        PromptMode, UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface,
+        sanitize_model_visible_text, sort_instruction_snippets_for_prompt,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -1510,7 +1520,13 @@ fn sanitized_reasoning_deltas(reasoning: Option<String>) -> Vec<String> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HostManagedModelErrorKind {
+    /// Caller-side misuse of the host model port (unknown tool, malformed request).
     InvalidRequest,
+    /// Provider/model output was structurally invalid for the active loop contract.
+    /// This is model-side bad output, not caller misuse — mapped to Unavailable so
+    /// loops can retry on transient provider anomalies.
+    #[serde(alias = "invalid_output")]
+    InvalidOutput,
     PolicyDenied,
     ConfigurationError,
     BudgetExceeded,
@@ -1619,11 +1635,30 @@ fn history_summaries_by_ref(summaries: Vec<SummaryArtifact>) -> HashMap<String, 
 
 fn context_message_to_loop_message(message: ContextMessage) -> Option<LoopContextMessage> {
     let message_ref = message_ref_from_context(&message)?;
+    let estimated_tokens = estimate_tokens_from_chars(&message.content).as_u64();
+    let compaction = Some(LoopContextCompactionMetadata {
+        sequence: message.sequence,
+        kind: compaction_kind_for_message(message.kind),
+        estimated_tokens,
+    });
     Some(LoopContextMessage {
         message_ref: Some(message_ref),
         role: role_for_kind(message.kind).to_string(),
         safe_summary: safe_context_summary(message.kind).to_string(),
+        compaction,
     })
+}
+
+fn compaction_kind_for_message(kind: MessageKind) -> LoopContextCompactionKind {
+    match kind {
+        MessageKind::User => LoopContextCompactionKind::User,
+        MessageKind::Assistant => LoopContextCompactionKind::Assistant,
+        MessageKind::System => LoopContextCompactionKind::System,
+        MessageKind::Summary => LoopContextCompactionKind::Summary,
+        MessageKind::CheckpointReference
+        | MessageKind::ToolResultReference
+        | MessageKind::CapabilityDisplayPreview => LoopContextCompactionKind::Other,
+    }
 }
 
 fn message_ref_from_context(message: &ContextMessage) -> Option<LoopMessageRef> {
@@ -1787,6 +1822,7 @@ fn model_gateway_error(error: HostManagedModelError) -> AgentLoopHostError {
 fn model_error_kind(kind: HostManagedModelErrorKind) -> AgentLoopHostErrorKind {
     match kind {
         HostManagedModelErrorKind::InvalidRequest => AgentLoopHostErrorKind::InvalidInvocation,
+        HostManagedModelErrorKind::InvalidOutput => AgentLoopHostErrorKind::Unavailable,
         HostManagedModelErrorKind::PolicyDenied => AgentLoopHostErrorKind::PolicyDenied,
         HostManagedModelErrorKind::ConfigurationError => AgentLoopHostErrorKind::Unavailable,
         HostManagedModelErrorKind::BudgetExceeded => AgentLoopHostErrorKind::BudgetExceeded,
@@ -1801,6 +1837,7 @@ fn model_error_kind(kind: HostManagedModelErrorKind) -> AgentLoopHostErrorKind {
 fn safe_model_summary(kind: HostManagedModelErrorKind) -> &'static str {
     match kind {
         HostManagedModelErrorKind::InvalidRequest => "model request is invalid",
+        HostManagedModelErrorKind::InvalidOutput => "model output was structurally invalid",
         HostManagedModelErrorKind::PolicyDenied => "model profile is not permitted",
         HostManagedModelErrorKind::ConfigurationError => "model route configuration is invalid",
         HostManagedModelErrorKind::BudgetExceeded => "model request exceeded its budget",

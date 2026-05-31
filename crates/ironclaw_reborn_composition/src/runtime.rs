@@ -83,17 +83,27 @@ use ironclaw_turns::{
 
 use crate::default_system_prompt::DefaultSystemPromptIdentitySource;
 use crate::factory::{LocalDevRootFilesystem, LocalDevTurnStateStore};
+use crate::local_dev_capability_policy::local_dev_capability_policy;
 use crate::projection::{RebornProjectionServices, build_reborn_projection_services};
 use crate::runtime_input::{PollSettings, RebornRuntimeIdentity, RebornRuntimeInput};
-use crate::{RebornBuildError, RebornCompositionProfile, RebornServices, build_reborn_services};
+use crate::{
+    RebornBuildError, RebornCompositionProfile, RebornProductAuthServices, RebornServices,
+    build_reborn_services,
+};
 
 mod approval;
 mod auth_interaction;
+#[cfg(test)]
+#[path = "runtime/tests/auth_interaction.rs"]
+mod auth_interaction_tests;
 #[cfg(test)]
 #[path = "runtime/tests/default_system_prompt.rs"]
 mod default_system_prompt_tests;
 mod local_dev;
 mod skills;
+
+#[cfg(test)]
+pub(crate) use local_dev::SKILL_ACTIVATE_CAPABILITY_ID;
 
 pub use skills::{
     RebornSkillActivation, RebornSkillActivationMode, RebornSkillAsset, RebornSkillBundle,
@@ -695,21 +705,8 @@ impl RebornRuntime {
             if state.status.is_terminal() {
                 return Ok(state.status);
             }
-            if state.status == TurnStatus::RecoveryRequired {
-                // RecoveryRequired keeps the durable turn active because a
-                // future recovery worker may resume it. The standalone
-                // runtime has no recovery worker, so cancel it before
-                // returning to release the conversation lock.
-                let response = self
-                    .cancel_run(
-                        scope,
-                        run_id,
-                        SanitizedCancelReason::OperatorRequested,
-                        "recovery-required-cancel",
-                    )
-                    .await?;
-                return Ok(response.status);
-            }
+            // TurnStatus::RecoveryRequired is now terminal (is_terminal() returns true)
+            // so the branch above handles it; no special cancel-to-release-lock is needed.
             if start.elapsed() > self.poll_settings.max_total {
                 self.cancel_run(
                     scope,
@@ -848,8 +845,9 @@ pub async fn build_reborn_runtime(
         runner,
         poll,
         identity,
+        regex_skill_activation_enabled,
         skill_context_source: configured_skill_context_source,
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         model_gateway_override,
     } = input;
 
@@ -899,6 +897,7 @@ pub async fn build_reborn_runtime(
                 let local_dev_skills = local_dev_filesystem_skill_context_source(
                     local_runtime,
                     &validated_identity.tenant_id,
+                    regex_skill_activation_enabled,
                 )?;
                 (
                     Some(local_dev_skills.source),
@@ -926,7 +925,7 @@ pub async fn build_reborn_runtime(
 
     #[cfg(feature = "root-llm-provider")]
     let model_gateway = {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if let Some(gateway) = model_gateway_override {
             gateway
         } else {
@@ -935,7 +934,7 @@ pub async fn build_reborn_runtime(
                 None => build_stub_gateway(),
             }
         }
-        #[cfg(not(test))]
+        #[cfg(not(any(test, feature = "test-support")))]
         {
             match llm {
                 Some(cfg) => build_llm_gateway(cfg).await?,
@@ -945,13 +944,13 @@ pub async fn build_reborn_runtime(
     };
     #[cfg(not(feature = "root-llm-provider"))]
     let model_gateway = {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if let Some(gateway) = model_gateway_override {
             gateway
         } else {
             build_stub_gateway()
         }
-        #[cfg(not(test))]
+        #[cfg(not(any(test, feature = "test-support")))]
         {
             build_stub_gateway()
         }
@@ -989,15 +988,35 @@ pub async fn build_reborn_runtime(
         Arc::clone(&event_log),
         validated_identity.reply_target_binding_ref.clone(),
     );
-    let milestone_sink = projection_services
-        .with_live_reasoning_milestone_sink(durable_milestone_sink, actor_user_id.clone());
+    let live_projection_publisher =
+        projection_services.live_projection_publisher(actor_user_id.clone());
+    if let Some(skill_activation_source) = &skill_activation_source {
+        skill_activation_source
+            .set_activation_observer(
+                projection_services
+                    .skill_activation_observer(Arc::clone(&live_projection_publisher)),
+            )
+            .map_err(|error| RebornRuntimeError::SkillExecution(error.to_string()))?;
+    }
+    let milestone_sink = projection_services.with_live_progress_milestone_sink_for_publisher(
+        durable_milestone_sink,
+        live_projection_publisher,
+    );
+    let local_dev_capability_policy = Arc::new(local_dev_capability_policy().map_err(|error| {
+        tracing::error!(%error, "local-dev capability policy is invalid");
+        RebornRuntimeError::InvalidArgument {
+            reason: format!("local-dev capability policy is invalid: {error}"),
+        }
+    })?);
     let local_dev_capabilities = local_dev::capability_wiring(
         &services,
         Arc::clone(&thread_service) as Arc<dyn SessionThreadService>,
         thread_scope.clone(),
         actor_user_id.clone(),
+        Arc::clone(&local_dev_capability_policy),
         model_gateway,
         milestone_sink.clone(),
+        skill_activation_source.clone(),
     )
     .ok_or(RebornRuntimeError::HostRuntimeUnavailable)?;
     let capability_factory = local_dev_capabilities.capability_factory;
@@ -1082,33 +1101,34 @@ pub async fn build_reborn_runtime(
         Arc::new(DefaultApprovalInteractionService::new(
             approval_read_model,
             Arc::new(approval::LocalDevApprovalLeaseTermsProvider::new(
+                local_dev_capability_policy,
                 local_runtime.workspace_mounts.clone(),
                 local_runtime.skill_mounts.clone(),
             )),
             approval_resolver,
             Arc::clone(&planned_turn_coordinator),
         ));
-    let auth_interaction_service: Arc<dyn AuthInteractionService> =
-        if let Some(product_auth) = services.product_auth.as_ref() {
-            if let Some(flow_records) = product_auth.flow_record_source() {
-                Arc::new(DefaultAuthInteractionService::new(
-                    Arc::new(auth_interaction::LocalDevAuthInteractionReadModel::new(
-                        Arc::clone(&turn_state_store),
-                        flow_records,
-                    )),
-                    product_auth.flow_manager(),
-                    Arc::clone(&planned_turn_coordinator),
-                ))
-            } else {
-                Arc::new(auth_interaction::UnavailableAuthInteractionService)
-            }
-        } else {
-            Arc::new(auth_interaction::UnavailableAuthInteractionService)
-        };
+    let auth_interaction_service = build_webui_auth_interaction_service(
+        services.product_auth.as_deref(),
+        Arc::clone(&turn_state_store),
+        Arc::clone(&planned_turn_coordinator),
+    );
     let turn_event_source: Arc<dyn TurnEventProjectionSource> = turn_state_store.clone();
     let projection_services = projection_services
         .with_turn_events(turn_event_source, Arc::clone(&planned_turn_coordinator))
         .with_display_previews(Arc::clone(&local_dev_capabilities.display_previews));
+    // Wire auth-challenge enrichment when the product-auth bundle exposes a
+    // flow record source (local-dev / test mode). Production deployments without
+    // a wired flow_record_source fall back to the plain 4-field AuthPromptView.
+    let projection_services = if let Some(provider) = services
+        .product_auth
+        .as_ref()
+        .and_then(|pa| pa.as_auth_challenge_provider())
+    {
+        projection_services.with_auth_challenges(provider)
+    } else {
+        projection_services
+    };
     services.turn_coordinator = Some(Arc::clone(&planned_turn_coordinator));
 
     let worker_cancel = CancellationToken::new();
@@ -1143,6 +1163,32 @@ pub async fn build_reborn_runtime(
         skill_activation_source,
         skill_execution_adapter,
     })
+}
+
+fn build_webui_auth_interaction_service(
+    product_auth: Option<&RebornProductAuthServices>,
+    turn_state_store: Arc<LocalDevTurnStateStore>,
+    turn_coordinator: Arc<dyn TurnCoordinator>,
+) -> Arc<dyn AuthInteractionService> {
+    // `AuthFlowRecordSource` is optional on the product-auth bundle because
+    // production may supply a durable read projection that is not the flow
+    // manager itself. Local-dev can render pending WebUI auth interactions only
+    // when the bundle explicitly exposes this scoped projection; otherwise the
+    // WebUI surface fails closed with a stable unavailable error.
+    let Some(product_auth) = product_auth else {
+        return Arc::new(auth_interaction::UnavailableAuthInteractionService);
+    };
+    let Some(flow_records) = product_auth.flow_record_source() else {
+        return Arc::new(auth_interaction::UnavailableAuthInteractionService);
+    };
+    Arc::new(DefaultAuthInteractionService::new(
+        Arc::new(auth_interaction::LocalDevAuthInteractionReadModel::new(
+            turn_state_store,
+            flow_records,
+        )),
+        product_auth.flow_manager(),
+        turn_coordinator,
+    ))
 }
 
 const LOOP_RUN_CAPABILITY_ID: &str = "loop.run";
@@ -1207,9 +1253,30 @@ struct LocalDevSkillContextSource {
     execution_adapter: Arc<LocalDevSkillExecutionAdapter>,
 }
 
+/// Build the [`SkillActivationSelectorConfig`] used by the local-dev
+/// filesystem skill context source. Extracted from
+/// [`local_dev_filesystem_skill_context_source`] so the wiring of the
+/// `regex_skill_activation_enabled` flag from [`RebornRuntimeInput`] is
+/// covered by a unit test (see `tests::local_dev_selector_config_*`).
+/// Without this seam the propagation was tested only indirectly through
+/// the full [`build_reborn_runtime`] path, where an accidental
+/// `..SkillActivationSelectorConfig::default()` regression would slip
+/// through silently.
+fn local_dev_selector_config(
+    regex_skill_activation_enabled: bool,
+) -> SkillActivationSelectorConfig {
+    SkillActivationSelectorConfig {
+        selection_mode:
+            ironclaw_first_party_extension_ports::SkillActivationSelectionMode::ExplicitOnly,
+        regex_activation_enabled: regex_skill_activation_enabled,
+        ..SkillActivationSelectorConfig::default()
+    }
+}
+
 fn local_dev_filesystem_skill_context_source(
     local_runtime: &crate::factory::RebornLocalRuntimeServices,
     tenant_id: &TenantId,
+    regex_skill_activation_enabled: bool,
 ) -> Result<LocalDevSkillContextSource, RebornRuntimeError> {
     let extension = FirstPartySkillsExtension::new(
         Arc::clone(&local_runtime.skill_filesystem),
@@ -1223,8 +1290,9 @@ fn local_dev_filesystem_skill_context_source(
     .map_err(|reason| RebornRuntimeError::InvalidArgument {
         reason: format!("first-party skills extension source: {reason}"),
     })?;
+    let selector_config = local_dev_selector_config(regex_skill_activation_enabled);
     let selectable_skills = extension.selectable_skill_runtime_with_setup_markers(
-        SkillActivationSelectorConfig::default(),
+        selector_config,
         Arc::clone(&local_runtime.workspace_filesystem),
     );
     Ok(LocalDevSkillContextSource {
@@ -1339,6 +1407,36 @@ mod tests {
     use std::time::Duration;
 
     use async_trait::async_trait;
+
+    /// Wiring guard: the `regex_skill_activation_enabled` flag from
+    /// [`RebornRuntimeInput`] must reach
+    /// [`SkillActivationSelectorConfig::regex_activation_enabled`]
+    /// unchanged, not get clobbered by a stray
+    /// `..SkillActivationSelectorConfig::default()` spread or by the
+    /// helper accidentally taking `Default::default()`. Covers the
+    /// composition-level path that
+    /// [`local_dev_filesystem_skill_context_source`] depends on.
+    #[test]
+    fn local_dev_selector_config_propagates_regex_activation_disabled() {
+        let cfg = super::local_dev_selector_config(false);
+        assert!(
+            !cfg.regex_activation_enabled,
+            "regex_skill_activation_enabled=false must propagate into SkillActivationSelectorConfig"
+        );
+        assert!(matches!(
+            cfg.selection_mode,
+            ironclaw_first_party_extension_ports::SkillActivationSelectionMode::ExplicitOnly
+        ));
+    }
+
+    #[test]
+    fn local_dev_selector_config_propagates_regex_activation_enabled() {
+        let cfg = super::local_dev_selector_config(true);
+        assert!(
+            cfg.regex_activation_enabled,
+            "regex_skill_activation_enabled=true must propagate into SkillActivationSelectorConfig"
+        );
+    }
     use ironclaw_authorization::CapabilityLeaseStore;
     use ironclaw_events::{EventStreamKey, ReadScope};
     use ironclaw_host_api::{
@@ -3406,7 +3504,7 @@ mod tests {
                 WebUiSendMessageRequest {
                     client_action_id: Some("send-webui-skill-message".to_string()),
                     thread_id: Some(created.thread.thread_id.to_string()),
-                    content: Some("please use webui-helper".to_string()),
+                    content: Some("$webui-helper please help".to_string()),
                 },
             )
             .await

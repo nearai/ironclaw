@@ -23,7 +23,7 @@ use ironclaw_host_api::{
 };
 use serde_json::Value;
 
-use state::{SharedCodingEditLocks, SharedCodingReadState};
+use state::SharedCodingEditLocks;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CodingCapabilityKind {
@@ -105,7 +105,6 @@ impl CodingCapabilityError {
 
 #[derive(Debug, Default)]
 pub struct CodingCapabilityState {
-    read_state: SharedCodingReadState,
     edit_locks: SharedCodingEditLocks,
 }
 
@@ -114,20 +113,19 @@ impl CodingCapabilityState {
         &self,
         request: &CodingCapabilityRequest<'_>,
     ) -> Result<CodingCapabilityOutput, CodingCapabilityError> {
-        dispatch(request, &self.read_state, &self.edit_locks).await
+        dispatch(request, &self.edit_locks).await
     }
 }
 
 async fn dispatch(
     request: &CodingCapabilityRequest<'_>,
-    read_state: &SharedCodingReadState,
     edit_locks: &SharedCodingEditLocks,
 ) -> Result<CodingCapabilityOutput, CodingCapabilityError> {
     match request.kind {
-        CodingCapabilityKind::ReadFile => file::read_file(request, read_state)
+        CodingCapabilityKind::ReadFile => file::read_file(request)
             .await
             .map(CodingCapabilityOutput::new),
-        CodingCapabilityKind::WriteFile => file::write_file(request, read_state, edit_locks).await,
+        CodingCapabilityKind::WriteFile => file::write_file(request, edit_locks).await,
         CodingCapabilityKind::ListDir => file::list_dir(request)
             .await
             .map(CodingCapabilityOutput::new),
@@ -137,9 +135,7 @@ async fn dispatch(
         CodingCapabilityKind::Grep => grep_tool::grep(request)
             .await
             .map(CodingCapabilityOutput::new),
-        CodingCapabilityKind::ApplyPatch => {
-            file::apply_patch(request, read_state, edit_locks).await
-        }
+        CodingCapabilityKind::ApplyPatch => file::apply_patch(request, edit_locks).await,
     }
 }
 

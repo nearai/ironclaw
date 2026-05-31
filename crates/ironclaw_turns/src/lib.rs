@@ -64,8 +64,8 @@ pub use loop_exit::{
     BlockedEvidenceRequest, CompletionEvidenceRequest, FailureEvidenceRequest,
     FinalCheckpointEvidenceRequest, LoopBlocked, LoopBlockedKind, LoopCancelled,
     LoopCancelledReasonKind, LoopCompleted, LoopCompletionKind, LoopExit, LoopExitApplier,
-    LoopExitEvidencePort, LoopExitInvalidHandling, LoopExitMapping, LoopExitValidationDecision,
-    LoopExitViolation, LoopExitViolationKind, LoopFailed, LoopFailureKind,
+    LoopExitEvidencePort, LoopExitMapping, LoopExitValidationDecision, LoopExitViolation,
+    LoopExitViolationKind, LoopFailed, LoopFailureKind,
 };
 pub use memory::{InMemoryTurnStateStore, InMemoryTurnStateStoreLimits};
 pub use request::{

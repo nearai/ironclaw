@@ -16,7 +16,7 @@ use async_trait::async_trait;
 use ironclaw_host_api::sha256_digest_token;
 use ironclaw_llm::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmProvider, Role,
-    ToolCall, ToolCompletionRequest, ToolCompletionResponse, ToolDefinition,
+    ToolCall, ToolCompletionRequest, ToolCompletionResponse, ToolDefinition, clean_response,
 };
 use ironclaw_loop_support::{
     HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
@@ -850,7 +850,7 @@ async fn tool_response_to_host(
             .any(|tool_call| !advertised_tool_names.contains(&tool_call.name))
         {
             return Err(HostManagedModelError::safe(
-                HostManagedModelErrorKind::InvalidRequest,
+                HostManagedModelErrorKind::InvalidOutput,
                 "model returned a tool call outside the advertised capability surface",
             ));
         }
@@ -893,7 +893,7 @@ async fn tool_response_to_host(
 
     match response.finish_reason {
         FinishReason::Stop => {
-            let content = response.content.unwrap_or_default();
+            let content = clean_response(&response.content.unwrap_or_default());
             debug!(
                 content_bytes = content.len(),
                 "reborn model gateway classified tool-capable provider response as assistant reply"
@@ -912,7 +912,7 @@ async fn tool_response_to_host(
             "model response was blocked by provider policy",
         )),
         FinishReason::ToolUse => Err(HostManagedModelError::safe(
-            HostManagedModelErrorKind::InvalidRequest,
+            HostManagedModelErrorKind::InvalidOutput,
             "model returned tool-use finish without tool calls",
         )),
         FinishReason::Unknown => Err(HostManagedModelError::safe(
@@ -968,10 +968,13 @@ fn response_to_host_reply(
     response: CompletionResponse,
 ) -> Result<HostManagedModelResponse, HostManagedModelError> {
     match response.finish_reason {
-        FinishReason::Stop => Ok(HostManagedModelResponse::assistant_reply_with_reasoning(
-            response.content,
-            response.reasoning,
-        )),
+        FinishReason::Stop => {
+            let content = clean_response(&response.content);
+            Ok(HostManagedModelResponse::assistant_reply_with_reasoning(
+                content,
+                response.reasoning,
+            ))
+        }
         FinishReason::Length => Err(HostManagedModelError::safe(
             HostManagedModelErrorKind::BudgetExceeded,
             "model response was truncated before completion",
@@ -981,7 +984,7 @@ fn response_to_host_reply(
             "model response was blocked by provider policy",
         )),
         FinishReason::ToolUse => Err(HostManagedModelError::safe(
-            HostManagedModelErrorKind::InvalidRequest,
+            HostManagedModelErrorKind::InvalidOutput,
             "model returned unsupported tool calls for a text-only loop",
         )),
         FinishReason::Unknown => Err(HostManagedModelError::safe(

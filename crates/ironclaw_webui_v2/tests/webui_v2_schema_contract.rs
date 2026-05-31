@@ -3,8 +3,9 @@ use ironclaw_host_api::{CapabilityId, ExtensionId, InvocationId, RuntimeKind, Th
 use ironclaw_product_workflow::{
     AuthPromptView, CapabilityActivityStatusView, CapabilityActivityView,
     CapabilityDisplayPreviewView, FinalReplyView, GatePromptView, ProductOutboundPayload,
-    ProductProjectionItem, ProductProjectionState, ProgressKind, ProgressUpdateView,
-    ProjectionCursor, RebornCancelRunResponse, RebornGetRunStateResponse, RebornSubmitTurnResponse,
+    ProductProjectionItem, ProductProjectionState, ProductWorkSummaryPhase, ProgressKind,
+    ProgressUpdateView, ProjectionCursor, RebornCancelRunResponse, RebornGetRunStateResponse,
+    RebornSubmitTurnResponse,
 };
 use ironclaw_turns::{
     AcceptedMessageRef, EventCursor, RunProfileId, RunProfileVersion, SanitizedFailure, TurnRunId,
@@ -87,6 +88,11 @@ fn auth_prompt() -> AuthPromptView {
         auth_request_ref: "auth:oauth".to_string(),
         headline: "Connect account".to_string(),
         body: "Connect before continuing.".to_string(),
+        challenge_kind: None,
+        provider: None,
+        account_label: None,
+        authorization_url: None,
+        expires_at: None,
     }
 }
 
@@ -139,6 +145,12 @@ fn projection_state() -> ProductProjectionState {
             ProductProjectionItem::RunStatus {
                 run_id: run_id(),
                 status: "running".to_string(),
+            },
+            ProductProjectionItem::WorkSummary {
+                id: "work-summary-1".to_string(),
+                run_id: run_id(),
+                phase: ProductWorkSummaryPhase::Planning,
+                body: "checking branch state".to_string(),
             },
         ],
     )

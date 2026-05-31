@@ -4,11 +4,11 @@ use thiserror::Error;
 
 use super::{
     DurableAuditSink, DurableEventSink, EmptyWasmRuntimeCredentials, InMemoryApprovalRequestStore,
-    InMemoryAuditSink, InMemoryCapabilityLeaseStore, InMemoryDurableAuditLog,
-    InMemoryDurableEventLog, InMemoryEventSink, InMemoryProcessResultStore, InMemoryProcessStore,
-    InMemoryResourceGovernor, InMemoryRunStateStore, InMemorySecretStore, InMemoryTurnStateStore,
-    LocalFilesystem, LocalHostProcessPort, NoopTurnRunWakeNotifier, RebornEventStoreError,
-    RuntimeKind,
+    InMemoryAuditSink, InMemoryCapabilityLeaseStore, InMemoryCredentialBroker,
+    InMemoryDurableAuditLog, InMemoryDurableEventLog, InMemoryEventSink,
+    InMemoryProcessResultStore, InMemoryProcessStore, InMemoryResourceGovernor,
+    InMemoryRunStateStore, InMemorySecretStore, InMemoryTurnStateStore, LocalFilesystem,
+    LocalHostProcessPort, NoopTurnRunWakeNotifier, RebornEventStoreError, RuntimeKind,
 };
 
 #[derive(Debug, Error)]
@@ -32,6 +32,7 @@ pub struct ProductionWiringConfig {
     pub(super) required_runtime_backends: Vec<RuntimeKind>,
     pub(super) require_runtime_http_egress: bool,
     pub(super) require_wasm_credentials: bool,
+    pub(super) require_credential_broker: bool,
 }
 
 impl ProductionWiringConfig {
@@ -43,6 +44,7 @@ impl ProductionWiringConfig {
             required_runtime_backends: required_runtime_backends.into_iter().collect(),
             require_runtime_http_egress: false,
             require_wasm_credentials: false,
+            require_credential_broker: false,
         }
     }
 
@@ -53,6 +55,11 @@ impl ProductionWiringConfig {
 
     pub fn require_wasm_credentials(mut self) -> Self {
         self.require_wasm_credentials = true;
+        self
+    }
+
+    pub fn require_credential_broker(mut self) -> Self {
+        self.require_credential_broker = true;
         self
     }
 
@@ -77,6 +84,8 @@ pub enum ProductionWiringComponent {
     EventSink,
     AuditSink,
     SecretStore,
+    CredentialAccountStore,
+    CredentialSessionStore,
     RuntimeHttpEgress,
     RuntimeProcessPort,
     WasmCredentialProvider,
@@ -105,6 +114,8 @@ impl ProductionWiringComponent {
             Self::EventSink => "event_sink",
             Self::AuditSink => "audit_sink",
             Self::SecretStore => "secret_store",
+            Self::CredentialAccountStore => "credential_account_store",
+            Self::CredentialSessionStore => "credential_session_store",
             Self::RuntimeHttpEgress => "runtime_http_egress",
             Self::RuntimeProcessPort => "runtime_process_port",
             Self::WasmCredentialProvider => "wasm_credential_provider",
@@ -200,6 +211,8 @@ pub(super) struct ProductionComponentTypes {
     pub(super) event_sink: Option<ProductionComponentType>,
     pub(super) audit_sink: Option<ProductionComponentType>,
     pub(super) secret_store: Option<ProductionComponentType>,
+    pub(super) credential_account_store: Option<ProductionComponentType>,
+    pub(super) credential_session_store: Option<ProductionComponentType>,
     pub(super) runtime_http_egress: Option<ProductionComponentType>,
     pub(super) runtime_http_egress_verified: bool,
     pub(super) runtime_process_port: ProductionComponentType,
@@ -268,6 +281,7 @@ fn classify_component_type<T: 'static>() -> ProductionImplementationReadiness {
             || type_id == TypeId::of::<InMemoryAuditSink>()
             || type_id == TypeId::of::<InMemoryDurableAuditLog>()
             || type_id == TypeId::of::<InMemorySecretStore>()
+            || type_id == TypeId::of::<InMemoryCredentialBroker>()
             || type_id == TypeId::of::<EmptyWasmRuntimeCredentials>()
             || type_id == TypeId::of::<InMemoryTurnStateStore>()
             || type_id == TypeId::of::<NoopTurnRunWakeNotifier>()

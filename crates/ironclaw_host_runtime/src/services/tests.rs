@@ -1,4 +1,7 @@
-use std::sync::{Arc, Mutex};
+use std::{
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use ironclaw_authorization::GrantAuthorizer;
@@ -18,20 +21,26 @@ use ironclaw_processes::{InMemoryProcessResultStore, InMemoryProcessStore, Proce
 use ironclaw_resources::{
     InMemoryResourceGovernor, ResourceAccount, ResourceGovernor, ResourceTally,
 };
-use ironclaw_secrets::{InMemorySecretStore, SecretMaterial};
+use ironclaw_secrets::{
+    InMemorySecretStore, SecretLeaseId, SecretMaterial, SecretStore, SecretStoreError,
+};
 use serde_json::{Value, json};
 
 use super::{
     CapabilitySurfaceVersion, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
     FirstPartyCapabilityRegistry, FirstPartyRuntimeAdapter, HostRuntimeServices,
     LocalHostProcessPort, LocalInvocationServicesResolver, NetworkMode, ProcessBackendKind,
-    ProcessResultStore, ProcessStore, RootFilesystem, RuntimeAdapter, RuntimeAdapterRequest,
+    ProcessResultStore, ProcessStore, ProductionWiringComponent, ProductionWiringConfig,
+    ProductionWiringIssueKind, RootFilesystem, RuntimeAdapter, RuntimeAdapterRequest,
     RuntimeAdapterResult, RuntimeProfile, SecretMode, ServiceResolvedRuntimeAdapter,
 };
 use crate::CommandExecutionRequest;
+use crate::obligations::{NetworkObligationPolicyStore, RuntimeSecretInjectionStore};
 
-#[test]
-fn shared_extension_registry_returns_same_instance() {
+mod first_party_runtime_adapter;
+
+#[tokio::test]
+async fn shared_extension_registry_returns_same_instance() {
     let services = test_services();
     let left = services.shared_extension_registry();
     let right = services.shared_extension_registry();
@@ -39,8 +48,55 @@ fn shared_extension_registry_returns_same_instance() {
     assert_eq!(Arc::as_ptr(&left), Arc::as_ptr(&right)); // safety: test assertion only; verifies both accessors expose the same shared registry.
 }
 
-#[test]
-fn host_http_egress_borrows_staged_policy_for_repeated_invocation_requests() {
+#[tokio::test]
+async fn product_auth_provider_runtime_ports_returns_none_without_egress() {
+    let services = test_services();
+
+    assert!(services.product_auth_provider_runtime_ports().is_none());
+}
+
+#[tokio::test]
+async fn product_auth_provider_runtime_ports_returns_configured_egress_and_obligation_handler() {
+    let secret_store = Arc::new(InMemorySecretStore::new());
+    let services = test_services()
+        .with_secret_store(Arc::clone(&secret_store))
+        .try_with_host_http_egress(RecordingNetwork::ok())
+        .expect("host HTTP egress should wire with graph secret store");
+    let scope = sample_scope();
+    let capability_id = sample_capability_id();
+    let handle = SecretHandle::new("product-auth-secret").unwrap();
+    secret_store
+        .put(
+            scope.clone(),
+            handle.clone(),
+            SecretMaterial::from("product-auth-material"),
+        )
+        .await
+        .expect("test secret should store");
+
+    let ports = services
+        .product_auth_provider_runtime_ports()
+        .expect("runtime ports should be configured");
+    assert!(Arc::ptr_eq(
+        &ports.runtime_http_egress(),
+        &configured_egress(&services)
+    ));
+    let _handler = ports.obligation_handler();
+    ports
+        .stage_secret_once(&scope, &capability_id, &handle)
+        .await
+        .expect("runtime ports should stage product auth secret");
+    assert!(
+        services
+            .secret_injection_store
+            .take(&scope, &capability_id, &handle)
+            .expect("staged secret should be readable for assertion")
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn host_http_egress_borrows_staged_policy_for_repeated_invocation_requests() {
     let network = RecordingNetwork::ok();
     let recorded_requests = Arc::clone(&network.requests);
     let services = test_services()
@@ -60,9 +116,11 @@ fn host_http_egress_borrows_staged_policy_for_repeated_invocation_requests() {
             scope.clone(),
             capability_id.clone(),
         ))
+        .await
         .expect("first request should observe staged policy");
     egress
         .execute(request_without_credentials(scope, capability_id))
+        .await
         .expect("second request in same invocation should observe borrowed staged policy");
 
     let requests = recorded_requests.lock().unwrap();
@@ -71,8 +129,8 @@ fn host_http_egress_borrows_staged_policy_for_repeated_invocation_requests() {
     assert_eq!(requests[1].policy, staged_policy);
 }
 
-#[test]
-fn host_http_egress_helper_injects_staged_credentials_from_handoff_store() {
+#[tokio::test]
+async fn host_http_egress_helper_injects_staged_credentials_from_handoff_store() {
     let scope = sample_scope();
     let capability_id = sample_capability_id();
     let handle = SecretHandle::new("api-token").unwrap();
@@ -99,6 +157,7 @@ fn host_http_egress_helper_injects_staged_credentials_from_handoff_store() {
 
     egress
         .execute(request_with_staged_credential(scope, capability_id, handle))
+        .await
         .expect("StagedObligation should inject from handoff store");
 
     let requests = recorded_requests.lock().unwrap();
@@ -112,6 +171,77 @@ fn host_http_egress_helper_injects_staged_credentials_from_handoff_store() {
             "authorization".to_string(),
             "Bearer staged-secret".to_string()
         ))
+    );
+}
+
+#[tokio::test]
+async fn host_http_egress_treats_expired_staged_secret_as_missing() {
+    let scope = sample_scope();
+    let capability_id = sample_capability_id();
+    let handle = SecretHandle::new("api-token").unwrap();
+
+    let network = RecordingNetwork::ok();
+    let recorded_requests = Arc::clone(&network.requests);
+    let mut services = test_services().with_secret_store(Arc::new(InMemorySecretStore::new()));
+    services.secret_injection_store = Arc::new(RuntimeSecretInjectionStore::with_ttl(
+        Duration::from_millis(5),
+    ));
+    services = services
+        .try_with_host_http_egress(network)
+        .expect("host HTTP egress should wire with graph secret store");
+    services
+        .network_policy_store
+        .insert(&scope, &capability_id, staged_policy());
+    services
+        .secret_injection_store
+        .insert(
+            &scope,
+            &capability_id,
+            &handle,
+            SecretMaterial::from("staged-secret"),
+        )
+        .expect("staged credential should be seeded");
+    std::thread::sleep(Duration::from_millis(20));
+    let egress = configured_egress(&services);
+
+    let error = egress
+        .execute(request_with_staged_credential(scope, capability_id, handle))
+        .await
+        .expect_err("expired staged secret should fail as missing");
+
+    assert!(matches!(
+        error,
+        ironclaw_host_api::RuntimeHttpEgressError::Credential { ref reason }
+            if reason == "required credential is unavailable"
+    ));
+    assert!(recorded_requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn host_http_egress_verification_rejects_mismatched_handoff_stores() {
+    let mismatched_network_policies = Arc::new(NetworkObligationPolicyStore::new());
+    let mismatched_secret_injections = Arc::new(RuntimeSecretInjectionStore::new());
+    let egress = Arc::new(crate::HostHttpEgressService::production(
+        RecordingNetwork::ok(),
+        InMemorySecretStore::new(),
+        mismatched_network_policies,
+        mismatched_secret_injections,
+        Arc::new(crate::http_body::UnsupportedRuntimeHttpBodyStore),
+    ));
+    let services = test_services()
+        .with_secret_store(Arc::new(InMemorySecretStore::new()))
+        .with_host_http_egress_service(egress);
+
+    let report = services
+        .validate_production_wiring(&ProductionWiringConfig::new([]).require_runtime_http_egress())
+        .expect_err("mismatched handoff stores must not satisfy production egress verification");
+
+    assert!(
+        report.contains(
+            ProductionWiringComponent::RuntimeHttpEgress,
+            ProductionWiringIssueKind::UnverifiedProductionImplementation
+        ),
+        "mismatched host HTTP egress stores should be reported as unverified: {report:?}"
     );
 }
 
@@ -819,8 +949,9 @@ impl RecordingNetwork {
     }
 }
 
+#[async_trait]
 impl NetworkHttpEgress for RecordingNetwork {
-    fn execute(
+    async fn execute(
         &self,
         request: NetworkHttpRequest,
     ) -> Result<NetworkHttpResponse, NetworkHttpError> {
@@ -836,4 +967,119 @@ impl NetworkHttpEgress for RecordingNetwork {
             },
         })
     }
+}
+
+/// `stage_secret_error` maps `SecretStoreError` variants to `ProductAuthCredentialStageError`.
+///
+/// These are synchronous unit tests of a pure function — no store, no async.
+#[test]
+fn stage_secret_error_maps_auth_and_backend_variants() {
+    use crate::services::stage_secret_error;
+    use ironclaw_host_api::CredentialStageError::{AuthRequired, Backend};
+
+    let scope = sample_scope();
+    let cases: &[(SecretStoreError, crate::ProductAuthCredentialStageError)] = &[
+        (
+            SecretStoreError::UnknownSecret {
+                scope: Box::new(scope.clone()),
+                handle: SecretHandle::new("h").unwrap(),
+            },
+            AuthRequired,
+        ),
+        (SecretStoreError::SecretExpired, AuthRequired),
+        (
+            SecretStoreError::LeaseRevoked {
+                lease_id: SecretLeaseId::default(),
+            },
+            AuthRequired,
+        ),
+        (
+            SecretStoreError::LeaseExpired {
+                lease_id: SecretLeaseId::default(),
+            },
+            AuthRequired,
+        ),
+        // Consumed lease: one-shot lease already used by a concurrent call.
+        // stable_reason = "CredentialExpired" — user-actionable, must be AuthRequired.
+        (
+            SecretStoreError::LeaseConsumed {
+                lease_id: SecretLeaseId::default(),
+            },
+            AuthRequired,
+        ),
+        // Unknown lease: lease gone (expired/evicted between lease_once and consume).
+        // stable_reason = "MissingCredential" — user-actionable, must be AuthRequired.
+        (
+            SecretStoreError::UnknownLease {
+                scope: Box::new(scope.clone()),
+                lease_id: SecretLeaseId::default(),
+            },
+            AuthRequired,
+        ),
+        (
+            SecretStoreError::BackendMisconfigured {
+                reason: "vault offline".to_string(),
+            },
+            Backend,
+        ),
+        (
+            SecretStoreError::StoreUnavailable {
+                reason: "down".to_string(),
+            },
+            Backend,
+        ),
+    ];
+    for (error, expected) in cases {
+        assert_eq!(
+            stage_secret_error(error.clone()),
+            *expected,
+            "error: {error:?}"
+        );
+    }
+}
+
+// T6 — RegisteredRuntimeHealth
+#[tokio::test]
+async fn registered_runtime_health_empty_available_reports_all_required_as_missing() {
+    use crate::services::{RegisteredRuntimeHealth, RuntimeBackendHealth};
+    let health = RegisteredRuntimeHealth::new(vec![]);
+    let missing = health
+        .missing_runtime_backends(&[RuntimeKind::Wasm, RuntimeKind::Mcp])
+        .await
+        .expect("health check must succeed");
+    // Both kinds are missing; order is normalized by runtime_sort_key.
+    assert!(
+        missing.contains(&RuntimeKind::Wasm),
+        "Wasm must be missing; got {missing:?}"
+    );
+    assert!(
+        missing.contains(&RuntimeKind::Mcp),
+        "Mcp must be missing; got {missing:?}"
+    );
+    assert_eq!(missing.len(), 2);
+}
+
+#[tokio::test]
+async fn registered_runtime_health_deduplicates_duplicate_required_kinds() {
+    use crate::services::{RegisteredRuntimeHealth, RuntimeBackendHealth};
+    let health = RegisteredRuntimeHealth::new(vec![RuntimeKind::Wasm]);
+    let missing = health
+        .missing_runtime_backends(&[RuntimeKind::Mcp, RuntimeKind::Mcp, RuntimeKind::Wasm])
+        .await
+        .expect("health check must succeed");
+    assert_eq!(missing, vec![RuntimeKind::Mcp], "got {missing:?}");
+}
+
+#[tokio::test]
+async fn registered_runtime_health_returns_empty_when_all_required_available() {
+    use crate::services::{RegisteredRuntimeHealth, RuntimeBackendHealth};
+    let health = RegisteredRuntimeHealth::new(vec![RuntimeKind::Wasm, RuntimeKind::Mcp]);
+    let missing = health
+        .missing_runtime_backends(&[RuntimeKind::Wasm])
+        .await
+        .expect("health check must succeed");
+    assert!(
+        missing.is_empty(),
+        "expected no missing kinds; got {missing:?}"
+    );
 }

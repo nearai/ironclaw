@@ -165,7 +165,7 @@ fn reborn_cli_binary_crate_stays_separate_from_v1_root() {
             "ironclaw_reborn_traces",
             "ironclaw_reborn_webui_ingress",
         ],
-        "ironclaw_reborn_cli should enter Reborn through ironclaw_reborn_composition (assembled-runtime facade), ironclaw_reborn_config (boot-config contract), ironclaw_reborn_traces (contributor-side TraceCommons client extracted from the legacy monolith), and ironclaw_reborn_webui_ingress (host-owned WebUI serve lifecycle) only. Adding any other workspace crate here re-opens speculative public API access to internal Reborn types.",
+        "ironclaw_reborn_cli should enter Reborn through ironclaw_reborn_composition (assembled-runtime and provider-admin facade), ironclaw_reborn_config (boot-config contract), ironclaw_reborn_traces (contributor-side TraceCommons client extracted from the legacy monolith), and ironclaw_reborn_webui_ingress (host-owned WebUI serve lifecycle) only. Adding any other workspace crate here re-opens speculative public API access to internal Reborn types.",
     );
     assert_workspace_deps_exactly(
         &dependencies_all_kinds,
@@ -1530,12 +1530,13 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             ],
         },
         BoundaryRule {
-            // The standalone CLI must reach the assembled runtime only
-            // through `ironclaw_reborn_composition`. Adding any of the
-            // forbidden deps here re-opens "speculative public API" access
-            // to internal Reborn types (turn coordinator, session thread
-            // service, loop drivers, LLM provider, etc.) and re-introduces
-            // the narrow-surface regression this rule exists to prevent.
+            // The standalone CLI reaches runtime and provider/admin UX through
+            // `ironclaw_reborn_composition` facades. Adding any of the
+            // forbidden deps here re-opens "speculative public API" access to
+            // internal Reborn types (turn coordinator, session thread service,
+            // loop drivers, LLM registry/auth internals, etc.) and
+            // re-introduces the narrow-surface regression this rule exists to
+            // prevent.
             crate_name: "ironclaw_reborn_cli",
             forbidden: vec![
                 "ironclaw",
@@ -1825,6 +1826,53 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_skills",
                 "ironclaw_tui",
                 "ironclaw_wasm",
+            ],
+        },
+        BoundaryRule {
+            // Trigger core owns source evaluation and trigger-domain state.
+            // Durable storage, poller lifecycle, capability registration,
+            // product adapters, and outbound delivery are wired by later
+            // owners, not by reaching upward from this crate.
+            crate_name: "ironclaw_triggers",
+            forbidden: vec![
+                "ironclaw",
+                "ironclaw_authorization",
+                "ironclaw_approvals",
+                "ironclaw_capabilities",
+                "ironclaw_dispatcher",
+                "ironclaw_engine",
+                "ironclaw_events",
+                "ironclaw_extensions",
+                "ironclaw_filesystem",
+                "ironclaw_gateway",
+                "ironclaw_host_runtime",
+                "ironclaw_mcp",
+                "ironclaw_memory",
+                "ironclaw_network",
+                "ironclaw_outbound",
+                "ironclaw_processes",
+                "ironclaw_product_adapter_registry",
+                "ironclaw_product_adapters",
+                "ironclaw_product_workflow",
+                "ironclaw_product_workflow_storage",
+                "ironclaw_reborn",
+                "ironclaw_reborn_cli",
+                "ironclaw_reborn_composition",
+                "ironclaw_reborn_config",
+                "ironclaw_reborn_event_store",
+                "ironclaw_resources",
+                "ironclaw_run_state",
+                "ironclaw_runtime_policy",
+                "ironclaw_safety",
+                "ironclaw_scripts",
+                "ironclaw_secrets",
+                "ironclaw_skills",
+                "ironclaw_threads",
+                "ironclaw_trust",
+                "ironclaw_tui",
+                "ironclaw_wasm",
+                "ironclaw_wasm_product_adapters",
+                "ironclaw_webui_v2",
             ],
         },
         BoundaryRule {

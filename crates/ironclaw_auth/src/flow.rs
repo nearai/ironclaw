@@ -128,6 +128,8 @@ pub struct AuthFlowRecord {
     pub authorization_code_hash: Option<AuthorizationCodeHash>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<AuthErrorCode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continuation_emitted_at: Option<Timestamp>,
     pub created_at: Timestamp,
     pub updated_at: Timestamp,
     pub expires_at: Timestamp,
@@ -226,6 +228,13 @@ pub trait AuthFlowManager: Send + Sync {
         input: OAuthCallbackFailureInput,
     ) -> Result<AuthFlowRecord, AuthProductError>;
 
+    async fn mark_continuation_dispatched(
+        &self,
+        scope: &AuthProductScope,
+        flow_id: AuthFlowId,
+        emitted_at: Timestamp,
+    ) -> Result<AuthFlowRecord, AuthProductError>;
+
     async fn cancel_flow(
         &self,
         scope: &AuthProductScope,
@@ -233,6 +242,32 @@ pub trait AuthFlowManager: Send + Sync {
     ) -> Result<AuthFlowRecord, AuthProductError>;
 }
 
-pub(crate) fn credential_status_for_completed_flow() -> CredentialAccountStatus {
+/// Read-only auth-flow projection source for product interaction views.
+///
+/// This is intentionally smaller than [`AuthFlowManager`]: callers can list
+/// sanitized flow records for scoped read-model composition, but cannot mutate
+/// auth-flow state or bypass manager validation.
+pub trait AuthFlowRecordSource: Send + Sync {
+    /// Returns a durable snapshot of auth-flow records.
+    ///
+    /// Implementations may return a broader snapshot than the caller's
+    /// current scope. Any consumer that projects these records into
+    /// product/user-facing views must scope-filter before exposing them.
+    fn flow_records_snapshot(&self) -> Vec<AuthFlowRecord>;
+
+    /// Returns the first flow record matching `predicate`.
+    ///
+    /// Implementations with an indexed or locked in-memory backing store can
+    /// avoid cloning unrelated flow records for single-record projection
+    /// lookups. The default keeps the trait backward-compatible.
+    fn flow_record_matching(
+        &self,
+        predicate: &mut dyn FnMut(&AuthFlowRecord) -> bool,
+    ) -> Option<AuthFlowRecord> {
+        self.flow_records_snapshot().into_iter().find(predicate)
+    }
+}
+
+pub fn credential_status_for_completed_flow() -> CredentialAccountStatus {
     CredentialAccountStatus::Configured
 }

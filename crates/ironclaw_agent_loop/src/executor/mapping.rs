@@ -155,6 +155,7 @@ pub(super) fn capability_error_class(kind: &CapabilityFailureKind) -> Capability
 
 pub(super) fn capability_failure_kind(kind: &CapabilityFailureKind) -> LoopFailureKind {
     match kind {
+        CapabilityFailureKind::InvalidInput => LoopFailureKind::ModelError,
         CapabilityFailureKind::Authorization | CapabilityFailureKind::PolicyDenied => {
             LoopFailureKind::PolicyDenied
         }
@@ -179,4 +180,33 @@ pub(super) fn honor_retry_alteration(
         });
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn invalid_capability_input_is_model_error_not_protocol_failure() {
+        assert_eq!(
+            capability_error_class(&CapabilityFailureKind::InvalidInput),
+            CapabilityErrorClass::InputInvalid
+        );
+        assert_eq!(
+            capability_failure_kind(&CapabilityFailureKind::InvalidInput),
+            LoopFailureKind::ModelError
+        );
+    }
+
+    #[test]
+    fn protocol_and_policy_failure_kinds_remain_distinct() {
+        assert_eq!(
+            capability_failure_kind(&CapabilityFailureKind::InvalidOutput),
+            LoopFailureKind::CapabilityProtocolError
+        );
+        assert_eq!(
+            capability_failure_kind(&CapabilityFailureKind::PolicyDenied),
+            LoopFailureKind::PolicyDenied
+        );
+    }
 }

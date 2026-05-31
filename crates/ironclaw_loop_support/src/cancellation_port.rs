@@ -18,6 +18,7 @@ use ironclaw_turns::{
     },
 };
 use parking_lot::RwLock;
+use tokio::sync::Notify;
 
 const DEFAULT_CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
@@ -25,12 +26,13 @@ const DEFAULT_CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(25);
 struct RunCancellationRequester {
     fired: Arc<AtomicBool>,
     signal: Arc<RwLock<Option<LoopCancellationSignal>>>,
+    notify: Arc<Notify>,
     owner: Weak<()>,
 }
 
 impl RunCancellationRequester {
     fn request(&self, reason_kind: LoopCancelReasonKind) {
-        request_cancellation(&self.fired, &self.signal, reason_kind);
+        request_cancellation(&self.fired, &self.signal, &self.notify, reason_kind);
     }
 
     fn is_owner_alive(&self) -> bool {
@@ -41,6 +43,7 @@ impl RunCancellationRequester {
 fn request_cancellation(
     fired: &AtomicBool,
     signal: &RwLock<Option<LoopCancellationSignal>>,
+    notify: &Notify,
     reason_kind: LoopCancelReasonKind,
 ) {
     if fired.load(Ordering::Acquire) {
@@ -60,6 +63,7 @@ fn request_cancellation(
     // populated `signal_lock`, independent of the RwLock's own ordering.
     fired.store(true, Ordering::Release);
     drop(signal_lock);
+    notify.notify_waiters();
 }
 
 /// Snapshot handle the host runtime owns and flips on cancellation.
@@ -67,22 +71,41 @@ fn request_cancellation(
 pub struct RunCancellationHandle {
     fired: Arc<AtomicBool>,
     signal: Arc<RwLock<Option<LoopCancellationSignal>>>,
+    notify: Arc<Notify>,
     owner: Arc<()>,
 }
 
 impl RunCancellationHandle {
     pub fn request(&self, reason_kind: LoopCancelReasonKind) {
-        request_cancellation(&self.fired, &self.signal, reason_kind);
+        request_cancellation(&self.fired, &self.signal, &self.notify, reason_kind);
     }
 
     pub fn is_requested(&self) -> bool {
         self.fired.load(Ordering::Acquire)
     }
 
+    fn observe(&self) -> Option<LoopCancellationSignal> {
+        if !self.fired.load(Ordering::Acquire) {
+            return None;
+        }
+        self.signal.read().clone()
+    }
+
+    async fn requested(&self) -> LoopCancellationSignal {
+        loop {
+            let notified = self.notify.notified();
+            if let Some(signal) = self.observe() {
+                return signal;
+            }
+            notified.await;
+        }
+    }
+
     fn requester(&self) -> RunCancellationRequester {
         RunCancellationRequester {
             fired: Arc::clone(&self.fired),
             signal: Arc::clone(&self.signal),
+            notify: Arc::clone(&self.notify),
             owner: Arc::downgrade(&self.owner),
         }
     }
@@ -99,21 +122,28 @@ impl RunStateLoopCancellationPort {
     }
 }
 
+#[async_trait]
 impl LoopCancellationPort for RunStateLoopCancellationPort {
     fn observe_cancellation(&self) -> Option<LoopCancellationSignal> {
-        if !self.handle.fired.load(Ordering::Acquire) {
-            return None;
-        }
-        self.handle.signal.read().clone()
+        self.handle.observe()
+    }
+
+    async fn cancellation_requested(&self) -> LoopCancellationSignal {
+        self.handle.requested().await
     }
 }
 
 /// Always reports "not cancelled".
 pub struct AlwaysAliveLoopCancellationPort;
 
+#[async_trait]
 impl LoopCancellationPort for AlwaysAliveLoopCancellationPort {
     fn observe_cancellation(&self) -> Option<LoopCancellationSignal> {
         None
+    }
+
+    async fn cancellation_requested(&self) -> LoopCancellationSignal {
+        std::future::pending().await
     }
 }
 
@@ -309,7 +339,7 @@ impl TurnStateRunCancellationFactory {
         let handles = Arc::clone(&self.handles);
         let base_interval = self.poll_interval;
         tokio::spawn(async move {
-            // Exponential backoff caps long-lived stuck runs (e.g. `RecoveryRequired`)
+            // Exponential backoff caps long-lived stuck runs
             // at one poll every `MAX_POLL_INTERVAL` instead of hammering the store at
             // `base_interval` for the full owner lifetime.
             const MAX_POLL_INTERVAL: Duration = Duration::from_secs(5);
@@ -618,6 +648,36 @@ mod tests {
         assert_eq!(second.reason_kind, LoopCancelReasonKind::UserRequested);
     }
 
+    #[tokio::test]
+    async fn cancellation_requested_returns_immediately_after_flip() {
+        let handle = RunCancellationHandle::default();
+        let port = RunStateLoopCancellationPort::new(handle.clone());
+        handle.request(LoopCancelReasonKind::UserRequested);
+
+        let signal = tokio::time::timeout(Duration::from_millis(50), port.cancellation_requested())
+            .await
+            .expect("already-requested cancellation should not wait");
+
+        assert_eq!(signal.reason_kind, LoopCancelReasonKind::UserRequested);
+    }
+
+    #[tokio::test]
+    async fn cancellation_requested_wakes_waiter_after_request() {
+        let handle = RunCancellationHandle::default();
+        let port = Arc::new(RunStateLoopCancellationPort::new(handle.clone()));
+        let waiter = Arc::clone(&port);
+        let join = tokio::spawn(async move { waiter.cancellation_requested().await });
+
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        handle.request(LoopCancelReasonKind::Superseded);
+
+        let signal = tokio::time::timeout(Duration::from_millis(100), join)
+            .await
+            .expect("waiter should be notified")
+            .expect("waiter task should complete");
+        assert_eq!(signal.reason_kind, LoopCancelReasonKind::Superseded);
+    }
+
     #[test]
     fn observe_payload_includes_requested_at() {
         let handle = RunCancellationHandle::default();
@@ -659,6 +719,16 @@ mod tests {
         let port = AlwaysAliveLoopCancellationPort;
 
         assert_eq!(port.observe_cancellation(), None);
+    }
+
+    #[tokio::test]
+    async fn always_alive_cancellation_requested_never_resolves() {
+        let port = AlwaysAliveLoopCancellationPort;
+
+        let result =
+            tokio::time::timeout(Duration::from_millis(10), port.cancellation_requested()).await;
+
+        assert!(result.is_err());
     }
 
     #[tokio::test]

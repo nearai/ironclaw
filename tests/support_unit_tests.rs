@@ -587,7 +587,7 @@ mod reborn_support_tests {
             .await
             .expect_err("unadvertised scripted capability should fail");
 
-        assert_eq!(error.kind, HostManagedModelErrorKind::InvalidRequest);
+        assert_eq!(error.kind, HostManagedModelErrorKind::InvalidOutput);
         assert!(
             error
                 .safe_summary
@@ -605,7 +605,11 @@ mod reborn_support_tests {
             .stream_model(model_request(Vec::new()))
             .await
             .expect_err("empty trace should fail");
-        assert!(error.safe_summary.contains("exhausted"));
+        assert!(
+            error.safe_summary.contains("no matching step"),
+            "unexpected error summary: {}",
+            error.safe_summary
+        );
     }
 
     #[tokio::test]
@@ -866,8 +870,8 @@ mod reborn_support_tests {
         assert_eq!(replay.arguments, serde_json::json!({"q": "near"}));
     }
 
-    #[test]
-    fn recording_network_transport_records_request_and_returns_scripted_response() {
+    #[tokio::test]
+    async fn recording_network_transport_records_request_and_returns_scripted_response() {
         let transport = RecordingNetworkHttpTransport::new();
         transport.push_response(NetworkHttpResponse {
             status: 200,
@@ -886,6 +890,7 @@ mod reborn_support_tests {
                 response_body_limit: Some(1024),
                 timeout_ms: Some(50),
             })
+            .await
             .expect("scripted response");
 
         assert_eq!(response.status, 200);
@@ -913,12 +918,13 @@ mod reborn_support_tests {
                 response_body_limit: None,
                 timeout_ms: None,
             })
+            .await
             .expect_err("scripted error");
         assert!(matches!(error, NetworkHttpError::Transport { .. }));
     }
 
-    #[test]
-    fn network_transport_mixed_results() {
+    #[tokio::test]
+    async fn network_transport_mixed_results() {
         let transport = RecordingNetworkHttpTransport::new();
         transport.push_response(NetworkHttpResponse {
             status: 200,
@@ -938,29 +944,43 @@ mod reborn_support_tests {
             usage: NetworkUsage::default(),
         });
 
-        assert_eq!(execute_recorded_get(&transport).expect("first").status, 200);
-        assert!(execute_recorded_get(&transport).is_err());
-        assert_eq!(execute_recorded_get(&transport).expect("third").status, 202);
+        assert_eq!(
+            execute_recorded_get(&transport)
+                .await
+                .expect("first")
+                .status,
+            200
+        );
+        assert!(execute_recorded_get(&transport).await.is_err());
+        assert_eq!(
+            execute_recorded_get(&transport)
+                .await
+                .expect("third")
+                .status,
+            202
+        );
         assert_eq!(transport.requests().len(), 3);
     }
 
-    #[test]
-    fn recording_network_transport_sanitizes_sensitive_request_data() {
+    #[tokio::test]
+    async fn recording_network_transport_sanitizes_sensitive_request_data() {
         let transport = RecordingNetworkHttpTransport::new();
-        let _ = transport.execute(NetworkTransportRequest {
-            method: NetworkMethod::Get,
-            url: "https://api.example.test/v1?token=secret&ok=1".to_string(),
-            headers: vec![
-                ("authorization".to_string(), "Bearer secret".to_string()),
-                ("x-api-key".to_string(), "secret-key".to_string()),
-                ("x-token-type".to_string(), "Bearer".to_string()),
-                ("x-secret-hash-algorithm".to_string(), "sha256".to_string()),
-            ],
-            body: b"secret body".to_vec(),
-            resolved_ips: vec![IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))],
-            response_body_limit: None,
-            timeout_ms: None,
-        });
+        let _ = transport
+            .execute(NetworkTransportRequest {
+                method: NetworkMethod::Get,
+                url: "https://api.example.test/v1?token=secret&ok=1".to_string(),
+                headers: vec![
+                    ("authorization".to_string(), "Bearer secret".to_string()),
+                    ("x-api-key".to_string(), "secret-key".to_string()),
+                    ("x-token-type".to_string(), "Bearer".to_string()),
+                    ("x-secret-hash-algorithm".to_string(), "sha256".to_string()),
+                ],
+                body: b"secret body".to_vec(),
+                resolved_ips: vec![IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))],
+                response_body_limit: None,
+                timeout_ms: None,
+            })
+            .await;
 
         let request = transport.requests().pop().expect("recorded request");
         assert_eq!(request.url, "https://api.example.test/v1?<redacted>");
@@ -977,11 +997,13 @@ mod reborn_support_tests {
         assert_ne!(request.body_sha256, "secret body");
     }
 
-    #[test]
-    fn recording_network_transport_errors_on_unexpected_request() {
+    #[tokio::test]
+    async fn recording_network_transport_errors_on_unexpected_request() {
         let transport = RecordingNetworkHttpTransport::new();
 
-        let error = execute_recorded_get(&transport).expect_err("unexpected request should fail");
+        let error = execute_recorded_get(&transport)
+            .await
+            .expect_err("unexpected request should fail");
 
         assert!(
             matches!(&error, NetworkHttpError::Transport { reason, .. } if reason.contains("unexpected HTTP request")),
@@ -990,8 +1012,8 @@ mod reborn_support_tests {
         assert_eq!(transport.requests().len(), 1);
     }
 
-    #[test]
-    fn policy_network_egress_blocks_private_ip_before_transport() {
+    #[tokio::test]
+    async fn policy_network_egress_blocks_private_ip_before_transport() {
         let transport = RecordingNetworkHttpTransport::new();
         let _default_policy_egress = transport.policy_egress();
         let egress = PolicyNetworkHttpEgress::new_with_resolver(
@@ -1010,6 +1032,7 @@ mod reborn_support_tests {
                 response_body_limit: Some(1024),
                 timeout_ms: None,
             })
+            .await
             .expect_err("private IP should be denied before transport");
 
         assert!(matches!(error, NetworkHttpError::PolicyDenied { .. }));
@@ -2066,18 +2089,20 @@ mod reborn_support_tests {
         }
     }
 
-    fn execute_recorded_get(
+    async fn execute_recorded_get(
         transport: &RecordingNetworkHttpTransport,
     ) -> Result<NetworkHttpResponse, NetworkHttpError> {
-        transport.execute(NetworkTransportRequest {
-            method: NetworkMethod::Get,
-            url: "https://api.example.test/v1".to_string(),
-            headers: vec![],
-            body: Vec::new(),
-            resolved_ips: vec![IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))],
-            response_body_limit: None,
-            timeout_ms: None,
-        })
+        transport
+            .execute(NetworkTransportRequest {
+                method: NetworkMethod::Get,
+                url: "https://api.example.test/v1".to_string(),
+                headers: vec![],
+                body: Vec::new(),
+                resolved_ips: vec![IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))],
+                response_body_limit: None,
+                timeout_ms: None,
+            })
+            .await
     }
 
     fn tool_result_message(
@@ -2116,7 +2141,7 @@ mod reborn_support_tests {
                 signature: None,
             }),
             tool_result_content: Some(HostManagedToolResultContent::Resolved {
-                safe_summary: ToolResultSafeSummary::new("tool completed").unwrap(),
+                safe_summary: ToolResultSafeSummary::new("tool completed").expect("safe summary"),
             }),
         }
     }

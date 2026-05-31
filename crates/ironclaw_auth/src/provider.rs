@@ -5,8 +5,8 @@ use ironclaw_host_api::SecretHandle;
 use secrecy::{ExposeSecret, SecretString};
 
 use crate::{
-    AuthProductError, AuthorizationCodeHash, CredentialAccountId, CredentialAccountLabel,
-    PkceVerifierHash, ProviderScope, ids::AuthProviderId,
+    AuthFlowId, AuthProductError, AuthProductScope, AuthorizationCodeHash, CredentialAccountId,
+    CredentialAccountLabel, PkceVerifierHash, ProviderScope, ids::AuthProviderId,
 };
 
 macro_rules! one_shot_secret {
@@ -37,7 +37,7 @@ macro_rules! one_shot_secret {
                 Ok(Self(value))
             }
 
-            pub(crate) fn expose_secret(&self) -> &str {
+            pub fn expose_secret(&self) -> &str {
                 self.0.expose_secret()
             }
         }
@@ -80,6 +80,14 @@ impl fmt::Debug for OAuthProviderCallbackRequest {
     }
 }
 
+/// Provider-exchange context claimed by the product-auth flow before raw
+/// provider material is exchanged or stored.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OAuthProviderExchangeContext {
+    pub scope: AuthProductScope,
+    pub flow_id: AuthFlowId,
+}
+
 /// Provider-exchange result safe to store in auth-flow/account records.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OAuthProviderExchange {
@@ -99,6 +107,7 @@ pub struct OAuthProviderExchange {
 #[derive(Clone, PartialEq, Eq)]
 pub struct OAuthProviderRefreshRequest {
     pub provider: AuthProviderId,
+    pub scope: AuthProductScope,
     pub account_id: CredentialAccountId,
     pub refresh_secret: SecretHandle,
     pub scopes: Vec<ProviderScope>,
@@ -109,6 +118,7 @@ impl fmt::Debug for OAuthProviderRefreshRequest {
         formatter
             .debug_struct("OAuthProviderRefreshRequest")
             .field("provider", &self.provider)
+            .field("scope", &self.scope)
             .field("account_id", &self.account_id)
             .field("refresh_secret", &"[REDACTED]")
             .field("scopes", &self.scopes)
@@ -129,6 +139,7 @@ pub struct OAuthProviderRefresh {
 pub trait AuthProviderClient: Send + Sync {
     async fn exchange_callback(
         &self,
+        context: OAuthProviderExchangeContext,
         request: OAuthProviderCallbackRequest,
     ) -> Result<OAuthProviderExchange, AuthProductError>;
 
@@ -136,9 +147,17 @@ pub trait AuthProviderClient: Send + Sync {
         &self,
         request: OAuthProviderRefreshRequest,
     ) -> Result<OAuthProviderRefresh, AuthProductError>;
+
+    async fn cleanup_exchange(
+        &self,
+        _context: OAuthProviderExchangeContext,
+        _exchange: &OAuthProviderExchange,
+    ) -> Result<(), AuthProductError> {
+        Ok(())
+    }
 }
 
-pub(crate) fn validate_provider_callback_request(
+pub fn validate_provider_callback_request(
     request: &OAuthProviderCallbackRequest,
 ) -> Result<(), AuthProductError> {
     if request.authorization_code.expose_secret().trim().is_empty()

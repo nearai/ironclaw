@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::{StreamExt, stream};
+use ironclaw_auth::{AuthProviderId, CredentialAccountLabel, OAuthAuthorizationUrl};
 #[cfg(test)]
 use ironclaw_event_projections::CapabilityActivityProjection;
 use ironclaw_event_projections::{
@@ -14,19 +15,19 @@ use ironclaw_event_streams::{
     InMemoryProjectionUpdateSource, NoExposureProjectionRedactionValidator,
     ProjectionStreamError as EventProjectionStreamError, ProjectionStreamItem,
     ProjectionSubscribeRequest, ProjectionSubscription as EventProjectionSubscription,
-    ProjectionTarget, ProjectionViewClass, SubscriberCapabilities, ThreadLiveProjectionItem,
-    ThreadLiveProjectionUpdate,
+    ProjectionTarget, ProjectionViewClass, SubscriberCapabilities, ThreadLiveProjectionUpdate,
 };
 use ironclaw_events::{DurableEventLog, EventCursor, EventStreamKey, ReadScope};
+use ironclaw_first_party_extension_ports::SkillActivationObserver;
 use ironclaw_host_api::UserId;
 use ironclaw_outbound::InMemoryOutboundStateStore;
 use ironclaw_product_adapters::{
-    AdapterInstallationId, CapabilityActivityStatusView, CapabilityActivityView,
-    CapabilityActivityViewInput, ExternalActorRef, ExternalConversationRef, ProductAdapterError,
-    ProductAdapterId, ProductOutboundEnvelope, ProductOutboundPayload, ProductOutboundTarget,
-    ProductProjectionItem, ProductProjectionState, ProductWorkflowRejectionKind,
-    ProjectionCursor as ProductProjectionCursor, ProjectionStream, ProjectionSubscriptionRequest,
-    RedactedString,
+    AdapterInstallationId, AuthPromptChallengeKind, CapabilityActivityStatusView,
+    CapabilityActivityView, CapabilityActivityViewInput, ExternalActorRef, ExternalConversationRef,
+    ProductAdapterError, ProductAdapterId, ProductOutboundEnvelope, ProductOutboundPayload,
+    ProductOutboundTarget, ProductProjectionItem, ProductProjectionState,
+    ProductWorkflowRejectionKind, ProjectionCursor as ProductProjectionCursor, ProjectionStream,
+    ProjectionSubscriptionRequest, RedactedString,
 };
 use ironclaw_turns::{
     ReplyTargetBindingRef, TurnActor, TurnCoordinator, TurnEventProjectionCursor,
@@ -34,15 +35,71 @@ use ironclaw_turns::{
 };
 
 mod display_preview;
-mod live_reasoning;
+mod live_progress;
 mod runtime_replay;
 mod turn_events;
 use display_preview::{CapabilityDisplayPreviewSource, NoopCapabilityDisplayPreviewSource};
-use live_reasoning::LiveReasoningMilestoneSink;
+use live_progress::{
+    LiveProgressMilestoneSink, LiveProjectionPublisher, LiveSkillActivationObserver,
+    product_items_for_live_update,
+};
 use runtime_replay::{
     RuntimePayloadCandidate, replay_payload_candidates, snapshot_payload_candidates,
 };
 use turn_events::{TurnEventBridge, TurnEventPayload};
+
+// ── Auth challenge projection ────────────────────────────────────────────────
+
+/// Redacted view of a pending auth challenge used exclusively for WebUI
+/// projection enrichment. Contains only data safe to surface over the wire.
+/// No raw secrets, PKCE verifiers, state hashes, or tokens.
+#[derive(Debug, Clone)]
+pub struct AuthChallengeView {
+    pub kind: AuthPromptChallengeKind,
+    pub provider: AuthProviderId,
+    pub account_label: Option<CredentialAccountLabel>,
+    pub authorization_url: Option<OAuthAuthorizationUrl>,
+    pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl AuthChallengeView {
+    /// Apply the view's enrichment fields onto a partially-constructed
+    /// `AuthPromptView`, removing the 5-field manual mapping at call sites.
+    ///
+    /// Caller constructs the 4 mandatory fields; this method fills the 5
+    /// optional enrichment fields from `self`.
+    pub(crate) fn enrich(
+        self,
+        mut view: ironclaw_product_adapters::AuthPromptView,
+    ) -> ironclaw_product_adapters::AuthPromptView {
+        view.challenge_kind = Some(self.kind);
+        view.provider = Some(self.provider.as_str().to_string());
+        view.account_label = self.account_label.map(|label| label.as_str().to_string());
+        view.authorization_url = self.authorization_url.map(|url| url.as_str().to_string());
+        view.expires_at = self.expires_at;
+        view
+    }
+}
+
+/// Narrow read-only interface used by the turn-event projection layer to
+/// enrich `AuthPromptView` with challenge metadata. Implemented by
+/// `RebornProductAuthServices` when a `flow_record_source` is wired in.
+///
+/// Implementations MUST verify caller user, run id, gate ref, and
+/// tenant/agent/project/thread before returning a record.
+#[async_trait]
+pub trait AuthChallengeProvider: Send + Sync {
+    /// Return the projection-safe challenge view for the given gate ref and
+    /// caller scope, or `None` if the auth flow cannot be found (already
+    /// consumed, not yet created, wrong scope, or record source unavailable).
+    async fn challenge_for_gate(
+        &self,
+        scope: &TurnScope,
+        owner_user_id: &UserId,
+        run_id: TurnRunId,
+        gate_ref: &str,
+    ) -> Option<AuthChallengeView>;
+}
 
 pub(crate) use display_preview::{CapabilityDisplayPreviewResult, CapabilityDisplayPreviewStore};
 #[cfg(test)]
@@ -60,6 +117,7 @@ pub(crate) struct RebornProjectionServices {
     turn_events: TurnEventBridge,
     display_previews: Arc<dyn CapabilityDisplayPreviewSource>,
     webui_reply_target_binding_ref: ReplyTargetBindingRef,
+    auth_challenges: Option<Arc<dyn AuthChallengeProvider>>,
 }
 
 impl RebornProjectionServices {
@@ -69,6 +127,15 @@ impl RebornProjectionServices {
         turn_coordinator: Arc<dyn TurnCoordinator>,
     ) -> Self {
         self.turn_events = TurnEventBridge::enabled(turn_event_source, turn_coordinator);
+        self
+    }
+
+    /// Wire in an auth challenge provider so `auth_required` SSE events carry
+    /// `challenge_kind`, `provider`, `account_label`, and `authorization_url`.
+    /// Optional: when absent the `AuthPromptView` omits those fields (backward
+    /// compatible — legacy consumers deserialise them as `None`).
+    pub(crate) fn with_auth_challenges(mut self, provider: Arc<dyn AuthChallengeProvider>) -> Self {
+        self.auth_challenges = Some(provider);
         self
     }
 
@@ -84,21 +151,35 @@ impl RebornProjectionServices {
         Arc::new(WebuiRuntimeProjectionStream {
             manager: Arc::clone(&self.event_stream_manager),
             turn_events: self.turn_events.clone(),
+            auth_challenges: self.auth_challenges.clone(),
             display_previews: Arc::clone(&self.display_previews),
             reply_target_binding_ref: self.webui_reply_target_binding_ref.clone(),
         })
     }
 
-    pub(crate) fn with_live_reasoning_milestone_sink(
+    pub(crate) fn with_live_progress_milestone_sink_for_publisher(
         &self,
         inner: Arc<dyn LoopHostMilestoneSink>,
-        actor_user_id: UserId,
+        publisher: Arc<LiveProjectionPublisher>,
     ) -> Arc<dyn LoopHostMilestoneSink> {
-        Arc::new(LiveReasoningMilestoneSink::new(
-            inner,
+        Arc::new(LiveProgressMilestoneSink::new(inner, publisher))
+    }
+
+    pub(crate) fn live_projection_publisher(
+        &self,
+        actor_user_id: UserId,
+    ) -> Arc<LiveProjectionPublisher> {
+        Arc::new(LiveProjectionPublisher::new(
             Arc::clone(&self.live_updates),
             actor_user_id,
         ))
+    }
+
+    pub(crate) fn skill_activation_observer(
+        &self,
+        publisher: Arc<LiveProjectionPublisher>,
+    ) -> Arc<dyn SkillActivationObserver> {
+        Arc::new(LiveSkillActivationObserver::new(publisher))
     }
 }
 
@@ -123,6 +204,7 @@ pub(crate) fn build_reborn_projection_services(
         turn_events: TurnEventBridge::default(),
         display_previews: Arc::new(NoopCapabilityDisplayPreviewSource),
         webui_reply_target_binding_ref,
+        auth_challenges: None,
     }
 }
 
@@ -135,6 +217,7 @@ pub(crate) fn build_reborn_projection_services(
 struct WebuiRuntimeProjectionStream {
     manager: Arc<EventStreamManager>,
     turn_events: TurnEventBridge,
+    auth_challenges: Option<Arc<dyn AuthChallengeProvider>>,
     display_previews: Arc<dyn CapabilityDisplayPreviewSource>,
     reply_target_binding_ref: ReplyTargetBindingRef,
 }
@@ -198,7 +281,12 @@ impl ProjectionStream for WebuiRuntimeProjectionStream {
         let turn_after = batch.cursor().turn.clone();
         let turn_drain = self
             .turn_events
-            .drain(&request.actor.user_id, &request.scope, turn_after)
+            .drain(
+                &request.actor.user_id,
+                &request.scope,
+                turn_after,
+                self.auth_challenges.as_deref(),
+            )
             .await?;
         for TurnEventPayload {
             cursor: turn_cursor,
@@ -538,16 +626,7 @@ fn live_update_payloads(
             reason: "runtime delivery offset exceeds runtime item payload count".to_string(),
         });
     }
-    let items = update
-        .items
-        .iter()
-        .map(|item| match item {
-            ThreadLiveProjectionItem::Thinking { id, body } => ProductProjectionItem::Thinking {
-                id: id.clone(),
-                body: body.clone(),
-            },
-        })
-        .collect::<Vec<_>>();
+    let items = product_items_for_live_update(update);
     if items.is_empty() {
         return Ok(None);
     }

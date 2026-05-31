@@ -76,7 +76,10 @@ async fn stub_gateway_send_cancels_recovery_required_and_releases_conversation()
     .unwrap()
     .unwrap();
 
-    assert_eq!(reply.status, TurnStatus::Cancelled);
+    // With no LLM gateway configured the driver returns Unavailable, which
+    // maps to a terminal Failed turn instead of the pre-PR RecoveryRequired
+    // path that cancelled via the standalone-runtime cancel guard.
+    assert_eq!(reply.status, TurnStatus::Failed);
     assert_eq!(reply.text, None);
 
     let second_reply = tokio::time::timeout(
@@ -87,7 +90,7 @@ async fn stub_gateway_send_cancels_recovery_required_and_releases_conversation()
     .unwrap()
     .unwrap();
 
-    assert_eq!(second_reply.status, TurnStatus::Cancelled);
+    assert_eq!(second_reply.status, TurnStatus::Failed);
     assert_eq!(second_reply.text, None);
 
     runtime.shutdown().await.unwrap();

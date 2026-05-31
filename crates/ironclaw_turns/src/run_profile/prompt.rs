@@ -265,6 +265,11 @@ where
         } else {
             None
         };
+        let compaction_message_index = context
+            .messages
+            .iter()
+            .filter_map(|message| message.compaction.clone())
+            .collect::<Vec<_>>();
         let instruction_bundle = self.instruction_builder().build(InstructionBundleRequest {
             context_bundle: context,
             visible_surface,
@@ -286,6 +291,7 @@ where
             bundle_ref: LoopPromptBundleRef::fresh_for_run(&self.context),
             messages: instruction_bundle.messages,
             surface_version: request.surface_version.clone(),
+            compaction_message_index,
             instruction_fingerprint: Some(instruction_bundle.fingerprint),
             identity_message_count,
             instruction_snippet_count,
@@ -313,11 +319,12 @@ mod tests {
 
     use super::*;
     use crate::{
-        RunProfileId, RunProfileVersion, TurnId, TurnRunId, TurnScope,
+        LoopMessageRef, RunProfileId, RunProfileVersion, TurnId, TurnRunId, TurnScope,
         run_profile::{
             InMemoryInstructionMaterializationStore, InMemoryLoopHostMilestoneSink,
-            LoopContextBundle, LoopContextMessage, LoopInlineMessage, LoopInlineMessageRole,
-            LoopSafeSummary, ResolvedRunProfile,
+            LoopContextBundle, LoopContextCompactionKind, LoopContextCompactionMetadata,
+            LoopContextMessage, LoopInlineMessage, LoopInlineMessageRole, LoopSafeSummary,
+            ResolvedRunProfile,
         },
     };
 
@@ -413,6 +420,7 @@ mod tests {
             message_ref: None,
             role: "system".to_string(),
             safe_summary: summary_text.to_string(),
+            compaction: None,
         };
         let store = Arc::new(InMemoryInstructionMaterializationStore::default());
         let port = HostManagedLoopPromptPort::new(
@@ -465,6 +473,7 @@ mod tests {
             message_ref: None,
             role: "user".to_string(),
             safe_summary: "What is the capital of France?".to_string(),
+            compaction: None,
         };
         let store = Arc::new(InMemoryInstructionMaterializationStore::default());
         let port = HostManagedLoopPromptPort::new(
@@ -504,6 +513,42 @@ mod tests {
             .unwrap()
             .expect("summary-only body message should be materialized");
         assert_eq!(materialized.model_content, "What is the capital of France?");
+    }
+
+    #[tokio::test]
+    async fn host_managed_prompt_port_preserves_compaction_message_index() {
+        let context = test_context();
+        let compaction = LoopContextCompactionMetadata {
+            sequence: 7,
+            kind: LoopContextCompactionKind::User,
+            estimated_tokens: 13,
+        };
+        let message = LoopContextMessage {
+            message_ref: Some(LoopMessageRef::new("msg:compaction-source").unwrap()),
+            role: "user".to_string(),
+            safe_summary: "visible message".to_string(),
+            compaction: Some(compaction.clone()),
+        };
+        let port = HostManagedLoopPromptPort::new(
+            context,
+            Arc::new(StubContextPort::new(vec![], vec![message])),
+            Arc::new(InMemoryLoopHostMilestoneSink::default()),
+        );
+
+        let bundle = port
+            .build_prompt_bundle(LoopPromptBundleRequest {
+                mode: PromptMode::TextOnly,
+                context_cursor: None,
+                surface_version: None,
+                checkpoint_state_ref: None,
+                max_messages: Some(8),
+                capability_view: None,
+                inline_messages: vec![],
+            })
+            .await
+            .expect("bundle should preserve compaction metadata");
+
+        assert_eq!(bundle.compaction_message_index, vec![compaction]);
     }
 
     fn test_context() -> LoopRunContext {

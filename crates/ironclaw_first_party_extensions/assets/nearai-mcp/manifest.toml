@@ -1,0 +1,25 @@
+schema_version = "reborn.extension_manifest.v2"
+id = "nearai"
+name = "NEAR AI"
+version = "0.1.0"
+description = "NEAR AI MCP tools for web search and hosted agent capabilities."
+trust = "first_party_requested"
+
+[runtime]
+kind = "mcp"
+transport = "http"
+url = "https://private.near.ai/mcp"
+
+[[capabilities]]
+id = "nearai.search"
+description = "Search through the NEAR AI MCP server."
+effects = ["dispatch_capability", "network", "use_secret"]
+runtime_credentials = [
+  { handle = "llm_nearai_api_key", source = { type = "product_auth_account", provider = "nearai" }, audience = { scheme = "https", host_pattern = "*.near.ai" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/nearai/search.input.v1.json"
+output_schema_ref = "schemas/nearai/search.output.v1.json"
+prompt_doc_ref = "prompts/nearai/search.md"
+required_host_ports = ["host.runtime.http_egress"]

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_auth::{AuthContinuationRef, AuthFlowRecord};
+use ironclaw_auth::{AuthContinuationRef, AuthFlowRecord, AuthFlowRecordSource};
 use ironclaw_product_workflow::{
     AuthGateRecord, AuthInteractionReadModel, AuthInteractionRejectionKind, AuthInteractionScope,
     AuthInteractionService, ListPendingAuthInteractionsRequest,
@@ -12,7 +12,6 @@ use ironclaw_turns::{
     GateRef, TurnActor, TurnPersistenceSnapshot, TurnRunId, TurnRunRecord, TurnScope, TurnStatus,
 };
 
-use crate::auth::RebornAuthFlowRecordSource;
 use crate::factory::LocalDevTurnStateStore;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -23,7 +22,7 @@ struct BlockedAuthRun {
 
 pub(super) struct LocalDevAuthInteractionReadModel {
     turn_state: Arc<LocalDevTurnStateStore>,
-    flow_records: Arc<dyn RebornAuthFlowRecordSource>,
+    flow_records: Arc<dyn AuthFlowRecordSource>,
 }
 
 pub(super) struct UnavailableAuthInteractionService;
@@ -48,7 +47,7 @@ impl AuthInteractionService for UnavailableAuthInteractionService {
 impl LocalDevAuthInteractionReadModel {
     pub(super) fn new(
         turn_state: Arc<LocalDevTurnStateStore>,
-        flow_records: Arc<dyn RebornAuthFlowRecordSource>,
+        flow_records: Arc<dyn AuthFlowRecordSource>,
     ) -> Self {
         Self {
             turn_state,

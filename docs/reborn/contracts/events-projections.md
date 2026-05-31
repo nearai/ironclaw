@@ -2,7 +2,7 @@
 
 **Date:** 2026-04-25
 **Status:** Draft contract
-**Depends on:** `docs/reborn/contracts/run-state.md`, `docs/reborn/contracts/host-api.md`
+**Depends on:** `docs/reborn/contracts/run-state.md`, `docs/reborn/contracts/host-api.md`, `docs/reborn/contracts/communication-delivery-resolution.md`
 
 ---
 
@@ -112,6 +112,10 @@ Reducer rules:
 - product-facing model reasoning projections must use model-visible-sanitized
   reasoning deltas only. They are live UI hints, not canonical transcript,
   checkpoint, audit, or replay state.
+- product-facing work summary projections must use sanitized driver
+  `LoopSafeSummary` text only. They describe host/driver progress phases such
+  as planning, waiting, retrying, or context work, and remain distinct from raw
+  model reasoning and durable transcript content.
 - transport adapters may bound activity fan-out per projection item; bounded
   snapshots must prefer the most recently updated activity facts and keep
   reconnect cursors resumable
@@ -173,6 +177,27 @@ Rules:
 - long-lived subscriptions pass admission policy and use bounded buffering
 - external push/fanout candidates are selected separately from subscribers and require projection access authorization for the actor/scope/target being fanned out
 - transport-specific reconnect details do not leak into core runtime services
+
+### Communication delivery resolution
+
+Outbound communication selection is downstream of event capture, durable
+projection, and access policy. It is not a projection source of truth.
+
+The outbound path is:
+
+```text
+durable event or projection fact
+  -> outbound candidate selection through ironclaw_outbound::OutboundPolicyService
+  -> ironclaw_outbound::OutboundPolicyService validation and delivery-attempt record
+  -> product adapter render and host transport send
+```
+
+Rules:
+
+- projection and event-store services may surface the facts that trigger a user-visible notification, but they do not choose the final outbound target;
+- external push and fan-out candidates are separate from subscribers and require projection access authorization for the actor, scope, and target being fanned out;
+- delivery resolution is not required for trigger event execution, only for the external delivery of a trigger result or other run notification;
+- the outbound candidate is still a candidate after projection; send authority only begins after `OutboundPolicyService` revalidates it.
 
 ---
 

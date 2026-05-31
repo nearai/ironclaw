@@ -6,9 +6,16 @@ mod tests {
 
     use super::super::*;
 
-    use ironclaw_host_api::{AgentId, MountPermissions, ProjectId, TenantId, ThreadId};
-    use ironclaw_host_runtime::SPAWN_SUBAGENT_CAPABILITY_ID;
-    use ironclaw_loop_support::HostManagedModelMessage;
+    use ironclaw_host_api::{
+        AgentId, EffectKind, MountPermissions, NetworkPolicy, ProjectId, TenantId, ThreadId,
+    };
+    use ironclaw_host_runtime::{
+        APPLY_PATCH_CAPABILITY_ID, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID,
+        HTTP_SAVE_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, READ_FILE_CAPABILITY_ID,
+        SHELL_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID,
+        SKILL_REMOVE_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID,
+    };
+    use ironclaw_loop_support::{HostManagedModelMessage, HostSkillContextSource};
     use ironclaw_product_workflow::{
         LifecyclePackageKind, LifecyclePackageRef, LifecycleProductAction, LifecycleProductContext,
         LifecycleProductFacade, LifecycleProductSurfaceContext,
@@ -18,13 +25,20 @@ mod tests {
         ToolResultReferenceEnvelope, ToolResultSafeSummary,
     };
     use ironclaw_turns::{
-        LoopMessageRef, RunProfileResolutionRequest, RunProfileResolver, TurnId, TurnRunId,
-        TurnScope,
+        AcceptedMessageRef, LoopMessageRef, RunProfileResolutionRequest, RunProfileResolver,
+        TurnActor, TurnId, TurnRunId, TurnScope,
         run_profile::{
-            CapabilityInvocation, CapabilityOutcome, InMemoryLoopHostMilestoneSink,
-            InMemoryRunProfileResolver, ModelProfileId, VisibleCapabilityRequest,
+            CapabilityFailureKind, CapabilityInvocation, CapabilityOutcome,
+            InMemoryLoopHostMilestoneSink, InMemoryRunProfileResolver, ModelProfileId,
+            VisibleCapabilityRequest,
         },
     };
+
+    use crate::extension_lifecycle_capabilities::{
+        EXTENSION_ACTIVATE_CAPABILITY_ID, EXTENSION_INSTALL_CAPABILITY_ID,
+        EXTENSION_REMOVE_CAPABILITY_ID, EXTENSION_SEARCH_CAPABILITY_ID,
+    };
+    use crate::runtime::local_dev_filesystem_skill_context_source;
 
     async fn run_context(label: &str) -> LoopRunContext {
         let resolved = InMemoryRunProfileResolver::default()
@@ -56,6 +70,12 @@ mod tests {
             reasoning: None,
             signature: None,
         }
+    }
+
+    fn skill_md(name: &str, description: &str, prompt: &str) -> String {
+        format!(
+            "---\nname: {name}\ndescription: {description}\nactivation:\n  keywords: [\"{name}\"]\n---\n\n{prompt}"
+        )
     }
 
     fn lifecycle_context(label: &str) -> LifecycleProductContext {
@@ -323,18 +343,33 @@ mod tests {
 
     #[test]
     fn local_dev_builtin_surface_grants_capability_classes() {
-        let capability_ids = local_dev_builtin_capability_ids();
+        let policy = crate::local_dev_capability_policy::local_dev_capability_policy()
+            .expect("policy parses");
+        let capability_ids = policy
+            .capability_ids()
+            .map(|capability| capability.as_str())
+            .collect::<Vec<_>>();
 
         assert!(capability_ids.contains(&WRITE_FILE_CAPABILITY_ID));
         assert!(capability_ids.contains(&APPLY_PATCH_CAPABILITY_ID));
         assert!(capability_ids.contains(&SKILL_LIST_CAPABILITY_ID));
+        // SKILL_ACTIVATE_CAPABILITY_ID is a synthetic capability added by
+        // wrap_local_dev_synthetic_capabilities, not a policy capability.
+        assert!(!capability_ids.contains(&SKILL_ACTIVATE_CAPABILITY_ID));
         assert!(capability_ids.contains(&SKILL_INSTALL_CAPABILITY_ID));
         assert!(capability_ids.contains(&SKILL_REMOVE_CAPABILITY_ID));
         assert!(capability_ids.contains(&SHELL_CAPABILITY_ID));
         assert!(capability_ids.contains(&HTTP_CAPABILITY_ID));
         assert!(capability_ids.contains(&HTTP_SAVE_CAPABILITY_ID));
+        let local_dev_allowed_effects = vec![
+            EffectKind::DispatchCapability,
+            EffectKind::ReadFilesystem,
+            EffectKind::WriteFilesystem,
+        ];
+        let local_dev_shell_network_policy =
+            crate::local_dev_capability_policy::local_dev_wildcard_network_policy();
         assert_eq!(
-            local_dev_allowed_effects(),
+            local_dev_allowed_effects,
             vec![
                 EffectKind::DispatchCapability,
                 EffectKind::ReadFilesystem,
@@ -342,11 +377,12 @@ mod tests {
             ]
         );
         assert_eq!(
-            local_dev_provider_allowed_effects(),
+            policy.provider.authority_effects,
             vec![
                 EffectKind::DispatchCapability,
                 EffectKind::ReadFilesystem,
                 EffectKind::WriteFilesystem,
+                EffectKind::DeleteFilesystem,
                 EffectKind::SpawnProcess,
                 EffectKind::ExecuteCode,
                 EffectKind::Network
@@ -376,12 +412,11 @@ mod tests {
             mount_for("/system/skills").permissions,
             MountPermissions::read_only()
         );
-        let grants = local_dev_builtin_grants(
+        let grants = policy.builtin_grants(
             &ExtensionId::new("loop-driver").expect("valid extension id"),
             &workspace_mounts,
             &skill_mounts,
-        )
-        .expect("local-dev grants build");
+        );
         let grant_for = |capability_id: &str| {
             grants
                 .grants
@@ -405,7 +440,7 @@ mod tests {
         assert!(shell_grant.constraints.mounts.mounts.is_empty());
         assert_eq!(
             shell_grant.constraints.network,
-            local_dev_shell_network_policy()
+            local_dev_shell_network_policy
         );
 
         let http_grant = grant_for(HTTP_CAPABILITY_ID);
@@ -416,7 +451,7 @@ mod tests {
         assert!(http_grant.constraints.mounts.mounts.is_empty());
         assert_eq!(
             http_grant.constraints.network,
-            local_dev_shell_network_policy()
+            local_dev_shell_network_policy
         );
 
         let http_save_grant = grant_for(HTTP_SAVE_CAPABILITY_ID);
@@ -431,7 +466,7 @@ mod tests {
         assert_eq!(http_save_grant.constraints.mounts, workspace_mounts);
         assert_eq!(
             http_save_grant.constraints.network,
-            local_dev_shell_network_policy()
+            local_dev_shell_network_policy
         );
 
         let extension_search_grant = grant_for(EXTENSION_SEARCH_CAPABILITY_ID);
@@ -451,10 +486,7 @@ mod tests {
             EXTENSION_REMOVE_CAPABILITY_ID,
         ] {
             let grant = grant_for(capability_id);
-            assert_eq!(
-                grant.constraints.allowed_effects,
-                local_dev_allowed_effects()
-            );
+            assert_eq!(grant.constraints.allowed_effects, local_dev_allowed_effects);
             assert!(grant.constraints.mounts.mounts.is_empty());
             assert_eq!(grant.constraints.network, NetworkPolicy::default());
         }
@@ -462,7 +494,7 @@ mod tests {
         let read_file_grant = grant_for(READ_FILE_CAPABILITY_ID);
         assert_eq!(
             read_file_grant.constraints.allowed_effects,
-            local_dev_allowed_effects()
+            local_dev_allowed_effects
         );
         assert_eq!(read_file_grant.constraints.mounts, workspace_mounts);
         assert_eq!(
@@ -473,12 +505,233 @@ mod tests {
         let skill_install_grant = grant_for(SKILL_INSTALL_CAPABILITY_ID);
         assert_eq!(
             skill_install_grant.constraints.allowed_effects,
-            local_dev_skill_install_allowed_effects()
+            vec![
+                EffectKind::DispatchCapability,
+                EffectKind::ReadFilesystem,
+                EffectKind::WriteFilesystem,
+                EffectKind::DeleteFilesystem,
+                EffectKind::Network
+            ]
         );
         assert_eq!(skill_install_grant.constraints.mounts, skill_mounts);
         assert_eq!(
             skill_install_grant.constraints.network,
-            local_dev_shell_network_policy()
+            local_dev_shell_network_policy
+        );
+
+        let skill_remove_grant = grant_for(SKILL_REMOVE_CAPABILITY_ID);
+        assert_eq!(
+            skill_remove_grant.constraints.allowed_effects,
+            vec![
+                EffectKind::DispatchCapability,
+                EffectKind::ReadFilesystem,
+                EffectKind::WriteFilesystem,
+                EffectKind::DeleteFilesystem
+            ]
+        );
+        assert_eq!(skill_remove_grant.constraints.mounts, skill_mounts);
+        assert_eq!(
+            skill_remove_grant.constraints.network,
+            NetworkPolicy::default()
+        );
+        assert!(
+            !grants
+                .grants
+                .iter()
+                .any(|grant| { grant.capability.as_str() == SKILL_ACTIVATE_CAPABILITY_ID }),
+            "skill activation is a local-dev synthetic capability, not a host-runtime grant"
+        );
+    }
+
+    #[tokio::test]
+    async fn local_dev_skill_activate_tool_loads_selected_skill_context() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage_root = dir.path().join("local-dev");
+        let services = crate::build_reborn_services(crate::RebornBuildInput::local_dev(
+            "local-dev-skill-activate-owner",
+            storage_root.clone(),
+        ))
+        .await
+        .expect("local-dev services build");
+        let skill_path = storage_root.join("skills/unit-activate-helper/SKILL.md");
+        std::fs::create_dir_all(skill_path.parent().expect("skill parent")).expect("skill dir");
+        std::fs::write(
+            &skill_path,
+            skill_md(
+                "unit-activate-helper",
+                "Unit activation helper",
+                "UNIT_ACTIVATE_SENTINEL",
+            ),
+        )
+        .expect("skill file");
+        let runtime = services.host_runtime.clone().expect("host runtime");
+        let local_runtime = services
+            .local_runtime
+            .as_ref()
+            .expect("local runtime substrate");
+        let mut run_context = run_context("skill-activate-tool").await;
+        run_context = run_context
+            .with_accepted_message_ref(
+                AcceptedMessageRef::new("msg:skill-activate-tool").expect("message ref"),
+            )
+            .with_actor(TurnActor::new(
+                UserId::new("skill-activate-user").expect("user id"),
+            ));
+        let skill_context = local_dev_filesystem_skill_context_source(
+            local_runtime,
+            &run_context.scope.tenant_id,
+            false,
+        )
+        .expect("skill context source");
+        let activation_source = skill_context.activation_source;
+        let capability_io = Arc::new(LocalDevCapabilityIo::default());
+        let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
+        let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
+        let policy = Arc::new(
+            crate::local_dev_capability_policy::local_dev_capability_policy()
+                .expect("policy parses"),
+        );
+        let skill_mounts = local_runtime.skill_mounts.clone();
+        let factory = LocalDevLoopCapabilityPortFactory {
+            runtime,
+            user_id: UserId::new("skill-activate-user").expect("user id"),
+            policy,
+            workspace_mounts: local_runtime.workspace_mounts.clone(),
+            skill_mounts,
+            extension_surface_source: LocalDevExtensionSurfaceSource::default(),
+            input_resolver,
+            result_writer,
+            milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
+            skill_activation_source: Some(Arc::clone(&activation_source)),
+        };
+        let port = factory
+            .create_capability_port(&run_context)
+            .await
+            .expect("capability port");
+        let surface = port
+            .visible_capabilities(VisibleCapabilityRequest {})
+            .await
+            .expect("visible surface");
+        let descriptor = surface
+            .descriptors
+            .iter()
+            .find(|descriptor| descriptor.capability_id.as_str() == SKILL_ACTIVATE_CAPABILITY_ID)
+            .expect("skill_activate descriptor");
+        assert!(descriptor.provider.is_none());
+        assert!(
+            descriptor
+                .parameters_schema
+                .get("properties")
+                .and_then(|properties| properties.get("names"))
+                .is_some()
+        );
+        let tool_definition = port
+            .tool_definitions()
+            .expect("tool definitions")
+            .into_iter()
+            .find(|definition| definition.capability_id.as_str() == SKILL_ACTIVATE_CAPABILITY_ID)
+            .expect("skill_activate tool definition");
+        let call = ProviderToolCall {
+            provider_id: "test-provider".to_string(),
+            provider_model_id: "test-model".to_string(),
+            turn_id: Some("provider-turn-skill-activate".to_string()),
+            id: "call-skill-activate".to_string(),
+            name: tool_definition.name,
+            arguments: serde_json::json!({"names": ["unit-activate-helper"]}),
+            response_reasoning: None,
+            reasoning: None,
+            signature: None,
+        };
+        let candidate = port
+            .register_provider_tool_call(call)
+            .await
+            .expect("provider call stages");
+        assert_eq!(
+            candidate.capability_id.as_str(),
+            SKILL_ACTIVATE_CAPABILITY_ID
+        );
+        let outcome = port
+            .invoke_capability(CapabilityInvocation {
+                surface_version: candidate.surface_version,
+                capability_id: candidate.capability_id,
+                input_ref: candidate.input_ref,
+            })
+            .await
+            .expect("skill activation invokes");
+        assert!(matches!(outcome, CapabilityOutcome::Completed(_)));
+
+        let selected = activation_source
+            .load_skill_context_candidates(&run_context)
+            .await
+            .expect("selected skill context loads");
+        assert_eq!(selected.len(), 1);
+        assert!(
+            selected[0]
+                .skill_md
+                .as_ref()
+                .expect("skill context")
+                .contains("UNIT_ACTIVATE_SENTINEL")
+        );
+    }
+
+    #[tokio::test]
+    async fn capability_wiring_with_skill_activation_source_exposes_skill_activate_capability() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage_root = dir.path().join("local-dev");
+        let services = crate::build_reborn_services(crate::RebornBuildInput::local_dev(
+            "local-dev-skill-activate-wiring-owner",
+            storage_root.clone(),
+        ))
+        .await
+        .expect("local-dev services build");
+        let local_runtime = services
+            .local_runtime
+            .as_ref()
+            .expect("local runtime substrate");
+        let run_context = run_context("skill-activate-wiring").await;
+        let thread_scope = ThreadScope {
+            tenant_id: run_context.scope.tenant_id.clone(),
+            agent_id: run_context.scope.agent_id.clone().expect("agent id"),
+            project_id: run_context.scope.project_id.clone(),
+            owner_user_id: None,
+            mission_id: None,
+        };
+        let skill_context = local_dev_filesystem_skill_context_source(
+            local_runtime,
+            &run_context.scope.tenant_id,
+            false,
+        )
+        .expect("skill context source");
+        let policy = Arc::new(
+            crate::local_dev_capability_policy::local_dev_capability_policy()
+                .expect("policy parses"),
+        );
+        let wiring = capability_wiring(
+            &services,
+            Arc::new(InMemorySessionThreadService::default()),
+            thread_scope,
+            UserId::new("skill-activate-wiring-user").expect("user id"),
+            policy,
+            Arc::new(UnavailableModelGateway),
+            Arc::new(InMemoryLoopHostMilestoneSink::default()),
+            Some(skill_context.activation_source),
+        )
+        .expect("capability wiring");
+        let port = wiring
+            .capability_factory
+            .create_capability_port(&run_context)
+            .await
+            .expect("capability port");
+        let surface = port
+            .visible_capabilities(VisibleCapabilityRequest {})
+            .await
+            .expect("visible surface");
+
+        assert!(
+            surface
+                .descriptors
+                .iter()
+                .any(|descriptor| descriptor.capability_id.as_str() == SKILL_ACTIVATE_CAPABILITY_ID)
         );
     }
 
@@ -486,9 +739,18 @@ mod tests {
     async fn local_yolo_capability_port_reads_confirmed_host_mount() {
         let dir = tempfile::tempdir().expect("tempdir"); // safety: test-only setup in #[cfg(test)] module.
         let storage_root = dir.path().join("local-dev");
+        let workspace_root = dir.path().join("workspace");
+        std::fs::create_dir_all(&workspace_root).expect("workspace root"); // safety: test-only setup in #[cfg(test)] module.
+        std::fs::write(workspace_root.join("note.txt"), "safe workspace file\n")
+            .expect("workspace file"); // safety: test-only setup in #[cfg(test)] module.
         let host_home = dir.path().join("home");
         std::fs::create_dir_all(&host_home).expect("host home"); // safety: test-only setup in #[cfg(test)] module.
         std::fs::write(host_home.join("safe.txt"), "safe host file\n").expect("host file"); // safety: test-only setup in #[cfg(test)] module.
+        let raw_workspace = workspace_root
+            .canonicalize()
+            .expect("canonical workspace root")
+            .to_string_lossy()
+            .into_owned();
         let raw_host_home = host_home
             .canonicalize()
             .expect("canonical host home")
@@ -504,29 +766,37 @@ mod tests {
             .with_runtime_policy(
                 crate::local_dev_yolo_runtime_policy(true).expect("local-yolo policy resolves"), // safety: test-only helper in #[cfg(test)] module.
             )
+            .with_local_dev_workspace_root(workspace_root.clone())
             .with_local_dev_confirmed_host_home_root(host_home.clone()),
         )
         .await
         .expect("local-dev-yolo services build"); // safety: test-only assertion in #[cfg(test)] module.
         let runtime = services.host_runtime.clone().expect("host runtime"); // safety: test-only assertion in #[cfg(test)] module.
-        let workspace_mounts = services
+        let local_runtime = services
             .local_runtime
             .as_ref()
-            .expect("local runtime substrate") // safety: test-only assertion in #[cfg(test)] module.
-            .workspace_mounts
-            .clone();
+            .expect("local runtime substrate"); // safety: test-only assertion in #[cfg(test)] module.
+        let workspace_mounts = local_runtime.workspace_mounts.clone();
+        let skill_mounts = local_runtime.skill_mounts.clone();
+        let policy = Arc::new(
+            crate::local_dev_capability_policy::local_dev_capability_policy()
+                .expect("policy parses"),
+        );
         let capability_io = Arc::new(LocalDevCapabilityIo::default());
         let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
         let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
-        let factory = LocalDevLoopCapabilityPortFactory::new(
+        let factory = LocalDevLoopCapabilityPortFactory {
             runtime,
-            UserId::new("local-yolo-host-user").expect("user id"), // safety: literal test id is valid.
+            user_id: UserId::new("local-yolo-host-user").expect("user id"), // safety: literal test id is valid.
+            policy,
             workspace_mounts,
-            LocalDevExtensionSurfaceSource::default(),
+            skill_mounts,
+            extension_surface_source: LocalDevExtensionSurfaceSource::default(),
             input_resolver,
             result_writer,
-            Arc::new(InMemoryLoopHostMilestoneSink::default()),
-        );
+            milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
+            skill_activation_source: None,
+        };
         let run_context = run_context("host-mount-read").await;
         let port = factory
             .create_capability_port(&run_context)
@@ -577,8 +847,13 @@ mod tests {
             .find(|descriptor| descriptor.capability_id.as_str() == SHELL_CAPABILITY_ID)
             .expect("shell descriptor visible");
         assert!(
-            !shell_descriptor.safe_description.contains("/host"),
-            "shell does not receive scoped filesystem disclosure"
+            shell_descriptor.safe_description.contains("/host"),
+            "shell should disclose confirmed host alias: {}",
+            shell_descriptor.safe_description
+        );
+        assert!(
+            !shell_descriptor.safe_description.contains(&raw_host_home),
+            "shell description must not disclose raw host home path"
         );
         assert!(
             shell_descriptor.safe_description.contains("local host")
@@ -624,6 +899,15 @@ mod tests {
             .find(|definition| definition.capability_id.as_str() == SHELL_CAPABILITY_ID)
             .expect("shell tool definition visible");
         assert!(
+            shell_tool.description.contains("/host"),
+            "provider tool shell description should disclose confirmed host alias: {}",
+            shell_tool.description
+        );
+        assert!(
+            !shell_tool.description.contains(&raw_host_home),
+            "provider tool shell description must not disclose raw host home path"
+        );
+        assert!(
             shell_tool.description.contains("local host")
                 && shell_tool
                     .description
@@ -641,7 +925,7 @@ mod tests {
 
         let outcome = port
             .invoke_capability(CapabilityInvocation {
-                surface_version: surface.version,
+                surface_version: surface.version.clone(),
                 capability_id: CapabilityId::new(READ_FILE_CAPABILITY_ID)
                     .expect("read_file capability id"), // safety: built-in capability id is a valid literal.
                 input_ref,
@@ -659,37 +943,160 @@ mod tests {
             output["content"],
             serde_json::json!("     1│ safe host file")
         );
+
+        let input_ref = capability_io
+            .register_provider_tool_call_input(
+                &run_context,
+                &provider_tool_call(
+                    serde_json::json!({"path": format!("{raw_workspace}/note.txt")}),
+                ),
+            )
+            .await
+            .expect("input ref"); // safety: test-only assertion in #[cfg(test)] module.
+
+        let outcome = port
+            .invoke_capability(CapabilityInvocation {
+                surface_version: surface.version,
+                capability_id: CapabilityId::new(READ_FILE_CAPABILITY_ID)
+                    .expect("read_file capability id"), // safety: built-in capability id is a valid literal.
+                input_ref,
+            })
+            .await
+            .expect("raw workspace read_file invocation"); // safety: test-only assertion in #[cfg(test)] module.
+        let CapabilityOutcome::Completed(completed) = outcome else {
+            panic!("expected completed read_file invocation");
+        };
+        let output = capability_io
+            .result_output(completed.result_ref.as_str())
+            .expect("result output lookup") // safety: test-only assertion in #[cfg(test)] module.
+            .expect("result output"); // safety: test-only assertion in #[cfg(test)] module.
+        assert_eq!(
+            output["content"],
+            serde_json::json!("     1│ safe workspace file")
+        );
+    }
+
+    #[tokio::test]
+    async fn local_dev_capability_port_skill_install_writes_user_skill_root() {
+        let dir = tempfile::tempdir().expect("tempdir"); // safety: test-only setup in #[cfg(test)] module.
+        let storage_root = dir.path().join("local-dev");
+        let services = crate::build_reborn_services(crate::RebornBuildInput::local_dev(
+            "local-dev-skill-port-owner",
+            storage_root.clone(),
+        ))
+        .await
+        .expect("local-dev services build"); // safety: test-only assertion in #[cfg(test)] module.
+        let runtime = services.host_runtime.clone().expect("host runtime"); // safety: test-only assertion in #[cfg(test)] module.
+        let local_runtime = services
+            .local_runtime
+            .as_ref()
+            .expect("local runtime substrate"); // safety: test-only assertion in #[cfg(test)] module.
+        let workspace_mounts = local_runtime.workspace_mounts.clone();
+        let skill_mounts = local_runtime.skill_mounts.clone();
+        let policy = Arc::new(
+            crate::local_dev_capability_policy::local_dev_capability_policy()
+                .expect("policy parses"),
+        );
+        let capability_io = Arc::new(LocalDevCapabilityIo::default());
+        let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
+        let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
+        let factory = LocalDevLoopCapabilityPortFactory {
+            runtime,
+            user_id: UserId::new("local-dev-skill-port-user").expect("user id"), // safety: literal test id is valid.
+            policy,
+            workspace_mounts,
+            skill_mounts,
+            extension_surface_source: LocalDevExtensionSurfaceSource::default(),
+            input_resolver,
+            result_writer,
+            milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
+            skill_activation_source: None,
+        };
+        let run_context = run_context("skill-install-write").await;
+        let port = factory
+            .create_capability_port(&run_context)
+            .await
+            .expect("capability port"); // safety: test-only assertion in #[cfg(test)] module.
+        let surface = port
+            .visible_capabilities(VisibleCapabilityRequest {})
+            .await
+            .expect("visible surface"); // safety: test-only assertion in #[cfg(test)] module.
+        let content =
+            "---\nname: qa-smoke-skill\ndescription: qa smoke skill\n---\nqa skill loaded\n";
+        let input_ref = capability_io
+            .register_provider_tool_call_input(
+                &run_context,
+                &provider_tool_call(serde_json::json!({ "content": content })),
+            )
+            .await
+            .expect("input ref"); // safety: test-only assertion in #[cfg(test)] module.
+
+        let outcome = port
+            .invoke_capability(CapabilityInvocation {
+                surface_version: surface.version,
+                capability_id: CapabilityId::new(SKILL_INSTALL_CAPABILITY_ID)
+                    .expect("skill_install capability id"), // safety: built-in capability id is a valid literal.
+                input_ref,
+            })
+            .await
+            .expect("skill_install invocation"); // safety: test-only assertion in #[cfg(test)] module.
+
+        let CapabilityOutcome::Completed(completed) = outcome else {
+            panic!("expected completed skill_install invocation, got {outcome:?}");
+        };
+        let output = capability_io
+            .result_output(completed.result_ref.as_str())
+            .expect("result output lookup") // safety: test-only assertion in #[cfg(test)] module.
+            .expect("result output"); // safety: test-only assertion in #[cfg(test)] module.
+        assert_eq!(output["installed"], serde_json::json!(true));
+        assert!(storage_root.join("skills/qa-smoke-skill/SKILL.md").exists());
     }
 
     #[tokio::test]
     async fn local_dev_capability_port_omits_host_disclosure_without_confirmed_host_mount() {
         let dir = tempfile::tempdir().expect("tempdir"); // safety: test-only setup in #[cfg(test)] module.
         let storage_root = dir.path().join("local-dev");
-        let services = crate::build_reborn_services(crate::RebornBuildInput::local_dev(
-            "local-dev-no-host-owner",
-            storage_root,
-        ))
+        let workspace_root = dir.path().join("workspace");
+        std::fs::create_dir_all(&workspace_root).expect("workspace root"); // safety: test-only setup in #[cfg(test)] module.
+        std::fs::write(workspace_root.join("note.txt"), "hidden workspace file\n")
+            .expect("workspace file"); // safety: test-only setup in #[cfg(test)] module.
+        let raw_workspace = workspace_root
+            .canonicalize()
+            .expect("canonical workspace root")
+            .to_string_lossy()
+            .into_owned();
+        let services = crate::build_reborn_services(
+            crate::RebornBuildInput::local_dev("local-dev-no-host-owner", storage_root)
+                .with_local_dev_workspace_root(workspace_root.clone()),
+        )
         .await
         .expect("local-dev services build"); // safety: test-only assertion in #[cfg(test)] module.
         let runtime = services.host_runtime.clone().expect("host runtime"); // safety: test-only assertion in #[cfg(test)] module.
-        let workspace_mounts = services
+        let local_runtime = services
             .local_runtime
             .as_ref()
-            .expect("local runtime substrate") // safety: test-only assertion in #[cfg(test)] module.
-            .workspace_mounts
-            .clone();
+            .expect("local runtime substrate"); // safety: test-only assertion in #[cfg(test)] module.
+        let workspace_mounts = local_runtime.workspace_mounts.clone();
+        let skill_mounts = local_runtime.skill_mounts.clone();
+        let policy = Arc::new(
+            crate::local_dev_capability_policy::local_dev_capability_policy()
+                .expect("policy parses"),
+        );
         let capability_io = Arc::new(LocalDevCapabilityIo::default());
         let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
         let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
-        let factory = LocalDevLoopCapabilityPortFactory::new(
+        let factory = LocalDevLoopCapabilityPortFactory {
             runtime,
-            UserId::new("local-dev-no-host-user").expect("user id"), // safety: literal test id is valid.
+            user_id: UserId::new("local-dev-no-host-user").expect("user id"), // safety: literal test id is valid.
+            policy,
             workspace_mounts,
-            LocalDevExtensionSurfaceSource::default(),
+            skill_mounts,
+            extension_surface_source: LocalDevExtensionSurfaceSource::default(),
             input_resolver,
             result_writer,
-            Arc::new(InMemoryLoopHostMilestoneSink::default()),
-        );
+            milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
+            skill_activation_source: None,
+        };
         let run_context = run_context("no-host-disclosure").await;
         let port = factory
             .create_capability_port(&run_context)
@@ -748,6 +1155,31 @@ mod tests {
             "normal local-dev shell provider tool should not receive yolo disclosure: {}",
             shell_tool.description
         );
+
+        let input_ref = capability_io
+            .register_provider_tool_call_input(
+                &run_context,
+                &provider_tool_call(
+                    serde_json::json!({"path": format!("{raw_workspace}/note.txt")}),
+                ),
+            )
+            .await
+            .expect("input ref"); // safety: test-only assertion in #[cfg(test)] module.
+        let outcome = port
+            .invoke_capability(CapabilityInvocation {
+                surface_version: surface.version,
+                capability_id: CapabilityId::new(READ_FILE_CAPABILITY_ID)
+                    .expect("read_file capability id"), // safety: built-in capability id is a valid literal.
+                input_ref,
+            })
+            .await
+            .expect("raw workspace read_file invocation"); // safety: test-only assertion in #[cfg(test)] module.
+        match outcome {
+            CapabilityOutcome::Failed(failure) => {
+                assert_eq!(failure.error_kind, CapabilityFailureKind::InvalidInput);
+            }
+            other => panic!("expected raw workspace read to be denied, got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -814,8 +1246,13 @@ mod tests {
             Arc::new(InMemorySessionThreadService::default()),
             thread_scope,
             UserId::new("local-dev-github-user").expect("user id"),
+            Arc::new(
+                crate::local_dev_capability_policy::local_dev_capability_policy()
+                    .expect("policy parses"),
+            ),
             Arc::new(UnavailableModelGateway),
             Arc::new(InMemoryLoopHostMilestoneSink::default()),
+            None,
         )
         .expect("local-dev capability wiring");
         assert_github_capabilities_visible(&wiring, &run_context).await;
@@ -844,8 +1281,13 @@ mod tests {
             Arc::new(InMemorySessionThreadService::default()),
             thread_scope,
             UserId::new("local-dev-live-github-user").expect("user id"),
+            Arc::new(
+                crate::local_dev_capability_policy::local_dev_capability_policy()
+                    .expect("policy parses"),
+            ),
             Arc::new(UnavailableModelGateway),
             Arc::new(InMemoryLoopHostMilestoneSink::default()),
+            None,
         )
         .expect("local-dev capability wiring");
         let local_runtime = services

@@ -14,8 +14,9 @@ pub use handlers::{
     CALENDAR_UPDATE_EVENT_CAPABILITY_ID, GMAIL_CREATE_DRAFT_CAPABILITY_ID,
     GMAIL_GET_MESSAGE_CAPABILITY_ID, GMAIL_LIST_MESSAGES_CAPABILITY_ID,
     GMAIL_REPLY_TO_MESSAGE_CAPABILITY_ID, GMAIL_SEND_MESSAGE_CAPABILITY_ID,
-    GMAIL_TRASH_MESSAGE_CAPABILITY_ID, GsuiteDispatchError, GsuiteDispatchRequest,
-    GsuiteDispatchResult, GsuiteExecutor,
+    GMAIL_TRASH_MESSAGE_CAPABILITY_ID, GsuiteCredentialDispatchReason, GsuiteCredentialStageError,
+    GsuiteCredentialStageRequest, GsuiteCredentialStager, GsuiteDispatchError,
+    GsuiteDispatchRequest, GsuiteDispatchResult, GsuiteExecutor,
 };
 pub use manifest::{
     CALENDAR_EXTENSION_ID, GMAIL_EXTENSION_ID, GSUITE_OUTPUT_BYTES_LIMIT,

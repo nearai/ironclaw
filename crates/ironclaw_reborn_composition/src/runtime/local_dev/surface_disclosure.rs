@@ -124,7 +124,7 @@ impl LocalDevSurfaceDisclosure {
         parameters_schema: &mut serde_json::Value,
     ) {
         if capability_id.as_str() == SHELL_CAPABILITY_ID {
-            append_description_note(description, LOCAL_DEV_YOLO_SHELL_NOTE);
+            append_description_note(description, LOCAL_DEV_LOCAL_HOST_SHELL_NOTE);
             return;
         }
         if !local_dev_scoped_path_capability(capability_id.as_str()) {
@@ -138,8 +138,7 @@ impl LocalDevSurfaceDisclosure {
     }
 }
 
-const LOCAL_DEV_YOLO_SHELL_NOTE: &str =
-    "Runs on the local host with local-dev shell process and network access.";
+const LOCAL_DEV_LOCAL_HOST_SHELL_NOTE: &str = "Runs on the local host with local-dev shell process and network access. Local-host shell command paths may use /workspace and /host aliases when those roots are configured; they are translated to the confirmed local workspace and host-home paths before execution.";
 
 fn local_dev_scoped_path_capability(capability_id: &str) -> bool {
     matches!(
@@ -171,6 +170,7 @@ fn confirmed_host_roots_note(aliases: &[&str]) -> Option<String> {
     let roots = aliases.join(", ");
     let mut note = format!("Available scoped roots: {roots}.");
     note.push_str(" /host is the confirmed host home mount; prefer /host over raw home paths.");
+    note.push_str(" In local-host shell, the same roots are available as command path aliases.");
     Some(note)
 }
 

@@ -23,25 +23,46 @@ dev-in-memory-session = []
 [dependencies]
 async-trait = "0.1"
 axum = "0.8"
+base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
+hex = "0.4.3"
 ironclaw_host_api = { path = "../ironclaw_host_api" }
 ironclaw_reborn_composition = { path = "../ironclaw_reborn_composition", features = ["webui-v2-beta"] }
 jsonwebtoken = "9"
 parking_lot = "0.12"
+rand = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 secrecy = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
 subtle = "2"
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "net", "rt", "rt-multi-thread", "signal", "sync"] }
 tracing = "0.1"
 url = "2"
+urlencoding = "2"
+# `uuid` is consumed by `InMemorySessionStore` (session.rs) and the
+# library's internal tests under `#[cfg(test)]`. The earlier attempt
+# to mark it `optional = true` broke `cargo test` because the
+# `cfg(test)` gate activated the `use uuid::Uuid;` import without
+# pulling in the optional crate.
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 axum = { version = "0.8", features = ["macros"] }
 http = "1"
+http-body-util = "0.1"
+# End-to-end session test (`tests/session_round_trip.rs`) drives the
+# composed `webui_v2_app` with a minimal `RebornServicesApi` stub so
+# the assertion covers SessionAuthenticator + the v2 route surface
+# together. The runtime `ironclaw_reborn_composition` dep already
+# enables `webui-v2-beta`; the three crates below supply the trait
+# + DTO shapes the stub implements.
+ironclaw_product_workflow = { path = "../ironclaw_product_workflow" }
+ironclaw_threads = { path = "../ironclaw_threads" }
+ironclaw_turns = { path = "../ironclaw_turns" }
+tower = { version = "0.5", features = ["util"] }
 # Generate test RSA keypairs at test time so the OIDC e2e test can
 # mint real signed JWTs without relying on a checked-in private key.
 rsa = { version = "0.9", features = ["sha2"] }
