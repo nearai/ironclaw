@@ -76,17 +76,20 @@ impl std::fmt::Display for TriggerId {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TriggerRouteThreadId(String);
 
 impl TriggerRouteThreadId {
-    pub fn new(value: impl Into<String>) -> Self {
-        Self(value.into())
+    pub fn new(value: impl Into<String>) -> Result<Self, TriggerError> {
+        Self::try_from(value.into())
     }
 
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    fn new_unchecked(value: impl Into<String>) -> Self {
+        Self(value.into())
     }
 }
 
@@ -102,17 +105,28 @@ impl std::fmt::Display for TriggerRouteThreadId {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
+impl TryFrom<String> for TriggerRouteThreadId {
+    type Error = TriggerError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        validate_lower_hex_identifier("route thread id", value).map(Self)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TriggerExternalEventId(String);
 
 impl TriggerExternalEventId {
-    pub fn new(value: impl Into<String>) -> Self {
-        Self(value.into())
+    pub fn new(value: impl Into<String>) -> Result<Self, TriggerError> {
+        Self::try_from(value.into())
     }
 
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    fn new_unchecked(value: impl Into<String>) -> Self {
+        Self(value.into())
     }
 }
 
@@ -125,6 +139,54 @@ impl AsRef<str> for TriggerExternalEventId {
 impl std::fmt::Display for TriggerExternalEventId {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(&self.0)
+    }
+}
+
+impl TryFrom<String> for TriggerExternalEventId {
+    type Error = TriggerError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        validate_lower_hex_identifier("external event id", value).map(Self)
+    }
+}
+
+impl Serialize for TriggerRouteThreadId {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for TriggerRouteThreadId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        String::deserialize(deserializer)?
+            .try_into()
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+impl Serialize for TriggerExternalEventId {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for TriggerExternalEventId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        String::deserialize(deserializer)?
+            .try_into()
+            .map_err(serde::de::Error::custom)
     }
 }
 
@@ -195,7 +257,6 @@ impl TriggerSchedule {
     }
 
     pub fn next_slot_after(&self, after: Timestamp) -> Result<Option<Timestamp>, TriggerError> {
-        self.validate()?;
         match self {
             Self::Cron { expression } => Ok(parse_cron_schedule(expression)?.after(&after).next()),
         }
@@ -241,13 +302,13 @@ pub struct TriggerFireIdentity {
 
 impl TriggerFireIdentity {
     pub fn new(tenant_id: TenantId, trigger_id: TriggerId, fire_slot: Timestamp) -> Self {
-        let route_thread_id = TriggerRouteThreadId(derive_fire_digest(
+        let route_thread_id = TriggerRouteThreadId::new_unchecked(derive_fire_digest(
             ROUTE_THREAD_DOMAIN,
             &tenant_id,
             trigger_id,
             fire_slot,
         ));
-        let external_event_id = TriggerExternalEventId(derive_fire_digest(
+        let external_event_id = TriggerExternalEventId::new_unchecked(derive_fire_digest(
             EXTERNAL_EVENT_DOMAIN,
             &tenant_id,
             trigger_id,
@@ -379,14 +440,13 @@ impl TriggerRepository for InMemoryTriggerRepository {
     }
 
     async fn list_triggers(&self, tenant_id: TenantId) -> Result<Vec<TriggerRecord>, TriggerError> {
-        let mut records = self
-            .lock_state()?
+        let state = self.lock_state()?;
+        let mut records = state
             .values()
             .filter(|record| record.tenant_id == tenant_id)
-            .cloned()
             .collect::<Vec<_>>();
-        records.sort_by_key(|record| (record.created_at, record.trigger_id.to_string()));
-        Ok(records)
+        records.sort_by_key(|record| (record.created_at, record.trigger_id));
+        Ok(records.into_iter().cloned().collect())
     }
 
     async fn remove_trigger(
@@ -407,15 +467,14 @@ impl TriggerRepository for InMemoryTriggerRepository {
         if limit == 0 {
             return Ok(Vec::new());
         }
-        let mut records = self
-            .lock_state()?
+        let state = self.lock_state()?;
+        let mut records = state
             .values()
             .filter(|record| record.is_due_at(now))
-            .cloned()
             .collect::<Vec<_>>();
-        records.sort_by_key(|record| (record.next_run_at, record.trigger_id.to_string()));
+        records.sort_by_key(|record| (record.next_run_at, record.trigger_id));
         records.truncate(limit);
-        Ok(records)
+        Ok(records.into_iter().cloned().collect())
     }
 }
 
@@ -463,7 +522,7 @@ fn parse_cron_schedule(expression: &str) -> Result<Schedule, TriggerError> {
 }
 
 fn reject_sub_minute_seconds_field(field: &str) -> Result<(), TriggerError> {
-    if field == "0" {
+    if field.trim().parse::<u32>() == Ok(0) {
         return Ok(());
     }
     Err(TriggerError::InvalidSchedule {
@@ -473,26 +532,51 @@ fn reject_sub_minute_seconds_field(field: &str) -> Result<(), TriggerError> {
 }
 
 fn reject_sub_minute_cadence(schedule: &Schedule) -> Result<(), TriggerError> {
-    let probe = DateTime::from_timestamp(1_704_067_200, 0).ok_or_else(|| {
-        TriggerError::InvalidSchedule {
-            reason: "failed to build cadence validation timestamp".to_string(),
+    let probes = [0_i64, 15, 30, 45]
+        .into_iter()
+        .map(|offset_seconds| {
+            DateTime::from_timestamp(1_704_067_200 + offset_seconds, 0).ok_or_else(|| {
+                TriggerError::InvalidSchedule {
+                    reason: "failed to build cadence validation timestamp".to_string(),
+                }
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut found_fire = false;
+    for probe in probes {
+        let mut upcoming = schedule.after(&probe);
+        let Some(first) = upcoming.next() else {
+            continue;
+        };
+        found_fire = true;
+        let Some(second) = upcoming.next() else {
+            continue;
+        };
+        if (second - first).num_seconds() < MIN_FIRE_CADENCE.as_secs() as i64 {
+            return Err(TriggerError::InvalidSchedule {
+                reason: "schedule can fire more frequently than once per minute".to_string(),
+            });
         }
-    })?;
-    let mut upcoming = schedule.after(&probe);
-    let Some(first) = upcoming.next() else {
+    }
+    if !found_fire {
         return Err(TriggerError::InvalidSchedule {
             reason: "cron expression has no upcoming fire time".to_string(),
         });
-    };
-    let Some(second) = upcoming.next() else {
-        return Ok(());
-    };
-    if (second - first).num_seconds() < MIN_FIRE_CADENCE.as_secs() as i64 {
-        return Err(TriggerError::InvalidSchedule {
-            reason: "schedule can fire more frequently than once per minute".to_string(),
-        });
     }
     Ok(())
+}
+
+fn validate_lower_hex_identifier(label: &str, value: String) -> Result<String, TriggerError> {
+    if value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    {
+        return Ok(value);
+    }
+    Err(TriggerError::InvalidTriggerId {
+        reason: format!("{label} must be 64 lowercase hex characters"),
+    })
 }
 
 fn derive_fire_digest(
@@ -578,6 +662,17 @@ mod tests {
     }
 
     #[test]
+    fn cron_schedule_rejects_wrong_field_count() {
+        let error = TriggerSchedule::cron("0 8 * *").expect_err("cron field count rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("expected 5, 6, or 7 cron fields"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
     fn trigger_id_parse_rejects_invalid_ulid() {
         let error = TriggerId::parse("not-a-ulid").expect_err("malformed ulid rejected");
         assert!(
@@ -587,26 +682,52 @@ mod tests {
     }
 
     #[test]
-    fn public_fire_id_wrappers_expose_string_accessors() {
-        let route = TriggerRouteThreadId::new("route-1");
-        let event = TriggerExternalEventId::new("event-1");
+    fn public_fire_id_wrappers_validate_hex_accessors_and_serde_round_trip() {
+        let route_value = "a".repeat(64);
+        let event_value = "b".repeat(64);
+        let route = TriggerRouteThreadId::new(route_value.clone()).expect("valid route id");
+        let event = TriggerExternalEventId::new(event_value.clone()).expect("valid event id");
 
-        assert_eq!(route.as_str(), "route-1");
-        assert_eq!(route.as_ref(), "route-1");
-        assert_eq!(route.to_string(), "route-1");
-        assert_eq!(event.as_str(), "event-1");
-        assert_eq!(event.as_ref(), "event-1");
-        assert_eq!(event.to_string(), "event-1");
+        assert_eq!(route.as_str(), route_value);
+        assert_eq!(route.as_ref(), route_value);
+        assert_eq!(route.to_string(), route_value);
+        assert_eq!(event.as_str(), event_value);
+        assert_eq!(event.as_ref(), event_value);
+        assert_eq!(event.to_string(), event_value);
+        assert!(TriggerRouteThreadId::new("route-1").is_err());
+        assert!(TriggerExternalEventId::new("event-1").is_err());
+        assert_eq!(to_value(&route).unwrap(), json!(route_value));
+        assert_eq!(to_value(&event).unwrap(), json!(event_value));
+        assert_eq!(
+            from_value::<TriggerRouteThreadId>(json!(route_value)).unwrap(),
+            route
+        );
+        assert_eq!(
+            from_value::<TriggerExternalEventId>(json!(event_value)).unwrap(),
+            event
+        );
     }
 
     #[test]
     fn cron_schedule_rejects_sub_minute_seconds_fields() {
-        for expression in ["*/30 * * * * *", "1 * * * * *", "0/15 * * * * * *"] {
+        for expression in [
+            "*/30 * * * * *",
+            "1 * * * * *",
+            "0/15 * * * * * *",
+            "00/15 * * * * *",
+        ] {
             let error = TriggerSchedule::cron(expression).expect_err("sub-minute cron rejected");
             assert!(
                 error.to_string().contains("second-level cadence"),
                 "unexpected error: {error}"
             );
+        }
+    }
+
+    #[test]
+    fn cron_schedule_accepts_zero_and_zero_padded_seconds_fields() {
+        for expression in ["0 0 * * * *", "00 0 * * * *"] {
+            TriggerSchedule::cron(expression).expect("zero seconds accepted");
         }
     }
 
@@ -715,6 +836,15 @@ mod tests {
                 .expect("paused state is not due")
                 .is_none()
         );
+
+        record.state = TriggerState::Completed;
+        assert!(
+            provider
+                .evaluate(&record, ts(1_704_067_200))
+                .await
+                .expect("completed state is not due")
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -794,6 +924,20 @@ mod tests {
                 .await
                 .expect("lookup")
                 .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn in_memory_repository_remove_missing_key_returns_none() {
+        let repo = InMemoryTriggerRepository::default();
+        assert!(
+            repo.remove_trigger(
+                tenant("tenant-a"),
+                TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid")
+            )
+            .await
+            .expect("remove missing")
+            .is_none()
         );
     }
 
