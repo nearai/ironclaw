@@ -8,18 +8,25 @@ use ironclaw_auth::{
     AuthInteractionId, AuthInteractionService, AuthProductError, AuthProductScope,
     AuthProviderClient, AuthProviderId, CredentialAccountChoiceRequest, CredentialAccountId,
     CredentialAccountLabel, CredentialAccountListPage, CredentialAccountListRequest,
-    CredentialAccountProjection, CredentialAccountService, CredentialAccountStatus,
-    CredentialAccountUpdateBinding, CredentialRecoveryProjection, CredentialRecoveryRequest,
-    CredentialRefreshReport, CredentialRefreshRequest, CredentialSetupService,
-    InMemoryAuthProductServices, ManualTokenSetupRequest, NewAuthFlow, OAuthAuthorizationUrl,
-    OAuthCallbackClaimRequest, OAuthCallbackFailureInput, OAuthCallbackInput,
-    OAuthProviderCallbackRequest, OAuthProviderExchangeContext, OpaqueStateHash, PkceVerifierHash,
-    ProviderBackedCredentialAccountService, ProviderCallbackOutcome, SecretCleanupReport,
-    SecretCleanupRequest, SecretCleanupService, SecretSubmitRequest, Timestamp,
+    CredentialAccountLookupRequest, CredentialAccountProjection, CredentialAccountService,
+    CredentialAccountStatus, CredentialAccountUpdateBinding, CredentialRecoveryProjection,
+    CredentialRecoveryRequest, CredentialRefreshReport, CredentialRefreshRequest,
+    CredentialSetupService, InMemoryAuthProductServices, ManualTokenSetupRequest, NewAuthFlow,
+    OAuthAuthorizationUrl, OAuthCallbackClaimRequest, OAuthCallbackFailureInput,
+    OAuthCallbackInput, OAuthProviderCallbackRequest, OAuthProviderExchangeContext,
+    OpaqueStateHash, PkceVerifierHash, ProviderBackedCredentialAccountService,
+    ProviderCallbackOutcome, SecretCleanupReport, SecretCleanupRequest, SecretCleanupService,
+    SecretSubmitRequest, Timestamp,
 };
+use ironclaw_product_adapters::AuthPromptChallengeKind;
 use ironclaw_product_workflow::ProductAuthTurnGateResumeDispatcher;
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
+
+use ironclaw_host_api::UserId;
+use ironclaw_turns::{TurnRunId, TurnScope};
+
+use crate::projection::{AuthChallengeProvider, AuthChallengeView};
 
 /// Dispatches a typed continuation event once an OAuth callback flow has
 /// completed.
@@ -542,9 +549,34 @@ impl RebornProductAuthServices {
 
     /// Enable WebUI/local-dev auth interaction read models from a scoped
     /// auth-flow projection source.
-    pub(crate) fn with_flow_record_source(mut self, source: Arc<dyn AuthFlowRecordSource>) -> Self {
+    /// Enable WebUI/local-dev auth-flow projection source.
+    ///
+    /// Exported `pub` so integration-test harnesses outside the crate can
+    /// wire an in-memory fake. Not part of the stable product API — do not
+    /// call this from production composition paths; use `as_auth_challenge_provider()`
+    /// only when `product_auth` exposes a `flow_record_source` via the bundle.
+    #[doc(hidden)]
+    pub fn with_flow_record_source(mut self, source: Arc<dyn AuthFlowRecordSource>) -> Self {
         self.flow_record_source = Some(source);
         self
+    }
+
+    /// Expose this service as an `Arc<dyn AuthChallengeProvider>` so the
+    /// projection layer can enrich `AuthPromptView` SSE frames with
+    /// `challenge_kind`, `provider`, `account_label`, and `authorization_url`.
+    ///
+    /// Returns `None` when no `flow_record_source` is configured (meaning this
+    /// bundle was built without the in-memory projection source, e.g. in
+    /// production deployments that use durable DB backends not yet wired to
+    /// `AuthFlowRecordSource`). The WebUI prompt falls back to the plain
+    /// 4-field view in that case, which is backward-compatible.
+    #[doc(hidden)]
+    pub fn as_auth_challenge_provider(self: &Arc<Self>) -> Option<Arc<dyn AuthChallengeProvider>> {
+        if self.flow_record_source.is_some() {
+            Some(Arc::clone(self) as Arc<dyn AuthChallengeProvider>)
+        } else {
+            None
+        }
     }
 
     /// Refresh a credential account through the injected product-auth port.
@@ -580,13 +612,37 @@ impl RebornProductAuthServices {
 
     /// Select a single configured credential account through the injected
     /// account port.
-    ///
-    /// The selection is validated by the underlying port; this facade does
-    /// not reconstruct selection authority locally.
     pub async fn select_credential_account(
         &self,
         request: CredentialAccountChoiceRequest,
     ) -> Result<CredentialAccountProjection, RebornCredentialLifecycleError> {
+        let mut lookup_request =
+            CredentialAccountLookupRequest::new(request.scope.clone(), request.account_id);
+        if let Some(extension_id) = request.requester_extension.clone() {
+            lookup_request = lookup_request.for_extension(extension_id);
+        }
+        let account = self
+            .credential_account_service
+            .get_account(lookup_request)
+            .await
+            .map_err(RebornCredentialLifecycleError::from)?
+            .ok_or(RebornCredentialLifecycleError {
+                code: AuthErrorCode::CredentialMissing,
+                retryable: false,
+            })?;
+        if account.provider != request.provider {
+            return Err(RebornCredentialLifecycleError {
+                code: AuthErrorCode::CrossScopeDenied,
+                retryable: false,
+            });
+        }
+        if account.status != CredentialAccountStatus::Configured {
+            return Err(RebornCredentialLifecycleError {
+                code: AuthErrorCode::CredentialMissing,
+                retryable: false,
+            });
+        }
+
         self.credential_account_service
             .select_configured_account(request)
             .await
@@ -901,6 +957,104 @@ impl RebornProductAuthServices {
         RebornProductAuthServicePorts::from_shared(services.clone())
             .into_services(continuation_dispatcher)
             .with_flow_record_source(services)
+    }
+}
+
+/// Verify that an auth flow record belongs to the same user and
+/// tenant/agent/project/thread as the caller's `TurnScope`.
+///
+/// `thread_id` is fail-closed: a flow with no `thread_id` does not match a
+/// thread-scoped request. Pre-thread or test flows should be stored with a
+/// `thread_id` once a real turn is in progress; a flow missing one must not
+/// leak into an unrelated thread's gate.
+fn flow_scope_matches_turn_scope(
+    flow: &ironclaw_auth::AuthFlowRecord,
+    scope: &TurnScope,
+    owner_user_id: &UserId,
+) -> bool {
+    let resource = &flow.scope.resource;
+    resource.tenant_id == scope.tenant_id
+        && resource.user_id == *owner_user_id
+        && resource.agent_id.as_ref() == scope.agent_id.as_ref()
+        && resource.project_id.as_ref() == scope.project_id.as_ref()
+        // Fail-closed: a flow with no thread_id cannot match a thread-scoped request.
+        && match (&resource.thread_id, &scope.thread_id) {
+            (None, _) => false,
+            (Some(t), s) => t == s,
+        }
+}
+
+fn flow_matches_turn_gate(
+    flow: &ironclaw_auth::AuthFlowRecord,
+    run_id: &str,
+    gate_ref: &str,
+) -> bool {
+    matches!(
+        &flow.continuation,
+        ironclaw_auth::AuthContinuationRef::TurnGateResume {
+            turn_run_ref,
+            gate_ref: g,
+        } if turn_run_ref.as_str() == run_id && g.as_str() == gate_ref
+    )
+}
+
+fn auth_challenge_to_view(
+    challenge: &ironclaw_auth::AuthChallenge,
+    flow: &ironclaw_auth::AuthFlowRecord,
+) -> AuthChallengeView {
+    match challenge {
+        ironclaw_auth::AuthChallenge::OAuthUrl {
+            authorization_url,
+            expires_at,
+        } => AuthChallengeView {
+            kind: AuthPromptChallengeKind::OAuthUrl,
+            provider: flow.provider.clone(),
+            account_label: None,
+            authorization_url: Some(authorization_url.clone()),
+            expires_at: Some(*expires_at),
+        },
+        ironclaw_auth::AuthChallenge::ManualTokenRequired {
+            label, expires_at, ..
+        } => AuthChallengeView {
+            kind: AuthPromptChallengeKind::ManualToken,
+            provider: flow.provider.clone(),
+            account_label: Some(label.clone()),
+            authorization_url: None,
+            expires_at: Some(*expires_at),
+        },
+        ironclaw_auth::AuthChallenge::AccountSelectionRequired { .. }
+        | ironclaw_auth::AuthChallenge::ReauthorizeRequired { .. }
+        | ironclaw_auth::AuthChallenge::SetupRequired { .. } => AuthChallengeView {
+            kind: AuthPromptChallengeKind::Other,
+            provider: flow.provider.clone(),
+            account_label: None,
+            authorization_url: None,
+            expires_at: None,
+        },
+    }
+}
+
+#[async_trait]
+impl AuthChallengeProvider for RebornProductAuthServices {
+    async fn challenge_for_gate(
+        &self,
+        scope: &TurnScope,
+        owner_user_id: &UserId,
+        run_id: TurnRunId,
+        gate_ref: &str,
+    ) -> Option<AuthChallengeView> {
+        let source = self.flow_record_source.as_ref()?;
+        // The flow store is process-wide; always verify user, turn scope,
+        // run id, and gate ref before exposing challenge metadata.
+        let run_id = run_id.to_string();
+        let mut matches_challenge = |flow: &ironclaw_auth::AuthFlowRecord| {
+            !ironclaw_auth::is_terminal_status(flow.status)
+                && flow_scope_matches_turn_scope(flow, scope, owner_user_id)
+                && flow_matches_turn_gate(flow, &run_id, gate_ref)
+        };
+        let flow = source.flow_record_matching(&mut matches_challenge)?;
+        let challenge = flow.challenge.as_ref()?;
+        Some(auth_challenge_to_view(challenge, &flow))
     }
 }
 

@@ -88,6 +88,11 @@ fn auth_prompt() -> AuthPromptView {
         auth_request_ref: "auth:oauth".to_string(),
         headline: "Connect account".to_string(),
         body: "Connect before continuing.".to_string(),
+        challenge_kind: None,
+        provider: None,
+        account_label: None,
+        authorization_url: None,
+        expires_at: None,
     }
 }
 

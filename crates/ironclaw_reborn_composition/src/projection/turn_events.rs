@@ -17,6 +17,8 @@ use ironclaw_turns::{
 };
 use tokio::sync::Mutex;
 
+use crate::projection::AuthChallengeProvider;
+
 pub(super) const WEBUI_TURN_EVENT_PAGE_LIMIT: usize = 256;
 const FAILURE_EXPLANATION_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1500);
 const FAILURE_EXPLANATION_MAX_BYTES: usize = 512;
@@ -104,6 +106,7 @@ impl TurnEventBridge {
         caller_user_id: &ironclaw_host_api::UserId,
         scope: &TurnScope,
         after: Option<TurnEventProjectionCursor>,
+        auth_challenges: Option<&dyn AuthChallengeProvider>,
     ) -> Result<TurnEventDrain, ProductAdapterError> {
         let Self::Enabled {
             service,
@@ -144,9 +147,11 @@ impl TurnEventBridge {
             next_cursor = Some(page.next_cursor.clone());
             payloads.extend(
                 turn_event_payloads_for_page(
+                    caller_user_id,
                     coordinator.as_ref(),
                     failure_explainer.as_ref(),
                     failure_explanation_cache,
+                    auth_challenges,
                     page.entries,
                 )
                 .await?,
@@ -164,18 +169,22 @@ impl TurnEventBridge {
 }
 
 async fn turn_event_payloads_for_page(
+    caller_user_id: &ironclaw_host_api::UserId,
     coordinator: &dyn TurnCoordinator,
     failure_explainer: &dyn FailureExplanationProvider,
     failure_explanation_cache: &Arc<Mutex<HashMap<FailureExplanationCacheKey, String>>>,
+    auth_challenges: Option<&dyn AuthChallengeProvider>,
     events: Vec<TurnLifecycleEvent>,
 ) -> Result<Vec<TurnEventPayload>, ProductAdapterError> {
     let mut payloads = Vec::new();
     for event in events {
         let cursor = TurnEventProjectionCursor::for_scope(event.scope.clone(), event.cursor);
         if let Some(payload) = turn_event_payload(
+            caller_user_id,
             coordinator,
             failure_explainer,
             failure_explanation_cache,
+            auth_challenges,
             &event,
         )
         .await?
@@ -187,13 +196,16 @@ async fn turn_event_payloads_for_page(
 }
 
 async fn turn_event_payload(
+    caller_user_id: &ironclaw_host_api::UserId,
     coordinator: &dyn TurnCoordinator,
     failure_explainer: &dyn FailureExplanationProvider,
     failure_explanation_cache: &Arc<Mutex<HashMap<FailureExplanationCacheKey, String>>>,
+    auth_challenges: Option<&dyn AuthChallengeProvider>,
     event: &TurnLifecycleEvent,
 ) -> Result<Option<ProductOutboundPayload>, ProductAdapterError> {
     if matches!(event.kind, TurnEventKind::Blocked)
-        && let Some(prompt) = blocked_prompt_payload(coordinator, event).await?
+        && let Some(prompt) =
+            blocked_prompt_payload(caller_user_id, coordinator, auth_challenges, event).await?
     {
         return Ok(Some(prompt));
     }
@@ -260,7 +272,9 @@ impl FailureExplanationProvider for ModelFailureExplanationProvider {
 }
 
 async fn blocked_prompt_payload(
+    caller_user_id: &ironclaw_host_api::UserId,
     coordinator: &dyn TurnCoordinator,
+    auth_challenges: Option<&dyn AuthChallengeProvider>,
     event: &TurnLifecycleEvent,
 ) -> Result<Option<ProductOutboundPayload>, ProductAdapterError> {
     let state = match coordinator
@@ -289,22 +303,62 @@ async fn blocked_prompt_payload(
     let Some(gate_ref) = state.gate_ref else {
         return Ok(None);
     };
-    let gate_ref = gate_ref.as_str().to_string();
+    let gate_ref_str = gate_ref.as_str().to_string();
     match event.status {
-        TurnStatus::BlockedAuth => Ok(Some(ProductOutboundPayload::AuthPrompt(AuthPromptView {
-            turn_run_id: event.run_id,
-            auth_request_ref: gate_ref,
-            headline: "Authentication required".to_string(),
-            body: event
-                .sanitized_reason
-                .clone()
-                .unwrap_or_else(|| "Authenticate to continue this run.".to_string()),
-        }))),
-        TurnStatus::BlockedApproval => Ok(Some(gate_prompt(event, gate_ref, "Approval required"))),
-        TurnStatus::BlockedResource => {
-            Ok(Some(gate_prompt(event, gate_ref, "Resource unavailable")))
+        TurnStatus::BlockedAuth => {
+            // Enrich the prompt with auth-flow metadata when the provider is
+            // available. Missing = backward-compatible (fields omitted as None).
+            let challenge = match auth_challenges {
+                Some(provider) => {
+                    provider
+                        .challenge_for_gate(
+                            &event.scope,
+                            caller_user_id,
+                            event.run_id,
+                            &gate_ref_str,
+                        )
+                        .await
+                }
+                None => None,
+            };
+            let base_view = AuthPromptView {
+                turn_run_id: event.run_id,
+                auth_request_ref: gate_ref_str,
+                headline: "Authentication required".to_string(),
+                body: event
+                    .sanitized_reason
+                    .clone()
+                    .unwrap_or_else(|| "Authenticate to continue this run.".to_string()),
+                challenge_kind: None,
+                provider: None,
+                account_label: None,
+                authorization_url: None,
+                expires_at: None,
+            };
+            let view = match challenge {
+                Some(c) => c.enrich(base_view),
+                None => base_view,
+            };
+            Ok(Some(ProductOutboundPayload::AuthPrompt(view)))
         }
-        _ => Ok(None),
+        TurnStatus::BlockedApproval => {
+            Ok(Some(gate_prompt(event, gate_ref_str, "Approval required")))
+        }
+        TurnStatus::BlockedResource => Ok(Some(gate_prompt(
+            event,
+            gate_ref_str,
+            "Resource unavailable",
+        ))),
+        // Non-blocked statuses: no prompt payload. Exhaustive match so a new
+        // TurnStatus variant forces a compile error and an explicit decision.
+        TurnStatus::Queued
+        | TurnStatus::Running
+        | TurnStatus::BlockedDependentRun
+        | TurnStatus::RecoveryRequired
+        | TurnStatus::CancelRequested
+        | TurnStatus::Completed
+        | TurnStatus::Cancelled
+        | TurnStatus::Failed => Ok(None),
     }
 }
 

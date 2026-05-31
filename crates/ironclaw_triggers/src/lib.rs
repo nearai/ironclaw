@@ -52,20 +52,12 @@ impl TriggerId {
         Self(Ulid::new())
     }
 
-    pub fn from_ulid(value: Ulid) -> Self {
-        Self(value)
-    }
-
     pub fn parse(value: &str) -> Result<Self, TriggerError> {
         Ulid::from_str(value)
             .map(Self)
             .map_err(|error| TriggerError::InvalidTriggerId {
                 reason: error.to_string(),
             })
-    }
-
-    pub fn as_ulid(self) -> Ulid {
-        self.0
     }
 }
 

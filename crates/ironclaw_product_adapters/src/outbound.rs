@@ -535,12 +535,50 @@ pub struct GatePromptView {
     pub body: String,
 }
 
+/// Discriminator for the kind of auth challenge surfaced in an `AuthPromptView`.
+///
+/// Added in issue #4112 as additive optional context. Legacy consumers that
+/// serialized `AuthPromptView` before this field existed will deserialize it
+/// as `None` (via `serde(default)`) without error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthPromptChallengeKind {
+    /// Browser must open `authorization_url` in a new tab and wait for the
+    /// OAuth callback to resume the run server-side.
+    #[serde(rename = "oauth_url")]
+    OAuthUrl,
+    /// User must type a manual token (PAT, API key) into the chat form.
+    ManualToken,
+    /// Other challenge kind (account selection, setup required, reauthorize).
+    /// The UI should fall back to a generic "authentication required" card.
+    Other,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuthPromptView {
     pub turn_run_id: TurnRunId,
     pub auth_request_ref: String,
     pub headline: String,
     pub body: String,
+    /// Challenge kind — present when the projection layer has auth-flow
+    /// metadata available for this gate. Absent on rows written before #4112.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub challenge_kind: Option<AuthPromptChallengeKind>,
+    /// Short provider id (e.g. `"google"`, `"github"`, `"notion"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// Human-readable account label (e.g. `"work@example.com"`, `"GitHub PAT"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_label: Option<String>,
+    /// Opaque IDP authorization URL. Only present for `OAuthUrl` challenges.
+    /// This is the same URL already surfaced in the legacy
+    /// `AppEvent::OnboardingState.auth_url` field — safe to render in the
+    /// browser. Never contains a PKCE verifier, client secret, or token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorization_url: Option<String>,
+    /// Challenge expiry. Present when the auth flow has a bounded TTL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

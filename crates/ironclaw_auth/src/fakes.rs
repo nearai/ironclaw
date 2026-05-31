@@ -112,6 +112,14 @@ impl AuthFlowRecordSource for InMemoryAuthProductServices {
     fn flow_records_snapshot(&self) -> Vec<AuthFlowRecord> {
         Self::flow_records_snapshot(self)
     }
+
+    fn flow_record_matching(
+        &self,
+        predicate: &mut dyn FnMut(&AuthFlowRecord) -> bool,
+    ) -> Option<AuthFlowRecord> {
+        let state = self.lock_state();
+        state.flows.values().find(|flow| predicate(flow)).cloned()
+    }
 }
 
 #[async_trait]

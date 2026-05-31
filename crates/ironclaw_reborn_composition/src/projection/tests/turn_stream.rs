@@ -150,6 +150,73 @@ async fn webui_event_stream_resumes_mixed_batch_without_skipping_turn_event() {
 }
 
 #[tokio::test]
+async fn webui_event_stream_enriches_auth_prompt_through_projection_stream() {
+    let tenant_id = TenantId::new("webui-events-tenant").unwrap();
+    let user_id = UserId::new("webui-events-user").unwrap();
+    let agent_id = AgentId::new("webui-events-agent").unwrap();
+    let thread_id = ThreadId::new("webui-events-auth-enriched-thread").unwrap();
+    let turn_run = TurnRunId::new();
+    let gate_ref = "gate:auth-required";
+    let scope = TurnScope::new(
+        tenant_id.clone(),
+        Some(agent_id.clone()),
+        None,
+        thread_id.clone(),
+    );
+    let event_log_dyn: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
+    let services = build_reborn_projection_services(
+        event_log_dyn,
+        ReplyTargetBindingRef::new("webui-events-reply").unwrap(),
+    )
+    .with_turn_events(
+        Arc::new(FakeTurnEventSource {
+            events: vec![TurnLifecycleEvent {
+                cursor: TurnEventCursor(1),
+                scope: scope.clone(),
+                occurred_at: Some(chrono::Utc::now()),
+                owner_user_id: Some(user_id.clone()),
+                run_id: turn_run,
+                status: TurnStatus::BlockedAuth,
+                kind: TurnEventKind::Blocked,
+                blocked_gate: Some(TurnBlockedGateMetadata {
+                    gate_ref: GateRef::new(gate_ref).unwrap(),
+                    gate_kind: TurnBlockedGateKind::Auth,
+                }),
+                sanitized_reason: Some("GitHub authentication required".to_string()),
+            }],
+        }),
+        Arc::new(FakeTurnCoordinator {
+            state: turn_run_state(&scope, &user_id, turn_run, TurnEventCursor(1)),
+        }),
+    )
+    .with_auth_challenges(Arc::new(FakeAuthChallengeProvider {
+        expected_owner_user_id: user_id.clone(),
+        expected_run_id: turn_run,
+        expected_gate_ref: gate_ref.to_string(),
+    }));
+
+    let events = services
+        .webui_event_stream()
+        .drain(ProjectionSubscriptionRequest {
+            actor: TurnActor::new(user_id),
+            scope,
+            after_cursor: None,
+        })
+        .await
+        .unwrap();
+
+    assert!(events.iter().any(|event| matches!(
+        event.payload(),
+        ProductOutboundPayload::AuthPrompt(prompt)
+            if prompt.turn_run_id == turn_run
+                && prompt.auth_request_ref == gate_ref
+                && prompt.challenge_kind == Some(AuthPromptChallengeKind::OAuthUrl)
+                && prompt.provider.as_deref() == Some("github")
+                && prompt.authorization_url.as_deref() == Some("https://github.com/login/oauth/authorize")
+    )));
+}
+
+#[tokio::test]
 async fn webui_event_stream_projects_blocked_dependent_run_status() {
     let tenant_id = TenantId::new("webui-events-tenant").unwrap();
     let user_id = UserId::new("webui-events-user").unwrap();

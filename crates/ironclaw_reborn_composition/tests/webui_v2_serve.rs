@@ -1183,6 +1183,40 @@ async fn static_js_asset_returns_javascript_content_type() {
 }
 
 #[tokio::test]
+async fn static_chat_oauth_card_exposes_https_only_authorization_link() {
+    let (app, _) = build_app();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/v2/js/pages/chat/components/auth-oauth-card.js")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_body_string(response).await;
+
+    assert!(
+        body.contains("new URL(gate.authorizationUrl).protocol === \"https:\""),
+        "OAuth auth card must reject non-HTTPS authorization URLs before opening"
+    );
+    assert!(
+        body.contains("className=\"auth-oauth\""),
+        "OAuth auth card must keep the UI-test selector on the authorization control"
+    );
+    assert!(
+        body.contains("href=${hasHttpsAuthorizationUrl ? gate.authorizationUrl : undefined}"),
+        "OAuth auth card must expose the HTTPS authorization URL as a link href"
+    );
+    assert!(
+        body.contains("noopener,noreferrer"),
+        "OAuth authorization popup must keep opener isolation"
+    );
+}
+
+#[tokio::test]
 async fn static_css_asset_returns_text_css_content_type() {
     let (app, _) = build_app();
     let response = app

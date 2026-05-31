@@ -5,6 +5,7 @@ use super::turn_events::{
 use super::*;
 
 use async_trait::async_trait;
+use ironclaw_auth::{AuthProviderId, OAuthAuthorizationUrl};
 use ironclaw_event_projections::{
     CapabilityActivityProjection, ProjectionSnapshot, ThreadTimeline,
 };
@@ -14,15 +15,15 @@ use ironclaw_host_api::{
     ThreadId, UserId,
 };
 use ironclaw_product_adapters::{
-    CapabilityActivityStatusView, ProductOutboundEnvelope, ProductOutboundPayload,
-    ProductProjectionItem,
+    AuthPromptChallengeKind, CapabilityActivityStatusView, ProductOutboundEnvelope,
+    ProductOutboundPayload, ProductProjectionItem,
 };
 use ironclaw_turns::{
     AcceptedMessageRef, CancelRunRequest, CancelRunResponse, EventCursor as TurnEventCursor,
     GateRef, GetRunStateRequest, ResumeTurnRequest, ResumeTurnResponse, RunProfileId,
     RunProfileVersion, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse,
     TurnBlockedGateKind, TurnBlockedGateMetadata, TurnError, TurnEventKind, TurnEventPage,
-    TurnLifecycleEvent, TurnRunState, TurnStatus,
+    TurnLifecycleEvent, TurnRunId, TurnRunState, TurnStatus,
     run_profile::{
         LoopSafeSummary, SystemInferenceError, SystemInferencePort, SystemInferenceRequest,
         SystemInferenceResponse, SystemInferenceTaskId, SystemTaskKind,
@@ -278,6 +279,40 @@ impl TurnCoordinator for FailingTurnCoordinator {
     async fn get_run_state(&self, _request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
         Err(TurnError::Unavailable {
             reason: "state unavailable".to_string(),
+        })
+    }
+}
+
+struct FakeAuthChallengeProvider {
+    expected_owner_user_id: UserId,
+    expected_run_id: TurnRunId,
+    expected_gate_ref: String,
+}
+
+#[async_trait]
+impl AuthChallengeProvider for FakeAuthChallengeProvider {
+    async fn challenge_for_gate(
+        &self,
+        _scope: &TurnScope,
+        owner_user_id: &UserId,
+        run_id: TurnRunId,
+        gate_ref: &str,
+    ) -> Option<AuthChallengeView> {
+        if owner_user_id != &self.expected_owner_user_id
+            || run_id != self.expected_run_id
+            || gate_ref != self.expected_gate_ref
+        {
+            return None;
+        }
+        Some(AuthChallengeView {
+            kind: AuthPromptChallengeKind::OAuthUrl,
+            provider: AuthProviderId::new("github".to_string()).unwrap(),
+            account_label: None,
+            authorization_url: Some(
+                OAuthAuthorizationUrl::new("https://github.com/login/oauth/authorize".to_string())
+                    .unwrap(),
+            ),
+            expires_at: Some(chrono::Utc::now() + chrono::Duration::minutes(10)),
         })
     }
 }

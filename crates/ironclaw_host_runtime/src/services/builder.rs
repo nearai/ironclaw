@@ -610,14 +610,6 @@ where
         self
     }
 
-    pub fn with_runtime_credential_account_resolver_dyn(
-        mut self,
-        resolver: Arc<dyn RuntimeCredentialAccountResolver>,
-    ) -> Self {
-        self.runtime_credential_account_resolver = Some(resolver);
-        self
-    }
-
     pub fn with_credential_broker<T>(self, broker: Arc<T>) -> Self
     where
         T: CredentialAccountStore + CredentialSessionStore + 'static,
