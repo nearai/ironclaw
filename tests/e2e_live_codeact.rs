@@ -188,10 +188,7 @@ mod codeact_guideline_tests {
                 // 9am somewhere in the expression. Matches "0 9" (5/6 field
                 // `min hr` or `0 min hr`), or the bare hour field.
                 let nine_am = cadence.contains(" 9 ") || cadence.starts_with("0 9 ");
-                assert!(
-                    nine_am,
-                    "cadence must schedule for 9am; got: {cadence:?}"
-                );
+                assert!(nine_am, "cadence must schedule for 9am; got: {cadence:?}");
 
                 // Tomorrow's day-of-month must appear somewhere in the
                 // cadence. We can't pin timezone cleanly, so we accept
@@ -199,9 +196,9 @@ mod codeact_guideline_tests {
                 let local_tomorrow = chrono::Local::now().date_naive().succ_opt().unwrap();
                 let utc_tomorrow = chrono::Utc::now().date_naive().succ_opt().unwrap();
                 let accepted_days = [local_tomorrow.day(), utc_tomorrow.day()];
-                let day_ok = accepted_days
-                    .iter()
-                    .any(|d| cadence.contains(&format!(" {d} ")) || cadence.ends_with(&format!(" {d}")));
+                let day_ok = accepted_days.iter().any(|d| {
+                    cadence.contains(&format!(" {d} ")) || cadence.ends_with(&format!(" {d}"))
+                });
                 assert!(
                     day_ok,
                     "cadence must pin tomorrow's day-of-month (expected one of \
@@ -287,8 +284,7 @@ mod codeact_guideline_tests {
                 );
             } else if used_tool(&tools, "routine_create") {
                 let telegram_routine = tools.iter().any(|t| {
-                    t.starts_with("routine_create(")
-                        && t.to_ascii_lowercase().contains("telegram")
+                    t.starts_with("routine_create(") && t.to_ascii_lowercase().contains("telegram")
                 });
                 assert!(
                     telegram_routine,
@@ -497,8 +493,7 @@ features:
             match evt {
                 StatusUpdate::ToolStarted { name, detail, .. } => {
                     let lname = name.to_ascii_lowercase();
-                    let is_fetch =
-                        lname.contains("http") || lname.contains("web_fetch");
+                    let is_fetch = lname.contains("http") || lname.contains("web_fetch");
                     is_fetch
                         && detail
                             .as_deref()
@@ -557,7 +552,9 @@ features:
             return;
         }
 
-        let user_input = format!("You are in charge of solving {ISSUE_URL}, a public issue in the irondevrel/docs repo. Check the issue, understand the problem, modify the necessary files to fix it and open a pull request with the fix. Your job is not done until the PR is created. There are no humans in the loop to assist, so iterate until done. IMPORTANT: you do not have access to the shell `git` or `gh` commands, so you will have to work entirely remotely using the actions provided by the installed `github tool`.");
+        let user_input = format!(
+            "You are in charge of solving {ISSUE_URL}, a public issue in the irondevrel/docs repo. Check the issue, understand the problem, modify the necessary files to fix it and open a pull request with the fix. Your job is not done until the PR is created. There are no humans in the loop to assist, so iterate until done. IMPORTANT: you do not have access to the shell `git` or `gh` commands, so you will have to work entirely remotely using the actions provided by the installed `github tool`."
+        );
         let rig = harness.rig();
         rig.send_message(&user_input).await;
 
@@ -565,8 +562,15 @@ features:
 
         if responses.is_empty() {
             eprintln!("\n[GithubIssue] ── NO RESPONSE — diagnostic dump ────────");
-            eprintln!("[GithubIssue] Tools started ({}): {:?}", rig.tool_calls_started().len(), rig.tool_calls_started());
-            eprintln!("[GithubIssue] Tools completed: {:?}", rig.tool_calls_completed());
+            eprintln!(
+                "[GithubIssue] Tools started ({}): {:?}",
+                rig.tool_calls_started().len(),
+                rig.tool_calls_started()
+            );
+            eprintln!(
+                "[GithubIssue] Tools completed: {:?}",
+                rig.tool_calls_completed()
+            );
             let recorded = harness.rig().captured_llm_requests();
             eprintln!("[GithubIssue] LLM requests ({}):", recorded.len());
             for (i, msgs) in recorded.iter().enumerate() {
