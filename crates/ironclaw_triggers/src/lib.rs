@@ -439,13 +439,16 @@ impl TriggerRepository for InMemoryTriggerRepository {
     }
 
     async fn list_triggers(&self, tenant_id: TenantId) -> Result<Vec<TriggerRecord>, TriggerError> {
-        let state = self.lock_state()?;
-        let mut records = state
-            .values()
-            .filter(|record| record.tenant_id == tenant_id)
-            .collect::<Vec<_>>();
+        let mut records = {
+            let state = self.lock_state()?;
+            state
+                .values()
+                .filter(|record| record.tenant_id == tenant_id)
+                .cloned()
+                .collect::<Vec<_>>()
+        };
         records.sort_by_key(|record| (record.created_at, record.trigger_id));
-        Ok(records.into_iter().cloned().collect())
+        Ok(records)
     }
 
     async fn remove_trigger(
@@ -466,14 +469,17 @@ impl TriggerRepository for InMemoryTriggerRepository {
         if limit == 0 {
             return Ok(Vec::new());
         }
-        let state = self.lock_state()?;
-        let mut records = state
-            .values()
-            .filter(|record| record.is_due_at(now))
-            .collect::<Vec<_>>();
+        let mut records = {
+            let state = self.lock_state()?;
+            state
+                .values()
+                .filter(|record| record.is_due_at(now))
+                .cloned()
+                .collect::<Vec<_>>()
+        };
         records.sort_by_key(|record| (record.next_run_at, record.trigger_id));
         records.truncate(limit);
-        Ok(records.into_iter().cloned().collect())
+        Ok(records)
     }
 }
 
