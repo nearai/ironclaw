@@ -11,6 +11,8 @@
 - Trigger records, schedule validation, source-provider evaluation, deterministic fire identity, and repository contracts.
 - In-memory test behavior and durable trigger repository backends.
 - Cron validation, including rejection of schedules that can fire more often than once per minute.
+- Backend-specific trigger repository implementations may accept already-open database handles such as `Arc<libsql::Database>`.
+- This crate must not own database URL/path/env parsing, bootstrap config, or generic database accessors.
 
 ## Do Not Move In Here
 
@@ -18,6 +20,8 @@
 - First-party trigger capabilities such as create/list/remove.
 - Trusted inbound turn wiring, product adapter behavior, or outbound delivery resolution.
 - Active-run reservation/back-pressure enforcement; later poller slices own that policy.
+- libSQL/PostgreSQL handle construction, connection-string validation, production substrate selection, or shared Reborn database bootstrap.
+- Composition/bootstrap owns those boundaries and passes typed handles into repository constructors.
 
 ## Validation
 

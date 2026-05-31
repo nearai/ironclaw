@@ -448,6 +448,23 @@ Add the first durable `TriggerRepository` backend:
 - scoped list/remove behavior
 - backend-specific tests
 
+Reborn storage boundary: `ironclaw_triggers` may own the trigger repository
+backend because it owns trigger schema, row decoding, due-query semantics, and
+trigger-scoped persistence tests. It must not own generic database accessors,
+database URL/path/env parsing, production substrate selection, or shared
+connection bootstrap. Composition/bootstrap opens `Arc<libsql::Database>` or a
+PostgreSQL pool, then passes the already-constructed handle into the trigger
+repository constructor. This mirrors Reborn's substrate boundary: storage crates
+own domain persistence adapters; composition owns backend selection and handle
+construction.
+
+Because Reborn has moved several tenant-scoped stores away from raw database
+handles toward scoped filesystem storage, PR 10 must keep tenant boundaries
+explicit in the repository contract. Scoped create/list/remove remain
+tenant-scoped. The global due query is allowed only for the trusted host poller,
+and returned records must carry tenant/user/agent/project authority forward to
+later trusted-ingress materialization.
+
 Expected size: less than 1000 lines.
 
 ### PR 11 — Trigger Persistence, Backend 2 and Parity
@@ -458,6 +475,11 @@ Add the second required backend and parity coverage:
 - shared parity tests across both backends
 - parity for active-fire fields and retryable `next_run_at` behavior
 - any schema compatibility fixes from PR 10
+
+PR 11 must preserve the same boundary as PR 10: add the second backend-specific
+repository implementation and parity tests in the trigger storage layer, but do
+not introduce a trigger-owned generic DB bootstrap or connection-string parser.
+Backend construction remains composition-owned.
 
 Expected size: less than 1000 lines.
 
