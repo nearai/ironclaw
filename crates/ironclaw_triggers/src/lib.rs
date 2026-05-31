@@ -40,8 +40,8 @@ pub enum TriggerError {
     InvalidRecord { reason: String },
     #[error("invalid schedule: {reason}")]
     InvalidSchedule { reason: String },
-    #[error("trigger repository backend unavailable")]
-    Backend,
+    #[error("trigger repository backend unavailable: {reason}")]
+    Backend { reason: String },
     #[error("trigger not found")]
     NotFound,
 }
@@ -525,7 +525,9 @@ impl InMemoryTriggerRepository {
         &self,
     ) -> Result<std::sync::MutexGuard<'_, HashMap<TriggerRepositoryKey, TriggerRecord>>, TriggerError>
     {
-        self.state.lock().map_err(|_| TriggerError::Backend)
+        self.state.lock().map_err(|_| TriggerError::Backend {
+            reason: "trigger repository mutex poisoned".to_string(),
+        })
     }
 }
 
@@ -1128,6 +1130,6 @@ mod tests {
         let error = repo
             .lock_state()
             .expect_err("poisoned mutex maps to backend");
-        assert!(matches!(error, TriggerError::Backend));
+        assert!(matches!(error, TriggerError::Backend { .. }));
     }
 }

@@ -75,7 +75,7 @@ impl LibSqlTriggerRepository {
         let conn = self.connect().await?;
         conn.execute("BEGIN IMMEDIATE", ())
             .await
-            .map_err(|_| TriggerError::Backend)?;
+            .map_err(|error| backend_error("begin trigger migration", error))?;
 
         let result = async {
             conn.execute(
@@ -103,7 +103,7 @@ impl LibSqlTriggerRepository {
                 (),
             )
             .await
-            .map_err(|_| TriggerError::Backend)?;
+            .map_err(|error| backend_error("create trigger_records table", error))?;
             conn.execute(
                 &format!(
                     "CREATE INDEX IF NOT EXISTS trigger_records_state_next_run_at_idx
@@ -112,7 +112,7 @@ impl LibSqlTriggerRepository {
                 (),
             )
             .await
-            .map_err(|_| TriggerError::Backend)?;
+            .map_err(|error| backend_error("create trigger due index", error))?;
             Ok::<(), TriggerError>(())
         }
         .await;
@@ -122,11 +122,12 @@ impl LibSqlTriggerRepository {
                 .execute("COMMIT", ())
                 .await
                 .map(|_| ())
-                .map_err(|_| TriggerError::Backend),
+                .map_err(|error| backend_error("commit trigger migration", error)),
             Err(error) => {
                 if let Err(rollback_error) = conn.execute("ROLLBACK", ()).await {
                     tracing::warn!(
-                        error = %rollback_error,
+                        migration_error = %error,
+                        rollback_error = %rollback_error,
                         "ROLLBACK failed after libSQL trigger migration error"
                     );
                 }
@@ -136,10 +137,13 @@ impl LibSqlTriggerRepository {
     }
 
     async fn connect(&self) -> Result<libsql::Connection, TriggerError> {
-        let conn = self.db.connect().map_err(|_| TriggerError::Backend)?;
+        let conn = self
+            .db
+            .connect()
+            .map_err(|error| backend_error("connect trigger repository", error))?;
         conn.query("PRAGMA busy_timeout = 5000", ())
             .await
-            .map_err(|_| TriggerError::Backend)?;
+            .map_err(|error| backend_error("set trigger repository busy_timeout", error))?;
         Ok(conn)
     }
 }
@@ -193,7 +197,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
             ],
         )
         .await
-        .map_err(|_| TriggerError::Backend)?;
+        .map_err(|error| backend_error("upsert trigger record", error))?;
         Ok(())
     }
 
@@ -214,11 +218,11 @@ impl TriggerRepository for LibSqlTriggerRepository {
                 params![tenant_id.as_str(), trigger_id.to_string()],
             )
             .await
-            .map_err(|_| TriggerError::Backend)?;
+            .map_err(|error| backend_error("query trigger record", error))?;
         match rows.next().await {
             Ok(Some(row)) => Ok(Some(row_to_record(&row)?)),
             Ok(None) => Ok(None),
-            Err(_) => Err(TriggerError::Backend),
+            Err(error) => Err(backend_error("read trigger record row", error)),
         }
     }
 
@@ -235,13 +239,13 @@ impl TriggerRepository for LibSqlTriggerRepository {
                 params![tenant_id.as_str()],
             )
             .await
-            .map_err(|_| TriggerError::Backend)?;
+            .map_err(|error| backend_error("query tenant trigger records", error))?;
         let mut records = Vec::new();
         loop {
             match rows.next().await {
                 Ok(Some(row)) => records.push(row_to_record(&row)?),
                 Ok(None) => break,
-                Err(_) => return Err(TriggerError::Backend),
+                Err(error) => return Err(backend_error("read tenant trigger record row", error)),
             }
         }
         Ok(records)
@@ -263,11 +267,11 @@ impl TriggerRepository for LibSqlTriggerRepository {
                 params![tenant_id.as_str(), trigger_id.to_string()],
             )
             .await
-            .map_err(|_| TriggerError::Backend)?;
+            .map_err(|error| backend_error("remove trigger record", error))?;
         match rows.next().await {
             Ok(Some(row)) => Ok(Some(row_to_record(&row)?)),
             Ok(None) => Ok(None),
-            Err(_) => Err(TriggerError::Backend),
+            Err(error) => Err(backend_error("read removed trigger record row", error)),
         }
     }
 
@@ -297,13 +301,13 @@ impl TriggerRepository for LibSqlTriggerRepository {
                 ],
             )
             .await
-            .map_err(|_| TriggerError::Backend)?;
+            .map_err(|error| backend_error("query due trigger records", error))?;
         let mut records = Vec::new();
         loop {
             match rows.next().await {
                 Ok(Some(row)) => records.push(row_to_record(&row)?),
                 Ok(None) => break,
-                Err(_) => return Err(TriggerError::Backend),
+                Err(error) => return Err(backend_error("read due trigger record row", error)),
             }
         }
         Ok(records)
@@ -382,9 +386,10 @@ fn required_text(row: &libsql::Row, index: usize, field: &str) -> Result<String,
 fn optional_text(
     row: &libsql::Row,
     index: usize,
-    _field: &str,
+    field: &str,
 ) -> Result<Option<String>, TriggerError> {
-    row.get(index as i32).map_err(|_| TriggerError::Backend)
+    row.get(index as i32)
+        .map_err(|error| backend_error(&format!("read optional trigger field {field}"), error))
 }
 
 #[cfg(feature = "libsql")]
@@ -514,5 +519,12 @@ fn schedule_expression_text(schedule: &TriggerSchedule) -> String {
 fn invalid_record(field: &str, reason: impl Into<String>) -> TriggerError {
     TriggerError::InvalidRecord {
         reason: format!("{field}: {}", reason.into()),
+    }
+}
+
+#[cfg(feature = "libsql")]
+fn backend_error(operation: &str, error: impl std::fmt::Display) -> TriggerError {
+    TriggerError::Backend {
+        reason: format!("{operation}: {error}"),
     }
 }
