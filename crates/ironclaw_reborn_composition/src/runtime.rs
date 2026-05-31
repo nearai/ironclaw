@@ -1028,7 +1028,7 @@ pub async fn build_reborn_runtime(
         turn_state: Arc::clone(&turn_state_store),
         thread_service: Arc::clone(&thread_service),
         thread_scope: thread_scope.clone(),
-        model_gateway,
+        model_gateway: Arc::clone(&model_gateway),
         checkpoint_state_store: Arc::clone(&checkpoint_state_store)
             as Arc<dyn ironclaw_turns::CheckpointStateStore>,
         loop_checkpoint_store: Arc::clone(&loop_checkpoint_store)
@@ -1116,6 +1116,7 @@ pub async fn build_reborn_runtime(
     let turn_event_source: Arc<dyn TurnEventProjectionSource> = turn_state_store.clone();
     let projection_services = projection_services
         .with_turn_events(turn_event_source, Arc::clone(&planned_turn_coordinator))
+        .with_model_failure_explainer(Arc::clone(&model_gateway))
         .with_display_previews(Arc::clone(&local_dev_capabilities.display_previews));
     services.turn_coordinator = Some(Arc::clone(&planned_turn_coordinator));
 

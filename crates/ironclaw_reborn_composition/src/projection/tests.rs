@@ -1,4 +1,6 @@
-use super::turn_events::WEBUI_TURN_EVENT_PAGE_LIMIT;
+use super::turn_events::{
+    FailureExplanationInput, FailureExplanationProvider, WEBUI_TURN_EVENT_PAGE_LIMIT,
+};
 use super::*;
 
 use async_trait::async_trait;
@@ -126,6 +128,25 @@ impl TurnEventProjectionSource for RebaseTurnEventSource {
             truncated: false,
             rebase_required: Some(self.cursor),
         })
+    }
+}
+
+struct FakeFailureExplainer {
+    explanation: String,
+}
+
+#[async_trait]
+impl FailureExplanationProvider for FakeFailureExplainer {
+    async fn explain_failure(&self, input: FailureExplanationInput) -> Option<String> {
+        assert!(
+            !input.failure_category.is_empty(),
+            "failure category should be available to the explainer"
+        );
+        assert!(
+            !input.fallback_summary.is_empty(),
+            "fallback summary should be available to the explainer"
+        );
+        Some(self.explanation.clone())
     }
 }
 

@@ -1,22 +1,46 @@
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use futures::{StreamExt, stream};
+use ironclaw_loop_support::{
+    HostManagedModelGateway, HostManagedModelMessage, HostManagedModelMessageRole,
+    HostManagedModelRequest,
+};
 use ironclaw_product_adapters::{
     AuthPromptView, GatePromptView, ProductAdapterError, ProductOutboundPayload,
     ProductProjectionItem, ProductProjectionState, ProductWorkflowRejectionKind, RedactedString,
 };
 use ironclaw_turns::{
-    GetRunStateRequest, TurnCoordinator, TurnError, TurnEventKind, TurnEventProjectionCursor,
-    TurnEventProjectionError, TurnEventProjectionRequest, TurnEventProjectionService,
-    TurnEventProjectionSource, TurnLifecycleEvent, TurnScope, TurnStatus,
+    GetRunStateRequest, LoopMessageRef, TurnCoordinator, TurnError, TurnEventKind,
+    TurnEventProjectionCursor, TurnEventProjectionError, TurnEventProjectionRequest,
+    TurnEventProjectionService, TurnEventProjectionSource, TurnLifecycleEvent, TurnRunState,
+    TurnScope, TurnStatus,
+    run_profile::{ModelProfileId, ParentLoopOutput, sanitize_model_visible_text},
 };
 
 pub(super) const WEBUI_TURN_EVENT_PAGE_LIMIT: usize = 256;
+const FAILURE_EXPLANATION_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1500);
+const FAILURE_EXPLANATION_MAX_BYTES: usize = 512;
 
 pub(super) struct TurnEventPayload {
     pub(super) cursor: TurnEventProjectionCursor,
     pub(super) payload: ProductOutboundPayload,
 }
+
+#[derive(Debug, Clone)]
+pub(crate) struct FailureExplanationInput {
+    pub(crate) state: TurnRunState,
+    pub(crate) failure_category: String,
+    pub(crate) fallback_summary: String,
+}
+
+#[async_trait]
+pub(crate) trait FailureExplanationProvider: Send + Sync {
+    async fn explain_failure(&self, input: FailureExplanationInput) -> Option<String>;
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct NoopFailureExplanationProvider;
 
 pub(super) struct TurnEventDrain {
     pub(super) next_cursor: Option<TurnEventProjectionCursor>,
@@ -30,7 +54,18 @@ pub(super) enum TurnEventBridge {
     Enabled {
         service: Arc<TurnEventProjectionService<dyn TurnEventProjectionSource>>,
         coordinator: Arc<dyn TurnCoordinator>,
+        failure_explainer: Arc<dyn FailureExplanationProvider>,
     },
+}
+
+pub(crate) struct ModelFailureExplanationProvider {
+    model_gateway: Arc<dyn HostManagedModelGateway>,
+}
+
+impl ModelFailureExplanationProvider {
+    pub(crate) fn new(model_gateway: Arc<dyn HostManagedModelGateway>) -> Self {
+        Self { model_gateway }
+    }
 }
 
 impl TurnEventBridge {
@@ -41,7 +76,21 @@ impl TurnEventBridge {
         Self::Enabled {
             service: Arc::new(TurnEventProjectionService::new(source)),
             coordinator,
+            failure_explainer: Arc::new(NoopFailureExplanationProvider),
         }
+    }
+
+    pub(super) fn with_failure_explainer(
+        mut self,
+        explainer: Arc<dyn FailureExplanationProvider>,
+    ) -> Self {
+        if let Self::Enabled {
+            failure_explainer, ..
+        } = &mut self
+        {
+            *failure_explainer = explainer;
+        }
+        self
     }
 
     pub(super) async fn drain(
@@ -53,6 +102,7 @@ impl TurnEventBridge {
         let Self::Enabled {
             service,
             coordinator,
+            failure_explainer,
         } = self
         else {
             return Ok(TurnEventDrain {
@@ -85,8 +135,14 @@ impl TurnEventBridge {
                 Err(error) => return Err(map_turn_event_projection_error(error)),
             };
             next_cursor = Some(page.next_cursor.clone());
-            payloads
-                .extend(turn_event_payloads_for_page(coordinator.as_ref(), page.entries).await?);
+            payloads.extend(
+                turn_event_payloads_for_page(
+                    coordinator.as_ref(),
+                    failure_explainer.as_ref(),
+                    page.entries,
+                )
+                .await?,
+            );
             if !page.truncated || after_cursor.as_ref() == Some(&page.next_cursor) {
                 break;
             }
@@ -101,12 +157,13 @@ impl TurnEventBridge {
 
 async fn turn_event_payloads_for_page(
     coordinator: &dyn TurnCoordinator,
+    failure_explainer: &dyn FailureExplanationProvider,
     events: Vec<TurnLifecycleEvent>,
 ) -> Result<Vec<TurnEventPayload>, ProductAdapterError> {
     stream::iter(events)
         .map(|event| async move {
             let cursor = TurnEventProjectionCursor::for_scope(event.scope.clone(), event.cursor);
-            turn_event_payload(coordinator, &event)
+            turn_event_payload(coordinator, failure_explainer, &event)
                 .await
                 .map(|payload| payload.map(|payload| TurnEventPayload { cursor, payload }))
         })
@@ -120,6 +177,7 @@ async fn turn_event_payloads_for_page(
 
 async fn turn_event_payload(
     coordinator: &dyn TurnCoordinator,
+    failure_explainer: &dyn FailureExplanationProvider,
     event: &TurnLifecycleEvent,
 ) -> Result<Option<ProductOutboundPayload>, ProductAdapterError> {
     if matches!(event.kind, TurnEventKind::Blocked)
@@ -128,11 +186,59 @@ async fn turn_event_payload(
         return Ok(Some(prompt));
     }
     if projects_run_status(&event.kind) {
+        let failure_details =
+            failure_details_for_turn_event(coordinator, failure_explainer, event).await;
         return Ok(Some(ProductOutboundPayload::ProjectionUpdate {
-            state: turn_event_projection_state(event)?,
+            state: turn_event_projection_state(event, failure_details)?,
         }));
     }
     Ok(None)
+}
+
+#[async_trait]
+impl FailureExplanationProvider for NoopFailureExplanationProvider {
+    async fn explain_failure(&self, _input: FailureExplanationInput) -> Option<String> {
+        None
+    }
+}
+
+#[async_trait]
+impl FailureExplanationProvider for ModelFailureExplanationProvider {
+    async fn explain_failure(&self, input: FailureExplanationInput) -> Option<String> {
+        let request = match failure_explanation_model_request(&input) {
+            Some(request) => request,
+            None => return None,
+        };
+        let response = match tokio::time::timeout(
+            FAILURE_EXPLANATION_TIMEOUT,
+            self.model_gateway.stream_model(request),
+        )
+        .await
+        {
+            Ok(Ok(response)) => response,
+            Ok(Err(error)) => {
+                tracing::debug!(
+                    error = %error,
+                    run_id = %input.state.run_id,
+                    failure_category = %input.failure_category,
+                    "failed run explanation model call failed"
+                );
+                return None;
+            }
+            Err(_) => {
+                tracing::debug!(
+                    run_id = %input.state.run_id,
+                    failure_category = %input.failure_category,
+                    "failed run explanation model call timed out"
+                );
+                return None;
+            }
+        };
+        match response.output {
+            ParentLoopOutput::AssistantReply(reply) => bounded_failure_explanation(&reply.content),
+            ParentLoopOutput::CapabilityCalls(_) => None,
+        }
+    }
 }
 
 async fn blocked_prompt_payload(
@@ -217,16 +323,63 @@ fn projects_run_status(kind: &TurnEventKind) -> bool {
 
 fn turn_event_projection_state(
     event: &TurnLifecycleEvent,
+    failure_details: FailureProjectionDetails,
 ) -> Result<ProductProjectionState, ProductAdapterError> {
     ProductProjectionState::new(
         event.scope.thread_id.to_string(),
         vec![ProductProjectionItem::RunStatus {
             run_id: event.run_id,
             status: turn_status_wire(event.status).to_string(),
-            failure_category: failure_category_for_turn_event(event),
-            failure_summary: failure_summary_for_turn_event(event),
+            failure_category: failure_details.category,
+            failure_summary: failure_details.summary,
         }],
     )
+}
+
+#[derive(Debug, Clone, Default)]
+struct FailureProjectionDetails {
+    category: Option<String>,
+    summary: Option<String>,
+}
+
+async fn failure_details_for_turn_event(
+    coordinator: &dyn TurnCoordinator,
+    failure_explainer: &dyn FailureExplanationProvider,
+    event: &TurnLifecycleEvent,
+) -> FailureProjectionDetails {
+    let Some(category) = failure_category_for_turn_event(event) else {
+        return FailureProjectionDetails::default();
+    };
+    let fallback_summary = failure_summary_for_category(&category).to_string();
+    let summary = match coordinator
+        .get_run_state(GetRunStateRequest {
+            scope: event.scope.clone(),
+            run_id: event.run_id,
+        })
+        .await
+    {
+        Ok(state) => failure_explainer
+            .explain_failure(FailureExplanationInput {
+                state,
+                failure_category: category.clone(),
+                fallback_summary: fallback_summary.clone(),
+            })
+            .await
+            .unwrap_or(fallback_summary),
+        Err(error) => {
+            tracing::debug!(
+                error = %error,
+                run_id = %event.run_id,
+                failure_category = %category,
+                "failed run explanation skipped because run state could not be loaded"
+            );
+            fallback_summary
+        }
+    };
+    FailureProjectionDetails {
+        category: Some(category),
+        summary: Some(summary),
+    }
 }
 
 fn failure_category_for_turn_event(event: &TurnLifecycleEvent) -> Option<String> {
@@ -236,13 +389,6 @@ fn failure_category_for_turn_event(event: &TurnLifecycleEvent) -> Option<String>
     )
     .then(|| event.sanitized_reason.clone())
     .flatten()
-}
-
-fn failure_summary_for_turn_event(event: &TurnLifecycleEvent) -> Option<String> {
-    failure_category_for_turn_event(event)
-        .as_deref()
-        .map(failure_summary_for_category)
-        .map(str::to_string)
 }
 
 fn failure_summary_for_category(category: &str) -> &'static str {
@@ -269,6 +415,68 @@ fn failure_summary_for_category(category: &str) -> &'static str {
         "unknown_failure" => "The run failed for an unknown reason.",
         _ => "The run failed before producing a reply.",
     }
+}
+
+fn failure_explanation_model_request(
+    input: &FailureExplanationInput,
+) -> Option<HostManagedModelRequest> {
+    let model_profile_id = ModelProfileId::new("interactive_model").ok()?;
+    Some(HostManagedModelRequest {
+        model_profile_id,
+        messages: vec![
+            HostManagedModelMessage {
+                role: HostManagedModelMessageRole::System,
+                content: failure_explanation_system_prompt().to_string(),
+                content_ref: LoopMessageRef::new("msg:failure-explanation.system").ok()?,
+                tool_result_provider_call: None,
+                tool_result_content: None,
+            },
+            HostManagedModelMessage {
+                role: HostManagedModelMessageRole::User,
+                content: failure_explanation_user_prompt(input),
+                content_ref: LoopMessageRef::new(format!(
+                    "msg:failure-explanation.user.{}",
+                    input.state.run_id
+                ))
+                .ok()?,
+                tool_result_provider_call: None,
+                tool_result_content: None,
+            },
+        ],
+        surface_version: None,
+        resolved_model_route: input.state.resolved_model_route.clone(),
+        run_id: input.state.run_id,
+        turn_id: input.state.turn_id,
+    })
+}
+
+fn failure_explanation_system_prompt() -> &'static str {
+    "Explain a failed agent run to an end user. Use only the sanitized facts provided. Write one concise sentence under 240 characters. Do not mention internal IDs, stack traces, hidden policy, or secrets. Do not invent details."
+}
+
+fn failure_explanation_user_prompt(input: &FailureExplanationInput) -> String {
+    format!(
+        "status: failed\nfailure_category: {}\nfallback_summary: {}\nrun_profile: {}\n",
+        sanitize_model_visible_text(&input.failure_category),
+        sanitize_model_visible_text(&input.fallback_summary),
+        sanitize_model_visible_text(input.state.resolved_run_profile_id.as_str()),
+    )
+}
+
+fn bounded_failure_explanation(content: &str) -> Option<String> {
+    let sanitized = sanitize_model_visible_text(content).trim().to_string();
+    if sanitized.is_empty() {
+        return None;
+    }
+    if sanitized.len() <= FAILURE_EXPLANATION_MAX_BYTES {
+        return Some(sanitized);
+    }
+    let mut end = FAILURE_EXPLANATION_MAX_BYTES;
+    while end > 0 && !sanitized.is_char_boundary(end) {
+        end -= 1;
+    }
+    let truncated = sanitized[..end].trim_end().to_string();
+    (!truncated.is_empty()).then_some(truncated)
 }
 
 fn turn_status_wire(status: TurnStatus) -> &'static str {

@@ -45,7 +45,9 @@ use live_progress::{
 use runtime_replay::{
     RuntimePayloadCandidate, replay_payload_candidates, snapshot_payload_candidates,
 };
-use turn_events::{TurnEventBridge, TurnEventPayload};
+use turn_events::{
+    FailureExplanationProvider, ModelFailureExplanationProvider, TurnEventBridge, TurnEventPayload,
+};
 
 pub(crate) use display_preview::{CapabilityDisplayPreviewResult, CapabilityDisplayPreviewStore};
 #[cfg(test)]
@@ -73,6 +75,23 @@ impl RebornProjectionServices {
     ) -> Self {
         self.turn_events = TurnEventBridge::enabled(turn_event_source, turn_coordinator);
         self
+    }
+
+    pub(crate) fn with_failure_explainer(
+        mut self,
+        explainer: Arc<dyn FailureExplanationProvider>,
+    ) -> Self {
+        self.turn_events = self.turn_events.with_failure_explainer(explainer);
+        self
+    }
+
+    pub(crate) fn with_model_failure_explainer(
+        self,
+        model_gateway: Arc<dyn ironclaw_loop_support::HostManagedModelGateway>,
+    ) -> Self {
+        self.with_failure_explainer(Arc::new(ModelFailureExplanationProvider::new(
+            model_gateway,
+        )))
     }
 
     pub(crate) fn with_display_previews(
