@@ -1,11 +1,9 @@
-use ironclaw_host_api::{
-    CAPABILITY_DISPLAY_OUTPUT_PREVIEW_MAX_BYTES, CapabilityDisplayOutputKind,
-    CapabilityDisplayOutputPreview, truncate_to_byte_boundary,
-};
+use ironclaw_host_api::CapabilityDisplayOutputPreview;
 use similar::{ChangeTag, TextDiff};
 
 const DIFF_CONTEXT_LINES: usize = 3;
 const DIFF_PREVIEW_DETAILED_INPUT_MAX_BYTES: usize = 256 * 1024;
+const DIFF_PREVIEW_MAX_BYTES: usize = 16 * 1024;
 
 /// Returns `true` when `new_content` is large enough that a detailed diff
 /// preview will be skipped regardless of the old content. Callers (e.g.
@@ -34,7 +32,7 @@ pub(super) fn file_diff_preview(
     let mut deletions = 0usize;
     let mut truncated = false;
     for group in diff.grouped_ops(DIFF_CONTEXT_LINES) {
-        if output.len() >= CAPABILITY_DISPLAY_OUTPUT_PREVIEW_MAX_BYTES {
+        if output.len() >= DIFF_PREVIEW_MAX_BYTES {
             truncated = true;
             break;
         }
@@ -66,7 +64,7 @@ pub(super) fn file_diff_preview(
                     ChangeTag::Equal => ' ',
                 };
                 push_diff_line(&mut output, prefix, change.value());
-                if output.len() >= CAPABILITY_DISPLAY_OUTPUT_PREVIEW_MAX_BYTES {
+                if output.len() >= DIFF_PREVIEW_MAX_BYTES {
                     truncated = true;
                     break;
                 }
@@ -78,11 +76,11 @@ pub(super) fn file_diff_preview(
     }
 
     let (preview_text, boundary_truncated) =
-        truncate_to_byte_boundary(&output, CAPABILITY_DISPLAY_OUTPUT_PREVIEW_MAX_BYTES);
+        truncate_to_byte_boundary(&output, DIFF_PREVIEW_MAX_BYTES);
     CapabilityDisplayOutputPreview {
         output_summary: Some(format!("Edited 1 file: +{additions}/-{deletions}")),
         output_preview: preview_text,
-        output_kind: CapabilityDisplayOutputKind::unified_diff(),
+        output_kind: "unified_diff".to_string(),
         subtitle: Some(path.to_string()),
         truncated: truncated || boundary_truncated,
     }
@@ -94,7 +92,7 @@ fn large_diff_preview(path: &str, diff_path: &str) -> CapabilityDisplayOutputPre
         output_preview: format!(
             "--- a/{diff_path}\n+++ b/{diff_path}\n@@ large diff preview omitted @@\n"
         ),
-        output_kind: CapabilityDisplayOutputKind::unified_diff(),
+        output_kind: "unified_diff".to_string(),
         subtitle: Some(path.to_string()),
         truncated: true,
     }
@@ -112,9 +110,20 @@ fn push_diff_line(output: &mut String, prefix: char, value: &str) {
     }
 }
 
+fn truncate_to_byte_boundary(text: &str, max_bytes: usize) -> (String, bool) {
+    if text.len() <= max_bytes {
+        return (text.to_string(), false);
+    }
+    let mut end = max_bytes;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    (text[..end].to_string(), true)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::file_diff_preview;
+    use super::{DIFF_PREVIEW_MAX_BYTES, file_diff_preview};
 
     #[test]
     fn file_diff_preview_emits_unified_diff_and_stats() {
@@ -124,7 +133,7 @@ mod tests {
             "fn main() {\n    new();\n}\n",
         );
 
-        assert_eq!(preview.output_kind.as_str(), "unified_diff");
+        assert_eq!(preview.output_kind, "unified_diff");
         assert_eq!(
             preview.output_summary.as_deref(),
             Some("Edited 1 file: +1/-1")
@@ -175,10 +184,7 @@ mod tests {
                 .output_preview
                 .is_char_boundary(preview.output_preview.len())
         );
-        assert!(
-            preview.output_preview.len()
-                <= ironclaw_host_api::CAPABILITY_DISPLAY_OUTPUT_PREVIEW_MAX_BYTES
-        );
+        assert!(preview.output_preview.len() <= DIFF_PREVIEW_MAX_BYTES);
     }
 
     #[test]
@@ -186,7 +192,7 @@ mod tests {
         let content = "fn main() {}\n";
         let preview = file_diff_preview("src/lib.rs", content, content);
 
-        assert_eq!(preview.output_kind.as_str(), "unified_diff");
+        assert_eq!(preview.output_kind, "unified_diff");
         assert_eq!(
             preview.output_summary.as_deref(),
             Some("Edited 1 file: +0/-0")

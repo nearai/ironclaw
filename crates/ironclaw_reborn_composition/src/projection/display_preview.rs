@@ -2,10 +2,7 @@ use std::{collections::HashMap, sync::Mutex};
 
 use async_trait::async_trait;
 use ironclaw_event_projections::{CapabilityActivityProjection, CapabilityActivityStatus};
-use ironclaw_host_api::{
-    CapabilityDisplayOutputKind, CapabilityDisplayOutputPreview, CapabilityId, InvocationId,
-    truncate_to_byte_boundary,
-};
+use ironclaw_host_api::{CapabilityDisplayOutputPreview, CapabilityId, InvocationId};
 use ironclaw_product_adapters::{
     CAPABILITY_DISPLAY_PREVIEW_MAX_BYTES, CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES,
     CapabilityDisplayPreviewView, CapabilityDisplayPreviewViewInput, ProductAdapterError,
@@ -71,7 +68,7 @@ pub(crate) struct CapabilityDisplayPreviewRecord {
     pub(crate) input_summary: Option<String>,
     pub(crate) output_summary: Option<String>,
     pub(crate) output_preview: Option<String>,
-    pub(crate) output_kind: Option<CapabilityDisplayOutputKind>,
+    pub(crate) output_kind: Option<String>,
     pub(crate) output_bytes: Option<u64>,
     pub(crate) result_ref: Option<String>,
     pub(crate) truncated: bool,
@@ -244,7 +241,7 @@ fn capability_display_preview_from_store(
         input_summary: record.input_summary,
         output_summary: record.output_summary,
         output_preview: record.output_preview,
-        output_kind: record.output_kind.map(String::from),
+        output_kind: record.output_kind,
         output_bytes: activity.output_bytes.or(record.output_bytes),
         result_ref: record.result_ref,
         truncated: record.truncated,
@@ -295,31 +292,31 @@ fn failed_capability_display_preview(
 struct OutputPreview {
     summary: Option<String>,
     preview: Option<String>,
-    kind: CapabilityDisplayOutputKind,
+    kind: String,
     truncated: bool,
 }
 
 fn output_preview(value: &serde_json::Value) -> OutputPreview {
     let (kind, text, json_truncated) = if let Some(text) = value.as_str() {
-        (CapabilityDisplayOutputKind::text(), text.to_string(), false)
+        ("text".to_string(), text.to_string(), false)
     } else if let Some(text) = value
         .get("content")
         .or_else(|| value.get("text"))
         .or_else(|| value.get("stdout"))
         .and_then(serde_json::Value::as_str)
     {
-        (CapabilityDisplayOutputKind::text(), text.to_string(), false)
+        ("text".to_string(), text.to_string(), false)
     } else {
         let safe_value = sanitize_json_value_with_truncation(value);
         (
-            CapabilityDisplayOutputKind::json(),
+            "json".to_string(),
             serde_json::to_string_pretty(&safe_value.value).unwrap_or_else(|_| "{}".to_string()),
             safe_value.truncated,
         )
     };
     let preview = bounded_preview_text(&text);
     let summary = bounded_display_text(
-        if kind == CapabilityDisplayOutputKind::text() {
+        if kind == "text" {
             "text output"
         } else {
             "json output"
@@ -548,6 +545,17 @@ fn non_empty(text: String) -> Option<String> {
 fn truncate_bytes(text: &str, max_bytes: usize) -> DisplayText {
     let (text, truncated) = truncate_to_byte_boundary(text, max_bytes);
     DisplayText { text, truncated }
+}
+
+fn truncate_to_byte_boundary(text: &str, max_bytes: usize) -> (String, bool) {
+    if text.len() <= max_bytes {
+        return (text.to_string(), false);
+    }
+    let mut end = max_bytes;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    (text[..end].to_string(), true)
 }
 
 pub(crate) fn sanitize_text(text: &str) -> String {

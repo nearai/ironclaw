@@ -1912,10 +1912,9 @@ mod tests {
 
     use ironclaw_events::InMemoryAuditSink;
     use ironclaw_host_api::{
-        AgentId, CapabilityDisplayOutputKind, CapabilityDisplayOutputPreview, CapabilitySet,
-        CorrelationId, ExecutionContext, ExtensionId, InvocationId, NetworkScheme,
-        NetworkTargetPattern, ProjectId, ResourceReservationId, RuntimeKind, TenantId, TrustClass,
-        UserId,
+        AgentId, CapabilityDisplayOutputPreview, CapabilitySet, CorrelationId, ExecutionContext,
+        ExtensionId, InvocationId, NetworkScheme, NetworkTargetPattern, ProjectId,
+        ResourceReservationId, RuntimeKind, TenantId, TrustClass, UserId,
     };
     use ironclaw_resources::{InMemoryResourceGovernor, ResourceAccount};
     use ironclaw_secrets::InMemorySecretStore;
@@ -2081,7 +2080,7 @@ mod tests {
             display_preview: Some(CapabilityDisplayOutputPreview {
                 output_summary: Some("contains secret".to_string()),
                 output_preview: "sk-secret".to_string(),
-                output_kind: CapabilityDisplayOutputKind::text(),
+                output_kind: "text".to_string(),
                 subtitle: None,
                 truncated: false,
             }),

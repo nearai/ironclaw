@@ -270,7 +270,7 @@ impl LocalDevCapabilityIo {
                 input_summary: record.input_summary,
                 output_summary: record.output_summary,
                 output_preview: record.output_preview,
-                output_kind: record.output_kind.map(String::from),
+                output_kind: record.output_kind,
                 output_bytes: record.output_bytes,
                 result_ref: record.result_ref,
                 truncated: record.truncated,

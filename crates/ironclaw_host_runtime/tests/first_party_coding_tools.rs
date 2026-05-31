@@ -277,7 +277,7 @@ async fn builtin_write_file_returns_unified_diff_display_preview() {
     let preview = completed
         .display_preview
         .expect("write_file should attach display preview");
-    assert_eq!(preview.output_kind.as_str(), "unified_diff");
+    assert_eq!(preview.output_kind, "unified_diff");
     assert_eq!(preview.subtitle.as_deref(), Some("/workspace/main.rs"));
     assert!(preview.output_preview.contains("--- a/workspace/main.rs"));
     assert!(preview.output_preview.contains("-    old();"));
@@ -344,7 +344,7 @@ async fn builtin_write_file_new_file_returns_additions_only_diff_preview() {
     let preview = completed
         .display_preview
         .expect("write_file on new file should attach display preview");
-    assert_eq!(preview.output_kind.as_str(), "unified_diff");
+    assert_eq!(preview.output_kind, "unified_diff");
     // Additions-only: summary must contain /-0
     let summary = preview.output_summary.as_deref().unwrap_or("");
     assert!(
@@ -400,7 +400,7 @@ async fn builtin_apply_patch_returns_unified_diff_display_preview() {
     let preview = completed
         .display_preview
         .expect("apply_patch should attach display preview");
-    assert_eq!(preview.output_kind.as_str(), "unified_diff");
+    assert_eq!(preview.output_kind, "unified_diff");
     assert_eq!(
         preview.output_summary.as_deref(),
         Some("Edited 1 file: +1/-1")

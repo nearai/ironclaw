@@ -9,8 +9,8 @@ use std::{
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    ApprovalRequestId, CapabilityDisplayOutputKind, CapabilityDisplayOutputPreview, CapabilityId,
-    ExtensionId, ProcessId, ResourceEstimate, RuntimeKind,
+    ApprovalRequestId, CapabilityDisplayOutputPreview, CapabilityId, ExtensionId, ProcessId,
+    ResourceEstimate, RuntimeKind,
 };
 use ironclaw_host_runtime::{
     CancelRuntimeWorkOutcome, CancelRuntimeWorkRequest, HostRuntime, HostRuntimeError,
@@ -146,7 +146,7 @@ async fn runtime_completed_display_preview_is_forwarded_to_result_writer() {
                     display_preview: Some(CapabilityDisplayOutputPreview {
                         output_summary: Some("Edited 1 file: +1/-1".to_string()),
                         output_preview: "--- a/file\n+++ b/file\n-old\n+new\n".to_string(),
-                        output_kind: CapabilityDisplayOutputKind::unified_diff(),
+                        output_kind: "unified_diff".to_string(),
                         subtitle: Some("/workspace/file".to_string()),
                         truncated: false,
                     }),
@@ -171,7 +171,7 @@ async fn runtime_completed_display_preview_is_forwarded_to_result_writer() {
         .next()
         .flatten()
         .expect("display preview forwarded");
-    assert_eq!(preview.output_kind.as_str(), "unified_diff");
+    assert_eq!(preview.output_kind, "unified_diff");
     assert!(preview.output_preview.contains("+new"));
 }
 

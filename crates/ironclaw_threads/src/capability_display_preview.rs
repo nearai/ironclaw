@@ -1,12 +1,10 @@
 use chrono::{DateTime, Utc};
-use ironclaw_host_api::{
-    CAPABILITY_DISPLAY_OUTPUT_PREVIEW_MAX_BYTES, CapabilityDisplayOutputKind, CapabilityId,
-    InvocationId,
-};
+use ironclaw_host_api::{CapabilityId, InvocationId};
 use serde::{Deserialize, Serialize};
 
 const CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES: usize = 2 * 1024;
-const CAPABILITY_DISPLAY_PREVIEW_MAX_BYTES: usize = CAPABILITY_DISPLAY_OUTPUT_PREVIEW_MAX_BYTES;
+const CAPABILITY_DISPLAY_PREVIEW_MAX_BYTES: usize = 16 * 1024;
+const CAPABILITY_DISPLAY_KIND_MAX_BYTES: usize = 32;
 const CAPABILITY_DISPLAY_RESULT_REF_MAX_BYTES: usize = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -167,9 +165,19 @@ fn validate_output_kind(value: Option<&str>) -> Result<(), String> {
     let Some(value) = value else {
         return Ok(());
     };
-    CapabilityDisplayOutputKind::new(value)
-        .map(|_| ())
-        .map_err(|_| "capability display output kind must be valid".to_string())
+    validate_bounded_text(
+        "capability display output kind",
+        value,
+        CAPABILITY_DISPLAY_KIND_MAX_BYTES,
+    )?;
+    if !value.as_bytes()[0].is_ascii_lowercase()
+        || value
+            .bytes()
+            .any(|byte| !byte.is_ascii_lowercase() && !byte.is_ascii_digit() && byte != b'_')
+    {
+        return Err("capability display output kind must be snake_case ASCII".to_string());
+    }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -1,5 +1,5 @@
 use super::*;
-use ironclaw_host_api::{CapabilityDisplayOutputKind, CapabilityDisplayOutputPreview};
+use ironclaw_host_api::CapabilityDisplayOutputPreview;
 use ironclaw_product_adapters::CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES;
 use ironclaw_turns::run_profile::CapabilityInputRef;
 
@@ -656,7 +656,7 @@ async fn capability_display_preview_store_marks_truncated_side_channel_summary()
         Some(&CapabilityDisplayOutputPreview {
             output_summary: Some("x".repeat(CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES + 1)),
             output_preview: "--- a/workspace/main.rs\n+++ b/workspace/main.rs\n".to_string(),
-            output_kind: CapabilityDisplayOutputKind::unified_diff(),
+            output_kind: "unified_diff".to_string(),
             subtitle: Some("/workspace/main.rs".to_string()),
             truncated: false,
         }),

@@ -837,8 +837,7 @@ pub fn capability_allowlist(ids: impl IntoIterator<Item = CapabilityId>) -> Capa
 mod tests {
     use super::*;
     use ironclaw_host_api::{
-        AgentId, CapabilityDisplayOutputKind, CapabilityDisplayOutputPreview, InvocationId,
-        TenantId, ThreadId,
+        AgentId, CapabilityDisplayOutputPreview, InvocationId, TenantId, ThreadId,
     };
     use ironclaw_reborn::planned_driver_factory::default_planned_run_profile_resolver;
     use ironclaw_turns::{
@@ -899,7 +898,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn capability_io_records_typed_display_preview_side_channel() {
+    async fn capability_io_records_display_preview_side_channel() {
         let io = ProductLiveCapabilityIo::default();
         let run_context = loop_run_context().await;
         let input_ref = io
@@ -921,22 +920,18 @@ mod tests {
                 output_preview:
                     "--- a/workspace/main.rs\n+++ b/workspace/main.rs\n@@ -1,1 +1,1 @@\n-old\n+new\n"
                         .to_string(),
-                output_kind: CapabilityDisplayOutputKind::unified_diff(),
+                output_kind: "unified_diff".to_string(),
                 subtitle: Some("/workspace/main.rs".to_string()),
                 truncated: false,
             }),
         })
         .await
         .expect("result staged");
-
         let record = io
             .display_previews
             .record_for_invocation(invocation_id)
             .expect("preview recorded");
-        assert_eq!(
-            record.output_kind.as_ref().map(|k| k.as_str()),
-            Some("unified_diff")
-        );
+        assert_eq!(record.output_kind.as_deref(), Some("unified_diff"));
         assert_eq!(
             record.output_summary.as_deref(),
             Some("Edited 1 file: +1/-1")

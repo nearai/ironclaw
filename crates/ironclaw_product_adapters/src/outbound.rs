@@ -2,8 +2,7 @@
 
 use chrono::{DateTime, Utc};
 use ironclaw_host_api::{
-    CAPABILITY_DISPLAY_OUTPUT_PREVIEW_MAX_BYTES, CapabilityDisplayOutputKind, CapabilityId,
-    ExtensionId, InvocationId, ProcessId, RuntimeKind, ThreadId,
+    CapabilityId, ExtensionId, InvocationId, ProcessId, RuntimeKind, ThreadId,
 };
 use ironclaw_turns::{ReplyTargetBindingRef, TurnRunId};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -21,8 +20,8 @@ const CAPABILITY_ACTIVITY_ERROR_KIND_MAX_BYTES: usize = 64;
 const CAPABILITY_ACTIVITY_ERROR_KIND_SEGMENT_MAX_BYTES: usize = 24;
 const CAPABILITY_ACTIVITY_UNCLASSIFIED_ERROR_KIND: &str = "Unclassified";
 pub const CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES: usize = 2 * 1024;
-pub const CAPABILITY_DISPLAY_PREVIEW_MAX_BYTES: usize = CAPABILITY_DISPLAY_OUTPUT_PREVIEW_MAX_BYTES;
-pub use ironclaw_host_api::CAPABILITY_DISPLAY_OUTPUT_KIND_MAX_BYTES as CAPABILITY_DISPLAY_KIND_MAX_BYTES;
+pub const CAPABILITY_DISPLAY_PREVIEW_MAX_BYTES: usize = 16 * 1024;
+pub const CAPABILITY_DISPLAY_KIND_MAX_BYTES: usize = 32;
 pub const CAPABILITY_DISPLAY_RESULT_REF_MAX_BYTES: usize = 256;
 
 fn invalid(kind: &'static str, reason: impl Into<String>) -> ProductAdapterError {
@@ -119,14 +118,22 @@ fn validate_display_kind(value: Option<&str>) -> Result<(), ProductAdapterError>
     let Some(value) = value else {
         return Ok(());
     };
-    CapabilityDisplayOutputKind::new(value)
-        .map(|_| ())
-        .map_err(|_| {
-            invalid(
-                "capability_display_output_kind",
-                "must be a valid display output kind",
-            )
-        })
+    validate_bounded_text(
+        "capability_display_output_kind",
+        value,
+        CAPABILITY_DISPLAY_KIND_MAX_BYTES,
+    )?;
+    if !value.as_bytes()[0].is_ascii_lowercase()
+        || value
+            .bytes()
+            .any(|byte| !byte.is_ascii_lowercase() && !byte.is_ascii_digit() && byte != b'_')
+    {
+        return Err(invalid(
+            "capability_display_output_kind",
+            "must be snake_case ASCII",
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
