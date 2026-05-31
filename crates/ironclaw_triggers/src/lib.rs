@@ -166,7 +166,7 @@ impl TriggerRecord {
     }
 
     pub fn is_due_at(&self, now: Timestamp) -> bool {
-        self.enabled && self.state == TriggerState::Scheduled && self.next_run_at <= now
+        self.state == TriggerState::Scheduled && self.next_run_at <= now
     }
 }
 
@@ -228,8 +228,6 @@ pub enum TriggerCompletionPolicy {
 pub enum TriggerRunStatus {
     Ok,
     Error,
-    TimedOut,
-    ApprovalBlocked,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -626,14 +624,13 @@ mod tests {
             to_value(TriggerCompletionPolicy::CompleteAfterFirstFire).unwrap(),
             json!("complete_after_first_fire")
         );
+        assert_eq!(to_value(TriggerRunStatus::Ok).unwrap(), json!("ok"));
         assert_eq!(
-            to_value(TriggerRunStatus::ApprovalBlocked).unwrap(),
-            json!("approval_blocked")
+            from_value::<TriggerRunStatus>(json!("error")).unwrap(),
+            TriggerRunStatus::Error
         );
-        assert_eq!(
-            from_value::<TriggerRunStatus>(json!("timed_out")).unwrap(),
-            TriggerRunStatus::TimedOut
-        );
+        assert!(from_value::<TriggerRunStatus>(json!("timed_out")).is_err());
+        assert!(from_value::<TriggerRunStatus>(json!("approval_blocked")).is_err());
     }
 
     #[test]
@@ -693,6 +690,31 @@ mod tests {
         assert_eq!(fire.identity.trigger_id, trigger_id);
         assert_eq!(fire.identity.fire_slot, record.next_run_at);
         assert_eq!(fire.prompt, record.prompt);
+    }
+
+    #[tokio::test]
+    async fn schedule_provider_uses_state_as_fire_gate() {
+        let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid");
+        let mut record = sample_record(trigger_id, tenant("tenant-a"), ts(1_704_067_200));
+        record.enabled = false;
+        let provider = ScheduleTriggerSourceProvider;
+
+        assert!(
+            provider
+                .evaluate(&record, ts(1_704_067_200))
+                .await
+                .expect("scheduled state remains due")
+                .is_some()
+        );
+
+        record.state = TriggerState::Paused;
+        assert!(
+            provider
+                .evaluate(&record, ts(1_704_067_200))
+                .await
+                .expect("paused state is not due")
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -776,6 +798,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn in_memory_repository_rejects_invalid_record_on_upsert() {
+        let repo = InMemoryTriggerRepository::default();
+        let mut record = sample_record(
+            TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid"),
+            tenant("tenant-a"),
+            ts(1_704_067_200),
+        );
+        record.name.clear();
+        assert!(matches!(
+            repo.upsert_trigger(record).await,
+            Err(TriggerError::InvalidSchedule { .. })
+        ));
+
+        let mut record = sample_record(
+            TriggerId::parse("01J00000000000000000000000").expect("ulid"),
+            tenant("tenant-a"),
+            ts(1_704_067_200),
+        );
+        record.prompt.clear();
+        assert!(matches!(
+            repo.upsert_trigger(record).await,
+            Err(TriggerError::InvalidSchedule { .. })
+        ));
+    }
+
+    #[tokio::test]
     async fn in_memory_repository_list_due_triggers_handles_zero_limit() {
         let repo = InMemoryTriggerRepository::default();
         repo.upsert_trigger(sample_record(
@@ -791,6 +839,33 @@ mod tests {
             .await
             .expect("list due");
         assert!(due_records.is_empty());
+    }
+
+    #[tokio::test]
+    async fn in_memory_repository_list_due_triggers_truncates_to_limit_one() {
+        let repo = InMemoryTriggerRepository::default();
+        let first = sample_record(
+            TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid"),
+            tenant("tenant-a"),
+            ts(1_704_067_200),
+        );
+        let mut second = sample_record(
+            TriggerId::parse("01J00000000000000000000000").expect("ulid"),
+            tenant("tenant-a"),
+            ts(1_704_067_260),
+        );
+        second.created_at = ts(1_704_067_201);
+        repo.upsert_trigger(first.clone())
+            .await
+            .expect("insert first");
+        repo.upsert_trigger(second).await.expect("insert second");
+
+        let due_records = repo
+            .list_due_triggers(ts(1_704_067_260), 1)
+            .await
+            .expect("list due");
+        assert_eq!(due_records.len(), 1);
+        assert_eq!(due_records[0].trigger_id, first.trigger_id);
     }
 
     #[test]
