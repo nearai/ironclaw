@@ -220,6 +220,17 @@ mod tests {
     }
 
     #[test]
+    fn test_custom_limit_and_threshold() {
+        let monitor = ContextMonitor::new()
+            .with_limit(200_000)
+            .with_threshold(0.9);
+
+        assert_eq!(monitor.limit(), 200_000);
+        // threshold() returns context_limit * threshold_ratio
+        assert_eq!(monitor.threshold(), 180_000);
+    }
+
+    #[test]
     fn test_context_breakdown() {
         let messages = vec![
             ChatMessage::system("You are a helpful assistant."),
