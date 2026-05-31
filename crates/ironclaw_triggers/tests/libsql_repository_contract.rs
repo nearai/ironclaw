@@ -105,6 +105,13 @@ async fn libsql_repository_round_trip_and_scoped_isolation() {
         .expect("record present");
     assert_eq!(fetched, due);
 
+    assert!(
+        repo.get_trigger(tenant("tenant-b"), due.trigger_id)
+            .await
+            .expect("wrong-tenant lookup")
+            .is_none()
+    );
+
     let tenant_records = repo
         .list_triggers(tenant("tenant-a"))
         .await
@@ -135,12 +142,24 @@ async fn libsql_repository_round_trip_and_scoped_isolation() {
             .expect("lookup other tenant")
             .is_some()
     );
-
-    let missing = repo
-        .remove_trigger(tenant("tenant-a"), due.trigger_id)
-        .await
-        .expect("remove missing trigger");
-    assert!(missing.is_none());
+    assert_eq!(
+        repo.remove_trigger(tenant("tenant-a"), other_tenant.trigger_id)
+            .await
+            .expect("wrong-tenant remove"),
+        None
+    );
+    assert!(
+        repo.get_trigger(tenant("tenant-b"), other_tenant.trigger_id)
+            .await
+            .expect("other tenant remains")
+            .is_some()
+    );
+    assert!(
+        repo.remove_trigger(tenant("tenant-a"), due.trigger_id)
+            .await
+            .expect("remove missing trigger")
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -318,6 +337,18 @@ async fn libsql_repository_due_query_clamps_limit_and_respects_state_gate() {
     repo.upsert_trigger(paused.clone())
         .await
         .expect("insert paused");
+    let completed = {
+        let mut record = sample_record(
+            TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZX").expect("ulid"),
+            tenant("tenant-completed"),
+            due_slot,
+        );
+        record.state = TriggerState::Completed;
+        record
+    };
+    repo.upsert_trigger(completed.clone())
+        .await
+        .expect("insert completed");
 
     let small_a = sample_record(
         TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid"),
@@ -387,6 +418,28 @@ async fn libsql_repository_due_query_clamps_limit_and_respects_state_gate() {
             .any(|record| record.tenant_id == paused.tenant_id),
         "paused record must not be returned as due"
     );
+    assert!(
+        !due_records
+            .iter()
+            .any(|record| record.tenant_id == completed.tenant_id),
+        "completed record must not be returned as due"
+    );
+}
+
+#[tokio::test]
+async fn libsql_repository_run_migrations_is_idempotent() {
+    let dir = tempdir().expect("tempdir");
+    let db_path = dir.path().join("triggers.db");
+    let db = Arc::new(
+        libsql::Builder::new_local(db_path.display().to_string())
+            .build()
+            .await
+            .expect("build libsql db"),
+    );
+    let repo = LibSqlTriggerRepository::new(db);
+
+    repo.run_migrations().await.expect("first run migrations");
+    repo.run_migrations().await.expect("second run migrations");
 }
 
 #[tokio::test]

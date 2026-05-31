@@ -59,8 +59,8 @@ const LAST_STATUS_COL: usize = 14;
 #[cfg(feature = "libsql")]
 const CREATED_AT_COL: usize = 15;
 
-#[cfg(feature = "libsql")]
 /// Durable libSQL trigger repository.
+#[cfg(feature = "libsql")]
 pub struct LibSqlTriggerRepository {
     db: Arc<libsql::Database>,
 }
@@ -154,9 +154,10 @@ impl TriggerRepository for LibSqlTriggerRepository {
     async fn upsert_trigger(&self, record: TriggerRecord) -> Result<(), TriggerError> {
         record.validate()?;
         let conn = self.connect().await?;
-        conn.execute(
-            &format!(
-                "INSERT INTO {TRIGGER_TABLE} (
+        let affected = conn
+            .execute(
+                &format!(
+                    "INSERT INTO {TRIGGER_TABLE} (
                     trigger_id, tenant_id, creator_user_id, agent_id, project_id,
                     name, source, schedule_expression, completion_policy, prompt,
                     state, next_run_at, last_run_at, last_fired_slot, last_status,
@@ -176,28 +177,34 @@ impl TriggerRepository for LibSqlTriggerRepository {
                     last_run_at = excluded.last_run_at,
                     last_fired_slot = excluded.last_fired_slot,
                     last_status = excluded.last_status"
-            ),
-            params![
-                record.trigger_id.to_string(),
-                record.tenant_id.as_str(),
-                record.creator_user_id.as_str(),
-                opt_text(record.agent_id.as_ref().map(AgentId::as_str)),
-                opt_text(record.project_id.as_ref().map(ProjectId::as_str)),
-                record.name,
-                source_kind_text(record.source),
-                schedule_expression_text(&record.schedule),
-                completion_policy_text(record.completion_policy),
-                record.prompt,
-                state_text(record.state),
-                fmt_ts(&record.next_run_at),
-                opt_ts(record.last_run_at.as_ref()),
-                opt_ts(record.last_fired_slot.as_ref()),
-                opt_status(record.last_status),
-                fmt_ts(&record.created_at),
-            ],
-        )
-        .await
-        .map_err(|error| backend_error("upsert trigger record", error))?;
+                ),
+                params![
+                    record.trigger_id.to_string(),
+                    record.tenant_id.as_str(),
+                    record.creator_user_id.as_str(),
+                    opt_text(record.agent_id.as_ref().map(AgentId::as_str)),
+                    opt_text(record.project_id.as_ref().map(ProjectId::as_str)),
+                    record.name,
+                    source_kind_text(record.source),
+                    schedule_expression_text(&record.schedule),
+                    completion_policy_text(record.completion_policy),
+                    record.prompt,
+                    state_text(record.state),
+                    fmt_ts(&record.next_run_at),
+                    opt_ts(record.last_run_at.as_ref()),
+                    opt_ts(record.last_fired_slot.as_ref()),
+                    opt_status(record.last_status),
+                    fmt_ts(&record.created_at),
+                ],
+            )
+            .await
+            .map_err(|error| backend_error("upsert trigger record", error))?;
+        if affected == 0 {
+            return Err(backend_error(
+                "upsert trigger record",
+                "libSQL reported 0 affected rows",
+            ));
+        }
         Ok(())
     }
 

@@ -410,8 +410,8 @@ pub trait TriggerRepository: Send + Sync {
     ) -> Result<Vec<TriggerRecord>, TriggerError>;
 }
 
-#[cfg(feature = "libsql")]
 /// Feature-gated durable repository constructor for composition/test wiring.
+#[cfg(feature = "libsql")]
 pub use libsql::LibSqlTriggerRepository;
 
 #[derive(Clone, Default)]
@@ -493,29 +493,28 @@ impl TriggerRepository for InMemoryTriggerRepository {
             return Ok(Vec::new());
         }
         let limit = limit.min(MAX_DUE_TRIGGER_POLL_LIMIT);
-        let mut keys = {
+        let mut records = {
             let state = self.lock_state()?;
             state
                 .iter()
                 .filter(|(_, record)| record.is_due_at(now))
-                .map(|(key, record)| {
+                .map(|(_, record)| {
                     (
                         record.next_run_at,
                         record.tenant_id.clone(),
                         record.trigger_id,
-                        key.clone(),
+                        record.clone(),
                     )
                 })
                 .collect::<Vec<_>>()
         };
-        keys.sort_by_key(|(next_run_at, tenant_id, trigger_id, _)| {
+        records.sort_by_key(|(next_run_at, tenant_id, trigger_id, _)| {
             (*next_run_at, tenant_id.clone(), *trigger_id)
         });
-        keys.truncate(limit);
-        let state = self.lock_state()?;
-        Ok(keys
+        records.truncate(limit);
+        Ok(records
             .into_iter()
-            .filter_map(|(_, _, _, key)| state.get(&key).cloned())
+            .map(|(_, _, _, record)| record)
             .collect())
     }
 }
