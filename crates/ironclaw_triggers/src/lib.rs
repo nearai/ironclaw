@@ -81,8 +81,18 @@ impl std::fmt::Display for TriggerId {
 pub struct TriggerRouteThreadId(String);
 
 impl TriggerRouteThreadId {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+impl AsRef<str> for TriggerRouteThreadId {
+    fn as_ref(&self) -> &str {
+        self.as_str()
     }
 }
 
@@ -97,8 +107,18 @@ impl std::fmt::Display for TriggerRouteThreadId {
 pub struct TriggerExternalEventId(String);
 
 impl TriggerExternalEventId {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+impl AsRef<str> for TriggerExternalEventId {
+    fn as_ref(&self) -> &str {
+        self.as_str()
     }
 }
 
@@ -341,14 +361,14 @@ pub struct InMemoryTriggerRepository {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct TriggerRepositoryKey {
-    tenant_id: String,
+    tenant_id: TenantId,
     trigger_id: TriggerId,
 }
 
 impl TriggerRepositoryKey {
     fn new(tenant_id: &TenantId, trigger_id: TriggerId) -> Self {
         Self {
-            tenant_id: tenant_id.to_string(),
+            tenant_id: tenant_id.clone(),
             trigger_id,
         }
     }
@@ -378,11 +398,10 @@ impl TriggerRepository for InMemoryTriggerRepository {
     }
 
     async fn list_triggers(&self, tenant_id: TenantId) -> Result<Vec<TriggerRecord>, TriggerError> {
-        let tenant_id = tenant_id.to_string();
         let mut records = self
             .lock_state()?
             .values()
-            .filter(|record| record.tenant_id.to_string() == tenant_id)
+            .filter(|record| record.tenant_id == tenant_id)
             .cloned()
             .collect::<Vec<_>>();
         records.sort_by_key(|record| (record.created_at, record.trigger_id.to_string()));
@@ -404,6 +423,9 @@ impl TriggerRepository for InMemoryTriggerRepository {
         now: Timestamp,
         limit: usize,
     ) -> Result<Vec<TriggerRecord>, TriggerError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
         let mut records = self
             .lock_state()?
             .values()
@@ -574,6 +596,28 @@ mod tests {
     }
 
     #[test]
+    fn trigger_id_parse_rejects_invalid_ulid() {
+        let error = TriggerId::parse("not-a-ulid").expect_err("malformed ulid rejected");
+        assert!(
+            error.to_string().contains("invalid trigger id"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn public_fire_id_wrappers_expose_string_accessors() {
+        let route = TriggerRouteThreadId::new("route-1");
+        let event = TriggerExternalEventId::new("event-1");
+
+        assert_eq!(route.as_str(), "route-1");
+        assert_eq!(route.as_ref(), "route-1");
+        assert_eq!(route.to_string(), "route-1");
+        assert_eq!(event.as_str(), "event-1");
+        assert_eq!(event.as_ref(), "event-1");
+        assert_eq!(event.to_string(), "event-1");
+    }
+
+    #[test]
     fn cron_schedule_rejects_sub_minute_seconds_fields() {
         for expression in ["*/30 * * * * *", "1 * * * * *", "0/15 * * * * * *"] {
             let error = TriggerSchedule::cron(expression).expect_err("sub-minute cron rejected");
@@ -674,6 +718,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn schedule_provider_rejects_invalid_record() {
+        let mut record = sample_record(
+            TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid"),
+            tenant("tenant-a"),
+            ts(1_704_067_200),
+        );
+        record.prompt.clear();
+
+        let error = ScheduleTriggerSourceProvider
+            .evaluate(&record, ts(1_704_067_200))
+            .await
+            .expect_err("invalid record rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("trigger prompt must not be empty"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[tokio::test]
     async fn in_memory_repository_lists_and_removes_scoped_records() {
         let repo = InMemoryTriggerRepository::default();
         let due = sample_record(
@@ -730,5 +795,38 @@ mod tests {
                 .expect("lookup")
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn in_memory_repository_list_due_triggers_handles_zero_limit() {
+        let repo = InMemoryTriggerRepository::default();
+        repo.upsert_trigger(sample_record(
+            TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid"),
+            tenant("tenant-a"),
+            ts(1_704_067_200),
+        ))
+        .await
+        .expect("insert due");
+
+        let due_records = repo
+            .list_due_triggers(ts(1_704_067_200), 0)
+            .await
+            .expect("list due");
+        assert!(due_records.is_empty());
+    }
+
+    #[test]
+    fn in_memory_repository_returns_backend_error_when_mutex_is_poisoned() {
+        let repo = InMemoryTriggerRepository::default();
+        let poison_repo = repo.clone();
+        let _ = std::panic::catch_unwind(move || {
+            let _guard = poison_repo.state.lock().expect("lock before poison");
+            panic!("poison trigger repository mutex");
+        });
+
+        let error = repo
+            .lock_state()
+            .expect_err("poisoned mutex maps to backend");
+        assert!(matches!(error, TriggerError::Backend));
     }
 }
