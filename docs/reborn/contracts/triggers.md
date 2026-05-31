@@ -43,7 +43,6 @@ The trigger system is owned by `ironclaw_triggers` in implementation terms, but 
 | `source` | Trigger source kind |
 | `schedule` | V1 schedule definition |
 | `prompt` | Materialized instruction content |
-| `enabled` | Optional denormalized query flag derived from `state`; not an independent fire gate |
 | `state` | Lifecycle state for the trigger definition |
 | `next_run_at` | Next eligible fire time |
 | `last_run_at` | Last time a fire was submitted |
@@ -76,8 +75,9 @@ It is the source of truth for fire eligibility.
 - `Scheduled` means the trigger may be polled and fired.
 - `Paused` means the trigger is retained but must not fire.
 - `Completed` is reserved for future finite schedules and must not be treated as a V1 cron-state requirement.
-- If an implementation stores `enabled` for index/query convenience, it must be
-  derived from `state == Scheduled` and must never override `state`.
+- V1 does not expose a separate `enabled` field. Durable backends may add
+  denormalized indexes derived from `state == Scheduled`, but those indexes must
+  never become independent fire gates.
 
 ---
 
@@ -144,7 +144,16 @@ V1 has one provider: a schedule provider.
 
 `TriggerPollerWorker` is the background evaluator that scans eligible triggers and submits fires through trusted inbound.
 
-- The worker may poll on a configured interval and batch due triggers.
+- The worker may poll globally on a configured interval and batch due triggers
+  across tenants. Global due queries are host-owned background work only, not a
+  user-scoped request surface.
+- Every returned `TriggerRecord.tenant_id` is authority-bearing state. Trigger
+  workers must mint trusted inbound requests from the record's `tenant_id`,
+  `creator_user_id`, `agent_id`, and `project_id`; they must not use an ambient
+  or default tenant/user scope for a fire.
+- Claim, update, and remove operations must mutate the same tenant-scoped record
+  that was returned or claimed. A worker must not retarget a fire to another
+  tenant, actor, route, or scope.
 - The worker must enforce `max_concurrent_fires_per_trigger = 1` in V1 through
   an atomic repository claim/lease operation that covers read, eligibility
   check, active-fire check, and claim write.

@@ -202,7 +202,6 @@ pub struct TriggerRecord {
     pub schedule: TriggerSchedule,
     pub completion_policy: TriggerCompletionPolicy,
     pub prompt: String,
-    pub enabled: bool,
     pub state: TriggerState,
     pub next_run_at: Timestamp,
     pub last_run_at: Option<Timestamp>,
@@ -641,7 +640,6 @@ mod tests {
             schedule: TriggerSchedule::cron("0 8 * * *").expect("valid cron"),
             completion_policy: TriggerCompletionPolicy::Recurring,
             prompt: "summarize unread mail".to_string(),
-            enabled: true,
             state: TriggerState::Scheduled,
             next_run_at,
             last_run_at: None,
@@ -817,7 +815,6 @@ mod tests {
     async fn schedule_provider_uses_state_as_fire_gate() {
         let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid");
         let mut record = sample_record(trigger_id, tenant("tenant-a"), ts(1_704_067_200));
-        record.enabled = false;
         let provider = ScheduleTriggerSourceProvider;
 
         assert!(

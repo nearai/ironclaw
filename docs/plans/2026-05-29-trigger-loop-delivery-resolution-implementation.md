@@ -412,6 +412,17 @@ Add the trigger crate with domain and in-memory behavior:
 - schedule validation rejecting sub-minute fire cadence
 - in-memory repository for tests
 
+`TriggerRecord` should use `state` as the single V1 fire gate and should not
+carry a separate `enabled` field. Durable backends may add derived indexes in
+PR 10, but those indexes must not become independent authority or eligibility
+state.
+
+`TriggerRepository::list_due_triggers` may be global because the poller is
+host-owned background work, but every returned `TriggerRecord.tenant_id` is
+authority-bearing. Later worker/claim code must mint trusted inbound requests
+from each record's tenant/user/agent/project scope and must not use an ambient
+tenant scope.
+
 Include unit tests for schedule validation, serde, and deterministic fire
 identity. Include tests proving expressions with sub-minute cadence are
 rejected. The workspace already has `cron = "0.13"` available.
@@ -428,7 +439,9 @@ Add the first durable `TriggerRepository` backend:
 - repository trait methods for create/list/remove, due-trigger lookup, and
   submit-result bookkeeping, but not the atomic claim API yet
 - migrations/schema for one chosen backend
-- composite poller index on `(tenant_id, enabled, state, next_run_at)`
+- composite poller index on `(tenant_id, state, next_run_at)` or an equivalent
+  backend-specific derived index; any denormalized scheduled/enabled index must
+  be derived from `state == Scheduled`, not written as independent fire state
 - `active_fire_slot` and `active_run_ref` persistence fields separate from
   `last_status`
 - due-trigger query with limit
