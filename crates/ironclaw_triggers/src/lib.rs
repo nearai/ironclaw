@@ -388,6 +388,10 @@ pub trait TriggerRepository: Send + Sync {
         trigger_id: TriggerId,
     ) -> Result<Option<TriggerRecord>, TriggerError>;
 
+    /// Returns all triggers for a tenant in creation order.
+    ///
+    /// This method is currently unbounded. Callers must apply any product or
+    /// API pagination before exposing user-facing list surfaces.
     async fn list_triggers(&self, tenant_id: TenantId) -> Result<Vec<TriggerRecord>, TriggerError>;
 
     async fn remove_trigger(
@@ -493,28 +497,26 @@ impl TriggerRepository for InMemoryTriggerRepository {
             return Ok(Vec::new());
         }
         let limit = limit.min(MAX_DUE_TRIGGER_POLL_LIMIT);
-        let mut records = {
-            let state = self.lock_state()?;
-            state
-                .iter()
-                .filter(|(_, record)| record.is_due_at(now))
-                .map(|(_, record)| {
-                    (
-                        record.next_run_at,
-                        record.tenant_id.clone(),
-                        record.trigger_id,
-                        record.clone(),
-                    )
-                })
-                .collect::<Vec<_>>()
-        };
-        records.sort_by_key(|(next_run_at, tenant_id, trigger_id, _)| {
+        let state = self.lock_state()?;
+        let mut selected_keys = state
+            .iter()
+            .filter(|(_, record)| record.is_due_at(now))
+            .map(|(key, record)| {
+                (
+                    record.next_run_at,
+                    record.tenant_id.clone(),
+                    record.trigger_id,
+                    key.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        selected_keys.sort_by_key(|(next_run_at, tenant_id, trigger_id, _)| {
             (*next_run_at, tenant_id.clone(), *trigger_id)
         });
-        records.truncate(limit);
-        Ok(records
+        selected_keys.truncate(limit);
+        Ok(selected_keys
             .into_iter()
-            .map(|(_, _, _, record)| record)
+            .filter_map(|(_, _, _, key)| state.get(&key).cloned())
             .collect())
     }
 }

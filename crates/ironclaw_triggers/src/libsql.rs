@@ -199,12 +199,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
             )
             .await
             .map_err(|error| backend_error("upsert trigger record", error))?;
-        if affected == 0 {
-            return Err(backend_error(
-                "upsert trigger record",
-                "libSQL reported 0 affected rows",
-            ));
-        }
+        debug_assert!(affected >= 1, "libSQL upsert must affect at least one row");
         Ok(())
     }
 
@@ -353,7 +348,7 @@ fn row_to_record(row: &libsql::Row) -> Result<TriggerRecord, TriggerError> {
         .map(|value| parse_run_status(&value))
         .transpose()?;
 
-    Ok(TriggerRecord {
+    let record = TriggerRecord {
         trigger_id,
         tenant_id,
         creator_user_id,
@@ -380,7 +375,9 @@ fn row_to_record(row: &libsql::Row) -> Result<TriggerRecord, TriggerError> {
             &required_text(row, CREATED_AT_COL, "created_at")?,
             "created_at",
         )?,
-    })
+    };
+    record.validate()?;
+    Ok(record)
 }
 
 #[cfg(feature = "libsql")]

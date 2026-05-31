@@ -258,9 +258,13 @@ async fn libsql_repository_rejects_malformed_persisted_rows() {
         ("creator_user_id", "", "creator_user_id", "get"),
         ("agent_id", "", "agent_id", "get"),
         ("project_id", "", "project_id", "get"),
+        ("name", "", "name", "get"),
+        ("name", "   ", "name", "get"),
         ("source", "webhook", "source", "get"),
         ("state", "unknown", "state", "get"),
         ("completion_policy", "once", "completion_policy", "get"),
+        ("prompt", "", "prompt", "get"),
+        ("prompt", "\t  ", "prompt", "get"),
         ("next_run_at", "not-a-timestamp", "next_run_at", "get"),
         ("last_run_at", "not-a-timestamp", "last_run_at", "get"),
         (
@@ -325,6 +329,11 @@ async fn libsql_repository_rejects_malformed_persisted_rows() {
 async fn libsql_repository_due_query_clamps_limit_and_respects_state_gate() {
     let (_dir, repo) = build_repo().await;
     let due_slot = ts(1_704_067_200);
+    let future = sample_record(
+        TriggerId::parse("01J00000000000000000000002").expect("ulid"),
+        tenant("tenant-future"),
+        ts(1_704_067_320),
+    );
     let paused = {
         let mut record = sample_record(
             TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZY").expect("ulid"),
@@ -337,6 +346,9 @@ async fn libsql_repository_due_query_clamps_limit_and_respects_state_gate() {
     repo.upsert_trigger(paused.clone())
         .await
         .expect("insert paused");
+    repo.upsert_trigger(future.clone())
+        .await
+        .expect("insert future");
     let completed = {
         let mut record = sample_record(
             TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZX").expect("ulid"),
@@ -412,6 +424,12 @@ async fn libsql_repository_due_query_clamps_limit_and_respects_state_gate() {
         .await
         .expect("list due");
     assert_eq!(due_records.len(), 128);
+    assert!(
+        !due_records
+            .iter()
+            .any(|record| record.tenant_id == future.tenant_id),
+        "future scheduled record must not be returned as due"
+    );
     assert!(
         !due_records
             .iter()
