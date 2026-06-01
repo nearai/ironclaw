@@ -1,3 +1,5 @@
+// arch-exempt: large_file, deterministic tick core + ports + reports + tests co-located for PR15, plan #4303
+
 use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
