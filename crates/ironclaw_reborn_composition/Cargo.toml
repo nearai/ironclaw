@@ -24,8 +24,11 @@ root-llm-provider = [
 ]
 # Expose test-only helpers (mock LLM gateway, budget runtime accessors)
 # so integration tests in this crate's `tests/` directory and downstream
-# crates can drive `build_reborn_runtime` with a stub model gateway and
-# inspect the budget pipeline end-to-end.
+# crates can drive `build_reborn_runtime` with a stub model gateway
+# (via `RebornRuntimeInput::with_model_gateway_override`) and inspect the
+# budget pipeline end-to-end. Enable with `cargo test --features
+# test-support` (plus whatever feature surface the test crate also
+# requires, e.g. `webui-v2-beta`).
 test-support = []
 # Compose the Reborn WebChat v2 HTTP gateway in this crate. Off by
 # default; turning this on pulls in the v2 route crate plus the axum /
@@ -62,13 +65,13 @@ postgres = [
     "ironclaw_resources/postgres",
     "ironclaw_run_state/postgres",
 ]
-
 [dependencies]
 async-trait = "0.1"
 chrono = "0.4"
 deadpool-postgres = { version = "0.14", optional = true }
 futures = "0.3"
 ironclaw_auth = { path = "../ironclaw_auth" }
+ironclaw_common = { path = "../ironclaw_common" }
 ironclaw_capabilities = { path = "../ironclaw_capabilities" }
 ironclaw_approvals = { path = "../ironclaw_approvals" }
 ironclaw_authorization = { path = "../ironclaw_authorization" }
@@ -82,6 +85,7 @@ ironclaw_host_api = { path = "../ironclaw_host_api" }
 ironclaw_host_runtime = { path = "../ironclaw_host_runtime" }
 ironclaw_llm = { path = "../ironclaw_llm", optional = true, default-features = false }
 ironclaw_loop_support = { path = "../ironclaw_loop_support" }
+ironclaw_mcp = { path = "../ironclaw_mcp" }
 ironclaw_network = { path = "../ironclaw_network" }
 ironclaw_outbound = { path = "../ironclaw_outbound" }
 ironclaw_processes = { path = "../ironclaw_processes" }
@@ -117,6 +121,7 @@ serde_json = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["rt"] }
+toml = "0.8"
 tracing = "0.1"
 url = "2"
 uuid = { version = "1", features = ["v4"] }

@@ -138,6 +138,60 @@ async fn gateway_preserves_text_only_provider_reasoning() {
 }
 
 #[tokio::test]
+async fn gateway_cleans_legacy_tool_marker_from_text_only_assistant_reply() {
+    let provider = Arc::new(RecordingLlmProvider::reply(
+        "Done.\n[Called tool `demo__echo` with arguments: {\"message\":\"hi\"}]",
+    ));
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider,
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+
+    let response = gateway
+        .stream_model(model_request(interactive_model()))
+        .await
+        .unwrap();
+
+    assert_eq!(response.safe_text_deltas, vec!["Done.".to_string()]);
+    let ParentLoopOutput::AssistantReply(reply) = response.output else {
+        panic!("expected assistant reply");
+    };
+    assert_eq!(reply.content, "Done.");
+}
+
+#[tokio::test]
+async fn gateway_cleans_flattened_tool_history_from_text_only_assistant_reply() {
+    let provider = Arc::new(RecordingLlmProvider::reply(
+        "Done.\nTool result from the benchmark: passed.\nPrevious tool event: demo__echo was invoked.\nTool result from demo__echo: hi",
+    ));
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider,
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+
+    let response = gateway
+        .stream_model(model_request(interactive_model()))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.safe_text_deltas,
+        vec!["Done.\nTool result from the benchmark: passed.".to_string()]
+    );
+    let ParentLoopOutput::AssistantReply(reply) = response.output else {
+        panic!("expected assistant reply");
+    };
+    assert_eq!(
+        reply.content,
+        "Done.\nTool result from the benchmark: passed."
+    );
+}
+
+#[tokio::test]
 async fn gateway_with_empty_tool_definitions_uses_plain_complete() {
     let provider = Arc::new(ToolAwareProvider::plain_reply("assistant response"));
     let gateway = LlmProviderModelGateway::with_provider_identity(
@@ -159,6 +213,62 @@ async fn gateway_with_empty_tool_definitions_uses_plain_complete() {
     );
     assert_eq!(provider.complete_requests.lock().unwrap().len(), 1);
     assert!(provider.tool_requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn gateway_cleans_legacy_tool_marker_from_tool_capable_stop_reply() {
+    let provider = Arc::new(ToolAwareProvider::tool_stop_reply(
+        "Finished.\n[Called tool `demo__echo` with arguments: {\"message\":\"hi\"}]",
+    ));
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider,
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+    let capabilities = Arc::new(GatewayCapabilityPort::with_tool_surface());
+
+    let response = gateway
+        .stream_model_with_capabilities(model_request(interactive_model()), capabilities)
+        .await
+        .unwrap();
+
+    assert_eq!(response.safe_text_deltas, vec!["Finished.".to_string()]);
+    let ParentLoopOutput::AssistantReply(reply) = response.output else {
+        panic!("expected assistant reply");
+    };
+    assert_eq!(reply.content, "Finished.");
+}
+
+#[tokio::test]
+async fn gateway_cleans_flattened_tool_history_from_tool_capable_stop_reply() {
+    let provider = Arc::new(ToolAwareProvider::tool_stop_reply(
+        "Finished.\nTool result from the benchmark: passed.\nPrevious tool result from demo__echo: hi\nTool result from demo__echo: hi",
+    ));
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider,
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+    let capabilities = Arc::new(GatewayCapabilityPort::with_tool_surface());
+
+    let response = gateway
+        .stream_model_with_capabilities(model_request(interactive_model()), capabilities)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.safe_text_deltas,
+        vec!["Finished.\nTool result from the benchmark: passed.".to_string()]
+    );
+    let ParentLoopOutput::AssistantReply(reply) = response.output else {
+        panic!("expected assistant reply");
+    };
+    assert_eq!(
+        reply.content,
+        "Finished.\nTool result from the benchmark: passed."
+    );
 }
 
 #[tokio::test]
@@ -232,6 +342,47 @@ async fn gateway_with_tool_surface_calls_complete_with_tools_and_returns_capabil
 }
 
 #[tokio::test]
+async fn gateway_preserves_structured_tool_calls_when_content_has_legacy_marker() {
+    let provider = Arc::new(ToolAwareProvider::tool_response(ToolCompletionResponse {
+        content: Some(
+            "Calling tool.\n[Called tool `demo__echo` with arguments: {\"message\":\"hi\"}]"
+                .to_string(),
+        ),
+        tool_calls: vec![ToolCall {
+            id: "call_1".to_string(),
+            name: "demo__echo".to_string(),
+            arguments: serde_json::json!({"message":"hello"}),
+            reasoning: None,
+            signature: None,
+        }],
+        input_tokens: 1,
+        output_tokens: 1,
+        finish_reason: FinishReason::ToolUse,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+        reasoning: Some("response reasoning".to_string()),
+    }));
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider,
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+    let capabilities = Arc::new(GatewayCapabilityPort::with_tool_surface());
+
+    let response = gateway
+        .stream_model_with_capabilities(model_request(interactive_model()), capabilities.clone())
+        .await
+        .unwrap();
+
+    let ParentLoopOutput::CapabilityCalls(calls) = response.output else {
+        panic!("expected capability calls");
+    };
+    assert_eq!(calls.len(), 1);
+    assert_eq!(capabilities.registered.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
 async fn gateway_rejects_unknown_provider_tool_call_before_registration() {
     let provider = Arc::new(ToolAwareProvider::tool_calls(vec![
         ToolCall {
@@ -262,7 +413,7 @@ async fn gateway_rejects_unknown_provider_tool_call_before_registration() {
         .await
         .unwrap_err();
 
-    assert_eq!(error.kind, HostManagedModelErrorKind::InvalidRequest);
+    assert_eq!(error.kind, HostManagedModelErrorKind::InvalidOutput);
     assert!(capabilities.registered.lock().unwrap().is_empty());
 }
 
@@ -1004,7 +1155,7 @@ async fn gateway_rejects_tool_use_provider_responses() {
         .await
         .unwrap_err();
 
-    assert_eq!(error.kind, HostManagedModelErrorKind::InvalidRequest);
+    assert_eq!(error.kind, HostManagedModelErrorKind::InvalidOutput);
 }
 
 #[tokio::test]
@@ -1023,7 +1174,7 @@ async fn gateway_rejects_tool_use_without_tool_calls_on_capability_path() {
         .await
         .unwrap_err();
 
-    assert_eq!(error.kind, HostManagedModelErrorKind::InvalidRequest);
+    assert_eq!(error.kind, HostManagedModelErrorKind::InvalidOutput);
     assert!(capabilities.registered.lock().unwrap().is_empty());
 }
 
@@ -2025,20 +2176,37 @@ impl ToolAwareProvider {
     }
 
     fn tool_calls(tool_calls: Vec<ToolCall>) -> Self {
+        Self::tool_response(ToolCompletionResponse {
+            content: None,
+            tool_calls,
+            input_tokens: 1,
+            output_tokens: 1,
+            finish_reason: FinishReason::ToolUse,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+            reasoning: Some("response reasoning".to_string()),
+        })
+    }
+
+    fn tool_stop_reply(content: &str) -> Self {
+        Self::tool_response(ToolCompletionResponse {
+            content: Some(content.to_string()),
+            tool_calls: Vec::new(),
+            input_tokens: 1,
+            output_tokens: 1,
+            finish_reason: FinishReason::Stop,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+            reasoning: None,
+        })
+    }
+
+    fn tool_response(response: ToolCompletionResponse) -> Self {
         Self {
             complete_requests: Mutex::new(Vec::new()),
             tool_requests: Mutex::new(Vec::new()),
             plain_response: Mutex::new(None),
-            tool_response: Mutex::new(Some(ToolCompletionResponse {
-                content: None,
-                tool_calls,
-                input_tokens: 1,
-                output_tokens: 1,
-                finish_reason: FinishReason::ToolUse,
-                cache_read_input_tokens: 0,
-                cache_creation_input_tokens: 0,
-                reasoning: Some("response reasoning".to_string()),
-            })),
+            tool_response: Mutex::new(Some(response)),
         }
     }
 }

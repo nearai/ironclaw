@@ -106,6 +106,7 @@ impl From<RebornSkillSourceKind> for SkillSourceKind {
 pub enum RebornSkillActivationMode {
     ExplicitMention,
     ActivationCriteria,
+    ModelSelected,
 }
 
 impl From<FirstPartySkillActivationMode> for RebornSkillActivationMode {
@@ -113,6 +114,7 @@ impl From<FirstPartySkillActivationMode> for RebornSkillActivationMode {
         match value {
             FirstPartySkillActivationMode::ExplicitMention => Self::ExplicitMention,
             FirstPartySkillActivationMode::ActivationCriteria => Self::ActivationCriteria,
+            FirstPartySkillActivationMode::ModelSelected => Self::ModelSelected,
         }
     }
 }
@@ -122,6 +124,7 @@ impl From<RebornSkillActivationMode> for FirstPartySkillActivationMode {
         match value {
             RebornSkillActivationMode::ExplicitMention => Self::ExplicitMention,
             RebornSkillActivationMode::ActivationCriteria => Self::ActivationCriteria,
+            RebornSkillActivationMode::ModelSelected => Self::ModelSelected,
         }
     }
 }

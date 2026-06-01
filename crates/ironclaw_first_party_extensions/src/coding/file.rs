@@ -7,13 +7,14 @@ use ironclaw_filesystem::{FileType, FilesystemOperation};
 use ironclaw_host_api::RuntimeDispatchErrorKind;
 use serde_json::{Value, json};
 
-use super::{CodingCapabilityError, CodingCapabilityRequest};
+use super::{CodingCapabilityError, CodingCapabilityOutput, CodingCapabilityRequest};
 
 use super::{
     config::{
         DEFAULT_LINE_LIMIT, MAX_DIR_ENTRIES, MAX_PATCH_SIZE, MAX_READ_SIZE, MAX_VISITED_ENTRIES,
         MAX_WRITE_SIZE,
     },
+    diff_preview::{file_diff_preview, will_use_large_diff_path},
     input_error,
     inputs::{optional_usize, required_str},
     operation_error,
@@ -23,14 +24,13 @@ use super::{
         resolve_optional_path, resolve_required_path, scoped_child_path, stat_optional,
         virtual_to_relative,
     },
-    state::{SharedCodingEditLocks, SharedCodingReadState, content_hash, read_scope_key},
+    state::{SharedCodingEditLocks, read_scope_key},
     text::{count_matches, decode_text, encode_text, reject_binary_probe, replace_content},
     types::{ListEntry, MatchMethod, ResolvedPath},
 };
 
 pub(super) async fn read_file(
     request: &CodingCapabilityRequest<'_>,
-    read_state: &SharedCodingReadState,
 ) -> Result<Value, CodingCapabilityError> {
     let resolved = resolve_required_path(request, "path", FilesystemOperation::ReadFile)?;
     let offset = optional_usize(request.input, "offset")?.unwrap_or(0);
@@ -75,15 +75,6 @@ pub(super) async fn read_file(
         .map(|(index, line)| format!("{:>6}│ {}", start_line + index + 1, line))
         .collect();
 
-    let partial = has_explicit_range || truncated_by_default;
-    read_state.write().await.record_read(
-        read_scope_key(request),
-        resolved.virtual_path.as_str().to_string(),
-        stat.modified,
-        content_hash(&bytes),
-        partial,
-    );
-
     Ok(json!({
         "content": selected_lines.join("\n"),
         "total_lines": total_lines,
@@ -95,9 +86,8 @@ pub(super) async fn read_file(
 
 pub(super) async fn write_file(
     request: &CodingCapabilityRequest<'_>,
-    read_state: &SharedCodingReadState,
     edit_locks: &SharedCodingEditLocks,
-) -> Result<Value, CodingCapabilityError> {
+) -> Result<CodingCapabilityOutput, CodingCapabilityError> {
     let path_str = required_str(request.input, "path")?;
     if is_workspace_path(path_str) {
         return Err(input_error());
@@ -111,32 +101,42 @@ pub(super) async fn write_file(
     let _edit_guard = edit_locks
         .lock_edit(&scope, resolved.virtual_path.as_str())
         .await;
-    if let Some(stat) = stat_optional(request, &resolved.virtual_path).await?
+    let existing_stat = stat_optional(request, &resolved.virtual_path).await?;
+    if let Some(stat) = &existing_stat
         && stat.sensitive
     {
         return Err(CodingCapabilityError::new(
             RuntimeDispatchErrorKind::FilesystemDenied,
         ));
     }
+    // Skip reading the old file when the write-only permission is absent or when
+    // new content alone would trigger the large-diff fast path in file_diff_preview
+    // (the old file read would be wasted).
+    let old_content =
+        if !operation_allowed(&resolved.grant.permissions, FilesystemOperation::ReadFile)
+            || will_use_large_diff_path(content)
+        {
+            None
+        } else {
+            existing_text_for_preview(request, &resolved, existing_stat.as_ref()).await
+        };
     create_parent_dir_unless_sensitive(request, &resolved.virtual_path).await?;
     request
         .filesystem
         .write_file(&resolved.virtual_path, content.as_bytes())
         .await
         .map_err(filesystem_error)?;
-    if let Some(stat) = stat_optional(request, &resolved.virtual_path).await? {
-        read_state.write().await.update_after_write(
-            &scope,
-            resolved.virtual_path.as_str(),
-            stat.modified,
-            content_hash(content.as_bytes()),
-        );
-    }
-    Ok(json!({
+    let output = json!({
         "path": resolved.scoped_path.as_str(),
         "bytes_written": content.len(),
         "success": true
-    }))
+    });
+    let display_preview = old_content
+        .map(|old_content| file_diff_preview(resolved.scoped_path.as_str(), &old_content, content));
+    Ok(CodingCapabilityOutput::with_display_preview(
+        output,
+        display_preview,
+    ))
 }
 
 pub(super) async fn list_dir(
@@ -252,9 +252,8 @@ fn format_size(bytes: u64) -> String {
 
 pub(super) async fn apply_patch(
     request: &CodingCapabilityRequest<'_>,
-    read_state: &SharedCodingReadState,
     edit_locks: &SharedCodingEditLocks,
-) -> Result<Value, CodingCapabilityError> {
+) -> Result<CodingCapabilityOutput, CodingCapabilityError> {
     let path_str = required_str(request.input, "path")?;
     if is_workspace_path(path_str) {
         return Err(input_error());
@@ -299,12 +298,6 @@ pub(super) async fn apply_patch(
         .read_file(&resolved.virtual_path)
         .await
         .map_err(filesystem_error)?;
-    let current_hash = content_hash(&bytes);
-    read_state.read().await.check_before_edit(
-        &scope,
-        resolved.virtual_path.as_str(),
-        &current_hash,
-    )?;
     reject_binary_probe(&bytes)?;
     let (content, encoding, line_ending) = decode_text(&bytes)?;
     let (match_count, match_method) = count_matches(&content, old_string);
@@ -323,14 +316,6 @@ pub(super) async fn apply_patch(
         .write_file(&resolved.virtual_path, &output)
         .await
         .map_err(filesystem_error)?;
-    if let Some(stat) = stat_optional(request, &resolved.virtual_path).await? {
-        read_state.write().await.update_after_write(
-            &scope,
-            resolved.virtual_path.as_str(),
-            stat.modified,
-            content_hash(&output),
-        );
-    }
     let mut result = json!({
         "path": resolved.scoped_path.as_str(),
         "replacements": replacements,
@@ -339,5 +324,31 @@ pub(super) async fn apply_patch(
     if match_method != MatchMethod::Exact {
         result["match_method"] = json!(format!("{match_method:?}"));
     }
-    Ok(result)
+    let display_preview = file_diff_preview(resolved.scoped_path.as_str(), &content, &new_content);
+    Ok(CodingCapabilityOutput::with_display_preview(
+        result,
+        Some(display_preview),
+    ))
+}
+
+async fn existing_text_for_preview(
+    request: &CodingCapabilityRequest<'_>,
+    resolved: &ResolvedPath,
+    stat: Option<&ironclaw_filesystem::FileStat>,
+) -> Option<String> {
+    let Some(stat) = stat else {
+        return Some(String::new());
+    };
+    if stat.file_type != FileType::File || stat.len > MAX_WRITE_SIZE as u64 {
+        return None;
+    }
+    let bytes = request
+        .filesystem
+        .read_file(&resolved.virtual_path)
+        .await
+        // silent-ok: write_file display preview is best-effort; the write result is canonical.
+        .ok()?;
+    reject_binary_probe(&bytes).ok()?;
+    let (content, _encoding, _line_ending) = decode_text(&bytes).ok()?;
+    Some(content)
 }

@@ -25,7 +25,8 @@ use ironclaw_turns::{
         InstructionMaterializationStore, InstructionSafetyContext,
         LOOP_CONTEXT_SNIPPET_MODEL_CONTENT_MAX_BYTES, LoopCancellationPort, LoopCancellationSignal,
         LoopCapabilityPort, LoopCheckpointKind, LoopCheckpointPort, LoopCheckpointRequest,
-        LoopCheckpointStateRef, LoopContextBundle, LoopContextMessage, LoopContextPort,
+        LoopCheckpointStateRef, LoopCompactionError, LoopCompactionPort, LoopCompactionRequest,
+        LoopCompactionResponse, LoopContextBundle, LoopContextMessage, LoopContextPort,
         LoopContextRequest, LoopContextSnippet, LoopContextSnippetMetadata, LoopDriverId,
         LoopDriverNoteKind, LoopGateKind, LoopHostMilestone, LoopHostMilestoneEmitter,
         LoopHostMilestoneKind, LoopHostMilestoneSink, LoopInputAckToken, LoopInputBatch,
@@ -34,8 +35,8 @@ use ironclaw_turns::{
         LoopModelMessage, LoopModelPolicyGuard, LoopModelPort, LoopModelRequest, LoopModelResponse,
         LoopProgressEvent, LoopProgressPort, LoopPromptBundle, LoopPromptBundleAuthority,
         LoopPromptBundleRef, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext,
-        LoopRunInfoPort, LoopTranscriptPort, ModelCallOutcome, ParentLoopOutput, PromptMode,
-        PromptSkillContextMetadata, VisibleCapabilityRequest, VisibleCapabilitySurface,
+        LoopRunInfoPort, LoopTranscriptPort, ModelWorkOutcome, ModelWorkRequest, ParentLoopOutput,
+        PromptMode, PromptSkillContextMetadata, VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
     runner::{ClaimRunRequest, TurnRunTransitionPort},
 };
@@ -313,11 +314,13 @@ async fn instruction_bundle_builder_orders_sections_and_rebuilds_deterministical
                 message_ref: Some(LoopMessageRef::new("msg:identity").unwrap()),
                 role: "system".to_string(),
                 safe_summary: "identity safe".to_string(),
+                compaction: None,
             }],
             messages: vec![LoopContextMessage {
                 message_ref: Some(LoopMessageRef::new("msg:user-message").unwrap()),
                 role: "user".to_string(),
                 safe_summary: "user safe".to_string(),
+                compaction: None,
             }],
             instruction_snippets: vec![
                 LoopContextSnippet {
@@ -1041,6 +1044,7 @@ async fn prompt_bundle_authority_consumes_grant_after_successful_model_authoriza
         bundle_ref: LoopPromptBundleRef::for_run(&context, "bundle-once").unwrap(),
         messages: messages.clone(),
         surface_version: None,
+        compaction_message_index: Vec::new(),
         instruction_fingerprint: None,
         identity_message_count: 0,
         instruction_snippet_count: 0,
@@ -1359,11 +1363,8 @@ async fn loop_prompt_port_rejects_malformed_same_run_checkpoint_ref() {
             context_cursor: None,
             surface_version: None,
             checkpoint_state_ref: Some(
-                LoopCheckpointStateRef::new(format!(
-                    "checkpoint:{}:/host/path",
-                    host.context.run_id
-                ))
-                .unwrap(),
+                LoopCheckpointStateRef::new(format!("checkpoint:{}:", host.context.run_id))
+                    .unwrap(),
             ),
             max_messages: None,
             inline_messages: Vec::new(),
@@ -1770,6 +1771,7 @@ async fn loop_prompt_bundle_public_serialization_hides_raw_content() {
         received_at: Utc.with_ymd_and_hms(2026, 5, 7, 12, 0, 0).unwrap(),
         checkpoint_id: None,
         gate_ref: None,
+        credential_requirements: Vec::new(),
         failure: None,
         event_cursor: EventCursor(0),
     };
@@ -2121,6 +2123,7 @@ impl AgentLoopDriver for CapabilityDriver {
             .checkpoint(LoopCheckpointRequest {
                 kind: LoopCheckpointKind::BeforeBlock,
                 state_ref: state_ref.clone(),
+                gate_ref: None,
             })
             .await
             .map_err(driver_error)?;
@@ -2133,6 +2136,7 @@ impl AgentLoopDriver for CapabilityDriver {
         Ok(LoopExit::Blocked(LoopBlocked {
             kind: LoopBlockedKind::Approval,
             gate_ref,
+            credential_requirements: Vec::new(),
             checkpoint_id,
             state_ref,
             exit_id: LoopExitId::new("exit:capability-driver").unwrap(),
@@ -2303,6 +2307,7 @@ impl RecordingAgentLoopHost {
             message_ref: Some(LoopMessageRef::new(message_ref.into()).unwrap()),
             role: "system".to_string(),
             safe_summary: safe_summary.into(),
+            compaction: None,
         });
         self
     }
@@ -2317,6 +2322,7 @@ impl RecordingAgentLoopHost {
             message_ref: Some(LoopMessageRef::new(message_ref.into()).unwrap()),
             role: role.into(),
             safe_summary: safe_summary.into(),
+            compaction: None,
         });
         self
     }
@@ -2420,6 +2426,7 @@ impl LoopContextPort for RecordingAgentLoopHost {
             message_ref: Some(LoopMessageRef::new("msg:user-message").unwrap()),
             role: "user".to_string(),
             safe_summary: self.context_message_safe_summary.clone(),
+            compaction: None,
         }];
         messages.extend(self.context_tail_messages.clone());
         Ok(LoopContextBundle {
@@ -2482,6 +2489,7 @@ impl LoopPromptPort for RecordingAgentLoopHost {
                 })
                 .collect(),
             surface_version: request.surface_version,
+            compaction_message_index: Vec::new(),
             instruction_fingerprint: None,
             identity_message_count: 0,
             instruction_snippet_count: 0,
@@ -2613,9 +2621,24 @@ impl LoopProgressPort for RecordingAgentLoopHost {
     }
 }
 
+#[async_trait]
+impl LoopCompactionPort for RecordingAgentLoopHost {
+    async fn compact_loop_context(
+        &self,
+        _request: LoopCompactionRequest,
+    ) -> Result<LoopCompactionResponse, LoopCompactionError> {
+        Err(LoopCompactionError::InputTooLarge)
+    }
+}
+
+#[async_trait]
 impl LoopCancellationPort for RecordingAgentLoopHost {
     fn observe_cancellation(&self) -> Option<LoopCancellationSignal> {
         None
+    }
+
+    async fn cancellation_requested(&self) -> LoopCancellationSignal {
+        std::future::pending().await
     }
 }
 
@@ -2697,10 +2720,10 @@ struct DenyAllPolicyGuard;
 
 #[async_trait]
 impl LoopModelPolicyGuard for DenyAllPolicyGuard {
-    async fn check_model_policy(
+    async fn check_model_work_policy(
         &self,
         _context: &LoopRunContext,
-        _request: &LoopModelRequest,
+        _request: &ModelWorkRequest,
     ) -> Result<(), LoopModelGatewayError> {
         Err(LoopModelGatewayError::new(
             AgentLoopHostErrorKind::PolicyDenied,
@@ -2758,10 +2781,10 @@ impl RecordingBudgetAccountant {
 
 #[async_trait]
 impl LoopModelBudgetAccountant for RecordingBudgetAccountant {
-    async fn pre_model_call(
+    async fn pre_model_work(
         &self,
         _context: &LoopRunContext,
-        _request: &LoopModelRequest,
+        _request: &ModelWorkRequest,
     ) -> Result<(), LoopModelGatewayError> {
         self.pre_called.store(true, Ordering::SeqCst);
         if self.reject_pre.load(Ordering::SeqCst) {
@@ -2774,14 +2797,14 @@ impl LoopModelBudgetAccountant for RecordingBudgetAccountant {
         Ok(())
     }
 
-    async fn post_model_call(
+    async fn post_model_work(
         &self,
         _context: &LoopRunContext,
-        _request: &LoopModelRequest,
-        outcome: ModelCallOutcome<'_>,
+        _request: &ModelWorkRequest,
+        outcome: ModelWorkOutcome,
     ) -> Result<(), LoopModelGatewayError> {
         self.post_called.store(true, Ordering::SeqCst);
-        if matches!(outcome, ModelCallOutcome::Failure(_)) {
+        if matches!(outcome, ModelWorkOutcome::Failure(_)) {
             self.post_saw_failure.store(true, Ordering::SeqCst);
         }
         if self.reject_post.load(Ordering::SeqCst) {

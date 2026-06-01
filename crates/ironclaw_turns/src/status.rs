@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use ironclaw_host_api::RuntimeCredentialAuthRequirement;
+
 use crate::{
     AcceptedMessageRef, GateRef, ReplyTargetBindingRef, ResolvedRunProfile, RunProfileId,
     RunProfileVersion, SourceBindingRef, TurnActor, TurnAdmissionClass, TurnCheckpointId, TurnId,
@@ -25,7 +27,10 @@ pub enum TurnStatus {
 
 impl TurnStatus {
     pub fn is_terminal(self) -> bool {
-        matches!(self, Self::Cancelled | Self::Completed | Self::Failed)
+        matches!(
+            self,
+            Self::Cancelled | Self::Completed | Self::Failed | Self::RecoveryRequired
+        )
     }
 
     pub fn keeps_active_lock(self) -> bool {
@@ -108,6 +113,8 @@ pub enum BlockedReason {
     },
     Auth {
         gate_ref: GateRef,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        credential_requirements: Vec<RuntimeCredentialAuthRequirement>,
     },
     Resource {
         gate_ref: GateRef,
@@ -131,9 +138,19 @@ impl BlockedReason {
     pub fn gate_ref(&self) -> &GateRef {
         match self {
             Self::Approval { gate_ref }
-            | Self::Auth { gate_ref }
+            | Self::Auth { gate_ref, .. }
             | Self::Resource { gate_ref }
             | Self::AwaitDependentRun { gate_ref } => gate_ref,
+        }
+    }
+
+    pub fn credential_requirements(&self) -> &[RuntimeCredentialAuthRequirement] {
+        match self {
+            Self::Auth {
+                credential_requirements,
+                ..
+            } => credential_requirements,
+            _ => &[],
         }
     }
 }
@@ -292,6 +309,8 @@ pub struct TurnRunState {
     pub received_at: TurnTimestamp,
     pub checkpoint_id: Option<TurnCheckpointId>,
     pub gate_ref: Option<GateRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub credential_requirements: Vec<RuntimeCredentialAuthRequirement>,
     pub failure: Option<SanitizedFailure>,
     pub event_cursor: EventCursor,
 }

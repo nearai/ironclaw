@@ -15,9 +15,10 @@ mod skill_url_install;
 mod spawn_subagent;
 mod time;
 
-use std::{sync::Arc, time::Instant};
+use std::{future::Future, panic::AssertUnwindSafe, sync::Arc, time::Instant};
 
 use async_trait::async_trait;
+use futures_util::FutureExt as _;
 use ironclaw_extensions::{
     CapabilityManifest, CapabilityVisibility, ExtensionError, ExtensionManifest, ExtensionPackage,
     ExtensionRuntime, MANIFEST_SCHEMA_VERSION, ManifestSource,
@@ -28,7 +29,8 @@ use ironclaw_first_party_extensions::coding::{
 use ironclaw_host_api::{
     CapabilityId, CapabilityProfileSchemaRef, EffectKind, ExtensionId, HostApiError,
     PermissionMode, RequestedTrustClass, ResourceCeiling, ResourceEstimate, ResourceProfile,
-    ResourceUsage, RuntimeDispatchErrorKind, TrustClass, VirtualPath,
+    ResourceUsage, RuntimeDispatchErrorKind, RuntimeHttpEgressError, RuntimeHttpEgressResponse,
+    TrustClass, VirtualPath,
 };
 
 use crate::{
@@ -235,14 +237,14 @@ impl FirstPartyCapabilityHandler for BuiltinFirstPartyTools {
         normalize_optional_null_sentinels(&mut request);
         let start = Instant::now();
         let mut network_egress_bytes = 0;
-        let output = match request.capability_id.as_str() {
-            ECHO_CAPABILITY_ID => echo::dispatch(&request.input)?,
-            TIME_CAPABILITY_ID => time::dispatch(&request.input)?,
-            JSON_CAPABILITY_ID => json::dispatch(&request.input)?,
+        let (output, display_preview) = match request.capability_id.as_str() {
+            ECHO_CAPABILITY_ID => (echo::dispatch(&request.input)?, None),
+            TIME_CAPABILITY_ID => (time::dispatch(&request.input)?, None),
+            JSON_CAPABILITY_ID => (json::dispatch(&request.input)?, None),
             HTTP_CAPABILITY_ID | HTTP_SAVE_CAPABILITY_ID => {
                 let result = http::dispatch(&request).await?;
                 network_egress_bytes = result.network_egress_bytes;
-                result.output
+                (result.output, None)
             }
             SHELL_CAPABILITY_ID => {
                 let (output, duration) = shell::dispatch(&request).await?;
@@ -267,7 +269,7 @@ impl FirstPartyCapabilityHandler for BuiltinFirstPartyTools {
                     },
                 ));
             }
-            SPAWN_SUBAGENT_CAPABILITY_ID => spawn_subagent::dispatch(),
+            SPAWN_SUBAGENT_CAPABILITY_ID => (spawn_subagent::dispatch(), None),
             capability_id => {
                 let Some(metadata) = coding_capability_metadata(capability_id) else {
                     return Err(FirstPartyCapabilityError::new(
@@ -281,10 +283,12 @@ impl FirstPartyCapabilityHandler for BuiltinFirstPartyTools {
                     Arc::clone(&request.services.filesystem),
                     &request.input,
                 );
-                self.coding_state
+                let result = self
+                    .coding_state
                     .dispatch(&request)
                     .await
-                    .map_err(coding_error)?
+                    .map_err(coding_error)?;
+                (result.output, result.display_preview)
             }
         };
         let wall_clock_ms = start.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
@@ -309,7 +313,7 @@ impl FirstPartyCapabilityHandler for BuiltinFirstPartyTools {
             network_egress_bytes,
             ..ResourceUsage::default()
         };
-        Ok(FirstPartyCapabilityResult::new(output, usage))
+        Ok(FirstPartyCapabilityResult::new(output, usage).with_display_preview(display_preview))
     }
 }
 
@@ -344,14 +348,13 @@ fn bounded_output_bytes(
     Ok(bytes)
 }
 
-/// Treat the literal string `"null"` as absent for declared optional fields.
+/// Treat null sentinels as absent for declared optional fields.
 ///
 /// Weaker models (notably quantized local models) routinely populate every
 /// optional parameter with the string `"null"` instead of omitting it. Without
 /// this normalization an optional `"null"` reaches a typed parser (e.g. an IANA
 /// timezone) and aborts an otherwise valid call with `InputEncode`. Required
-/// fields are left untouched so a legitimate `"null"` payload is preserved, and
-/// only declared optional properties are normalized.
+/// fields are left untouched so a legitimate `"null"` payload is preserved.
 fn normalize_optional_null_sentinels(request: &mut FirstPartyCapabilityRequest) {
     let schema_name = request
         .capability_id
@@ -364,11 +367,27 @@ fn normalize_optional_null_sentinels(request: &mut FirstPartyCapabilityRequest) 
     else {
         return;
     };
-    let required: std::collections::HashSet<&str> = schema
+    let mut required: std::collections::HashSet<String> = schema
         .get("required")
         .and_then(|value| value.as_array())
-        .map(|values| values.iter().filter_map(|value| value.as_str()).collect())
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(|value| value.as_str().map(ToString::to_string))
+                .collect()
+        })
         .unwrap_or_default();
+    if let Some(branches) = schema.get("oneOf").and_then(|value| value.as_array()) {
+        for branch in branches {
+            if let Some(values) = branch.get("required").and_then(|value| value.as_array()) {
+                required.extend(
+                    values
+                        .iter()
+                        .filter_map(|value| value.as_str().map(ToString::to_string)),
+                );
+            }
+        }
+    }
     let declared: std::collections::HashSet<&str> = schema
         .get("properties")
         .and_then(|value| value.as_object())
@@ -377,14 +396,11 @@ fn normalize_optional_null_sentinels(request: &mut FirstPartyCapabilityRequest) 
     let Some(object) = request.input.as_object_mut() else {
         return;
     };
-    for (key, value) in object.iter_mut() {
-        if declared.contains(key.as_str())
-            && !required.contains(key.as_str())
-            && value.as_str() == Some("null")
-        {
-            *value = serde_json::Value::Null;
-        }
-    }
+    object.retain(|key, value| {
+        !(declared.contains(key.as_str())
+            && !required.contains(key)
+            && (value.as_str() == Some("null") || value.is_null()))
+    });
 }
 
 fn resource_profile() -> Option<ResourceProfile> {
@@ -407,6 +423,21 @@ fn resource_profile() -> Option<ResourceProfile> {
 
 fn input_error() -> FirstPartyCapabilityError {
     FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::InputEncode)
+}
+
+async fn run_egress_catching_panic<F, P>(
+    future: F,
+    panic_message: &'static str,
+    on_panic: P,
+) -> Result<Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError>, FirstPartyCapabilityError>
+where
+    F: Future<Output = Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError>>,
+    P: FnOnce() -> FirstPartyCapabilityError,
+{
+    AssertUnwindSafe(future).catch_unwind().await.map_err(|_| {
+        tracing::error!("{panic_message}");
+        on_panic()
+    })
 }
 
 fn operation_error() -> FirstPartyCapabilityError {

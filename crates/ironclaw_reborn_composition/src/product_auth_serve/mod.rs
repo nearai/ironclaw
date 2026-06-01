@@ -1,13 +1,19 @@
-//! Reborn-native product-auth OAuth route composition.
+//! Reborn-native product-auth route composition.
 //!
 //! This module owns only HTTP parsing, scope derivation from host-owned
 //! composition, one-way hashing of callback material, and sanitized response
 //! rendering. It deliberately delegates durable flow state, provider exchange,
 //! credential mutation, and continuation dispatch to [`RebornProductAuthServices`].
 
+mod accounts;
+mod lifecycle;
+mod manual_token;
+mod oauth;
+
 use std::{
     num::{NonZeroU32, NonZeroU64, NonZeroUsize},
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
 use axum::{
@@ -19,11 +25,15 @@ use axum::{
 };
 use chrono::{Duration as ChronoDuration, Utc};
 use ironclaw_auth::{
-    AuthContinuationRef, AuthErrorCode, AuthFlowId, AuthFlowStatus, AuthProductError,
-    AuthProductScope, AuthProviderId, AuthSessionId, AuthSurface, AuthorizationCodeHash,
-    CredentialAccountLabel, OAuthAuthorizationCode, OAuthAuthorizationUrl,
-    OAuthProviderCallbackRequest, OpaqueStateHash, PkceVerifierHash, PkceVerifierSecret,
-    ProviderScope, Timestamp,
+    AuthContinuationRef, AuthErrorCode, AuthFlowId, AuthFlowStatus, AuthGateRef, AuthInteractionId,
+    AuthProductError, AuthProductScope, AuthProviderId, AuthSessionId, AuthSurface,
+    AuthorizationCodeHash, CredentialAccountChoiceRequest, CredentialAccountId,
+    CredentialAccountLabel, CredentialAccountListPage, CredentialAccountListRequest,
+    CredentialAccountProjection, CredentialAccountStatus, CredentialRecoveryProjection,
+    CredentialRecoveryRequest, CredentialRefreshReport, CredentialRefreshRequest,
+    OAuthAuthorizationCode, OAuthAuthorizationUrl, OAuthProviderCallbackRequest, OpaqueStateHash,
+    PkceVerifierHash, PkceVerifierSecret, ProviderScope, SecretCleanupAction, SecretCleanupReport,
+    SecretCleanupRequest, Timestamp, TurnRunRef,
 };
 use ironclaw_host_api::NetworkMethod;
 use ironclaw_host_api::ingress::{
@@ -32,8 +42,7 @@ use ironclaw_host_api::ingress::{
     RateLimitPolicy, RateLimitScope, StreamingMode, WebSocketOriginPolicy,
 };
 use ironclaw_host_api::{
-    AgentId, InvocationId, ProjectId, ResourceScope, TenantId, ThreadId, UserId,
-    sha256_digest_token,
+    AgentId, ExtensionId, InvocationId, ProjectId, ResourceScope, TenantId, ThreadId, UserId,
 };
 use ironclaw_product_workflow::WebUiAuthenticatedCaller;
 use lru::LruCache;
@@ -44,28 +53,53 @@ use uuid::Uuid;
 
 use crate::auth::RebornOAuthStartFlowRequest;
 use crate::{
+    RebornManualTokenSetupRequest, RebornManualTokenSubmitRequest, RebornManualTokenSubmitResponse,
     RebornOAuthCallbackError, RebornOAuthCallbackOutcome, RebornOAuthCallbackRequest,
     RebornOAuthCallbackResponse, RebornProductAuthServices,
 };
 
 pub(crate) const OAUTH_START_PATH: &str = "/api/reborn/product-auth/oauth/start";
 pub(crate) const OAUTH_CALLBACK_PATH: &str = "/api/reborn/product-auth/oauth/callback/{flow_id}";
+pub(crate) const MANUAL_TOKEN_SUBMIT_PATH: &str = "/api/reborn/product-auth/manual-token/submit";
+pub(crate) const MANUAL_TOKEN_SETUP_PATH: &str = "/api/reborn/product-auth/manual-token/setup";
+pub(crate) const MANUAL_TOKEN_SECRET_SUBMIT_PATH: &str =
+    "/api/reborn/product-auth/manual-token/secret-submit";
+pub(crate) const ACCOUNTS_LIST_PATH: &str = "/api/reborn/product-auth/accounts/list";
+pub(crate) const ACCOUNTS_SELECT_PATH: &str = "/api/reborn/product-auth/accounts/select";
+pub(crate) const ACCOUNTS_RECOVERY_PATH: &str = "/api/reborn/product-auth/accounts/recovery";
+pub(crate) const ACCOUNTS_REFRESH_PATH: &str = "/api/reborn/product-auth/accounts/refresh";
+pub(crate) const LIFECYCLE_CLEANUP_PATH: &str = "/api/reborn/product-auth/lifecycle/cleanup";
 
 const OAUTH_START_ROUTE_ID: &str = "product_auth.oauth.start";
 const OAUTH_CALLBACK_ROUTE_ID: &str = "product_auth.oauth.callback";
+const MANUAL_TOKEN_SUBMIT_ROUTE_ID: &str = "product_auth.manual_token.submit";
+const MANUAL_TOKEN_SETUP_ROUTE_ID: &str = "product_auth.manual_token.setup";
+const MANUAL_TOKEN_SECRET_SUBMIT_ROUTE_ID: &str = "product_auth.manual_token.secret_submit";
+const ACCOUNTS_LIST_ROUTE_ID: &str = "product_auth.accounts.list";
+const ACCOUNTS_SELECT_ROUTE_ID: &str = "product_auth.accounts.select";
+const ACCOUNTS_RECOVERY_ROUTE_ID: &str = "product_auth.accounts.recovery";
+const ACCOUNTS_REFRESH_ROUTE_ID: &str = "product_auth.accounts.refresh";
+const LIFECYCLE_CLEANUP_ROUTE_ID: &str = "product_auth.lifecycle.cleanup";
 const OAUTH_PKCE_VERIFIER_CACHE_CAPACITY: NonZeroUsize = match NonZeroUsize::new(1024) {
     Some(value) => value,
     // SAFETY: 1024 is a non-zero literal cache cap.
     None => unreachable!(),
 };
-const OAUTH_START_BODY_LIMIT_BYTES: NonZeroU64 = match NonZeroU64::new(16 * 1024) {
+const PRODUCT_AUTH_MUTATION_BODY_LIMIT_BYTES: NonZeroU64 = match NonZeroU64::new(16 * 1024) {
     Some(value) => value,
     // SAFETY: 16 KiB is a non-zero literal body cap.
     None => unreachable!(),
 };
-const OAUTH_START_MAX_REQUESTS: NonZeroU32 = match NonZeroU32::new(20) {
+const PRODUCT_AUTH_MUTATION_MAX_REQUESTS: NonZeroU32 = match NonZeroU32::new(20) {
     Some(value) => value,
     // SAFETY: 20 is a non-zero literal rate limit.
+    None => unreachable!(),
+};
+// accounts/refresh triggers an external provider token-refresh call per request.
+// Use a tighter rate limit so one caller cannot fan out 20 provider calls per minute.
+const ACCOUNTS_REFRESH_MAX_REQUESTS: NonZeroU32 = match NonZeroU32::new(5) {
+    Some(value) => value,
+    // SAFETY: 5 is a non-zero literal rate limit.
     None => unreachable!(),
 };
 const OAUTH_CALLBACK_MAX_REQUESTS: NonZeroU32 = match NonZeroU32::new(120) {
@@ -78,7 +112,8 @@ const OAUTH_RATE_WINDOW_SECONDS: NonZeroU32 = match NonZeroU32::new(60) {
     // SAFETY: 60 is a non-zero literal rate-limit window.
     None => unreachable!(),
 };
-const OAUTH_FLOW_MAX_TTL_SECONDS: i64 = 10 * 60;
+const PRODUCT_AUTH_FLOW_MAX_TTL_SECONDS: i64 = 10 * 60;
+const PRODUCT_AUTH_BACKEND_TIMEOUT: Duration = Duration::from_secs(30);
 const OAUTH_CALLBACK_QUERY_MAX_BYTES: usize = 16 * 1024;
 const OAUTH_CALLBACK_FIELD_MAX_BYTES: usize = 512;
 const OAUTH_CALLBACK_SCOPES_MAX_BYTES: usize = 4 * 1024;
@@ -183,12 +218,14 @@ impl std::fmt::Debug for ProductAuthRouteState {
     }
 }
 
-struct StoredPkceVerifier {
+pub(super) struct StoredPkceVerifier {
     verifier: SecretString,
     expires_at: Timestamp,
 }
 
-fn remove_expired_pkce_verifiers(verifiers: &mut LruCache<AuthFlowId, StoredPkceVerifier>) {
+pub(super) fn remove_expired_pkce_verifiers(
+    verifiers: &mut LruCache<AuthFlowId, StoredPkceVerifier>,
+) {
     let now = Utc::now();
     let expired = verifiers
         .iter()
@@ -205,36 +242,99 @@ pub(crate) struct ProductAuthRouteMount {
     pub(crate) descriptors: Vec<IngressRouteDescriptor>,
 }
 
+// Product-auth HTTP is a host-owned auth/secret-ingress boundary. Its
+// mutations enter `RebornProductAuthServices` directly; they are not in-turn
+// tool calls and must not surface raw secrets through the model-visible
+// tool-dispatch path. Contract: `docs/reborn/contracts/auth-product.md`.
+// dispatch-exempt: host-owned auth/secret ingress, not in-turn tool dispatch
 pub(crate) fn product_auth_route_mount(state: ProductAuthRouteState) -> ProductAuthRouteMount {
     ProductAuthRouteMount {
         protected: Router::new()
-            .route(OAUTH_START_PATH, post(oauth_start_handler))
+            .route(OAUTH_START_PATH, post(oauth::oauth_start_handler))
+            .route(
+                MANUAL_TOKEN_SUBMIT_PATH,
+                post(manual_token::manual_token_submit_handler),
+            )
+            .route(
+                MANUAL_TOKEN_SETUP_PATH,
+                post(manual_token::manual_token_setup_handler),
+            )
+            .route(
+                MANUAL_TOKEN_SECRET_SUBMIT_PATH,
+                post(manual_token::manual_token_secret_submit_handler),
+            )
+            .route(ACCOUNTS_LIST_PATH, post(accounts::accounts_list_handler))
+            .route(
+                ACCOUNTS_SELECT_PATH,
+                post(accounts::accounts_select_handler),
+            )
+            .route(
+                ACCOUNTS_RECOVERY_PATH,
+                post(accounts::accounts_recovery_handler),
+            )
+            .route(
+                ACCOUNTS_REFRESH_PATH,
+                post(accounts::accounts_refresh_handler),
+            )
+            .route(
+                LIFECYCLE_CLEANUP_PATH,
+                post(lifecycle::lifecycle_cleanup_handler),
+            )
             .with_state(state.clone()),
         public: Router::new()
-            .route(OAUTH_CALLBACK_PATH, get(oauth_callback_handler))
+            .route(OAUTH_CALLBACK_PATH, get(oauth::oauth_callback_handler))
             .with_state(state),
         descriptors: product_auth_route_descriptors(),
     }
 }
 
 pub(crate) fn product_auth_route_descriptors() -> Vec<IngressRouteDescriptor> {
-    vec![
-        descriptor(
-            OAUTH_START_ROUTE_ID,
-            NetworkMethod::Post,
-            OAUTH_START_PATH,
-            start_policy(),
+    // All protected mutations share the same LocalGateway + Bearer + per-caller
+    // policy. Listing them as a table keeps the policy choice next to the path
+    // and stops descriptor blocks from drifting per-route.
+    const PROTECTED_MUTATIONS: &[(&str, &str)] = &[
+        (OAUTH_START_ROUTE_ID, OAUTH_START_PATH),
+        (MANUAL_TOKEN_SUBMIT_ROUTE_ID, MANUAL_TOKEN_SUBMIT_PATH),
+        (MANUAL_TOKEN_SETUP_ROUTE_ID, MANUAL_TOKEN_SETUP_PATH),
+        (
+            MANUAL_TOKEN_SECRET_SUBMIT_ROUTE_ID,
+            MANUAL_TOKEN_SECRET_SUBMIT_PATH,
         ),
-        descriptor(
-            OAUTH_CALLBACK_ROUTE_ID,
-            NetworkMethod::Get,
-            OAUTH_CALLBACK_PATH,
-            callback_policy(),
-        ),
-    ]
+        (ACCOUNTS_LIST_ROUTE_ID, ACCOUNTS_LIST_PATH),
+        (ACCOUNTS_SELECT_ROUTE_ID, ACCOUNTS_SELECT_PATH),
+        (ACCOUNTS_RECOVERY_ROUTE_ID, ACCOUNTS_RECOVERY_PATH),
+        // accounts/refresh omitted here — uses tighter rate limit below.
+        (LIFECYCLE_CLEANUP_ROUTE_ID, LIFECYCLE_CLEANUP_PATH),
+    ];
+    let mut descriptors: Vec<IngressRouteDescriptor> = PROTECTED_MUTATIONS
+        .iter()
+        .map(|(route_id, path)| {
+            descriptor(
+                route_id,
+                NetworkMethod::Post,
+                path,
+                protected_mutation_policy(),
+            )
+        })
+        .collect();
+    // accounts/refresh triggers a provider-side token-refresh call per request;
+    // give it a tighter per-caller rate limit than stateless mutation routes.
+    descriptors.push(descriptor(
+        ACCOUNTS_REFRESH_ROUTE_ID,
+        NetworkMethod::Post,
+        ACCOUNTS_REFRESH_PATH,
+        accounts_refresh_policy(),
+    ));
+    descriptors.push(descriptor(
+        OAUTH_CALLBACK_ROUTE_ID,
+        NetworkMethod::Get,
+        OAUTH_CALLBACK_PATH,
+        callback_policy(),
+    ));
+    descriptors
 }
 
-fn descriptor(
+pub(super) fn descriptor(
     route_id: &str,
     method: NetworkMethod,
     pattern: &str,
@@ -244,7 +344,7 @@ fn descriptor(
         .expect("product-auth route descriptor must validate at startup") // safety: ids/patterns are crate-local literals, and policies are constructed by sibling helpers that validate their parts.
 }
 
-fn start_policy() -> IngressPolicy {
+pub(super) fn protected_mutation_policy() -> IngressPolicy {
     IngressPolicy::new(IngressPolicyParts {
         listener_class: ListenerClass::LocalGateway,
         auth: IngressAuthPolicy::Required {
@@ -252,11 +352,11 @@ fn start_policy() -> IngressPolicy {
         },
         scope_source: ironclaw_host_api::IngressScopeSource::AuthenticatedCaller,
         body_limit: BodyLimitPolicy::Limited {
-            max_bytes: OAUTH_START_BODY_LIMIT_BYTES,
+            max_bytes: PRODUCT_AUTH_MUTATION_BODY_LIMIT_BYTES,
         },
         rate_limit: RateLimitPolicy::Limited {
             scope: RateLimitScope::PerCaller,
-            max_requests: OAUTH_START_MAX_REQUESTS,
+            max_requests: PRODUCT_AUTH_MUTATION_MAX_REQUESTS,
             window_seconds: OAUTH_RATE_WINDOW_SECONDS,
         },
         cors: CorsPolicy::SameOriginOnly,
@@ -268,7 +368,31 @@ fn start_policy() -> IngressPolicy {
     .expect("product-auth OAuth start policy must validate") // safety: LocalGateway + bearer + AuthenticatedCaller is the same authenticated local product workflow shape used by WebUI mutations.
 }
 
-fn callback_policy() -> IngressPolicy {
+pub(super) fn accounts_refresh_policy() -> IngressPolicy {
+    IngressPolicy::new(IngressPolicyParts {
+        listener_class: ListenerClass::LocalGateway,
+        auth: IngressAuthPolicy::Required {
+            schemes: vec![IngressAuthScheme::BearerToken],
+        },
+        scope_source: ironclaw_host_api::IngressScopeSource::AuthenticatedCaller,
+        body_limit: BodyLimitPolicy::Limited {
+            max_bytes: PRODUCT_AUTH_MUTATION_BODY_LIMIT_BYTES,
+        },
+        rate_limit: RateLimitPolicy::Limited {
+            scope: RateLimitScope::PerCaller,
+            max_requests: ACCOUNTS_REFRESH_MAX_REQUESTS,
+            window_seconds: OAUTH_RATE_WINDOW_SECONDS,
+        },
+        cors: CorsPolicy::SameOriginOnly,
+        websocket_origin: WebSocketOriginPolicy::NotApplicable,
+        streaming: StreamingMode::None,
+        audit: AuditTraceClass::UserAction,
+        effect_path: AllowedEffectPath::ProductWorkflow,
+    })
+    .expect("product-auth accounts refresh policy must validate") // safety: same shape as protected_mutation_policy but with tighter rate cap to guard against fan-out to provider refresh calls.
+}
+
+pub(super) fn callback_policy() -> IngressPolicy {
     IngressPolicy::new(IngressPolicyParts {
         listener_class: ListenerClass::OAuthCallback,
         auth: IngressAuthPolicy::Required {
@@ -291,15 +415,24 @@ fn callback_policy() -> IngressPolicy {
 }
 
 #[derive(Deserialize)]
-struct OAuthStartRequest {
+pub(super) struct OAuthStartRequest {
     provider: String,
     authorization_url: String,
     opaque_state: UnvalidatedRawCallbackValue,
     pkce_verifier: UnvalidatedRawSecretValue,
     expires_at: Timestamp,
-    #[serde(default)]
     session_id: Option<String>,
-    #[serde(default)]
+    thread_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub(super) struct ManualTokenSubmitRequest {
+    provider: String,
+    account_label: String,
+    token: UnvalidatedRawSecretValue,
+    run_id: String,
+    gate_ref: String,
+    session_id: Option<String>,
     thread_id: Option<String>,
 }
 
@@ -312,6 +445,103 @@ pub(crate) struct OAuthStartResponse {
     pub(crate) expires_at: Timestamp,
     pub(crate) continuation: AuthContinuationRef,
     pub(crate) callback_scope: OAuthCallbackScopeHint,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ManualTokenSubmitResponse {
+    pub(crate) credential_ref: CredentialAccountId,
+    pub(crate) status: CredentialAccountStatus,
+    pub(crate) continuation: AuthContinuationRef,
+}
+
+/// Caller-supplied scope fields shared by every product-auth route body.
+///
+/// `invocation_id` is round-tripped from a prior start/setup response so the
+/// host can re-derive the same `AuthProductScope` across follow-up calls
+/// (mirroring the OAuth start/callback pattern). All three fields are
+/// optional: routes default to a fresh scope when the browser has no prior
+/// invocation to carry forward.
+// Option<T> fields already default to None in serde without #[serde(default)].
+#[derive(Default, Deserialize)]
+pub(super) struct ScopeFields {
+    session_id: Option<String>,
+    thread_id: Option<String>,
+    invocation_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub(super) struct ManualTokenSetupRequest {
+    provider: String,
+    account_label: String,
+    run_id: Option<String>,
+    gate_ref: Option<String>,
+    #[serde(flatten)]
+    scope: ScopeFields,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ManualTokenSetupResponse {
+    pub(crate) interaction_id: AuthInteractionId,
+    pub(crate) provider: AuthProviderId,
+    pub(crate) label: CredentialAccountLabel,
+    pub(crate) expires_at: Timestamp,
+    /// Invocation scope used to mint this interaction. The browser carries it
+    /// back on the secret-submit call so the host can re-derive the same
+    /// `AuthProductScope` and let the interaction service match the pending
+    /// scope without trusting browser-supplied scope identifiers.
+    pub(crate) invocation_id: InvocationId,
+}
+
+#[derive(Deserialize)]
+pub(super) struct ManualTokenSecretSubmitRequest {
+    interaction_id: String,
+    token: UnvalidatedRawSecretValue,
+    #[serde(flatten)]
+    scope: ScopeFields,
+}
+
+#[derive(Deserialize)]
+pub(super) struct AccountsListRequest {
+    provider: String,
+    requester_extension: Option<String>,
+    cursor: Option<String>,
+    limit: Option<usize>,
+    #[serde(flatten)]
+    scope: ScopeFields,
+}
+
+#[derive(Deserialize)]
+pub(super) struct AccountsSelectRequest {
+    provider: String,
+    account_id: String,
+    requester_extension: Option<String>,
+    #[serde(flatten)]
+    scope: ScopeFields,
+}
+
+#[derive(Deserialize)]
+pub(super) struct AccountsRecoveryRequest {
+    provider: String,
+    requester_extension: Option<String>,
+    #[serde(flatten)]
+    scope: ScopeFields,
+}
+
+#[derive(Deserialize)]
+pub(super) struct AccountsRefreshRequest {
+    provider: String,
+    account_id: String,
+    requester_extension: Option<String>,
+    #[serde(flatten)]
+    scope: ScopeFields,
+}
+
+#[derive(Deserialize)]
+pub(super) struct LifecycleCleanupRequest {
+    extension_id: String,
+    action: SecretCleanupAction,
+    #[serde(flatten)]
+    scope: ScopeFields,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -329,7 +559,7 @@ pub(crate) struct OAuthCallbackScopeHint {
 }
 
 #[derive(Deserialize)]
-struct OAuthCallbackQuery {
+pub(super) struct OAuthCallbackQuery {
     user_id: String,
     invocation_id: String,
     state: Option<RawCallbackValue>,
@@ -337,20 +567,16 @@ struct OAuthCallbackQuery {
     account_label: Option<String>,
     code: Option<RawSecretValue>,
     error: Option<String>,
-    #[serde(default)]
     agent_id: Option<String>,
-    #[serde(default)]
     project_id: Option<String>,
-    #[serde(default)]
     thread_id: Option<String>,
-    #[serde(default)]
     session_id: Option<String>,
-    #[serde(default, alias = "scope")]
+    #[serde(alias = "scope")]
     scopes: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
-struct ProductAuthRouteFailure {
+pub(super) struct ProductAuthRouteFailure {
     status: StatusCode,
     body: RebornOAuthCallbackError,
 }
@@ -384,6 +610,13 @@ impl ProductAuthRouteFailure {
             AuthErrorCode::BackendUnavailable,
         )
     }
+
+    fn backend_timeout() -> Self {
+        Self::new(
+            StatusCode::GATEWAY_TIMEOUT,
+            AuthErrorCode::BackendUnavailable,
+        )
+    }
 }
 
 impl IntoResponse for ProductAuthRouteFailure {
@@ -404,7 +637,9 @@ impl From<RebornOAuthCallbackError> for ProductAuthRouteFailure {
     }
 }
 
-fn route_failure_from_callback_error(error: RebornOAuthCallbackError) -> ProductAuthRouteFailure {
+pub(super) fn route_failure_from_callback_error(
+    error: RebornOAuthCallbackError,
+) -> ProductAuthRouteFailure {
     let status = match error.code {
         AuthErrorCode::MalformedCallback | AuthErrorCode::InvalidRequest => StatusCode::BAD_REQUEST,
         AuthErrorCode::UnknownOrExpiredFlow => StatusCode::NOT_FOUND,
@@ -425,209 +660,53 @@ fn route_failure_from_callback_error(error: RebornOAuthCallbackError) -> Product
     }
 }
 
-async fn oauth_start_handler(
-    State(state): State<ProductAuthRouteState>,
-    Extension(caller): Extension<WebUiAuthenticatedCaller>,
-    Json(request): Json<OAuthStartRequest>,
-) -> Result<Json<OAuthStartResponse>, ProductAuthRouteFailure> {
-    let now = Utc::now();
-    if request.expires_at <= now
-        || request.expires_at > now + ChronoDuration::seconds(OAUTH_FLOW_MAX_TTL_SECONDS)
-    {
-        return Err(ProductAuthRouteFailure::invalid_request());
-    }
-
-    let scope = scope_from_authenticated_caller(&caller, &request)?;
-    let provider = AuthProviderId::new(request.provider).map_err(|_| {
-        ProductAuthRouteFailure::new(StatusCode::BAD_REQUEST, AuthErrorCode::InvalidRequest)
-    })?;
-    let authorization_endpoint = authorization_endpoint_url(&request.authorization_url)?;
-    let opaque_state = request
-        .opaque_state
-        .into_validated()
-        .map_err(|_| ProductAuthRouteFailure::invalid_request())?;
-    let pkce_verifier_value = request
-        .pkce_verifier
-        .into_validated()
-        .map_err(|_| ProductAuthRouteFailure::invalid_request())?;
-    let opaque_state_hash = opaque_state_hash(opaque_state.as_str())?;
-    let pkce_verifier_hash = pkce_verifier_hash(pkce_verifier_value.expose_secret())?;
-    let pkce_verifier = pkce_verifier_value.clone_secret();
-    state.ensure_pkce_verifier_capacity()?;
-
-    let flow = state
-        .product_auth
-        .start_setup_oauth_flow(RebornOAuthStartFlowRequest {
-            scope: scope.clone(),
-            provider: provider.clone(),
-            authorization_url: OAuthAuthorizationUrl::new(authorization_endpoint.to_string())
-                .map_err(ProductAuthRouteFailure::from)?,
-            opaque_state_hash,
-            pkce_verifier_hash,
-            expires_at: request.expires_at,
-        })
-        .await
-        .map_err(ProductAuthRouteFailure::from)?;
-    state.store_pkce_verifier(flow.id, pkce_verifier, flow.expires_at)?;
-    let authorization_url = compose_authorization_url(authorization_endpoint, flow.id, &scope)?;
-
-    Ok(Json(OAuthStartResponse {
-        flow_id: flow.id,
-        status: flow.status,
-        provider,
-        authorization_url,
-        expires_at: flow.expires_at,
-        continuation: flow.continuation,
-        callback_scope: scope_hint(&scope),
-    }))
-}
-
-async fn oauth_callback_handler(
-    State(state): State<ProductAuthRouteState>,
-    Path(flow_id): Path<String>,
-    RawQuery(raw_query): RawQuery,
-    uri: Uri,
-) -> Result<Json<RebornOAuthCallbackResponse>, ProductAuthRouteFailure> {
-    validate_callback_raw_query(raw_query.as_deref())?;
-    let query = axum::extract::Query::<OAuthCallbackQuery>::try_from_uri(&uri)
-        .map_err(|_| ProductAuthRouteFailure::malformed_callback())?
-        .0;
-    validate_callback_query_fields(&query)?;
-
-    let flow_id = AuthFlowId::from_uuid(
-        Uuid::parse_str(&flow_id).map_err(|_| ProductAuthRouteFailure::malformed_callback())?,
-    );
-    let scope = scope_from_callback_query(&state, &query)?;
-    let state_hash = opaque_state_hash(
-        query
-            .state
-            .as_ref()
-            .ok_or_else(ProductAuthRouteFailure::malformed_callback)?
-            .as_str(),
-    )?;
-
-    if is_authorized_callback_candidate(&query) {
-        state
-            .product_auth
-            .ensure_oauth_callback_flow_known(&scope, flow_id)
-            .await
-            .map_err(ProductAuthRouteFailure::from)?;
-    }
-    let outcome = callback_outcome_from_query(&state, flow_id, &scope, &query)?;
-
-    let response = match state
-        .product_auth
-        .handle_oauth_callback(RebornOAuthCallbackRequest {
-            scope,
-            flow_id,
-            opaque_state_hash: state_hash,
-            outcome,
-        })
-        .await
-    {
-        Ok(response) => {
-            state.remove_pkce_verifier(flow_id);
-            response
-        }
-        Err(error) => {
-            if should_forget_pkce_verifier(error.code) {
-                state.remove_pkce_verifier(flow_id);
-            }
-            return Err(ProductAuthRouteFailure::from(error));
-        }
-    };
-
-    Ok(Json(response))
-}
-
-fn callback_outcome_from_query(
-    state: &ProductAuthRouteState,
-    flow_id: AuthFlowId,
-    _scope: &AuthProductScope,
-    query: &OAuthCallbackQuery,
-) -> Result<RebornOAuthCallbackOutcome, ProductAuthRouteFailure> {
-    if query
-        .error
-        .as_deref()
-        .is_some_and(|value| !value.is_empty())
-    {
-        return Ok(RebornOAuthCallbackOutcome::ProviderDenied);
-    }
-
-    let provider = required_callback_value(query.provider.as_deref())?;
-    let account_label = required_callback_value(query.account_label.as_deref())?;
-    let code = query
-        .code
-        .as_ref()
-        .ok_or_else(ProductAuthRouteFailure::malformed_callback)?;
-    let pkce_verifier = state.pkce_verifier_for_callback(flow_id)?;
-    let scopes = parse_provider_scopes(query.scopes.as_deref())?;
-    if scopes.is_empty() {
-        return Err(ProductAuthRouteFailure::malformed_callback());
-    }
-    let authorization_code_hash = authorization_code_hash(code.expose_secret())?;
-    let pkce_verifier_hash = pkce_verifier_hash(pkce_verifier.expose_secret())?;
-
-    Ok(RebornOAuthCallbackOutcome::Authorized {
-        provider_request: OAuthProviderCallbackRequest {
-            provider: AuthProviderId::new(provider.to_string())
-                .map_err(|_| ProductAuthRouteFailure::malformed_callback())?,
-            account_label: CredentialAccountLabel::new(account_label.to_string())
-                .map_err(|_| ProductAuthRouteFailure::malformed_callback())?,
-            authorization_code: OAuthAuthorizationCode::new(code.clone_secret())
-                .map_err(ProductAuthRouteFailure::from)?,
-            authorization_code_hash,
-            pkce_verifier: PkceVerifierSecret::new(pkce_verifier)
-                .map_err(ProductAuthRouteFailure::from)?,
-            pkce_verifier_hash,
-            scopes,
-        },
-    })
-}
-
-fn is_authorized_callback_candidate(query: &OAuthCallbackQuery) -> bool {
-    query.error.as_deref().is_none_or(|value| value.is_empty())
-        && query.provider.is_some()
-        && query.account_label.is_some()
-        && query.code.is_some()
-}
-
-fn required_callback_value(value: Option<&str>) -> Result<&str, ProductAuthRouteFailure> {
-    value.ok_or_else(ProductAuthRouteFailure::malformed_callback)
-}
-
-fn should_forget_pkce_verifier(code: AuthErrorCode) -> bool {
-    matches!(
-        code,
-        AuthErrorCode::ProviderDenied
-            | AuthErrorCode::Canceled
-            | AuthErrorCode::FlowAlreadyTerminal
-            | AuthErrorCode::TokenExchangeFailed
-            | AuthErrorCode::RefreshFailed
-            | AuthErrorCode::CredentialMissing
-            | AuthErrorCode::AccountSelectionRequired
-    )
-}
-
-fn scope_from_authenticated_caller(
+pub(super) fn scope_from_authenticated_caller(
     caller: &WebUiAuthenticatedCaller,
     request: &OAuthStartRequest,
 ) -> Result<AuthProductScope, ProductAuthRouteFailure> {
-    let thread_id = request
+    scope_from_authenticated_caller_parts(
+        caller,
+        &ScopeFields {
+            session_id: request.session_id.clone(),
+            thread_id: request.thread_id.clone(),
+            invocation_id: None,
+        },
+    )
+}
+
+/// Derive an `AuthProductScope` from the authenticated caller plus the
+/// caller-supplied scope fields shared by every product-auth route body.
+///
+/// `invocation_id`, when supplied, must parse as an existing identifier
+/// (round-tripped from a prior start/setup response). Otherwise we mint a
+/// fresh one — mirroring the OAuth start/callback pattern from #4031 so the
+/// host owns the canonical id and the browser carries it forward across
+/// follow-up calls.
+pub(super) fn scope_from_authenticated_caller_parts(
+    caller: &WebUiAuthenticatedCaller,
+    fields: &ScopeFields,
+) -> Result<AuthProductScope, ProductAuthRouteFailure> {
+    let thread_id = fields
         .thread_id
-        .as_ref()
+        .as_deref()
         .map(|value| {
-            ThreadId::new(value.clone()).map_err(|_| ProductAuthRouteFailure::invalid_request())
+            ThreadId::new(value.to_string()).map_err(|_| ProductAuthRouteFailure::invalid_request())
         })
         .transpose()?;
-    let session_id = request
+    let session_id = fields
         .session_id
-        .as_ref()
+        .as_deref()
         .map(|value| {
-            AuthSessionId::new(value.clone())
+            AuthSessionId::new(value.to_string())
                 .map_err(|_| ProductAuthRouteFailure::invalid_request())
         })
         .transpose()?;
+    let invocation_id = match fields.invocation_id.as_deref() {
+        Some(value) => {
+            InvocationId::parse(value).map_err(|_| ProductAuthRouteFailure::invalid_request())?
+        }
+        None => InvocationId::new(),
+    };
 
     let mut scope = AuthProductScope::new(
         ResourceScope {
@@ -637,7 +716,7 @@ fn scope_from_authenticated_caller(
             project_id: caller.project_id.clone(),
             mission_id: None,
             thread_id,
-            invocation_id: InvocationId::new(),
+            invocation_id,
         },
         AuthSurface::Callback,
     );
@@ -647,7 +726,21 @@ fn scope_from_authenticated_caller(
     Ok(scope)
 }
 
-fn scope_from_callback_query(
+/// Like [`scope_from_authenticated_caller_parts`] but returns `invalid_request`
+/// when `invocation_id` is absent. Use for follow-up routes where the browser
+/// MUST carry back the id minted by a prior setup/start response so the host
+/// can re-derive the matching scope without minting a fresh, unmatched one.
+pub(super) fn scope_from_authenticated_caller_parts_requiring_invocation(
+    caller: &WebUiAuthenticatedCaller,
+    fields: &ScopeFields,
+) -> Result<AuthProductScope, ProductAuthRouteFailure> {
+    if fields.invocation_id.is_none() {
+        return Err(ProductAuthRouteFailure::invalid_request());
+    }
+    scope_from_authenticated_caller_parts(caller, fields)
+}
+
+pub(super) fn scope_from_callback_query(
     state: &ProductAuthRouteState,
     query: &OAuthCallbackQuery,
 ) -> Result<AuthProductScope, ProductAuthRouteFailure> {
@@ -705,7 +798,9 @@ fn scope_from_callback_query(
     Ok(scope)
 }
 
-fn validate_callback_raw_query(raw_query: Option<&str>) -> Result<(), ProductAuthRouteFailure> {
+pub(super) fn validate_callback_raw_query(
+    raw_query: Option<&str>,
+) -> Result<(), ProductAuthRouteFailure> {
     let Some(raw_query) = raw_query else {
         return Err(ProductAuthRouteFailure::malformed_callback());
     };
@@ -715,7 +810,7 @@ fn validate_callback_raw_query(raw_query: Option<&str>) -> Result<(), ProductAut
     Ok(())
 }
 
-fn validate_callback_query_fields(
+pub(super) fn validate_callback_query_fields(
     query: &OAuthCallbackQuery,
 ) -> Result<(), ProductAuthRouteFailure> {
     validate_callback_field(&query.user_id, OAUTH_CALLBACK_FIELD_MAX_BYTES, false)?;
@@ -763,7 +858,7 @@ fn validate_callback_query_fields(
     Ok(())
 }
 
-fn validate_optional_callback_field(
+pub(super) fn validate_optional_callback_field(
     value: Option<&str>,
     max_bytes: usize,
     allow_empty: bool,
@@ -774,7 +869,7 @@ fn validate_optional_callback_field(
     validate_callback_field(value, max_bytes, allow_empty)
 }
 
-fn validate_callback_field(
+pub(super) fn validate_callback_field(
     value: &str,
     max_bytes: usize,
     allow_empty: bool,
@@ -786,7 +881,7 @@ fn validate_callback_field(
         .map_err(|_| ProductAuthRouteFailure::malformed_callback())
 }
 
-fn scope_hint(scope: &AuthProductScope) -> OAuthCallbackScopeHint {
+pub(super) fn scope_hint(scope: &AuthProductScope) -> OAuthCallbackScopeHint {
     OAuthCallbackScopeHint {
         user_id: scope.resource.user_id.clone(),
         agent_id: scope.resource.agent_id.clone(),
@@ -797,7 +892,7 @@ fn scope_hint(scope: &AuthProductScope) -> OAuthCallbackScopeHint {
     }
 }
 
-fn authorization_endpoint_url(raw: &str) -> Result<Url, ProductAuthRouteFailure> {
+pub(super) fn authorization_endpoint_url(raw: &str) -> Result<Url, ProductAuthRouteFailure> {
     let authorization_url =
         OAuthAuthorizationUrl::new(raw.to_string()).map_err(ProductAuthRouteFailure::from)?;
     let parsed = Url::parse(authorization_url.as_str())
@@ -808,7 +903,7 @@ fn authorization_endpoint_url(raw: &str) -> Result<Url, ProductAuthRouteFailure>
     Ok(parsed)
 }
 
-fn compose_authorization_url(
+pub(super) fn compose_authorization_url(
     mut endpoint: Url,
     flow_id: AuthFlowId,
     scope: &AuthProductScope,
@@ -836,27 +931,27 @@ fn compose_authorization_url(
     OAuthAuthorizationUrl::new(endpoint.to_string()).map_err(ProductAuthRouteFailure::from)
 }
 
-fn opaque_state_hash(value: &str) -> Result<OpaqueStateHash, ProductAuthRouteFailure> {
+pub(super) fn opaque_state_hash(value: &str) -> Result<OpaqueStateHash, ProductAuthRouteFailure> {
     OpaqueStateHash::new(sha256_hex(value)).map_err(ProductAuthRouteFailure::from)
 }
 
-fn pkce_verifier_hash(value: &str) -> Result<PkceVerifierHash, ProductAuthRouteFailure> {
+pub(super) fn pkce_verifier_hash(value: &str) -> Result<PkceVerifierHash, ProductAuthRouteFailure> {
     PkceVerifierHash::new(sha256_hex(value)).map_err(ProductAuthRouteFailure::from)
 }
 
-fn authorization_code_hash(value: &str) -> Result<AuthorizationCodeHash, ProductAuthRouteFailure> {
+pub(super) fn authorization_code_hash(
+    value: &str,
+) -> Result<AuthorizationCodeHash, ProductAuthRouteFailure> {
     AuthorizationCodeHash::new(sha256_hex(value)).map_err(ProductAuthRouteFailure::from)
 }
 
-fn sha256_hex(value: &str) -> String {
-    let digest = sha256_digest_token(value.as_bytes());
-    digest
-        .strip_prefix("sha256:")
-        .unwrap_or(digest.as_str())
-        .to_string()
+pub(super) fn sha256_hex(value: &str) -> String {
+    ironclaw_common::hashing::sha256_hex(value.as_bytes())
 }
 
-fn parse_provider_scopes(raw: Option<&str>) -> Result<Vec<ProviderScope>, ProductAuthRouteFailure> {
+pub(super) fn parse_provider_scopes(
+    raw: Option<&str>,
+) -> Result<Vec<ProviderScope>, ProductAuthRouteFailure> {
     let Some(raw) = raw else {
         return Ok(Vec::new());
     };
@@ -878,7 +973,7 @@ fn parse_provider_scopes(raw: Option<&str>) -> Result<Vec<ProviderScope>, Produc
 }
 
 #[derive(Clone)]
-struct UnvalidatedRawCallbackValue(String);
+pub(super) struct UnvalidatedRawCallbackValue(String);
 
 impl UnvalidatedRawCallbackValue {
     fn into_validated(self) -> Result<RawCallbackValue, &'static str> {
@@ -896,7 +991,7 @@ impl<'de> Deserialize<'de> for UnvalidatedRawCallbackValue {
 }
 
 #[derive(Clone)]
-struct UnvalidatedRawSecretValue(SecretString);
+pub(super) struct UnvalidatedRawSecretValue(SecretString);
 
 impl UnvalidatedRawSecretValue {
     fn into_validated(self) -> Result<RawSecretValue, &'static str> {
@@ -915,7 +1010,7 @@ impl<'de> Deserialize<'de> for UnvalidatedRawSecretValue {
 }
 
 #[derive(Clone)]
-struct RawCallbackValue(String);
+pub(super) struct RawCallbackValue(String);
 
 impl RawCallbackValue {
     fn new(value: String) -> Result<Self, &'static str> {
@@ -939,7 +1034,7 @@ impl<'de> Deserialize<'de> for RawCallbackValue {
 }
 
 #[derive(Clone)]
-struct RawSecretValue(SecretString);
+pub(super) struct RawSecretValue(SecretString);
 
 impl RawSecretValue {
     fn new(value: String) -> Result<Self, &'static str> {
@@ -949,6 +1044,10 @@ impl RawSecretValue {
 
     fn expose_secret(&self) -> &str {
         self.0.expose_secret()
+    }
+
+    fn into_secret(self) -> SecretString {
+        self.0
     }
 
     fn clone_secret(&self) -> SecretString {
@@ -966,7 +1065,10 @@ impl<'de> Deserialize<'de> for RawSecretValue {
     }
 }
 
-fn validate_raw_value_with_limit(value: &str, max_bytes: usize) -> Result<(), &'static str> {
+pub(super) fn validate_raw_value_with_limit(
+    value: &str,
+    max_bytes: usize,
+) -> Result<(), &'static str> {
     if value.is_empty() {
         return Err("value must not be empty");
     }
@@ -980,6 +1082,54 @@ fn validate_raw_value_with_limit(value: &str, max_bytes: usize) -> Result<(), &'
         return Err("value must not contain NUL/control characters");
     }
     Ok(())
+}
+
+// ── Shared parse and timeout helpers ────────────────────────────────────────
+
+pub(super) fn parse_interaction_id(
+    value: &str,
+) -> Result<AuthInteractionId, ProductAuthRouteFailure> {
+    let parsed = Uuid::parse_str(value).map_err(|_| ProductAuthRouteFailure::invalid_request())?;
+    Ok(AuthInteractionId::from_uuid(parsed))
+}
+
+pub(super) fn parse_credential_account_id(
+    value: &str,
+) -> Result<CredentialAccountId, ProductAuthRouteFailure> {
+    let parsed = Uuid::parse_str(value).map_err(|_| ProductAuthRouteFailure::invalid_request())?;
+    Ok(CredentialAccountId::from_uuid(parsed))
+}
+
+pub(super) fn parse_extension_id(value: &str) -> Result<ExtensionId, ProductAuthRouteFailure> {
+    ExtensionId::new(value.to_string()).map_err(|_| ProductAuthRouteFailure::invalid_request())
+}
+
+pub(super) fn parse_optional_extension(
+    value: Option<&str>,
+) -> Result<Option<ExtensionId>, ProductAuthRouteFailure> {
+    value.map(parse_extension_id).transpose()
+}
+
+/// Await a product-auth backend call under the shared backend timeout and
+/// project both the elapsed-timeout failure and any returned auth error onto
+/// the route's sanitized failure shape.
+///
+/// Every protected product-auth route enters `RebornProductAuthServices` the
+/// same way; centralising the timeout/error wiring stops each handler from
+/// having to re-derive the same four lines and keeps the failure projection
+/// identical across routes.
+pub(super) async fn run_with_backend_timeout<T, E, F>(
+    future: F,
+) -> Result<T, ProductAuthRouteFailure>
+where
+    F: std::future::Future<Output = Result<T, E>>,
+    ProductAuthRouteFailure: From<E>,
+{
+    match tokio::time::timeout(PRODUCT_AUTH_BACKEND_TIMEOUT, future).await {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(error)) => Err(error.into()),
+        Err(_) => Err(ProductAuthRouteFailure::backend_timeout()),
+    }
 }
 
 #[cfg(test)]
@@ -1009,6 +1159,19 @@ mod tests {
             None,
             None,
         )
+    }
+
+    #[test]
+    fn sha256_hex_produces_plain_lowercase_hex_without_prefix() {
+        // Regression guard for the switch off `sha256_digest_token` (which
+        // returned a "sha256:"-prefixed token): the route hashes must stay
+        // plain lowercase hex so stored state/verifier/code hashes match.
+        let hashed = sha256_hex("abc");
+        assert_eq!(
+            hashed,
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert!(!hashed.starts_with("sha256:"));
     }
 
     #[test]

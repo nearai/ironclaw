@@ -36,10 +36,12 @@ mod conversation_binding;
 mod error;
 #[cfg(any(test, feature = "test-support"))]
 mod fakes;
+mod gate_state;
 mod in_memory_ledger;
 mod inbound_turn;
 mod ledger;
 mod lifecycle;
+mod outbound_delivery;
 mod policy;
 mod reborn_services;
 mod webui_inbound;
@@ -105,6 +107,13 @@ pub use lifecycle::{
     LifecycleReadinessBlocker, LifecycleSkillSource, LifecycleSkillSummary,
     UnsupportedLifecycleProductFacade,
 };
+// Product hosts use this outbound orchestration seam to wire outbound policy
+// decisions to adapter rendering without reaching into module internals.
+pub use outbound_delivery::{
+    ProductOutboundDeliveryError, ProductOutboundDeliveryOutcome, ProductOutboundDeliveryRequest,
+    ProductOutboundStatusUpdateFailure, ProductOutboundTargetResolver,
+    VerifiedProductOutboundTargetMetadata, prepare_and_render_product_outbound,
+};
 pub use policy::{
     BeforeInboundPolicy, BeforeInboundPolicyOutcome, BeforeInboundPolicyRequest,
     NoopBeforeInboundPolicy,
@@ -117,8 +126,8 @@ pub use policy::{
 pub use ironclaw_product_adapters::{
     AuthPromptView, CapabilityActivityStatusView, CapabilityActivityView,
     CapabilityDisplayPreviewView, FinalReplyView, GatePromptView, ProductOutboundEnvelope,
-    ProductOutboundPayload, ProductProjectionItem, ProductProjectionState, ProgressKind,
-    ProgressUpdateView, ProjectionCursor,
+    ProductOutboundPayload, ProductProjectionItem, ProductProjectionState, ProductWorkSummaryPhase,
+    ProgressKind, ProgressUpdateView, ProjectionCursor,
 };
 // Re-exported so the WebUI v2 handler crate can validate the
 // `extension_name` path segment at the handler/facade boundary

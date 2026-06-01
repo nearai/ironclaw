@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::{sync::Arc, sync::Mutex};
 use thiserror::Error;
 
-use ironclaw_host_api::{Timestamp, UserId};
+use ironclaw_host_api::{RuntimeCredentialAuthRequirement, Timestamp, UserId};
 
 use crate::{GateRef, TurnError, TurnRunId, TurnRunState, TurnScope, TurnStatus};
 
@@ -56,6 +56,8 @@ impl TurnBlockedGateKind {
 pub struct TurnBlockedGateMetadata {
     pub gate_ref: GateRef,
     pub gate_kind: TurnBlockedGateKind,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub credential_requirements: Vec<RuntimeCredentialAuthRequirement>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -92,6 +94,7 @@ impl TurnLifecycleEvent {
                     TurnBlockedGateMetadata {
                         gate_ref,
                         gate_kind,
+                        credential_requirements: state.credential_requirements.clone(),
                     }
                 })
             })
@@ -429,6 +432,7 @@ mod tests {
             blocked_gate: Some(TurnBlockedGateMetadata {
                 gate_ref: GateRef::new("gate:approval-a").expect("gate ref"),
                 gate_kind: TurnBlockedGateKind::Approval,
+                credential_requirements: Vec::new(),
             }),
             sanitized_reason: Some("approval_required".to_string()),
         }

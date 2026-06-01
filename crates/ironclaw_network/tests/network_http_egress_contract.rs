@@ -1,7 +1,7 @@
 use std::io::{Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, TcpListener};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use ironclaw_host_api::{
     InvocationId, NetworkMethod, NetworkPolicy, NetworkTargetPattern, ResourceScope, TenantId,
@@ -13,8 +13,8 @@ use ironclaw_network::{
     NetworkUsage, PolicyNetworkHttpEgress, ReqwestNetworkTransport,
 };
 
-#[test]
-fn http_egress_authorizes_default_https_port_and_pins_resolved_ip() {
+#[tokio::test]
+async fn http_egress_authorizes_default_https_port_and_pins_resolved_ip() {
     let resolved_ips = vec![
         IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)),
         IpAddr::V4(Ipv4Addr::new(93, 184, 216, 35)),
@@ -46,6 +46,7 @@ fn http_egress_authorizes_default_https_port_and_pins_resolved_ip() {
             response_body_limit: Some(1024),
             timeout_ms: None,
         })
+        .await
         .expect("default HTTPS port should satisfy a 443 policy");
 
     assert_eq!(response.usage.response_bytes, 2);
@@ -55,8 +56,8 @@ fn http_egress_authorizes_default_https_port_and_pins_resolved_ip() {
     assert_eq!(requests[0].response_body_limit, Some(1024));
 }
 
-#[test]
-fn http_egress_forwards_timeout_to_transport() {
+#[tokio::test]
+async fn http_egress_forwards_timeout_to_transport() {
     let transport = RecordingTransport::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![],
@@ -84,6 +85,7 @@ fn http_egress_forwards_timeout_to_transport() {
             response_body_limit: Some(1024),
             timeout_ms: Some(250),
         })
+        .await
         .expect("network response should be returned");
 
     let requests = requests.lock().unwrap();
@@ -91,8 +93,8 @@ fn http_egress_forwards_timeout_to_transport() {
     assert_eq!(requests[0].timeout_ms, Some(250));
 }
 
-#[test]
-fn http_egress_denies_private_resolved_host_before_transport() {
+#[tokio::test]
+async fn http_egress_denies_private_resolved_host_before_transport() {
     let transport = RecordingTransport::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![],
@@ -116,6 +118,7 @@ fn http_egress_denies_private_resolved_host_before_transport() {
             response_body_limit: Some(1024),
             timeout_ms: None,
         })
+        .await
         .expect_err("private resolved targets should fail closed");
 
     assert!(error.to_string().contains("private"));
@@ -123,8 +126,8 @@ fn http_egress_denies_private_resolved_host_before_transport() {
     assert!(requests.lock().unwrap().is_empty());
 }
 
-#[test]
-fn http_egress_counts_url_and_headers_in_policy_egress_estimate_before_transport() {
+#[tokio::test]
+async fn http_egress_counts_url_and_headers_in_policy_egress_estimate_before_transport() {
     let transport = RecordingTransport::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![],
@@ -148,6 +151,7 @@ fn http_egress_counts_url_and_headers_in_policy_egress_estimate_before_transport
             response_body_limit: Some(1024),
             timeout_ms: None,
         })
+        .await
         .expect_err("URL and headers must count toward egress policy estimates");
 
     assert!(matches!(error, NetworkHttpError::PolicyDenied { .. }));
@@ -155,8 +159,29 @@ fn http_egress_counts_url_and_headers_in_policy_egress_estimate_before_transport
     assert!(requests.lock().unwrap().is_empty());
 }
 
-#[test]
-fn http_egress_rejects_caller_provided_host_header_before_transport() {
+#[tokio::test]
+async fn http_egress_maps_panicking_resolver_to_transport_error() {
+    let transport = RecordingTransport::ok(NetworkHttpResponse {
+        status: 200,
+        headers: vec![],
+        body: b"ok".to_vec(),
+        usage: NetworkUsage::default(),
+    });
+    let requests = transport.requests.clone();
+    let egress = PolicyNetworkHttpEgress::new_with_resolver(transport, PanickingResolver);
+
+    let error = egress
+        .execute(sample_request("https://api.example.test/v1"))
+        .await
+        .expect_err("resolver panic should map to a transport error");
+
+    assert!(matches!(error, NetworkHttpError::Transport { .. }));
+    assert!(error.to_string().contains("network resolver worker failed"));
+    assert!(requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn http_egress_rejects_caller_provided_host_header_before_transport() {
     let transport = RecordingTransport::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![],
@@ -180,6 +205,7 @@ fn http_egress_rejects_caller_provided_host_header_before_transport() {
             response_body_limit: Some(1024),
             timeout_ms: None,
         })
+        .await
         .expect_err("caller-provided Host should not be forwarded after URL policy validation");
 
     assert!(matches!(error, NetworkHttpError::PolicyDenied { .. }));
@@ -188,8 +214,8 @@ fn http_egress_rejects_caller_provided_host_header_before_transport() {
     assert!(requests.lock().unwrap().is_empty());
 }
 
-#[test]
-fn http_egress_rejects_userinfo_url_before_transport() {
+#[tokio::test]
+async fn http_egress_rejects_userinfo_url_before_transport() {
     let transport = RecordingTransport::ok(NetworkHttpResponse {
         status: 200,
         headers: vec![],
@@ -213,6 +239,7 @@ fn http_egress_rejects_userinfo_url_before_transport() {
             response_body_limit: Some(1024),
             timeout_ms: None,
         })
+        .await
         .expect_err("userinfo credentials in URLs must fail before policy/DNS/transport");
 
     assert!(matches!(error, NetworkHttpError::InvalidUrl { .. }));
@@ -220,8 +247,8 @@ fn http_egress_rejects_userinfo_url_before_transport() {
     assert!(requests.lock().unwrap().is_empty());
 }
 
-#[test]
-fn reqwest_transport_does_not_follow_redirects() {
+#[tokio::test]
+async fn reqwest_transport_does_not_follow_redirects() {
     let (url, server) = single_response_server(
         "HTTP/1.1 302 Found\r\nLocation: http://example.invalid/\r\nContent-Length: 0\r\n\r\n",
     );
@@ -238,6 +265,7 @@ fn reqwest_transport_does_not_follow_redirects() {
             response_body_limit: Some(1024),
             timeout_ms: None,
         })
+        .await
         .expect("redirect responses should be returned, not followed");
     server.join().unwrap();
 
@@ -246,8 +274,8 @@ fn reqwest_transport_does_not_follow_redirects() {
     assert_eq!(response.usage.response_bytes, 0);
 }
 
-#[test]
-fn reqwest_transport_uses_all_resolved_addresses_for_connection_fallback() {
+#[tokio::test]
+async fn reqwest_transport_uses_all_resolved_addresses_for_connection_fallback() {
     let (url, server) = single_response_server_for_host(
         "fallback.example.test",
         "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok",
@@ -267,6 +295,7 @@ fn reqwest_transport_uses_all_resolved_addresses_for_connection_fallback() {
             response_body_limit: Some(1024),
             timeout_ms: None,
         })
+        .await
         .expect("transport should allow connector fallback across resolved addresses");
     server.join().unwrap();
 
@@ -274,8 +303,8 @@ fn reqwest_transport_uses_all_resolved_addresses_for_connection_fallback() {
     assert_eq!(response.body, b"ok");
 }
 
-#[test]
-fn reqwest_transport_enforces_streaming_response_limit_separately_from_request_bytes() {
+#[tokio::test]
+async fn reqwest_transport_enforces_streaming_response_limit_separately_from_request_bytes() {
     let (url, server) =
         single_response_server("HTTP/1.1 200 OK\r\nContent-Length: 6\r\n\r\nabcdef");
     let egress = PolicyNetworkHttpEgress::new(ReqwestNetworkTransport::new(Duration::from_secs(2)));
@@ -291,6 +320,7 @@ fn reqwest_transport_enforces_streaming_response_limit_separately_from_request_b
             response_body_limit: Some(5),
             timeout_ms: None,
         })
+        .await
         .expect_err("response body limit should stop reads after the limit");
     server.join().unwrap();
 
@@ -299,8 +329,8 @@ fn reqwest_transport_enforces_streaming_response_limit_separately_from_request_b
     assert_eq!(error.response_bytes(), 6);
 }
 
-#[test]
-fn reqwest_transport_clamps_oversized_explicit_response_limit_to_safe_default() {
+#[tokio::test]
+async fn reqwest_transport_clamps_oversized_explicit_response_limit_to_safe_default() {
     let body_len = DEFAULT_RESPONSE_BODY_LIMIT + 1;
     let (url, server) = sized_response_server(body_len);
     let transport = ReqwestNetworkTransport::new(Duration::from_secs(2));
@@ -315,6 +345,7 @@ fn reqwest_transport_clamps_oversized_explicit_response_limit_to_safe_default() 
             response_body_limit: Some(DEFAULT_RESPONSE_BODY_LIMIT + 1024),
             timeout_ms: None,
         })
+        .await
         .expect_err("oversized explicit response limits should still be clamped");
     server.join().unwrap();
 
@@ -328,8 +359,8 @@ fn reqwest_transport_clamps_oversized_explicit_response_limit_to_safe_default() 
     assert_eq!(error.response_bytes(), DEFAULT_RESPONSE_BODY_LIMIT + 1);
 }
 
-#[test]
-fn reqwest_transport_clamps_unspecified_response_limit_to_safe_default() {
+#[tokio::test]
+async fn reqwest_transport_clamps_unspecified_response_limit_to_safe_default() {
     let body_len = DEFAULT_RESPONSE_BODY_LIMIT + 1;
     let (url, server) = sized_response_server(body_len);
     let transport = ReqwestNetworkTransport::new(Duration::from_secs(2));
@@ -344,6 +375,7 @@ fn reqwest_transport_clamps_unspecified_response_limit_to_safe_default() {
             response_body_limit: None,
             timeout_ms: None,
         })
+        .await
         .expect_err("unspecified response limits should still be bounded");
     server.join().unwrap();
 
@@ -355,6 +387,30 @@ fn reqwest_transport_clamps_unspecified_response_limit_to_safe_default() {
         }
     ));
     assert_eq!(error.response_bytes(), DEFAULT_RESPONSE_BODY_LIMIT + 1);
+}
+
+#[tokio::test]
+async fn http_egress_concurrent_requests_do_not_serialize_on_transport() {
+    let transport = DelayedTransport::new(Duration::from_millis(100));
+    let egress = PolicyNetworkHttpEgress::new_with_resolver(
+        transport,
+        StaticResolver::new(vec![IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))]),
+    );
+
+    let started = Instant::now();
+    let (left, middle, right) = tokio::join!(
+        egress.execute(sample_request("https://api.example.test/v1/left")),
+        egress.execute(sample_request("https://api.example.test/v1/middle")),
+        egress.execute(sample_request("https://api.example.test/v1/right")),
+    );
+
+    left.expect("left request should complete");
+    middle.expect("middle request should complete");
+    right.expect("right request should complete");
+    assert!(
+        started.elapsed() < Duration::from_millis(250),
+        "concurrent async egress calls should overlap instead of serializing"
+    );
 }
 
 #[derive(Clone)]
@@ -372,13 +428,45 @@ impl RecordingTransport {
     }
 }
 
+#[async_trait::async_trait]
 impl NetworkHttpTransport for RecordingTransport {
-    fn execute(
+    async fn execute(
         &self,
         request: NetworkTransportRequest,
     ) -> Result<NetworkHttpResponse, NetworkHttpError> {
         self.requests.lock().unwrap().push(request);
         self.response.clone()
+    }
+}
+
+#[derive(Clone)]
+struct DelayedTransport {
+    delay: Duration,
+}
+
+impl DelayedTransport {
+    fn new(delay: Duration) -> Self {
+        Self { delay }
+    }
+}
+
+#[async_trait::async_trait]
+impl NetworkHttpTransport for DelayedTransport {
+    async fn execute(
+        &self,
+        _request: NetworkTransportRequest,
+    ) -> Result<NetworkHttpResponse, NetworkHttpError> {
+        tokio::time::sleep(self.delay).await;
+        Ok(NetworkHttpResponse {
+            status: 200,
+            headers: vec![],
+            body: b"ok".to_vec(),
+            usage: NetworkUsage {
+                request_bytes: 0,
+                response_bytes: 2,
+                resolved_ip: None,
+            },
+        })
     }
 }
 
@@ -396,6 +484,28 @@ impl StaticResolver {
 impl NetworkResolver for StaticResolver {
     fn resolve_ips(&self, _host: &str, _port: u16) -> Result<Vec<IpAddr>, NetworkHttpError> {
         Ok(self.ips.clone())
+    }
+}
+
+#[derive(Clone)]
+struct PanickingResolver;
+
+impl NetworkResolver for PanickingResolver {
+    fn resolve_ips(&self, _host: &str, _port: u16) -> Result<Vec<IpAddr>, NetworkHttpError> {
+        panic!("resolver panic")
+    }
+}
+
+fn sample_request(url: &str) -> NetworkHttpRequest {
+    NetworkHttpRequest {
+        scope: sample_scope(),
+        method: NetworkMethod::Get,
+        url: url.to_string(),
+        headers: vec![],
+        body: vec![],
+        policy: policy("api.example.test", Some(443), true, None),
+        response_body_limit: Some(1024),
+        timeout_ms: None,
     }
 }
 

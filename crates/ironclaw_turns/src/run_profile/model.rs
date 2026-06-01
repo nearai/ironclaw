@@ -11,6 +11,7 @@ use super::host::{
     LoopRunContext, LoopSafeSummary, ParentLoopOutput, sanitize_model_visible_text,
 };
 use super::milestones::{LoopHostMilestoneEmitter, LoopHostMilestoneSink};
+use super::model_work::{ModelWorkOutcome, ModelWorkRequest};
 
 /// Outcome passed to [`LoopModelBudgetAccountant::post_model_call`] so the
 /// accountant can record usage on success or note the failure kind.
@@ -30,13 +31,31 @@ pub enum ModelCallOutcome<'a> {
 /// provider call entirely.
 #[async_trait]
 pub trait LoopModelBudgetAccountant: Send + Sync {
+    /// Called **before** any model-backed work dispatches to a provider.
+    async fn pre_model_work(
+        &self,
+        context: &LoopRunContext,
+        request: &ModelWorkRequest,
+    ) -> Result<(), LoopModelGatewayError>;
+
+    /// Called after model-backed work succeeds or fails.
+    async fn post_model_work(
+        &self,
+        context: &LoopRunContext,
+        request: &ModelWorkRequest,
+        outcome: ModelWorkOutcome,
+    ) -> Result<(), LoopModelGatewayError>;
+
     /// Called **before** dispatching the model request. Return `Err` with
     /// `AgentLoopHostErrorKind::BudgetExceeded` to reject the call.
     async fn pre_model_call(
         &self,
         context: &LoopRunContext,
         request: &LoopModelRequest,
-    ) -> Result<(), LoopModelGatewayError>;
+    ) -> Result<(), LoopModelGatewayError> {
+        self.pre_model_work(context, &ModelWorkRequest::for_assistant(context, request))
+            .await
+    }
 
     /// Called **after** the model call completes (or fails). Implementations
     /// should record success usage and reconcile or release any pre-call
@@ -48,7 +67,14 @@ pub trait LoopModelBudgetAccountant: Send + Sync {
         context: &LoopRunContext,
         request: &LoopModelRequest,
         outcome: ModelCallOutcome<'_>,
-    ) -> Result<(), LoopModelGatewayError>;
+    ) -> Result<(), LoopModelGatewayError> {
+        self.post_model_work(
+            context,
+            &ModelWorkRequest::for_assistant(context, request),
+            ModelWorkOutcome::from_model_call(outcome),
+        )
+        .await
+    }
 
     /// Best-effort synchronous release of any in-flight reservation for this
     /// run. Invoked from cancellation paths (parent task drop, timeout)
@@ -124,13 +150,24 @@ pub trait LoopModelGateway: Send + Sync {
 /// provider or credential is touched.
 #[async_trait]
 pub trait LoopModelPolicyGuard: Send + Sync {
+    /// Return `Ok(())` to allow model-backed work, or `Err` with
+    /// `AgentLoopHostErrorKind::PolicyDenied` and a sanitized summary.
+    async fn check_model_work_policy(
+        &self,
+        context: &LoopRunContext,
+        request: &ModelWorkRequest,
+    ) -> Result<(), LoopModelGatewayError>;
+
     /// Return `Ok(())` to allow the call, or `Err` with
     /// `AgentLoopHostErrorKind::PolicyDenied` and a sanitized summary.
     async fn check_model_policy(
         &self,
         context: &LoopRunContext,
         request: &LoopModelRequest,
-    ) -> Result<(), LoopModelGatewayError>;
+    ) -> Result<(), LoopModelGatewayError> {
+        self.check_model_work_policy(context, &ModelWorkRequest::for_assistant(context, request))
+            .await
+    }
 }
 
 /// A no-op policy guard that allows every model call.
@@ -138,10 +175,10 @@ pub struct NoOpPolicyGuard;
 
 #[async_trait]
 impl LoopModelPolicyGuard for NoOpPolicyGuard {
-    async fn check_model_policy(
+    async fn check_model_work_policy(
         &self,
         _context: &LoopRunContext,
-        _request: &LoopModelRequest,
+        _request: &ModelWorkRequest,
     ) -> Result<(), LoopModelGatewayError> {
         Ok(())
     }
@@ -154,19 +191,19 @@ pub struct NoOpBudgetAccountant;
 
 #[async_trait]
 impl LoopModelBudgetAccountant for NoOpBudgetAccountant {
-    async fn pre_model_call(
+    async fn pre_model_work(
         &self,
         _context: &LoopRunContext,
-        _request: &LoopModelRequest,
+        _request: &ModelWorkRequest,
     ) -> Result<(), LoopModelGatewayError> {
         Ok(())
     }
 
-    async fn post_model_call(
+    async fn post_model_work(
         &self,
         _context: &LoopRunContext,
-        _request: &LoopModelRequest,
-        _outcome: ModelCallOutcome<'_>,
+        _request: &ModelWorkRequest,
+        _outcome: ModelWorkOutcome,
     ) -> Result<(), LoopModelGatewayError> {
         Ok(())
     }
@@ -247,10 +284,12 @@ where
         &self,
         request: LoopModelRequest,
     ) -> Result<LoopModelResponse, AgentLoopHostError> {
+        let work_request = ModelWorkRequest::for_assistant(&self.context, &request);
+
         // Policy check — rejects before any provider or credential is touched.
         if let Err(policy_error) = self
             .policy_guard
-            .check_model_policy(&self.context, &request)
+            .check_model_work_policy(&self.context, &work_request)
             .await
         {
             return Err(policy_error.into_host_error());
@@ -259,7 +298,7 @@ where
         // Pre-call budget check — rejects before touching the provider.
         if let Err(budget_error) = self
             .accountant
-            .pre_model_call(&self.context, &request)
+            .pre_model_work(&self.context, &work_request)
             .await
         {
             return Err(budget_error.into_host_error());

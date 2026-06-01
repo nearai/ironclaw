@@ -11,10 +11,10 @@
 
 mod cleanup;
 mod credential;
+pub mod domain;
 mod error;
 mod fakes;
 mod flow;
-mod google_provider;
 mod ids;
 mod interaction;
 mod oauth;
@@ -28,23 +28,22 @@ pub use cleanup::{
 pub use credential::{
     CredentialAccount, CredentialAccountChoiceRequest, CredentialAccountListPage,
     CredentialAccountListRequest, CredentialAccountLookupRequest, CredentialAccountMutation,
-    CredentialAccountProjection, CredentialAccountSelectionRequest, CredentialAccountService,
-    CredentialAccountStatus, CredentialAccountUpdate, CredentialOwnership, CredentialRecoveryKind,
+    CredentialAccountOwnerScope, CredentialAccountProjection, CredentialAccountRecordSource,
+    CredentialAccountSelectionRequest, CredentialAccountService, CredentialAccountStatus,
+    CredentialAccountUpdate, CredentialOwnership, CredentialRecoveryKind,
     CredentialRecoveryProjection, CredentialRecoveryReason, CredentialRecoveryRequest,
     CredentialRecoveryState, CredentialRefreshReport, CredentialRefreshRequest,
-    CredentialSetupService, NewCredentialAccount,
+    CredentialSetupService, NewCredentialAccount, ProviderBackedCredentialAccountService,
 };
 pub use error::{AuthErrorCode, AuthProductError};
 pub use fakes::InMemoryAuthProductServices;
 pub use flow::{
     AuthChallenge, AuthContinuationEvent, AuthContinuationRef, AuthFlowKind, AuthFlowManager,
-    AuthFlowRecord, AuthFlowStatus, CredentialAccountUpdateBinding, CredentialSelectionInput,
+    AuthFlowOwnerScope, AuthFlowRecord, AuthFlowRecordSource, AuthFlowStatus,
+    CredentialAccountUpdateBinding, CredentialSelectionInput, ManualTokenCompletionInput,
     NewAuthFlow, OAuthCallbackClaimRequest, OAuthCallbackFailureInput, OAuthCallbackInput,
-    ProviderCallbackOutcome,
-};
-pub use google_provider::{
-    GoogleProviderEgressPolicyAuthorizer, GoogleProviderStoredTokens, GoogleProviderTokenSet,
-    GoogleProviderTokenSink, GoogleProviderTokenStorageRequest,
+    ProviderCallbackOutcome, TurnGateAuthFlowQuery, credential_status_for_completed_flow,
+    flow_matches_turn_gate_query,
 };
 pub use ids::{
     AuthFlowId, AuthGateRef, AuthInteractionId, AuthProviderId, AuthSessionId,
@@ -103,11 +102,11 @@ fn validate_public_text(
     Ok(value)
 }
 
-fn scope_matches(left: &AuthProductScope, right: &AuthProductScope) -> bool {
+pub fn scope_matches(left: &AuthProductScope, right: &AuthProductScope) -> bool {
     left == right
 }
 
-fn is_terminal_status(status: AuthFlowStatus) -> bool {
+pub fn is_terminal_status(status: AuthFlowStatus) -> bool {
     matches!(
         status,
         AuthFlowStatus::Completed

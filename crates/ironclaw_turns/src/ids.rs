@@ -40,6 +40,10 @@ impl TurnRunId {
         Self(Uuid::new_v4())
     }
 
+    pub fn parse(value: &str) -> Result<Self, uuid::Error> {
+        Uuid::parse_str(value).map(Self)
+    }
+
     pub fn from_uuid(value: Uuid) -> Self {
         Self(value)
     }
@@ -58,6 +62,14 @@ impl Default for TurnRunId {
 impl std::fmt::Display for TurnRunId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0)
+    }
+}
+
+impl std::str::FromStr for TurnRunId {
+    type Err = uuid::Error;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::parse(value)
     }
 }
 
@@ -251,7 +263,7 @@ impl PartialEq<GateRef> for LoopGateRef {
 
 #[cfg(test)]
 mod tests {
-    use super::{GateRef, LoopGateRef};
+    use super::{GateRef, LoopGateRef, TurnRunId};
 
     #[test]
     fn gate_ref_eq_loop_gate_ref_matches_exact_gate_string() {
@@ -264,6 +276,14 @@ mod tests {
         assert_eq!(loop_gate_ref, gate_ref);
         assert_ne!(gate_ref, other_loop_gate_ref);
         assert_ne!(loop_gate_ref, other_gate_ref);
+    }
+
+    #[test]
+    fn turn_run_id_parse_round_trips_display_string() {
+        let run_id = TurnRunId::new();
+        let parsed = TurnRunId::parse(&run_id.to_string()).expect("parse run id");
+        assert_eq!(parsed, run_id);
+        assert!("not-a-uuid".parse::<TurnRunId>().is_err());
     }
 }
 

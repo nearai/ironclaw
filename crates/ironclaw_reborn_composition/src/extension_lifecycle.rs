@@ -66,6 +66,7 @@ impl ActiveExtensionCapability {
 
 pub(crate) async fn restore_extension_lifecycle_state(
     catalog: &AvailableExtensionCatalog,
+    filesystem: &Arc<dyn RootFilesystem>,
     installation_store: &Arc<dyn ExtensionInstallationStore>,
     lifecycle_service: &Arc<Mutex<ExtensionLifecycleService>>,
     active_extensions: &ActiveExtensionPublisher,
@@ -81,6 +82,7 @@ pub(crate) async fn restore_extension_lifecycle_state(
         )?;
         let available = catalog.resolve(&package_ref)?;
         validate_restored_manifest_hash(&installation, available)?;
+        materialize_available_extension(filesystem.as_ref(), available).await?;
         {
             let mut lifecycle = lifecycle_service.lock().await;
             lifecycle
@@ -1094,6 +1096,7 @@ mod tests {
 
         restore_extension_lifecycle_state(
             &restored_catalog,
+            &port.filesystem,
             &installation_store,
             &restored_lifecycle,
             &restored_active_extensions,
@@ -1116,6 +1119,53 @@ mod tests {
                 .snapshot()
                 .get_extension(&ExtensionId::new("fixture").unwrap())
                 .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn restore_refreshes_materialized_extension_assets_from_catalog() {
+        let (_dir, storage_root, port, _active_registry, installation_store, _trust_policy) =
+            extension_management_port_fixture_with_catalog_service_and_trust(
+                AvailableExtensionCatalog::from_packages(vec![fixture_extension_package()]),
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+            );
+        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
+            .expect("valid ref");
+        port.install(package_ref.clone())
+            .await
+            .expect("install fixture extension");
+        port.activate(package_ref)
+            .await
+            .expect("activate fixture extension");
+
+        let wasm_path = storage_root.join("system/extensions/fixture/wasm/fixture.wasm");
+        std::fs::write(&wasm_path, b"stale-installed-module").expect("corrupt installed module");
+
+        let restored_lifecycle = Arc::new(Mutex::new(ExtensionLifecycleService::new(
+            ExtensionRegistry::new(),
+        )));
+        let restored_active_registry =
+            Arc::new(SharedExtensionRegistry::new(ExtensionRegistry::new()));
+        let restored_trust_policy = test_extension_trust_policy();
+        let restored_active_extensions = test_active_extension_publisher(
+            Arc::clone(&restored_active_registry),
+            Arc::clone(&restored_trust_policy),
+        );
+        let installation_store: Arc<dyn ExtensionInstallationStore> = installation_store;
+
+        restore_extension_lifecycle_state(
+            &AvailableExtensionCatalog::from_packages(vec![fixture_extension_package()]),
+            &port.filesystem,
+            &installation_store,
+            &restored_lifecycle,
+            &restored_active_extensions,
+        )
+        .await
+        .expect("restore extension lifecycle state");
+
+        assert_eq!(
+            std::fs::read(wasm_path).expect("refreshed module"),
+            b"\0asm\x01\0\0\0"
         );
     }
 
@@ -1154,6 +1204,7 @@ mod tests {
 
         let error = restore_extension_lifecycle_state(
             &changed_catalog,
+            &port.filesystem,
             &installation_store,
             &restored_lifecycle,
             &restored_active_extensions,
@@ -1215,9 +1266,11 @@ mod tests {
             Arc::clone(&restored_trust_policy),
         );
         let installation_store: Arc<dyn ExtensionInstallationStore> = installation_store;
+        let filesystem: Arc<dyn RootFilesystem> = Arc::new(LocalFilesystem::new());
 
         let error = restore_extension_lifecycle_state(
             &catalog,
+            &filesystem,
             &installation_store,
             &restored_lifecycle,
             &restored_active_extensions,

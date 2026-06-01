@@ -32,12 +32,15 @@
 //! that directory and matches `source_binding_id`+`external_event_id` against
 //! the persisted record body.
 
+mod message_sequence_index;
+
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex, OnceLock, Weak},
 };
 
 use async_trait::async_trait;
+use futures::future::join_all;
 use ironclaw_filesystem::{
     CasExpectation, ContentType, Entry, FileType, FilesystemError, FilesystemOperation,
     RecordVersion, RootFilesystem, ScopedFilesystem,
@@ -57,15 +60,30 @@ use crate::{
     LoadContextMessagesRequest, LoadContextWindowRequest, MessageContent, MessageKind,
     MessageStatus, ProviderToolCallReferenceEnvelope, RedactMessageRequest,
     ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadRecord,
-    SessionThreadService, SummaryArtifact, ThreadHistory, ThreadHistoryRequest, ThreadMessageId,
+    SessionThreadService, SummaryArtifact, SummaryModelContextPolicy, ThreadHistory,
+    ThreadHistoryRequest, ThreadMessageId, ThreadMessageRange, ThreadMessageRangeRequest,
     ThreadMessageRecord, ThreadScope, ToolResultReferenceEnvelope, UpdateAssistantDraftRequest,
     UpdateToolResultReferenceRequest,
 };
+use message_sequence_index::MessageSequenceIndexStore;
 
 /// Bound on the CAS retry loop. Mirrors the run-state / authorization
 /// store budgets — enough to absorb routine cross-process contention,
 /// small enough to surface pathological loops loudly.
 const FILESYSTEM_CAS_RETRIES: usize = 8;
+
+/// Conservative fan-out for indexed range materialization.
+const INDEXED_RANGE_MESSAGE_READ_CONCURRENCY: usize = 8;
+
+#[derive(Debug, Clone, Copy)]
+enum MessageRangeFallbackPolicy {
+    FullScan,
+}
+
+struct MaterializedMessageRange {
+    thread: StoredThreadRecord,
+    messages: Vec<ThreadMessageRecord>,
+}
 
 /// On-disk thread state record. The transcript boundary's
 /// [`SessionThreadRecord`] is the user-visible shape; this struct adds
@@ -201,6 +219,47 @@ where
         Ok(Some((record, versioned.version)))
     }
 
+    async fn write_message_sequence_index(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        message: &ThreadMessageRecord,
+    ) -> Result<(), SessionThreadError> {
+        MessageSequenceIndexStore::new(self.filesystem.as_ref())
+            .write_new(scope, thread_id, message)
+            .await
+    }
+
+    async fn write_new_message(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        message: &ThreadMessageRecord,
+        description: &'static str,
+    ) -> Result<(), SessionThreadError> {
+        let path = message_record_path(scope, thread_id, message.message_id)?;
+        let entry = Self::message_entry(message)?;
+        match put_with_cas(
+            self.filesystem.as_ref(),
+            &scope.to_resource_scope(),
+            &path,
+            entry,
+            CasExpectation::Absent,
+        )
+        .await
+        {
+            Ok(()) => {
+                self.write_message_sequence_index(scope, thread_id, message)
+                    .await
+            }
+            Err(PutError::VersionMismatch) => Err(SessionThreadError::Backend(format!(
+                "filesystem CAS Absent rejected new {description} at {}",
+                path.as_str()
+            ))),
+            Err(PutError::Other(error)) => Err(error),
+        }
+    }
+
     async fn list_thread_messages(
         &self,
         scope: &ThreadScope,
@@ -240,6 +299,73 @@ where
         }
         messages.sort_by_key(|message| message.sequence);
         Ok(messages)
+    }
+
+    async fn list_thread_messages_range_indexed(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        after_sequence: u64,
+        through_sequence: u64,
+    ) -> Result<Option<Vec<ThreadMessageRecord>>, SessionThreadError> {
+        let Some(indexes) = MessageSequenceIndexStore::new(self.filesystem.as_ref())
+            .read_range(scope, thread_id, after_sequence, through_sequence)
+            .await?
+        else {
+            return Ok(None);
+        };
+        let mut messages = Vec::with_capacity(indexes.len());
+        for chunk in indexes.chunks(INDEXED_RANGE_MESSAGE_READ_CONCURRENCY) {
+            let reads = chunk
+                .iter()
+                .map(|index| self.read_message_versioned(scope, thread_id, index.message_id));
+            let results = join_all(reads).await;
+            for (index, result) in chunk.iter().zip(results) {
+                let Some((message, _)) = result? else {
+                    return Err(SessionThreadError::UnknownMessage {
+                        message_id: index.message_id,
+                    });
+                };
+                messages.push(message);
+            }
+        }
+        messages.sort_by_key(|message| message.sequence);
+        Ok(Some(messages))
+    }
+
+    async fn materialize_message_range(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        after_sequence: u64,
+        through_sequence: u64,
+        fallback_policy: MessageRangeFallbackPolicy,
+    ) -> Result<MaterializedMessageRange, SessionThreadError> {
+        let thread = self
+            .read_thread_versioned(scope, thread_id)
+            .await?
+            .ok_or_else(|| SessionThreadError::UnknownThread {
+                thread_id: thread_id.clone(),
+            })?
+            .0;
+        let through_sequence = through_sequence.min(thread.next_sequence.saturating_sub(1));
+        let messages = match self
+            .list_thread_messages_range_indexed(scope, thread_id, after_sequence, through_sequence)
+            .await?
+        {
+            Some(messages) => messages,
+            None => match fallback_policy {
+                MessageRangeFallbackPolicy::FullScan => self
+                    .list_thread_messages(scope, thread_id)
+                    .await?
+                    .into_iter()
+                    .filter(|message| {
+                        message.sequence > after_sequence && message.sequence <= through_sequence
+                    })
+                    .collect(),
+            },
+        };
+        Ok(MaterializedMessageRange { thread, messages })
     }
 
     async fn find_capability_display_preview_message(
@@ -460,6 +586,7 @@ where
             created_by_actor_id: request.created_by_actor_id,
             title: request.title,
             metadata_json: request.metadata_json,
+            goal: None,
         };
         let stored = StoredThreadRecord {
             record: record.clone(),
@@ -569,26 +696,8 @@ where
             content: Some(request.content.clone().into_text()),
             redaction_ref: None,
         };
-        let message_path = message_record_path(&request.scope, &request.thread_id, message_id)?;
-        let entry = Self::message_entry(&message)?;
-        match put_with_cas(
-            self.filesystem.as_ref(),
-            &request.scope.to_resource_scope(),
-            &message_path,
-            entry,
-            CasExpectation::Absent,
-        )
-        .await
-        {
-            Ok(()) => {}
-            Err(PutError::VersionMismatch) => {
-                return Err(SessionThreadError::Backend(format!(
-                    "filesystem CAS Absent rejected new message at {}",
-                    message_path.as_str()
-                )));
-            }
-            Err(PutError::Other(error)) => return Err(error),
-        }
+        self.write_new_message(&request.scope, &request.thread_id, &message, "message")
+            .await?;
 
         if let Some(idempotency_key) = InboundIdempotencyKey::from_request(&request) {
             let idem_record = InboundIdempotencyRecord {
@@ -748,24 +857,14 @@ where
             content: Some(request.content.into_text()),
             redaction_ref: None,
         };
-        let path = message_record_path(&request.scope, &request.thread_id, message.message_id)?;
-        let entry = Self::message_entry(&message)?;
-        match put_with_cas(
-            self.filesystem.as_ref(),
-            &request.scope.to_resource_scope(),
-            &path,
-            entry,
-            CasExpectation::Absent,
+        self.write_new_message(
+            &request.scope,
+            &request.thread_id,
+            &message,
+            "assistant draft",
         )
-        .await
-        {
-            Ok(()) => Ok(message),
-            Err(PutError::VersionMismatch) => Err(SessionThreadError::Backend(format!(
-                "filesystem CAS Absent rejected new assistant draft at {}",
-                path.as_str()
-            ))),
-            Err(PutError::Other(error)) => Err(error),
-        }
+        .await?;
+        Ok(message)
     }
 
     async fn append_tool_result_reference(
@@ -845,24 +944,14 @@ where
             content: Some(content),
             redaction_ref: None,
         };
-        let path = message_record_path(&request.scope, &request.thread_id, message.message_id)?;
-        let entry = Self::message_entry(&message)?;
-        match put_with_cas(
-            self.filesystem.as_ref(),
-            &request.scope.to_resource_scope(),
-            &path,
-            entry,
-            CasExpectation::Absent,
+        self.write_new_message(
+            &request.scope,
+            &request.thread_id,
+            &message,
+            "tool result reference",
         )
-        .await
-        {
-            Ok(()) => Ok(message),
-            Err(PutError::VersionMismatch) => Err(SessionThreadError::Backend(format!(
-                "filesystem CAS Absent rejected new tool result reference at {}",
-                path.as_str()
-            ))),
-            Err(PutError::Other(error)) => Err(error),
-        }
+        .await?;
+        Ok(message)
     }
 
     async fn append_capability_display_preview(
@@ -922,7 +1011,11 @@ where
         )
         .await
         {
-            Ok(()) => Ok(message),
+            Ok(()) => {
+                self.write_message_sequence_index(&request.scope, &request.thread_id, &message)
+                    .await?;
+                Ok(message)
+            }
             Err(PutError::VersionMismatch) => self
                 .read_message_versioned(&request.scope, &request.thread_id, message_id)
                 .await?
@@ -1121,6 +1214,25 @@ where
         })
     }
 
+    async fn list_thread_messages_range(
+        &self,
+        request: ThreadMessageRangeRequest,
+    ) -> Result<ThreadMessageRange, SessionThreadError> {
+        let range = self
+            .materialize_message_range(
+                &request.scope,
+                &request.thread_id,
+                request.after_sequence,
+                request.through_sequence,
+                MessageRangeFallbackPolicy::FullScan,
+            )
+            .await?;
+        Ok(ThreadMessageRange {
+            thread: range.thread.record,
+            messages: range.messages.iter().map(history_message).collect(),
+        })
+    }
+
     async fn latest_thread_message(
         &self,
         request: LatestThreadMessageRequest,
@@ -1166,21 +1278,24 @@ where
                 end_sequence: request.end_sequence,
             });
         }
-        self.read_thread_versioned(&request.scope, &request.thread_id)
-            .await?
-            .ok_or_else(|| SessionThreadError::UnknownThread {
-                thread_id: request.thread_id.clone(),
-            })?;
-        let messages = self
-            .list_thread_messages(&request.scope, &request.thread_id)
+        let range_messages = self
+            .materialize_message_range(
+                &request.scope,
+                &request.thread_id,
+                request.start_sequence.saturating_sub(1),
+                request.end_sequence,
+                MessageRangeFallbackPolicy::FullScan,
+            )
             .await?;
-        let has_start = messages
+        if !range_messages
+            .messages
             .iter()
-            .any(|message| message.sequence == request.start_sequence);
-        let has_end = messages
-            .iter()
-            .any(|message| message.sequence == request.end_sequence);
-        if !has_start || !has_end {
+            .any(|message| message.sequence == request.start_sequence)
+            || !range_messages
+                .messages
+                .iter()
+                .any(|message| message.sequence == request.end_sequence)
+        {
             return Err(SessionThreadError::InvalidSummaryRange {
                 start_sequence: request.start_sequence,
                 end_sequence: request.end_sequence,
@@ -1189,9 +1304,10 @@ where
         let existing_summaries = self
             .list_thread_summaries(&request.scope, &request.thread_id)
             .await?;
-        if request.model_context_policy.as_deref() == Some("replace_range_when_selected")
+        if request.model_context_policy == Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected)
             && existing_summaries.iter().any(|summary| {
-                summary.model_context_policy.as_deref() == Some("replace_range_when_selected")
+                summary.model_context_policy
+                    == Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected)
                     && ranges_overlap(
                         request.start_sequence,
                         request.end_sequence,
@@ -1624,7 +1740,8 @@ fn context_messages_with_summary_replacements(
     let replacement_summaries = summaries
         .iter()
         .filter(|summary| {
-            summary.model_context_policy.as_deref() == Some("replace_range_when_selected")
+            summary.model_context_policy
+                == Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected)
                 && !summary_covers_hidden_content(messages, summary)
         })
         .collect::<Vec<_>>();
@@ -1856,8 +1973,28 @@ impl From<FilesystemError> for SessionThreadError {
 mod tests {
     use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
 
+    use super::message_sequence_index::{sequence_from_index_filename, sequence_index_filename};
     use super::{InboundIdempotencyKey, idempotency_record_key};
     use crate::ThreadScope;
+
+    #[test]
+    fn sequence_index_filenames_sort_by_sequence() {
+        let names = [10, 2, 1]
+            .into_iter()
+            .map(sequence_index_filename)
+            .collect::<Vec<_>>();
+        let mut sorted = names.clone();
+        sorted.sort();
+
+        assert_eq!(
+            sorted
+                .iter()
+                .filter_map(|name| sequence_from_index_filename(name))
+                .collect::<Vec<_>>(),
+            vec![1, 2, 10]
+        );
+        assert_eq!(sequence_from_index_filename("not-a-sequence.json"), None);
+    }
 
     #[test]
     fn idempotency_record_key_is_fixed_size_for_long_external_ids() {

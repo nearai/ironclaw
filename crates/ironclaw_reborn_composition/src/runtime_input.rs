@@ -132,6 +132,7 @@ pub struct RebornRuntimeInput {
     pub runner: TurnRunnerSettings,
     pub poll: PollSettings,
     pub identity: RebornRuntimeIdentity,
+    pub regex_skill_activation_enabled: bool,
     pub skill_context_source: Option<Arc<dyn HostSkillContextSource>>,
     /// Pre-resolved budget defaults to seed the model-budget accountant.
     /// The caller owns the config-layer precedence (compiled -> section
@@ -173,6 +174,7 @@ impl RebornRuntimeInput {
             runner: TurnRunnerSettings::default(),
             poll: PollSettings::default(),
             identity: RebornRuntimeIdentity::default(),
+            regex_skill_activation_enabled: true,
             skill_context_source: None,
             budget_defaults: None,
             budget_event_observer: None,
@@ -225,6 +227,22 @@ impl RebornRuntimeInput {
 
     pub fn with_identity(mut self, identity: RebornRuntimeIdentity) -> Self {
         self.identity = identity;
+        self
+    }
+
+    pub fn with_regex_skill_activation_enabled(mut self, enabled: bool) -> Self {
+        self.regex_skill_activation_enabled = enabled;
+        self
+    }
+
+    /// Override the runtime owner id after the input (and its host-access
+    /// disclosure gate) has been built. The WebChat v2 serve path uses this to
+    /// align the runtime owner with the authenticated WebUI user. No-op when
+    /// the services input is absent.
+    pub fn with_owner_id(mut self, owner_id: impl Into<String>) -> Self {
+        self.services = self
+            .services
+            .map(|services| services.with_owner_id(owner_id));
         self
     }
 

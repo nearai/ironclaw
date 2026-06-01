@@ -137,7 +137,8 @@ impl SandboxBrokerPolicy {
                                     binding.placeholder_value
                                 )
                     }
-                    RuntimeCredentialTarget::QueryParam { .. } => false,
+                    RuntimeCredentialTarget::QueryParam { .. }
+                    | RuntimeCredentialTarget::PathPlaceholder { .. } => false,
                 }
         })
     }

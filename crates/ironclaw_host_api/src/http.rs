@@ -5,6 +5,7 @@
 //! policy/transport with scoped secret leases; runtime crates must not perform
 //! their own outbound HTTP, DNS, private-IP checks, or credential injection.
 
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -102,6 +103,9 @@ pub enum RuntimeCredentialTarget {
     QueryParam {
         name: String,
     },
+    PathPlaceholder {
+        placeholder: String,
+    },
 }
 
 pub fn valid_http_field_name(name: &str) -> bool {
@@ -148,6 +152,9 @@ impl RuntimeCredentialTarget {
                     "must not be empty or contain NUL/control characters",
                 )?;
             }
+            Self::PathPlaceholder { placeholder } => {
+                validate_runtime_credential_path_placeholder(placeholder)?;
+            }
         }
         Ok(())
     }
@@ -158,6 +165,22 @@ fn validate_runtime_credential_header_name(name: &str) -> Result<(), HostApiErro
         return Err(HostApiError::invalid_runtime_credential_target(
             "header_name",
             "must be an ASCII HTTP field-name token",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_runtime_credential_path_placeholder(placeholder: &str) -> Result<(), HostApiError> {
+    if placeholder.is_empty()
+        || placeholder == "."
+        || placeholder == ".."
+        || !placeholder
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~'))
+    {
+        return Err(HostApiError::invalid_runtime_credential_target(
+            "path_placeholder",
+            "must be a non-empty unreserved path segment other than . or ..",
         ));
     }
     Ok(())
@@ -352,21 +375,23 @@ pub fn is_sensitive_runtime_response_header(name: &str) -> bool {
             .any(|marker| normalized.contains(marker))
 }
 
+#[async_trait]
 pub trait RuntimeHttpEgress: Send + Sync {
-    fn execute(
+    async fn execute(
         &self,
         request: RuntimeHttpEgressRequest,
     ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError>;
 }
 
+#[async_trait]
 impl<T> RuntimeHttpEgress for std::sync::Arc<T>
 where
     T: RuntimeHttpEgress + ?Sized,
 {
-    fn execute(
+    async fn execute(
         &self,
         request: RuntimeHttpEgressRequest,
     ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
-        self.as_ref().execute(request)
+        self.as_ref().execute(request).await
     }
 }

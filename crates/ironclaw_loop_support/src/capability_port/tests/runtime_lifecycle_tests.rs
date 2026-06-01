@@ -9,15 +9,17 @@ use std::{
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    ApprovalRequestId, CapabilityId, ExtensionId, ProcessId, ResourceEstimate, RuntimeKind,
+    ApprovalRequestId, CapabilityDisplayOutputPreview, CapabilityId, ExtensionId, ProcessId,
+    ResourceEstimate, RuntimeCredentialAccountProviderId, RuntimeCredentialAuthRequirement,
+    RuntimeKind,
 };
 use ironclaw_host_runtime::{
     CancelRuntimeWorkOutcome, CancelRuntimeWorkRequest, HostRuntime, HostRuntimeError,
     HostRuntimeHealth, HostRuntimeStatus, RuntimeApprovalGate, RuntimeAuthGate,
-    RuntimeBlockedReason, RuntimeCapabilityFailure, RuntimeCapabilityOutcome,
-    RuntimeCapabilityRequest, RuntimeCapabilityResumeRequest, RuntimeCapabilityUnknown,
-    RuntimeGateId, RuntimeProcessHandle, RuntimeResourceGate, RuntimeStatusRequest,
-    VisibleCapabilitySurface,
+    RuntimeBlockedReason, RuntimeCapabilityCompleted, RuntimeCapabilityFailure,
+    RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeCapabilityResumeRequest,
+    RuntimeCapabilityUnknown, RuntimeGateId, RuntimeProcessHandle, RuntimeResourceGate,
+    RuntimeStatusRequest, VisibleCapabilitySurface,
 };
 use ironclaw_turns::run_profile::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityFailureKind, CapabilityOutcome,
@@ -121,6 +123,57 @@ async fn runtime_capability_emits_completion_after_result_write_retry_succeeds()
             && provider == &provider_id
             && *output_bytes == RECORDING_OUTPUT_BYTES
     ));
+}
+
+#[tokio::test]
+async fn runtime_completed_display_preview_is_forwarded_to_result_writer() {
+    let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
+    let provider_id = ExtensionId::new("demo").expect("valid provider id");
+    let result_writer = Arc::new(RecordingResultWriter::default());
+    let milestone_sink =
+        Arc::new(ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink::default());
+    let port = runtime_capability_port(
+        &capability_id,
+        &provider_id,
+        Arc::new(QueuedHostRuntime::new(
+            vec![visible_capability(
+                capability_id.clone(),
+                provider_id.clone(),
+            )],
+            vec![Ok(RuntimeCapabilityOutcome::Completed(Box::new(
+                RuntimeCapabilityCompleted {
+                    capability_id: capability_id.clone(),
+                    output: serde_json::json!({"ok": true}),
+                    display_preview: Some(CapabilityDisplayOutputPreview {
+                        output_summary: Some("Edited 1 file: +1/-1".to_string()),
+                        output_preview: "--- a/file\n+++ b/file\n-old\n+new\n".to_string(),
+                        output_kind: "unified_diff".to_string(),
+                        subtitle: Some("/workspace/file".to_string()),
+                        truncated: false,
+                    }),
+                    usage: ResourceUsage::default(),
+                },
+            )))],
+        )),
+        result_writer.clone(),
+        milestone_sink,
+        "thread-runtime-capability-display-preview",
+    )
+    .await;
+
+    let outcome = invoke_visible_runtime_capability(&port)
+        .await
+        .expect("runtime outcome maps to loop outcome");
+
+    assert!(matches!(outcome, CapabilityOutcome::Completed(_)));
+    let previews = result_writer.display_previews();
+    let preview = previews
+        .into_iter()
+        .next()
+        .flatten()
+        .expect("display preview forwarded");
+    assert_eq!(preview.output_kind, "unified_diff");
+    assert!(preview.output_preview.contains("+new"));
 }
 
 #[tokio::test]
@@ -257,6 +310,7 @@ async fn runtime_capability_mismatched_outcome_does_not_emit_terminal_milestone(
                 RuntimeCapabilityCompleted {
                     capability_id: other_capability_id,
                     output: serde_json::json!({"ok": true}),
+                    display_preview: None,
                     usage: ResourceUsage::default(),
                 },
             )))],
@@ -297,6 +351,7 @@ async fn runtime_capability_suspension_outcomes_do_not_emit_terminal_lifecycle_m
             capability_id: capability_id.clone(),
             reason: RuntimeBlockedReason::AuthRequired,
             required_secrets: Vec::new(),
+            credential_requirements: Vec::new(),
         }),
         RuntimeCapabilityOutcome::ResourceBlocked(RuntimeResourceGate {
             gate_id: RuntimeGateId::new(),
@@ -344,6 +399,51 @@ async fn runtime_capability_suspension_outcomes_do_not_emit_terminal_lifecycle_m
             } if actual == &capability_id
         ));
     }
+}
+
+#[tokio::test]
+async fn runtime_auth_gate_forwards_credential_requirements() {
+    let capability_id = CapabilityId::new("demo.echo").expect("capability id");
+    let provider_id = ExtensionId::new("demo").expect("provider id");
+    let requirement = RuntimeCredentialAuthRequirement {
+        provider: RuntimeCredentialAccountProviderId::new("github").unwrap(),
+        requester_extension: provider_id.clone(),
+    };
+    let port = runtime_capability_port(
+        &capability_id,
+        &provider_id,
+        Arc::new(QueuedHostRuntime::new(
+            vec![visible_capability(
+                capability_id.clone(),
+                provider_id.clone(),
+            )],
+            vec![Ok(RuntimeCapabilityOutcome::AuthRequired(
+                RuntimeAuthGate {
+                    gate_id: RuntimeGateId::new(),
+                    capability_id: capability_id.clone(),
+                    reason: RuntimeBlockedReason::AuthRequired,
+                    required_secrets: Vec::new(),
+                    credential_requirements: vec![requirement.clone()],
+                },
+            ))],
+        )),
+        Arc::new(RecordingResultWriter::default()),
+        Arc::new(ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink::default()),
+        "thread-runtime-auth-requirement",
+    )
+    .await;
+
+    let outcome = invoke_visible_runtime_capability(&port)
+        .await
+        .expect("auth gate is a suspension outcome");
+
+    assert!(matches!(
+        outcome,
+        CapabilityOutcome::AuthRequired {
+            credential_requirements,
+            ..
+        } if credential_requirements == vec![requirement]
+    ));
 }
 
 #[tokio::test]

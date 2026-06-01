@@ -6,9 +6,9 @@ use std::{
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    CapabilityDescriptor, CapabilityId, CapabilitySet, ExecutionContext, ExtensionId, InvocationId,
-    MountAlias, MountGrant, MountPermissions, MountView, PermissionMode, ResourceEstimate,
-    ResourceUsage, RuntimeKind, ThreadId, TrustClass, UserId, VirtualPath,
+    CapabilityDescriptor, CapabilityId, CapabilitySet, ExecutionContext, ExtensionId, MountAlias,
+    MountGrant, MountPermissions, MountView, PermissionMode, ResourceEstimate, ResourceUsage,
+    RuntimeKind, ThreadId, TrustClass, UserId, VirtualPath,
 };
 use ironclaw_host_runtime::{
     CancelRuntimeWorkOutcome, CancelRuntimeWorkRequest, CapabilitySurfaceVersion, HostRuntime,
@@ -19,14 +19,15 @@ use ironclaw_host_runtime::{
     VisibleCapabilitySurface as HostVisibleCapabilitySurface,
 };
 use ironclaw_loop_support::{
-    HostRuntimeLoopCapabilityPortFactory, LoopCapabilityInputResolver, LoopCapabilityResultWriter,
+    CapabilityResultWrite, HostRuntimeLoopCapabilityPortFactory, LoopCapabilityInputResolver,
+    LoopCapabilityResultWriter,
 };
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 use ironclaw_turns::{
     InMemoryRunProfileResolver, LoopResultRef, RunProfileResolutionRequest, RunProfileResolver,
     TurnId, TurnRunId, TurnScope,
     run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityInputRef, CapabilityInvocation,
+        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityInvocation,
         InMemoryLoopHostMilestoneSink, LoopCapabilityPort, LoopRunContext, ProviderToolCall,
         VisibleCapabilityRequest,
     },
@@ -327,6 +328,7 @@ impl HostRuntime for SingleToolHostRuntime {
             RuntimeCapabilityCompleted {
                 capability_id: request.capability_id,
                 output: serde_json::json!({"ok": true}),
+                display_preview: None,
                 usage: ResourceUsage::default(),
             },
         )))
@@ -410,11 +412,7 @@ struct UnusedResultWriter;
 impl LoopCapabilityResultWriter for UnusedResultWriter {
     async fn write_capability_result(
         &self,
-        _run_context: &LoopRunContext,
-        _input_ref: &CapabilityInputRef,
-        _invocation_id: InvocationId,
-        _capability_id: &CapabilityId,
-        _output: serde_json::Value,
+        _write: CapabilityResultWrite<'_>,
     ) -> Result<LoopResultRef, AgentLoopHostError> {
         LoopResultRef::new("result:factory").map_err(|_| {
             AgentLoopHostError::new(

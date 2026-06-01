@@ -33,6 +33,8 @@ use ironclaw_trust::{
 };
 use serde_json::{Value, json};
 
+const FIRST_PARTY_STAGED_SECRET: &str = "sk-first-party-staged-secret";
+
 #[tokio::test]
 async fn host_runtime_invokes_first_party_handler_through_capability_host() {
     let handler = Arc::new(RecordingFirstPartyHandler::new(
@@ -164,6 +166,11 @@ async fn first_party_handler_uses_staged_secret_through_production_host_egress()
         panic!("expected completed first-party HTTP fixture, got {outcome:?}");
     };
     assert_eq!(completed.output["status"], json!(200));
+    let public_output = serde_json::to_string(&completed.output).unwrap();
+    assert!(
+        !public_output.contains(FIRST_PARTY_STAGED_SECRET),
+        "first-party public output must not contain staged credential material: {public_output}"
+    );
     let requests = network_recorder.lock().unwrap();
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].url, "https://api.example.test/v1/native");
@@ -174,7 +181,7 @@ async fn first_party_handler_uses_staged_secret_through_production_host_egress()
             .find(|(name, _)| name == "authorization"),
         Some(&(
             "authorization".to_string(),
-            "Bearer sk-first-party-staged-secret".to_string()
+            format!("Bearer {FIRST_PARTY_STAGED_SECRET}")
         ))
     );
 }
@@ -319,8 +326,8 @@ async fn first_party_handler_rejects_non_string_url_input() {
     }
 }
 
-#[test]
-fn http_error_kind_maps_all_reason_codes() {
+#[tokio::test]
+async fn http_error_kind_maps_all_reason_codes() {
     let cases = [
         (
             RuntimeHttpEgressReasonCode::CredentialUnavailable,
@@ -752,6 +759,7 @@ impl FirstPartyCapabilityHandler for HttpFirstPartyHandler {
                 save_body_to: None,
                 timeout_ms: Some(1000),
             })
+            .await
             .map_err(|error| {
                 FirstPartyCapabilityError::new(http_error_kind(error.reason_code()))
             })?;
@@ -917,7 +925,7 @@ async fn stage_http_secret(
         .put(
             scope.clone(),
             handle.clone(),
-            SecretMaterial::from("sk-first-party-staged-secret"),
+            SecretMaterial::from(FIRST_PARTY_STAGED_SECRET),
         )
         .await
         .unwrap();
@@ -963,8 +971,9 @@ struct FailingRuntimeHttpEgress {
 
 struct UnreachableRuntimeHttpEgress;
 
+#[async_trait::async_trait]
 impl RuntimeHttpEgress for FailingRuntimeHttpEgress {
-    fn execute(
+    async fn execute(
         &self,
         _request: RuntimeHttpEgressRequest,
     ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
@@ -972,8 +981,9 @@ impl RuntimeHttpEgress for FailingRuntimeHttpEgress {
     }
 }
 
+#[async_trait::async_trait]
 impl RuntimeHttpEgress for UnreachableRuntimeHttpEgress {
-    fn execute(
+    async fn execute(
         &self,
         _request: RuntimeHttpEgressRequest,
     ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
@@ -981,8 +991,9 @@ impl RuntimeHttpEgress for UnreachableRuntimeHttpEgress {
     }
 }
 
+#[async_trait::async_trait]
 impl NetworkHttpEgress for RecordingNetworkHttpEgress {
-    fn execute(
+    async fn execute(
         &self,
         request: NetworkHttpRequest,
     ) -> Result<NetworkHttpResponse, NetworkHttpError> {

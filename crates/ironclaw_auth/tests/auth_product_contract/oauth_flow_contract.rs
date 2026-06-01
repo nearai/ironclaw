@@ -131,6 +131,22 @@ async fn credential_selection_completes_account_selection_flow_once() {
 }
 
 #[tokio::test]
+async fn auth_flow_record_source_returns_stable_sorted_snapshot() {
+    let services = InMemoryAuthProductServices::new();
+    let alice = oauth_flow(&services, scope("alice")).await;
+    let bob = oauth_flow(&services, scope("bob")).await;
+
+    let snapshot = services.flow_records_snapshot();
+
+    let ids = snapshot.iter().map(|flow| flow.id).collect::<Vec<_>>();
+    let mut sorted = ids.clone();
+    sorted.sort_by_key(|id| id.as_uuid());
+    assert_eq!(ids, sorted);
+    assert!(ids.contains(&alice.id));
+    assert!(ids.contains(&bob.id));
+}
+
+#[tokio::test]
 async fn credential_selection_rejects_unlisted_or_cross_scope_account() {
     let services = InMemoryAuthProductServices::new();
     let owner = scope("alice");

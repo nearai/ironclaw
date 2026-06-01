@@ -10,8 +10,9 @@ use super::{
     AgentLoopExecutorError, AssistantReplyInput, BudgetInput, BudgetStep, CancelCheck,
     CapabilityInput, CheckpointInput, CheckpointKind, CheckpointStage, DefaultExecutorPipeline,
     DrainInput, ExecutorStage, ExitInput, InputStep, ModelInput, ModelStep, PendingInputAck,
-    PromptInput, PromptStep, StageContext, StopInput, StopObservationInput, StopObservationStep,
-    StopStep, TurnCompletedStep, UserFacingInputDrainMode,
+    PromptInput, PromptStep, ReplyAdmissionInput, ReplyAdmissionStep, StageContext, StopInput,
+    StopObservationInput, StopObservationStep, StopStep, TurnCompletedStep,
+    UserFacingInputDrainMode,
 };
 
 impl DefaultExecutorPipeline {
@@ -143,16 +144,28 @@ impl DefaultExecutorPipeline {
             let response_usage = model_response.usage;
             let completed = match model_response.output {
                 ParentLoopOutput::AssistantReply(reply) => {
-                    self.assistant_reply
-                        .process(
-                            ctx,
-                            AssistantReplyInput {
-                                state,
-                                reply,
-                                usage: response_usage,
-                            },
-                        )
+                    match self
+                        .reply_admission
+                        .process(ctx, ReplyAdmissionInput { state, reply })
                         .await?
+                    {
+                        ReplyAdmissionStep::Accept { state, reply } => {
+                            self.assistant_reply
+                                .process(
+                                    ctx,
+                                    AssistantReplyInput {
+                                        state: *state,
+                                        reply,
+                                        usage: response_usage,
+                                    },
+                                )
+                                .await?
+                        }
+                        ReplyAdmissionStep::Reject { state } => TurnCompletedStep::Continue {
+                            state,
+                            summary: crate::strategies::TurnSummary::reply_rejected(),
+                        },
+                    }
                 }
                 ParentLoopOutput::CapabilityCalls(calls) => {
                     self.capabilities

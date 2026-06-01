@@ -11,11 +11,14 @@ mod credential_detect;
 mod leak_detector;
 mod policy;
 mod provider_validation;
+mod redaction;
 mod sanitizer;
 pub mod sensitive_paths;
 mod validator;
 
-pub use credential_detect::params_contain_manual_credentials;
+pub use credential_detect::{
+    http_parts_contain_manual_credentials, params_contain_manual_credentials,
+};
 pub use leak_detector::{
     LeakAction, LeakDetectionError, LeakDetector, LeakMatch, LeakPattern, LeakScanResult,
     LeakSeverity,
@@ -26,8 +29,33 @@ pub use provider_validation::{
     validate_optional_provider_metadata_text, validate_provider_arguments,
     validate_provider_identity, validate_provider_token, validate_provider_tool_name,
 };
+pub use redaction::{redact_exact_values, redaction_values_for_secret};
 pub use sanitizer::{InjectionWarning, SanitizedOutput, Sanitizer};
 pub use validator::{ValidationResult, Validator};
+
+/// Interface for raw prompt-injection scans before untrusted text is wrapped
+/// into model-visible structural markup.
+pub trait InjectionScanner: Send + Sync {
+    fn scan_injection(&self, content: &str) -> Vec<InjectionWarning>;
+}
+
+impl InjectionScanner for Sanitizer {
+    fn scan_injection(&self, content: &str) -> Vec<InjectionWarning> {
+        self.detect(content)
+    }
+}
+
+/// Interface for secret-leak checks before model output crosses a persistence
+/// or projection boundary.
+pub trait LeakScanner: Send + Sync {
+    fn scan_leaks(&self, content: &str) -> LeakScanResult;
+}
+
+impl LeakScanner for LeakDetector {
+    fn scan_leaks(&self, content: &str) -> LeakScanResult {
+        self.scan(content)
+    }
+}
 
 /// Safety configuration.
 #[derive(Debug, Clone)]

@@ -26,6 +26,7 @@ pub(super) struct GateInput {
     pub(super) call: CapabilityCallCandidate,
     pub(super) kind: GateKind,
     pub(super) gate_ref: ironclaw_turns::LoopGateRef,
+    pub(super) credential_requirements: Vec<ironclaw_host_api::RuntimeCredentialAuthRequirement>,
 }
 
 pub(super) struct AwaitDependentRunGateInput {
@@ -70,11 +71,12 @@ impl ExecutorStage<GateInput> for GateStage {
                     )
                     .await;
                 let checked = CheckpointStage
-                    .write(ctx, state, CheckpointKind::BeforeBlock)
+                    .write_before_block(ctx, state, &gate_ref)
                     .await?;
                 Ok(BatchStep::Exit(LoopExit::Blocked(LoopBlocked {
                     kind: blocked_kind(kind),
                     gate_ref,
+                    credential_requirements: input.credential_requirements,
                     checkpoint_id: checked.checkpoint_id,
                     state_ref: checked.state_ref,
                     exit_id: exit_id(ctx.host, "blocked")?,
@@ -158,11 +160,12 @@ impl ExecutorStage<AwaitDependentRunGateInput> for AwaitDependentRunGateStage {
                     )
                     .await;
                 let checked = CheckpointStage
-                    .write(ctx, state, CheckpointKind::BeforeBlock)
+                    .write_before_block(ctx, state, &gate_ref)
                     .await?;
                 Ok(BatchStep::Exit(LoopExit::Blocked(LoopBlocked {
                     kind: blocked_kind(GateKind::AwaitDependentRun),
                     gate_ref,
+                    credential_requirements: Vec::new(),
                     checkpoint_id: checked.checkpoint_id,
                     state_ref: checked.state_ref,
                     exit_id: exit_id(ctx.host, "blocked")?,

@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Notion page, database, or data source ID."
+    },
+    "url": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Notion page, database, or data source URL."
+    }
+  },
+  "anyOf": [
+    { "required": ["id"] },
+    { "required": ["url"] }
+  ]
+}

@@ -110,5 +110,8 @@ fn credential_target_summary(target: &RuntimeCredentialTarget) -> String {
             )
         }
         RuntimeCredentialTarget::QueryParam { name } => format!("query:{name}=<secret>"),
+        RuntimeCredentialTarget::PathPlaceholder { placeholder } => {
+            format!("path:{placeholder}=<secret>")
+        }
     }
 }

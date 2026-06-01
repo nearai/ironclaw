@@ -18,11 +18,12 @@ use ironclaw_hooks::middleware::{
 use ironclaw_host_api::ExtensionId;
 use ironclaw_loop_support::{
     CapabilityResolveError, CapabilitySurfaceProfileFilter, CapabilitySurfaceProfileResolver,
-    EmptyLoopCapabilityPort, HostIdentityContextSource, HostInputQueue, HostManagedModelGateway,
-    HostQueueLoopInputPort, HostSkillContextSource, LoopCapabilityInputResolver,
-    RunCancellationFactory, RunCancellationObservationKind, RunStateLoopCancellationPort,
-    SubagentLoopPromptPort, SubagentPromptComposer, ThreadBackedLoopContextPort,
-    ThreadBackedLoopTranscriptPort, TurnStateRunCancellationFactory,
+    EmptyLoopCapabilityPort, GuardedSystemInferencePort, HostIdentityContextSource, HostInputQueue,
+    HostManagedModelGateway, HostQueueLoopInputPort, HostSkillContextSource,
+    LoopCapabilityInputResolver, ModelGatewayBackedSystemInferencePort, RunCancellationFactory,
+    RunCancellationObservationKind, RunStateLoopCancellationPort, SubagentLoopPromptPort,
+    SubagentPromptComposer, ThreadBackedLoopContextPort, ThreadBackedLoopTranscriptPort,
+    TurnStateRunCancellationFactory, default_host_managed_loop_compaction_port,
 };
 use ironclaw_threads::{SessionThreadService, ThreadScope};
 
@@ -63,15 +64,16 @@ use ironclaw_turns::{
         InstructionBundleMaterializedMessage, InstructionMaterializationStore,
         InstructionSafetyContext, LoadCheckpointPayloadRequest, LoadedCheckpointPayload,
         LoopCancellationPort, LoopCancellationSignal, LoopCapabilityPort, LoopCheckpointPort,
-        LoopCheckpointRequest, LoopContextBundle, LoopContextPort, LoopContextRequest,
+        LoopCheckpointRequest, LoopCompactionError, LoopCompactionPort, LoopCompactionRequest,
+        LoopCompactionResponse, LoopContextBundle, LoopContextPort, LoopContextRequest,
         LoopHostMilestoneSink, LoopInputAckToken, LoopInputBatch, LoopInputCursor, LoopInputPort,
         LoopModelBudgetAccountant, LoopModelPolicyGuard, LoopModelPort, LoopModelRequest,
         LoopModelResponse, LoopProgressEvent, LoopProgressPort, LoopPromptBundle,
         LoopPromptBundleAuthority, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext,
         LoopRunInfoPort, LoopTranscriptPort, NoOpBudgetAccountant, NoOpPolicyGuard,
         ProviderToolCall, ProviderToolDefinition, RunScopedHookMilestoneSink,
-        StageCheckpointPayloadRequest, UpdateAssistantDraft, VisibleCapabilityRequest,
-        VisibleCapabilitySurface,
+        StageCheckpointPayloadRequest, SystemInferencePort, UpdateAssistantDraft,
+        VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
     runner::ClaimedTurnRun,
 };
@@ -879,6 +881,27 @@ where
         self.cancellation_factory.observation_kind()
     }
 
+    fn build_compaction_ports(&self, run_context: &LoopRunContext) -> Arc<dyn LoopCompactionPort> {
+        let direct_system_inference: Arc<dyn SystemInferencePort> =
+            Arc::new(ModelGatewayBackedSystemInferencePort::new(
+                Arc::clone(&self.model_gateway),
+                run_context.clone(),
+            ));
+        let system_inference: Arc<dyn SystemInferencePort> =
+            Arc::new(GuardedSystemInferencePort::new(
+                direct_system_inference,
+                run_context.clone(),
+                Arc::clone(&self.model_accountant),
+                Arc::clone(&self.model_policy_guard),
+            ));
+        default_host_managed_loop_compaction_port(
+            system_inference,
+            Arc::clone(&self.thread_service),
+            self.thread_scope.clone(),
+            include_str!("../../ironclaw_loop_support/prompts/compaction_summarizer_fresh.md"),
+        )
+    }
+
     pub fn with_skill_context_source(mut self, source: Arc<dyn HostSkillContextSource>) -> Self {
         self.skill_context_source = Some(source);
         self
@@ -1386,6 +1409,7 @@ where
             run_context.clone(),
             Arc::clone(&self.milestone_sink),
         ));
+        let compaction = self.build_compaction_ports(&run_context);
         let cancellation_handle = self
             .cancellation_factory
             .handle_for_run(&run_context.scope, run_context.run_id)
@@ -1406,6 +1430,7 @@ where
             capabilities,
             transcript,
             progress,
+            compaction,
             cancellation,
             _event_subscription: event_subscription,
         })
@@ -1472,6 +1497,7 @@ pub struct RebornLoopDriverHost {
     capabilities: Arc<dyn LoopCapabilityPort>,
     transcript: Arc<dyn LoopTranscriptPort>,
     progress: Arc<dyn LoopProgressPort>,
+    compaction: Arc<dyn LoopCompactionPort>,
     cancellation: Arc<dyn LoopCancellationPort>,
     _event_subscription: Option<EventTriggeredHookSubscriptionHandle>,
 }
@@ -1494,9 +1520,14 @@ impl LoopRunInfoPort for RebornLoopDriverHost {
     }
 }
 
+#[async_trait]
 impl LoopCancellationPort for RebornLoopDriverHost {
     fn observe_cancellation(&self) -> Option<LoopCancellationSignal> {
         self.cancellation.observe_cancellation()
+    }
+
+    async fn cancellation_requested(&self) -> LoopCancellationSignal {
+        self.cancellation.cancellation_requested().await
     }
 }
 
@@ -1648,6 +1679,16 @@ impl LoopCheckpointPort for RebornLoopDriverHost {
 impl LoopProgressPort for RebornLoopDriverHost {
     async fn emit_loop_progress(&self, event: LoopProgressEvent) -> Result<(), AgentLoopHostError> {
         self.progress.emit_loop_progress(event).await
+    }
+}
+
+#[async_trait]
+impl LoopCompactionPort for RebornLoopDriverHost {
+    async fn compact_loop_context(
+        &self,
+        request: LoopCompactionRequest,
+    ) -> Result<LoopCompactionResponse, LoopCompactionError> {
+        self.compaction.compact_loop_context(request).await
     }
 }
 
@@ -1932,6 +1973,20 @@ fn validate_thread_scope(
     {
         return Err(RebornLoopDriverHostError::ScopeMismatch {
             reason: "thread scope does not match loop run scope".to_string(),
+        });
+    }
+    // The thread store keys threads by `owner_user_id` (via the MountView in
+    // `ThreadScope::to_resource_scope`), but that axis is not part of the
+    // on-disk thread path, so a wrong owner silently reads an empty subtree
+    // and surfaces as `UnknownThread` deep in the Prompt stage. When the run
+    // carries an authenticated actor and the thread scope declares an owner,
+    // require them to agree so the divergence fails loud here instead.
+    if let (Some(thread_owner), Some(actor)) =
+        (thread_scope.owner_user_id.as_ref(), run_context.actor())
+        && thread_owner != &actor.user_id
+    {
+        return Err(RebornLoopDriverHostError::ScopeMismatch {
+            reason: "thread scope owner does not match the loop run actor".to_string(),
         });
     }
     Ok(())
@@ -2224,6 +2279,7 @@ mod tests {
             .checkpoint(LoopCheckpointRequest {
                 kind: LoopCheckpointKind::BeforeSideEffect,
                 state_ref,
+                gate_ref: None,
             })
             .await
             .expect("write checkpoint metadata");
@@ -2261,6 +2317,7 @@ mod tests {
             .checkpoint(LoopCheckpointRequest {
                 kind: LoopCheckpointKind::BeforeModel,
                 state_ref,
+                gate_ref: None,
             })
             .await
             .expect("write checkpoint metadata");
@@ -2296,6 +2353,7 @@ mod tests {
             .checkpoint(LoopCheckpointRequest {
                 kind: LoopCheckpointKind::BeforeModel,
                 state_ref,
+                gate_ref: None,
             })
             .await
             .expect("write checkpoint metadata");
@@ -2352,6 +2410,7 @@ mod tests {
                 schema_id: expected_schema_id.clone(),
                 schema_version: expected_schema_version,
                 kind: LoopCheckpointKind::BeforeBlock,
+                gate_ref: None,
             })
             .await
             .expect("write checkpoint metadata");

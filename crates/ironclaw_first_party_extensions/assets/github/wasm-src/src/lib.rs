@@ -37,7 +37,16 @@ struct ToolContext {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SearchIssuesParams {
-    query: String,
+    query: Option<String>,
+    repository: Option<String>,
+    owner: Option<String>,
+    repo: Option<String>,
+    author: Option<String>,
+    assignee: Option<String>,
+    involves: Option<String>,
+    state: Option<String>,
+    #[serde(rename = "type")]
+    issue_type: Option<String>,
     page: Option<u32>,
     limit: Option<u32>,
     sort: Option<String>,
@@ -70,7 +79,7 @@ impl exports::near::agent::tool::Guest for GitHubTool {
             },
             Err(error) => exports::near::agent::tool::Response {
                 output: None,
-                error: Some(error),
+                error: Some(guest_error_payload(&error)),
             },
         }
     }
@@ -97,7 +106,10 @@ impl exports::near::agent::tool::Guest for GitHubTool {
 }
 
 fn schema_value(schema: &str) -> serde_json::Value {
-    serde_json::from_str(schema).expect("bundled GitHub schema must be valid JSON") // safety: bundled schemas are static assets covered by `validates_static_schema_json`.
+    match serde_json::from_str(schema) {
+        Ok(value) => value,
+        Err(_) => serde_json::json!({}),
+    }
 }
 
 fn execute_inner(params: &str, context: Option<&str>) -> Result<String, String> {
@@ -122,12 +134,13 @@ fn operation_from_context(context: Option<&str>) -> Result<GitHubOperation, Stri
         "github.search_issues" => Ok(GitHubOperation::SearchIssues),
         "github.get_issue" => Ok(GitHubOperation::GetIssue),
         "github.comment_issue" => Ok(GitHubOperation::CommentIssue),
-        _ => Err("unsupported_github_capability".to_string()),
+        _ => Err("unsupported_capability".to_string()),
     }
 }
 
 fn search_issues(params: SearchIssuesParams) -> Result<String, String> {
-    validate_text(&params.query, "query", MAX_QUERY_LENGTH)?;
+    let query = search_query(&params)?;
+    validate_text(&query, "query", MAX_QUERY_LENGTH)?;
     validate_search_page(params.page)?;
     validate_search_limit(params.limit)?;
     validate_search_sort(params.sort.as_deref())?;
@@ -136,7 +149,7 @@ fn search_issues(params: SearchIssuesParams) -> Result<String, String> {
     let limit = params.limit.unwrap_or(30);
     let mut path = format!(
         "/search/issues?q={}&per_page={}",
-        url_encode_query(&params.query),
+        url_encode_query(&query),
         limit
     );
 
@@ -154,6 +167,76 @@ fn search_issues(params: SearchIssuesParams) -> Result<String, String> {
     }
 
     github_request("GET", &path, None)
+}
+
+fn search_query(params: &SearchIssuesParams) -> Result<String, String> {
+    let mut parts = Vec::new();
+    if params.repository.is_some() && (params.owner.is_some() || params.repo.is_some()) {
+        return Err("invalid_repository".to_string());
+    }
+    if let Some(query) = params
+        .query
+        .as_deref()
+        .map(str::trim)
+        .filter(|query| !query.is_empty())
+    {
+        parts.push(query.to_string());
+    }
+    if let Some(repository) = params.repository.as_deref() {
+        let (owner, repo) = repository
+            .split_once('/')
+            .ok_or_else(|| "invalid_repository".to_string())?;
+        validate_repo(owner, repo)?;
+        parts.push(format!("repo:{owner}/{repo}"));
+    }
+    match (params.owner.as_deref(), params.repo.as_deref()) {
+        (Some(owner), Some(repo)) => {
+            validate_repo(owner, repo)?;
+            parts.push(format!("repo:{owner}/{repo}"));
+        }
+        (None, Some(repo)) => {
+            let (owner, repo) = repo
+                .split_once('/')
+                .ok_or_else(|| "invalid_repository".to_string())?;
+            validate_repo(owner, repo)?;
+            parts.push(format!("repo:{owner}/{repo}"));
+        }
+        (None, None) => {}
+        (Some(_), None) => return Err("invalid_repository".to_string()),
+    }
+    push_qualifier(&mut parts, "author", params.author.as_deref())?;
+    push_qualifier(&mut parts, "assignee", params.assignee.as_deref())?;
+    push_qualifier(&mut parts, "involves", params.involves.as_deref())?;
+    if let Some(state) = params.state.as_deref() {
+        validate_search_state(state)?;
+        parts.push(format!("state:{state}"));
+    }
+    if let Some(issue_type) = params.issue_type.as_deref() {
+        validate_search_type(issue_type)?;
+        parts.push(format!("is:{issue_type}"));
+    }
+
+    if parts.is_empty() {
+        Err("invalid_query_empty".to_string())
+    } else {
+        Ok(parts.join(" "))
+    }
+}
+
+fn push_qualifier(
+    parts: &mut Vec<String>,
+    qualifier: &str,
+    value: Option<&str>,
+) -> Result<(), String> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(());
+    };
+    if validate_search_qualifier_value(value) {
+        parts.push(format!("{qualifier}:{value}"));
+        Ok(())
+    } else {
+        Err(format!("invalid_{qualifier}"))
+    }
 }
 
 fn get_issue(params: GetIssueParams) -> Result<String, String> {
@@ -207,11 +290,17 @@ fn github_request(method: &str, path: &str, body: Option<String>) -> Result<Stri
 
     if (200..300).contains(&response.status) {
         let body =
-            String::from_utf8(response.body).map_err(|_| "github_api_invalid_utf8".to_string())?;
+            String::from_utf8(response.body).map_err(|_| "host_http_invalid_utf8".to_string())?;
         return Ok(body);
     }
 
-    Err(format!("github_api_error_status_{}", response.status))
+    match response.status {
+        401 => Err("AuthRequired".to_string()),
+        403 => Err("host_http_forbidden".to_string()),
+        422 => Err("invalid_parameters".to_string()),
+        429 => Err("host_http_rate_limited".to_string()),
+        status => Err(format!("host_http_error_status_{status}")),
+    }
 }
 
 fn sanitize_host_error(error: &str) -> String {
@@ -224,18 +313,23 @@ fn sanitize_host_error(error: &str) -> String {
         return "AuthRequired".to_string();
     }
     if lower.contains("timeout") || lower.contains("deadline") {
-        return "github_api_timeout".to_string();
+        return "host_http_timeout".to_string();
     }
     if lower.contains("redirect") {
-        return "github_api_redirect_denied".to_string();
+        return "host_http_redirect_denied".to_string();
     }
     if lower.contains("body") || lower.contains("size") || lower.contains("large") {
-        return "github_api_body_limit".to_string();
+        return "host_http_body_limit".to_string();
     }
-    if lower.contains("deny") || lower.contains("allow") || lower.contains("host") {
-        return "github_api_egress_denied".to_string();
+    if lower.contains("deny")
+        || lower.contains("denied")
+        || lower.contains("policy")
+        || lower.contains("allow")
+        || lower.contains("host")
+    {
+        return "host_http_network_denied".to_string();
     }
-    "github_api_request_failed".to_string()
+    "host_http_request_failed".to_string()
 }
 
 fn validate_repo(owner: &str, repo: &str) -> Result<(), String> {
@@ -261,11 +355,73 @@ fn validate_path_segment(value: &str) -> bool {
         && value.len() <= MAX_REPOSITORY_SEGMENT_LENGTH
         && !value.contains('/')
         && !value.contains("..")
+        && !value.contains(':')
         && !value.contains('?')
         && !value.contains('#')
         && !value
             .chars()
             .any(|ch| ch.is_control() || ch.is_whitespace())
+}
+
+fn validate_search_qualifier_value(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_REPOSITORY_SEGMENT_LENGTH
+        && !value.contains(char::is_whitespace)
+        && !value
+            .chars()
+            .any(|ch| ch.is_control() || matches!(ch, ':' | '"' | '(' | ')'))
+}
+
+fn guest_error_payload(code: &str) -> String {
+    serde_json::json!({
+        "code": code,
+        "kind": guest_error_kind(code),
+    })
+    .to_string()
+}
+
+fn guest_error_kind(code: &str) -> &'static str {
+    match code {
+        "AuthRequired" => "auth_required",
+        "missing_invocation_context"
+        | "invalid_invocation_context"
+        | "unsupported_capability"
+        | "invalid_parameters"
+        | "invalid_repository"
+        | "invalid_query_empty"
+        | "invalid_query_too_large"
+        | "invalid_author"
+        | "invalid_assignee"
+        | "invalid_involves"
+        | "invalid_state"
+        | "invalid_type"
+        | "invalid_sort"
+        | "invalid_order"
+        | "invalid_page"
+        | "invalid_limit"
+        | "invalid_issue_number"
+        | "invalid_body_empty"
+        | "invalid_body_too_large" => "input",
+        "host_http_body_limit" => "output_too_large",
+        "host_http_timeout" => "executor",
+        "host_http_network_denied" => "network_denied",
+        "host_http_forbidden" | "host_http_rate_limited" => "client",
+        _ => "operation_failed",
+    }
+}
+
+fn validate_search_state(state: &str) -> Result<(), String> {
+    match state {
+        "open" | "closed" => Ok(()),
+        _ => Err("invalid_state".to_string()),
+    }
+}
+
+fn validate_search_type(issue_type: &str) -> Result<(), String> {
+    match issue_type {
+        "issue" | "pr" => Ok(()),
+        _ => Err("invalid_type".to_string()),
+    }
 }
 
 fn validate_search_sort(sort: Option<&str>) -> Result<(), String> {
@@ -348,7 +504,7 @@ mod tests {
         );
         assert_eq!(
             operation_from_context(Some(r#"{"capability_id":"github.create_issue"}"#)).unwrap_err(),
-            "unsupported_github_capability"
+            "unsupported_capability"
         );
     }
 
@@ -356,7 +512,15 @@ mod tests {
     fn rejects_parameters_that_do_not_match_advertised_schema() {
         assert_eq!(
             search_issues(SearchIssuesParams {
-                query: String::new(),
+                query: Some(String::new()),
+                repository: None,
+                owner: None,
+                repo: None,
+                author: None,
+                assignee: None,
+                involves: None,
+                state: None,
+                issue_type: None,
                 page: None,
                 limit: None,
                 sort: None,
@@ -367,7 +531,15 @@ mod tests {
         );
         assert_eq!(
             search_issues(SearchIssuesParams {
-                query: "repo:nearai/ironclaw is:issue".to_string(),
+                query: Some("repo:nearai/ironclaw is:issue".to_string()),
+                repository: None,
+                owner: None,
+                repo: None,
+                author: None,
+                assignee: None,
+                involves: None,
+                state: None,
+                issue_type: None,
                 page: Some(0),
                 limit: None,
                 sort: None,
@@ -378,7 +550,15 @@ mod tests {
         );
         assert_eq!(
             search_issues(SearchIssuesParams {
-                query: "repo:nearai/ironclaw is:issue".to_string(),
+                query: Some("repo:nearai/ironclaw is:issue".to_string()),
+                repository: None,
+                owner: None,
+                repo: None,
+                author: None,
+                assignee: None,
+                involves: None,
+                state: None,
+                issue_type: None,
                 page: None,
                 limit: Some(0),
                 sort: None,
@@ -389,7 +569,15 @@ mod tests {
         );
         assert_eq!(
             search_issues(SearchIssuesParams {
-                query: "repo:nearai/ironclaw is:issue".to_string(),
+                query: Some("repo:nearai/ironclaw is:issue".to_string()),
+                repository: None,
+                owner: None,
+                repo: None,
+                author: None,
+                assignee: None,
+                involves: None,
+                state: None,
+                issue_type: None,
                 page: None,
                 limit: None,
                 sort: Some("reactions".to_string()),
@@ -421,6 +609,71 @@ mod tests {
     }
 
     #[test]
+    fn builds_query_from_structured_search_fields() {
+        let mut params = empty_search_params();
+        params.repo = Some("nearai/ironclaw".to_string());
+        params.author = Some("serrrfirat".to_string());
+        params.state = Some("open".to_string());
+        params.issue_type = Some("issue".to_string());
+        let query = search_query(&params).expect("structured fields build search query");
+
+        assert_eq!(
+            query,
+            "repo:nearai/ironclaw author:serrrfirat state:open is:issue"
+        );
+    }
+
+    #[test]
+    fn search_query_rejects_duplicate_repository_inputs() {
+        let mut params = empty_search_params();
+        params.repository = Some("nearai/ironclaw".to_string());
+        params.owner = Some("nearai".to_string());
+        params.repo = Some("ironclaw".to_string());
+
+        assert_eq!(search_query(&params).unwrap_err(), "invalid_repository");
+    }
+
+    #[test]
+    fn search_query_rejects_owner_without_repo() {
+        let mut params = empty_search_params();
+        params.owner = Some("nearai".to_string());
+
+        assert_eq!(search_query(&params).unwrap_err(), "invalid_repository");
+    }
+
+    #[test]
+    fn search_query_rejects_repository_without_slash() {
+        let mut params = empty_search_params();
+        params.repository = Some("ironclaw".to_string());
+
+        assert_eq!(search_query(&params).unwrap_err(), "invalid_repository");
+    }
+
+    #[test]
+    fn push_qualifier_validates_structured_qualifier_values() {
+        let mut parts = vec!["repo:nearai/ironclaw".to_string()];
+        push_qualifier(&mut parts, "author", Some("   ")).unwrap();
+        assert_eq!(parts, vec!["repo:nearai/ironclaw"]);
+
+        assert_eq!(
+            push_qualifier(&mut parts, "author", Some("bad user")).unwrap_err(),
+            "invalid_author"
+        );
+        assert_eq!(
+            push_qualifier(&mut parts, "author", Some("bad\nuser")).unwrap_err(),
+            "invalid_author"
+        );
+        assert_eq!(
+            push_qualifier(&mut parts, "author", Some("user:label")).unwrap_err(),
+            "invalid_author"
+        );
+        assert_eq!(
+            push_qualifier(&mut parts, "author", Some(r#"user"label"#)).unwrap_err(),
+            "invalid_author"
+        );
+    }
+
+    #[test]
     fn serde_rejects_unknown_fields_before_egress() {
         assert_eq!(
             execute_inner(
@@ -438,7 +691,9 @@ mod tests {
         let parsed: serde_json::Value =
             serde_json::from_str(&schema).expect("schema should be valid JSON");
         assert_eq!(parsed["type"], "object");
-        assert!(parsed["oneOf"].as_array().is_some_and(|schemas| schemas.len() == 3));
+        assert!(parsed["oneOf"]
+            .as_array()
+            .is_some_and(|schemas| schemas.len() == 3));
     }
 
     #[test]
@@ -447,16 +702,51 @@ mod tests {
             sanitize_host_error("missing token ghp_secret_value"),
             "AuthRequired"
         );
-        assert_eq!(sanitize_host_error("deadline exceeded"), "github_api_timeout");
-        assert_eq!(sanitize_host_error("redirect blocked"), "github_api_redirect_denied");
+        assert_eq!(
+            sanitize_host_error("deadline exceeded"),
+            "host_http_timeout"
+        );
+        assert_eq!(
+            sanitize_host_error("redirect blocked"),
+            "host_http_redirect_denied"
+        );
         assert_eq!(
             sanitize_host_error("response body too large"),
-            "github_api_body_limit"
+            "host_http_body_limit"
         );
-        assert_eq!(sanitize_host_error("host not allowed"), "github_api_egress_denied");
+        assert_eq!(
+            sanitize_host_error("host not allowed"),
+            "host_http_network_denied"
+        );
+        assert_eq!(
+            sanitize_host_error("policy_denied"),
+            "host_http_network_denied"
+        );
         assert_eq!(
             sanitize_host_error("connection reset with token ghp_secret_value"),
             "AuthRequired"
         );
+        assert_eq!(
+            sanitize_host_error("connection reset"),
+            "host_http_request_failed"
+        );
+    }
+
+    fn empty_search_params() -> SearchIssuesParams {
+        SearchIssuesParams {
+            query: None,
+            repository: None,
+            owner: None,
+            repo: None,
+            author: None,
+            assignee: None,
+            involves: None,
+            state: None,
+            issue_type: None,
+            page: None,
+            limit: None,
+            sort: None,
+            order: None,
+        }
     }
 }

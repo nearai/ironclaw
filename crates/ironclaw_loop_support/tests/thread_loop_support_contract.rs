@@ -27,10 +27,10 @@ use ironclaw_threads::{
     CreateSummaryArtifactRequest, EnsureThreadRequest, InMemorySessionThreadService,
     LoadContextMessagesRequest, MessageContent, MessageKind, MessageStatus,
     ProviderToolCallReferenceEnvelope, RedactMessageRequest, ReplayAcceptedInboundMessageRequest,
-    SessionThreadError, SessionThreadRecord, SessionThreadService, SummaryArtifact, ThreadHistory,
-    ThreadHistoryRequest, ThreadMessageId, ThreadMessageRecord, ThreadScope,
-    ToolResultReferenceEnvelope, ToolResultSafeSummary, UpdateAssistantDraftRequest,
-    UpdateToolResultReferenceRequest,
+    SessionThreadError, SessionThreadRecord, SessionThreadService, SummaryArtifact,
+    SummaryModelContextPolicy, ThreadHistory, ThreadHistoryRequest, ThreadMessageId,
+    ThreadMessageRecord, ThreadScope, ToolResultReferenceEnvelope, ToolResultSafeSummary,
+    UpdateAssistantDraftRequest, UpdateToolResultReferenceRequest,
 };
 use ironclaw_turns::{
     LoopMessageRef, LoopResultRef, RunProfileResolutionRequest, RunProfileResolver, TurnActor,
@@ -41,15 +41,15 @@ use ironclaw_turns::{
         CapabilityDeniedReasonKind, CapabilityInputRef, CapabilityInvocation, CapabilityOutcome,
         CapabilitySurfaceVersion, FinalizeAssistantMessage, HostManagedLoopPromptPort,
         InMemoryInstructionMaterializationStore, InMemoryLoopHostMilestoneSink,
-        InMemoryRunProfileResolver, LoopCapabilityPort, LoopContextBundle, LoopContextMessage,
-        LoopContextPort, LoopContextRequest, LoopContextSnippet, LoopDriverNoteKind,
-        LoopHostMilestoneKind, LoopHostMilestoneSink, LoopInputCursor, LoopInputCursorToken,
-        LoopModelCapabilityView, LoopModelMessage, LoopModelPort, LoopModelRequest,
-        LoopModelRouteSnapshot, LoopPromptBundle, LoopPromptBundleAuthority, LoopPromptBundleRef,
-        LoopPromptPort, LoopRunContext, LoopTranscriptPort, ParentLoopOutput,
-        PersonalContextPolicy, PromptMode, PromptSkillContextMetadata, ProviderToolCallReference,
-        ProviderToolDefinition, SkillVisibility, UpdateAssistantDraft, VisibleCapabilityRequest,
-        VisibleCapabilitySurface,
+        InMemoryRunProfileResolver, LoopCapabilityPort, LoopContextBundle,
+        LoopContextCompactionKind, LoopContextMessage, LoopContextPort, LoopContextRequest,
+        LoopContextSnippet, LoopDriverNoteKind, LoopHostMilestoneKind, LoopHostMilestoneSink,
+        LoopInputCursor, LoopInputCursorToken, LoopModelCapabilityView, LoopModelMessage,
+        LoopModelPort, LoopModelRequest, LoopModelRouteSnapshot, LoopPromptBundle,
+        LoopPromptBundleAuthority, LoopPromptBundleRef, LoopPromptPort, LoopRunContext,
+        LoopTranscriptPort, ParentLoopOutput, PersonalContextPolicy, PromptMode,
+        PromptSkillContextMetadata, ProviderToolCallReference, ProviderToolDefinition,
+        SkillVisibility, UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
 };
 use tracing_test::traced_test;
@@ -85,7 +85,71 @@ async fn thread_context_port_loads_policy_filtered_transcript_messages() {
             .as_str(),
         format!("msg:{}", fixture.user_message_id).as_str()
     );
+    let compaction = bundle.messages[0]
+        .compaction
+        .as_ref()
+        .expect("model-visible transcript message should carry compaction metadata");
+    assert_eq!(compaction.sequence, 1);
+    assert_eq!(compaction.kind, LoopContextCompactionKind::User);
+    assert!(compaction.estimated_tokens > 0);
     assert!(bundle.memory_snippets.is_empty());
+}
+
+#[tokio::test]
+async fn thread_context_port_rejects_run_actor_owner_mismatch() {
+    // Defense in depth for the thread-owner MountView divergence: the store
+    // keys threads by owner, so reading a thread whose scope owner differs
+    // from the run's authenticated actor silently targets the wrong
+    // `owners/<user>` subtree. The port must fail loud before that read.
+    let fixture = ThreadFixture::new().await;
+    let mismatched_run_context = fixture
+        .run_context
+        .clone()
+        .with_actor(TurnActor::new(UserId::new("intruder-user").unwrap()));
+    let adapter = ThreadBackedLoopContextPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        mismatched_run_context,
+        16,
+    );
+
+    let error = adapter
+        .load_loop_context(LoopContextRequest {
+            after: None,
+            limit: 16,
+            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+        })
+        .await
+        .expect_err("owner mismatch must be rejected before the thread read");
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::ScopeMismatch);
+}
+
+#[tokio::test]
+async fn thread_context_port_accepts_matching_run_actor_owner() {
+    // The same path must still succeed when the run actor owns the thread.
+    let fixture = ThreadFixture::new().await;
+    let matched_run_context = fixture
+        .run_context
+        .clone()
+        .with_actor(TurnActor::new(UserId::new("user-loop-support").unwrap()));
+    let adapter = ThreadBackedLoopContextPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        matched_run_context,
+        16,
+    );
+
+    let bundle = adapter
+        .load_loop_context(LoopContextRequest {
+            after: None,
+            limit: 16,
+            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+        })
+        .await
+        .expect("matching run actor owner must load context");
+
+    assert_eq!(bundle.messages.len(), 1);
 }
 
 #[tokio::test]
@@ -98,9 +162,9 @@ async fn thread_context_port_preserves_summary_replacements_as_system_messages()
             thread_id: fixture.thread_id.clone(),
             start_sequence: 1,
             end_sequence: 1,
-            summary_kind: "model_context".to_string(),
+            summary_kind: ironclaw_threads::SummaryKind::Compaction,
             content: MessageContent::text("summarized hello"),
-            model_context_policy: Some("replace_range_when_selected".to_string()),
+            model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
         })
         .await
         .unwrap();
@@ -170,18 +234,14 @@ async fn thread_context_port_builds_skill_instruction_snippets_from_real_skill_m
         .unwrap();
 
     assert_eq!(bundle.instruction_snippets.len(), 1);
-    assert_eq!(bundle.instruction_snippets[0].snippet_ref, "skill:alpha");
-    assert!(
-        bundle.instruction_snippets[0]
-            .safe_summary
-            .contains("safe alpha description")
-    );
-    assert!(
-        bundle.instruction_snippets[0]
-            .safe_summary
-            .contains("Use alpha prompt content.")
-    );
-    assert!(!bundle.instruction_snippets[0].safe_summary.contains("/tmp"));
+    let snippet = &bundle.instruction_snippets[0];
+    assert_eq!(snippet.snippet_ref, "skill:alpha");
+    assert!(snippet.safe_summary.contains("safe alpha description"));
+    assert!(!snippet.safe_summary.contains("Use alpha prompt content."));
+    assert!(snippet.model_content.contains("safe alpha description"));
+    assert!(snippet.model_content.contains("Use alpha prompt content."));
+    assert!(!snippet.safe_summary.contains("/tmp"));
+    assert!(!snippet.model_content.contains("/tmp"));
 }
 
 #[tokio::test]
@@ -255,8 +315,18 @@ async fn thread_context_port_builds_skill_instruction_snippets_from_skill_bundle
             .contains("safe alpha description")
     );
     assert!(
-        bundle.instruction_snippets[0]
+        !bundle.instruction_snippets[0]
             .safe_summary
+            .contains("Use trusted alpha prompt content.")
+    );
+    assert!(
+        bundle.instruction_snippets[0]
+            .model_content
+            .contains("safe alpha description")
+    );
+    assert!(
+        bundle.instruction_snippets[0]
+            .model_content
             .contains("Use trusted alpha prompt content.")
     );
     assert!(
@@ -267,6 +337,11 @@ async fn thread_context_port_builds_skill_instruction_snippets_from_skill_bundle
     assert!(
         !bundle.instruction_snippets[1]
             .safe_summary
+            .contains("RAW_INSTALLED_PROMPT_SENTINEL")
+    );
+    assert!(
+        !bundle.instruction_snippets[1]
+            .model_content
             .contains("RAW_INSTALLED_PROMPT_SENTINEL")
     );
     assert_eq!(
@@ -936,6 +1011,42 @@ async fn model_port_limits_provider_tool_definitions_to_model_visible_capability
 }
 
 #[tokio::test]
+async fn model_port_maps_invalid_model_output_to_recoverable_model_error() {
+    let fixture = ThreadFixture::new().await;
+    let messages = user_model_messages(&fixture);
+    issue_prompt_grant(&fixture.run_context, &messages);
+
+    let gateway = Arc::new(RecordingGateway::model_error(
+        HostManagedModelErrorKind::InvalidOutput,
+        "model returned a tool call outside the advertised capability surface",
+    ));
+    let model_port = ThreadBackedLoopModelPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        gateway.clone(),
+        16,
+    );
+
+    let error = model_port
+        .stream_model(LoopModelRequest {
+            messages,
+            surface_version: None,
+            model_preference: None,
+            capability_view: None,
+        })
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::Unavailable);
+    assert_eq!(
+        error.safe_summary,
+        "model returned a tool call outside the advertised capability surface"
+    );
+    assert_eq!(gateway.calls.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
 async fn model_port_preserves_capability_info_for_filtered_capability_view() {
     let fixture = ThreadFixture::new().await;
     let messages = user_model_messages(&fixture);
@@ -1103,12 +1214,12 @@ async fn thread_context_port_ignores_malformed_hidden_skill_content() {
         .unwrap();
 
     assert_eq!(bundle.instruction_snippets.len(), 1);
-    assert_eq!(bundle.instruction_snippets[0].snippet_ref, "skill:alpha");
-    assert!(
-        bundle.instruction_snippets[0]
-            .safe_summary
-            .contains("visible prompt")
-    );
+    let snippet = &bundle.instruction_snippets[0];
+    assert_eq!(snippet.snippet_ref, "skill:alpha");
+    assert!(snippet.safe_summary.contains("visible description"));
+    assert!(!snippet.safe_summary.contains("visible prompt"));
+    assert!(snippet.model_content.contains("visible description"));
+    assert!(snippet.model_content.contains("visible prompt"));
 }
 
 #[tokio::test]
@@ -1365,6 +1476,7 @@ async fn prompt_and_model_ports_resolve_instruction_memory_and_identity_refs() {
                 message_ref: Some(LoopMessageRef::new("msg:identity-policy").unwrap()),
                 role: "system".to_string(),
                 safe_summary: "identity policy summary".to_string(),
+                compaction: None,
             }],
             messages: vec![LoopContextMessage {
                 message_ref: Some(
@@ -1372,6 +1484,7 @@ async fn prompt_and_model_ports_resolve_instruction_memory_and_identity_refs() {
                 ),
                 role: "user".to_string(),
                 safe_summary: "user message available".to_string(),
+                compaction: None,
             }],
             instruction_snippets: vec![LoopContextSnippet {
                 snippet_ref: "instruction:project".to_string(),
@@ -3268,6 +3381,7 @@ fn issue_prompt_grant(context: &LoopRunContext, messages: &[LoopModelMessage]) {
         bundle_ref: LoopPromptBundleRef::for_run(context, "test-bundle").unwrap(),
         messages: messages.to_vec(),
         surface_version: None,
+        compaction_message_index: Vec::new(),
         instruction_fingerprint: None,
         identity_message_count: 0,
         instruction_snippet_count: 0,
@@ -3816,6 +3930,14 @@ impl RecordingGateway {
                 HostManagedModelErrorKind::PolicyDenied,
                 safe_summary,
             )),
+        }
+    }
+
+    fn model_error(kind: HostManagedModelErrorKind, safe_summary: &str) -> Self {
+        Self {
+            calls: Mutex::new(Vec::new()),
+            tool_definition_calls: Mutex::new(Vec::new()),
+            response: Err(HostManagedModelError::safe(kind, safe_summary)),
         }
     }
 
