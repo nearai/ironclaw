@@ -121,10 +121,7 @@ pub(super) fn schema() -> serde_json::Value {
                 "description": "Compatibility alias for detail=schema."
             }
         },
-        "anyOf": [
-            { "required": ["name"] },
-            { "required": ["capability_id"] }
-        ],
+        "required": ["name"],
     })
 }
 

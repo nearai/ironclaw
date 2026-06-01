@@ -238,6 +238,7 @@ struct PreparedProviderToolCall {
     provider_turn_id: String,
     normalized_arguments: serde_json::Value,
     effective_capability_ids: Vec<CapabilityId>,
+    capability_info_target_missing: bool,
 }
 
 const MAX_IN_MEMORY_DISPATCH_RECORDS: usize = 128;
@@ -810,6 +811,7 @@ impl HostRuntimeLoopCapabilityPort {
             provider_turn_id,
             normalized_arguments: prepared.normalized_arguments,
             effective_capability_ids: prepared.effective_capability_ids,
+            capability_info_target_missing: prepared.capability_info_target_missing,
         })
     }
 }
@@ -837,7 +839,7 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
     ) -> Result<ProviderToolCallCapabilityIds, AgentLoopHostError> {
         let prepared = self.prepare_provider_tool_call(tool_call)?;
         if prepared.capability_id.as_str() == crate::capability_info::CAPABILITY_ID
-            && prepared.effective_capability_ids.len() == 1
+            && prepared.capability_info_target_missing
         {
             return Err(AgentLoopHostError::new(
                 AgentLoopHostErrorKind::InvalidInvocation,
@@ -3037,11 +3039,8 @@ mod tests {
             .find(|definition| definition.name == capability_info::TOOL_NAME)
             .expect("capability_info definition is advertised");
         assert_eq!(
-            capability_info_definition.parameters["anyOf"],
-            serde_json::json!([
-                { "required": ["name"] },
-                { "required": ["capability_id"] }
-            ])
+            capability_info_definition.parameters["required"],
+            serde_json::json!(["name"])
         );
         assert!(
             tool_definitions
@@ -3209,7 +3208,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn capability_info_rejects_invalid_detail_arguments() {
+    async fn capability_info_reports_invalid_detail_arguments_as_model_visible_failure() {
         let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
         let provider_id = ExtensionId::new("demo").expect("valid provider id");
         let context = execution_context("thread-capability-info-invalid-detail");
@@ -3218,35 +3217,80 @@ mod tests {
             capability_id.clone(),
             provider_id,
         )]));
+        let result_writer = Arc::new(RecordingResultWriter::default());
         let port = HostRuntimeLoopCapabilityPortFactory::new(
-            runtime,
+            runtime.clone(),
             visible_request(context),
             dummy_input_resolver(),
-            dummy_result_writer(),
+            result_writer.clone(),
             dummy_milestone_sink(),
         )
         .port_for_run_context(run_context);
-        port.visible_capabilities(VisibleCapabilityRequest {})
+        let surface = port
+            .visible_capabilities(VisibleCapabilityRequest {})
             .await
             .expect("visible capabilities load");
 
-        for arguments in [
-            serde_json::json!({ "name": capability_id.as_str(), "include_schema": 1 }),
-            serde_json::json!({ "name": capability_id.as_str(), "detail": "everything" }),
-        ] {
+        for (index, (arguments, expected_summary)) in [
+            (
+                serde_json::json!({ "name": capability_id.as_str(), "include_schema": 1 }),
+                "capability_info include_schema must be boolean",
+            ),
+            (
+                serde_json::json!({ "name": capability_id.as_str(), "detail": "everything" }),
+                "capability_info detail must be names, summary, or schema",
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
             let mut call = provider_tool_call();
+            call.id = format!("call_invalid_detail_{index}");
             call.name = capability_info::TOOL_NAME.to_string();
             call.arguments = arguments;
-            let error = port
+
+            port.validate_provider_tool_call(&call).expect(
+                "invalid capability_info arguments should be staged for model-visible failure",
+            );
+            let candidate = port
                 .register_provider_tool_call(call)
                 .await
-                .expect_err("invalid capability_info arguments should fail");
-            assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+                .expect("invalid capability_info arguments should stage");
+
+            assert_eq!(
+                candidate.effective_capability_ids,
+                vec![CapabilityId::new(capability_info::CAPABILITY_ID).expect("synthetic id")]
+            );
+
+            let outcome = port
+                .invoke_capability(CapabilityInvocation {
+                    surface_version: surface.version.clone(),
+                    capability_id: candidate.capability_id,
+                    input_ref: candidate.input_ref,
+                })
+                .await
+                .expect("invalid arguments should return a capability failure, not a host error");
+
+            assert!(matches!(
+                outcome,
+                CapabilityOutcome::Failed(CapabilityFailure {
+                    error_kind: CapabilityFailureKind::InvalidInput,
+                    safe_summary
+                }) if safe_summary == expected_summary
+            ));
         }
+        assert!(
+            result_writer.records().is_empty(),
+            "failed capability_info calls are reported through the provider error-result path"
+        );
+        assert!(
+            runtime.take_requests().is_empty(),
+            "capability_info failure must not dispatch to the host runtime"
+        );
     }
 
     #[tokio::test]
-    async fn capability_info_rejects_invalid_name_inputs() {
+    async fn capability_info_reports_invalid_name_inputs_as_model_visible_failure() {
         let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
         let provider_id = ExtensionId::new("demo").expect("valid provider id");
         let context = execution_context("thread-capability-info-invalid-name");
@@ -3255,35 +3299,73 @@ mod tests {
             capability_id,
             provider_id,
         )]));
+        let result_writer = Arc::new(RecordingResultWriter::default());
         let port = HostRuntimeLoopCapabilityPortFactory::new(
-            runtime,
+            runtime.clone(),
             visible_request(context),
             dummy_input_resolver(),
-            dummy_result_writer(),
+            result_writer.clone(),
             dummy_milestone_sink(),
         )
         .port_for_run_context(run_context);
-        port.visible_capabilities(VisibleCapabilityRequest {})
+        let surface = port
+            .visible_capabilities(VisibleCapabilityRequest {})
             .await
             .expect("visible capabilities load");
 
-        for arguments in [
+        for (index, arguments) in [
             serde_json::json!({}),
             serde_json::json!({ "name": "" }),
             serde_json::json!({ "name": "demo echo" }),
             serde_json::json!({ "name": "demo.echo!" }),
             serde_json::json!({ "name": "demo.écho" }),
             serde_json::json!({ "name": "a".repeat(161) }),
-        ] {
+        ]
+        .into_iter()
+        .enumerate()
+        {
             let mut call = provider_tool_call();
+            call.id = format!("call_invalid_name_{index}");
             call.name = capability_info::TOOL_NAME.to_string();
             call.arguments = arguments;
-            let error = port
+
+            port.validate_provider_tool_call(&call)
+                .expect("invalid capability_info names should be staged for model-visible failure");
+            let candidate = port
                 .register_provider_tool_call(call)
                 .await
-                .expect_err("invalid capability_info name should fail");
-            assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+                .expect("invalid capability_info name should stage");
+
+            assert_eq!(
+                candidate.effective_capability_ids,
+                vec![CapabilityId::new(capability_info::CAPABILITY_ID).expect("synthetic id")]
+            );
+
+            let outcome = port
+                .invoke_capability(CapabilityInvocation {
+                    surface_version: surface.version.clone(),
+                    capability_id: candidate.capability_id,
+                    input_ref: candidate.input_ref,
+                })
+                .await
+                .expect("invalid name should return a capability failure, not a host error");
+
+            assert!(matches!(
+                outcome,
+                CapabilityOutcome::Failed(CapabilityFailure {
+                    error_kind: CapabilityFailureKind::InvalidInput,
+                    ..
+                })
+            ));
         }
+        assert!(
+            result_writer.records().is_empty(),
+            "failed capability_info calls are reported through the provider error-result path"
+        );
+        assert!(
+            runtime.take_requests().is_empty(),
+            "capability_info failure must not dispatch to the host runtime"
+        );
     }
 
     #[tokio::test]
