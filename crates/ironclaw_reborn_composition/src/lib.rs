@@ -42,7 +42,10 @@ mod local_runtime_profile;
 mod manual_token_flow;
 mod mcp;
 mod nearai_mcp;
+mod notion_oauth;
+mod oauth_provider_client;
 mod product_auth_durable;
+mod product_auth_providers;
 mod product_auth_runtime_credentials;
 #[cfg(feature = "webui-v2-beta")]
 mod product_auth_serve;

@@ -43,6 +43,8 @@ pub enum TriggerError {
     InvalidRecord { reason: String },
     #[error("invalid schedule: {reason}")]
     InvalidSchedule { reason: String },
+    #[error("invalid trigger materialization: {reason}")]
+    InvalidMaterialization { reason: String },
     #[error("trigger repository backend unavailable: {reason}")]
     Backend { reason: String },
     #[error("trigger not found")]
@@ -150,6 +152,70 @@ impl TryFrom<String> for TriggerExternalEventId {
 
     fn try_from(value: String) -> Result<Self, Self::Error> {
         validate_lower_hex_identifier("external event id", value).map(Self)
+    }
+}
+
+/// Opaque reference to materialized trigger prompt content.
+///
+/// Values must be non-empty, at most 512 bytes, and free of control
+/// characters. The concrete content store is owned by composition.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TriggerInboundContentRef(String);
+
+impl TriggerInboundContentRef {
+    /// Create a validated inbound content reference.
+    ///
+    /// Validation is byte-based: the value must be non-empty, at most 512
+    /// bytes, and free of control characters.
+    pub fn new(value: impl Into<String>) -> Result<Self, TriggerError> {
+        let value = value.into();
+        validate_inbound_content_ref(&value)?;
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl AsRef<str> for TriggerInboundContentRef {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl std::fmt::Display for TriggerInboundContentRef {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl TryFrom<String> for TriggerInboundContentRef {
+    type Error = TriggerError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        validate_inbound_content_ref(&value)?;
+        Ok(Self(value))
+    }
+}
+
+impl Serialize for TriggerInboundContentRef {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for TriggerInboundContentRef {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        String::deserialize(deserializer)?
+            .try_into()
+            .map_err(serde::de::Error::custom)
     }
 }
 
@@ -341,6 +407,14 @@ pub struct TriggerFire {
     pub prompt: String,
 }
 
+#[async_trait]
+pub trait TriggerPromptMaterializer: Send + Sync {
+    async fn materialize_prompt(
+        &self,
+        fire: TriggerFire,
+    ) -> Result<TriggerInboundContentRef, TriggerError>;
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClaimDueFireRequest {
     pub tenant_id: TenantId,
@@ -401,6 +475,14 @@ pub struct FirePermanentFailedRequest {
     pub trigger_id: TriggerId,
     pub fire_slot: Timestamp,
     pub next_run_at: Timestamp,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClearActiveFireRequest {
+    pub tenant_id: TenantId,
+    pub trigger_id: TriggerId,
+    pub fire_slot: Timestamp,
+    pub run_id: TurnRunId,
 }
 
 #[async_trait]
@@ -499,6 +581,11 @@ pub trait TriggerRepository: Send + Sync {
     async fn mark_fire_permanently_failed(
         &self,
         request: FirePermanentFailedRequest,
+    ) -> Result<Option<TriggerRecord>, TriggerError>;
+
+    async fn clear_active_fire(
+        &self,
+        request: ClearActiveFireRequest,
     ) -> Result<Option<TriggerRecord>, TriggerError>;
 }
 
@@ -754,6 +841,25 @@ impl TriggerRepository for InMemoryTriggerRepository {
         };
         Ok(Some(record))
     }
+
+    async fn clear_active_fire(
+        &self,
+        request: ClearActiveFireRequest,
+    ) -> Result<Option<TriggerRecord>, TriggerError> {
+        let mut state = self.lock_state()?;
+        let key = TriggerRepositoryKey::new(&request.tenant_id, request.trigger_id);
+        let Some(record) = state.get_mut(&key) else {
+            return Ok(None);
+        };
+        if record.active_fire_slot != Some(request.fire_slot)
+            || record.active_run_ref != Some(request.run_id)
+        {
+            return Ok(None);
+        }
+        record.active_fire_slot = None;
+        record.active_run_ref = None;
+        Ok(Some(record.clone()))
+    }
 }
 
 impl InMemoryTriggerRepository {
@@ -897,6 +1003,25 @@ fn validate_lower_hex_identifier(label: &str, value: String) -> Result<String, T
     })
 }
 
+fn validate_inbound_content_ref(value: &str) -> Result<(), TriggerError> {
+    if value.is_empty() {
+        return Err(TriggerError::InvalidMaterialization {
+            reason: "inbound content ref must not be empty".to_string(),
+        });
+    }
+    if value.len() > 512 {
+        return Err(TriggerError::InvalidMaterialization {
+            reason: "inbound content ref must be at most 512 bytes".to_string(),
+        });
+    }
+    if value.chars().any(|ch| ch == '\0' || ch.is_control()) {
+        return Err(TriggerError::InvalidMaterialization {
+            reason: "inbound content ref must not contain control characters".to_string(),
+        });
+    }
+    Ok(())
+}
+
 fn derive_fire_digest(
     domain_label: &str,
     tenant_id: &TenantId,
@@ -937,6 +1062,14 @@ mod tests {
 
     fn tenant(value: &str) -> TenantId {
         TenantId::new(value).expect("valid tenant")
+    }
+
+    fn poison_in_memory_repo(repo: &InMemoryTriggerRepository) {
+        let poison_repo = repo.clone();
+        let _ = std::panic::catch_unwind(move || {
+            let _guard = poison_repo.state.lock().expect("lock before poison");
+            panic!("poison trigger repository mutex");
+        });
     }
 
     fn user(value: &str) -> UserId {
@@ -1143,6 +1276,73 @@ mod tests {
         assert_eq!(fire.identity.trigger_id, trigger_id);
         assert_eq!(fire.identity.fire_slot, record.next_run_at);
         assert_eq!(fire.prompt, record.prompt);
+    }
+
+    #[test]
+    fn trigger_inbound_content_ref_is_opaque_validated_materialization_output() {
+        let content_ref =
+            TriggerInboundContentRef::new("content:trigger-fire-01").expect("valid content ref");
+
+        assert_eq!(content_ref.as_str(), "content:trigger-fire-01");
+        assert_eq!(content_ref.as_ref(), "content:trigger-fire-01");
+        assert_eq!(content_ref.to_string(), "content:trigger-fire-01");
+        assert_eq!(
+            to_value(&content_ref).unwrap(),
+            json!("content:trigger-fire-01")
+        );
+        assert_eq!(
+            from_value::<TriggerInboundContentRef>(json!("content:trigger-fire-01")).unwrap(),
+            content_ref
+        );
+        assert!(TriggerInboundContentRef::new("x".repeat(512)).is_ok());
+
+        assert!(TriggerInboundContentRef::new("").is_err());
+        assert!(TriggerInboundContentRef::new("content:\ntrigger").is_err());
+        assert!(TriggerInboundContentRef::new("x".repeat(513)).is_err());
+
+        assert!(from_value::<TriggerInboundContentRef>(json!("")).is_err());
+        assert!(from_value::<TriggerInboundContentRef>(json!("content:\ntrigger")).is_err());
+        assert!(from_value::<TriggerInboundContentRef>(json!("x".repeat(513))).is_err());
+    }
+
+    #[tokio::test]
+    async fn prompt_materializer_port_receives_fire_and_returns_content_ref() {
+        struct RecordingMaterializer;
+
+        #[async_trait]
+        impl TriggerPromptMaterializer for RecordingMaterializer {
+            async fn materialize_prompt(
+                &self,
+                fire: TriggerFire,
+            ) -> Result<TriggerInboundContentRef, TriggerError> {
+                assert_eq!(fire.creator_user_id, user("user-a"));
+                assert_eq!(fire.agent_id, Some(AgentId::new("agent-a").unwrap()));
+                assert_eq!(fire.project_id, Some(ProjectId::new("project-a").unwrap()));
+                assert_eq!(fire.prompt, "summarize unread mail");
+                TriggerInboundContentRef::new(format!(
+                    "content:{}",
+                    fire.identity.external_event_id
+                ))
+            }
+        }
+
+        let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid");
+        let record = sample_record(trigger_id, tenant("tenant-a"), ts(1_704_067_200));
+        let fire = ScheduleTriggerSourceProvider
+            .evaluate(&record, ts(1_704_067_200))
+            .await
+            .expect("due")
+            .expect("fire");
+
+        let materialized = RecordingMaterializer
+            .materialize_prompt(fire.clone())
+            .await
+            .expect("materialized");
+
+        assert_eq!(
+            materialized.as_str(),
+            format!("content:{}", fire.identity.external_event_id)
+        );
     }
 
     #[tokio::test]
@@ -1428,11 +1628,7 @@ mod tests {
     #[tokio::test]
     async fn in_memory_repository_claim_due_fire_returns_backend_error_when_mutex_is_poisoned() {
         let repo = InMemoryTriggerRepository::default();
-        let poison_repo = repo.clone();
-        let _ = std::panic::catch_unwind(move || {
-            let _guard = poison_repo.state.lock().expect("lock before poison");
-            panic!("poison trigger repository mutex");
-        });
+        poison_in_memory_repo(&repo);
 
         let error = repo
             .claim_due_fire(ClaimDueFireRequest {
@@ -1450,11 +1646,7 @@ mod tests {
     async fn in_memory_repository_mark_fire_accepted_returns_backend_error_when_mutex_is_poisoned()
     {
         let repo = InMemoryTriggerRepository::default();
-        let poison_repo = repo.clone();
-        let _ = std::panic::catch_unwind(move || {
-            let _guard = poison_repo.state.lock().expect("lock before poison");
-            panic!("poison trigger repository mutex");
-        });
+        poison_in_memory_repo(&repo);
 
         let fire_slot = ts(1_704_067_200);
         let error = repo
@@ -1469,6 +1661,65 @@ mod tests {
             })
             .await
             .expect_err("poisoned mutex maps to backend through accepted-result API");
+        assert!(matches!(error, TriggerError::Backend { .. }));
+    }
+
+    #[tokio::test]
+    async fn in_memory_repository_mark_fire_replayed_returns_backend_error_when_mutex_is_poisoned()
+    {
+        let repo = InMemoryTriggerRepository::default();
+        poison_in_memory_repo(&repo);
+
+        let fire_slot = ts(1_704_067_200);
+        let error = repo
+            .mark_fire_replayed(FireReplayedRequest {
+                tenant_id: tenant("tenant-a"),
+                trigger_id: TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid"),
+                fire_slot,
+                original_run_id: TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5a")
+                    .expect("valid run"),
+                replayed_at: fire_slot,
+                next_run_at: ts(1_704_067_260),
+            })
+            .await
+            .expect_err("poisoned mutex maps to backend through replayed-result API");
+        assert!(matches!(error, TriggerError::Backend { .. }));
+    }
+
+    #[tokio::test]
+    async fn in_memory_repository_mark_fire_retryable_failed_returns_backend_error_when_mutex_is_poisoned()
+     {
+        let repo = InMemoryTriggerRepository::default();
+        poison_in_memory_repo(&repo);
+
+        let fire_slot = ts(1_704_067_200);
+        let error = repo
+            .mark_fire_retryable_failed(FireRetryableFailedRequest {
+                tenant_id: tenant("tenant-a"),
+                trigger_id: TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid"),
+                fire_slot,
+            })
+            .await
+            .expect_err("poisoned mutex maps to backend through retryable-failure API");
+        assert!(matches!(error, TriggerError::Backend { .. }));
+    }
+
+    #[tokio::test]
+    async fn in_memory_repository_mark_fire_permanently_failed_returns_backend_error_when_mutex_is_poisoned()
+     {
+        let repo = InMemoryTriggerRepository::default();
+        poison_in_memory_repo(&repo);
+
+        let fire_slot = ts(1_704_067_200);
+        let error = repo
+            .mark_fire_permanently_failed(FirePermanentFailedRequest {
+                tenant_id: tenant("tenant-a"),
+                trigger_id: TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid"),
+                fire_slot,
+                next_run_at: ts(1_704_067_260),
+            })
+            .await
+            .expect_err("poisoned mutex maps to backend through permanent-failure API");
         assert!(matches!(error, TriggerError::Backend { .. }));
     }
 }

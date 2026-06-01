@@ -234,8 +234,13 @@ export function useChat(threadId) {
         always: opts.always,
         credentialRef: opts.credentialRef,
       });
+      const shouldContinueProcessing =
+        resolution === "approved" || resolution === "credential_provided";
       setPendingGate(null);
-      setIsProcessing(true);
+      setIsProcessing(shouldContinueProcessing);
+      if (!shouldContinueProcessing) {
+        setActiveRun(null);
+      }
     },
     [pendingGate, threadId],
   );

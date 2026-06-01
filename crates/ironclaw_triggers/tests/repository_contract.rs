@@ -3,8 +3,9 @@
 use chrono::{TimeZone, Utc};
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, Timestamp, UserId};
 use ironclaw_triggers::{
-    InMemoryTriggerRepository, TriggerCompletionPolicy, TriggerError, TriggerId, TriggerRecord,
-    TriggerRepository, TriggerRunStatus, TriggerSchedule, TriggerSourceKind, TriggerState,
+    ClearActiveFireRequest, InMemoryTriggerRepository, TriggerCompletionPolicy, TriggerError,
+    TriggerId, TriggerRecord, TriggerRepository, TriggerRunStatus, TriggerSchedule,
+    TriggerSourceKind, TriggerState,
 };
 use ironclaw_turns::TurnRunId;
 
@@ -1346,6 +1347,102 @@ mod fire_claim_contract {
         assert_error_contains(error, "must be after the claimed fire slot");
     }
 
+    async fn assert_fire_clear_contract(repo: &impl TriggerRepository) {
+        let trigger_id = TriggerId::parse("01J00000000000000000000016").expect("ulid");
+        let tenant_id = tenant("tenant-clear");
+        let fire_slot = ts(1_704_067_200);
+        let run_id = TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f66").expect("valid run");
+        let mut active_record = sample_record(trigger_id, tenant_id.clone(), fire_slot);
+        active_record.active_fire_slot = Some(fire_slot);
+        active_record.active_run_ref = Some(run_id);
+        repo.upsert_trigger(active_record.clone())
+            .await
+            .expect("insert active record");
+
+        let wrong_run_clear = repo
+            .clear_active_fire(ClearActiveFireRequest {
+                tenant_id: tenant_id.clone(),
+                trigger_id,
+                fire_slot,
+                run_id: TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f67")
+                    .expect("valid run"),
+            })
+            .await
+            .expect("clear with wrong run ref");
+        assert!(
+            wrong_run_clear.is_none(),
+            "mismatched run ref must not clear"
+        );
+        let reloaded = repo
+            .get_trigger(tenant_id.clone(), trigger_id)
+            .await
+            .expect("reload mismatched clear")
+            .expect("record present");
+        assert_eq!(reloaded, active_record);
+
+        let wrong_slot_clear = repo
+            .clear_active_fire(ClearActiveFireRequest {
+                tenant_id: tenant_id.clone(),
+                trigger_id,
+                fire_slot: fire_slot + chrono::Duration::minutes(1),
+                run_id,
+            })
+            .await
+            .expect("clear with wrong fire slot");
+        assert!(
+            wrong_slot_clear.is_none(),
+            "mismatched fire slot must not clear"
+        );
+        let reloaded = repo
+            .get_trigger(tenant_id.clone(), trigger_id)
+            .await
+            .expect("reload wrong-slot clear")
+            .expect("record present");
+        assert_eq!(reloaded, active_record);
+
+        let wrong_tenant_clear = repo
+            .clear_active_fire(ClearActiveFireRequest {
+                tenant_id: tenant("tenant-clear-other"),
+                trigger_id,
+                fire_slot,
+                run_id,
+            })
+            .await
+            .expect("clear with wrong tenant");
+        assert!(
+            wrong_tenant_clear.is_none(),
+            "mismatched tenant must not clear"
+        );
+        let reloaded = repo
+            .get_trigger(tenant_id.clone(), trigger_id)
+            .await
+            .expect("reload wrong-tenant clear")
+            .expect("record present");
+        assert_eq!(reloaded, active_record);
+
+        let cleared = repo
+            .clear_active_fire(ClearActiveFireRequest {
+                tenant_id: tenant_id.clone(),
+                trigger_id,
+                fire_slot,
+                run_id,
+            })
+            .await
+            .expect("clear active fire")
+            .expect("active fire should clear");
+        let mut expected = active_record;
+        expected.active_fire_slot = None;
+        expected.active_run_ref = None;
+        assert_eq!(cleared, expected);
+
+        let persisted = repo
+            .get_trigger(tenant_id, trigger_id)
+            .await
+            .expect("reload cleared record")
+            .expect("record present");
+        assert_eq!(persisted, expected);
+    }
+
     async fn assert_fire_claim_exclusions_and_active_gate_contract(repo: &impl TriggerRepository) {
         let fire_slot = ts(1_704_067_200);
         let tenant_id = tenant("tenant-a");
@@ -1670,82 +1767,13 @@ mod fire_claim_contract {
         assert_eq!(persisted.active_run_ref, None);
     }
 
-    trait ClaimDueFireOutcomeAssertions {
-        fn matches_not_found(&self) -> bool;
-        fn matches_not_due(&self) -> bool;
-        fn matches_already_active(
-            &self,
-            active_fire_slot: Option<Timestamp>,
-            active_run_ref: Option<TurnRunId>,
-        ) -> bool;
-    }
-
-    impl ClaimDueFireOutcomeAssertions for ClaimDueFireOutcome {
-        fn matches_not_found(&self) -> bool {
-            matches!(self, Self::NotFound)
-        }
-
-        fn matches_not_due(&self) -> bool {
-            matches!(self, Self::NotDue { .. })
-        }
-
-        fn matches_already_active(
-            &self,
-            active_fire_slot: Option<Timestamp>,
-            active_run_ref: Option<TurnRunId>,
-        ) -> bool {
-            matches!(
-                self,
-                Self::AlreadyActive {
-                    active_fire_slot: actual_fire_slot,
-                    active_run_ref: actual_run_ref,
-                } if *actual_fire_slot == active_fire_slot && *actual_run_ref == active_run_ref
-            )
-        }
-    }
-
-    async fn assert_durable_fire_claim_contract(repo: &impl TriggerRepository) {
-        assert_fire_claim_and_update_contract(repo).await;
-        assert_fire_claim_exclusions_and_active_gate_contract(repo).await;
-        assert_fire_result_rejects_invalid_next_run_at(repo).await;
-    }
-
-    fn assert_error_contains(error: TriggerError, expected: &str) {
-        assert!(
-            error.to_string().contains(expected),
-            "expected error to contain {expected:?}, got {error}"
-        );
-    }
-
-    #[tokio::test]
-    async fn in_memory_repository_fire_claim_contract() {
-        let repo = InMemoryTriggerRepository::default();
-        assert_fire_claim_and_update_contract(&repo).await;
-        assert_fire_claim_exclusions_and_active_gate_contract(&repo).await;
-        assert_fire_result_rejects_invalid_next_run_at(&repo).await;
-    }
-
-    #[cfg(feature = "libsql")]
-    #[tokio::test]
-    async fn libsql_repository_fire_claim_contract() {
-        let (_dir, repo) = build_libsql_repo().await;
-        assert_durable_fire_claim_contract(&repo).await;
-    }
-
-    #[cfg(feature = "libsql")]
-    #[tokio::test]
-    async fn libsql_repository_fire_claim_is_atomic() {
-        let (_dir, repo) = build_libsql_repo().await;
-        assert_durable_claim_is_atomic(std::sync::Arc::new(repo)).await;
-    }
-
-    #[cfg(feature = "libsql")]
-    #[tokio::test]
-    async fn libsql_repository_mark_fire_accepted_is_idempotent_under_concurrency() {
-        let (_dir, repo) = build_libsql_repo().await;
-        let repo = std::sync::Arc::new(repo);
-        let trigger_id = TriggerId::parse("01J00000000000000000000014").expect("ulid");
-        let tenant_id = tenant("tenant-accepted-concurrent");
+    async fn assert_mark_fire_accepted_is_idempotent_under_concurrency<R>(
+        repo: std::sync::Arc<R>,
+        trigger_id: TriggerId,
+        tenant_id: TenantId,
+    ) where
+        R: TriggerRepository + 'static,
+    {
         let fire_slot = ts(1_704_067_200);
         let accepted_at = ts(1_704_067_205);
         let record = sample_record(trigger_id, tenant_id.clone(), fire_slot);
@@ -1811,13 +1839,13 @@ mod fire_claim_contract {
         assert_eq!(persisted, first);
     }
 
-    #[cfg(feature = "libsql")]
-    #[tokio::test]
-    async fn libsql_repository_mark_fire_replayed_is_idempotent_under_concurrency() {
-        let (_dir, repo) = build_libsql_repo().await;
-        let repo = std::sync::Arc::new(repo);
-        let trigger_id = TriggerId::parse("01J00000000000000000000015").expect("ulid");
-        let tenant_id = tenant("tenant-replayed-concurrent");
+    async fn assert_mark_fire_replayed_is_idempotent_under_concurrency<R>(
+        repo: std::sync::Arc<R>,
+        trigger_id: TriggerId,
+        tenant_id: TenantId,
+    ) where
+        R: TriggerRepository + 'static,
+    {
         let fire_slot = ts(1_704_067_200);
         let replayed_at = ts(1_704_067_205);
         let record = sample_record(trigger_id, tenant_id.clone(), fire_slot);
@@ -1884,6 +1912,101 @@ mod fire_claim_contract {
         assert_eq!(persisted, first);
     }
 
+    trait ClaimDueFireOutcomeAssertions {
+        fn matches_not_found(&self) -> bool;
+        fn matches_not_due(&self) -> bool;
+        fn matches_already_active(
+            &self,
+            active_fire_slot: Option<Timestamp>,
+            active_run_ref: Option<TurnRunId>,
+        ) -> bool;
+    }
+
+    impl ClaimDueFireOutcomeAssertions for ClaimDueFireOutcome {
+        fn matches_not_found(&self) -> bool {
+            matches!(self, Self::NotFound)
+        }
+
+        fn matches_not_due(&self) -> bool {
+            matches!(self, Self::NotDue { .. })
+        }
+
+        fn matches_already_active(
+            &self,
+            active_fire_slot: Option<Timestamp>,
+            active_run_ref: Option<TurnRunId>,
+        ) -> bool {
+            matches!(
+                self,
+                Self::AlreadyActive {
+                    active_fire_slot: actual_fire_slot,
+                    active_run_ref: actual_run_ref,
+                } if *actual_fire_slot == active_fire_slot && *actual_run_ref == active_run_ref
+            )
+        }
+    }
+
+    async fn assert_durable_fire_claim_contract(repo: &impl TriggerRepository) {
+        assert_fire_claim_and_update_contract(repo).await;
+        assert_fire_claim_exclusions_and_active_gate_contract(repo).await;
+        assert_fire_result_rejects_invalid_next_run_at(repo).await;
+        assert_fire_clear_contract(repo).await;
+    }
+
+    fn assert_error_contains(error: TriggerError, expected: &str) {
+        assert!(
+            error.to_string().contains(expected),
+            "expected error to contain {expected:?}, got {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn in_memory_repository_fire_claim_contract() {
+        let repo = InMemoryTriggerRepository::default();
+        assert_fire_claim_and_update_contract(&repo).await;
+        assert_fire_claim_exclusions_and_active_gate_contract(&repo).await;
+        assert_fire_result_rejects_invalid_next_run_at(&repo).await;
+        assert_fire_clear_contract(&repo).await;
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn libsql_repository_fire_claim_contract() {
+        let (_dir, repo) = build_libsql_repo().await;
+        assert_durable_fire_claim_contract(&repo).await;
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn libsql_repository_fire_claim_is_atomic() {
+        let (_dir, repo) = build_libsql_repo().await;
+        assert_durable_claim_is_atomic(std::sync::Arc::new(repo)).await;
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn libsql_repository_mark_fire_accepted_is_idempotent_under_concurrency() {
+        let (_dir, repo) = build_libsql_repo().await;
+        assert_mark_fire_accepted_is_idempotent_under_concurrency(
+            std::sync::Arc::new(repo),
+            TriggerId::parse("01J00000000000000000000014").expect("ulid"),
+            tenant("tenant-accepted-concurrent"),
+        )
+        .await;
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn libsql_repository_mark_fire_replayed_is_idempotent_under_concurrency() {
+        let (_dir, repo) = build_libsql_repo().await;
+        assert_mark_fire_replayed_is_idempotent_under_concurrency(
+            std::sync::Arc::new(repo),
+            TriggerId::parse("01J00000000000000000000015").expect("ulid"),
+            tenant("tenant-replayed-concurrent"),
+        )
+        .await;
+    }
+
     #[cfg(feature = "postgres")]
     #[tokio::test]
     async fn postgres_repository_fire_claim_contract() {
@@ -1905,6 +2028,40 @@ mod fire_claim_contract {
         let repo = PostgresTriggerRepository::new(pool.clone());
         repo.run_migrations().await.expect("run migrations");
         assert_durable_claim_is_atomic(std::sync::Arc::new(repo)).await;
+        clear_postgres_triggers(&pool).await;
+    }
+
+    #[cfg(feature = "postgres")]
+    #[tokio::test]
+    async fn postgres_repository_mark_fire_accepted_is_idempotent_under_concurrency() {
+        let Some((_container, pool)) = postgres_pool_or_skip().await else {
+            return;
+        };
+        let repo = PostgresTriggerRepository::new(pool.clone());
+        repo.run_migrations().await.expect("run migrations");
+        assert_mark_fire_accepted_is_idempotent_under_concurrency(
+            std::sync::Arc::new(repo),
+            TriggerId::parse("01J00000000000000000000016").expect("ulid"),
+            tenant("tenant-postgres-accepted-concurrent"),
+        )
+        .await;
+        clear_postgres_triggers(&pool).await;
+    }
+
+    #[cfg(feature = "postgres")]
+    #[tokio::test]
+    async fn postgres_repository_mark_fire_replayed_is_idempotent_under_concurrency() {
+        let Some((_container, pool)) = postgres_pool_or_skip().await else {
+            return;
+        };
+        let repo = PostgresTriggerRepository::new(pool.clone());
+        repo.run_migrations().await.expect("run migrations");
+        assert_mark_fire_replayed_is_idempotent_under_concurrency(
+            std::sync::Arc::new(repo),
+            TriggerId::parse("01J00000000000000000000017").expect("ulid"),
+            tenant("tenant-postgres-replayed-concurrent"),
+        )
+        .await;
         clear_postgres_triggers(&pool).await;
     }
 }

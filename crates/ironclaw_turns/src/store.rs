@@ -7,10 +7,11 @@ use crate::{
     AcceptedMessageRef, AdmissionRejection, CancelRunRequest, CancelRunResponse, GateRef,
     GetRunStateRequest, IdempotencyKey, LoopCheckpointRecord, ReplyTargetBindingRef,
     ResumeTurnRequest, ResumeTurnResponse, RunProfileResolver, SourceBindingRef,
-    SubmitChildRunRequest, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy, TurnActor,
-    TurnAdmissionPolicy, TurnAdmissionReservationRecord, TurnCapacityResource, TurnCheckpointId,
-    TurnError, TurnErrorCategory, TurnId, TurnLeaseToken, TurnLifecycleEvent, TurnRunId,
-    TurnRunProfile, TurnRunState, TurnRunnerId, TurnScope, TurnStatus, TurnTimestamp,
+    SubmitChildRunRequest, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy,
+    TurnActiveRunRefState, TurnActor, TurnAdmissionPolicy, TurnAdmissionReservationRecord,
+    TurnCapacityResource, TurnCheckpointId, TurnError, TurnErrorCategory, TurnId, TurnLeaseToken,
+    TurnLifecycleEvent, TurnRunId, TurnRunProfile, TurnRunState, TurnRunnerId, TurnScope,
+    TurnStatus, TurnTimestamp,
     events::EventCursor,
     run_profile::{LoopCheckpointKind, LoopCheckpointStateRef, LoopModelRouteSnapshot},
 };
@@ -34,7 +35,38 @@ pub trait TurnStateStore: Send + Sync {
         request: CancelRunRequest,
     ) -> Result<CancelRunResponse, TurnError>;
 
+    /// Return the run state when the run exists in the supplied exact scope.
+    ///
+    /// Missing runs and runs outside the supplied scope must both return
+    /// [`TurnError::ScopeNotFound`]. This keeps scoped lookups non-enumerating
+    /// and gives higher-level helpers one canonical missing-run shape.
     async fn get_run_state(&self, request: GetRunStateRequest) -> Result<TurnRunState, TurnError>;
+}
+
+/// Classify an active run reference through the shared turn-state lookup.
+///
+/// `None` and missing records both map to [`TurnActiveRunRefState::Missing`];
+/// only looked-up terminal records map to [`TurnActiveRunRefState::Terminal`].
+pub async fn active_run_ref_state<S>(
+    store: &S,
+    scope: TurnScope,
+    active_run_ref: Option<TurnRunId>,
+) -> Result<TurnActiveRunRefState, TurnError>
+where
+    S: TurnStateStore + ?Sized,
+{
+    let Some(run_id) = active_run_ref else {
+        return Ok(TurnActiveRunRefState::Missing);
+    };
+    match store
+        .get_run_state(GetRunStateRequest { scope, run_id })
+        .await
+    {
+        Ok(state) if state.status.is_terminal() => Ok(TurnActiveRunRefState::Terminal),
+        Ok(_) => Ok(TurnActiveRunRefState::Nonterminal),
+        Err(TurnError::ScopeNotFound) => Ok(TurnActiveRunRefState::Missing),
+        Err(error) => Err(error),
+    }
 }
 
 #[async_trait]

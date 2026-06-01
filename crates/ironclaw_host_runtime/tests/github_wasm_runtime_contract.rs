@@ -185,89 +185,6 @@ async fn host_runtime_services_maps_github_wasm_input_errors_to_invalid_input() 
 }
 
 #[tokio::test]
-async fn host_runtime_services_maps_github_wasm_http_errors_to_failure_kinds() {
-    let cases = [
-        (
-            RecordingNetworkHttpEgress::with_status(
-                403,
-                br#"{"message":"forbidden ghp_fake_fixture_token"}"#.to_vec(),
-            ),
-            RuntimeFailureKind::Backend,
-        ),
-        (
-            RecordingNetworkHttpEgress::with_error(NetworkHttpError::ResponseBodyLimit {
-                limit: 1024,
-                request_bytes: 12,
-                response_bytes: 2048,
-            }),
-            RuntimeFailureKind::OutputTooLarge,
-        ),
-        (
-            RecordingNetworkHttpEgress::with_error(NetworkHttpError::PolicyDenied {
-                reason: "api.github.com denied".to_string(),
-                request_bytes: 0,
-                response_bytes: 0,
-            }),
-            RuntimeFailureKind::Network,
-        ),
-    ];
-
-    for (network, expected_kind) in cases {
-        let capability_id = CapabilityId::new("github.search_issues").unwrap();
-        let scope = sample_scope(InvocationId::new());
-        let secret_store = Arc::new(InMemorySecretStore::new());
-        let slot_handle = SecretHandle::new("github_runtime_token").unwrap();
-        let account_access_secret = SecretHandle::new("github_manual_access").unwrap();
-        let services = HostRuntimeServices::new(
-            Arc::new(registry_with_github_package()),
-            Arc::new(filesystem_with_github_package()),
-            Arc::new(governor_with_default_limit(sample_account())),
-            Arc::new(ObligatingAuthorizer::new(vec![
-                Obligation::ApplyNetworkPolicy {
-                    policy: github_policy(),
-                },
-                Obligation::InjectCredentialAccountOnce {
-                    handle: slot_handle,
-                    provider: RuntimeCredentialAccountProviderId::new("github").unwrap(),
-                    requester_extension: ExtensionId::new("github").unwrap(),
-                },
-            ])),
-            ProcessServices::in_memory(),
-            CapabilitySurfaceVersion::new("surface-v1").unwrap(),
-        )
-        .with_secret_store(Arc::clone(&secret_store))
-        .with_runtime_credential_account_resolver(Arc::new(FixedRuntimeCredentialAccountResolver {
-            result: Ok(account_access_secret.clone()),
-        }))
-        .with_trust_policy(Arc::new(github_first_party_trust_policy()))
-        .try_with_host_http_egress(network.clone())
-        .unwrap()
-        .try_with_wasm_runtime(WitToolRuntimeConfig::default(), WitToolHost::deny_all())
-        .unwrap();
-        secret_store
-            .put(
-                scope.clone(),
-                account_access_secret,
-                SecretMaterial::from("ghp_fake_fixture_token"),
-            )
-            .await
-            .unwrap();
-
-        let outcome = services
-            .host_runtime_for_local_testing()
-            .invoke_capability(wasm_runtime_request_for_scope(
-                capability_id,
-                scope,
-                json!({"query": "repo:nearai/ironclaw is:issue", "limit": 1}),
-            ))
-            .await
-            .unwrap();
-
-        assert_failed_outcome(outcome, expected_kind);
-    }
-}
-
-#[tokio::test]
 async fn host_runtime_services_missing_github_runtime_secret_blocks_on_auth() {
     let capability_id = CapabilityId::new("github.search_issues").unwrap();
     let scope = sample_scope(InvocationId::new());
@@ -434,6 +351,342 @@ async fn bundled_github_wasm_builds_query_from_structured_search_fields() {
 }
 
 #[tokio::test]
+async fn bundled_github_wasm_replies_to_pull_request_comment_under_pr_path() {
+    let http = Arc::new(RecordingWasmHostHttp::ok(WasmHttpResponse {
+        status: 201,
+        headers_json: "{}".to_string(),
+        body: br##"{"id":45,"body":"Reply from Reborn"}"##.to_vec(),
+    }));
+
+    let reply = execute_bundled_github_wasm(
+        "github.reply_pull_request_comment",
+        json!({
+            "owner": "nearai",
+            "repo": "ironclaw",
+            "pr_number": 4280,
+            "comment_id": 123456789_u64,
+            "body": "Reply from Reborn",
+        }),
+        Arc::clone(&http),
+    );
+
+    assert_eq!(reply.error, None);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(reply.output_json.as_deref().unwrap()).unwrap()["body"],
+        json!("Reply from Reborn")
+    );
+    assert_single_wasm_request(
+        &http,
+        "POST",
+        "https://api.github.com/repos/nearai/ironclaw/pulls/4280/comments/123456789/replies",
+        Some(br#"{"body":"Reply from Reborn"}"#),
+    );
+}
+
+#[tokio::test]
+async fn bundled_github_wasm_returns_json_for_empty_success_responses() {
+    let http = Arc::new(RecordingWasmHostHttp::ok(WasmHttpResponse {
+        status: 204,
+        headers_json: "{}".to_string(),
+        body: Vec::new(),
+    }));
+
+    let dispatch = execute_bundled_github_wasm(
+        "github.trigger_workflow",
+        json!({
+            "owner": "nearai",
+            "repo": "ironclaw",
+            "workflow_id": "ci.yml",
+            "ref": "main",
+            "inputs": {"suite": "smoke"}
+        }),
+        Arc::clone(&http),
+    );
+
+    assert_eq!(dispatch.error, None);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(dispatch.output_json.as_deref().unwrap())
+            .unwrap(),
+        json!({"status": 204})
+    );
+    assert_single_wasm_request(
+        &http,
+        "POST",
+        "https://api.github.com/repos/nearai/ironclaw/actions/workflows/ci.yml/dispatches",
+        Some(br#"{"inputs":{"suite":"smoke"},"ref":"main"}"#),
+    );
+}
+
+#[tokio::test]
+async fn bundled_github_wasm_create_branch_rejects_source_ref_without_sha() {
+    let http = Arc::new(RecordingWasmHostHttp::ok(WasmHttpResponse {
+        status: 200,
+        headers_json: "{}".to_string(),
+        body: br#"{"object":{"type":"commit"}}"#.to_vec(),
+    }));
+
+    let create = execute_bundled_github_wasm(
+        "github.create_branch",
+        json!({
+            "owner": "nearai",
+            "repo": "ironclaw",
+            "branch": "feature/reborn-github",
+            "from_ref": "main"
+        }),
+        Arc::clone(&http),
+    );
+
+    assert_eq!(
+        structured_wasm_error_code(&create).as_deref(),
+        Some("Source ref response missing object.sha")
+    );
+    let requests = http.requests().unwrap();
+    assert_eq!(
+        requests.len(),
+        1,
+        "malformed source ref response must not create the branch ref"
+    );
+    assert_eq!(
+        requests[0].url,
+        "https://api.github.com/repos/nearai/ironclaw/git/ref/heads/main"
+    );
+}
+
+#[tokio::test]
+async fn bundled_github_wasm_create_branch_propagates_missing_source_ref() {
+    let http = Arc::new(RecordingWasmHostHttp::ok(WasmHttpResponse {
+        status: 404,
+        headers_json: "{}".to_string(),
+        body: br#"{"message":"Not Found"}"#.to_vec(),
+    }));
+
+    let create = execute_bundled_github_wasm(
+        "github.create_branch",
+        json!({
+            "owner": "nearai",
+            "repo": "ironclaw",
+            "branch": "feature/reborn-github",
+            "from_ref": "missing-branch"
+        }),
+        Arc::clone(&http),
+    );
+
+    assert_eq!(
+        structured_wasm_error_code(&create).as_deref(),
+        Some("github_api_error_status_404")
+    );
+    let requests = http.requests().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].url,
+        "https://api.github.com/repos/nearai/ironclaw/git/ref/heads/missing-branch"
+    );
+}
+
+#[tokio::test]
+async fn bundled_github_wasm_rejects_raw_sha_as_create_branch_source_ref() {
+    let http = Arc::new(RecordingWasmHostHttp::ok(WasmHttpResponse {
+        status: 200,
+        headers_json: "{}".to_string(),
+        body: br#"{"object":{"sha":"abc"}}"#.to_vec(),
+    }));
+
+    let create = execute_bundled_github_wasm(
+        "github.create_branch",
+        json!({
+            "owner": "nearai",
+            "repo": "ironclaw",
+            "branch": "feature/reborn-github",
+            "from_ref": "0123456789abcdef0123456789abcdef01234567"
+        }),
+        Arc::clone(&http),
+    );
+
+    assert_eq!(
+        structured_wasm_error_code(&create).as_deref(),
+        Some("Unsupported from_ref: use a branch or tag ref, not a raw commit SHA")
+    );
+    assert!(
+        http.requests().unwrap().is_empty(),
+        "raw SHA validation should fail before GitHub egress"
+    );
+}
+
+#[tokio::test]
+async fn bundled_github_wasm_builds_create_repo_fork_and_release_requests() {
+    let create_repo_http = Arc::new(RecordingWasmHostHttp::ok(WasmHttpResponse {
+        status: 201,
+        headers_json: "{}".to_string(),
+        body: br#"{"name":"reborn-fixture"}"#.to_vec(),
+    }));
+    let create_repo = execute_bundled_github_wasm(
+        "github.create_repo",
+        json!({
+            "name": "reborn-fixture",
+            "description": "fixture repo",
+            "private": true,
+            "auto_init": true
+        }),
+        Arc::clone(&create_repo_http),
+    );
+    assert_eq!(create_repo.error, None);
+    assert_single_wasm_request_json_body(
+        &create_repo_http,
+        "POST",
+        "https://api.github.com/user/repos",
+        json!({
+            "name": "reborn-fixture",
+            "description": "fixture repo",
+            "private": true,
+            "auto_init": true
+        }),
+    );
+
+    let fork_http = Arc::new(RecordingWasmHostHttp::ok(WasmHttpResponse {
+        status: 202,
+        headers_json: "{}".to_string(),
+        body: br#"{"name":"ironclaw-fork"}"#.to_vec(),
+    }));
+    let fork = execute_bundled_github_wasm(
+        "github.fork_repo",
+        json!({
+            "owner": "nearai",
+            "repo": "ironclaw",
+            "organization": "nearai-labs",
+            "name": "ironclaw-fork",
+            "default_branch_only": true
+        }),
+        Arc::clone(&fork_http),
+    );
+    assert_eq!(fork.error, None);
+    assert_single_wasm_request_json_body(
+        &fork_http,
+        "POST",
+        "https://api.github.com/repos/nearai/ironclaw/forks",
+        json!({
+            "organization": "nearai-labs",
+            "name": "ironclaw-fork",
+            "default_branch_only": true
+        }),
+    );
+
+    let release_http = Arc::new(RecordingWasmHostHttp::ok(WasmHttpResponse {
+        status: 201,
+        headers_json: "{}".to_string(),
+        body: br#"{"tag_name":"v1.2.3"}"#.to_vec(),
+    }));
+    let release = execute_bundled_github_wasm(
+        "github.create_release",
+        json!({
+            "owner": "nearai",
+            "repo": "ironclaw",
+            "tag_name": "v1.2.3",
+            "target_commitish": "main",
+            "name": "v1.2.3",
+            "body": "release notes",
+            "draft": true,
+            "prerelease": false,
+            "generate_release_notes": true
+        }),
+        Arc::clone(&release_http),
+    );
+    assert_eq!(release.error, None);
+    assert_single_wasm_request_json_body(
+        &release_http,
+        "POST",
+        "https://api.github.com/repos/nearai/ironclaw/releases",
+        json!({
+            "tag_name": "v1.2.3",
+            "target_commitish": "main",
+            "name": "v1.2.3",
+            "body": "release notes",
+            "draft": true,
+            "prerelease": false,
+            "generate_release_notes": true
+        }),
+    );
+}
+
+#[tokio::test]
+async fn bundled_github_wasm_rejects_relative_file_path_segments_before_egress() {
+    let http = Arc::new(RecordingWasmHostHttp::ok(WasmHttpResponse {
+        status: 200,
+        headers_json: "{}".to_string(),
+        body: br#"{"content":"Zm9v"}"#.to_vec(),
+    }));
+    let file = execute_bundled_github_wasm(
+        "github.get_file_content",
+        json!({
+            "owner": "nearai",
+            "repo": "ironclaw",
+            "path": "src/./main.rs"
+        }),
+        Arc::clone(&http),
+    );
+
+    assert_eq!(
+        structured_wasm_error_code(&file).as_deref(),
+        Some("Invalid path: relative path segments not allowed")
+    );
+    assert!(
+        http.requests().unwrap().is_empty(),
+        "relative path segment validation should fail before GitHub egress"
+    );
+}
+
+#[tokio::test]
+async fn bundled_github_wasm_rejects_invalid_review_event_and_merge_method() {
+    let review_http = Arc::new(RecordingWasmHostHttp::ok(WasmHttpResponse {
+        status: 200,
+        headers_json: "{}".to_string(),
+        body: br#"{"id":1}"#.to_vec(),
+    }));
+    let review = execute_bundled_github_wasm(
+        "github.create_pr_review",
+        json!({
+            "owner": "nearai",
+            "repo": "ironclaw",
+            "pr_number": 4280,
+            "body": "review body",
+            "event": "approve"
+        }),
+        Arc::clone(&review_http),
+    );
+    assert_eq!(
+        structured_wasm_error_code(&review).as_deref(),
+        Some("invalid_parameters")
+    );
+    assert!(
+        review_http.requests().unwrap().is_empty(),
+        "invalid review event should fail before GitHub egress"
+    );
+
+    let merge_http = Arc::new(RecordingWasmHostHttp::ok(WasmHttpResponse {
+        status: 200,
+        headers_json: "{}".to_string(),
+        body: br#"{"merged":true}"#.to_vec(),
+    }));
+    let merge = execute_bundled_github_wasm(
+        "github.merge_pull_request",
+        json!({
+            "owner": "nearai",
+            "repo": "ironclaw",
+            "pr_number": 4280,
+            "merge_method": "fast-forward"
+        }),
+        Arc::clone(&merge_http),
+    );
+    assert_eq!(
+        structured_wasm_error_code(&merge).as_deref(),
+        Some("invalid_parameters")
+    );
+    assert!(
+        merge_http.requests().unwrap().is_empty(),
+        "invalid merge method should fail before GitHub egress"
+    );
+}
+
+#[tokio::test]
 async fn bundled_github_wasm_sanitizes_host_http_and_api_failures() {
     let cases = [
         (
@@ -450,19 +703,19 @@ async fn bundled_github_wasm_sanitizes_host_http_and_api_failures() {
         ),
         (
             RecordingWasmHostHttp::err(WasmHostError::Failed("redirect blocked".to_string())),
-            "host_http_redirect_denied",
+            "github_api_redirect_denied",
         ),
         (
             RecordingWasmHostHttp::err(WasmHostError::FailedAfterRequestSent(
                 "response body too large".to_string(),
             )),
-            "host_http_body_limit",
+            "github_api_body_limit",
         ),
         (
             RecordingWasmHostHttp::err(WasmHostError::Denied(
                 "host not allowed: api.evil.test".to_string(),
             )),
-            "host_http_network_denied",
+            "github_api_egress_denied",
         ),
         (
             RecordingWasmHostHttp::ok(WasmHttpResponse {
@@ -470,7 +723,7 @@ async fn bundled_github_wasm_sanitizes_host_http_and_api_failures() {
                 headers_json: "{}".to_string(),
                 body: br#"{"message":"bad credentials ghp_fake_fixture_token"}"#.to_vec(),
             }),
-            "host_http_forbidden",
+            "github_api_error_status_403",
         ),
         (
             RecordingWasmHostHttp::ok(WasmHttpResponse {
@@ -478,17 +731,20 @@ async fn bundled_github_wasm_sanitizes_host_http_and_api_failures() {
                 headers_json: "{}".to_string(),
                 body: vec![0xff, 0xfe],
             }),
-            "host_http_invalid_utf8",
+            "github_api_invalid_utf8",
         ),
     ];
 
-    for (http, expected_code) in cases {
+    for (http, expected_error) in cases {
         let execution = execute_bundled_github_wasm(
             "github.search_issues",
             json!({"query": "repo:nearai/ironclaw is:issue", "limit": 1}),
             Arc::new(http),
         );
-        assert_structured_wasm_error_code(&execution, expected_code);
+        assert_eq!(
+            structured_wasm_error_code(&execution).as_deref(),
+            Some(expected_error)
+        );
         assert!(
             !format!("{execution:?}").contains("ghp_fake_fixture_token"),
             "guest-visible failure must not leak credential material"
@@ -512,28 +768,35 @@ async fn bundled_github_wasm_leaves_success_json_for_host_output_decode() {
     assert_eq!(execution.error, None);
 }
 
+fn assert_failed_outcome(outcome: RuntimeCapabilityOutcome, expected_kind: RuntimeFailureKind) {
+    match outcome {
+        RuntimeCapabilityOutcome::Failed(failure) => assert_eq!(failure.kind, expected_kind),
+        other => panic!("expected failed outcome {expected_kind:?}, got {other:?}"),
+    }
+}
+
+fn structured_wasm_error_code(execution: &WitToolExecution) -> Option<String> {
+    let error = execution.error.as_deref()?;
+    let parsed: serde_json::Value =
+        serde_json::from_str(error).expect("WASM guest errors are structured JSON");
+    assert!(
+        parsed["kind"].as_str().is_some_and(|kind| !kind.is_empty()),
+        "structured WASM guest error must include a non-empty kind"
+    );
+    parsed["code"].as_str().map(str::to_string)
+}
+
 #[derive(Debug, Clone)]
 struct RecordingNetworkHttpEgress {
     requests: Arc<std::sync::Mutex<Vec<NetworkHttpRequest>>>,
-    response: Result<(u16, Vec<u8>), NetworkHttpError>,
+    response_body: Vec<u8>,
 }
 
 impl RecordingNetworkHttpEgress {
     fn with_body(response_body: Vec<u8>) -> Self {
-        Self::with_status(200, response_body)
-    }
-
-    fn with_status(status: u16, response_body: Vec<u8>) -> Self {
         Self {
             requests: Arc::new(std::sync::Mutex::new(Vec::new())),
-            response: Ok((status, response_body)),
-        }
-    }
-
-    fn with_error(error: NetworkHttpError) -> Self {
-        Self {
-            requests: Arc::new(std::sync::Mutex::new(Vec::new())),
-            response: Err(error),
+            response_body,
         }
     }
 
@@ -550,36 +813,17 @@ impl NetworkHttpEgress for RecordingNetworkHttpEgress {
     ) -> Result<NetworkHttpResponse, NetworkHttpError> {
         let request_bytes = request.body.len() as u64;
         self.requests.lock().unwrap().push(request);
-        let (status, response_body) = self.response.clone()?;
         Ok(NetworkHttpResponse {
-            status,
+            status: 200,
             headers: Vec::new(),
-            body: response_body.clone(),
+            body: self.response_body.clone(),
             usage: NetworkUsage {
                 request_bytes,
-                response_bytes: response_body.len() as u64,
+                response_bytes: self.response_body.len() as u64,
                 resolved_ip: None,
             },
         })
     }
-}
-
-fn assert_failed_outcome(outcome: RuntimeCapabilityOutcome, expected_kind: RuntimeFailureKind) {
-    match outcome {
-        RuntimeCapabilityOutcome::Failed(failure) => assert_eq!(failure.kind, expected_kind),
-        other => panic!("expected failed outcome {expected_kind:?}, got {other:?}"),
-    }
-}
-
-fn assert_structured_wasm_error_code(execution: &WitToolExecution, expected_code: &str) {
-    let error = execution.error.as_deref().expect("expected WASM error");
-    let parsed: serde_json::Value =
-        serde_json::from_str(error).expect("WASM guest errors are structured JSON");
-    assert_eq!(parsed["code"], json!(expected_code));
-    assert!(
-        parsed["kind"].as_str().is_some_and(|kind| !kind.is_empty()),
-        "structured WASM guest error must include a non-empty kind"
-    );
 }
 
 struct ObligatingAuthorizer {
@@ -813,6 +1057,28 @@ fn assert_single_wasm_request(
     assert_eq!(request.url, expected_url);
     assert_eq!(request.timeout_ms, Some(10_000));
     assert_eq!(request.body.as_deref(), expected_body);
+
+    let headers: serde_json::Value = serde_json::from_str(&request.headers_json).unwrap();
+    assert_eq!(headers["User-Agent"], "IronClaw-GitHub-Reborn-WASM");
+    assert_eq!(headers["X-GitHub-Api-Version"], "2026-03-10");
+}
+
+fn assert_single_wasm_request_json_body(
+    http: &RecordingWasmHostHttp,
+    expected_method: &str,
+    expected_url: &str,
+    expected_body: serde_json::Value,
+) {
+    let requests = http.requests().unwrap();
+    assert_eq!(requests.len(), 1);
+    let request = &requests[0];
+    assert_eq!(request.method, expected_method);
+    assert_eq!(request.url, expected_url);
+    assert_eq!(request.timeout_ms, Some(10_000));
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(request.body.as_deref().unwrap()).unwrap(),
+        expected_body
+    );
 
     let headers: serde_json::Value = serde_json::from_str(&request.headers_json).unwrap();
     assert_eq!(headers["User-Agent"], "IronClaw-GitHub-Reborn-WASM");

@@ -14,10 +14,10 @@ use libsql::params;
 
 #[cfg(feature = "libsql")]
 use crate::{
-    ClaimDueFireOutcome, ClaimDueFireRequest, ClaimedTriggerFire, FireAcceptedRequest,
-    FirePermanentFailedRequest, FireReplayedRequest, FireRetryableFailedRequest,
-    TriggerCompletionPolicy, TriggerError, TriggerId, TriggerRecord, TriggerRepository,
-    TriggerRunStatus, TriggerSchedule, TriggerSourceKind, TriggerState,
+    ClaimDueFireOutcome, ClaimDueFireRequest, ClaimedTriggerFire, ClearActiveFireRequest,
+    FireAcceptedRequest, FirePermanentFailedRequest, FireReplayedRequest,
+    FireRetryableFailedRequest, TriggerCompletionPolicy, TriggerError, TriggerId, TriggerRecord,
+    TriggerRepository, TriggerRunStatus, TriggerSchedule, TriggerSourceKind, TriggerState,
     reject_failed_result_after_active_run, reject_non_future_next_run_at, reject_run_ref_rewrite,
 };
 
@@ -508,6 +508,36 @@ impl TriggerRepository for LibSqlTriggerRepository {
         }
         resolve_missed_fire_result_update(&conn, &tenant_id, trigger_id, fire_slot, None, None)
             .await
+    }
+
+    async fn clear_active_fire(
+        &self,
+        request: ClearActiveFireRequest,
+    ) -> Result<Option<TriggerRecord>, TriggerError> {
+        let conn = self.connect().await?;
+        // Keep active-fire clearing atomic as one predicate-guarded write.
+        let mut rows = conn
+            .query(
+                &format!(
+                    "UPDATE {TRIGGER_TABLE}
+                     SET active_fire_slot = NULL,
+                         active_run_ref = NULL
+                     WHERE tenant_id = ?1
+                       AND trigger_id = ?2
+                       AND active_fire_slot = ?3
+                       AND active_run_ref = ?4
+                     RETURNING {TRIGGER_COLUMNS}"
+                ),
+                params![
+                    request.tenant_id.as_str(),
+                    request.trigger_id.to_string(),
+                    fmt_ts(&request.fire_slot),
+                    request.run_id.to_string(),
+                ],
+            )
+            .await
+            .map_err(|error| backend_error("clear active trigger fire", error))?;
+        returned_record(&mut rows, "read cleared trigger fire").await
     }
 }
 

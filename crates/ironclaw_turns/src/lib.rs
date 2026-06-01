@@ -89,12 +89,13 @@ pub use run_profile::{
 pub use scope::{TurnActor, TurnScope};
 pub use status::{
     AdmissionRejection, AdmissionRejectionReason, BlockedReason, SanitizedCancelReason,
-    SanitizedFailure, TurnCapacityResource, TurnError, TurnErrorCategory, TurnRunProfile,
-    TurnRunState, TurnStatus,
+    SanitizedFailure, TurnActiveRunRefState, TurnCapacityResource, TurnError, TurnErrorCategory,
+    TurnRunProfile, TurnRunState, TurnStatus,
 };
 pub use store::{
     SpawnTreeReservation, SpawnTreeReservationKey, TurnActiveLockKey, TurnActiveLockRecord,
     TurnCheckpointRecord, TurnIdempotencyErrorReplay, TurnIdempotencyOperationKind,
     TurnIdempotencyOutcomeKind, TurnIdempotencyRecord, TurnIdempotencyReplay, TurnLockVersion,
     TurnPersistenceSnapshot, TurnRecord, TurnRunRecord, TurnSpawnTreeStateStore, TurnStateStore,
+    active_run_ref_state,
 };
