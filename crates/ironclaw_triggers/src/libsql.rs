@@ -121,6 +121,15 @@ impl LibSqlTriggerRepository {
             )
             .await
             .map_err(|error| backend_error("create trigger due index", error))?;
+            conn.execute(
+                &format!(
+                    "CREATE INDEX IF NOT EXISTS trigger_records_tenant_created_at_idx
+                     ON {TRIGGER_TABLE} (tenant_id, created_at, trigger_id)"
+                ),
+                (),
+            )
+            .await
+            .map_err(|error| backend_error("create trigger tenant list index", error))?;
             Ok::<(), TriggerError>(())
         }
         .await;

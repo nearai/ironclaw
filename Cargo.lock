@@ -5202,6 +5202,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "cron",
+ "deadpool-postgres",
  "hex",
  "ironclaw_host_api",
  "ironclaw_turns",
@@ -5210,8 +5211,10 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
+ "testcontainers-modules",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-postgres",
  "tracing",
  "ulid",
 ]

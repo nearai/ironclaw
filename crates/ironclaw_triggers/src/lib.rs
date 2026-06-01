@@ -24,6 +24,8 @@ use ulid::Ulid;
 
 #[cfg(feature = "libsql")]
 mod libsql;
+#[cfg(feature = "postgres")]
+mod postgres;
 
 const MIN_FIRE_CADENCE: Duration = Duration::from_secs(60);
 const MAX_DUE_TRIGGER_POLL_LIMIT: usize = 128;
@@ -412,6 +414,9 @@ pub trait TriggerRepository: Send + Sync {
 /// Feature-gated durable repository constructor for composition/test wiring.
 #[cfg(feature = "libsql")]
 pub use libsql::LibSqlTriggerRepository;
+/// Feature-gated durable repository constructor for composition/test wiring.
+#[cfg(feature = "postgres")]
+pub use postgres::PostgresTriggerRepository;
 
 #[derive(Clone, Default)]
 pub struct InMemoryTriggerRepository {
