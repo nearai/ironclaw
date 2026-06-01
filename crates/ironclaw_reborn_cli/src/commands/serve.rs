@@ -6,8 +6,8 @@ use std::sync::Arc;
 use anyhow::{Context, anyhow};
 use clap::Args;
 use ironclaw_reborn_composition::{
-    RebornReadiness, RebornRuntimeIdentity, RebornRuntimeInput, RebornWebuiBundle,
-    WebuiServeConfig, build_reborn_runtime, build_webui_services, webui_v2_app,
+    GoogleOAuthRouteConfig, RebornReadiness, RebornRuntimeIdentity, RebornRuntimeInput,
+    RebornWebuiBundle, WebuiServeConfig, build_reborn_runtime, build_webui_services, webui_v2_app,
 };
 use ironclaw_reborn_config::IdentitySection;
 use ironclaw_reborn_webui_ingress::{
@@ -16,7 +16,7 @@ use ironclaw_reborn_webui_ingress::{
 use secrecy::SecretString;
 
 use crate::context::RebornCliContext;
-use crate::runtime::RuntimeInputOptions;
+use crate::runtime::{RuntimeInputOptions, resolve_google_oauth_config_from_env};
 
 const DEFAULT_SERVE_HOST: &str = "127.0.0.1";
 const DEFAULT_SERVE_PORT: u16 = 3000;
@@ -274,6 +274,16 @@ impl ServeCommand {
                 .with_default_agent_id(default_agent_id);
             if let Some(project_id) = default_project_id {
                 serve_config = serve_config.with_default_project_id(project_id);
+            }
+            if let Some(google_oauth) = resolve_google_oauth_config_from_env()
+                .context("failed to resolve Google OAuth setup config for WebUI")?
+            {
+                let mut route_config =
+                    GoogleOAuthRouteConfig::from_oauth_client_config(&google_oauth.client);
+                if let Some(hosted_domain_hint) = google_oauth.hosted_domain_hint {
+                    route_config = route_config.with_hosted_domain_hint(hosted_domain_hint);
+                }
+                serve_config = serve_config.with_google_oauth(route_config);
             }
             if let Some(value) = csp_override {
                 serve_config = serve_config

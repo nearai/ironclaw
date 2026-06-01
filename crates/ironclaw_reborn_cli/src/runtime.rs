@@ -5,11 +5,12 @@ use std::{future::Future, thread};
 
 use anyhow::Context;
 use ironclaw_reborn_composition::{
-    PollSettings, RebornBuildInput, RebornCompositionProfile, RebornLocalRuntimeProfileOptions,
-    RebornRuntimeIdentity, RebornRuntimeInput, TurnRunnerSettings, build_reborn_runtime,
-    local_runtime_build_input_with_options,
+    OAuthClientConfig, PollSettings, RebornBuildInput, RebornCompositionProfile,
+    RebornLocalRuntimeProfileOptions, RebornRuntimeIdentity, RebornRuntimeInput,
+    TurnRunnerSettings, build_reborn_runtime, local_runtime_build_input_with_options,
 };
 use ironclaw_reborn_config::{REBORN_PROFILE_ENV, RebornBootConfig, RebornProfile};
+use secrecy::SecretString;
 use tokio_util::sync::CancellationToken;
 
 use crate::context::RebornCliContext;
@@ -297,6 +298,12 @@ pub(crate) struct RuntimeServicesInput {
     config_file: Option<ironclaw_reborn_config::RebornConfigFile>,
 }
 
+#[derive(Clone)]
+pub(crate) struct ResolvedGoogleOAuthConfig {
+    pub(crate) client: OAuthClientConfig,
+    pub(crate) hosted_domain_hint: Option<String>,
+}
+
 pub(crate) fn build_services_input_with_options(
     config: &RebornBootConfig,
     caller: RuntimeInputCaller,
@@ -337,11 +344,64 @@ pub(crate) fn build_services_input_with_options(
             confirmed_host_home_root(options).context("local-dev-yolo host access")?;
         services_input = services_input.with_local_dev_confirmed_host_home_root(host_home_root);
     }
+    if let Some(google_oauth) = resolve_google_oauth_config_from_env()? {
+        services_input = services_input.with_google_oauth_backend(google_oauth.client);
+    }
 
     Ok(RuntimeServicesInput {
         services_input,
         config_file,
     })
+}
+
+pub(crate) fn resolve_google_oauth_config_from_env()
+-> anyhow::Result<Option<ResolvedGoogleOAuthConfig>> {
+    let reborn_client_id = optional_nonempty_env("IRONCLAW_REBORN_GOOGLE_CLIENT_ID");
+    let reborn_redirect_uri = optional_nonempty_env("IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI");
+    let reborn_client_secret = optional_nonempty_env("IRONCLAW_REBORN_GOOGLE_CLIENT_SECRET");
+    let reborn_hosted_domain_hint = optional_nonempty_env("IRONCLAW_REBORN_GOOGLE_ALLOWED_HD");
+    let legacy_redirect_uri = optional_nonempty_env("GOOGLE_OAUTH_REDIRECT_URI");
+
+    if reborn_client_id.is_none()
+        && reborn_redirect_uri.is_none()
+        && reborn_client_secret.is_none()
+        && reborn_hosted_domain_hint.is_none()
+        && legacy_redirect_uri.is_none()
+    {
+        return Ok(None);
+    }
+
+    let client_id = reborn_client_id
+        .or_else(|| optional_nonempty_env("GOOGLE_CLIENT_ID"))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "IRONCLAW_REBORN_GOOGLE_CLIENT_ID or GOOGLE_CLIENT_ID is required for Google OAuth setup"
+            )
+        })?;
+    let redirect_uri = reborn_redirect_uri.or(legacy_redirect_uri).ok_or_else(|| {
+        anyhow::anyhow!(
+            "IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI or GOOGLE_OAUTH_REDIRECT_URI is required for Google OAuth setup"
+        )
+    })?;
+    let client_secret = reborn_client_secret
+        .or_else(|| optional_nonempty_env("GOOGLE_CLIENT_SECRET"))
+        .map(SecretString::from);
+    let hosted_domain_hint =
+        reborn_hosted_domain_hint.or_else(|| optional_nonempty_env("GOOGLE_ALLOWED_HD"));
+    let client = OAuthClientConfig::new(client_id, redirect_uri, client_secret)
+        .context("invalid Google OAuth client configuration")?;
+
+    Ok(Some(ResolvedGoogleOAuthConfig {
+        client,
+        hosted_domain_hint,
+    }))
+}
+
+fn optional_nonempty_env(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 pub(crate) fn default_owner_id(

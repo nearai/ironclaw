@@ -50,7 +50,9 @@ use tower_http::cors::{AllowHeaders, CorsLayer};
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::set_header::SetResponseHeaderLayer;
 
-use crate::product_auth_serve::{ProductAuthRouteState, product_auth_route_mount};
+use crate::product_auth_serve::{
+    GoogleOAuthRouteConfig, ProductAuthRouteState, product_auth_route_mount,
+};
 use crate::webui::RebornWebuiBundle;
 use crate::webui_body_limit::{build_body_limit_state, enforce_body_limit};
 use crate::webui_rate_limit::{build_rate_limit_state, enforce_rate_limit};
@@ -158,6 +160,10 @@ pub struct WebuiServeConfig {
     /// they do to the v2 facade and the product-auth callback —
     /// no side door. Defaults to `None`.
     pub(crate) public_mount: Option<PublicRouteMount>,
+    /// Optional Google OAuth setup config for Reborn product-auth
+    /// credential onboarding. When absent, the mounted Google setup
+    /// route fails closed with a sanitized service-unavailable response.
+    pub(crate) google_oauth: Option<GoogleOAuthRouteConfig>,
 }
 
 /// A host-supplied public sub-router plus the descriptors composition
@@ -188,7 +194,13 @@ impl WebuiServeConfig {
             default_agent_id: None,
             default_project_id: None,
             public_mount: None,
+            google_oauth: None,
         }
+    }
+
+    pub fn with_google_oauth(mut self, config: GoogleOAuthRouteConfig) -> Self {
+        self.google_oauth = Some(config);
+        self
     }
 
     /// Attach a host-supplied public sub-router PLUS its route
@@ -365,12 +377,16 @@ pub fn webui_v2_app(
     };
 
     let product_auth_mount = bundle.product_auth.clone().map(|product_auth| {
-        product_auth_route_mount(ProductAuthRouteState::new(
+        let mut state = ProductAuthRouteState::new(
             product_auth,
             config.tenant_id.clone(),
             config.default_agent_id.clone(),
             config.default_project_id.clone(),
-        ))
+        );
+        if let Some(google_oauth) = config.google_oauth.clone() {
+            state = state.with_google_oauth(google_oauth);
+        }
+        product_auth_route_mount(state)
     });
     let public_mount = config.public_mount;
     let mut descriptors = ironclaw_webui_v2::webui_v2_routes();

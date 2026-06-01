@@ -31,9 +31,12 @@ use ironclaw_auth::{
     CredentialAccountLabel, CredentialAccountListPage, CredentialAccountListRequest,
     CredentialAccountProjection, CredentialAccountStatus, CredentialRecoveryProjection,
     CredentialRecoveryRequest, CredentialRefreshReport, CredentialRefreshRequest,
-    OAuthAuthorizationCode, OAuthAuthorizationUrl, OAuthProviderCallbackRequest, OpaqueStateHash,
-    PkceVerifierHash, PkceVerifierSecret, ProviderScope, SecretCleanupAction, SecretCleanupReport,
-    SecretCleanupRequest, Timestamp, TurnRunRef,
+    GOOGLE_CALENDAR_EVENTS_SCOPE, GOOGLE_CALENDAR_READONLY_SCOPE, GOOGLE_GMAIL_MODIFY_SCOPE,
+    GOOGLE_GMAIL_READONLY_SCOPE, GOOGLE_GMAIL_SEND_SCOPE, GOOGLE_PROVIDER_ID,
+    OAuthAuthorizationCode, OAuthAuthorizationUrl, OAuthClientId, OAuthProviderCallbackRequest,
+    OAuthRedirectUri, OpaqueStateHash, PkceVerifierHash, PkceVerifierSecret, ProviderScope,
+    SecretCleanupAction, SecretCleanupReport, SecretCleanupRequest, Timestamp, TurnRunRef,
+    build_google_authorization_url, pkce_s256_challenge,
 };
 use ironclaw_host_api::NetworkMethod;
 use ironclaw_host_api::ingress::{
@@ -53,13 +56,16 @@ use uuid::Uuid;
 
 use crate::auth::RebornOAuthStartFlowRequest;
 use crate::{
-    RebornManualTokenSetupRequest, RebornManualTokenSubmitRequest, RebornManualTokenSubmitResponse,
-    RebornOAuthCallbackError, RebornOAuthCallbackOutcome, RebornOAuthCallbackRequest,
-    RebornOAuthCallbackResponse, RebornProductAuthServices,
+    OAuthClientConfig, RebornManualTokenSetupRequest, RebornManualTokenSubmitRequest,
+    RebornManualTokenSubmitResponse, RebornOAuthCallbackError, RebornOAuthCallbackOutcome,
+    RebornOAuthCallbackRequest, RebornOAuthCallbackResponse, RebornProductAuthServices,
 };
 
 pub(crate) const OAUTH_START_PATH: &str = "/api/reborn/product-auth/oauth/start";
 pub(crate) const OAUTH_CALLBACK_PATH: &str = "/api/reborn/product-auth/oauth/callback/{flow_id}";
+pub(crate) const GOOGLE_OAUTH_START_PATH: &str = "/api/reborn/product-auth/oauth/google/start";
+pub(crate) const GOOGLE_OAUTH_CALLBACK_PATH: &str =
+    "/api/reborn/product-auth/oauth/google/callback";
 pub(crate) const MANUAL_TOKEN_SUBMIT_PATH: &str = "/api/reborn/product-auth/manual-token/submit";
 pub(crate) const MANUAL_TOKEN_SETUP_PATH: &str = "/api/reborn/product-auth/manual-token/setup";
 pub(crate) const MANUAL_TOKEN_SECRET_SUBMIT_PATH: &str =
@@ -72,6 +78,8 @@ pub(crate) const LIFECYCLE_CLEANUP_PATH: &str = "/api/reborn/product-auth/lifecy
 
 const OAUTH_START_ROUTE_ID: &str = "product_auth.oauth.start";
 const OAUTH_CALLBACK_ROUTE_ID: &str = "product_auth.oauth.callback";
+const GOOGLE_OAUTH_START_ROUTE_ID: &str = "product_auth.oauth.google.start";
+const GOOGLE_OAUTH_CALLBACK_ROUTE_ID: &str = "product_auth.oauth.google.callback";
 const MANUAL_TOKEN_SUBMIT_ROUTE_ID: &str = "product_auth.manual_token.submit";
 const MANUAL_TOKEN_SETUP_ROUTE_ID: &str = "product_auth.manual_token.setup";
 const MANUAL_TOKEN_SECRET_SUBMIT_ROUTE_ID: &str = "product_auth.manual_token.secret_submit";
@@ -125,11 +133,13 @@ pub(crate) struct ProductAuthRouteState {
     tenant_id: TenantId,
     default_agent_id: Option<AgentId>,
     default_project_id: Option<ProjectId>,
+    google_oauth: Option<GoogleOAuthRouteConfig>,
     // First-slice WebUI OAuth stores the raw PKCE verifier process-locally
     // because `AuthFlowRecord` deliberately serializes hashes only. Production
     // HA must replace this with a host-owned encrypted verifier store before
     // routing callbacks across replicas or restarts.
     pkce_verifiers: Arc<Mutex<LruCache<AuthFlowId, StoredPkceVerifier>>>,
+    pending_google_oauth: Arc<Mutex<LruCache<OpaqueStateHash, PendingGoogleOAuthFlow>>>,
 }
 
 impl ProductAuthRouteState {
@@ -144,10 +154,25 @@ impl ProductAuthRouteState {
             tenant_id,
             default_agent_id,
             default_project_id,
+            google_oauth: None,
             pkce_verifiers: Arc::new(Mutex::new(LruCache::new(
                 OAUTH_PKCE_VERIFIER_CACHE_CAPACITY,
             ))),
+            pending_google_oauth: Arc::new(Mutex::new(LruCache::new(
+                OAUTH_PKCE_VERIFIER_CACHE_CAPACITY,
+            ))),
         }
+    }
+
+    pub(crate) fn with_google_oauth(mut self, config: GoogleOAuthRouteConfig) -> Self {
+        self.google_oauth = Some(config);
+        self
+    }
+
+    fn google_oauth_config(&self) -> Result<&GoogleOAuthRouteConfig, ProductAuthRouteFailure> {
+        self.google_oauth
+            .as_ref()
+            .ok_or_else(ProductAuthRouteFailure::backend_unavailable)
     }
 
     fn store_pkce_verifier(
@@ -196,10 +221,58 @@ impl ProductAuthRouteState {
         self.lock_pkce_verifiers().pop(&flow_id);
     }
 
+    fn ensure_pending_google_oauth_capacity(&self) -> Result<(), ProductAuthRouteFailure> {
+        let mut pending_flows = self.lock_pending_google_oauth();
+        remove_expired_pending_google_oauth(&mut pending_flows);
+        if pending_flows.len() >= pending_flows.cap().get() {
+            return Err(ProductAuthRouteFailure::backend_unavailable());
+        }
+        Ok(())
+    }
+
+    fn store_pending_google_oauth(
+        &self,
+        state_hash: OpaqueStateHash,
+        pending: PendingGoogleOAuthFlow,
+    ) -> Result<(), ProductAuthRouteFailure> {
+        let mut pending_flows = self.lock_pending_google_oauth();
+        remove_expired_pending_google_oauth(&mut pending_flows);
+        if pending_flows.len() >= pending_flows.cap().get() && !pending_flows.contains(&state_hash)
+        {
+            return Err(ProductAuthRouteFailure::backend_unavailable());
+        }
+        pending_flows.put(state_hash, pending);
+        Ok(())
+    }
+
+    fn pending_google_oauth_flow(
+        &self,
+        state_hash: &OpaqueStateHash,
+    ) -> Result<PendingGoogleOAuthFlow, ProductAuthRouteFailure> {
+        let mut pending_flows = self.lock_pending_google_oauth();
+        remove_expired_pending_google_oauth(&mut pending_flows);
+        pending_flows
+            .get(state_hash)
+            .cloned()
+            .ok_or_else(ProductAuthRouteFailure::unknown_or_expired_flow)
+    }
+
+    fn remove_pending_google_oauth(&self, state_hash: &OpaqueStateHash) {
+        self.lock_pending_google_oauth().pop(state_hash);
+    }
+
     fn lock_pkce_verifiers(
         &self,
     ) -> std::sync::MutexGuard<'_, LruCache<AuthFlowId, StoredPkceVerifier>> {
         self.pkce_verifiers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn lock_pending_google_oauth(
+        &self,
+    ) -> std::sync::MutexGuard<'_, LruCache<OpaqueStateHash, PendingGoogleOAuthFlow>> {
+        self.pending_google_oauth
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
@@ -213,13 +286,68 @@ impl std::fmt::Debug for ProductAuthRouteState {
             .field("tenant_id", &self.tenant_id)
             .field("default_agent_id", &self.default_agent_id)
             .field("default_project_id", &self.default_project_id)
+            .field("google_oauth", &self.google_oauth.is_some())
             .field("pkce_verifiers", &"Arc<Mutex<LruCache<...>>>")
+            .field("pending_google_oauth", &"Arc<Mutex<LruCache<...>>>")
+            .finish()
+    }
+}
+
+#[derive(Clone)]
+pub struct GoogleOAuthRouteConfig {
+    client_id: OAuthClientId,
+    redirect_uri: OAuthRedirectUri,
+    hosted_domain_hint: Option<String>,
+}
+
+impl GoogleOAuthRouteConfig {
+    pub fn new(
+        client_id: impl Into<String>,
+        redirect_uri: impl Into<String>,
+    ) -> Result<Self, AuthProductError> {
+        Ok(Self {
+            client_id: OAuthClientId::new(client_id)?,
+            redirect_uri: OAuthRedirectUri::new(redirect_uri)?,
+            hosted_domain_hint: None,
+        })
+    }
+
+    pub fn from_oauth_client_config(config: &OAuthClientConfig) -> Self {
+        Self {
+            client_id: config.client_id.clone(),
+            redirect_uri: config.redirect_uri.clone(),
+            hosted_domain_hint: None,
+        }
+    }
+
+    pub fn with_hosted_domain_hint(mut self, hosted_domain: impl Into<String>) -> Self {
+        self.hosted_domain_hint = Some(hosted_domain.into());
+        self
+    }
+}
+
+impl std::fmt::Debug for GoogleOAuthRouteConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("GoogleOAuthRouteConfig")
+            .field("client_id", &"[REDACTED]")
+            .field("redirect_uri", &self.redirect_uri)
+            .field("hosted_domain_hint", &self.hosted_domain_hint)
             .finish()
     }
 }
 
 pub(super) struct StoredPkceVerifier {
     verifier: SecretString,
+    expires_at: Timestamp,
+}
+
+#[derive(Clone)]
+pub(super) struct PendingGoogleOAuthFlow {
+    flow_id: AuthFlowId,
+    scope: AuthProductScope,
+    account_label: CredentialAccountLabel,
+    requested_scopes: Vec<ProviderScope>,
     expires_at: Timestamp,
 }
 
@@ -233,6 +361,21 @@ pub(super) fn remove_expired_pkce_verifiers(
         .collect::<Vec<_>>();
     for flow_id in expired {
         verifiers.pop(&flow_id);
+    }
+}
+
+pub(super) fn remove_expired_pending_google_oauth(
+    pending_flows: &mut LruCache<OpaqueStateHash, PendingGoogleOAuthFlow>,
+) {
+    let now = Utc::now();
+    let expired = pending_flows
+        .iter()
+        .filter_map(|(state_hash, pending)| {
+            (pending.expires_at <= now).then_some(state_hash.clone())
+        })
+        .collect::<Vec<_>>();
+    for state_hash in expired {
+        pending_flows.pop(&state_hash);
     }
 }
 
@@ -251,6 +394,10 @@ pub(crate) fn product_auth_route_mount(state: ProductAuthRouteState) -> ProductA
     ProductAuthRouteMount {
         protected: Router::new()
             .route(OAUTH_START_PATH, post(oauth::oauth_start_handler))
+            .route(
+                GOOGLE_OAUTH_START_PATH,
+                post(oauth::google_oauth_start_handler),
+            )
             .route(
                 MANUAL_TOKEN_SUBMIT_PATH,
                 post(manual_token::manual_token_submit_handler),
@@ -283,6 +430,10 @@ pub(crate) fn product_auth_route_mount(state: ProductAuthRouteState) -> ProductA
             .with_state(state.clone()),
         public: Router::new()
             .route(OAUTH_CALLBACK_PATH, get(oauth::oauth_callback_handler))
+            .route(
+                GOOGLE_OAUTH_CALLBACK_PATH,
+                get(oauth::google_oauth_callback_handler),
+            )
             .with_state(state),
         descriptors: product_auth_route_descriptors(),
     }
@@ -294,6 +445,7 @@ pub(crate) fn product_auth_route_descriptors() -> Vec<IngressRouteDescriptor> {
     // and stops descriptor blocks from drifting per-route.
     const PROTECTED_MUTATIONS: &[(&str, &str)] = &[
         (OAUTH_START_ROUTE_ID, OAUTH_START_PATH),
+        (GOOGLE_OAUTH_START_ROUTE_ID, GOOGLE_OAUTH_START_PATH),
         (MANUAL_TOKEN_SUBMIT_ROUTE_ID, MANUAL_TOKEN_SUBMIT_PATH),
         (MANUAL_TOKEN_SETUP_ROUTE_ID, MANUAL_TOKEN_SETUP_PATH),
         (
@@ -329,6 +481,12 @@ pub(crate) fn product_auth_route_descriptors() -> Vec<IngressRouteDescriptor> {
         OAUTH_CALLBACK_ROUTE_ID,
         NetworkMethod::Get,
         OAUTH_CALLBACK_PATH,
+        callback_policy(),
+    ));
+    descriptors.push(descriptor(
+        GOOGLE_OAUTH_CALLBACK_ROUTE_ID,
+        NetworkMethod::Get,
+        GOOGLE_OAUTH_CALLBACK_PATH,
         callback_policy(),
     ));
     descriptors
@@ -426,6 +584,15 @@ pub(super) struct OAuthStartRequest {
 }
 
 #[derive(Deserialize)]
+pub(super) struct GoogleOAuthStartRequest {
+    account_label: String,
+    scopes: Vec<String>,
+    expires_at: Timestamp,
+    session_id: Option<String>,
+    thread_id: Option<String>,
+}
+
+#[derive(Deserialize)]
 pub(super) struct ManualTokenSubmitRequest {
     provider: String,
     account_label: String,
@@ -438,6 +605,17 @@ pub(super) struct ManualTokenSubmitRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct OAuthStartResponse {
+    pub(crate) flow_id: AuthFlowId,
+    pub(crate) status: AuthFlowStatus,
+    pub(crate) provider: AuthProviderId,
+    pub(crate) authorization_url: OAuthAuthorizationUrl,
+    pub(crate) expires_at: Timestamp,
+    pub(crate) continuation: AuthContinuationRef,
+    pub(crate) callback_scope: OAuthCallbackScopeHint,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct GoogleOAuthStartResponse {
     pub(crate) flow_id: AuthFlowId,
     pub(crate) status: AuthFlowStatus,
     pub(crate) provider: AuthProviderId,
@@ -571,6 +749,15 @@ pub(super) struct OAuthCallbackQuery {
     project_id: Option<String>,
     thread_id: Option<String>,
     session_id: Option<String>,
+    #[serde(alias = "scope")]
+    scopes: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub(super) struct GoogleOAuthCallbackQuery {
+    state: Option<RawCallbackValue>,
+    code: Option<RawSecretValue>,
+    error: Option<String>,
     #[serde(alias = "scope")]
     scopes: Option<String>,
 }

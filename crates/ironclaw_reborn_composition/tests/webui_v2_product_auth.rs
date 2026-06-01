@@ -13,10 +13,11 @@ use chrono::{Duration as ChronoDuration, Utc};
 use ironclaw_auth::{
     AuthChallenge, AuthContinuationEvent, AuthFlowManager, AuthInteractionId,
     AuthInteractionService, AuthProductError, AuthProductScope, AuthProviderClient,
-    CredentialAccountService, CredentialSetupService, InMemoryAuthProductServices,
-    ManualTokenSetupRequest, OAuthProviderCallbackRequest, OAuthProviderExchange,
-    OAuthProviderExchangeContext, OAuthProviderRefresh, OAuthProviderRefreshRequest,
-    SecretCleanupService, SecretSubmitRequest, SecretSubmitResult,
+    CredentialAccountService, CredentialSetupService, GOOGLE_CALENDAR_READONLY_SCOPE,
+    GOOGLE_GMAIL_READONLY_SCOPE, InMemoryAuthProductServices, ManualTokenSetupRequest,
+    OAuthProviderCallbackRequest, OAuthProviderExchange, OAuthProviderExchangeContext,
+    OAuthProviderRefresh, OAuthProviderRefreshRequest, SecretCleanupService, SecretSubmitRequest,
+    SecretSubmitResult,
 };
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
 use ironclaw_product_workflow::{
@@ -30,8 +31,8 @@ use ironclaw_product_workflow::{
     WebUiSetupExtensionRequest,
 };
 use ironclaw_reborn_composition::{
-    RebornAuthContinuationDispatcher, RebornProductAuthServices, RebornReadiness,
-    RebornWebuiBundle, WebuiAuthenticator, WebuiServeConfig, webui_v2_app,
+    GoogleOAuthRouteConfig, RebornAuthContinuationDispatcher, RebornProductAuthServices,
+    RebornReadiness, RebornWebuiBundle, WebuiAuthenticator, WebuiServeConfig, webui_v2_app,
 };
 use serde_json::json;
 use tower::ServiceExt;
@@ -278,18 +279,28 @@ fn build_app_with_product_auth() -> (axum::Router, Arc<RecordingAuthDispatcher>)
 fn build_app_with_product_auth_service(
     product_auth: Arc<RebornProductAuthServices>,
 ) -> axum::Router {
+    build_app_with_product_auth_service_and_config(product_auth, None)
+}
+
+fn build_app_with_product_auth_service_and_config(
+    product_auth: Arc<RebornProductAuthServices>,
+    google_oauth: Option<GoogleOAuthRouteConfig>,
+) -> axum::Router {
     let bundle = RebornWebuiBundle {
         api: Arc::new(UnusedServices),
         product_auth: Some(product_auth),
         readiness: RebornReadiness::disabled(),
     };
-    let config = WebuiServeConfig::new(
+    let mut config = WebuiServeConfig::new(
         TenantId::new(TENANT).expect("tenant"),
         Arc::new(OnlyValidToken),
         vec![HeaderValue::from_static("http://localhost:1234")],
     )
     .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
     .with_default_project_id(ProjectId::new(PROJECT).expect("project"));
+    if let Some(google_oauth) = google_oauth {
+        config = config.with_google_oauth(google_oauth);
+    }
     webui_v2_app(bundle, config).expect("webui v2 app")
 }
 
@@ -360,6 +371,35 @@ async fn post_oauth_start(app: &axum::Router, body: serde_json::Value) -> axum::
             Request::builder()
                 .method(Method::POST)
                 .uri("/api/reborn/product-auth/oauth/start")
+                .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot")
+}
+
+fn google_oauth_start_body(extra_fields: serde_json::Value) -> serde_json::Value {
+    let expires_at = (Utc::now() + ChronoDuration::minutes(5)).to_rfc3339();
+    let mut body = json!({
+        "account_label": "work google",
+        "scopes": [GOOGLE_GMAIL_READONLY_SCOPE, GOOGLE_CALENDAR_READONLY_SCOPE],
+        "expires_at": expires_at
+    });
+    merge_json_object(&mut body, extra_fields);
+    body
+}
+
+async fn post_google_oauth_start(
+    app: &axum::Router,
+    body: serde_json::Value,
+) -> axum::response::Response {
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/reborn/product-auth/oauth/google/start")
                 .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(body.to_string()))
@@ -851,6 +891,120 @@ async fn product_auth_oauth_routes_create_flow_and_complete_callback() {
     let callback_json: serde_json::Value =
         serde_json::from_str(&callback_body).expect("callback json");
     assert_eq!(callback_json["flow_id"], started.flow_id);
+    assert_eq!(callback_json["status"], "completed");
+    assert_eq!(dispatcher.events().len(), 1);
+}
+
+#[tokio::test]
+async fn product_auth_google_oauth_start_builds_provider_authorization_url() {
+    let product_auth = Arc::new(RebornProductAuthServices::from_shared(
+        Arc::new(InMemoryAuthProductServices::new()),
+        Arc::new(RecordingAuthDispatcher::default()),
+    ));
+    let app = build_app_with_product_auth_service_and_config(
+        product_auth,
+        Some(
+            GoogleOAuthRouteConfig::new(
+                "google-client.apps.googleusercontent.com",
+                "http://127.0.0.1:3000/api/reborn/product-auth/oauth/google/callback",
+            )
+            .expect("google oauth route config")
+            .with_hosted_domain_hint("example.com"),
+        ),
+    );
+
+    let response = post_google_oauth_start(
+        &app,
+        google_oauth_start_body(json!({
+            "session_id": "web-session-google",
+            "thread_id": "thread-auth-google"
+        })),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_body_string(response).await;
+    assert!(!body.contains("google-pkce"));
+    let json: serde_json::Value = serde_json::from_str(&body).expect("start json");
+    assert_eq!(json["provider"], "google");
+    assert_eq!(json["continuation"]["type"], "setup_only");
+    let authorization_url = json["authorization_url"]
+        .as_str()
+        .expect("authorization url");
+    let parsed = url::Url::parse(authorization_url).expect("google authorization url");
+    assert_eq!(parsed.host_str(), Some("accounts.google.com"));
+    let query = parsed.query_pairs().collect::<Vec<_>>();
+    assert!(
+        query.iter().any(|(name, value)| name == "client_id"
+            && value == "google-client.apps.googleusercontent.com")
+    );
+    assert!(query.iter().any(|(name, value)| name == "redirect_uri"
+        && value == "http://127.0.0.1:3000/api/reborn/product-auth/oauth/google/callback"));
+    assert!(query.iter().any(|(name, value)| name == "scope"
+        && value.contains(GOOGLE_GMAIL_READONLY_SCOPE)
+        && value.contains(GOOGLE_CALENDAR_READONLY_SCOPE)));
+    assert!(
+        query
+            .iter()
+            .any(|(name, value)| name == "access_type" && value == "offline")
+    );
+    assert!(
+        query
+            .iter()
+            .any(|(name, value)| name == "hd" && value == "example.com")
+    );
+}
+
+#[tokio::test]
+async fn product_auth_google_oauth_callback_completes_setup_flow() {
+    let dispatcher = Arc::new(RecordingAuthDispatcher::default());
+    let product_auth = Arc::new(RebornProductAuthServices::from_shared(
+        Arc::new(InMemoryAuthProductServices::new()),
+        dispatcher.clone(),
+    ));
+    let app = build_app_with_product_auth_service_and_config(
+        product_auth,
+        Some(
+            GoogleOAuthRouteConfig::new(
+                "google-client.apps.googleusercontent.com",
+                "http://127.0.0.1:3000/api/reborn/product-auth/oauth/google/callback",
+            )
+            .expect("google oauth route config"),
+        ),
+    );
+    let start_response = post_google_oauth_start(
+        &app,
+        google_oauth_start_body(json!({
+            "session_id": "web-session-google",
+            "thread_id": "thread-auth-google"
+        })),
+    )
+    .await;
+    assert_eq!(start_response.status(), StatusCode::OK);
+    let start_body = read_body_string(start_response).await;
+    let start_json: serde_json::Value = serde_json::from_str(&start_body).expect("start json");
+    let authorization_url = start_json["authorization_url"]
+        .as_str()
+        .expect("authorization url");
+    let parsed = url::Url::parse(authorization_url).expect("google authorization url");
+    let state = parsed
+        .query_pairs()
+        .find_map(|(name, value)| (name == "state").then(|| value.into_owned()))
+        .expect("state");
+    let scopes = format!("{GOOGLE_GMAIL_READONLY_SCOPE}%20{GOOGLE_CALENDAR_READONLY_SCOPE}");
+
+    let callback_response = app
+        .oneshot(callback_request(format!(
+            "/api/reborn/product-auth/oauth/google/callback?state={state}&code=google-auth-code&scope={scopes}"
+        )))
+        .await
+        .expect("oneshot");
+    assert_eq!(callback_response.status(), StatusCode::OK);
+    let callback_body = read_body_string(callback_response).await;
+    assert!(!callback_body.contains("google-auth-code"));
+    let callback_json: serde_json::Value =
+        serde_json::from_str(&callback_body).expect("callback json");
+    assert_eq!(callback_json["flow_id"], start_json["flow_id"]);
     assert_eq!(callback_json["status"], "completed");
     assert_eq!(dispatcher.events().len(), 1);
 }
