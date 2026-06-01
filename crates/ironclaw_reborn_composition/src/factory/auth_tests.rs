@@ -509,6 +509,7 @@ async fn create_flow(
     product_auth
         .flow_manager()
         .create_flow(NewAuthFlow {
+            id: None,
             scope,
             kind: AuthFlowKind::IntegrationCredential,
             provider: provider(),
@@ -536,6 +537,7 @@ async fn create_google_flow(
     product_auth
         .flow_manager()
         .create_flow(NewAuthFlow {
+            id: None,
             scope,
             kind: AuthFlowKind::IntegrationCredential,
             provider: google_provider(),

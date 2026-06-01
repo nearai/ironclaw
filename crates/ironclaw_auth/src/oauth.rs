@@ -186,7 +186,7 @@ impl GoogleOAuthCallbackState {
     pub fn decode(raw: &str) -> Result<Self, AuthProductError> {
         let encoded = raw
             .strip_prefix(Self::PREFIX)
-            .ok_or_else(|| AuthProductError::MalformedCallback)?;
+            .ok_or(AuthProductError::MalformedCallback)?;
         let payload = URL_SAFE_NO_PAD
             .decode(encoded)
             .map_err(|_| AuthProductError::MalformedCallback)?;

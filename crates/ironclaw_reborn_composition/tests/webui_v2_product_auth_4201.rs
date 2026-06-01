@@ -1200,6 +1200,7 @@ async fn challenge_for_gate_returns_oauth_url_view_for_seeded_flow() {
 
     shared
         .create_flow(NewAuthFlow {
+            id: None,
             // Flow must carry the same thread_id as the TurnScope — thread_id matching
             // is fail-closed: a flow with None thread_id does not match any scoped request.
             scope: caller_scope_with_invocation_and_thread(InvocationId::new(), thread_id.clone()),
