@@ -3,8 +3,9 @@
 use chrono::{TimeZone, Utc};
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, Timestamp, UserId};
 use ironclaw_triggers::{
-    InMemoryTriggerRepository, TriggerCompletionPolicy, TriggerError, TriggerId, TriggerRecord,
-    TriggerRepository, TriggerRunStatus, TriggerSchedule, TriggerSourceKind, TriggerState,
+    ClearActiveFireRequest, InMemoryTriggerRepository, TriggerCompletionPolicy, TriggerError,
+    TriggerId, TriggerRecord, TriggerRepository, TriggerRunStatus, TriggerSchedule,
+    TriggerSourceKind, TriggerState,
 };
 use ironclaw_turns::TurnRunId;
 
@@ -1346,6 +1347,102 @@ mod fire_claim_contract {
         assert_error_contains(error, "must be after the claimed fire slot");
     }
 
+    async fn assert_fire_clear_contract(repo: &impl TriggerRepository) {
+        let trigger_id = TriggerId::parse("01J00000000000000000000016").expect("ulid");
+        let tenant_id = tenant("tenant-clear");
+        let fire_slot = ts(1_704_067_200);
+        let run_id = TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f66").expect("valid run");
+        let mut active_record = sample_record(trigger_id, tenant_id.clone(), fire_slot);
+        active_record.active_fire_slot = Some(fire_slot);
+        active_record.active_run_ref = Some(run_id);
+        repo.upsert_trigger(active_record.clone())
+            .await
+            .expect("insert active record");
+
+        let wrong_run_clear = repo
+            .clear_active_fire(ClearActiveFireRequest {
+                tenant_id: tenant_id.clone(),
+                trigger_id,
+                fire_slot,
+                run_id: TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f67")
+                    .expect("valid run"),
+            })
+            .await
+            .expect("clear with wrong run ref");
+        assert!(
+            wrong_run_clear.is_none(),
+            "mismatched run ref must not clear"
+        );
+        let reloaded = repo
+            .get_trigger(tenant_id.clone(), trigger_id)
+            .await
+            .expect("reload mismatched clear")
+            .expect("record present");
+        assert_eq!(reloaded, active_record);
+
+        let wrong_slot_clear = repo
+            .clear_active_fire(ClearActiveFireRequest {
+                tenant_id: tenant_id.clone(),
+                trigger_id,
+                fire_slot: fire_slot + chrono::Duration::minutes(1),
+                run_id,
+            })
+            .await
+            .expect("clear with wrong fire slot");
+        assert!(
+            wrong_slot_clear.is_none(),
+            "mismatched fire slot must not clear"
+        );
+        let reloaded = repo
+            .get_trigger(tenant_id.clone(), trigger_id)
+            .await
+            .expect("reload wrong-slot clear")
+            .expect("record present");
+        assert_eq!(reloaded, active_record);
+
+        let wrong_tenant_clear = repo
+            .clear_active_fire(ClearActiveFireRequest {
+                tenant_id: tenant("tenant-clear-other"),
+                trigger_id,
+                fire_slot,
+                run_id,
+            })
+            .await
+            .expect("clear with wrong tenant");
+        assert!(
+            wrong_tenant_clear.is_none(),
+            "mismatched tenant must not clear"
+        );
+        let reloaded = repo
+            .get_trigger(tenant_id.clone(), trigger_id)
+            .await
+            .expect("reload wrong-tenant clear")
+            .expect("record present");
+        assert_eq!(reloaded, active_record);
+
+        let cleared = repo
+            .clear_active_fire(ClearActiveFireRequest {
+                tenant_id: tenant_id.clone(),
+                trigger_id,
+                fire_slot,
+                run_id,
+            })
+            .await
+            .expect("clear active fire")
+            .expect("active fire should clear");
+        let mut expected = active_record;
+        expected.active_fire_slot = None;
+        expected.active_run_ref = None;
+        assert_eq!(cleared, expected);
+
+        let persisted = repo
+            .get_trigger(tenant_id, trigger_id)
+            .await
+            .expect("reload cleared record")
+            .expect("record present");
+        assert_eq!(persisted, expected);
+    }
+
     async fn assert_fire_claim_exclusions_and_active_gate_contract(repo: &impl TriggerRepository) {
         let fire_slot = ts(1_704_067_200);
         let tenant_id = tenant("tenant-a");
@@ -1708,6 +1805,7 @@ mod fire_claim_contract {
         assert_fire_claim_and_update_contract(repo).await;
         assert_fire_claim_exclusions_and_active_gate_contract(repo).await;
         assert_fire_result_rejects_invalid_next_run_at(repo).await;
+        assert_fire_clear_contract(repo).await;
     }
 
     fn assert_error_contains(error: TriggerError, expected: &str) {
@@ -1723,6 +1821,7 @@ mod fire_claim_contract {
         assert_fire_claim_and_update_contract(&repo).await;
         assert_fire_claim_exclusions_and_active_gate_contract(&repo).await;
         assert_fire_result_rejects_invalid_next_run_at(&repo).await;
+        assert_fire_clear_contract(&repo).await;
     }
 
     #[cfg(feature = "libsql")]

@@ -43,6 +43,8 @@ pub enum TriggerError {
     InvalidRecord { reason: String },
     #[error("invalid schedule: {reason}")]
     InvalidSchedule { reason: String },
+    #[error("invalid trigger materialization: {reason}")]
+    InvalidMaterialization { reason: String },
     #[error("trigger repository backend unavailable: {reason}")]
     Backend { reason: String },
     #[error("trigger not found")]
@@ -150,6 +152,43 @@ impl TryFrom<String> for TriggerExternalEventId {
 
     fn try_from(value: String) -> Result<Self, Self::Error> {
         validate_lower_hex_identifier("external event id", value).map(Self)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+#[serde(transparent)]
+pub struct TriggerInboundContentRef(String);
+
+impl TriggerInboundContentRef {
+    pub fn new(value: impl Into<String>) -> Result<Self, TriggerError> {
+        let value = value.into();
+        validate_inbound_content_ref(&value)?;
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl AsRef<str> for TriggerInboundContentRef {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl std::fmt::Display for TriggerInboundContentRef {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for TriggerInboundContentRef {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Self::new(String::deserialize(deserializer)?).map_err(serde::de::Error::custom)
     }
 }
 
@@ -341,6 +380,14 @@ pub struct TriggerFire {
     pub prompt: String,
 }
 
+#[async_trait]
+pub trait TriggerPromptMaterializer: Send + Sync {
+    async fn materialize_prompt(
+        &self,
+        fire: TriggerFire,
+    ) -> Result<TriggerInboundContentRef, TriggerError>;
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClaimDueFireRequest {
     pub tenant_id: TenantId,
@@ -401,6 +448,23 @@ pub struct FirePermanentFailedRequest {
     pub trigger_id: TriggerId,
     pub fire_slot: Timestamp,
     pub next_run_at: Timestamp,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClearActiveFireRequest {
+    pub tenant_id: TenantId,
+    pub trigger_id: TriggerId,
+    pub fire_slot: Timestamp,
+    pub run_id: TurnRunId,
+}
+
+impl ClearActiveFireRequest {
+    pub fn matches_record_active_fire(&self, record: &TriggerRecord) -> bool {
+        record.tenant_id == self.tenant_id
+            && record.trigger_id == self.trigger_id
+            && record.active_fire_slot == Some(self.fire_slot)
+            && record.active_run_ref == Some(self.run_id)
+    }
 }
 
 #[async_trait]
@@ -499,6 +563,11 @@ pub trait TriggerRepository: Send + Sync {
     async fn mark_fire_permanently_failed(
         &self,
         request: FirePermanentFailedRequest,
+    ) -> Result<Option<TriggerRecord>, TriggerError>;
+
+    async fn clear_active_fire(
+        &self,
+        request: ClearActiveFireRequest,
     ) -> Result<Option<TriggerRecord>, TriggerError>;
 }
 
@@ -754,6 +823,23 @@ impl TriggerRepository for InMemoryTriggerRepository {
         };
         Ok(Some(record))
     }
+
+    async fn clear_active_fire(
+        &self,
+        request: ClearActiveFireRequest,
+    ) -> Result<Option<TriggerRecord>, TriggerError> {
+        let mut state = self.lock_state()?;
+        let key = TriggerRepositoryKey::new(&request.tenant_id, request.trigger_id);
+        let Some(record) = state.get_mut(&key) else {
+            return Ok(None);
+        };
+        if !request.matches_record_active_fire(record) {
+            return Ok(None);
+        }
+        record.active_fire_slot = None;
+        record.active_run_ref = None;
+        Ok(Some(record.clone()))
+    }
 }
 
 impl InMemoryTriggerRepository {
@@ -895,6 +981,25 @@ fn validate_lower_hex_identifier(label: &str, value: String) -> Result<String, T
         label: label.to_string(),
         reason: "must be 64 lowercase hex characters".to_string(),
     })
+}
+
+fn validate_inbound_content_ref(value: &str) -> Result<(), TriggerError> {
+    if value.is_empty() {
+        return Err(TriggerError::InvalidMaterialization {
+            reason: "inbound content ref must not be empty".to_string(),
+        });
+    }
+    if value.len() > 512 {
+        return Err(TriggerError::InvalidMaterialization {
+            reason: "inbound content ref must be at most 512 bytes".to_string(),
+        });
+    }
+    if value.chars().any(|ch| ch == '\0' || ch.is_control()) {
+        return Err(TriggerError::InvalidMaterialization {
+            reason: "inbound content ref must not contain control characters".to_string(),
+        });
+    }
+    Ok(())
 }
 
 fn derive_fire_digest(
@@ -1143,6 +1248,100 @@ mod tests {
         assert_eq!(fire.identity.trigger_id, trigger_id);
         assert_eq!(fire.identity.fire_slot, record.next_run_at);
         assert_eq!(fire.prompt, record.prompt);
+    }
+
+    #[test]
+    fn trigger_inbound_content_ref_is_opaque_validated_materialization_output() {
+        let content_ref =
+            TriggerInboundContentRef::new("content:trigger-fire-01").expect("valid content ref");
+
+        assert_eq!(content_ref.as_str(), "content:trigger-fire-01");
+        assert_eq!(content_ref.as_ref(), "content:trigger-fire-01");
+        assert_eq!(content_ref.to_string(), "content:trigger-fire-01");
+        assert_eq!(
+            to_value(&content_ref).unwrap(),
+            json!("content:trigger-fire-01")
+        );
+        assert_eq!(
+            from_value::<TriggerInboundContentRef>(json!("content:trigger-fire-01")).unwrap(),
+            content_ref
+        );
+        assert!(TriggerInboundContentRef::new("x".repeat(512)).is_ok());
+
+        assert!(TriggerInboundContentRef::new("").is_err());
+        assert!(TriggerInboundContentRef::new("content:\ntrigger").is_err());
+        assert!(TriggerInboundContentRef::new("x".repeat(513)).is_err());
+    }
+
+    #[tokio::test]
+    async fn prompt_materializer_port_receives_fire_and_returns_content_ref() {
+        struct RecordingMaterializer;
+
+        #[async_trait]
+        impl TriggerPromptMaterializer for RecordingMaterializer {
+            async fn materialize_prompt(
+                &self,
+                fire: TriggerFire,
+            ) -> Result<TriggerInboundContentRef, TriggerError> {
+                assert_eq!(fire.creator_user_id, user("user-a"));
+                assert_eq!(fire.agent_id, Some(AgentId::new("agent-a").unwrap()));
+                assert_eq!(fire.project_id, Some(ProjectId::new("project-a").unwrap()));
+                assert_eq!(fire.prompt, "summarize unread mail");
+                TriggerInboundContentRef::new(format!(
+                    "content:{}",
+                    fire.identity.external_event_id
+                ))
+            }
+        }
+
+        let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid");
+        let record = sample_record(trigger_id, tenant("tenant-a"), ts(1_704_067_200));
+        let fire = ScheduleTriggerSourceProvider
+            .evaluate(&record, ts(1_704_067_200))
+            .await
+            .expect("due")
+            .expect("fire");
+
+        let materialized = RecordingMaterializer
+            .materialize_prompt(fire.clone())
+            .await
+            .expect("materialized");
+
+        assert_eq!(
+            materialized.as_str(),
+            format!("content:{}", fire.identity.external_event_id)
+        );
+    }
+
+    #[test]
+    fn clear_active_fire_request_matches_only_the_active_fire_and_run_ref() {
+        let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid");
+        let fire_slot = ts(1_704_067_200);
+        let run_id = TurnRunId::new();
+        let mut record = sample_record(trigger_id, tenant("tenant-a"), fire_slot);
+        record.active_fire_slot = Some(fire_slot);
+        record.active_run_ref = Some(run_id);
+        record.last_status = Some(TriggerRunStatus::Error);
+        let request = ClearActiveFireRequest {
+            tenant_id: record.tenant_id.clone(),
+            trigger_id,
+            fire_slot,
+            run_id,
+        };
+
+        assert!(request.matches_record_active_fire(&record));
+
+        let mut wrong_slot = record.clone();
+        wrong_slot.active_fire_slot = Some(fire_slot + chrono::Duration::minutes(1));
+        assert!(!request.matches_record_active_fire(&wrong_slot));
+
+        let mut wrong_run = record.clone();
+        wrong_run.active_run_ref = Some(TurnRunId::new());
+        assert!(!request.matches_record_active_fire(&wrong_run));
+
+        let mut unaccepted_claim = record;
+        unaccepted_claim.active_run_ref = None;
+        assert!(!request.matches_record_active_fire(&unaccepted_claim));
     }
 
     #[tokio::test]

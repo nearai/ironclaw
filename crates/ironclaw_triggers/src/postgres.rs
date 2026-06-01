@@ -5,10 +5,10 @@ use ironclaw_turns::TurnRunId;
 use tokio_postgres::Row;
 
 use crate::{
-    ClaimDueFireOutcome, ClaimDueFireRequest, ClaimedTriggerFire, FireAcceptedRequest,
-    FirePermanentFailedRequest, FireReplayedRequest, FireRetryableFailedRequest,
-    TriggerCompletionPolicy, TriggerError, TriggerId, TriggerRecord, TriggerRepository,
-    TriggerRunStatus, TriggerSchedule, TriggerSourceKind, TriggerState,
+    ClaimDueFireOutcome, ClaimDueFireRequest, ClaimedTriggerFire, ClearActiveFireRequest,
+    FireAcceptedRequest, FirePermanentFailedRequest, FireReplayedRequest,
+    FireRetryableFailedRequest, TriggerCompletionPolicy, TriggerError, TriggerId, TriggerRecord,
+    TriggerRepository, TriggerRunStatus, TriggerSchedule, TriggerSourceKind, TriggerState,
     reject_failed_result_after_active_run, reject_non_future_next_run_at, reject_run_ref_rewrite,
 };
 
@@ -521,6 +521,41 @@ impl TriggerRepository for PostgresTriggerRepository {
             .await
             .map_err(|error| backend_error("commit permanent trigger fire failure", error))?;
         Ok(Some(record))
+    }
+
+    async fn clear_active_fire(
+        &self,
+        request: ClearActiveFireRequest,
+    ) -> Result<Option<TriggerRecord>, TriggerError> {
+        let client = self.connect().await?;
+        let trigger_id = request.trigger_id.to_string();
+        let fire_slot = fmt_ts(&request.fire_slot);
+        let run_id = request.run_id.to_string();
+        let row = client
+            .query_opt(
+                &format!(
+                    "UPDATE {TRIGGER_TABLE}
+                     SET active_fire_slot = NULL,
+                         active_run_ref = NULL
+                     WHERE tenant_id = $1
+                       AND trigger_id = $2
+                       AND active_fire_slot = $3
+                       AND active_run_ref = $4
+                     RETURNING {TRIGGER_COLUMNS}"
+                ),
+                &[
+                    &request.tenant_id.as_str(),
+                    &trigger_id,
+                    &fire_slot,
+                    &run_id,
+                ],
+            )
+            .await
+            .map_err(|error| backend_error("clear active trigger fire", error))?;
+        match row {
+            Some(row) => Ok(Some(row_to_record(&row)?)),
+            None => Ok(None),
+        }
     }
 }
 

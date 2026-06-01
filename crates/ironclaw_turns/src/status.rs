@@ -36,6 +36,27 @@ impl TurnStatus {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TurnActiveRunRefState {
+    Missing,
+    Nonterminal,
+    Terminal,
+}
+
+impl TurnActiveRunRefState {
+    pub fn is_missing(self) -> bool {
+        matches!(self, Self::Missing)
+    }
+
+    pub fn is_nonterminal(self) -> bool {
+        matches!(self, Self::Nonterminal)
+    }
+
+    pub fn is_terminal(self) -> bool {
+        matches!(self, Self::Terminal)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct TurnRunProfile {
     pub id: RunProfileId,
