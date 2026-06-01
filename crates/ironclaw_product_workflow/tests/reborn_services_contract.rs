@@ -363,6 +363,7 @@ impl TurnCoordinator for FakeTurnCoordinator {
             received_at: Utc::now(),
             checkpoint_id: None,
             gate_ref,
+            credential_requirements: Vec::new(),
             failure: None,
             event_cursor: EventCursor(17),
         })

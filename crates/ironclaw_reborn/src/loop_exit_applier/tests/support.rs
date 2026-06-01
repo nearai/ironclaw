@@ -195,6 +195,7 @@ pub(super) fn blocked_exit_with_checkpoint(
     LoopExit::Blocked(LoopBlocked {
         kind,
         gate_ref: LoopGateRef::new("gate:test").expect("valid"),
+        credential_requirements: Vec::new(),
         checkpoint_id,
         state_ref,
         exit_id: test_exit_id(),
@@ -282,6 +283,7 @@ pub(super) fn claimed_run() -> ClaimedTurnRun {
             received_at: chrono::Utc::now(),
             checkpoint_id: None,
             gate_ref: None,
+            credential_requirements: Vec::new(),
             failure: None,
             event_cursor: EventCursor(0),
         },
@@ -537,6 +539,7 @@ fn state_for_mapping(
         received_at: chrono::Utc::now(),
         checkpoint_id: None,
         gate_ref,
+        credential_requirements: Vec::new(),
         failure,
         event_cursor: EventCursor(0),
     }
