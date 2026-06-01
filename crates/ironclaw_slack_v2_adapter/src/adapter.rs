@@ -330,7 +330,7 @@ impl ProductAdapter for SlackV2Adapter {
 }
 
 async fn record_status(sink: &dyn OutboundDeliverySink, status: DeliveryStatus) {
-    // Guard against a hung sink blocking the delivery hot path indefinitely.
+    // silent-ok: sink timeout guard — hung sink must not block the delivery hot path.
     let _ = tokio::time::timeout(SINK_RECORD_TIMEOUT, sink.record(status)).await;
 }
 

@@ -135,7 +135,7 @@ fn slack_events_policy() -> IngressPolicy {
             max_bytes: SLACK_EVENTS_BODY_LIMIT_BYTES,
         },
         rate_limit: RateLimitPolicy::Limited {
-            scope: RateLimitScope::PerIp,
+            scope: RateLimitScope::Global,
             max_requests: SLACK_EVENTS_MAX_REQUESTS,
             window_seconds: SLACK_EVENTS_RATE_WINDOW_SECONDS,
         },
@@ -204,4 +204,183 @@ fn runner_error_response(error: RunnerError) -> Response {
         "Slack Events API webhook rejected"
     );
     status.into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use axum::body::Body;
+    use axum::http::Request;
+    use http_body_util::BodyExt;
+    use ironclaw_product_adapters::ProtocolAuthFailure;
+    use ironclaw_product_adapters::auth::mark_request_signature_verified;
+    use tower::ServiceExt;
+
+    use super::*;
+
+    #[derive(Clone)]
+    struct FakeSlackDispatcher {
+        verify_result: Result<ProtocolAuthEvidence, RunnerError>,
+        dispatch_result: Result<WebhookProcessOutcome, RunnerError>,
+        dispatch_calls: Arc<AtomicUsize>,
+    }
+
+    impl FakeSlackDispatcher {
+        fn verified() -> Self {
+            Self {
+                verify_result: Ok(mark_request_signature_verified(
+                    "X-Slack-Signature",
+                    Some("X-Slack-Request-Timestamp".to_string()),
+                    "slack_install_alpha",
+                )),
+                dispatch_result: Ok(WebhookProcessOutcome::AcceptedForAsyncDispatch),
+                dispatch_calls: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+
+        fn auth_failure() -> Self {
+            Self {
+                verify_result: Err(RunnerError::AuthenticationFailed {
+                    failure: ProtocolAuthFailure::Missing,
+                }),
+                dispatch_result: Ok(WebhookProcessOutcome::AcceptedForAsyncDispatch),
+                dispatch_calls: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+
+        fn at_capacity() -> Self {
+            Self {
+                dispatch_result: Err(RunnerError::TooManyInFlight { max_in_flight: 1 }),
+                ..Self::verified()
+            }
+        }
+    }
+
+    impl SlackEventsWebhookDispatcher for FakeSlackDispatcher {
+        fn verify_webhook_auth(
+            &self,
+            _headers: &HeaderMap,
+            _body: &[u8],
+        ) -> Result<ProtocolAuthEvidence, RunnerError> {
+            self.verify_result.clone()
+        }
+
+        fn process_verified_webhook_immediate_ack<'a>(
+            &'a self,
+            _body: &'a [u8],
+            _evidence: &'a ProtocolAuthEvidence,
+        ) -> Pin<Box<dyn Future<Output = Result<WebhookProcessOutcome, RunnerError>> + Send + 'a>>
+        {
+            self.dispatch_calls.fetch_add(1, Ordering::SeqCst);
+            let result = self.dispatch_result.clone();
+            Box::pin(async move { result })
+        }
+    }
+
+    async fn post_slack_events(dispatcher: FakeSlackDispatcher, body: &'static str) -> Response {
+        let mount = slack_events_route_mount(SlackEventsRouteState::new(Arc::new(dispatcher)));
+        mount
+            .router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(SLACK_EVENTS_PATH)
+                    .body(Body::from(body))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("router should respond")
+    }
+
+    #[tokio::test]
+    async fn slack_events_handler_returns_401_on_auth_failure() {
+        let dispatcher = FakeSlackDispatcher::auth_failure();
+        let calls = Arc::clone(&dispatcher.dispatch_calls);
+        let response = post_slack_events(dispatcher, r#"{"type":"event_callback"}"#).await;
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn slack_events_handler_returns_challenge_on_url_verification() {
+        let dispatcher = FakeSlackDispatcher::verified();
+        let calls = Arc::clone(&dispatcher.dispatch_calls);
+        let response = post_slack_events(
+            dispatcher,
+            r#"{"type":"url_verification","challenge":"challenge-token"}"#,
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body should collect")
+            .to_bytes();
+        assert_eq!(&bytes[..], b"challenge-token");
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn slack_events_handler_returns_400_on_url_verification_parse_error() {
+        let dispatcher = FakeSlackDispatcher::verified();
+        let calls = Arc::clone(&dispatcher.dispatch_calls);
+        let response = post_slack_events(dispatcher, r#"{"type":"url_verification"}"#).await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn slack_events_handler_returns_429_when_at_capacity() {
+        let dispatcher = FakeSlackDispatcher::at_capacity();
+        let calls = Arc::clone(&dispatcher.dispatch_calls);
+        let response = post_slack_events(dispatcher, r#"{"type":"event_callback"}"#).await;
+
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn slack_events_handler_returns_ok_on_successful_dispatch() {
+        let dispatcher = FakeSlackDispatcher::verified();
+        let calls = Arc::clone(&dispatcher.dispatch_calls);
+        let response = post_slack_events(dispatcher, r#"{"type":"event_callback"}"#).await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body should collect")
+            .to_bytes();
+        assert_eq!(&bytes[..], b"ok");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn runner_error_response_maps_adapter_panicked_to_503() {
+        let response = runner_error_response(RunnerError::AdapterPanicked);
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[test]
+    fn slack_events_route_uses_global_rate_limit_scope() {
+        let descriptors = slack_events_route_descriptors();
+        let [descriptor] = descriptors.as_slice() else {
+            panic!("expected exactly one Slack Events route descriptor")
+        };
+        let RateLimitPolicy::Limited { scope, .. } = descriptor.policy().rate_limit() else {
+            panic!("Slack Events route should be rate limited")
+        };
+
+        assert_eq!(*scope, RateLimitScope::Global);
+    }
 }

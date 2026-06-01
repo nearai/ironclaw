@@ -1,15 +1,6 @@
 //! Native ProductAdapter runner.
-//!
-//! `NativeProductAdapterRunner` is the integration point that turns a single
-//! webhook request into the full Reborn pipeline:
-//!
-//! 1. Authenticate the protocol payload with a [`WebhookAuthVerifier`].
-//! 2. On success, mint a `Verified` evidence via the public `mark_*_verified`
-//!    helpers in `ironclaw_product_adapters::auth`.
-//! 3. Hand the verified evidence + raw payload to the adapter's
-//!    [`ironclaw_product_adapters::ProductAdapter::parse_inbound`].
-//! 4. Forward the resulting envelope to the [`ironclaw_product_adapters::ProductWorkflow`]
-//!    facade and return the structured outcome.
+//! Authenticates native webhook payloads, stamps trusted inbound context, and
+//! forwards envelopes to the Reborn ProductWorkflow facade.
 
 use std::num::NonZeroUsize;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -28,9 +19,7 @@ use ironclaw_product_adapters::{
 };
 use thiserror::Error;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
-
-#[path = "runner_immediate_ack.rs"]
-mod runner_immediate_ack;
+use tokio::task::JoinSet;
 
 use crate::auth_verifier::{
     HmacWebhookAuth, SharedSecretHeaderAuth, VerificationOutcome, WebhookAuthVerifier,
@@ -248,10 +237,11 @@ impl Default for NativeProductAdapterRunnerConfig {
 
 pub struct NativeProductAdapterRunner {
     adapter: Arc<dyn ProductAdapter>,
-    workflow: Arc<dyn ProductWorkflow>,
+    pub(crate) workflow: Arc<dyn ProductWorkflow>,
     auth: WebhookAuth,
-    config: NativeProductAdapterRunnerConfig,
+    pub(crate) config: NativeProductAdapterRunnerConfig,
     admission: Arc<Semaphore>,
+    pub(crate) immediate_ack_tasks: Arc<tokio::sync::Mutex<JoinSet<()>>>,
 }
 
 impl NativeProductAdapterRunner {
@@ -279,6 +269,7 @@ impl NativeProductAdapterRunner {
             workflow,
             auth,
             admission: Arc::new(Semaphore::new(config.max_in_flight())),
+            immediate_ack_tasks: Arc::new(tokio::sync::Mutex::new(JoinSet::new())),
             config,
         }
     }
@@ -316,7 +307,7 @@ impl NativeProductAdapterRunner {
         }
     }
 
-    fn prepare_inbound_envelope(
+    pub(crate) async fn prepare_inbound_envelope(
         &self,
         body: &[u8],
         evidence: &ProtocolAuthEvidence,
@@ -327,9 +318,22 @@ impl NativeProductAdapterRunner {
                 max_in_flight: self.config.max_in_flight(),
             }
         })?;
-        let parse_result = catch_unwind(AssertUnwindSafe(|| {
-            self.adapter.parse_inbound(body, evidence)
-        }));
+        let adapter = Arc::clone(&self.adapter);
+        let body = body.to_vec();
+        let parse_evidence = evidence.clone();
+        let parse_result = tokio::task::spawn_blocking(move || {
+            catch_unwind(AssertUnwindSafe(|| {
+                adapter.parse_inbound(&body, &parse_evidence)
+            }))
+        })
+        .await
+        .map_err(|join_error| {
+            if join_error.is_panic() {
+                RunnerError::AdapterPanicked
+            } else {
+                RunnerError::WorkflowJoinFailed
+            }
+        })?;
         let parsed = match parse_result {
             Ok(result) => result?,
             Err(_) => return Err(RunnerError::AdapterPanicked),
@@ -378,7 +382,7 @@ impl NativeProductAdapterRunner {
         body: &[u8],
     ) -> Result<WebhookProcessOutcome, RunnerError> {
         let evidence = self.verify_webhook_auth(headers, body)?;
-        let (envelope, _permit) = self.prepare_inbound_envelope(body, &evidence)?;
+        let (envelope, _permit) = self.prepare_inbound_envelope(body, &evidence).await?;
         let workflow = Arc::clone(&self.workflow);
         let mut workflow_task =
             tokio::spawn(async move { workflow.accept_inbound(envelope).await });
