@@ -43,6 +43,30 @@ pub struct CapabilityDisplayOutputPreview {
     pub truncated: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapabilityDisplayText {
+    pub text: String,
+    pub truncated: bool,
+}
+
+pub fn truncate_capability_display_text(text: &str, max_bytes: usize) -> CapabilityDisplayText {
+    if text.len() <= max_bytes {
+        return CapabilityDisplayText {
+            text: text.to_string(),
+            truncated: false,
+        };
+    }
+
+    let mut end = max_bytes;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    CapabilityDisplayText {
+        text: text[..end].to_string(),
+        truncated: true,
+    }
+}
+
 /// Normalized dispatch result returned by a runtime dispatcher.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapabilityDispatchResult {

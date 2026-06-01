@@ -1,4 +1,4 @@
-use ironclaw_host_api::CapabilityDisplayOutputPreview;
+use ironclaw_host_api::{CapabilityDisplayOutputPreview, truncate_capability_display_text};
 use similar::{ChangeTag, TextDiff};
 
 const DIFF_CONTEXT_LINES: usize = 3;
@@ -75,14 +75,13 @@ pub(super) fn file_diff_preview(
         }
     }
 
-    let (preview_text, boundary_truncated) =
-        truncate_to_byte_boundary(&output, DIFF_PREVIEW_MAX_BYTES);
+    let preview_text = truncate_capability_display_text(&output, DIFF_PREVIEW_MAX_BYTES);
     CapabilityDisplayOutputPreview {
         output_summary: Some(format!("Edited 1 file: +{additions}/-{deletions}")),
-        output_preview: preview_text,
+        output_preview: preview_text.text,
         output_kind: "unified_diff".to_string(),
         subtitle: Some(path.to_string()),
-        truncated: truncated || boundary_truncated,
+        truncated: truncated || preview_text.truncated,
     }
 }
 
@@ -108,17 +107,6 @@ fn push_diff_line(output: &mut String, prefix: char, value: &str) {
     if !value.ends_with('\n') {
         output.push('\n');
     }
-}
-
-fn truncate_to_byte_boundary(text: &str, max_bytes: usize) -> (String, bool) {
-    if text.len() <= max_bytes {
-        return (text.to_string(), false);
-    }
-    let mut end = max_bytes;
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    (text[..end].to_string(), true)
 }
 
 #[cfg(test)]

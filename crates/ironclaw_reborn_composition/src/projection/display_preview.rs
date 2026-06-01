@@ -2,7 +2,10 @@ use std::{collections::HashMap, sync::Mutex};
 
 use async_trait::async_trait;
 use ironclaw_event_projections::{CapabilityActivityProjection, CapabilityActivityStatus};
-use ironclaw_host_api::{CapabilityDisplayOutputPreview, CapabilityId, InvocationId};
+use ironclaw_host_api::{
+    CapabilityDisplayOutputPreview, CapabilityDisplayText, CapabilityId, InvocationId,
+    truncate_capability_display_text,
+};
 use ironclaw_product_adapters::{
     CAPABILITY_DISPLAY_PREVIEW_MAX_BYTES, CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES,
     CapabilityDisplayPreviewView, CapabilityDisplayPreviewViewInput, ProductAdapterError,
@@ -346,13 +349,7 @@ fn output_preview_from_display(value: &CapabilityDisplayOutputPreview) -> Output
     }
 }
 
-#[derive(Debug, Clone)]
-struct DisplayText {
-    text: String,
-    truncated: bool,
-}
-
-fn input_summary(capability_id: &str, value: &serde_json::Value) -> Option<DisplayText> {
+fn input_summary(capability_id: &str, value: &serde_json::Value) -> Option<CapabilityDisplayText> {
     if (capability_id == "read_file"
         || capability_id == "builtin.read_file"
         || capability_id.ends_with(".read_file"))
@@ -528,12 +525,12 @@ fn is_sensitive_key(key: &str) -> bool {
         || key == "key"
 }
 
-fn bounded_display_text(text: &str, max_bytes: usize) -> DisplayText {
+fn bounded_display_text(text: &str, max_bytes: usize) -> CapabilityDisplayText {
     let sanitized = sanitize_text(text);
     truncate_bytes(&sanitized, max_bytes)
 }
 
-fn bounded_preview_text(text: &str) -> DisplayText {
+fn bounded_preview_text(text: &str) -> CapabilityDisplayText {
     let sanitized = sanitize_text(text);
     truncate_bytes(&sanitized, CAPABILITY_DISPLAY_PREVIEW_MAX_BYTES)
 }
@@ -542,20 +539,8 @@ fn non_empty(text: String) -> Option<String> {
     if text.is_empty() { None } else { Some(text) }
 }
 
-fn truncate_bytes(text: &str, max_bytes: usize) -> DisplayText {
-    let (text, truncated) = truncate_to_byte_boundary(text, max_bytes);
-    DisplayText { text, truncated }
-}
-
-fn truncate_to_byte_boundary(text: &str, max_bytes: usize) -> (String, bool) {
-    if text.len() <= max_bytes {
-        return (text.to_string(), false);
-    }
-    let mut end = max_bytes;
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    (text[..end].to_string(), true)
+fn truncate_bytes(text: &str, max_bytes: usize) -> CapabilityDisplayText {
+    truncate_capability_display_text(text, max_bytes)
 }
 
 pub(crate) fn sanitize_text(text: &str) -> String {
