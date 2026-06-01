@@ -1477,6 +1477,8 @@ struct LocalDevSkillContextSource {
     execution_adapter: Arc<LocalDevSkillExecutionAdapter>,
 }
 
+const LOCAL_DEV_MAX_SKILL_CONTEXT_TOKENS: usize = 6000;
+
 /// Build the [`SkillActivationSelectorConfig`] used by the local-dev
 /// filesystem skill context source. Extracted from
 /// [`local_dev_filesystem_skill_context_source`] so the wiring of the
@@ -1490,6 +1492,7 @@ fn local_dev_selector_config(
     regex_skill_activation_enabled: bool,
 ) -> SkillActivationSelectorConfig {
     SkillActivationSelectorConfig {
+        max_context_tokens: LOCAL_DEV_MAX_SKILL_CONTEXT_TOKENS,
         selection_mode:
             ironclaw_first_party_extension_ports::SkillActivationSelectionMode::ExplicitOnly,
         regex_activation_enabled: regex_skill_activation_enabled,
@@ -1702,6 +1705,15 @@ mod tests {
         assert!(
             cfg.regex_activation_enabled,
             "regex_skill_activation_enabled=true must propagate into SkillActivationSelectorConfig"
+        );
+    }
+
+    #[test]
+    fn local_dev_selector_config_uses_large_skill_context_budget() {
+        let cfg = super::local_dev_selector_config(true);
+        assert_eq!(
+            cfg.max_context_tokens, 6000,
+            "local-dev Reborn skill activation should match the legacy 6000-token skill budget"
         );
     }
     use ironclaw_authorization::CapabilityLeaseStore;
