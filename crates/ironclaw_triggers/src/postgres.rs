@@ -250,8 +250,8 @@ impl TriggerRepository for PostgresTriggerRepository {
         let client = self.connect().await?;
         let rows = match after {
             Some(cursor) => {
-                let active_fire_slot = fmt_ts(&cursor.active_fire_slot);
-                let trigger_id = cursor.trigger_id.to_string();
+                let active_fire_slot = fmt_ts(&cursor.active_fire_slot());
+                let trigger_id = cursor.trigger_id().to_string();
                 client
                     .query(
                         &format!(
@@ -268,7 +268,7 @@ impl TriggerRepository for PostgresTriggerRepository {
                         ),
                         &[
                             &active_fire_slot,
-                            &cursor.tenant_id.as_str(),
+                            &cursor.tenant_id().as_str(),
                             &trigger_id,
                             &limit,
                         ],
@@ -913,4 +913,8 @@ CREATE INDEX IF NOT EXISTS trigger_records_state_next_run_at_idx
 
 CREATE INDEX IF NOT EXISTS trigger_records_tenant_created_at_idx
     ON trigger_records (tenant_id, created_at, trigger_id);
+
+CREATE INDEX IF NOT EXISTS trigger_records_active_fire_slot_idx
+    ON trigger_records (active_fire_slot, tenant_id, trigger_id)
+    WHERE active_fire_slot IS NOT NULL;
 "#;

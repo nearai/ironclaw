@@ -134,6 +134,16 @@ impl LibSqlTriggerRepository {
             )
             .await
             .map_err(|error| backend_error("create trigger tenant list index", error))?;
+            conn.execute(
+                &format!(
+                    "CREATE INDEX IF NOT EXISTS trigger_records_active_fire_slot_idx
+                     ON {TRIGGER_TABLE} (active_fire_slot, tenant_id, trigger_id)
+                     WHERE active_fire_slot IS NOT NULL"
+                ),
+                (),
+            )
+            .await
+            .map_err(|error| backend_error("create trigger active scan index", error))?;
             Ok::<(), TriggerError>(())
         }
         .await;
@@ -324,9 +334,9 @@ impl TriggerRepository for LibSqlTriggerRepository {
                          LIMIT ?4"
                     ),
                     params![
-                        fmt_ts(&cursor.active_fire_slot),
-                        cursor.tenant_id.as_str(),
-                        cursor.trigger_id.to_string(),
+                        fmt_ts(&cursor.active_fire_slot()),
+                        cursor.tenant_id().as_str(),
+                        cursor.trigger_id().to_string(),
                         limit as i64,
                     ],
                 )

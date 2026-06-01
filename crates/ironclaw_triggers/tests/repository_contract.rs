@@ -529,13 +529,10 @@ async fn assert_active_query_lists_active_records_in_deterministic_order(
         ]
     );
 
-    let cursor = ActiveTriggerScanCursor {
-        active_fire_slot: first_page[2].active_fire_slot.expect("active slot"),
-        tenant_id: first_page[2].tenant_id.clone(),
-        trigger_id: first_page[2].trigger_id,
-    };
+    let cursor =
+        ActiveTriggerScanCursor::from_active_record(&first_page[2]).expect("active cursor");
     let second_page = repo
-        .list_active_triggers_after(Some(cursor), 3)
+        .list_active_triggers_after(Some(cursor.clone()), 3)
         .await
         .expect("list second active page");
     assert_eq!(
@@ -557,6 +554,16 @@ async fn assert_active_query_lists_active_records_in_deterministic_order(
                 overflow_records[0].trigger_id,
             ),
         ]
+    );
+    let cursor_at_last =
+        ActiveTriggerScanCursor::from_active_record(overflow_records.last().expect("overflow row"))
+            .expect("last active cursor");
+    assert!(
+        repo.list_active_triggers_after(Some(cursor_at_last), 3)
+            .await
+            .expect("list after last active row")
+            .is_empty(),
+        "cursor at the last active row must return an empty page"
     );
 
     let active = repo

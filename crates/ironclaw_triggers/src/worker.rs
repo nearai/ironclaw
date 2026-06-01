@@ -156,7 +156,7 @@ impl TriggerPollerWorker {
         }
         report.active_records = active_records.len();
         let mut next_cursor = cursor;
-        let mut advance_cursor = true;
+        let mut first_unadvanced_cursor: Option<ActiveTriggerScanCursor> = None;
         for record in active_records {
             debug_assert!(
                 record.active_fire_slot.is_some(),
@@ -165,10 +165,8 @@ impl TriggerPollerWorker {
             let Some(fire_slot) = record.active_fire_slot else {
                 continue;
             };
-            let record_cursor = ActiveTriggerScanCursor {
-                active_fire_slot: fire_slot,
-                tenant_id: record.tenant_id.clone(),
-                trigger_id: record.trigger_id,
+            let Some(record_cursor) = ActiveTriggerScanCursor::from_active_record(&record) else {
+                continue;
             };
             let Some(run_id) = record.active_run_ref else {
                 // Keep claim-only rows blocked until recovery has lease or age
@@ -182,7 +180,7 @@ impl TriggerPollerWorker {
                         active_run_ref: None,
                     },
                 });
-                if advance_cursor {
+                if first_unadvanced_cursor.is_none() {
                     next_cursor = Some(record_cursor);
                 }
                 continue;
@@ -209,7 +207,7 @@ impl TriggerPollerWorker {
                             reason: TriggerPollerFailureReason::ActiveRunLookup,
                         },
                     });
-                    advance_cursor = false;
+                    first_unadvanced_cursor.get_or_insert(record_cursor);
                     continue;
                 }
             };
@@ -256,7 +254,7 @@ impl TriggerPollerWorker {
                     });
                 }
             }
-            if advance_cursor {
+            if first_unadvanced_cursor.is_none() {
                 next_cursor = Some(record_cursor);
             }
         }
@@ -1257,6 +1255,110 @@ mod tests {
             .expect("terminal record");
         assert_eq!(persisted.active_fire_slot, None);
         assert_eq!(persisted.active_run_ref, None);
+    }
+
+    #[tokio::test]
+    async fn tick_active_cleanup_cursor_wraps_to_start_when_page_is_empty() {
+        let repo = Arc::new(InMemoryTriggerRepository::default());
+        let first_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid");
+        let second_id = TriggerId::parse("01J00000000000000000000000").expect("ulid");
+        let third_id = TriggerId::parse("01J00000000000000000000001").expect("ulid");
+        let first_slot = ts(1_704_067_200);
+        let second_slot = ts(1_704_067_260);
+        let third_slot = ts(1_704_067_320);
+        let first_run = TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5a").expect("run id");
+        let second_run = TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5b").expect("run id");
+        let third_run = TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5c").expect("run id");
+
+        let mut first = sample_record(first_id, tenant("tenant-a"), ts(1_704_067_800));
+        first.active_fire_slot = Some(first_slot);
+        first.active_run_ref = Some(first_run);
+        let mut second = sample_record(second_id, tenant("tenant-a"), ts(1_704_067_800));
+        second.active_fire_slot = Some(second_slot);
+        second.active_run_ref = Some(second_run);
+        let mut third = sample_record(third_id, tenant("tenant-a"), ts(1_704_067_800));
+        third.active_fire_slot = Some(third_slot);
+        third.active_run_ref = Some(third_run);
+        repo.upsert_trigger(first).await.expect("insert first");
+        repo.upsert_trigger(second).await.expect("insert second");
+        repo.upsert_trigger(third).await.expect("insert third");
+
+        let active_lookup = Arc::new(RecordingActiveRunLookup::with_results(vec![
+            Ok(TriggerActiveRunState::Nonterminal),
+            Ok(TriggerActiveRunState::Nonterminal),
+            Ok(TriggerActiveRunState::Nonterminal),
+            Ok(TriggerActiveRunState::Nonterminal),
+            Ok(TriggerActiveRunState::Nonterminal),
+        ]));
+        let worker = worker_with_config(
+            repo,
+            Arc::new(crate::ScheduleTriggerSourceProvider),
+            Arc::new(RecordingMaterializer::success("content:trigger-fire")),
+            Arc::new(RecordingSubmitter::with_outcomes(Vec::new())),
+            active_lookup.clone(),
+            TriggerPollerWorkerConfig {
+                fires_per_tick: 2,
+                ..TriggerPollerWorkerConfig::default()
+            },
+        );
+
+        let first_report = worker.tick_once(first_slot).await.expect("first tick");
+        assert_eq!(first_report.active_records, 2);
+        let second_report = worker.tick_once(second_slot).await.expect("second tick");
+        assert_eq!(second_report.active_records, 1);
+
+        let third_report = worker.tick_once(third_slot).await.expect("third tick");
+        assert_eq!(third_report.active_records, 2);
+        assert_eq!(
+            third_report
+                .results
+                .iter()
+                .map(|result| result.trigger_id)
+                .collect::<Vec<_>>(),
+            vec![first_id, second_id]
+        );
+        assert_eq!(
+            active_lookup
+                .requests()
+                .into_iter()
+                .map(|request| request.trigger_id)
+                .collect::<Vec<_>>(),
+            vec![first_id, second_id, third_id, first_id, second_id]
+        );
+    }
+
+    #[tokio::test]
+    async fn tick_fails_when_wrap_refetch_returns_backend_error() {
+        let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid");
+        let fire_slot = ts(1_704_067_200);
+        let run_id = TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5a").expect("run id");
+        let mut record = sample_record(trigger_id, tenant("tenant-a"), ts(1_704_067_800));
+        record.active_fire_slot = Some(fire_slot);
+        record.active_run_ref = Some(run_id);
+        let repo = Arc::new(ActiveWrapRefetchErrorRepository::new(record));
+        let worker = worker_with_config(
+            repo.clone(),
+            Arc::new(crate::ScheduleTriggerSourceProvider),
+            Arc::new(RecordingMaterializer::success("content:trigger-fire")),
+            Arc::new(RecordingSubmitter::with_outcomes(Vec::new())),
+            Arc::new(RecordingActiveRunLookup::with_state(
+                TriggerActiveRunState::Nonterminal,
+            )),
+            TriggerPollerWorkerConfig {
+                fires_per_tick: 1,
+                ..TriggerPollerWorkerConfig::default()
+            },
+        );
+
+        let first_report = worker.tick_once(fire_slot).await.expect("first tick");
+        assert_eq!(first_report.active_records, 1);
+
+        let error = worker
+            .tick_once(fire_slot)
+            .await
+            .expect_err("wrap refetch fails");
+        assert!(matches!(error, TriggerError::Backend { .. }));
+        assert_eq!(repo.active_scan_call_shapes(), vec![false, true, false]);
     }
 
     #[tokio::test]
@@ -2467,6 +2569,147 @@ mod tests {
         }
     }
 
+    struct ActiveWrapRefetchErrorRepository {
+        record: TriggerRecord,
+        active_scan_calls: Mutex<Vec<bool>>,
+    }
+
+    impl ActiveWrapRefetchErrorRepository {
+        fn new(record: TriggerRecord) -> Self {
+            Self {
+                record,
+                active_scan_calls: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn active_scan_call_shapes(&self) -> Vec<bool> {
+            self.active_scan_calls
+                .lock()
+                .expect("active scan calls lock")
+                .clone()
+        }
+    }
+
+    #[async_trait]
+    impl TriggerRepository for ActiveWrapRefetchErrorRepository {
+        async fn upsert_trigger(&self, _record: TriggerRecord) -> Result<(), TriggerError> {
+            unreachable!("active-wrap-refetch-error repository is read-only")
+        }
+
+        async fn get_trigger(
+            &self,
+            _tenant_id: TenantId,
+            _trigger_id: TriggerId,
+        ) -> Result<Option<TriggerRecord>, TriggerError> {
+            unreachable!("active-wrap-refetch-error repository does not load records")
+        }
+
+        async fn list_triggers(
+            &self,
+            _tenant_id: TenantId,
+        ) -> Result<Vec<TriggerRecord>, TriggerError> {
+            unreachable!("active-wrap-refetch-error repository does not list tenant records")
+        }
+
+        async fn remove_trigger(
+            &self,
+            _tenant_id: TenantId,
+            _trigger_id: TriggerId,
+        ) -> Result<Option<TriggerRecord>, TriggerError> {
+            unreachable!("active-wrap-refetch-error repository does not remove records")
+        }
+
+        async fn list_due_triggers(
+            &self,
+            _now: Timestamp,
+            _limit: usize,
+        ) -> Result<Vec<TriggerRecord>, TriggerError> {
+            Ok(Vec::new())
+        }
+
+        async fn list_active_triggers(
+            &self,
+            limit: usize,
+        ) -> Result<Vec<TriggerRecord>, TriggerError> {
+            self.list_active_triggers_after(None, limit).await
+        }
+
+        async fn list_active_triggers_after(
+            &self,
+            after: Option<ActiveTriggerScanCursor>,
+            _limit: usize,
+        ) -> Result<Vec<TriggerRecord>, TriggerError> {
+            let mut calls = self
+                .active_scan_calls
+                .lock()
+                .expect("active scan calls lock");
+            calls.push(after.is_some());
+            match calls.len() {
+                1 => Ok(vec![self.record.clone()]),
+                2 => Ok(Vec::new()),
+                3 => Err(TriggerError::Backend {
+                    reason: "wrap refetch unavailable".to_string(),
+                }),
+                _ => unreachable!("unexpected active scan call"),
+            }
+        }
+
+        async fn claim_due_fire(
+            &self,
+            _request: ClaimDueFireRequest,
+        ) -> Result<ClaimDueFireOutcome, TriggerError> {
+            unreachable!("active-wrap-refetch-error repository should not claim fires")
+        }
+
+        async fn mark_fire_accepted(
+            &self,
+            _request: FireAcceptedRequest,
+        ) -> Result<Option<TriggerRecord>, TriggerError> {
+            unreachable!("active-wrap-refetch-error repository should not persist accepted fires")
+        }
+
+        async fn mark_fire_replayed(
+            &self,
+            _request: FireReplayedRequest,
+        ) -> Result<Option<TriggerRecord>, TriggerError> {
+            unreachable!("active-wrap-refetch-error repository should not persist replayed fires")
+        }
+
+        async fn mark_fire_retryable_failed(
+            &self,
+            _request: FireRetryableFailedRequest,
+        ) -> Result<Option<TriggerRecord>, TriggerError> {
+            unreachable!(
+                "active-wrap-refetch-error repository should not persist retryable failures"
+            )
+        }
+
+        async fn mark_fire_permanently_failed(
+            &self,
+            _request: FirePermanentFailedRequest,
+        ) -> Result<Option<TriggerRecord>, TriggerError> {
+            unreachable!(
+                "active-wrap-refetch-error repository should not persist permanent failures"
+            )
+        }
+
+        async fn mark_fire_terminally_failed(
+            &self,
+            _request: FireTerminalFailedRequest,
+        ) -> Result<Option<TriggerRecord>, TriggerError> {
+            unreachable!(
+                "active-wrap-refetch-error repository should not persist terminal failures"
+            )
+        }
+
+        async fn clear_active_fire(
+            &self,
+            _request: ClearActiveFireRequest,
+        ) -> Result<Option<TriggerRecord>, TriggerError> {
+            unreachable!("active-wrap-refetch-error repository should not clear active fires")
+        }
+    }
+
     struct ActiveClearRaceRepository {
         active_record: TriggerRecord,
     }
@@ -2658,9 +2901,9 @@ mod tests {
                         Some(cursor) => {
                             (*active_fire_slot, tenant_id, *trigger_id)
                                 > (
-                                    cursor.active_fire_slot,
-                                    &cursor.tenant_id,
-                                    cursor.trigger_id,
+                                    cursor.active_fire_slot(),
+                                    cursor.tenant_id(),
+                                    cursor.trigger_id(),
                                 )
                         }
                         None => true,

@@ -559,9 +559,31 @@ pub struct ClearActiveFireRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActiveTriggerScanCursor {
-    pub active_fire_slot: Timestamp,
-    pub tenant_id: TenantId,
-    pub trigger_id: TriggerId,
+    active_fire_slot: Timestamp,
+    tenant_id: TenantId,
+    trigger_id: TriggerId,
+}
+
+impl ActiveTriggerScanCursor {
+    pub fn from_active_record(record: &TriggerRecord) -> Option<Self> {
+        Some(Self {
+            active_fire_slot: record.active_fire_slot?,
+            tenant_id: record.tenant_id.clone(),
+            trigger_id: record.trigger_id,
+        })
+    }
+
+    pub fn active_fire_slot(&self) -> Timestamp {
+        self.active_fire_slot
+    }
+
+    pub fn tenant_id(&self) -> &TenantId {
+        &self.tenant_id
+    }
+
+    pub fn trigger_id(&self) -> TriggerId {
+        self.trigger_id
+    }
 }
 
 #[async_trait]
@@ -858,9 +880,9 @@ impl TriggerRepository for InMemoryTriggerRepository {
                     Some(cursor) => {
                         (*active_fire_slot, tenant_id, *trigger_id)
                             > (
-                                cursor.active_fire_slot,
-                                &cursor.tenant_id,
-                                cursor.trigger_id,
+                                cursor.active_fire_slot(),
+                                cursor.tenant_id(),
+                                cursor.trigger_id(),
                             )
                     }
                     None => true,
