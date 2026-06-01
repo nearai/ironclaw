@@ -96,6 +96,63 @@ async fn thread_context_port_loads_policy_filtered_transcript_messages() {
 }
 
 #[tokio::test]
+async fn thread_context_port_rejects_run_actor_owner_mismatch() {
+    // Defense in depth for the thread-owner MountView divergence: the store
+    // keys threads by owner, so reading a thread whose scope owner differs
+    // from the run's authenticated actor silently targets the wrong
+    // `owners/<user>` subtree. The port must fail loud before that read.
+    let fixture = ThreadFixture::new().await;
+    let mismatched_run_context = fixture
+        .run_context
+        .clone()
+        .with_actor(TurnActor::new(UserId::new("intruder-user").unwrap()));
+    let adapter = ThreadBackedLoopContextPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        mismatched_run_context,
+        16,
+    );
+
+    let error = adapter
+        .load_loop_context(LoopContextRequest {
+            after: None,
+            limit: 16,
+            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+        })
+        .await
+        .expect_err("owner mismatch must be rejected before the thread read");
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::ScopeMismatch);
+}
+
+#[tokio::test]
+async fn thread_context_port_accepts_matching_run_actor_owner() {
+    // The same path must still succeed when the run actor owns the thread.
+    let fixture = ThreadFixture::new().await;
+    let matched_run_context = fixture
+        .run_context
+        .clone()
+        .with_actor(TurnActor::new(UserId::new("user-loop-support").unwrap()));
+    let adapter = ThreadBackedLoopContextPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        matched_run_context,
+        16,
+    );
+
+    let bundle = adapter
+        .load_loop_context(LoopContextRequest {
+            after: None,
+            limit: 16,
+            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+        })
+        .await
+        .expect("matching run actor owner must load context");
+
+    assert_eq!(bundle.messages.len(), 1);
+}
+
+#[tokio::test]
 async fn thread_context_port_preserves_summary_replacements_as_system_messages() {
     let fixture = ThreadFixture::new().await;
     fixture

@@ -743,7 +743,22 @@ impl HostRuntimeLoopCapabilityPort {
             .input_resolver
             .resolve_capability_input(&self.run_context, &request.input_ref)
             .await?;
-        let output = capability.output(&input, |requested| snapshot.capability_info(requested))?;
+        let output =
+            match capability.output(&input, |requested| snapshot.capability_info(requested)) {
+                Ok(output) => output,
+                Err(error) if error.kind == AgentLoopHostErrorKind::InvalidInvocation => {
+                    // Synthetic capability InvalidInvocation errors are model-side input failures
+                    // such as bad arguments or an unknown capability_info target. Keep those
+                    // model-visible so the driver can retry instead of terminalizing the host.
+                    // INVARIANT: synthetic capabilities must not use InvalidInvocation for
+                    // internal or host-fatal conditions.
+                    return Ok(CapabilityOutcome::Failed(CapabilityFailure {
+                        error_kind: CapabilityFailureKind::InvalidInput,
+                        safe_summary: error.safe_summary,
+                    }));
+                }
+                Err(error) => return Err(error),
+            };
         let result_ref = self
             .result_writer
             .write_capability_result(
@@ -814,6 +829,14 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
         tool_call: &ProviderToolCall,
     ) -> Result<ProviderToolCallCapabilityIds, AgentLoopHostError> {
         let prepared = self.prepare_provider_tool_call(tool_call)?;
+        if prepared.capability_id.as_str() == crate::capability_info::CAPABILITY_ID
+            && prepared.effective_capability_ids.len() == 1
+        {
+            return Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::InvalidInvocation,
+                "capability_info target is not on the visible surface",
+            ));
+        }
         Ok(ProviderToolCallCapabilityIds {
             provider_capability_id: prepared.capability_id,
             effective_capability_ids: prepared.effective_capability_ids,
@@ -999,8 +1022,8 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
                     .invoke_synthetic_capability(request, capability, snapshot)
                     .await;
                 if result.is_ok() {
-                    self.record_loop_completed(&idempotency_key, result.clone())?;
                     guard.commit();
+                    self.record_loop_completed(&idempotency_key, result.clone())?;
                 }
                 return result;
             }
@@ -3153,6 +3176,14 @@ mod tests {
             .register_provider_tool_call(call)
             .await
             .expect("capability_info call should register by provider tool name");
+        assert_eq!(
+            candidate.effective_capability_ids,
+            vec![
+                CapabilityId::new(capability_info::CAPABILITY_ID).expect("synthetic id"),
+                capability_id.clone(),
+            ],
+            "known target should include both capability_info and target ids"
+        );
         port.invoke_capability(CapabilityInvocation {
             surface_version: surface.version,
             capability_id: candidate.capability_id,
@@ -3248,24 +3279,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn capability_info_rejects_targets_outside_visible_surface() {
+    async fn capability_info_reports_unknown_targets_as_model_visible_failure() {
         let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
         let provider_id = ExtensionId::new("demo").expect("valid provider id");
-        let context = execution_context("thread-capability-info-invisible-target");
+        let context = execution_context("thread-capability-info-unknown-target");
         let run_context = loop_run_context(&context).await;
         let runtime = Arc::new(RecordingHostRuntime::new(vec![visible_capability(
             capability_id,
             provider_id,
         )]));
+        let result_writer = Arc::new(RecordingResultWriter::default());
         let port = HostRuntimeLoopCapabilityPortFactory::new(
-            runtime,
+            runtime.clone(),
             visible_request(context),
             dummy_input_resolver(),
-            dummy_result_writer(),
+            result_writer.clone(),
             dummy_milestone_sink(),
         )
         .port_for_run_context(run_context);
-        port.visible_capabilities(VisibleCapabilityRequest {})
+        let surface = port
+            .visible_capabilities(VisibleCapabilityRequest {})
             .await
             .expect("visible capabilities load");
 
@@ -3273,11 +3306,44 @@ mod tests {
         call.name = capability_info::TOOL_NAME.to_string();
         call.arguments = serde_json::json!({ "name": "demo.missing" });
         let error = port
+            .provider_tool_call_capability_ids(&call)
+            .expect_err("approval-time capability id lookup should reject unknown targets");
+        assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+
+        let candidate = port
             .register_provider_tool_call(call)
             .await
-            .expect_err("unknown target should fail");
+            .expect("unknown target should stage so the model can observe the tool error");
 
-        assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+        assert_eq!(
+            candidate.effective_capability_ids,
+            vec![CapabilityId::new(capability_info::CAPABILITY_ID).expect("synthetic id")]
+        );
+
+        let outcome = port
+            .invoke_capability(CapabilityInvocation {
+                surface_version: surface.version,
+                capability_id: candidate.capability_id,
+                input_ref: candidate.input_ref,
+            })
+            .await
+            .expect("unknown target should return a capability failure, not a host error");
+
+        assert!(matches!(
+            outcome,
+            CapabilityOutcome::Failed(CapabilityFailure {
+                error_kind: CapabilityFailureKind::InvalidInput,
+                safe_summary
+            }) if safe_summary == "capability_info target is not on the visible surface"
+        ));
+        assert!(
+            result_writer.records().is_empty(),
+            "failed capability_info calls are reported through the provider error-result path"
+        );
+        assert!(
+            runtime.take_requests().is_empty(),
+            "capability_info failure must not dispatch to the host runtime"
+        );
     }
 
     /// Regression: `capability_info` previously used `as_runtime()` for

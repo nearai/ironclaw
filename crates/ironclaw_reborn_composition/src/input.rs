@@ -150,6 +150,18 @@ impl RebornBuildInput {
         &self.owner_id
     }
 
+    /// Override the owner id after construction.
+    ///
+    /// The WebChat v2 serve path uses this to pin the runtime owner to the
+    /// authenticated WebUI user *after* the runtime input (and its host-access
+    /// disclosure gate) has been built, so the turn-runner loop host reads
+    /// thread context from the same `owners/<user>` subtree the v2 facade
+    /// wrote to.
+    pub fn with_owner_id(mut self, owner_id: impl Into<String>) -> Self {
+        self.owner_id = owner_id.into();
+        self
+    }
+
     pub fn disabled(owner_id: impl Into<String>) -> Self {
         Self::new(
             RebornCompositionProfile::Disabled,

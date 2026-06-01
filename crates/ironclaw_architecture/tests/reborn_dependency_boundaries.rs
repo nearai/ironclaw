@@ -1183,8 +1183,9 @@ fn reborn_product_auth_contract_stays_reborn_native() {
         &forbidden,
         &mut violations,
     );
-    collect_forbidden_uses(
+    collect_forbidden_reborn_auth_path_uses(
         &root.join("crates/ironclaw_reborn_composition/src/product_auth_serve"),
+        &root.join("crates/ironclaw_reborn_composition/src/product_auth_serve.rs"),
         &root,
         &forbidden,
         &mut violations,
@@ -2416,6 +2417,20 @@ fn collect_forbidden_uses(
             }
         }
     }
+}
+
+fn collect_forbidden_reborn_auth_path_uses(
+    module_dir: &std::path::Path,
+    legacy_file: &std::path::Path,
+    root: &std::path::Path,
+    forbidden: &[ForbiddenUse],
+    violations: &mut Vec<String>,
+) {
+    if module_dir.is_dir() {
+        collect_forbidden_uses(module_dir, root, forbidden, violations);
+        return;
+    }
+    collect_forbidden_reborn_auth_file_uses(legacy_file, root, forbidden, violations);
 }
 
 fn collect_forbidden_reborn_auth_file_uses(

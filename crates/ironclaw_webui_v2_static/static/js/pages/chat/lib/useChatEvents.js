@@ -5,6 +5,7 @@ import {
   toolCardFromActivity,
   toolCardFromPreview,
 } from "./history-messages.js";
+import { failureMessageForRunStatus } from "./failureMessages.js";
 
 // Handler factory for v2 `WebChatV2EventFrame` events.
 //
@@ -210,7 +211,12 @@ function applyProjectionItems({
   let activeRunId = latestRunIdRef?.current ?? null;
   for (const item of items) {
     if (item.run_status) {
-      const { run_id: runId, status } = item.run_status;
+      const {
+        run_id: runId,
+        status,
+        failure_category: failureCategory,
+        failure_summary: failureSummary,
+      } = item.run_status;
       if (runId) {
         activeRunId = runId;
         setActiveRun?.((current) =>
@@ -243,16 +249,27 @@ function applyProjectionItems({
           // bubble instead of stacking.
           const messageId = `err-${runId || "unknown"}`;
           setMessages((prev) => {
-            if (prev.some((m) => m.id === messageId)) return prev;
+            const existing = prev.findIndex((m) => m.id === messageId);
+            const content = failureMessageForRunStatus({
+              status,
+              failureCategory,
+              failureSummary,
+            });
+            if (existing >= 0) {
+              if (!failureSummary || prev[existing].content === content) return prev;
+              const next = [...prev];
+              next[existing] = {
+                ...next[existing],
+                content,
+              };
+              return next;
+            }
             return [
               ...prev,
               {
                 id: messageId,
                 role: "error",
-                content:
-                  status === "recovery_required"
-                    ? "The run is awaiting recovery — backend reported `recovery_required`."
-                    : "The run failed before producing a reply.",
+                content,
                 timestamp: new Date().toISOString(),
               },
             ];

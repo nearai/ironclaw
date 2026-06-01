@@ -1,4 +1,7 @@
-use super::turn_events::WEBUI_TURN_EVENT_PAGE_LIMIT;
+use super::turn_events::{
+    FailureExplanationInput, FailureExplanationProvider, ModelFailureExplanationProvider,
+    WEBUI_TURN_EVENT_PAGE_LIMIT, bounded_failure_explanation,
+};
 use super::*;
 
 use async_trait::async_trait;
@@ -22,10 +25,18 @@ use ironclaw_turns::{
     RunProfileVersion, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse,
     TurnBlockedGateKind, TurnBlockedGateMetadata, TurnError, TurnEventKind, TurnEventPage,
     TurnLifecycleEvent, TurnRunId, TurnRunState, TurnStatus,
+    run_profile::{
+        LoopSafeSummary, SystemInferenceError, SystemInferencePort, SystemInferenceRequest,
+        SystemInferenceResponse, SystemInferenceTaskId, SystemTaskKind,
+    },
 };
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
+use tokio::sync::Mutex;
 
 mod cursor_validation;
 mod display_preview;
+mod failure_explanation;
 mod runtime_stream;
 mod turn_stream;
 
@@ -62,7 +73,7 @@ fn contains_run_status(
         | ProductOutboundPayload::ProjectionUpdate { state } => state.items.iter().any(|item| {
             matches!(
                 item,
-                ProductProjectionItem::RunStatus { run_id, status }
+                ProductProjectionItem::RunStatus { run_id, status, .. }
                     if *run_id == expected_run_id && status == expected_status
             )
         }),
@@ -127,6 +138,71 @@ impl TurnEventProjectionSource for RebaseTurnEventSource {
             next_cursor: self.cursor,
             truncated: false,
             rebase_required: Some(self.cursor),
+        })
+    }
+}
+
+struct FakeFailureExplainer {
+    explanation: String,
+}
+
+#[async_trait]
+impl FailureExplanationProvider for FakeFailureExplainer {
+    async fn explain_failure(&self, input: FailureExplanationInput) -> Option<String> {
+        assert!(
+            !input.failure_category.is_empty(),
+            "failure category should be available to the explainer"
+        );
+        assert!(
+            !input.fallback_summary.is_empty(),
+            "fallback summary should be available to the explainer"
+        );
+        Some(self.explanation.clone())
+    }
+}
+
+struct CountingFailureExplainer {
+    explanation: String,
+    calls: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl FailureExplanationProvider for CountingFailureExplainer {
+    async fn explain_failure(&self, _input: FailureExplanationInput) -> Option<String> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Some(self.explanation.clone())
+    }
+}
+
+struct RecordingFailureGateway {
+    response: Mutex<Result<SystemInferenceResponse, SystemInferenceError>>,
+    requests: Mutex<Vec<SystemInferenceRequest>>,
+}
+
+#[async_trait]
+impl SystemInferencePort for RecordingFailureGateway {
+    async fn call_system_inference(
+        &self,
+        request: SystemInferenceRequest,
+    ) -> Result<SystemInferenceResponse, SystemInferenceError> {
+        self.requests.lock().await.push(request);
+        self.response.lock().await.clone()
+    }
+}
+
+struct SlowSystemInference;
+
+#[async_trait]
+impl SystemInferencePort for SlowSystemInference {
+    async fn call_system_inference(
+        &self,
+        request: SystemInferenceRequest,
+    ) -> Result<SystemInferenceResponse, SystemInferenceError> {
+        tokio::time::sleep(Duration::from_millis(2000)).await;
+        Ok(SystemInferenceResponse {
+            task_id: request.task_id,
+            output_text: "too late".to_string(),
+            elapsed_ms: 2000,
         })
     }
 }

@@ -348,7 +348,7 @@ async fn webui_event_stream_projects_blocked_dependent_run_status() {
         ProductOutboundPayload::ProjectionUpdate { state } => state.items.iter().any(|item| {
             matches!(
                 item,
-                ProductProjectionItem::RunStatus { run_id, status }
+                ProductProjectionItem::RunStatus { run_id, status, .. }
                     if *run_id == turn_run && status == "blocked_dependent_run"
             )
         }),
