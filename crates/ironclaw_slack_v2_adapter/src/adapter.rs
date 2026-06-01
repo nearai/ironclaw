@@ -41,7 +41,7 @@ pub struct SlackV2Adapter {
 impl SlackV2Adapter {
     pub fn new(config: SlackV2AdapterConfig) -> Self {
         let declared_egress = vec![DeclaredEgressTarget::new(
-            DeclaredEgressHost::new(SLACK_API_HOST).expect("static Slack host valid"), // INVARIANT: compile-time const "slack.com" satisfies DeclaredEgressHost validation
+            DeclaredEgressHost::new(SLACK_API_HOST).expect("static Slack host valid"), // safety: compile-time const "slack.com" satisfies DeclaredEgressHost validation
             Some(config.egress_credential_handle.clone()),
         )];
         Self {
@@ -69,7 +69,7 @@ pub fn slack_request_signature_auth_requirement() -> AuthRequirement {
 }
 
 pub fn slack_declared_egress_hosts() -> Vec<DeclaredEgressHost> {
-    vec![DeclaredEgressHost::new(SLACK_API_HOST).expect("static Slack host valid")] // INVARIANT: compile-time const "slack.com" satisfies DeclaredEgressHost validation
+    vec![DeclaredEgressHost::new(SLACK_API_HOST).expect("static Slack host valid")] // safety: compile-time const "slack.com" satisfies DeclaredEgressHost validation
 }
 
 #[async_trait]
