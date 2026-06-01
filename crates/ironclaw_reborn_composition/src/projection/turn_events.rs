@@ -1,4 +1,7 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, VecDeque},
+    sync::Arc,
+};
 
 use async_trait::async_trait;
 use futures::{StreamExt, stream};
@@ -7,16 +10,17 @@ use ironclaw_product_adapters::{
     ProductProjectionItem, ProductProjectionState, ProductWorkflowRejectionKind, RedactedString,
 };
 use ironclaw_turns::{
-    GetRunStateRequest, TurnCoordinator, TurnError, TurnEventKind, TurnEventProjectionCursor,
-    TurnEventProjectionError, TurnEventProjectionRequest, TurnEventProjectionService,
-    TurnEventProjectionSource, TurnLifecycleEvent, TurnRunId, TurnScope, TurnStatus,
+    GetRunStateRequest, SanitizedFailure, TurnCoordinator, TurnError, TurnEventKind,
+    TurnEventProjectionCursor, TurnEventProjectionError, TurnEventProjectionRequest,
+    TurnEventProjectionService, TurnEventProjectionSource, TurnLifecycleEvent, TurnRunId,
+    TurnScope, TurnStatus,
     run_profile::{
         SystemInferenceIdentity, SystemInferencePort, SystemInferenceRequest,
         SystemInferenceTaskId, SystemPromptId, SystemPromptSource, SystemTaskKind,
         sanitize_model_visible_text,
     },
 };
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, OnceCell, Semaphore};
 
 use crate::projection::AuthChallengeProvider;
 
@@ -24,6 +28,8 @@ pub(super) const WEBUI_TURN_EVENT_PAGE_LIMIT: usize = 256;
 const FAILURE_EXPLANATION_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1500);
 const FAILURE_EXPLANATION_MAX_BYTES: usize = 512;
 const FAILURE_EXPLANATION_MAX_INPUT_TOKENS: u64 = 512;
+const FAILURE_EXPLANATION_CACHE_CAPACITY: usize = 1000;
+const FAILURE_EXPLANATION_MAX_CONCURRENT_MODEL_CALLS: usize = 4;
 
 pub(super) struct TurnEventPayload {
     pub(super) cursor: TurnEventProjectionCursor,
@@ -57,17 +63,35 @@ pub(super) enum TurnEventBridge {
         service: Arc<TurnEventProjectionService<dyn TurnEventProjectionSource>>,
         coordinator: Arc<dyn TurnCoordinator>,
         failure_explainer: Arc<dyn FailureExplanationProvider>,
-        failure_explanation_cache: Arc<Mutex<HashMap<FailureExplanationCacheKey, String>>>,
+        failure_explanation_cache: Arc<Mutex<FailureExplanationCache>>,
     },
 }
 
 pub(crate) struct ModelFailureExplanationProvider {
-    system_inference: Arc<dyn SystemInferencePort>,
+    system_inference: Arc<dyn Fn() -> Arc<dyn SystemInferencePort> + Send + Sync>,
+    permits: Arc<Semaphore>,
 }
 
 impl ModelFailureExplanationProvider {
+    #[cfg(test)]
     pub(crate) fn new(system_inference: Arc<dyn SystemInferencePort>) -> Self {
-        Self { system_inference }
+        Self {
+            system_inference: Arc::new(move || Arc::clone(&system_inference)),
+            permits: Arc::new(Semaphore::new(
+                FAILURE_EXPLANATION_MAX_CONCURRENT_MODEL_CALLS,
+            )),
+        }
+    }
+
+    pub(crate) fn from_factory(
+        system_inference: Arc<dyn Fn() -> Arc<dyn SystemInferencePort> + Send + Sync>,
+    ) -> Self {
+        Self {
+            system_inference,
+            permits: Arc::new(Semaphore::new(
+                FAILURE_EXPLANATION_MAX_CONCURRENT_MODEL_CALLS,
+            )),
+        }
     }
 }
 
@@ -80,7 +104,9 @@ impl TurnEventBridge {
             service: Arc::new(TurnEventProjectionService::new(source)),
             coordinator,
             failure_explainer: Arc::new(NoopFailureExplanationProvider),
-            failure_explanation_cache: Arc::new(Mutex::new(HashMap::new())),
+            failure_explanation_cache: Arc::new(Mutex::new(FailureExplanationCache::new(
+                FAILURE_EXPLANATION_CACHE_CAPACITY,
+            ))),
         }
     }
 
@@ -168,7 +194,7 @@ async fn turn_event_payloads_for_page(
     caller_user_id: &ironclaw_host_api::UserId,
     coordinator: &dyn TurnCoordinator,
     failure_explainer: &dyn FailureExplanationProvider,
-    failure_explanation_cache: &Arc<Mutex<HashMap<FailureExplanationCacheKey, String>>>,
+    failure_explanation_cache: &Arc<Mutex<FailureExplanationCache>>,
     auth_challenges: Option<&dyn AuthChallengeProvider>,
     events: Vec<TurnLifecycleEvent>,
 ) -> Result<Vec<TurnEventPayload>, ProductAdapterError> {
@@ -200,7 +226,7 @@ async fn turn_event_payload(
     caller_user_id: &ironclaw_host_api::UserId,
     coordinator: &dyn TurnCoordinator,
     failure_explainer: &dyn FailureExplanationProvider,
-    failure_explanation_cache: &Arc<Mutex<HashMap<FailureExplanationCacheKey, String>>>,
+    failure_explanation_cache: &Arc<Mutex<FailureExplanationCache>>,
     auth_challenges: Option<&dyn AuthChallengeProvider>,
     event: &TurnLifecycleEvent,
 ) -> Result<Option<ProductOutboundPayload>, ProductAdapterError> {
@@ -231,13 +257,20 @@ impl FailureExplanationProvider for NoopFailureExplanationProvider {
 #[async_trait]
 impl FailureExplanationProvider for ModelFailureExplanationProvider {
     async fn explain_failure(&self, input: FailureExplanationInput) -> Option<String> {
+        let Ok(_permit) = self.permits.try_acquire() else {
+            tracing::debug!(
+                failure_category = %input.failure_category,
+                "failed run explanation skipped because model explanation capacity is saturated"
+            );
+            return None;
+        };
         let request = match failure_explanation_request(&input) {
             Some(request) => request,
             None => return None,
         };
         let response = match tokio::time::timeout(
             FAILURE_EXPLANATION_TIMEOUT,
-            self.system_inference.call_system_inference(request),
+            (self.system_inference)().call_system_inference(request),
         )
         .await
         {
@@ -401,7 +434,7 @@ fn turn_event_projection_state(
 
 #[derive(Debug, Clone, Default)]
 struct FailureProjectionDetails {
-    category: Option<String>,
+    category: Option<SanitizedFailure>,
     summary: Option<String>,
 }
 
@@ -411,9 +444,41 @@ pub(super) struct FailureExplanationCacheKey {
     category: String,
 }
 
+#[derive(Debug)]
+pub(super) struct FailureExplanationCache {
+    capacity: usize,
+    entries: HashMap<FailureExplanationCacheKey, Arc<OnceCell<String>>>,
+    order: VecDeque<FailureExplanationCacheKey>,
+}
+
+impl FailureExplanationCache {
+    fn new(capacity: usize) -> Self {
+        Self {
+            capacity,
+            entries: HashMap::new(),
+            order: VecDeque::new(),
+        }
+    }
+
+    fn cell_for(&mut self, key: FailureExplanationCacheKey) -> Arc<OnceCell<String>> {
+        if let Some(cell) = self.entries.get(&key) {
+            return Arc::clone(cell);
+        }
+        if self.entries.len() >= self.capacity
+            && let Some(evicted) = self.order.pop_front()
+        {
+            self.entries.remove(&evicted);
+        }
+        let cell = Arc::new(OnceCell::new());
+        self.entries.insert(key.clone(), Arc::clone(&cell));
+        self.order.push_back(key);
+        cell
+    }
+}
+
 async fn failure_details_for_turn_event(
     failure_explainer: &dyn FailureExplanationProvider,
-    failure_explanation_cache: &Arc<Mutex<HashMap<FailureExplanationCacheKey, String>>>,
+    failure_explanation_cache: &Arc<Mutex<FailureExplanationCache>>,
     event: &TurnLifecycleEvent,
 ) -> FailureProjectionDetails {
     let Some(category) = failure_category_for_turn_event(event) else {
@@ -429,13 +494,13 @@ async fn failure_details_for_turn_event(
     })
     .await;
     FailureProjectionDetails {
-        category: Some(category),
+        category: SanitizedFailure::new(category).ok(),
         summary: Some(summary),
     }
 }
 
 async fn cached_failure_summary<F, Fut>(
-    cache: &Arc<Mutex<HashMap<FailureExplanationCacheKey, String>>>,
+    cache: &Arc<Mutex<FailureExplanationCache>>,
     key: FailureExplanationCacheKey,
     compute: F,
 ) -> String
@@ -443,12 +508,8 @@ where
     F: FnOnce() -> Fut,
     Fut: std::future::Future<Output = String>,
 {
-    if let Some(summary) = cache.lock().await.get(&key).cloned() {
-        return summary;
-    }
-    let summary = compute().await;
-    cache.lock().await.insert(key, summary.clone());
-    summary
+    let cell = cache.lock().await.cell_for(key);
+    cell.get_or_init(compute).await.clone()
 }
 
 async fn failure_summary_for_turn_event(
@@ -519,7 +580,7 @@ fn failure_explanation_request(input: &FailureExplanationInput) -> Option<System
 }
 
 fn failure_explanation_system_prompt() -> &'static str {
-    include_str!("../../../ironclaw_loop_support/prompts/failure_explanation.md")
+    ironclaw_loop_support::FAILURE_EXPLANATION_SYSTEM_PROMPT
 }
 
 fn failure_explanation_user_prompt(input: &FailureExplanationInput) -> String {

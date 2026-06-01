@@ -4,8 +4,8 @@ use chrono::{DateTime, Utc};
 use ironclaw_host_api::{
     CapabilityId, ExtensionId, InvocationId, ProcessId, RuntimeKind, ThreadId,
 };
-use ironclaw_turns::{ReplyTargetBindingRef, TurnRunId};
-use serde::{Deserialize, Deserializer, Serialize};
+use ironclaw_turns::{ReplyTargetBindingRef, SanitizedFailure, TurnRunId};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use uuid::Uuid;
 
 use crate::error::ProductAdapterError;
@@ -30,6 +30,19 @@ pub const CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES: usize = 2 * 1024;
 pub const CAPABILITY_DISPLAY_PREVIEW_MAX_BYTES: usize = 16 * 1024;
 pub const CAPABILITY_DISPLAY_KIND_MAX_BYTES: usize = 32;
 pub const CAPABILITY_DISPLAY_RESULT_REF_MAX_BYTES: usize = 256;
+
+fn serialize_failure_category<S>(
+    value: &Option<SanitizedFailure>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    match value {
+        Some(failure) => serializer.serialize_some(failure.category()),
+        None => serializer.serialize_none(),
+    }
+}
 
 fn invalid(kind: &'static str, reason: impl Into<String>) -> ProductAdapterError {
     ProductAdapterError::InvalidIdentifier {
@@ -604,8 +617,11 @@ pub enum ProductProjectionItem {
         /// Sanitized, opaque product category. Projection sources may use
         /// different internal namespaces; clients should not parse this for
         /// user-facing copy and should prefer `failure_summary` when present.
-        #[serde(skip_serializing_if = "Option::is_none")]
-        failure_category: Option<String>,
+        #[serde(
+            skip_serializing_if = "Option::is_none",
+            serialize_with = "serialize_failure_category"
+        )]
+        failure_category: Option<SanitizedFailure>,
         /// User-facing sanitized explanation for terminal failure states.
         #[serde(skip_serializing_if = "Option::is_none")]
         failure_summary: Option<String>,
@@ -639,7 +655,7 @@ impl ProductProjectionItem {
             }
             Self::RunStatus {
                 status,
-                failure_category,
+                failure_category: _,
                 failure_summary,
                 ..
             } => {
@@ -648,13 +664,6 @@ impl ProductProjectionItem {
                     status,
                     PROJECTION_ITEM_ID_MAX_BYTES,
                 )?;
-                if let Some(category) = failure_category {
-                    validate_bounded_text(
-                        "projection_failure_category",
-                        category,
-                        PROJECTION_ITEM_ID_MAX_BYTES,
-                    )?;
-                }
                 if let Some(summary) = failure_summary {
                     validate_bounded_text(
                         "projection_failure_summary",
@@ -778,7 +787,10 @@ impl<'de> Deserialize<'de> for ProductProjectionItem {
             } => ProductProjectionItem::RunStatus {
                 run_id,
                 status,
-                failure_category,
+                failure_category: failure_category
+                    .map(SanitizedFailure::new)
+                    .transpose()
+                    .map_err(serde::de::Error::custom)?,
                 failure_summary,
             },
             Wire::Gate { gate_ref, headline } => ProductProjectionItem::Gate { gate_ref, headline },
@@ -998,7 +1010,7 @@ mod tests {
             vec![ProductProjectionItem::RunStatus {
                 run_id,
                 status: "failed".to_string(),
-                failure_category: Some("lease_expired".to_string()),
+                failure_category: Some(SanitizedFailure::new("lease_expired").unwrap()),
                 failure_summary: Some(
                     "The run failed because its runner lease expired.".to_string(),
                 ),

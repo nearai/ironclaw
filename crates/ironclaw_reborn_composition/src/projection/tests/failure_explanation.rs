@@ -59,7 +59,7 @@ async fn webui_event_stream_projects_failed_run_failure_summary() {
                     failure_summary: Some(summary),
                 } if *run_id == turn_run
                     && status == "failed"
-                    && category == "lease_expired"
+                    && category.category() == "lease_expired"
                     && summary == "The run failed because its runner lease expired."
             )
         }),
@@ -131,7 +131,7 @@ async fn webui_event_stream_uses_model_failure_explanation_when_available() {
                     failure_summary: Some(summary),
                 } if *run_id == turn_run
                     && status == "failed"
-                    && category == "driver_invalid_request"
+                    && category.category() == "driver_invalid_request"
                     && summary
                         == "The run asked the driver for an invalid operation, so it stopped before replying."
             )
@@ -277,7 +277,7 @@ async fn webui_event_stream_projects_recovery_required_failure_summary() {
                     failure_summary: Some(summary),
                 } if *run_id == turn_run
                     && status == "recovery_required"
-                    && category == "driver_failed"
+                    && category.category() == "driver_failed"
                     && summary == "The run failed because the execution driver reported an error."
             )
         }),
@@ -363,6 +363,12 @@ fn bounded_failure_explanation_truncates_at_utf8_boundary() {
     assert!(output.len() <= 512);
     assert!(output.is_char_boundary(output.len()));
     assert!(output.chars().all(|character| character == 'é'));
+}
+
+#[test]
+fn bounded_failure_explanation_returns_none_for_empty_or_whitespace_input() {
+    assert_eq!(bounded_failure_explanation(""), None);
+    assert_eq!(bounded_failure_explanation("   \n\t"), None);
 }
 
 #[tokio::test]

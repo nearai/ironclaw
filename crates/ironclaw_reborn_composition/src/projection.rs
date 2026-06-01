@@ -30,7 +30,7 @@ use ironclaw_product_adapters::{
     ProjectionSubscriptionRequest, RedactedString,
 };
 use ironclaw_turns::{
-    ReplyTargetBindingRef, TurnActor, TurnCoordinator, TurnEventProjectionCursor,
+    ReplyTargetBindingRef, SanitizedFailure, TurnActor, TurnCoordinator, TurnEventProjectionCursor,
     TurnEventProjectionSource, TurnRunId, TurnScope, run_profile::LoopHostMilestoneSink,
 };
 
@@ -140,11 +140,13 @@ impl RebornProjectionServices {
         self
     }
 
-    pub(crate) fn with_model_failure_explainer(
+    pub(crate) fn with_model_failure_explainer_factory(
         self,
-        system_inference: Arc<dyn ironclaw_turns::run_profile::SystemInferencePort>,
+        system_inference: Arc<
+            dyn Fn() -> Arc<dyn ironclaw_turns::run_profile::SystemInferencePort> + Send + Sync,
+        >,
     ) -> Self {
-        self.with_failure_explainer(Arc::new(ModelFailureExplanationProvider::new(
+        self.with_failure_explainer(Arc::new(ModelFailureExplanationProvider::from_factory(
             system_inference,
         )))
     }
@@ -980,7 +982,7 @@ fn run_status_projection_state(
     ProductProjectionState::new(scope.thread_id.to_string(), items).map(Some)
 }
 
-fn run_failure_category(run: &RunStatusProjection) -> Option<String> {
+fn run_failure_category(run: &RunStatusProjection) -> Option<SanitizedFailure> {
     // Runtime replay categories intentionally use the event-projection namespace
     // (model_failed, dispatch_failed, process_killed, ...), while turn lifecycle
     // events use runner/driver failure reasons (lease_expired, driver_failed, ...).
@@ -992,11 +994,13 @@ fn run_failure_category(run: &RunStatusProjection) -> Option<String> {
     )
     .then(|| run.error_kind.clone())
     .flatten()
+    .and_then(|category| SanitizedFailure::new(category).ok())
 }
 
 fn run_failure_summary(run: &RunStatusProjection) -> Option<String> {
     run_failure_category(run)
-        .as_deref()
+        .as_ref()
+        .map(SanitizedFailure::category)
         .map(runtime_failure_summary_for_category)
         .map(str::to_string)
 }

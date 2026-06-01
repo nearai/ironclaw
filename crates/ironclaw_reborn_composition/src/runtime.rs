@@ -1088,22 +1088,25 @@ pub async fn build_reborn_runtime(
                 reason: format!("failure explanation thread id: {reason}"),
             }
         })?;
-    let failure_explanation_context = LoopRunContext::new(
-        TurnScope::new(
-            thread_scope.tenant_id.clone(),
-            Some(thread_scope.agent_id.clone()),
-            thread_scope.project_id.clone(),
-            failure_explanation_thread_id,
-        ),
-        TurnId::new(),
-        TurnRunId::new(),
-        default_resolved_run_profile,
+    let failure_explanation_scope = TurnScope::new(
+        thread_scope.tenant_id.clone(),
+        Some(thread_scope.agent_id.clone()),
+        thread_scope.project_id.clone(),
+        failure_explanation_thread_id,
     );
-    let failure_explanation_inference: Arc<dyn ironclaw_turns::run_profile::SystemInferencePort> =
+    let failure_explanation_profile = default_resolved_run_profile.clone();
+    let failure_explanation_model_gateway = Arc::clone(&model_gateway);
+    let failure_explanation_inference = Arc::new(move || {
         Arc::new(ModelGatewayBackedSystemInferencePort::new(
-            Arc::clone(&model_gateway),
-            failure_explanation_context,
-        ));
+            Arc::clone(&failure_explanation_model_gateway),
+            LoopRunContext::new(
+                failure_explanation_scope.clone(),
+                TurnId::new(),
+                TurnRunId::new(),
+                failure_explanation_profile.clone(),
+            ),
+        )) as Arc<dyn ironclaw_turns::run_profile::SystemInferencePort>
+    });
     let planned_turn_coordinator: Arc<dyn TurnCoordinator> = composition.coordinator.clone();
     let approval_turn_runs = Arc::new(LocalDevApprovalTurnRunLocator::new(Arc::clone(
         &turn_state_store,
@@ -1139,7 +1142,7 @@ pub async fn build_reborn_runtime(
     let turn_event_source: Arc<dyn TurnEventProjectionSource> = turn_state_store.clone();
     let projection_services = projection_services
         .with_turn_events(turn_event_source, Arc::clone(&planned_turn_coordinator))
-        .with_model_failure_explainer(failure_explanation_inference)
+        .with_model_failure_explainer_factory(failure_explanation_inference)
         .with_display_previews(Arc::clone(&local_dev_capabilities.display_previews));
     // Wire auth-challenge enrichment when the product-auth bundle exposes a
     // flow record source (local-dev / test mode). Production deployments without

@@ -94,6 +94,8 @@ pub use subagent_spawn_port::{
     SubagentThreadMetadata,
 };
 pub use system_inference::{GuardedSystemInferencePort, ModelGatewayBackedSystemInferencePort};
+pub const FAILURE_EXPLANATION_SYSTEM_PROMPT: &str =
+    include_str!("../prompts/failure_explanation.md");
 pub use token_estimator::{
     CHARS_PER_TOKEN_DEFAULT, EstimatedTokenCount, estimate_tokens_from_chars,
 };

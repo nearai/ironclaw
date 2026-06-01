@@ -829,6 +829,14 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
         tool_call: &ProviderToolCall,
     ) -> Result<ProviderToolCallCapabilityIds, AgentLoopHostError> {
         let prepared = self.prepare_provider_tool_call(tool_call)?;
+        if prepared.capability_id.as_str() == crate::capability_info::CAPABILITY_ID
+            && prepared.effective_capability_ids.len() == 1
+        {
+            return Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::InvalidInvocation,
+                "capability_info target is not on the visible surface",
+            ));
+        }
         Ok(ProviderToolCallCapabilityIds {
             provider_capability_id: prepared.capability_id,
             effective_capability_ids: prepared.effective_capability_ids,
@@ -1014,8 +1022,8 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
                     .invoke_synthetic_capability(request, capability, snapshot)
                     .await;
                 if result.is_ok() {
-                    self.record_loop_completed(&idempotency_key, result.clone())?;
                     guard.commit();
+                    self.record_loop_completed(&idempotency_key, result.clone())?;
                 }
                 return result;
             }
@@ -3296,6 +3304,11 @@ mod tests {
         let mut call = provider_tool_call();
         call.name = capability_info::TOOL_NAME.to_string();
         call.arguments = serde_json::json!({ "name": "demo.missing" });
+        let error = port
+            .provider_tool_call_capability_ids(&call)
+            .expect_err("approval-time capability id lookup should reject unknown targets");
+        assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+
         let candidate = port
             .register_provider_tool_call(call)
             .await
