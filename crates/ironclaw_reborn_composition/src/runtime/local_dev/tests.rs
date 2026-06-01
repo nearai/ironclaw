@@ -140,46 +140,46 @@ mod tests {
         assert!(!capability_ids.contains(&SPAWN_SUBAGENT_CAPABILITY_ID));
     }
 
-    async fn assert_gsuite_capabilities_visible_to_model(
+    async fn assert_gsuite_capabilities_visibility(
         wiring: &LocalDevCapabilityWiring,
         run_context: &LoopRunContext,
+        expected: GsuiteCapabilityVisibility,
     ) {
-        let port = wiring
-            .capability_factory
-            .create_capability_port(run_context)
-            .await
-            .expect("capability port");
-        let surface = port
-            .visible_capabilities(VisibleCapabilityRequest {})
-            .await
-            .expect("visible surface");
-        let descriptor_ids = surface
-            .descriptors
-            .iter()
-            .map(|descriptor| descriptor.capability_id.as_str())
-            .collect::<Vec<_>>();
-        let tool_definitions = port.tool_definitions().expect("tool definitions");
-        let tool_definition_ids = tool_definitions
-            .iter()
-            .map(|definition| definition.capability_id.as_str())
-            .collect::<Vec<_>>();
+        let (descriptor_ids, tool_definition_ids) =
+            visible_capability_ids(wiring, run_context).await;
 
         for capability_id in gsuite_capability_ids() {
-            assert!(
-                descriptor_ids.contains(&capability_id),
-                "{capability_id} should be visible on the capability surface"
-            );
-            assert!(
-                tool_definition_ids.contains(&capability_id),
-                "{capability_id} should be advertised to the model as a provider tool"
-            );
+            let descriptor_visible = descriptor_ids.iter().any(|id| id == capability_id);
+            let tool_visible = tool_definition_ids.iter().any(|id| id == capability_id);
+            match expected {
+                GsuiteCapabilityVisibility::Visible => {
+                    assert!(
+                        descriptor_visible,
+                        "{capability_id} should be visible on the capability surface"
+                    );
+                    assert!(
+                        tool_visible,
+                        "{capability_id} should be advertised to the model as a provider tool"
+                    );
+                }
+                GsuiteCapabilityVisibility::HiddenUntilActivated => {
+                    assert!(
+                        !descriptor_visible,
+                        "{capability_id} should not be visible before activation"
+                    );
+                    assert!(
+                        !tool_visible,
+                        "{capability_id} should not be advertised before activation"
+                    );
+                }
+            }
         }
     }
 
-    async fn assert_gsuite_capabilities_not_visible_to_model(
+    async fn visible_capability_ids(
         wiring: &LocalDevCapabilityWiring,
         run_context: &LoopRunContext,
-    ) {
+    ) -> (Vec<String>, Vec<String>) {
         let port = wiring
             .capability_factory
             .create_capability_port(run_context)
@@ -192,24 +192,15 @@ mod tests {
         let descriptor_ids = surface
             .descriptors
             .iter()
-            .map(|descriptor| descriptor.capability_id.as_str())
+            .map(|descriptor| descriptor.capability_id.as_str().to_string())
             .collect::<Vec<_>>();
         let tool_definitions = port.tool_definitions().expect("tool definitions");
         let tool_definition_ids = tool_definitions
             .iter()
-            .map(|definition| definition.capability_id.as_str())
+            .map(|definition| definition.capability_id.as_str().to_string())
             .collect::<Vec<_>>();
 
-        for capability_id in gsuite_capability_ids() {
-            assert!(
-                !descriptor_ids.contains(&capability_id),
-                "{capability_id} should not be visible before activation"
-            );
-            assert!(
-                !tool_definition_ids.contains(&capability_id),
-                "{capability_id} should not be advertised before activation"
-            );
-        }
+        (descriptor_ids, tool_definition_ids)
     }
 
     fn gsuite_capability_ids() -> [&'static str; 15] {
@@ -230,6 +221,110 @@ mod tests {
             "google-calendar.add_attendees",
             "google-calendar.set_reminder",
         ]
+    }
+
+    struct GsuiteSurfaceHarness {
+        _dir: tempfile::TempDir,
+        wiring: LocalDevCapabilityWiring,
+        run_context: LoopRunContext,
+    }
+
+    #[derive(Clone, Copy)]
+    enum GsuiteCapabilityVisibility {
+        Visible,
+        HiddenUntilActivated,
+    }
+
+    #[derive(Clone, Copy)]
+    enum GsuiteExtensionState {
+        Installed,
+        Activated,
+    }
+
+    async fn gsuite_surface_harness(
+        owner: &str,
+        label: &str,
+        user: &str,
+        extension_state: GsuiteExtensionState,
+    ) -> GsuiteSurfaceHarness {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let services = crate::build_reborn_services(crate::RebornBuildInput::local_dev(
+            owner,
+            dir.path().join("local-dev"),
+        ))
+        .await
+        .expect("local-dev services build");
+        let run_context = run_context(label).await;
+        let thread_scope = ThreadScope {
+            tenant_id: run_context.scope.tenant_id.clone(),
+            agent_id: run_context.scope.agent_id.clone().expect("agent id"),
+            project_id: run_context.scope.project_id.clone(),
+            owner_user_id: None,
+            mission_id: None,
+        };
+        install_gsuite_extensions(&services, extension_state).await;
+        let wiring = capability_wiring(
+            &services,
+            Arc::new(InMemorySessionThreadService::default()),
+            thread_scope,
+            UserId::new(user).expect("user id"),
+            Arc::new(
+                crate::local_dev_capability_policy::local_dev_capability_policy()
+                    .expect("policy parses"),
+            ),
+            Arc::new(UnavailableModelGateway),
+            Arc::new(InMemoryLoopHostMilestoneSink::default()),
+            None,
+        )
+        .expect("local-dev capability wiring");
+
+        GsuiteSurfaceHarness {
+            _dir: dir,
+            wiring,
+            run_context,
+        }
+    }
+
+    async fn install_gsuite_extensions(
+        services: &crate::RebornServices,
+        extension_state: GsuiteExtensionState,
+    ) {
+        let local_runtime = services
+            .local_runtime
+            .as_ref()
+            .expect("local runtime substrate");
+        let extension_management = local_runtime
+            .extension_management
+            .as_ref()
+            .expect("extension management")
+            .clone();
+        let facade = crate::lifecycle::RebornLocalLifecycleFacade::new(
+            local_runtime.skill_management.clone(),
+        )
+        .with_extension_management(extension_management);
+        for extension_id in ["gmail", "google-calendar"] {
+            let package_ref =
+                LifecyclePackageRef::new(LifecyclePackageKind::Extension, extension_id)
+                    .expect("valid extension ref");
+            facade
+                .execute(
+                    lifecycle_context(extension_id),
+                    LifecycleProductAction::ExtensionInstall {
+                        package_ref: package_ref.clone(),
+                    },
+                )
+                .await
+                .expect("install GSuite extension");
+            if matches!(extension_state, GsuiteExtensionState::Activated) {
+                facade
+                    .execute(
+                        lifecycle_context(extension_id),
+                        LifecycleProductAction::ExtensionActivate { package_ref },
+                    )
+                    .await
+                    .expect("activate GSuite extension");
+            }
+        }
     }
 
     #[tokio::test]
@@ -1419,131 +1514,38 @@ mod tests {
 
     #[tokio::test]
     async fn local_dev_capability_port_exposes_activated_gsuite_extensions_to_model() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let services = crate::build_reborn_services(crate::RebornBuildInput::local_dev(
+        let harness = gsuite_surface_harness(
             "local-dev-gsuite-surface-owner",
-            dir.path().join("local-dev"),
-        ))
-        .await
-        .expect("local-dev services build");
-        let run_context = run_context("gsuite-surface").await;
-        let thread_scope = ThreadScope {
-            tenant_id: run_context.scope.tenant_id.clone(),
-            agent_id: run_context.scope.agent_id.clone().expect("agent id"),
-            project_id: run_context.scope.project_id.clone(),
-            owner_user_id: None,
-            mission_id: None,
-        };
-        let local_runtime = services
-            .local_runtime
-            .as_ref()
-            .expect("local runtime substrate");
-        let extension_management = local_runtime
-            .extension_management
-            .as_ref()
-            .expect("extension management")
-            .clone();
-        let facade = crate::lifecycle::RebornLocalLifecycleFacade::new(
-            local_runtime.skill_management.clone(),
+            "gsuite-surface",
+            "local-dev-gsuite-surface-user",
+            GsuiteExtensionState::Activated,
         )
-        .with_extension_management(extension_management);
-        for extension_id in ["gmail", "google-calendar"] {
-            let package_ref =
-                LifecyclePackageRef::new(LifecyclePackageKind::Extension, extension_id)
-                    .expect("valid extension ref");
-            facade
-                .execute(
-                    lifecycle_context(extension_id),
-                    LifecycleProductAction::ExtensionInstall {
-                        package_ref: package_ref.clone(),
-                    },
-                )
-                .await
-                .expect("install GSuite extension");
-            facade
-                .execute(
-                    lifecycle_context(extension_id),
-                    LifecycleProductAction::ExtensionActivate { package_ref },
-                )
-                .await
-                .expect("activate GSuite extension");
-        }
-        let wiring = capability_wiring(
-            &services,
-            Arc::new(InMemorySessionThreadService::default()),
-            thread_scope,
-            UserId::new("local-dev-gsuite-surface-user").expect("user id"),
-            Arc::new(
-                crate::local_dev_capability_policy::local_dev_capability_policy()
-                    .expect("policy parses"),
-            ),
-            Arc::new(UnavailableModelGateway),
-            Arc::new(InMemoryLoopHostMilestoneSink::default()),
-            None,
-        )
-        .expect("local-dev capability wiring");
+        .await;
 
-        assert_gsuite_capabilities_visible_to_model(&wiring, &run_context).await;
+        assert_gsuite_capabilities_visibility(
+            &harness.wiring,
+            &harness.run_context,
+            GsuiteCapabilityVisibility::Visible,
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn deactivated_gsuite_extension_capabilities_not_exposed_to_model() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let services = crate::build_reborn_services(crate::RebornBuildInput::local_dev(
+        let harness = gsuite_surface_harness(
             "local-dev-gsuite-inactive-surface-owner",
-            dir.path().join("local-dev"),
-        ))
-        .await
-        .expect("local-dev services build");
-        let run_context = run_context("gsuite-inactive-surface").await;
-        let thread_scope = ThreadScope {
-            tenant_id: run_context.scope.tenant_id.clone(),
-            agent_id: run_context.scope.agent_id.clone().expect("agent id"),
-            project_id: run_context.scope.project_id.clone(),
-            owner_user_id: None,
-            mission_id: None,
-        };
-        let local_runtime = services
-            .local_runtime
-            .as_ref()
-            .expect("local runtime substrate");
-        let extension_management = local_runtime
-            .extension_management
-            .as_ref()
-            .expect("extension management")
-            .clone();
-        let facade = crate::lifecycle::RebornLocalLifecycleFacade::new(
-            local_runtime.skill_management.clone(),
+            "gsuite-inactive-surface",
+            "local-dev-gsuite-inactive-surface-user",
+            GsuiteExtensionState::Installed,
         )
-        .with_extension_management(extension_management);
-        for extension_id in ["gmail", "google-calendar"] {
-            let package_ref =
-                LifecyclePackageRef::new(LifecyclePackageKind::Extension, extension_id)
-                    .expect("valid extension ref");
-            facade
-                .execute(
-                    lifecycle_context(extension_id),
-                    LifecycleProductAction::ExtensionInstall { package_ref },
-                )
-                .await
-                .expect("install GSuite extension");
-        }
-        let wiring = capability_wiring(
-            &services,
-            Arc::new(InMemorySessionThreadService::default()),
-            thread_scope,
-            UserId::new("local-dev-gsuite-inactive-surface-user").expect("user id"),
-            Arc::new(
-                crate::local_dev_capability_policy::local_dev_capability_policy()
-                    .expect("policy parses"),
-            ),
-            Arc::new(UnavailableModelGateway),
-            Arc::new(InMemoryLoopHostMilestoneSink::default()),
-            None,
-        )
-        .expect("local-dev capability wiring");
+        .await;
 
-        assert_gsuite_capabilities_not_visible_to_model(&wiring, &run_context).await;
+        assert_gsuite_capabilities_visibility(
+            &harness.wiring,
+            &harness.run_context,
+            GsuiteCapabilityVisibility::HiddenUntilActivated,
+        )
+        .await;
     }
 
     #[test]
