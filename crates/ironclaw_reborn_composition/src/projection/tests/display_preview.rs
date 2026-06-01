@@ -1,4 +1,6 @@
 use super::*;
+use ironclaw_host_api::CapabilityDisplayOutputPreview;
+use ironclaw_product_adapters::CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES;
 use ironclaw_turns::run_profile::CapabilityInputRef;
 
 fn preview_input_ref(label: &str) -> CapabilityInputRef {
@@ -135,6 +137,61 @@ async fn capability_display_preview_store_redacts_unsafe_paths_and_secrets() {
     assert!(!rendered.contains("/etc/passwd"));
     assert!(!rendered.contains("\\\\host\\\\share"));
     assert!(rendered.contains("[redacted]"));
+}
+
+#[tokio::test]
+async fn capability_display_preview_store_admits_workspace_and_project_scoped_path_subtitles() {
+    // /workspace/ and /project/ prefixed paths should appear as workspace-relative subtitles;
+    // other absolute paths (e.g. /etc/passwd) must be dropped for safety.
+    for (input_path, expected_subtitle) in [
+        ("/workspace/src/main.rs", Some("src/main.rs")),
+        ("/project/src/lib.rs", Some("src/lib.rs")),
+        ("/etc/passwd", None),
+        ("relative/path.rs", Some("relative/path.rs")),
+    ] {
+        let run_id = TurnRunId::new();
+        let capability = CapabilityId::new("builtin.write_file").unwrap();
+        let input_ref = preview_input_ref(&format!("subtitle-path-input-{input_path}"));
+        let store = CapabilityDisplayPreviewStore::default();
+        store.record_input(
+            &run_id.to_string(),
+            &input_ref,
+            "write_file",
+            &serde_json::json!({ "path": input_path }),
+        );
+        store.record_result(CapabilityDisplayPreviewResult {
+            run_id: &run_id.to_string(),
+            input_ref: &input_ref,
+            invocation_id: InvocationId::from_uuid(run_id.as_uuid()),
+            capability_id: &capability,
+            result_ref: "result:subtitle-path",
+            output: &serde_json::json!({"success": true}),
+            output_bytes: 4,
+        });
+        let preview = store
+            .preview(&CapabilityActivityProjection {
+                invocation_id: InvocationId::from_uuid(run_id.as_uuid()),
+                run_id: Some(InvocationId::from_uuid(run_id.as_uuid())),
+                capability_id: capability,
+                thread_id: None,
+                status: ironclaw_event_projections::CapabilityActivityStatus::Completed,
+                provider: None,
+                runtime: None,
+                process_id: None,
+                output_bytes: Some(4),
+                error_kind: None,
+                last_cursor: ironclaw_events::EventCursor::new(1),
+                updated_at: chrono::Utc::now(),
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            preview.subtitle.as_deref(),
+            expected_subtitle,
+            "subtitle mismatch for input path: {input_path}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -577,6 +634,56 @@ async fn capability_display_preview_store_preserves_long_line_counts() {
             .unwrap()
             .contains("line-120")
     );
+}
+
+#[tokio::test]
+async fn capability_display_preview_store_marks_truncated_side_channel_summary() {
+    let run_id = TurnRunId::new();
+    let capability = CapabilityId::new("builtin.write_file").unwrap();
+    let input_ref = preview_input_ref("long-summary-preview-input");
+    let invocation_id = InvocationId::new();
+    let store = CapabilityDisplayPreviewStore::default();
+    store.record_result_with_preview(
+        CapabilityDisplayPreviewResult {
+            run_id: &run_id.to_string(),
+            input_ref: &input_ref,
+            invocation_id,
+            capability_id: &capability,
+            result_ref: "result:long-summary-preview",
+            output: &serde_json::json!({"success": true}),
+            output_bytes: 32,
+        },
+        Some(&CapabilityDisplayOutputPreview {
+            output_summary: Some("x".repeat(CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES + 1)),
+            output_preview: "--- a/workspace/main.rs\n+++ b/workspace/main.rs\n".to_string(),
+            output_kind: "unified_diff".to_string(),
+            subtitle: Some("/workspace/main.rs".to_string()),
+            truncated: false,
+        }),
+    );
+
+    let preview = store
+        .preview(&CapabilityActivityProjection {
+            invocation_id,
+            run_id: Some(InvocationId::from_uuid(run_id.as_uuid())),
+            capability_id: capability,
+            thread_id: Some(ThreadId::new("webui-preview-thread").unwrap()),
+            status: ironclaw_event_projections::CapabilityActivityStatus::Completed,
+            provider: None,
+            runtime: None,
+            process_id: None,
+            output_bytes: Some(32),
+            error_kind: None,
+            last_cursor: ironclaw_events::EventCursor::new(1),
+            updated_at: chrono::Utc::now(),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(preview.output_kind.as_deref(), Some("unified_diff"));
+    assert_eq!(preview.subtitle.as_deref(), Some("/workspace/main.rs"));
+    assert!(preview.truncated);
 }
 
 #[tokio::test]

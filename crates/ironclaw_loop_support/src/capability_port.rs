@@ -5,8 +5,9 @@ use std::{
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    CapabilityId, CapabilitySet, CorrelationId, EffectKind, ExecutionContext, ExtensionId,
-    InvocationId, MountView, Principal, RuntimeKind, sha256_digest_token,
+    CapabilityDisplayOutputPreview, CapabilityId, CapabilitySet, CorrelationId, EffectKind,
+    ExecutionContext, ExtensionId, InvocationId, MountView, Principal, RuntimeKind,
+    sha256_digest_token,
 };
 use ironclaw_host_runtime::{
     CapabilityFailureDisposition, HostRuntime, HostRuntimeError, IdempotencyKey,
@@ -135,11 +136,7 @@ impl LoopCapabilityInputResolver for ProviderToolCallInputResolver {
 pub trait LoopCapabilityResultWriter: Send + Sync {
     async fn write_capability_result(
         &self,
-        run_context: &LoopRunContext,
-        input_ref: &CapabilityInputRef,
-        invocation_id: InvocationId,
-        capability_id: &CapabilityId,
-        output: serde_json::Value,
+        write: CapabilityResultWrite<'_>,
     ) -> Result<LoopResultRef, AgentLoopHostError>;
 
     async fn update_capability_result(
@@ -161,6 +158,15 @@ pub trait LoopCapabilityResultWriter: Send + Sync {
     ) -> Result<(), AgentLoopHostError> {
         Ok(())
     }
+}
+
+pub struct CapabilityResultWrite<'a> {
+    pub run_context: &'a LoopRunContext,
+    pub input_ref: &'a CapabilityInputRef,
+    pub invocation_id: InvocationId,
+    pub capability_id: &'a CapabilityId,
+    pub output: serde_json::Value,
+    pub display_preview: Option<CapabilityDisplayOutputPreview>,
 }
 
 #[derive(Clone)]
@@ -761,13 +767,14 @@ impl HostRuntimeLoopCapabilityPort {
             };
         let result_ref = self
             .result_writer
-            .write_capability_result(
-                &self.run_context,
-                &request.input_ref,
-                InvocationId::new(),
-                &request.capability_id,
+            .write_capability_result(CapabilityResultWrite {
+                run_context: &self.run_context,
+                input_ref: &request.input_ref,
+                invocation_id: InvocationId::new(),
+                capability_id: &request.capability_id,
                 output,
-            )
+                display_preview: None,
+            })
             .await?;
         Ok(CapabilityOutcome::Completed(CapabilityResultMessage {
             result_ref,
@@ -1764,13 +1771,14 @@ async fn runtime_outcome_to_loop(
     Ok(match outcome {
         RuntimeCapabilityOutcome::Completed(completed) => {
             let result_ref = result_writer
-                .write_capability_result(
+                .write_capability_result(CapabilityResultWrite {
                     run_context,
                     input_ref,
                     invocation_id,
-                    &completed.capability_id,
-                    completed.output.clone(),
-                )
+                    capability_id: &completed.capability_id,
+                    output: completed.output.clone(),
+                    display_preview: completed.display_preview.clone(),
+                })
                 .await?;
             CapabilityOutcome::Completed(CapabilityResultMessage {
                 result_ref,
@@ -1784,6 +1792,7 @@ async fn runtime_outcome_to_loop(
         },
         RuntimeCapabilityOutcome::AuthRequired(gate) => CapabilityOutcome::AuthRequired {
             gate_ref: loop_gate_ref("auth", gate.gate_id.to_string())?,
+            credential_requirements: gate.credential_requirements,
             safe_summary: blocked_summary(gate.reason).to_string(),
         },
         RuntimeCapabilityOutcome::ResourceBlocked(gate) => CapabilityOutcome::ResourceBlocked {
@@ -4359,6 +4368,7 @@ mod tests {
                 RuntimeCapabilityCompleted {
                     capability_id: request.capability_id,
                     output: serde_json::json!({"ok": true}),
+                    display_preview: None,
                     usage: ResourceUsage {
                         output_bytes: RECORDING_OUTPUT_BYTES,
                         ..ResourceUsage::default()
@@ -4591,11 +4601,7 @@ mod tests {
     impl LoopCapabilityResultWriter for StaticResultWriter {
         async fn write_capability_result(
             &self,
-            _run_context: &LoopRunContext,
-            _input_ref: &CapabilityInputRef,
-            _invocation_id: InvocationId,
-            _capability_id: &CapabilityId,
-            _output: serde_json::Value,
+            _write: CapabilityResultWrite<'_>,
         ) -> Result<LoopResultRef, AgentLoopHostError> {
             LoopResultRef::new("result:mount-test").map_err(|_| {
                 AgentLoopHostError::new(
@@ -4621,11 +4627,7 @@ mod tests {
     impl LoopCapabilityResultWriter for FailOnceResultWriter {
         async fn write_capability_result(
             &self,
-            _run_context: &LoopRunContext,
-            _input_ref: &CapabilityInputRef,
-            _invocation_id: InvocationId,
-            _capability_id: &CapabilityId,
-            _output: serde_json::Value,
+            _write: CapabilityResultWrite<'_>,
         ) -> Result<LoopResultRef, AgentLoopHostError> {
             if self.attempts.fetch_add(1, Ordering::SeqCst) == 0 {
                 return Err(AgentLoopHostError::new(
@@ -4645,11 +4647,19 @@ mod tests {
     #[derive(Default)]
     struct RecordingResultWriter {
         records: Mutex<Vec<(CapabilityId, serde_json::Value)>>,
+        display_previews: Mutex<Vec<Option<CapabilityDisplayOutputPreview>>>,
     }
 
     impl RecordingResultWriter {
         fn records(&self) -> Vec<(CapabilityId, serde_json::Value)> {
             self.records.lock().expect("records lock").clone()
+        }
+
+        fn display_previews(&self) -> Vec<Option<CapabilityDisplayOutputPreview>> {
+            self.display_previews
+                .lock()
+                .expect("display previews lock")
+                .clone()
         }
     }
 
@@ -4657,16 +4667,16 @@ mod tests {
     impl LoopCapabilityResultWriter for RecordingResultWriter {
         async fn write_capability_result(
             &self,
-            _run_context: &LoopRunContext,
-            _input_ref: &CapabilityInputRef,
-            _invocation_id: InvocationId,
-            capability_id: &CapabilityId,
-            output: serde_json::Value,
+            write: CapabilityResultWrite<'_>,
         ) -> Result<LoopResultRef, AgentLoopHostError> {
             self.records
                 .lock()
                 .expect("records lock")
-                .push((capability_id.clone(), output));
+                .push((write.capability_id.clone(), write.output));
+            self.display_previews
+                .lock()
+                .expect("display previews lock")
+                .push(write.display_preview);
             LoopResultRef::new("result:capability-info").map_err(|_| {
                 AgentLoopHostError::new(
                     AgentLoopHostErrorKind::Internal,
@@ -4737,11 +4747,7 @@ mod tests {
     impl LoopCapabilityResultWriter for NoopCapabilityIo {
         async fn write_capability_result(
             &self,
-            _run_context: &LoopRunContext,
-            _input_ref: &CapabilityInputRef,
-            _invocation_id: InvocationId,
-            _capability_id: &CapabilityId,
-            _output: serde_json::Value,
+            _write: CapabilityResultWrite<'_>,
         ) -> Result<LoopResultRef, AgentLoopHostError> {
             unreachable!("noop capability io should not be called")
         }

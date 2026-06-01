@@ -8,15 +8,14 @@ use ironclaw_auth::{
     AuthInteractionId, AuthInteractionService, AuthProductError, AuthProductScope,
     AuthProviderClient, AuthProviderId, CredentialAccountChoiceRequest, CredentialAccountId,
     CredentialAccountLabel, CredentialAccountListPage, CredentialAccountListRequest,
-    CredentialAccountLookupRequest, CredentialAccountProjection, CredentialAccountService,
-    CredentialAccountStatus, CredentialAccountUpdateBinding, CredentialRecoveryProjection,
-    CredentialRecoveryRequest, CredentialRefreshReport, CredentialRefreshRequest,
-    CredentialSetupService, InMemoryAuthProductServices, ManualTokenSetupRequest, NewAuthFlow,
-    OAuthAuthorizationUrl, OAuthCallbackClaimRequest, OAuthCallbackFailureInput,
-    OAuthCallbackInput, OAuthProviderCallbackRequest, OAuthProviderExchangeContext,
-    OpaqueStateHash, PkceVerifierHash, ProviderBackedCredentialAccountService,
-    ProviderCallbackOutcome, SecretCleanupReport, SecretCleanupRequest, SecretCleanupService,
-    SecretSubmitRequest, Timestamp,
+    CredentialAccountProjection, CredentialAccountService, CredentialAccountStatus,
+    CredentialAccountUpdateBinding, CredentialRecoveryProjection, CredentialRecoveryRequest,
+    CredentialRefreshReport, CredentialRefreshRequest, CredentialSetupService,
+    InMemoryAuthProductServices, ManualTokenSetupRequest, NewAuthFlow, OAuthAuthorizationUrl,
+    OAuthCallbackClaimRequest, OAuthCallbackFailureInput, OAuthCallbackInput,
+    OAuthProviderCallbackRequest, OAuthProviderExchangeContext, OpaqueStateHash, PkceVerifierHash,
+    ProviderBackedCredentialAccountService, ProviderCallbackOutcome, SecretCleanupReport,
+    SecretCleanupRequest, SecretCleanupService, SecretSubmitRequest, Timestamp,
 };
 use ironclaw_product_adapters::AuthPromptChallengeKind;
 use ironclaw_product_workflow::ProductAuthTurnGateResumeDispatcher;
@@ -395,6 +394,10 @@ pub struct RebornProductAuthServices {
     /// without this port. When absent, runtime composition must expose the
     /// WebUI pending-auth interaction surface as explicitly unavailable
     /// instead of silently fabricating an unscoped read model.
+    ///
+    /// arch-exempt: optional Arc, durable auth-flow read projection is tracked
+    /// by product-auth issue #4112 and remains genuinely optional until the
+    /// durable backend exposes the same scoped projection as the in-memory port.
     flow_record_source: Option<Arc<dyn AuthFlowRecordSource>>,
 }
 
@@ -616,33 +619,6 @@ impl RebornProductAuthServices {
         &self,
         request: CredentialAccountChoiceRequest,
     ) -> Result<CredentialAccountProjection, RebornCredentialLifecycleError> {
-        let mut lookup_request =
-            CredentialAccountLookupRequest::new(request.scope.clone(), request.account_id);
-        if let Some(extension_id) = request.requester_extension.clone() {
-            lookup_request = lookup_request.for_extension(extension_id);
-        }
-        let account = self
-            .credential_account_service
-            .get_account(lookup_request)
-            .await
-            .map_err(RebornCredentialLifecycleError::from)?
-            .ok_or(RebornCredentialLifecycleError {
-                code: AuthErrorCode::CredentialMissing,
-                retryable: false,
-            })?;
-        if account.provider != request.provider {
-            return Err(RebornCredentialLifecycleError {
-                code: AuthErrorCode::CrossScopeDenied,
-                retryable: false,
-            });
-        }
-        if account.status != CredentialAccountStatus::Configured {
-            return Err(RebornCredentialLifecycleError {
-                code: AuthErrorCode::CredentialMissing,
-                retryable: false,
-            });
-        }
-
         self.credential_account_service
             .select_configured_account(request)
             .await
@@ -963,7 +939,10 @@ impl RebornProductAuthServices {
 /// Verify that an auth flow record belongs to the same user and
 /// tenant/agent/project/thread as the caller's `TurnScope`.
 ///
-/// `thread_id` is fail-closed: a flow with no `thread_id` does not match a
+/// `TurnScope` deliberately does not carry `session_id`; session isolation is
+/// enforced when creating/submitting the auth interaction, and this projection
+/// gate additionally requires the exact run id and gate ref. The axes available
+/// here are still fail-closed: a flow with no `thread_id` does not match a
 /// thread-scoped request. Pre-thread or test flows should be stored with a
 /// `thread_id` once a real turn is in progress; a flow missing one must not
 /// leak into an unrelated thread's gate.
@@ -1014,10 +993,13 @@ fn auth_challenge_to_view(
             expires_at: Some(*expires_at),
         },
         ironclaw_auth::AuthChallenge::ManualTokenRequired {
-            label, expires_at, ..
+            provider,
+            label,
+            expires_at,
+            ..
         } => AuthChallengeView {
             kind: AuthPromptChallengeKind::ManualToken,
-            provider: flow.provider.clone(),
+            provider: provider.clone(),
             account_label: Some(label.clone()),
             authorization_url: None,
             expires_at: Some(*expires_at),
@@ -1062,7 +1044,7 @@ impl AuthChallengeProvider for RebornProductAuthServices {
 mod tests {
     use super::*;
     use ironclaw_auth::{
-        AuthChallenge, AuthFlowId, AuthFlowRecord, AuthProductError, AuthProductScope,
+        AuthChallenge, AuthFlowId, AuthFlowRecord, AuthProductError, AuthProductScope, AuthSurface,
         CredentialAccount, CredentialAccountChoiceRequest, CredentialAccountId,
         CredentialAccountListPage, CredentialAccountListRequest, CredentialAccountLookupRequest,
         CredentialAccountMutation, CredentialAccountProjection, CredentialAccountSelectionRequest,
@@ -1078,6 +1060,96 @@ mod tests {
 
     fn arc_data_ptr<T: ?Sized>(arc: &Arc<T>) -> *const () {
         Arc::as_ptr(arc) as *const ()
+    }
+
+    fn test_turn_scope(thread_id: ironclaw_host_api::ThreadId) -> TurnScope {
+        TurnScope::new(
+            ironclaw_host_api::TenantId::new("tenant-auth-scope").expect("tenant id"),
+            Some(ironclaw_host_api::AgentId::new("agent-auth-scope").expect("agent id")),
+            Some(ironclaw_host_api::ProjectId::new("project-auth-scope").expect("project id")),
+            thread_id,
+        )
+    }
+
+    fn test_flow_record(
+        owner_user_id: &UserId,
+        scope: &TurnScope,
+        thread_id: Option<ironclaw_host_api::ThreadId>,
+    ) -> AuthFlowRecord {
+        let now = Utc::now();
+        AuthFlowRecord {
+            id: AuthFlowId::new(),
+            scope: AuthProductScope::new(
+                ironclaw_host_api::ResourceScope {
+                    tenant_id: scope.tenant_id.clone(),
+                    user_id: owner_user_id.clone(),
+                    agent_id: scope.agent_id.clone(),
+                    project_id: scope.project_id.clone(),
+                    mission_id: None,
+                    thread_id,
+                    invocation_id: ironclaw_host_api::InvocationId::new(),
+                },
+                AuthSurface::Chat,
+            ),
+            kind: AuthFlowKind::IntegrationCredential,
+            status: AuthFlowStatus::AwaitingUser,
+            provider: AuthProviderId::new("github").expect("provider id"),
+            challenge: None,
+            continuation: AuthContinuationRef::SetupOnly,
+            credential_account_id: None,
+            update_binding: None,
+            opaque_state_hash: None,
+            pkce_verifier_hash: None,
+            authorization_code_hash: None,
+            error: None,
+            continuation_emitted_at: None,
+            created_at: now,
+            updated_at: now,
+            expires_at: now,
+        }
+    }
+
+    #[test]
+    fn flow_scope_matches_turn_scope_none_thread_id_never_matches() {
+        let owner = UserId::new("user-auth-scope").expect("user id");
+        let thread = ironclaw_host_api::ThreadId::new("thread-auth-scope").expect("thread id");
+        let scope = test_turn_scope(thread);
+        let flow = test_flow_record(&owner, &scope, None);
+
+        assert!(!flow_scope_matches_turn_scope(&flow, &scope, &owner));
+    }
+
+    #[test]
+    fn flow_scope_matches_turn_scope_thread_id_mismatch_returns_false() {
+        let owner = UserId::new("user-auth-scope").expect("user id");
+        let request_thread =
+            ironclaw_host_api::ThreadId::new("thread-auth-scope").expect("thread id");
+        let flow_thread = ironclaw_host_api::ThreadId::new("thread-auth-other").expect("thread id");
+        let scope = test_turn_scope(request_thread);
+        let flow = test_flow_record(&owner, &scope, Some(flow_thread));
+
+        assert!(!flow_scope_matches_turn_scope(&flow, &scope, &owner));
+    }
+
+    #[test]
+    fn flow_scope_matches_turn_scope_user_id_mismatch_returns_false() {
+        let owner = UserId::new("user-auth-scope").expect("user id");
+        let other = UserId::new("user-auth-other").expect("user id");
+        let thread = ironclaw_host_api::ThreadId::new("thread-auth-scope").expect("thread id");
+        let scope = test_turn_scope(thread.clone());
+        let flow = test_flow_record(&owner, &scope, Some(thread));
+
+        assert!(!flow_scope_matches_turn_scope(&flow, &scope, &other));
+    }
+
+    #[test]
+    fn flow_scope_matches_turn_scope_all_fields_match_returns_true() {
+        let owner = UserId::new("user-auth-scope").expect("user id");
+        let thread = ironclaw_host_api::ThreadId::new("thread-auth-scope").expect("thread id");
+        let scope = test_turn_scope(thread.clone());
+        let flow = test_flow_record(&owner, &scope, Some(thread));
+
+        assert!(flow_scope_matches_turn_scope(&flow, &scope, &owner));
     }
 
     #[test]

@@ -6,8 +6,9 @@ use std::{
 use async_trait::async_trait;
 use futures::{StreamExt, stream};
 use ironclaw_product_adapters::{
-    AuthPromptView, GatePromptView, ProductAdapterError, ProductOutboundPayload,
-    ProductProjectionItem, ProductProjectionState, ProductWorkflowRejectionKind, RedactedString,
+    AuthPromptChallengeKind, AuthPromptView, GatePromptView, ProductAdapterError,
+    ProductOutboundPayload, ProductProjectionItem, ProductProjectionState,
+    ProductWorkflowRejectionKind, RedactedString,
 };
 use ironclaw_turns::{
     GetRunStateRequest, SanitizedFailure, TurnCoordinator, TurnError, TurnEventKind,
@@ -324,7 +325,7 @@ async fn blocked_prompt_payload(
     if state.status != event.status || state.event_cursor != event.cursor {
         return Ok(None);
     }
-    let Some(gate_ref) = state.gate_ref else {
+    let Some(gate_ref) = state.gate_ref.as_ref() else {
         return Ok(None);
     };
     let gate_ref_str = gate_ref.as_str().to_string();
@@ -332,12 +333,13 @@ async fn blocked_prompt_payload(
         TurnStatus::BlockedAuth => {
             // Enrich the prompt with auth-flow metadata when the provider is
             // available. Missing = backward-compatible (fields omitted as None).
+            let owner_user_id = event.owner_user_id.as_ref().unwrap_or(caller_user_id);
             let challenge = match auth_challenges {
                 Some(provider) => {
                     provider
                         .challenge_for_gate(
                             &event.scope,
-                            caller_user_id,
+                            owner_user_id,
                             event.run_id,
                             &gate_ref_str,
                         )
@@ -361,7 +363,7 @@ async fn blocked_prompt_payload(
             };
             let view = match challenge {
                 Some(c) => c.enrich(base_view),
-                None => base_view,
+                None => auth_prompt_from_credential_requirement(base_view, &state),
             };
             Ok(Some(ProductOutboundPayload::AuthPrompt(view)))
         }
@@ -384,6 +386,20 @@ async fn blocked_prompt_payload(
         | TurnStatus::Cancelled
         | TurnStatus::Failed => Ok(None),
     }
+}
+
+fn auth_prompt_from_credential_requirement(
+    mut view: AuthPromptView,
+    state: &ironclaw_turns::TurnRunState,
+) -> AuthPromptView {
+    let [requirement] = state.credential_requirements.as_slice() else {
+        return view;
+    };
+    let provider = requirement.provider.as_str().to_string();
+    view.challenge_kind = Some(AuthPromptChallengeKind::ManualToken);
+    view.provider = Some(provider.clone());
+    view.account_label = Some(provider);
+    view
 }
 
 fn gate_prompt(

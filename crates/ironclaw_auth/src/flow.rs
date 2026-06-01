@@ -260,6 +260,13 @@ pub trait AuthFlowRecordSource: Send + Sync {
     /// Implementations with an indexed or locked in-memory backing store can
     /// avoid cloning unrelated flow records for single-record projection
     /// lookups. The default keeps the trait backward-compatible.
+    ///
+    /// # Performance
+    ///
+    /// The default falls back to [`Self::flow_records_snapshot`], which may
+    /// allocate and clone every record before filtering. Non-trivial stores MUST
+    /// override this method so hot projection paths do not do an O(N) clone per
+    /// lookup.
     fn flow_record_matching(
         &self,
         predicate: &mut dyn FnMut(&AuthFlowRecord) -> bool,

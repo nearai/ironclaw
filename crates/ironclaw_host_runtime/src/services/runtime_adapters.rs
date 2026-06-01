@@ -126,6 +126,7 @@ where
 
         Ok(RuntimeAdapterResult {
             output: execution.result.output,
+            display_preview: None,
             usage: execution.result.usage,
             receipt: execution.receipt,
             output_bytes: execution.result.output_bytes,
@@ -176,6 +177,7 @@ where
 
         Ok(RuntimeAdapterResult {
             output: execution.result.output,
+            display_preview: None,
             usage: execution.result.usage,
             receipt: execution.receipt,
             output_bytes: execution.result.output_bytes,
@@ -393,6 +395,7 @@ where
 
         Ok(RuntimeAdapterResult {
             output: result.output,
+            display_preview: result.display_preview,
             usage,
             receipt,
             output_bytes,
@@ -639,6 +642,7 @@ where
     };
     Ok(RuntimeAdapterResult {
         output,
+        display_preview: None,
         output_bytes: execution.usage.output_bytes,
         usage: execution.usage,
         receipt,

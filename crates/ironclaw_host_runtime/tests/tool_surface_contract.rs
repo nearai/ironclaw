@@ -1873,6 +1873,7 @@ impl CapabilityDispatcher for RecordingDispatcher {
             provider: ExtensionId::new("echo").unwrap(),
             runtime: RuntimeKind::Wasm,
             output: json!({"ok": true}),
+            display_preview: None,
             usage: ResourceUsage::default(),
             receipt: ResourceReceipt {
                 id: ResourceReservationId::new(),

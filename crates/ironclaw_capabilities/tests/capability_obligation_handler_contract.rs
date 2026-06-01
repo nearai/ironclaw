@@ -566,6 +566,7 @@ impl CapabilityDispatcher for OutputDispatcher {
             provider: extension_id(),
             runtime: RuntimeKind::Wasm,
             output: self.output.clone(),
+            display_preview: None,
             usage: ResourceUsage::default(),
             receipt: ResourceReceipt {
                 id: ResourceReservationId::new(),

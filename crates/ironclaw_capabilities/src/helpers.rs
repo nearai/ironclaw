@@ -365,6 +365,7 @@ mod tests {
         let error = CapabilityInvocationError::AuthorizationRequiresAuth {
             capability: capability(),
             required_secrets: Vec::new(),
+            credential_requirements: Vec::new(),
         };
         let transition = error
             .run_state_transition()

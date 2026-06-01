@@ -23,6 +23,7 @@ ironclaw_safety = { path = "../ironclaw_safety" }
 ironclaw_skills = { path = "../ironclaw_skills" }
 regex = "1"
 serde_json = "1"
+similar = "2"
 thiserror = "2"
 tokio = { version = "1", features = ["rt", "sync"] }
 tracing = "0.1"

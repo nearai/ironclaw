@@ -1003,6 +1003,7 @@ fn scripted_capability_outcome(
         ScriptedCapabilityOutcome::AuthRequired { gate_ref } => {
             Ok(CapabilityOutcome::AuthRequired {
                 gate_ref: loop_gate_ref(&gate_ref),
+                credential_requirements: Vec::new(),
                 safe_summary: "auth required".to_string(),
             })
         }

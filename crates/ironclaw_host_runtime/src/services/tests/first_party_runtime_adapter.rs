@@ -411,6 +411,7 @@ impl crate::FirstPartyCapabilityHandler for SucceedingFirstPartyHandler {
     ) -> Result<crate::FirstPartyCapabilityResult, crate::FirstPartyCapabilityError> {
         Ok(crate::FirstPartyCapabilityResult {
             output: serde_json::json!({"ok": true}),
+            display_preview: None,
             usage: ironclaw_host_api::ResourceUsage::default(),
         })
     }

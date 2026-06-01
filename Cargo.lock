@@ -4400,6 +4400,7 @@ dependencies = [
  "ironclaw_skills",
  "regex",
  "serde_json",
+ "similar",
  "thiserror 2.0.18",
  "tokio",
  "tracing",

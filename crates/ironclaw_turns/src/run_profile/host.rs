@@ -5,7 +5,9 @@ use std::{
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use ironclaw_host_api::{CapabilityId, ExtensionId, RuntimeKind, ThreadId};
+use ironclaw_host_api::{
+    CapabilityId, ExtensionId, RuntimeCredentialAuthRequirement, RuntimeKind, ThreadId,
+};
 use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 
@@ -1363,6 +1365,8 @@ pub enum CapabilityOutcome {
     },
     AuthRequired {
         gate_ref: LoopGateRef,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        credential_requirements: Vec<RuntimeCredentialAuthRequirement>,
         safe_summary: String,
     },
     ResourceBlocked {

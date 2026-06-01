@@ -211,8 +211,11 @@ where
             .await?
             .map(|(account, _)| account)
             .ok_or(AuthProductError::CredentialMissing)?;
-        if !scope_matches(&request.scope, &account.scope) || account.provider != request.provider {
+        if !scope_matches(&request.scope, &account.scope) {
             return Err(AuthProductError::CrossScopeDenied);
+        }
+        if account.provider != request.provider {
+            return Err(AuthProductError::CredentialMissing);
         }
         if account.status != CredentialAccountStatus::Configured {
             return Err(AuthProductError::CredentialMissing);
