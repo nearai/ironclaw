@@ -27,8 +27,8 @@ use ironclaw_host_api::{
     AgentId, CapabilityDescriptor, CapabilityGrant, CapabilityGrantId, Decision, DenyReason,
     EffectKind, ExecutionContext, HostApiError, InvocationFingerprint, InvocationId, MissionId,
     NetworkPolicy, Obligation, Obligations, Principal, ProjectId, ResourceCeiling,
-    ResourceEstimate, ResourceScope, RuntimeCredentialRequirementSource, SandboxQuota, ScopedPath,
-    TenantId, ThreadId, UserId,
+    ResourceEstimate, ResourceScope, RuntimeCredentialRequirementSource, RuntimeKind, SandboxQuota,
+    ScopedPath, TenantId, ThreadId, UserId,
 };
 use ironclaw_trust::{AuthorityCeiling, TrustDecision};
 use serde::{Deserialize, Serialize};
@@ -1185,11 +1185,17 @@ fn obligations_for_grant(
             }
         }
     } else if descriptor.effects.contains(&EffectKind::UseSecret) {
-        match grant.constraints.secrets.as_slice() {
-            [handle] => obligations.push(Obligation::InjectSecretOnce {
-                handle: handle.clone(),
-            }),
-            _ => return None,
+        // Some first-party handlers choose account-scoped credentials at
+        // dispatch time and stage the selected secret through their own
+        // host-runtime port, so there is no static grant handle to inject here.
+        if !(descriptor.runtime == RuntimeKind::FirstParty && grant.constraints.secrets.is_empty())
+        {
+            match grant.constraints.secrets.as_slice() {
+                [handle] => obligations.push(Obligation::InjectSecretOnce {
+                    handle: handle.clone(),
+                }),
+                _ => return None,
+            }
         }
     }
 

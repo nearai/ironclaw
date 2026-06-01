@@ -9,7 +9,8 @@ use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, Trust
 
 use crate::extension_lifecycle::{ActiveExtensionCapability, RebornLocalExtensionManagementPort};
 use ironclaw_first_party_extensions::{
-    EXA_MCP_HOST, NETWORK_EGRESS_LIMIT, WEB_ACCESS_EXTENSION_ID, WEB_SEARCH_CAPABILITY_ID,
+    CALENDAR_EXTENSION_ID, EXA_MCP_HOST, GMAIL_EXTENSION_ID, NETWORK_EGRESS_LIMIT,
+    WEB_ACCESS_EXTENSION_ID, WEB_SEARCH_CAPABILITY_ID, google_api_network_policy,
 };
 use ironclaw_product_workflow::ProductWorkflowError;
 
@@ -118,6 +119,13 @@ impl LocalDevExtensionSurface {
 }
 
 fn extension_network_policy(capability: &ActiveExtensionCapability) -> NetworkPolicy {
+    if matches!(
+        capability.provider.as_str(),
+        GMAIL_EXTENSION_ID | CALENDAR_EXTENSION_ID
+    ) {
+        return google_api_network_policy();
+    }
+
     let mut targets = Vec::new();
     for credential in &capability.runtime_credentials {
         if !targets.contains(&credential.audience) {
@@ -198,5 +206,23 @@ mod tests {
 
         assert_eq!(policy.allowed_targets.len(), 1);
         assert_eq!(policy.max_egress_bytes, Some(NETWORK_EGRESS_LIMIT));
+    }
+
+    #[test]
+    fn gsuite_capabilities_get_google_api_network_policy() {
+        let capability = ActiveExtensionCapability {
+            id: CapabilityId::new("gmail.list_messages").unwrap(),
+            provider: ExtensionId::new(GMAIL_EXTENSION_ID).unwrap(),
+            effects: vec![
+                EffectKind::DispatchCapability,
+                EffectKind::Network,
+                EffectKind::UseSecret,
+            ],
+            runtime_credentials: Vec::new(),
+        };
+
+        let policy = extension_network_policy(&capability);
+
+        assert_eq!(policy, google_api_network_policy());
     }
 }
