@@ -90,8 +90,7 @@ pub(crate) async fn restore_extension_lifecycle_state(
                 "bundled extension manifest hash changed; migrating stored installation to new manifest hash"
             );
             let migration_plan =
-                prepare_manifest_migration(available, &installation)
-                    .map_err(|_| hash_error)?;
+                prepare_manifest_migration(available, &installation).map_err(|_| hash_error)?;
             installation_store
                 .upsert_manifest(migration_plan.manifest_record)
                 .await
