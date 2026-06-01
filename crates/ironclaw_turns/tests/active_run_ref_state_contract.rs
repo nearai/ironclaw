@@ -3,8 +3,45 @@ use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_turns::{
     AcceptedMessageRef, AllowAllTurnAdmissionPolicy, IdempotencyKey, InMemoryRunProfileResolver,
     ReplyTargetBindingRef, RunProfileRequest, SourceBindingRef, TurnActiveRunRefState, TurnActor,
-    TurnRunId, TurnScope, TurnStateStore, TurnStatus,
+    TurnError, TurnRunId, TurnScope, TurnStateStore, TurnStatus,
 };
+
+struct FailingTurnStateStore;
+
+#[async_trait::async_trait]
+impl TurnStateStore for FailingTurnStateStore {
+    async fn submit_turn(
+        &self,
+        _request: ironclaw_turns::SubmitTurnRequest,
+        _admission_policy: &dyn ironclaw_turns::TurnAdmissionPolicy,
+        _run_profile_resolver: &dyn ironclaw_turns::RunProfileResolver,
+    ) -> Result<ironclaw_turns::SubmitTurnResponse, TurnError> {
+        unreachable!("active_run_ref_state only calls get_run_state")
+    }
+
+    async fn resume_turn(
+        &self,
+        _request: ironclaw_turns::ResumeTurnRequest,
+    ) -> Result<ironclaw_turns::ResumeTurnResponse, TurnError> {
+        unreachable!("active_run_ref_state only calls get_run_state")
+    }
+
+    async fn request_cancel(
+        &self,
+        _request: ironclaw_turns::CancelRunRequest,
+    ) -> Result<ironclaw_turns::CancelRunResponse, TurnError> {
+        unreachable!("active_run_ref_state only calls get_run_state")
+    }
+
+    async fn get_run_state(
+        &self,
+        _request: ironclaw_turns::GetRunStateRequest,
+    ) -> Result<ironclaw_turns::TurnRunState, TurnError> {
+        Err(TurnError::Unavailable {
+            reason: "backend unavailable".to_string(),
+        })
+    }
+}
 
 fn turn_scope(thread: &str) -> TurnScope {
     TurnScope::new(
@@ -102,4 +139,16 @@ async fn active_run_ref_state_treats_missing_lookup_as_missing() {
             .unwrap(),
         TurnActiveRunRefState::Missing
     );
+}
+
+#[tokio::test]
+async fn active_run_ref_state_propagates_non_scope_not_found_errors() {
+    let result = ironclaw_turns::active_run_ref_state(
+        &FailingTurnStateStore,
+        turn_scope("active-run-ref-error"),
+        Some(TurnRunId::new()),
+    )
+    .await;
+
+    assert!(matches!(result, Err(TurnError::Unavailable { .. })));
 }

@@ -159,8 +159,7 @@ impl TryFrom<String> for TriggerExternalEventId {
 ///
 /// Values must be non-empty, at most 512 bytes, and free of control
 /// characters. The concrete content store is owned by composition.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
-#[serde(transparent)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TriggerInboundContentRef(String);
 
 impl TriggerInboundContentRef {
@@ -191,12 +190,32 @@ impl std::fmt::Display for TriggerInboundContentRef {
     }
 }
 
+impl TryFrom<String> for TriggerInboundContentRef {
+    type Error = TriggerError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        validate_inbound_content_ref(&value)?;
+        Ok(Self(value))
+    }
+}
+
+impl Serialize for TriggerInboundContentRef {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.0)
+    }
+}
+
 impl<'de> Deserialize<'de> for TriggerInboundContentRef {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
     {
-        Self::new(String::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+        String::deserialize(deserializer)?
+            .try_into()
+            .map_err(serde::de::Error::custom)
     }
 }
 
@@ -832,9 +851,7 @@ impl TriggerRepository for InMemoryTriggerRepository {
         let Some(record) = state.get_mut(&key) else {
             return Ok(None);
         };
-        if record.tenant_id != request.tenant_id
-            || record.trigger_id != request.trigger_id
-            || record.active_fire_slot != Some(request.fire_slot)
+        if record.active_fire_slot != Some(request.fire_slot)
             || record.active_run_ref != Some(request.run_id)
         {
             return Ok(None);
