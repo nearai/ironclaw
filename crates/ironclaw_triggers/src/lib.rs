@@ -609,6 +609,14 @@ pub trait TriggerRepository: Send + Sync {
         request: FirePermanentFailedRequest,
     ) -> Result<Option<TriggerRecord>, TriggerError>;
 
+    /// Marks a trusted poller-owned claimed fire as terminally failed.
+    ///
+    /// # Safety / Authorization
+    ///
+    /// This clears active-fire state and completes the trigger when a claimed
+    /// fire cannot advance to another schedule slot. Callers must derive the
+    /// tenant, trigger id, and fire slot from a trusted claimed record, not from
+    /// user input or a tenant-scoped list path.
     async fn mark_fire_terminally_failed(
         &self,
         request: FireTerminalFailedRequest,
@@ -743,14 +751,14 @@ impl TriggerRepository for InMemoryTriggerRepository {
         let state = self.lock_state()?;
         let mut selected_keys = state
             .iter()
-            .filter(|(_, record)| record.active_fire_slot.is_some())
-            .map(|(key, record)| {
-                (
-                    record.active_fire_slot.unwrap_or(record.next_run_at),
+            .filter_map(|(key, record)| {
+                let active_fire_slot = record.active_fire_slot?;
+                Some((
+                    active_fire_slot,
                     record.tenant_id.clone(),
                     record.trigger_id,
                     key.clone(),
-                )
+                ))
             })
             .collect::<Vec<_>>();
         selected_keys.sort_by_key(|(active_fire_slot, tenant_id, trigger_id, _)| {

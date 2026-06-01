@@ -128,6 +128,8 @@ impl TriggerPollerWorker {
                 continue;
             };
             let Some(run_id) = record.active_run_ref else {
+                // Keep claim-only rows blocked until recovery has lease or age
+                // evidence that clearing cannot double-submit after a crash.
                 report.results.push(TriggerPollerFireReport {
                     tenant_id: record.tenant_id,
                     trigger_id: record.trigger_id,
@@ -194,6 +196,8 @@ impl TriggerPollerWorker {
                     }
                 }
                 TriggerActiveRunState::Missing | TriggerActiveRunState::Nonterminal => {
+                    // Missing remains conservative until recovery can prove the
+                    // active run lookup is not merely stale or temporarily empty.
                     report.results.push(TriggerPollerFireReport {
                         tenant_id: record.tenant_id,
                         trigger_id: record.trigger_id,
@@ -260,7 +264,7 @@ impl TriggerPollerWorker {
                         fire_slot,
                         SubmitFailureKind::Permanent,
                         error.to_string(),
-                        None,
+                        PermanentFailureDestination::Terminal,
                     )
                     .await;
             }
@@ -274,7 +278,7 @@ impl TriggerPollerWorker {
                         fire_slot,
                         SubmitFailureKind::Permanent,
                         "claimed trigger did not produce a fire".to_string(),
-                        Some(next_run_at),
+                        PermanentFailureDestination::Reschedule(next_run_at),
                     )
                     .await;
             }
@@ -285,7 +289,7 @@ impl TriggerPollerWorker {
                         fire_slot,
                         classify_error(&error),
                         error.to_string(),
-                        Some(next_run_at),
+                        PermanentFailureDestination::Reschedule(next_run_at),
                     )
                     .await;
             }
@@ -304,7 +308,7 @@ impl TriggerPollerWorker {
                         fire_slot,
                         classify_error(&error),
                         error.to_string(),
-                        Some(next_run_at),
+                        PermanentFailureDestination::Reschedule(next_run_at),
                     )
                     .await;
             }
@@ -373,7 +377,7 @@ impl TriggerPollerWorker {
                     fire_slot,
                     SubmitFailureKind::Retryable,
                     reason,
-                    Some(next_run_at),
+                    PermanentFailureDestination::Reschedule(next_run_at),
                 )
                 .await
             }
@@ -383,7 +387,7 @@ impl TriggerPollerWorker {
                     fire_slot,
                     SubmitFailureKind::Permanent,
                     reason,
-                    Some(next_run_at),
+                    PermanentFailureDestination::Reschedule(next_run_at),
                 )
                 .await
             }
@@ -393,7 +397,7 @@ impl TriggerPollerWorker {
                     fire_slot,
                     classify_error(&error),
                     error.to_string(),
-                    Some(next_run_at),
+                    PermanentFailureDestination::Reschedule(next_run_at),
                 )
                 .await
             }
@@ -406,7 +410,7 @@ impl TriggerPollerWorker {
         fire_slot: Timestamp,
         kind: SubmitFailureKind,
         reason: String,
-        next_run_at: Option<Timestamp>,
+        permanent_destination: PermanentFailureDestination,
     ) -> Result<TriggerPollerFireOutcome, TriggerError> {
         match kind {
             SubmitFailureKind::Retryable => {
@@ -421,26 +425,29 @@ impl TriggerPollerWorker {
                 Ok(TriggerPollerFireOutcome::RetryableFailed { reason })
             }
             SubmitFailureKind::Permanent => {
-                let Some(next_run_at) = next_run_at else {
-                    self.deps
-                        .repository
-                        .mark_fire_terminally_failed(FireTerminalFailedRequest {
-                            tenant_id: record.tenant_id,
-                            trigger_id: record.trigger_id,
-                            fire_slot,
-                        })
-                        .await?;
-                    return Ok(TriggerPollerFireOutcome::PermanentFailed { reason });
-                };
-                self.deps
-                    .repository
-                    .mark_fire_permanently_failed(FirePermanentFailedRequest {
-                        tenant_id: record.tenant_id,
-                        trigger_id: record.trigger_id,
-                        fire_slot,
-                        next_run_at,
-                    })
-                    .await?;
+                match permanent_destination {
+                    PermanentFailureDestination::Terminal => {
+                        self.deps
+                            .repository
+                            .mark_fire_terminally_failed(FireTerminalFailedRequest {
+                                tenant_id: record.tenant_id,
+                                trigger_id: record.trigger_id,
+                                fire_slot,
+                            })
+                            .await?;
+                    }
+                    PermanentFailureDestination::Reschedule(next_run_at) => {
+                        self.deps
+                            .repository
+                            .mark_fire_permanently_failed(FirePermanentFailedRequest {
+                                tenant_id: record.tenant_id,
+                                trigger_id: record.trigger_id,
+                                fire_slot,
+                                next_run_at,
+                            })
+                            .await?;
+                    }
+                }
                 Ok(TriggerPollerFireOutcome::PermanentFailed { reason })
             }
         }
@@ -571,6 +578,12 @@ enum SubmitFailureKind {
     Permanent,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PermanentFailureDestination {
+    Reschedule(Timestamp),
+    Terminal,
+}
+
 fn classify_error(error: &TriggerError) -> SubmitFailureKind {
     match error {
         TriggerError::Backend { .. } => SubmitFailureKind::Retryable,
@@ -680,6 +693,29 @@ mod tests {
         };
         assert!(matches!(
             config.validate(),
+            Err(TriggerError::InvalidPollerConfig { .. })
+        ));
+    }
+
+    #[test]
+    fn worker_new_rejects_invalid_config() {
+        let config = TriggerPollerWorkerConfig {
+            fires_per_tick: 0,
+            ..TriggerPollerWorkerConfig::default()
+        };
+        let result = TriggerPollerWorker::new(
+            config,
+            TriggerPollerWorkerDeps {
+                repository: Arc::new(InMemoryTriggerRepository::default()),
+                source_provider: Arc::new(crate::ScheduleTriggerSourceProvider),
+                materializer: Arc::new(RecordingMaterializer::success("content:trigger-fire")),
+                trusted_submitter: Arc::new(RecordingSubmitter::with_outcomes(Vec::new())),
+                active_run_lookup: Arc::new(RecordingActiveRunLookup::default()),
+            },
+        );
+
+        assert!(matches!(
+            result,
             Err(TriggerError::InvalidPollerConfig { .. })
         ));
     }
@@ -1450,6 +1486,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tick_source_provider_not_found_persists_permanent_failure_with_next_slot() {
+        let repo = Arc::new(InMemoryTriggerRepository::default());
+        let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid");
+        let fire_slot = ts(1_704_067_200);
+        let record = sample_record(trigger_id, tenant("tenant-a"), fire_slot);
+        let expected_next_run_at = record
+            .schedule
+            .next_slot_after(fire_slot)
+            .expect("next run")
+            .expect("future run");
+        repo.upsert_trigger(record).await.expect("insert");
+        let worker = worker_with_source_provider(
+            repo.clone(),
+            Arc::new(NotFoundSourceProvider),
+            Arc::new(RecordingMaterializer::success("content:trigger-fire")),
+            Arc::new(RecordingSubmitter::with_outcomes(Vec::new())),
+            Arc::new(RecordingActiveRunLookup::default()),
+        );
+
+        let report = worker.tick_once(fire_slot).await.expect("tick succeeds");
+
+        assert!(matches!(
+            report.results.last().map(|result| &result.outcome),
+            Some(TriggerPollerFireOutcome::PermanentFailed { .. })
+        ));
+        let persisted = repo
+            .get_trigger(tenant("tenant-a"), trigger_id)
+            .await
+            .expect("load")
+            .expect("record present");
+        assert_eq!(persisted.last_status, Some(TriggerRunStatus::Error));
+        assert_eq!(persisted.next_run_at, expected_next_run_at);
+        assert_eq!(persisted.active_fire_slot, None);
+        assert_eq!(persisted.active_run_ref, None);
+    }
+
+    #[tokio::test]
     async fn tick_permanent_failure_without_next_slot_completes_trigger() {
         let repo = Arc::new(InMemoryTriggerRepository::default());
         let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid");
@@ -1488,6 +1561,8 @@ mod tests {
 
     struct NullSourceProvider;
 
+    struct NotFoundSourceProvider;
+
     #[async_trait]
     impl TriggerSourceProvider for NullSourceProvider {
         async fn evaluate(
@@ -1496,6 +1571,17 @@ mod tests {
             _now: Timestamp,
         ) -> Result<Option<TriggerFire>, TriggerError> {
             Ok(None)
+        }
+    }
+
+    #[async_trait]
+    impl TriggerSourceProvider for NotFoundSourceProvider {
+        async fn evaluate(
+            &self,
+            _record: &TriggerRecord,
+            _now: Timestamp,
+        ) -> Result<Option<TriggerFire>, TriggerError> {
+            Err(TriggerError::NotFound)
         }
     }
 
