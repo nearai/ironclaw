@@ -636,9 +636,10 @@ pub use libsql::LibSqlTriggerRepository;
 pub use postgres::PostgresTriggerRepository;
 pub use worker::{
     TriggerActiveRunLookup, TriggerActiveRunState, TriggerActiveRunStateRequest,
-    TriggerPollerFireOutcome, TriggerPollerFireReport, TriggerPollerTickReport,
-    TriggerPollerWorker, TriggerPollerWorkerConfig, TriggerPollerWorkerDeps,
-    TrustedTriggerFireSubmitOutcome, TrustedTriggerFireSubmitter, TrustedTriggerSubmitRequest,
+    TriggerPollerFailureReason, TriggerPollerFireOutcome, TriggerPollerFireReport,
+    TriggerPollerTickReport, TriggerPollerWorker, TriggerPollerWorkerConfig,
+    TriggerPollerWorkerDeps, TrustedTriggerFireSubmitOutcome, TrustedTriggerFireSubmitter,
+    TrustedTriggerSubmitFailureReason, TrustedTriggerSubmitRequest,
 };
 
 #[derive(Clone, Default)]

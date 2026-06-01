@@ -88,12 +88,13 @@ impl TriggerPollerWorker {
             let outcome = match self.process_due_record(record, now).await {
                 Ok(outcome) => outcome,
                 Err(error) => {
+                    let classification = classify_failure(&error);
                     report.results.push(TriggerPollerFireReport {
                         tenant_id,
                         trigger_id,
                         fire_slot,
                         outcome: TriggerPollerFireOutcome::DueFireFailed {
-                            reason: error.to_string(),
+                            reason: classification.reason,
                         },
                     });
                     continue;
@@ -153,14 +154,14 @@ impl TriggerPollerWorker {
                 .await
             {
                 Ok(state) => state,
-                Err(error) => {
+                Err(_error) => {
                     report.results.push(TriggerPollerFireReport {
                         tenant_id: record.tenant_id,
                         trigger_id: record.trigger_id,
                         fire_slot,
                         outcome: TriggerPollerFireOutcome::ActiveRunLookupFailed {
                             run_id,
-                            reason: error.to_string(),
+                            reason: TriggerPollerFailureReason::ActiveRunLookup,
                         },
                     });
                     continue;
@@ -258,12 +259,13 @@ impl TriggerPollerWorker {
         let next_run_at = match next_run_at_after_fire(&record, fire_slot) {
             Ok(next_run_at) => next_run_at,
             Err(error) => {
+                let classification = classify_failure(&error);
                 return self
                     .persist_failed_fire(
                         record,
                         fire_slot,
-                        SubmitFailureKind::Permanent,
-                        error.to_string(),
+                        classification.kind,
+                        classification.reason,
                         PermanentFailureDestination::Terminal,
                     )
                     .await;
@@ -277,18 +279,19 @@ impl TriggerPollerWorker {
                         record,
                         fire_slot,
                         SubmitFailureKind::Permanent,
-                        "claimed trigger did not produce a fire".to_string(),
+                        TriggerPollerFailureReason::SourceNoFire,
                         PermanentFailureDestination::Reschedule(next_run_at),
                     )
                     .await;
             }
             Err(error) => {
+                let classification = classify_failure(&error);
                 return self
                     .persist_failed_fire(
                         record,
                         fire_slot,
-                        classify_error(&error),
-                        error.to_string(),
+                        classification.kind,
+                        classification.reason,
                         PermanentFailureDestination::Reschedule(next_run_at),
                     )
                     .await;
@@ -302,12 +305,13 @@ impl TriggerPollerWorker {
         {
             Ok(content_ref) => content_ref,
             Err(error) => {
+                let classification = classify_failure(&error);
                 return self
                     .persist_failed_fire(
                         record,
                         fire_slot,
-                        classify_error(&error),
-                        error.to_string(),
+                        classification.kind,
+                        classification.reason,
                         PermanentFailureDestination::Reschedule(next_run_at),
                     )
                     .await;
@@ -376,7 +380,7 @@ impl TriggerPollerWorker {
                     record,
                     fire_slot,
                     SubmitFailureKind::Retryable,
-                    reason,
+                    TriggerPollerFailureReason::from_trusted_submit_failure(reason),
                     PermanentFailureDestination::Reschedule(next_run_at),
                 )
                 .await
@@ -386,17 +390,18 @@ impl TriggerPollerWorker {
                     record,
                     fire_slot,
                     SubmitFailureKind::Permanent,
-                    reason,
+                    TriggerPollerFailureReason::from_trusted_submit_failure(reason),
                     PermanentFailureDestination::Reschedule(next_run_at),
                 )
                 .await
             }
             Err(error) => {
+                let classification = classify_failure(&error);
                 self.persist_failed_fire(
                     record,
                     fire_slot,
-                    classify_error(&error),
-                    error.to_string(),
+                    classification.kind,
+                    classification.reason,
                     PermanentFailureDestination::Reschedule(next_run_at),
                 )
                 .await
@@ -409,7 +414,7 @@ impl TriggerPollerWorker {
         record: TriggerRecord,
         fire_slot: Timestamp,
         kind: SubmitFailureKind,
-        reason: String,
+        reason: TriggerPollerFailureReason,
         permanent_destination: PermanentFailureDestination,
     ) -> Result<TriggerPollerFireOutcome, TriggerError> {
         match kind {
@@ -490,17 +495,17 @@ pub enum TriggerPollerFireOutcome {
         original_run_id: TurnRunId,
     },
     RetryableFailed {
-        reason: String,
+        reason: TriggerPollerFailureReason,
     },
     PermanentFailed {
-        reason: String,
+        reason: TriggerPollerFailureReason,
     },
     ClearedTerminalActive {
         run_id: TurnRunId,
     },
     ActiveRunLookupFailed {
         run_id: TurnRunId,
-        reason: String,
+        reason: TriggerPollerFailureReason,
     },
     SkippedAlreadyCleared {
         run_id: TurnRunId,
@@ -510,10 +515,35 @@ pub enum TriggerPollerFireOutcome {
         active_run_ref: Option<TurnRunId>,
     },
     DueFireFailed {
-        reason: String,
+        reason: TriggerPollerFailureReason,
     },
     SkippedNotDue,
     SkippedNotFound,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TriggerPollerFailureReason {
+    Backend,
+    InvalidTriggerId,
+    InvalidFireIdentity,
+    InvalidRecord,
+    InvalidPollerConfig,
+    InvalidSchedule,
+    InvalidMaterialization,
+    NotFound,
+    SourceNoFire,
+    TrustedSubmitRetryable,
+    TrustedSubmitPermanent,
+    ActiveRunLookup,
+}
+
+impl TriggerPollerFailureReason {
+    fn from_trusted_submit_failure(reason: TrustedTriggerSubmitFailureReason) -> Self {
+        match reason {
+            TrustedTriggerSubmitFailureReason::Retryable => Self::TrustedSubmitRetryable,
+            TrustedTriggerSubmitFailureReason::Permanent => Self::TrustedSubmitPermanent,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -521,6 +551,12 @@ pub struct TrustedTriggerSubmitRequest {
     pub fire: TriggerFire,
     pub content_ref: TriggerInboundContentRef,
     pub received_at: Timestamp,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrustedTriggerSubmitFailureReason {
+    Retryable,
+    Permanent,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -534,10 +570,10 @@ pub enum TrustedTriggerFireSubmitOutcome {
         replayed_at: Timestamp,
     },
     RetryableFailed {
-        reason: String,
+        reason: TrustedTriggerSubmitFailureReason,
     },
     PermanentFailed {
-        reason: String,
+        reason: TrustedTriggerSubmitFailureReason,
     },
 }
 
@@ -584,17 +620,48 @@ enum PermanentFailureDestination {
     Terminal,
 }
 
-fn classify_error(error: &TriggerError) -> SubmitFailureKind {
-    match error {
-        TriggerError::Backend { .. } => SubmitFailureKind::Retryable,
-        TriggerError::InvalidTriggerId { .. }
-        | TriggerError::InvalidFireIdentityComponent { .. }
-        | TriggerError::InvalidRecord { .. }
-        | TriggerError::InvalidPollerConfig { .. }
-        | TriggerError::InvalidSchedule { .. }
-        | TriggerError::InvalidMaterialization { .. }
-        | TriggerError::NotFound => SubmitFailureKind::Permanent,
-    }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FailureClassification {
+    kind: SubmitFailureKind,
+    reason: TriggerPollerFailureReason,
+}
+
+fn classify_failure(error: &TriggerError) -> FailureClassification {
+    let (kind, reason) = match error {
+        TriggerError::Backend { .. } => (
+            SubmitFailureKind::Retryable,
+            TriggerPollerFailureReason::Backend,
+        ),
+        TriggerError::InvalidTriggerId { .. } => (
+            SubmitFailureKind::Permanent,
+            TriggerPollerFailureReason::InvalidTriggerId,
+        ),
+        TriggerError::InvalidFireIdentityComponent { .. } => (
+            SubmitFailureKind::Permanent,
+            TriggerPollerFailureReason::InvalidFireIdentity,
+        ),
+        TriggerError::InvalidRecord { .. } => (
+            SubmitFailureKind::Permanent,
+            TriggerPollerFailureReason::InvalidRecord,
+        ),
+        TriggerError::InvalidPollerConfig { .. } => (
+            SubmitFailureKind::Permanent,
+            TriggerPollerFailureReason::InvalidPollerConfig,
+        ),
+        TriggerError::InvalidSchedule { .. } => (
+            SubmitFailureKind::Permanent,
+            TriggerPollerFailureReason::InvalidSchedule,
+        ),
+        TriggerError::InvalidMaterialization { .. } => (
+            SubmitFailureKind::Permanent,
+            TriggerPollerFailureReason::InvalidMaterialization,
+        ),
+        TriggerError::NotFound => (
+            SubmitFailureKind::Permanent,
+            TriggerPollerFailureReason::NotFound,
+        ),
+    };
+    FailureClassification { kind, reason }
 }
 
 fn next_run_at_after_fire(
@@ -1110,8 +1177,10 @@ mod tests {
                 .any(|result| result.trigger_id == active_id
                     && matches!(
                         result.outcome,
-                        TriggerPollerFireOutcome::ActiveRunLookupFailed { run_id: actual_run_id, .. }
-                        if actual_run_id == run_id
+                        TriggerPollerFireOutcome::ActiveRunLookupFailed {
+                            run_id: actual_run_id,
+                            reason: TriggerPollerFailureReason::ActiveRunLookup,
+                        } if actual_run_id == run_id
                     ))
         );
         assert!(
@@ -1223,7 +1292,7 @@ mod tests {
             Arc::new(RecordingMaterializer::success("content:trigger-fire")),
             Arc::new(RecordingSubmitter::with_outcomes(vec![Ok(
                 TrustedTriggerFireSubmitOutcome::RetryableFailed {
-                    reason: "turn service unavailable".to_string(),
+                    reason: TrustedTriggerSubmitFailureReason::Retryable,
                 },
             )])),
             Arc::new(RecordingActiveRunLookup::default()),
@@ -1233,7 +1302,9 @@ mod tests {
 
         assert!(matches!(
             report.results.last().map(|result| &result.outcome),
-            Some(TriggerPollerFireOutcome::RetryableFailed { .. })
+            Some(TriggerPollerFireOutcome::RetryableFailed {
+                reason: TriggerPollerFailureReason::TrustedSubmitRetryable,
+            })
         ));
         let persisted = repo
             .get_trigger(tenant("tenant-a"), trigger_id)
@@ -1275,7 +1346,7 @@ mod tests {
                 && matches!(
                     &result.outcome,
                     TriggerPollerFireOutcome::DueFireFailed { reason }
-                        if reason.contains("persisting accepted submit result")
+                        if *reason == TriggerPollerFailureReason::Backend
                 )
         }));
     }
@@ -1317,7 +1388,9 @@ mod tests {
                 .any(|result| result.trigger_id == failed_id
                     && matches!(
                         result.outcome,
-                        TriggerPollerFireOutcome::DueFireFailed { .. }
+                        TriggerPollerFireOutcome::DueFireFailed {
+                            reason: TriggerPollerFailureReason::Backend,
+                        }
                     ))
         );
         assert!(
@@ -1355,7 +1428,9 @@ mod tests {
 
         assert!(matches!(
             report.results.last().map(|result| &result.outcome),
-            Some(TriggerPollerFireOutcome::RetryableFailed { .. })
+            Some(TriggerPollerFireOutcome::RetryableFailed {
+                reason: TriggerPollerFailureReason::Backend,
+            })
         ));
         let persisted = repo
             .get_trigger(tenant("tenant-a"), trigger_id)
@@ -1385,7 +1460,7 @@ mod tests {
             Arc::new(RecordingMaterializer::success("content:trigger-fire")),
             Arc::new(RecordingSubmitter::with_outcomes(vec![Ok(
                 TrustedTriggerFireSubmitOutcome::PermanentFailed {
-                    reason: "trusted inbound rejected scope".to_string(),
+                    reason: TrustedTriggerSubmitFailureReason::Permanent,
                 },
             )])),
             Arc::new(RecordingActiveRunLookup::default()),
@@ -1395,7 +1470,9 @@ mod tests {
 
         assert!(matches!(
             report.results.last().map(|result| &result.outcome),
-            Some(TriggerPollerFireOutcome::PermanentFailed { .. })
+            Some(TriggerPollerFireOutcome::PermanentFailed {
+                reason: TriggerPollerFailureReason::TrustedSubmitPermanent,
+            })
         ));
         let persisted = repo
             .get_trigger(tenant("tenant-a"), trigger_id)
@@ -1435,7 +1512,9 @@ mod tests {
 
         assert!(matches!(
             report.results.last().map(|result| &result.outcome),
-            Some(TriggerPollerFireOutcome::PermanentFailed { .. })
+            Some(TriggerPollerFireOutcome::PermanentFailed {
+                reason: TriggerPollerFailureReason::InvalidMaterialization,
+            })
         ));
         let persisted = repo
             .get_trigger(tenant("tenant-a"), trigger_id)
@@ -1472,7 +1551,9 @@ mod tests {
 
         assert!(matches!(
             report.results.last().map(|result| &result.outcome),
-            Some(TriggerPollerFireOutcome::PermanentFailed { .. })
+            Some(TriggerPollerFireOutcome::PermanentFailed {
+                reason: TriggerPollerFailureReason::SourceNoFire,
+            })
         ));
         let persisted = repo
             .get_trigger(tenant("tenant-a"), trigger_id)
@@ -1509,7 +1590,9 @@ mod tests {
 
         assert!(matches!(
             report.results.last().map(|result| &result.outcome),
-            Some(TriggerPollerFireOutcome::PermanentFailed { .. })
+            Some(TriggerPollerFireOutcome::PermanentFailed {
+                reason: TriggerPollerFailureReason::NotFound,
+            })
         ));
         let persisted = repo
             .get_trigger(tenant("tenant-a"), trigger_id)
@@ -1520,6 +1603,61 @@ mod tests {
         assert_eq!(persisted.next_run_at, expected_next_run_at);
         assert_eq!(persisted.active_fire_slot, None);
         assert_eq!(persisted.active_run_ref, None);
+    }
+
+    #[tokio::test]
+    async fn tick_source_provider_errors_report_bounded_permanent_reasons() {
+        let cases = vec![
+            (
+                TriggerError::InvalidTriggerId {
+                    reason: "bad trigger".to_string(),
+                },
+                TriggerPollerFailureReason::InvalidTriggerId,
+            ),
+            (
+                TriggerError::InvalidFireIdentityComponent {
+                    label: "fire_slot".to_string(),
+                    reason: "bad component".to_string(),
+                },
+                TriggerPollerFailureReason::InvalidFireIdentity,
+            ),
+            (
+                TriggerError::InvalidRecord {
+                    reason: "bad record".to_string(),
+                },
+                TriggerPollerFailureReason::InvalidRecord,
+            ),
+            (
+                TriggerError::InvalidPollerConfig {
+                    reason: "bad config".to_string(),
+                },
+                TriggerPollerFailureReason::InvalidPollerConfig,
+            ),
+        ];
+
+        for (error, expected_reason) in cases {
+            let repo = Arc::new(InMemoryTriggerRepository::default());
+            let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid");
+            let fire_slot = ts(1_704_067_200);
+            repo.upsert_trigger(sample_record(trigger_id, tenant("tenant-a"), fire_slot))
+                .await
+                .expect("insert");
+            let worker = worker_with_source_provider(
+                repo,
+                Arc::new(ErrorSourceProvider::new(error)),
+                Arc::new(RecordingMaterializer::success("content:trigger-fire")),
+                Arc::new(RecordingSubmitter::with_outcomes(Vec::new())),
+                Arc::new(RecordingActiveRunLookup::default()),
+            );
+
+            let report = worker.tick_once(fire_slot).await.expect("tick succeeds");
+
+            assert!(matches!(
+                report.results.last().map(|result| &result.outcome),
+                Some(TriggerPollerFireOutcome::PermanentFailed { reason })
+                    if *reason == expected_reason
+            ));
+        }
     }
 
     #[tokio::test]
@@ -1541,7 +1679,9 @@ mod tests {
 
         assert!(matches!(
             report.results.last().map(|result| &result.outcome),
-            Some(TriggerPollerFireOutcome::PermanentFailed { .. })
+            Some(TriggerPollerFireOutcome::PermanentFailed {
+                reason: TriggerPollerFailureReason::InvalidSchedule,
+            })
         ));
         let persisted = repo
             .get_trigger(tenant("tenant-a"), trigger_id)
@@ -1563,6 +1703,18 @@ mod tests {
 
     struct NotFoundSourceProvider;
 
+    struct ErrorSourceProvider {
+        error: Mutex<Option<TriggerError>>,
+    }
+
+    impl ErrorSourceProvider {
+        fn new(error: TriggerError) -> Self {
+            Self {
+                error: Mutex::new(Some(error)),
+            }
+        }
+    }
+
     #[async_trait]
     impl TriggerSourceProvider for NullSourceProvider {
         async fn evaluate(
@@ -1582,6 +1734,22 @@ mod tests {
             _now: Timestamp,
         ) -> Result<Option<TriggerFire>, TriggerError> {
             Err(TriggerError::NotFound)
+        }
+    }
+
+    #[async_trait]
+    impl TriggerSourceProvider for ErrorSourceProvider {
+        async fn evaluate(
+            &self,
+            _record: &TriggerRecord,
+            _now: Timestamp,
+        ) -> Result<Option<TriggerFire>, TriggerError> {
+            Err(self
+                .error
+                .lock()
+                .expect("error lock")
+                .take()
+                .expect("source provider error configured"))
         }
     }
 

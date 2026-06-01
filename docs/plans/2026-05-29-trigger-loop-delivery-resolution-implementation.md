@@ -600,7 +600,10 @@ Add the heavier caller-level tests separately from the worker core:
 - active-cleanup fairness coverage: when the earliest active rows are
   long-running, nonterminal, or claim-only, later terminal active rows must
   still be reached eventually instead of being starved by the same ordered
-  first page on every tick
+  first page on every tick. Treat this as a PR 16 caller-level harness
+  requirement, not a best-effort unit test: the harness should run multiple
+  ticks with more active rows than the cleanup page size and prove terminal
+  rows outside the first page are eventually cleared.
 - if the fairness test exposes starvation, add cursor/rotation, widened cleanup
   scanning, or an equivalent repository/worker policy. If this touches
   in-memory `list_active_triggers`, consider replacing sort-then-truncate with
@@ -674,11 +677,11 @@ Wire the trigger poller into Reborn composition:
   surfaced to users or admins. Permanent failures should produce a durable,
   throttled notification; retryable failures should avoid per-tick spam and use
   thresholded or summarized reporting.
-- any failure reason that leaves the in-process tick report must be bounded and
-  redacted. Do not persist, log broadly, or send raw
-  `TriggerSourceProvider`/`TriggerPromptMaterializer` error strings to users;
-  map them to typed failure categories or sanitized summaries at the lifecycle,
-  logging, or notification boundary.
+- preserve the PR 15 bounded tick-report failure categories when lifecycle,
+  logging, and notification wiring are added. Do not reintroduce persisted,
+  broadly logged, or user-visible raw `TriggerSourceProvider`,
+  `TriggerPromptMaterializer`, backend, or submitter error strings; map typed
+  categories to sanitized summaries at the lifecycle/notification boundary.
 - approval waits continue to belong to the turn pipeline. Composition should
   define durable approval TTL/reminder behavior, fail-closed expiry, and stale
   approval rejection while preserving trigger `active_run_ref` back-pressure.
