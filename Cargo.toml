@@ -276,6 +276,7 @@ ironclaw_reborn = { path = "crates/ironclaw_reborn", version = "0.1.0" }
 ironclaw_reborn_composition = { path = "crates/ironclaw_reborn_composition", version = "0.1.0" }
 ironclaw_threads = { path = "crates/ironclaw_threads", version = "0.1.0" }
 ironclaw_trust = { path = "crates/ironclaw_trust", version = "0.1.0" }
+ironclaw_wasm = { path = "crates/ironclaw_wasm", version = "0.1.0" }
 # Same idea for embeddings: `MockEmbeddings` is only reachable in dev builds.
 ironclaw_embeddings = { path = "crates/ironclaw_embeddings", version = "0.1.0", features = ["testing"] }
 

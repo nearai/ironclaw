@@ -175,6 +175,55 @@ async fn host_http_egress_helper_injects_staged_credentials_from_handoff_store()
 }
 
 #[tokio::test]
+async fn host_http_egress_helper_reuses_staged_credentials_during_same_dispatch() {
+    let scope = sample_scope();
+    let capability_id = sample_capability_id();
+    let handle = SecretHandle::new("api-token").unwrap();
+
+    let network = RecordingNetwork::ok();
+    let recorded_requests = Arc::clone(&network.requests);
+    let services = test_services()
+        .with_secret_store(Arc::new(InMemorySecretStore::new()))
+        .try_with_host_http_egress(network)
+        .expect("host HTTP egress should wire with graph secret store");
+    services
+        .network_policy_store
+        .insert(&scope, &capability_id, staged_policy());
+    services
+        .secret_injection_store
+        .insert(
+            &scope,
+            &capability_id,
+            &handle,
+            SecretMaterial::from("staged-secret"),
+        )
+        .expect("staged credential should be seeded");
+    let egress = configured_egress(&services);
+
+    egress
+        .execute(request_with_staged_credential(
+            scope.clone(),
+            capability_id.clone(),
+            handle.clone(),
+        ))
+        .await
+        .expect("first request should inject staged credential");
+    egress
+        .execute(request_with_staged_credential(scope, capability_id, handle))
+        .await
+        .expect("second request in same dispatch should reuse staged credential");
+
+    let requests = recorded_requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(requests.iter().all(|request| {
+        request
+            .headers
+            .iter()
+            .any(|(name, value)| name == "authorization" && value == "Bearer staged-secret")
+    }));
+}
+
+#[tokio::test]
 async fn host_http_egress_treats_expired_staged_secret_as_missing() {
     let scope = sample_scope();
     let capability_id = sample_capability_id();

@@ -60,12 +60,13 @@ pub trait RuntimeCredentialAccountResolver: Send + Sync + fmt::Debug {
     ) -> Result<SecretHandle, CredentialStageError>;
 }
 
-/// One-shot runtime secret material staged after `InjectSecretOnce` lease consumption.
+/// Runtime secret material staged after `InjectSecretOnce` lease consumption.
 ///
 /// The store is keyed by scoped invocation, capability, and handle. Runtime adapters
-/// must use `take(...)` so staged material is removed before it can be reused.
-/// Entries also expire after a short TTL so abandoned handoffs from setup
-/// failures, cancellation, or adapter bugs cannot remain usable indefinitely.
+/// borrow staged material during dispatch; `complete_dispatch`/`abort` removes it
+/// after the scoped capability finishes. Entries also expire after a short TTL so
+/// abandoned handoffs from setup failures, cancellation, or adapter bugs cannot
+/// remain usable indefinitely.
 #[derive(Clone)]
 pub(crate) struct RuntimeSecretInjectionStore {
     state: Arc<RuntimeSecretInjectionState>,
@@ -132,6 +133,24 @@ impl RuntimeSecretInjectionStore {
                 handle,
             ))
             .map(|entry| entry.material))
+    }
+
+    pub(crate) fn get(
+        &self,
+        scope: &ResourceScope,
+        capability_id: &CapabilityId,
+        handle: &SecretHandle,
+    ) -> Result<Option<SecretMaterial>, RuntimeSecretInjectionStoreError> {
+        let now = Instant::now();
+        let mut secrets = self.lock()?;
+        prune_expired_entries(&mut secrets, now);
+        Ok(secrets
+            .get(&RuntimeSecretInjectionKey::new(
+                scope,
+                capability_id,
+                handle,
+            ))
+            .map(|entry| entry.material.clone()))
     }
 
     /// Discard all staged secrets for a scoped capability before process ownership exists.

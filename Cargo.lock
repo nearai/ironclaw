@@ -4021,6 +4021,7 @@ dependencies = [
  "ironclaw_trust",
  "ironclaw_tui",
  "ironclaw_turns",
+ "ironclaw_wasm",
  "json5",
  "jsonschema",
  "jsonwebtoken",

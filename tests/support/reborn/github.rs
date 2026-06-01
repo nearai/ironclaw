@@ -60,7 +60,7 @@ pub fn provider_id() -> GithubSupportResult<ExtensionId> {
 }
 
 pub fn secret_handles() -> GithubSupportResult<Vec<SecretHandle>> {
-    Ok(vec![SecretHandle::new("github_token")?])
+    Ok(vec![SecretHandle::new("github_runtime_token")?])
 }
 
 pub fn search_response_body() -> Vec<u8> {
