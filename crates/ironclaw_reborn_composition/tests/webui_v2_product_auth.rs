@@ -1072,40 +1072,8 @@ async fn product_auth_google_oauth_start_builds_provider_authorization_url() {
 
 #[tokio::test]
 async fn product_auth_google_oauth_callback_completes_setup_flow() {
-    let dispatcher = Arc::new(RecordingAuthDispatcher::default());
-    let product_auth = Arc::new(RebornProductAuthServices::from_shared(
-        Arc::new(InMemoryAuthProductServices::new()),
-        dispatcher.clone(),
-    ));
-    let app = build_app_with_product_auth_service_and_config(
-        product_auth,
-        Some(
-            GoogleOAuthRouteConfig::new(
-                "google-client.apps.googleusercontent.com",
-                "http://127.0.0.1:3000/api/reborn/product-auth/oauth/google/callback",
-            )
-            .expect("google oauth route config"),
-        ),
-    );
-    let start_response = post_google_oauth_start(
-        &app,
-        google_oauth_start_body(json!({
-            "session_id": "web-session-google",
-            "thread_id": "thread-auth-google"
-        })),
-    )
-    .await;
-    assert_eq!(start_response.status(), StatusCode::OK);
-    let start_body = read_body_string(start_response).await;
-    let start_json: serde_json::Value = serde_json::from_str(&start_body).expect("start json");
-    let authorization_url = start_json["authorization_url"]
-        .as_str()
-        .expect("authorization url");
-    let parsed = url::Url::parse(authorization_url).expect("google authorization url");
-    let state = parsed
-        .query_pairs()
-        .find_map(|(name, value)| (name == "state").then(|| value.into_owned()))
-        .expect("state");
+    let (app, dispatcher) = build_app_with_google_oauth();
+    let (start_json, state) = start_google_oauth_flow(&app).await;
     let scopes = format!("{GOOGLE_GMAIL_READONLY_SCOPE}%20{GOOGLE_CALENDAR_READONLY_SCOPE}");
 
     let callback_response = app
@@ -1122,6 +1090,36 @@ async fn product_auth_google_oauth_callback_completes_setup_flow() {
     assert_eq!(callback_json["flow_id"], start_json["flow_id"]);
     assert_eq!(callback_json["status"], "completed");
     assert_eq!(dispatcher.events().len(), 1);
+}
+
+#[tokio::test]
+async fn product_auth_google_oauth_callback_rejects_disallowed_scopes() {
+    let (app, dispatcher) = build_app_with_google_oauth();
+    let (_, state) = start_google_oauth_flow(&app).await;
+
+    let response = app
+        .clone()
+        .oneshot(callback_request(format!(
+            "/api/reborn/product-auth/oauth/google/callback?state={state}&code=google-auth-code&scope=https://www.googleapis.com/auth/drive"
+        )))
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = read_body_string(response).await;
+    assert!(body.contains("\"code\":\"malformed_callback\""));
+    assert!(!body.contains(&state));
+    assert!(!body.contains("google-auth-code"));
+    assert!(!body.contains("drive"));
+    assert!(dispatcher.events().is_empty());
+
+    let replay_response = app
+        .oneshot(callback_request(format!(
+            "/api/reborn/product-auth/oauth/google/callback?state={state}&code=google-auth-code&scope={GOOGLE_GMAIL_READONLY_SCOPE}"
+        )))
+        .await
+        .expect("oneshot");
+    assert_eq!(replay_response.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]

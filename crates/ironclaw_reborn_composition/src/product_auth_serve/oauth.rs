@@ -230,8 +230,7 @@ pub(super) async fn google_oauth_callback_handler(
             },
         ))
         .await;
-        state.remove_pkce_verifier(pending.flow_id);
-        state.remove_pending_google_oauth(&state_hash);
+        forget_google_oauth_callback_state(&state, pending.flow_id, &state_hash);
         return response.map(Json);
     }
 
@@ -242,20 +241,29 @@ pub(super) async fn google_oauth_callback_handler(
     )
     .await
     {
-        state.remove_pkce_verifier(pending.flow_id);
-        state.remove_pending_google_oauth(&state_hash);
+        forget_google_oauth_callback_state(&state, pending.flow_id, &state_hash);
         return Err(error);
     }
-    let code = query
-        .code
-        .as_ref()
-        .ok_or_else(ProductAuthRouteFailure::malformed_callback)?;
-    let pkce_verifier = state.pkce_verifier_for_callback(pending.flow_id)?;
-    let callback_scopes = parse_google_callback_scopes(query.scopes.as_deref())?
-        .unwrap_or_else(|| pending.requested_scopes.clone());
+    let Some(code) = query.code.as_ref() else {
+        forget_google_oauth_callback_state(&state, pending.flow_id, &state_hash);
+        return Err(ProductAuthRouteFailure::malformed_callback());
+    };
+    let pkce_verifier = match state.pkce_verifier_for_callback(pending.flow_id) {
+        Ok(pkce_verifier) => pkce_verifier,
+        Err(error) => {
+            forget_google_oauth_callback_state(&state, pending.flow_id, &state_hash);
+            return Err(error);
+        }
+    };
+    let callback_scopes = match parse_google_callback_scopes(query.scopes.as_deref()) {
+        Ok(callback_scopes) => callback_scopes.unwrap_or_else(|| pending.requested_scopes.clone()),
+        Err(error) => {
+            forget_google_oauth_callback_state(&state, pending.flow_id, &state_hash);
+            return Err(error);
+        }
+    };
     if callback_scopes.is_empty() {
-        state.remove_pkce_verifier(pending.flow_id);
-        state.remove_pending_google_oauth(&state_hash);
+        forget_google_oauth_callback_state(&state, pending.flow_id, &state_hash);
         return Err(ProductAuthRouteFailure::malformed_callback());
     }
     let authorization_code_hash = authorization_code_hash(code.expose_secret())?;
@@ -287,20 +295,27 @@ pub(super) async fn google_oauth_callback_handler(
     .await
     {
         Ok(response) => {
-            state.remove_pkce_verifier(pending.flow_id);
-            state.remove_pending_google_oauth(&state_hash);
+            forget_google_oauth_callback_state(&state, pending.flow_id, &state_hash);
             response
         }
         Err(error) => {
             if should_forget_pkce_verifier(error.body.code) {
-                state.remove_pkce_verifier(pending.flow_id);
-                state.remove_pending_google_oauth(&state_hash);
+                forget_google_oauth_callback_state(&state, pending.flow_id, &state_hash);
             }
             return Err(error);
         }
     };
 
     Ok(Json(response))
+}
+
+fn forget_google_oauth_callback_state(
+    state: &ProductAuthRouteState,
+    flow_id: AuthFlowId,
+    state_hash: &OpaqueStateHash,
+) {
+    state.remove_pkce_verifier(flow_id);
+    state.remove_pending_google_oauth(state_hash);
 }
 
 pub(super) fn callback_outcome_from_query(
@@ -386,6 +401,9 @@ fn parse_google_callback_scopes(
     raw.split([' ', ','])
         .filter(|scope| !scope.is_empty())
         .map(|scope| {
+            if !is_allowed_google_scope(scope) {
+                return Err(ProductAuthRouteFailure::malformed_callback());
+            }
             ProviderScope::new(scope.to_string())
                 .map_err(|_| ProductAuthRouteFailure::malformed_callback())
         })
