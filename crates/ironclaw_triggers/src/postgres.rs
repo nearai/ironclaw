@@ -216,7 +216,10 @@ impl TriggerRepository for PostgresTriggerRepository {
                 &format!(
                     "SELECT {TRIGGER_COLUMNS}
                      FROM {TRIGGER_TABLE}
-                     WHERE state = $1 AND next_run_at <= $2
+                     WHERE state = $1
+                       AND next_run_at <= $2
+                       AND active_fire_slot IS NULL
+                       AND active_run_ref IS NULL
                      ORDER BY next_run_at, tenant_id, trigger_id
                      LIMIT $3"
                 ),

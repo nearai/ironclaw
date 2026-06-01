@@ -247,6 +247,25 @@ async fn assert_due_query_clamps_limit_and_respects_state_gate(repo: &impl Trigg
         record.state = TriggerState::Completed;
         record
     };
+    let active_claim = {
+        let mut record = sample_record(
+            TriggerId::parse("01J00000000000000000000004").expect("ulid"),
+            tenant("tenant-active-claim"),
+            due_slot,
+        );
+        record.active_fire_slot = Some(due_slot);
+        record
+    };
+    let active_run_claim = {
+        let mut record = sample_record(
+            TriggerId::parse("01J00000000000000000000005").expect("ulid"),
+            tenant("tenant-active-run"),
+            due_slot,
+        );
+        record.active_run_ref =
+            Some(TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5a").expect("valid run"));
+        record
+    };
     repo.upsert_trigger(paused.clone())
         .await
         .expect("insert paused");
@@ -256,6 +275,12 @@ async fn assert_due_query_clamps_limit_and_respects_state_gate(repo: &impl Trigg
     repo.upsert_trigger(completed.clone())
         .await
         .expect("insert completed");
+    repo.upsert_trigger(active_claim.clone())
+        .await
+        .expect("insert active claim");
+    repo.upsert_trigger(active_run_claim.clone())
+        .await
+        .expect("insert active run claim");
 
     let small_a = sample_record(
         TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid"),
@@ -360,6 +385,18 @@ async fn assert_due_query_clamps_limit_and_respects_state_gate(repo: &impl Trigg
             .iter()
             .any(|record| record.tenant_id == completed.tenant_id),
         "completed record must not be returned as due"
+    );
+    assert!(
+        !due_records
+            .iter()
+            .any(|record| record.tenant_id == active_claim.tenant_id),
+        "active fire claim must not be returned as due"
+    );
+    assert!(
+        !due_records
+            .iter()
+            .any(|record| record.tenant_id == active_run_claim.tenant_id),
+        "active run claim must not be returned as due"
     );
 }
 
@@ -806,7 +843,7 @@ async fn clear_postgres_triggers(pool: &deadpool_postgres::Pool) {
         .expect("clear trigger records");
 }
 
-mod pr12_fire_claim_contract {
+mod fire_claim_contract {
     use super::*;
 
     use ironclaw_triggers::{
@@ -1319,7 +1356,7 @@ mod pr12_fire_claim_contract {
                 tenant_id: status_only.tenant_id.clone(),
                 trigger_id: status_only.trigger_id,
                 fire_slot,
-                now: fire_slot,
+                now: ts(1_704_067_260),
             })
             .await
             .expect("status-only claim");
