@@ -21,7 +21,7 @@ jobs:
       - name: Fetch upstream
         run: |
           git remote add upstream https://github.com/nearai/ironclaw.git
-          git fetch upstream main --tags
+          git fetch upstream main --no-tags
 
       - name: Check if upstream has new commits
         id: check
