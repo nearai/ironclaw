@@ -5,11 +5,13 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use async_trait::async_trait;
 use ironclaw_auth::{
     AuthProductScope, AuthSurface, CredentialAccountLabel, CredentialAccountStatus,
     CredentialOwnership, InMemoryAuthProductServices, NewCredentialAccount, ProviderScope,
 };
 use ironclaw_first_party_extensions::{
+    GsuiteCredentialStageError, GsuiteCredentialStageRequest, GsuiteCredentialStager,
     GsuiteDispatchError, GsuiteDispatchRequest, GsuiteExecutor, google_provider_id,
 };
 use ironclaw_host_api::{
@@ -17,6 +19,23 @@ use ironclaw_host_api::{
     RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, SecretHandle, UserId,
 };
 use serde_json::json;
+
+#[derive(Debug, Default)]
+pub(crate) struct NoopCredentialStager;
+
+#[async_trait]
+impl GsuiteCredentialStager for NoopCredentialStager {
+    async fn stage(
+        &self,
+        _request: GsuiteCredentialStageRequest<'_>,
+    ) -> Result<(), GsuiteCredentialStageError> {
+        Ok(())
+    }
+}
+
+pub(crate) fn noop_credential_stager() -> Arc<dyn GsuiteCredentialStager> {
+    Arc::new(NoopCredentialStager)
+}
 
 pub(crate) struct RecordingEgress {
     requests: Mutex<Vec<RuntimeHttpEgressRequest>>,
@@ -228,7 +247,7 @@ pub(crate) async fn dispatch_ok(
     input: serde_json::Value,
     egress: Arc<RecordingEgress>,
 ) -> serde_json::Value {
-    let executor = GsuiteExecutor::new(auth);
+    let executor = GsuiteExecutor::new(auth, noop_credential_stager());
     let capability_id = capability_id(capability);
     executor
         .dispatch(GsuiteDispatchRequest {
@@ -249,7 +268,61 @@ pub(crate) async fn dispatch_error(
     input: serde_json::Value,
     egress: Arc<RecordingEgress>,
 ) -> GsuiteDispatchError {
-    let executor = GsuiteExecutor::new(auth);
+    let executor = GsuiteExecutor::new(auth, noop_credential_stager());
+    let capability_id = capability_id(capability);
+    executor
+        .dispatch(GsuiteDispatchRequest {
+            capability_id: &capability_id,
+            scope: &scope,
+            input: &input,
+            runtime_http_egress: egress,
+        })
+        .await
+        .unwrap_err()
+}
+
+/// A stager that succeeds on the first N-1 calls and fails with AuthRequired on the Nth call.
+pub(crate) struct FailOnNthCallStager {
+    calls: std::sync::atomic::AtomicUsize,
+    fail_on: usize,
+}
+
+impl FailOnNthCallStager {
+    pub(crate) fn fail_on_second_call() -> Arc<dyn GsuiteCredentialStager> {
+        Arc::new(Self {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            fail_on: 2,
+        })
+    }
+}
+
+#[async_trait]
+impl GsuiteCredentialStager for FailOnNthCallStager {
+    async fn stage(
+        &self,
+        _request: GsuiteCredentialStageRequest<'_>,
+    ) -> Result<(), GsuiteCredentialStageError> {
+        let n = self
+            .calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
+        if n >= self.fail_on {
+            Err(GsuiteCredentialStageError::AuthRequired)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+pub(crate) async fn dispatch_error_with_stager(
+    auth: Arc<InMemoryAuthProductServices>,
+    scope: ResourceScope,
+    capability: &str,
+    input: serde_json::Value,
+    egress: Arc<RecordingEgress>,
+    stager: Arc<dyn GsuiteCredentialStager>,
+) -> GsuiteDispatchError {
+    let executor = GsuiteExecutor::new(auth, stager);
     let capability_id = capability_id(capability);
     executor
         .dispatch(GsuiteDispatchRequest {

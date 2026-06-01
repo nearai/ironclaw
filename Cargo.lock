@@ -4400,6 +4400,7 @@ dependencies = [
  "ironclaw_skills",
  "regex",
  "serde_json",
+ "similar",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -4892,6 +4893,7 @@ dependencies = [
  "ironclaw_host_runtime",
  "ironclaw_llm",
  "ironclaw_loop_support",
+ "ironclaw_mcp",
  "ironclaw_network",
  "ironclaw_outbound",
  "ironclaw_processes",
@@ -5207,6 +5209,30 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "ironclaw_triggers"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "cron",
+ "deadpool-postgres",
+ "hex",
+ "ironclaw_host_api",
+ "ironclaw_turns",
+ "libsql",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "testcontainers-modules",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-postgres",
+ "tracing",
+ "ulid",
 ]
 
 [[package]]
@@ -9776,6 +9802,17 @@ dependencies = [
  "memoffset",
  "tempfile",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "ulid"
+version = "1.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "470dbf6591da1b39d43c14523b2b469c86879a53e8b758c8e090a470fe7b1fbe"
+dependencies = [
+ "rand 0.9.4",
+ "serde",
+ "web-time",
 ]
 
 [[package]]

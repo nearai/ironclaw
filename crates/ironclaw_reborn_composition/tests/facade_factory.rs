@@ -563,9 +563,10 @@ async fn production_requires_configured_trust_policy() {
 
 #[cfg(feature = "libsql")]
 #[tokio::test]
-async fn production_rejects_google_oauth_config_without_product_auth_ports() {
+async fn production_google_oauth_config_uses_factory_built_product_auth_ports() {
     let dir = tempfile::tempdir().unwrap();
     let db = libsql_db_at(dir.path().join("reborn.db")).await;
+    let (notifier, handle) = live_wake_notifier();
 
     let result = build_reborn_services(
         RebornBuildInput::libsql(
@@ -580,14 +581,86 @@ async fn production_rejects_google_oauth_config_without_product_auth_ports() {
             client_id: OAuthClientId::new("google-client-123").unwrap(),
             client_secret: None,
             redirect_uri: OAuthRedirectUri::new("https://app.example/oauth/callback").unwrap(),
-        }),
+        })
+        .with_production_trust_policy(production_trust_policy())
+        .with_runtime_policy(production_runtime_policy())
+        .with_turn_run_wake_notifier(notifier)
+        .with_runtime_process_binding(test_sandbox_process_binding()),
     )
     .await;
 
-    let Err(RebornBuildError::InvalidConfig { reason }) = result else {
-        panic!("expected invalid Google OAuth/product-auth config, got {result:?}");
-    };
-    assert!(reason.contains("product-auth ports"));
+    handle.shutdown().await;
+
+    let services = result.expect("production Google OAuth should use durable product-auth ports");
+    assert!(services.product_auth.is_some());
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn production_factory_built_product_auth_manual_token_round_trips() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = libsql_db_at(dir.path().join("reborn.db")).await;
+    let (notifier, handle) = live_wake_notifier();
+
+    let services = build_reborn_services(
+        RebornBuildInput::libsql(
+            RebornCompositionProfile::Production,
+            "test-owner",
+            db,
+            dir.path().join("events.db").to_string_lossy(),
+            None,
+            test_master_key(),
+        )
+        .with_production_trust_policy(production_trust_policy())
+        .with_runtime_policy(production_runtime_policy())
+        .with_turn_run_wake_notifier(notifier)
+        .with_runtime_process_binding(test_sandbox_process_binding()),
+    )
+    .await
+    .expect("production services should build durable product-auth ports");
+
+    let product_auth = services
+        .product_auth
+        .as_ref()
+        .expect("production composes product auth");
+    let scope = auth_scope("alice");
+    let provider = ironclaw_auth::AuthProviderId::new("manual-provider").unwrap();
+    let label = ironclaw_auth::CredentialAccountLabel::new("manual production").unwrap();
+    let challenge = product_auth
+        .request_manual_token_setup(RebornManualTokenSetupRequest::new(
+            scope.clone(),
+            provider.clone(),
+            label,
+            ironclaw_auth::AuthContinuationRef::SetupOnly,
+            chrono::Utc::now() + chrono::Duration::minutes(5),
+        ))
+        .await
+        .unwrap();
+
+    let result = product_auth
+        .submit_manual_token(RebornManualTokenSubmitRequest::new(
+            scope.clone(),
+            challenge.interaction_id,
+            SecretString::from("production-manual-token"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        result.status,
+        ironclaw_auth::CredentialAccountStatus::Configured
+    );
+
+    let accounts = product_auth
+        .credential_account_service()
+        .list_accounts(ironclaw_auth::CredentialAccountListRequest::new(
+            scope, provider,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(accounts.accounts.len(), 1);
+    assert_eq!(accounts.accounts[0].id, result.account_id);
+
+    handle.shutdown().await;
 }
 
 #[cfg(feature = "libsql")]
@@ -817,6 +890,7 @@ async fn production_libsql_services_wire_first_party_runtime_http_egress() {
     );
     assert!(services.host_runtime.is_some());
     assert!(services.turn_coordinator.is_some());
+    assert!(services.product_auth.is_some());
 }
 
 #[cfg(feature = "postgres")]

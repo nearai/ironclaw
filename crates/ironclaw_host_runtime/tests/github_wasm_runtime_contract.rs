@@ -7,15 +7,16 @@ use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry
 use ironclaw_filesystem::LocalFilesystem;
 use ironclaw_host_api::{
     AgentId, CapabilityDescriptor, CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet,
-    CorrelationId, Decision, EffectKind, ExecutionContext, ExtensionId, GrantConstraints, HostPath,
-    InvocationId, MissionId, MountView, NetworkMethod, NetworkPolicy, NetworkScheme,
-    NetworkTargetPattern, Obligation, Obligations, PackageId, Principal, ProjectId,
-    ResourceEstimate, ResourceScope, RuntimeCredentialTarget, RuntimeKind, SecretHandle, TenantId,
-    TrustClass, UserId, VirtualPath,
+    CorrelationId, CredentialStageError, Decision, EffectKind, ExecutionContext, ExtensionId,
+    GrantConstraints, HostPath, InvocationId, MissionId, MountView, NetworkMethod, NetworkPolicy,
+    NetworkScheme, NetworkTargetPattern, Obligation, Obligations, PackageId, Principal, ProjectId,
+    ResourceEstimate, ResourceScope, RuntimeCredentialAccountProviderId, RuntimeKind, SecretHandle,
+    TenantId, TrustClass, UserId, VirtualPath,
 };
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, HostRuntime, HostRuntimeServices, RuntimeCapabilityOutcome,
-    RuntimeCapabilityRequest, default_host_api_contract_registry, default_host_port_catalog,
+    RuntimeCapabilityRequest, RuntimeCredentialAccountRequest, RuntimeCredentialAccountResolver,
+    default_host_api_contract_registry, default_host_port_catalog,
 };
 use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
@@ -30,9 +31,8 @@ use ironclaw_trust::{
     HostTrustPolicy, TrustDecision, TrustProvenance,
 };
 use ironclaw_wasm::{
-    RecordingWasmHostHttp, WasmHostError, WasmHttpResponse, WasmStagedRuntimeCredential,
-    WasmStagedRuntimeCredentials, WitToolExecution, WitToolHost, WitToolRequest, WitToolRuntime,
-    WitToolRuntimeConfig,
+    RecordingWasmHostHttp, WasmHostError, WasmHttpResponse, WitToolExecution, WitToolHost,
+    WitToolRequest, WitToolRuntime, WitToolRuntimeConfig,
 };
 use serde_json::json;
 
@@ -47,7 +47,8 @@ async fn host_runtime_services_routes_github_wasm_read_through_runtime_http_egre
         br#"{"total_count":0,"incomplete_results":false,"items":[]}"#.to_vec(),
     );
     let secret_store = Arc::new(InMemorySecretStore::new());
-    let secret_handle = SecretHandle::new("github_token").unwrap();
+    let slot_handle = SecretHandle::new("github_runtime_token").unwrap();
+    let account_access_secret = SecretHandle::new("github_manual_access").unwrap();
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_github_package()),
         Arc::new(filesystem_with_github_package()),
@@ -56,26 +57,20 @@ async fn host_runtime_services_routes_github_wasm_read_through_runtime_http_egre
             Obligation::ApplyNetworkPolicy {
                 policy: policy.clone(),
             },
-            Obligation::InjectSecretOnce {
-                handle: secret_handle.clone(),
+            Obligation::InjectCredentialAccountOnce {
+                handle: slot_handle,
+                provider: RuntimeCredentialAccountProviderId::new("github").unwrap(),
+                requester_extension: ExtensionId::new("github").unwrap(),
             },
         ])),
         ProcessServices::in_memory(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_secret_store(Arc::clone(&secret_store))
+    .with_runtime_credential_account_resolver(Arc::new(FixedRuntimeCredentialAccountResolver {
+        result: Ok(account_access_secret.clone()),
+    }))
     .with_trust_policy(Arc::new(github_first_party_trust_policy()))
-    .with_wasm_runtime_credential_provider(Arc::new(WasmStagedRuntimeCredentials::new(vec![
-        WasmStagedRuntimeCredential::for_exact_url(
-            secret_handle.clone(),
-            RuntimeCredentialTarget::Header {
-                name: "authorization".to_string(),
-                prefix: Some("Bearer ".to_string()),
-            },
-            true,
-            expected_url.to_string(),
-        ),
-    ])))
     .try_with_host_http_egress(network.clone())
     .unwrap()
     .try_with_wasm_runtime(WitToolRuntimeConfig::default(), WitToolHost::deny_all())
@@ -83,7 +78,7 @@ async fn host_runtime_services_routes_github_wasm_read_through_runtime_http_egre
     secret_store
         .put(
             scope.clone(),
-            secret_handle,
+            account_access_secret,
             SecretMaterial::from("ghp_fake_fixture_token"),
         )
         .await
@@ -131,13 +126,11 @@ async fn host_runtime_services_routes_github_wasm_read_through_runtime_http_egre
 async fn host_runtime_services_missing_github_runtime_secret_blocks_on_auth() {
     let capability_id = CapabilityId::new("github.search_issues").unwrap();
     let scope = sample_scope(InvocationId::new());
-    let expected_url =
-        "https://api.github.com/search/issues?q=repo%3Anearai%2Fironclaw%20is%3Aissue&per_page=1";
     let network = RecordingNetworkHttpEgress::with_body(
         br#"{"total_count":0,"incomplete_results":false,"items":[]}"#.to_vec(),
     );
     let secret_store = Arc::new(InMemorySecretStore::new());
-    let secret_handle = SecretHandle::new("github_token").unwrap();
+    let slot_handle = SecretHandle::new("github_runtime_token").unwrap();
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_github_package()),
         Arc::new(filesystem_with_github_package()),
@@ -146,26 +139,20 @@ async fn host_runtime_services_missing_github_runtime_secret_blocks_on_auth() {
             Obligation::ApplyNetworkPolicy {
                 policy: github_policy(),
             },
-            Obligation::InjectSecretOnce {
-                handle: secret_handle.clone(),
+            Obligation::InjectCredentialAccountOnce {
+                handle: slot_handle,
+                provider: RuntimeCredentialAccountProviderId::new("github").unwrap(),
+                requester_extension: ExtensionId::new("github").unwrap(),
             },
         ])),
         ProcessServices::in_memory(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_secret_store(Arc::clone(&secret_store))
+    .with_runtime_credential_account_resolver(Arc::new(FixedRuntimeCredentialAccountResolver {
+        result: Err(CredentialStageError::AuthRequired),
+    }))
     .with_trust_policy(Arc::new(github_first_party_trust_policy()))
-    .with_wasm_runtime_credential_provider(Arc::new(WasmStagedRuntimeCredentials::new(vec![
-        WasmStagedRuntimeCredential::for_exact_url(
-            secret_handle.clone(),
-            RuntimeCredentialTarget::Header {
-                name: "authorization".to_string(),
-                prefix: Some("Bearer ".to_string()),
-            },
-            true,
-            expected_url.to_string(),
-        ),
-    ])))
     .try_with_host_http_egress(network.clone())
     .unwrap()
     .try_with_wasm_runtime(WitToolRuntimeConfig::default(), WitToolHost::deny_all())
@@ -429,6 +416,23 @@ impl TrustAwareCapabilityDispatchAuthorizer for ObligatingAuthorizer {
     }
 }
 
+#[derive(Debug)]
+struct FixedRuntimeCredentialAccountResolver {
+    result: Result<SecretHandle, CredentialStageError>,
+}
+
+#[async_trait]
+impl RuntimeCredentialAccountResolver for FixedRuntimeCredentialAccountResolver {
+    async fn resolve_access_secret(
+        &self,
+        request: RuntimeCredentialAccountRequest<'_>,
+    ) -> Result<SecretHandle, CredentialStageError> {
+        assert_eq!(request.provider.as_str(), "github");
+        assert_eq!(request.requester_extension.as_str(), "github");
+        self.result.clone()
+    }
+}
+
 fn registry_with_github_package() -> ExtensionRegistry {
     let manifest = ExtensionManifest::parse_with_host_api_contracts(
         &std::fs::read_to_string(github_asset_root().join("manifest.toml")).unwrap(),
@@ -544,7 +548,7 @@ fn capability_grants(capability: CapabilityId) -> CapabilitySet {
             ],
             mounts: MountView::default(),
             network: NetworkPolicy::default(),
-            secrets: vec![SecretHandle::new("github_token").unwrap()],
+            secrets: Vec::new(),
             resource_ceiling: None,
             expires_at: None,
             max_invocations: None,

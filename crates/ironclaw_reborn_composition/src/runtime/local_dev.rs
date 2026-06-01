@@ -15,9 +15,9 @@ use ironclaw_host_runtime::{
     VisibleCapabilityRequest as HostVisibleCapabilityRequest,
 };
 use ironclaw_loop_support::{
-    HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
-    HostManagedModelMessageRole, HostManagedModelRequest, HostManagedModelResponse,
-    HostManagedToolResultContent, HostRuntimeLoopCapabilityPortFactory,
+    CapabilityResultWrite, HostManagedModelError, HostManagedModelErrorKind,
+    HostManagedModelGateway, HostManagedModelMessageRole, HostManagedModelRequest,
+    HostManagedModelResponse, HostManagedToolResultContent, HostRuntimeLoopCapabilityPortFactory,
     LoopCapabilityInputResolver, LoopCapabilityResultWriter, loop_driver_execution_extension_id,
 };
 use ironclaw_reborn::loop_driver_host::LoopCapabilityPortFactory;
@@ -39,15 +39,22 @@ use crate::local_dev_capability_policy::LocalDevCapabilityPolicy;
 use crate::{
     RebornServices,
     projection::{CapabilityDisplayPreviewResult, CapabilityDisplayPreviewStore},
+    runtime::LocalDevSelectableSkillContextSource,
 };
 
 mod extension_surface;
 #[cfg(test)]
 mod shell_tests;
+mod skill_activation;
 mod surface_disclosure;
+mod synthetic_capability;
 
 use extension_surface::{LocalDevExtensionSurface, LocalDevExtensionSurfaceSource};
+#[cfg(test)]
+pub(crate) use skill_activation::SKILL_ACTIVATE_CAPABILITY_ID;
+use skill_activation::skill_activation_capability;
 use surface_disclosure::wrap_local_dev_surface_disclosure;
+use synthetic_capability::wrap_local_dev_synthetic_capabilities;
 
 pub(super) struct LocalDevCapabilityWiring {
     pub(super) capability_factory: Arc<dyn LoopCapabilityPortFactory>,
@@ -57,6 +64,7 @@ pub(super) struct LocalDevCapabilityWiring {
     pub(super) display_previews: Arc<CapabilityDisplayPreviewStore>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn capability_wiring(
     services: &RebornServices,
     thread_service: Arc<dyn SessionThreadService>,
@@ -65,6 +73,7 @@ pub(super) fn capability_wiring(
     policy: Arc<LocalDevCapabilityPolicy>,
     model_gateway: Arc<dyn HostManagedModelGateway>,
     milestone_sink: Arc<dyn LoopHostMilestoneSink>,
+    skill_activation_source: Option<Arc<LocalDevSelectableSkillContextSource>>,
 ) -> Option<LocalDevCapabilityWiring> {
     let runtime = services.host_runtime.clone()?;
     let local_runtime = services.local_runtime.as_ref()?;
@@ -91,6 +100,7 @@ pub(super) fn capability_wiring(
             input_resolver: Arc::clone(&capability_input_resolver),
             result_writer: Arc::clone(&capability_result_writer),
             milestone_sink,
+            skill_activation_source,
         });
     let model_gateway: Arc<dyn HostManagedModelGateway> = Arc::new(
         LocalDevResultHydratingModelGateway::new(model_gateway, capability_io),
@@ -116,6 +126,7 @@ struct LocalDevLoopCapabilityPortFactory {
     input_resolver: Arc<dyn LoopCapabilityInputResolver>,
     result_writer: Arc<dyn LoopCapabilityResultWriter>,
     milestone_sink: Arc<dyn LoopHostMilestoneSink>,
+    skill_activation_source: Option<Arc<LocalDevSelectableSkillContextSource>>,
 }
 
 #[async_trait::async_trait]
@@ -153,6 +164,21 @@ impl LoopCapabilityPortFactory for LocalDevLoopCapabilityPortFactory {
                 .with_capability_execution_mount(capability_id.clone(), skill_mounts.clone());
         }
         let port = factory.for_run_context(run_context.clone());
+        let synthetic_capabilities = match &self.skill_activation_source {
+            Some(skill_activation_source) => {
+                vec![skill_activation_capability(Arc::clone(
+                    skill_activation_source,
+                ))?]
+            }
+            None => Vec::new(),
+        };
+        let port = wrap_local_dev_synthetic_capabilities(
+            port,
+            synthetic_capabilities,
+            run_context.clone(),
+            Arc::clone(&self.input_resolver),
+            Arc::clone(&self.result_writer),
+        )?;
         Ok(wrap_local_dev_surface_disclosure(port, &disclosure_mounts))
     }
 }
@@ -432,12 +458,16 @@ impl LoopCapabilityInputResolver for LocalDevCapabilityIo {
 impl LoopCapabilityResultWriter for LocalDevCapabilityIo {
     async fn write_capability_result(
         &self,
-        run_context: &LoopRunContext,
-        input_ref: &CapabilityInputRef,
-        invocation_id: InvocationId,
-        _capability_id: &CapabilityId,
-        output: serde_json::Value,
+        write: CapabilityResultWrite<'_>,
     ) -> Result<LoopResultRef, AgentLoopHostError> {
+        let CapabilityResultWrite {
+            run_context,
+            input_ref,
+            invocation_id,
+            capability_id,
+            output,
+            display_preview,
+        } = write;
         let result_ref =
             LoopResultRef::new(format!("result:{}.{}", run_context.run_id, Uuid::new_v4()))
                 .map_err(|_| {
@@ -451,17 +481,19 @@ impl LoopCapabilityResultWriter for LocalDevCapabilityIo {
             let mut results = self.results.lock().map_err(|_| capability_io_error())?;
             results.insert_with_oldest_eviction(result_ref.as_str().to_string(), output.clone())?;
         }
-        self.display_previews
-            .record_result(CapabilityDisplayPreviewResult {
+        self.display_previews.record_result_with_preview(
+            CapabilityDisplayPreviewResult {
                 run_id: &run_context.run_id.to_string(),
                 input_ref,
                 invocation_id,
-                capability_id: _capability_id,
+                capability_id,
                 result_ref: result_ref.as_str(),
                 output: &output,
                 output_bytes,
-            });
-        self.append_durable_display_preview(run_context, invocation_id, _capability_id)
+            },
+            display_preview.as_ref(),
+        );
+        self.append_durable_display_preview(run_context, invocation_id, capability_id)
             .await?;
         Ok(result_ref)
     }

@@ -256,13 +256,21 @@ async fn concrete_mcp_http_client_routes_json_rpc_through_shared_egress() {
     }));
 
     let planner_calls = planner.calls();
-    assert_eq!(planner_calls.len(), 4);
+    assert_eq!(planner_calls.len(), 3);
     assert!(planner_calls.iter().all(|call| call.scope == scope));
     assert!(
         planner_calls
             .iter()
             .all(|call| call.url == "https://mcp.example.test/mcp")
     );
+    assert_eq!(
+        planner_calls
+            .iter()
+            .map(|call| call.json_rpc_method.as_str())
+            .collect::<Vec<_>>(),
+        vec!["tools/call", "initialize", "notifications/initialized"]
+    );
+    assert_eq!(planner_calls[0].json_rpc_id, json_rpc_id(&requests[2].body));
 }
 
 #[tokio::test]
@@ -338,7 +346,7 @@ async fn concrete_mcp_http_client_sends_credentials_only_for_tool_call_exchange(
             .all(|(name, _)| !name.eq_ignore_ascii_case("Mcp-Session-Id")),
         "failed preflight must not leave a stale session id for the next initialize"
     );
-    assert_eq!(planner.calls().len(), 5);
+    assert_eq!(planner.calls().len(), 4);
 }
 
 #[tokio::test]
@@ -1067,7 +1075,7 @@ impl RuntimeHttpEgress for RecordingRuntimeEgress {
         self.requests.lock().unwrap().push(request.clone());
         match method.as_str() {
             "initialize" => Ok(runtime_json_response(
-                Some(1),
+                json_rpc_id(&request.body),
                 json!({
                     "protocolVersion": "2024-11-05",
                     "capabilities": {"tools": {"listChanged": false}},
@@ -1108,6 +1116,8 @@ struct RecordedPlanCall {
     scope: ResourceScope,
     method: NetworkMethod,
     url: String,
+    json_rpc_method: String,
+    json_rpc_id: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -1139,6 +1149,8 @@ impl McpHostHttpEgressPlanner for RecordingEgressPlanner {
             scope: request.scope.clone(),
             method: request.method,
             url: request.url.to_string(),
+            json_rpc_method: json_rpc_method(request.body),
+            json_rpc_id: json_rpc_id(request.body),
         });
         self.plan.lock().unwrap().clone()
     }

@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use ironclaw_host_api::{AgentId, ProjectId, TenantId};
+use ironclaw_host_api::{AgentId, ProjectId, RuntimeCredentialAuthRequirement, TenantId};
 
 use crate::{
     AcceptedMessageRef, AdmissionRejection, CancelRunRequest, CancelRunResponse, GateRef,
@@ -143,6 +143,8 @@ pub struct TurnRunRecord {
     pub resolved_model_route: Option<LoopModelRouteSnapshot>,
     pub checkpoint_id: Option<TurnCheckpointId>,
     pub gate_ref: Option<GateRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub credential_requirements: Vec<RuntimeCredentialAuthRequirement>,
     pub failure: Option<crate::SanitizedFailure>,
     pub event_cursor: EventCursor,
     pub runner_id: Option<TurnRunnerId>,

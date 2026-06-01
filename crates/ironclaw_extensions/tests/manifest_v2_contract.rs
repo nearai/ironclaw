@@ -10,6 +10,7 @@ use ironclaw_extensions::{
 use ironclaw_host_api::{
     CapabilityProfileId, ExtensionId, HostPortCatalog, HostPortCatalogEntry, HostPortId,
     NetworkScheme, NetworkTargetPattern, PermissionMode, RequestedTrustClass,
+    RuntimeCredentialAccountProviderId, RuntimeCredentialRequirementSource,
     RuntimeCredentialTarget, RuntimeKind, SecretHandle, TrustClass,
 };
 
@@ -91,6 +92,10 @@ default_permission = "allow""#,
         credential.handle,
         SecretHandle::new("github_token").unwrap()
     );
+    assert_eq!(
+        credential.source,
+        RuntimeCredentialRequirementSource::SecretHandle
+    );
     assert!(credential.required);
     assert_eq!(
         credential.audience,
@@ -105,6 +110,27 @@ default_permission = "allow""#,
         RuntimeCredentialTarget::Header {
             name: "authorization".to_string(),
             prefix: Some("Bearer ".to_string()),
+        }
+    );
+}
+
+#[test]
+fn parses_product_auth_account_runtime_credential_source() {
+    let toml = third_party_wasm_manifest("acme-tools", "acme-tools.echo").replace(
+        r#"default_permission = "allow""#,
+        r#"effects = ["network", "use_secret"]
+runtime_credentials = [
+  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+default_permission = "allow""#,
+    );
+    let manifest =
+        ExtensionManifestV2::parse(&toml, ManifestSource::InstalledLocal, &catalog()).unwrap();
+
+    assert_eq!(
+        manifest.capabilities[0].runtime_credentials[0].source,
+        RuntimeCredentialRequirementSource::ProductAuthAccount {
+            provider: RuntimeCredentialAccountProviderId::new("github").unwrap(),
         }
     );
 }
@@ -200,6 +226,27 @@ default_permission = "allow""#,
     let err =
         ExtensionManifestV2::parse(&toml, ManifestSource::InstalledLocal, &catalog()).unwrap_err();
     assert!(err.to_string().contains("invalid secret"), "{err:?}");
+}
+
+#[test]
+fn rejects_unknown_runtime_credential_source_type() {
+    // An unknown `source.type` in the manifest must produce a parse error rather than
+    // silently defaulting. This catches forward-incompatible manifests from future versions.
+    let toml = third_party_wasm_manifest("acme-tools", "acme-tools.echo").replace(
+        r#"default_permission = "allow""#,
+        r#"effects = ["network", "use_secret"]
+runtime_credentials = [
+  { handle = "api_token", source = { type = "oauth_token_v99" }, audience = { scheme = "https", host_pattern = "api.example.com" }, target = { type = "header", name = "authorization" } },
+]
+default_permission = "allow""#,
+    );
+    let err =
+        ExtensionManifestV2::parse(&toml, ManifestSource::InstalledLocal, &catalog()).unwrap_err();
+    // Unknown source.type produces a Parse error (serde unknown variant), not Invalid.
+    assert!(
+        matches!(err, ManifestV2Error::Parse { .. }),
+        "expected parse error for unknown source type, got {err:?}"
+    );
 }
 
 #[test]

@@ -44,6 +44,7 @@ use ironclaw_host_api::{
 use ironclaw_loop_support::{
     CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
     FilesystemSkillBundleSource, HostSkillContextSource, JsonSpawnSubagentInputCodec,
+    ModelGatewayBackedSystemInferencePort,
 };
 use ironclaw_product_adapters::ProjectionStream;
 use ironclaw_product_workflow::{
@@ -76,8 +77,8 @@ use ironclaw_turns::{
     AcceptedMessageRef, CancelRunRequest, CancelRunResponse, GetRunStateRequest, IdempotencyKey,
     ReplyTargetBindingRef, RunProfileResolutionRequest, SanitizedCancelReason, SourceBindingRef,
     SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError,
-    TurnEventProjectionSource, TurnPersistenceSnapshot, TurnRunId, TurnRunRecord, TurnScope,
-    TurnStatus,
+    TurnEventProjectionSource, TurnId, TurnPersistenceSnapshot, TurnRunId, TurnRunRecord,
+    TurnScope, TurnStatus,
     run_profile::{LoopHostMilestoneSink, LoopRunContext},
 };
 
@@ -101,6 +102,9 @@ mod auth_interaction_tests;
 mod default_system_prompt_tests;
 mod local_dev;
 mod skills;
+
+#[cfg(test)]
+pub(crate) use local_dev::SKILL_ACTIVATE_CAPABILITY_ID;
 
 pub use skills::{
     RebornSkillActivation, RebornSkillActivationMode, RebornSkillAsset, RebornSkillBundle,
@@ -702,21 +706,8 @@ impl RebornRuntime {
             if state.status.is_terminal() {
                 return Ok(state.status);
             }
-            if state.status == TurnStatus::RecoveryRequired {
-                // RecoveryRequired keeps the durable turn active because a
-                // future recovery worker may resume it. The standalone
-                // runtime has no recovery worker, so cancel it before
-                // returning to release the conversation lock.
-                let response = self
-                    .cancel_run(
-                        scope,
-                        run_id,
-                        SanitizedCancelReason::OperatorRequested,
-                        "recovery-required-cancel",
-                    )
-                    .await?;
-                return Ok(response.status);
-            }
+            // TurnStatus::RecoveryRequired is now terminal (is_terminal() returns true)
+            // so the branch above handles it; no special cancel-to-release-lock is needed.
             if start.elapsed() > self.poll_settings.max_total {
                 self.cancel_run(
                     scope,
@@ -855,6 +846,7 @@ pub async fn build_reborn_runtime(
         runner,
         poll,
         identity,
+        regex_skill_activation_enabled,
         skill_context_source: configured_skill_context_source,
         #[cfg(any(test, feature = "test-support"))]
         model_gateway_override,
@@ -906,6 +898,7 @@ pub async fn build_reborn_runtime(
                 let local_dev_skills = local_dev_filesystem_skill_context_source(
                     local_runtime,
                     &validated_identity.tenant_id,
+                    regex_skill_activation_enabled,
                 )?;
                 (
                     Some(local_dev_skills.source),
@@ -1024,6 +1017,7 @@ pub async fn build_reborn_runtime(
         Arc::clone(&local_dev_capability_policy),
         model_gateway,
         milestone_sink.clone(),
+        skill_activation_source.clone(),
     )
     .ok_or(RebornRuntimeError::HostRuntimeUnavailable)?;
     let capability_factory = local_dev_capabilities.capability_factory;
@@ -1035,7 +1029,7 @@ pub async fn build_reborn_runtime(
         turn_state: Arc::clone(&turn_state_store),
         thread_service: Arc::clone(&thread_service),
         thread_scope: thread_scope.clone(),
-        model_gateway,
+        model_gateway: Arc::clone(&model_gateway),
         checkpoint_state_store: Arc::clone(&checkpoint_state_store)
             as Arc<dyn ironclaw_turns::CheckpointStateStore>,
         loop_checkpoint_store: Arc::clone(&loop_checkpoint_store)
@@ -1088,6 +1082,31 @@ pub async fn build_reborn_runtime(
             reason: format!("could not resolve default run profile: {error}"),
         })?;
     let default_run_profile_id = default_resolved_run_profile.profile_id.as_str().to_string();
+    let failure_explanation_thread_id =
+        ThreadId::new("failure-explanation-system").map_err(|reason| {
+            RebornRuntimeError::InvalidArgument {
+                reason: format!("failure explanation thread id: {reason}"),
+            }
+        })?;
+    let failure_explanation_scope = TurnScope::new(
+        thread_scope.tenant_id.clone(),
+        Some(thread_scope.agent_id.clone()),
+        thread_scope.project_id.clone(),
+        failure_explanation_thread_id,
+    );
+    let failure_explanation_profile = default_resolved_run_profile.clone();
+    let failure_explanation_model_gateway = Arc::clone(&model_gateway);
+    let failure_explanation_inference = Arc::new(move || {
+        Arc::new(ModelGatewayBackedSystemInferencePort::new(
+            Arc::clone(&failure_explanation_model_gateway),
+            LoopRunContext::new(
+                failure_explanation_scope.clone(),
+                TurnId::new(),
+                TurnRunId::new(),
+                failure_explanation_profile.clone(),
+            ),
+        )) as Arc<dyn ironclaw_turns::run_profile::SystemInferencePort>
+    });
     let planned_turn_coordinator: Arc<dyn TurnCoordinator> = composition.coordinator.clone();
     let approval_turn_runs = Arc::new(LocalDevApprovalTurnRunLocator::new(Arc::clone(
         &turn_state_store,
@@ -1123,7 +1142,20 @@ pub async fn build_reborn_runtime(
     let turn_event_source: Arc<dyn TurnEventProjectionSource> = turn_state_store.clone();
     let projection_services = projection_services
         .with_turn_events(turn_event_source, Arc::clone(&planned_turn_coordinator))
+        .with_model_failure_explainer_factory(failure_explanation_inference)
         .with_display_previews(Arc::clone(&local_dev_capabilities.display_previews));
+    // Wire auth-challenge enrichment when the product-auth bundle exposes a
+    // flow record source (local-dev / test mode). Production deployments without
+    // a wired flow_record_source fall back to the plain 4-field AuthPromptView.
+    let projection_services = if let Some(provider) = services
+        .product_auth
+        .as_ref()
+        .and_then(|pa| pa.as_auth_challenge_provider())
+    {
+        projection_services.with_auth_challenges(provider)
+    } else {
+        projection_services
+    };
     services.turn_coordinator = Some(Arc::clone(&planned_turn_coordinator));
 
     let worker_cancel = CancellationToken::new();
@@ -1248,9 +1280,30 @@ struct LocalDevSkillContextSource {
     execution_adapter: Arc<LocalDevSkillExecutionAdapter>,
 }
 
+/// Build the [`SkillActivationSelectorConfig`] used by the local-dev
+/// filesystem skill context source. Extracted from
+/// [`local_dev_filesystem_skill_context_source`] so the wiring of the
+/// `regex_skill_activation_enabled` flag from [`RebornRuntimeInput`] is
+/// covered by a unit test (see `tests::local_dev_selector_config_*`).
+/// Without this seam the propagation was tested only indirectly through
+/// the full [`build_reborn_runtime`] path, where an accidental
+/// `..SkillActivationSelectorConfig::default()` regression would slip
+/// through silently.
+fn local_dev_selector_config(
+    regex_skill_activation_enabled: bool,
+) -> SkillActivationSelectorConfig {
+    SkillActivationSelectorConfig {
+        selection_mode:
+            ironclaw_first_party_extension_ports::SkillActivationSelectionMode::ExplicitOnly,
+        regex_activation_enabled: regex_skill_activation_enabled,
+        ..SkillActivationSelectorConfig::default()
+    }
+}
+
 fn local_dev_filesystem_skill_context_source(
     local_runtime: &crate::factory::RebornLocalRuntimeServices,
     tenant_id: &TenantId,
+    regex_skill_activation_enabled: bool,
 ) -> Result<LocalDevSkillContextSource, RebornRuntimeError> {
     let extension = FirstPartySkillsExtension::new(
         Arc::clone(&local_runtime.skill_filesystem),
@@ -1264,8 +1317,9 @@ fn local_dev_filesystem_skill_context_source(
     .map_err(|reason| RebornRuntimeError::InvalidArgument {
         reason: format!("first-party skills extension source: {reason}"),
     })?;
+    let selector_config = local_dev_selector_config(regex_skill_activation_enabled);
     let selectable_skills = extension.selectable_skill_runtime_with_setup_markers(
-        SkillActivationSelectorConfig::default(),
+        selector_config,
         Arc::clone(&local_runtime.workspace_filesystem),
     );
     Ok(LocalDevSkillContextSource {
@@ -1380,6 +1434,36 @@ mod tests {
     use std::time::Duration;
 
     use async_trait::async_trait;
+
+    /// Wiring guard: the `regex_skill_activation_enabled` flag from
+    /// [`RebornRuntimeInput`] must reach
+    /// [`SkillActivationSelectorConfig::regex_activation_enabled`]
+    /// unchanged, not get clobbered by a stray
+    /// `..SkillActivationSelectorConfig::default()` spread or by the
+    /// helper accidentally taking `Default::default()`. Covers the
+    /// composition-level path that
+    /// [`local_dev_filesystem_skill_context_source`] depends on.
+    #[test]
+    fn local_dev_selector_config_propagates_regex_activation_disabled() {
+        let cfg = super::local_dev_selector_config(false);
+        assert!(
+            !cfg.regex_activation_enabled,
+            "regex_skill_activation_enabled=false must propagate into SkillActivationSelectorConfig"
+        );
+        assert!(matches!(
+            cfg.selection_mode,
+            ironclaw_first_party_extension_ports::SkillActivationSelectionMode::ExplicitOnly
+        ));
+    }
+
+    #[test]
+    fn local_dev_selector_config_propagates_regex_activation_enabled() {
+        let cfg = super::local_dev_selector_config(true);
+        assert!(
+            cfg.regex_activation_enabled,
+            "regex_skill_activation_enabled=true must propagate into SkillActivationSelectorConfig"
+        );
+    }
     use ironclaw_authorization::CapabilityLeaseStore;
     use ironclaw_events::{EventStreamKey, ReadScope};
     use ironclaw_host_api::{
@@ -2974,7 +3058,11 @@ mod tests {
                             | ProductOutboundPayload::ProjectionUpdate { state }
                             if state.items.iter().any(|item| matches!(
                                 item,
-                                ProductProjectionItem::RunStatus { run_id: seen, status }
+                                ProductProjectionItem::RunStatus {
+                                    run_id: seen,
+                                    status,
+                                    ..
+                                }
                                     if *seen == run_id && status == "completed"
                             ))
                     )
@@ -3447,7 +3535,7 @@ mod tests {
                 WebUiSendMessageRequest {
                     client_action_id: Some("send-webui-skill-message".to_string()),
                     thread_id: Some(created.thread.thread_id.to_string()),
-                    content: Some("please use webui-helper".to_string()),
+                    content: Some("$webui-helper please help".to_string()),
                 },
             )
             .await

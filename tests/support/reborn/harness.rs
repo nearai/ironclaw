@@ -29,11 +29,11 @@ use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_filesystem::{LocalFilesystem, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
     AgentId, CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind,
-    ExtensionId, GrantConstraints, HostPath, InvocationId, MountAlias, MountGrant,
-    MountPermissions, MountView, NetworkPolicy, NetworkScheme, NetworkTargetPattern, PackageId,
-    Principal, ProjectId, ResourceScope, RuntimeHttpEgress, RuntimeHttpEgressError,
-    RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, RuntimeKind, SecretHandle, TenantId,
-    ThreadId, TrustClass, UserId, VirtualPath,
+    ExtensionId, GrantConstraints, HostPath, MountAlias, MountGrant, MountPermissions, MountView,
+    NetworkPolicy, NetworkScheme, NetworkTargetPattern, PackageId, Principal, ProjectId,
+    ResourceScope, RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
+    RuntimeHttpEgressResponse, RuntimeKind, SecretHandle, TenantId, ThreadId, TrustClass, UserId,
+    VirtualPath,
 };
 use ironclaw_host_runtime::{
     APPLY_PATCH_CAPABILITY_ID, BUILTIN_FIRST_PARTY_PROVIDER, CapabilitySurfacePolicy,
@@ -45,10 +45,11 @@ use ironclaw_host_runtime::{
     builtin_first_party_package,
 };
 use ironclaw_loop_support::{
-    CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
-    DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID, HostIdentityContextBuildError,
-    HostIdentityContextCandidate, HostIdentityContextSource, HostManagedModelRequest,
-    HostRuntimeLoopCapabilityPortFactory, JsonSpawnSubagentInputCodec, LoopCapabilityResultWriter,
+    CapabilityAllowSet, CapabilityResolveError, CapabilityResultWrite,
+    CapabilitySurfaceProfileResolver, DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID,
+    HostIdentityContextBuildError, HostIdentityContextCandidate, HostIdentityContextSource,
+    HostManagedModelRequest, HostRuntimeLoopCapabilityPortFactory, JsonSpawnSubagentInputCodec,
+    LoopCapabilityResultWriter,
 };
 use ironclaw_network::{PolicyNetworkHttpEgress, ReqwestNetworkTransport};
 use ironclaw_product_adapters::{
@@ -1928,24 +1929,13 @@ struct RecordingCapabilityResultWriter {
 impl LoopCapabilityResultWriter for RecordingCapabilityResultWriter {
     async fn write_capability_result(
         &self,
-        run_context: &LoopRunContext,
-        input_ref: &CapabilityInputRef,
-        invocation_id: InvocationId,
-        capability_id: &CapabilityId,
-        output: serde_json::Value,
+        write: CapabilityResultWrite<'_>,
     ) -> Result<LoopResultRef, AgentLoopHostError> {
-        let result_ref = self
-            .inner
-            .write_capability_result(
-                run_context,
-                input_ref,
-                invocation_id,
-                capability_id,
-                output.clone(),
-            )
-            .await?;
+        let capability_id = write.capability_id.clone();
+        let output = write.output.clone();
+        let result_ref = self.inner.write_capability_result(write).await?;
         self.results.lock().unwrap().push(RecordedCapabilityResult {
-            capability_id: capability_id.clone(),
+            capability_id,
             output,
         });
         Ok(result_ref)

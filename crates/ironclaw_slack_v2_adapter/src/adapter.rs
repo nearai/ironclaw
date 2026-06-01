@@ -678,6 +678,11 @@ mod tests {
                 auth_request_ref: "auth-1".to_string(),
                 headline: "Auth required".to_string(),
                 body: "Open WebUI".to_string(),
+                challenge_kind: None,
+                provider: None,
+                account_label: None,
+                authorization_url: None,
+                expires_at: None,
             });
 
         let outcome = adapter

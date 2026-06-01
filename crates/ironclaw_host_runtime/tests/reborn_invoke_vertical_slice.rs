@@ -239,6 +239,7 @@ impl RuntimeAdapter<LocalFilesystem, InMemoryResourceGovernor> for RecordingRunt
             })?;
         Ok(RuntimeAdapterResult {
             output,
+            display_preview: None,
             usage,
             receipt,
             output_bytes,

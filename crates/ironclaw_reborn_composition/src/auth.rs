@@ -6,8 +6,10 @@ use ironclaw_auth::{
     AuthChallenge, AuthContinuationEvent, AuthContinuationRef, AuthErrorCode, AuthFlowId,
     AuthFlowKind, AuthFlowManager, AuthFlowRecord, AuthFlowRecordSource, AuthFlowStatus,
     AuthInteractionId, AuthInteractionService, AuthProductError, AuthProductScope,
-    AuthProviderClient, AuthProviderId, CredentialAccountId, CredentialAccountLabel,
-    CredentialAccountService, CredentialAccountStatus, CredentialAccountUpdateBinding,
+    AuthProviderClient, AuthProviderId, CredentialAccountChoiceRequest, CredentialAccountId,
+    CredentialAccountLabel, CredentialAccountListPage, CredentialAccountListRequest,
+    CredentialAccountProjection, CredentialAccountService, CredentialAccountStatus,
+    CredentialAccountUpdateBinding, CredentialRecoveryProjection, CredentialRecoveryRequest,
     CredentialRefreshReport, CredentialRefreshRequest, CredentialSetupService,
     InMemoryAuthProductServices, ManualTokenSetupRequest, NewAuthFlow, OAuthAuthorizationUrl,
     OAuthCallbackClaimRequest, OAuthCallbackFailureInput, OAuthCallbackInput,
@@ -15,10 +17,28 @@ use ironclaw_auth::{
     ProviderBackedCredentialAccountService, ProviderCallbackOutcome, SecretCleanupReport,
     SecretCleanupRequest, SecretCleanupService, SecretSubmitRequest, Timestamp,
 };
+use ironclaw_product_adapters::AuthPromptChallengeKind;
 use ironclaw_product_workflow::ProductAuthTurnGateResumeDispatcher;
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 
+use ironclaw_host_api::UserId;
+use ironclaw_turns::{TurnRunId, TurnScope};
+
+use crate::projection::{AuthChallengeProvider, AuthChallengeView};
+
+/// Dispatches a typed continuation event once an OAuth callback flow has
+/// completed.
+///
+/// # Idempotency contract
+///
+/// Implementations MUST be idempotent on `flow_id`.  The product-auth layer
+/// guarantees *at-least-once* delivery: if `dispatch_auth_continuation`
+/// succeeds but the subsequent `mark_continuation_dispatched` call fails
+/// (e.g. a transient `BackendConflict` or `BackendUnavailable`), the caller
+/// will retry the full callback path and dispatch the same `flow_id` again.
+/// An implementation that assumes exactly-once delivery will process duplicate
+/// continuations and is incorrect.
 #[async_trait]
 pub trait RebornAuthContinuationDispatcher: Send + Sync {
     async fn dispatch_auth_continuation(
@@ -289,11 +309,26 @@ impl RebornProductAuthServicePorts {
             + SecretCleanupService
             + 'static,
     {
+        let provider_client: Arc<dyn AuthProviderClient> = services.clone();
+        Self::from_shared_with_provider(services, provider_client)
+    }
+
+    pub fn from_shared_with_provider<T>(
+        services: Arc<T>,
+        provider_client: Arc<dyn AuthProviderClient>,
+    ) -> Self
+    where
+        T: AuthFlowManager
+            + AuthInteractionService
+            + CredentialSetupService
+            + CredentialAccountService
+            + SecretCleanupService
+            + 'static,
+    {
         let flow_manager: Arc<dyn AuthFlowManager> = services.clone();
         let interaction_service: Arc<dyn AuthInteractionService> = services.clone();
         let credential_setup_service: Arc<dyn CredentialSetupService> = services.clone();
         let credential_account_service: Arc<dyn CredentialAccountService> = services.clone();
-        let provider_client: Arc<dyn AuthProviderClient> = services.clone();
         let cleanup_service: Arc<dyn SecretCleanupService> = services;
 
         Self::new(
@@ -304,6 +339,10 @@ impl RebornProductAuthServicePorts {
             provider_client,
             cleanup_service,
         )
+    }
+
+    pub fn credential_account_service(&self) -> Arc<dyn CredentialAccountService> {
+        self.credential_account_service.clone()
     }
 
     pub(crate) fn into_services(
@@ -355,6 +394,10 @@ pub struct RebornProductAuthServices {
     /// without this port. When absent, runtime composition must expose the
     /// WebUI pending-auth interaction surface as explicitly unavailable
     /// instead of silently fabricating an unscoped read model.
+    ///
+    /// arch-exempt: optional Arc, durable auth-flow read projection is tracked
+    /// by product-auth issue #4112 and remains genuinely optional until the
+    /// durable backend exposes the same scoped projection as the in-memory port.
     flow_record_source: Option<Arc<dyn AuthFlowRecordSource>>,
 }
 
@@ -509,9 +552,34 @@ impl RebornProductAuthServices {
 
     /// Enable WebUI/local-dev auth interaction read models from a scoped
     /// auth-flow projection source.
-    pub(crate) fn with_flow_record_source(mut self, source: Arc<dyn AuthFlowRecordSource>) -> Self {
+    /// Enable WebUI/local-dev auth-flow projection source.
+    ///
+    /// Exported `pub` so integration-test harnesses outside the crate can
+    /// wire an in-memory fake. Not part of the stable product API — do not
+    /// call this from production composition paths; use `as_auth_challenge_provider()`
+    /// only when `product_auth` exposes a `flow_record_source` via the bundle.
+    #[doc(hidden)]
+    pub fn with_flow_record_source(mut self, source: Arc<dyn AuthFlowRecordSource>) -> Self {
         self.flow_record_source = Some(source);
         self
+    }
+
+    /// Expose this service as an `Arc<dyn AuthChallengeProvider>` so the
+    /// projection layer can enrich `AuthPromptView` SSE frames with
+    /// `challenge_kind`, `provider`, `account_label`, and `authorization_url`.
+    ///
+    /// Returns `None` when no `flow_record_source` is configured (meaning this
+    /// bundle was built without the in-memory projection source, e.g. in
+    /// production deployments that use durable DB backends not yet wired to
+    /// `AuthFlowRecordSource`). The WebUI prompt falls back to the plain
+    /// 4-field view in that case, which is backward-compatible.
+    #[doc(hidden)]
+    pub fn as_auth_challenge_provider(self: &Arc<Self>) -> Option<Arc<dyn AuthChallengeProvider>> {
+        if self.flow_record_source.is_some() {
+            Some(Arc::clone(self) as Arc<dyn AuthChallengeProvider>)
+        } else {
+            None
+        }
     }
 
     /// Refresh a credential account through the injected product-auth port.
@@ -525,6 +593,48 @@ impl RebornProductAuthServices {
     ) -> Result<CredentialRefreshReport, RebornCredentialLifecycleError> {
         self.credential_account_service
             .refresh_account(request)
+            .await
+            .map_err(RebornCredentialLifecycleError::from)
+    }
+
+    /// List redacted credential account projections through the injected
+    /// account port.
+    ///
+    /// Routes/CLIs/extensions enter here so they never bypass the account
+    /// port's grant filtering, status redaction, or extension-scoped
+    /// visibility rules.
+    pub async fn list_credential_accounts(
+        &self,
+        request: CredentialAccountListRequest,
+    ) -> Result<CredentialAccountListPage, RebornCredentialLifecycleError> {
+        self.credential_account_service
+            .list_accounts(request)
+            .await
+            .map_err(RebornCredentialLifecycleError::from)
+    }
+
+    /// Select a single configured credential account through the injected
+    /// account port.
+    pub async fn select_credential_account(
+        &self,
+        request: CredentialAccountChoiceRequest,
+    ) -> Result<CredentialAccountProjection, RebornCredentialLifecycleError> {
+        self.credential_account_service
+            .select_configured_account(request)
+            .await
+            .map_err(RebornCredentialLifecycleError::from)
+    }
+
+    /// Project the stable credential recovery state for a provider through
+    /// the injected account port. The projection drives WebUI/CLI/API
+    /// recovery, refresh, and reauthorize prompts without exposing backend
+    /// errors or secret handles.
+    pub async fn project_credential_recovery(
+        &self,
+        request: CredentialRecoveryRequest,
+    ) -> Result<CredentialRecoveryProjection, RebornCredentialLifecycleError> {
+        self.credential_account_service
+            .project_credential_recovery(request)
             .await
             .map_err(RebornCredentialLifecycleError::from)
     }
@@ -548,7 +658,7 @@ impl RebornProductAuthServices {
         &self,
         request: RebornOAuthCallbackRequest,
     ) -> Result<RebornOAuthCallbackResponse, RebornOAuthCallbackError> {
-        let completed = match request.outcome {
+        let (mut completed, should_dispatch_continuation) = match request.outcome {
             RebornOAuthCallbackOutcome::Authorized { provider_request } => {
                 let claimed = self
                     .flow_manager
@@ -565,7 +675,8 @@ impl RebornProductAuthServices {
                     .map_err(RebornOAuthCallbackError::from)?;
 
                 if claimed.status == AuthFlowStatus::Completed {
-                    claimed
+                    let should_dispatch = claimed.continuation_emitted_at.is_none();
+                    (claimed, should_dispatch)
                 } else {
                     let exchange = match self
                         .provider_client
@@ -604,7 +715,7 @@ impl RebornProductAuthServices {
                         }
                     };
                     let exchange_for_cleanup = exchange.clone();
-                    match self
+                    let completed = match self
                         .flow_manager
                         .complete_oauth_callback(
                             &request.scope,
@@ -638,7 +749,8 @@ impl RebornProductAuthServices {
                             }
                             return Err(error.into());
                         }
-                    }
+                    };
+                    (completed, true)
                 }
             }
             RebornOAuthCallbackOutcome::ProviderDenied => self
@@ -652,36 +764,45 @@ impl RebornProductAuthServices {
                     },
                 )
                 .await
+                .map(|completed| (completed, true))
                 .map_err(RebornOAuthCallbackError::from)?,
             RebornOAuthCallbackOutcome::Malformed => {
                 return Err(AuthProductError::MalformedCallback.into());
             }
         };
 
-        let event = AuthContinuationEvent {
-            flow_id: completed.id,
-            scope: completed.scope.clone(),
-            continuation: completed.continuation.clone(),
-            credential_account_id: completed.credential_account_id,
-            emitted_at: Utc::now(),
-        };
-        if let Err(error) = self
-            .continuation_dispatcher
-            .dispatch_auth_continuation(event)
-            .await
-        {
-            tracing::debug!(
-                flow_id = %completed.id,
-                error_code = ?error.code(),
-                "reborn auth callback completed but continuation dispatch failed"
-            );
-            let error = match error {
-                AuthProductError::TokenExchangeFailed
-                | AuthProductError::ProviderDenied
-                | AuthProductError::MalformedCallback => AuthProductError::BackendUnavailable,
-                error => error,
+        if should_dispatch_continuation {
+            let emitted_at = Utc::now();
+            let event = AuthContinuationEvent {
+                flow_id: completed.id,
+                scope: completed.scope.clone(),
+                continuation: completed.continuation.clone(),
+                credential_account_id: completed.credential_account_id,
+                emitted_at,
             };
-            return Err(error.into());
+            if let Err(error) = self
+                .continuation_dispatcher
+                .dispatch_auth_continuation(event)
+                .await
+            {
+                tracing::debug!(
+                    flow_id = %completed.id,
+                    error_code = ?error.code(),
+                    "reborn auth callback completed but continuation dispatch failed"
+                );
+                let error = match error {
+                    AuthProductError::TokenExchangeFailed
+                    | AuthProductError::ProviderDenied
+                    | AuthProductError::MalformedCallback => AuthProductError::BackendUnavailable,
+                    error => error,
+                };
+                return Err(error.into());
+            }
+            completed = self
+                .flow_manager
+                .mark_continuation_dispatched(&completed.scope, completed.id, emitted_at)
+                .await
+                .map_err(RebornOAuthCallbackError::from)?;
         }
 
         Ok(RebornOAuthCallbackResponse {
@@ -815,11 +936,115 @@ impl RebornProductAuthServices {
     }
 }
 
+/// Verify that an auth flow record belongs to the same user and
+/// tenant/agent/project/thread as the caller's `TurnScope`.
+///
+/// `TurnScope` deliberately does not carry `session_id`; session isolation is
+/// enforced when creating/submitting the auth interaction, and this projection
+/// gate additionally requires the exact run id and gate ref. The axes available
+/// here are still fail-closed: a flow with no `thread_id` does not match a
+/// thread-scoped request. Pre-thread or test flows should be stored with a
+/// `thread_id` once a real turn is in progress; a flow missing one must not
+/// leak into an unrelated thread's gate.
+fn flow_scope_matches_turn_scope(
+    flow: &ironclaw_auth::AuthFlowRecord,
+    scope: &TurnScope,
+    owner_user_id: &UserId,
+) -> bool {
+    let resource = &flow.scope.resource;
+    resource.tenant_id == scope.tenant_id
+        && resource.user_id == *owner_user_id
+        && resource.agent_id.as_ref() == scope.agent_id.as_ref()
+        && resource.project_id.as_ref() == scope.project_id.as_ref()
+        // Fail-closed: a flow with no thread_id cannot match a thread-scoped request.
+        && match (&resource.thread_id, &scope.thread_id) {
+            (None, _) => false,
+            (Some(t), s) => t == s,
+        }
+}
+
+fn flow_matches_turn_gate(
+    flow: &ironclaw_auth::AuthFlowRecord,
+    run_id: &str,
+    gate_ref: &str,
+) -> bool {
+    matches!(
+        &flow.continuation,
+        ironclaw_auth::AuthContinuationRef::TurnGateResume {
+            turn_run_ref,
+            gate_ref: g,
+        } if turn_run_ref.as_str() == run_id && g.as_str() == gate_ref
+    )
+}
+
+fn auth_challenge_to_view(
+    challenge: &ironclaw_auth::AuthChallenge,
+    flow: &ironclaw_auth::AuthFlowRecord,
+) -> AuthChallengeView {
+    match challenge {
+        ironclaw_auth::AuthChallenge::OAuthUrl {
+            authorization_url,
+            expires_at,
+        } => AuthChallengeView {
+            kind: AuthPromptChallengeKind::OAuthUrl,
+            provider: flow.provider.clone(),
+            account_label: None,
+            authorization_url: Some(authorization_url.clone()),
+            expires_at: Some(*expires_at),
+        },
+        ironclaw_auth::AuthChallenge::ManualTokenRequired {
+            provider,
+            label,
+            expires_at,
+            ..
+        } => AuthChallengeView {
+            kind: AuthPromptChallengeKind::ManualToken,
+            provider: provider.clone(),
+            account_label: Some(label.clone()),
+            authorization_url: None,
+            expires_at: Some(*expires_at),
+        },
+        ironclaw_auth::AuthChallenge::AccountSelectionRequired { .. }
+        | ironclaw_auth::AuthChallenge::ReauthorizeRequired { .. }
+        | ironclaw_auth::AuthChallenge::SetupRequired { .. } => AuthChallengeView {
+            kind: AuthPromptChallengeKind::Other,
+            provider: flow.provider.clone(),
+            account_label: None,
+            authorization_url: None,
+            expires_at: None,
+        },
+    }
+}
+
+#[async_trait]
+impl AuthChallengeProvider for RebornProductAuthServices {
+    async fn challenge_for_gate(
+        &self,
+        scope: &TurnScope,
+        owner_user_id: &UserId,
+        run_id: TurnRunId,
+        gate_ref: &str,
+    ) -> Option<AuthChallengeView> {
+        let source = self.flow_record_source.as_ref()?;
+        // The flow store is process-wide; always verify user, turn scope,
+        // run id, and gate ref before exposing challenge metadata.
+        let run_id = run_id.to_string();
+        let mut matches_challenge = |flow: &ironclaw_auth::AuthFlowRecord| {
+            !ironclaw_auth::is_terminal_status(flow.status)
+                && flow_scope_matches_turn_scope(flow, scope, owner_user_id)
+                && flow_matches_turn_gate(flow, &run_id, gate_ref)
+        };
+        let flow = source.flow_record_matching(&mut matches_challenge)?;
+        let challenge = flow.challenge.as_ref()?;
+        Some(auth_challenge_to_view(challenge, &flow))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use ironclaw_auth::{
-        AuthChallenge, AuthFlowId, AuthFlowRecord, AuthProductError, AuthProductScope,
+        AuthChallenge, AuthFlowId, AuthFlowRecord, AuthProductError, AuthProductScope, AuthSurface,
         CredentialAccount, CredentialAccountChoiceRequest, CredentialAccountId,
         CredentialAccountListPage, CredentialAccountListRequest, CredentialAccountLookupRequest,
         CredentialAccountMutation, CredentialAccountProjection, CredentialAccountSelectionRequest,
@@ -835,6 +1060,96 @@ mod tests {
 
     fn arc_data_ptr<T: ?Sized>(arc: &Arc<T>) -> *const () {
         Arc::as_ptr(arc) as *const ()
+    }
+
+    fn test_turn_scope(thread_id: ironclaw_host_api::ThreadId) -> TurnScope {
+        TurnScope::new(
+            ironclaw_host_api::TenantId::new("tenant-auth-scope").expect("tenant id"),
+            Some(ironclaw_host_api::AgentId::new("agent-auth-scope").expect("agent id")),
+            Some(ironclaw_host_api::ProjectId::new("project-auth-scope").expect("project id")),
+            thread_id,
+        )
+    }
+
+    fn test_flow_record(
+        owner_user_id: &UserId,
+        scope: &TurnScope,
+        thread_id: Option<ironclaw_host_api::ThreadId>,
+    ) -> AuthFlowRecord {
+        let now = Utc::now();
+        AuthFlowRecord {
+            id: AuthFlowId::new(),
+            scope: AuthProductScope::new(
+                ironclaw_host_api::ResourceScope {
+                    tenant_id: scope.tenant_id.clone(),
+                    user_id: owner_user_id.clone(),
+                    agent_id: scope.agent_id.clone(),
+                    project_id: scope.project_id.clone(),
+                    mission_id: None,
+                    thread_id,
+                    invocation_id: ironclaw_host_api::InvocationId::new(),
+                },
+                AuthSurface::Chat,
+            ),
+            kind: AuthFlowKind::IntegrationCredential,
+            status: AuthFlowStatus::AwaitingUser,
+            provider: AuthProviderId::new("github").expect("provider id"),
+            challenge: None,
+            continuation: AuthContinuationRef::SetupOnly,
+            credential_account_id: None,
+            update_binding: None,
+            opaque_state_hash: None,
+            pkce_verifier_hash: None,
+            authorization_code_hash: None,
+            error: None,
+            continuation_emitted_at: None,
+            created_at: now,
+            updated_at: now,
+            expires_at: now,
+        }
+    }
+
+    #[test]
+    fn flow_scope_matches_turn_scope_none_thread_id_never_matches() {
+        let owner = UserId::new("user-auth-scope").expect("user id");
+        let thread = ironclaw_host_api::ThreadId::new("thread-auth-scope").expect("thread id");
+        let scope = test_turn_scope(thread);
+        let flow = test_flow_record(&owner, &scope, None);
+
+        assert!(!flow_scope_matches_turn_scope(&flow, &scope, &owner));
+    }
+
+    #[test]
+    fn flow_scope_matches_turn_scope_thread_id_mismatch_returns_false() {
+        let owner = UserId::new("user-auth-scope").expect("user id");
+        let request_thread =
+            ironclaw_host_api::ThreadId::new("thread-auth-scope").expect("thread id");
+        let flow_thread = ironclaw_host_api::ThreadId::new("thread-auth-other").expect("thread id");
+        let scope = test_turn_scope(request_thread);
+        let flow = test_flow_record(&owner, &scope, Some(flow_thread));
+
+        assert!(!flow_scope_matches_turn_scope(&flow, &scope, &owner));
+    }
+
+    #[test]
+    fn flow_scope_matches_turn_scope_user_id_mismatch_returns_false() {
+        let owner = UserId::new("user-auth-scope").expect("user id");
+        let other = UserId::new("user-auth-other").expect("user id");
+        let thread = ironclaw_host_api::ThreadId::new("thread-auth-scope").expect("thread id");
+        let scope = test_turn_scope(thread.clone());
+        let flow = test_flow_record(&owner, &scope, Some(thread));
+
+        assert!(!flow_scope_matches_turn_scope(&flow, &scope, &other));
+    }
+
+    #[test]
+    fn flow_scope_matches_turn_scope_all_fields_match_returns_true() {
+        let owner = UserId::new("user-auth-scope").expect("user id");
+        let thread = ironclaw_host_api::ThreadId::new("thread-auth-scope").expect("thread id");
+        let scope = test_turn_scope(thread.clone());
+        let flow = test_flow_record(&owner, &scope, Some(thread));
+
+        assert!(flow_scope_matches_turn_scope(&flow, &scope, &owner));
     }
 
     #[test]
@@ -908,6 +1223,31 @@ mod tests {
         assert_eq!(arc_data_ptr(&services.cleanup_service()), shared_ptr);
     }
 
+    #[test]
+    fn reborn_product_auth_ports_from_shared_with_provider_uses_separate_provider_client() {
+        let shared = Arc::new(SharedAuthTestDouble);
+        let provider_client: Arc<dyn AuthProviderClient> = Arc::new(SharedAuthTestDouble);
+        let shared_ptr = arc_data_ptr(&shared);
+        let provider_ptr = arc_data_ptr(&provider_client);
+
+        let ports =
+            RebornProductAuthServicePorts::from_shared_with_provider(shared, provider_client);
+        let services = ports.into_services(Arc::new(NoopAuthContinuationDispatcher));
+
+        assert_eq!(arc_data_ptr(&services.flow_manager()), shared_ptr);
+        assert_eq!(arc_data_ptr(&services.interaction_service()), shared_ptr);
+        assert_eq!(
+            arc_data_ptr(&services.credential_setup_service()),
+            shared_ptr
+        );
+        assert_eq!(
+            arc_data_ptr(&services.credential_account_service()),
+            shared_ptr
+        );
+        assert_eq!(arc_data_ptr(&services.provider_client()), provider_ptr);
+        assert_eq!(arc_data_ptr(&services.cleanup_service()), shared_ptr);
+    }
+
     #[async_trait::async_trait]
     impl AuthFlowManager for SharedAuthTestDouble {
         async fn create_flow(
@@ -961,6 +1301,15 @@ mod tests {
             &self,
             _scope: &AuthProductScope,
             _flow_id: AuthFlowId,
+        ) -> Result<AuthFlowRecord, AuthProductError> {
+            unreachable!("constructor tests do not call auth-flow methods")
+        }
+
+        async fn mark_continuation_dispatched(
+            &self,
+            _scope: &AuthProductScope,
+            _flow_id: AuthFlowId,
+            _emitted_at: ironclaw_auth::Timestamp,
         ) -> Result<AuthFlowRecord, AuthProductError> {
             unreachable!("constructor tests do not call auth-flow methods")
         }

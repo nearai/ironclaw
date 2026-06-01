@@ -184,7 +184,7 @@ output_schema_ref = "schemas/github/search_issues.output.v1.json"
 prompt_doc_ref = "prompts/github/search_issues.md"
 required_host_ports = ["host.runtime.http_egress"]
 runtime_credentials = [
-  { handle = "github_token", audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
 ]
 ```
 
@@ -291,11 +291,12 @@ Rules:
 - effects must parse as `EffectKind`.
 - default permission must parse as `PermissionMode`.
 - `runtime_credentials` declares host-owned credential injection metadata for
-  runtime HTTP egress. Each entry names a secret handle, HTTPS-only audience
-  `NetworkTargetPattern`, injection target (`header` or `query_param`), and
-  optional `required` flag. The field is only valid when the capability declares
-  `use_secret`; duplicate handles within one capability are invalid. The
-  manifest never contains raw secret material.
+  runtime HTTP egress. Each entry names a runtime credential slot handle,
+  material source (`secret_handle` by default, or `product_auth_account` with a
+  provider id), HTTPS-only audience `NetworkTargetPattern`, injection target
+  (`header` or `query_param`), and optional `required` flag. The field is only
+  valid when the capability declares `use_secret`; duplicate handles within one
+  capability are invalid. The manifest never contains raw secret material.
 - top-level legacy capabilities must provide `input_schema_ref` and
   `output_schema_ref`; `prompt_doc_ref` is optional lazy help metadata.
 - during this cutover, `CapabilityDescriptor.parameters_schema` is a projection

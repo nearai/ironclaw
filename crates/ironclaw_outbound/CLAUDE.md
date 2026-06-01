@@ -4,6 +4,7 @@
 - Do not send transport messages, validate concrete Slack/Telegram/Web payloads, or mutate canonical transcript/projection state.
 - Persist metadata/refs/cursors only: no raw prompts, message bodies, tool inputs/outputs, secrets, host paths, or backend error details.
 - External push targets are candidates only; the outbound policy service must call the reply-target validator before every delivery attempt.
+- `OutboundResolutionEngine` is the read-only candidate selector above `OutboundPolicyService`; it resolves typed delivery requests into `CommunicationDeliveryCandidate` or `NoDelivery`, but never validates targets, records attempts, or mutates inbound/approval/auth state.
 - Authorization-revoked delivery attempts record sanitized failure status and must not return a sendable target.
 - Delivery failure records are separate from canonical transcript/projection state and must not mark turns/runs failed.
 - Trust-bearing types (`ThreadProjectionAccessGrant`, `ValidatedReplyTargetBinding`) are sealed: only `OutboundPolicyService` mints them via `pub(crate)` constructors. Policy and validator implementors return the corresponding untrusted `Claim` types (`ThreadProjectionAccessClaim`, `ReplyTargetBindingClaim`) and never construct a grant/binding directly. New trust-bearing types added to this crate follow the same claim/seal split, keep fields non-public, and must not derive `Deserialize`; public envelope types that carry them (for example `OutboundDeliveryDecision`) also must not derive `Deserialize`.

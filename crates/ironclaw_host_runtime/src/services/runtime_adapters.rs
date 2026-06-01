@@ -18,6 +18,7 @@ use super::{
     WasmRuntimeHttpAdapter, WasmRuntimePolicyDiscarder, WitToolHost, WitToolRequest,
     WitToolRuntime, WitToolRuntimeConfig, plan_capability, runtime_http_egress,
 };
+use crate::FirstPartyCapabilityError;
 
 pub(super) struct ServiceResolvedRuntimeAdapter<T> {
     inner: Arc<T>,
@@ -125,6 +126,7 @@ where
 
         Ok(RuntimeAdapterResult {
             output: execution.result.output,
+            display_preview: None,
             usage: execution.result.usage,
             receipt: execution.receipt,
             output_bytes: execution.result.output_bytes,
@@ -175,6 +177,7 @@ where
 
         Ok(RuntimeAdapterResult {
             output: execution.result.output,
+            display_preview: None,
             usage: execution.result.usage,
             receipt: execution.receipt,
             output_bytes: execution.result.output_bytes,
@@ -312,15 +315,32 @@ where
             Ok(Err(error)) => {
                 tracing::debug!(
                     reservation_id = %reservation.id,
-                    error_kind = %error.kind(),
+                    is_auth_required = error.is_auth_required(),
                     "first-party runtime adapter handler failed"
                 );
-                account_or_release_failed_first_party_execution(
+                if let Err(acct_err) = account_or_release_failed_first_party_execution(
                     request.governor,
                     reservation.id,
                     error.usage(),
-                )?;
-                return Err(DispatchError::FirstParty { kind: error.kind() });
+                ) {
+                    tracing::warn!(
+                        reservation_id = %reservation.id,
+                        error = ?acct_err,
+                        "first-party resource accounting failed on handler error; \
+                         returning original handler error"
+                    );
+                }
+                return match error {
+                    FirstPartyCapabilityError::AuthRequired {
+                        required_secrets, ..
+                    } => Err(DispatchError::AuthRequired {
+                        capability: request.capability_id.clone(),
+                        required_secrets,
+                    }),
+                    FirstPartyCapabilityError::Dispatch { kind, .. } => {
+                        Err(DispatchError::FirstParty { kind })
+                    }
+                };
             }
             Err(_) => {
                 tracing::debug!(
@@ -341,6 +361,7 @@ where
                     reservation_id = %reservation.id,
                     "first-party runtime adapter output serialization failed"
                 );
+                release_first_party_reservation(request.governor, reservation.id);
                 DispatchError::FirstParty {
                     kind: RuntimeDispatchErrorKind::OutputDecode,
                 }
@@ -374,6 +395,7 @@ where
 
         Ok(RuntimeAdapterResult {
             output: result.output,
+            display_preview: result.display_preview,
             usage,
             receipt,
             output_bytes,
@@ -620,6 +642,7 @@ where
     };
     Ok(RuntimeAdapterResult {
         output,
+        display_preview: None,
         output_bytes: execution.usage.output_bytes,
         usage: execution.usage,
         receipt,

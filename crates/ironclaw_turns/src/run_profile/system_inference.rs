@@ -111,6 +111,7 @@ impl<'de> Deserialize<'de> for SystemPromptId {
 pub enum SystemTaskKind {
     Compaction,
     GoalRefresh,
+    FailureExplanation,
 }
 
 /// Origin metadata for the system prompt used by a system inference task.

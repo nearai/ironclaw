@@ -48,7 +48,7 @@ pub use capability_allow_set::{
     CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
 };
 pub use capability_port::{
-    HostRuntimeLoopCapabilityPort, HostRuntimeLoopCapabilityPortFactory,
+    CapabilityResultWrite, HostRuntimeLoopCapabilityPort, HostRuntimeLoopCapabilityPortFactory,
     LoopCapabilityInputResolver, LoopCapabilityResultWriter, concurrency_hint_from_effects,
     loop_driver_execution_extension_id,
 };
@@ -94,6 +94,8 @@ pub use subagent_spawn_port::{
     SubagentThreadMetadata,
 };
 pub use system_inference::{GuardedSystemInferencePort, ModelGatewayBackedSystemInferencePort};
+pub const FAILURE_EXPLANATION_SYSTEM_PROMPT: &str =
+    include_str!("../prompts/failure_explanation.md");
 pub use token_estimator::{
     CHARS_PER_TOKEN_DEFAULT, EstimatedTokenCount, estimate_tokens_from_chars,
 };
@@ -1520,10 +1522,12 @@ fn sanitized_reasoning_deltas(reasoning: Option<String>) -> Vec<String> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HostManagedModelErrorKind {
+    /// Caller-side misuse of the host model port (unknown tool, malformed request).
     InvalidRequest,
-    /// Provider/model output was structurally invalid for the active loop
-    /// contract. This is model-side bad output, not caller misuse of the host
-    /// model port.
+    /// Provider/model output was structurally invalid for the active loop contract.
+    /// This is model-side bad output, not caller misuse — mapped to Unavailable so
+    /// loops can retry on transient provider anomalies.
+    #[serde(alias = "invalid_output")]
     InvalidOutput,
     PolicyDenied,
     ConfigurationError,
@@ -1568,6 +1572,21 @@ fn validate_thread_scope_for_run(
         return Err(AgentLoopHostError::new(
             AgentLoopHostErrorKind::ScopeMismatch,
             "thread scope does not match loop run scope",
+        ));
+    }
+    // The thread store keys threads by `owner_user_id` (via the MountView in
+    // `ThreadScope::to_resource_scope`), but that axis is absent from the
+    // on-disk thread path, so a wrong owner silently reads an empty subtree
+    // and surfaces as `UnknownThread`. When the run carries an authenticated
+    // actor and the thread scope declares an owner, require them to agree so
+    // the divergence fails loud here rather than at the storage read.
+    if let (Some(thread_owner), Some(actor)) =
+        (thread_scope.owner_user_id.as_ref(), run_context.actor())
+        && thread_owner != &actor.user_id
+    {
+        return Err(AgentLoopHostError::new(
+            AgentLoopHostErrorKind::ScopeMismatch,
+            "thread scope owner does not match the loop run actor",
         ));
     }
     Ok(())
@@ -1835,7 +1854,7 @@ fn model_error_kind(kind: HostManagedModelErrorKind) -> AgentLoopHostErrorKind {
 fn safe_model_summary(kind: HostManagedModelErrorKind) -> &'static str {
     match kind {
         HostManagedModelErrorKind::InvalidRequest => "model request is invalid",
-        HostManagedModelErrorKind::InvalidOutput => "model output is invalid",
+        HostManagedModelErrorKind::InvalidOutput => "model output was structurally invalid",
         HostManagedModelErrorKind::PolicyDenied => "model profile is not permitted",
         HostManagedModelErrorKind::ConfigurationError => "model route configuration is invalid",
         HostManagedModelErrorKind::BudgetExceeded => "model request exceeded its budget",

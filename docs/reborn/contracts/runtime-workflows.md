@@ -38,7 +38,7 @@ These are logical service contracts. They do not all need to become crates immed
 | `CapabilityCatalog` | Capability descriptors, provider mapping, schema metadata, model-visible names/descriptions | Action-time authorization, runtime execution, resource accounting |
 | `CapabilityAccessManager` | Visible capability surface, grants, scope filtering, action-time authorization inputs | Capability execution, manifest parsing, model prompting |
 | `ApprovalManager` | Approval requests, stable request ids, approve/deny/always decisions, replay-safe resolution | Chat transcript ownership, auth flows, runtime execution |
-| `AuthFlowManager` | Auth-required state, OAuth/token prompting, callback completion, retry-after-auth | Approval semantics, raw secret display, runtime dispatch |
+| `AuthFlowManager` | Auth-required state, OAuth/token prompting, callback completion, retry-after-auth | Approval semantics, auth prompt delivery policy, raw secret display, runtime dispatch |
 | `RunStateManager` | One-active-run-per-thread, blocked states, cancel/interrupt/resume, terminal transitions, checkpoints | Transcript storage, stream delivery, capability execution |
 | `RuntimeDispatcher` | Runtime lane selection and fail-closed handoff to configured backends | Manifest discovery, runtime-specific implementation, product workflows |
 | `EventStreamManager` | Realtime delivery, event ids, reconnect semantics, keepalives, fanout | Durable audit/history ownership, business policy |
@@ -140,6 +140,7 @@ CapabilityCall
 Key rules:
 
 - auth-required state is not approval-required state
+- presenting the auth prompt is a transport/outbound concern; `AuthFlowManager.begin` and callback completion stay separate from prompt delivery and token storage
 - raw secrets are never written to model-visible output or transcript text
 - retry-after-auth must be replay-safe
 - secret leases are scoped and auditable

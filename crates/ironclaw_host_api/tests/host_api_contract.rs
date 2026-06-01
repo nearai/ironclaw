@@ -280,6 +280,24 @@ fn dispatch_errors_preserve_typed_failure_kind() {
         .failure_kind(),
         DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Guest)
     );
+    let required_secrets = vec![SecretHandle::new("google-access-token").unwrap()];
+    assert_eq!(
+        DispatchError::AuthRequired {
+            capability: CapabilityId::new("test.cap").unwrap(),
+            required_secrets: required_secrets.clone(),
+        }
+        .failure_kind(),
+        DispatchFailureKind::AuthRequired
+    );
+    // Empty required_secrets must classify the same way.
+    assert_eq!(
+        DispatchError::AuthRequired {
+            capability: CapabilityId::new("test.cap").unwrap(),
+            required_secrets: Vec::new(),
+        }
+        .failure_kind(),
+        DispatchFailureKind::AuthRequired
+    );
 }
 
 #[test]
@@ -324,6 +342,11 @@ fn dispatch_failure_kind_display_preserves_stable_literals() {
     assert_eq!(
         DispatchFailureKind::UnsupportedRuntime.as_str(),
         "UnsupportedRuntime"
+    );
+    assert_eq!(DispatchFailureKind::AuthRequired.as_str(), "AuthRequired");
+    assert_eq!(
+        DispatchFailureKind::AuthRequired.to_string(),
+        "AuthRequired"
     );
     assert_eq!(
         DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::NetworkDenied).as_str(),
@@ -1665,4 +1688,58 @@ fn sample_network_policy() -> NetworkPolicy {
         deny_private_ip_ranges: true,
         max_egress_bytes: Some(1024 * 1024),
     }
+}
+
+#[test]
+fn dispatch_error_event_kind_pins_auth_required_token() {
+    // "auth_required" is a stable observability token used in tracing and metrics.
+    // Regressions (typos, missing match arms) must be caught here.
+    let cap = || CapabilityId::new("test.cap").unwrap();
+    let handle = SecretHandle::new("google-access-token").unwrap();
+
+    assert_eq!(
+        DispatchError::AuthRequired {
+            capability: cap(),
+            required_secrets: vec![handle],
+        }
+        .event_kind(),
+        "auth_required"
+    );
+    // Empty required_secrets must produce the same token.
+    assert_eq!(
+        DispatchError::AuthRequired {
+            capability: cap(),
+            required_secrets: Vec::new(),
+        }
+        .event_kind(),
+        "auth_required"
+    );
+}
+
+#[test]
+fn dispatch_error_auth_required_debug_redacts_required_secrets() {
+    let handle = SecretHandle::new("google-access-token").unwrap();
+    let error = DispatchError::AuthRequired {
+        capability: CapabilityId::new("test.cap").unwrap(),
+        required_secrets: vec![handle],
+    };
+    let debug = format!("{error:?}");
+    assert!(
+        !debug.contains("google-access-token"),
+        "handle name must not appear in Debug output; got: {debug}"
+    );
+    assert!(
+        debug.contains("1 handle(s) redacted"),
+        "redaction count must appear in Debug output; got: {debug}"
+    );
+    // Empty list variant.
+    let empty = DispatchError::AuthRequired {
+        capability: CapabilityId::new("test.cap").unwrap(),
+        required_secrets: Vec::new(),
+    };
+    let debug_empty = format!("{empty:?}");
+    assert!(
+        debug_empty.contains("0 handle(s) redacted"),
+        "zero redaction count must appear; got: {debug_empty}"
+    );
 }

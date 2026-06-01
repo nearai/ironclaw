@@ -1767,6 +1767,7 @@ async fn loop_prompt_bundle_public_serialization_hides_raw_content() {
         received_at: Utc.with_ymd_and_hms(2026, 5, 7, 12, 0, 0).unwrap(),
         checkpoint_id: None,
         gate_ref: None,
+        credential_requirements: Vec::new(),
         failure: None,
         event_cursor: EventCursor(0),
     };
@@ -2118,6 +2119,7 @@ impl AgentLoopDriver for CapabilityDriver {
             .checkpoint(LoopCheckpointRequest {
                 kind: LoopCheckpointKind::BeforeBlock,
                 state_ref: state_ref.clone(),
+                gate_ref: None,
             })
             .await
             .map_err(driver_error)?;
@@ -2130,6 +2132,7 @@ impl AgentLoopDriver for CapabilityDriver {
         Ok(LoopExit::Blocked(LoopBlocked {
             kind: LoopBlockedKind::Approval,
             gate_ref,
+            credential_requirements: Vec::new(),
             checkpoint_id,
             state_ref,
             exit_id: LoopExitId::new("exit:capability-driver").unwrap(),

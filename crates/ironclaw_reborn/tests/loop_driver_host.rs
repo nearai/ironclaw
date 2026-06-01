@@ -11,9 +11,9 @@ use ironclaw_filesystem::LocalFilesystem;
 use ironclaw_host_api::{
     AgentId, ApprovalRequestId, CapabilityDescriptor, CapabilityGrant, CapabilityGrantId,
     CapabilityId, CapabilitySet, EffectKind, ExecutionContext, ExtensionId, GrantConstraints,
-    HostPortCatalog, InvocationId, MountView, NetworkPolicy, PackageId, PermissionMode, Principal,
-    ProcessId, ProjectId, ResourceEstimate, ResourceUsage, RuntimeKind, SecretHandle, TenantId,
-    ThreadId, TrustClass, UserId, VirtualPath,
+    HostPortCatalog, MountView, NetworkPolicy, PackageId, PermissionMode, Principal, ProcessId,
+    ProjectId, ResourceEstimate, ResourceUsage, RuntimeKind, SecretHandle, TenantId, ThreadId,
+    TrustClass, UserId, VirtualPath,
 };
 use ironclaw_host_runtime::{
     CancelRuntimeWorkOutcome, CancelRuntimeWorkRequest, CapabilitySurfacePolicy, HostRuntime,
@@ -25,16 +25,16 @@ use ironclaw_host_runtime::{
     VisibleCapability, VisibleCapabilityAccess,
 };
 use ironclaw_loop_support::{
-    CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
-    EmptyLoopCapabilityPort, HostIdentityContextBuildError, HostIdentityContextCandidate,
-    HostIdentityContextSource, HostIdentityMessageContent, HostInputBatch, HostInputEnvelope,
-    HostInputQueue, HostInputQueueError, HostManagedModelError, HostManagedModelErrorKind,
-    HostManagedModelGateway, HostManagedModelMessageRole, HostManagedModelRequest,
-    HostManagedModelResponse, HostRuntimeLoopCapabilityPort, HostSkillContextBuildError,
-    HostSkillContextCandidate, HostSkillContextSource, IdentityApplicability, IdentityFileName,
-    JsonSpawnSubagentInputCodec, LoopCapabilityInputResolver, LoopCapabilityResultWriter,
-    ProductLiveCancellationProbe, RunCancellationFactory, RunCancellationHandle,
-    identity_message_ref,
+    CapabilityAllowSet, CapabilityResolveError, CapabilityResultWrite,
+    CapabilitySurfaceProfileResolver, EmptyLoopCapabilityPort, HostIdentityContextBuildError,
+    HostIdentityContextCandidate, HostIdentityContextSource, HostIdentityMessageContent,
+    HostInputBatch, HostInputEnvelope, HostInputQueue, HostInputQueueError, HostManagedModelError,
+    HostManagedModelErrorKind, HostManagedModelGateway, HostManagedModelMessageRole,
+    HostManagedModelRequest, HostManagedModelResponse, HostRuntimeLoopCapabilityPort,
+    HostSkillContextBuildError, HostSkillContextCandidate, HostSkillContextSource,
+    IdentityApplicability, IdentityFileName, JsonSpawnSubagentInputCodec,
+    LoopCapabilityInputResolver, LoopCapabilityResultWriter, ProductLiveCancellationProbe,
+    RunCancellationFactory, RunCancellationHandle, identity_message_ref,
 };
 use ironclaw_processes::ProcessServices;
 use ironclaw_reborn::driver_registry::{
@@ -233,6 +233,7 @@ async fn text_only_host_factory_builds_complete_agent_loop_driver_host() {
         .checkpoint(LoopCheckpointRequest {
             kind: LoopCheckpointKind::BeforeModel,
             state_ref: checkpoint_state.state_ref.clone(),
+            gate_ref: None,
         })
         .await
         .unwrap();
@@ -1664,21 +1665,21 @@ async fn turn_runner_rejects_driver_fabricated_approval_block_without_durable_ga
     let cancel_clone = cancel.clone();
     let handle = tokio::spawn(async move { worker.run(cancel_clone).await });
 
-    let recovery_state = wait_for_run_status(
+    let failed_state = wait_for_run_status(
         turn_store.as_ref(),
         &fixture.context.scope,
         run_id,
-        TurnStatus::RecoveryRequired,
+        TurnStatus::Failed,
         "production-like evidence must reject fabricated approval block",
     )
     .await;
     cancel.cancel();
     handle.await.unwrap();
 
-    assert_eq!(recovery_state.run_id, run_id);
-    assert_eq!(recovery_state.gate_ref, None);
+    assert_eq!(failed_state.run_id, run_id);
+    assert_eq!(failed_state.gate_ref, None);
     assert_eq!(
-        recovery_state.failure.expect("failure").category(),
+        failed_state.failure.expect("failure").category(),
         "driver_protocol_violation"
     );
     assert!(fixture.gateway.requests().is_empty());
@@ -1905,6 +1906,7 @@ async fn text_only_host_e2e_keeps_persisted_model_route_through_full_flow() {
         .checkpoint(LoopCheckpointRequest {
             kind: LoopCheckpointKind::BeforeModel,
             state_ref: checkpoint_state.state_ref.clone(),
+            gate_ref: None,
         })
         .await
         .unwrap();
@@ -1940,7 +1942,7 @@ async fn text_only_host_e2e_keeps_persisted_model_route_through_full_flow() {
 }
 
 #[tokio::test]
-async fn turn_runner_worker_records_recovery_when_real_host_factory_rejects_claimed_scope() {
+async fn turn_runner_worker_fails_when_real_host_factory_rejects_claimed_scope() {
     let fixture = HostFixture::new_unsubmitted("thread-runner-host-edge", "hello edge").await;
     let turn_store = Arc::new(InMemoryTurnStateStore::default());
     let resolver = InMemoryRunProfileResolver::default();
@@ -2006,13 +2008,13 @@ async fn turn_runner_worker_records_recovery_when_real_host_factory_rejects_clai
             })
             .await
             .unwrap();
-        if state.status == TurnStatus::RecoveryRequired {
+        if state.status == TurnStatus::Failed {
             assert!(state.failure.is_some());
             break;
         }
         assert!(
             tokio::time::Instant::now() < deadline,
-            "host factory scope rejection should record RecoveryRequired"
+            "host factory scope rejection should fail the run"
         );
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
@@ -2990,6 +2992,7 @@ async fn text_only_host_e2e_flow_persists_checkpoint_mapping_in_turn_state_store
         .checkpoint(LoopCheckpointRequest {
             kind: LoopCheckpointKind::BeforeBlock,
             state_ref: checkpoint_state.state_ref.clone(),
+            gate_ref: None,
         })
         .await
         .unwrap();
@@ -3621,6 +3624,7 @@ async fn text_only_host_checkpoint_port_persists_ref_without_public_payload() {
         .checkpoint(LoopCheckpointRequest {
             kind: LoopCheckpointKind::BeforeSideEffect,
             state_ref: checkpoint_state.state_ref.clone(),
+            gate_ref: None,
         })
         .await
         .unwrap();
@@ -3684,6 +3688,7 @@ async fn text_only_host_checkpoint_port_rejects_foreign_state_ref() {
         .checkpoint(LoopCheckpointRequest {
             kind: LoopCheckpointKind::BeforeModel,
             state_ref: foreign_state.state_ref,
+            gate_ref: None,
         })
         .await
         .unwrap_err();
@@ -3703,6 +3708,7 @@ async fn text_only_host_checkpoint_port_rejects_kind_mismatch() {
         .checkpoint(LoopCheckpointRequest {
             kind: LoopCheckpointKind::BeforeSideEffect,
             state_ref: state.state_ref,
+            gate_ref: None,
         })
         .await
         .unwrap_err();
@@ -3729,6 +3735,7 @@ async fn text_only_host_checkpoint_port_maps_store_failures_to_unavailable() {
         .checkpoint(LoopCheckpointRequest {
             kind: LoopCheckpointKind::BeforeBlock,
             state_ref: state.state_ref,
+            gate_ref: None,
         })
         .await
         .unwrap_err();
@@ -3764,6 +3771,7 @@ async fn text_only_host_stage_checkpoint_payload_returns_ref_usable_by_checkpoin
         .checkpoint(LoopCheckpointRequest {
             kind: LoopCheckpointKind::BeforeSideEffect,
             state_ref: state_ref.clone(),
+            gate_ref: None,
         })
         .await
         .expect("checkpoint should accept the staged state_ref");
@@ -3974,6 +3982,7 @@ async fn text_only_host_routes_capability_invocation_through_host_runtime() {
         RuntimeCapabilityCompleted {
             capability_id: capability_id.clone(),
             output: json!({"echoed": true}),
+            display_preview: None,
             usage: ResourceUsage::default(),
         },
     )));
@@ -4185,6 +4194,7 @@ async fn text_only_host_uses_fresh_execution_context_per_capability_invocation()
             RuntimeCapabilityCompleted {
                 capability_id: capability_id.clone(),
                 output,
+                display_preview: None,
                 usage: ResourceUsage::default(),
             },
         )));
@@ -4387,10 +4397,7 @@ async fn text_only_host_sanitizes_runtime_failure_message_before_driver_output()
     let CapabilityOutcome::Failed(failure) = outcome else {
         panic!("expected failed capability outcome");
     };
-    assert_eq!(
-        failure.safe_summary,
-        "capability invocation could not safely continue"
-    );
+    assert_eq!(failure.safe_summary, "capability invocation failed");
 }
 
 #[tokio::test]
@@ -4418,6 +4425,7 @@ async fn text_only_host_maps_runtime_suspension_and_process_outcomes() {
         capability_id: auth_id.clone(),
         reason: RuntimeBlockedReason::AuthRequired,
         required_secrets: vec![SecretHandle::new("api_key").unwrap()],
+        credential_requirements: Vec::new(),
     }));
     runtime.push_outcome(RuntimeCapabilityOutcome::ResourceBlocked(
         RuntimeResourceGate {
@@ -4500,7 +4508,11 @@ async fn text_only_host_maps_runtime_suspension_and_process_outcomes() {
     ));
     assert!(matches!(
         &outcomes[1],
-        CapabilityOutcome::AuthRequired { gate_ref, safe_summary }
+        CapabilityOutcome::AuthRequired {
+            gate_ref,
+            safe_summary,
+            ..
+        }
             if gate_ref.as_str().starts_with("gate:auth-")
                 && safe_summary == "capability requires authentication"
     ));
@@ -4674,6 +4686,7 @@ async fn text_only_host_batch_stops_on_first_suspension_before_later_invocations
         RuntimeCapabilityCompleted {
             capability_id: echo_id.clone(),
             output: json!({"should_not_run": true}),
+            display_preview: None,
             usage: ResourceUsage::default(),
         },
     )));
@@ -4861,6 +4874,7 @@ async fn text_only_host_waits_for_concurrent_duplicate_invocation_result() {
             RuntimeCapabilityCompleted {
                 capability_id: capability_id.clone(),
                 output,
+                display_preview: None,
                 usage: ResourceUsage::default(),
             },
         )));
@@ -4928,6 +4942,7 @@ async fn text_only_host_bounds_completed_dispatch_records() {
             RuntimeCapabilityCompleted {
                 capability_id: capability_id.clone(),
                 output: json!({"call": index}),
+                display_preview: None,
                 usage: ResourceUsage::default(),
             },
         )));
@@ -4939,6 +4954,7 @@ async fn text_only_host_bounds_completed_dispatch_records() {
         RuntimeCapabilityCompleted {
             capability_id: capability_id.clone(),
             output: json!({"call": "retried-after-eviction"}),
+            display_preview: None,
             usage: ResourceUsage::default(),
         },
     )));
@@ -5040,6 +5056,7 @@ async fn text_only_host_does_not_reinvoke_runtime_after_result_write_failure_ret
         RuntimeCapabilityCompleted {
             capability_id: capability_id.clone(),
             output: json!({"write": "fails"}),
+            display_preview: None,
             usage: ResourceUsage::default(),
         },
     )));
@@ -5047,6 +5064,7 @@ async fn text_only_host_does_not_reinvoke_runtime_after_result_write_failure_ret
         RuntimeCapabilityCompleted {
             capability_id: capability_id.clone(),
             output: json!({"duplicate": true}),
+            display_preview: None,
             usage: ResourceUsage::default(),
         },
     )));
@@ -5112,6 +5130,7 @@ async fn text_only_host_rejects_runtime_outcome_for_different_capability() {
         RuntimeCapabilityCompleted {
             capability_id: returned_id,
             output: json!({"wrong": true}),
+            display_preview: None,
             usage: ResourceUsage::default(),
         },
     )));
@@ -5170,6 +5189,7 @@ async fn text_only_host_rejects_previous_surface_after_refetch() {
         RuntimeCapabilityCompleted {
             capability_id: first_id.clone(),
             output: json!({"stale": true}),
+            display_preview: None,
             usage: ResourceUsage::default(),
         },
     )));
@@ -5398,6 +5418,7 @@ async fn text_only_host_allows_retry_after_missing_capability_input_is_staged() 
         RuntimeCapabilityCompleted {
             capability_id: capability_id.clone(),
             output: json!({"retried": true}),
+            display_preview: None,
             usage: ResourceUsage::default(),
         },
     )));
@@ -5790,11 +5811,7 @@ impl LoopCapabilityInputResolver for InMemoryCapabilityIo {
 impl LoopCapabilityResultWriter for InMemoryCapabilityIo {
     async fn write_capability_result(
         &self,
-        run_context: &LoopRunContext,
-        _input_ref: &CapabilityInputRef,
-        _invocation_id: InvocationId,
-        capability_id: &CapabilityId,
-        output: Value,
+        write: CapabilityResultWrite<'_>,
     ) -> Result<LoopResultRef, AgentLoopHostError> {
         let mut remaining_failures = self.fail_result_writes_remaining.lock().unwrap();
         if *remaining_failures > 0 {
@@ -5808,8 +5825,12 @@ impl LoopCapabilityResultWriter for InMemoryCapabilityIo {
         self.results
             .lock()
             .unwrap()
-            .push((capability_id.clone(), output));
-        let result_ref = format!("result:{}-{}", run_context.run_id, capability_id.as_str());
+            .push((write.capability_id.clone(), write.output));
+        let result_ref = format!(
+            "result:{}-{}",
+            write.run_context.run_id,
+            write.capability_id.as_str()
+        );
         self.result_refs.lock().unwrap().push(result_ref.clone());
         LoopResultRef::new(result_ref).map_err(|_| {
             AgentLoopHostError::new(
@@ -6345,6 +6366,7 @@ impl AgentLoopDriver for ApprovalBlockThenFinalReplyDriver {
         Ok(LoopExit::Blocked(LoopBlocked {
             kind: LoopBlockedKind::Approval,
             gate_ref: LoopGateRef::new("gate:approval-resume-e2e").unwrap(),
+            credential_requirements: Vec::new(),
             checkpoint_id: ironclaw_turns::TurnCheckpointId::new(),
             state_ref: LoopCheckpointStateRef::new("checkpoint:approval-resume-state").unwrap(),
             exit_id: LoopExitId::new("exit:approval-resume-blocked").unwrap(),
@@ -6659,6 +6681,7 @@ impl HostFixture {
             received_at: Utc::now(),
             checkpoint_id: None,
             gate_ref: None,
+            credential_requirements: Vec::new(),
             failure: None,
             event_cursor: EventCursor(1),
         };

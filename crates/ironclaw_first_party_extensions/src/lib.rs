@@ -8,6 +8,7 @@
 pub mod coding;
 mod gsuite;
 pub mod skills;
+pub mod web_access;
 
 pub use gsuite::{
     CALENDAR_ADD_ATTENDEES_CAPABILITY_ID, CALENDAR_CREATE_EVENT_CAPABILITY_ID,
@@ -20,8 +21,14 @@ pub use gsuite::{
     GMAIL_SEND_MESSAGE_CAPABILITY_ID, GMAIL_TRASH_MESSAGE_CAPABILITY_ID, GSUITE_OUTPUT_BYTES_LIMIT,
     GSUITE_REQUEST_BODY_LIMIT, GSUITE_RESPONSE_BODY_LIMIT, GSUITE_TIMEOUT_MS, GoogleCredential,
     GoogleCredentialError, GoogleCredentialResolver, GsuiteCapabilityOperation,
-    GsuiteCapabilitySpec, GsuiteCredentialDispatchReason, GsuiteDispatchError,
+    GsuiteCapabilitySpec, GsuiteCredentialDispatchReason, GsuiteCredentialStageError,
+    GsuiteCredentialStageRequest, GsuiteCredentialStager, GsuiteDispatchError,
     GsuiteDispatchRequest, GsuiteDispatchResult, GsuiteExecutor, GsuitePackageSpec,
     calendar_package_spec, find_gsuite_capability, gmail_package_spec, google_api_network_policy,
     google_provider_id, gsuite_package_specs, gsuite_resource_profile,
+};
+pub use web_access::{
+    EXA_MCP_HOST, NETWORK_EGRESS_LIMIT, WEB_ACCESS_EXTENSION_ID, WEB_GET_CONTENT_CAPABILITY_ID,
+    WEB_SEARCH_CAPABILITY_ID, WebAccessDispatchError, WebAccessDispatchRequest,
+    WebAccessDispatchResult, WebAccessExecutor,
 };

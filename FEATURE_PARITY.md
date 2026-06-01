@@ -310,7 +310,7 @@ Trace Commons issuer/TenantCtx note: the server-side `zmanian/tracedao-server` s
 | Post-compaction context injection | ✅ | ❌ | Workspace context as system event |
 | Compaction start/end notices | ✅ | ❌ | Opt-in lifecycle notices during compaction |
 | Custom system prompts | ✅ | ✅ | Template variables, safety guardrails |
-| Skills (modular capabilities) | ✅ | ✅ | Prompt-based skills with trust gating, attenuation, activation criteria, catalog, selector |
+| Skills (modular capabilities) | ✅ | ✅ | Prompt-based skills with trust gating, attenuation, activation criteria, catalog, selector; Reborn local-dev now uses catalog/list-first model-selected activation before loading full skill context |
 | Skill Workshop plugin | ✅ | ❌ | Captures reusable workflow corrections as pending or auto-applied workspace skills, threshold-based reviewer |
 | Grouped skill directories | ✅ | ✅ | `skills/<group>/<skill>/SKILL.md` discovery |
 | Skill installer metadata | ✅ | ❌ | One-click install recipes (npm/pip), API key entry, source metadata |
@@ -336,6 +336,8 @@ Trace Commons issuer/TenantCtx note: the server-side `zmanian/tracedao-server` s
 | Tool-level streaming | ✅ | ❌ | |
 | Z.AI tool_stream | ✅ | ❌ | Real-time tool call streaming |
 | Plugin tools | ✅ | ✅ | WASM tools |
+| Hosted MCP extensions | ✅ | 🚧 | Reborn composes host-mediated MCP runtime and bundles the current Notion MCP supported tool set; dynamic schema discovery/OAuth setup parity still pending |
+| NEAR AI MCP extension | ✅ | 🚧 | Host-bundled Reborn MCP extension exposes `nearai.search` via host-mediated HTTP and `llm_nearai_api_key`; this is a static NEAR adapter, while the generic product-auth-to-MCP staged credential bridge remains tracked by #4176 and dynamic MCP tool discovery remains pending |
 | Tool policies (allow/deny) | ✅ | ✅ | |
 | Exec approvals (`/approve`) | ✅ | ✅ | TUI approval overlay |
 | Tool inventory cache | ✅ | ❌ | Coalesced effective-tool inventory cache with channel-registry invalidation |
@@ -348,6 +350,7 @@ Trace Commons issuer/TenantCtx note: the server-side `zmanian/tracedao-server` s
 | Stuck loop detection | ✅ | ❌ | Exponential backoff on stuck agent loops; unknown-tool guard default-on |
 | llms.txt discovery | ✅ | ❌ | Auto-discover site metadata |
 | Multiple images per tool call | ✅ | ❌ | Single tool call, multiple images |
+| Web search extension | ✅ | 🚧 | Host-bundled `web-access` extension provides no-config Exa MCP search and saved-result content retrieval; Brave backend and generic fetch parity still pending |
 | URL allowlist (web_search/fetch) | ✅ | ❌ | Restrict web tool targets |
 | suppressToolErrors config | ✅ | ❌ | Hide tool errors from user |
 | Intent-first tool display | ✅ | ❌ | Details and exec summaries |

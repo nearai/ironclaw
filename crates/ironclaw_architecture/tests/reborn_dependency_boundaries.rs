@@ -1184,7 +1184,8 @@ fn reborn_product_auth_contract_stays_reborn_native() {
         &forbidden,
         &mut violations,
     );
-    collect_forbidden_reborn_auth_file_uses(
+    collect_forbidden_reborn_auth_path_uses(
+        &root.join("crates/ironclaw_reborn_composition/src/product_auth_serve"),
         &root.join("crates/ironclaw_reborn_composition/src/product_auth_serve.rs"),
         &root,
         &forbidden,
@@ -1884,6 +1885,53 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             ],
         },
         BoundaryRule {
+            // Trigger core owns source evaluation and trigger-domain state.
+            // Durable storage, poller lifecycle, capability registration,
+            // product adapters, and outbound delivery are wired by later
+            // owners, not by reaching upward from this crate.
+            crate_name: "ironclaw_triggers",
+            forbidden: vec![
+                "ironclaw",
+                "ironclaw_authorization",
+                "ironclaw_approvals",
+                "ironclaw_capabilities",
+                "ironclaw_dispatcher",
+                "ironclaw_engine",
+                "ironclaw_events",
+                "ironclaw_extensions",
+                "ironclaw_filesystem",
+                "ironclaw_gateway",
+                "ironclaw_host_runtime",
+                "ironclaw_mcp",
+                "ironclaw_memory",
+                "ironclaw_network",
+                "ironclaw_outbound",
+                "ironclaw_processes",
+                "ironclaw_product_adapter_registry",
+                "ironclaw_product_adapters",
+                "ironclaw_product_workflow",
+                "ironclaw_product_workflow_storage",
+                "ironclaw_reborn",
+                "ironclaw_reborn_cli",
+                "ironclaw_reborn_composition",
+                "ironclaw_reborn_config",
+                "ironclaw_reborn_event_store",
+                "ironclaw_resources",
+                "ironclaw_run_state",
+                "ironclaw_runtime_policy",
+                "ironclaw_safety",
+                "ironclaw_scripts",
+                "ironclaw_secrets",
+                "ironclaw_skills",
+                "ironclaw_threads",
+                "ironclaw_trust",
+                "ironclaw_tui",
+                "ironclaw_wasm",
+                "ironclaw_wasm_product_adapters",
+                "ironclaw_webui_v2",
+            ],
+        },
+        BoundaryRule {
             crate_name: "ironclaw_wasm_product_adapters",
             forbidden: vec![
                 "ironclaw",
@@ -2424,6 +2472,20 @@ fn collect_forbidden_uses(
             }
         }
     }
+}
+
+fn collect_forbidden_reborn_auth_path_uses(
+    module_dir: &std::path::Path,
+    legacy_file: &std::path::Path,
+    root: &std::path::Path,
+    forbidden: &[ForbiddenUse],
+    violations: &mut Vec<String>,
+) {
+    if module_dir.is_dir() {
+        collect_forbidden_uses(module_dir, root, forbidden, violations);
+        return;
+    }
+    collect_forbidden_reborn_auth_file_uses(legacy_file, root, forbidden, violations);
 }
 
 fn collect_forbidden_reborn_auth_file_uses(
