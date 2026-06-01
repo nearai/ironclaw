@@ -1929,6 +1929,7 @@ impl Inner {
             let now = Utc::now();
             record.status = TurnStatus::Queued;
             record.gate_ref = None;
+            record.credential_requirements = Vec::new();
             record.source_binding_ref = request.source_binding_ref.clone();
             record.reply_target_binding_ref = request.reply_target_binding_ref.clone();
             record.event_cursor = self.next_cursor();
@@ -2231,6 +2232,7 @@ impl Inner {
         record.status = reason.status();
         record.checkpoint_id = Some(checkpoint_id);
         record.gate_ref = Some(reason.gate_ref().clone());
+        record.credential_requirements = reason.credential_requirements().to_vec();
         record.runner_id = None;
         record.lease_token = None;
         record.lease_expires_at = None;

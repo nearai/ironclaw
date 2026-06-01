@@ -78,17 +78,17 @@ pub(super) async fn abandon_manual_token_after_submit_failure(
     {
         Ok(Ok(_)) => {}
         Ok(Err(cleanup_error)) => {
-            tracing::debug!(
+            tracing::warn!(
                 error_code = ?submit_error_code,
                 cleanup_error_code = ?cleanup_error.code,
-                "manual-token submit failed and interaction cleanup failed"
+                "manual-token submit failed and interaction cleanup failed — interaction may be orphaned until TTL"
             );
         }
         Err(_) => {
-            tracing::debug!(
+            tracing::warn!(
                 error_code = ?submit_error_code,
                 cleanup_error_code = ?AuthErrorCode::BackendUnavailable,
-                "manual-token submit failed and interaction cleanup timed out"
+                "manual-token submit failed and interaction cleanup timed out — interaction may be orphaned until TTL"
             );
         }
     }
@@ -176,10 +176,21 @@ pub(super) async fn manual_token_secret_submit_handler(
     let scope =
         scope_from_authenticated_caller_parts_requiring_invocation(&caller, &request.scope)?;
     let interaction_id = parse_interaction_id(&request.interaction_id)?;
-    let token = request
-        .token
-        .into_validated()
-        .map_err(|_| ProductAuthRouteFailure::invalid_request())?;
+    // Validate the token before any async work. On validation failure, abandon
+    // the interaction so it does not remain active until its TTL expires.
+    let token = match request.token.into_validated() {
+        Ok(t) => t,
+        Err(_) => {
+            abandon_manual_token_after_submit_failure(
+                &state,
+                &scope,
+                interaction_id,
+                AuthErrorCode::InvalidRequest,
+            )
+            .await;
+            return Err(ProductAuthRouteFailure::invalid_request());
+        }
+    };
 
     let submitted =
         submit_manual_token_with_abandon(&state, &scope, interaction_id, token.into_secret())
