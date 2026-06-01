@@ -51,6 +51,7 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::identifiers::SummaryArtifactId;
+use crate::title::derive_thread_title;
 use crate::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
     AppendAssistantDraftRequest, AppendCapabilityDisplayPreviewRequest,
@@ -63,7 +64,7 @@ use crate::{
     SessionThreadService, SummaryArtifact, SummaryModelContextPolicy, ThreadHistory,
     ThreadHistoryRequest, ThreadMessageId, ThreadMessageRange, ThreadMessageRangeRequest,
     ThreadMessageRecord, ThreadScope, ToolResultReferenceEnvelope, UpdateAssistantDraftRequest,
-    UpdateToolResultReferenceRequest, derive_title_from_message,
+    UpdateToolResultReferenceRequest,
 };
 use message_sequence_index::MessageSequenceIndexStore;
 
@@ -1462,11 +1463,7 @@ where
             for ((idx, thread_id), msgs_result) in needs_title.into_iter().zip(title_results) {
                 match msgs_result {
                     Ok(messages) => {
-                        if let Some(first_user) =
-                            messages.iter().find(|m| m.kind == MessageKind::User)
-                            && let Some(content) = first_user.content.as_deref()
-                            && let Some(title) = derive_title_from_message(content)
-                        {
+                        if let Some(title) = derive_thread_title(&messages) {
                             page[idx].title = Some(title);
                         }
                     }

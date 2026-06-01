@@ -20,7 +20,11 @@ mod title;
 mod tool_result_reference;
 
 pub use filesystem_service::FilesystemSessionThreadService;
-pub use title::derive_title_from_message;
+// `title::derive_thread_title` is deliberately NOT re-exported here —
+// it is an internal helper consumed only by the two backend impls in
+// this crate, and keeping it off the public surface avoids committing
+// to it via semver. Sibling modules import directly through
+// `crate::title::derive_thread_title`.
 
 pub use capability_display_preview::{
     CapabilityDisplayPreviewEnvelope, CapabilityDisplayPreviewEnvelopeInput,

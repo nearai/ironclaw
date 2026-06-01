@@ -9,6 +9,7 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use crate::identifiers::SummaryArtifactId;
+use crate::title::derive_thread_title;
 use crate::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
     AppendAssistantDraftRequest, AppendCapabilityDisplayPreviewRequest,
@@ -20,7 +21,7 @@ use crate::{
     SessionThreadRecord, SessionThreadService, SummaryArtifact, SummaryModelContextPolicy,
     ThreadHistory, ThreadHistoryRequest, ThreadMessageId, ThreadMessageRange,
     ThreadMessageRangeRequest, ThreadMessageRecord, ThreadScope, ToolResultReferenceEnvelope,
-    UpdateAssistantDraftRequest, UpdateToolResultReferenceRequest, derive_title_from_message,
+    UpdateAssistantDraftRequest, UpdateToolResultReferenceRequest,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -648,10 +649,7 @@ impl SessionThreadService for InMemorySessionThreadService {
             .map(|stored| {
                 let mut record = stored.record.clone();
                 if record.title.is_none()
-                    && let Some(first_user) =
-                        stored.messages.iter().find(|m| m.kind == MessageKind::User)
-                    && let Some(content) = first_user.content.as_deref()
-                    && let Some(title) = derive_title_from_message(content)
+                    && let Some(title) = derive_thread_title(&stored.messages)
                 {
                     record.title = Some(title);
                 }
