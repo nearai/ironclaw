@@ -242,11 +242,18 @@ impl TriggerPollerWorker {
             ClaimDueFireOutcome::AlreadyActive {
                 active_fire_slot,
                 active_run_ref,
-            } => TriggerPollerFireOutcome::SkippedAlreadyActive {
-                active_fire_slot: active_fire_slot
-                    .expect("AlreadyActive claim outcome must include active_fire_slot"),
-                active_run_ref,
-            },
+            } => {
+                let Some(active_fire_slot) = active_fire_slot else {
+                    return Err(TriggerError::Backend {
+                        reason: "AlreadyActive claim outcome did not include active_fire_slot"
+                            .to_string(),
+                    });
+                };
+                TriggerPollerFireOutcome::SkippedAlreadyActive {
+                    active_fire_slot,
+                    active_run_ref,
+                }
+            }
             ClaimDueFireOutcome::NotDue { .. } => TriggerPollerFireOutcome::SkippedNotDue,
             ClaimDueFireOutcome::NotFound => TriggerPollerFireOutcome::SkippedNotFound,
         };
