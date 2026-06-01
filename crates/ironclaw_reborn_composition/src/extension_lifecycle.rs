@@ -29,14 +29,13 @@ pub(crate) use active_publication::ActiveExtensionPublisher;
 #[cfg(test)]
 use active_publication::extension_trust_policy_input;
 
-// This port is deliberately scoped to LocalSingleUser composition. The
-// lifecycle service models the installed extension set, while active_registry
-// is the model-visible capability surface read by host runtime dispatch.
-// install/remove keep the lifecycle set durable; activate/remove are the only
-// local-dev writers that should mirror lifecycle-managed packages into or out
-// of active_registry. Production and multi-tenant reuse require scoped storage
-// and registry ownership first; tracked in #4091.
-pub(crate) struct RebornLocalExtensionManagementPort {
+// Host-composed extension lifecycle management. The lifecycle service models
+// the installed extension set, while active_extensions is the model-visible
+// capability and trust-policy publisher read by host runtime dispatch. The
+// composition root owns the filesystem/store scope it passes here: local-dev
+// uses its local root, and production profiles use durable database-backed root
+// filesystems.
+pub(crate) struct RebornExtensionManagementPort {
     filesystem: Arc<dyn RootFilesystem>,
     catalog: AvailableExtensionCatalog,
     installation_store: Arc<dyn ExtensionInstallationStore>,
@@ -109,7 +108,7 @@ pub(crate) async fn restore_extension_lifecycle_state(
     Ok(())
 }
 
-impl RebornLocalExtensionManagementPort {
+impl RebornExtensionManagementPort {
     pub(crate) fn new(
         filesystem: Arc<dyn RootFilesystem>,
         catalog: AvailableExtensionCatalog,
@@ -1580,7 +1579,7 @@ mod tests {
             .insert(package)
             .expect("active package");
         let active_registry = Arc::new(SharedExtensionRegistry::new(active_registry_initial));
-        let port = RebornLocalExtensionManagementPort::new(
+        let port = RebornExtensionManagementPort::new(
             Arc::new(filesystem),
             AvailableExtensionCatalog::from_packages(Vec::new()),
             Arc::new(InMemoryExtensionInstallationStore::default()),
@@ -1936,7 +1935,7 @@ mod tests {
     ) -> (
         tempfile::TempDir,
         std::path::PathBuf,
-        Arc<RebornLocalExtensionManagementPort>,
+        Arc<RebornExtensionManagementPort>,
         Arc<SharedExtensionRegistry>,
         Arc<InMemoryExtensionInstallationStore>,
     ) {
@@ -1960,7 +1959,7 @@ mod tests {
     ) -> (
         tempfile::TempDir,
         std::path::PathBuf,
-        Arc<RebornLocalExtensionManagementPort>,
+        Arc<RebornExtensionManagementPort>,
         Arc<SharedExtensionRegistry>,
         Arc<InMemoryExtensionInstallationStore>,
         Arc<HostTrustPolicy>,
@@ -1987,7 +1986,7 @@ mod tests {
         let active_registry = Arc::new(SharedExtensionRegistry::new(ExtensionRegistry::new()));
         let installation_store = Arc::new(InMemoryExtensionInstallationStore::default());
         let trust_policy = test_extension_trust_policy();
-        let extension_management = Arc::new(RebornLocalExtensionManagementPort::new(
+        let extension_management = Arc::new(RebornExtensionManagementPort::new(
             root_filesystem,
             catalog,
             installation_store.clone(),
@@ -2048,7 +2047,7 @@ mod tests {
         ));
         let active_registry = Arc::new(SharedExtensionRegistry::new(ExtensionRegistry::new()));
         let installation_store = Arc::new(InMemoryExtensionInstallationStore::default());
-        let extension_management = Arc::new(RebornLocalExtensionManagementPort::new(
+        let extension_management = Arc::new(RebornExtensionManagementPort::new(
             root_filesystem,
             catalog,
             installation_store.clone(),
@@ -2073,7 +2072,7 @@ mod tests {
         initial_active_registry: ExtensionRegistry,
     ) -> (
         tempfile::TempDir,
-        RebornLocalExtensionManagementPort,
+        RebornExtensionManagementPort,
         Arc<SharedExtensionRegistry>,
         Arc<DeleteInstallationFailingStore>,
         Arc<HostTrustPolicy>,
@@ -2086,7 +2085,7 @@ mod tests {
 
     fn extension_port_with_delete_manifest_failing_store() -> (
         tempfile::TempDir,
-        RebornLocalExtensionManagementPort,
+        RebornExtensionManagementPort,
         Arc<SharedExtensionRegistry>,
         Arc<DeleteInstallationFailingStore>,
         Arc<HostTrustPolicy>,
@@ -2102,7 +2101,7 @@ mod tests {
         failing_store: DeleteInstallationFailingStore,
     ) -> (
         tempfile::TempDir,
-        RebornLocalExtensionManagementPort,
+        RebornExtensionManagementPort,
         Arc<SharedExtensionRegistry>,
         Arc<DeleteInstallationFailingStore>,
         Arc<HostTrustPolicy>,
@@ -2129,7 +2128,7 @@ mod tests {
         let trust_policy = test_extension_trust_policy();
         let failing_store = Arc::new(failing_store);
         let installation_store: Arc<dyn ExtensionInstallationStore> = failing_store.clone();
-        let port = RebornLocalExtensionManagementPort::new(
+        let port = RebornExtensionManagementPort::new(
             root_filesystem,
             AvailableExtensionCatalog::from_packages(vec![fixture_extension_package()]),
             installation_store,
@@ -2146,7 +2145,7 @@ mod tests {
 
     fn extension_port_with_file_delete_failing_filesystem() -> (
         tempfile::TempDir,
-        RebornLocalExtensionManagementPort,
+        RebornExtensionManagementPort,
         Arc<SharedExtensionRegistry>,
         Arc<InMemoryExtensionInstallationStore>,
         Arc<HostTrustPolicy>,
@@ -2175,7 +2174,7 @@ mod tests {
         let installation_store = Arc::new(InMemoryExtensionInstallationStore::default());
         let extension_installation_store: Arc<dyn ExtensionInstallationStore> =
             installation_store.clone();
-        let port = RebornLocalExtensionManagementPort::new(
+        let port = RebornExtensionManagementPort::new(
             root_filesystem,
             AvailableExtensionCatalog::from_packages(vec![fixture_extension_package()]),
             extension_installation_store,

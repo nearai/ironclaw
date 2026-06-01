@@ -16,7 +16,7 @@ use ironclaw_skills::{
     remove_skill, search_skills,
 };
 
-use crate::extension_lifecycle::RebornLocalExtensionManagementPort;
+use crate::extension_lifecycle::RebornExtensionManagementPort;
 
 const SKILL_SEARCH_RESULT_LIMIT: usize = 50;
 
@@ -167,7 +167,7 @@ fn invalid_skill_context(error: impl std::fmt::Display) -> RebornLocalSkillManag
 #[derive(Clone)]
 pub(crate) struct RebornLocalLifecycleFacade {
     skill_management: Arc<RebornLocalSkillManagementPort>,
-    extension_management: Option<Arc<RebornLocalExtensionManagementPort>>,
+    extension_management: Option<Arc<RebornExtensionManagementPort>>,
 }
 
 impl RebornLocalLifecycleFacade {
@@ -180,7 +180,7 @@ impl RebornLocalLifecycleFacade {
 
     pub(crate) fn with_extension_management(
         mut self,
-        extension_management: Arc<RebornLocalExtensionManagementPort>,
+        extension_management: Arc<RebornExtensionManagementPort>,
     ) -> Self {
         self.extension_management = Some(extension_management);
         self

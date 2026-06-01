@@ -96,8 +96,7 @@ use crate::{
     },
     extension_installation_store::FilesystemExtensionInstallationStore,
     extension_lifecycle::{
-        ActiveExtensionPublisher, RebornLocalExtensionManagementPort,
-        restore_extension_lifecycle_state,
+        ActiveExtensionPublisher, RebornExtensionManagementPort, restore_extension_lifecycle_state,
     },
     extension_lifecycle_capabilities::{
         extend_builtin_first_party_package, insert_handlers as insert_extension_lifecycle_handlers,
@@ -311,10 +310,11 @@ pub(crate) struct RebornLocalRuntimeServices {
     pub(crate) loop_checkpoint_store: Arc<dyn LoopCheckpointStore>,
     pub(crate) thread_service: Arc<dyn SessionThreadService>,
     pub(crate) skill_management: Arc<RebornLocalSkillManagementPort>,
-    // LocalSingleUser-only for now. Production and multi-tenant lifecycle
-    // wiring need scoped storage/registry ownership before this is reused
-    // outside local-dev composition. Tracked in #4091.
-    pub(crate) extension_management: Option<Arc<RebornLocalExtensionManagementPort>>,
+    // Local runtime handle used by the local-dev agent surface to expose
+    // activated extension capabilities. Production profiles wire lifecycle
+    // management directly into host-runtime composition instead of carrying a
+    // local runtime substrate.
+    pub(crate) extension_management: Option<Arc<RebornExtensionManagementPort>>,
     pub(crate) skill_mounts: MountView,
     pub(crate) skill_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
     pub(crate) workspace_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
@@ -515,7 +515,7 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     let local_dev_trust_policy = Arc::new(local_dev_first_party_trust_policy()?);
     let local_dev_trust_invalidation_bus = Arc::new(ironclaw_trust::InvalidationBus::new());
     let mut services = HostRuntimeServices::new(
-        Arc::new(local_dev_builtin_extension_registry()?),
+        Arc::new(extension_lifecycle_builtin_extension_registry()?),
         Arc::clone(&filesystem),
         Arc::clone(&store_graph.resource_governor),
         Arc::new(GrantAuthorizer::new()),
@@ -589,55 +589,15 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
             reason: format!("web access first-party handlers are invalid: {error}"),
         },
     )?;
-    let mut available_extensions = AvailableExtensionCatalog::from_filesystem_root(
-        filesystem.as_ref(),
-        &VirtualPath::new("/system/extensions")?,
-    )
-    .await
-    .map_err(|error| RebornBuildError::InvalidConfig {
-        reason: format!("available extension catalog could not be loaded: {error}"),
-    })?;
-    available_extensions.extend(
-        AvailableExtensionCatalog::from_first_party_assets().map_err(|error| {
-            RebornBuildError::InvalidConfig {
-                reason: format!("first-party extension catalog could not be loaded: {error}"),
-            }
-        })?,
-    );
-    let extension_filesystem: Arc<dyn RootFilesystem> = filesystem.clone();
-    let extension_installation_store: Arc<dyn ExtensionInstallationStore> = Arc::new(
-        FilesystemExtensionInstallationStore::load(extension_filesystem.clone())
-            .await
-            .map_err(|error| RebornBuildError::InvalidConfig {
-                reason: format!("extension installation state could not be loaded: {error}"),
-            })?,
-    );
-    let extension_lifecycle_service = Arc::new(tokio::sync::Mutex::new(
-        ExtensionLifecycleService::new(services.shared_extension_registry().snapshot_owned()),
-    ));
     let active_registry = services.shared_extension_registry();
     let active_extensions = ActiveExtensionPublisher::new(
         active_registry,
         local_dev_trust_policy,
         local_dev_trust_invalidation_bus,
     );
-    restore_extension_lifecycle_state(
-        &available_extensions,
-        &extension_installation_store,
-        &extension_lifecycle_service,
-        &active_extensions,
-    )
-    .await
-    .map_err(|error| RebornBuildError::InvalidConfig {
-        reason: format!("extension lifecycle state could not be restored: {error}"),
-    })?;
-    let extension_management = Arc::new(RebornLocalExtensionManagementPort::new(
-        extension_filesystem,
-        available_extensions,
-        extension_installation_store,
-        extension_lifecycle_service,
-        active_extensions,
-    ));
+    let extension_filesystem: Arc<dyn RootFilesystem> = filesystem.clone();
+    let extension_management =
+        build_extension_management_port(extension_filesystem, active_extensions).await?;
     insert_extension_lifecycle_handlers(
         &mut first_party_registry,
         Arc::clone(&extension_management),
@@ -1152,7 +1112,7 @@ fn builtin_first_party_registry() -> Result<FirstPartyCapabilityRegistry, Reborn
     })
 }
 
-fn local_dev_builtin_extension_registry() -> Result<ExtensionRegistry, RebornBuildError> {
+fn extension_lifecycle_builtin_extension_registry() -> Result<ExtensionRegistry, RebornBuildError> {
     let mut registry = builtin_extension_registry()?;
     let builtin_id =
         ExtensionId::new("builtin").map_err(|error| RebornBuildError::InvalidConfig {
@@ -1165,15 +1125,65 @@ fn local_dev_builtin_extension_registry() -> Result<ExtensionRegistry, RebornBui
         })?;
     let package = extend_builtin_first_party_package(package).map_err(|error| {
         RebornBuildError::InvalidConfig {
-            reason: format!("local-dev extension lifecycle package is invalid: {error}"),
+            reason: format!("extension lifecycle package is invalid: {error}"),
         }
     })?;
     registry
         .insert(package)
         .map_err(|error| RebornBuildError::InvalidConfig {
-            reason: format!("local-dev built-in first-party registry is invalid: {error}"),
+            reason: format!("built-in extension lifecycle registry is invalid: {error}"),
         })?;
     Ok(registry)
+}
+
+async fn build_extension_management_port(
+    filesystem: Arc<dyn RootFilesystem>,
+    active_extensions: ActiveExtensionPublisher,
+) -> Result<Arc<RebornExtensionManagementPort>, RebornBuildError> {
+    let mut available_extensions = AvailableExtensionCatalog::from_filesystem_root(
+        filesystem.as_ref(),
+        &VirtualPath::new("/system/extensions")?,
+    )
+    .await
+    .map_err(|error| RebornBuildError::InvalidConfig {
+        reason: format!("available extension catalog could not be loaded: {error}"),
+    })?;
+    available_extensions.extend(
+        AvailableExtensionCatalog::from_first_party_assets().map_err(|error| {
+            RebornBuildError::InvalidConfig {
+                reason: format!("first-party extension catalog could not be loaded: {error}"),
+            }
+        })?,
+    );
+
+    let extension_installation_store: Arc<dyn ExtensionInstallationStore> = Arc::new(
+        FilesystemExtensionInstallationStore::load(Arc::clone(&filesystem))
+            .await
+            .map_err(|error| RebornBuildError::InvalidConfig {
+                reason: format!("extension installation state could not be loaded: {error}"),
+            })?,
+    );
+    let extension_lifecycle_service = Arc::new(tokio::sync::Mutex::new(
+        ExtensionLifecycleService::new((*active_extensions.snapshot()).clone()),
+    ));
+    restore_extension_lifecycle_state(
+        &available_extensions,
+        &extension_installation_store,
+        &extension_lifecycle_service,
+        &active_extensions,
+    )
+    .await
+    .map_err(|error| RebornBuildError::InvalidConfig {
+        reason: format!("extension lifecycle state could not be restored: {error}"),
+    })?;
+
+    Ok(Arc::new(RebornExtensionManagementPort::new(
+        filesystem,
+        available_extensions,
+        extension_installation_store,
+        extension_lifecycle_service,
+        active_extensions,
+    )))
 }
 
 fn local_dev_first_party_trust_policy() -> Result<HostTrustPolicy, RebornBuildError> {
@@ -1684,11 +1694,19 @@ where
         product_auth_ports,
         google_oauth_config,
     } = context;
+    let mut first_party_registry = builtin_first_party_registry()?;
+    let extension_filesystem: Arc<dyn RootFilesystem> = stores.filesystem.clone();
+    // The production trust-invalidation bus is consumed exclusively by
+    // `ActiveExtensionPublisher`; `HostRuntimeServices` has no equivalent
+    // builder method. Grant revocations from trust-policy changes flow
+    // through the publisher rather than the services layer.
+    let production_trust_policy = Arc::clone(&production_wiring.trust_policy);
+    let production_trust_invalidation_bus = Arc::new(ironclaw_trust::InvalidationBus::new());
     let secret_store: Arc<dyn SecretStore> = stores.secret_credentials.secret_store.clone();
     let mut first_party_registry = builtin_first_party_registry()?;
     let product_auth_filesystem = Arc::clone(&stores.scoped_filesystem);
     let services = HostRuntimeServices::new(
-        Arc::new(builtin_extension_registry()?),
+        Arc::new(extension_lifecycle_builtin_extension_registry()?),
         Arc::clone(&stores.filesystem),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
@@ -1724,10 +1742,24 @@ where
             )
         })
         .transpose()?;
-    let services = apply_production_runtime_process_binding(
+    let mut services = apply_production_runtime_process_binding(
         services,
         production_wiring.runtime_process_binding,
     );
+    let active_registry = services.shared_extension_registry();
+    let active_extensions = ActiveExtensionPublisher::new(
+        active_registry,
+        production_trust_policy,
+        production_trust_invalidation_bus,
+    );
+    let extension_management =
+        build_extension_management_port(extension_filesystem, active_extensions).await?;
+    insert_extension_lifecycle_handlers(&mut first_party_registry, extension_management).map_err(
+        |error| RebornBuildError::InvalidConfig {
+            reason: format!("production extension lifecycle handlers are invalid: {error}"),
+        },
+    )?;
+    services = services.with_first_party_capabilities(Arc::new(first_party_registry));
 
     let turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator> =
         Arc::new(services.turn_coordinator_for_production()?);

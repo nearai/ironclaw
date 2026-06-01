@@ -15,7 +15,7 @@ use ironclaw_host_runtime::{
 use ironclaw_product_workflow::{LifecyclePackageKind, LifecyclePackageRef, ProductWorkflowError};
 use serde::Deserialize;
 
-use crate::extension_lifecycle::RebornLocalExtensionManagementPort;
+use crate::extension_lifecycle::RebornExtensionManagementPort;
 
 pub(crate) const EXTENSION_SEARCH_CAPABILITY_ID: &str = "builtin.extension_search";
 pub(crate) const EXTENSION_INSTALL_CAPABILITY_ID: &str = "builtin.extension_install";
@@ -38,7 +38,7 @@ pub(crate) fn extend_builtin_first_party_package(
 
 pub(crate) fn insert_handlers(
     registry: &mut FirstPartyCapabilityRegistry,
-    extension_management: Arc<RebornLocalExtensionManagementPort>,
+    extension_management: Arc<RebornExtensionManagementPort>,
 ) -> Result<(), HostApiError> {
     let handler = Arc::new(ExtensionLifecycleToolHandler {
         extension_management,
@@ -59,19 +59,19 @@ fn manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
         )?,
         lifecycle_manifest(
             EXTENSION_INSTALL_CAPABILITY_ID,
-            "Install a locally available Reborn extension into durable local-dev lifecycle state",
+            "Install a locally available Reborn extension into durable lifecycle state",
             vec![EffectKind::ReadFilesystem, EffectKind::WriteFilesystem],
             PermissionMode::Ask,
         )?,
         lifecycle_manifest(
             EXTENSION_ACTIVATE_CAPABILITY_ID,
-            "Activate an installed Reborn extension for the model-visible local-dev capability surface",
+            "Activate an installed Reborn extension for the model-visible capability surface",
             vec![EffectKind::ReadFilesystem, EffectKind::WriteFilesystem],
             PermissionMode::Ask,
         )?,
         lifecycle_manifest(
             EXTENSION_REMOVE_CAPABILITY_ID,
-            "Remove an installed Reborn extension from durable local-dev lifecycle state",
+            "Remove an installed Reborn extension from durable lifecycle state",
             vec![EffectKind::ReadFilesystem, EffectKind::WriteFilesystem],
             PermissionMode::Ask,
         )?,
@@ -113,7 +113,7 @@ fn lifecycle_manifest(
 }
 
 struct ExtensionLifecycleToolHandler {
-    extension_management: Arc<RebornLocalExtensionManagementPort>,
+    extension_management: Arc<RebornExtensionManagementPort>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -404,7 +404,7 @@ mod tests {
     }
 
     async fn active_extension_capability_ids(
-        extension_management: &RebornLocalExtensionManagementPort,
+        extension_management: &RebornExtensionManagementPort,
     ) -> Vec<String> {
         extension_management
             .active_model_visible_capabilities()

@@ -173,12 +173,12 @@ fn network_denied_runtime_policy() -> EffectiveRuntimePolicy {
 fn local_dev_builtin_visible_request() -> VisibleCapabilityRequest {
     let grants = CapabilitySet {
         grants: vec![
-            local_dev_grant("builtin.echo", vec![EffectKind::DispatchCapability]),
-            local_dev_grant(
+            test_capability_grant("builtin.echo", vec![EffectKind::DispatchCapability]),
+            test_capability_grant(
                 "builtin.http",
                 vec![EffectKind::DispatchCapability, EffectKind::Network],
             ),
-            local_dev_grant(
+            test_capability_grant(
                 "builtin.http.save",
                 vec![
                     EffectKind::DispatchCapability,
@@ -222,7 +222,7 @@ fn local_dev_builtin_visible_request() -> VisibleCapabilityRequest {
 }
 
 #[cfg(feature = "libsql")]
-fn local_dev_grant(capability: &str, allowed_effects: Vec<EffectKind>) -> CapabilityGrant {
+fn test_capability_grant(capability: &str, allowed_effects: Vec<EffectKind>) -> CapabilityGrant {
     CapabilityGrant {
         id: CapabilityGrantId::new(),
         capability: CapabilityId::new(capability).unwrap(),
