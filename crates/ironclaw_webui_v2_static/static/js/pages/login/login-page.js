@@ -8,12 +8,13 @@ import { html } from "../../lib/html.js";
 import { useT } from "../../lib/i18n.js";
 import { cn } from "../../utils/cn.js";
 import { OAuthProviderButtons } from "./components/oauth-provider-buttons.js";
+import { NearLoginButton } from "./components/near-login-button.js";
 import { useOAuthProviders } from "./hooks/useOAuthProviders.js";
 
 export function LoginPage({ initialToken, error, oauthRedirectAfter = "/v2", onSubmit }) {
   const t = useT();
   const { theme, toggleTheme } = useInterfaceTheme();
-  const oauthProviders = useOAuthProviders();
+  const { oauth: oauthProviders, near: nearEnabled } = useOAuthProviders();
   const {
     formState: { errors, isSubmitting },
     handleSubmit,
@@ -101,10 +102,21 @@ export function LoginPage({ initialToken, error, oauthRedirectAfter = "/v2", onS
           <//>
         </form>
 
-        <${OAuthProviderButtons}
-          providers=${oauthProviders}
-          redirectAfter=${oauthRedirectAfter}
-        />
+        ${(oauthProviders.length > 0 || nearEnabled) &&
+          html`<div className="mt-6 space-y-3">
+            <div
+              className="flex items-center gap-3 text-[11px] uppercase text-[var(--v2-text-faint)]"
+            >
+              <span className="h-px flex-1 bg-[var(--v2-panel-border)]"></span>
+              <span>${t("login.oauthDivider")}</span>
+              <span className="h-px flex-1 bg-[var(--v2-panel-border)]"></span>
+            </div>
+            <${OAuthProviderButtons}
+              providers=${oauthProviders}
+              redirectAfter=${oauthRedirectAfter}
+            />
+            ${nearEnabled && html`<${NearLoginButton} onToken=${onSubmit} />`}
+          </div>`}
       <//>
     </main>
   `;

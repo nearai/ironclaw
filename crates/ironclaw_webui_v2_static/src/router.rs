@@ -160,6 +160,15 @@ fn render_index_with_nonce() -> Response {
     // the CDNs out of `connect-src` cuts off the most direct path
     // for any XSS-injected script to use those origins as
     // exfiltration channels.
+    //
+    // `connect-src` additionally allows the public NEAR RPC endpoints:
+    // the NEAR wallet login button (`pages/login`) lazy-loads
+    // `@hot-labs/near-connect` (script-src) which, once the user opts
+    // in, queries the chain RPC to resolve the connected account. The
+    // two origins are narrow (no wildcard) so this is a bounded
+    // addition, not a blanket CDN connect allowance. The signature
+    // itself is verified server-side; an exfil via the RPC origins
+    // would carry no secret material the server doesn't already gate.
     let csp = format!(
         "default-src 'self'; \
          script-src 'self' 'nonce-{nonce}' https://esm.sh https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; \
@@ -168,7 +177,7 @@ fn render_index_with_nonce() -> Response {
          style-src-elem 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdn.jsdelivr.net; \
          font-src 'self' https://fonts.gstatic.com data:; \
          img-src 'self' data:; \
-         connect-src 'self'; \
+         connect-src 'self' https://rpc.mainnet.near.org https://rpc.testnet.near.org; \
          object-src 'none'; \
          frame-ancestors 'none'; \
          base-uri 'self'",
