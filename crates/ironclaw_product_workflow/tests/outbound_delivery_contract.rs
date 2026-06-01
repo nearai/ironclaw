@@ -772,7 +772,7 @@ async fn requested_outbound_preserves_actor_and_modality_before_rendering() {
 }
 
 #[tokio::test]
-async fn mismatched_payload_kind_rejects_before_policy_or_render() {
+async fn mismatched_payload_kind_marks_authorized_attempt_failed_without_render() {
     let scope = scope();
     let store = InMemoryOutboundStateStore::default();
     let validator = FakeReplyTargetBindingValidator::default();
@@ -801,23 +801,95 @@ async fn mismatched_payload_kind_rejects_before_policy_or_render() {
         },
     )
     .await
-    .expect_err("payload kind mismatch fails before policy");
+    .expect_err("payload kind mismatch fails before render");
 
     assert!(matches!(
         err,
         ironclaw_product_workflow::ProductOutboundDeliveryError::PayloadKindMismatch { .. }
     ));
-    assert_eq!(preferences.load_calls(), 0);
-    assert_eq!(validator.calls(), 0);
+    assert_eq!(preferences.load_calls(), 1);
+    assert_eq!(validator.calls(), 1);
     assert_eq!(resolver.calls(), 0);
     assert!(egress.calls().is_empty());
     assert!(sink.statuses().is_empty());
-    assert!(
-        store
-            .list_delivery_attempts(scope)
-            .await
-            .unwrap()
-            .is_empty()
+    let attempts = store.list_delivery_attempts(scope).await.unwrap();
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(
+        attempts[0].status,
+        ironclaw_outbound::OutboundDeliveryStatus::Failed
+    );
+    assert_eq!(
+        attempts[0].failure_kind,
+        Some(ironclaw_outbound::DeliveryFailureKind::Rejected)
+    );
+}
+
+#[tokio::test]
+async fn target_metadata_failure_with_status_update_failure_preserves_workflow_error() {
+    let scope = scope();
+    let store = StatusFailingOutboundStore::default();
+    let validator = FakeReplyTargetBindingValidator::default();
+    validator.allow(validated_reply_target());
+    store
+        .put_communication_preference(preference_record(&scope))
+        .await
+        .expect("seed preference");
+    let resolver = FakeProductOutboundTargetResolver::default();
+    resolver.fail();
+    let policy = OutboundPolicyService::new(&store, &ACCESS_POLICY, &validator);
+    let adapter = telegram_adapter();
+    let egress = FakeProtocolHttpEgress::new(["api.telegram.org".to_string()]);
+    egress.allow_credential_handle("telegram_bot_token");
+    let sink = FakeOutboundDeliverySink::new();
+
+    let err = prepare_and_render_product_outbound(
+        &policy,
+        &store,
+        &resolver,
+        ProductOutboundDeliveryRequest {
+            delivery: delivery_request(scope.clone()),
+            payload: final_reply_payload(),
+            projection_cursor: ProjectionCursor::new("cursor:outbound:target-fail-status-update")
+                .expect("valid cursor"),
+            adapter: &adapter,
+            egress: &egress,
+            delivery_sink: &sink,
+        },
+    )
+    .await
+    .expect_err("target metadata failure propagates");
+
+    assert!(matches!(
+        err,
+        ironclaw_product_workflow::ProductOutboundDeliveryError::Workflow {
+            status_update_error: Some(ProductOutboundStatusUpdateFailure::Backend),
+            ..
+        }
+    ));
+    assert_eq!(validator.calls(), 1);
+    assert_eq!(resolver.calls(), 1);
+    assert!(egress.calls().is_empty());
+    assert!(sink.statuses().is_empty());
+    let attempts = store.list_delivery_attempts(scope.clone()).await.unwrap();
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(
+        attempts[0].status,
+        ironclaw_outbound::OutboundDeliveryStatus::Pending
+    );
+    let status_update_requests = store.status_update_requests();
+    assert_eq!(status_update_requests.len(), 1);
+    assert_eq!(
+        status_update_requests[0].delivery_id,
+        attempts[0].delivery_id
+    );
+    assert_eq!(status_update_requests[0].scope, scope);
+    assert_eq!(
+        status_update_requests[0].status,
+        ironclaw_outbound::OutboundDeliveryStatus::Failed
+    );
+    assert_eq!(
+        status_update_requests[0].failure_kind,
+        Some(ironclaw_outbound::DeliveryFailureKind::TransportUnavailable)
     );
 }
 
@@ -874,6 +946,64 @@ async fn target_metadata_failure_marks_attempt_failed_without_render() {
     assert_eq!(
         attempts[0].failure_kind,
         Some(ironclaw_outbound::DeliveryFailureKind::TransportUnavailable)
+    );
+}
+
+#[tokio::test]
+async fn keep_alive_payload_marks_authorized_attempt_failed_without_render() {
+    let scope = scope();
+    let store = InMemoryOutboundStateStore::default();
+    let validator = FakeReplyTargetBindingValidator::default();
+    validator.allow(validated_reply_target());
+    let preferences = FakePreferenceRepository::default();
+    let resolver = FakeProductOutboundTargetResolver::default();
+    let policy = configured_policy(&store, &validator);
+    let adapter = telegram_adapter();
+    let egress = FakeProtocolHttpEgress::new(["api.telegram.org".to_string()]);
+    egress.allow_credential_handle("telegram_bot_token");
+    let sink = FakeOutboundDeliverySink::new();
+
+    let requesting_actor = actor();
+    let err = prepare_and_render_product_outbound(
+        &policy,
+        &preferences,
+        &resolver,
+        ProductOutboundDeliveryRequest {
+            delivery: requested_outbound_delivery_request(
+                scope.clone(),
+                requesting_actor,
+                CommunicationModality::Text,
+            ),
+            payload: ProductOutboundPayload::KeepAlive,
+            projection_cursor: ProjectionCursor::new("cursor:outbound:keepalive")
+                .expect("valid cursor"),
+            adapter: &adapter,
+            egress: &egress,
+            delivery_sink: &sink,
+        },
+    )
+    .await
+    .expect_err("keepalive payload is not renderable for a sendable delivery");
+    assert!(matches!(
+        err,
+        ironclaw_product_workflow::ProductOutboundDeliveryError::PayloadKindMismatch {
+            payload_kind: None,
+            ..
+        }
+    ));
+    assert_eq!(validator.calls(), 1);
+    assert_eq!(resolver.calls(), 0);
+    assert!(egress.calls().is_empty());
+    assert!(sink.statuses().is_empty());
+    let attempts = store.list_delivery_attempts(scope).await.unwrap();
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(
+        attempts[0].status,
+        ironclaw_outbound::OutboundDeliveryStatus::Failed
+    );
+    assert_eq!(
+        attempts[0].failure_kind,
+        Some(ironclaw_outbound::DeliveryFailureKind::Rejected)
     );
 }
 

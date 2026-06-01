@@ -2,11 +2,10 @@
 
 use async_trait::async_trait;
 use ironclaw_outbound::{
-    CommunicationDeliveryIntent, CommunicationDeliveryResolutionRequest,
     CommunicationPreferenceRepository, DeliveryFailureKind, OutboundDeliveryAttempt,
     OutboundDeliveryDecision, OutboundDeliveryStatus, OutboundError, OutboundPolicyService,
-    OutboundPushKind, PrepareCommunicationDeliveryRequest, RunNotificationOrigin,
-    UpdateDeliveryStatusRequest, ValidatedReplyTargetBinding,
+    OutboundPushKind, PrepareCommunicationDeliveryRequest, UpdateDeliveryStatusRequest,
+    ValidatedReplyTargetBinding,
 };
 use ironclaw_product_adapters::{
     ExternalActorRef, ExternalConversationRef, OutboundDeliverySink, ProductAdapter,
@@ -14,6 +13,7 @@ use ironclaw_product_adapters::{
     ProductRenderOutcome, ProtocolHttpEgress,
 };
 use thiserror::Error;
+use tracing::warn;
 
 use crate::ProductWorkflowError;
 
@@ -113,32 +113,10 @@ pub async fn prepare_and_render_product_outbound(
     let delivery_kind = OutboundPushKind::from(request.delivery.resolution_request.delivery_kind());
     let payload_kind = outbound_push_kind_for_payload(&request.payload);
 
-    let decision = if is_known_no_delivery_request(&request.delivery.resolution_request) {
-        let decision = outbound_policy
-            .prepare_communication_delivery_attempt(request.delivery, communication_preferences)
-            .await?;
-        let Some(decision) = decision else {
-            return Ok(ProductOutboundDeliveryOutcome::NoDelivery);
-        };
-        if payload_kind != Some(delivery_kind) {
-            return Err(ProductOutboundDeliveryError::PayloadKindMismatch {
-                delivery_kind,
-                payload_kind,
-            });
-        }
-        Some(decision)
-    } else {
-        if payload_kind != Some(delivery_kind) {
-            return Err(ProductOutboundDeliveryError::PayloadKindMismatch {
-                delivery_kind,
-                payload_kind,
-            });
-        }
-        outbound_policy
-            .prepare_communication_delivery_attempt(request.delivery, communication_preferences)
-            .await?
-    };
-    let Some(decision) = decision else {
+    let Some(decision) = outbound_policy
+        .prepare_communication_delivery_attempt(request.delivery, communication_preferences)
+        .await?
+    else {
         return Ok(ProductOutboundDeliveryOutcome::NoDelivery);
     };
 
@@ -148,6 +126,15 @@ pub async fn prepare_and_render_product_outbound(
             return Ok(ProductOutboundDeliveryOutcome::Rejected { attempt });
         }
     };
+
+    if payload_kind != Some(delivery_kind) {
+        let _status_update_error =
+            mark_attempt_failed(outbound_policy, &attempt, DeliveryFailureKind::Rejected).await;
+        return Err(ProductOutboundDeliveryError::PayloadKindMismatch {
+            delivery_kind,
+            payload_kind,
+        });
+    }
 
     let metadata = match target_resolver
         .resolve_product_outbound_target_metadata(&target)
@@ -235,17 +222,6 @@ pub async fn prepare_and_render_product_outbound(
     })
 }
 
-fn is_known_no_delivery_request(request: &CommunicationDeliveryResolutionRequest) -> bool {
-    matches!(
-        &request.intent,
-        CommunicationDeliveryIntent::RunNotification(context)
-            if matches!(
-                &context.origin,
-                RunNotificationOrigin::SystemEvent { .. }
-            )
-    )
-}
-
 fn outbound_push_kind_for_payload(payload: &ProductOutboundPayload) -> Option<OutboundPushKind> {
     match payload {
         ProductOutboundPayload::FinalReply(_) => Some(OutboundPushKind::FinalReply),
@@ -275,7 +251,16 @@ async fn mark_attempt_failed(
         })
         .await
         .err()
-        .map(ProductOutboundStatusUpdateFailure::from)
+        .map(|error| {
+            let status_update_error = ProductOutboundStatusUpdateFailure::from(error);
+            warn!(
+                delivery_id = %attempt.delivery_id,
+                failure_kind = ?failure_kind,
+                status_update_error = ?status_update_error,
+                "failed to mark outbound delivery as failed"
+            );
+            status_update_error
+        })
 }
 
 fn delivery_failure_kind_for_adapter_error(error: &ProductAdapterError) -> DeliveryFailureKind {
