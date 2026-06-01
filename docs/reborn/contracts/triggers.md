@@ -169,6 +169,10 @@ atomically covers due-row read, trigger-state check, active-fire check, and
 claim write, and PR 13 owns the durable PostgreSQL/libSQL transaction/CAS
 implementations plus concurrency proof.
 
+Claim eligibility checks the trigger state before active-fire metadata. A
+`Paused` or `Completed` trigger with stale active-fire metadata is not due; it
+must not be surfaced as an active scheduled fire.
+
 The skip policy is per-trigger, not global. Other triggers may continue to fire on the same tick.
 
 ---

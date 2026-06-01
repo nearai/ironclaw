@@ -631,19 +631,19 @@ impl TriggerRepository for InMemoryTriggerRepository {
             return Ok(ClaimDueFireOutcome::NotFound);
         };
 
-        if record.has_active_fire() {
-            return Ok(ClaimDueFireOutcome::AlreadyActive {
-                active_fire_slot: record.active_fire_slot,
-                active_run_ref: record.active_run_ref,
-            });
-        }
-
         if record.state != TriggerState::Scheduled
             || record.next_run_at != request.fire_slot
             || request.fire_slot > request.now
         {
             return Ok(ClaimDueFireOutcome::NotDue {
                 record: record.clone(),
+            });
+        }
+
+        if record.has_active_fire() {
+            return Ok(ClaimDueFireOutcome::AlreadyActive {
+                active_fire_slot: record.active_fire_slot,
+                active_run_ref: record.active_run_ref,
             });
         }
 

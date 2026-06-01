@@ -1177,6 +1177,21 @@ mod fire_claim_contract {
             .await
             .expect("insert paused");
 
+        let paused_active = {
+            let mut record = sample_record(
+                TriggerId::parse("01J0000000000000000000000B").expect("ulid"),
+                tenant("tenant-paused-active"),
+                fire_slot,
+            );
+            record.state = TriggerState::Paused;
+            record.active_run_ref =
+                Some(TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5f").expect("valid run"));
+            record
+        };
+        repo.upsert_trigger(paused_active.clone())
+            .await
+            .expect("insert paused active");
+
         let completed = {
             let mut record = sample_record(
                 TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZX").expect("ulid"),
@@ -1236,6 +1251,19 @@ mod fire_claim_contract {
             .expect("paused claim")
             .matches_not_due(),
             "paused row must not be claimable"
+        );
+
+        assert!(
+            repo.claim_due_fire(ClaimDueFireRequest {
+                tenant_id: paused_active.tenant_id.clone(),
+                trigger_id: paused_active.trigger_id,
+                fire_slot,
+                now: fire_slot,
+            })
+            .await
+            .expect("paused active claim")
+            .matches_not_due(),
+            "paused row with stale active metadata must not be claimable"
         );
 
         assert!(

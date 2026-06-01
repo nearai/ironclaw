@@ -528,6 +528,13 @@ concurrency invariant:
   invariant.
 - backend parity tests for concurrent claim attempts, accepted/replayed write
   order, retryable failure bookkeeping, and permanent failure bookkeeping.
+- durable claim implementations must preserve PR 12 state-first eligibility:
+  `Paused` or `Completed` rows return not-due even if stale active-fire metadata
+  is still present.
+- replace the PR 12 durable-backend sentinel defaults deliberately. Decide in
+  PR 13 whether the trait keeps explicit temporary backend errors during rollout
+  or moves to compile-time enforcement once PostgreSQL/libSQL implement every
+  method.
 - duplicate replay for the same fire identity returns the original accepted
   message and turn submission; terminal run failure does not mint a second V1
   turn for the same fire slot.
