@@ -1722,7 +1722,8 @@ mod tests {
     };
     use ironclaw_product_adapters::{ProductOutboundPayload, ProductProjectionItem};
     use ironclaw_product_workflow::{
-        ExtensionName, LifecycleReadinessBlocker, RebornServicesErrorCode, RebornServicesErrorKind,
+        LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase, LifecycleProductPayload,
+        LifecycleReadinessBlocker, RebornServicesErrorCode, RebornServicesErrorKind,
         RebornStreamEventsRequest, RebornSubmitTurnResponse, WebUiAuthenticatedCaller,
         WebUiCreateThreadRequest, WebUiResolveGateRequest, WebUiSendMessageRequest,
         WebUiSetupExtensionRequest, approval_gate_ref,
@@ -3376,19 +3377,25 @@ mod tests {
             .api
             .setup_extension(
                 caller,
-                ExtensionName::new("github").expect("valid extension name"),
+                LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github")
+                    .expect("valid package ref"),
                 WebUiSetupExtensionRequest::default(),
             )
             .await
             .expect("setup extension lifecycle projection");
 
+        assert_eq!(setup.package_ref.id.as_str(), "github");
+        assert_eq!(setup.phase, LifecyclePhase::Discovered);
+        assert!(setup.blockers.is_empty());
         assert!(
-            setup.blockers.iter().any(|blocker| matches!(
-                blocker,
-                LifecycleReadinessBlocker::Runtime { ref_id: Some(ref_id) }
-                    if ref_id.as_str() == "extension_lifecycle_local_runtime_unwired"
-            )),
-            "local webui bundle should use the local lifecycle facade projection"
+            matches!(
+                setup.payload,
+                Some(LifecycleProductPayload::ExtensionList { extensions, count })
+                    if count == 1
+                        && extensions.len() == 1
+                        && extensions[0].summary.package_ref.id.as_str() == "github"
+            ),
+            "local webui bundle should use the local lifecycle facade package projection"
         );
         assert!(
             !setup.blockers.iter().any(|blocker| matches!(

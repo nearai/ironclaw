@@ -1,49 +1,55 @@
 // Extensions surface:
-// - `submitExtensionSetup` is the one function that wires to a real v2
-//   endpoint (`POST /api/webchat/v2/extensions/{name}/setup`).
-//   The v2 facade currently returns `status: not_implemented`, which is
-//   surfaced as-is to the caller — see issue #3886 implementation notes
-//   and `ironclaw_webui_v2/CLAUDE.md` "Setup-extension (skeleton)".
-// - Every other function is a TODO stub returning empty data so the
-//   fork's extensions UI renders without hitting any v1 path.
+// - The browser talks only to `/api/webchat/v2/extensions/*` endpoints.
+// - The v2 backend owns the registry/list/install/activate/remove/setup
+//   projection and maps those operations to the extension registry.
 
-import { setupExtension } from "../../../lib/api.js";
+import { apiFetch, setupExtension } from "../../../lib/api.js";
 
 export function fetchExtensions() {
-  return Promise.resolve({ extensions: [], todo: true });
+  return apiFetch("/api/webchat/v2/extensions");
 }
 export function fetchExtensionRegistry() {
-  return Promise.resolve({ entries: [], todo: true });
+  return apiFetch("/api/webchat/v2/extensions/registry");
 }
-export function installExtension(_name, _kind) {
-  return Promise.resolve({ success: false, message: "TODO: requires v2 install endpoint" });
-}
-export function activateExtension(_name) {
-  return Promise.resolve({ success: false, message: "TODO: requires v2 activate endpoint" });
-}
-export function removeExtension(_name) {
-  return Promise.resolve({ success: false, message: "TODO: requires v2 remove endpoint" });
-}
-export function fetchExtensionSetup(_name) {
-  // v2 has no GET counterpart for setup — the configure modal then
-  // renders its "no configuration required" empty branch and submit
-  // becomes a no-op POST that returns `not_implemented`.
-  return Promise.resolve({
-    secrets: [],
-    fields: [],
-    onboarding: null,
-    todo: true,
+export function installExtension(packageRef) {
+  return apiFetch("/api/webchat/v2/extensions/install", {
+    method: "POST",
+    body: JSON.stringify({ package_ref: packageRef }),
   });
 }
-export function submitExtensionSetup(name, secrets, fields) {
-  return setupExtension(name, {
+export function activateExtension(packageRef) {
+  return apiFetch(`/api/webchat/v2/extensions/${encodeURIComponent(packageId(packageRef))}/activate`, {
+    method: "POST",
+  });
+}
+export function removeExtension(packageRef) {
+  return apiFetch(`/api/webchat/v2/extensions/${encodeURIComponent(packageId(packageRef))}/remove`, {
+    method: "POST",
+  });
+}
+export function fetchExtensionSetup(packageRef) {
+  return apiFetch(`/api/webchat/v2/extensions/${encodeURIComponent(packageId(packageRef))}/setup`);
+}
+export function submitExtensionSetup(packageRef, secrets, fields) {
+  return setupExtension(packageId(packageRef), {
     action: "submit",
     payload: { secrets, fields },
   });
 }
-export function fetchPairingRequests(_channel) {
-  return Promise.resolve({ requests: [], todo: true });
+export function fetchPairingRequests() {
+  return Promise.resolve({ requests: [] });
 }
-export function approvePairingCode(_channel, _code) {
-  return Promise.resolve({ success: false, message: "TODO: requires v2 pairing endpoint" });
+export function approvePairingCode() {
+  return Promise.resolve({
+    success: false,
+    message: "Pairing requires a v2 pairing endpoint.",
+  });
+}
+
+function packageId(packageRef) {
+  const id = typeof packageRef === "string" ? packageRef : packageRef?.id;
+  if (!id) {
+    throw new Error("Extension package_ref is required");
+  }
+  return id;
 }

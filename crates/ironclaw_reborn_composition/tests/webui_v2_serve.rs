@@ -20,7 +20,8 @@ use axum::http::{HeaderValue, Method, Request, StatusCode, header};
 use http_body_util::BodyExt;
 use ironclaw_host_api::{AgentId, NetworkMethod, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_product_workflow::{
-    ExtensionName, LifecyclePhase, RebornCancelRunResponse, RebornCreateThreadResponse,
+    LifecyclePackageRef, LifecyclePhase, RebornCancelRunResponse, RebornCreateThreadResponse,
+    RebornExtensionActionResponse, RebornExtensionListResponse, RebornExtensionRegistryResponse,
     RebornGetRunStateRequest, RebornGetRunStateResponse, RebornListThreadsResponse,
     RebornResolveGateResponse, RebornServicesApi, RebornServicesError, RebornServicesErrorCode,
     RebornServicesErrorKind, RebornSetupExtensionResponse, RebornStreamEventsRequest,
@@ -209,19 +210,71 @@ impl RebornServicesApi for StubServices {
         })
     }
 
+    async fn list_extensions(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornExtensionListResponse, RebornServicesError> {
+        Ok(RebornExtensionListResponse {
+            extensions: Vec::new(),
+        })
+    }
+
+    async fn list_extension_registry(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornExtensionRegistryResponse, RebornServicesError> {
+        Ok(RebornExtensionRegistryResponse {
+            entries: Vec::new(),
+        })
+    }
+
+    async fn install_extension(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _package_ref: LifecyclePackageRef,
+    ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
+        Err(unused_services_error())
+    }
+
+    async fn activate_extension(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _package_ref: LifecyclePackageRef,
+    ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
+        Err(unused_services_error())
+    }
+
+    async fn remove_extension(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _package_ref: LifecyclePackageRef,
+    ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
+        Err(unused_services_error())
+    }
+
     async fn setup_extension(
         &self,
         _caller: WebUiAuthenticatedCaller,
-        extension_name: ExtensionName,
+        package_ref: LifecyclePackageRef,
         _request: WebUiSetupExtensionRequest,
     ) -> Result<RebornSetupExtensionResponse, RebornServicesError> {
         Ok(RebornSetupExtensionResponse {
-            extension_name,
+            package_ref,
             phase: LifecyclePhase::UnsupportedOrLegacy,
             blockers: Vec::new(),
-            package_ref: None,
             payload: None,
         })
+    }
+}
+
+fn unused_services_error() -> RebornServicesError {
+    RebornServicesError {
+        code: RebornServicesErrorCode::Internal,
+        kind: RebornServicesErrorKind::Internal,
+        status_code: 500,
+        retryable: false,
+        field: None,
+        validation_code: None,
     }
 }
 
@@ -956,8 +1009,8 @@ async fn setup_extension_returns_lifecycle_projection_via_facade() {
         "setup_extension must not surface legacy status aliases, got: {body}",
     );
     assert!(
-        body.contains("\"extension_name\":\"telegram\""),
-        "setup_extension must echo the path-bound extension name, got: {body}",
+        body.contains("\"package_ref\":{\"kind\":\"extension\",\"id\":\"telegram\"}"),
+        "setup_extension must echo the path-bound package ref, got: {body}",
     );
 }
 
@@ -1087,14 +1140,12 @@ async fn every_webui_v2_descriptor_is_mounted_on_composed_app() {
 
 fn expand_route_pattern(pattern: &str) -> String {
     // Stand-in values for the four path params the v2 descriptors use.
-    // All must satisfy each handler's path-segment validation (handlers
-    // only validate `extension_name` before facade dispatch; the others
-    // pass straight through to the stub services).
+    // All must satisfy each handler's path-segment validation.
     pattern
         .replace("{thread_id}", "thread.fake")
         .replace("{run_id}", "11111111-1111-1111-1111-111111111111")
         .replace("{gate_ref}", "gate.fake")
-        .replace("{extension_name}", "ext_fake")
+        .replace("{package_id}", "ext-fake")
 }
 
 // ─── static SPA mount (`ironclaw_webui_v2_static`) ────────────────────

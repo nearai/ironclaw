@@ -1,16 +1,14 @@
-use ironclaw_common::ExtensionName;
-
 use crate::{
-    LifecyclePackageKind, LifecyclePackageRef, LifecycleProductContext, LifecycleProductFacade,
-    LifecycleProductResponse, LifecycleProductSurfaceContext, ProductWorkflowError,
-    RebornServicesError, RebornServicesErrorCode, RebornSetupExtensionResponse,
-    WebUiAuthenticatedCaller, WebUiSetupExtensionRequest,
+    LifecyclePackageRef, LifecycleProductContext, LifecycleProductFacade, LifecycleProductResponse,
+    LifecycleProductSurfaceContext, ProductWorkflowError, RebornServicesError,
+    RebornServicesErrorCode, RebornSetupExtensionResponse, WebUiAuthenticatedCaller,
+    WebUiSetupExtensionRequest,
 };
 
 pub(super) async fn setup_extension(
     facade: &dyn LifecycleProductFacade,
     caller: WebUiAuthenticatedCaller,
-    extension_name: ExtensionName,
+    package_ref: LifecyclePackageRef,
     _request: WebUiSetupExtensionRequest,
 ) -> Result<RebornSetupExtensionResponse, RebornServicesError> {
     let lifecycle = facade
@@ -21,28 +19,28 @@ pub(super) async fn setup_extension(
                 agent_id: caller.agent_id,
                 project_id: caller.project_id,
             }),
-            LifecyclePackageRef::new(LifecyclePackageKind::Extension, extension_name.as_str())
-                .map_err(map_lifecycle_error)?,
+            package_ref,
         )
         .await
         .map_err(map_lifecycle_error)?;
-    Ok(setup_extension_response(extension_name, lifecycle))
+    setup_extension_response(lifecycle)
 }
 
 fn setup_extension_response(
-    extension_name: ExtensionName,
     lifecycle: LifecycleProductResponse,
-) -> RebornSetupExtensionResponse {
-    RebornSetupExtensionResponse {
-        extension_name,
+) -> Result<RebornSetupExtensionResponse, RebornServicesError> {
+    let package_ref = lifecycle
+        .package_ref
+        .ok_or_else(RebornServicesError::internal_invariant)?;
+    Ok(RebornSetupExtensionResponse {
+        package_ref,
         phase: lifecycle.phase,
         blockers: lifecycle.blockers,
-        package_ref: lifecycle.package_ref,
         payload: lifecycle.payload,
-    }
+    })
 }
 
-fn map_lifecycle_error(error: ProductWorkflowError) -> RebornServicesError {
+pub(super) fn map_lifecycle_error(error: ProductWorkflowError) -> RebornServicesError {
     match error {
         ProductWorkflowError::InvalidBindingRequest { .. }
         | ProductWorkflowError::UnsupportedActionKind { .. } => {

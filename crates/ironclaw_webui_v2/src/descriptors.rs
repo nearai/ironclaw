@@ -21,6 +21,12 @@ pub const WEBUI_V2_ROUTE_STREAM_EVENTS: &str = "webui.v2.stream_events";
 pub const WEBUI_V2_ROUTE_STREAM_EVENTS_WS: &str = "webui.v2.stream_events_ws";
 pub const WEBUI_V2_ROUTE_CANCEL_RUN: &str = "webui.v2.cancel_run";
 pub const WEBUI_V2_ROUTE_RESOLVE_GATE: &str = "webui.v2.resolve_gate";
+pub const WEBUI_V2_ROUTE_LIST_EXTENSIONS: &str = "webui.v2.list_extensions";
+pub const WEBUI_V2_ROUTE_LIST_EXTENSION_REGISTRY: &str = "webui.v2.list_extension_registry";
+pub const WEBUI_V2_ROUTE_INSTALL_EXTENSION: &str = "webui.v2.install_extension";
+pub const WEBUI_V2_ROUTE_ACTIVATE_EXTENSION: &str = "webui.v2.activate_extension";
+pub const WEBUI_V2_ROUTE_REMOVE_EXTENSION: &str = "webui.v2.remove_extension";
+pub const WEBUI_V2_ROUTE_GET_EXTENSION_SETUP: &str = "webui.v2.get_extension_setup";
 pub const WEBUI_V2_ROUTE_SETUP_EXTENSION: &str = "webui.v2.setup_extension";
 
 pub const WEBUI_V2_PATTERN_CREATE_THREAD: &str = "/api/webchat/v2/threads";
@@ -33,8 +39,14 @@ pub const WEBUI_V2_PATTERN_CANCEL_RUN: &str =
     "/api/webchat/v2/threads/{thread_id}/runs/{run_id}/cancel";
 pub const WEBUI_V2_PATTERN_RESOLVE_GATE: &str =
     "/api/webchat/v2/threads/{thread_id}/runs/{run_id}/gates/{gate_ref}/resolve";
-pub const WEBUI_V2_PATTERN_SETUP_EXTENSION: &str =
-    "/api/webchat/v2/extensions/{extension_name}/setup";
+pub const WEBUI_V2_PATTERN_LIST_EXTENSIONS: &str = "/api/webchat/v2/extensions";
+pub const WEBUI_V2_PATTERN_LIST_EXTENSION_REGISTRY: &str = "/api/webchat/v2/extensions/registry";
+pub const WEBUI_V2_PATTERN_INSTALL_EXTENSION: &str = "/api/webchat/v2/extensions/install";
+pub const WEBUI_V2_PATTERN_ACTIVATE_EXTENSION: &str =
+    "/api/webchat/v2/extensions/{package_id}/activate";
+pub const WEBUI_V2_PATTERN_REMOVE_EXTENSION: &str =
+    "/api/webchat/v2/extensions/{package_id}/remove";
+pub const WEBUI_V2_PATTERN_SETUP_EXTENSION: &str = "/api/webchat/v2/extensions/{package_id}/setup";
 
 /// Return the canonical [`IngressRouteDescriptor`] set for the WebChat v2
 /// beta route surface.
@@ -52,6 +64,12 @@ pub fn webui_v2_routes() -> Vec<IngressRouteDescriptor> {
         stream_events_ws_descriptor(),
         cancel_run_descriptor(),
         resolve_gate_descriptor(),
+        list_extensions_descriptor(),
+        list_extension_registry_descriptor(),
+        install_extension_descriptor(),
+        activate_extension_descriptor(),
+        remove_extension_descriptor(),
+        get_extension_setup_descriptor(),
         setup_extension_descriptor(),
     ]
 }
@@ -165,6 +183,90 @@ fn stream_events_ws_descriptor() -> IngressRouteDescriptor {
             stream_rate_limit(),
             AuditTraceClass::StreamingSubscription,
             AllowedEffectPath::ProjectionOnly,
+        ),
+    )
+}
+
+fn list_extensions_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_LIST_EXTENSIONS,
+        NetworkMethod::Get,
+        WEBUI_V2_PATTERN_LIST_EXTENSIONS,
+        read_policy(
+            read_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProjectionOnly,
+            StreamingMode::None,
+        ),
+    )
+}
+
+fn list_extension_registry_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_LIST_EXTENSION_REGISTRY,
+        NetworkMethod::Get,
+        WEBUI_V2_PATTERN_LIST_EXTENSION_REGISTRY,
+        read_policy(
+            read_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProjectionOnly,
+            StreamingMode::None,
+        ),
+    )
+}
+
+fn install_extension_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_INSTALL_EXTENSION,
+        NetworkMethod::Post,
+        WEBUI_V2_PATTERN_INSTALL_EXTENSION,
+        mutation_policy(
+            body_limit_kib(16),
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+        ),
+    )
+}
+
+fn activate_extension_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_ACTIVATE_EXTENSION,
+        NetworkMethod::Post,
+        WEBUI_V2_PATTERN_ACTIVATE_EXTENSION,
+        mutation_policy(
+            body_limit_kib(4),
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+        ),
+    )
+}
+
+fn remove_extension_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_REMOVE_EXTENSION,
+        NetworkMethod::Post,
+        WEBUI_V2_PATTERN_REMOVE_EXTENSION,
+        mutation_policy(
+            body_limit_kib(4),
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+        ),
+    )
+}
+
+fn get_extension_setup_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_GET_EXTENSION_SETUP,
+        NetworkMethod::Get,
+        WEBUI_V2_PATTERN_SETUP_EXTENSION,
+        read_policy(
+            read_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProjectionOnly,
+            StreamingMode::None,
         ),
     )
 }

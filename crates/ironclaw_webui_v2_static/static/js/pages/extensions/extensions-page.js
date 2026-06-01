@@ -31,7 +31,7 @@ export function ExtensionsPage() {
     invalidate,
   } = useExtensions();
 
-  const handleConfigure = React.useCallback((name) => setConfiguring(name), []);
+  const handleConfigure = React.useCallback((extension) => setConfiguring(extension), []);
   const handleCloseModal = React.useCallback(() => setConfiguring(null), []);
   const handleSaved = React.useCallback(() => invalidate(), [invalidate]);
 
@@ -112,7 +112,7 @@ export function ExtensionsPage() {
       ${configuring &&
       html`
         <${ConfigureModal}
-          extensionName=${configuring}
+          extension=${configuring}
           onClose=${handleCloseModal}
           onSaved=${handleSaved}
         />
