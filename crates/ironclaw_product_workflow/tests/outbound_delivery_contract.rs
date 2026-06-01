@@ -21,8 +21,9 @@ use ironclaw_product_adapters::{
     ExternalActorRef, ExternalConversationRef, FakeOutboundDeliverySink, FakeProtocolHttpEgress,
     FinalReplyView, OutboundDeliverySink, ProductAdapter, ProductAdapterCapabilities,
     ProductAdapterError, ProductAdapterId, ProductOutboundEnvelope, ProductOutboundPayload,
-    ProductRenderOutcome, ProductSurfaceKind, ProductSynchronousResponse, ProgressKind,
-    ProgressUpdateView, ProjectionCursor, ProtocolHttpEgress,
+    ProductRenderOutcome, ProductSurfaceKind, ProductSynchronousResponse,
+    ProductWorkflowRejectionKind, ProgressKind, ProgressUpdateView, ProjectionCursor,
+    ProtocolHttpEgress, RedactedString,
 };
 use ironclaw_product_workflow::{
     ProductOutboundDeliveryOutcome, ProductOutboundDeliveryRequest,
@@ -167,7 +168,7 @@ impl CommunicationPreferenceRepository for FakePreferenceRepository {
 #[derive(Default)]
 struct FakeProductOutboundTargetResolver {
     calls: Mutex<Vec<ReplyTargetBindingRef>>,
-    fail: Mutex<bool>,
+    error: Mutex<Option<ProductWorkflowError>>,
 }
 
 impl FakeProductOutboundTargetResolver {
@@ -180,7 +181,13 @@ impl FakeProductOutboundTargetResolver {
     }
 
     fn fail(&self) {
-        *self.fail.lock().expect("target resolver lock") = true;
+        self.fail_with(ProductWorkflowError::Transient {
+            reason: "target metadata unavailable".into(),
+        });
+    }
+
+    fn fail_with(&self, error: ProductWorkflowError) {
+        *self.error.lock().expect("target resolver lock") = Some(error);
     }
 }
 
@@ -194,10 +201,8 @@ impl ProductOutboundTargetResolver for FakeProductOutboundTargetResolver {
             .lock()
             .expect("target resolver lock")
             .push(target.target().clone());
-        if *self.fail.lock().expect("target resolver lock") {
-            return Err(ProductWorkflowError::Transient {
-                reason: "target metadata unavailable".into(),
-            });
+        if let Some(error) = self.error.lock().expect("target resolver lock").clone() {
+            return Err(error);
         }
         Ok(VerifiedProductOutboundTargetMetadata {
             external_conversation_ref: ExternalConversationRef::new(
@@ -426,6 +431,65 @@ impl ProductAdapter for DeferredAdapter {
         _delivery_sink: &dyn OutboundDeliverySink,
     ) -> Result<ProductRenderOutcome, ProductAdapterError> {
         Ok(ProductRenderOutcome::Deferred)
+    }
+}
+
+struct FailingAdapter {
+    adapter_id: ProductAdapterId,
+    installation_id: AdapterInstallationId,
+    error: ProductAdapterError,
+}
+
+impl FailingAdapter {
+    fn new(error: ProductAdapterError) -> Self {
+        Self {
+            adapter_id: ProductAdapterId::new("failing_test").expect("valid adapter id"),
+            installation_id: AdapterInstallationId::new("failing_install").expect("valid install"),
+            error,
+        }
+    }
+}
+
+#[async_trait]
+impl ProductAdapter for FailingAdapter {
+    fn adapter_id(&self) -> &ProductAdapterId {
+        &self.adapter_id
+    }
+
+    fn installation_id(&self) -> &AdapterInstallationId {
+        &self.installation_id
+    }
+
+    fn surface_kind(&self) -> ProductSurfaceKind {
+        ProductSurfaceKind::SynchronousApi
+    }
+
+    fn capabilities(&self) -> &ProductAdapterCapabilities {
+        &SYNC_ADAPTER_CAPABILITIES
+    }
+
+    fn auth_requirement(&self) -> &AuthRequirement {
+        static AUTH_REQUIREMENT: AuthRequirement = AuthRequirement::BearerToken;
+        &AUTH_REQUIREMENT
+    }
+
+    fn parse_inbound(
+        &self,
+        _raw_payload: &[u8],
+        _auth_evidence: &ironclaw_product_adapters::ProtocolAuthEvidence,
+    ) -> Result<ironclaw_product_adapters::ParsedProductInbound, ProductAdapterError> {
+        Err(ProductAdapterError::Internal {
+            detail: RedactedString::new("not used"),
+        })
+    }
+
+    async fn render_outbound(
+        &self,
+        _envelope: ProductOutboundEnvelope,
+        _egress: &dyn ProtocolHttpEgress,
+        _delivery_sink: &dyn OutboundDeliverySink,
+    ) -> Result<ProductRenderOutcome, ProductAdapterError> {
+        Err(self.error.clone())
     }
 }
 
@@ -910,7 +974,10 @@ async fn mismatched_payload_kind_marks_authorized_attempt_failed_without_render(
 
     assert!(matches!(
         err,
-        ironclaw_product_workflow::ProductOutboundDeliveryError::PayloadKindMismatch { .. }
+        ironclaw_product_workflow::ProductOutboundDeliveryError::PayloadKindMismatch {
+            status_update_error: None,
+            ..
+        }
     ));
     assert_eq!(preferences.load_calls(), 1);
     assert_eq!(validator.calls(), 1);
@@ -925,6 +992,74 @@ async fn mismatched_payload_kind_marks_authorized_attempt_failed_without_render(
     );
     assert_eq!(
         attempts[0].failure_kind,
+        Some(ironclaw_outbound::DeliveryFailureKind::Rejected)
+    );
+}
+
+#[tokio::test]
+async fn payload_kind_mismatch_preserves_status_update_failure() {
+    let scope = scope();
+    let store = StatusFailingOutboundStore::default();
+    let validator = FakeReplyTargetBindingValidator::default();
+    validator.allow(validated_reply_target());
+    store
+        .put_communication_preference(preference_record(&scope))
+        .await
+        .expect("seed preference");
+    let resolver = FakeProductOutboundTargetResolver::default();
+    let policy = OutboundPolicyService::new(&store, &ACCESS_POLICY, &validator);
+    let adapter = telegram_adapter();
+    let egress = FakeProtocolHttpEgress::new(["api.telegram.org".to_string()]);
+    egress.allow_credential_handle("telegram_bot_token");
+    let sink = FakeOutboundDeliverySink::new();
+
+    let err = prepare_and_render_product_outbound(
+        &policy,
+        &store,
+        &resolver,
+        ProductOutboundDeliveryRequest {
+            delivery: delivery_request(scope.clone()),
+            payload: progress_payload(),
+            projection_cursor: ProjectionCursor::new("cursor:outbound:mismatch-status-fail")
+                .expect("valid cursor"),
+            adapter: &adapter,
+            egress: &egress,
+            delivery_sink: &sink,
+        },
+    )
+    .await
+    .expect_err("payload kind mismatch preserves status update failure");
+
+    assert!(matches!(
+        err,
+        ironclaw_product_workflow::ProductOutboundDeliveryError::PayloadKindMismatch {
+            status_update_error: Some(ProductOutboundStatusUpdateFailure::Backend),
+            ..
+        }
+    ));
+    assert_eq!(validator.calls(), 1);
+    assert_eq!(resolver.calls(), 0);
+    assert!(egress.calls().is_empty());
+    assert!(sink.statuses().is_empty());
+    let attempts = store.list_delivery_attempts(scope.clone()).await.unwrap();
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(
+        attempts[0].status,
+        ironclaw_outbound::OutboundDeliveryStatus::Pending
+    );
+    let status_update_requests = store.status_update_requests();
+    assert_eq!(status_update_requests.len(), 1);
+    assert_eq!(
+        status_update_requests[0].delivery_id,
+        attempts[0].delivery_id
+    );
+    assert_eq!(status_update_requests[0].scope, scope);
+    assert_eq!(
+        status_update_requests[0].status,
+        ironclaw_outbound::OutboundDeliveryStatus::Failed
+    );
+    assert_eq!(
+        status_update_requests[0].failure_kind,
         Some(ironclaw_outbound::DeliveryFailureKind::Rejected)
     );
 }
@@ -1055,6 +1190,77 @@ async fn target_metadata_failure_marks_attempt_failed_without_render() {
 }
 
 #[tokio::test]
+async fn target_metadata_rejection_errors_mark_attempt_failed_rejected() {
+    let cases = [
+        ProductWorkflowError::BindingAccessDenied,
+        ProductWorkflowError::BindingRequired {
+            reason: "actor binding required".into(),
+        },
+        ProductWorkflowError::UnknownInstallation,
+        ProductWorkflowError::InvalidBindingRequest {
+            reason: "invalid binding".into(),
+        },
+    ];
+
+    for (index, workflow_error) in cases.into_iter().enumerate() {
+        let scope = scope();
+        let store = InMemoryOutboundStateStore::default();
+        let validator = FakeReplyTargetBindingValidator::default();
+        validator.allow(validated_reply_target());
+        let preferences = FakePreferenceRepository::default();
+        seed_preference(&preferences, &scope);
+        let resolver = FakeProductOutboundTargetResolver::default();
+        resolver.fail_with(workflow_error);
+        let policy = configured_policy(&store, &validator);
+        let adapter = telegram_adapter();
+        let egress = FakeProtocolHttpEgress::new(["api.telegram.org".to_string()]);
+        egress.allow_credential_handle("telegram_bot_token");
+        let sink = FakeOutboundDeliverySink::new();
+
+        let err = prepare_and_render_product_outbound(
+            &policy,
+            &preferences,
+            &resolver,
+            ProductOutboundDeliveryRequest {
+                delivery: delivery_request(scope.clone()),
+                payload: final_reply_payload(),
+                projection_cursor: ProjectionCursor::new(format!(
+                    "cursor:outbound:workflow-rejected-{index}"
+                ))
+                .expect("valid cursor"),
+                adapter: &adapter,
+                egress: &egress,
+                delivery_sink: &sink,
+            },
+        )
+        .await
+        .expect_err("target metadata rejection propagates");
+
+        assert!(matches!(
+            err,
+            ironclaw_product_workflow::ProductOutboundDeliveryError::Workflow {
+                status_update_error: None,
+                ..
+            }
+        ));
+        assert_eq!(validator.calls(), 1);
+        assert_eq!(resolver.calls(), 1);
+        assert!(egress.calls().is_empty());
+        assert!(sink.statuses().is_empty());
+        let attempts = store.list_delivery_attempts(scope).await.unwrap();
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(
+            attempts[0].status,
+            ironclaw_outbound::OutboundDeliveryStatus::Failed
+        );
+        assert_eq!(
+            attempts[0].failure_kind,
+            Some(ironclaw_outbound::DeliveryFailureKind::Rejected)
+        );
+    }
+}
+
+#[tokio::test]
 async fn keep_alive_payload_marks_authorized_attempt_failed_without_render() {
     let scope = scope();
     let store = InMemoryOutboundStateStore::default();
@@ -1093,6 +1299,7 @@ async fn keep_alive_payload_marks_authorized_attempt_failed_without_render() {
         err,
         ironclaw_product_workflow::ProductOutboundDeliveryError::PayloadKindMismatch {
             payload_kind: None,
+            status_update_error: None,
             ..
         }
     ));
@@ -1174,6 +1381,83 @@ async fn adapter_render_failure_is_returned_and_marks_attempt_failed() {
         attempts[0].failure_kind,
         Some(ironclaw_outbound::DeliveryFailureKind::TransportUnavailable)
     );
+}
+
+#[tokio::test]
+async fn adapter_non_retryable_errors_mark_attempt_failed_rejected() {
+    let cases = [
+        ProductAdapterError::EgressDenied {
+            reason: RedactedString::new("policy denied"),
+        },
+        ProductAdapterError::EgressUndeclaredHost {
+            host: "api.example.invalid".into(),
+        },
+        ProductAdapterError::InvalidIdentifier {
+            kind: "chat",
+            reason: "not canonical".into(),
+        },
+        ProductAdapterError::WorkflowRejected {
+            kind: ProductWorkflowRejectionKind::InvalidRequest,
+            status_code: 400,
+            retryable: false,
+            reason: RedactedString::new("not retryable"),
+        },
+    ];
+
+    for (index, adapter_error) in cases.into_iter().enumerate() {
+        let scope = scope();
+        let store = InMemoryOutboundStateStore::default();
+        let validator = FakeReplyTargetBindingValidator::default();
+        validator.allow(validated_reply_target());
+        let preferences = FakePreferenceRepository::default();
+        seed_preference(&preferences, &scope);
+        let resolver = FakeProductOutboundTargetResolver::default();
+        let policy = configured_policy(&store, &validator);
+        let adapter = FailingAdapter::new(adapter_error);
+        let egress = FakeProtocolHttpEgress::new(["api.telegram.org".to_string()]);
+        let sink = FakeOutboundDeliverySink::new();
+
+        let err = prepare_and_render_product_outbound(
+            &policy,
+            &preferences,
+            &resolver,
+            ProductOutboundDeliveryRequest {
+                delivery: delivery_request(scope.clone()),
+                payload: final_reply_payload(),
+                projection_cursor: ProjectionCursor::new(format!(
+                    "cursor:outbound:adapter-rejected-{index}"
+                ))
+                .expect("valid cursor"),
+                adapter: &adapter,
+                egress: &egress,
+                delivery_sink: &sink,
+            },
+        )
+        .await
+        .expect_err("adapter rejection propagates");
+
+        assert!(matches!(
+            err,
+            ironclaw_product_workflow::ProductOutboundDeliveryError::Adapter {
+                status_update_error: None,
+                ..
+            }
+        ));
+        assert_eq!(validator.calls(), 1);
+        assert_eq!(resolver.calls(), 1);
+        assert!(egress.calls().is_empty());
+        assert!(sink.statuses().is_empty());
+        let attempts = store.list_delivery_attempts(scope).await.unwrap();
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(
+            attempts[0].status,
+            ironclaw_outbound::OutboundDeliveryStatus::Failed
+        );
+        assert_eq!(
+            attempts[0].failure_kind,
+            Some(ironclaw_outbound::DeliveryFailureKind::Rejected)
+        );
+    }
 }
 
 #[tokio::test]

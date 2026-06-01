@@ -10,10 +10,10 @@ use ironclaw_outbound::{
 use ironclaw_product_adapters::{
     ExternalActorRef, ExternalConversationRef, OutboundDeliverySink, ProductAdapter,
     ProductAdapterError, ProductOutboundEnvelope, ProductOutboundPayload, ProductOutboundTarget,
-    ProductRenderOutcome, ProtocolHttpEgress,
+    ProductRenderOutcome, ProjectionCursor, ProtocolHttpEgress,
 };
 use thiserror::Error;
-use tracing::warn;
+use tracing::debug;
 
 use crate::ProductWorkflowError;
 
@@ -41,7 +41,7 @@ pub trait ProductOutboundTargetResolver: Send + Sync {
 pub struct ProductOutboundDeliveryRequest<'a> {
     pub delivery: PrepareCommunicationDeliveryRequest,
     pub payload: ProductOutboundPayload,
-    pub projection_cursor: ironclaw_product_adapters::ProjectionCursor,
+    pub projection_cursor: ProjectionCursor,
     pub adapter: &'a dyn ProductAdapter,
     pub egress: &'a dyn ProtocolHttpEgress,
     pub delivery_sink: &'a dyn OutboundDeliverySink,
@@ -96,6 +96,7 @@ pub enum ProductOutboundDeliveryError {
     PayloadKindMismatch {
         delivery_kind: OutboundPushKind,
         payload_kind: Option<OutboundPushKind>,
+        status_update_error: Option<ProductOutboundStatusUpdateFailure>,
     },
 }
 
@@ -128,11 +129,12 @@ pub async fn prepare_and_render_product_outbound(
     };
 
     if payload_kind != Some(delivery_kind) {
-        let _status_update_error =
+        let status_update_error =
             mark_attempt_failed(outbound_policy, &attempt, DeliveryFailureKind::Rejected).await;
         return Err(ProductOutboundDeliveryError::PayloadKindMismatch {
             delivery_kind,
             payload_kind,
+            status_update_error,
         });
     }
 
@@ -253,7 +255,7 @@ async fn mark_attempt_failed(
         .err()
         .map(|error| {
             let status_update_error = ProductOutboundStatusUpdateFailure::from(error);
-            warn!(
+            debug!(
                 delivery_id = %attempt.delivery_id,
                 failure_kind = ?failure_kind,
                 status_update_error = ?status_update_error,

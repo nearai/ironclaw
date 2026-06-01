@@ -107,9 +107,8 @@ pub use lifecycle::{
     LifecycleReadinessBlocker, LifecycleSkillSource, LifecycleSkillSummary,
     UnsupportedLifecycleProductFacade,
 };
-// PR7 exposes this product outbound orchestration seam so composition/product
-// hosts can wire outbound policy decisions to adapter rendering without
-// reaching into module internals.
+// Product hosts use this outbound orchestration seam to wire outbound policy
+// decisions to adapter rendering without reaching into module internals.
 pub use outbound_delivery::{
     ProductOutboundDeliveryError, ProductOutboundDeliveryOutcome, ProductOutboundDeliveryRequest,
     ProductOutboundStatusUpdateFailure, ProductOutboundTargetResolver,
