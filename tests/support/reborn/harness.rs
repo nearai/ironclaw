@@ -31,8 +31,8 @@ use ironclaw_filesystem::{LocalFilesystem, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
     AgentId, CapabilityDescriptor, CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet,
     CredentialStageError, Decision, EffectKind, ExecutionContext, ExtensionId, GrantConstraints,
-    HostPath, InvocationId, MountAlias, MountGrant, MountPermissions, MountView, NetworkPolicy,
-    NetworkScheme, NetworkTargetPattern, Obligation, Obligations, PackageId, Principal, ProjectId,
+    HostPath, MountAlias, MountGrant, MountPermissions, MountView, NetworkPolicy, NetworkScheme,
+    NetworkTargetPattern, Obligation, Obligations, PackageId, Principal, ProjectId,
     ResourceEstimate, ResourceScope, RuntimeCredentialAccountProviderId, RuntimeHttpEgress,
     RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, RuntimeKind,
     SecretHandle, TenantId, ThreadId, TrustClass, UserId, VirtualPath,
@@ -48,10 +48,11 @@ use ironclaw_host_runtime::{
     builtin_first_party_package,
 };
 use ironclaw_loop_support::{
-    CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
-    DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID, HostIdentityContextBuildError,
-    HostIdentityContextCandidate, HostIdentityContextSource, HostManagedModelRequest,
-    HostRuntimeLoopCapabilityPortFactory, JsonSpawnSubagentInputCodec, LoopCapabilityResultWriter,
+    CapabilityAllowSet, CapabilityResolveError, CapabilityResultWrite,
+    CapabilitySurfaceProfileResolver, DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID,
+    HostIdentityContextBuildError, HostIdentityContextCandidate, HostIdentityContextSource,
+    HostManagedModelRequest, HostRuntimeLoopCapabilityPortFactory, JsonSpawnSubagentInputCodec,
+    LoopCapabilityResultWriter,
 };
 use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
@@ -1772,7 +1773,7 @@ impl LoopCapabilityPortFactory for HostRuntimeHarnessCapabilityPortFactory {
     ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
         let authority = ProductLiveVisibleCapabilityRequestConfig::new(
             self.harness.user_id.clone(),
-            self.harness.runtime_kind.clone(),
+            self.harness.runtime_kind,
             TrustClass::FirstParty,
             SurfaceKind::new("agent_loop").map_err(host_runtime_harness_error)?,
             CapabilitySurfacePolicy::allow_all(),
@@ -2299,24 +2300,13 @@ struct RecordingCapabilityResultWriter {
 impl LoopCapabilityResultWriter for RecordingCapabilityResultWriter {
     async fn write_capability_result(
         &self,
-        run_context: &LoopRunContext,
-        input_ref: &CapabilityInputRef,
-        invocation_id: InvocationId,
-        capability_id: &CapabilityId,
-        output: serde_json::Value,
+        write: CapabilityResultWrite<'_>,
     ) -> Result<LoopResultRef, AgentLoopHostError> {
-        let result_ref = self
-            .inner
-            .write_capability_result(
-                run_context,
-                input_ref,
-                invocation_id,
-                capability_id,
-                output.clone(),
-            )
-            .await?;
+        let capability_id = write.capability_id.clone();
+        let output = write.output.clone();
+        let result_ref = self.inner.write_capability_result(write).await?;
         self.results.lock().unwrap().push(RecordedCapabilityResult {
-            capability_id: capability_id.clone(),
+            capability_id,
             output,
         });
         Ok(result_ref)

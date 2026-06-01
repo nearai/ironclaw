@@ -46,6 +46,11 @@ pub(crate) fn schema() -> String {
 }
 
 fn schema_value(schema: &str) -> serde_json::Value {
-    // Safety: bundled schemas are compile-time assets and validated by tests.
-    serde_json::from_str(schema).expect("bundled GitHub schema must be valid JSON")
+    match serde_json::from_str(schema) {
+        Ok(value) => value,
+        Err(error) => serde_json::json!({
+            "not": {},
+            "description": format!("invalid bundled GitHub schema: {error}"),
+        }),
+    }
 }

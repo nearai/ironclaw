@@ -63,10 +63,6 @@ pub fn secret_handles() -> GithubSupportResult<Vec<SecretHandle>> {
     Ok(vec![SecretHandle::new("github_runtime_token")?])
 }
 
-pub fn search_response_body() -> Vec<u8> {
-    br#"{"total_count":0,"incomplete_results":false,"items":[]}"#.to_vec()
-}
-
 pub fn api_policy() -> NetworkPolicy {
     NetworkPolicy {
         allowed_targets: vec![NetworkTargetPattern {

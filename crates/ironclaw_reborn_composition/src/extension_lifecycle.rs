@@ -1320,9 +1320,23 @@ mod tests {
             panic!("expected extension search payload");
         };
         assert_eq!(extensions.len(), 1);
-        assert_eq!(
-            extensions[0].visible_read_only_capability_ids,
-            vec!["github.search_issues", "github.get_issue"]
+        assert!(
+            extensions[0]
+                .visible_read_only_capability_ids
+                .iter()
+                .any(|id| id == "github.search_issues")
+        );
+        assert!(
+            extensions[0]
+                .visible_read_only_capability_ids
+                .iter()
+                .any(|id| id == "github.search_issues_pull_requests")
+        );
+        assert!(
+            extensions[0]
+                .visible_read_only_capability_ids
+                .iter()
+                .any(|id| id == "github.get_issue")
         );
 
         let package_ref =
