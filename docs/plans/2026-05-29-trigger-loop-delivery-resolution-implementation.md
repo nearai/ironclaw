@@ -591,6 +591,12 @@ Add the heavier caller-level tests separately from the worker core:
 - active-run back-pressure behavior
 - proof that a second due fire is skipped while one fire for the same trigger
   is active
+- trusted-poller authority guard coverage: global poller-only repository
+  queries such as `list_active_triggers` must remain unreachable from
+  user/API/capability paths. Add an architecture or caller-level test that
+  proves only the trusted poller path can exercise the cross-tenant active
+  scan, and carry this into PR 18 if the final token is constructed by
+  composition.
 - active-cleanup fairness coverage: when the earliest active rows are
   long-running, nonterminal, or claim-only, later terminal active rows must
   still be reached eventually instead of being starved by the same ordered
@@ -638,9 +644,21 @@ Wire the trigger poller into Reborn composition:
 - a dedicated `TriggerPollerWorkerConfig` or equivalent composition-owned type
   for poll interval, fires per tick, and per-trigger active-run cap. Do not
   reuse `RebornRuntimeInput::PollSettings`, which is request-completion polling.
+- add a sealed `TrustedTriggerPollerScope` or equivalent host-owned token before
+  exposing the real background poller lifecycle. Global trigger scans should
+  require that token or return a wrapper type such as `GlobalActiveTriggerRecord`
+  so product adapters, first-party capabilities, and tenant-scoped APIs cannot
+  accidentally treat cross-tenant poller rows as ordinary caller-scoped lists.
+  Keep tenant-scoped `list_triggers(tenant_id)` as the only user/API listing
+  path.
 - background task bundle or worker-supervisor type that owns both turn-runner
   and trigger-poller handles, cancellation, await/shutdown ordering, and panic
   or early-exit reporting.
+- decide whether the PR 15 `worker.rs` file is split into
+  `worker::{config,ports,report,mod}` or receives a tracked architecture
+  exemption. The current large-file shape is acceptable for landing the core
+  slice only if the follow-up is explicit before lifecycle and harness code add
+  more responsibilities.
 - background trigger poller lifecycle should apply bounded startup and per-tick
   wake jitter to reduce replica stampedes, but it must not jitter trigger
   schedule calculation, fire identity, `fire_slot`, or `next_run_at`.
@@ -656,6 +674,11 @@ Wire the trigger poller into Reborn composition:
   surfaced to users or admins. Permanent failures should produce a durable,
   throttled notification; retryable failures should avoid per-tick spam and use
   thresholded or summarized reporting.
+- any failure reason that leaves the in-process tick report must be bounded and
+  redacted. Do not persist, log broadly, or send raw
+  `TriggerSourceProvider`/`TriggerPromptMaterializer` error strings to users;
+  map them to typed failure categories or sanitized summaries at the lifecycle,
+  logging, or notification boundary.
 - approval waits continue to belong to the turn pipeline. Composition should
   define durable approval TTL/reminder behavior, fail-closed expiry, and stale
   approval rejection while preserving trigger `active_run_ref` back-pressure.
