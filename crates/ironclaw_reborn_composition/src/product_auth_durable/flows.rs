@@ -224,7 +224,15 @@ where
             .read_flow(scope, flow_id)
             .await?
             .ok_or(AuthProductError::UnknownOrExpiredFlow)?;
-        validate_manual_token_flow(&mut record, scope, &input, now)?;
+        match validate_manual_token_flow(&mut record, scope, &input, now) {
+            Ok(()) => {}
+            Err(AuthProductError::UnknownOrExpiredFlow) => {
+                self.write_flow(scope, &record, CasExpectation::Version(version))
+                    .await?;
+                return Err(AuthProductError::UnknownOrExpiredFlow);
+            }
+            Err(error) => return Err(error),
+        }
         if record.status == AuthFlowStatus::Completed {
             return Ok(record);
         }

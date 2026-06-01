@@ -52,30 +52,9 @@ impl RuntimeCredentialAccountSelectionService for ProductAuthRuntimeCredentialAc
         &self,
         request: CredentialAccountSelectionRequest,
     ) -> Result<CredentialAccount, AuthProductError> {
-        let configured = self
-            .accounts
-            .accounts_for_owner(&request.scope)
-            .await?
-            .into_iter()
-            .filter(|account| {
-                account.provider == request.provider
-                    && account.status == CredentialAccountStatus::Configured
-            })
-            .collect::<Vec<_>>();
-        if configured.is_empty() {
-            return Err(AuthProductError::CredentialMissing);
-        }
-        let selectable = configured
-            .into_iter()
-            .filter(|account| {
-                account.is_authorized_for_requester(request.requester_extension.as_ref())
-            })
-            .collect::<Vec<_>>();
-        match selectable.as_slice() {
-            [] => Err(AuthProductError::CrossScopeDenied),
-            [account] => Ok(account.clone()),
-            _ => Err(AuthProductError::AccountSelectionRequired),
-        }
+        self.accounts
+            .select_unique_configured_account_for_owner(request)
+            .await
     }
 }
 

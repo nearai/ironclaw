@@ -582,6 +582,35 @@ pub trait CredentialAccountRecordSource: Send + Sync {
         &self,
         scope: &AuthProductScope,
     ) -> Result<Vec<CredentialAccount>, AuthProductError>;
+
+    async fn select_unique_configured_account_for_owner(
+        &self,
+        request: CredentialAccountSelectionRequest,
+    ) -> Result<CredentialAccount, AuthProductError> {
+        let configured = self
+            .accounts_for_owner(&request.scope)
+            .await?
+            .into_iter()
+            .filter(|account| {
+                account.provider == request.provider
+                    && account.status == CredentialAccountStatus::Configured
+            })
+            .collect::<Vec<_>>();
+        if configured.is_empty() {
+            return Err(AuthProductError::CredentialMissing);
+        }
+        let selectable = configured
+            .into_iter()
+            .filter(|account| {
+                account.is_authorized_for_requester(request.requester_extension.as_ref())
+            })
+            .collect::<Vec<_>>();
+        match selectable.as_slice() {
+            [] => Err(AuthProductError::CrossScopeDenied),
+            [account] => Ok(account.clone()),
+            _ => Err(AuthProductError::AccountSelectionRequired),
+        }
+    }
 }
 
 #[async_trait]

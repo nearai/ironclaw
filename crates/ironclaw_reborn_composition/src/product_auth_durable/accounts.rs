@@ -247,6 +247,13 @@ where
         let owner = CredentialAccountOwnerScope::from_scope(scope);
         self.account_records_for_owner(&owner).await
     }
+
+    async fn select_unique_configured_account_for_owner(
+        &self,
+        request: CredentialAccountSelectionRequest,
+    ) -> Result<CredentialAccount, AuthProductError> {
+        self.select_configured_account_for_owner(request).await
+    }
 }
 
 #[async_trait]

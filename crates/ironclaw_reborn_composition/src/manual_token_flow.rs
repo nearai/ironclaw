@@ -2,8 +2,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_auth::{
-    AuthChallenge, AuthFlowKind, AuthFlowManager, AuthInteractionId, AuthInteractionService,
-    AuthProductError, AuthProductScope, InMemoryAuthProductServices, ManualTokenCompletionInput,
+    AuthChallenge, AuthFlowKind, AuthFlowManager, AuthFlowRecord, AuthInteractionId,
+    AuthInteractionService, AuthProductError, AuthProductScope, CredentialAccountService,
+    CredentialAccountStatus, InMemoryAuthProductServices, ManualTokenCompletionInput,
     ManualTokenSetupRequest, NewAuthFlow, SecretSubmitRequest, SecretSubmitResult,
 };
 use ironclaw_filesystem::RootFilesystem;
@@ -22,7 +23,7 @@ pub trait RebornManualTokenFlowService: Send + Sync {
         &self,
         scope: &AuthProductScope,
         request: SecretSubmitRequest,
-    ) -> Result<SecretSubmitResult, AuthProductError>;
+    ) -> Result<(SecretSubmitResult, AuthFlowRecord), AuthProductError>;
 
     async fn abandon_manual_token_flow(
         &self,
@@ -35,16 +36,19 @@ pub trait RebornManualTokenFlowService: Send + Sync {
 pub(crate) struct PortBackedManualTokenFlowService {
     flow_manager: Arc<dyn AuthFlowManager>,
     interaction_service: Arc<dyn AuthInteractionService>,
+    credential_account_service: Arc<dyn CredentialAccountService>,
 }
 
 impl PortBackedManualTokenFlowService {
     pub(crate) fn new(
         flow_manager: Arc<dyn AuthFlowManager>,
         interaction_service: Arc<dyn AuthInteractionService>,
+        credential_account_service: Arc<dyn CredentialAccountService>,
     ) -> Self {
         Self {
             flow_manager,
             interaction_service,
+            credential_account_service,
         }
     }
 }
@@ -67,10 +71,11 @@ impl RebornManualTokenFlowService for PortBackedManualTokenFlowService {
         &self,
         scope: &AuthProductScope,
         request: SecretSubmitRequest,
-    ) -> Result<SecretSubmitResult, AuthProductError> {
+    ) -> Result<(SecretSubmitResult, AuthFlowRecord), AuthProductError> {
         submit_manual_token_flow_with(
             self.flow_manager.as_ref(),
             self.interaction_service.as_ref(),
+            self.credential_account_service.as_ref(),
             scope,
             request,
         )
@@ -105,8 +110,8 @@ impl RebornManualTokenFlowService for InMemoryAuthProductServices {
         &self,
         scope: &AuthProductScope,
         request: SecretSubmitRequest,
-    ) -> Result<SecretSubmitResult, AuthProductError> {
-        submit_manual_token_flow_with(self, self, scope, request).await
+    ) -> Result<(SecretSubmitResult, AuthFlowRecord), AuthProductError> {
+        submit_manual_token_flow_with(self, self, self, scope, request).await
     }
 
     async fn abandon_manual_token_flow(
@@ -134,8 +139,8 @@ where
         &self,
         scope: &AuthProductScope,
         request: SecretSubmitRequest,
-    ) -> Result<SecretSubmitResult, AuthProductError> {
-        submit_manual_token_flow_with(self, self, scope, request).await
+    ) -> Result<(SecretSubmitResult, AuthFlowRecord), AuthProductError> {
+        submit_manual_token_flow_with(self, self, self, scope, request).await
     }
 
     async fn abandon_manual_token_flow(
@@ -207,14 +212,15 @@ async fn request_manual_token_flow_with(
 async fn submit_manual_token_flow_with(
     flow_manager: &dyn AuthFlowManager,
     interaction_service: &dyn AuthInteractionService,
+    credential_account_service: &dyn CredentialAccountService,
     scope: &AuthProductScope,
     request: SecretSubmitRequest,
-) -> Result<SecretSubmitResult, AuthProductError> {
+) -> Result<(SecretSubmitResult, AuthFlowRecord), AuthProductError> {
     let interaction_id = request.interaction_id;
     let result = interaction_service
         .submit_manual_token(scope, request)
         .await?;
-    if let Err(error) = flow_manager
+    let completed = match flow_manager
         .complete_manual_token(
             scope,
             ManualTokenCompletionInput {
@@ -224,20 +230,35 @@ async fn submit_manual_token_flow_with(
         )
         .await
     {
-        if let Err(cleanup_error) = flow_manager
-            .cancel_manual_token(scope, interaction_id)
-            .await
-        {
-            tracing::warn!(
-                interaction_id = %interaction_id,
-                error_code = ?error.code(),
-                cleanup_error_code = ?cleanup_error.code(),
-                "manual-token flow completion failed and flow cleanup failed"
-            );
+        Ok(completed) => completed,
+        Err(error) => {
+            if let Err(cleanup_error) = flow_manager
+                .cancel_manual_token(scope, interaction_id)
+                .await
+            {
+                tracing::warn!(
+                    interaction_id = %interaction_id,
+                    error_code = ?error.code(),
+                    cleanup_error_code = ?cleanup_error.code(),
+                    "manual-token flow completion failed and flow cleanup failed"
+                );
+            }
+            if let Err(cleanup_error) = credential_account_service
+                .update_status(scope, result.account_id, CredentialAccountStatus::Revoked)
+                .await
+            {
+                tracing::warn!(
+                    interaction_id = %interaction_id,
+                    account_id = %result.account_id,
+                    error_code = ?error.code(),
+                    cleanup_error_code = ?cleanup_error.code(),
+                    "manual-token flow completion failed and account compensation failed"
+                );
+            }
+            return Err(error);
         }
-        return Err(error);
-    }
-    Ok(result)
+    };
+    Ok((result, completed))
 }
 
 async fn abandon_manual_token_flow_with(

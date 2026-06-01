@@ -84,8 +84,7 @@ use crate::local_dev_mounts::{
     ambient_workspace_mount_view, skill_context_mount_view, skill_management_mount_view,
     workspace_mount_view,
 };
-use crate::mcp::host_mediated_mcp_runtime;
-use crate::mcp_router::McpExecutorRouter;
+use crate::mcp::hosted_http_mcp_runtime;
 use crate::product_auth_runtime_credentials::ProductAuthRuntimeCredentialResolver;
 use crate::{
     RebornAuthContinuationDispatcher, RebornBuildError, RebornBuildInput, RebornCompositionProfile,
@@ -107,7 +106,6 @@ use crate::{
     gsuite::{
         ProductAuthRuntimeGsuiteCredentialStager, register_bundled_gsuite_first_party_handlers,
     },
-    nearai_mcp::{nearai_mcp_endpoint_from_env, nearai_mcp_runtime},
     web_access::register_bundled_web_access_first_party_handlers,
 };
 
@@ -253,31 +251,10 @@ where
     let runtime_http_egress = runtime_ports.runtime_http_egress();
     let registry = services.shared_extension_registry();
 
-    let mut router = McpExecutorRouter::new();
-
-    // NEAR AI MCP — optional; skip gracefully if endpoint env is absent.
-    match nearai_mcp_endpoint_from_env() {
-        Ok(endpoint) => {
-            router.insert(
-                "nearai",
-                nearai_mcp_runtime(runtime_http_egress.clone(), endpoint),
-            );
-        }
-        Err(reason) => {
-            tracing::debug!(
-                "skipping NEAR AI MCP runtime: {reason} \
-                 (this only affects the optional NEAR AI MCP extension)"
-            );
-        }
-    }
-
-    // Notion MCP — host-registry-mediated.
-    router.insert(
-        "notion",
-        Arc::new(host_mediated_mcp_runtime(registry, runtime_http_egress)),
-    );
-
-    Ok(services.with_mcp_runtime(Arc::new(router)))
+    Ok(services.with_mcp_runtime(Arc::new(hosted_http_mcp_runtime(
+        registry,
+        runtime_http_egress,
+    ))))
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]

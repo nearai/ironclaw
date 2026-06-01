@@ -16,14 +16,14 @@ use crate::product_auth_runtime_credentials::{
 };
 use ironclaw_auth::{
     AuthChallenge, AuthContinuationRef, AuthFlowKind, AuthFlowManager, AuthFlowOwnerScope,
-    AuthFlowRecordSource, AuthFlowStatus, AuthInteractionService, AuthProductError,
-    AuthProductScope, AuthProviderId, AuthSessionId, AuthSurface, AuthorizationCodeHash,
-    CredentialAccountChoiceRequest, CredentialAccountLabel, CredentialAccountListRequest,
-    CredentialAccountLookupRequest, CredentialAccountSelectionRequest, CredentialAccountService,
-    CredentialAccountStatus, CredentialOwnership, ManualTokenCompletionInput,
-    ManualTokenSetupRequest, NewAuthFlow, NewCredentialAccount, OAuthAuthorizationUrl,
-    OAuthCallbackClaimRequest, OAuthCallbackInput, OAuthProviderExchange, OpaqueStateHash,
-    PkceVerifierHash, ProviderScope, SecretSubmitRequest,
+    AuthFlowRecordSource, AuthFlowStatus, AuthInteractionId, AuthInteractionService,
+    AuthProductError, AuthProductScope, AuthProviderId, AuthSessionId, AuthSurface,
+    AuthorizationCodeHash, CredentialAccountChoiceRequest, CredentialAccountLabel,
+    CredentialAccountListRequest, CredentialAccountLookupRequest, CredentialAccountRecordSource,
+    CredentialAccountSelectionRequest, CredentialAccountService, CredentialAccountStatus,
+    CredentialOwnership, ManualTokenCompletionInput, ManualTokenSetupRequest, NewAuthFlow,
+    NewCredentialAccount, OAuthAuthorizationUrl, OAuthCallbackClaimRequest, OAuthCallbackInput,
+    OAuthProviderExchange, OpaqueStateHash, PkceVerifierHash, ProviderScope, SecretSubmitRequest,
 };
 
 fn test_scope() -> AuthProductScope {
@@ -79,6 +79,53 @@ fn pkce_hash(value: &str) -> PkceVerifierHash {
 
 fn code_hash(value: &str) -> AuthorizationCodeHash {
     AuthorizationCodeHash::new(fake_digest(value)).unwrap()
+}
+
+async fn create_manual_token_flow(
+    service: &FilesystemAuthProductServices<InMemoryBackend>,
+    scope: &AuthProductScope,
+    expires_at: chrono::DateTime<Utc>,
+) -> AuthInteractionId {
+    let challenge = service
+        .request_secret_input(ManualTokenSetupRequest {
+            scope: scope.clone(),
+            provider: google_provider(),
+            label: account_label(),
+            continuation: AuthContinuationRef::SetupOnly,
+            update_binding: None,
+            expires_at,
+        })
+        .await
+        .unwrap();
+    let AuthChallenge::ManualTokenRequired {
+        interaction_id,
+        provider,
+        label,
+        expires_at: challenge_expires_at,
+    } = challenge
+    else {
+        panic!("expected manual token challenge");
+    };
+    service
+        .create_flow(NewAuthFlow {
+            scope: scope.clone(),
+            kind: AuthFlowKind::IntegrationCredential,
+            provider,
+            challenge: AuthChallenge::ManualTokenRequired {
+                interaction_id,
+                provider: google_provider(),
+                label,
+                expires_at: challenge_expires_at,
+            },
+            continuation: AuthContinuationRef::SetupOnly,
+            update_binding: None,
+            opaque_state_hash: None,
+            pkce_verifier_hash: None,
+            expires_at,
+        })
+        .await
+        .unwrap();
+    interaction_id
 }
 
 #[tokio::test]
@@ -162,49 +209,6 @@ async fn filesystem_runtime_account_selection_matches_setup_invocation_account()
         .unwrap();
 
     assert_eq!(selected.id, created.id);
-    assert_eq!(selected.access_secret, Some(access_secret));
-}
-
-#[tokio::test]
-async fn filesystem_runtime_account_selection_finds_session_scoped_setup_account() {
-    let filesystem = test_filesystem();
-    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
-    let mut setup_scope = test_scope();
-    setup_scope.surface = AuthSurface::Web;
-    setup_scope.resource.thread_id = Some(ThreadId::new("thread-auth-session-account").unwrap());
-    setup_scope.session_id = Some(AuthSessionId::new("session-auth-account").unwrap());
-    let mut runtime_scope = AuthProductScope::new(setup_scope.resource.clone(), AuthSurface::Api);
-    runtime_scope.resource.invocation_id = InvocationId::new();
-    let service = Arc::new(test_service(filesystem, secret_store));
-    let access_secret = SecretHandle::new("google-session-access").unwrap();
-
-    let created = service
-        .create_account(NewCredentialAccount {
-            scope: setup_scope,
-            provider: google_provider(),
-            label: account_label(),
-            status: CredentialAccountStatus::Configured,
-            ownership: CredentialOwnership::UserReusable,
-            owner_extension: None,
-            granted_extensions: Vec::new(),
-            access_secret: Some(access_secret.clone()),
-            refresh_secret: None,
-            scopes: vec![ProviderScope::new("gmail.readonly").unwrap()],
-        })
-        .await
-        .unwrap();
-
-    let selector = ProductAuthRuntimeCredentialAccountSelector::new(service.clone());
-    let selected = selector
-        .select_unique_configured_runtime_account(CredentialAccountSelectionRequest::new(
-            runtime_scope,
-            google_provider(),
-        ))
-        .await
-        .unwrap();
-
-    assert_eq!(selected.id, created.id);
-    assert_eq!(selected.scope.session_id, created.scope.session_id);
     assert_eq!(selected.access_secret, Some(access_secret));
 }
 
@@ -350,6 +354,149 @@ async fn filesystem_manual_token_completion_persists_auth_flow_account() {
 }
 
 #[tokio::test]
+async fn filesystem_manual_token_completion_rejects_invalid_completed_account() {
+    let filesystem = test_filesystem();
+    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let scope = test_scope();
+    let service = test_service(filesystem, secret_store);
+    let interaction_id =
+        create_manual_token_flow(&service, &scope, Utc::now() + Duration::minutes(5)).await;
+
+    let missing = service
+        .complete_manual_token(
+            &scope,
+            ManualTokenCompletionInput {
+                interaction_id,
+                credential_account_id: CredentialAccountId::new(),
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(missing, AuthProductError::CredentialMissing);
+
+    let account = service
+        .create_account(NewCredentialAccount {
+            scope: scope.clone(),
+            provider: google_provider(),
+            label: account_label(),
+            status: CredentialAccountStatus::PendingSetup,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: vec![],
+            access_secret: None,
+            refresh_secret: None,
+            scopes: vec![],
+        })
+        .await
+        .unwrap();
+    let unconfigured = service
+        .complete_manual_token(
+            &scope,
+            ManualTokenCompletionInput {
+                interaction_id,
+                credential_account_id: account.id,
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(unconfigured, AuthProductError::CrossScopeDenied);
+
+    let mut foreign_scope = scope.clone();
+    foreign_scope.resource.user_id = UserId::new("bob").unwrap();
+    let foreign = service
+        .create_account(NewCredentialAccount {
+            scope: foreign_scope,
+            provider: google_provider(),
+            label: account_label(),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: vec![],
+            access_secret: Some(SecretHandle::new("foreign-access").unwrap()),
+            refresh_secret: None,
+            scopes: vec![],
+        })
+        .await
+        .unwrap();
+    let cross_scope = service
+        .complete_manual_token(
+            &scope,
+            ManualTokenCompletionInput {
+                interaction_id,
+                credential_account_id: foreign.id,
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(cross_scope, AuthProductError::CrossScopeDenied);
+}
+
+#[tokio::test]
+async fn filesystem_manual_token_completion_expires_stale_auth_flow() {
+    let filesystem = test_filesystem();
+    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let scope = test_scope();
+    let service = test_service(filesystem, secret_store);
+    let interaction_id =
+        create_manual_token_flow(&service, &scope, Utc::now() - Duration::minutes(1)).await;
+
+    let submitted = service
+        .submit_manual_token(
+            &scope,
+            SecretSubmitRequest {
+                interaction_id,
+                secret: SecretString::from("manual-token-value"),
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(submitted, AuthProductError::UnknownOrExpiredFlow);
+
+    let err = service
+        .complete_manual_token(
+            &scope,
+            ManualTokenCompletionInput {
+                interaction_id,
+                credential_account_id: CredentialAccountId::new(),
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err, AuthProductError::UnknownOrExpiredFlow);
+    let flows = service.flows_for_scope(&scope).await.unwrap();
+    assert_eq!(flows.len(), 1);
+    assert_eq!(flows[0].0.status, AuthFlowStatus::Expired);
+}
+
+#[tokio::test]
+async fn filesystem_manual_token_cancel_marks_flow_canceled_and_is_idempotent() {
+    let filesystem = test_filesystem();
+    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let scope = test_scope();
+    let service = test_service(filesystem, secret_store);
+    let interaction_id =
+        create_manual_token_flow(&service, &scope, Utc::now() + Duration::minutes(5)).await;
+
+    let canceled = service
+        .cancel_manual_token(&scope, interaction_id)
+        .await
+        .unwrap()
+        .expect("manual-token flow should be canceled");
+    assert_eq!(canceled.status, AuthFlowStatus::Canceled);
+    let still_canceled = service
+        .cancel_manual_token(&scope, interaction_id)
+        .await
+        .unwrap()
+        .expect("terminal flow should still be returned");
+    assert_eq!(still_canceled.status, AuthFlowStatus::Canceled);
+    let unknown = service
+        .cancel_manual_token(&scope, AuthInteractionId::new())
+        .await
+        .unwrap();
+    assert!(unknown.is_none());
+}
+
+#[tokio::test]
 async fn filesystem_flow_record_source_projects_session_scoped_manual_flows() {
     let filesystem = test_filesystem();
     let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
@@ -441,6 +588,44 @@ async fn filesystem_flow_record_source_projects_session_scoped_manual_flows() {
         Some(submitted.account_id),
         "manual-token completion must remain visible to the auth read model"
     );
+}
+
+#[tokio::test]
+async fn filesystem_account_record_source_projects_session_scoped_accounts_for_runtime_owner() {
+    let filesystem = test_filesystem();
+    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let mut setup_scope = test_scope();
+    setup_scope.surface = AuthSurface::Callback;
+    setup_scope.resource.thread_id = Some(ThreadId::new("thread-auth-account").unwrap());
+    setup_scope.session_id = Some(AuthSessionId::new("session-auth-account").unwrap());
+    let service = FilesystemAuthProductServices::new(filesystem, secret_store);
+    let account = service
+        .create_account(NewCredentialAccount {
+            scope: setup_scope.clone(),
+            provider: google_provider(),
+            label: account_label(),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: Vec::new(),
+            access_secret: Some(SecretHandle::new("session-scoped-access").unwrap()),
+            refresh_secret: None,
+            scopes: Vec::new(),
+        })
+        .await
+        .unwrap();
+    let mut runtime_resource = setup_scope.resource.clone();
+    runtime_resource.invocation_id = InvocationId::new();
+    let runtime_scope = AuthProductScope::new(runtime_resource, AuthSurface::Api);
+
+    let projected = service.accounts_for_owner(&runtime_scope).await.unwrap();
+    let projected_account = projected
+        .iter()
+        .find(|candidate| candidate.id == account.id)
+        .expect("runtime owner projection should include session-scoped setup account");
+
+    assert_eq!(projected_account.scope.session_id, setup_scope.session_id);
+    assert_eq!(projected_account.provider, google_provider());
 }
 
 #[tokio::test]
