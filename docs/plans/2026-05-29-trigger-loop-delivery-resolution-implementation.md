@@ -591,6 +591,15 @@ Add the heavier caller-level tests separately from the worker core:
 - active-run back-pressure behavior
 - proof that a second due fire is skipped while one fire for the same trigger
   is active
+- active-cleanup fairness coverage: when the earliest active rows are
+  long-running, nonterminal, or claim-only, later terminal active rows must
+  still be reached eventually instead of being starved by the same ordered
+  first page on every tick
+- if the fairness test exposes starvation, add cursor/rotation, widened cleanup
+  scanning, or an equivalent repository/worker policy. If this touches
+  in-memory `list_active_triggers`, consider replacing sort-then-truncate with
+  a bounded selection approach in the same pass; otherwise keep that as a
+  low-priority test-helper optimization.
 - concurrent poller claim attempts cannot both submit the same trigger/slot
 - claim-only active-fire recovery must require a composition-owned lease or
   age signal before retrying, so a freshly claimed slot is never misclassified
@@ -635,6 +644,14 @@ Wire the trigger poller into Reborn composition:
 - background trigger poller lifecycle should apply bounded startup and per-tick
   wake jitter to reduce replica stampedes, but it must not jitter trigger
   schedule calculation, fire identity, `fire_slot`, or `next_run_at`.
+- consider bounded active-run lookup concurrency at the lifecycle/config layer
+  once caller-level fairness coverage exists. Keep the default conservative
+  until the concrete turn-state backend and shutdown/cancellation behavior are
+  wired.
+- do not parallelize active-fire cleanup and the due-trigger query with a raw
+  `tokio::join!` unless the design preserves cleanup-before-due semantics:
+  clearing a terminal active fire before `list_due_triggers` can make that same
+  trigger eligible in the current tick.
 - lifecycle/notification wiring should define how trigger submit failures are
   surfaced to users or admins. Permanent failures should produce a durable,
   throttled notification; retryable failures should avoid per-tick spam and use
