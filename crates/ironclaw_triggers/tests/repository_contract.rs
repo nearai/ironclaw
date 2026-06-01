@@ -978,7 +978,7 @@ mod fire_claim_contract {
 
     use ironclaw_triggers::{
         ClaimDueFireOutcome, ClaimDueFireRequest, FireAcceptedRequest, FirePermanentFailedRequest,
-        FireReplayedRequest, FireRetryableFailedRequest,
+        FireReplayedRequest, FireRetryableFailedRequest, FireTerminalFailedRequest,
     };
 
     async fn assert_fire_claim_and_update_contract(repo: &impl TriggerRepository) {
@@ -1240,6 +1240,43 @@ mod fire_claim_contract {
         assert_eq!(permanent_failed.active_fire_slot, None);
         assert_eq!(permanent_failed.active_run_ref, None);
         assert!(permanent_failed.next_run_at > fire_slot);
+
+        let terminal_trigger_id = TriggerId::parse("01J00000000000000000000006").expect("ulid");
+        let terminal_tenant_id = tenant("tenant-terminal");
+        let mut terminal_record =
+            sample_record(terminal_trigger_id, terminal_tenant_id.clone(), fire_slot);
+        terminal_record.last_run_at = Some(failure_previous_run_at);
+        terminal_record.last_fired_slot = Some(failure_previous_slot);
+        repo.upsert_trigger(terminal_record)
+            .await
+            .expect("insert terminal-failure record");
+        let terminal_claim = repo
+            .claim_due_fire(ClaimDueFireRequest {
+                tenant_id: terminal_tenant_id.clone(),
+                trigger_id: terminal_trigger_id,
+                fire_slot,
+                now: fire_slot,
+            })
+            .await
+            .expect("claim terminal-failure record");
+        assert!(matches!(terminal_claim, ClaimDueFireOutcome::Claimed(_)));
+
+        let terminal_failed = repo
+            .mark_fire_terminally_failed(FireTerminalFailedRequest {
+                tenant_id: terminal_tenant_id,
+                trigger_id: terminal_trigger_id,
+                fire_slot,
+            })
+            .await
+            .expect("mark terminally failed")
+            .expect("terminal failure should persist");
+        assert_eq!(terminal_failed.last_run_at, Some(failure_previous_run_at));
+        assert_eq!(terminal_failed.last_fired_slot, Some(failure_previous_slot));
+        assert_eq!(terminal_failed.last_status, Some(TriggerRunStatus::Error));
+        assert_eq!(terminal_failed.state, TriggerState::Completed);
+        assert_eq!(terminal_failed.active_fire_slot, None);
+        assert_eq!(terminal_failed.active_run_ref, None);
+        assert_eq!(terminal_failed.next_run_at, fire_slot);
     }
 
     async fn assert_fire_result_rejects_invalid_next_run_at(repo: &impl TriggerRepository) {

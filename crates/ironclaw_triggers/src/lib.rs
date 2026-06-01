@@ -486,6 +486,13 @@ pub struct FirePermanentFailedRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FireTerminalFailedRequest {
+    pub tenant_id: TenantId,
+    pub trigger_id: TriggerId,
+    pub fire_slot: Timestamp,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClearActiveFireRequest {
     pub tenant_id: TenantId,
     pub trigger_id: TriggerId,
@@ -600,6 +607,11 @@ pub trait TriggerRepository: Send + Sync {
     async fn mark_fire_permanently_failed(
         &self,
         request: FirePermanentFailedRequest,
+    ) -> Result<Option<TriggerRecord>, TriggerError>;
+
+    async fn mark_fire_terminally_failed(
+        &self,
+        request: FireTerminalFailedRequest,
     ) -> Result<Option<TriggerRecord>, TriggerError>;
 
     async fn clear_active_fire(
@@ -884,6 +896,29 @@ impl TriggerRepository for InMemoryTriggerRepository {
                 reject_non_future_next_run_at(request.fire_slot, request.next_run_at)?;
                 record.last_status = Some(TriggerRunStatus::Error);
                 record.next_run_at = request.next_run_at;
+                record.active_fire_slot = None;
+                record.active_run_ref = None;
+                Ok(())
+            },
+        )?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(record))
+    }
+
+    async fn mark_fire_terminally_failed(
+        &self,
+        request: FireTerminalFailedRequest,
+    ) -> Result<Option<TriggerRecord>, TriggerError> {
+        let Some(record) = self.update_claimed_fire(
+            &request.tenant_id,
+            request.trigger_id,
+            request.fire_slot,
+            |record| {
+                reject_failed_result_after_active_run(record.active_run_ref)?;
+                record.state = TriggerState::Completed;
+                record.last_status = Some(TriggerRunStatus::Error);
                 record.active_fire_slot = None;
                 record.active_run_ref = None;
                 Ok(())

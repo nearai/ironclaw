@@ -570,6 +570,11 @@ Implement `TriggerPollerWorker` core logic:
 - call `handle_inbound_turn_with_trusted_scope`
 - persist synchronous submit status and next-run bookkeeping
 - preserve replay safety across crash retry or dual poller attempts
+- treat per-record due-fire processing failures and active-run lookup failures
+  as structured tick report outcomes so later due records can still be handled;
+  keep batch-level repository list failures fail-fast
+- for permanent failures with no future schedule slot, mark the trigger
+  `Completed` rather than writing a sentinel `next_run_at`
 
 Keep post-run async statuses fast-follow.
 
@@ -630,6 +635,13 @@ Wire the trigger poller into Reborn composition:
 - background trigger poller lifecycle should apply bounded startup and per-tick
   wake jitter to reduce replica stampedes, but it must not jitter trigger
   schedule calculation, fire identity, `fire_slot`, or `next_run_at`.
+- lifecycle/notification wiring should define how trigger submit failures are
+  surfaced to users or admins. Permanent failures should produce a durable,
+  throttled notification; retryable failures should avoid per-tick spam and use
+  thresholded or summarized reporting.
+- approval waits continue to belong to the turn pipeline. Composition should
+  define durable approval TTL/reminder behavior, fail-closed expiry, and stale
+  approval rejection while preserving trigger `active_run_ref` back-pressure.
 - readiness semantics for whether a disabled trigger poller is allowed and
   whether a failed trigger worker marks Reborn runtime readiness degraded.
 - architecture tests for `ironclaw_triggers` dependency edges

@@ -16,9 +16,10 @@ use libsql::params;
 use crate::{
     ClaimDueFireOutcome, ClaimDueFireRequest, ClaimedTriggerFire, ClearActiveFireRequest,
     FireAcceptedRequest, FirePermanentFailedRequest, FireReplayedRequest,
-    FireRetryableFailedRequest, TriggerCompletionPolicy, TriggerError, TriggerId, TriggerRecord,
-    TriggerRepository, TriggerRunStatus, TriggerSchedule, TriggerSourceKind, TriggerState,
-    reject_failed_result_after_active_run, reject_non_future_next_run_at, reject_run_ref_rewrite,
+    FireRetryableFailedRequest, FireTerminalFailedRequest, TriggerCompletionPolicy, TriggerError,
+    TriggerId, TriggerRecord, TriggerRepository, TriggerRunStatus, TriggerSchedule,
+    TriggerSourceKind, TriggerState, reject_failed_result_after_active_run,
+    reject_non_future_next_run_at, reject_run_ref_rewrite,
 };
 
 #[cfg(feature = "libsql")]
@@ -533,6 +534,60 @@ impl TriggerRepository for LibSqlTriggerRepository {
             .map_err(|error| backend_error("mark permanent trigger fire failure", error))?;
         if let Some(record) =
             returned_record(&mut rows, "read permanent trigger fire failure").await?
+        {
+            return Ok(Some(record));
+        }
+        resolve_missed_fire_result_update(&conn, &tenant_id, trigger_id, fire_slot, None, None)
+            .await
+    }
+
+    async fn mark_fire_terminally_failed(
+        &self,
+        request: FireTerminalFailedRequest,
+    ) -> Result<Option<TriggerRecord>, TriggerError> {
+        let FireTerminalFailedRequest {
+            tenant_id,
+            trigger_id,
+            fire_slot,
+        } = request;
+        let conn = self.connect().await?;
+        let Some(record) = fetch_record(&conn, &tenant_id, trigger_id).await? else {
+            return Ok(None);
+        };
+        if record.active_fire_slot != Some(fire_slot) {
+            return Ok(None);
+        }
+        reject_failed_result_after_active_run(record.active_run_ref)?;
+
+        let fire_slot_text = fmt_ts(&fire_slot);
+        let last_status = status_text(TriggerRunStatus::Error);
+        let completed = state_text(TriggerState::Completed);
+        let mut rows = conn
+            .query(
+                &format!(
+                    "UPDATE {TRIGGER_TABLE}
+                     SET state = ?3,
+                         last_status = ?4,
+                         active_fire_slot = NULL,
+                         active_run_ref = NULL
+                     WHERE tenant_id = ?1
+                       AND trigger_id = ?2
+                       AND active_fire_slot = ?5
+                       AND active_run_ref IS NULL
+                     RETURNING {TRIGGER_COLUMNS}"
+                ),
+                params![
+                    tenant_id.as_str(),
+                    trigger_id.to_string(),
+                    completed,
+                    last_status,
+                    fire_slot_text,
+                ],
+            )
+            .await
+            .map_err(|error| backend_error("mark terminal trigger fire failure", error))?;
+        if let Some(record) =
+            returned_record(&mut rows, "read terminal trigger fire failure").await?
         {
             return Ok(Some(record));
         }
