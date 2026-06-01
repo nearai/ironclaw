@@ -127,8 +127,8 @@ use ironclaw_turns::{
         LoopModelMessage, LoopModelPort, LoopModelRequest, LoopModelResponse, LoopModelUsage,
         LoopPromptBundleAuthority, LoopRunContext, LoopRunInfoPort, LoopSafeSummary,
         LoopTranscriptPort, ModelStreamChunk, ParentLoopOutput, PromptMode, UpdateAssistantDraft,
-        VisibleCapabilityRequest, VisibleCapabilitySurface,
-        sanitize_model_visible_text, sort_instruction_snippets_for_prompt,
+        VisibleCapabilityRequest, VisibleCapabilitySurface, sanitize_model_visible_text,
+        sort_instruction_snippets_for_prompt,
     },
 };
 use serde::{Deserialize, Serialize};
