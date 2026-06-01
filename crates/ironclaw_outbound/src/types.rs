@@ -3,7 +3,9 @@ use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, Timestamp};
 use ironclaw_turns::{ReplyTargetBindingRef, TurnActor, TurnRunId, TurnScope};
 use serde::{Deserialize, Serialize};
 
-use crate::delivery_resolution::CommunicationDeliveryResolutionRequest;
+use crate::delivery_resolution::{
+    CommunicationDeliveryKind, CommunicationDeliveryResolutionRequest,
+};
 use crate::{OutboundDeliveryId, OutboundError, ProjectionSubscriptionId, ProjectionUpdateRef};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -14,6 +16,18 @@ pub enum OutboundPushKind {
     GateRequired,
     AuthPrompt,
     DeliveryStatus,
+}
+
+impl From<CommunicationDeliveryKind> for OutboundPushKind {
+    fn from(kind: CommunicationDeliveryKind) -> Self {
+        match kind {
+            CommunicationDeliveryKind::FinalReply => Self::FinalReply,
+            CommunicationDeliveryKind::ProgressUpdate => Self::Progress,
+            CommunicationDeliveryKind::ApprovalPrompt => Self::GateRequired,
+            CommunicationDeliveryKind::AuthPrompt => Self::AuthPrompt,
+            CommunicationDeliveryKind::DeliveryStatus => Self::DeliveryStatus,
+        }
+    }
 }
 
 #[allow(dead_code)] // retained for future debug/log surfaces — not yet wired

@@ -3,10 +3,10 @@ use async_trait::async_trait;
 use crate::resolution_engine::OutboundResolutionEngine;
 use crate::validation::validate_delivery_scope_candidate;
 use crate::{
-    CommunicationDeliveryKind, CommunicationDeliveryResolution, CommunicationPreferenceRepository,
-    DeliveryFailureKind, OutboundDeliveryAttempt, OutboundDeliveryDecision, OutboundDeliveryId,
-    OutboundDeliveryStatus, OutboundError, OutboundPushCandidate, OutboundPushKind,
-    OutboundStateStore, PrepareCommunicationDeliveryRequest, PrepareOutboundDeliveryRequest,
+    CommunicationDeliveryResolution, CommunicationPreferenceRepository, DeliveryFailureKind,
+    OutboundDeliveryAttempt, OutboundDeliveryDecision, OutboundDeliveryId, OutboundDeliveryStatus,
+    OutboundError, OutboundPushCandidate, OutboundPushKind, OutboundStateStore,
+    PrepareCommunicationDeliveryRequest, PrepareOutboundDeliveryRequest,
     ProjectionSubscriptionRecord, ProjectionSubscriptionRequest, ReplyTargetBindingClaim,
     ReplyTargetValidationRequest, ThreadProjectionAccessClaim, ThreadProjectionAccessGrant,
     ThreadProjectionAccessRequest, ValidatedReplyTargetBinding,
@@ -161,7 +161,7 @@ impl<'a> OutboundPolicyService<'a> {
         request: PrepareCommunicationDeliveryRequest,
         resolution: CommunicationDeliveryResolution,
     ) -> Result<Option<OutboundDeliveryDecision>, OutboundError> {
-        let Some(request) = lower_communication_delivery_resolution(request, resolution)? else {
+        let Some(request) = lower_communication_delivery_resolution(request, resolution) else {
             return Ok(None);
         };
 
@@ -172,7 +172,7 @@ impl<'a> OutboundPolicyService<'a> {
 fn lower_communication_delivery_resolution(
     request: PrepareCommunicationDeliveryRequest,
     resolution: CommunicationDeliveryResolution,
-) -> Result<Option<PrepareOutboundDeliveryRequest>, OutboundError> {
+) -> Option<PrepareOutboundDeliveryRequest> {
     let PrepareCommunicationDeliveryRequest {
         resolution_request,
         turn_run_id,
@@ -180,36 +180,29 @@ fn lower_communication_delivery_resolution(
         attempted_at,
     } = request;
     let CommunicationDeliveryResolution::Candidate { candidate } = resolution else {
-        return Ok(None);
+        return None;
     };
-    let kind = outbound_push_kind(candidate.kind)?;
+    let kind = OutboundPushKind::from(candidate.kind);
 
     let scope = resolution_request.scope;
-    Ok(Some(PrepareOutboundDeliveryRequest {
-        scope: scope.clone(),
-        candidate: OutboundPushCandidate {
-            tenant_id: scope.tenant_id,
-            agent_id: scope.agent_id,
-            project_id: scope.project_id,
-            thread_id: scope.thread_id,
-            turn_run_id,
-            target: candidate.target,
-            kind,
-            projection_ref,
-            requires_reply_target_revalidation: true,
-        },
+    let candidate = OutboundPushCandidate {
+        tenant_id: scope.tenant_id.clone(),
+        agent_id: scope.agent_id.clone(),
+        project_id: scope.project_id.clone(),
+        thread_id: scope.thread_id.clone(),
+        turn_run_id,
+        target: candidate.target,
+        kind,
+        projection_ref,
+        // Resolution only selects a candidate; every lowered candidate must
+        // pass reply-target validation before it can be rendered or sent.
+        requires_reply_target_revalidation: true,
+    };
+    Some(PrepareOutboundDeliveryRequest {
+        scope,
+        candidate,
         attempted_at,
-    }))
-}
-
-fn outbound_push_kind(kind: CommunicationDeliveryKind) -> Result<OutboundPushKind, OutboundError> {
-    match kind {
-        CommunicationDeliveryKind::FinalReply => Ok(OutboundPushKind::FinalReply),
-        CommunicationDeliveryKind::ProgressUpdate => Ok(OutboundPushKind::Progress),
-        CommunicationDeliveryKind::ApprovalPrompt => Ok(OutboundPushKind::GateRequired),
-        CommunicationDeliveryKind::AuthPrompt => Ok(OutboundPushKind::AuthPrompt),
-        CommunicationDeliveryKind::DeliveryStatus => Ok(OutboundPushKind::DeliveryStatus),
-    }
+    })
 }
 
 fn validate_access_claim(
