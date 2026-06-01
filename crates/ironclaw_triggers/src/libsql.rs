@@ -234,7 +234,6 @@ impl TriggerRepository for LibSqlTriggerRepository {
         trigger_id: TriggerId,
     ) -> Result<Option<TriggerRecord>, TriggerError> {
         let conn = self.connect().await?;
-        // Keep active-fire clearing atomic as one predicate-guarded write.
         let mut rows = conn
             .query(
                 &format!(
@@ -516,6 +515,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
         request: ClearActiveFireRequest,
     ) -> Result<Option<TriggerRecord>, TriggerError> {
         let conn = self.connect().await?;
+        // Keep active-fire clearing atomic as one predicate-guarded write.
         let mut rows = conn
             .query(
                 &format!(
