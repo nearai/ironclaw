@@ -348,144 +348,50 @@ impl TriggerRepository for LibSqlTriggerRepository {
                 active_run_ref: record.active_run_ref,
             });
         }
-        Err(backend_error(
-            "claim trigger fire",
-            "claim predicate failed without a visible row-state change",
-        ))
+        // A competing poller can claim and clear the fire before this
+        // diagnostic read. The row may be due again, but this attempt did not
+        // claim it; let a later poll cycle observe it normally.
+        Ok(ClaimDueFireOutcome::NotDue { record })
     }
 
     async fn mark_fire_accepted(
         &self,
         request: FireAcceptedRequest,
     ) -> Result<Option<TriggerRecord>, TriggerError> {
-        let FireAcceptedRequest {
-            tenant_id,
-            trigger_id,
-            fire_slot,
-            run_id,
-            submitted_at,
-            next_run_at,
-        } = request;
         let conn = self.connect().await?;
-        let Some(record) = fetch_record(&conn, &tenant_id, trigger_id).await? else {
-            return Ok(None);
-        };
-        if record.active_fire_slot != Some(fire_slot) {
-            return Ok(None);
-        }
-        if let Some(active_run_ref) = record.active_run_ref {
-            reject_run_ref_rewrite(active_run_ref, run_id)?;
-            return Ok(Some(record));
-        }
-        reject_non_future_next_run_at(fire_slot, next_run_at)?;
-
-        let fire_slot_text = fmt_ts(&fire_slot);
-        let submitted_at = fmt_ts(&submitted_at);
-        let next_run_at = fmt_ts(&next_run_at);
-        let active_run_ref = run_id.to_string();
-        let last_status = status_text(TriggerRunStatus::Ok);
-        let mut rows = conn
-            .query(
-                &format!(
-                    "UPDATE {TRIGGER_TABLE}
-                     SET last_run_at = ?3,
-                         last_fired_slot = ?4,
-                         last_status = ?5,
-                         next_run_at = ?6,
-                         active_fire_slot = ?4,
-                         active_run_ref = ?7
-                     WHERE tenant_id = ?1
-                       AND trigger_id = ?2
-                       AND active_fire_slot = ?4
-                       AND active_run_ref IS NULL
-                     RETURNING {TRIGGER_COLUMNS}"
-                ),
-                params![
-                    tenant_id.as_str(),
-                    trigger_id.to_string(),
-                    submitted_at,
-                    fire_slot_text,
-                    last_status,
-                    next_run_at,
-                    active_run_ref,
-                ],
-            )
-            .await
-            .map_err(|error| backend_error("mark accepted trigger fire", error))?;
-        if let Some(record) = returned_record(&mut rows, "read accepted trigger fire").await? {
-            return Ok(Some(record));
-        }
-        resolve_missed_fire_result_update(&conn, &tenant_id, trigger_id, fire_slot, Some(run_id))
-            .await
+        mark_successful_fire_result(
+            &conn,
+            SuccessfulFireResultUpdate {
+                tenant_id: &request.tenant_id,
+                trigger_id: request.trigger_id,
+                fire_slot: request.fire_slot,
+                run_id: request.run_id,
+                result_at: request.submitted_at,
+                next_run_at: request.next_run_at,
+                update_operation: "mark accepted trigger fire",
+                read_operation: "read accepted trigger fire",
+            },
+        )
+        .await
     }
 
     async fn mark_fire_replayed(
         &self,
         request: FireReplayedRequest,
     ) -> Result<Option<TriggerRecord>, TriggerError> {
-        let FireReplayedRequest {
-            tenant_id,
-            trigger_id,
-            fire_slot,
-            original_run_id,
-            replayed_at,
-            next_run_at,
-        } = request;
         let conn = self.connect().await?;
-        let Some(record) = fetch_record(&conn, &tenant_id, trigger_id).await? else {
-            return Ok(None);
-        };
-        if record.active_fire_slot != Some(fire_slot) {
-            return Ok(None);
-        }
-        if let Some(active_run_ref) = record.active_run_ref {
-            reject_run_ref_rewrite(active_run_ref, original_run_id)?;
-            return Ok(Some(record));
-        }
-        reject_non_future_next_run_at(fire_slot, next_run_at)?;
-
-        let fire_slot_text = fmt_ts(&fire_slot);
-        let replayed_at = fmt_ts(&replayed_at);
-        let next_run_at = fmt_ts(&next_run_at);
-        let active_run_ref = original_run_id.to_string();
-        let last_status = status_text(TriggerRunStatus::Ok);
-        let mut rows = conn
-            .query(
-                &format!(
-                    "UPDATE {TRIGGER_TABLE}
-                     SET last_run_at = ?3,
-                         last_fired_slot = ?4,
-                         last_status = ?5,
-                         next_run_at = ?6,
-                         active_fire_slot = ?4,
-                         active_run_ref = ?7
-                     WHERE tenant_id = ?1
-                       AND trigger_id = ?2
-                       AND active_fire_slot = ?4
-                       AND active_run_ref IS NULL
-                     RETURNING {TRIGGER_COLUMNS}"
-                ),
-                params![
-                    tenant_id.as_str(),
-                    trigger_id.to_string(),
-                    replayed_at,
-                    fire_slot_text,
-                    last_status,
-                    next_run_at,
-                    active_run_ref,
-                ],
-            )
-            .await
-            .map_err(|error| backend_error("mark replayed trigger fire", error))?;
-        if let Some(record) = returned_record(&mut rows, "read replayed trigger fire").await? {
-            return Ok(Some(record));
-        }
-        resolve_missed_fire_result_update(
+        mark_successful_fire_result(
             &conn,
-            &tenant_id,
-            trigger_id,
-            fire_slot,
-            Some(original_run_id),
+            SuccessfulFireResultUpdate {
+                tenant_id: &request.tenant_id,
+                trigger_id: request.trigger_id,
+                fire_slot: request.fire_slot,
+                run_id: request.original_run_id,
+                result_at: request.replayed_at,
+                next_run_at: request.next_run_at,
+                update_operation: "mark replayed trigger fire",
+                read_operation: "read replayed trigger fire",
+            },
         )
         .await
     }
@@ -544,7 +450,8 @@ impl TriggerRepository for LibSqlTriggerRepository {
         {
             return Ok(Some(record));
         }
-        resolve_missed_fire_result_update(&conn, &tenant_id, trigger_id, fire_slot, None).await
+        resolve_missed_fire_result_update(&conn, &tenant_id, trigger_id, fire_slot, None, None)
+            .await
     }
 
     async fn mark_fire_permanently_failed(
@@ -599,7 +506,8 @@ impl TriggerRepository for LibSqlTriggerRepository {
         {
             return Ok(Some(record));
         }
-        resolve_missed_fire_result_update(&conn, &tenant_id, trigger_id, fire_slot, None).await
+        resolve_missed_fire_result_update(&conn, &tenant_id, trigger_id, fire_slot, None, None)
+            .await
     }
 }
 
@@ -775,6 +683,7 @@ async fn resolve_missed_fire_result_update(
     trigger_id: TriggerId,
     fire_slot: Timestamp,
     expected_run_ref: Option<TurnRunId>,
+    next_run_at: Option<Timestamp>,
 ) -> Result<Option<TriggerRecord>, TriggerError> {
     let Some(record) = fetch_record(conn, tenant_id, trigger_id).await? else {
         return Ok(None);
@@ -789,7 +698,78 @@ async fn resolve_missed_fire_result_update(
         }
         reject_failed_result_after_active_run(Some(active_run_ref))?;
     }
-    Ok(None)
+    if let Some(next_run_at) = next_run_at {
+        reject_non_future_next_run_at(fire_slot, next_run_at)?;
+    }
+    Err(backend_error(
+        "reconcile missed trigger fire result update",
+        "update predicate failed while claimed fire remained active without a run ref",
+    ))
+}
+
+#[cfg(feature = "libsql")]
+async fn mark_successful_fire_result(
+    conn: &libsql::Connection,
+    update: SuccessfulFireResultUpdate<'_>,
+) -> Result<Option<TriggerRecord>, TriggerError> {
+    let fire_slot_text = fmt_ts(&update.fire_slot);
+    let result_at = fmt_ts(&update.result_at);
+    let next_run_at_text = fmt_ts(&update.next_run_at);
+    let active_run_ref = update.run_id.to_string();
+    let last_status = status_text(TriggerRunStatus::Ok);
+    let mut rows = conn
+        .query(
+            &format!(
+                "UPDATE {TRIGGER_TABLE}
+                 SET last_run_at = ?3,
+                     last_fired_slot = ?4,
+                     last_status = ?5,
+                     next_run_at = ?6,
+                     active_fire_slot = ?4,
+                     active_run_ref = ?7
+                 WHERE tenant_id = ?1
+                   AND trigger_id = ?2
+                   AND active_fire_slot = ?4
+                   AND active_run_ref IS NULL
+                   AND ?6 > ?4
+                 RETURNING {TRIGGER_COLUMNS}"
+            ),
+            params![
+                update.tenant_id.as_str(),
+                update.trigger_id.to_string(),
+                result_at,
+                fire_slot_text,
+                last_status,
+                next_run_at_text,
+                active_run_ref,
+            ],
+        )
+        .await
+        .map_err(|error| backend_error(update.update_operation, error))?;
+    if let Some(record) = returned_record(&mut rows, update.read_operation).await? {
+        return Ok(Some(record));
+    }
+    resolve_missed_fire_result_update(
+        conn,
+        update.tenant_id,
+        update.trigger_id,
+        update.fire_slot,
+        Some(update.run_id),
+        Some(update.next_run_at),
+    )
+    .await
+}
+
+#[cfg(feature = "libsql")]
+struct SuccessfulFireResultUpdate<'a> {
+    tenant_id: &'a TenantId,
+    trigger_id: TriggerId,
+    fire_slot: Timestamp,
+    run_id: TurnRunId,
+    result_at: Timestamp,
+    next_run_at: Timestamp,
+    update_operation: &'static str,
+    read_operation: &'static str,
 }
 
 #[cfg(feature = "libsql")]

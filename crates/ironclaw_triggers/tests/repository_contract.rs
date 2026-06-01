@@ -1739,6 +1739,151 @@ mod fire_claim_contract {
         assert_durable_claim_is_atomic(std::sync::Arc::new(repo)).await;
     }
 
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn libsql_repository_mark_fire_accepted_is_idempotent_under_concurrency() {
+        let (_dir, repo) = build_libsql_repo().await;
+        let repo = std::sync::Arc::new(repo);
+        let trigger_id = TriggerId::parse("01J00000000000000000000014").expect("ulid");
+        let tenant_id = tenant("tenant-accepted-concurrent");
+        let fire_slot = ts(1_704_067_200);
+        let accepted_at = ts(1_704_067_205);
+        let record = sample_record(trigger_id, tenant_id.clone(), fire_slot);
+        let next_run_at = record
+            .schedule
+            .next_slot_after(fire_slot)
+            .expect("next slot calculation")
+            .expect("future slot");
+        repo.upsert_trigger(record).await.expect("insert record");
+        assert!(matches!(
+            repo.claim_due_fire(ClaimDueFireRequest {
+                tenant_id: tenant_id.clone(),
+                trigger_id,
+                fire_slot,
+                now: fire_slot,
+            })
+            .await
+            .expect("claim fire"),
+            ClaimDueFireOutcome::Claimed(_)
+        ));
+
+        let run_id = TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f64").expect("valid run");
+        let request = FireAcceptedRequest {
+            tenant_id: tenant_id.clone(),
+            trigger_id,
+            fire_slot,
+            run_id,
+            submitted_at: accepted_at,
+            next_run_at,
+        };
+        let first_repo = repo.clone();
+        let second_repo = repo.clone();
+        let first_request = request.clone();
+        let second_request = request;
+        let first = async move {
+            tokio::task::yield_now().await;
+            first_repo.mark_fire_accepted(first_request).await
+        };
+        let second = async move {
+            tokio::task::yield_now().await;
+            second_repo.mark_fire_accepted(second_request).await
+        };
+
+        let (first, second) = tokio::join!(first, second);
+        let first = first
+            .expect("first accepted result")
+            .expect("first accepted record");
+        let second = second
+            .expect("second accepted result")
+            .expect("second accepted record");
+        assert_eq!(first, second);
+        assert_eq!(first.active_fire_slot, Some(fire_slot));
+        assert_eq!(first.active_run_ref, Some(run_id));
+        assert_eq!(first.last_run_at, Some(accepted_at));
+        assert_eq!(first.last_fired_slot, Some(fire_slot));
+        assert_eq!(first.last_status, Some(TriggerRunStatus::Ok));
+
+        let persisted = repo
+            .get_trigger(tenant_id, trigger_id)
+            .await
+            .expect("reload accepted result")
+            .expect("record present");
+        assert_eq!(persisted, first);
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn libsql_repository_mark_fire_replayed_is_idempotent_under_concurrency() {
+        let (_dir, repo) = build_libsql_repo().await;
+        let repo = std::sync::Arc::new(repo);
+        let trigger_id = TriggerId::parse("01J00000000000000000000015").expect("ulid");
+        let tenant_id = tenant("tenant-replayed-concurrent");
+        let fire_slot = ts(1_704_067_200);
+        let replayed_at = ts(1_704_067_205);
+        let record = sample_record(trigger_id, tenant_id.clone(), fire_slot);
+        let next_run_at = record
+            .schedule
+            .next_slot_after(fire_slot)
+            .expect("next slot calculation")
+            .expect("future slot");
+        repo.upsert_trigger(record).await.expect("insert record");
+        assert!(matches!(
+            repo.claim_due_fire(ClaimDueFireRequest {
+                tenant_id: tenant_id.clone(),
+                trigger_id,
+                fire_slot,
+                now: fire_slot,
+            })
+            .await
+            .expect("claim fire"),
+            ClaimDueFireOutcome::Claimed(_)
+        ));
+
+        let original_run_id =
+            TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f65").expect("valid run");
+        let request = FireReplayedRequest {
+            tenant_id: tenant_id.clone(),
+            trigger_id,
+            fire_slot,
+            original_run_id,
+            replayed_at,
+            next_run_at,
+        };
+        let first_repo = repo.clone();
+        let second_repo = repo.clone();
+        let first_request = request.clone();
+        let second_request = request;
+        let first = async move {
+            tokio::task::yield_now().await;
+            first_repo.mark_fire_replayed(first_request).await
+        };
+        let second = async move {
+            tokio::task::yield_now().await;
+            second_repo.mark_fire_replayed(second_request).await
+        };
+
+        let (first, second) = tokio::join!(first, second);
+        let first = first
+            .expect("first replayed result")
+            .expect("first replayed record");
+        let second = second
+            .expect("second replayed result")
+            .expect("second replayed record");
+        assert_eq!(first, second);
+        assert_eq!(first.active_fire_slot, Some(fire_slot));
+        assert_eq!(first.active_run_ref, Some(original_run_id));
+        assert_eq!(first.last_run_at, Some(replayed_at));
+        assert_eq!(first.last_fired_slot, Some(fire_slot));
+        assert_eq!(first.last_status, Some(TriggerRunStatus::Ok));
+
+        let persisted = repo
+            .get_trigger(tenant_id, trigger_id)
+            .await
+            .expect("reload replayed result")
+            .expect("record present");
+        assert_eq!(persisted, first);
+    }
+
     #[cfg(feature = "postgres")]
     #[tokio::test]
     async fn postgres_repository_fire_claim_contract() {
