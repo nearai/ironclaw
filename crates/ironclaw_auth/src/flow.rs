@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use ironclaw_host_api::ExtensionId;
+use ironclaw_host_api::{AgentId, ExtensionId, ProjectId, TenantId, ThreadId, UserId};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -135,6 +135,40 @@ pub struct AuthFlowRecord {
     pub expires_at: Timestamp,
 }
 
+/// Stable owner fields used by read models that project auth flows.
+///
+/// Invocation id, surface, session, and mission are intentionally excluded:
+/// they describe how setup happened, not who owns the blocked auth interaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthFlowOwnerScope {
+    pub tenant_id: TenantId,
+    pub user_id: UserId,
+    pub agent_id: Option<AgentId>,
+    pub project_id: Option<ProjectId>,
+    pub thread_id: ThreadId,
+}
+
+impl AuthFlowOwnerScope {
+    pub fn matches(&self, flow: &AuthFlowRecord) -> bool {
+        let resource = &flow.scope.resource;
+        resource.tenant_id == self.tenant_id
+            && resource.user_id == self.user_id
+            && resource.agent_id == self.agent_id
+            && resource.project_id == self.project_id
+            && resource.mission_id.is_none()
+            && resource.thread_id.as_ref() == Some(&self.thread_id)
+    }
+}
+
+/// Query for one auth flow that backs a blocked turn gate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TurnGateAuthFlowQuery {
+    pub owner: AuthFlowOwnerScope,
+    pub turn_run_ref: TurnRunRef,
+    pub gate_ref: AuthGateRef,
+    pub include_terminal: bool,
+}
+
 /// Input used to create an auth flow.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewAuthFlow {
@@ -184,6 +218,13 @@ pub struct CredentialSelectionInput {
     pub credential_account_id: CredentialAccountId,
 }
 
+/// User-submitted manual token that completed a manual-token auth flow.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManualTokenCompletionInput {
+    pub interaction_id: AuthInteractionId,
+    pub credential_account_id: CredentialAccountId,
+}
+
 /// Pre-egress claim for an authorized OAuth callback. This validates and marks
 /// the scoped flow before one-shot provider exchange can consume a raw code.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -222,6 +263,18 @@ pub trait AuthFlowManager: Send + Sync {
         input: CredentialSelectionInput,
     ) -> Result<AuthFlowRecord, AuthProductError>;
 
+    async fn complete_manual_token(
+        &self,
+        scope: &AuthProductScope,
+        input: ManualTokenCompletionInput,
+    ) -> Result<AuthFlowRecord, AuthProductError>;
+
+    async fn cancel_manual_token(
+        &self,
+        scope: &AuthProductScope,
+        interaction_id: AuthInteractionId,
+    ) -> Result<Option<AuthFlowRecord>, AuthProductError>;
+
     async fn fail_oauth_callback(
         &self,
         scope: &AuthProductScope,
@@ -247,32 +300,33 @@ pub trait AuthFlowManager: Send + Sync {
 /// This is intentionally smaller than [`AuthFlowManager`]: callers can list
 /// sanitized flow records for scoped read-model composition, but cannot mutate
 /// auth-flow state or bypass manager validation.
+#[async_trait]
 pub trait AuthFlowRecordSource: Send + Sync {
-    /// Returns a durable snapshot of auth-flow records.
-    ///
-    /// Implementations may return a broader snapshot than the caller's
-    /// current scope. Any consumer that projects these records into
-    /// product/user-facing views must scope-filter before exposing them.
-    fn flow_records_snapshot(&self) -> Vec<AuthFlowRecord>;
-
-    /// Returns the first flow record matching `predicate`.
-    ///
-    /// Implementations with an indexed or locked in-memory backing store can
-    /// avoid cloning unrelated flow records for single-record projection
-    /// lookups. The default keeps the trait backward-compatible.
-    ///
-    /// # Performance
-    ///
-    /// The default falls back to [`Self::flow_records_snapshot`], which may
-    /// allocate and clone every record before filtering. Non-trivial stores MUST
-    /// override this method so hot projection paths do not do an O(N) clone per
-    /// lookup.
-    fn flow_record_matching(
+    async fn flow_for_turn_gate(
         &self,
-        predicate: &mut dyn FnMut(&AuthFlowRecord) -> bool,
-    ) -> Option<AuthFlowRecord> {
-        self.flow_records_snapshot().into_iter().find(predicate)
+        query: TurnGateAuthFlowQuery,
+    ) -> Result<Option<AuthFlowRecord>, AuthProductError>;
+
+    async fn flows_for_owner(
+        &self,
+        owner: AuthFlowOwnerScope,
+    ) -> Result<Vec<AuthFlowRecord>, AuthProductError>;
+}
+
+pub fn flow_matches_turn_gate_query(flow: &AuthFlowRecord, query: &TurnGateAuthFlowQuery) -> bool {
+    if !query.include_terminal && crate::is_terminal_status(flow.status) {
+        return false;
     }
+    if !query.owner.matches(flow) {
+        return false;
+    }
+    matches!(
+        &flow.continuation,
+        AuthContinuationRef::TurnGateResume {
+            turn_run_ref,
+            gate_ref,
+        } if turn_run_ref == &query.turn_run_ref && gate_ref == &query.gate_ref
+    )
 }
 
 pub fn credential_status_for_completed_flow() -> CredentialAccountStatus {

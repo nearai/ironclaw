@@ -4401,6 +4401,7 @@ dependencies = [
  "ironclaw_skills",
  "regex",
  "serde_json",
+ "similar",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -5160,6 +5161,21 @@ dependencies = [
  "tokio",
  "tracing",
  "urlencoding",
+]
+
+[[package]]
+name = "ironclaw_slack_v2_adapter"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "ironclaw_product_adapters",
+ "ironclaw_turns",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]

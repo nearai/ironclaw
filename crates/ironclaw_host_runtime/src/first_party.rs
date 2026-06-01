@@ -10,8 +10,8 @@ use std::{collections::HashMap, fmt, sync::Arc};
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    CapabilityId, MountView, ResourceEstimate, ResourceScope, ResourceUsage,
-    RuntimeDispatchErrorKind, SecretHandle,
+    CapabilityDisplayOutputPreview, CapabilityId, MountView, ResourceEstimate, ResourceScope,
+    ResourceUsage, RuntimeDispatchErrorKind, SecretHandle,
 };
 use serde_json::Value;
 
@@ -88,12 +88,25 @@ impl FirstPartyCapabilityRequest {
 #[non_exhaustive]
 pub struct FirstPartyCapabilityResult {
     pub output: Value,
+    pub display_preview: Option<CapabilityDisplayOutputPreview>,
     pub usage: ResourceUsage,
 }
 
 impl FirstPartyCapabilityResult {
     pub fn new(output: Value, usage: ResourceUsage) -> Self {
-        Self { output, usage }
+        Self {
+            output,
+            display_preview: None,
+            usage,
+        }
+    }
+
+    pub fn with_display_preview(
+        mut self,
+        display_preview: Option<CapabilityDisplayOutputPreview>,
+    ) -> Self {
+        self.display_preview = display_preview;
+        self
     }
 }
 

@@ -161,7 +161,16 @@ pub(crate) enum GitHubAction {
     },
     #[serde(rename = "search_issues_pull_requests")]
     SearchIssuesPullRequests {
-        query: String,
+        query: Option<String>,
+        repository: Option<String>,
+        owner: Option<String>,
+        repo: Option<String>,
+        author: Option<String>,
+        assignee: Option<String>,
+        involves: Option<String>,
+        state: Option<String>,
+        #[serde(rename = "type")]
+        issue_type: Option<String>,
         page: Option<u32>,
         limit: Option<u32>,
         sort: Option<String>,

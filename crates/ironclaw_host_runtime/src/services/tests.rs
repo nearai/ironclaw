@@ -838,6 +838,7 @@ impl RuntimeAdapter<LocalFilesystem, InMemoryResourceGovernor> for RecordingRunt
             })?;
         Ok(RuntimeAdapterResult {
             output: Value::Null,
+            display_preview: None,
             usage,
             receipt,
             output_bytes: 0,

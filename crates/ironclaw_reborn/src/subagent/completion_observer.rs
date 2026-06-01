@@ -782,9 +782,9 @@ mod tests {
     use std::sync::Mutex;
 
     use async_trait::async_trait;
-    use ironclaw_host_api::{AgentId, CapabilityId, InvocationId, TenantId, ThreadId, UserId};
+    use ironclaw_host_api::{AgentId, CapabilityId, TenantId, ThreadId, UserId};
     use ironclaw_loop_support::{
-        AwaitedChildSetRecord, SubagentGateResolutionStore, SubagentKindId,
+        AwaitedChildSetRecord, CapabilityResultWrite, SubagentGateResolutionStore, SubagentKindId,
     };
     use ironclaw_threads::{
         AppendAssistantDraftRequest, AppendToolResultReferenceRequest, EnsureThreadRequest,
@@ -902,13 +902,9 @@ mod tests {
     impl LoopCapabilityResultWriter for RecordingResultWriter {
         async fn write_capability_result(
             &self,
-            _run_context: &ironclaw_turns::run_profile::LoopRunContext,
-            _input_ref: &ironclaw_turns::run_profile::CapabilityInputRef,
-            _invocation_id: InvocationId,
-            _capability_id: &CapabilityId,
-            output: serde_json::Value,
+            write: CapabilityResultWrite<'_>,
         ) -> Result<LoopResultRef, AgentLoopHostError> {
-            self.writes.lock().unwrap().push(output);
+            self.writes.lock().unwrap().push(write.output);
             Ok(self.result_ref.clone())
         }
 

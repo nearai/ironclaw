@@ -56,6 +56,7 @@ impl CapabilityDispatcher for RecordingDispatcher {
             provider: extension_id(),
             runtime: RuntimeKind::Wasm,
             output: json!({"ok": true}),
+            display_preview: None,
             usage: ResourceUsage::default(),
             receipt: ResourceReceipt {
                 id: ResourceReservationId::new(),

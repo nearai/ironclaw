@@ -29,7 +29,7 @@ impl exports::near::agent::tool::Guest for GitHubTool {
             },
             Err(error) => exports::near::agent::tool::Response {
                 output: None,
-                error: Some(error),
+                error: Some(guest_error_payload(&error)),
             },
         }
     }
@@ -41,6 +41,53 @@ impl exports::near::agent::tool::Guest for GitHubTool {
     fn description() -> String {
         "First-party GitHub Reborn tool: repositories, issues, pull requests, reviews/comments, search, branches, code reads, file writes, releases, workflow dispatch/runs, forks, and webhook normalization. GitHub credentials are injected only by host HTTP egress."
             .to_string()
+    }
+}
+
+fn guest_error_payload(code: &str) -> String {
+    serde_json::json!({
+        "code": code,
+        "kind": guest_error_kind(code),
+    })
+    .to_string()
+}
+
+fn guest_error_kind(code: &str) -> &'static str {
+    match code {
+        "AuthRequired" => "auth_required",
+        "missing_invocation_context"
+        | "invalid_invocation_context"
+        | "unsupported_github_capability"
+        | "invalid_parameters"
+        | "invalid_repository"
+        | "invalid_query_empty"
+        | "invalid_query_too_large"
+        | "invalid_author"
+        | "invalid_assignee"
+        | "invalid_involves"
+        | "invalid_state"
+        | "invalid_type"
+        | "invalid_sort"
+        | "invalid_order"
+        | "invalid_page"
+        | "invalid_limit"
+        | "invalid_labels"
+        | "Invalid owner or repo name"
+        | "Invalid repository name"
+        | "Invalid org name"
+        | "Invalid fork name"
+        | "Invalid username"
+        | "Invalid path: relative path segments not allowed"
+        | "Invalid path: empty segment not allowed"
+        | "Unsupported from_ref: use a branch or tag ref, not a raw commit SHA"
+        | "Unsupported from_ref: only refs/heads/* and refs/tags/* are supported"
+        | "Source ref response missing object.sha" => "input",
+        "github_api_body_limit" => "output_too_large",
+        "github_api_timeout" => "executor",
+        "github_api_egress_denied" | "github_api_redirect_denied" => "network_denied",
+        "github_api_error_status_401" => "auth_required",
+        "github_api_error_status_403" | "github_api_error_status_429" => "client",
+        _ => "operation_failed",
     }
 }
 

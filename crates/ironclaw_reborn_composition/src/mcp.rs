@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
-use ironclaw_extensions::SharedExtensionRegistry;
+use ironclaw_extensions::{
+    ExtensionPackage, ExtensionRuntime, ManifestSource, SharedExtensionRegistry,
+};
 use ironclaw_host_api::{
     CapabilityId, ExtensionId, NetworkPolicy, NetworkScheme, NetworkTargetPattern,
     RuntimeCredentialInjection, RuntimeCredentialSource, RuntimeHttpEgress,
@@ -14,17 +16,7 @@ const MCP_RESPONSE_BODY_LIMIT: u64 = 2 * 1024 * 1024;
 const MCP_NETWORK_EGRESS_LIMIT: u64 = 2 * 1024 * 1024;
 const MCP_TIMEOUT_MS: u32 = 60_000;
 
-/// Known hosted MCP providers served through the registry-driven planner.
-///
-/// Each provider maps to a single pinned endpoint. Capabilities from
-/// an unknown provider return an empty plan so dispatch fails closed;
-/// a spoofed capability descriptor cannot redirect credentials to an
-/// unexpected host.
-const NOTION_EXTENSION_ID: &str = "notion";
-const NOTION_MCP_HOST: &str = "mcp.notion.com";
-const NOTION_MCP_PATH: &str = "/mcp";
-
-pub(crate) fn host_mediated_mcp_runtime(
+pub(crate) fn hosted_http_mcp_runtime(
     registry: Arc<SharedExtensionRegistry>,
     runtime_http_egress: Arc<dyn RuntimeHttpEgress>,
 ) -> McpRuntime<
@@ -49,15 +41,19 @@ impl RegistryMcpEgressPlanner {
 
     fn credential_injections(
         &self,
+        provider: &ExtensionId,
         capability_id: &CapabilityId,
+        endpoint: &HostedMcpEndpoint,
     ) -> Vec<RuntimeCredentialInjection> {
         self.registry
             .snapshot()
             .get_capability(capability_id)
+            .filter(|descriptor| &descriptor.provider == provider)
             .map(|descriptor| {
                 descriptor
                     .runtime_credentials
                     .iter()
+                    .filter(|credential| endpoint.allows_target(&credential.audience))
                     .map(|credential| RuntimeCredentialInjection {
                         handle: credential.handle.clone(),
                         source: RuntimeCredentialSource::StagedObligation {
@@ -71,32 +67,24 @@ impl RegistryMcpEgressPlanner {
             .unwrap_or_default()
     }
 
-    /// Return the pinned endpoint for `provider`, or `None` if the provider is
-    /// not a known hosted MCP extension handled by this planner.
     fn provider_endpoint(&self, provider: &ExtensionId) -> Option<HostedMcpEndpoint> {
-        match provider.as_str() {
-            NOTION_EXTENSION_ID => Some(HostedMcpEndpoint {
-                host_pattern: NOTION_MCP_HOST,
-                path: NOTION_MCP_PATH,
-            }),
-            _ => None,
-        }
+        let registry = self.registry.snapshot();
+        registry
+            .get_extension(provider)
+            .and_then(hosted_http_mcp_endpoint)
     }
 }
 
 impl McpHostHttpEgressPlanner for RegistryMcpEgressPlanner {
     fn plan(&self, request: McpHostHttpEgressPlanRequest<'_>) -> McpHostHttpEgressPlan {
-        // Provider must be a known hosted MCP extension and the request URL must
-        // match its pinned host, scheme, and path. This mirrors the NEAR AI
-        // planner approach (#4223): an unknown capability descriptor cannot
-        // phish credentials to an unexpected host.
         let Some(endpoint) = self.provider_endpoint(request.provider) else {
             return McpHostHttpEgressPlan::default();
         };
         if !hosted_mcp_url_allowed(request.url, &endpoint) {
             return McpHostHttpEgressPlan::default();
         }
-        let credential_injections = self.credential_injections(request.capability_id);
+        let credential_injections =
+            self.credential_injections(request.provider, request.capability_id, &endpoint);
         if credential_injections.is_empty() {
             return McpHostHttpEgressPlan::default();
         }
@@ -112,38 +100,83 @@ impl McpHostHttpEgressPlanner for RegistryMcpEgressPlanner {
     }
 }
 
-/// A pinned endpoint for a known hosted MCP provider.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct HostedMcpEndpoint {
-    host_pattern: &'static str,
-    path: &'static str,
+    host_pattern: String,
+    port: Option<u16>,
+    path: String,
+}
+
+impl HostedMcpEndpoint {
+    fn parse(url: &str) -> Option<Self> {
+        let parsed = url::Url::parse(url).ok()?;
+        if parsed.scheme() != "https"
+            || !parsed.username().is_empty()
+            || parsed.password().is_some()
+            || parsed.query().is_some()
+            || parsed.fragment().is_some()
+        {
+            return None;
+        }
+        Some(Self {
+            host_pattern: parsed.host_str()?.to_ascii_lowercase(),
+            port: parsed.port(),
+            path: normalize_mcp_path(parsed.path()),
+        })
+    }
+
+    fn allows_target(&self, target: &NetworkTargetPattern) -> bool {
+        target.scheme == Some(NetworkScheme::Https)
+            && target.host_pattern.eq_ignore_ascii_case(&self.host_pattern)
+            && target.port == self.port
+    }
+
+    fn matches_url(&self, url: &str) -> bool {
+        Self::parse(url).is_some_and(|request_endpoint| request_endpoint == *self)
+    }
+}
+
+fn hosted_http_mcp_endpoint(package: &ExtensionPackage) -> Option<HostedMcpEndpoint> {
+    if package.manifest.source != ManifestSource::HostBundled {
+        return None;
+    }
+    let ExtensionRuntime::Mcp {
+        transport,
+        command: None,
+        args,
+        url: Some(url),
+    } = &package.manifest.runtime
+    else {
+        return None;
+    };
+    if transport != "http" || !args.is_empty() {
+        return None;
+    }
+    HostedMcpEndpoint::parse(url)
 }
 
 /// Returns `true` only when `url` has scheme `https`, a host that
 /// case-insensitively matches `endpoint.host_pattern`, and a path that
 /// (ignoring trailing slashes) matches `endpoint.path`.
 fn hosted_mcp_url_allowed(url: &str, endpoint: &HostedMcpEndpoint) -> bool {
-    let Ok(parsed) = url::Url::parse(url) else {
-        return false;
-    };
-    if parsed.scheme() != "https" {
-        return false;
+    endpoint.matches_url(url)
+}
+
+fn normalize_mcp_path(path: &str) -> String {
+    let trimmed = path.trim_end_matches('/');
+    if trimmed.is_empty() {
+        "/".to_string()
+    } else {
+        trimmed.to_string()
     }
-    if parsed.path().trim_end_matches('/') != endpoint.path {
-        return false;
-    }
-    parsed
-        .host_str()
-        .map(|host| host.eq_ignore_ascii_case(endpoint.host_pattern))
-        .unwrap_or(false)
 }
 
 fn hosted_mcp_network_policy(endpoint: &HostedMcpEndpoint) -> NetworkPolicy {
     NetworkPolicy {
         allowed_targets: vec![NetworkTargetPattern {
             scheme: Some(NetworkScheme::Https),
-            host_pattern: endpoint.host_pattern.to_string(),
-            port: None,
+            host_pattern: endpoint.host_pattern.clone(),
+            port: endpoint.port,
         }],
         // Matches the bundled manifest's deny_private_ip_ranges default.
         // Dispatcher would reject anyway, but the plan must agree.
@@ -158,10 +191,14 @@ mod tests {
     use ironclaw_host_api::{
         CapabilityId, CapabilityProfileSchemaRef, ExtensionId, InvocationId, NetworkMethod,
         NetworkScheme, NetworkTargetPattern, PermissionMode, ProjectId, ResourceScope,
+        RuntimeCredentialAccountProviderId, RuntimeCredentialRequirementSource,
         RuntimeCredentialTarget, SecretHandle, TenantId, TrustClass, UserId, VirtualPath,
     };
 
     use super::*;
+
+    const NOTION_MCP_HOST: &str = "mcp.notion.com";
+    const NOTION_MCP_URL: &str = "https://mcp.notion.com/mcp";
 
     // ── credential projection ──────────────────────────────────────────────
 
@@ -169,9 +206,11 @@ mod tests {
     fn mcp_planner_projects_manifest_runtime_credentials_to_staged_injections() {
         let registry = Arc::new(SharedExtensionRegistry::new(registry_with_notion()));
         let planner = RegistryMcpEgressPlanner::new(registry);
+        let provider = ExtensionId::new("notion").unwrap();
         let capability_id = CapabilityId::new("notion.notion-search").unwrap();
+        let endpoint = HostedMcpEndpoint::parse(NOTION_MCP_URL).unwrap();
 
-        let injections = planner.credential_injections(&capability_id);
+        let injections = planner.credential_injections(&provider, &capability_id, &endpoint);
 
         assert_eq!(injections.len(), 1);
         assert_eq!(
@@ -207,6 +246,33 @@ mod tests {
 
         assert!(plan.credential_injections.is_empty());
         assert!(plan.network_policy.allowed_targets.is_empty());
+    }
+
+    #[test]
+    fn planner_accepts_any_host_bundled_http_mcp_provider() {
+        let registry = Arc::new(SharedExtensionRegistry::new(registry_with_provider(
+            "fixture",
+            "https://fixture.example.com/mcp",
+            "fixture.search",
+            "fixture_token",
+        )));
+        let planner = RegistryMcpEgressPlanner::new(registry);
+        let provider = ExtensionId::new("fixture").unwrap();
+        let cap = CapabilityId::new("fixture.search").unwrap();
+        let scope = sample_scope();
+
+        let plan = planner.plan(sample_plan_request(
+            &provider,
+            &cap,
+            "https://fixture.example.com/mcp",
+            &scope,
+        ));
+
+        assert_eq!(plan.credential_injections.len(), 1);
+        assert_eq!(
+            plan.network_policy.allowed_targets[0].host_pattern,
+            "fixture.example.com"
+        );
     }
 
     #[test]
@@ -286,7 +352,7 @@ mod tests {
         assert_eq!(plan.network_policy.allowed_targets.len(), 1);
         assert_eq!(
             plan.network_policy.allowed_targets[0].host_pattern,
-            NOTION_MCP_HOST
+            NOTION_MCP_HOST.to_string()
         );
         assert_eq!(
             plan.network_policy.allowed_targets[0].scheme,
@@ -300,22 +366,13 @@ mod tests {
 
     #[test]
     fn hosted_mcp_url_allowed_accepts_canonical_notion_url() {
-        let endpoint = HostedMcpEndpoint {
-            host_pattern: NOTION_MCP_HOST,
-            path: NOTION_MCP_PATH,
-        };
-        assert!(hosted_mcp_url_allowed(
-            "https://mcp.notion.com/mcp",
-            &endpoint
-        ));
+        let endpoint = HostedMcpEndpoint::parse(NOTION_MCP_URL).unwrap();
+        assert!(hosted_mcp_url_allowed(NOTION_MCP_URL, &endpoint));
     }
 
     #[test]
     fn hosted_mcp_url_allowed_rejects_http_scheme() {
-        let endpoint = HostedMcpEndpoint {
-            host_pattern: NOTION_MCP_HOST,
-            path: NOTION_MCP_PATH,
-        };
+        let endpoint = HostedMcpEndpoint::parse(NOTION_MCP_URL).unwrap();
         assert!(!hosted_mcp_url_allowed(
             "http://mcp.notion.com/mcp",
             &endpoint
@@ -324,10 +381,7 @@ mod tests {
 
     #[test]
     fn hosted_mcp_url_allowed_rejects_wrong_host() {
-        let endpoint = HostedMcpEndpoint {
-            host_pattern: NOTION_MCP_HOST,
-            path: NOTION_MCP_PATH,
-        };
+        let endpoint = HostedMcpEndpoint::parse(NOTION_MCP_URL).unwrap();
         assert!(!hosted_mcp_url_allowed(
             "https://evil.example.com/mcp",
             &endpoint
@@ -336,10 +390,7 @@ mod tests {
 
     #[test]
     fn hosted_mcp_url_allowed_rejects_wrong_path() {
-        let endpoint = HostedMcpEndpoint {
-            host_pattern: NOTION_MCP_HOST,
-            path: NOTION_MCP_PATH,
-        };
+        let endpoint = HostedMcpEndpoint::parse(NOTION_MCP_URL).unwrap();
         assert!(!hosted_mcp_url_allowed(
             "https://mcp.notion.com/other",
             &endpoint
@@ -348,12 +399,27 @@ mod tests {
 
     #[test]
     fn hosted_mcp_url_allowed_accepts_trailing_slash() {
-        let endpoint = HostedMcpEndpoint {
-            host_pattern: NOTION_MCP_HOST,
-            path: NOTION_MCP_PATH,
-        };
+        let endpoint = HostedMcpEndpoint::parse(NOTION_MCP_URL).unwrap();
         assert!(hosted_mcp_url_allowed(
             "https://mcp.notion.com/mcp/",
+            &endpoint
+        ));
+    }
+
+    #[test]
+    fn hosted_mcp_url_allowed_rejects_extra_url_components() {
+        let endpoint = HostedMcpEndpoint::parse(NOTION_MCP_URL).unwrap();
+
+        assert!(!hosted_mcp_url_allowed(
+            "https://mcp.notion.com/mcp?token=shadow",
+            &endpoint
+        ));
+        assert!(!hosted_mcp_url_allowed(
+            "https://mcp.notion.com/mcp#fragment",
+            &endpoint
+        ));
+        assert!(!hosted_mcp_url_allowed(
+            "https://user@mcp.notion.com/mcp",
             &endpoint
         ));
     }
@@ -391,16 +457,35 @@ mod tests {
     }
 
     fn registry_with_notion() -> ironclaw_extensions::ExtensionRegistry {
+        registry_with_provider(
+            "notion",
+            NOTION_MCP_URL,
+            "notion.notion-search",
+            "mcp_notion_access_token",
+        )
+    }
+
+    fn registry_with_provider(
+        provider: &str,
+        url: &str,
+        capability_id: &str,
+        credential_handle: &str,
+    ) -> ironclaw_extensions::ExtensionRegistry {
         let mut registry = ironclaw_extensions::ExtensionRegistry::new();
+        let host = url::Url::parse(url)
+            .unwrap()
+            .host_str()
+            .unwrap()
+            .to_string();
         registry
             .insert(
                 ExtensionPackage::from_manifest(
                     ExtensionManifest {
                         schema_version: ironclaw_extensions::MANIFEST_SCHEMA_VERSION.to_string(),
-                        id: ExtensionId::new("notion").unwrap(),
-                        name: "Notion".to_string(),
+                        id: ExtensionId::new(provider).unwrap(),
+                        name: provider.to_string(),
                         version: "0.1.0".to_string(),
-                        description: "Notion MCP".to_string(),
+                        description: "Hosted MCP".to_string(),
                         source: ManifestSource::HostBundled,
                         requested_trust: ironclaw_host_api::RequestedTrustClass::ThirdParty,
                         descriptor_trust_default: TrustClass::Sandbox,
@@ -408,13 +493,13 @@ mod tests {
                             transport: "http".to_string(),
                             command: None,
                             args: Vec::new(),
-                            url: Some("https://mcp.notion.com/mcp".to_string()),
+                            url: Some(url.to_string()),
                         },
                         host_apis: Vec::new(),
                         capabilities: vec![ironclaw_extensions::CapabilityManifest {
-                            id: CapabilityId::new("notion.notion-search").unwrap(),
+                            id: CapabilityId::new(capability_id).unwrap(),
                             implements: Vec::new(),
-                            description: "Search Notion".to_string(),
+                            description: "Search".to_string(),
                             effects: vec![
                                 ironclaw_host_api::EffectKind::DispatchCapability,
                                 ironclaw_host_api::EffectKind::Network,
@@ -434,11 +519,17 @@ mod tests {
                             required_host_ports: Vec::new(),
                             runtime_credentials: vec![
                                 ironclaw_host_api::RuntimeCredentialRequirement {
-                                    handle: SecretHandle::new("mcp_notion_access_token").unwrap(),
-                                    source: ironclaw_host_api::RuntimeCredentialRequirementSource::default(),
+                                    handle: SecretHandle::new(credential_handle).unwrap(),
+                                    source:
+                                        RuntimeCredentialRequirementSource::ProductAuthAccount {
+                                            provider: RuntimeCredentialAccountProviderId::new(
+                                                provider,
+                                            )
+                                            .unwrap(),
+                                        },
                                     audience: NetworkTargetPattern {
                                         scheme: Some(NetworkScheme::Https),
-                                        host_pattern: "mcp.notion.com".to_string(),
+                                        host_pattern: host,
                                         port: None,
                                     },
                                     target: RuntimeCredentialTarget::Header {
@@ -451,7 +542,7 @@ mod tests {
                             resource_profile: None,
                         }],
                     },
-                    VirtualPath::new("/system/extensions/notion").unwrap(),
+                    VirtualPath::new(format!("/system/extensions/{provider}")).unwrap(),
                 )
                 .unwrap(),
             )

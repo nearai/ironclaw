@@ -2,6 +2,8 @@
 mod tests {
     #![allow(clippy::module_inception)]
 
+    mod display_preview;
+
     use super::super::*;
 
     use ironclaw_host_api::{
@@ -174,14 +176,16 @@ mod tests {
             .expect("input stages");
         let invocation_id = InvocationId::new();
 
+        let capability_id = CapabilityId::new("builtin.echo").expect("capability id");
         let result_ref = capability_io
-            .write_capability_result(
-                &run_context,
-                &input_ref,
+            .write_capability_result(CapabilityResultWrite {
+                run_context: &run_context,
+                input_ref: &input_ref,
                 invocation_id,
-                &CapabilityId::new("builtin.echo").expect("capability id"),
-                serde_json::json!({"content": "hello"}),
-            )
+                capability_id: &capability_id,
+                output: serde_json::json!({"content": "hello"}),
+                display_preview: None,
+            })
             .await
             .expect("result stages");
 
@@ -242,14 +246,16 @@ mod tests {
             .expect("input stages");
         let invocation_id = InvocationId::new();
 
+        let capability_id = CapabilityId::new("builtin.echo").expect("capability id");
         let error = capability_io
-            .write_capability_result(
-                &run_context,
-                &input_ref,
+            .write_capability_result(CapabilityResultWrite {
+                run_context: &run_context,
+                input_ref: &input_ref,
                 invocation_id,
-                &CapabilityId::new("builtin.echo").expect("capability id"),
-                serde_json::json!({"content": "hello"}),
-            )
+                capability_id: &capability_id,
+                output: serde_json::json!({"content": "hello"}),
+                display_preview: None,
+            })
             .await
             .expect_err("missing thread rejects durable preview append");
 

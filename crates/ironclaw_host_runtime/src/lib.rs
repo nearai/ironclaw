@@ -26,9 +26,9 @@
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    ApprovalRequestId, CapabilityId, CorrelationId, ExecutionContext, ExtensionId, ProcessId,
-    ResourceEstimate, ResourceScope, ResourceUsage, RuntimeCredentialAuthRequirement, RuntimeKind,
-    SecretHandle,
+    ApprovalRequestId, CapabilityDisplayOutputPreview, CapabilityId, CorrelationId,
+    ExecutionContext, ExtensionId, ProcessId, ResourceEstimate, ResourceScope, ResourceUsage,
+    RuntimeCredentialAuthRequirement, RuntimeKind, SecretHandle,
     runtime_policy::{DeploymentMode, EffectiveRuntimePolicy, RuntimeProfile},
 };
 use ironclaw_trust::TrustDecision;
@@ -463,6 +463,7 @@ pub struct VisibleCapabilitySurface {
 pub struct RuntimeCapabilityCompleted {
     pub capability_id: CapabilityId,
     pub output: Value,
+    pub display_preview: Option<CapabilityDisplayOutputPreview>,
     pub usage: ResourceUsage,
 }
 

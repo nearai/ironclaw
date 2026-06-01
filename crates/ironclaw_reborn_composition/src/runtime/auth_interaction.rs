@@ -1,7 +1,10 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_auth::{AuthContinuationRef, AuthFlowRecord, AuthFlowRecordSource};
+use ironclaw_auth::{
+    AuthFlowOwnerScope, AuthFlowRecord, AuthFlowRecordSource, AuthGateRef, TurnGateAuthFlowQuery,
+    TurnRunRef, flow_matches_turn_gate_query,
+};
 use ironclaw_product_workflow::{
     AuthGateRecord, AuthInteractionReadModel, AuthInteractionRejectionKind, AuthInteractionScope,
     AuthInteractionService, ListPendingAuthInteractionsRequest,
@@ -146,16 +149,89 @@ impl LocalDevAuthInteractionReadModel {
         Ok(historical.into_iter().next())
     }
 
-    fn flow_for_gate(
+    async fn flow_for_gate(
         &self,
         scope: &AuthInteractionScope,
         run_id: TurnRunId,
         gate_ref: &GateRef,
-    ) -> Option<AuthFlowRecord> {
+    ) -> Result<Option<AuthFlowRecord>, ProductWorkflowError> {
         self.flow_records
-            .flow_records_snapshot()
-            .into_iter()
-            .find(|flow| same_auth_owner(flow, scope) && flow_matches_gate(flow, run_id, gate_ref))
+            .flow_for_turn_gate(turn_gate_query(scope, run_id, gate_ref)?)
+            .await
+            .map_err(|error| {
+                tracing::warn!(
+                    %error,
+                    %run_id,
+                    gate_ref = %gate_ref.as_str(),
+                    "local-dev auth read model failed to query flow for turn gate"
+                );
+                auth_read_model_unavailable()
+            })
+    }
+}
+
+fn owner_scope_for_interaction(scope: &AuthInteractionScope) -> AuthFlowOwnerScope {
+    AuthFlowOwnerScope {
+        tenant_id: scope.tenant_id.clone(),
+        user_id: scope.user_id.clone(),
+        agent_id: scope.agent_id.clone(),
+        project_id: scope.project_id.clone(),
+        thread_id: scope.thread_id.clone(),
+    }
+}
+
+fn turn_gate_query(
+    scope: &AuthInteractionScope,
+    run_id: TurnRunId,
+    gate_ref: &GateRef,
+) -> Result<TurnGateAuthFlowQuery, ProductWorkflowError> {
+    Ok(TurnGateAuthFlowQuery {
+        owner: owner_scope_for_interaction(scope),
+        turn_run_ref: TurnRunRef::new(run_id.to_string())
+            .map_err(|_| auth_read_model_unavailable())?,
+        gate_ref: AuthGateRef::new(gate_ref.as_str()).map_err(|_| auth_read_model_unavailable())?,
+        include_terminal: false,
+    })
+}
+
+async fn flows_for_owner(
+    source: &Arc<dyn AuthFlowRecordSource>,
+    scope: &AuthInteractionScope,
+) -> Result<Vec<AuthFlowRecord>, ProductWorkflowError> {
+    source
+        .flows_for_owner(owner_scope_for_interaction(scope))
+        .await
+        .map_err(|error| {
+            tracing::warn!(
+                %error,
+                tenant_id = %scope.tenant_id.as_str(),
+                user_id = %scope.user_id.as_str(),
+                thread_id = %scope.thread_id.as_str(),
+                "local-dev auth read model failed to query flows for owner"
+            );
+            auth_read_model_unavailable()
+        })
+}
+
+fn matching_flow_for_run(
+    flows: &[AuthFlowRecord],
+    scope: &AuthInteractionScope,
+    run_id: TurnRunId,
+    gate_ref: &GateRef,
+) -> Result<Option<AuthFlowRecord>, ProductWorkflowError> {
+    let query = turn_gate_query(scope, run_id, gate_ref)?;
+    Ok(flows
+        .iter()
+        .find(|flow| flow_matches_turn_gate_query(flow, &query))
+        .cloned())
+}
+
+impl LocalDevAuthInteractionReadModel {
+    async fn owner_flows(
+        &self,
+        scope: &AuthInteractionScope,
+    ) -> Result<Vec<AuthFlowRecord>, ProductWorkflowError> {
+        flows_for_owner(&self.flow_records, scope).await
     }
 }
 
@@ -166,8 +242,9 @@ impl AuthInteractionReadModel for LocalDevAuthInteractionReadModel {
         scope: &AuthInteractionScope,
     ) -> Result<Vec<AuthGateRecord>, ProductWorkflowError> {
         let mut gates = Vec::new();
+        let flows = self.owner_flows(scope).await?;
         for run in self.blocked_auth_runs(scope).await? {
-            if let Some(flow) = self.flow_for_gate(scope, run.run_id, &run.gate_ref) {
+            if let Some(flow) = matching_flow_for_run(&flows, scope, run.run_id, &run.gate_ref)? {
                 gates.push(AuthGateRecord::new(run.run_id, run.gate_ref, flow)?);
             }
         }
@@ -189,7 +266,7 @@ impl AuthInteractionReadModel for LocalDevAuthInteractionReadModel {
                 run_id
             }
         };
-        let Some(flow) = self.flow_for_gate(scope, run_id, gate_ref) else {
+        let Some(flow) = self.flow_for_gate(scope, run_id, gate_ref).await? else {
             return Ok(None);
         };
         Ok(Some(AuthGateRecord::new(run_id, gate_ref.clone(), flow)?))
@@ -203,30 +280,6 @@ fn turn_scope_for_interaction(scope: &AuthInteractionScope) -> TurnScope {
         scope.project_id.clone(),
         scope.thread_id.clone(),
     )
-}
-
-fn same_auth_owner(flow: &AuthFlowRecord, scope: &AuthInteractionScope) -> bool {
-    let resource = &flow.scope.resource;
-    // Surface/session/invocation are not authority for this UI bridge; the
-    // caller must own the tenant/user/agent/project/thread that is blocked.
-    resource.tenant_id == scope.tenant_id
-        && resource.user_id == scope.user_id
-        && resource.agent_id == scope.agent_id
-        && resource.project_id == scope.project_id
-        && resource.mission_id.is_none()
-        && resource.thread_id.as_ref() == Some(&scope.thread_id)
-}
-
-fn flow_matches_gate(flow: &AuthFlowRecord, run_id: TurnRunId, gate_ref: &GateRef) -> bool {
-    let AuthContinuationRef::TurnGateResume {
-        turn_run_ref,
-        gate_ref: continuation_gate_ref,
-    } = &flow.continuation
-    else {
-        return false;
-    };
-    turn_run_ref.as_str() == run_id.to_string()
-        && continuation_gate_ref.as_str() == gate_ref.as_str()
 }
 
 fn snapshot_run_actor_matches(

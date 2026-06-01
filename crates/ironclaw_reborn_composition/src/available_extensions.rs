@@ -834,6 +834,9 @@ where
                 }
             }
         };
+        if existing_asset_matches(fs, &path, &bytes).await {
+            continue;
+        }
         if let Err(error) = fs.write_file(&path, &bytes).await {
             for written_path in written_paths.iter().rev() {
                 let _ = fs.delete(written_path).await;
@@ -848,6 +851,17 @@ where
         written_paths.push(path);
     }
     Ok(())
+}
+
+async fn existing_asset_matches<F>(fs: &F, path: &VirtualPath, bytes: &[u8]) -> bool
+where
+    F: RootFilesystem + ?Sized,
+{
+    match fs.read_file(path).await {
+        Ok(existing) => existing == bytes,
+        Err(FilesystemError::NotFound { .. }) | Err(FilesystemError::MountNotFound { .. }) => false,
+        Err(_) => false,
+    }
 }
 
 async fn load_filesystem_packages<F>(
@@ -980,8 +994,9 @@ pub(crate) fn visible_capability_ids(
 #[cfg(test)]
 mod tests {
     use std::{
-        collections::HashSet,
+        collections::{HashMap, HashSet},
         sync::{Arc, Mutex},
+        time::SystemTime,
     };
 
     use async_trait::async_trait;
@@ -1125,6 +1140,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn materialize_skips_matching_existing_assets() {
+        let fs = RecordingMaterializeFilesystem::default();
+        let extension = test_extension_package();
+        for asset in &extension.assets {
+            let path = extension_asset_path(&extension.package.id, &asset.path).unwrap();
+            let AvailableExtensionAssetContent::Bytes(bytes) = &asset.content else {
+                panic!("test fixture assets are byte-backed");
+            };
+            fs.files
+                .lock()
+                .unwrap()
+                .insert(path.as_str().to_string(), bytes.clone());
+        }
+
+        materialize_available_extension(&fs, &extension)
+            .await
+            .expect("matching assets already materialized");
+
+        assert!(
+            fs.writes.lock().unwrap().is_empty(),
+            "restore should not rewrite already materialized matching assets"
+        );
+    }
+
+    #[tokio::test]
     async fn filesystem_catalog_loads_manifest_and_runtime_assets() {
         let fs = InMemoryBackend::default();
         let extension = test_extension_package();
@@ -1185,6 +1225,68 @@ mod tests {
     struct FailingWriteState {
         writes: Vec<String>,
         deletes: Vec<String>,
+    }
+
+    #[derive(Default)]
+    struct RecordingMaterializeFilesystem {
+        files: Arc<Mutex<HashMap<String, Vec<u8>>>>,
+        writes: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[async_trait]
+    impl RootFilesystem for RecordingMaterializeFilesystem {
+        fn capabilities(&self) -> BackendCapabilities {
+            BackendCapabilities::default()
+        }
+
+        async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+            Err(FilesystemError::Unsupported {
+                path: path.clone(),
+                operation: FilesystemOperation::ListDir,
+            })
+        }
+
+        async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+            let files = self.files.lock().unwrap();
+            let Some(bytes) = files.get(path.as_str()) else {
+                return Err(FilesystemError::NotFound {
+                    path: path.clone(),
+                    operation: FilesystemOperation::Stat,
+                });
+            };
+            Ok(FileStat {
+                path: path.clone(),
+                file_type: FileType::File,
+                len: bytes.len() as u64,
+                modified: Some(SystemTime::UNIX_EPOCH),
+                sensitive: false,
+            })
+        }
+
+        async fn read_file(&self, path: &VirtualPath) -> Result<Vec<u8>, FilesystemError> {
+            self.files
+                .lock()
+                .unwrap()
+                .get(path.as_str())
+                .cloned()
+                .ok_or_else(|| FilesystemError::NotFound {
+                    path: path.clone(),
+                    operation: FilesystemOperation::ReadFile,
+                })
+        }
+
+        async fn write_file(
+            &self,
+            path: &VirtualPath,
+            bytes: &[u8],
+        ) -> Result<(), FilesystemError> {
+            self.writes.lock().unwrap().push(path.as_str().to_string());
+            self.files
+                .lock()
+                .unwrap()
+                .insert(path.as_str().to_string(), bytes.to_vec());
+            Ok(())
+        }
     }
 
     #[async_trait]

@@ -62,6 +62,7 @@ mod tests {
         let use_chat = asset_text("js/pages/chat/hooks/useChat.js");
         assert!(use_chat.contains("AUTH_TOKEN_FLOW_TIMEOUT_MS"));
         assert!(use_chat.contains("authTokenSubmitRef"));
+        assert!(use_chat.contains("submitResponseResumedTurnGate"));
         assert!(use_chat.contains("submitManualToken({"));
         assert!(use_chat.contains("authTokenSubmitRef.current.credentialRef"));
         assert!(use_chat.contains("authTokenSubmitRef.current.inFlight"));
@@ -72,6 +73,7 @@ mod tests {
         );
         assert!(use_chat.contains("resolveGateRequest({"));
         assert!(use_chat.contains("resolution: \"credential_provided\""));
+        assert!(use_chat.contains("continuation?.type === \"turn_gate_resume\""));
         assert!(use_chat.contains("credentialRef"));
         assert!(use_chat.contains("safeAuthGateCode"));
     }

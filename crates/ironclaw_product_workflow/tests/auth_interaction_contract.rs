@@ -7,8 +7,9 @@ use ironclaw_auth::{
     AuthFlowStatus, AuthGateRef, AuthProductError, AuthProductScope, AuthSurface,
     CredentialAccountId, CredentialAccountLabel, CredentialAccountProjection,
     CredentialAccountStatus, CredentialAccountUpdateBinding, CredentialOwnership,
-    CredentialSelectionInput, NewAuthFlow, OAuthAuthorizationUrl, OAuthCallbackClaimRequest,
-    OAuthCallbackFailureInput, OAuthCallbackInput, Timestamp, TurnRunRef,
+    CredentialSelectionInput, ManualTokenCompletionInput, NewAuthFlow, OAuthAuthorizationUrl,
+    OAuthCallbackClaimRequest, OAuthCallbackFailureInput, OAuthCallbackInput, Timestamp,
+    TurnRunRef,
 };
 use ironclaw_host_api::{
     AgentId, ExtensionId, InvocationId, ProjectId, ResourceScope, TenantId, ThreadId, UserId,
@@ -155,6 +156,22 @@ impl AuthFlowManager for RecordingFlowManager {
         record.credential_account_id = Some(input.credential_account_id);
         record.updated_at = Utc::now();
         Ok(record.clone())
+    }
+
+    async fn complete_manual_token(
+        &self,
+        _scope: &AuthProductScope,
+        _input: ManualTokenCompletionInput,
+    ) -> Result<AuthFlowRecord, AuthProductError> {
+        Err(AuthProductError::BackendUnavailable)
+    }
+
+    async fn cancel_manual_token(
+        &self,
+        _scope: &AuthProductScope,
+        _interaction_id: ironclaw_auth::AuthInteractionId,
+    ) -> Result<Option<AuthFlowRecord>, AuthProductError> {
+        Err(AuthProductError::BackendUnavailable)
     }
 
     async fn fail_oauth_callback(
