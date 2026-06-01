@@ -9,8 +9,8 @@ use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, Trust
 
 use crate::extension_lifecycle::{ActiveExtensionCapability, RebornLocalExtensionManagementPort};
 use ironclaw_first_party_extensions::{
-    CALENDAR_EXTENSION_ID, EXA_MCP_HOST, GMAIL_EXTENSION_ID, NETWORK_EGRESS_LIMIT,
-    WEB_ACCESS_EXTENSION_ID, WEB_SEARCH_CAPABILITY_ID, google_api_network_policy,
+    EXA_MCP_HOST, NETWORK_EGRESS_LIMIT, WEB_ACCESS_EXTENSION_ID, WEB_SEARCH_CAPABILITY_ID,
+    gsuite_network_policy_for,
 };
 use ironclaw_product_workflow::ProductWorkflowError;
 
@@ -119,11 +119,8 @@ impl LocalDevExtensionSurface {
 }
 
 fn extension_network_policy(capability: &ActiveExtensionCapability) -> NetworkPolicy {
-    if matches!(
-        capability.provider.as_str(),
-        GMAIL_EXTENSION_ID | CALENDAR_EXTENSION_ID
-    ) {
-        return google_api_network_policy();
+    if let Some(policy) = gsuite_network_policy_for(&capability.provider) {
+        return policy;
     }
 
     let mut targets = Vec::new();
@@ -155,6 +152,7 @@ fn extension_network_policy(capability: &ActiveExtensionCapability) -> NetworkPo
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ironclaw_first_party_extensions::google_api_network_policy;
     use ironclaw_host_api::CapabilityId;
 
     #[test]
@@ -212,7 +210,27 @@ mod tests {
     fn gsuite_capabilities_get_google_api_network_policy() {
         let capability = ActiveExtensionCapability {
             id: CapabilityId::new("gmail.list_messages").unwrap(),
-            provider: ExtensionId::new(GMAIL_EXTENSION_ID).unwrap(),
+            provider: ExtensionId::new(ironclaw_first_party_extensions::GMAIL_EXTENSION_ID)
+                .unwrap(),
+            effects: vec![
+                EffectKind::DispatchCapability,
+                EffectKind::Network,
+                EffectKind::UseSecret,
+            ],
+            runtime_credentials: Vec::new(),
+        };
+
+        let policy = extension_network_policy(&capability);
+
+        assert_eq!(policy, google_api_network_policy());
+    }
+
+    #[test]
+    fn calendar_capability_gets_google_api_network_policy() {
+        let capability = ActiveExtensionCapability {
+            id: CapabilityId::new("google-calendar.list_events").unwrap(),
+            provider: ExtensionId::new(ironclaw_first_party_extensions::CALENDAR_EXTENSION_ID)
+                .unwrap(),
             effects: vec![
                 EffectKind::DispatchCapability,
                 EffectKind::Network,

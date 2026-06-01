@@ -158,6 +158,14 @@ impl<'a> OutboundPolicyService<'a> {
             .await
     }
 
+    /// Update the durable status for an attempt prepared by this policy service.
+    pub async fn update_delivery_status(
+        &self,
+        request: crate::UpdateDeliveryStatusRequest,
+    ) -> Result<(), OutboundError> {
+        self.store.update_delivery_status(request).await
+    }
+
     async fn prepare_communication_delivery_attempt_from_resolution(
         &self,
         request: PrepareCommunicationDeliveryRequest,

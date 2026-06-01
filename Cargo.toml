@@ -136,6 +136,7 @@ ironclaw_common = { path = "crates/ironclaw_common", version = "0.4.2" }
 ironclaw_host_api = { path = "crates/ironclaw_host_api", version = "0.1.0" }
 ironclaw_loop_support = { path = "crates/ironclaw_loop_support", version = "0.1.0" }
 ironclaw_memory = { path = "crates/ironclaw_memory", version = "0.1.0" }
+ironclaw_resources = { path = "crates/ironclaw_resources", version = "0.1.0" }
 ironclaw_runtime_policy = { path = "crates/ironclaw_runtime_policy", version = "0.1.0" }
 ironclaw_turns = { path = "crates/ironclaw_turns", version = "0.1.0" }
 
@@ -276,6 +277,7 @@ ironclaw_reborn = { path = "crates/ironclaw_reborn", version = "0.1.0" }
 ironclaw_reborn_composition = { path = "crates/ironclaw_reborn_composition", version = "0.1.0" }
 ironclaw_threads = { path = "crates/ironclaw_threads", version = "0.1.0" }
 ironclaw_trust = { path = "crates/ironclaw_trust", version = "0.1.0" }
+ironclaw_wasm = { path = "crates/ironclaw_wasm", version = "0.1.0" }
 # Same idea for embeddings: `MockEmbeddings` is only reachable in dev builds.
 ironclaw_embeddings = { path = "crates/ironclaw_embeddings", version = "0.1.0", features = ["testing"] }
 

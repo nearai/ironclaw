@@ -735,7 +735,7 @@ async fn resource_managed_store_denies_before_process_record_creation() {
 
     assert!(matches!(
         err,
-        ProcessError::Resource(ResourceError::LimitExceeded(_))
+        ProcessError::Resource(ResourceError::LimitExceeded { .. })
     ));
     assert!(store.get(&scope, process_id).await.unwrap().is_none());
     assert_eq!(

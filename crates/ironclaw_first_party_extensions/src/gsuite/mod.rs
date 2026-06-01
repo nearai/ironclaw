@@ -24,4 +24,4 @@ pub use manifest::{
     GsuiteCapabilityOperation, GsuiteCapabilitySpec, GsuitePackageSpec, calendar_package_spec,
     find_gsuite_capability, gmail_package_spec, gsuite_package_specs, gsuite_resource_profile,
 };
-pub use network::google_api_network_policy;
+pub use network::{google_api_network_policy, gsuite_network_policy_for};

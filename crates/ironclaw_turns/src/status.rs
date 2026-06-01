@@ -38,6 +38,13 @@ impl TurnStatus {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TurnActiveRunRefState {
+    Missing,
+    Nonterminal,
+    Terminal,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct TurnRunProfile {
     pub id: RunProfileId,

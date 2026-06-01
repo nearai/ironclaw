@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "GitHub create_pr_review input",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "owner": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 100,
+      "pattern": "^[^\\s/?#]+$",
+      "not": {
+        "pattern": "\\.\\."
+      },
+      "description": "Repository owner or organization."
+    },
+    "repo": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 100,
+      "pattern": "^[^\\s/?#]+$",
+      "not": {
+        "pattern": "\\.\\."
+      },
+      "description": "Repository name."
+    },
+    "pr_number": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Pull request number."
+    },
+    "body": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 65536,
+      "description": "Review body."
+    },
+    "event": {
+      "type": "string",
+      "enum": [
+        "APPROVE",
+        "REQUEST_CHANGES",
+        "COMMENT"
+      ]
+    }
+  },
+  "required": [
+    "owner",
+    "repo",
+    "pr_number",
+    "body",
+    "event"
+  ]
+}

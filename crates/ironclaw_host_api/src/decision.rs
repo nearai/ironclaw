@@ -12,8 +12,8 @@ use std::collections::HashSet;
 
 use crate::ApprovalRequest;
 use crate::{
-    ExtensionId, HostApiError, MountView, NetworkPolicy, ResourceCeiling, ResourceReservationId,
-    RuntimeCredentialAccountProviderId, SecretHandle,
+    CapabilityId, ExtensionId, HostApiError, MountView, NetworkPolicy, ResourceCeiling,
+    ResourceReservationId, RuntimeCredentialAccountProviderId, SecretHandle,
 };
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -60,6 +60,9 @@ pub enum Obligation {
         provider: RuntimeCredentialAccountProviderId,
         requester_extension: ExtensionId,
     },
+    FirstPartyCredentialStagedViaHostPort {
+        capability_id: CapabilityId,
+    },
     ApplyNetworkPolicy {
         policy: NetworkPolicy,
     },
@@ -86,6 +89,7 @@ pub enum ObligationKind {
     ApplyNetworkPolicy,
     InjectSecretOnce,
     InjectCredentialAccountOnce,
+    FirstPartyCredentialStagedViaHostPort,
     AuditBefore,
     RedactOutput,
     EnforceResourceCeiling,
@@ -100,6 +104,7 @@ pub const OBLIGATION_EVALUATION_ORDER: &[ObligationKind] = &[
     ObligationKind::ApplyNetworkPolicy,
     ObligationKind::InjectSecretOnce,
     ObligationKind::InjectCredentialAccountOnce,
+    ObligationKind::FirstPartyCredentialStagedViaHostPort,
     ObligationKind::AuditBefore,
     ObligationKind::RedactOutput,
     ObligationKind::EnforceResourceCeiling,
@@ -226,6 +231,9 @@ impl Obligation {
             Self::UseScopedMounts { .. } => ObligationKind::UseScopedMounts,
             Self::InjectSecretOnce { .. } => ObligationKind::InjectSecretOnce,
             Self::InjectCredentialAccountOnce { .. } => ObligationKind::InjectCredentialAccountOnce,
+            Self::FirstPartyCredentialStagedViaHostPort { .. } => {
+                ObligationKind::FirstPartyCredentialStagedViaHostPort
+            }
             Self::ApplyNetworkPolicy { .. } => ObligationKind::ApplyNetworkPolicy,
             Self::EnforceResourceCeiling { .. } => ObligationKind::EnforceResourceCeiling,
             Self::EnforceOutputLimit { .. } => ObligationKind::EnforceOutputLimit,

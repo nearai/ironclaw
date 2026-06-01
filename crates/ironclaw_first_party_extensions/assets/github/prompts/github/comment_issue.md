@@ -1,5 +1,5 @@
-Use `github.comment_issue` to add a Markdown comment to an existing GitHub issue or pull request when the repository owner, repository name, issue number, and exact comment body are known.
+Use `github.comment_issue` to add an issue or pull request comment.
 
-Pass `owner`, `repo`, `issue_number`, and `body` exactly. If the user provides a GitHub issue or pull request URL, extract the owner, repository, and number before calling this capability.
+Pass the required fields exactly as requested by the user. If the user provides a GitHub URL, extract the owner, repository, and number/path/ref fields before calling this capability.
 
-This capability performs an external write through the GitHub API using the host HTTP egress port. It requires approval before dispatch and requires a configured GitHub product-auth account.
+This capability performs an external write through the GitHub API using host HTTP egress. It requires approval and a configured GitHub product-auth account.

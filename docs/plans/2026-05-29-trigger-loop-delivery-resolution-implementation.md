@@ -570,6 +570,11 @@ Implement `TriggerPollerWorker` core logic:
 - call `handle_inbound_turn_with_trusted_scope`
 - persist synchronous submit status and next-run bookkeeping
 - preserve replay safety across crash retry or dual poller attempts
+- treat per-record due-fire processing failures and active-run lookup failures
+  as structured tick report outcomes so later due records can still be handled;
+  keep batch-level repository list failures fail-fast
+- for permanent failures with no future schedule slot, mark the trigger
+  `Completed` rather than writing a sentinel `next_run_at`
 
 Keep post-run async statuses fast-follow.
 
@@ -586,7 +591,28 @@ Add the heavier caller-level tests separately from the worker core:
 - active-run back-pressure behavior
 - proof that a second due fire is skipped while one fire for the same trigger
   is active
+- trusted-poller authority guard coverage: global poller-only repository
+  queries such as `list_active_triggers` must remain unreachable from
+  user/API/capability paths. Add an architecture or caller-level test that
+  proves only the trusted poller path can exercise the cross-tenant active
+  scan, and carry this into PR 18 if the final token is constructed by
+  composition.
+- active-cleanup fairness coverage: when the earliest active rows are
+  long-running, nonterminal, or claim-only, later terminal active rows must
+  still be reached eventually instead of being starved by the same ordered
+  first page on every tick. Treat this as a PR 16 caller-level harness
+  requirement, not a best-effort unit test: the harness should run multiple
+  ticks with more active rows than the cleanup page size and prove terminal
+  rows outside the first page are eventually cleared.
+- if the fairness test exposes starvation, add cursor/rotation, widened cleanup
+  scanning, or an equivalent repository/worker policy. If this touches
+  in-memory `list_active_triggers`, consider replacing sort-then-truncate with
+  a bounded selection approach in the same pass; otherwise keep that as a
+  low-priority test-helper optimization.
 - concurrent poller claim attempts cannot both submit the same trigger/slot
+- claim-only active-fire recovery must require a composition-owned lease or
+  age signal before retrying, so a freshly claimed slot is never misclassified
+  as abandoned and submitted twice
 - retryable submit failure leaves `next_run_at` retryable
 - terminal run failure for an already accepted/submitted slot does not mint a
   second V1 turn for the same fire identity
@@ -621,9 +647,44 @@ Wire the trigger poller into Reborn composition:
 - a dedicated `TriggerPollerWorkerConfig` or equivalent composition-owned type
   for poll interval, fires per tick, and per-trigger active-run cap. Do not
   reuse `RebornRuntimeInput::PollSettings`, which is request-completion polling.
+- add a sealed `TrustedTriggerPollerScope` or equivalent host-owned token before
+  exposing the real background poller lifecycle. Global trigger scans should
+  require that token or return a wrapper type such as `GlobalActiveTriggerRecord`
+  so product adapters, first-party capabilities, and tenant-scoped APIs cannot
+  accidentally treat cross-tenant poller rows as ordinary caller-scoped lists.
+  Keep tenant-scoped `list_triggers(tenant_id)` as the only user/API listing
+  path.
 - background task bundle or worker-supervisor type that owns both turn-runner
   and trigger-poller handles, cancellation, await/shutdown ordering, and panic
   or early-exit reporting.
+- decide whether the PR 15 `worker.rs` file is split into
+  `worker::{config,ports,report,mod}` or receives a tracked architecture
+  exemption. The current large-file shape is acceptable for landing the core
+  slice only if the follow-up is explicit before lifecycle and harness code add
+  more responsibilities.
+- background trigger poller lifecycle should apply bounded startup and per-tick
+  wake jitter to reduce replica stampedes, but it must not jitter trigger
+  schedule calculation, fire identity, `fire_slot`, or `next_run_at`.
+- consider bounded active-run lookup concurrency at the lifecycle/config layer
+  once caller-level fairness coverage exists. Keep the default conservative
+  until the concrete turn-state backend and shutdown/cancellation behavior are
+  wired.
+- do not parallelize active-fire cleanup and the due-trigger query with a raw
+  `tokio::join!` unless the design preserves cleanup-before-due semantics:
+  clearing a terminal active fire before `list_due_triggers` can make that same
+  trigger eligible in the current tick.
+- lifecycle/notification wiring should define how trigger submit failures are
+  surfaced to users or admins. Permanent failures should produce a durable,
+  throttled notification; retryable failures should avoid per-tick spam and use
+  thresholded or summarized reporting.
+- preserve the PR 15 bounded tick-report failure categories when lifecycle,
+  logging, and notification wiring are added. Do not reintroduce persisted,
+  broadly logged, or user-visible raw `TriggerSourceProvider`,
+  `TriggerPromptMaterializer`, backend, or submitter error strings; map typed
+  categories to sanitized summaries at the lifecycle/notification boundary.
+- approval waits continue to belong to the turn pipeline. Composition should
+  define durable approval TTL/reminder behavior, fail-closed expiry, and stale
+  approval rejection while preserving trigger `active_run_ref` back-pressure.
 - readiness semantics for whether a disabled trigger poller is allowed and
   whether a failed trigger worker marks Reborn runtime readiness degraded.
 - architecture tests for `ironclaw_triggers` dependency edges

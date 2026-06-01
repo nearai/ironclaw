@@ -730,6 +730,7 @@ pub(super) fn reply_response_with_text(text: &str) -> LoopModelResponse {
             content: text.to_string(),
         }),
         effective_model_profile_id: ModelProfileId::new("model").expect("valid"),
+        usage: None,
     }
 }
 
@@ -745,6 +746,7 @@ pub(super) fn calls_response() -> LoopModelResponse {
             provider_replay: None,
         }]),
         effective_model_profile_id: ModelProfileId::new("model").expect("valid"),
+        usage: None,
     }
 }
 
@@ -769,6 +771,7 @@ pub(super) fn two_calls_response() -> LoopModelResponse {
             },
         ]),
         effective_model_profile_id: ModelProfileId::new("model").expect("valid"), // safety: test-only fixture
+        usage: None,
     }
 }
 
@@ -794,6 +797,7 @@ pub(super) fn provider_calls_response() -> LoopModelResponse {
             }),
         }]),
         effective_model_profile_id: ModelProfileId::new("model").expect("valid"),
+        usage: None,
     }
 }
 
@@ -838,6 +842,7 @@ pub(super) fn provider_two_calls_response() -> LoopModelResponse {
             },
         ]),
         effective_model_profile_id: ModelProfileId::new("model").expect("valid"),
+        usage: None,
     }
 }
 
@@ -853,6 +858,7 @@ pub(super) fn stale_surface_calls_response() -> LoopModelResponse {
             provider_replay: None,
         }]),
         effective_model_profile_id: ModelProfileId::new("model").expect("valid"),
+        usage: None,
     }
 }
 
@@ -877,6 +883,7 @@ pub(super) fn mixed_surface_calls_response() -> LoopModelResponse {
             },
         ]),
         effective_model_profile_id: ModelProfileId::new("model").expect("valid"),
+        usage: None,
     }
 }
 

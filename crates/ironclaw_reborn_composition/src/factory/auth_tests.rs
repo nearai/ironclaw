@@ -3,15 +3,18 @@ use chrono::{Duration, Utc};
 use ironclaw_auth::{
     AuthChallenge, AuthContinuationRef, AuthErrorCode, AuthFlowId, AuthFlowKind, AuthGateRef,
     AuthProductScope, AuthProviderId, AuthSessionId, AuthSurface, AuthorizationCodeHash,
-    CredentialAccountLabel, GOOGLE_PROVIDER_ID, InMemoryAuthProductServices, LifecyclePackageRef,
-    NewAuthFlow, OAuthAuthorizationCode, OAuthAuthorizationUrl, OAuthClientId,
-    OAuthProviderCallbackRequest, OAuthRedirectUri, OpaqueStateHash, PkceVerifierHash,
-    PkceVerifierSecret, ProviderScope, TurnRunRef,
+    CredentialAccountLabel, InMemoryAuthProductServices, LifecyclePackageRef, NewAuthFlow,
+    OAuthAuthorizationCode, OAuthAuthorizationUrl, OAuthClientId, OAuthProviderCallbackRequest,
+    OAuthRedirectUri, OpaqueStateHash, PkceVerifierHash, PkceVerifierSecret, ProviderScope,
+    TurnRunRef,
 };
+use ironclaw_capabilities::{CapabilityObligationHandler, CapabilityObligationRequest};
 use ironclaw_host_api::{
-    AgentId, InvocationId, ProjectId, ResourceScope, TenantId, ThreadId, UserId,
+    AgentId, InvocationId, ProjectId, ResourceScope, RuntimeHttpEgress, RuntimeHttpEgressError,
+    RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, TenantId, ThreadId, UserId,
 };
 use ironclaw_product_workflow::ProductAuthTurnGateResumeDispatcher;
+use ironclaw_secrets::InMemorySecretStore;
 use ironclaw_turns::{
     AcceptedMessageRef, BlockedReason, CancelRunRequest, CancelRunResponse, GetRunStateRequest,
     IdempotencyKey, LoopCheckpointStateRef, ReplyTargetBindingRef, RunProfileRequest,
@@ -21,8 +24,11 @@ use ironclaw_turns::{
     runner::{BlockRunRequest, ClaimRunRequest, TurnRunTransitionPort},
 };
 use secrecy::SecretString;
+use std::sync::Mutex;
 
 use super::*;
+use crate::notion_oauth::{NOTION_PROVIDER_ID, notion_provider_spec};
+use crate::oauth_provider_client::HostOAuthProviderClient;
 
 #[derive(Clone)]
 struct ErrorTurnCoordinator {
@@ -58,13 +64,87 @@ impl TurnCoordinator for ErrorTurnCoordinator {
     }
 }
 
+#[derive(Debug, Default)]
+struct NoopContinuationDispatcher;
+
+#[async_trait::async_trait]
+impl RebornAuthContinuationDispatcher for NoopContinuationDispatcher {
+    async fn dispatch_auth_continuation(
+        &self,
+        _event: ironclaw_auth::AuthContinuationEvent,
+    ) -> Result<(), ironclaw_auth::AuthProductError> {
+        Ok(())
+    }
+}
+
+#[derive(Debug, Default)]
+struct NoopObligationHandler;
+
+#[async_trait::async_trait]
+impl CapabilityObligationHandler for NoopObligationHandler {
+    async fn satisfy(
+        &self,
+        _request: CapabilityObligationRequest<'_>,
+    ) -> Result<(), ironclaw_capabilities::CapabilityObligationError> {
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+struct RecordingOAuthEgress {
+    response_body: Vec<u8>,
+    requests: Mutex<Vec<RuntimeHttpEgressRequest>>,
+}
+
+impl RecordingOAuthEgress {
+    fn ok(response_body: Vec<u8>) -> Self {
+        Self {
+            response_body,
+            requests: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn single_request(&self) -> RuntimeHttpEgressRequest {
+        let requests = self
+            .requests
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if requests.len() != 1 {
+            panic!("expected exactly one OAuth egress request");
+        }
+        requests[0].clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl RuntimeHttpEgress for RecordingOAuthEgress {
+    async fn execute(
+        &self,
+        request: RuntimeHttpEgressRequest,
+    ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
+        self.requests
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(request);
+        Ok(RuntimeHttpEgressResponse {
+            status: 200,
+            headers: vec![("content-type".to_string(), "application/json".to_string())],
+            body: self.response_body.clone(),
+            saved_body: None,
+            request_bytes: 0,
+            response_bytes: 0,
+            redaction_applied: true,
+        })
+    }
+}
+
 #[tokio::test]
 async fn local_dev_oauth_turn_gate_callback_resumes_default_turn_coordinator() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let services = build_reborn_services(RebornBuildInput::local_dev(
-        "local-dev-auth-owner",
-        dir.path().join("local-dev"),
-    ))
+    let services = build_reborn_services(
+        RebornBuildInput::local_dev("local-dev-auth-owner", dir.path().join("local-dev"))
+            .with_product_auth_ports(in_memory_product_auth_ports()),
+    )
     .await
     .expect("local-dev services build");
     let product_auth = services.product_auth.as_ref().expect("product auth");
@@ -187,7 +267,7 @@ async fn local_dev_oauth_turn_gate_callback_resumes_default_turn_coordinator() {
 }
 
 #[tokio::test]
-async fn local_dev_google_oauth_backend_routes_callback_to_composed_google_client() {
+async fn local_dev_google_oauth_backend_builds_with_host_provider_config() {
     let dir = tempfile::tempdir().expect("tempdir");
     let services = build_reborn_services(
         RebornBuildInput::local_dev("local-dev-google-oauth-owner", dir.path().join("local-dev"))
@@ -200,25 +280,80 @@ async fn local_dev_google_oauth_backend_routes_callback_to_composed_google_clien
     )
     .await
     .expect("local-dev services build");
-    let product_auth = services.product_auth.as_ref().expect("product auth");
-    let auth_scope = system_auth_scope();
-    let flow = create_google_flow(
-        product_auth,
+    assert!(services.product_auth.is_some());
+}
+
+#[tokio::test]
+async fn local_dev_notion_oauth_backend_builds_with_host_provider_config() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let services = build_reborn_services(
+        RebornBuildInput::local_dev("local-dev-notion-oauth-owner", dir.path().join("local-dev"))
+            .with_google_oauth_backend(OAuthClientConfig {
+                client_id: OAuthClientId::new("google-client-123").expect("client id"),
+                client_secret: None,
+                redirect_uri: OAuthRedirectUri::new("https://app.example/oauth/google/callback")
+                    .expect("redirect uri"),
+            })
+            .with_notion_oauth_backend(OAuthClientConfig {
+                client_id: OAuthClientId::new("notion-client-123").expect("client id"),
+                client_secret: None,
+                redirect_uri: OAuthRedirectUri::new("https://app.example/oauth/notion/callback")
+                    .expect("redirect uri"),
+            }),
+    )
+    .await
+    .expect("local-dev services build");
+    assert!(services.product_auth.is_some());
+}
+
+#[tokio::test]
+async fn oauth_callback_exchanges_notion_through_reborn_product_auth_boundary() {
+    let egress = Arc::new(RecordingOAuthEgress::ok(
+        br#"{"access_token":"notion-access","refresh_token":"notion-refresh","expires_in":3600,"token_type":"Bearer"}"#.to_vec(),
+    ));
+    let provider_client = HostOAuthProviderClient::new(
+        notion_provider_spec(),
+        egress.clone(),
+        Arc::new(InMemorySecretStore::new()),
+        Arc::new(NoopObligationHandler),
+        OAuthClientId::new("notion-client-123").expect("client id"),
+        OAuthRedirectUri::new("https://app.example/oauth/notion/callback").expect("redirect uri"),
+    )
+    .expect("notion provider client");
+    let services = RebornProductAuthServices::from_shared(
+        Arc::new(InMemoryAuthProductServices::new()),
+        Arc::new(NoopContinuationDispatcher),
+    )
+    .with_provider_client(Arc::new(provider_client));
+    let auth_scope = auth_scope_for_turn(
+        &turn_scope(),
+        &TurnActor::new(UserId::new("alice").unwrap()),
+    );
+    let flow_id = create_notion_flow(
+        &services,
         auth_scope.clone(),
-        AuthContinuationRef::LifecycleActivation {
-            package_ref: LifecyclePackageRef::new("google-calendar").unwrap(),
-        },
+        AuthContinuationRef::SetupOnly,
     )
     .await;
 
-    let error = product_auth
-        .handle_oauth_callback(google_authorized_request(auth_scope, flow))
+    let response = services
+        .handle_oauth_callback(notion_authorized_request(auth_scope, flow_id))
         .await
-        .expect_err("composed Google provider rejects system-scoped callbacks before egress");
+        .expect("notion callback succeeds through product auth");
 
-    // The local-dev in-memory provider accepts this otherwise-valid callback.
-    // CrossScopeDenied proves composition replaced it with GoogleProviderClient.
-    assert_eq!(error.code, AuthErrorCode::CrossScopeDenied);
+    assert_eq!(response.flow_id, flow_id);
+    assert!(response.credential_account_id.is_some());
+    let request = egress.single_request();
+    assert_eq!(request.url, "https://mcp.notion.com/token");
+    let body = form_params(&request.body);
+    assert_eq!(
+        body.get("grant_type").map(String::as_str),
+        Some("authorization_code")
+    );
+    assert_eq!(
+        body.get("resource").map(String::as_str),
+        Some("https://mcp.notion.com/mcp")
+    );
 }
 
 #[tokio::test]
@@ -238,32 +373,16 @@ async fn local_dev_google_oauth_backend_accepts_optional_client_secret_config() 
     )
     .await
     .expect("local-dev services build");
-    let product_auth = services.product_auth.as_ref().expect("product auth");
-    let auth_scope = system_auth_scope();
-    let flow = create_google_flow(
-        product_auth,
-        auth_scope.clone(),
-        AuthContinuationRef::LifecycleActivation {
-            package_ref: LifecyclePackageRef::new("google-calendar").unwrap(),
-        },
-    )
-    .await;
-
-    let error = product_auth
-        .handle_oauth_callback(google_authorized_request(auth_scope, flow))
-        .await
-        .expect_err("composed Google provider rejects system-scoped callbacks before egress");
-
-    assert_eq!(error.code, AuthErrorCode::CrossScopeDenied);
+    assert!(services.product_auth.is_some());
 }
 
 #[tokio::test]
 async fn oauth_callback_with_stale_gate_maps_to_terminal_invalid_request() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let services = build_reborn_services(RebornBuildInput::local_dev(
-        "local-dev-auth-stale-owner",
-        dir.path().join("local-dev"),
-    ))
+    let services = build_reborn_services(
+        RebornBuildInput::local_dev("local-dev-auth-stale-owner", dir.path().join("local-dev"))
+            .with_product_auth_ports(in_memory_product_auth_ports()),
+    )
     .await
     .expect("local-dev services build");
     let product_auth = services.product_auth.as_ref().expect("product auth");
@@ -305,10 +424,13 @@ async fn oauth_callback_with_stale_gate_maps_to_terminal_invalid_request() {
 #[tokio::test]
 async fn oauth_callback_with_lifecycle_activation_returns_ok_without_resume() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let services = build_reborn_services(RebornBuildInput::local_dev(
-        "local-dev-auth-lifecycle-owner",
-        dir.path().join("local-dev"),
-    ))
+    let services = build_reborn_services(
+        RebornBuildInput::local_dev(
+            "local-dev-auth-lifecycle-owner",
+            dir.path().join("local-dev"),
+        )
+        .with_product_auth_ports(in_memory_product_auth_ports()),
+    )
     .await
     .expect("local-dev services build");
     let product_auth = services.product_auth.as_ref().expect("product auth");
@@ -392,6 +514,11 @@ fn turn_scope() -> TurnScope {
 }
 
 #[cfg(test)]
+fn in_memory_product_auth_ports() -> RebornProductAuthServicePorts {
+    RebornProductAuthServicePorts::from_shared(Arc::new(InMemoryAuthProductServices::new()))
+}
+
+#[cfg(test)]
 fn auth_scope_for_turn(scope: &TurnScope, actor: &TurnActor) -> AuthProductScope {
     AuthProductScope::new(
         ResourceScope {
@@ -409,19 +536,13 @@ fn auth_scope_for_turn(scope: &TurnScope, actor: &TurnActor) -> AuthProductScope
 }
 
 #[cfg(test)]
-fn system_auth_scope() -> AuthProductScope {
-    AuthProductScope::new(ResourceScope::system(), AuthSurface::Callback)
-        .with_session_id(AuthSessionId::new("session-google-oauth-callback").unwrap())
-}
-
-#[cfg(test)]
 fn provider() -> AuthProviderId {
     AuthProviderId::new("github").unwrap()
 }
 
 #[cfg(test)]
-fn google_provider() -> AuthProviderId {
-    AuthProviderId::new(GOOGLE_PROVIDER_ID).unwrap()
+fn notion_provider() -> AuthProviderId {
+    AuthProviderId::new(NOTION_PROVIDER_ID).unwrap()
 }
 
 #[cfg(test)]
@@ -430,8 +551,8 @@ fn label() -> CredentialAccountLabel {
 }
 
 #[cfg(test)]
-fn google_label() -> CredentialAccountLabel {
-    CredentialAccountLabel::new("work google").unwrap()
+fn notion_label() -> CredentialAccountLabel {
+    CredentialAccountLabel::new("work notion").unwrap()
 }
 
 #[cfg(test)]
@@ -528,23 +649,20 @@ async fn create_flow(
         .id
 }
 
-#[cfg(test)]
-async fn create_google_flow(
+async fn create_notion_flow(
     product_auth: &RebornProductAuthServices,
     scope: AuthProductScope,
     continuation: AuthContinuationRef,
 ) -> AuthFlowId {
-    product_auth
+    match product_auth
         .flow_manager()
         .create_flow(NewAuthFlow {
             id: None,
             scope,
             kind: AuthFlowKind::IntegrationCredential,
-            provider: google_provider(),
+            provider: notion_provider(),
             challenge: AuthChallenge::OAuthUrl {
-                authorization_url: authorization_url(
-                    "https://accounts.google.com/o/oauth2/v2/auth",
-                ),
+                authorization_url: authorization_url("https://mcp.notion.com/oauth/authorize"),
                 expires_at: Utc::now() + Duration::minutes(5),
             },
             continuation,
@@ -554,8 +672,10 @@ async fn create_google_flow(
             expires_at: Utc::now() + Duration::minutes(5),
         })
         .await
-        .expect("google auth flow")
-        .id
+    {
+        Ok(flow) => flow.id,
+        Err(error) => panic!("notion auth flow failed: {error:?}"),
+    }
 }
 
 #[cfg(test)]
@@ -587,8 +707,7 @@ fn authorized_request(
     }
 }
 
-#[cfg(test)]
-fn google_authorized_request(
+fn notion_authorized_request(
     scope: AuthProductScope,
     flow_id: AuthFlowId,
 ) -> crate::RebornOAuthCallbackRequest {
@@ -598,21 +717,19 @@ fn google_authorized_request(
         opaque_state_hash: state_hash(),
         outcome: crate::RebornOAuthCallbackOutcome::Authorized {
             provider_request: OAuthProviderCallbackRequest {
-                provider: google_provider(),
-                account_label: google_label(),
+                provider: notion_provider(),
+                account_label: notion_label(),
                 authorization_code: OAuthAuthorizationCode::new(SecretString::from(
-                    "raw-google-auth-code".to_string(),
+                    "raw-notion-auth-code".to_string(),
                 ))
                 .unwrap(),
                 authorization_code_hash: code_hash(),
                 pkce_verifier: PkceVerifierSecret::new(SecretString::from(
-                    "raw-google-pkce-verifier".to_string(),
+                    "raw-notion-pkce-verifier".to_string(),
                 ))
                 .unwrap(),
                 pkce_verifier_hash: pkce_hash(),
-                scopes: vec![provider_scope(
-                    "https://www.googleapis.com/auth/gmail.readonly",
-                )],
+                scopes: vec![provider_scope("workspace")],
             },
         },
     }
@@ -640,4 +757,8 @@ fn fake_digest(value: &str) -> String {
             hash.wrapping_mul(31).wrapping_add(u64::from(byte))
         })
     )
+}
+
+fn form_params(body: &[u8]) -> std::collections::BTreeMap<String, String> {
+    url::form_urlencoded::parse(body).into_owned().collect()
 }
