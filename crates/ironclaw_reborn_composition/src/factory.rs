@@ -51,9 +51,11 @@ use ironclaw_resources::{FilesystemResourceGovernorStore, PersistentResourceGove
 use ironclaw_run_state::{FilesystemApprovalRequestStore, FilesystemRunStateStore};
 #[cfg(not(feature = "libsql"))]
 use ironclaw_run_state::{InMemoryApprovalRequestStore, InMemoryRunStateStore};
-use ironclaw_secrets::SecretStore;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-use ironclaw_secrets::{FilesystemCredentialBroker, FilesystemSecretStore};
+use ironclaw_secrets::FilesystemCredentialBroker;
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+use ironclaw_secrets::FilesystemSecretStore;
+use ironclaw_secrets::SecretStore;
 #[cfg(feature = "libsql")]
 use ironclaw_threads::FilesystemSessionThreadService;
 #[cfg(not(feature = "libsql"))]
@@ -121,6 +123,8 @@ type LocalDevWorkspaceFilesystems = (
 );
 
 const LOCAL_DEV_DEFAULT_SYSTEM_PROMPT_PATH: &str = "system/prompts/default-system.md";
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+const LOCAL_DEV_SECRETS_MASTER_KEY_PATH: &str = ".reborn-local-dev-secrets-master-key";
 
 #[cfg(feature = "libsql")]
 pub(crate) type LocalDevTurnStateStore = FilesystemTurnStateStore<LocalDevRootFilesystem>;
@@ -509,6 +513,14 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     let turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator> = Arc::new(
         DefaultTurnCoordinator::new(Arc::clone(&store_graph.turn_state)),
     );
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
+    let local_dev_product_auth_filesystem = local_dev_scoped_filesystem(Arc::clone(&filesystem));
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
+    let local_dev_secret_store =
+        build_local_dev_secret_store(&root, Arc::clone(&local_dev_product_auth_filesystem))?;
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
+    let secret_store: Arc<dyn SecretStore> = local_dev_secret_store.clone();
+    #[cfg(not(any(feature = "libsql", feature = "postgres")))]
     let secret_store: Arc<dyn SecretStore> = Arc::new(ironclaw_secrets::InMemorySecretStore::new());
     let mut first_party_registry = builtin_first_party_registry()?;
 
@@ -565,7 +577,7 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
             #[cfg(any(feature = "libsql", feature = "postgres"))]
             {
                 let durable_services = Arc::new(FilesystemAuthProductServices::new(
-                    local_dev_scoped_filesystem(Arc::clone(&filesystem)),
+                    local_dev_product_auth_filesystem,
                     Arc::clone(&secret_store),
                 ));
                 let provider_client: Arc<dyn AuthProviderClient> = google_provider_client
@@ -937,6 +949,78 @@ fn local_dev_project_filesystem(
         )?;
     }
     Ok(filesystem)
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+fn build_local_dev_secret_store<F>(
+    root: &Path,
+    scoped_filesystem: Arc<ScopedFilesystem<F>>,
+) -> Result<Arc<FilesystemSecretStore<F>>, RebornBuildError>
+where
+    F: RootFilesystem + 'static,
+{
+    let master_key = resolve_local_dev_secret_master_key(root)?;
+    let crypto = Arc::new(ironclaw_secrets::SecretsCrypto::new(master_key)?);
+    Ok(Arc::new(FilesystemSecretStore::new(
+        scoped_filesystem,
+        crypto,
+    )))
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+fn resolve_local_dev_secret_master_key(
+    root: &Path,
+) -> Result<ironclaw_secrets::SecretMaterial, RebornBuildError> {
+    let key_path = root.join(LOCAL_DEV_SECRETS_MASTER_KEY_PATH);
+    match std::fs::read_to_string(&key_path) {
+        Ok(existing) => {
+            return Ok(ironclaw_secrets::SecretMaterial::from(
+                existing.trim().to_string(),
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(RebornBuildError::InvalidConfig {
+                reason: format!("local-dev secrets master key could not be read: {error}"),
+            });
+        }
+    }
+
+    let key = std::env::var(ironclaw_secrets::keychain::SECRETS_MASTER_KEY_ENV)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(ironclaw_secrets::keychain::generate_master_key_hex);
+    write_local_dev_secret_master_key(&key_path, &key)?;
+    Ok(ironclaw_secrets::SecretMaterial::from(key))
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+fn write_local_dev_secret_master_key(path: &Path, key: &str) -> Result<(), RebornBuildError> {
+    #[cfg(unix)]
+    {
+        use std::io::Write as _;
+        use std::os::unix::fs::OpenOptionsExt as _;
+
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)
+            .map_err(|error| RebornBuildError::InvalidConfig {
+                reason: format!("local-dev secrets master key could not be created: {error}"),
+            })?;
+        file.write_all(key.as_bytes())
+            .and_then(|_| file.write_all(b"\n"))
+            .map_err(|error| RebornBuildError::InvalidConfig {
+                reason: format!("local-dev secrets master key could not be written: {error}"),
+            })
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, format!("{key}\n")).map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("local-dev secrets master key could not be written: {error}"),
+        })
+    }
 }
 
 #[cfg(feature = "libsql")]
@@ -1893,6 +1977,8 @@ mod tests {
     };
     use ironclaw_product_workflow::{LifecyclePackageKind, LifecyclePackageRef};
     use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
+    #[cfg(feature = "libsql")]
+    use secrecy::ExposeSecret;
 
     use crate::runtime::SKILL_ACTIVATE_CAPABILITY_ID;
 
@@ -1923,15 +2009,14 @@ mod tests {
 
     #[cfg(feature = "libsql")]
     #[tokio::test]
-    async fn local_dev_default_product_auth_uses_durable_manual_token_accounts() {
+    async fn local_dev_default_product_auth_preserves_manual_token_across_rebuilds() {
         let dir = tempfile::tempdir().expect("tempdir");
+        let local_dev_root = dir.path().join("local-dev");
         let owner = "local-dev-durable-auth-owner";
-        let services = build_reborn_services(RebornBuildInput::local_dev(
-            owner,
-            dir.path().join("local-dev"),
-        ))
-        .await
-        .expect("local-dev services build");
+        let services =
+            build_reborn_services(RebornBuildInput::local_dev(owner, local_dev_root.clone()))
+                .await
+                .expect("local-dev services build");
         let product_auth = services.product_auth.as_ref().expect("product auth");
         let scope = AuthProductScope::new(
             ResourceScope::local_default(UserId::new(owner).unwrap(), InvocationId::new()).unwrap(),
@@ -1973,6 +2058,44 @@ mod tests {
             access_secret.as_str().starts_with("product-auth-manual-"),
             "local-dev default product-auth must create durable SecretStore-backed handles"
         );
+
+        let rebuilt =
+            build_reborn_services(RebornBuildInput::local_dev(owner, local_dev_root.clone()))
+                .await
+                .expect("local-dev services rebuild");
+        let rebuilt_product_auth = rebuilt.product_auth.as_ref().expect("product auth");
+        let rebuilt_account = rebuilt_product_auth
+            .credential_account_service()
+            .get_account(ironclaw_auth::CredentialAccountLookupRequest::new(
+                scope.clone(),
+                submitted.account_id,
+            ))
+            .await
+            .unwrap()
+            .expect("manual-token account should survive local-dev rebuild");
+        assert_eq!(rebuilt_account.access_secret.as_ref(), Some(&access_secret));
+
+        let rebuilt_filesystem = build_local_dev_root_filesystem(
+            &local_dev_root,
+            &local_dev_root.join("workspace"),
+            None,
+        )
+        .await
+        .expect("local-dev filesystem rebuild");
+        let rebuilt_secret_store = build_local_dev_secret_store(
+            &local_dev_root,
+            local_dev_scoped_filesystem(rebuilt_filesystem),
+        )
+        .expect("local-dev secret store rebuild");
+        let lease = rebuilt_secret_store
+            .lease_once(&scope.resource, &access_secret)
+            .await
+            .expect("manual token secret should survive local-dev rebuild");
+        let raw_secret = rebuilt_secret_store
+            .consume(&scope.resource, lease.id)
+            .await
+            .expect("manual token secret should decrypt after local-dev rebuild");
+        assert_eq!(raw_secret.expose_secret(), "ghp_local_dev_pat");
 
         let flows = product_auth
             .flow_record_source()
