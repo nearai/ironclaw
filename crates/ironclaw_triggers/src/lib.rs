@@ -568,9 +568,13 @@ pub trait TriggerRepository: Send + Sync {
 
     /// Lists active trigger fires across all tenants for trusted poller cleanup.
     ///
+    /// # Safety / Authorization
+    ///
     /// This is a global query and must not be used for tenant-scoped or
     /// user-facing list operations. It exists so the poller can clear completed
-    /// active fires before future schedule slots become eligible.
+    /// active fires before future schedule slots become eligible. Callers must
+    /// preserve each returned record's tenant authority when checking or
+    /// clearing active fire state.
     async fn list_active_triggers(&self, limit: usize) -> Result<Vec<TriggerRecord>, TriggerError>;
 
     async fn claim_due_fire(

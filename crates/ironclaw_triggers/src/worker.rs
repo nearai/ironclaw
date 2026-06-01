@@ -106,15 +106,10 @@ impl TriggerPollerWorker {
         report.active_records = active_records.len();
         for record in active_records {
             let Some(fire_slot) = record.active_fire_slot else {
-                report.results.push(TriggerPollerFireReport {
-                    tenant_id: record.tenant_id,
-                    trigger_id: record.trigger_id,
-                    fire_slot: record.next_run_at,
-                    outcome: TriggerPollerFireOutcome::SkippedAlreadyActive {
-                        active_fire_slot: None,
-                        active_run_ref: record.active_run_ref,
-                    },
-                });
+                debug_assert!(
+                    record.active_fire_slot.is_some(),
+                    "list_active_triggers returned a record without active_fire_slot"
+                );
                 continue;
             };
             let Some(run_id) = record.active_run_ref else {
@@ -158,6 +153,13 @@ impl TriggerPollerWorker {
                             trigger_id: record.trigger_id,
                             fire_slot,
                             outcome: TriggerPollerFireOutcome::ClearedTerminalActive { run_id },
+                        });
+                    } else {
+                        report.results.push(TriggerPollerFireReport {
+                            tenant_id: record.tenant_id,
+                            trigger_id: record.trigger_id,
+                            fire_slot,
+                            outcome: TriggerPollerFireOutcome::SkippedAlreadyCleared { run_id },
                         });
                     }
                 }
@@ -223,7 +225,13 @@ impl TriggerPollerWorker {
             Ok(next_run_at) => next_run_at,
             Err(error) => {
                 return self
-                    .persist_failed_fire(record, fire_slot, SubmitFailureKind::Permanent, error)
+                    .persist_failed_fire(
+                        record,
+                        fire_slot,
+                        SubmitFailureKind::Permanent,
+                        error.to_string(),
+                        None,
+                    )
                     .await;
             }
         };
@@ -235,15 +243,20 @@ impl TriggerPollerWorker {
                         record,
                         fire_slot,
                         SubmitFailureKind::Permanent,
-                        TriggerError::InvalidRecord {
-                            reason: "claimed trigger did not produce a fire".to_string(),
-                        },
+                        "claimed trigger did not produce a fire".to_string(),
+                        Some(next_run_at),
                     )
                     .await;
             }
             Err(error) => {
                 return self
-                    .persist_failed_fire(record, fire_slot, classify_error(&error), error)
+                    .persist_failed_fire(
+                        record,
+                        fire_slot,
+                        classify_error(&error),
+                        error.to_string(),
+                        Some(next_run_at),
+                    )
                     .await;
             }
         };
@@ -256,7 +269,13 @@ impl TriggerPollerWorker {
             Ok(content_ref) => content_ref,
             Err(error) => {
                 return self
-                    .persist_failed_fire(record, fire_slot, classify_error(&error), error)
+                    .persist_failed_fire(
+                        record,
+                        fire_slot,
+                        classify_error(&error),
+                        error.to_string(),
+                        Some(next_run_at),
+                    )
                     .await;
             }
         };
@@ -319,7 +338,7 @@ impl TriggerPollerWorker {
                 Ok(TriggerPollerFireOutcome::Replayed { original_run_id })
             }
             Ok(TrustedTriggerFireSubmitOutcome::RetryableFailed { reason }) => {
-                self.persist_failed_fire_with_reason(
+                self.persist_failed_fire(
                     record,
                     fire_slot,
                     SubmitFailureKind::Retryable,
@@ -329,7 +348,7 @@ impl TriggerPollerWorker {
                 .await
             }
             Ok(TrustedTriggerFireSubmitOutcome::PermanentFailed { reason }) => {
-                self.persist_failed_fire_with_reason(
+                self.persist_failed_fire(
                     record,
                     fire_slot,
                     SubmitFailureKind::Permanent,
@@ -339,31 +358,19 @@ impl TriggerPollerWorker {
                 .await
             }
             Err(error) => {
-                self.persist_failed_fire(record, fire_slot, classify_error(&error), error)
-                    .await
+                self.persist_failed_fire(
+                    record,
+                    fire_slot,
+                    classify_error(&error),
+                    error.to_string(),
+                    Some(next_run_at),
+                )
+                .await
             }
         }
     }
 
     async fn persist_failed_fire(
-        &self,
-        record: TriggerRecord,
-        fire_slot: Timestamp,
-        kind: SubmitFailureKind,
-        error: TriggerError,
-    ) -> Result<TriggerPollerFireOutcome, TriggerError> {
-        let next_run_at = next_run_at_after_fire(&record, fire_slot).ok();
-        self.persist_failed_fire_with_reason(
-            record,
-            fire_slot,
-            kind,
-            error.to_string(),
-            next_run_at,
-        )
-        .await
-    }
-
-    async fn persist_failed_fire_with_reason(
         &self,
         record: TriggerRecord,
         fire_slot: Timestamp,
@@ -445,6 +452,9 @@ pub enum TriggerPollerFireOutcome {
         reason: String,
     },
     ClearedTerminalActive {
+        run_id: TurnRunId,
+    },
+    SkippedAlreadyCleared {
         run_id: TurnRunId,
     },
     SkippedAlreadyActive {
@@ -551,8 +561,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        InMemoryTriggerRepository, TriggerCompletionPolicy, TriggerRunStatus, TriggerSchedule,
-        TriggerSourceKind, TriggerState,
+        ClaimedTriggerFire, InMemoryTriggerRepository, TriggerCompletionPolicy, TriggerRunStatus,
+        TriggerSchedule, TriggerSourceKind, TriggerState,
     };
 
     fn ts(seconds: i64) -> Timestamp {
@@ -882,6 +892,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tick_reports_terminal_active_clear_race() {
+        let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid");
+        let fire_slot = ts(1_704_067_200);
+        let run_id = TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5a").expect("run id");
+        let mut record = sample_record(trigger_id, tenant("tenant-a"), ts(1_704_067_260));
+        record.active_fire_slot = Some(fire_slot);
+        record.active_run_ref = Some(run_id);
+        let worker = worker(
+            Arc::new(ActiveClearRaceRepository {
+                active_record: record,
+            }),
+            Arc::new(RecordingMaterializer::success("content:trigger-fire")),
+            Arc::new(RecordingSubmitter::with_outcomes(Vec::new())),
+            Arc::new(RecordingActiveRunLookup::with_state(
+                TriggerActiveRunState::Terminal,
+            )),
+        );
+
+        let report = worker.tick_once(fire_slot).await.expect("tick succeeds");
+
+        assert_eq!(report.active_records, 1);
+        assert_eq!(
+            report.results.last().map(|result| &result.outcome),
+            Some(&TriggerPollerFireOutcome::SkippedAlreadyCleared { run_id })
+        );
+    }
+
+    #[tokio::test]
     async fn tick_clears_terminal_active_and_processes_due_trigger() {
         let repo = Arc::new(InMemoryTriggerRepository::default());
         let active_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid");
@@ -1050,6 +1088,38 @@ mod tests {
         assert_eq!(persisted.next_run_at, fire_slot);
         assert_eq!(persisted.active_fire_slot, None);
         assert_eq!(persisted.active_run_ref, None);
+    }
+
+    #[tokio::test]
+    async fn tick_accepted_mark_fire_missing_propagates_backend_error() {
+        let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid");
+        let fire_slot = ts(1_704_067_200);
+        let mut claimed_record = sample_record(trigger_id, tenant("tenant-a"), fire_slot);
+        claimed_record.active_fire_slot = Some(fire_slot);
+        let run_id = TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5a").expect("run id");
+        let worker = worker(
+            Arc::new(AcceptedMissingRepository {
+                claimed_record,
+                fire_slot,
+            }),
+            Arc::new(RecordingMaterializer::success("content:trigger-fire")),
+            Arc::new(RecordingSubmitter::with_outcomes(vec![Ok(
+                TrustedTriggerFireSubmitOutcome::Accepted {
+                    run_id,
+                    submitted_at: fire_slot,
+                },
+            )])),
+            Arc::new(RecordingActiveRunLookup::default()),
+        );
+
+        let error = worker
+            .tick_once(fire_slot)
+            .await
+            .expect_err("missing claimed row after accepted submit must fail");
+
+        assert!(
+            matches!(error, TriggerError::Backend { ref reason } if reason.contains("persisting accepted submit result"))
+        );
     }
 
     #[tokio::test]
@@ -1276,6 +1346,192 @@ mod tests {
                 .lock()
                 .expect("state lock")
                 .unwrap_or(TriggerActiveRunState::Nonterminal))
+        }
+    }
+
+    struct ActiveClearRaceRepository {
+        active_record: TriggerRecord,
+    }
+
+    #[async_trait]
+    impl TriggerRepository for ActiveClearRaceRepository {
+        async fn upsert_trigger(&self, _record: TriggerRecord) -> Result<(), TriggerError> {
+            unreachable!("active-clear-race repository is read-only")
+        }
+
+        async fn get_trigger(
+            &self,
+            _tenant_id: TenantId,
+            _trigger_id: TriggerId,
+        ) -> Result<Option<TriggerRecord>, TriggerError> {
+            unreachable!("active-clear-race repository does not load records")
+        }
+
+        async fn list_triggers(
+            &self,
+            _tenant_id: TenantId,
+        ) -> Result<Vec<TriggerRecord>, TriggerError> {
+            unreachable!("active-clear-race repository does not list tenant records")
+        }
+
+        async fn remove_trigger(
+            &self,
+            _tenant_id: TenantId,
+            _trigger_id: TriggerId,
+        ) -> Result<Option<TriggerRecord>, TriggerError> {
+            unreachable!("active-clear-race repository does not remove records")
+        }
+
+        async fn list_due_triggers(
+            &self,
+            _now: Timestamp,
+            _limit: usize,
+        ) -> Result<Vec<TriggerRecord>, TriggerError> {
+            Ok(Vec::new())
+        }
+
+        async fn list_active_triggers(
+            &self,
+            _limit: usize,
+        ) -> Result<Vec<TriggerRecord>, TriggerError> {
+            Ok(vec![self.active_record.clone()])
+        }
+
+        async fn claim_due_fire(
+            &self,
+            _request: ClaimDueFireRequest,
+        ) -> Result<ClaimDueFireOutcome, TriggerError> {
+            unreachable!("active-clear-race repository should not claim fires")
+        }
+
+        async fn mark_fire_accepted(
+            &self,
+            _request: FireAcceptedRequest,
+        ) -> Result<Option<TriggerRecord>, TriggerError> {
+            unreachable!("active-clear-race repository should not persist accepted fires")
+        }
+
+        async fn mark_fire_replayed(
+            &self,
+            _request: FireReplayedRequest,
+        ) -> Result<Option<TriggerRecord>, TriggerError> {
+            unreachable!("active-clear-race repository should not persist replayed fires")
+        }
+
+        async fn mark_fire_retryable_failed(
+            &self,
+            _request: FireRetryableFailedRequest,
+        ) -> Result<Option<TriggerRecord>, TriggerError> {
+            unreachable!("active-clear-race repository should not persist retryable failures")
+        }
+
+        async fn mark_fire_permanently_failed(
+            &self,
+            _request: FirePermanentFailedRequest,
+        ) -> Result<Option<TriggerRecord>, TriggerError> {
+            unreachable!("active-clear-race repository should not persist permanent failures")
+        }
+
+        async fn clear_active_fire(
+            &self,
+            _request: ClearActiveFireRequest,
+        ) -> Result<Option<TriggerRecord>, TriggerError> {
+            Ok(None)
+        }
+    }
+
+    struct AcceptedMissingRepository {
+        claimed_record: TriggerRecord,
+        fire_slot: Timestamp,
+    }
+
+    #[async_trait]
+    impl TriggerRepository for AcceptedMissingRepository {
+        async fn upsert_trigger(&self, _record: TriggerRecord) -> Result<(), TriggerError> {
+            unreachable!("accepted-missing repository is read-only")
+        }
+
+        async fn get_trigger(
+            &self,
+            _tenant_id: TenantId,
+            _trigger_id: TriggerId,
+        ) -> Result<Option<TriggerRecord>, TriggerError> {
+            unreachable!("accepted-missing repository does not load records")
+        }
+
+        async fn list_triggers(
+            &self,
+            _tenant_id: TenantId,
+        ) -> Result<Vec<TriggerRecord>, TriggerError> {
+            unreachable!("accepted-missing repository does not list tenant records")
+        }
+
+        async fn remove_trigger(
+            &self,
+            _tenant_id: TenantId,
+            _trigger_id: TriggerId,
+        ) -> Result<Option<TriggerRecord>, TriggerError> {
+            unreachable!("accepted-missing repository does not remove records")
+        }
+
+        async fn list_due_triggers(
+            &self,
+            _now: Timestamp,
+            _limit: usize,
+        ) -> Result<Vec<TriggerRecord>, TriggerError> {
+            Ok(vec![self.claimed_record.clone()])
+        }
+
+        async fn list_active_triggers(
+            &self,
+            _limit: usize,
+        ) -> Result<Vec<TriggerRecord>, TriggerError> {
+            Ok(Vec::new())
+        }
+
+        async fn claim_due_fire(
+            &self,
+            _request: ClaimDueFireRequest,
+        ) -> Result<ClaimDueFireOutcome, TriggerError> {
+            Ok(ClaimDueFireOutcome::Claimed(ClaimedTriggerFire {
+                record: self.claimed_record.clone(),
+                fire_slot: self.fire_slot,
+            }))
+        }
+
+        async fn mark_fire_accepted(
+            &self,
+            _request: FireAcceptedRequest,
+        ) -> Result<Option<TriggerRecord>, TriggerError> {
+            Ok(None)
+        }
+
+        async fn mark_fire_replayed(
+            &self,
+            _request: FireReplayedRequest,
+        ) -> Result<Option<TriggerRecord>, TriggerError> {
+            unreachable!("accepted-missing repository should not persist replayed fires")
+        }
+
+        async fn mark_fire_retryable_failed(
+            &self,
+            _request: FireRetryableFailedRequest,
+        ) -> Result<Option<TriggerRecord>, TriggerError> {
+            unreachable!("accepted-missing repository should not persist retryable failures")
+        }
+
+        async fn mark_fire_permanently_failed(
+            &self,
+            _request: FirePermanentFailedRequest,
+        ) -> Result<Option<TriggerRecord>, TriggerError> {
+            unreachable!("accepted-missing repository should not persist permanent failures")
+        }
+
+        async fn clear_active_fire(
+            &self,
+            _request: ClearActiveFireRequest,
+        ) -> Result<Option<TriggerRecord>, TriggerError> {
+            unreachable!("accepted-missing repository should not clear active fires")
         }
     }
 
