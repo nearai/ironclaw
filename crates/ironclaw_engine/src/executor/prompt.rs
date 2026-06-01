@@ -22,69 +22,45 @@ use crate::types::capability::{
 use crate::types::message::{MessageRole, ThreadMessage};
 use crate::types::project::ProjectId;
 
-/// Runtime platform metadata injected into system prompts for self-awareness.
-///
-/// Provides the agent with knowledge about its own identity and environment
-/// so it can answer questions about itself, its capabilities, and its
-/// configuration without relying on training data.
-#[derive(Debug, Clone, Default)]
-pub struct PlatformInfo {
-    /// Software version (from CARGO_PKG_VERSION).
-    pub version: Option<String>,
-    /// LLM backend name (e.g. "nearai", "openai", "anthropic").
-    pub llm_backend: Option<String>,
-    /// Active model name.
-    pub model_name: Option<String>,
-    /// Database backend (e.g. "libsql", "postgres").
-    pub database_backend: Option<String>,
-    /// Active channel names (e.g. ["telegram", "cli"]).
-    pub active_channels: Vec<String>,
-    /// Owner identifier.
-    pub owner_id: Option<String>,
-    /// Project repository URL.
-    pub repo_url: Option<String>,
-}
-
-impl PlatformInfo {
-    /// Format as a prompt section. Returns empty string if no info is set.
-    pub fn to_prompt_section(&self) -> String {
-        let mut lines = Vec::new();
-
-        lines.push("You are **IronClaw**, a secure autonomous AI assistant platform.".into());
-        if let Some(ref v) = self.version {
-            lines.push(format!("- Version: {v}"));
-        }
-        if let Some(ref repo) = self.repo_url {
-            lines.push(format!("- Repository: {repo}"));
-        }
-        if let Some(ref owner) = self.owner_id {
-            lines.push(format!("- Owner: {owner}"));
-        }
-        if let Some(ref backend) = self.llm_backend {
-            let model = self.model_name.as_deref().unwrap_or("default");
-            lines.push(format!("- LLM: {backend} ({model})"));
-        }
-        if let Some(ref db) = self.database_backend {
-            lines.push(format!("- Database: {db}"));
-        }
-        if !self.active_channels.is_empty() {
-            lines.push(format!("- Channels: {}", self.active_channels.join(", ")));
-        }
-
-        if lines.len() <= 1 {
-            // Only the identity line, no runtime details — still include it
-            return format!("\n\n## Platform\n\n{}\n", lines[0]);
-        }
-
-        format!("\n\n## Platform\n\n{}\n", lines.join("\n"))
-    }
-}
+// Runtime platform metadata lives in `ironclaw_common::platform`. Re-exported
+// from this module's path for back-compat with prior call sites.
+pub use ironclaw_common::platform::PlatformInfo;
 
 /// The main instruction block (before tool listing).
 const CODEACT_PREAMBLE: &str = include_str!("../../prompts/codeact_preamble.md");
 
 /// The strategy/closing block appended after the dynamic metadata sections.
 const CODEACT_POSTAMBLE: &str = include_str!("../../prompts/codeact_postamble.md");
+
+/// Structured-tools-only preamble used when `IRONCLAW_DISABLE_CODEACT` is set.
+const STRUCTURED_TOOL_PREAMBLE: &str = r#"You are IronClaw, a personal AI assistant.
+
+## Execution mode
+
+Use the provider's structured tool_calls interface for every action.
+Do not emit Python, repl, py, or other executable fenced code blocks.
+Do not call tools as Python functions.
+Do not write tool invocations in assistant text. Never output `[[call_tool ...]]`, `<tool_call>`, `<function_call>`, JSON tool-call blobs, or function-style calls such as `tool_name(...)`.
+Only the provider-level `tool_calls` field invokes tools. If you need a tool, return a structured tool call instead of describing or printing the call.
+When no action is needed, answer in plain text.
+"#;
+
+/// Structured-tools-only postamble used when `IRONCLAW_DISABLE_CODEACT` is set.
+const STRUCTURED_TOOL_POSTAMBLE: &str = r#"
+## Strategy
+
+Use structured tool calls when you need data, persistence, external effects, or system state.
+After tool results are available, continue with another structured tool call or return the final plain-text answer.
+Some integrations use literal UI blocks such as `[[choice_set]]...[[/choice_set]]` in final user-facing text. These are UI markup only; do not invent other bracketed control blocks, especially `[[call_tool ...]]`.
+"#;
+
+/// Whether CodeAct (Tier 1 Python execution) is disabled by env var.
+pub fn codeact_disabled() -> bool {
+    matches!(
+        std::env::var("IRONCLAW_DISABLE_CODEACT").as_deref(),
+        Ok("true" | "1")
+    )
+}
 
 /// Marker for the engine-owned CodeAct system prompt.
 const CODEACT_SYSTEM_PROMPT_MARKER: &str = "<!-- ironclaw:codeact-system-prompt -->\n";
@@ -133,7 +109,13 @@ pub async fn build_codeact_system_prompt(
     } else {
         None
     };
-    build_codeact_system_prompt_inner(capabilities, compact_actions, overlay.as_deref(), platform)
+    build_codeact_system_prompt_inner(
+        codeact_disabled(),
+        capabilities,
+        compact_actions,
+        overlay.as_deref(),
+        platform,
+    )
 }
 
 /// Build the system prompt using pre-fetched memory docs.
@@ -148,18 +130,36 @@ pub fn build_codeact_system_prompt_with_docs(
     platform: Option<&PlatformInfo>,
 ) -> String {
     let overlay = extract_prompt_overlay(system_docs);
-    build_codeact_system_prompt_inner(capabilities, compact_actions, overlay.as_deref(), platform)
+    build_codeact_system_prompt_inner(
+        codeact_disabled(),
+        capabilities,
+        compact_actions,
+        overlay.as_deref(),
+        platform,
+    )
 }
 
 /// Shared prompt builder used by both the async and pre-fetched-docs variants.
-fn build_codeact_system_prompt_inner(
+///
+/// `disable_codeact` is threaded as an explicit parameter (rather than read
+/// from the env directly) so tests can exercise both branches without
+/// process-global env mutation.
+pub(crate) fn build_codeact_system_prompt_inner(
+    disable_codeact: bool,
     capabilities: &[CapabilitySummary],
     compact_actions: &[ActionDef],
     overlay: Option<&str>,
     platform: Option<&PlatformInfo>,
 ) -> String {
+    tracing::debug!(codeact_disabled = disable_codeact, "engine v2 prompt mode");
+    let (preamble, postamble) = if disable_codeact {
+        (STRUCTURED_TOOL_PREAMBLE, STRUCTURED_TOOL_POSTAMBLE)
+    } else {
+        (CODEACT_PREAMBLE, CODEACT_POSTAMBLE)
+    };
+
     let mut prompt = String::from(CODEACT_SYSTEM_PROMPT_MARKER);
-    prompt.push_str(CODEACT_PREAMBLE);
+    prompt.push_str(preamble);
 
     // Inject platform identity and runtime metadata
     if let Some(info) = platform {
@@ -184,19 +184,28 @@ fn build_codeact_system_prompt_inner(
         }
     }
 
-    let compact_actions: Vec<_> = compact_actions
-        .iter()
-        .filter(|action| matches!(action.model_tool_surface, ModelToolSurface::CompactToolInfo))
-        .collect();
+    // In disabled-CodeAct mode the "Enabled Tools" listing is omitted:
+    // compact actions are emitted into the provider tool list (see
+    // `LlmBridgeAdapter::complete`) with their full schemas, so the prompt
+    // would only duplicate that surface and the `tool_info` schema-lookup
+    // instruction wouldn't apply. Without this guard, compact tools used to
+    // appear in the prompt as "available" but never made it into
+    // `tool_calls`, leaving them effectively unreachable (PR #3665 review).
+    if !disable_codeact {
+        let compact_actions: Vec<_> = compact_actions
+            .iter()
+            .filter(|action| matches!(action.model_tool_surface, ModelToolSurface::CompactToolInfo))
+            .collect();
 
-    if !compact_actions.is_empty() {
-        prompt.push_str(CODEACT_ENABLED_TOOLS_HEADING);
-        prompt.push('\n');
-        prompt.push_str(
-            "These enabled tools are shown in compact form. Before calling one, always check its schema with `tool_info(name=\"<tool>\", detail=\"schema\")`.\n\n",
-        );
-        for action in compact_actions {
-            prompt.push_str(&render_enabled_tool(action));
+        if !compact_actions.is_empty() {
+            prompt.push_str(CODEACT_ENABLED_TOOLS_HEADING);
+            prompt.push('\n');
+            prompt.push_str(
+                "These enabled tools are shown in compact form. Before calling one, always check its schema with `tool_info(name=\"<tool>\", detail=\"schema\")`.\n\n",
+            );
+            for action in compact_actions {
+                prompt.push_str(&render_enabled_tool(action));
+            }
         }
     }
 
@@ -204,14 +213,20 @@ fn build_codeact_system_prompt_inner(
         prompt.push_str(CODEACT_ACTIVATABLE_INTEGRATIONS_HEADING);
         prompt.push('\n');
         prompt.push_str(
-            "If you need one of these integrations, call `tool_activate(name=\"<integration>\")` first. After it succeeds, its tools will be available on the next turn. If you need parameter details before enabling one, call `tool_info(name=\"<tool>\", detail=\"summary\")` on one of the previewed tools.\n\n",
+            "These integrations need user setup before their tools become callable. \
+             When the user asks to connect/install/enable one of them, call \
+             `tool_install(name=\"<name>\")` directly — don't enumerate alternatives or \
+             describe manual UI steps. If credentials are missing the engine raises an \
+             auth gate at execute time and the user is prompted in chat. \
+             For parameter details before installing, call \
+             `tool_info(name=\"<tool>\", detail=\"summary\")` on a preview tool.\n\n",
         );
         for capability in activatable_integrations {
             prompt.push_str(&render_activatable_integration(capability));
         }
     }
 
-    prompt.push_str(CODEACT_POSTAMBLE);
+    prompt.push_str(postamble);
     prompt
 }
 
@@ -310,13 +325,16 @@ const fn capability_kind_label(kind: CapabilitySummaryKind) -> &'static str {
 }
 
 fn is_activatable_integration(capability: &CapabilitySummary) -> bool {
+    // NeedsAuth is intentionally NOT here: post-#3133, installed-but-unauthed
+    // provider tools are direct-callable (the engine's auth preflight raises
+    // an Authentication gate at execute time) so they live in the regular
+    // action inventory, not in the separate setup-required section.
     matches!(
         capability.kind,
         CapabilitySummaryKind::Provider | CapabilitySummaryKind::Channel
     ) && matches!(
         capability.status,
-        CapabilityStatus::NeedsAuth
-            | CapabilityStatus::NeedsSetup
+        CapabilityStatus::NeedsSetup
             | CapabilityStatus::Inactive
             | CapabilityStatus::Latent
             | CapabilityStatus::AvailableNotInstalled
@@ -576,7 +594,11 @@ mod tests {
                     name: "slack".into(),
                     display_name: None,
                     kind: crate::types::capability::CapabilitySummaryKind::Provider,
-                    status: CapabilityStatus::NeedsAuth,
+                    // NeedsSetup (not NeedsAuth) lands in "Activatable
+                    // Integrations". NeedsAuth tools are direct-callable
+                    // post-#3133, so they live in the regular action
+                    // inventory rather than the setup-required section.
+                    status: CapabilityStatus::NeedsSetup,
                     description: Some("Slack workspace integration".into()),
                     action_preview: vec!["slack_send".into(), "slack_history".into()],
                     routing_hint: None,
@@ -593,9 +615,14 @@ mod tests {
         assert!(prompt.contains("Usable through message"));
         assert!(prompt.contains("## Activatable Integrations"));
         assert!(prompt.contains("`slack` [provider]"));
-        assert!(prompt.contains("tool_activate(name=\"<integration>\")"));
+        assert!(prompt.contains("need user setup before their tools become callable"));
         assert!(prompt.contains("tool_info(name=\"<tool>\", detail=\"summary\")"));
         assert!(prompt.contains("Unlocks: `slack_send`, `slack_history`"));
+        // Regression for #3533: the prompt must direct the model to call
+        // tool_install for activatable integrations instead of narrating
+        // manual UI steps or enumerating alternatives.
+        assert!(prompt.contains("tool_install(name=\"<name>\")"));
+        assert!(prompt.contains("don't enumerate alternatives"));
     }
 
     #[test]
@@ -605,7 +632,10 @@ mod tests {
                 name: "gmail".into(),
                 display_name: Some("Gmail".into()),
                 kind: CapabilitySummaryKind::Provider,
-                status: CapabilityStatus::NeedsAuth,
+                // NeedsSetup keeps gmail in Activatable Integrations.
+                // NeedsAuth gmail would render in the regular action
+                // inventory instead (post-#3133 direct-callable path).
+                status: CapabilityStatus::NeedsSetup,
                 description: Some("Gmail integration".into()),
                 action_preview: vec!["gmail_send".into()],
                 routing_hint: None,
@@ -644,6 +674,29 @@ mod tests {
         assert!(!prompt.contains("- `http`"));
         assert!(prompt.contains("## Activatable Integrations"));
         assert_eq!(prompt.matches("`gmail` [provider]").count(), 1);
+    }
+
+    #[test]
+    fn needs_auth_capability_is_not_activatable_integration() {
+        // Post-#3133: gmail with NeedsAuth status (installed but missing
+        // OAuth) is direct-callable. The auth gate raises at execute
+        // time, so the capability does NOT belong in the Activatable
+        // Integrations section.
+        let prompt = build_codeact_system_prompt_with_docs(
+            &[CapabilitySummary {
+                name: "gmail".into(),
+                display_name: Some("Gmail".into()),
+                kind: CapabilitySummaryKind::Provider,
+                status: CapabilityStatus::NeedsAuth,
+                description: Some("Gmail integration".into()),
+                action_preview: vec!["gmail_send".into()],
+                routing_hint: None,
+            }],
+            &[],
+            &[],
+            None,
+        );
+        assert!(!prompt.contains("## Activatable Integrations"));
     }
 
     #[test]
@@ -764,5 +817,76 @@ mod tests {
         assert!(refreshed.contains("## Prior Knowledge (from completed threads)"));
         assert!(refreshed.contains("GitHub API Skill"));
         assert!(refreshed.contains("/missing"));
+    }
+
+    /// PR #3665 review (serrrfirat). With CodeAct disabled the structured-tool
+    /// prompt previously listed compact actions under "## Enabled Tools" with
+    /// a `tool_info` schema-lookup instruction — but the LLM adapter only
+    /// emitted FullSchema actions to the provider tool list. The result was
+    /// that compact tools (mission_create, gmail_send, notion_search, ...)
+    /// appeared in the prompt as "available" but could not be called via
+    /// `tool_calls`. Fix: skip the "Enabled Tools" section in disabled mode
+    /// and emit every action into the provider tool list instead (the
+    /// adapter-side half of this fix lives in `src/bridge/llm_adapter.rs`).
+    #[test]
+    fn disabled_codeact_omits_enabled_tools_section_and_keeps_activatable() {
+        let actions = vec![
+            ActionDef {
+                name: "mission_create".into(),
+                description: "Create scheduled or event-driven missions.".into(),
+                parameters_schema: serde_json::json!({"type": "object"}),
+                effects: Vec::new(),
+                requires_approval: false,
+                model_tool_surface: ModelToolSurface::CompactToolInfo,
+                discovery: None,
+            },
+            ActionDef {
+                name: "http".into(),
+                description: "Make HTTP requests.".into(),
+                parameters_schema: serde_json::json!({"type": "object"}),
+                effects: Vec::new(),
+                requires_approval: false,
+                model_tool_surface: ModelToolSurface::FullSchema,
+                discovery: None,
+            },
+        ];
+        let capabilities = vec![CapabilitySummary {
+            name: "gmail".into(),
+            display_name: Some("Gmail".into()),
+            kind: CapabilitySummaryKind::Provider,
+            status: CapabilityStatus::NeedsSetup,
+            description: Some("Gmail integration".into()),
+            action_preview: vec!["gmail_send".into()],
+            routing_hint: None,
+        }];
+
+        // Enabled (control): the existing section renders.
+        let enabled = build_codeact_system_prompt_inner(false, &capabilities, &actions, None, None);
+        assert!(enabled.contains("## Enabled Tools"));
+        assert!(enabled.contains("- `mission_create`"));
+        assert!(enabled.contains("## Activatable Integrations"));
+
+        // Disabled: section is gone, but Activatable Integrations stays
+        // (the model still needs to know what `tool_install` can target),
+        // and `mission_create` does NOT appear in the prompt — it's only
+        // reachable via the provider tool list now.
+        let disabled = build_codeact_system_prompt_inner(true, &capabilities, &actions, None, None);
+        assert!(
+            !disabled.contains("## Enabled Tools"),
+            "Enabled Tools section must be omitted in disabled-CodeAct mode"
+        );
+        assert!(
+            !disabled.contains("mission_create"),
+            "compact action must not appear in prompt — it's in the provider tool list"
+        );
+        assert!(
+            !disabled.contains("detail=\"schema\""),
+            "schema-lookup instruction is meaningless when provider sends full schemas \
+             (the `detail=\"summary\"` reference in Activatable Integrations is fine)"
+        );
+        assert!(
+            disabled.contains("## Activatable Integrations"),
+            "Activatable Integrations is still needed so the model can tool_install"
+        );
     }
 }

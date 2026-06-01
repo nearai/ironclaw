@@ -11,57 +11,10 @@ use uuid::Uuid;
 
 use crate::error::ChannelError;
 
-/// Kind of attachment carried on an incoming message.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AttachmentKind {
-    /// Audio content (voice notes, audio files).
-    Audio,
-    /// Image content (photos, screenshots).
-    Image,
-    /// Document content (PDFs, files).
-    Document,
-}
-
-impl AttachmentKind {
-    /// Infer attachment kind from MIME type.
-    pub fn from_mime_type(mime: &str) -> Self {
-        let base = mime.split(';').next().unwrap_or(mime).trim();
-        if base.starts_with("audio/") {
-            Self::Audio
-        } else if base.starts_with("image/") {
-            Self::Image
-        } else {
-            Self::Document
-        }
-    }
-}
-
-/// A file or media attachment on an incoming message.
-#[derive(Debug, Clone)]
-pub struct IncomingAttachment {
-    /// Unique identifier within the channel (e.g., Telegram file_id).
-    pub id: String,
-    /// What kind of content this is.
-    pub kind: AttachmentKind,
-    /// MIME type (e.g., "image/jpeg", "audio/ogg", "application/pdf").
-    pub mime_type: String,
-    /// Original filename, if known.
-    pub filename: Option<String>,
-    /// File size in bytes, if known.
-    pub size_bytes: Option<u64>,
-    /// URL to download the file from the channel's API.
-    pub source_url: Option<String>,
-    /// Opaque key for host-side storage (e.g., after download/caching).
-    pub storage_key: Option<String>,
-    /// Relative path to a project-local copy saved on disk, if persisted.
-    pub local_path: Option<String>,
-    /// Extracted text content (e.g., OCR result, PDF text, audio transcript).
-    pub extracted_text: Option<String>,
-    /// Raw file bytes (for small files downloaded by the channel).
-    pub data: Vec<u8>,
-    /// Duration in seconds (for audio/video).
-    pub duration_secs: Option<u32>,
-}
+// Channel-agnostic attachment types live in `ironclaw_common::attachment`.
+// Re-exported here so the existing `crate::channels::AttachmentKind` /
+// `crate::channels::IncomingAttachment` import paths keep working.
+pub use ironclaw_common::attachment::{AttachmentKind, IncomingAttachment};
 
 /// A message received from an external channel.
 #[derive(Debug, Clone)]
@@ -130,6 +83,19 @@ pub struct IncomingMessage {
 
 impl IncomingMessage {
     /// Create a new incoming message.
+    ///
+    /// The default `metadata` carries `{"user_id": <user_id>}` so that any
+    /// downstream consumer that scopes by `metadata.user_id` (notably
+    /// `GatewayChannel::send_status` for SSE/WS event routing) has the
+    /// owning tenant identity even when the producer never calls
+    /// [`Self::with_metadata`]. Producers replacing metadata wholesale
+    /// should prefer [`Self::with_metadata`], which overwrites a
+    /// **string-typed** `user_id` key on the supplied object with
+    /// `self.user_id` — caller-supplied string values are dropped to
+    /// keep the SSE recipient scope unforgeable. Non-string values
+    /// (e.g. Telegram's `i64` chat user ID) are left alone; the SSE
+    /// routing layer's `as_str()` treats them as missing and fails
+    /// closed in multi-tenant mode.
     pub fn new(
         channel: impl Into<String>,
         user_id: impl Into<String>,
@@ -140,6 +106,7 @@ impl IncomingMessage {
             id: Uuid::new_v4(),
             channel: channel.into(),
             sender_id: user_id.clone(),
+            metadata: serde_json::json!({ "user_id": &user_id }),
             user_id,
             user_name: None,
             content: content.into(),
@@ -147,7 +114,6 @@ impl IncomingMessage {
             thread_id: None,
             conversation_scope_id: None,
             received_at: Utc::now(),
-            metadata: serde_json::Value::Null,
             timezone: None,
             attachments: Vec::new(),
             is_internal: false,
@@ -236,7 +202,50 @@ impl IncomingMessage {
     }
 
     /// Set metadata.
+    ///
+    /// A **string-typed** `metadata.user_id` is always overwritten with
+    /// `self.user_id` — caller-supplied string values are dropped. This
+    /// makes the SSE/WS recipient scope unforgeable from channel
+    /// metadata: a WASM extension whose emitted JSON contains
+    /// `{"user_id":"victim"}` (intentionally or via bug) cannot route a
+    /// later `ToolStarted` / `ToolResult` event into another tenant's
+    /// stream, because the SSE routing layer reads the field via
+    /// `as_str()`.
+    ///
+    /// **Non-string** `user_id` values (e.g. Telegram's `i64` chat user
+    /// ID, which the Telegram WASM channel persists in this same
+    /// metadata field for its own `on_respond` routing) are left alone:
+    /// they cannot be exploited because the SSE routing layer
+    /// (`as_str()`) treats them as missing and fails closed in
+    /// multi-tenant mode. Stomping them would corrupt channel-private
+    /// metadata.
+    ///
+    /// Non-object inputs (`Null`, array, scalar) are replaced with a
+    /// fresh object carrying `self.user_id`. A missing `user_id` key is
+    /// inserted with `self.user_id`.
+    ///
+    /// If a caller legitimately needs to forward to a different tenant
+    /// (e.g. a proactive broadcast) it must mint a separate
+    /// `IncomingMessage` with the target `user_id` rather than
+    /// hand-rolling the metadata field.
     pub fn with_metadata(mut self, metadata: serde_json::Value) -> Self {
+        let mut metadata = match metadata {
+            serde_json::Value::Object(_) => metadata,
+            _ => serde_json::json!({}),
+        };
+        if let Some(obj) = metadata.as_object_mut() {
+            let should_set = match obj.get("user_id") {
+                None => true,
+                Some(serde_json::Value::String(_)) => true,
+                Some(_) => false,
+            };
+            if should_set {
+                obj.insert(
+                    "user_id".to_string(),
+                    serde_json::Value::String(self.user_id.clone()),
+                );
+            }
+        }
         self.metadata = metadata;
         self
     }
@@ -319,6 +328,17 @@ pub fn routing_target_from_metadata(metadata: &serde_json::Value) -> Option<Stri
 /// Stream of incoming messages.
 pub type MessageStream = Pin<Box<dyn Stream<Item = IncomingMessage> + Send>>;
 
+/// In-memory attachment to send back to a channel.
+#[derive(Debug, Clone)]
+pub struct OutgoingAttachment {
+    /// Filename to present to the receiving channel.
+    pub filename: String,
+    /// MIME type (e.g., "image/png").
+    pub mime_type: String,
+    /// Raw attachment bytes.
+    pub data: Vec<u8>,
+}
+
 /// Response to send back to a channel.
 #[derive(Debug, Clone)]
 pub struct OutgoingResponse {
@@ -331,6 +351,8 @@ pub struct OutgoingResponse {
     pub thread_id: Option<ExternalThreadId>,
     /// Optional file paths to attach.
     pub attachments: Vec<String>,
+    /// Optional in-memory attachments to attach.
+    pub inline_attachments: Vec<OutgoingAttachment>,
     /// Channel-specific metadata for the response.
     pub metadata: serde_json::Value,
 }
@@ -342,6 +364,7 @@ impl OutgoingResponse {
             content: content.into(),
             thread_id: None,
             attachments: Vec::new(),
+            inline_attachments: Vec::new(),
             metadata: serde_json::Value::Null,
         }
     }
@@ -386,6 +409,12 @@ impl OutgoingResponse {
     /// Add attachments to the response.
     pub fn with_attachments(mut self, paths: Vec<String>) -> Self {
         self.attachments = paths;
+        self
+    }
+
+    /// Add in-memory attachments to the response.
+    pub fn with_inline_attachments(mut self, attachments: Vec<OutgoingAttachment>) -> Self {
+        self.inline_attachments = attachments;
         self
     }
 }
@@ -1089,6 +1118,80 @@ mod tests {
     fn test_incoming_message_with_timezone() {
         let msg = IncomingMessage::new("test", "user1", "hello").with_timezone("America/New_York");
         assert_eq!(msg.timezone.as_deref(), Some("America/New_York"));
+    }
+
+    /// Regression: a WASM channel that emits metadata containing a
+    /// foreign string `user_id` must NOT be able to override the
+    /// message's owner. `apply_emitted_metadata` in the WASM wrapper
+    /// feeds parsed JSON straight into `with_metadata`; if a malicious
+    /// or buggy extension supplies `{"user_id":"victim"}`, downstream
+    /// `send_status` would route ToolStarted/ToolResult into the
+    /// victim's SSE stream. `with_metadata` must clobber the field
+    /// when it is a string.
+    #[test]
+    fn with_metadata_overwrites_caller_supplied_string_user_id() {
+        let msg = IncomingMessage::new("wasm_channel", "alice", "hi")
+            .with_metadata(serde_json::json!({"user_id": "bob", "chat_id": 42}));
+        assert_eq!(
+            msg.metadata.get("user_id").and_then(|v| v.as_str()),
+            Some("alice"),
+            "with_metadata must drop caller-supplied string user_id and use the message's own"
+        );
+        // Other caller fields survive.
+        assert_eq!(
+            msg.metadata.get("chat_id").and_then(|v| v.as_i64()),
+            Some(42)
+        );
+    }
+
+    /// Regression: the Telegram WASM channel persists its Telegram
+    /// user ID as `metadata.user_id: <i64>` and re-parses it in
+    /// `on_respond` via `TelegramMessageMetadata { user_id: i64, ... }`.
+    /// `with_metadata` must NOT clobber a non-string `user_id`: the
+    /// SSE routing layer reads via `as_str()`, treats non-strings as
+    /// missing, and fails closed in multi-tenant mode — so the forge
+    /// threat is mitigated without corrupting channel-private metadata.
+    /// Without this carve-out the Telegram channel cannot deserialize
+    /// its own metadata back. Reference: PR #3390 follow-up.
+    #[test]
+    fn with_metadata_preserves_non_string_user_id() {
+        let msg = IncomingMessage::new("telegram", "alice", "hi")
+            .with_metadata(serde_json::json!({"user_id": 999, "chat_id": 999, "message_id": 1}));
+        assert_eq!(
+            msg.metadata.get("user_id").and_then(|v| v.as_i64()),
+            Some(999),
+            "with_metadata must preserve i64 user_id (channel-private routing)"
+        );
+        // SSE routing reads via as_str() — non-string values must read as None.
+        assert!(
+            msg.metadata
+                .get("user_id")
+                .and_then(|v| v.as_str())
+                .is_none(),
+            "non-string user_id must read as None via as_str() so SSE routing fails closed"
+        );
+    }
+
+    #[test]
+    fn with_metadata_inserts_user_id_when_missing() {
+        let msg = IncomingMessage::new("test", "alice", "hi")
+            .with_metadata(serde_json::json!({"chat_id": 42}));
+        assert_eq!(
+            msg.metadata.get("user_id").and_then(|v| v.as_str()),
+            Some("alice"),
+            "with_metadata must insert user_id when the caller's object lacks it"
+        );
+    }
+
+    #[test]
+    fn with_metadata_replaces_non_object_with_owner_user_id() {
+        let msg =
+            IncomingMessage::new("test", "alice", "hi").with_metadata(serde_json::Value::Null);
+        assert_eq!(
+            msg.metadata.get("user_id").and_then(|v| v.as_str()),
+            Some("alice"),
+            "non-object metadata must be replaced with an object carrying user_id"
+        );
     }
 
     #[test]

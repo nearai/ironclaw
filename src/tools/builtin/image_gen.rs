@@ -195,7 +195,7 @@ impl Tool for ImageGenerateTool {
 
         let media_type = infer_generated_image_media_type(image_data);
 
-        // Return sentinel JSON for image display
+        // Return sentinel JSON for image display.
         let sentinel = serde_json::json!({
             "type": "image_generated",
             "data": format!("data:{media_type};base64,{}", image_data),

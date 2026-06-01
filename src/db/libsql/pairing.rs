@@ -462,6 +462,27 @@ impl ChannelPairingStore for LibSqlBackend {
         .map_err(|e| DatabaseError::Query(e.to_string()))?;
         Ok(())
     }
+
+    async fn create_channel_identity(
+        &self,
+        channel: &str,
+        external_id: &str,
+        owner_id: &str,
+    ) -> Result<(), DatabaseError> {
+        let channel = crate::pairing::normalize_channel_name(channel);
+        let id = uuid::Uuid::new_v4().to_string();
+        let conn = self.connect().await?;
+        conn.execute(
+            "INSERT INTO channel_identities (id, owner_id, channel, external_id)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT (channel, external_id)
+             DO UPDATE SET owner_id = ?2",
+            params![id, owner_id, channel, external_id],
+        )
+        .await
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

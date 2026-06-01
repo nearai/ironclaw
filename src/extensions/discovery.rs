@@ -107,6 +107,7 @@ impl OnlineDiscovery {
                             fallback_source: None,
                             auth_hint: AuthHint::Dcr,
                             version: None,
+                            hidden: false,
                         })
                     } else {
                         None
@@ -183,6 +184,7 @@ impl OnlineDiscovery {
                     fallback_source: None,
                     auth_hint: AuthHint::Dcr,
                     version: None,
+                    hidden: false,
                 })
             })
             .collect()

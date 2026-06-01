@@ -18,16 +18,17 @@ use crate::agent::dispatcher::{
     persist_selected_auth_prompt, restore_selected_auth_prompt,
 };
 use crate::agent::session::{
-    MAX_PENDING_MESSAGES, PendingApproval, Session, ThreadState, TurnOutcome,
+    MAX_PENDING_MESSAGES, PendingApproval, Session, ThreadState, TurnOutcome, TurnToolCall,
 };
 use crate::agent::submission::SubmissionResult;
 use crate::channels::{ChatApprovalPrompt, HistoryMessage, IncomingMessage, StatusUpdate};
 use crate::context::JobContext;
 use crate::error::Error;
-use crate::generated_images::GeneratedImageSentinel;
-use crate::llm::{ChatMessage, ToolCall};
+use crate::generated_images::{GeneratedImageSentinel, stage_generated_image_data_url};
 use crate::tools::redact_params;
 use ironclaw_common::truncate_preview;
+use ironclaw_llm::{ChatMessage, ToolCall};
+use ironclaw_safety::{PolicyAction, SafetyLayer, ValidationResult};
 
 const FORGED_THREAD_ID_ERROR: &str = "Invalid or unauthorized thread ID.";
 const LIVE_STATE_METADATA_KEY: &str = "live_state";
@@ -47,6 +48,43 @@ fn tool_result_preview_for_persistence(result: &serde_json::Value) -> String {
         serde_json::Value::String(s) => truncate_preview(s, 500),
         other => truncate_preview(&other.to_string(), 500),
     }
+}
+
+fn stage_generated_image_response_attachments(tool_calls: &[TurnToolCall]) -> Vec<String> {
+    let mut attachments = Vec::new();
+    for call in tool_calls {
+        if !matches!(call.name.as_str(), "image_generate" | "image_edit") {
+            continue;
+        }
+        let Some(result) = call.result.as_ref() else {
+            continue;
+        };
+        let Some(sentinel) = GeneratedImageSentinel::from_value(result) else {
+            continue;
+        };
+        let Some(data_url) = sentinel.data_url().filter(|value| !value.is_empty()) else {
+            continue;
+        };
+        match stage_generated_image_data_url(data_url) {
+            Ok(path) => attachments.push(path),
+            Err(error) => tracing::warn!(
+                tool = %call.name,
+                error = %error,
+                "Failed to stage generated image as response attachment"
+            ),
+        }
+    }
+    attachments
+}
+
+fn strip_markdown_image_lines(content: &str) -> String {
+    content
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("!["))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string()
 }
 
 fn tool_result_content_for_persistence(result: &serde_json::Value) -> String {
@@ -76,6 +114,10 @@ fn requires_preexisting_uuid_thread(channel: &str) -> bool {
     // Gateway-style channels send server-issued conversation UUIDs.
     // Unknown UUIDs should be rejected instead of silently creating a new thread.
     matches!(channel, "gateway" | "test")
+}
+
+fn validate_inbound_text_for_message(safety: &SafetyLayer, content: &str) -> ValidationResult {
+    safety.validate_input(content)
 }
 
 fn auth_retry_message_for_error(error: &crate::extensions::ExtensionError) -> Option<String> {
@@ -200,6 +242,44 @@ fn pending_approval_message(pending: Option<&PendingApproval>) -> String {
 }
 
 impl Agent {
+    fn reject_unsafe_inbound_user_message(
+        &self,
+        message: &IncomingMessage,
+        effective_content: &str,
+    ) -> Option<SubmissionResult> {
+        let validation = validate_inbound_text_for_message(self.safety(), effective_content);
+        if !validation.is_valid {
+            let details = validation
+                .errors
+                .iter()
+                .map(|e| format!("{}: {}", e.field, e.message))
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Some(SubmissionResult::error(format!(
+                "Input rejected by safety validation: {details}",
+            )));
+        }
+
+        let violations = self.safety().check_policy(effective_content);
+        if violations
+            .iter()
+            .any(|rule| rule.action == PolicyAction::Block)
+        {
+            return Some(SubmissionResult::error("Input rejected by safety policy."));
+        }
+
+        if let Some(warning) = self.safety().scan_inbound_for_secrets(effective_content) {
+            tracing::warn!(
+                user = %message.user_id,
+                channel = %message.channel,
+                "Inbound message blocked: contains leaked secret"
+            );
+            return Some(SubmissionResult::error(warning));
+        }
+
+        None
+    }
+
     /// Hydrate a historical thread from DB into memory if not already present.
     ///
     /// Called before `resolve_thread` so that the session manager finds the
@@ -416,6 +496,13 @@ impl Agent {
             "Processing user input"
         );
 
+        let augmented =
+            crate::agent::attachments::augment_with_attachments(content, &message.attachments);
+        let (effective_content, image_parts) = match &augmented {
+            Some(result) => (result.text.as_str(), result.image_parts.clone()),
+            None => (content, Vec::new()),
+        };
+
         // First check thread state without holding lock during I/O
         let (thread_state, pending_approval) = {
             let sess = session.lock().await;
@@ -452,36 +539,11 @@ impl Agent {
                             }
 
                             // Run the same safety checks that the normal path applies
-                            // (validation, policy, secret scan) so that blocked content
-                            // is never stored in pending_messages or serialized.
-                            let validation = self.safety().validate_input(content);
-                            if !validation.is_valid {
-                                let details = validation
-                                    .errors
-                                    .iter()
-                                    .map(|e| format!("{}: {}", e.field, e.message))
-                                    .collect::<Vec<_>>()
-                                    .join("; ");
-                                return Ok(SubmissionResult::error(format!(
-                                    "Input rejected by safety validation: {details}",
-                                )));
-                            }
-                            let violations = self.safety().check_policy(content);
-                            if violations
-                                .iter()
-                                .any(|rule| rule.action == ironclaw_safety::PolicyAction::Block)
+                            // so blocked content is never stored in pending_messages.
+                            if let Some(rejection) =
+                                self.reject_unsafe_inbound_user_message(message, effective_content)
                             {
-                                return Ok(SubmissionResult::error(
-                                    "Input rejected by safety policy.",
-                                ));
-                            }
-                            if let Some(warning) = self.safety().scan_inbound_for_secrets(content) {
-                                tracing::warn!(
-                                    user = %message.user_id,
-                                    channel = %message.channel,
-                                    "Queued message blocked: contains leaked secret"
-                                );
-                                return Ok(SubmissionResult::error(warning));
+                                return Ok(rejection);
                             }
 
                             if !thread.queue_message(content.to_string()) {
@@ -543,50 +605,12 @@ impl Agent {
             }
         }
 
-        // Attachments can carry the only user-visible payload (for example,
-        // a files-only send with empty chat text), so validation and policy
-        // checks must run against the augmented content that will actually
-        // enter the turn rather than the raw text field alone.
-        let augmented =
-            crate::agent::attachments::augment_with_attachments(content, &message.attachments);
-        let (effective_content, image_parts) = match &augmented {
-            Some(result) => (result.text.as_str(), result.image_parts.clone()),
-            None => (content, Vec::new()),
-        };
-
-        // Safety validation for user input
-        let validation = self.safety().validate_input(effective_content);
-        if !validation.is_valid {
-            let details = validation
-                .errors
-                .iter()
-                .map(|e| format!("{}: {}", e.field, e.message))
-                .collect::<Vec<_>>()
-                .join("; ");
-            return Ok(SubmissionResult::error(format!(
-                "Input rejected by safety validation: {}",
-                details
-            )));
-        }
-
-        let violations = self.safety().check_policy(effective_content);
-        if violations
-            .iter()
-            .any(|rule| rule.action == ironclaw_safety::PolicyAction::Block)
+        // Validate inbound content before the turn is created. Attachment-only
+        // messages are checked after attachment augmentation so extracted text
+        // and multimodal metadata go through the same safety pipeline.
+        if let Some(rejection) = self.reject_unsafe_inbound_user_message(message, effective_content)
         {
-            return Ok(SubmissionResult::error("Input rejected by safety policy."));
-        }
-
-        // Scan inbound messages for secrets (API keys, tokens).
-        // Catching them here prevents the LLM from echoing them back, which
-        // would trigger the outbound leak detector and create error loops.
-        if let Some(warning) = self.safety().scan_inbound_for_secrets(effective_content) {
-            tracing::warn!(
-                user = %message.user_id,
-                channel = %message.channel,
-                "Inbound message blocked: contains leaked secret"
-            );
-            return Ok(SubmissionResult::error(warning));
+            return Ok(rejection);
         }
 
         // Handle explicit commands (starting with /) directly
@@ -631,8 +655,9 @@ impl Agent {
                     .await;
 
                 let compactor = ContextCompactor::new(self.llm().clone());
+                let workspace = self.workspace_for_user(&message.user_id);
                 if let Err(e) = compactor
-                    .compact(thread, strategy, self.workspace().map(|w| w.as_ref()))
+                    .compact(thread, strategy, workspace.as_deref())
                     .await
                 {
                     tracing::warn!("Auto-compaction failed: {}", e);
@@ -756,7 +781,8 @@ impl Agent {
                     crate::agent::dispatcher::extract_suggestions(&response);
 
                 // Hook: TransformResponse — allow hooks to modify or reject the final response
-                let response = {
+                let mut response_attachments_allowed = true;
+                let mut response = {
                     let event = crate::hooks::HookEvent::ResponseTransform {
                         user_id: message.user_id.clone(),
                         thread_id: thread_id.to_string(),
@@ -764,9 +790,11 @@ impl Agent {
                     };
                     match self.hooks().run(&event).await {
                         Err(crate::hooks::HookError::Rejected { reason }) => {
+                            response_attachments_allowed = false;
                             format!("[Response filtered: {}]", reason)
                         }
                         Err(err) => {
+                            response_attachments_allowed = false;
                             format!("[Response blocked by hook policy: {}]", err)
                         }
                         Ok(crate::hooks::HookOutcome::Continue {
@@ -775,6 +803,20 @@ impl Agent {
                         _ => response, // fail-open: use original
                     }
                 };
+
+                let response_attachments = if response_attachments_allowed {
+                    let current_tool_calls = thread
+                        .turns
+                        .last()
+                        .map(|turn| turn.tool_calls.clone())
+                        .unwrap_or_default();
+                    stage_generated_image_response_attachments(&current_tool_calls)
+                } else {
+                    Vec::new()
+                };
+                if !response_attachments.is_empty() {
+                    response = strip_markdown_image_lines(&response);
+                }
 
                 thread.conclude_turn(TurnOutcome::Completed(response.clone()));
                 let (turn_number, tool_calls, narrative) = thread
@@ -817,7 +859,10 @@ impl Agent {
                 self.send_turn_cost_status(&message.channel, &message.metadata, &turn_usage)
                     .await;
 
-                Ok(SubmissionResult::response(response))
+                Ok(SubmissionResult::response_with_attachments(
+                    response,
+                    response_attachments,
+                ))
             }
             Ok(AgenticLoopResult::NeedApproval {
                 pending,
@@ -1330,6 +1375,7 @@ impl Agent {
         thread_id: Uuid,
     ) -> Result<SubmissionResult, Error> {
         let mut sess = session.lock().await;
+        let user_id = sess.user_id.clone();
         let thread = sess
             .threads
             .get_mut(&thread_id)
@@ -1345,8 +1391,9 @@ impl Agent {
             );
 
         let compactor = ContextCompactor::new(self.llm().clone());
+        let workspace = self.workspace_for_user(&user_id);
         match compactor
-            .compact(thread, strategy, self.workspace().map(|w| w.as_ref()))
+            .compact(thread, strategy, workspace.as_deref())
             .await
         {
             Ok(result) => {
@@ -1388,6 +1435,26 @@ impl Agent {
         // Clear undo history too
         let undo_mgr = self.session_manager.get_undo_manager(thread_id).await;
         undo_mgr.lock().await.clear();
+
+        // Drain in-flight OAuth flows for this user (#3320). Mirror of the
+        // engine-v2 cleanup in `bridge::router::clear_engine_conversation` so
+        // both code paths give `/clear` a consistent "clean slate" contract.
+        // Pending flows otherwise live until `OAUTH_FLOW_EXPIRY` (5 min) and
+        // can fool a fresh auth attempt's CSRF dedupe or leave a ghost entry
+        // in `pending_oauth_flows()` after the user already moved on.
+        if let Some(ext_mgr) = self.deps.extension_manager.as_ref() {
+            let mut flows = ext_mgr.pending_oauth_flows().write().await;
+            let before = flows.len();
+            flows.retain(|_state, flow| flow.user_id != user_id);
+            let removed = before.saturating_sub(flows.len());
+            if removed > 0 {
+                tracing::debug!(
+                    user_id = %user_id,
+                    removed,
+                    "engine v1: drained pending OAuth flows on /clear"
+                );
+            }
+        }
 
         Ok(SubmissionResult::ok_with_message("Thread cleared."))
     }
@@ -1690,10 +1757,10 @@ impl Agent {
             // === Phase 1: Preflight (sequential) ===
             // Walk deferred tools checking approval. Collect runnable
             // tools; stop at the first that needs approval.
-            let mut runnable: Vec<crate::llm::ToolCall> = Vec::new();
+            let mut runnable: Vec<ironclaw_llm::ToolCall> = Vec::new();
             let mut approval_needed: Option<(
                 usize,
-                crate::llm::ToolCall,
+                ironclaw_llm::ToolCall,
                 Arc<dyn crate::tools::Tool>,
                 bool, // allow_always
             )> = None;
@@ -1728,7 +1795,8 @@ impl Agent {
             }
 
             // === Phase 2: Parallel execution ===
-            let exec_results: Vec<(crate::llm::ToolCall, Result<String, Error>)> = if runnable.len()
+            let exec_results: Vec<(ironclaw_llm::ToolCall, Result<String, Error>)> = if runnable
+                .len()
                 <= 1
             {
                 // Single tool (or none): execute inline
@@ -1832,7 +1900,7 @@ impl Agent {
                 }
 
                 // Collect and reorder by original index
-                let mut ordered: Vec<Option<(crate::llm::ToolCall, Result<String, Error>)>> =
+                let mut ordered: Vec<Option<(ironclaw_llm::ToolCall, Result<String, Error>)>> =
                     (0..runnable_count).map(|_| None).collect();
                 while let Some(join_result) = join_set.join_next().await {
                     match join_result {
@@ -2662,6 +2730,7 @@ fn rebuild_chat_messages_from_db(
                                     .get("rationale")
                                     .and_then(|v| v.as_str())
                                     .map(String::from),
+                                signature: None,
                             })
                             .collect();
 
@@ -2706,17 +2775,22 @@ fn rebuild_chat_messages_from_db(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::channels::{AttachmentKind, IncomingAttachment};
+    use crate::config::{AgentConfig, SafetyConfig, SkillsConfig};
     use std::sync::Mutex as StdMutex;
+    use std::sync::atomic::{AtomicU32, Ordering};
 
     use crate::agent::AgentDeps;
     use crate::agent::cost_guard::{CostGuard, CostGuardConfig};
     use crate::channels::{
         Channel, ChannelManager, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate,
     };
-    use crate::config::{AgentConfig, SafetyConfig, SkillsConfig};
     use crate::context::ContextManager;
     use crate::error::ChannelError;
-    use crate::generated_images::{GeneratedImageSentinel, MAX_RECORDED_IMAGE_SENTINEL_BYTES};
+    use crate::generated_images::{
+        GeneratedImageSentinel, MAX_RECORDED_IMAGE_SENTINEL_BYTES,
+        remove_staged_generated_image_attachments,
+    };
     use crate::hooks::HookRegistry;
     use crate::testing::{StubChannel, StubLlm};
     use crate::tools::ToolRegistry;
@@ -2769,7 +2843,7 @@ mod tests {
         struct StaticLlmProvider;
 
         #[async_trait::async_trait]
-        impl crate::llm::LlmProvider for StaticLlmProvider {
+        impl ironclaw_llm::LlmProvider for StaticLlmProvider {
             fn model_name(&self) -> &str {
                 "static-mock"
             }
@@ -2780,13 +2854,13 @@ mod tests {
 
             async fn complete(
                 &self,
-                _request: crate::llm::CompletionRequest,
-            ) -> Result<crate::llm::CompletionResponse, crate::error::LlmError> {
-                Ok(crate::llm::CompletionResponse {
+                _request: ironclaw_llm::CompletionRequest,
+            ) -> Result<ironclaw_llm::CompletionResponse, crate::error::LlmError> {
+                Ok(ironclaw_llm::CompletionResponse {
                     content: "ok".to_string(),
                     input_tokens: 0,
                     output_tokens: 0,
-                    finish_reason: crate::llm::FinishReason::Stop,
+                    finish_reason: ironclaw_llm::FinishReason::Stop,
                     cache_read_input_tokens: 0,
                     cache_creation_input_tokens: 0,
                 })
@@ -2794,20 +2868,29 @@ mod tests {
 
             async fn complete_with_tools(
                 &self,
-                _request: crate::llm::ToolCompletionRequest,
-            ) -> Result<crate::llm::ToolCompletionResponse, crate::error::LlmError> {
-                Ok(crate::llm::ToolCompletionResponse {
+                _request: ironclaw_llm::ToolCompletionRequest,
+            ) -> Result<ironclaw_llm::ToolCompletionResponse, crate::error::LlmError> {
+                Ok(ironclaw_llm::ToolCompletionResponse {
                     content: Some("ok".to_string()),
                     tool_calls: Vec::new(),
                     input_tokens: 0,
                     output_tokens: 0,
-                    finish_reason: crate::llm::FinishReason::Stop,
+                    finish_reason: ironclaw_llm::FinishReason::Stop,
                     cache_read_input_tokens: 0,
                     cache_creation_input_tokens: 0,
+                    reasoning: None,
                 })
             }
         }
 
+        let llm: Arc<dyn ironclaw_llm::LlmProvider> = Arc::new(StaticLlmProvider);
+        make_thread_ops_test_agent_with(llm, Arc::new(crate::tools::ToolRegistry::new())).await
+    }
+
+    async fn make_thread_ops_test_agent_with(
+        llm: Arc<dyn ironclaw_llm::LlmProvider>,
+        tools: Arc<crate::tools::ToolRegistry>,
+    ) -> (Agent, Arc<TokioMutex<Vec<StatusUpdate>>>) {
         let statuses = Arc::new(TokioMutex::new(Vec::new()));
         let channels = Arc::new(crate::channels::ChannelManager::new());
         channels
@@ -2820,7 +2903,7 @@ mod tests {
             owner_id: "default".to_string(),
             store: None,
             settings_store: None,
-            llm: Arc::new(StaticLlmProvider),
+            llm,
             cheap_llm: None,
             safety: Arc::new(ironclaw_safety::SafetyLayer::new(
                 &ironclaw_safety::SafetyConfig {
@@ -2828,7 +2911,7 @@ mod tests {
                     injection_check_enabled: true,
                 },
             )),
-            tools: Arc::new(crate::tools::ToolRegistry::new()),
+            tools,
             workspace: None,
             extension_manager: None,
             skill_registry: None,
@@ -2883,6 +2966,179 @@ mod tests {
         );
 
         (agent, statuses)
+    }
+
+    const TEST_IMAGE_DATA_URL: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=";
+
+    struct SequencedImageLlm {
+        calls: AtomicU32,
+    }
+
+    impl SequencedImageLlm {
+        fn new() -> Self {
+            Self {
+                calls: AtomicU32::new(0),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ironclaw_llm::LlmProvider for SequencedImageLlm {
+        fn model_name(&self) -> &str {
+            "sequenced-image-mock"
+        }
+
+        fn cost_per_token(&self) -> (Decimal, Decimal) {
+            (Decimal::ZERO, Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            _request: ironclaw_llm::CompletionRequest,
+        ) -> Result<ironclaw_llm::CompletionResponse, crate::error::LlmError> {
+            Ok(ironclaw_llm::CompletionResponse {
+                content: "unused".to_string(),
+                input_tokens: 0,
+                output_tokens: 0,
+                finish_reason: ironclaw_llm::FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            })
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _request: ironclaw_llm::ToolCompletionRequest,
+        ) -> Result<ironclaw_llm::ToolCompletionResponse, crate::error::LlmError> {
+            let call = self.calls.fetch_add(1, Ordering::Relaxed);
+            if call == 0 {
+                return Ok(ironclaw_llm::ToolCompletionResponse {
+                    content: None,
+                    tool_calls: vec![ToolCall {
+                        id: "call_img_0".to_string(),
+                        name: "image_generate".to_string(),
+                        arguments: serde_json::json!({"prompt": "cat"}),
+                        reasoning: None,
+                        signature: None,
+                    }],
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    finish_reason: ironclaw_llm::FinishReason::ToolUse,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                    reasoning: None,
+                });
+            }
+
+            Ok(ironclaw_llm::ToolCompletionResponse {
+                content: Some(
+                    "已生成小猫图片：\n\n![小猫](/mnt/data/generated_image.jpg)".to_string(),
+                ),
+                tool_calls: Vec::new(),
+                input_tokens: 0,
+                output_tokens: 0,
+                finish_reason: ironclaw_llm::FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+                reasoning: None,
+            })
+        }
+    }
+
+    struct GeneratedImageTool;
+
+    #[async_trait::async_trait]
+    impl crate::tools::Tool for GeneratedImageTool {
+        fn name(&self) -> &str {
+            "image_generate"
+        }
+
+        fn description(&self) -> &str {
+            "Generate an image for tests"
+        }
+
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "prompt": {"type": "string"}
+                },
+                "required": ["prompt"]
+            })
+        }
+
+        async fn execute(
+            &self,
+            _params: serde_json::Value,
+            _ctx: &JobContext,
+        ) -> Result<crate::tools::ToolOutput, crate::tools::ToolError> {
+            Ok(crate::tools::ToolOutput::success(
+                serde_json::json!({
+                    "type": "image_generated",
+                    "data": TEST_IMAGE_DATA_URL,
+                    "media_type": "image/png"
+                }),
+                Duration::from_millis(1),
+            ))
+        }
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn process_compact_writes_summary_to_session_user_workspace() {
+        let (db, _dir) = crate::agent::test_support::make_libsql_test_db().await;
+        let owner_workspace = Arc::new(crate::workspace::Workspace::new_with_db(
+            "owner-scope",
+            Arc::clone(&db),
+        ));
+        let (mut agent, _statuses) = make_thread_ops_test_agent().await;
+        agent.deps.store = Some(Arc::clone(&db));
+        agent.deps.workspace = Some(owner_workspace);
+
+        let session = Arc::new(Mutex::new(Session::new("alice")));
+        let thread_id = {
+            let mut sess = session.lock().await;
+            let thread = sess.create_thread(Some("gateway"));
+            for i in 0..6 {
+                thread.start_turn(format!("msg-{i}"));
+                thread.conclude_turn(TurnOutcome::Completed(format!("resp-{i}")));
+            }
+            thread.id
+        };
+
+        let before_date = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        let result = agent
+            .process_compact(Arc::clone(&session), thread_id)
+            .await
+            .expect("manual compaction should run");
+        let after_date = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        assert!(
+            matches!(result, SubmissionResult::Ok { .. }),
+            "unexpected compact result: {result:?}"
+        );
+
+        let mut candidate_paths = vec![format!("daily/{before_date}.md")];
+        if after_date != before_date {
+            candidate_paths.push(format!("daily/{after_date}.md"));
+        }
+
+        let alice_ws = crate::workspace::Workspace::new_with_db("alice", Arc::clone(&db));
+        let mut stored = None;
+        for path in &candidate_paths {
+            if let Ok(doc) = alice_ws.read(path).await {
+                stored = Some((path.clone(), doc));
+                break;
+            }
+        }
+        let (path, alice_doc) =
+            stored.expect("compaction summary should be written to the session user's workspace");
+        assert!(alice_doc.content.contains("Context Summary"));
+
+        let owner_ws = crate::workspace::Workspace::new_with_db("owner-scope", Arc::clone(&db));
+        assert!(
+            owner_ws.read(&path).await.is_err(),
+            "compaction summary must not be written to the startup owner workspace"
+        );
     }
 
     #[test]
@@ -2944,8 +3200,8 @@ mod tests {
         ];
         let result = rebuild_chat_messages_from_db(&messages);
         assert_eq!(result.len(), 2);
-        assert_eq!(result[0].role, crate::llm::Role::User);
-        assert_eq!(result[1].role, crate::llm::Role::Assistant);
+        assert_eq!(result[0].role, ironclaw_llm::Role::User);
+        assert_eq!(result[1].role, ironclaw_llm::Role::Assistant);
     }
 
     /// Regression: a `PendingApproval` deserialized from a row written
@@ -3021,7 +3277,7 @@ mod tests {
         let result = Ok(AgenticLoopResult::Response {
             text: "done".to_string(),
             turn_usage: TurnUsageSummary {
-                usage: crate::llm::TokenUsage {
+                usage: ironclaw_llm::TokenUsage {
                     input_tokens: 12,
                     output_tokens: 3,
                     cache_read_input_tokens: 0,
@@ -3045,7 +3301,7 @@ mod tests {
             }
             .into(),
             turn_usage: TurnUsageSummary {
-                usage: crate::llm::TokenUsage {
+                usage: ironclaw_llm::TokenUsage {
                     input_tokens: 7,
                     output_tokens: 2,
                     cache_read_input_tokens: 0,
@@ -3099,10 +3355,10 @@ mod tests {
         assert_eq!(result.len(), 5);
 
         // user
-        assert_eq!(result[0].role, crate::llm::Role::User);
+        assert_eq!(result[0].role, ironclaw_llm::Role::User);
 
         // assistant with tool_calls
-        assert_eq!(result[1].role, crate::llm::Role::Assistant);
+        assert_eq!(result[1].role, ironclaw_llm::Role::Assistant);
         assert!(result[1].tool_calls.is_some());
         let tcs = result[1].tool_calls.as_ref().unwrap();
         assert_eq!(tcs.len(), 2);
@@ -3111,16 +3367,16 @@ mod tests {
         assert_eq!(tcs[1].name, "echo");
 
         // tool results
-        assert_eq!(result[2].role, crate::llm::Role::Tool);
+        assert_eq!(result[2].role, ironclaw_llm::Role::Tool);
         assert_eq!(result[2].tool_call_id, Some("call_0".to_string()));
         assert!(result[2].content.contains("Found 3 results"));
 
-        assert_eq!(result[3].role, crate::llm::Role::Tool);
+        assert_eq!(result[3].role, ironclaw_llm::Role::Tool);
         assert_eq!(result[3].tool_call_id, Some("call_1".to_string()));
         assert!(result[3].content.contains("timeout"));
 
         // final assistant
-        assert_eq!(result[4].role, crate::llm::Role::Assistant);
+        assert_eq!(result[4].role, ironclaw_llm::Role::Assistant);
         assert_eq!(result[4].content, "I found some results.");
     }
 
@@ -3144,7 +3400,7 @@ mod tests {
         let result = rebuild_chat_messages_from_db(&messages);
 
         assert_eq!(result.len(), 3);
-        assert_eq!(result[2].role, crate::llm::Role::Tool);
+        assert_eq!(result[2].role, ironclaw_llm::Role::Tool);
         assert_eq!(result[2].tool_call_id, Some("call_1".to_string()));
         assert_eq!(result[2].content, wrapped_error);
     }
@@ -3164,8 +3420,8 @@ mod tests {
 
         // Legacy rows are skipped, only user + assistant
         assert_eq!(result.len(), 2);
-        assert_eq!(result[0].role, crate::llm::Role::User);
-        assert_eq!(result[1].role, crate::llm::Role::Assistant);
+        assert_eq!(result[0].role, ironclaw_llm::Role::User);
+        assert_eq!(result[1].role, ironclaw_llm::Role::Assistant);
     }
 
     #[test]
@@ -3211,13 +3467,55 @@ mod tests {
         // Verify turn boundaries
         assert_eq!(result[0].content, "Find X");
         assert!(result[1].tool_calls.is_some());
-        assert_eq!(result[2].role, crate::llm::Role::Tool);
+        assert_eq!(result[2].role, ironclaw_llm::Role::Tool);
         assert_eq!(result[3].content, "Found X");
 
         assert_eq!(result[4].content, "Write it");
         assert!(result[5].tool_calls.is_some());
-        assert_eq!(result[6].role, crate::llm::Role::Tool);
+        assert_eq!(result[6].role, ironclaw_llm::Role::Tool);
         assert_eq!(result[7].content, "Written");
+    }
+
+    #[test]
+    fn test_validate_inbound_text_rejects_empty_text_without_attachments() {
+        let safety = SafetyLayer::new(&SafetyConfig {
+            max_output_length: 10_000,
+            injection_check_enabled: true,
+        });
+
+        let result = validate_inbound_text_for_message(&safety, "");
+        assert!(!result.is_valid);
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].field, "input");
+        assert_eq!(result.errors[0].message, "Input cannot be empty");
+    }
+
+    #[test]
+    fn test_validate_inbound_text_accepts_augmented_attachment_content() {
+        let safety = SafetyLayer::new(&SafetyConfig {
+            max_output_length: 10_000,
+            injection_check_enabled: true,
+        });
+
+        let attachments = vec![IncomingAttachment {
+            id: "image-1".to_string(),
+            kind: AttachmentKind::Image,
+            mime_type: "image/jpeg".to_string(),
+            filename: Some("photo.jpg".to_string()),
+            size_bytes: Some(128),
+            source_url: Some("https://example.com/photo.jpg".to_string()),
+            storage_key: None,
+            local_path: None,
+            extracted_text: None,
+            data: vec![1, 2, 3],
+            duration_secs: None,
+        }];
+
+        let augmented = crate::agent::attachments::augment_with_attachments("", &attachments)
+            .expect("attachments should augment content");
+        let result = validate_inbound_text_for_message(&safety, &augmented.text);
+        assert!(result.is_valid);
+        assert!(result.errors.is_empty());
     }
 
     #[test]
@@ -3244,8 +3542,19 @@ mod tests {
         let result = rebuild_chat_messages_from_db(&messages);
 
         assert_eq!(result.len(), 4);
-        assert_eq!(result[2].role, crate::llm::Role::Tool);
+        assert_eq!(result[2].role, ironclaw_llm::Role::Tool);
         assert_eq!(result[2].content, "Generated image (image/jpeg)");
+    }
+
+    #[test]
+    fn test_strip_markdown_image_lines_can_return_empty_text() {
+        let content = "![generated](/mnt/data/image.png)";
+
+        assert_eq!(strip_markdown_image_lines(content), "");
+        assert_eq!(
+            strip_markdown_image_lines("已生成：\n\n![generated](/mnt/data/image.png)"),
+            "已生成："
+        );
     }
 
     #[test]
@@ -3632,7 +3941,7 @@ mod tests {
             .expect("attachment-only message handled");
 
         match result {
-            SubmissionResult::Response { content } => {
+            SubmissionResult::Response { content, .. } => {
                 assert_eq!(content.to_ascii_lowercase(), "ok")
             }
             other => panic!("expected response result, got {other:?}"),
@@ -3657,6 +3966,136 @@ mod tests {
             "{}",
             turn.user_input
         );
+    }
+
+    #[tokio::test]
+    async fn test_process_user_input_attaches_generated_image_from_tool_result() {
+        use crate::agent::session::{Session, Thread};
+        use uuid::Uuid;
+
+        let tools = Arc::new(ToolRegistry::new());
+        tools.register(Arc::new(GeneratedImageTool)).await;
+        let llm: Arc<dyn ironclaw_llm::LlmProvider> = Arc::new(SequencedImageLlm::new());
+        let (agent, statuses) = make_thread_ops_test_agent_with(llm, tools).await;
+        let session_id = Uuid::new_v4();
+        let thread_id = Uuid::new_v4();
+        let thread = Thread::with_id(thread_id, session_id, Some("test"));
+
+        let mut sess = Session::new("test-user");
+        sess.threads.insert(thread_id, thread);
+        let session = Arc::new(TokioMutex::new(sess));
+        let message = IncomingMessage::new("test", "test-user", "生成一张小猫图片");
+
+        let result = agent
+            .process_user_input(
+                &message,
+                agent.tenant_ctx("test-user").await,
+                Arc::clone(&session),
+                thread_id,
+                "生成一张小猫图片",
+            )
+            .await
+            .expect("image generation turn handled");
+
+        let attachments = match result {
+            SubmissionResult::Response {
+                content,
+                attachments,
+            } => {
+                assert_eq!(content, "已生成小猫图片：");
+                assert!(!content.contains("!["));
+                attachments
+            }
+            other => panic!("expected response result, got {other:?}"),
+        };
+
+        assert_eq!(attachments.len(), 1);
+        assert!(
+            std::path::Path::new(&attachments[0]).exists(),
+            "staged generated image attachment should exist"
+        );
+        remove_staged_generated_image_attachments(&attachments);
+
+        let statuses = statuses.lock().await.clone();
+        assert!(statuses.iter().any(|status| matches!(
+            status,
+            StatusUpdate::ImageGenerated {
+                event_id,
+                data_url,
+                ..
+            } if event_id == "call_img_0" && data_url == TEST_IMAGE_DATA_URL
+        )));
+    }
+
+    #[tokio::test]
+    async fn test_response_transform_rejection_blocks_generated_image_attachment() {
+        use crate::agent::session::{Session, Thread};
+        use crate::hooks::{Hook, HookContext, HookError, HookEvent, HookOutcome, HookPoint};
+        use uuid::Uuid;
+
+        struct RejectGeneratedImageResponseHook;
+
+        #[async_trait::async_trait]
+        impl Hook for RejectGeneratedImageResponseHook {
+            fn name(&self) -> &str {
+                "reject-generated-image-response"
+            }
+
+            fn hook_points(&self) -> &[HookPoint] {
+                const POINTS: &[HookPoint] = &[HookPoint::TransformResponse];
+                POINTS
+            }
+
+            async fn execute(
+                &self,
+                _event: &HookEvent,
+                _ctx: &HookContext,
+            ) -> Result<HookOutcome, HookError> {
+                Ok(HookOutcome::reject("blocked by response policy"))
+            }
+        }
+
+        let tools = Arc::new(ToolRegistry::new());
+        tools.register(Arc::new(GeneratedImageTool)).await;
+        let llm: Arc<dyn ironclaw_llm::LlmProvider> = Arc::new(SequencedImageLlm::new());
+        let (agent, _statuses) = make_thread_ops_test_agent_with(llm, tools).await;
+        agent
+            .hooks()
+            .register(Arc::new(RejectGeneratedImageResponseHook))
+            .await;
+        let session_id = Uuid::new_v4();
+        let thread_id = Uuid::new_v4();
+        let thread = Thread::with_id(thread_id, session_id, Some("test"));
+
+        let mut sess = Session::new("test-user");
+        sess.threads.insert(thread_id, thread);
+        let session = Arc::new(TokioMutex::new(sess));
+        let message = IncomingMessage::new("test", "test-user", "生成一张小猫图片");
+
+        let result = agent
+            .process_user_input(
+                &message,
+                agent.tenant_ctx("test-user").await,
+                Arc::clone(&session),
+                thread_id,
+                "生成一张小猫图片",
+            )
+            .await
+            .expect("image generation turn handled");
+
+        match result {
+            SubmissionResult::Response {
+                content,
+                attachments,
+            } => {
+                assert_eq!(content, "[Response filtered: blocked by response policy]");
+                assert!(
+                    attachments.is_empty(),
+                    "rejected response must not deliver generated image attachments"
+                );
+            }
+            other => panic!("expected response result, got {other:?}"),
+        }
     }
 
     #[tokio::test]

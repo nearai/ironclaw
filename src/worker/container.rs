@@ -21,7 +21,6 @@ use crate::agent::agentic_loop::{
 use crate::config::SafetyConfig;
 use crate::context::JobContext;
 use crate::error::WorkerError;
-use crate::llm::{ChatMessage, LlmProvider, Reasoning, ReasoningContext, ResponseMetadata};
 use crate::tools::ToolRegistry;
 use crate::tools::execute::{execute_tool_simple, process_tool_result};
 use crate::worker::api::{CompletionReport, JobEventPayload, StatusUpdate, WorkerHttpClient};
@@ -30,6 +29,7 @@ use crate::worker::autonomous_recovery::{
     EMPTY_TOOL_COMPLETION_NUDGE, FORCE_TEXT_RECOVERY_PROMPT,
 };
 use crate::worker::proxy_llm::ProxyLlmProvider;
+use ironclaw_llm::{ChatMessage, LlmProvider, Reasoning, ReasoningContext, ResponseMetadata};
 use ironclaw_safety::SafetyLayer;
 
 /// Configuration for the worker runtime.
@@ -423,7 +423,7 @@ impl LoopDelegate for ContainerDelegate {
         reasoning: &Reasoning,
         reason_ctx: &mut ReasoningContext,
         _iteration: usize,
-    ) -> Result<crate::llm::RespondOutput, crate::error::Error> {
+    ) -> Result<ironclaw_llm::RespondOutput, crate::error::Error> {
         // Container uses respond_with_tools (which may return either text or tool calls)
         reasoning
             .respond_with_tools(reason_ctx)
@@ -507,9 +507,10 @@ impl LoopDelegate for ContainerDelegate {
 
     async fn execute_tool_calls(
         &self,
-        tool_calls: Vec<crate::llm::ToolCall>,
+        tool_calls: Vec<ironclaw_llm::ToolCall>,
         content: Option<String>,
         reason_ctx: &mut ReasoningContext,
+        reasoning: Option<String>,
     ) -> Result<Option<LoopOutcome>, crate::error::Error> {
         {
             let mut recovery = self.recovery_state.lock().await;
@@ -527,13 +528,12 @@ impl LoopDelegate for ContainerDelegate {
             .await;
         }
 
-        // Add assistant message with tool_calls (OpenAI protocol)
-        reason_ctx
-            .messages
-            .push(ChatMessage::assistant_with_tool_calls(
-                content,
-                tool_calls.clone(),
-            ));
+        // Add assistant message with tool_calls (OpenAI protocol).
+        // Carry reasoning for the next turn — see #3201, #3225.
+        reason_ctx.messages.push(
+            ChatMessage::assistant_with_tool_calls(content, tool_calls.clone())
+                .with_reasoning(reasoning),
+        );
 
         // Execute tools sequentially (container context — no parallel execution)
         let mut tool_failure_count: usize = 0;

@@ -719,7 +719,15 @@ function loadMissions() {
     renderMissionsList(currentMissionList);
     renderMissionsActivity(threadData.threads || []);
     enrichMissionProgress(currentMissionList);
-  }).catch(function() {});
+  }).catch(function(err) {
+    // See #3274: a silent catch here left the Missions tab blank when the
+    // first request raced engine init. Log + flag so the SSE-open retry
+    // in init-auth.js refetches once the engine is fully ready.
+    console.error('[missions] loadMissions failed:', err);
+    if (window._initialHydrationPending) {
+      window._initialHydrationPending.missions = true;
+    }
+  });
 }
 
 function renderMissionsSummary(s) {

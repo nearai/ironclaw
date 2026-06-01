@@ -112,9 +112,7 @@ pub(crate) fn resolve_embedding_dimension() -> Option<usize> {
     let model =
         std::env::var("EMBEDDING_MODEL").unwrap_or_else(|_| "text-embedding-3-small".to_string());
 
-    Some(crate::config::embeddings::default_dimension_for_model(
-        &model,
-    ))
+    Some(ironclaw_embeddings::default_dimension_for_model(&model))
 }
 
 impl LibSqlBackend {

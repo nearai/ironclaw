@@ -472,6 +472,23 @@ pub trait Tool: Send + Sync {
         None
     }
 
+    /// Names of the secrets store credentials this tool needs to function.
+    ///
+    /// Returns the `secret_name` for every non-optional credential the
+    /// tool declares (e.g. WASM tools' `capabilities.http.credentials`).
+    /// The engine's auth preflight (`AuthManager::check_action_auth`)
+    /// consults this list and raises an `Authentication` gate if any
+    /// declared credential is missing from the secrets store, so the
+    /// model can call the tool directly — no separate enablement step
+    /// is required.
+    ///
+    /// Default returns empty — built-in tools that don't need a
+    /// credential, or that handle missing credentials internally,
+    /// override only when relevant.
+    fn required_credentials(&self) -> Vec<String> {
+        Vec::new()
+    }
+
     /// Get the tool schema for LLM function calling.
     fn schema(&self) -> ToolSchema {
         let parameters = self.parameters_schema();

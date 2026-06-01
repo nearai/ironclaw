@@ -32,6 +32,26 @@ pub mod task;
 mod thread_ops;
 pub mod undo;
 
+#[cfg(all(test, feature = "libsql"))]
+pub(crate) mod test_support {
+    use std::sync::Arc;
+
+    use crate::db::Database;
+
+    pub(crate) async fn make_libsql_test_db() -> (Arc<dyn Database>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("failed to create temp dir"); // safety: test-only setup helper
+        let path = dir.path().join("test.db");
+        let backend = crate::db::libsql::LibSqlBackend::new_local(&path)
+            .await
+            .expect("failed to create test LibSqlBackend"); // safety: test-only setup helper
+        backend
+            .run_migrations()
+            .await
+            .expect("failed to run migrations"); // safety: test-only setup helper
+        (Arc::new(backend) as Arc<dyn Database>, dir)
+    }
+}
+
 pub(crate) use agent_loop::truncate_for_preview;
 pub use agent_loop::{Agent, AgentDeps};
 pub(crate) use attachments::augment_with_attachments;

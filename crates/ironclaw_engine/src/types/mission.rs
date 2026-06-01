@@ -11,6 +11,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::gate::ResumeKind;
 use crate::types::error::EngineError;
 use crate::types::project::ProjectId;
 use crate::types::thread::ThreadId;
@@ -100,6 +101,35 @@ pub enum MissionCadence {
     Manual,
 }
 
+/// Persisted gate metadata for a mission whose child thread paused on
+/// an unresolved gate (auth, approval, or external callback).
+///
+/// Two identifiers are carried because they serve different consumers:
+///
+/// - `call_id` — engine-side LLM tool-call id (e.g. `call_657a9167...`).
+///   Internal to engine resume.
+/// - `gate_request_id` — UUID surfaced to the user-facing auth tray and
+///   `/api/chat/gate/resolve` handler. The handler `Uuid::parse_str`'s
+///   the field, so it MUST be a UUID, not the engine call_id.
+///
+/// Used by both half-1 (`MissionNotification.gate`) and half-2
+/// (`Mission.paused_gate`) of #3133.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MissionGateInfo {
+    /// Engine-side gate name (e.g., `auth_required`, `approval_required`).
+    pub gate_name: String,
+    /// Action that paused (e.g., `gmail`, `http`, `slack_send`).
+    pub action_name: String,
+    /// Original action parameters at the time of the pause.
+    pub parameters: serde_json::Value,
+    /// Engine-side LLM tool-call id (e.g. `call_657a9167...`).
+    pub call_id: String,
+    /// Freshly-generated UUID identifying this surfaced gate to the user.
+    pub gate_request_id: Uuid,
+    /// What kind of resolution unblocks this gate.
+    pub resume_kind: ResumeKind,
+}
+
 /// A mission — a long-running goal that spawns threads over time.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Mission {
@@ -181,6 +211,16 @@ pub struct Mission {
     pub updated_at: DateTime<Utc>,
     /// When the next thread should be spawned (for Cron cadence).
     pub next_fire_at: Option<DateTime<Utc>>,
+
+    /// When the mission's child thread paused on an unresolved gate, this
+    /// records the gate metadata so the credential-write / gate-resolve
+    /// paths can match a paused mission back to its waiting gate and
+    /// auto-resume it (#3166 / half-2 of #3133).
+    ///
+    /// Cleared when the mission resumes (manually or automatically) or
+    /// fires successfully.
+    #[serde(default)]
+    pub paused_gate: Option<MissionGateInfo>,
 }
 
 impl Mission {
@@ -245,6 +285,7 @@ impl Mission {
             created_at: now,
             updated_at: now,
             next_fire_at: None,
+            paused_gate: None,
         }
     }
 

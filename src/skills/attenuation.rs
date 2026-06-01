@@ -17,7 +17,7 @@
 //! | Trusted only       | All tools (user placed these, full trust)         |
 //! | Installed present  | Read-only tools ONLY                              |
 
-use crate::llm::ToolDefinition;
+use ironclaw_llm::ToolDefinition;
 use ironclaw_skills::{LoadedSkill, SkillTrust};
 
 /// Tools that are always safe -- read-only, no side effects.

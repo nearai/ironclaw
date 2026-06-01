@@ -96,7 +96,21 @@ pub(crate) fn assign_surface(subject: SurfacePolicyInput) -> SurfaceAssignment {
 }
 
 const fn is_direct_ready(status: CapabilityStatus) -> bool {
-    matches!(status, CapabilityStatus::Ready)
+    // `NeedsAuth` tools (e.g. installed-but-unauthed gmail) stay on
+    // the callable surface post-#3133/#3166: the engine's auth
+    // preflight (`AuthManager::check_action_auth`) raises an
+    // `Authentication` gate when the tool is invoked and any required
+    // credential is missing, the inline-await machinery parks the VM,
+    // and the OAuth-callback hook delivers `Approved` to retry the
+    // action against the now-present secret. The model can therefore
+    // call the tool directly without a separate enablement step.
+    // `NeedsSetup` / `Inactive` / `Latent` still fall through to
+    // the capabilities surface — those need real onboarding work that
+    // a credential-write hook can't supply.
+    matches!(
+        status,
+        CapabilityStatus::Ready | CapabilityStatus::NeedsAuth
+    )
 }
 
 const fn fallback_assignment(status: CapabilityStatus) -> SurfaceAssignment {
@@ -171,14 +185,18 @@ mod tests {
                 expected: SurfaceAssignment::actions_only(),
             },
             Case {
-                name: "needs-auth extension direct action",
+                // Post-#3133/#3166: NeedsAuth extension tools stay
+                // on the callable surface — the engine raises an
+                // Authentication gate at execute time and inline-await
+                // resumes the action after OAuth completes.
+                name: "needs-auth extension direct action stays callable",
                 subject: SurfacePolicyInput {
                     kind: SurfaceSubjectKind::ExtensionDirectAction,
                     status: CapabilityStatus::NeedsAuth,
                     invocation_mode: InvocationMode::Direct,
                     leased_and_callable: false,
                 },
-                expected: SurfaceAssignment::capabilities_only(),
+                expected: SurfaceAssignment::actions_only(),
             },
             Case {
                 name: "needs-setup extension direct action",

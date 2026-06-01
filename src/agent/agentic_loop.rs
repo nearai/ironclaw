@@ -12,7 +12,7 @@ use std::hash::{Hash, Hasher};
 
 use crate::agent::session::PendingApproval;
 use crate::error::Error;
-use crate::llm::{
+use ironclaw_llm::{
     ChatMessage, FinishReason, Reasoning, ReasoningContext, RespondResult, ResponseMetadata,
     ToolCall,
 };
@@ -105,7 +105,7 @@ pub trait LoopDelegate: Send + Sync {
         reasoning: &Reasoning,
         reason_ctx: &mut ReasoningContext,
         iteration: usize,
-    ) -> Result<crate::llm::RespondOutput, Error>;
+    ) -> Result<ironclaw_llm::RespondOutput, Error>;
 
     /// Handle a text-only response from the LLM.
     /// Return `TextAction::Return` to exit the loop, `TextAction::Continue` to proceed.
@@ -124,9 +124,10 @@ pub trait LoopDelegate: Send + Sync {
     /// duplicate tool call detector to escalate repeated identical failures.
     async fn execute_tool_calls(
         &self,
-        tool_calls: Vec<crate::llm::ToolCall>,
+        tool_calls: Vec<ironclaw_llm::ToolCall>,
         content: Option<String>,
         reason_ctx: &mut ReasoningContext,
+        reasoning: Option<String>,
     ) -> Result<Option<LoopOutcome>, Error>;
 
     /// Called when the LLM expresses tool intent without actually calling a tool.
@@ -253,6 +254,7 @@ pub async fn run_agentic_loop(
             RespondResult::ToolCalls {
                 tool_calls,
                 content,
+                reasoning: _,
             } => {
                 let names: Vec<&str> = tool_calls.iter().map(|tc| tc.name.as_str()).collect();
                 tracing::debug!(
@@ -272,7 +274,7 @@ pub async fn run_agentic_loop(
                     && !reason_ctx.available_tools.is_empty()
                     && !reason_ctx.force_text
                     && consecutive_tool_intent_nudges < config.max_tool_intent_nudges
-                    && crate::llm::llm_signals_tool_intent(&text)
+                    && ironclaw_llm::llm_signals_tool_intent(&text)
                 {
                     consecutive_tool_intent_nudges += 1;
                     tracing::info!(
@@ -283,13 +285,13 @@ pub async fn run_agentic_loop(
                     reason_ctx.messages.push(ChatMessage::assistant(&text));
                     reason_ctx
                         .messages
-                        .push(ChatMessage::user(crate::llm::TOOL_INTENT_NUDGE));
+                        .push(ChatMessage::user(ironclaw_llm::TOOL_INTENT_NUDGE));
                     delegate.after_iteration(iteration).await;
                     continue;
                 }
 
                 // Reset nudge counter since we got a non-intent text response
-                if !crate::llm::llm_signals_tool_intent(&text) {
+                if !ironclaw_llm::llm_signals_tool_intent(&text) {
                     consecutive_tool_intent_nudges = 0;
                 }
 
@@ -307,6 +309,7 @@ pub async fn run_agentic_loop(
             RespondResult::ToolCalls {
                 tool_calls,
                 content,
+                reasoning,
             } => {
                 // If the response was truncated, tool call parameters are likely
                 // incomplete. Discard them and tell the LLM to try a different
@@ -325,7 +328,7 @@ pub async fn run_agentic_loop(
                     }
                     reason_ctx
                         .messages
-                        .push(ChatMessage::user(crate::llm::TRUNCATED_TOOL_CALL_NOTICE));
+                        .push(ChatMessage::user(ironclaw_llm::TRUNCATED_TOOL_CALL_NOTICE));
                     // After repeated truncations, force text-only mode so the LLM
                     // stops attempting tool calls it can't fit in the output budget.
                     if truncation_count >= 3 {
@@ -345,7 +348,7 @@ pub async fn run_agentic_loop(
                 reason_ctx.last_tool_batch_all_failed = false;
 
                 if let Some(outcome) = delegate
-                    .execute_tool_calls(tool_calls, content, reason_ctx)
+                    .execute_tool_calls(tool_calls, content, reason_ctx, reasoning)
                     .await?
                 {
                     return Ok(outcome);
@@ -401,8 +404,8 @@ pub fn truncate_for_preview(s: &str, max: usize) -> Cow<'_, str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::llm::{RespondOutput, ResponseAnomaly, ResponseMetadata, TokenUsage, ToolCall};
     use crate::testing::StubLlm;
+    use ironclaw_llm::{RespondOutput, ResponseAnomaly, ResponseMetadata, TokenUsage, ToolCall};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::Mutex;
@@ -434,6 +437,7 @@ mod tests {
             result: RespondResult::ToolCalls {
                 tool_calls: calls,
                 content: None,
+                reasoning: None,
             },
             usage: zero_usage(),
             finish_reason: FinishReason::ToolUse,
@@ -448,6 +452,7 @@ mod tests {
         tool_exec_count: AtomicUsize,
         tool_exec_outcome: Mutex<Option<LoopOutcome>>,
         iterations_seen: Mutex<Vec<usize>>,
+        call_llm_iterations: Mutex<Vec<usize>>,
         early_exit: Mutex<Option<(usize, LoopOutcome)>>,
         nudge_count: AtomicUsize,
         /// When true, execute_tool_calls sets last_tool_batch_all_failed = true.
@@ -462,6 +467,7 @@ mod tests {
                 tool_exec_count: AtomicUsize::new(0),
                 tool_exec_outcome: Mutex::new(None),
                 iterations_seen: Mutex::new(Vec::new()),
+                call_llm_iterations: Mutex::new(Vec::new()),
                 early_exit: Mutex::new(None),
                 nudge_count: AtomicUsize::new(0),
                 simulate_all_failed: false,
@@ -506,8 +512,9 @@ mod tests {
             &self,
             _reasoning: &Reasoning,
             _reason_ctx: &mut ReasoningContext,
-            _iteration: usize,
-        ) -> Result<crate::llm::RespondOutput, crate::error::Error> {
+            iteration: usize,
+        ) -> Result<ironclaw_llm::RespondOutput, crate::error::Error> {
+            self.call_llm_iterations.lock().await.push(iteration);
             let mut responses = self.llm_responses.lock().await;
             if responses.is_empty() {
                 panic!("MockDelegate: no more LLM responses queued");
@@ -529,6 +536,7 @@ mod tests {
             _tool_calls: Vec<ToolCall>,
             _content: Option<String>,
             reason_ctx: &mut ReasoningContext,
+            _reasoning: Option<String>,
         ) -> Result<Option<LoopOutcome>, crate::error::Error> {
             self.tool_exec_count.fetch_add(1, Ordering::SeqCst);
             reason_ctx
@@ -549,6 +557,41 @@ mod tests {
     }
 
     // --- Tests ---
+
+    #[tokio::test]
+    async fn first_call_llm_iteration_is_one() {
+        // Regression: ChatDelegate::call_llm gates per-request overrides
+        // (Responses API `temperature`, settings `temperature`, `selected_model`
+        // from `/model`) on the first iteration. The gate's expected value must
+        // match what this loop produces on its first call_llm invocation. An
+        // off-by-one here silently disables every override and was shipped once
+        // already (gate was `iteration == 0` while the loop starts at 1).
+        let tool_call = ToolCall {
+            id: "call_1".to_string(),
+            name: "echo".to_string(),
+            arguments: serde_json::json!({}),
+            reasoning: None,
+            signature: None,
+        };
+        let delegate = MockDelegate::new(vec![
+            tool_calls_output(vec![tool_call]),
+            text_output("done"),
+        ]);
+        let reasoning = stub_reasoning();
+        let mut ctx = ReasoningContext::new();
+        let config = AgenticLoopConfig::default();
+
+        run_agentic_loop(&delegate, &reasoning, &mut ctx, &config)
+            .await
+            .unwrap();
+
+        let iterations = delegate.call_llm_iterations.lock().await;
+        assert_eq!(
+            iterations.first().copied(),
+            Some(1),
+            "first call_llm iteration must be 1 — see dispatcher.rs override gate"
+        );
+    }
 
     #[tokio::test]
     async fn test_text_response_returns_immediately() {
@@ -577,6 +620,7 @@ mod tests {
             name: "echo".to_string(),
             arguments: serde_json::json!({}),
             reasoning: None,
+            signature: None,
         };
         let delegate = MockDelegate::new(vec![
             tool_calls_output(vec![tool_call]),
@@ -630,9 +674,9 @@ mod tests {
 
         assert!(matches!(outcome, LoopOutcome::Response(_)));
         assert!(
-            ctx.messages
-                .iter()
-                .any(|m| m.role == crate::llm::Role::User && m.content.contains("injected prompt")),
+            ctx.messages.iter().any(
+                |m| m.role == ironclaw_llm::Role::User && m.content.contains("injected prompt")
+            ),
             "Injected message should appear in context"
         );
     }
@@ -660,7 +704,7 @@ mod tests {
                 _: &Reasoning,
                 _: &mut ReasoningContext,
                 _: usize,
-            ) -> Result<crate::llm::RespondOutput, crate::error::Error> {
+            ) -> Result<ironclaw_llm::RespondOutput, crate::error::Error> {
                 Ok(RespondOutput {
                     result: RespondResult::Text("fallback".to_string()),
                     usage: zero_usage(),
@@ -688,6 +732,7 @@ mod tests {
                 _: Vec<ToolCall>,
                 _: Option<String>,
                 _: &mut ReasoningContext,
+                _: Option<String>,
             ) -> Result<Option<LoopOutcome>, crate::error::Error> {
                 Ok(None)
             }
@@ -731,7 +776,7 @@ mod tests {
                 _: &Reasoning,
                 _: &mut ReasoningContext,
                 _: usize,
-            ) -> Result<crate::llm::RespondOutput, crate::error::Error> {
+            ) -> Result<ironclaw_llm::RespondOutput, crate::error::Error> {
                 Ok(text_output("still working"))
             }
             async fn handle_text_response(
@@ -748,6 +793,7 @@ mod tests {
                 _: Vec<ToolCall>,
                 _: Option<String>,
                 _: &mut ReasoningContext,
+                _: Option<String>,
             ) -> Result<Option<LoopOutcome>, crate::error::Error> {
                 Ok(None)
             }
@@ -769,7 +815,7 @@ mod tests {
         let assistant_count = ctx
             .messages
             .iter()
-            .filter(|m| m.role == crate::llm::Role::Assistant)
+            .filter(|m| m.role == ironclaw_llm::Role::Assistant)
             .count();
         assert_eq!(assistant_count, 3);
     }
@@ -783,7 +829,7 @@ mod tests {
         ]);
         let reasoning = stub_reasoning();
         let mut ctx = ReasoningContext::new();
-        ctx.available_tools.push(crate::llm::ToolDefinition {
+        ctx.available_tools.push(ironclaw_llm::ToolDefinition {
             name: "search".to_string(),
             description: "Search files".to_string(),
             parameters: serde_json::json!({"type": "object"}),
@@ -804,7 +850,7 @@ mod tests {
             .messages
             .iter()
             .filter(|m| {
-                m.role == crate::llm::Role::User
+                m.role == ironclaw_llm::Role::User
                     && m.content.contains("you did not include any tool calls")
             })
             .count();
@@ -866,11 +912,13 @@ mod tests {
             name: "memory_write".to_string(),
             arguments: serde_json::json!({}), // empty — truncated
             reasoning: None,
+            signature: None,
         };
         let truncated_output = RespondOutput {
             result: RespondResult::ToolCalls {
                 tool_calls: vec![truncated_tool_call],
                 content: Some("I'll write the report.".to_string()),
+                reasoning: None,
             },
             usage: zero_usage(),
             finish_reason: FinishReason::Length, // response was truncated
@@ -896,14 +944,14 @@ mod tests {
         assert!(
             ctx.messages
                 .iter()
-                .any(|m| m.role == crate::llm::Role::User && m.content.contains("truncated")),
+                .any(|m| m.role == ironclaw_llm::Role::User && m.content.contains("truncated")),
             "Should inject truncation notice into context"
         );
         // The partial assistant content should have been preserved
         assert!(
             ctx.messages
                 .iter()
-                .any(|m| m.role == crate::llm::Role::Assistant
+                .any(|m| m.role == ironclaw_llm::Role::Assistant
                     && m.content.contains("write the report")),
             "Should preserve partial assistant content"
         );
@@ -918,8 +966,10 @@ mod tests {
                     name: "memory_write".to_string(),
                     arguments: serde_json::json!({}),
                     reasoning: None,
+                    signature: None,
                 }],
                 content: None,
+                reasoning: None,
             },
             usage: zero_usage(),
             finish_reason: FinishReason::Length,
@@ -962,6 +1012,7 @@ mod tests {
             name: "echo".into(),
             arguments: serde_json::json!({"msg": "hi"}),
             reasoning: None,
+            signature: None,
         }];
         let fp = DuplicateToolCallTracker::fingerprint(&calls);
         // Tool succeeded — count stays at 0
@@ -977,6 +1028,7 @@ mod tests {
             name: "http_get".into(),
             arguments: serde_json::json!({"url": "https://example.com"}),
             reasoning: None,
+            signature: None,
         }];
         let fp = DuplicateToolCallTracker::fingerprint(&calls);
         assert_eq!(tracker.record_with_fingerprint(fp, true), 1);
@@ -992,6 +1044,7 @@ mod tests {
             name: "http_get".into(),
             arguments: serde_json::json!({"url": "https://example.com"}),
             reasoning: None,
+            signature: None,
         }];
         let fp = DuplicateToolCallTracker::fingerprint(&calls);
         assert_eq!(tracker.record_with_fingerprint(fp, true), 1);
@@ -1010,12 +1063,14 @@ mod tests {
             name: "http_get".into(),
             arguments: serde_json::json!({"url": "https://a.com"}),
             reasoning: None,
+            signature: None,
         }];
         let calls_b = vec![ToolCall {
             id: "c1".into(),
             name: "http_get".into(),
             arguments: serde_json::json!({"url": "https://b.com"}),
             reasoning: None,
+            signature: None,
         }];
         let fp_a = DuplicateToolCallTracker::fingerprint(&calls_a);
         let fp_b = DuplicateToolCallTracker::fingerprint(&calls_b);
@@ -1033,12 +1088,14 @@ mod tests {
             name: "echo".into(),
             arguments: serde_json::json!({"a": 1, "b": 2}),
             reasoning: None,
+            signature: None,
         }];
         let calls_b = vec![ToolCall {
             id: "c1".into(),
             name: "echo".into(),
             arguments: serde_json::json!({"b": 2, "a": 1}),
             reasoning: None,
+            signature: None,
         }];
         assert_eq!(
             DuplicateToolCallTracker::fingerprint(&calls_a),
@@ -1055,6 +1112,7 @@ mod tests {
             name: "http_get".to_string(),
             arguments: serde_json::json!({"url": "https://broken.example.com"}),
             reasoning: None,
+            signature: None,
         };
         // 3 identical failing tool calls, then text response
         let mut delegate = MockDelegate::new(vec![
@@ -1082,7 +1140,7 @@ mod tests {
             .messages
             .iter()
             .filter(|m| {
-                m.role == crate::llm::Role::User && m.content.contains("same failing tool call")
+                m.role == ironclaw_llm::Role::User && m.content.contains("same failing tool call")
             })
             .count();
         assert!(
@@ -1103,6 +1161,7 @@ mod tests {
             name: "http_get".to_string(),
             arguments: serde_json::json!({"url": "https://broken.example.com"}),
             reasoning: None,
+            signature: None,
         };
         // 5 identical failing tool calls, then text response
         let mut delegate = MockDelegate::new(vec![
@@ -1140,6 +1199,7 @@ mod tests {
             name: "http_get".to_string(),
             arguments: serde_json::json!({"url": "https://broken.example.com"}),
             reasoning: None,
+            signature: None,
         };
         // 2 failing calls, then a text continuation, then 2 more of the same failing calls
         // The text response in the middle should reset the streak, so we never hit 3.
@@ -1166,7 +1226,7 @@ mod tests {
                 _: &Reasoning,
                 _: &mut ReasoningContext,
                 _: usize,
-            ) -> Result<crate::llm::RespondOutput, crate::error::Error> {
+            ) -> Result<ironclaw_llm::RespondOutput, crate::error::Error> {
                 let mut responses = self.llm_responses.lock().await;
                 if responses.is_empty() {
                     panic!("No more responses");
@@ -1193,6 +1253,7 @@ mod tests {
                 _: Vec<ToolCall>,
                 _: Option<String>,
                 reason_ctx: &mut ReasoningContext,
+                _reasoning: Option<String>,
             ) -> Result<Option<LoopOutcome>, crate::error::Error> {
                 self.tool_exec_count.fetch_add(1, Ordering::SeqCst);
                 reason_ctx.messages.push(ChatMessage::user("tool error"));
@@ -1230,7 +1291,7 @@ mod tests {
             .messages
             .iter()
             .filter(|m| {
-                m.role == crate::llm::Role::User && m.content.contains("same failing tool call")
+                m.role == ironclaw_llm::Role::User && m.content.contains("same failing tool call")
             })
             .count();
         assert_eq!(

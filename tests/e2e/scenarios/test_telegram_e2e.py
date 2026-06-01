@@ -8,13 +8,28 @@ import asyncio
 import json
 import os
 import re
+import shutil
 import time
 from itertools import count
+from pathlib import Path
 
 import httpx
 import pytest
 
 from helpers import api_post, auth_headers
+
+# Local WASM build (relative to repo root) — when present, overlays the
+# release artifact downloaded by `/api/extensions/install` so tests run
+# against the source tree's pairing-reply text and other recent
+# behaviour rather than the last-published binary.
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+_LOCAL_TELEGRAM_WASM = (
+    _REPO_ROOT
+    / "channels-src/telegram/target/wasm32-wasip2/release/telegram_channel.wasm"
+)
+_LOCAL_TELEGRAM_CAPS = (
+    _REPO_ROOT / "channels-src/telegram/telegram.capabilities.json"
+)
 
 # Bot token used throughout these tests.
 BOT_TOKEN = "111222333:FAKE_E2E_TOKEN"
@@ -46,8 +61,15 @@ async def reset_fake_tg(fake_tg_url: str):
         await c.post(f"{fake_tg_url}/__mock/reset")
 
 
-async def install_telegram(base_url: str):
-    """Install the bundled Telegram WASM channel if not already installed."""
+async def install_telegram(base_url: str, channels_dir: str | None = None):
+    """Install the bundled Telegram WASM channel if not already installed.
+
+    The install API downloads the published release artifact, which lags
+    behind the source tree until the next release is cut. When a locally-
+    built WASM is available, overlay it on top of the downloaded file so
+    tests exercise the source-tree behaviour (e.g. the pairing-reply
+    wording in #3317) instead of the previous release's bytes.
+    """
     r = await api_post(
         base_url,
         "/api/extensions/install",
@@ -58,6 +80,21 @@ async def install_telegram(base_url: str):
     assert r.status_code in (200, 409), (
         f"Telegram install failed ({r.status_code}): {r.text}"
     )
+
+    if channels_dir and _LOCAL_TELEGRAM_WASM.exists():
+        try:
+            shutil.copy(_LOCAL_TELEGRAM_WASM, Path(channels_dir) / "telegram.wasm")
+            if _LOCAL_TELEGRAM_CAPS.exists():
+                shutil.copy(
+                    _LOCAL_TELEGRAM_CAPS,
+                    Path(channels_dir) / "telegram.capabilities.json",
+                )
+        except OSError as e:
+            # Don't hard-fail if the overlay can't land (read-only FS in some
+            # CI sandboxes). The downloaded artifact still works for tests
+            # that don't rely on source-tree-only behaviour; assertions that
+            # do will fail loudly with a clear diff.
+            print(f"[install_telegram] local WASM overlay skipped: {e}")
 
 
 def _patch_capabilities_for_testing(channels_dir: str):
@@ -124,7 +161,7 @@ async def activate_telegram(
         return
 
     await reset_fake_tg(fake_tg_url)
-    await install_telegram(base_url)
+    await install_telegram(base_url, channels_dir)
 
     # Patch capabilities for testing (remove validation_endpoint, ensure
     # webhook secret is declared in required_secrets).

@@ -8,9 +8,11 @@ Covers:
   - Clearing search restores all items
 """
 
+import asyncio
 import json
+import uuid
 
-from helpers import SEL, api_post
+from helpers import SEL, api_get, api_post
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -180,21 +182,35 @@ async def test_search_filters_extension_cards(page):
 async def test_search_filters_user_rows(page, ironclaw_server):
     """Search filters user table rows in the Users subtab."""
     # Seed two users via the admin API
-    await api_post(ironclaw_server, "/api/admin/users", json={
-        "display_name": "Alice Searchtest",
-        "email": "alice-searchtest@example.test",
+    suffix = uuid.uuid4().hex[:8]
+    alice = await api_post(ironclaw_server, "/api/admin/users", json={
+        "display_name": f"Alice Searchtest {suffix}",
+        "email": f"alice-searchtest-{suffix}@example.test",
         "role": "member",
     })
-    await api_post(ironclaw_server, "/api/admin/users", json={
-        "display_name": "Bob Searchtest",
-        "email": "bob-searchtest@example.test",
+    assert alice.status_code == 200, alice.text
+    bob = await api_post(ironclaw_server, "/api/admin/users", json={
+        "display_name": f"Bob Searchtest {suffix}",
+        "email": f"bob-searchtest-{suffix}@example.test",
         "role": "member",
     })
+    assert bob.status_code == 200, bob.text
+
+    expected_ids = {alice.json()["id"], bob.json()["id"]}
+    for _ in range(20):
+        listed = await api_get(ironclaw_server, "/api/admin/users")
+        assert listed.status_code == 200, listed.text
+        listed_ids = {u["id"] for u in listed.json().get("users", [])}
+        if expected_ids <= listed_ids:
+            break
+        await asyncio.sleep(0.25)
+    else:
+        raise AssertionError("Seeded users did not appear in admin API list")
 
     await _open_settings_subtab(page, "users")
 
     rows = page.locator(SEL["users_tbody_row"])
-    await rows.first.wait_for(state="visible", timeout=5000)
+    await rows.first.wait_for(state="visible", timeout=15000)
     total = await rows.count()
     assert total >= 2, f"Need at least 2 user rows, got {total}"
 

@@ -8,8 +8,8 @@
 use clap::Subcommand;
 use std::path::Path;
 
-use crate::llm::registry::ProviderRegistry;
 use crate::settings::Settings;
+use ironclaw_llm::registry::ProviderRegistry;
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum ModelsCommand {
@@ -164,44 +164,49 @@ async fn try_fetch_models(provider_id: &str, config_path: Option<&Path>) -> Opti
     let mut llm_config = config.llm.clone();
     llm_config.backend = provider_id.to_string();
 
-    // For registry providers, resolve the RegistryProviderConfig if not
-    // already set for this backend.
-    if provider_id != "nearai" && provider_id != "bedrock" {
-        let registry = ProviderRegistry::load();
-        if let Some(def) = registry.find(provider_id)
-            && llm_config
-                .provider
-                .as_ref()
-                .is_none_or(|p| p.provider_id != def.id)
-        {
-            // Build a minimal RegistryProviderConfig from env + registry
-            let api_key = def
-                .api_key_env
-                .as_ref()
-                .and_then(|env| std::env::var(env).ok());
-            if def.api_key_required && api_key.is_none() {
-                return None;
-            }
-            let base_url = def.default_base_url.clone().unwrap_or_default();
-            llm_config.provider = Some(crate::llm::RegistryProviderConfig {
-                protocol: def.protocol,
-                provider_id: def.id.clone(),
-                model: def.default_model.clone(),
-                api_key: api_key.map(secrecy::SecretString::from),
-                base_url,
-                extra_headers: Vec::new(),
-                oauth_token: None,
-                is_codex_chatgpt: false,
-                refresh_token: None,
-                auth_path: None,
-                cache_retention: Default::default(),
-                unsupported_params: def.unsupported_params.clone(),
-            });
+    // For OpenAI-shape registry providers, resolve the RegistryProviderConfig
+    // if not already set for this backend. Backends with a dedicated config
+    // slot (nearai/bedrock/codex/gemini_oauth) read from their own
+    // `LlmConfig.{nearai,bedrock,openai_codex,gemini_oauth}` sub-struct
+    // instead of `LlmConfig.provider`, so they're skipped here.
+    let registry = ProviderRegistry::load();
+    let needs_registry_provider_config = registry
+        .find(provider_id)
+        .is_some_and(|def| !def.protocol.has_dedicated_config());
+    if needs_registry_provider_config
+        && let Some(def) = registry.find(provider_id)
+        && llm_config
+            .provider
+            .as_ref()
+            .is_none_or(|p| p.provider_id != def.id)
+    {
+        // Build a minimal RegistryProviderConfig from env + registry
+        let api_key = def
+            .api_key_env
+            .as_ref()
+            .and_then(|env| std::env::var(env).ok());
+        if def.api_key_required && api_key.is_none() {
+            return None;
         }
+        let base_url = def.default_base_url.clone().unwrap_or_default();
+        llm_config.provider = Some(ironclaw_llm::RegistryProviderConfig {
+            protocol: def.protocol,
+            provider_id: def.id.clone(),
+            model: def.default_model.clone(),
+            api_key: api_key.map(secrecy::SecretString::from),
+            base_url,
+            extra_headers: Vec::new(),
+            oauth_token: None,
+            is_codex_chatgpt: false,
+            refresh_token: None,
+            auth_path: None,
+            cache_retention: Default::default(),
+            unsupported_params: def.unsupported_params.clone(),
+        });
     }
 
-    let session = crate::llm::create_session_manager(config.llm.session.clone()).await;
-    let provider = crate::llm::create_llm_provider(&llm_config, session)
+    let session = ironclaw_llm::create_session_manager(config.llm.session.clone()).await;
+    let provider = ironclaw_llm::create_llm_provider(&llm_config, session)
         .await
         .ok()?;
     provider.list_models().await.ok().filter(|m| !m.is_empty())

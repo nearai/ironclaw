@@ -1,0 +1,51 @@
+{
+  "version": "0.1.0",
+  "wit_version": "0.3.0",
+  "type": "channel",
+  "name": "wechat",
+  "description": "WeChat iLink Bot channel for direct-message chat via long polling",
+  "setup": {
+    "required_secrets": [
+      {
+        "name": "wechat_bot_token",
+        "prompt": "Connect this channel from the WeChat setup flow. IronClaw stores the bot token after QR login succeeds.",
+        "optional": false
+      }
+    ],
+    "setup_url": "https://ilinkai.weixin.qq.com"
+  },
+  "capabilities": {
+    "http": {
+      "allowlist": [
+        { "host": "ilinkai.weixin.qq.com", "path_prefix": "/" },
+        { "host": "novac2c.cdn.weixin.qq.com", "path_prefix": "/c2c/" }
+      ],
+      "rate_limit": {
+        "requests_per_minute": 60,
+        "requests_per_hour": 1200
+      }
+    },
+    "secrets": {
+      "allowed_names": ["wechat_*"]
+    },
+    "channel": {
+      "allowed_paths": [],
+      "allow_polling": true,
+      "min_poll_interval_ms": 30000,
+      "workspace_prefix": "channels/wechat/",
+      "callback_timeout_secs": 45,
+      "emit_rate_limit": {
+        "messages_per_minute": 100,
+        "messages_per_hour": 5000
+      }
+    }
+  },
+  "config": {
+    "base_url": "https://ilinkai.weixin.qq.com",
+    "cdn_base_url": "https://novac2c.cdn.weixin.qq.com/c2c",
+    "bot_type": "3",
+    "poll_interval_ms": 30000,
+    "long_poll_timeout_ms": 35000,
+    "inbound_merge_window_ms": 5000
+  }
+}
