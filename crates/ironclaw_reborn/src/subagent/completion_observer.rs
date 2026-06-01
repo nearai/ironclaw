@@ -1073,6 +1073,7 @@ mod tests {
             received_at: chrono::Utc::now(),
             checkpoint_id: None,
             gate_ref: None,
+            credential_requirements: Vec::new(),
             failure: None,
             event_cursor: EventCursor(1),
         }
@@ -1102,6 +1103,7 @@ mod tests {
             resolved_model_route: None,
             checkpoint_id: None,
             gate_ref: None,
+            credential_requirements: Vec::new(),
             failure: None,
             event_cursor: EventCursor(1),
             runner_id: None,
@@ -1174,6 +1176,7 @@ mod tests {
             received_at: chrono::Utc::now(),
             checkpoint_id: None,
             gate_ref: None,
+            credential_requirements: Vec::new(),
             failure: None,
             event_cursor: EventCursor(1),
         };

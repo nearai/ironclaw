@@ -44,6 +44,7 @@ use ironclaw_host_api::{
 use ironclaw_loop_support::{
     CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
     FilesystemSkillBundleSource, HostSkillContextSource, JsonSpawnSubagentInputCodec,
+    ModelGatewayBackedSystemInferencePort,
 };
 use ironclaw_product_adapters::ProjectionStream;
 use ironclaw_product_workflow::{
@@ -76,8 +77,8 @@ use ironclaw_turns::{
     AcceptedMessageRef, CancelRunRequest, CancelRunResponse, GetRunStateRequest, IdempotencyKey,
     ReplyTargetBindingRef, RunProfileResolutionRequest, SanitizedCancelReason, SourceBindingRef,
     SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError,
-    TurnEventProjectionSource, TurnPersistenceSnapshot, TurnRunId, TurnRunRecord, TurnScope,
-    TurnStatus,
+    TurnEventProjectionSource, TurnId, TurnPersistenceSnapshot, TurnRunId, TurnRunRecord,
+    TurnScope, TurnStatus,
     run_profile::{LoopHostMilestoneSink, LoopRunContext},
 };
 
@@ -1028,7 +1029,7 @@ pub async fn build_reborn_runtime(
         turn_state: Arc::clone(&turn_state_store),
         thread_service: Arc::clone(&thread_service),
         thread_scope: thread_scope.clone(),
-        model_gateway,
+        model_gateway: Arc::clone(&model_gateway),
         checkpoint_state_store: Arc::clone(&checkpoint_state_store)
             as Arc<dyn ironclaw_turns::CheckpointStateStore>,
         loop_checkpoint_store: Arc::clone(&loop_checkpoint_store)
@@ -1081,6 +1082,31 @@ pub async fn build_reborn_runtime(
             reason: format!("could not resolve default run profile: {error}"),
         })?;
     let default_run_profile_id = default_resolved_run_profile.profile_id.as_str().to_string();
+    let failure_explanation_thread_id =
+        ThreadId::new("failure-explanation-system").map_err(|reason| {
+            RebornRuntimeError::InvalidArgument {
+                reason: format!("failure explanation thread id: {reason}"),
+            }
+        })?;
+    let failure_explanation_scope = TurnScope::new(
+        thread_scope.tenant_id.clone(),
+        Some(thread_scope.agent_id.clone()),
+        thread_scope.project_id.clone(),
+        failure_explanation_thread_id,
+    );
+    let failure_explanation_profile = default_resolved_run_profile.clone();
+    let failure_explanation_model_gateway = Arc::clone(&model_gateway);
+    let failure_explanation_inference = Arc::new(move || {
+        Arc::new(ModelGatewayBackedSystemInferencePort::new(
+            Arc::clone(&failure_explanation_model_gateway),
+            LoopRunContext::new(
+                failure_explanation_scope.clone(),
+                TurnId::new(),
+                TurnRunId::new(),
+                failure_explanation_profile.clone(),
+            ),
+        )) as Arc<dyn ironclaw_turns::run_profile::SystemInferencePort>
+    });
     let planned_turn_coordinator: Arc<dyn TurnCoordinator> = composition.coordinator.clone();
     let approval_turn_runs = Arc::new(LocalDevApprovalTurnRunLocator::new(Arc::clone(
         &turn_state_store,
@@ -1116,6 +1142,7 @@ pub async fn build_reborn_runtime(
     let turn_event_source: Arc<dyn TurnEventProjectionSource> = turn_state_store.clone();
     let projection_services = projection_services
         .with_turn_events(turn_event_source, Arc::clone(&planned_turn_coordinator))
+        .with_model_failure_explainer_factory(failure_explanation_inference)
         .with_display_previews(Arc::clone(&local_dev_capabilities.display_previews));
     // Wire auth-challenge enrichment when the product-auth bundle exposes a
     // flow record source (local-dev / test mode). Production deployments without
@@ -3031,7 +3058,11 @@ mod tests {
                             | ProductOutboundPayload::ProjectionUpdate { state }
                             if state.items.iter().any(|item| matches!(
                                 item,
-                                ProductProjectionItem::RunStatus { run_id: seen, status }
+                                ProductProjectionItem::RunStatus {
+                                    run_id: seen,
+                                    status,
+                                    ..
+                                }
                                     if *seen == run_id && status == "completed"
                             ))
                     )

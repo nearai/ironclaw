@@ -432,6 +432,7 @@ fn turn_run_state_actor_is_serde_backward_compatible() {
         received_at: fixed_time(),
         checkpoint_id: None,
         gate_ref: None,
+        credential_requirements: Vec::new(),
         failure: None,
         event_cursor: EventCursor(1),
     };
@@ -480,6 +481,7 @@ fn turn_checkpoint_public_status_does_not_expose_checkpoint_payload() {
         received_at: fixed_time(),
         checkpoint_id: Some(checkpoint_id),
         gate_ref: Some(GateRef::new("gate-checkpoint-public").unwrap()),
+        credential_requirements: Vec::new(),
         failure: None,
         event_cursor: EventCursor(1),
     };
@@ -494,6 +496,7 @@ fn turn_checkpoint_public_status_does_not_expose_checkpoint_payload() {
         blocked_gate: Some(ironclaw_turns::TurnBlockedGateMetadata {
             gate_ref: GateRef::new("gate-checkpoint-public").unwrap(),
             gate_kind: ironclaw_turns::TurnBlockedGateKind::Approval,
+            credential_requirements: Vec::new(),
         }),
         sanitized_reason: Some("checkpointed".to_string()),
     };

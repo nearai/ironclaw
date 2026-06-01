@@ -682,7 +682,7 @@ async fn credential_recovery_projection_returns_redacted_authorized_choices() {
         ))
         .await
         .expect_err("provider mismatch cannot bind an existing account id");
-    assert_eq!(provider_mismatch, AuthProductError::CrossScopeDenied);
+    assert_eq!(provider_mismatch, AuthProductError::CredentialMissing);
 
     let missing = services
         .select_configured_account(CredentialAccountChoiceRequest::new(

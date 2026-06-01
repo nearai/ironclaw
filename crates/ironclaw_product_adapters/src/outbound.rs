@@ -4,8 +4,8 @@ use chrono::{DateTime, Utc};
 use ironclaw_host_api::{
     CapabilityId, ExtensionId, InvocationId, ProcessId, RuntimeKind, ThreadId,
 };
-use ironclaw_turns::{ReplyTargetBindingRef, TurnRunId};
-use serde::{Deserialize, Deserializer, Serialize};
+use ironclaw_turns::{ReplyTargetBindingRef, SanitizedFailure, TurnRunId};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use uuid::Uuid;
 
 use crate::error::ProductAdapterError;
@@ -30,6 +30,19 @@ pub const CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES: usize = 2 * 1024;
 pub const CAPABILITY_DISPLAY_PREVIEW_MAX_BYTES: usize = 16 * 1024;
 pub const CAPABILITY_DISPLAY_KIND_MAX_BYTES: usize = 32;
 pub const CAPABILITY_DISPLAY_RESULT_REF_MAX_BYTES: usize = 256;
+
+fn serialize_failure_category<S>(
+    value: &Option<SanitizedFailure>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    match value {
+        Some(failure) => serializer.serialize_some(failure.category()),
+        None => serializer.serialize_none(),
+    }
+}
 
 fn invalid(kind: &'static str, reason: impl Into<String>) -> ProductAdapterError {
     ProductAdapterError::InvalidIdentifier {
@@ -574,6 +587,9 @@ pub struct AuthPromptView {
     /// This is the same URL already surfaced in the legacy
     /// `AppEvent::OnboardingState.auth_url` field — safe to render in the
     /// browser. Never contains a PKCE verifier, client secret, or token.
+    ///
+    /// Upstream projection converts this from validated `OAuthAuthorizationUrl`;
+    /// the DTO stores a `String` only to preserve the stable JSON wire shape.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub authorization_url: Option<String>,
     /// Challenge expiry. Present when the auth flow has a bounded TTL.
@@ -601,6 +617,17 @@ pub enum ProductProjectionItem {
     RunStatus {
         run_id: TurnRunId,
         status: String,
+        /// Sanitized, opaque product category. Projection sources may use
+        /// different internal namespaces; clients should not parse this for
+        /// user-facing copy and should prefer `failure_summary` when present.
+        #[serde(
+            skip_serializing_if = "Option::is_none",
+            serialize_with = "serialize_failure_category"
+        )]
+        failure_category: Option<SanitizedFailure>,
+        /// User-facing sanitized explanation for terminal failure states.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        failure_summary: Option<String>,
     },
     Gate {
         gate_ref: String,
@@ -629,11 +656,26 @@ impl ProductProjectionItem {
                     PROJECTION_WORK_SUMMARY_MAX_BYTES,
                 )
             }
-            Self::RunStatus { status, .. } => validate_bounded_text(
-                "projection_run_status",
+            Self::RunStatus {
                 status,
-                PROJECTION_ITEM_ID_MAX_BYTES,
-            ),
+                failure_category: _,
+                failure_summary,
+                ..
+            } => {
+                validate_bounded_text(
+                    "projection_run_status",
+                    status,
+                    PROJECTION_ITEM_ID_MAX_BYTES,
+                )?;
+                if let Some(summary) = failure_summary {
+                    validate_bounded_text(
+                        "projection_failure_summary",
+                        summary,
+                        PROJECTION_TEXT_MAX_BYTES,
+                    )?;
+                }
+                Ok(())
+            }
             Self::Gate { gate_ref, headline } => {
                 validate_bounded_text(
                     "projection_gate_ref",
@@ -710,6 +752,10 @@ impl<'de> Deserialize<'de> for ProductProjectionItem {
             RunStatus {
                 run_id: TurnRunId,
                 status: String,
+                #[serde(default)]
+                failure_category: Option<String>,
+                #[serde(default)]
+                failure_summary: Option<String>,
             },
             Gate {
                 gate_ref: String,
@@ -736,9 +782,20 @@ impl<'de> Deserialize<'de> for ProductProjectionItem {
                 phase,
                 body,
             },
-            Wire::RunStatus { run_id, status } => {
-                ProductProjectionItem::RunStatus { run_id, status }
-            }
+            Wire::RunStatus {
+                run_id,
+                status,
+                failure_category,
+                failure_summary,
+            } => ProductProjectionItem::RunStatus {
+                run_id,
+                status,
+                failure_category: failure_category
+                    .map(SanitizedFailure::new)
+                    .transpose()
+                    .map_err(serde::de::Error::custom)?,
+                failure_summary,
+            },
             Wire::Gate { gate_ref, headline } => ProductProjectionItem::Gate { gate_ref, headline },
             Wire::SkillActivation {
                 id,
@@ -890,6 +947,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn auth_prompt_challenge_kind_all_variants_roundtrip() {
+        for (variant, expected) in [
+            (AuthPromptChallengeKind::OAuthUrl, "\"oauth_url\""),
+            (AuthPromptChallengeKind::ManualToken, "\"manual_token\""),
+            (AuthPromptChallengeKind::Other, "\"other\""),
+        ] {
+            let serialized = serde_json::to_string(&variant).expect("serialize challenge kind");
+            assert_eq!(serialized, expected);
+            let decoded: AuthPromptChallengeKind =
+                serde_json::from_str(&serialized).expect("deserialize challenge kind");
+            assert_eq!(decoded, variant);
+        }
+    }
+
+    #[test]
     fn cursor_round_trips() {
         let cursor = ProjectionCursor::new("thread:42#cursor:7").expect("valid");
         let json = serde_json::to_string(&cursor).expect("serialize");
@@ -949,6 +1021,61 @@ mod tests {
     }
 
     #[test]
+    fn projection_state_round_trips_run_status_failure_details() {
+        let run_id = TurnRunId::new();
+        let state = ProductProjectionState::new(
+            "thread-1",
+            vec![ProductProjectionItem::RunStatus {
+                run_id,
+                status: "failed".to_string(),
+                failure_category: Some(SanitizedFailure::new("lease_expired").unwrap()),
+                failure_summary: Some(
+                    "The run failed because its runner lease expired.".to_string(),
+                ),
+            }],
+        )
+        .expect("valid run status projection");
+        let value = serde_json::to_value(&state).expect("serialize");
+        assert_eq!(
+            value["items"][0]["run_status"]["failure_category"],
+            "lease_expired"
+        );
+        assert_eq!(
+            value["items"][0]["run_status"]["failure_summary"],
+            "The run failed because its runner lease expired."
+        );
+        let decoded: ProductProjectionState =
+            serde_json::from_value(value).expect("deserialize run status projection");
+        assert_eq!(decoded, state);
+    }
+
+    #[test]
+    fn projection_state_accepts_legacy_run_status_without_failure_details() {
+        let run_id = TurnRunId::new();
+        let json = serde_json::json!({
+            "thread_id": "thread-1",
+            "items": [{
+                "run_status": {
+                    "run_id": run_id,
+                    "status": "failed"
+                }
+            }]
+        });
+
+        let decoded: ProductProjectionState =
+            serde_json::from_value(json).expect("deserialize legacy run status projection");
+        assert_eq!(
+            decoded.items,
+            vec![ProductProjectionItem::RunStatus {
+                run_id,
+                status: "failed".to_string(),
+                failure_category: None,
+                failure_summary: None,
+            }]
+        );
+    }
+
+    #[test]
     fn projection_state_round_trips_skill_activation_item() {
         let run_id = TurnRunId::new();
         let state = ProductProjectionState::new(
@@ -986,6 +1113,35 @@ mod tests {
         });
 
         assert!(serde_json::from_value::<ProductProjectionState>(json).is_err());
+    }
+
+    #[test]
+    fn projection_state_rejects_oversized_run_status_failure_details() {
+        let oversized_category = serde_json::json!({
+            "thread_id": "thread-1",
+            "items": [{
+                "run_status": {
+                    "run_id": TurnRunId::new(),
+                    "status": "failed",
+                    "failure_category": "x".repeat(PROJECTION_ITEM_ID_MAX_BYTES + 1),
+                    "failure_summary": "The run failed."
+                }
+            }]
+        });
+        assert!(serde_json::from_value::<ProductProjectionState>(oversized_category).is_err());
+
+        let oversized_summary = serde_json::json!({
+            "thread_id": "thread-1",
+            "items": [{
+                "run_status": {
+                    "run_id": TurnRunId::new(),
+                    "status": "failed",
+                    "failure_category": "driver_failed",
+                    "failure_summary": "x".repeat(PROJECTION_TEXT_MAX_BYTES + 1)
+                }
+            }]
+        });
+        assert!(serde_json::from_value::<ProductProjectionState>(oversized_summary).is_err());
     }
 
     #[test]

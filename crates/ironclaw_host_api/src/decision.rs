@@ -71,6 +71,12 @@ pub enum Obligation {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeCredentialAuthRequirement {
+    pub provider: RuntimeCredentialAccountProviderId,
+    pub requester_extension: ExtensionId,
+}
+
 /// Canonical obligation evaluation classes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

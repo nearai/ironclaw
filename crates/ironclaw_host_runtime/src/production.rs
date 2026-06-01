@@ -530,7 +530,12 @@ impl HostRuntime for DefaultHostRuntime {
                     CapabilityInvocationError::AuthorizationRequiresAuth {
                         capability,
                         required_secrets,
-                    } => Ok(auth_required_outcome(capability, required_secrets)),
+                        credential_requirements,
+                    } => Ok(auth_required_outcome(
+                        capability,
+                        required_secrets,
+                        credential_requirements,
+                    )),
                     other => Ok(RuntimeCapabilityOutcome::Failed(failure_from(
                         other,
                         capability_id,
@@ -629,7 +634,12 @@ impl HostRuntime for DefaultHostRuntime {
                     CapabilityInvocationError::AuthorizationRequiresAuth {
                         capability,
                         required_secrets,
-                    } => Ok(auth_required_outcome(capability, required_secrets)),
+                        credential_requirements,
+                    } => Ok(auth_required_outcome(
+                        capability,
+                        required_secrets,
+                        credential_requirements,
+                    )),
                     other => Ok(RuntimeCapabilityOutcome::Failed(failure_from(
                         other,
                         capability_id,
@@ -996,7 +1006,12 @@ impl DefaultHostRuntime {
             CapabilityInvocationError::AuthorizationRequiresAuth {
                 capability,
                 required_secrets,
-            } => Ok(auth_required_outcome(capability, required_secrets)),
+                credential_requirements,
+            } => Ok(auth_required_outcome(
+                capability,
+                required_secrets,
+                credential_requirements,
+            )),
             other => Ok(RuntimeCapabilityOutcome::Failed(failure_from(
                 other,
                 capability_id,
@@ -1271,12 +1286,14 @@ fn completed_outcome_from(
 fn auth_required_outcome(
     capability_id: CapabilityId,
     required_secrets: Vec<SecretHandle>,
+    credential_requirements: Vec<ironclaw_host_api::RuntimeCredentialAuthRequirement>,
 ) -> RuntimeCapabilityOutcome {
     RuntimeCapabilityOutcome::AuthRequired(RuntimeAuthGate {
         gate_id: RuntimeGateId::new(),
         capability_id,
         reason: RuntimeBlockedReason::AuthRequired,
         required_secrets,
+        credential_requirements,
     })
 }
 

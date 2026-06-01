@@ -217,18 +217,19 @@ fn caller_scope_with_invocation_and_thread(
     )
 }
 
-async fn seed_configured_account(
+async fn seed_account_with_status(
     shared: &InMemoryAuthProductServices,
     invocation_id: InvocationId,
     provider: &str,
     label: &str,
+    status: CredentialAccountStatus,
 ) -> ironclaw_auth::CredentialAccountId {
     let account = shared
         .create_account(NewCredentialAccount {
             scope: caller_scope_with_invocation(invocation_id),
             provider: AuthProviderId::new(provider.to_string()).expect("provider"),
             label: CredentialAccountLabel::new(label.to_string()).expect("label"),
-            status: CredentialAccountStatus::Configured,
+            status,
             ownership: CredentialOwnership::UserReusable,
             owner_extension: None,
             granted_extensions: Vec::new(),
@@ -239,6 +240,22 @@ async fn seed_configured_account(
         .await
         .expect("seeded account");
     account.id
+}
+
+async fn seed_configured_account(
+    shared: &InMemoryAuthProductServices,
+    invocation_id: InvocationId,
+    provider: &str,
+    label: &str,
+) -> ironclaw_auth::CredentialAccountId {
+    seed_account_with_status(
+        shared,
+        invocation_id,
+        provider,
+        label,
+        CredentialAccountStatus::Configured,
+    )
+    .await
 }
 
 async fn read_body_string(response: axum::response::Response) -> String {
@@ -526,6 +543,60 @@ async fn accounts_select_rejects_account_from_different_invocation_scope() {
     );
     let body = read_body_string(response).await;
     assert!(body.contains("\"code\":\"cross_scope_denied\""));
+}
+
+#[tokio::test]
+async fn accounts_select_rejects_wrong_provider_as_missing() {
+    let fixture = build_fixture();
+    let invocation_id = InvocationId::new();
+    let account_id =
+        seed_configured_account(&fixture.shared, invocation_id, "github", "work github").await;
+
+    let response = post_authenticated(
+        &fixture.app,
+        "/api/reborn/product-auth/accounts/select",
+        json!({
+            "provider": "slack",
+            "account_id": account_id.to_string(),
+            "invocation_id": invocation_id.to_string()
+        }),
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::CONFLICT,
+        "wrong provider must not reveal that the account id exists"
+    );
+    let body = read_body_string(response).await;
+    assert!(body.contains("\"code\":\"credential_missing\""));
+}
+
+#[tokio::test]
+async fn accounts_select_rejects_unconfigured_account() {
+    let fixture = build_fixture();
+    let invocation_id = InvocationId::new();
+    let account_id = seed_account_with_status(
+        &fixture.shared,
+        invocation_id,
+        "github",
+        "expired github",
+        CredentialAccountStatus::Expired,
+    )
+    .await;
+
+    let response = post_authenticated(
+        &fixture.app,
+        "/api/reborn/product-auth/accounts/select",
+        json!({
+            "provider": "github",
+            "account_id": account_id.to_string(),
+            "invocation_id": invocation_id.to_string()
+        }),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body = read_body_string(response).await;
+    assert!(body.contains("\"code\":\"credential_missing\""));
 }
 
 #[tokio::test]

@@ -4005,7 +4005,10 @@ async fn block_run_auth_emits_blocked_event_with_auth_gate_kind() {
     block_run_with_reason_yields_expected_blocked_gate(
         "thread-block-auth",
         "idem-submit-auth",
-        |gate_ref| BlockedReason::Auth { gate_ref },
+        |gate_ref| BlockedReason::Auth {
+            gate_ref,
+            credential_requirements: Vec::new(),
+        },
         ironclaw_turns::TurnBlockedGateKind::Auth,
         "auth-gate",
     )
@@ -6539,6 +6542,7 @@ impl TurnRunTransitionPort for AtomicLoopExitPort {
             received_at: received_at(),
             checkpoint_id: None,
             gate_ref: None,
+            credential_requirements: Vec::new(),
             failure: None,
             event_cursor: EventCursor(1),
         })

@@ -4425,6 +4425,7 @@ async fn text_only_host_maps_runtime_suspension_and_process_outcomes() {
         capability_id: auth_id.clone(),
         reason: RuntimeBlockedReason::AuthRequired,
         required_secrets: vec![SecretHandle::new("api_key").unwrap()],
+        credential_requirements: Vec::new(),
     }));
     runtime.push_outcome(RuntimeCapabilityOutcome::ResourceBlocked(
         RuntimeResourceGate {
@@ -4507,7 +4508,11 @@ async fn text_only_host_maps_runtime_suspension_and_process_outcomes() {
     ));
     assert!(matches!(
         &outcomes[1],
-        CapabilityOutcome::AuthRequired { gate_ref, safe_summary }
+        CapabilityOutcome::AuthRequired {
+            gate_ref,
+            safe_summary,
+            ..
+        }
             if gate_ref.as_str().starts_with("gate:auth-")
                 && safe_summary == "capability requires authentication"
     ));
@@ -6361,6 +6366,7 @@ impl AgentLoopDriver for ApprovalBlockThenFinalReplyDriver {
         Ok(LoopExit::Blocked(LoopBlocked {
             kind: LoopBlockedKind::Approval,
             gate_ref: LoopGateRef::new("gate:approval-resume-e2e").unwrap(),
+            credential_requirements: Vec::new(),
             checkpoint_id: ironclaw_turns::TurnCheckpointId::new(),
             state_ref: LoopCheckpointStateRef::new("checkpoint:approval-resume-state").unwrap(),
             exit_id: LoopExitId::new("exit:approval-resume-blocked").unwrap(),
@@ -6675,6 +6681,7 @@ impl HostFixture {
             received_at: Utc::now(),
             checkpoint_id: None,
             gate_ref: None,
+            credential_requirements: Vec::new(),
             failure: None,
             event_cursor: EventCursor(1),
         };

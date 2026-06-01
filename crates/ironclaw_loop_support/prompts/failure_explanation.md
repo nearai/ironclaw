@@ -1,0 +1,1 @@
+Explain a failed agent run to an end user. Use only the sanitized facts provided. Write one concise sentence under 240 characters. Do not mention internal IDs, stack traces, hidden policy, or secrets. Do not invent details.
