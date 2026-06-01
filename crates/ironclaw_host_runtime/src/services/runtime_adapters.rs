@@ -779,13 +779,13 @@ fn wasm_guest_error_kind(error: &str) -> RuntimeDispatchErrorKind {
         return RuntimeDispatchErrorKind::InputEncode;
     }
     match error {
-        "missing_invocation_context" | "unsupported_github_capability" => {
+        "missing_invocation_context" | "unsupported_capability" => {
             RuntimeDispatchErrorKind::InputEncode
         }
-        "github_api_body_limit" => RuntimeDispatchErrorKind::OutputTooLarge,
-        "github_api_timeout" => RuntimeDispatchErrorKind::Executor,
-        "github_api_egress_denied" => RuntimeDispatchErrorKind::NetworkDenied,
-        "github_api_forbidden" | "github_api_rate_limited" => RuntimeDispatchErrorKind::Client,
+        "host_http_body_limit" => RuntimeDispatchErrorKind::OutputTooLarge,
+        "host_http_timeout" => RuntimeDispatchErrorKind::Executor,
+        "host_http_network_denied" => RuntimeDispatchErrorKind::NetworkDenied,
+        "host_http_forbidden" | "host_http_rate_limited" => RuntimeDispatchErrorKind::Client,
         _ => RuntimeDispatchErrorKind::OperationFailed,
     }
 }

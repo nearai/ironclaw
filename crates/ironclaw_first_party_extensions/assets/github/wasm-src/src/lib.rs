@@ -132,7 +132,7 @@ fn operation_from_context(context: Option<&str>) -> Result<GitHubOperation, Stri
         "github.search_issues" => Ok(GitHubOperation::SearchIssues),
         "github.get_issue" => Ok(GitHubOperation::GetIssue),
         "github.comment_issue" => Ok(GitHubOperation::CommentIssue),
-        _ => Err("unsupported_github_capability".to_string()),
+        _ => Err("unsupported_capability".to_string()),
     }
 }
 
@@ -285,16 +285,16 @@ fn github_request(method: &str, path: &str, body: Option<String>) -> Result<Stri
 
     if (200..300).contains(&response.status) {
         let body =
-            String::from_utf8(response.body).map_err(|_| "github_api_invalid_utf8".to_string())?;
+            String::from_utf8(response.body).map_err(|_| "host_http_invalid_utf8".to_string())?;
         return Ok(body);
     }
 
     match response.status {
         401 => Err("AuthRequired".to_string()),
-        403 => Err("github_api_forbidden".to_string()),
+        403 => Err("host_http_forbidden".to_string()),
         422 => Err("invalid_parameters".to_string()),
-        429 => Err("github_api_rate_limited".to_string()),
-        status => Err(format!("github_api_error_status_{status}")),
+        429 => Err("host_http_rate_limited".to_string()),
+        status => Err(format!("host_http_error_status_{status}")),
     }
 }
 
@@ -308,18 +308,23 @@ fn sanitize_host_error(error: &str) -> String {
         return "AuthRequired".to_string();
     }
     if lower.contains("timeout") || lower.contains("deadline") {
-        return "github_api_timeout".to_string();
+        return "host_http_timeout".to_string();
     }
     if lower.contains("redirect") {
-        return "github_api_redirect_denied".to_string();
+        return "host_http_redirect_denied".to_string();
     }
     if lower.contains("body") || lower.contains("size") || lower.contains("large") {
-        return "github_api_body_limit".to_string();
+        return "host_http_body_limit".to_string();
     }
-    if lower.contains("deny") || lower.contains("allow") || lower.contains("host") {
-        return "github_api_egress_denied".to_string();
+    if lower.contains("deny")
+        || lower.contains("denied")
+        || lower.contains("policy")
+        || lower.contains("allow")
+        || lower.contains("host")
+    {
+        return "host_http_network_denied".to_string();
     }
-    "github_api_request_failed".to_string()
+    "host_http_request_failed".to_string()
 }
 
 fn validate_repo(owner: &str, repo: &str) -> Result<(), String> {
@@ -453,7 +458,7 @@ mod tests {
         );
         assert_eq!(
             operation_from_context(Some(r#"{"capability_id":"github.create_issue"}"#)).unwrap_err(),
-            "unsupported_github_capability"
+            "unsupported_capability"
         );
     }
 
@@ -613,19 +618,23 @@ mod tests {
         );
         assert_eq!(
             sanitize_host_error("deadline exceeded"),
-            "github_api_timeout"
+            "host_http_timeout"
         );
         assert_eq!(
             sanitize_host_error("redirect blocked"),
-            "github_api_redirect_denied"
+            "host_http_redirect_denied"
         );
         assert_eq!(
             sanitize_host_error("response body too large"),
-            "github_api_body_limit"
+            "host_http_body_limit"
         );
         assert_eq!(
             sanitize_host_error("host not allowed"),
-            "github_api_egress_denied"
+            "host_http_network_denied"
+        );
+        assert_eq!(
+            sanitize_host_error("policy_denied"),
+            "host_http_network_denied"
         );
         assert_eq!(
             sanitize_host_error("connection reset with token ghp_secret_value"),

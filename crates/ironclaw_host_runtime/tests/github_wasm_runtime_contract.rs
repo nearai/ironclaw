@@ -16,7 +16,7 @@ use ironclaw_host_api::{
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, HostRuntime, HostRuntimeServices, RuntimeCapabilityOutcome,
     RuntimeCapabilityRequest, RuntimeCredentialAccountRequest, RuntimeCredentialAccountResolver,
-    default_host_api_contract_registry, default_host_port_catalog,
+    RuntimeFailureKind, default_host_api_contract_registry, default_host_port_catalog,
 };
 use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
@@ -37,7 +37,7 @@ use ironclaw_wasm::{
 use serde_json::json;
 
 #[tokio::test]
-async fn host_runtime_services_routes_github_wasm_read_through_runtime_http_egress() {
+async fn host_runtime_services_routes_structured_github_wasm_search_through_runtime_http_egress() {
     let capability_id = CapabilityId::new("github.search_issues").unwrap();
     let scope = sample_scope(InvocationId::new());
     let expected_url =
@@ -89,7 +89,7 @@ async fn host_runtime_services_routes_github_wasm_read_through_runtime_http_egre
         .invoke_capability(wasm_runtime_request_for_scope(
             capability_id.clone(),
             scope,
-            json!({"query": "repo:nearai/ironclaw is:issue", "limit": 1}),
+            json!({"repo": "nearai/ironclaw", "type": "issue", "limit": 1}),
         ))
         .await
         .unwrap();
@@ -120,6 +120,151 @@ async fn host_runtime_services_routes_github_wasm_read_through_runtime_http_egre
             "Bearer ghp_fake_fixture_token".to_string(),
         ))
     );
+}
+
+#[tokio::test]
+async fn host_runtime_services_maps_github_wasm_input_errors_to_invalid_input() {
+    let capability_id = CapabilityId::new("github.search_issues").unwrap();
+    let scope = sample_scope(InvocationId::new());
+    let network = RecordingNetworkHttpEgress::with_body(
+        br#"{"total_count":0,"incomplete_results":false,"items":[]}"#.to_vec(),
+    );
+    let secret_store = Arc::new(InMemorySecretStore::new());
+    let slot_handle = SecretHandle::new("github_runtime_token").unwrap();
+    let account_access_secret = SecretHandle::new("github_manual_access").unwrap();
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_github_package()),
+        Arc::new(filesystem_with_github_package()),
+        Arc::new(governor_with_default_limit(sample_account())),
+        Arc::new(ObligatingAuthorizer::new(vec![
+            Obligation::ApplyNetworkPolicy {
+                policy: github_policy(),
+            },
+            Obligation::InjectCredentialAccountOnce {
+                handle: slot_handle,
+                provider: RuntimeCredentialAccountProviderId::new("github").unwrap(),
+                requester_extension: ExtensionId::new("github").unwrap(),
+            },
+        ])),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_secret_store(Arc::clone(&secret_store))
+    .with_runtime_credential_account_resolver(Arc::new(FixedRuntimeCredentialAccountResolver {
+        result: Ok(account_access_secret.clone()),
+    }))
+    .with_trust_policy(Arc::new(github_first_party_trust_policy()))
+    .try_with_host_http_egress(network.clone())
+    .unwrap()
+    .try_with_wasm_runtime(WitToolRuntimeConfig::default(), WitToolHost::deny_all())
+    .unwrap();
+    secret_store
+        .put(
+            scope.clone(),
+            account_access_secret,
+            SecretMaterial::from("ghp_fake_fixture_token"),
+        )
+        .await
+        .unwrap();
+
+    let outcome = services
+        .host_runtime_for_local_testing()
+        .invoke_capability(wasm_runtime_request_for_scope(
+            capability_id,
+            scope,
+            json!({}),
+        ))
+        .await
+        .unwrap();
+
+    assert_failed_outcome(outcome, RuntimeFailureKind::InvalidInput);
+    assert!(
+        network.requests().is_empty(),
+        "guest validation failures must block before HTTP egress"
+    );
+}
+
+#[tokio::test]
+async fn host_runtime_services_maps_github_wasm_http_errors_to_failure_kinds() {
+    let cases = [
+        (
+            RecordingNetworkHttpEgress::with_status(
+                403,
+                br#"{"message":"forbidden ghp_fake_fixture_token"}"#.to_vec(),
+            ),
+            RuntimeFailureKind::Backend,
+        ),
+        (
+            RecordingNetworkHttpEgress::with_error(NetworkHttpError::ResponseBodyLimit {
+                limit: 1024,
+                request_bytes: 12,
+                response_bytes: 2048,
+            }),
+            RuntimeFailureKind::OutputTooLarge,
+        ),
+        (
+            RecordingNetworkHttpEgress::with_error(NetworkHttpError::PolicyDenied {
+                reason: "api.github.com denied".to_string(),
+                request_bytes: 0,
+                response_bytes: 0,
+            }),
+            RuntimeFailureKind::Network,
+        ),
+    ];
+
+    for (network, expected_kind) in cases {
+        let capability_id = CapabilityId::new("github.search_issues").unwrap();
+        let scope = sample_scope(InvocationId::new());
+        let secret_store = Arc::new(InMemorySecretStore::new());
+        let slot_handle = SecretHandle::new("github_runtime_token").unwrap();
+        let account_access_secret = SecretHandle::new("github_manual_access").unwrap();
+        let services = HostRuntimeServices::new(
+            Arc::new(registry_with_github_package()),
+            Arc::new(filesystem_with_github_package()),
+            Arc::new(governor_with_default_limit(sample_account())),
+            Arc::new(ObligatingAuthorizer::new(vec![
+                Obligation::ApplyNetworkPolicy {
+                    policy: github_policy(),
+                },
+                Obligation::InjectCredentialAccountOnce {
+                    handle: slot_handle,
+                    provider: RuntimeCredentialAccountProviderId::new("github").unwrap(),
+                    requester_extension: ExtensionId::new("github").unwrap(),
+                },
+            ])),
+            ProcessServices::in_memory(),
+            CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        )
+        .with_secret_store(Arc::clone(&secret_store))
+        .with_runtime_credential_account_resolver(Arc::new(FixedRuntimeCredentialAccountResolver {
+            result: Ok(account_access_secret.clone()),
+        }))
+        .with_trust_policy(Arc::new(github_first_party_trust_policy()))
+        .try_with_host_http_egress(network.clone())
+        .unwrap()
+        .try_with_wasm_runtime(WitToolRuntimeConfig::default(), WitToolHost::deny_all())
+        .unwrap();
+        secret_store
+            .put(
+                scope.clone(),
+                account_access_secret,
+                SecretMaterial::from("ghp_fake_fixture_token"),
+            )
+            .await
+            .unwrap();
+
+        let outcome = services
+            .host_runtime_for_local_testing()
+            .invoke_capability(wasm_runtime_request_for_scope(
+                capability_id,
+                scope,
+                json!({"query": "repo:nearai/ironclaw is:issue", "limit": 1}),
+            ))
+            .await
+            .unwrap();
+
+        assert_failed_outcome(outcome, expected_kind);
+    }
 }
 
 #[tokio::test]
@@ -305,19 +450,19 @@ async fn bundled_github_wasm_sanitizes_host_http_and_api_failures() {
         ),
         (
             RecordingWasmHostHttp::err(WasmHostError::Failed("redirect blocked".to_string())),
-            "github_api_redirect_denied",
+            "host_http_redirect_denied",
         ),
         (
             RecordingWasmHostHttp::err(WasmHostError::FailedAfterRequestSent(
                 "response body too large".to_string(),
             )),
-            "github_api_body_limit",
+            "host_http_body_limit",
         ),
         (
             RecordingWasmHostHttp::err(WasmHostError::Denied(
                 "host not allowed: api.evil.test".to_string(),
             )),
-            "github_api_egress_denied",
+            "host_http_network_denied",
         ),
         (
             RecordingWasmHostHttp::ok(WasmHttpResponse {
@@ -325,7 +470,7 @@ async fn bundled_github_wasm_sanitizes_host_http_and_api_failures() {
                 headers_json: "{}".to_string(),
                 body: br#"{"message":"bad credentials ghp_fake_fixture_token"}"#.to_vec(),
             }),
-            "github_api_forbidden",
+            "host_http_forbidden",
         ),
         (
             RecordingWasmHostHttp::ok(WasmHttpResponse {
@@ -333,7 +478,7 @@ async fn bundled_github_wasm_sanitizes_host_http_and_api_failures() {
                 headers_json: "{}".to_string(),
                 body: vec![0xff, 0xfe],
             }),
-            "github_api_invalid_utf8",
+            "host_http_invalid_utf8",
         ),
     ];
 
@@ -370,14 +515,25 @@ async fn bundled_github_wasm_leaves_success_json_for_host_output_decode() {
 #[derive(Debug, Clone)]
 struct RecordingNetworkHttpEgress {
     requests: Arc<std::sync::Mutex<Vec<NetworkHttpRequest>>>,
-    response_body: Vec<u8>,
+    response: Result<(u16, Vec<u8>), NetworkHttpError>,
 }
 
 impl RecordingNetworkHttpEgress {
     fn with_body(response_body: Vec<u8>) -> Self {
+        Self::with_status(200, response_body)
+    }
+
+    fn with_status(status: u16, response_body: Vec<u8>) -> Self {
         Self {
             requests: Arc::new(std::sync::Mutex::new(Vec::new())),
-            response_body,
+            response: Ok((status, response_body)),
+        }
+    }
+
+    fn with_error(error: NetworkHttpError) -> Self {
+        Self {
+            requests: Arc::new(std::sync::Mutex::new(Vec::new())),
+            response: Err(error),
         }
     }
 
@@ -394,16 +550,24 @@ impl NetworkHttpEgress for RecordingNetworkHttpEgress {
     ) -> Result<NetworkHttpResponse, NetworkHttpError> {
         let request_bytes = request.body.len() as u64;
         self.requests.lock().unwrap().push(request);
+        let (status, response_body) = self.response.clone()?;
         Ok(NetworkHttpResponse {
-            status: 200,
+            status,
             headers: Vec::new(),
-            body: self.response_body.clone(),
+            body: response_body.clone(),
             usage: NetworkUsage {
                 request_bytes,
-                response_bytes: self.response_body.len() as u64,
+                response_bytes: response_body.len() as u64,
                 resolved_ip: None,
             },
         })
+    }
+}
+
+fn assert_failed_outcome(outcome: RuntimeCapabilityOutcome, expected_kind: RuntimeFailureKind) {
+    match outcome {
+        RuntimeCapabilityOutcome::Failed(failure) => assert_eq!(failure.kind, expected_kind),
+        other => panic!("expected failed outcome {expected_kind:?}, got {other:?}"),
     }
 }
 
