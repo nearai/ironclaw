@@ -158,7 +158,15 @@ impl LocalDevAuthInteractionReadModel {
         self.flow_records
             .flow_for_turn_gate(turn_gate_query(scope, run_id, gate_ref)?)
             .await
-            .map_err(|_| auth_read_model_unavailable())
+            .map_err(|error| {
+                tracing::warn!(
+                    %error,
+                    %run_id,
+                    gate_ref = %gate_ref.as_str(),
+                    "local-dev auth read model failed to query flow for turn gate"
+                );
+                auth_read_model_unavailable()
+            })
     }
 }
 
@@ -193,7 +201,16 @@ async fn flows_for_owner(
     source
         .flows_for_owner(owner_scope_for_interaction(scope))
         .await
-        .map_err(|_| auth_read_model_unavailable())
+        .map_err(|error| {
+            tracing::warn!(
+                %error,
+                tenant_id = %scope.tenant_id.as_str(),
+                user_id = %scope.user_id.as_str(),
+                thread_id = %scope.thread_id.as_str(),
+                "local-dev auth read model failed to query flows for owner"
+            );
+            auth_read_model_unavailable()
+        })
 }
 
 fn matching_flow_for_run(

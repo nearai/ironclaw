@@ -16,7 +16,7 @@ use serde::{Serialize, de::DeserializeOwned};
 
 use ironclaw_auth::{
     AuthFlowId, AuthFlowOwnerScope, AuthFlowRecord, AuthProductError, AuthSessionId, AuthSurface,
-    CredentialAccount, CredentialAccountId, NewCredentialAccount,
+    CredentialAccount, CredentialAccountId, CredentialAccountOwnerScope, NewCredentialAccount,
 };
 
 use self::domain::validate_new_credential_account;
@@ -246,6 +246,66 @@ where
         flows.sort_by_key(|flow| flow.id);
         flows.dedup_by_key(|flow| flow.id);
         Ok(flows)
+    }
+
+    async fn account_records_for_owner(
+        &self,
+        owner: &CredentialAccountOwnerScope,
+    ) -> Result<Vec<CredentialAccount>, AuthProductError> {
+        let resource = ResourceScope {
+            tenant_id: owner.tenant_id.clone(),
+            user_id: owner.user_id.clone(),
+            agent_id: owner.agent_id.clone(),
+            project_id: owner.project_id.clone(),
+            mission_id: owner.mission_id.clone(),
+            thread_id: owner.thread_id.clone(),
+            invocation_id: ironclaw_host_api::InvocationId::new(),
+        };
+        let mut accounts = Vec::new();
+        for surface in AuthSurface::ALL {
+            let scope = ironclaw_auth::AuthProductScope::new(resource.clone(), surface);
+            accounts.extend(
+                self.account_records_under_scope_root(&scope)
+                    .await?
+                    .into_iter()
+                    .filter(|account| owner.matches(account)),
+            );
+            if let Some(session_id) = &owner.session_id {
+                let mut session_scope =
+                    ironclaw_auth::AuthProductScope::new(resource.clone(), surface);
+                session_scope.session_id = Some(session_id.clone());
+                accounts.extend(
+                    self.account_records_under_scope_root(&session_scope)
+                        .await?
+                        .into_iter()
+                        .filter(|account| owner.matches(account)),
+                );
+                continue;
+            }
+
+            let sessions_root = surface_sessions_root(&resource, surface)?;
+            let entries = match self.filesystem.list_dir(&resource, &sessions_root).await {
+                Ok(entries) => entries,
+                Err(FilesystemError::NotFound { .. }) => continue,
+                Err(error) => return Err(fs_error(error)),
+            };
+            for entry in entries {
+                let session_id = AuthSessionId::new(entry.name)
+                    .map_err(|_| AuthProductError::BackendUnavailable)?;
+                let mut session_scope =
+                    ironclaw_auth::AuthProductScope::new(resource.clone(), surface);
+                session_scope.session_id = Some(session_id);
+                accounts.extend(
+                    self.account_records_under_scope_root(&session_scope)
+                        .await?
+                        .into_iter()
+                        .filter(|account| owner.matches(account)),
+                );
+            }
+        }
+        accounts.sort_by_key(|account| account.id);
+        accounts.dedup_by_key(|account| account.id);
+        Ok(accounts)
     }
 
     async fn read_account(

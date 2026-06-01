@@ -1015,10 +1015,64 @@ fn write_local_dev_secret_master_key(path: &Path, key: &str) -> Result<(), Rebor
                 reason: format!("local-dev secrets master key could not be written: {error}"),
             })
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        std::fs::write(path, format!("{key}\n")).map_err(|error| RebornBuildError::InvalidConfig {
-            reason: format!("local-dev secrets master key could not be written: {error}"),
+        use std::io::Write as _;
+
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .map_err(|error| RebornBuildError::InvalidConfig {
+                reason: format!("local-dev secrets master key could not be created: {error}"),
+            })?;
+        let account = std::env::var("USERDOMAIN")
+            .ok()
+            .filter(|domain| !domain.trim().is_empty())
+            .zip(
+                std::env::var("USERNAME")
+                    .ok()
+                    .filter(|user| !user.trim().is_empty()),
+            )
+            .map(|(domain, user)| format!("{domain}\\{user}"))
+            .or_else(|| std::env::var("USERNAME").ok())
+            .ok_or_else(|| RebornBuildError::InvalidConfig {
+                reason: "local-dev secrets master key could not be restricted: USERNAME is unset"
+                    .to_string(),
+            })?;
+        let status = std::process::Command::new("icacls")
+            .arg(path)
+            .arg("/inheritance:r")
+            .arg("/grant:r")
+            .arg(format!("{account}:F"))
+            .status()
+            .map_err(|error| RebornBuildError::InvalidConfig {
+                reason: format!(
+                    "local-dev secrets master key permissions could not be set: {error}"
+                ),
+            })?;
+        if !status.success() {
+            let _ = std::fs::remove_file(path);
+            return Err(RebornBuildError::InvalidConfig {
+                reason: format!(
+                    "local-dev secrets master key permissions could not be set: icacls exited with {status}"
+                ),
+            });
+        }
+        file.write_all(key.as_bytes())
+            .and_then(|_| file.write_all(b"\n"))
+            .map_err(|error| RebornBuildError::InvalidConfig {
+                reason: format!("local-dev secrets master key could not be written: {error}"),
+            })
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = path;
+        let _ = key;
+        Err(RebornBuildError::InvalidConfig {
+            reason:
+                "local-dev filesystem secret persistence requires Unix permissions or Windows ACLs"
+                    .to_string(),
         })
     }
 }

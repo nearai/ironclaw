@@ -166,6 +166,49 @@ async fn filesystem_runtime_account_selection_matches_setup_invocation_account()
 }
 
 #[tokio::test]
+async fn filesystem_runtime_account_selection_finds_session_scoped_setup_account() {
+    let filesystem = test_filesystem();
+    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let mut setup_scope = test_scope();
+    setup_scope.surface = AuthSurface::Web;
+    setup_scope.resource.thread_id = Some(ThreadId::new("thread-auth-session-account").unwrap());
+    setup_scope.session_id = Some(AuthSessionId::new("session-auth-account").unwrap());
+    let mut runtime_scope = AuthProductScope::new(setup_scope.resource.clone(), AuthSurface::Api);
+    runtime_scope.resource.invocation_id = InvocationId::new();
+    let service = Arc::new(test_service(filesystem, secret_store));
+    let access_secret = SecretHandle::new("google-session-access").unwrap();
+
+    let created = service
+        .create_account(NewCredentialAccount {
+            scope: setup_scope,
+            provider: google_provider(),
+            label: account_label(),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: Vec::new(),
+            access_secret: Some(access_secret.clone()),
+            refresh_secret: None,
+            scopes: vec![ProviderScope::new("gmail.readonly").unwrap()],
+        })
+        .await
+        .unwrap();
+
+    let selector = ProductAuthRuntimeCredentialAccountSelector::new(service.clone());
+    let selected = selector
+        .select_unique_configured_runtime_account(CredentialAccountSelectionRequest::new(
+            runtime_scope,
+            google_provider(),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(selected.id, created.id);
+    assert_eq!(selected.scope.session_id, created.scope.session_id);
+    assert_eq!(selected.access_secret, Some(access_secret));
+}
+
+#[tokio::test]
 async fn filesystem_manual_token_submit_stores_secret_and_dedupes_replay() {
     let filesystem = test_filesystem();
     let concrete_secret_store = Arc::new(InMemorySecretStore::new());
