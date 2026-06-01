@@ -5,7 +5,9 @@
 //! decides whether to mount this fragment (for example behind
 //! `REBORN_SLACK_ENABLED`) and supplies a preconfigured native adapter runner.
 
+use std::future::Future;
 use std::num::{NonZeroU32, NonZeroU64};
+use std::pin::Pin;
 use std::sync::Arc;
 
 use axum::{
@@ -23,8 +25,11 @@ use ironclaw_host_api::ingress::{
     IngressScopeSource, ListenerClass, RateLimitPolicy, RateLimitScope, StreamingMode,
     WebSocketOriginPolicy,
 };
+use ironclaw_product_adapters::ProtocolAuthEvidence;
 use ironclaw_slack_v2_adapter::parse_slack_url_verification_challenge;
-use ironclaw_wasm_product_adapters::{NativeProductAdapterRunner, RunnerError};
+use ironclaw_wasm_product_adapters::{
+    NativeProductAdapterRunner, RunnerError, WebhookProcessOutcome,
+};
 
 use crate::webui_serve::PublicRouteMount;
 
@@ -43,14 +48,50 @@ const SLACK_EVENTS_RATE_WINDOW_SECONDS: NonZeroU32 = match NonZeroU32::new(60) {
     None => NonZeroU32::MIN,
 };
 
+pub trait SlackEventsWebhookDispatcher: Send + Sync {
+    fn verify_webhook_auth(
+        &self,
+        headers: &HeaderMap,
+        body: &[u8],
+    ) -> Result<ProtocolAuthEvidence, RunnerError>;
+
+    fn process_verified_webhook_immediate_ack<'a>(
+        &'a self,
+        body: &'a [u8],
+        evidence: &'a ProtocolAuthEvidence,
+    ) -> Pin<Box<dyn Future<Output = Result<WebhookProcessOutcome, RunnerError>> + Send + 'a>>;
+}
+
+impl SlackEventsWebhookDispatcher for NativeProductAdapterRunner {
+    fn verify_webhook_auth(
+        &self,
+        headers: &HeaderMap,
+        body: &[u8],
+    ) -> Result<ProtocolAuthEvidence, RunnerError> {
+        NativeProductAdapterRunner::verify_webhook_auth(self, headers, body)
+    }
+
+    fn process_verified_webhook_immediate_ack<'a>(
+        &'a self,
+        body: &'a [u8],
+        evidence: &'a ProtocolAuthEvidence,
+    ) -> Pin<Box<dyn Future<Output = Result<WebhookProcessOutcome, RunnerError>> + Send + 'a>> {
+        Box::pin(
+            NativeProductAdapterRunner::process_verified_webhook_immediate_ack(
+                self, body, evidence,
+            ),
+        )
+    }
+}
+
 #[derive(Clone)]
 pub struct SlackEventsRouteState {
-    runner: Arc<NativeProductAdapterRunner>,
+    dispatcher: Arc<dyn SlackEventsWebhookDispatcher>,
 }
 
 impl SlackEventsRouteState {
-    pub fn new(runner: Arc<NativeProductAdapterRunner>) -> Self {
-        Self { runner }
+    pub fn new(dispatcher: Arc<dyn SlackEventsWebhookDispatcher>) -> Self {
+        Self { dispatcher }
     }
 }
 
@@ -58,7 +99,7 @@ impl std::fmt::Debug for SlackEventsRouteState {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("SlackEventsRouteState")
-            .field("runner", &"Arc<NativeProductAdapterRunner>")
+            .field("dispatcher", &"Arc<dyn SlackEventsWebhookDispatcher>")
             .finish()
     }
 }
@@ -112,7 +153,10 @@ async fn slack_events_handler(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let evidence = match state.runner.verify_webhook_auth(&headers, body.as_ref()) {
+    let evidence = match state
+        .dispatcher
+        .verify_webhook_auth(&headers, body.as_ref())
+    {
         Ok(evidence) => evidence,
         Err(error) => return runner_error_response(error),
     };
@@ -131,8 +175,9 @@ async fn slack_events_handler(
     }
 
     match state
-        .runner
+        .dispatcher
         .process_verified_webhook_immediate_ack(body.as_ref(), &evidence)
+        .await
     {
         Ok(_) => (StatusCode::OK, "ok").into_response(),
         Err(error) => runner_error_response(error),

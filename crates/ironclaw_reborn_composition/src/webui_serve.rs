@@ -232,12 +232,6 @@ impl WebuiServeConfig {
         self
     }
 
-    /// Alias for callers that want to make the append semantics explicit when
-    /// composing several host-native public surfaces.
-    pub fn with_additional_public_route_mount(self, mount: PublicRouteMount) -> Self {
-        self.with_public_route_mount(mount)
-    }
-
     /// Set the canonical host for WebSocket same-origin checks. See
     /// [`Self::canonical_host`] for why this is more robust than
     /// trusting the request's `Host` header.
