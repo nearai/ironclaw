@@ -98,7 +98,7 @@ impl<'a> OutboundPolicyService<'a> {
             .reply_target_validator
             .validate_reply_target(ReplyTargetValidationRequest {
                 scope: request.scope.clone(),
-                actor: request.actor.clone(),
+                actor: request.actor,
                 modality: request.modality,
                 candidate: request.candidate.clone(),
             })

@@ -736,6 +736,48 @@ async fn communication_delivery_validator_can_enforce_prompt_actor_context() {
 }
 
 #[tokio::test]
+async fn communication_delivery_actor_and_modality_forwarded_through_lowering() {
+    let store = InMemoryOutboundStateStore::default();
+    let access_policy = FakeThreadProjectionAccessPolicy::default();
+    let validator = FakeReplyTargetBindingValidator::default();
+    let service = OutboundPolicyService::new(&store, &access_policy, &validator);
+    let scope = turn_scope("thread-1");
+    let expected_actor = actor("exact-owner");
+    let expected_modality = CommunicationModality::Voice;
+    let mut request = requested_outbound_request_with_scope(
+        scope.clone(),
+        "reply:requested",
+        RequestedOutboundKind::ProductMessage,
+    );
+    request.actor = expected_actor.clone();
+    request.modality = expected_modality;
+    validator.allow(reply_ref("reply:requested"));
+    validator.require_actor(expected_actor);
+    validator.require_modality(expected_modality);
+
+    let decision = service
+        .prepare_communication_delivery_attempt(prepare_communication_request(request), &store)
+        .await
+        .expect("matching actor and modality authorize")
+        .expect("requested outbound has a delivery target");
+
+    let OutboundDeliveryDecision::Authorized { attempt, target } = decision else {
+        panic!("expected authorized delivery");
+    };
+    assert_eq!(attempt.status, OutboundDeliveryStatus::Pending);
+    assert_eq!(target.target(), &reply_ref("reply:requested"));
+    assert_eq!(validator.calls(), 1);
+    assert_eq!(
+        store
+            .list_delivery_attempts(scope)
+            .await
+            .expect("list delivery attempts")
+            .as_slice(),
+        std::slice::from_ref(&attempt)
+    );
+}
+
+#[tokio::test]
 async fn communication_delivery_validator_can_enforce_requested_modality() {
     let store = InMemoryOutboundStateStore::default();
     let access_policy = FakeThreadProjectionAccessPolicy::default();
