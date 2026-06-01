@@ -1572,6 +1572,21 @@ fn validate_thread_scope_for_run(
             "thread scope does not match loop run scope",
         ));
     }
+    // The thread store keys threads by `owner_user_id` (via the MountView in
+    // `ThreadScope::to_resource_scope`), but that axis is absent from the
+    // on-disk thread path, so a wrong owner silently reads an empty subtree
+    // and surfaces as `UnknownThread`. When the run carries an authenticated
+    // actor and the thread scope declares an owner, require them to agree so
+    // the divergence fails loud here rather than at the storage read.
+    if let (Some(thread_owner), Some(actor)) =
+        (thread_scope.owner_user_id.as_ref(), run_context.actor())
+        && thread_owner != &actor.user_id
+    {
+        return Err(AgentLoopHostError::new(
+            AgentLoopHostErrorKind::ScopeMismatch,
+            "thread scope owner does not match the loop run actor",
+        ));
+    }
     Ok(())
 }
 
