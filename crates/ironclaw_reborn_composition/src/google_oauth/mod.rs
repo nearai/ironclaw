@@ -53,16 +53,21 @@ mod tests {
         GoogleProviderEgressPolicyAuthorizer, ObligationGoogleEgressPolicyAuthorizer,
     };
     use crate::google_oauth::secret_sink::{
-        GoogleProviderStoredTokens, GoogleProviderTokenSet, GoogleProviderTokenSink,
-        GoogleProviderTokenStorageRequest, SecretStoreGoogleTokenSink,
+        GoogleProviderRefreshTokenStorageRequest, GoogleProviderStoredTokens,
+        GoogleProviderTokenSet, GoogleProviderTokenSink, GoogleProviderTokenStorageRequest,
+        SecretStoreGoogleTokenSink,
     };
     use crate::google_oauth::token_response::{parse_token_response, scopes_for_exchange};
+    use crate::{RebornAuthContinuationDispatcher, RebornProductAuthServices};
     use async_trait::async_trait;
     use ironclaw_auth::{
-        AuthFlowId, AuthProductScope, AuthProviderId, AuthSurface, AuthorizationCodeHash,
-        CredentialAccountLabel, GOOGLE_GMAIL_READONLY_SCOPE, GOOGLE_GMAIL_SEND_SCOPE,
-        GOOGLE_PROVIDER_ID, GOOGLE_TOKEN_ENDPOINT, OAuthAuthorizationCode, OAuthClientId,
-        OAuthProviderCallbackRequest, OAuthProviderExchangeContext, OAuthProviderRefreshRequest,
+        AuthContinuationEvent, AuthFlowId, AuthProductScope, AuthProviderId, AuthSurface,
+        AuthorizationCodeHash, CredentialAccountLabel, CredentialAccountLookupRequest,
+        CredentialAccountService, CredentialAccountStatus, CredentialOwnership,
+        CredentialRefreshRequest, GOOGLE_GMAIL_READONLY_SCOPE, GOOGLE_GMAIL_SEND_SCOPE,
+        GOOGLE_PROVIDER_ID, GOOGLE_TOKEN_ENDPOINT, InMemoryAuthProductServices,
+        NewCredentialAccount, OAuthAuthorizationCode, OAuthClientId, OAuthProviderCallbackRequest,
+        OAuthProviderExchange, OAuthProviderExchangeContext, OAuthProviderRefreshRequest,
         OAuthRedirectUri, PkceVerifierHash, PkceVerifierSecret, ProviderScope,
     };
     use ironclaw_authorization::GrantAuthorizer;
@@ -87,6 +92,19 @@ mod tests {
     use secrecy::{ExposeSecret, SecretString};
     use std::collections::{BTreeMap, VecDeque};
     use std::sync::Mutex;
+
+    #[derive(Debug, Default)]
+    struct NoopContinuationDispatcher;
+
+    #[async_trait]
+    impl RebornAuthContinuationDispatcher for NoopContinuationDispatcher {
+        async fn dispatch_auth_continuation(
+            &self,
+            _event: AuthContinuationEvent,
+        ) -> Result<(), AuthProductError> {
+            Ok(())
+        }
+    }
 
     #[test]
     fn response_body_parses_to_token_response() {
@@ -381,6 +399,47 @@ mod tests {
 
         assert_eq!(error, AuthProductError::BackendUnavailable);
         assert!(egress.requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn google_provider_fails_closed_when_policy_is_not_staged() {
+        let network = RecordingNetwork::google_token_response();
+        let network_requests = network.requests_handle();
+        let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+        let services = test_host_runtime_services()
+            .with_secret_store_dyn(Arc::clone(&secret_store))
+            .try_with_host_http_egress(network)
+            .expect("host egress should wire with graph secret store");
+        let runtime_ports = services
+            .product_auth_provider_runtime_ports()
+            .expect("runtime ports");
+        let client = GoogleProviderClient::new(
+            runtime_ports.runtime_http_egress(),
+            Arc::new(RecordingTokenSink::new(
+                SecretHandle::new("google-access-secret").expect("valid handle"),
+                None,
+            )),
+            Arc::new(NoopPolicyAuthorizer),
+            OAuthClientId::new("google-client-123").expect("client id"),
+            OAuthRedirectUri::new("https://app.example/oauth/callback").expect("redirect uri"),
+        )
+        .expect("client");
+
+        let error = client
+            .exchange_callback(
+                exchange_context(scope("google-provider-policy-missing"), AuthFlowId::new()),
+                callback_request(google_provider(), label("work gmail")),
+            )
+            .await
+            .expect_err("unstaged policy must fail closed");
+
+        assert_eq!(error, AuthProductError::BackendUnavailable);
+        assert!(
+            network_requests
+                .lock()
+                .expect("network requests")
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -720,11 +779,274 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn google_provider_refresh_token_returns_refresh_failed_without_egress() {
+    async fn google_provider_refresh_uses_host_egress_and_stores_access_handle_only() {
         let egress = Arc::new(RecordingEgress::ok(RuntimeHttpEgressResponse {
             status: 200,
+            headers: vec![("content-type".to_string(), "application/json".to_string())],
+            body: br#"{
+                "access_token":"provider-refreshed-access-token",
+                "scope":"https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.send",
+                "expires_in":3600,
+                "token_type":"Bearer"
+            }"#
+            .to_vec(),
+            saved_body: None,
+            request_bytes: 0,
+            response_bytes: 0,
+            redaction_applied: true,
+        }));
+        let sink = Arc::new(RecordingTokenSink::new(
+            SecretHandle::new("google-refreshed-access-secret").expect("valid handle"),
+            None,
+        ));
+        let policy_authorizer = Arc::new(RecordingPolicyAuthorizer::default());
+        let client = GoogleProviderClient::new(
+            egress.clone(),
+            sink.clone(),
+            policy_authorizer.clone(),
+            OAuthClientId::new("google-client-123").expect("client id"),
+            OAuthRedirectUri::new("https://app.example/oauth/callback").expect("redirect uri"),
+        )
+        .expect("client")
+        .with_runtime(RuntimeKind::FirstParty)
+        .with_timeout_ms(12_345);
+
+        let refresh = client
+            .refresh_token(refresh_request(google_provider()))
+            .await
+            .expect("refresh");
+
+        assert_eq!(refresh.provider, google_provider());
+        assert_eq!(
+            refresh.access_secret,
+            SecretHandle::new("google-refreshed-access-secret").unwrap()
+        );
+        assert!(refresh.refresh_secret.is_none());
+        assert_eq!(
+            refresh.scopes,
+            provider_scopes(&[GOOGLE_GMAIL_READONLY_SCOPE, GOOGLE_GMAIL_SEND_SCOPE])
+        );
+        assert_eq!(
+            sink.access_tokens(),
+            vec!["provider-refreshed-access-token".to_string()]
+        );
+        assert!(sink.refresh_tokens().is_empty());
+
+        let requests = egress.requests();
+        assert_eq!(requests.len(), 1);
+        let request = &requests[0];
+        assert_eq!(request.runtime, RuntimeKind::FirstParty);
+        assert_eq!(request.timeout_ms, Some(12_345));
+        assert_eq!(request.method, NetworkMethod::Post);
+        assert_eq!(request.url, GOOGLE_TOKEN_ENDPOINT);
+        let form = token_request_form(&request.body);
+        assert_eq!(
+            form.get("grant_type").map(String::as_str),
+            Some("refresh_token")
+        );
+        assert_eq!(
+            form.get("refresh_token").map(String::as_str),
+            Some("stored-refresh-token")
+        );
+        assert_eq!(
+            form.get("client_id").map(String::as_str),
+            Some("google-client-123")
+        );
+        assert!(request.network_policy.deny_private_ip_ranges);
+        assert_eq!(
+            request
+                .network_policy
+                .allowed_targets
+                .iter()
+                .map(|target| (target.scheme, target.host_pattern.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(Some(NetworkScheme::Https), "oauth2.googleapis.com")]
+        );
+        assert_eq!(policy_authorizer.authorizations().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn google_provider_refresh_rejects_system_scope_before_side_effects() {
+        let egress = Arc::new(RecordingEgress::ok(RuntimeHttpEgressResponse {
+            status: 200,
+            headers: vec![("content-type".to_string(), "application/json".to_string())],
+            body: br#"{
+                "access_token":"provider-refreshed-access-token",
+                "scope":"https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.send",
+                "expires_in":3600,
+                "token_type":"Bearer"
+            }"#
+            .to_vec(),
+            saved_body: None,
+            request_bytes: 0,
+            response_bytes: 0,
+            redaction_applied: true,
+        }));
+        let sink = Arc::new(RecordingTokenSink::new(
+            SecretHandle::new("google-refreshed-access-secret").expect("valid handle"),
+            None,
+        ));
+        let policy_authorizer = Arc::new(RecordingPolicyAuthorizer::default());
+        let client = GoogleProviderClient::new(
+            egress.clone(),
+            sink.clone(),
+            policy_authorizer.clone(),
+            OAuthClientId::new("google-client-123").expect("client id"),
+            OAuthRedirectUri::new("https://app.example/oauth/callback").expect("redirect uri"),
+        )
+        .expect("client");
+
+        let error = client
+            .refresh_token(OAuthProviderRefreshRequest {
+                provider: google_provider(),
+                scope: AuthProductScope::new(ResourceScope::system(), AuthSurface::Callback),
+                account_id: ironclaw_auth::CredentialAccountId::new(),
+                refresh_secret: SecretHandle::new("google-refresh-secret").expect("valid handle"),
+                scopes: provider_scopes(&[GOOGLE_GMAIL_READONLY_SCOPE, GOOGLE_GMAIL_SEND_SCOPE]),
+            })
+            .await
+            .expect_err("system-scoped refresh is rejected");
+
+        assert_eq!(error, AuthProductError::CrossScopeDenied);
+        assert!(egress.requests().is_empty());
+        assert!(policy_authorizer.authorizations().is_empty());
+        assert!(sink.access_tokens().is_empty());
+        assert!(sink.deleted_handles().is_empty());
+    }
+
+    #[tokio::test]
+    async fn google_provider_refresh_maps_http_5xx_to_backend_unavailable() {
+        let egress = Arc::new(RecordingEgress::ok(RuntimeHttpEgressResponse {
+            status: 503,
+            headers: vec![("content-type".to_string(), "application/json".to_string())],
+            body: br#"{"error":"unavailable"}"#.to_vec(),
+            saved_body: None,
+            request_bytes: 0,
+            response_bytes: 0,
+            redaction_applied: false,
+        }));
+        let client = google_client(egress, Arc::new(RecordingPolicyAuthorizer::default()));
+
+        let error = client
+            .refresh_token(refresh_request(google_provider()))
+            .await
+            .expect_err("5xx response is backend unavailable");
+        assert_eq!(error, AuthProductError::BackendUnavailable);
+    }
+
+    #[tokio::test]
+    async fn product_auth_refresh_uses_concrete_google_provider_and_updates_account() {
+        let owner = scope("google-product-refresh");
+        let auth = Arc::new(InMemoryAuthProductServices::new());
+        let old_access = SecretHandle::new("google-product-old-access").expect("valid handle");
+        let old_refresh = SecretHandle::new("google-product-old-refresh").expect("valid handle");
+        let account = CredentialAccountService::create_account(
+            auth.as_ref(),
+            NewCredentialAccount {
+                scope: owner.clone(),
+                provider: google_provider(),
+                label: label("work gmail"),
+                status: CredentialAccountStatus::Expired,
+                ownership: CredentialOwnership::UserReusable,
+                owner_extension: None,
+                granted_extensions: Vec::new(),
+                access_secret: Some(old_access.clone()),
+                refresh_secret: Some(old_refresh.clone()),
+                scopes: provider_scopes(&[GOOGLE_GMAIL_READONLY_SCOPE]),
+            },
+        )
+        .await
+        .expect("account");
+        let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+        secret_store
+            .put(
+                owner.resource.clone(),
+                old_refresh.clone(),
+                SecretString::from("stored-refresh-token"),
+            )
+            .await
+            .expect("store refresh secret");
+        let egress = Arc::new(RecordingEgress::ok(RuntimeHttpEgressResponse {
+            status: 200,
+            headers: vec![("content-type".to_string(), "application/json".to_string())],
+            body: br#"{
+                "access_token":"provider-product-refreshed-access-token",
+                "scope":"https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.send",
+                "expires_in":3600,
+                "token_type":"Bearer"
+            }"#
+            .to_vec(),
+            saved_body: None,
+            request_bytes: 0,
+            response_bytes: 0,
+            redaction_applied: true,
+        }));
+        let google_client: Arc<dyn AuthProviderClient> = Arc::new(
+            GoogleProviderClient::new(
+                egress.clone(),
+                Arc::new(SecretStoreGoogleTokenSink {
+                    store: secret_store,
+                }),
+                Arc::new(RecordingPolicyAuthorizer::default()),
+                OAuthClientId::new("google-client-123").expect("client id"),
+                OAuthRedirectUri::new("https://app.example/oauth/callback").expect("redirect uri"),
+            )
+            .expect("client"),
+        );
+        let services = RebornProductAuthServices::from_shared(
+            auth.clone(),
+            Arc::new(NoopContinuationDispatcher),
+        )
+        .with_provider_client(google_client);
+
+        let report = services
+            .refresh_credential_account(CredentialRefreshRequest::new(
+                owner.clone(),
+                google_provider(),
+                account.id,
+            ))
+            .await
+            .expect("product auth refresh");
+
+        assert!(report.refreshed);
+        assert_eq!(report.account.status, CredentialAccountStatus::Configured);
+        let stored = CredentialAccountService::get_account(
+            auth.as_ref(),
+            CredentialAccountLookupRequest::new(owner.clone(), account.id),
+        )
+        .await
+        .expect("stored account")
+        .expect("account exists");
+        assert_eq!(stored.status, CredentialAccountStatus::Configured);
+        assert_ne!(stored.access_secret, Some(old_access));
+        assert_eq!(stored.refresh_secret, Some(old_refresh));
+        assert_eq!(
+            stored.scopes,
+            provider_scopes(&[GOOGLE_GMAIL_READONLY_SCOPE, GOOGLE_GMAIL_SEND_SCOPE])
+        );
+        let requests = egress.requests();
+        assert_eq!(requests.len(), 1);
+        let form = token_request_form(&requests[0].body);
+        assert_eq!(
+            form.get("grant_type").map(String::as_str),
+            Some("refresh_token")
+        );
+        assert_eq!(
+            form.get("refresh_token").map(String::as_str),
+            Some("stored-refresh-token")
+        );
+        assert_eq!(
+            form.get("client_id").map(String::as_str),
+            Some("google-client-123")
+        );
+    }
+
+    #[tokio::test]
+    async fn google_provider_refresh_sanitizes_provider_and_egress_failures() {
+        let egress = Arc::new(RecordingEgress::ok(RuntimeHttpEgressResponse {
+            status: 400,
             headers: Vec::new(),
-            body: Vec::new(),
+            body: br#"{"error":"invalid_grant","error_description":"raw refresh body"}"#.to_vec(),
             saved_body: None,
             request_bytes: 0,
             response_bytes: 0,
@@ -738,15 +1060,116 @@ mod tests {
         let google_error = client
             .refresh_token(refresh_request(google_provider()))
             .await
-            .expect_err("google refresh is unsupported");
+            .expect_err("google refresh failure is sanitized");
         assert_eq!(google_error, AuthProductError::RefreshFailed);
+        assert!(!google_error.to_string().contains("raw refresh body"));
 
+        let egress_error = Arc::new(RecordingEgress::err(RuntimeHttpEgressError::Network {
+            reason: "raw refresh network secret".to_string(),
+            request_bytes: 0,
+            response_bytes: 0,
+        }));
+        let client = google_client(egress_error, Arc::new(RecordingPolicyAuthorizer::default()));
+        let error = client
+            .refresh_token(refresh_request(google_provider()))
+            .await
+            .expect_err("egress failure is sanitized");
+        assert_eq!(error, AuthProductError::BackendUnavailable);
+        assert!(!error.to_string().contains("raw refresh network secret"));
+    }
+
+    #[tokio::test]
+    async fn google_provider_refresh_rejects_non_google_provider_before_egress() {
+        let egress = Arc::new(RecordingEgress::ok(RuntimeHttpEgressResponse {
+            status: 200,
+            headers: Vec::new(),
+            body: Vec::new(),
+            saved_body: None,
+            request_bytes: 0,
+            response_bytes: 0,
+            redaction_applied: false,
+        }));
+        let client = google_client(
+            Arc::clone(&egress),
+            Arc::new(RecordingPolicyAuthorizer::default()),
+        );
         let non_google_error = client
             .refresh_token(refresh_request(provider()))
             .await
-            .expect_err("non-google refresh is unsupported");
+            .expect_err("non-google refresh is rejected");
         assert_eq!(non_google_error, AuthProductError::RefreshFailed);
         assert!(egress.requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn google_provider_cleanup_exchange_deletes_google_handles_and_skips_non_google() {
+        let access_handle =
+            SecretHandle::new("google-cleanup-access-secret").expect("valid handle");
+        let refresh_handle =
+            SecretHandle::new("google-cleanup-refresh-secret").expect("valid handle");
+        let sink = Arc::new(RecordingTokenSink::new(
+            access_handle.clone(),
+            Some(refresh_handle.clone()),
+        ));
+        let client = GoogleProviderClient::new(
+            Arc::new(RecordingEgress::ok(RuntimeHttpEgressResponse {
+                status: 200,
+                headers: vec![],
+                body: Vec::new(),
+                request_bytes: 0,
+                response_bytes: 0,
+                saved_body: None,
+                redaction_applied: false,
+            })),
+            sink.clone(),
+            Arc::new(RecordingPolicyAuthorizer::default()),
+            OAuthClientId::new("google-client-123").expect("client id"),
+            OAuthRedirectUri::new("https://app.example/oauth/callback").expect("redirect uri"),
+        )
+        .expect("client");
+
+        let google_exchange = OAuthProviderExchange {
+            provider: google_provider(),
+            account_label: label("work gmail"),
+            authorization_code_hash: code_hash("cleanup-code-hash"),
+            pkce_verifier_hash: pkce_hash("cleanup-pkce-hash"),
+            access_secret: access_handle.clone(),
+            refresh_secret: Some(refresh_handle.clone()),
+            scopes: provider_scopes(&[GOOGLE_GMAIL_READONLY_SCOPE, GOOGLE_GMAIL_SEND_SCOPE]),
+            account_id: None,
+        };
+        client
+            .cleanup_exchange(
+                exchange_context(scope("google-cleanup"), AuthFlowId::new()),
+                &google_exchange,
+            )
+            .await
+            .expect("google cleanup");
+        assert_eq!(
+            sink.deleted_handles(),
+            vec![vec![access_handle.clone(), refresh_handle.clone()]]
+        );
+
+        sink.clear_deleted_handles();
+
+        let non_google_exchange = OAuthProviderExchange {
+            provider: provider(),
+            account_label: label("work github"),
+            authorization_code_hash: code_hash("cleanup-non-google-code-hash"),
+            pkce_verifier_hash: pkce_hash("cleanup-non-google-pkce-hash"),
+            access_secret: access_handle,
+            refresh_secret: Some(refresh_handle),
+            scopes: provider_scopes(&[GOOGLE_GMAIL_READONLY_SCOPE]),
+            account_id: None,
+        };
+        client
+            .cleanup_exchange(
+                exchange_context(scope("google-cleanup-non-google"), AuthFlowId::new()),
+                &non_google_exchange,
+            )
+            .await
+            .expect("non-google cleanup");
+        assert!(sink.deleted_handles().is_empty());
     }
 
     #[tokio::test]
@@ -881,8 +1304,10 @@ mod tests {
     }
 
     fn refresh_request(provider: AuthProviderId) -> OAuthProviderRefreshRequest {
+        let scope = scope("google-refresh");
         OAuthProviderRefreshRequest {
             provider,
+            scope,
             account_id: ironclaw_auth::CredentialAccountId::new(),
             refresh_secret: SecretHandle::new("google-refresh-secret").expect("valid handle"),
             scopes: provider_scopes(&[GOOGLE_GMAIL_READONLY_SCOPE, GOOGLE_GMAIL_SEND_SCOPE]),
@@ -969,8 +1394,9 @@ mod tests {
         }
     }
 
+    #[async_trait::async_trait]
     impl RuntimeHttpEgress for RecordingEgress {
-        fn execute(
+        async fn execute(
             &self,
             request: RuntimeHttpEgressRequest,
         ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
@@ -1007,8 +1433,9 @@ mod tests {
         }
     }
 
+    #[async_trait::async_trait]
     impl NetworkHttpEgress for RecordingNetwork {
-        fn execute(
+        async fn execute(
             &self,
             request: NetworkHttpRequest,
         ) -> Result<NetworkHttpResponse, NetworkHttpError> {
@@ -1034,6 +1461,7 @@ mod tests {
         flow_ids: Mutex<Vec<AuthFlowId>>,
         access_tokens: Mutex<Vec<String>>,
         refresh_tokens: Mutex<Vec<String>>,
+        deleted_handles: Mutex<Vec<Vec<SecretHandle>>>,
         access_handle: SecretHandle,
         refresh_handle: Option<SecretHandle>,
     }
@@ -1045,6 +1473,7 @@ mod tests {
                 flow_ids: Mutex::new(Vec::new()),
                 access_tokens: Mutex::new(Vec::new()),
                 refresh_tokens: Mutex::new(Vec::new()),
+                deleted_handles: Mutex::new(Vec::new()),
                 access_handle,
                 refresh_handle,
             }
@@ -1064,6 +1493,20 @@ mod tests {
 
         fn refresh_tokens(&self) -> Vec<String> {
             self.refresh_tokens.lock().expect("refresh tokens").clone()
+        }
+
+        fn deleted_handles(&self) -> Vec<Vec<SecretHandle>> {
+            self.deleted_handles
+                .lock()
+                .expect("deleted handles")
+                .clone()
+        }
+
+        fn clear_deleted_handles(&self) {
+            self.deleted_handles
+                .lock()
+                .expect("deleted handles")
+                .clear();
         }
     }
 
@@ -1096,6 +1539,51 @@ mod tests {
                 access_secret: self.access_handle.clone(),
                 refresh_secret: self.refresh_handle.clone(),
             })
+        }
+
+        async fn store_refreshed_tokens(
+            &self,
+            request: GoogleProviderRefreshTokenStorageRequest,
+        ) -> Result<GoogleProviderStoredTokens, AuthProductError> {
+            self.scopes
+                .lock()
+                .expect("scopes")
+                .push(request.scope.clone());
+            let tokens = request.tokens;
+            self.access_tokens
+                .lock()
+                .expect("access tokens")
+                .push(tokens.access_token.expose_secret().to_string());
+            if let Some(refresh_token) = tokens.refresh_token {
+                self.refresh_tokens
+                    .lock()
+                    .expect("refresh tokens")
+                    .push(refresh_token.expose_secret().to_string());
+            }
+            Ok(GoogleProviderStoredTokens {
+                access_secret: self.access_handle.clone(),
+                refresh_secret: self.refresh_handle.clone(),
+            })
+        }
+
+        async fn load_refresh_token(
+            &self,
+            _scope: &ResourceScope,
+            _handle: &SecretHandle,
+        ) -> Result<SecretString, AuthProductError> {
+            Ok(secret("stored-refresh-token"))
+        }
+
+        async fn delete_tokens(
+            &self,
+            _scope: &ResourceScope,
+            handles: &[SecretHandle],
+        ) -> Result<(), AuthProductError> {
+            self.deleted_handles
+                .lock()
+                .expect("deleted handles")
+                .push(handles.to_vec());
+            Ok(())
         }
     }
 
@@ -1151,6 +1639,20 @@ mod tests {
         }
     }
 
+    struct NoopPolicyAuthorizer;
+
+    #[async_trait]
+    impl GoogleProviderEgressPolicyAuthorizer for NoopPolicyAuthorizer {
+        async fn authorize_google_token_exchange(
+            &self,
+            _scope: &ResourceScope,
+            _capability_id: &CapabilityId,
+            _policy: &NetworkPolicy,
+        ) -> Result<(), AuthProductError> {
+            Ok(())
+        }
+    }
+
     struct FailingTokenSink {
         error: AuthProductError,
     }
@@ -1162,6 +1664,29 @@ mod tests {
             _request: GoogleProviderTokenStorageRequest,
         ) -> Result<GoogleProviderStoredTokens, AuthProductError> {
             Err(self.error.clone())
+        }
+
+        async fn store_refreshed_tokens(
+            &self,
+            _request: GoogleProviderRefreshTokenStorageRequest,
+        ) -> Result<GoogleProviderStoredTokens, AuthProductError> {
+            Err(self.error.clone())
+        }
+
+        async fn load_refresh_token(
+            &self,
+            _scope: &ResourceScope,
+            _handle: &SecretHandle,
+        ) -> Result<SecretString, AuthProductError> {
+            Ok(secret("stored-refresh-token"))
+        }
+
+        async fn delete_tokens(
+            &self,
+            _scope: &ResourceScope,
+            _handles: &[SecretHandle],
+        ) -> Result<(), AuthProductError> {
+            Ok(())
         }
     }
 
@@ -1230,6 +1755,14 @@ mod tests {
         ) -> Result<Option<ironclaw_secrets::SecretMetadata>, ironclaw_secrets::SecretStoreError>
         {
             Ok(None)
+        }
+
+        async fn delete(
+            &self,
+            _scope: &ResourceScope,
+            _handle: &SecretHandle,
+        ) -> Result<bool, ironclaw_secrets::SecretStoreError> {
+            Ok(true)
         }
 
         async fn lease_once(

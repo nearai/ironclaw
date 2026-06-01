@@ -389,9 +389,9 @@ fn model_retry_attempt_class(class: ModelErrorClass) -> Option<RecoveryAttemptCl
 fn capability_error_to_failure_kind(class: CapabilityErrorClass) -> LoopFailureKind {
     match class {
         CapabilityErrorClass::PolicyDenied => LoopFailureKind::PolicyDenied,
+        CapabilityErrorClass::InputInvalid => LoopFailureKind::ModelError,
         CapabilityErrorClass::Transient
         | CapabilityErrorClass::Permanent
-        | CapabilityErrorClass::InputInvalid
         | CapabilityErrorClass::OperationFailed
         | CapabilityErrorClass::Unavailable
         | CapabilityErrorClass::Internal => LoopFailureKind::CapabilityProtocolError,
@@ -742,7 +742,7 @@ mod tests {
         use super::super::{
             CapabilityErrorClass, CapabilityErrorSummary, DefaultRecoveryStrategy, ModelErrorClass,
             ModelErrorSummary, RecoveryOutcome, RecoveryStrategy, RetryAlteration, RetryScope,
-            SanitizedStrategySummary, backoff_for,
+            SanitizedStrategySummary, backoff_for, capability_error_to_failure_kind,
         };
         use crate::state::{LoopExecutionState, RecoveryAttemptClass, RecoveryStrategyState};
         use ironclaw_turns::LoopFailureKind;
@@ -895,6 +895,10 @@ mod tests {
                 }
                 other => panic!("expected ToolErrorResult, got {other:?}"),
             }
+            assert_eq!(
+                capability_error_to_failure_kind(CapabilityErrorClass::InputInvalid),
+                LoopFailureKind::ModelError
+            );
         }
 
         #[tokio::test]

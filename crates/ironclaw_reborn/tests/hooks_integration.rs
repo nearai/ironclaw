@@ -3327,6 +3327,7 @@ async fn observer_hook_fires_after_checkpoint_through_factory() {
     host.checkpoint(LoopCheckpointRequest {
         kind: LoopCheckpointKind::BeforeModel,
         state_ref: state_record.state_ref,
+        gate_ref: None,
     })
     .await
     .expect("checkpoint write succeeds through the wrapped checkpoint port");

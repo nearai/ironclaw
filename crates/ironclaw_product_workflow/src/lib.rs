@@ -36,6 +36,7 @@ mod conversation_binding;
 mod error;
 #[cfg(any(test, feature = "test-support"))]
 mod fakes;
+mod gate_state;
 mod in_memory_ledger;
 mod inbound_turn;
 mod ledger;
@@ -117,8 +118,8 @@ pub use policy::{
 pub use ironclaw_product_adapters::{
     AuthPromptView, CapabilityActivityStatusView, CapabilityActivityView,
     CapabilityDisplayPreviewView, FinalReplyView, GatePromptView, ProductOutboundEnvelope,
-    ProductOutboundPayload, ProductProjectionItem, ProductProjectionState, ProgressKind,
-    ProgressUpdateView, ProjectionCursor,
+    ProductOutboundPayload, ProductProjectionItem, ProductProjectionState, ProductWorkSummaryPhase,
+    ProgressKind, ProgressUpdateView, ProjectionCursor,
 };
 // Re-exported so the WebUI v2 handler crate can validate the
 // `extension_name` path segment at the handler/facade boundary

@@ -5,7 +5,7 @@ use crate::planner::AgentLoopPlannerInternal;
 
 use super::{
     AgentLoopExecutorError, AssistantReplyStage, BudgetStage, CapabilityStage, ExitStage,
-    InputStage, ModelStage, PromptStage, StopStage,
+    InputStage, ModelStage, PromptStage, ReplyAdmissionStage, StopStage,
 };
 
 #[derive(Clone, Copy)]
@@ -31,6 +31,7 @@ pub(crate) struct DefaultExecutorPipeline {
     pub(crate) input: InputStage,
     pub(crate) prompt: PromptStage,
     pub(crate) model: ModelStage,
+    pub(crate) reply_admission: ReplyAdmissionStage,
     pub(crate) assistant_reply: AssistantReplyStage,
     pub(crate) capabilities: CapabilityStage,
     pub(crate) stop: StopStage,

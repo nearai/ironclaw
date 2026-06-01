@@ -847,6 +847,177 @@ async fn assistant_reply_stage_returns_reply_summary() {
 }
 
 #[tokio::test]
+async fn reply_admission_rejects_candidate_before_finalizing_and_continues() {
+    let result_ref = LoopResultRef::new("result:done").expect("valid");
+    let host = MockHost::new(vec![reply_response(), calls_response(), reply_response()])
+        .with_batch_outcomes(vec![ironclaw_turns::run_profile::CapabilityBatchOutcome {
+            outcomes: vec![CapabilityOutcome::Completed(CapabilityResultMessage {
+                result_ref: result_ref.clone(),
+                safe_summary: "done".to_string(),
+                terminate_hint: false,
+            })],
+            stopped_on_suspension: false,
+        }]);
+    let family = family_with_reply_admission(FixedReplyAdmissionPolicy::RejectFirst);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&family, &host, state)
+        .await
+        .expect("execute");
+
+    assert!(matches!(exit, LoopExit::Completed(_)));
+    assert_eq!(host.model_requests().len(), 3);
+    let prompt_requests = host.prompt_requests();
+    assert_eq!(prompt_requests.len(), 3);
+    assert!(prompt_requests[0].inline_messages.is_empty());
+    assert_eq!(prompt_requests[1].inline_messages.len(), 1);
+    assert_eq!(
+        prompt_requests[1].inline_messages[0].safe_body.as_str(),
+        "loop control reply rejected stop condition not met continue"
+    );
+    assert!(prompt_requests[2].inline_messages.is_empty());
+
+    let before_model_states = host
+        .staged_payloads()
+        .into_iter()
+        .filter(|request| request.kind == LoopCheckpointKind::BeforeModel)
+        .map(|request| {
+            LoopExecutionState::from_checkpoint_payload(
+                &request.payload,
+                CheckpointKind::BeforeModel,
+            )
+            .expect("checkpoint payload")
+        })
+        .collect::<Vec<_>>();
+    assert!(before_model_states.iter().any(|state| {
+        state.reply_admission_state.pending_rejection.is_some()
+            && state.reply_admission_state.pending_rejection_rendered
+    }));
+
+    let final_state = final_staged_state(&host);
+    assert_eq!(
+        final_state.assistant_refs,
+        vec![message_ref("msg:assistant")]
+    );
+    assert_eq!(
+        final_state.reply_admission_state.rejected_reply_candidates,
+        1
+    );
+    assert!(
+        final_state
+            .reply_admission_state
+            .pending_rejection
+            .is_none()
+    );
+    assert_eq!(final_state.stop_state.turns_completed, 3);
+}
+
+#[tokio::test]
+async fn reply_admission_rendered_flag_stays_false_when_context_suppresses_control_message() {
+    let result_ref = LoopResultRef::new("result:done").expect("valid");
+    let host = MockHost::new(vec![reply_response(), calls_response(), reply_response()])
+        .with_batch_outcomes(vec![ironclaw_turns::run_profile::CapabilityBatchOutcome {
+            outcomes: vec![CapabilityOutcome::Completed(CapabilityResultMessage {
+                result_ref: result_ref.clone(),
+                safe_summary: "done".to_string(),
+                terminate_hint: false,
+            })],
+            stopped_on_suspension: false,
+        }]);
+    let family =
+        family_with_reply_admission_without_inline_context(FixedReplyAdmissionPolicy::RejectFirst);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&family, &host, state)
+        .await
+        .expect("execute");
+
+    assert!(matches!(exit, LoopExit::Completed(_)));
+    assert!(
+        host.prompt_requests()
+            .iter()
+            .all(|request| request.inline_messages.is_empty())
+    );
+
+    let before_model_states = host
+        .staged_payloads()
+        .into_iter()
+        .filter(|request| request.kind == LoopCheckpointKind::BeforeModel)
+        .map(|request| {
+            LoopExecutionState::from_checkpoint_payload(
+                &request.payload,
+                CheckpointKind::BeforeModel,
+            )
+            .expect("checkpoint payload")
+        })
+        .collect::<Vec<_>>();
+    assert!(before_model_states.iter().any(|state| {
+        state.reply_admission_state.pending_rejection.is_some()
+            && !state.reply_admission_state.pending_rejection_rendered
+    }));
+}
+
+#[tokio::test]
+async fn repeated_reply_rejections_stop_as_invalid_model_output() {
+    let host = MockHost::new(vec![reply_response(), reply_response(), reply_response()]);
+    let family = family_with_reply_admission(FixedReplyAdmissionPolicy::RejectAlways);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&family, &host, state)
+        .await
+        .expect("execute");
+
+    match exit {
+        LoopExit::Failed(failed) => {
+            assert_eq!(failed.reason_kind, LoopFailureKind::InvalidModelOutput);
+        }
+        other => panic!("expected failed invalid-model-output exit, got {other:?}"),
+    }
+    assert_eq!(host.model_requests().len(), 3);
+    let final_state = final_staged_state(&host);
+    assert!(final_state.assistant_refs.is_empty());
+    assert_eq!(
+        final_state.reply_admission_state.rejected_reply_candidates,
+        3
+    );
+    assert_eq!(final_state.stop_state.trailing_rejected_replies, 3);
+}
+
+#[tokio::test]
+async fn default_reply_admission_rejects_tool_history_echo_and_continues() {
+    let host = MockHost::new(vec![
+        reply_response_with_text("Previous tool event: demo__echo was invoked."),
+        reply_response_with_text("done"),
+    ]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("execute");
+
+    assert!(matches!(exit, LoopExit::Completed(_)));
+    assert_eq!(host.model_requests().len(), 2);
+    let final_state = final_staged_state(&host);
+    assert_eq!(
+        final_state.assistant_refs,
+        vec![message_ref("msg:assistant")]
+    );
+    assert_eq!(
+        final_state.reply_admission_state.rejected_reply_candidates,
+        1
+    );
+    assert_eq!(final_state.stop_state.turns_completed, 2);
+}
+
+#[tokio::test]
 async fn prompt_stage_host_unavailable_on_visible_capabilities_propagates_error() {
     let host = MockHost::new(Vec::new()).with_failing_visible_capabilities();
     let family = crate::families::default();

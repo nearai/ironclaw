@@ -17,12 +17,16 @@ use rust_decimal::prelude::MathematicalOps;
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 
+use self::nearai_tool_message_flattening::flatten_tool_messages;
 use crate::config::NearAiConfig;
 use crate::error::LlmError;
 use crate::provider::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider, Role, ToolCall,
     ToolCompletionRequest, ToolCompletionResponse,
 };
+
+#[path = "nearai_tool_message_flattening.rs"]
+mod nearai_tool_message_flattening;
 use crate::tool_schema::{ToolSchemaPolicy, shape_tool_schema};
 use crate::{costs, session::SessionManager};
 
@@ -970,67 +974,6 @@ async fn fetch_pricing(
     Ok(map)
 }
 
-/// Rewrite tool-call / tool-result messages into plain assistant/user text.
-///
-/// NEAR AI cloud-api does not support the OpenAI multi-turn tool-calling
-/// protocol (`role: "tool"` messages). This function converts:
-///   - Assistant messages with `tool_calls` → assistant text describing the calls
-///   - Tool result messages (`role: "tool"`) → user messages with the result
-///
-/// Non-tool messages pass through unchanged.
-fn flatten_tool_messages(messages: Vec<ChatCompletionMessage>) -> Vec<ChatCompletionMessage> {
-    let has_tool_msgs = messages.iter().any(|m| m.role == "tool");
-    if !has_tool_msgs {
-        return messages;
-    }
-
-    tracing::debug!("Flattening tool messages for NEAR AI compatibility");
-
-    messages
-        .into_iter()
-        .map(|msg| {
-            if let (true, Some(calls)) = (msg.role == "assistant", &msg.tool_calls) {
-                // Convert assistant tool_calls into descriptive text
-                let mut parts: Vec<String> = Vec::new();
-                if let Some(text) = msg.content.as_ref().and_then(|c| c.as_text()) {
-                    parts.push(text.to_string());
-                }
-                for tc in calls {
-                    parts.push(format!(
-                        "[Called tool `{}` with arguments: {}]",
-                        tc.function.name, tc.function.arguments
-                    ));
-                }
-                ChatCompletionMessage {
-                    role: "assistant".to_string(),
-                    content: Some(MessageContent::Text(parts.join("\n"))),
-
-                    tool_call_id: None,
-                    name: None,
-                    tool_calls: None,
-                }
-            } else if msg.role == "tool" {
-                // Convert tool result into a user message
-                let tool_name = msg.name.as_deref().unwrap_or("unknown");
-                let result = msg.content.as_ref().and_then(|c| c.as_text()).unwrap_or("");
-                ChatCompletionMessage {
-                    role: "user".to_string(),
-                    content: Some(MessageContent::Text(format!(
-                        "[Tool `{}` returned: {}]",
-                        tool_name, result
-                    ))),
-
-                    tool_call_id: None,
-                    name: None,
-                    tool_calls: None,
-                }
-            } else {
-                msg
-            }
-        })
-        .collect()
-}
-
 impl From<ChatMessage> for ChatCompletionMessage {
     fn from(msg: ChatMessage) -> Self {
         let role = match msg.role {
@@ -1493,127 +1436,6 @@ mod tests {
         let parsed: serde_json::Value =
             serde_json::from_str(&calls[0].function.arguments).expect("valid JSON string");
         assert_eq!(parsed["key"], "value");
-    }
-
-    #[test]
-    fn test_flatten_no_tool_messages_passthrough() {
-        let messages = vec![
-            ChatCompletionMessage {
-                role: "system".to_string(),
-                content: Some(MessageContent::Text("You are helpful.".to_string())),
-                tool_call_id: None,
-                name: None,
-                tool_calls: None,
-            },
-            ChatCompletionMessage {
-                role: "user".to_string(),
-                content: Some(MessageContent::Text("Hello".to_string())),
-                tool_call_id: None,
-                name: None,
-                tool_calls: None,
-            },
-        ];
-        let result = flatten_tool_messages(messages);
-        assert_eq!(result.len(), 2);
-        assert_eq!(result[0].role, "system");
-        assert_eq!(result[1].role, "user");
-    }
-
-    #[test]
-    fn test_flatten_tool_call_and_result() {
-        let messages = vec![
-            ChatCompletionMessage {
-                role: "user".to_string(),
-                content: Some(MessageContent::Text("test".to_string())),
-                tool_call_id: None,
-                name: None,
-                tool_calls: None,
-            },
-            ChatCompletionMessage {
-                role: "assistant".to_string(),
-                content: None,
-                tool_call_id: None,
-                name: None,
-                tool_calls: Some(vec![ChatCompletionToolCall {
-                    id: "call_1".to_string(),
-                    call_type: "function".to_string(),
-                    function: ChatCompletionToolCallFunction {
-                        name: "echo".to_string(),
-                        arguments: r#"{"message":"hi"}"#.to_string(),
-                    },
-                }]),
-            },
-            ChatCompletionMessage {
-                role: "tool".to_string(),
-                content: Some(MessageContent::Text("hi".to_string())),
-                tool_call_id: Some("call_1".to_string()),
-                name: Some("echo".to_string()),
-                tool_calls: None,
-            },
-        ];
-
-        let result = flatten_tool_messages(messages);
-        assert_eq!(result.len(), 3);
-
-        // Assistant tool_calls → plain assistant text
-        assert_eq!(result[1].role, "assistant");
-        assert!(result[1].tool_calls.is_none());
-        assert!(
-            result[1]
-                .content
-                .as_ref()
-                .and_then(|c| c.as_text())
-                .unwrap()
-                .contains("[Called tool `echo`")
-        );
-
-        // Tool result → user message
-        assert_eq!(result[2].role, "user");
-        assert!(result[2].tool_call_id.is_none());
-        assert!(
-            result[2]
-                .content
-                .as_ref()
-                .and_then(|c| c.as_text())
-                .unwrap()
-                .contains("[Tool `echo` returned: hi]")
-        );
-    }
-
-    #[test]
-    fn test_flatten_preserves_assistant_text_with_tool_calls() {
-        let messages = vec![
-            ChatCompletionMessage {
-                role: "assistant".to_string(),
-                content: Some(MessageContent::Text("Let me check that.".to_string())),
-                tool_call_id: None,
-                name: None,
-                tool_calls: Some(vec![ChatCompletionToolCall {
-                    id: "call_1".to_string(),
-                    call_type: "function".to_string(),
-                    function: ChatCompletionToolCallFunction {
-                        name: "search".to_string(),
-                        arguments: r#"{"q":"test"}"#.to_string(),
-                    },
-                }]),
-            },
-            ChatCompletionMessage {
-                role: "tool".to_string(),
-                content: Some(MessageContent::Text("found it".to_string())),
-                tool_call_id: Some("call_1".to_string()),
-                name: Some("search".to_string()),
-                tool_calls: None,
-            },
-        ];
-
-        let result = flatten_tool_messages(messages);
-        let text = result[0]
-            .content
-            .as_ref()
-            .and_then(|c| c.as_text())
-            .unwrap();
-        assert!(text.starts_with("Let me check that."));
-        assert!(text.contains("[Called tool `search`"));
     }
 
     #[test]
@@ -2601,106 +2423,6 @@ mod tests {
         assert_eq!(resp.data.unwrap().len(), 2);
     }
 
-    // -- flatten_tool_messages edge cases -------------------------------------
-
-    #[test]
-    fn test_flatten_tool_result_missing_name_uses_unknown() {
-        let messages = vec![ChatCompletionMessage {
-            role: "tool".to_string(),
-            content: Some(MessageContent::Text("result data".to_string())),
-            tool_call_id: Some("call_1".to_string()),
-            name: None,
-            tool_calls: None,
-        }];
-        let result = flatten_tool_messages(messages);
-        assert_eq!(result[0].role, "user");
-        assert!(
-            result[0]
-                .content
-                .as_ref()
-                .unwrap()
-                .as_text()
-                .unwrap()
-                .contains("[Tool `unknown` returned:")
-        );
-    }
-
-    #[test]
-    fn test_flatten_tool_result_missing_content_uses_empty() {
-        let messages = vec![ChatCompletionMessage {
-            role: "tool".to_string(),
-            content: None,
-            tool_call_id: Some("call_1".to_string()),
-            name: Some("my_tool".to_string()),
-            tool_calls: None,
-        }];
-        let result = flatten_tool_messages(messages);
-        assert_eq!(result[0].role, "user");
-        assert!(
-            result[0]
-                .content
-                .as_ref()
-                .unwrap()
-                .as_text()
-                .unwrap()
-                .contains("[Tool `my_tool` returned: ]")
-        );
-    }
-
-    #[test]
-    fn test_flatten_multiple_tool_calls_in_single_assistant_message() {
-        let messages = vec![
-            ChatCompletionMessage {
-                role: "assistant".to_string(),
-                content: None,
-                tool_call_id: None,
-                name: None,
-                tool_calls: Some(vec![
-                    ChatCompletionToolCall {
-                        id: "call_1".to_string(),
-                        call_type: "function".to_string(),
-                        function: ChatCompletionToolCallFunction {
-                            name: "search".to_string(),
-                            arguments: r#"{"q":"a"}"#.to_string(),
-                        },
-                    },
-                    ChatCompletionToolCall {
-                        id: "call_2".to_string(),
-                        call_type: "function".to_string(),
-                        function: ChatCompletionToolCallFunction {
-                            name: "fetch".to_string(),
-                            arguments: r#"{"url":"http://x"}"#.to_string(),
-                        },
-                    },
-                ]),
-            },
-            ChatCompletionMessage {
-                role: "tool".to_string(),
-                content: Some(MessageContent::Text("found".to_string())),
-                tool_call_id: Some("call_1".to_string()),
-                name: Some("search".to_string()),
-                tool_calls: None,
-            },
-            ChatCompletionMessage {
-                role: "tool".to_string(),
-                content: Some(MessageContent::Text("fetched".to_string())),
-                tool_call_id: Some("call_2".to_string()),
-                name: Some("fetch".to_string()),
-                tool_calls: None,
-            },
-        ];
-        let result = flatten_tool_messages(messages);
-        assert_eq!(result.len(), 3);
-        // Assistant message has both calls described
-        let assistant_text = result[0].content.as_ref().unwrap().as_text().unwrap();
-        assert!(assistant_text.contains("[Called tool `search`"));
-        assert!(assistant_text.contains("[Called tool `fetch`"));
-        assert!(result[0].tool_calls.is_none());
-        // Both tool results become user messages
-        assert_eq!(result[1].role, "user");
-        assert_eq!(result[2].role, "user");
-    }
-
     // -- ChatMessage → ChatCompletionMessage edge cases -----------------------
 
     #[test]
@@ -2782,65 +2504,6 @@ mod tests {
         assert_eq!(deserialized.call_type, "function");
         assert_eq!(deserialized.function.name, "get_weather");
         assert_eq!(deserialized.function.arguments, r#"{"city":"London"}"#);
-    }
-
-    // -- flatten_tool_messages in complete() path ----------------------------
-
-    #[test]
-    fn test_flatten_applied_on_text_only_path() {
-        // Verify that flatten_tool_messages converts tool-role messages to user
-        // messages (mirrors the complete_with_tools path).
-        let messages = vec![
-            ChatCompletionMessage {
-                role: "user".to_string(),
-                content: Some(MessageContent::Text("run it".to_string())),
-                tool_call_id: None,
-                name: None,
-                tool_calls: None,
-            },
-            ChatCompletionMessage {
-                role: "tool".to_string(),
-                content: Some(MessageContent::Text("ok".to_string())),
-                tool_call_id: Some("call_1".to_string()),
-                name: Some("run_cmd".to_string()),
-                tool_calls: None,
-            },
-        ];
-        let flattened = flatten_tool_messages(messages);
-        assert_eq!(flattened.len(), 2);
-        assert_eq!(flattened[1].role, "user");
-        let text = flattened[1]
-            .content
-            .as_ref()
-            .and_then(|c| c.as_text())
-            .unwrap();
-        assert!(text.contains("run_cmd"), "should reference tool name");
-        assert!(text.contains("ok"), "should include tool result");
-    }
-
-    #[test]
-    fn test_no_flatten_when_no_tool_messages() {
-        // When there are no tool-role messages, flatten_tool_messages is a no-op.
-        let messages = vec![
-            ChatCompletionMessage {
-                role: "user".to_string(),
-                content: Some(MessageContent::Text("hi".to_string())),
-                tool_call_id: None,
-                name: None,
-                tool_calls: None,
-            },
-            ChatCompletionMessage {
-                role: "assistant".to_string(),
-                content: Some(MessageContent::Text("hello".to_string())),
-                tool_call_id: None,
-                name: None,
-                tool_calls: None,
-            },
-        ];
-        let result = flatten_tool_messages(messages);
-        // No tool messages → unchanged roles
-        assert_eq!(result[0].role, "user");
-        assert_eq!(result[1].role, "assistant");
     }
 
     // -- api_url edge cases ---------------------------------------------------

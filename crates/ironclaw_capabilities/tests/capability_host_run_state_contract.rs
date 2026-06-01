@@ -860,8 +860,14 @@ async fn capability_host_revokes_claimed_lease_when_dispatch_fails_after_resume(
             kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Backend)
         }
     ));
+    // Per PR #4236 disposition policy, the capability host no longer
+    // transitions run state on dispatch failures — the higher host_runtime
+    // layer consults `capability_failure_disposition` and either retries
+    // (for `Backend`/`RetrySameCall`) or surfaces the failure to the model
+    // (`ModelVisibleToolError`). The run therefore stays in its prior state
+    // (`BlockedApproval`, set by the initial invoke).
     let run = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
-    assert_eq!(run.status, RunStatus::Failed);
+    assert_eq!(run.status, RunStatus::BlockedApproval);
     let revoked = leases.get(&scope, lease.grant.id).await.unwrap();
     assert_eq!(revoked.status, CapabilityLeaseStatus::Revoked);
 }

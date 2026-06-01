@@ -167,6 +167,7 @@ mod tests {
         LoopCheckpointRequest {
             kind: LoopCheckpointKind::BeforeModel,
             state_ref: LoopCheckpointStateRef::new("checkpoint:test-0001").expect("ok"),
+            gate_ref: None,
         }
     }
 

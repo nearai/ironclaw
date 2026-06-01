@@ -1,7 +1,8 @@
 use async_trait::async_trait;
-use ironclaw_turns::run_profile::{LoopPromptBundleRequest, PromptMode};
+use ironclaw_turns::run_profile::{LoopInlineMessage, LoopPromptBundleRequest, PromptMode};
 
 use crate::state::LoopExecutionState;
+use crate::strategies::reply_admission::reply_admission_control_message;
 
 /// Decides what context the host should materialize for the next model call.
 ///
@@ -14,11 +15,16 @@ use crate::state::LoopExecutionState;
 /// field from `state`.
 #[async_trait]
 pub(crate) trait ContextStrategy: Send + Sync {
-    async fn plan_context_request(&self, state: &LoopExecutionState) -> LoopPromptBundleRequest;
+    async fn plan_context_request(&self, state: &LoopExecutionState) -> ContextPlan;
 }
 
 #[allow(dead_code)]
 fn _assert_object_safe(_: &dyn ContextStrategy) {}
+
+pub(crate) struct ContextPlan {
+    pub(crate) request: LoopPromptBundleRequest,
+    pub(crate) emitted_admission_control: bool,
+}
 
 /// Reference baseline `ContextStrategy` implementation.
 ///
@@ -48,20 +54,34 @@ impl Default for DefaultContextStrategy {
 
 #[async_trait]
 impl ContextStrategy for DefaultContextStrategy {
-    async fn plan_context_request(&self, _state: &LoopExecutionState) -> LoopPromptBundleRequest {
+    async fn plan_context_request(&self, state: &LoopExecutionState) -> ContextPlan {
+        let (inline_messages, emitted_admission_control) = loop_control_inline_messages(state);
         // `max(1)` keeps the host's "zero is rejected" invariant from
         // `LoopPromptBundleRequest` even if a loop family overrides
         // `max_messages` to zero by accident.
-        LoopPromptBundleRequest {
-            mode: PromptMode::TextOnly,
-            context_cursor: None,
-            surface_version: None,
-            checkpoint_state_ref: None,
-            max_messages: Some(self.max_messages.max(1)),
-            inline_messages: Vec::new(),
-            capability_view: None,
+        ContextPlan {
+            request: LoopPromptBundleRequest {
+                mode: PromptMode::TextOnly,
+                context_cursor: None,
+                surface_version: None,
+                checkpoint_state_ref: None,
+                max_messages: Some(self.max_messages.max(1)),
+                inline_messages,
+                capability_view: None,
+            },
+            emitted_admission_control,
         }
     }
+}
+
+fn loop_control_inline_messages(state: &LoopExecutionState) -> (Vec<LoopInlineMessage>, bool) {
+    let Some(rejection) = state.reply_admission_state.pending_rejection.as_ref() else {
+        return (Vec::new(), false);
+    };
+    if state.reply_admission_state.pending_rejection_rendered {
+        return (Vec::new(), false);
+    }
+    (vec![reply_admission_control_message(rejection)], true)
 }
 
 #[cfg(test)]
@@ -79,7 +99,7 @@ mod tests {
     };
 
     use super::{ContextStrategy, DefaultContextStrategy};
-    use crate::state::LoopExecutionState;
+    use crate::state::{LoopExecutionState, ReplyAdmissionRejection};
 
     #[allow(dead_code)]
     fn _check(_: &dyn ContextStrategy) {}
@@ -170,12 +190,13 @@ mod tests {
 
         let request = strategy.plan_context_request(&state).await;
 
-        assert_eq!(request.mode, PromptMode::TextOnly);
-        assert_eq!(request.max_messages, Some(16));
-        assert!(request.inline_messages.is_empty());
-        assert!(request.context_cursor.is_none());
-        assert!(request.surface_version.is_none());
-        assert!(request.checkpoint_state_ref.is_none());
+        assert_eq!(request.request.mode, PromptMode::TextOnly);
+        assert_eq!(request.request.max_messages, Some(16));
+        assert!(request.request.inline_messages.is_empty());
+        assert!(!request.emitted_admission_control);
+        assert!(request.request.context_cursor.is_none());
+        assert!(request.request.surface_version.is_none());
+        assert!(request.request.checkpoint_state_ref.is_none());
     }
 
     #[tokio::test]
@@ -185,6 +206,37 @@ mod tests {
 
         let request = strategy.plan_context_request(&state).await;
 
-        assert_eq!(request.max_messages, Some(1));
+        assert_eq!(request.request.max_messages, Some(1));
+    }
+
+    #[tokio::test]
+    async fn plan_context_request_emits_pending_reply_admission_control_once() {
+        let strategy = DefaultContextStrategy::default();
+        let mut state = LoopExecutionState::initial_for_run(&test_run_context());
+        state.reply_admission_state.pending_rejection =
+            Some(ReplyAdmissionRejection::stop_condition_not_met());
+
+        let request = strategy.plan_context_request(&state).await;
+
+        assert!(request.emitted_admission_control);
+        assert_eq!(request.request.inline_messages.len(), 1);
+        assert_eq!(
+            request.request.inline_messages[0].safe_body.as_str(),
+            "loop control reply rejected stop condition not met continue"
+        );
+    }
+
+    #[tokio::test]
+    async fn plan_context_request_suppresses_rendered_reply_admission_control() {
+        let strategy = DefaultContextStrategy::default();
+        let mut state = LoopExecutionState::initial_for_run(&test_run_context());
+        state.reply_admission_state.pending_rejection =
+            Some(ReplyAdmissionRejection::stop_condition_not_met());
+        state.reply_admission_state.pending_rejection_rendered = true;
+
+        let request = strategy.plan_context_request(&state).await;
+
+        assert!(!request.emitted_admission_control);
+        assert!(request.request.inline_messages.is_empty());
     }
 }

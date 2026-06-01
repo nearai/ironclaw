@@ -12,7 +12,7 @@ use ironclaw_run_state::{
 use tracing::{debug, warn};
 
 use crate::helpers::{
-    CapabilityActionKind, apply_run_state_transition_if_configured,
+    CapabilityActionKind, CapabilityRunStateTransition, apply_run_state_transition_if_configured,
     approval_not_approved_error_kind, capability_lease_error_kind,
     claim_error_may_be_concurrent_resume, complete_run_after_side_effect, fail_run_if_configured,
     invocation_fingerprint_for_kind, matching_approval_lease, resume_context_mismatch_kind,
@@ -470,8 +470,15 @@ where
                     &obligation_outcome,
                 )
                 .await;
-                fail_run_if_configured(self.run_state, &scope, invocation_id, "Dispatch").await;
-                return Err(CapabilityInvocationError::from(error));
+                let invocation_error = CapabilityInvocationError::from(error);
+                apply_run_state_transition_if_configured(
+                    self.run_state,
+                    &scope,
+                    invocation_id,
+                    &invocation_error,
+                )
+                .await;
+                return Err(invocation_error);
             }
         };
 
@@ -807,8 +814,14 @@ where
                     &obligation_outcome,
                 )
                 .await;
-                fail_run_if_configured(Some(run_state), &scope, invocation_id, "Dispatch").await;
                 let invocation_error = CapabilityInvocationError::from(error);
+                apply_run_state_transition_if_configured(
+                    Some(run_state),
+                    &scope,
+                    invocation_id,
+                    &invocation_error,
+                )
+                .await;
                 if let Err(revoke_error) = capability_leases
                     .revoke(&scope, claimed_lease.grant.id)
                     .await
@@ -1640,8 +1653,15 @@ fn prepare_obligation_error_to_invocation(
             }
         }
         CapabilityObligationError::AuthRequired => {
+            // CapabilityObligationError::AuthRequired is a unit variant (no secret
+            // handle list).  The obligation handler does not surface which staged
+            // secret was missing, so required_secrets is left empty here.  The
+            // runtime auth gate accepts an empty list and falls back to the generic
+            // re-auth prompt; the dispatch-side conversion in error.rs forwards the
+            // real list when DispatchError::AuthRequired is raised instead.
             CapabilityInvocationError::AuthorizationRequiresAuth {
                 capability: capability_id.clone(),
+                required_secrets: Vec::new(),
             }
         }
         CapabilityObligationError::Failed { kind } => CapabilityInvocationError::ObligationFailed {
@@ -1665,5 +1685,12 @@ fn completion_obligation_error_to_invocation(
 }
 
 fn obligation_invocation_error_kind(error: &CapabilityInvocationError) -> &'static str {
-    error.run_state_transition().error_kind()
+    // `run_state_transition` returns `None` for `CapabilityInvocationError::Dispatch`
+    // because PR #4236 handles those failures via the disposition policy on the
+    // outcome path. The obligation call sites only see this function for
+    // diagnostic logging; fall back to a stable "Dispatch" label in that case.
+    error
+        .run_state_transition()
+        .map(CapabilityRunStateTransition::error_kind)
+        .unwrap_or("Dispatch")
 }

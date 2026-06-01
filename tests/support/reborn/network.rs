@@ -72,8 +72,9 @@ impl Default for RecordingNetworkHttpTransport {
     }
 }
 
+#[async_trait::async_trait]
 impl NetworkHttpTransport for RecordingNetworkHttpTransport {
-    fn execute(
+    async fn execute(
         &self,
         request: NetworkTransportRequest,
     ) -> Result<NetworkHttpResponse, NetworkHttpError> {

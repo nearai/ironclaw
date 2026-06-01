@@ -14,7 +14,7 @@ use ironclaw_authorization::GrantAuthorizer;
 use ironclaw_extensions::ExtensionRegistry;
 #[cfg(feature = "libsql")]
 use ironclaw_filesystem::LibSqlRootFilesystem;
-use ironclaw_filesystem::{LocalFilesystem, RootFilesystem};
+use ironclaw_filesystem::{InMemoryBackend, LocalFilesystem, RootFilesystem};
 use ironclaw_host_api::runtime_policy::{
     ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
     NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
@@ -86,21 +86,7 @@ async fn builtin_first_party_package_declares_expected_capabilities() {
         vec![
             EffectKind::ReadFilesystem,
             EffectKind::WriteFilesystem,
-            EffectKind::DeleteFilesystem,
             EffectKind::Network
-        ]
-    );
-    let skill_remove = package
-        .capabilities
-        .iter()
-        .find(|descriptor| descriptor.id.as_str() == SKILL_REMOVE_CAPABILITY_ID)
-        .expect("skill_remove manifest");
-    assert_eq!(
-        skill_remove.effects,
-        vec![
-            EffectKind::ReadFilesystem,
-            EffectKind::WriteFilesystem,
-            EffectKind::DeleteFilesystem
         ]
     );
     let http = package
@@ -579,7 +565,70 @@ async fn builtin_shell_truncates_large_output_without_output_overflow() {
 
     let output = output["output"].as_str().expect("shell output is text");
     assert!(output.contains("[truncated"));
+    assert!(output.contains("no file_read-accessible scoped path was available"));
+    assert!(!output.contains(std::env::temp_dir().to_string_lossy().as_ref()));
     assert!(output.len() <= 66_000);
+}
+
+#[tokio::test]
+async fn builtin_shell_saves_large_output_to_file_read_path() {
+    let (filesystem, mounts) = in_memory_mounted_filesystem(MountPermissions::read_write());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts_and_network(
+        [SHELL_CAPABILITY_ID, READ_FILE_CAPABILITY_ID],
+        mounts,
+        shell_test_policy(),
+    );
+    let shell_output = invoke_with_context(
+        &runtime,
+        SHELL_CAPABILITY_ID,
+        json!({
+            "command": "printf 'saved-start\\n'; yes m | head -c 70000; printf 'saved-end'",
+            "timeout": 5
+        }),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+    let output = shell_output["output"].as_str().expect("shell output text");
+    let saved_path = output
+        .split("Full output saved to: ")
+        .nth(1)
+        .and_then(|tail| tail.split_whitespace().next())
+        .expect("saved output path");
+    assert!(saved_path.starts_with("/workspace/command-outputs/"));
+    assert!(!output.contains(std::env::temp_dir().to_string_lossy().as_ref()));
+    assert!(output.contains("Use file_read to inspect it"));
+
+    let read_output = invoke_with_context(
+        &runtime,
+        READ_FILE_CAPABILITY_ID,
+        json!({"path": saved_path, "limit": 1}),
+        context,
+    )
+    .await
+    .unwrap();
+    assert!(
+        read_output["content"]
+            .as_str()
+            .expect("read_file content")
+            .contains("saved-start")
+    );
+    assert_eq!(read_output["path"], json!(saved_path));
+}
+
+#[tokio::test]
+async fn builtin_shell_blocks_small_secret_output_through_dispatch() {
+    let output = invoke_shell(json!({
+        "command": "printf '%s' 'sk-proj-test1234567890abcdefghij'"
+    }))
+    .await
+    .unwrap();
+
+    assert_eq!(
+        output["output"],
+        json!("[Full command output blocked due to potential secret leakage]\n")
+    );
 }
 
 #[tokio::test]
@@ -2597,6 +2646,21 @@ async fn builtin_http_maps_runtime_egress_errors_by_source() {
 }
 
 #[tokio::test]
+async fn builtin_http_maps_panicking_runtime_egress_to_backend_failure() {
+    let runtime = runtime_with_http_egress(Arc::new(PanickingRuntimeHttpEgress));
+    let error = invoke_with_context(
+        &runtime,
+        HTTP_CAPABILITY_ID,
+        json!({"url": "https://api.example.test/v1/items"}),
+        execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy()),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error, RuntimeFailureKind::Backend);
+}
+
+#[tokio::test]
 async fn builtin_http_rejects_sensitive_headers_through_host_validator() {
     let transport = RecordingTransport::ok(NetworkHttpResponse {
         status: 200,
@@ -2689,7 +2753,7 @@ async fn builtin_http_returns_redirects_without_following_private_location() {
 }
 
 #[tokio::test]
-async fn builtin_http_runs_blocking_egress_off_tokio_worker() {
+async fn builtin_http_awaits_async_egress_without_blocking_tokio_worker() {
     let egress = Arc::new(SleepingRuntimeHttpEgress {
         delay: Duration::from_millis(100),
         body: Vec::new(),
@@ -2704,7 +2768,7 @@ async fn builtin_http_runs_blocking_egress_off_tokio_worker() {
     tokio::pin!(invocation);
 
     tokio::select! {
-        _ = &mut invocation => panic!("HTTP dispatch blocked the tokio worker"),
+        _ = &mut invocation => panic!("HTTP dispatch should remain pending while async egress sleeps"),
         _ = tokio::time::sleep(Duration::from_millis(20)) => {}
     }
 
@@ -3263,10 +3327,9 @@ async fn builtin_coding_apply_patch_serializes_concurrent_edits_on_same_path() {
     let result_b = task_b.await.unwrap();
 
     // Serialization guarantee: the second patch reads the post-write file and
-    // its cached hash (taken before either write) no longer matches, so
-    // exactly one apply_patch must succeed. Without the per-path edit lock,
-    // both calls can pass `check_before_edit` concurrently and silently lose
-    // an update.
+    // no longer finds `old_string`, so exactly one apply_patch must succeed.
+    // Without the per-path edit lock, both calls can read the original file
+    // concurrently and silently lose an update.
     let outcomes = [result_a.is_ok(), result_b.is_ok()];
     assert_eq!(
         outcomes.iter().filter(|ok| **ok).count(),
@@ -3734,22 +3797,13 @@ async fn builtin_coding_read_rejects_non_file_paths() {
 }
 
 #[tokio::test]
-async fn builtin_apply_patch_matches_v1_exact_unique_and_replace_all_behavior() {
+async fn builtin_apply_patch_matches_exact_unique_and_replace_all_behavior() {
     let temp = tempfile::tempdir().unwrap();
     std::fs::write(temp.path().join("code.rs"), "old\nold\nunique\n").unwrap();
 
     let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
     let runtime = runtime_with_filesystem(filesystem);
     let context = execution_context_with_mounts(all_builtin_capability_ids(), mounts);
-
-    invoke_with_context(
-        &runtime,
-        READ_FILE_CAPABILITY_ID,
-        json!({"path": "/workspace/code.rs"}),
-        context.clone(),
-    )
-    .await
-    .unwrap();
 
     let duplicate = invoke_with_context(
         &runtime,
@@ -3793,7 +3847,7 @@ async fn builtin_apply_patch_matches_v1_exact_unique_and_replace_all_behavior() 
 }
 
 #[tokio::test]
-async fn builtin_apply_patch_requires_full_fresh_read_like_v1() {
+async fn builtin_apply_patch_accepts_unique_match_without_prior_read() {
     let temp = tempfile::tempdir().unwrap();
     std::fs::write(temp.path().join("code.rs"), "old\n").unwrap();
 
@@ -3801,39 +3855,25 @@ async fn builtin_apply_patch_requires_full_fresh_read_like_v1() {
     let runtime = runtime_with_filesystem(filesystem);
     let context = execution_context_with_mounts(all_builtin_capability_ids(), mounts);
 
-    let unread = invoke_with_context(
+    let patched = invoke_with_context(
         &runtime,
         APPLY_PATCH_CAPABILITY_ID,
         json!({"path": "/workspace/code.rs", "old_string": "old", "new_string": "new"}),
-        context.clone(),
-    )
-    .await
-    .unwrap_err();
-    assert_eq!(unread, RuntimeFailureKind::OperationFailed);
-
-    invoke_with_context(
-        &runtime,
-        READ_FILE_CAPABILITY_ID,
-        json!({"path": "/workspace/code.rs", "limit": 1}),
-        context.clone(),
+        context,
     )
     .await
     .unwrap();
-    let partial = invoke_with_context(
-        &runtime,
-        APPLY_PATCH_CAPABILITY_ID,
-        json!({"path": "/workspace/code.rs", "old_string": "old", "new_string": "new"}),
-        context.clone(),
-    )
-    .await
-    .unwrap_err();
-    assert_eq!(partial, RuntimeFailureKind::OperationFailed);
+
+    assert_eq!(patched["success"], json!(true));
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("code.rs")).unwrap(),
+        "new\n"
+    );
 }
 
 #[tokio::test]
-async fn builtin_apply_patch_rejects_same_second_content_changes_after_read() {
+async fn builtin_apply_patch_accepts_file_content_written_by_same_scope() {
     let temp = tempfile::tempdir().unwrap();
-    std::fs::write(temp.path().join("code.rs"), "old\n").unwrap();
 
     let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
     let runtime = runtime_with_filesystem(filesystem);
@@ -3841,15 +3881,46 @@ async fn builtin_apply_patch_rejects_same_second_content_changes_after_read() {
 
     invoke_with_context(
         &runtime,
-        READ_FILE_CAPABILITY_ID,
-        json!({"path": "/workspace/code.rs"}),
+        WRITE_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/math_utils.py", "content": "def multiply(a, b):\n    return a + b\n"}),
         context.clone(),
     )
     .await
     .unwrap();
-    std::fs::write(temp.path().join("code.rs"), "old\nchanged\n").unwrap();
 
-    let stale = invoke_with_context(
+    let patched = invoke_with_context(
+        &runtime,
+        APPLY_PATCH_CAPABILITY_ID,
+        json!({
+            "path": "/workspace/math_utils.py",
+            "old_string": "    return a + b",
+            "new_string": "    return a * b"
+        }),
+        context,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(patched["success"], json!(true));
+    assert_eq!(patched["replacements"], json!(1));
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("math_utils.py")).unwrap(),
+        "def multiply(a, b):\n    return a * b\n"
+    );
+}
+
+#[tokio::test]
+async fn builtin_apply_patch_rejects_when_old_string_is_no_longer_present() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(temp.path().join("code.rs"), "old\n").unwrap();
+
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(all_builtin_capability_ids(), mounts);
+
+    std::fs::write(temp.path().join("code.rs"), "changed\n").unwrap();
+
+    let missing = invoke_with_context(
         &runtime,
         APPLY_PATCH_CAPABILITY_ID,
         json!({"path": "/workspace/code.rs", "old_string": "old", "new_string": "new"}),
@@ -3857,7 +3928,7 @@ async fn builtin_apply_patch_rejects_same_second_content_changes_after_read() {
     )
     .await
     .unwrap_err();
-    assert_eq!(stale, RuntimeFailureKind::OperationFailed);
+    assert_eq!(missing, RuntimeFailureKind::OperationFailed);
 }
 
 #[tokio::test]
@@ -4238,6 +4309,16 @@ fn mounted_filesystem(path: &Path, permissions: MountPermissions) -> (LocalFiles
     (filesystem, mounts)
 }
 
+fn in_memory_mounted_filesystem(permissions: MountPermissions) -> (InMemoryBackend, MountView) {
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/workspace").unwrap(),
+        VirtualPath::new("/projects/coding-pack").unwrap(),
+        permissions,
+    )])
+    .unwrap();
+    (InMemoryBackend::new(), mounts)
+}
+
 fn mounted_skill_filesystem(path: &Path) -> (LocalFilesystem, MountView) {
     let mut filesystem = LocalFilesystem::new();
     filesystem
@@ -4329,6 +4410,7 @@ impl RuntimeProcessPort for RecordingProcessPort {
         self.requests.lock().unwrap().push(request.clone());
         Ok(CommandExecutionOutput {
             output: format!("process port: {}", request.command),
+            saved_output: None,
             exit_code: 0,
             sandboxed: true,
             duration: Duration::from_millis(7),
@@ -4350,6 +4432,7 @@ impl SandboxCommandTransport for RecordingSandboxTransport {
         self.requests.lock().unwrap().push(request.clone());
         Ok(CommandExecutionOutput {
             output: format!("process port: {}", request.command),
+            saved_output: None,
             exit_code: 0,
             sandboxed: false,
             duration: Duration::from_millis(7),
@@ -4425,8 +4508,9 @@ impl RecordingRuntimeHttpEgress {
     }
 }
 
+#[async_trait::async_trait]
 impl RuntimeHttpEgress for RecordingRuntimeHttpEgress {
-    fn execute(
+    async fn execute(
         &self,
         request: RuntimeHttpEgressRequest,
     ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
@@ -4462,12 +4546,13 @@ struct SleepingRuntimeHttpEgress {
     body: Vec<u8>,
 }
 
+#[async_trait::async_trait]
 impl RuntimeHttpEgress for SleepingRuntimeHttpEgress {
-    fn execute(
+    async fn execute(
         &self,
         request: RuntimeHttpEgressRequest,
     ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
-        thread::sleep(self.delay);
+        tokio::time::sleep(self.delay).await;
         let body = if self.body.is_empty() {
             b"ok".to_vec()
         } else {
@@ -4486,6 +4571,19 @@ impl RuntimeHttpEgress for SleepingRuntimeHttpEgress {
 }
 
 #[derive(Debug, Clone)]
+struct PanickingRuntimeHttpEgress;
+
+#[async_trait::async_trait]
+impl RuntimeHttpEgress for PanickingRuntimeHttpEgress {
+    async fn execute(
+        &self,
+        _request: RuntimeHttpEgressRequest,
+    ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
+        panic!("runtime HTTP egress panic")
+    }
+}
+
+#[derive(Debug, Clone)]
 struct RecordingTransport {
     response: Result<NetworkHttpResponse, NetworkHttpError>,
     requests: Arc<std::sync::Mutex<Vec<NetworkTransportRequest>>>,
@@ -4500,8 +4598,9 @@ impl RecordingTransport {
     }
 }
 
+#[async_trait::async_trait]
 impl NetworkHttpTransport for RecordingTransport {
-    fn execute(
+    async fn execute(
         &self,
         request: NetworkTransportRequest,
     ) -> Result<NetworkHttpResponse, NetworkHttpError> {
@@ -4629,7 +4728,6 @@ fn builtin_effects() -> Vec<EffectKind> {
         EffectKind::DispatchCapability,
         EffectKind::ReadFilesystem,
         EffectKind::WriteFilesystem,
-        EffectKind::DeleteFilesystem,
         EffectKind::Network,
         EffectKind::SpawnProcess,
         EffectKind::ExecuteCode,

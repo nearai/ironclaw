@@ -70,6 +70,40 @@ async fn paired_actor_without_binding_creates_thread_binding_message_and_submits
 }
 
 #[tokio::test]
+async fn untrusted_inbound_uses_untrusted_binding_resolution_and_preserves_requested_scope_hints() {
+    let services = InMemoryConversationServices::default();
+    services
+        .pair_external_actor(
+            tenant(),
+            telegram(),
+            default_installation(),
+            external_actor("telegram-user-1"),
+            user("alice"),
+        )
+        .await;
+    let binding = UntrustedOnlyBindingService::new(services.clone());
+    let coordinator = Arc::new(RecordingTurnCoordinator::default());
+    let inbound = InboundTurnService::new(binding.clone(), services.clone(), coordinator);
+
+    inbound
+        .handle_inbound_turn(inbound_request(
+            telegram(),
+            external_actor("telegram-user-1"),
+            external_conversation("chat-untrusted-path", None),
+            "telegram-event-untrusted-path",
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(binding.untrusted_calls(), 1);
+    assert_eq!(binding.trusted_calls(), 0);
+    let resolve_requests = binding.resolve_requests();
+    assert_eq!(resolve_requests.len(), 1);
+    assert_eq!(resolve_requests[0].requested_agent_id, Some(agent()));
+    assert_eq!(resolve_requests[0].requested_project_id, Some(project()));
+}
+
+#[tokio::test]
 async fn unpaired_external_actor_returns_binding_required_before_message_or_turn_submission() {
     let services = InMemoryConversationServices::default();
     let coordinator = Arc::new(RecordingTurnCoordinator::default());
@@ -2757,6 +2791,80 @@ impl ConversationBindingService for DriftBindingService {
         _request: ValidateReplyTargetRequest,
     ) -> Result<ReplyTargetBinding, InboundTurnError> {
         unimplemented!("not used by inbound facade tests")
+    }
+}
+
+#[derive(Clone)]
+struct UntrustedOnlyBindingService {
+    inner: InMemoryConversationServices,
+    resolve_requests: Arc<Mutex<Vec<ironclaw_conversations::ResolveConversationRequest>>>,
+    untrusted_calls: Arc<Mutex<usize>>,
+    trusted_calls: Arc<Mutex<usize>>,
+}
+
+impl UntrustedOnlyBindingService {
+    fn new(inner: InMemoryConversationServices) -> Self {
+        Self {
+            inner,
+            resolve_requests: Arc::new(Mutex::new(Vec::new())),
+            untrusted_calls: Arc::new(Mutex::new(0)),
+            trusted_calls: Arc::new(Mutex::new(0)),
+        }
+    }
+
+    fn untrusted_calls(&self) -> usize {
+        *self.untrusted_calls.lock().unwrap()
+    }
+
+    fn trusted_calls(&self) -> usize {
+        *self.trusted_calls.lock().unwrap()
+    }
+
+    fn resolve_requests(&self) -> Vec<ironclaw_conversations::ResolveConversationRequest> {
+        self.resolve_requests.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl ConversationBindingService for UntrustedOnlyBindingService {
+    async fn resolve_or_create_binding(
+        &self,
+        request: ironclaw_conversations::ResolveConversationRequest,
+    ) -> Result<ConversationBindingResolution, InboundTurnError> {
+        *self.untrusted_calls.lock().unwrap() += 1;
+        self.resolve_requests.lock().unwrap().push(request.clone());
+        self.inner.resolve_or_create_binding(request).await
+    }
+
+    async fn resolve_or_create_binding_with_trusted_scope(
+        &self,
+        _request: ironclaw_conversations::ResolveConversationRequest,
+        _trusted_agent_id: Option<AgentId>,
+        _trusted_project_id: Option<ProjectId>,
+    ) -> Result<ConversationBindingResolution, InboundTurnError> {
+        *self.trusted_calls.lock().unwrap() += 1;
+        panic!("untrusted inbound must not call trusted resolver path")
+    }
+
+    async fn lookup_binding(
+        &self,
+        request: ironclaw_conversations::ResolveConversationRequest,
+    ) -> Result<ConversationBindingResolution, InboundTurnError> {
+        self.inner.lookup_binding(request).await
+    }
+
+    async fn link_conversation_to_thread(
+        &self,
+        request: LinkConversationRequest,
+    ) -> Result<LinkedConversationBinding, InboundTurnError> {
+        self.inner.link_conversation_to_thread(request).await
+    }
+
+    async fn validate_reply_target(
+        &self,
+        request: ValidateReplyTargetRequest,
+    ) -> Result<ReplyTargetBinding, InboundTurnError> {
+        self.inner.validate_reply_target(request).await
     }
 }
 

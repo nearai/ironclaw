@@ -109,8 +109,8 @@ async fn mcp_runtime_requires_host_mediated_egress_for_http_transports() {
     assert!(client.requests.lock().unwrap().is_empty());
 }
 
-#[test]
-fn mcp_host_http_adapter_returns_sanitized_shared_egress_errors() {
+#[tokio::test]
+async fn mcp_host_http_adapter_returns_sanitized_shared_egress_errors() {
     let adapter = McpRuntimeHttpAdapter::new(Arc::new(SecretEchoRuntimeEgress));
 
     let error = adapter
@@ -126,12 +126,37 @@ fn mcp_host_http_adapter_returns_sanitized_shared_egress_errors() {
             response_body_limit: Some(4096),
             timeout_ms: Some(1000),
         })
+        .await
         .expect_err("MCP HTTP adapter errors should be sanitized before runtime visibility");
 
     let rendered = error.to_string();
     assert!(rendered.contains("network_error"));
     assert!(!rendered.contains("sk-test-secret"));
     assert!(!rendered.contains("10.0.0.7"));
+}
+
+#[tokio::test]
+async fn mcp_host_http_adapter_maps_panicking_runtime_egress_to_sanitized_error() {
+    let adapter = McpRuntimeHttpAdapter::new(Arc::new(PanickingRuntimeEgress));
+
+    let error = adapter
+        .request(McpHostHttpRequest {
+            scope: sample_scope(),
+            capability_id: CapabilityId::new("github-mcp.search").unwrap(),
+            method: NetworkMethod::Get,
+            url: "https://mcp.example.test/mcp".to_string(),
+            headers: vec![],
+            body: vec![],
+            network_policy: mcp_http_policy(),
+            credential_injections: vec![],
+            response_body_limit: Some(4096),
+            timeout_ms: Some(1000),
+        })
+        .await
+        .expect_err("runtime egress panics should be contained at the MCP host boundary");
+
+    let rendered = error.to_string();
+    assert!(rendered.contains("runtime_http_egress_panicked"));
 }
 
 #[tokio::test]
@@ -238,13 +263,20 @@ async fn concrete_mcp_http_client_routes_json_rpc_through_shared_egress() {
             .iter()
             .all(|call| call.url == "https://mcp.example.test/mcp")
     );
+    assert_eq!(
+        planner_calls
+            .iter()
+            .map(|call| call.json_rpc_method.as_str())
+            .collect::<Vec<_>>(),
+        vec!["tools/call", "initialize", "notifications/initialized"]
+    );
+    assert_eq!(planner_calls[0].json_rpc_id, json_rpc_id(&requests[2].body));
 }
 
 #[tokio::test]
 async fn concrete_mcp_http_client_sends_credentials_only_for_tool_call_exchange() {
     let scope = sample_scope();
     let mut plan = host_http_plan();
-    let staged_obligation = plan.credential_injections[0].clone();
     let secret_store_lease = RuntimeCredentialInjection {
         handle: SecretHandle::new("legacy-token").unwrap(),
         source: RuntimeCredentialSource::SecretStoreLease,
@@ -254,13 +286,37 @@ async fn concrete_mcp_http_client_sends_credentials_only_for_tool_call_exchange(
         },
         required: true,
     };
-    plan.credential_injections = vec![secret_store_lease, staged_obligation.clone()];
+    plan.credential_injections = vec![secret_store_lease];
     let egress = RecordingRuntimeEgress::json_rpc();
+    let planner = RecordingEgressPlanner::new(plan.clone());
     let client = McpHostHttpClient::new(
         McpRuntimeHttpAdapter::new(Arc::new(egress.clone())),
-        RecordingEgressPlanner::new(plan.clone()),
+        planner.clone(),
     );
 
+    let error = client
+        .call_tool(McpClientRequest {
+            provider: ExtensionId::new("github-mcp").unwrap(),
+            capability_id: CapabilityId::new("github-mcp.search").unwrap(),
+            scope: scope.clone(),
+            transport: "http".to_string(),
+            command: None,
+            args: vec![],
+            url: Some("https://mcp.example.test/mcp".to_string()),
+            input: json!({"query": "ironclaw"}),
+            max_output_bytes: 4096,
+        })
+        .await
+        .expect_err("direct secret-store leases must fail before MCP transport");
+
+    assert_eq!(error, "request_denied");
+    assert!(
+        egress.requests().is_empty(),
+        "direct leases must be rejected before initialize or tools/call transport"
+    );
+    assert_eq!(planner.calls().len(), 1);
+
+    planner.set_plan(host_http_plan());
     client
         .call_tool(McpClientRequest {
             provider: ExtensionId::new("github-mcp").unwrap(),
@@ -274,23 +330,23 @@ async fn concrete_mcp_http_client_sends_credentials_only_for_tool_call_exchange(
             max_output_bytes: 4096,
         })
         .await
-        .unwrap();
+        .expect("failed direct-lease preflight must not poison later MCP session state");
 
     let requests = egress.requests();
-    assert_eq!(requests.len(), 3);
-    assert!(
-        requests[0].credential_injections.is_empty(),
-        "initialize handshake must not receive credential injections"
-    );
-    assert!(
-        requests[1].credential_injections.is_empty(),
-        "initialized notification must not receive credential injections"
-    );
     assert_eq!(
-        requests[2].credential_injections,
-        vec![staged_obligation],
-        "MCP tools/call must only receive credentials staged by satisfied obligations"
+        requests.len(),
+        3,
+        "legitimate call should perform initialize, initialized, tools/call after failed preflight"
     );
+    assert_eq!(json_rpc_method(&requests[0].body), "initialize");
+    assert!(
+        requests[0]
+            .headers
+            .iter()
+            .all(|(name, _)| !name.eq_ignore_ascii_case("Mcp-Session-Id")),
+        "failed preflight must not leave a stale session id for the next initialize"
+    );
+    assert_eq!(planner.calls().len(), 4);
 }
 
 #[tokio::test]
@@ -654,7 +710,7 @@ async fn mcp_runtime_denies_budget_before_adapter_call() {
         .set_limit(
             account.clone(),
             ResourceLimits {
-                max_concurrency_slots: Some(0),
+                max_output_bytes: Some(1),
                 ..ResourceLimits::default()
             },
         )
@@ -668,7 +724,7 @@ async fn mcp_runtime_denies_budget_before_adapter_call() {
                 capability_id: &CapabilityId::new("github-mcp.search").unwrap(),
                 scope,
                 estimate: ResourceEstimate {
-                    concurrency_slots: Some(1),
+                    output_bytes: Some(10_000),
                     ..ResourceEstimate::default()
                 },
                 resource_reservation: None,
@@ -1009,8 +1065,9 @@ impl RecordingRuntimeEgress {
     }
 }
 
+#[async_trait::async_trait]
 impl RuntimeHttpEgress for RecordingRuntimeEgress {
-    fn execute(
+    async fn execute(
         &self,
         request: RuntimeHttpEgressRequest,
     ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
@@ -1018,7 +1075,7 @@ impl RuntimeHttpEgress for RecordingRuntimeEgress {
         self.requests.lock().unwrap().push(request.clone());
         match method.as_str() {
             "initialize" => Ok(runtime_json_response(
-                Some(1),
+                json_rpc_id(&request.body),
                 json!({
                     "protocolVersion": "2024-11-05",
                     "capabilities": {"tools": {"listChanged": false}},
@@ -1059,24 +1116,30 @@ struct RecordedPlanCall {
     scope: ResourceScope,
     method: NetworkMethod,
     url: String,
+    json_rpc_method: String,
+    json_rpc_id: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
 struct RecordingEgressPlanner {
-    plan: McpHostHttpEgressPlan,
+    plan: Arc<Mutex<McpHostHttpEgressPlan>>,
     calls: Arc<Mutex<Vec<RecordedPlanCall>>>,
 }
 
 impl RecordingEgressPlanner {
     fn new(plan: McpHostHttpEgressPlan) -> Self {
         Self {
-            plan,
+            plan: Arc::new(Mutex::new(plan)),
             calls: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
     fn calls(&self) -> Vec<RecordedPlanCall> {
         self.calls.lock().unwrap().clone()
+    }
+
+    fn set_plan(&self, plan: McpHostHttpEgressPlan) {
+        *self.plan.lock().unwrap() = plan;
     }
 }
 
@@ -1086,8 +1149,10 @@ impl McpHostHttpEgressPlanner for RecordingEgressPlanner {
             scope: request.scope.clone(),
             method: request.method,
             url: request.url.to_string(),
+            json_rpc_method: json_rpc_method(request.body),
+            json_rpc_id: json_rpc_id(request.body),
         });
-        self.plan.clone()
+        self.plan.lock().unwrap().clone()
     }
 }
 
@@ -1189,8 +1254,9 @@ impl ScopedSessionRuntimeEgress {
     }
 }
 
+#[async_trait::async_trait]
 impl RuntimeHttpEgress for ScopedSessionRuntimeEgress {
-    fn execute(
+    async fn execute(
         &self,
         request: RuntimeHttpEgressRequest,
     ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
@@ -1231,8 +1297,9 @@ impl RuntimeHttpEgress for ScopedSessionRuntimeEgress {
 #[derive(Debug)]
 struct InvalidSessionRuntimeEgress;
 
+#[async_trait::async_trait]
 impl RuntimeHttpEgress for InvalidSessionRuntimeEgress {
-    fn execute(
+    async fn execute(
         &self,
         request: RuntimeHttpEgressRequest,
     ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
@@ -1255,8 +1322,9 @@ impl RuntimeHttpEgress for InvalidSessionRuntimeEgress {
 #[derive(Debug)]
 struct MissingIdRuntimeEgress;
 
+#[async_trait::async_trait]
 impl RuntimeHttpEgress for MissingIdRuntimeEgress {
-    fn execute(
+    async fn execute(
         &self,
         request: RuntimeHttpEgressRequest,
     ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
@@ -1308,8 +1376,9 @@ impl ErrorSessionRuntimeEgress {
     }
 }
 
+#[async_trait::async_trait]
 impl RuntimeHttpEgress for ErrorSessionRuntimeEgress {
-    fn execute(
+    async fn execute(
         &self,
         request: RuntimeHttpEgressRequest,
     ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
@@ -1365,8 +1434,9 @@ impl RuntimeHttpEgress for ErrorSessionRuntimeEgress {
 #[derive(Debug)]
 struct SecretEchoRuntimeEgress;
 
+#[async_trait::async_trait]
 impl RuntimeHttpEgress for SecretEchoRuntimeEgress {
-    fn execute(
+    async fn execute(
         &self,
         _request: RuntimeHttpEgressRequest,
     ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
@@ -1375,6 +1445,19 @@ impl RuntimeHttpEgress for SecretEchoRuntimeEgress {
             request_bytes: 0,
             response_bytes: 0,
         })
+    }
+}
+
+#[derive(Debug)]
+struct PanickingRuntimeEgress;
+
+#[async_trait]
+impl RuntimeHttpEgress for PanickingRuntimeEgress {
+    async fn execute(
+        &self,
+        _request: RuntimeHttpEgressRequest,
+    ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
+        panic!("runtime HTTP egress should not unwind through MCP host");
     }
 }
 
@@ -1532,7 +1615,13 @@ transport = "stdio"
 command = "github-mcp"
 args = ["--stdio"]
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "github-mcp.search"
 description = "Search GitHub"
 effects = ["network", "dispatch_capability"]
@@ -1555,7 +1644,13 @@ runner = "sandboxed_process"
 command = "script-echo"
 args = ["--json"]
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "script.echo"
 description = "Echo text"
 effects = ["dispatch_capability"]

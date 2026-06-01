@@ -15,9 +15,10 @@ mod skill_url_install;
 mod spawn_subagent;
 mod time;
 
-use std::{sync::Arc, time::Instant};
+use std::{future::Future, panic::AssertUnwindSafe, sync::Arc, time::Instant};
 
 use async_trait::async_trait;
+use futures_util::FutureExt as _;
 use ironclaw_extensions::{
     CapabilityManifest, CapabilityVisibility, ExtensionError, ExtensionManifest, ExtensionPackage,
     ExtensionRuntime, MANIFEST_SCHEMA_VERSION, ManifestSource,
@@ -28,7 +29,8 @@ use ironclaw_first_party_extensions::coding::{
 use ironclaw_host_api::{
     CapabilityId, CapabilityProfileSchemaRef, EffectKind, ExtensionId, HostApiError,
     PermissionMode, RequestedTrustClass, ResourceCeiling, ResourceEstimate, ResourceProfile,
-    ResourceUsage, RuntimeDispatchErrorKind, TrustClass, VirtualPath,
+    ResourceUsage, RuntimeDispatchErrorKind, RuntimeHttpEgressError, RuntimeHttpEgressResponse,
+    TrustClass, VirtualPath,
 };
 
 use crate::{
@@ -419,6 +421,21 @@ fn resource_profile() -> Option<ResourceProfile> {
 
 fn input_error() -> FirstPartyCapabilityError {
     FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::InputEncode)
+}
+
+async fn run_egress_catching_panic<F, P>(
+    future: F,
+    panic_message: &'static str,
+    on_panic: P,
+) -> Result<Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError>, FirstPartyCapabilityError>
+where
+    F: Future<Output = Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError>>,
+    P: FnOnce() -> FirstPartyCapabilityError,
+{
+    AssertUnwindSafe(future).catch_unwind().await.map_err(|_| {
+        tracing::error!("{panic_message}");
+        on_panic()
+    })
 }
 
 fn operation_error() -> FirstPartyCapabilityError {

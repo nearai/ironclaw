@@ -27,6 +27,7 @@ pub(crate) mod gate;
 mod model;
 pub mod progress;
 pub(crate) mod recovery;
+mod reply_admission;
 mod stop;
 
 pub(crate) use batch::{
@@ -35,7 +36,7 @@ pub(crate) use batch::{
 pub(crate) use budget::{BudgetStrategy, DefaultBudgetStrategy};
 pub(crate) use capability::{CapabilityFilter, CapabilityStrategy, DefaultCapabilityStrategy};
 pub(crate) use compaction::{CompactionDecision, CompactionStrategy, DefaultCompactionStrategy};
-pub(crate) use context::{ContextStrategy, DefaultContextStrategy};
+pub(crate) use context::{ContextPlan, ContextStrategy, DefaultContextStrategy};
 pub(crate) use drain::{DefaultInputDrainStrategy, InputDrainStrategy};
 pub(crate) use gate::{
     DefaultGateHandlingStrategy, GateHandlingStrategy, GateKind, GateOutcome, GateSummary,
@@ -45,6 +46,9 @@ pub(crate) use recovery::{
     BackoffDelayMs, CapabilityErrorClass, CapabilityErrorSummary, DefaultRecoveryStrategy,
     ModelErrorClass, ModelErrorSummary, RecoveryOutcome, RecoveryStrategy, RetryAlteration,
     RetryScope, SanitizedStrategySummary,
+};
+pub(crate) use reply_admission::{
+    DefaultReplyAdmissionStrategy, ReplyAdmissionOutcome, ReplyAdmissionStrategy,
 };
 pub(crate) use stop::{
     DefaultStopConditionStrategy, StopConditionStrategy, StopKind, StopOutcome, TurnEndKind,

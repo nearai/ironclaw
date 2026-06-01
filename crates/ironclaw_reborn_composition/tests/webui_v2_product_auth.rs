@@ -11,9 +11,12 @@ use axum::extract::ConnectInfo;
 use axum::http::{HeaderValue, Method, Request, StatusCode, header};
 use chrono::{Duration as ChronoDuration, Utc};
 use ironclaw_auth::{
-    AuthContinuationEvent, AuthProductError, AuthProviderClient, InMemoryAuthProductServices,
-    OAuthProviderCallbackRequest, OAuthProviderExchange, OAuthProviderExchangeContext,
-    OAuthProviderRefresh, OAuthProviderRefreshRequest,
+    AuthChallenge, AuthContinuationEvent, AuthFlowManager, AuthInteractionId,
+    AuthInteractionService, AuthProductError, AuthProductScope, AuthProviderClient,
+    CredentialAccountService, CredentialSetupService, InMemoryAuthProductServices,
+    ManualTokenSetupRequest, OAuthProviderCallbackRequest, OAuthProviderExchange,
+    OAuthProviderExchangeContext, OAuthProviderRefresh, OAuthProviderRefreshRequest,
+    SecretCleanupService, SecretSubmitRequest, SecretSubmitResult,
 };
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
 use ironclaw_product_workflow::{
@@ -87,6 +90,87 @@ impl AuthProviderClient for FailingProviderClient {
         _request: OAuthProviderRefreshRequest,
     ) -> Result<OAuthProviderRefresh, AuthProductError> {
         Err(AuthProductError::RefreshFailed)
+    }
+}
+
+#[derive(Debug, Default)]
+struct SubmitFailingManualTokenInteractions {
+    interaction_id: AuthInteractionId,
+    abandoned: Mutex<Vec<(AuthProductScope, AuthInteractionId)>>,
+}
+
+impl SubmitFailingManualTokenInteractions {
+    fn abandoned(&self) -> Vec<(AuthProductScope, AuthInteractionId)> {
+        self.abandoned
+            .lock()
+            .expect("abandoned interactions lock")
+            .clone()
+    }
+}
+
+#[async_trait]
+impl AuthInteractionService for SubmitFailingManualTokenInteractions {
+    async fn request_secret_input(
+        &self,
+        request: ManualTokenSetupRequest,
+    ) -> Result<AuthChallenge, AuthProductError> {
+        Ok(AuthChallenge::ManualTokenRequired {
+            interaction_id: self.interaction_id,
+            provider: request.provider,
+            label: request.label,
+            expires_at: request.expires_at,
+        })
+    }
+
+    async fn submit_manual_token(
+        &self,
+        _scope: &AuthProductScope,
+        _request: SecretSubmitRequest,
+    ) -> Result<SecretSubmitResult, AuthProductError> {
+        Err(AuthProductError::InvalidRequest {
+            reason: "provider rejected token".to_string(),
+        })
+    }
+
+    async fn abandon_manual_token(
+        &self,
+        scope: &AuthProductScope,
+        interaction_id: AuthInteractionId,
+    ) -> Result<bool, AuthProductError> {
+        self.abandoned
+            .lock()
+            .expect("abandoned interactions lock")
+            .push((scope.clone(), interaction_id));
+        Ok(true)
+    }
+}
+
+#[derive(Debug)]
+struct SetupFailingManualTokenInteractions;
+
+#[async_trait]
+impl AuthInteractionService for SetupFailingManualTokenInteractions {
+    async fn request_secret_input(
+        &self,
+        _request: ManualTokenSetupRequest,
+    ) -> Result<AuthChallenge, AuthProductError> {
+        Err(AuthProductError::BackendUnavailable)
+    }
+
+    async fn submit_manual_token(
+        &self,
+        _scope: &AuthProductScope,
+        _request: SecretSubmitRequest,
+    ) -> Result<SecretSubmitResult, AuthProductError> {
+        unreachable!("setup-failure test does not submit manual tokens")
+    }
+
+    async fn abandon_manual_token(
+        &self,
+        _scope: &AuthProductScope,
+        _interaction_id: AuthInteractionId,
+    ) -> Result<bool, AuthProductError> {
+        unreachable!("setup-failure test does not abandon manual tokens")
     }
 }
 
@@ -209,6 +293,27 @@ fn build_app_with_product_auth_service(
     webui_v2_app(bundle, config).expect("webui v2 app")
 }
 
+fn product_auth_with_interaction_service(
+    interaction_service: Arc<dyn AuthInteractionService>,
+) -> Arc<RebornProductAuthServices> {
+    let shared = Arc::new(InMemoryAuthProductServices::new());
+    let flow_manager: Arc<dyn AuthFlowManager> = shared.clone();
+    let credential_setup_service: Arc<dyn CredentialSetupService> = shared.clone();
+    let credential_account_service: Arc<dyn CredentialAccountService> = shared.clone();
+    let provider_client: Arc<dyn AuthProviderClient> = shared.clone();
+    let cleanup_service: Arc<dyn SecretCleanupService> = shared;
+
+    Arc::new(RebornProductAuthServices::new(
+        flow_manager,
+        interaction_service,
+        credential_setup_service,
+        credential_account_service,
+        provider_client,
+        cleanup_service,
+        Arc::new(RecordingAuthDispatcher::default()),
+    ))
+}
+
 #[derive(Debug)]
 struct StartedFlow {
     flow_id: String,
@@ -262,6 +367,37 @@ async fn post_oauth_start(app: &axum::Router, body: serde_json::Value) -> axum::
         )
         .await
         .expect("oneshot")
+}
+
+async fn post_manual_token_submit(
+    app: &axum::Router,
+    body: serde_json::Value,
+) -> axum::response::Response {
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/reborn/product-auth/manual-token/submit")
+                .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot")
+}
+
+fn manual_token_body(token: &str, extra_fields: serde_json::Value) -> serde_json::Value {
+    let mut body = json!({
+        "provider": "github",
+        "account_label": "work github",
+        "token": token,
+        "run_id": "11111111-1111-1111-1111-111111111111",
+        "gate_ref": "gate:auth-github",
+        "thread_id": "thread-auth-1"
+    });
+    merge_json_object(&mut body, extra_fields);
+    body
 }
 
 fn merge_json_object(target: &mut serde_json::Value, source: serde_json::Value) {
@@ -354,6 +490,215 @@ async fn product_auth_oauth_start_requires_bearer_auth() {
         .expect("oneshot");
 
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn product_auth_manual_token_submit_requires_bearer_auth() {
+    let (app, _) = build_app_with_product_auth();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/reborn/product-auth/manual-token/submit")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    manual_token_body("ghp_secret", json!({})).to_string(),
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn product_auth_manual_token_submit_returns_credential_ref_without_exposing_pat() {
+    let (app, dispatcher) = build_app_with_product_auth();
+    let raw_pat = "ghp_super_secret_manual_pat";
+
+    let response = post_manual_token_submit(&app, manual_token_body(raw_pat, json!({}))).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_body_string(response).await;
+    assert!(
+        !body.contains(raw_pat),
+        "manual token response must not expose the raw PAT: {body}"
+    );
+
+    let json: serde_json::Value = serde_json::from_str(&body).expect("manual token json");
+    assert!(json["credential_ref"].as_str().is_some());
+    assert_eq!(json["status"].as_str(), Some("configured"));
+    assert_eq!(
+        json["continuation"]["type"].as_str(),
+        Some("turn_gate_resume")
+    );
+    assert_eq!(
+        json["continuation"]["gate_ref"].as_str(),
+        Some("gate:auth-github")
+    );
+    assert_eq!(
+        json["continuation"]["turn_run_ref"].as_str(),
+        Some("11111111-1111-1111-1111-111111111111")
+    );
+    assert!(
+        dispatcher.events().is_empty(),
+        "manual token submit should return credential_ref; resolve_gate owns turn resumption"
+    );
+}
+
+#[tokio::test]
+async fn product_auth_manual_token_submit_rejects_invalid_secret_without_echoing_it() {
+    let (app, _) = build_app_with_product_auth();
+    let raw_pat = " padded-ghp-secret ";
+
+    let response = post_manual_token_submit(&app, manual_token_body(raw_pat, json!({}))).await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = read_body_string(response).await;
+    assert!(!body.contains(raw_pat));
+    assert!(body.contains("invalid_request"));
+}
+
+#[tokio::test]
+async fn product_auth_manual_token_submit_abandons_interaction_on_submit_failure() {
+    let interactions = Arc::new(SubmitFailingManualTokenInteractions::default());
+    let expected_interaction_id = interactions.interaction_id;
+    let app = build_app_with_product_auth_service(product_auth_with_interaction_service(
+        interactions.clone(),
+    ));
+
+    let response = post_manual_token_submit(
+        &app,
+        manual_token_body(
+            "ghp_submit_fails_after_interaction",
+            json!({ "thread_id": "thread-cleanup-1" }),
+        ),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = read_body_string(response).await;
+    assert!(!body.contains("ghp_submit_fails_after_interaction"));
+    assert!(!body.contains("credential_ref"));
+    assert!(!body.contains("interaction_id"));
+
+    let abandoned = interactions.abandoned();
+    assert_eq!(abandoned.len(), 1);
+    assert_eq!(abandoned[0].1, expected_interaction_id);
+    assert_eq!(
+        abandoned[0].0.resource.tenant_id,
+        TenantId::new(TENANT).unwrap()
+    );
+    assert_eq!(abandoned[0].0.resource.user_id, UserId::new(USER).unwrap());
+    assert_eq!(
+        abandoned[0]
+            .0
+            .resource
+            .thread_id
+            .as_ref()
+            .map(|id| id.as_str()),
+        Some("thread-cleanup-1")
+    );
+}
+
+#[tokio::test]
+async fn product_auth_manual_token_submit_handles_setup_service_error() {
+    let app = build_app_with_product_auth_service(product_auth_with_interaction_service(Arc::new(
+        SetupFailingManualTokenInteractions,
+    )));
+    let raw_pat = "ghp_setup_fails_before_submit";
+
+    let response = post_manual_token_submit(&app, manual_token_body(raw_pat, json!({}))).await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = read_body_string(response).await;
+    assert!(body.contains("\"code\":\"backend_unavailable\""));
+    assert!(!body.contains(raw_pat));
+    assert!(!body.contains("credential_ref"));
+    assert!(!body.contains("interaction_id"));
+}
+
+#[tokio::test]
+async fn product_auth_manual_token_submit_oversized_body_rejects_before_auth() {
+    let (app, _) = build_app_with_product_auth();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/reborn/product-auth/manual-token/submit")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from("x".repeat(17 * 1024)))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+}
+
+#[tokio::test]
+async fn product_auth_manual_token_submit_has_per_caller_rate_limit() {
+    let (app, _) = build_app_with_product_auth();
+
+    for index in 0..20 {
+        let response = post_manual_token_submit(
+            &app,
+            manual_token_body(&format!("ghp_secret_{index}"), json!({})),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    let response =
+        post_manual_token_submit(&app, manual_token_body("ghp_secret_over", json!({}))).await;
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+}
+
+#[tokio::test]
+async fn product_auth_manual_token_submit_invalid_fields_are_sanitized() {
+    let (app, _) = build_app_with_product_auth();
+
+    let invalid_requests = [
+        manual_token_body("ghp_invalid_provider_secret", json!({ "provider": "" })),
+        manual_token_body("ghp_invalid_label_secret", json!({ "account_label": "" })),
+        manual_token_body("ghp_invalid_run_secret", json!({ "run_id": "" })),
+        manual_token_body("ghp_invalid_gate_secret", json!({ "gate_ref": "" })),
+    ];
+
+    for body in invalid_requests {
+        let response = post_manual_token_submit(&app, body).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = read_body_string(response).await;
+        assert!(body.contains("\"code\":\"invalid_request\""));
+        assert!(!body.contains("ghp_invalid_provider_secret"));
+        assert!(!body.contains("ghp_invalid_label_secret"));
+        assert!(!body.contains("ghp_invalid_run_secret"));
+        assert!(!body.contains("ghp_invalid_gate_secret"));
+    }
+}
+
+#[tokio::test]
+async fn product_auth_manual_token_submit_invalid_scope_fields_are_sanitized() {
+    let (app, _) = build_app_with_product_auth();
+
+    let invalid_requests = [
+        manual_token_body(
+            "ghp_invalid_thread_secret",
+            json!({ "thread_id": "bad/thread" }),
+        ),
+        manual_token_body(
+            "ghp_invalid_session_secret",
+            json!({ "session_id": "bad\u{0}session" }),
+        ),
+    ];
+
+    for body in invalid_requests {
+        let response = post_manual_token_submit(&app, body).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = read_body_string(response).await;
+        assert!(body.contains("\"code\":\"invalid_request\""));
+        assert!(!body.contains("ghp_invalid_thread_secret"));
+        assert!(!body.contains("ghp_invalid_session_secret"));
+        assert!(!body.contains("credential_ref"));
+    }
 }
 
 #[tokio::test]

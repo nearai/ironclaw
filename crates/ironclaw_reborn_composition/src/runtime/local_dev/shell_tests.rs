@@ -101,6 +101,7 @@ async fn local_dev_yolo_shell_translates_workspace_workdir_without_scoped_mounts
         input_resolver,
         result_writer,
         milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
+        skill_activation_source: None,
     };
     let run_context = run_context("shell-workdir").await;
     let port = factory

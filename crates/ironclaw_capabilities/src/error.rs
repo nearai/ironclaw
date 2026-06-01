@@ -1,6 +1,7 @@
 use ironclaw_authorization::CapabilityLeaseError;
 use ironclaw_host_api::{
     CapabilityId, DenyReason, DispatchError, DispatchFailureKind, HostApiError, Obligation,
+    SecretHandle,
 };
 use ironclaw_processes::ProcessError;
 
@@ -38,7 +39,10 @@ pub enum CapabilityInvocationError {
     #[error("capability {capability} invocation requires approval")]
     AuthorizationRequiresApproval { capability: CapabilityId },
     #[error("capability {capability} invocation requires authentication")]
-    AuthorizationRequiresAuth { capability: CapabilityId },
+    AuthorizationRequiresAuth {
+        capability: CapabilityId,
+        required_secrets: Vec<SecretHandle>,
+    },
     #[error("capability {capability} invocation fingerprint failed: {source}")]
     InvocationFingerprint {
         capability: CapabilityId,
@@ -109,8 +113,17 @@ impl From<ProcessError> for CapabilityInvocationError {
 
 impl From<DispatchError> for CapabilityInvocationError {
     fn from(error: DispatchError) -> Self {
-        Self::Dispatch {
-            kind: dispatch_error_kind(&error),
+        match error {
+            DispatchError::AuthRequired {
+                capability,
+                required_secrets,
+            } => Self::AuthorizationRequiresAuth {
+                capability,
+                required_secrets,
+            },
+            other => Self::Dispatch {
+                kind: dispatch_error_kind(&other),
+            },
         }
     }
 }
@@ -122,7 +135,7 @@ fn dispatch_error_kind(error: &DispatchError) -> DispatchFailureKind {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_host_api::{ExtensionId, RuntimeDispatchErrorKind, RuntimeKind};
+    use ironclaw_host_api::{ExtensionId, RuntimeDispatchErrorKind, RuntimeKind, SecretHandle};
 
     fn cap() -> CapabilityId {
         CapabilityId::new("test.cap").unwrap()
@@ -231,6 +244,35 @@ mod tests {
                 )
             }
             other => panic!("expected Dispatch variant, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn from_dispatch_auth_required_round_trips_required_secrets() {
+        let cases: &[&[&str]] = &[
+            &[],
+            &["google-access-token"],
+            &["google-access-token", "google-refresh-token"],
+        ];
+        for handles in cases {
+            let secrets: Vec<SecretHandle> = handles
+                .iter()
+                .map(|h| SecretHandle::new(*h).unwrap())
+                .collect();
+            let err = CapabilityInvocationError::from(DispatchError::AuthRequired {
+                capability: cap(),
+                required_secrets: secrets.clone(),
+            });
+            match err {
+                CapabilityInvocationError::AuthorizationRequiresAuth {
+                    capability,
+                    required_secrets,
+                } => {
+                    assert_eq!(capability, cap(), "handles: {handles:?}");
+                    assert_eq!(required_secrets, secrets, "handles: {handles:?}");
+                }
+                other => panic!("expected AuthorizationRequiresAuth, got {other:?}"),
+            }
         }
     }
 }

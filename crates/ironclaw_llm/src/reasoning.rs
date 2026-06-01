@@ -5,6 +5,8 @@ use std::sync::{Arc, LazyLock};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
+use ironclaw_common::provider_transcript::strip_provider_transcript_artifact_lines;
+
 use crate::error::LlmError;
 
 use crate::{
@@ -1674,7 +1676,9 @@ pub fn recover_tool_calls_from_content(
         }
     }
 
-    // Bracket format from flatten_tool_messages:
+    // Legacy bracket format previously emitted by provider fallback
+    // flattening. Keep defensive recovery while old transcripts and weak
+    // model echoes still exist; new code must not generate this format.
     // [Called tool `name` with arguments: {...}]
     {
         let mut remaining = content;
@@ -1881,8 +1885,10 @@ pub fn clean_response(text: &str) -> String {
         result = strip_pipe_tag(&result, tag);
     }
 
-    // 6b. Strip bracket-format inline tool calls: [Called tool `name` with arguments: {...}]
+    // 6b. Strip legacy bracket-format inline tool calls:
+    // [Called tool `name` with arguments: {...}]
     result = strip_bracket_tool_calls(&result);
+    result = strip_provider_transcript_artifact_lines(&result);
 
     // 6c. Strip markdown-fenced tool calls: ```tool_call\n{json}\n```
     // These pass cleanly through the XML/pipe strippers because they
@@ -1979,10 +1985,11 @@ fn strip_markdown_fence_block(text: &str, tag: &str) -> String {
     }
 }
 
-/// Strip bracket-format inline tool calls produced by `flatten_tool_messages`.
+/// Strip legacy bracket-format inline tool calls.
 ///
 /// Removes patterns like `[Called tool `name` with arguments: {...}]` from text
-/// so the user doesn't see raw tool call syntax when the model echoes it back.
+/// so old transcript artifacts or model echoes do not reach the user. New
+/// provider flattening code must not generate this format.
 fn strip_bracket_tool_calls(text: &str) -> String {
     let mut result = String::with_capacity(text.len());
     let mut remaining = text;
@@ -3093,6 +3100,24 @@ That's my plan."#;
         assert!(!cleaned.contains("[Called tool"));
         assert!(cleaned.contains("Let me fetch that."));
         assert!(cleaned.contains("Here are the results."));
+    }
+
+    #[test]
+    fn test_clean_response_strips_flattened_tool_history_lines() {
+        let input = "Done.\nPrevious tool event: demo__echo was invoked.\nPrevious tool result from demo__echo: hi\nTool result from demo__echo: hi";
+        assert_eq!(clean_response(input), "Done.");
+    }
+
+    #[test]
+    fn test_clean_response_strips_replay_only_flattened_tool_history_to_empty() {
+        let input = "Previous tool event: demo__echo was invoked.";
+        assert_eq!(clean_response(input), "");
+    }
+
+    #[test]
+    fn test_clean_response_strips_multiline_replay_only_flattened_tool_history_to_empty() {
+        let input = "Previous tool event: demo__echo was invoked.\nTool result from demo__echo: ok";
+        assert_eq!(clean_response(input), "");
     }
 
     // ---- merge_system_messages: duplicate system message regression (Bug #597) ----

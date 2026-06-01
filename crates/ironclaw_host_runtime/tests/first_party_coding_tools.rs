@@ -254,6 +254,29 @@ async fn builtin_coding_list_fails_when_visited_entry_budget_is_exceeded() {
     assert_eq!(error, RuntimeFailureKind::Resource);
 }
 
+#[tokio::test]
+async fn builtin_coding_glob_reports_visited_entry_budget_as_truncated_result() {
+    let temp = tempfile::tempdir().unwrap();
+    let (_filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_only());
+    let runtime = runtime_with_filesystem(ManySkippedEntriesFilesystem);
+
+    let output = invoke_with_context(
+        &runtime,
+        GLOB_CAPABILITY_ID,
+        json!({"path": "/workspace", "pattern": "*.txt"}),
+        execution_context_with_mounts(coding_capability_ids(), mounts),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(output["truncated"], json!(true));
+    assert_eq!(output["limit_reason"], json!("visited_entries"));
+    assert_eq!(output["visited_entries"], json!(50_000));
+    assert_eq!(output["max_visited_entries"], json!(50_000));
+    assert_eq!(output["count"], json!(0));
+    assert_eq!(output["files"], json!([]));
+}
+
 fn assert_aggregate_scan_limit(output: &Value) {
     assert_eq!(output["truncated"], json!(true));
     assert_eq!(output["limit_reason"], json!("aggregate_scan_bytes"));

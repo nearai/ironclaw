@@ -1520,7 +1520,13 @@ fn sanitized_reasoning_deltas(reasoning: Option<String>) -> Vec<String> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HostManagedModelErrorKind {
+    /// Caller-side misuse of the host model port (unknown tool, malformed request).
     InvalidRequest,
+    /// Provider/model output was structurally invalid for the active loop contract.
+    /// This is model-side bad output, not caller misuse — mapped to Unavailable so
+    /// loops can retry on transient provider anomalies.
+    #[serde(alias = "invalid_output")]
+    InvalidOutput,
     PolicyDenied,
     ConfigurationError,
     BudgetExceeded,
@@ -1564,6 +1570,21 @@ fn validate_thread_scope_for_run(
         return Err(AgentLoopHostError::new(
             AgentLoopHostErrorKind::ScopeMismatch,
             "thread scope does not match loop run scope",
+        ));
+    }
+    // The thread store keys threads by `owner_user_id` (via the MountView in
+    // `ThreadScope::to_resource_scope`), but that axis is absent from the
+    // on-disk thread path, so a wrong owner silently reads an empty subtree
+    // and surfaces as `UnknownThread`. When the run carries an authenticated
+    // actor and the thread scope declares an owner, require them to agree so
+    // the divergence fails loud here rather than at the storage read.
+    if let (Some(thread_owner), Some(actor)) =
+        (thread_scope.owner_user_id.as_ref(), run_context.actor())
+        && thread_owner != &actor.user_id
+    {
+        return Err(AgentLoopHostError::new(
+            AgentLoopHostErrorKind::ScopeMismatch,
+            "thread scope owner does not match the loop run actor",
         ));
     }
     Ok(())
@@ -1816,6 +1837,7 @@ fn model_gateway_error(error: HostManagedModelError) -> AgentLoopHostError {
 fn model_error_kind(kind: HostManagedModelErrorKind) -> AgentLoopHostErrorKind {
     match kind {
         HostManagedModelErrorKind::InvalidRequest => AgentLoopHostErrorKind::InvalidInvocation,
+        HostManagedModelErrorKind::InvalidOutput => AgentLoopHostErrorKind::Unavailable,
         HostManagedModelErrorKind::PolicyDenied => AgentLoopHostErrorKind::PolicyDenied,
         HostManagedModelErrorKind::ConfigurationError => AgentLoopHostErrorKind::Unavailable,
         HostManagedModelErrorKind::BudgetExceeded => AgentLoopHostErrorKind::BudgetExceeded,
@@ -1830,6 +1852,7 @@ fn model_error_kind(kind: HostManagedModelErrorKind) -> AgentLoopHostErrorKind {
 fn safe_model_summary(kind: HostManagedModelErrorKind) -> &'static str {
     match kind {
         HostManagedModelErrorKind::InvalidRequest => "model request is invalid",
+        HostManagedModelErrorKind::InvalidOutput => "model output was structurally invalid",
         HostManagedModelErrorKind::PolicyDenied => "model profile is not permitted",
         HostManagedModelErrorKind::ConfigurationError => "model route configuration is invalid",
         HostManagedModelErrorKind::BudgetExceeded => "model request exceeded its budget",
