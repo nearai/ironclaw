@@ -97,6 +97,23 @@ mod tests {
     }
 
     #[test]
+    fn sanitize_error_code_redacts_codes_with_digits() {
+        // The allow-set is lowercase ASCII + `_` only; digits are
+        // excluded. This locks that contract so a future maintainer
+        // broadening it to permit `error_123` does so deliberately, with
+        // a failing test forcing the decision rather than silently
+        // widening the log-injection surface.
+        assert_eq!(
+            sanitize_error_code("bad1code"),
+            "<redacted_invalid_error_code>"
+        );
+        assert_eq!(
+            sanitize_error_code("error_123"),
+            "<redacted_invalid_error_code>"
+        );
+    }
+
+    #[test]
     fn sanitize_error_code_redacts_oversized() {
         let oversized = "a".repeat(65);
         assert_eq!(
@@ -108,5 +125,51 @@ mod tests {
     #[test]
     fn sanitize_error_code_redacts_empty() {
         assert_eq!(sanitize_error_code(""), "<redacted_invalid_error_code>");
+    }
+
+    /// A response whose body is cut short mid-stream (the connection
+    /// drops before the advertised `Content-Length` is delivered) must
+    /// surface the `reqwest::Response::chunk` error, NOT silently return
+    /// the partial bytes as `Ok`. Every other test delivers a complete
+    /// body, so without this the chunk-read error arm of the streaming
+    /// loop is unexercised — a regression swallowing it into
+    /// `Ok(partial)` would pass them all.
+    #[tokio::test]
+    async fn read_capped_body_propagates_chunk_read_error() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let server = tokio::spawn(async move {
+            if let Ok((mut sock, _)) = listener.accept().await {
+                // Drain the request so the client's write completes.
+                let mut buf = [0u8; 1024];
+                let _ = sock.read(&mut buf).await;
+                // Advertise 1000 bytes (well under the cap, so the
+                // Content-Length early-bail does NOT fire) but send only
+                // 10, then drop the connection. The client reads the
+                // first chunk, then errors on the premature EOF.
+                let _ = sock
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\n\r\nonly-ten!!")
+                    .await;
+                let _ = sock.flush().await;
+                // Socket dropped here without the remaining 990 bytes.
+            }
+        });
+
+        let resp = reqwest::Client::new()
+            .get(format!("http://{addr}/"))
+            .send()
+            .await
+            .expect("send");
+        let result = read_capped_body(resp).await;
+        server.abort();
+
+        assert!(
+            result.is_err(),
+            "a body cut short mid-stream must surface as an error, not Ok(partial)",
+        );
     }
 }

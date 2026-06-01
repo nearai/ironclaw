@@ -353,6 +353,58 @@ async fn callback_success_mints_session_for_primary_verified_email() {
     assert_eq!(replay.status(), StatusCode::UNAUTHORIZED);
 }
 
+#[tokio::test]
+async fn callback_with_unverified_emails_mints_session_for_provider_sub() {
+    // When GitHub returns NO verified address, the provider falls back
+    // to the unverified profile email flagged `email_verified = false`.
+    // The whole point of that flag is that the session identity must NOT
+    // be the email — `EmailUserDirectory` (and any fail-closed
+    // production directory) must mint the session for the provider-sub
+    // (`github:<id>`) instead. This drives the full login→callback→
+    // exchange pipeline and asserts the resulting `user_id`, so a
+    // regression decoupling `email_verified` from the minted identity —
+    // invisible to the provider-level unit test — fails here.
+    let mut stub = StubGitHub::octocat();
+    stub.user_body = serde_json::json!({
+        "id": 90210,
+        "login": "octocat",
+        "name": "The Octocat",
+        "email": "octocat@example.com",
+    });
+    // Every address unverified — including the primary.
+    stub.emails = vec![
+        MockEmail {
+            email: "octocat@example.com",
+            verified: false,
+            primary: true,
+        },
+        MockEmail {
+            email: "alt@example.com",
+            verified: false,
+            primary: false,
+        },
+    ];
+    let (addr, _server) = spawn_stub_github(stub).await;
+    let store_inner: Arc<InMemorySessionStore> = Arc::new(InMemorySessionStore::new());
+    let session_store: Arc<dyn SessionStore> = store_inner.clone();
+    let router = build_router(vec![github_provider(addr)], session_store);
+
+    let landing = login_and_callback(&router).await;
+    assert!(landing.starts_with("/v2?login_ticket="), "got {landing}");
+    let ticket = ticket_from_landing(&landing);
+    let bearer = redeem_ticket(&router, &ticket).await;
+    let session = store_inner
+        .lookup(&bearer)
+        .await
+        .expect("lookup")
+        .expect("session present");
+    assert_eq!(
+        session.user_id.as_str(),
+        "github:90210",
+        "an unverified email must mint a provider-sub session, never an email identity",
+    );
+}
+
 // ─── callback failure ─────────────────────────────────────────────────
 
 #[tokio::test]
