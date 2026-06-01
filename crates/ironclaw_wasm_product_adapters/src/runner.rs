@@ -375,21 +375,45 @@ impl NativeProductAdapterRunner {
         )?;
         let envelope = ProductInboundEnvelope::from_trusted_parse(context, parsed)?;
         let workflow = Arc::clone(&self.workflow);
+        let workflow_timeout = self.config.workflow_timeout;
         tokio::spawn(async move {
             let _permit = permit;
-            match workflow.accept_inbound(envelope).await {
-                Ok(ack) if ack.retry_disposition() == InboundRetryDisposition::Retry => {
+            let mut workflow_task =
+                tokio::spawn(async move { workflow.accept_inbound(envelope).await });
+            match tokio::time::timeout(workflow_timeout, &mut workflow_task).await {
+                Ok(Ok(Ok(ack))) if ack.retry_disposition() == InboundRetryDisposition::Retry => {
                     tracing::warn!(
                         target = "ironclaw::product_adapter::runner",
                         "async webhook workflow dispatch requested retry after protocol ack"
                     );
                 }
-                Ok(_) => {}
-                Err(error) => {
+                Ok(Ok(Ok(_))) => {}
+                Ok(Ok(Err(error))) => {
                     tracing::warn!(
                         target = "ironclaw::product_adapter::runner",
                         error = %error,
                         "async webhook workflow dispatch failed after protocol ack"
+                    );
+                }
+                Ok(Err(join_error)) if join_error.is_panic() => {
+                    tracing::warn!(
+                        target = "ironclaw::product_adapter::runner",
+                        "async webhook workflow dispatch panicked after protocol ack"
+                    );
+                }
+                Ok(Err(error)) => {
+                    tracing::warn!(
+                        target = "ironclaw::product_adapter::runner",
+                        error = %error,
+                        "async webhook workflow dispatch task failed after protocol ack"
+                    );
+                }
+                Err(_) => {
+                    workflow_task.abort();
+                    tracing::warn!(
+                        target = "ironclaw::product_adapter::runner",
+                        timeout_ms = workflow_timeout.as_millis() as u64,
+                        "async webhook workflow dispatch timed out after protocol ack"
                     );
                 }
             }
@@ -894,6 +918,33 @@ mod tests {
             .await
             .expect_err("slow workflow should time out");
         assert!(matches!(err, RunnerError::WorkflowTimeout { .. }));
+    }
+
+    #[tokio::test]
+    async fn process_webhook_immediate_ack_times_out_async_dispatch_and_releases_admission() {
+        let runner = NativeProductAdapterRunner::with_config(
+            Arc::new(StaticAdapter::new(sample_parsed())),
+            Arc::new(PendingWorkflow),
+            shared_secret_auth(),
+            test_config(1, Duration::from_millis(5)),
+        );
+
+        let outcome = runner
+            .process_webhook_immediate_ack(&auth_headers(), b"{}")
+            .expect("first request should schedule async dispatch");
+        assert_eq!(outcome, WebhookProcessOutcome::AcceptedForAsyncDispatch);
+
+        let err = runner
+            .process_webhook_immediate_ack(&auth_headers(), b"{}")
+            .expect_err("second request should hit admission while async dispatch is pending");
+        assert_eq!(err, RunnerError::TooManyInFlight { max_in_flight: 1 });
+
+        tokio::time::sleep(Duration::from_millis(25)).await;
+
+        let outcome = runner
+            .process_webhook_immediate_ack(&auth_headers(), b"{}")
+            .expect("timed-out async dispatch should release admission");
+        assert_eq!(outcome, WebhookProcessOutcome::AcceptedForAsyncDispatch);
     }
 
     #[tokio::test]

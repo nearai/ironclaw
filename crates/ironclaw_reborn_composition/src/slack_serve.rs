@@ -148,8 +148,8 @@ fn runner_error_response(error: RunnerError) -> Response {
         }
         RunnerError::WorkflowTimeout { .. }
         | RunnerError::WorkflowJoinFailed
-        | RunnerError::WorkflowPanicked => StatusCode::SERVICE_UNAVAILABLE,
-        RunnerError::AdapterPanicked => StatusCode::BAD_GATEWAY,
+        | RunnerError::WorkflowPanicked
+        | RunnerError::AdapterPanicked => StatusCode::SERVICE_UNAVAILABLE,
         RunnerError::Adapter(_) => StatusCode::BAD_REQUEST,
     };
     tracing::debug!(
