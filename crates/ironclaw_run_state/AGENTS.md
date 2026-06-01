@@ -11,8 +11,12 @@
 
 ## What This Crate Owns
 
-- Run lifecycle and blocking-state contracts used by capability and approval flows.
+- Durable invocation state and approval request records used by capability and approval flows, currently:
+- Run lifecycle records: `RunStatus`, `RunRecord`, `RunStart`.
+- Approval request records (control-plane state, not authority): `ApprovalStatus`, `ApprovalRecord`.
+- Store traits `RunStateStore`, `ApprovalRequestStore`, `RunStateApprovalStore`, with in-memory (`InMemoryRunStateStore`, `InMemoryApprovalRequestStore`) and filesystem (`FilesystemRunStateStore`, `FilesystemApprovalRequestStore`) backends; `RunStateError`.
 - Crate-local public API, tests, and fixtures needed to prove that ownership.
+- All lookups/transitions are resource-owner scoped; filesystem backends are process-local — production shared callers use feature-gated PostgreSQL/libSQL stores.
 
 ## Do Not Move In Here
 
