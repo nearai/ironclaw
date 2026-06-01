@@ -74,9 +74,6 @@ use ironclaw_turns::{
 
 use crate::RebornProductAuthServicePorts;
 use crate::default_system_prompt::seed_default_system_prompt;
-use crate::google_oauth::google_provider_client;
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-use crate::input::OAuthClientConfig;
 use crate::input::{RebornRuntimeProcessBinding, RebornStorageInput};
 use crate::lifecycle::{RebornLocalSkillManagementPort, build_local_skill_management_port};
 use crate::local_dev_capability_policy::local_dev_capability_policy;
@@ -85,6 +82,7 @@ use crate::local_dev_mounts::{
     workspace_mount_view,
 };
 use crate::mcp::hosted_http_mcp_runtime;
+use crate::product_auth_providers::compose_provider_client;
 use crate::product_auth_runtime_credentials::ProductAuthRuntimeCredentialResolver;
 use crate::{
     RebornAuthContinuationDispatcher, RebornBuildError, RebornBuildInput, RebornCompositionProfile,
@@ -419,7 +417,7 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         runtime_policy,
         runtime_process_binding,
         product_auth_ports,
-        google_oauth_config,
+        oauth_provider_configs,
         owner_id,
         ..
     } = input;
@@ -554,18 +552,14 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     services = attach_hosted_mcp_runtime(services)?;
     services = attach_wasm_runtime(services)?;
     let product_auth_runtime_ports = require_product_auth_runtime_ports(&services)?;
-    let google_provider_client = google_oauth_config
-        .map(|config| {
-            google_provider_client(
-                config,
-                Arc::clone(&secret_store),
-                product_auth_runtime_ports.clone(),
-            )
-        })
-        .transpose()?;
+    let provider_client = compose_provider_client(
+        oauth_provider_configs,
+        Arc::clone(&secret_store),
+        product_auth_runtime_ports.clone(),
+    )?;
     let product_auth = match product_auth_ports {
         Some(ports) => {
-            compose_product_auth_services(ports, turn_coordinator.clone(), google_provider_client)
+            compose_product_auth_services(ports, turn_coordinator.clone(), provider_client)
         }
         None => {
             #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -574,8 +568,8 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
                     local_dev_product_auth_filesystem,
                     Arc::clone(&secret_store),
                 ));
-                let provider_client: Arc<dyn AuthProviderClient> = google_provider_client
-                    .unwrap_or_else(|| Arc::new(UnavailableAuthProviderClient));
+                let provider_client: Arc<dyn AuthProviderClient> =
+                    provider_client.unwrap_or_else(|| Arc::new(UnavailableAuthProviderClient));
                 let services = RebornProductAuthServicePorts::from_shared_with_provider(
                     Arc::clone(&durable_services),
                     provider_client,
@@ -589,7 +583,7 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
                 let services = RebornProductAuthServices::local_dev_in_memory(
                     auth_continuation_dispatcher(turn_coordinator.clone()),
                 );
-                Arc::new(match google_provider_client {
+                Arc::new(match provider_client {
                     Some(provider_client) => services.with_provider_client(provider_client),
                     None => services,
                 })
@@ -1436,7 +1430,7 @@ async fn build_production_shaped(
         require_runtime_http_egress,
         require_wasm_credentials,
         product_auth_ports,
-        google_oauth_config,
+        oauth_provider_configs,
     } = input;
     #[cfg(any(feature = "libsql", feature = "postgres"))]
     let wiring_config = production_config(
@@ -1454,7 +1448,7 @@ async fn build_production_shaped(
         require_runtime_http_egress,
         require_wasm_credentials,
         product_auth_ports,
-        google_oauth_config,
+        oauth_provider_configs,
     );
 
     match storage {
@@ -1485,7 +1479,7 @@ async fn build_production_shaped(
                 wiring_config,
                 production_wiring,
                 product_auth_ports,
-                google_oauth_config,
+                oauth_provider_configs,
             };
             build_libsql_production(context, db, path_or_url, auth_token, secret_master_key).await
         }
@@ -1507,7 +1501,7 @@ async fn build_production_shaped(
                 wiring_config,
                 production_wiring,
                 product_auth_ports,
-                google_oauth_config,
+                oauth_provider_configs,
             };
             build_postgres_production(context, pool, url, secret_master_key).await
         }
@@ -1537,7 +1531,7 @@ struct RebornProductionBuildContext {
     wiring_config: ironclaw_host_runtime::ProductionWiringConfig,
     production_wiring: RebornProductionWiring,
     product_auth_ports: Option<RebornProductAuthServicePorts>,
-    google_oauth_config: Option<OAuthClientConfig>,
+    oauth_provider_configs: Vec<crate::input::OAuthProviderBackendConfig>,
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -1836,7 +1830,7 @@ where
         wiring_config,
         production_wiring,
         product_auth_ports,
-        google_oauth_config,
+        oauth_provider_configs,
     } = context;
     let secret_store: Arc<dyn SecretStore> = stores.secret_credentials.secret_store.clone();
     let mut first_party_registry = builtin_first_party_registry()?;
@@ -1869,15 +1863,11 @@ where
     .with_turn_run_wake_notifier(production_wiring.turn_run_wake_notifier);
     let product_auth_runtime_ports = require_product_auth_runtime_ports(&services)?;
     let services = attach_hosted_mcp_runtime(services)?;
-    let google_provider_client = google_oauth_config
-        .map(|config| {
-            google_provider_client(
-                config,
-                Arc::clone(&secret_store),
-                product_auth_runtime_ports.clone(),
-            )
-        })
-        .transpose()?;
+    let provider_client = compose_provider_client(
+        oauth_provider_configs,
+        Arc::clone(&secret_store),
+        product_auth_runtime_ports.clone(),
+    )?;
     let services = apply_production_runtime_process_binding(
         services,
         production_wiring.runtime_process_binding,
@@ -1893,13 +1883,15 @@ where
         ));
         RebornProductAuthServicePorts::from_shared_with_provider(
             durable,
-            Arc::new(UnavailableAuthProviderClient),
+            provider_client
+                .clone()
+                .unwrap_or_else(|| Arc::new(UnavailableAuthProviderClient)),
         )
     });
     let product_auth_services = compose_product_auth_services(
         product_auth_ports,
         turn_coordinator.clone(),
-        google_provider_client,
+        provider_client,
     );
     let product_auth_ready = true;
     // Wire ProductAuthAccount runtime credential resolver before

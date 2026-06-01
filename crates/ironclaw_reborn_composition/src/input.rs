@@ -11,9 +11,12 @@ use ironclaw_host_runtime::{SchedulerTurnRunWakeNotifier, TenantSandboxProcessPo
 use ironclaw_trust::HostTrustPolicy;
 use secrecy::SecretString;
 
+use crate::google_oauth::google_provider_spec;
+use crate::notion_oauth::notion_provider_spec;
+use crate::oauth_provider_client::HostOAuthProviderSpec;
 use crate::{RebornCompositionProfile, RebornProductAuthServicePorts};
 
-/// Composition-time Google OAuth client metadata.
+/// Composition-time OAuth client metadata.
 ///
 /// `RebornBuildInput` owns this seam for product/bootstrap-provided values
 /// until a settings-backed source exists.
@@ -36,6 +39,12 @@ impl std::fmt::Debug for OAuthClientConfig {
             .field("redirect_uri", &self.redirect_uri)
             .finish()
     }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct OAuthProviderBackendConfig {
+    pub(crate) spec: HostOAuthProviderSpec,
+    pub(crate) client: OAuthClientConfig,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -113,7 +122,7 @@ pub struct RebornBuildInput {
     pub(crate) require_runtime_http_egress: bool,
     pub(crate) require_wasm_credentials: bool,
     pub(crate) product_auth_ports: Option<RebornProductAuthServicePorts>,
-    pub(crate) google_oauth_config: Option<OAuthClientConfig>,
+    pub(crate) oauth_provider_configs: Vec<OAuthProviderBackendConfig>,
 }
 
 pub(crate) enum RebornStorageInput {
@@ -369,8 +378,36 @@ impl RebornBuildInput {
     /// `RebornBuildInput` owns this composition seam until a settings-backed
     /// source exists.
     pub fn with_google_oauth_backend(mut self, config: OAuthClientConfig) -> Self {
-        self.google_oauth_config = Some(config);
+        self.push_oauth_provider_config(google_provider_spec(), config);
         self
+    }
+
+    /// Record product/bootstrap-provided Notion MCP OAuth metadata on the build input.
+    ///
+    /// This keeps Notion OAuth in the Reborn product-auth provider path; callers
+    /// that use dynamic client registration can pass the client metadata they
+    /// registered for this host callback URL.
+    pub fn with_notion_oauth_backend(mut self, config: OAuthClientConfig) -> Self {
+        self.push_oauth_provider_config(notion_provider_spec(), config);
+        self
+    }
+
+    fn push_oauth_provider_config(
+        &mut self,
+        spec: HostOAuthProviderSpec,
+        client: OAuthClientConfig,
+    ) {
+        if let Some(existing) = self
+            .oauth_provider_configs
+            .iter_mut()
+            .find(|existing| existing.spec.provider_id == spec.provider_id)
+        {
+            existing.spec = spec;
+            existing.client = client;
+            return;
+        }
+        self.oauth_provider_configs
+            .push(OAuthProviderBackendConfig { spec, client });
     }
 
     fn new(
@@ -390,7 +427,7 @@ impl RebornBuildInput {
             require_runtime_http_egress: false,
             require_wasm_credentials: false,
             product_auth_ports: None,
-            google_oauth_config: None,
+            oauth_provider_configs: Vec::new(),
         }
     }
 }
