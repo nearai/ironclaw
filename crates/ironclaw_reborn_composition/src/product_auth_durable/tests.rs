@@ -3,22 +3,27 @@ use std::sync::Arc;
 use chrono::{Duration, Utc};
 use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
 use ironclaw_host_api::{
-    InvocationId, MountAlias, MountGrant, MountPermissions, SecretHandle, UserId, VirtualPath,
+    InvocationId, MountAlias, MountGrant, MountPermissions, SecretHandle, ThreadId, UserId,
+    VirtualPath,
 };
 use ironclaw_secrets::{InMemorySecretStore, SecretStore};
 use secrecy::SecretString;
 use tokio::task::JoinSet;
 
 use super::*;
+use crate::product_auth_runtime_credentials::{
+    ProductAuthRuntimeCredentialAccountSelector, RuntimeCredentialAccountSelectionService,
+};
 use ironclaw_auth::{
-    AuthChallenge, AuthContinuationRef, AuthFlowKind, AuthFlowManager, AuthFlowStatus,
-    AuthInteractionService, AuthProductError, AuthProductScope, AuthProviderId, AuthSurface,
-    AuthorizationCodeHash, CredentialAccountChoiceRequest, CredentialAccountLabel,
-    CredentialAccountListRequest, CredentialAccountLookupRequest,
-    CredentialAccountSelectionRequest, CredentialAccountService, CredentialAccountStatus,
-    CredentialOwnership, ManualTokenSetupRequest, NewAuthFlow, NewCredentialAccount,
-    OAuthAuthorizationUrl, OAuthCallbackClaimRequest, OAuthCallbackInput, OAuthProviderExchange,
-    OpaqueStateHash, PkceVerifierHash, ProviderScope, SecretSubmitRequest,
+    AuthChallenge, AuthContinuationRef, AuthFlowKind, AuthFlowManager, AuthFlowOwnerScope,
+    AuthFlowRecordSource, AuthFlowStatus, AuthInteractionService, AuthProductError,
+    AuthProductScope, AuthProviderId, AuthSessionId, AuthSurface, AuthorizationCodeHash,
+    CredentialAccountChoiceRequest, CredentialAccountLabel, CredentialAccountListRequest,
+    CredentialAccountLookupRequest, CredentialAccountSelectionRequest, CredentialAccountService,
+    CredentialAccountStatus, CredentialOwnership, ManualTokenCompletionInput,
+    ManualTokenSetupRequest, NewAuthFlow, NewCredentialAccount, OAuthAuthorizationUrl,
+    OAuthCallbackClaimRequest, OAuthCallbackInput, OAuthProviderExchange, OpaqueStateHash,
+    PkceVerifierHash, ProviderScope, SecretSubmitRequest,
 };
 
 fn test_scope() -> AuthProductScope {
@@ -120,6 +125,47 @@ async fn filesystem_accounts_survive_service_recreation() {
 }
 
 #[tokio::test]
+async fn filesystem_runtime_account_selection_matches_setup_invocation_account() {
+    let filesystem = test_filesystem();
+    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let mut setup_scope = test_scope();
+    setup_scope.surface = AuthSurface::Callback;
+    setup_scope.resource.thread_id = Some(ThreadId::new("thread-auth-1").unwrap());
+    let mut runtime_scope = AuthProductScope::new(setup_scope.resource.clone(), AuthSurface::Api);
+    runtime_scope.resource.invocation_id = InvocationId::new();
+    let service = Arc::new(test_service(filesystem, secret_store));
+    let access_secret = SecretHandle::new("google-access").unwrap();
+
+    let created = service
+        .create_account(NewCredentialAccount {
+            scope: setup_scope,
+            provider: google_provider(),
+            label: account_label(),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: Vec::new(),
+            access_secret: Some(access_secret.clone()),
+            refresh_secret: None,
+            scopes: vec![ProviderScope::new("gmail.readonly").unwrap()],
+        })
+        .await
+        .unwrap();
+
+    let selector = ProductAuthRuntimeCredentialAccountSelector::new(service.clone());
+    let selected = selector
+        .select_unique_configured_runtime_account(CredentialAccountSelectionRequest::new(
+            runtime_scope,
+            google_provider(),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(selected.id, created.id);
+    assert_eq!(selected.access_secret, Some(access_secret));
+}
+
+#[tokio::test]
 async fn filesystem_manual_token_submit_stores_secret_and_dedupes_replay() {
     let filesystem = test_filesystem();
     let concrete_secret_store = Arc::new(InMemorySecretStore::new());
@@ -182,6 +228,176 @@ async fn filesystem_manual_token_submit_stores_secret_and_dedupes_replay() {
         .await
         .expect_err("manual token submit should be one-shot");
     assert_eq!(replay, AuthProductError::UnknownOrExpiredFlow);
+}
+
+#[tokio::test]
+async fn filesystem_manual_token_completion_persists_auth_flow_account() {
+    let filesystem = test_filesystem();
+    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let scope = test_scope();
+    let service = test_service(filesystem, secret_store);
+    let expires_at = Utc::now() + Duration::minutes(5);
+
+    let challenge = service
+        .request_secret_input(ManualTokenSetupRequest {
+            scope: scope.clone(),
+            provider: google_provider(),
+            label: account_label(),
+            continuation: AuthContinuationRef::SetupOnly,
+            update_binding: None,
+            expires_at,
+        })
+        .await
+        .unwrap();
+    let AuthChallenge::ManualTokenRequired {
+        interaction_id,
+        provider,
+        label,
+        expires_at: challenge_expires_at,
+    } = challenge
+    else {
+        panic!("expected manual token challenge");
+    };
+
+    let flow = service
+        .create_flow(NewAuthFlow {
+            scope: scope.clone(),
+            kind: AuthFlowKind::IntegrationCredential,
+            provider: google_provider(),
+            challenge: AuthChallenge::ManualTokenRequired {
+                interaction_id,
+                provider,
+                label,
+                expires_at: challenge_expires_at,
+            },
+            continuation: AuthContinuationRef::SetupOnly,
+            update_binding: None,
+            opaque_state_hash: None,
+            pkce_verifier_hash: None,
+            expires_at,
+        })
+        .await
+        .unwrap();
+
+    let submitted = service
+        .submit_manual_token(
+            &scope,
+            SecretSubmitRequest {
+                interaction_id,
+                secret: SecretString::from("manual-token-value"),
+            },
+        )
+        .await
+        .unwrap();
+
+    let completed = service
+        .complete_manual_token(
+            &scope,
+            ManualTokenCompletionInput {
+                interaction_id,
+                credential_account_id: submitted.account_id,
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(completed.id, flow.id);
+    assert_eq!(completed.status, AuthFlowStatus::Completed);
+    assert_eq!(completed.credential_account_id, Some(submitted.account_id));
+}
+
+#[tokio::test]
+async fn filesystem_flow_record_source_projects_session_scoped_manual_flows() {
+    let filesystem = test_filesystem();
+    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let mut scope = test_scope();
+    scope.surface = AuthSurface::Callback;
+    scope.resource.thread_id = Some(ThreadId::new("thread-auth-flow").unwrap());
+    scope.session_id = Some(AuthSessionId::new("session-auth-flow").unwrap());
+    let service = FilesystemAuthProductServices::new(filesystem, secret_store);
+    let expires_at = Utc::now() + Duration::minutes(5);
+
+    let challenge = service
+        .request_secret_input(ManualTokenSetupRequest {
+            scope: scope.clone(),
+            provider: google_provider(),
+            label: account_label(),
+            continuation: AuthContinuationRef::SetupOnly,
+            update_binding: None,
+            expires_at,
+        })
+        .await
+        .unwrap();
+    let AuthChallenge::ManualTokenRequired {
+        interaction_id,
+        provider,
+        label,
+        expires_at: challenge_expires_at,
+    } = challenge
+    else {
+        panic!("expected manual token challenge");
+    };
+    let flow = service
+        .create_flow(NewAuthFlow {
+            scope: scope.clone(),
+            kind: AuthFlowKind::IntegrationCredential,
+            provider: google_provider(),
+            challenge: AuthChallenge::ManualTokenRequired {
+                interaction_id,
+                provider,
+                label,
+                expires_at: challenge_expires_at,
+            },
+            continuation: AuthContinuationRef::SetupOnly,
+            update_binding: None,
+            opaque_state_hash: None,
+            pkce_verifier_hash: None,
+            expires_at,
+        })
+        .await
+        .unwrap();
+
+    let submitted = service
+        .submit_manual_token(
+            &scope,
+            SecretSubmitRequest {
+                interaction_id,
+                secret: SecretString::from("manual-token-value"),
+            },
+        )
+        .await
+        .unwrap();
+    service
+        .complete_manual_token(
+            &scope,
+            ManualTokenCompletionInput {
+                interaction_id,
+                credential_account_id: submitted.account_id,
+            },
+        )
+        .await
+        .unwrap();
+
+    let owner = AuthFlowOwnerScope {
+        tenant_id: scope.resource.tenant_id.clone(),
+        user_id: scope.resource.user_id.clone(),
+        agent_id: scope.resource.agent_id.clone(),
+        project_id: scope.resource.project_id.clone(),
+        thread_id: scope.resource.thread_id.clone().unwrap(),
+    };
+    let snapshot = service.flows_for_owner(owner).await.unwrap();
+    let projected = snapshot
+        .iter()
+        .find(|record| record.id == flow.id)
+        .expect("session-scoped flow should be projected for auth gates");
+
+    assert_eq!(projected.status, AuthFlowStatus::Completed);
+    assert_eq!(projected.scope.session_id, scope.session_id);
+    assert_eq!(
+        projected.credential_account_id,
+        Some(submitted.account_id),
+        "manual-token completion must remain visible to the auth read model"
+    );
 }
 
 #[tokio::test]

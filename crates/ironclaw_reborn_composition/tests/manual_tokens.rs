@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use chrono::{Duration, Utc};
 use ironclaw_auth::{
     AuthChallenge, AuthContinuationEvent, AuthContinuationRef, AuthErrorCode, AuthFlowManager,
-    AuthInteractionId, AuthInteractionService, AuthProductError, AuthProductScope,
+    AuthFlowStatus, AuthInteractionId, AuthInteractionService, AuthProductError, AuthProductScope,
     AuthProviderClient, AuthProviderId, AuthSessionId, AuthSurface, CredentialAccountLabel,
     CredentialAccountListRequest, CredentialAccountService, CredentialAccountStatus,
     CredentialAccountUpdateBinding, CredentialOwnership, CredentialSetupService,
@@ -300,6 +300,44 @@ async fn manual_token_facade_submits_secret_without_exposing_token() {
     let accounts_json = serde_json::to_string(&accounts).unwrap();
     assert!(!accounts_json.contains(RAW_TOKEN));
     assert!(!accounts_json.contains("manual-access-"));
+}
+
+#[tokio::test]
+async fn manual_token_facade_tracks_setup_and_submit_in_auth_flow() {
+    let shared = Arc::new(InMemoryAuthProductServices::new());
+    let services = RebornProductAuthServices::from_shared(
+        shared.clone(),
+        Arc::new(NoopContinuationDispatcher),
+    );
+    let owner = scope("alice");
+
+    let challenge = services
+        .request_manual_token_setup(setup_request(owner.clone()))
+        .await
+        .expect("manual-token challenge");
+
+    let flows = shared.flow_records_snapshot();
+    assert_eq!(flows.len(), 1);
+    assert_eq!(flows[0].status, AuthFlowStatus::AwaitingUser);
+    assert!(matches!(
+        &flows[0].challenge,
+        Some(AuthChallenge::ManualTokenRequired { interaction_id, .. })
+            if interaction_id == &challenge.interaction_id
+    ));
+
+    let response = services
+        .submit_manual_token(RebornManualTokenSubmitRequest::new(
+            owner,
+            challenge.interaction_id,
+            secret(RAW_TOKEN),
+        ))
+        .await
+        .expect("manual token submit succeeds");
+
+    let flows = shared.flow_records_snapshot();
+    assert_eq!(flows.len(), 1);
+    assert_eq!(flows[0].status, AuthFlowStatus::Completed);
+    assert_eq!(flows[0].credential_account_id, Some(response.account_id));
 }
 
 #[tokio::test]

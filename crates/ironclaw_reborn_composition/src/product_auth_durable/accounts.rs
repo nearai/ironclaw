@@ -9,9 +9,10 @@ use super::domain::{
 };
 use super::{FilesystemAuthProductServices, scope_matches};
 use ironclaw_auth::{
-    AuthProductError, CredentialAccount, CredentialAccountChoiceRequest, CredentialAccountId,
-    CredentialAccountListPage, CredentialAccountListRequest, CredentialAccountLookupRequest,
-    CredentialAccountMutation, CredentialAccountProjection, CredentialAccountSelectionRequest,
+    AuthProductError, AuthSurface, CredentialAccount, CredentialAccountChoiceRequest,
+    CredentialAccountId, CredentialAccountListPage, CredentialAccountListRequest,
+    CredentialAccountLookupRequest, CredentialAccountMutation, CredentialAccountOwnerScope,
+    CredentialAccountProjection, CredentialAccountRecordSource, CredentialAccountSelectionRequest,
     CredentialAccountService, CredentialAccountStatus, CredentialRecoveryProjection,
     CredentialRecoveryReason, CredentialRecoveryRequest, CredentialRefreshReport,
     CredentialRefreshRequest, CredentialSetupService, NewCredentialAccount,
@@ -231,6 +232,33 @@ where
         _request: CredentialRefreshRequest,
     ) -> Result<CredentialRefreshReport, AuthProductError> {
         Err(AuthProductError::BackendUnavailable)
+    }
+}
+
+#[async_trait]
+impl<F> CredentialAccountRecordSource for FilesystemAuthProductServices<F>
+where
+    F: RootFilesystem + 'static,
+{
+    async fn accounts_for_owner(
+        &self,
+        scope: &ironclaw_auth::AuthProductScope,
+    ) -> Result<Vec<CredentialAccount>, AuthProductError> {
+        let owner = CredentialAccountOwnerScope::from_scope(scope);
+        let mut accounts = Vec::new();
+        for surface in AuthSurface::ALL {
+            let mut surface_scope = scope.clone();
+            surface_scope.surface = surface;
+            accounts.extend(
+                self.account_records_under_scope_root(&surface_scope)
+                    .await?
+                    .into_iter()
+                    .filter(|account| owner.matches(account)),
+            );
+        }
+        accounts.sort_by_key(|account| account.id);
+        accounts.dedup_by_key(|account| account.id);
+        Ok(accounts)
     }
 }
 

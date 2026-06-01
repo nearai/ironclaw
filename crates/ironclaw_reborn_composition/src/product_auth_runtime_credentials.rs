@@ -2,21 +2,80 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_auth::{
-    AuthProductError, AuthProductScope, AuthProviderId, AuthSurface,
-    CredentialAccountLookupRequest, CredentialAccountSelectionRequest, CredentialAccountService,
-    CredentialAccountStatus,
+    AuthProductError, AuthProductScope, AuthProviderId, AuthSurface, CredentialAccount,
+    CredentialAccountRecordSource, CredentialAccountSelectionRequest, CredentialAccountStatus,
 };
 use ironclaw_host_api::{CredentialStageError, SecretHandle};
 use ironclaw_host_runtime::{RuntimeCredentialAccountRequest, RuntimeCredentialAccountResolver};
 
 #[derive(Clone)]
 pub(crate) struct ProductAuthRuntimeCredentialResolver {
-    accounts: Arc<dyn CredentialAccountService>,
+    accounts: Arc<dyn RuntimeCredentialAccountSelectionService>,
 }
 
 impl ProductAuthRuntimeCredentialResolver {
-    pub(crate) fn new(accounts: Arc<dyn CredentialAccountService>) -> Self {
+    pub(crate) fn new(accounts: Arc<dyn RuntimeCredentialAccountSelectionService>) -> Self {
         Self { accounts }
+    }
+}
+
+#[async_trait]
+pub(crate) trait RuntimeCredentialAccountSelectionService: Send + Sync {
+    async fn select_unique_configured_runtime_account(
+        &self,
+        request: CredentialAccountSelectionRequest,
+    ) -> Result<CredentialAccount, AuthProductError>;
+}
+
+pub(crate) struct ProductAuthRuntimeCredentialAccountSelector {
+    accounts: Arc<dyn CredentialAccountRecordSource>,
+}
+
+impl ProductAuthRuntimeCredentialAccountSelector {
+    pub(crate) fn new(accounts: Arc<dyn CredentialAccountRecordSource>) -> Self {
+        Self { accounts }
+    }
+}
+
+impl std::fmt::Debug for ProductAuthRuntimeCredentialAccountSelector {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProductAuthRuntimeCredentialAccountSelector")
+            .field("accounts", &"<credential_account_record_source>")
+            .finish()
+    }
+}
+
+#[async_trait]
+impl RuntimeCredentialAccountSelectionService for ProductAuthRuntimeCredentialAccountSelector {
+    async fn select_unique_configured_runtime_account(
+        &self,
+        request: CredentialAccountSelectionRequest,
+    ) -> Result<CredentialAccount, AuthProductError> {
+        let configured = self
+            .accounts
+            .accounts_for_owner(&request.scope)
+            .await?
+            .into_iter()
+            .filter(|account| {
+                account.provider == request.provider
+                    && account.status == CredentialAccountStatus::Configured
+            })
+            .collect::<Vec<_>>();
+        if configured.is_empty() {
+            return Err(AuthProductError::CredentialMissing);
+        }
+        let selectable = configured
+            .into_iter()
+            .filter(|account| {
+                account.is_authorized_for_requester(request.requester_extension.as_ref())
+            })
+            .collect::<Vec<_>>();
+        match selectable.as_slice() {
+            [] => Err(AuthProductError::CrossScopeDenied),
+            [account] => Ok(account.clone()),
+            _ => Err(AuthProductError::AccountSelectionRequired),
+        }
     }
 }
 
@@ -44,23 +103,14 @@ impl RuntimeCredentialAccountResolver for ProductAuthRuntimeCredentialResolver {
             );
             CredentialStageError::Backend
         })?;
-        let selected = self
+        let account = self
             .accounts
-            .select_unique_configured_account(
-                CredentialAccountSelectionRequest::new(auth_scope.clone(), provider)
+            .select_unique_configured_runtime_account(
+                CredentialAccountSelectionRequest::new(auth_scope, provider)
                     .for_extension(request.requester_extension.clone()),
             )
             .await
             .map_err(map_account_error)?;
-        let account = self
-            .accounts
-            .get_account(
-                CredentialAccountLookupRequest::new(auth_scope, selected.id)
-                    .for_extension(request.requester_extension.clone()),
-            )
-            .await
-            .map_err(map_account_error)?
-            .ok_or(CredentialStageError::AuthRequired)?;
         if account.status != CredentialAccountStatus::Configured {
             return Err(CredentialStageError::AuthRequired);
         }
@@ -86,11 +136,12 @@ fn map_account_error(error: AuthProductError) -> CredentialStageError {
 #[cfg(test)]
 mod tests {
     use ironclaw_auth::{
-        CredentialAccountLabel, CredentialOwnership, InMemoryAuthProductServices,
-        NewCredentialAccount,
+        CredentialAccountLabel, CredentialAccountService, CredentialOwnership,
+        InMemoryAuthProductServices, NewCredentialAccount,
     };
     use ironclaw_host_api::{
-        ExtensionId, InvocationId, ResourceScope, RuntimeCredentialAccountProviderId, UserId,
+        ExtensionId, InvocationId, ResourceScope, RuntimeCredentialAccountProviderId, ThreadId,
+        UserId,
     };
 
     use super::*;
@@ -118,7 +169,9 @@ mod tests {
             })
             .await
             .unwrap();
-        let resolver = ProductAuthRuntimeCredentialResolver::new(accounts);
+        let resolver = ProductAuthRuntimeCredentialResolver::new(Arc::new(
+            ProductAuthRuntimeCredentialAccountSelector::new(accounts),
+        ));
 
         let resolved = resolver
             .resolve_access_secret(RuntimeCredentialAccountRequest {
@@ -133,9 +186,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resolver_matches_callback_setup_account_from_runtime_invocation() {
+        let accounts = Arc::new(InMemoryAuthProductServices::new());
+        let mut setup_scope =
+            ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new())
+                .unwrap();
+        setup_scope.thread_id = Some(ThreadId::new("thread-auth-1").unwrap());
+        let mut runtime_scope = setup_scope.clone();
+        runtime_scope.invocation_id = InvocationId::new();
+        let access_secret = SecretHandle::new("github_manual_access").unwrap();
+        accounts
+            .create_account(NewCredentialAccount {
+                scope: AuthProductScope::new(setup_scope, AuthSurface::Callback),
+                provider: AuthProviderId::new("github").unwrap(),
+                label: CredentialAccountLabel::new("work github").unwrap(),
+                status: CredentialAccountStatus::Configured,
+                ownership: CredentialOwnership::UserReusable,
+                owner_extension: None,
+                granted_extensions: Vec::new(),
+                access_secret: Some(access_secret.clone()),
+                refresh_secret: None,
+                scopes: Vec::new(),
+            })
+            .await
+            .unwrap();
+        let resolver = ProductAuthRuntimeCredentialResolver::new(Arc::new(
+            ProductAuthRuntimeCredentialAccountSelector::new(accounts),
+        ));
+
+        let resolved = resolver
+            .resolve_access_secret(RuntimeCredentialAccountRequest {
+                scope: &runtime_scope,
+                provider: &RuntimeCredentialAccountProviderId::new("github").unwrap(),
+                requester_extension: &ExtensionId::new("github").unwrap(),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(resolved, access_secret);
+    }
+
+    #[tokio::test]
     async fn resolver_maps_missing_account_to_auth_required() {
-        let resolver =
-            ProductAuthRuntimeCredentialResolver::new(Arc::new(InMemoryAuthProductServices::new()));
+        let accounts = Arc::new(InMemoryAuthProductServices::new());
+        let resolver = ProductAuthRuntimeCredentialResolver::new(Arc::new(
+            ProductAuthRuntimeCredentialAccountSelector::new(accounts),
+        ));
         let scope =
             ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new())
                 .unwrap();
@@ -174,7 +270,9 @@ mod tests {
             })
             .await
             .unwrap();
-        let resolver = ProductAuthRuntimeCredentialResolver::new(accounts);
+        let resolver = ProductAuthRuntimeCredentialResolver::new(Arc::new(
+            ProductAuthRuntimeCredentialAccountSelector::new(accounts),
+        ));
 
         let error = resolver
             .resolve_access_secret(RuntimeCredentialAccountRequest {
@@ -210,7 +308,9 @@ mod tests {
             })
             .await
             .unwrap();
-        let resolver = ProductAuthRuntimeCredentialResolver::new(accounts);
+        let resolver = ProductAuthRuntimeCredentialResolver::new(Arc::new(
+            ProductAuthRuntimeCredentialAccountSelector::new(accounts),
+        ));
 
         let error = resolver
             .resolve_access_secret(RuntimeCredentialAccountRequest {
@@ -253,7 +353,9 @@ mod tests {
                 .await
                 .unwrap();
         }
-        let resolver = ProductAuthRuntimeCredentialResolver::new(accounts);
+        let resolver = ProductAuthRuntimeCredentialResolver::new(Arc::new(
+            ProductAuthRuntimeCredentialAccountSelector::new(accounts),
+        ));
 
         let error = resolver
             .resolve_access_secret(RuntimeCredentialAccountRequest {

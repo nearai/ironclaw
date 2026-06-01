@@ -562,17 +562,38 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
             compose_product_auth_services(ports, turn_coordinator.clone(), google_provider_client)
         }
         None => {
-            let services = RebornProductAuthServices::local_dev_in_memory(
-                auth_continuation_dispatcher(turn_coordinator.clone()),
-            );
-            Arc::new(match google_provider_client {
-                Some(provider_client) => services.with_provider_client(provider_client),
-                None => services,
-            })
+            #[cfg(any(feature = "libsql", feature = "postgres"))]
+            {
+                let durable_services = Arc::new(FilesystemAuthProductServices::new(
+                    local_dev_scoped_filesystem(Arc::clone(&filesystem)),
+                    Arc::clone(&secret_store),
+                ));
+                let provider_client: Arc<dyn AuthProviderClient> = google_provider_client
+                    .unwrap_or_else(|| Arc::new(UnavailableAuthProviderClient));
+                let services = RebornProductAuthServicePorts::from_shared_with_provider(
+                    Arc::clone(&durable_services),
+                    provider_client,
+                )
+                .into_services(auth_continuation_dispatcher(turn_coordinator.clone()))
+                .with_flow_record_source(durable_services);
+                Arc::new(services)
+            }
+            #[cfg(not(any(feature = "libsql", feature = "postgres")))]
+            {
+                let services = RebornProductAuthServices::local_dev_in_memory(
+                    auth_continuation_dispatcher(turn_coordinator.clone()),
+                );
+                Arc::new(match google_provider_client {
+                    Some(provider_client) => services.with_provider_client(provider_client),
+                    None => services,
+                })
+            }
         }
     };
     services = services.with_runtime_credential_account_resolver(Arc::new(
-        ProductAuthRuntimeCredentialResolver::new(product_auth.credential_account_service()),
+        ProductAuthRuntimeCredentialResolver::new(
+            product_auth.runtime_credential_account_selection_service(),
+        ),
     ));
     register_bundled_gsuite_first_party_handlers(
         &mut first_party_registry,
@@ -1754,7 +1775,7 @@ where
     // always exists (durable filesystem fallback from #4234).
     let services = services.with_runtime_credential_account_resolver(Arc::new(
         ProductAuthRuntimeCredentialResolver::new(
-            product_auth_services.credential_account_service(),
+            product_auth_services.runtime_credential_account_selection_service(),
         ),
     ));
     register_bundled_gsuite_first_party_handlers(
@@ -1898,6 +1919,81 @@ mod tests {
                 .is_some()
         );
         assert_eq!(services.readiness.state, RebornReadinessState::DevOnly);
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn local_dev_default_product_auth_uses_durable_manual_token_accounts() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let owner = "local-dev-durable-auth-owner";
+        let services = build_reborn_services(RebornBuildInput::local_dev(
+            owner,
+            dir.path().join("local-dev"),
+        ))
+        .await
+        .expect("local-dev services build");
+        let product_auth = services.product_auth.as_ref().expect("product auth");
+        let scope = AuthProductScope::new(
+            ResourceScope::local_default(UserId::new(owner).unwrap(), InvocationId::new()).unwrap(),
+            AuthSurface::Callback,
+        );
+        let mut scope = scope;
+        scope.resource.thread_id = Some(ironclaw_host_api::ThreadId::new("auth-thread").unwrap());
+
+        let challenge = product_auth
+            .request_manual_token_setup(crate::RebornManualTokenSetupRequest::new(
+                scope.clone(),
+                ironclaw_auth::AuthProviderId::new("github").unwrap(),
+                CredentialAccountLabel::new("work github").unwrap(),
+                ironclaw_auth::AuthContinuationRef::SetupOnly,
+                chrono::Utc::now() + chrono::Duration::minutes(5),
+            ))
+            .await
+            .unwrap();
+        let submitted = product_auth
+            .submit_manual_token(crate::RebornManualTokenSubmitRequest::new(
+                scope.clone(),
+                challenge.interaction_id,
+                secrecy::SecretString::from("ghp_local_dev_pat"),
+            ))
+            .await
+            .unwrap();
+
+        let account = product_auth
+            .credential_account_service()
+            .get_account(ironclaw_auth::CredentialAccountLookupRequest::new(
+                scope.clone(),
+                submitted.account_id,
+            ))
+            .await
+            .unwrap()
+            .expect("manual-token submit should create account");
+        let access_secret = account.access_secret.expect("manual token access secret");
+        assert!(
+            access_secret.as_str().starts_with("product-auth-manual-"),
+            "local-dev default product-auth must create durable SecretStore-backed handles"
+        );
+
+        let flows = product_auth
+            .flow_record_source()
+            .expect("local-dev product-auth flow source")
+            .flows_for_owner(ironclaw_auth::AuthFlowOwnerScope {
+                tenant_id: scope.resource.tenant_id.clone(),
+                user_id: scope.resource.user_id.clone(),
+                agent_id: scope.resource.agent_id.clone(),
+                project_id: scope.resource.project_id.clone(),
+                thread_id: scope.resource.thread_id.clone().unwrap(),
+            })
+            .await
+            .unwrap();
+        let completed_flow = flows
+            .iter()
+            .find(|flow| flow.credential_account_id == Some(submitted.account_id))
+            .expect("manual-token completion should remain visible to auth gates");
+        assert_eq!(
+            completed_flow.status,
+            ironclaw_auth::AuthFlowStatus::Completed
+        );
     }
 
     /// Verify that `attach_hosted_mcp_runtime` is soft-disabled when the host

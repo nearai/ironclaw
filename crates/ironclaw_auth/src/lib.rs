@@ -28,8 +28,9 @@ pub use cleanup::{
 pub use credential::{
     CredentialAccount, CredentialAccountChoiceRequest, CredentialAccountListPage,
     CredentialAccountListRequest, CredentialAccountLookupRequest, CredentialAccountMutation,
-    CredentialAccountProjection, CredentialAccountSelectionRequest, CredentialAccountService,
-    CredentialAccountStatus, CredentialAccountUpdate, CredentialOwnership, CredentialRecoveryKind,
+    CredentialAccountOwnerScope, CredentialAccountProjection, CredentialAccountRecordSource,
+    CredentialAccountSelectionRequest, CredentialAccountService, CredentialAccountStatus,
+    CredentialAccountUpdate, CredentialOwnership, CredentialRecoveryKind,
     CredentialRecoveryProjection, CredentialRecoveryReason, CredentialRecoveryRequest,
     CredentialRecoveryState, CredentialRefreshReport, CredentialRefreshRequest,
     CredentialSetupService, NewCredentialAccount, ProviderBackedCredentialAccountService,
@@ -38,9 +39,11 @@ pub use error::{AuthErrorCode, AuthProductError};
 pub use fakes::InMemoryAuthProductServices;
 pub use flow::{
     AuthChallenge, AuthContinuationEvent, AuthContinuationRef, AuthFlowKind, AuthFlowManager,
-    AuthFlowRecord, AuthFlowRecordSource, AuthFlowStatus, CredentialAccountUpdateBinding,
-    CredentialSelectionInput, NewAuthFlow, OAuthCallbackClaimRequest, OAuthCallbackFailureInput,
-    OAuthCallbackInput, ProviderCallbackOutcome, credential_status_for_completed_flow,
+    AuthFlowOwnerScope, AuthFlowRecord, AuthFlowRecordSource, AuthFlowStatus,
+    CredentialAccountUpdateBinding, CredentialSelectionInput, ManualTokenCompletionInput,
+    NewAuthFlow, OAuthCallbackClaimRequest, OAuthCallbackFailureInput, OAuthCallbackInput,
+    ProviderCallbackOutcome, TurnGateAuthFlowQuery, credential_status_for_completed_flow,
+    flow_matches_turn_gate_query,
 };
 pub use ids::{
     AuthFlowId, AuthGateRef, AuthInteractionId, AuthProviderId, AuthSessionId,
