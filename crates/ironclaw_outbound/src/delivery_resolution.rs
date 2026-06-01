@@ -204,10 +204,33 @@ pub struct CommunicationDeliveryCandidate {
     pub kind: CommunicationDeliveryKind,
 }
 
+/// Result of resolving a communication request.
+///
+/// Most intents produce a concrete delivery candidate. Host/system events are
+/// metadata-only in P0 unless a caller explicitly requested outbound delivery,
+/// so they resolve to `NoDelivery` rather than being treated as invalid input.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum CommunicationDeliveryResolution {
+    Candidate {
+        candidate: CommunicationDeliveryCandidate,
+    },
+    NoDelivery {
+        reason: SystemEventReasonCode,
+    },
+}
+
+impl CommunicationDeliveryResolution {
+    pub fn candidate(candidate: CommunicationDeliveryCandidate) -> Self {
+        Self::Candidate { candidate }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
+    use serde::Serialize;
     use serde::de::DeserializeOwned;
     use serde_json::{from_str, to_string};
 
@@ -381,6 +404,19 @@ mod tests {
     }
 
     #[test]
+    fn communication_delivery_resolution_serializes_all_variants() {
+        assert_json_serializes(CommunicationDeliveryResolution::candidate(
+            CommunicationDeliveryCandidate {
+                target: reply_ref("reply:candidate"),
+                kind: CommunicationDeliveryKind::FinalReply,
+            },
+        ));
+        assert_json_serializes(CommunicationDeliveryResolution::NoDelivery {
+            reason: SystemEventReasonCode::Operator,
+        });
+    }
+
+    #[test]
     fn delivery_target_capabilities_round_trip() {
         let capabilities = DeliveryTargetCapabilities {
             final_replies: true,
@@ -456,5 +492,12 @@ mod tests {
         let json = to_string(&value).expect("serialize value");
         let decoded: T = from_str(&json).expect("deserialize value");
         assert_eq!(decoded, value);
+    }
+
+    fn assert_json_serializes<T>(value: T)
+    where
+        T: Serialize + std::fmt::Debug,
+    {
+        to_string(&value).expect("serialize value");
     }
 }

@@ -92,11 +92,6 @@ Only non-terminal auth-flow states are listed as pending interactions. Terminal
 states such as `failed`, `completed`, `expired`, and `canceled` must not be
 rendered as actionable auth gates.
 
-Auth prompt notification is separate from auth-flow creation, callback
-completion, credential exchange, and token storage. The auth flow contracts own
-the state machine and secret handling; outbound delivery only decides where an
-already-created auth prompt may be attempted.
-
 Legacy web/CLI/channel auth UX may remain behavior-compatible during
 migration, but Reborn paths should enter through `ProductWorkflow` or the
 WebUI-facing `RebornServicesApi` facade. They must not call V1 pending maps,
@@ -439,7 +434,7 @@ pretending cleanup succeeded.
 
 The Reborn composition mounts host-owned HTTP routes that enter
 `RebornProductAuthServices` (see
-`crates/ironclaw_reborn_composition/src/product_auth_serve.rs`). All mutation
+`crates/ironclaw_reborn_composition/src/product_auth_serve/mod.rs`). All mutation
 routes share the same `LocalGateway` + `BearerToken` + per-caller body and
 rate-limit posture as the original `oauth/start` route and derive
 `AuthProductScope` from the authenticated caller, never from caller-supplied
@@ -524,3 +519,56 @@ Rules:
   cleanup quarantine reporting;
 - serde validation for newtypes and snake_case wire enums;
 - serialization checks proving raw code/verifier/token material is absent.
+
+---
+
+## AuthPromptView v2 enrichment (issue #4112)
+
+`AuthPromptView` in `crates/ironclaw_product_adapters/src/outbound.rs` carries
+five new optional fields added in #4112 for WebUI v2 OAuth/PAT rendering:
+
+| Field | Type | Present when |
+|---|---|---|
+| `challenge_kind` | `"oauth_url" \| "manual_token" \| "other"` | Projection finds a matching auth-flow record |
+| `provider` | `string` | Same as above |
+| `account_label` | `string \| null` | `ManualToken` challenge only |
+| `authorization_url` | `string \| null` | `OAuthUrl` challenge only |
+| `expires_at` | RFC-3339 string or `null` | When the flow has a bounded TTL |
+
+All fields are `#[serde(default, skip_serializing_if = "Option::is_none")]`.
+**Existing serialised rows without these fields round-trip safely** — they
+deserialise as `None` on both ends. V1 channels that persist or replay
+`AuthPromptView` are unaffected.
+
+### Redaction invariant
+
+`authorization_url` is the opaque IDP authorization URL already surfaced in
+the legacy `AppEvent::OnboardingState.auth_url` field. It is safe to render
+in the browser. **None of the following ever appear in this view:**
+PKCE verifier, opaque state, client secret, auth code, access token, refresh
+token, `interaction_id`.
+
+### WebUI v2 consumer contract
+
+`gates.js::gateFromEvent` reads these fields into the gate object:
+- `challengeKind` ← `prompt.challenge_kind || "manual_token"` (fallback)
+- `authorizationUrl` ← `prompt.authorization_url || null`
+- `expiresAt` ← `prompt.expires_at || null`
+
+`chat.js` dispatches by `challengeKind`:
+- `"oauth_url"` → `AuthOauthCard` (new in #4112; opens IDP URL in a new tab)
+- `"manual_token"` → `AuthTokenCard` (existing manual-token form; also used for
+  legacy prompts that omit `challenge_kind`)
+- `"other"` or any explicit unknown value → `AuthGenericCard`
+
+### Wire-shape tests
+
+`crates/ironclaw_reborn_composition/tests/webui_v2_product_auth_4201.rs`
+covers:
+- Serialisation of the new optional fields when present.
+- Omission of all new fields when absent (backward-compat check).
+- Round-trip deserialisation of legacy rows without any new fields.
+- `challenge_for_gate` returns an `AuthChallengeView` for a seeded OAuth flow.
+- `challenge_for_gate` returns `None` for mismatched owner/scope/run/gate refs
+  or terminal flows.
+- `as_auth_challenge_provider` returns `None` when no flow record source.

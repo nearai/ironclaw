@@ -16,10 +16,16 @@ use async_trait::async_trait;
 use chrono::{SecondsFormat, Utc};
 use cron::Schedule;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, Timestamp, UserId};
+use ironclaw_turns::TurnRunId;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use ulid::Ulid;
+
+#[cfg(feature = "libsql")]
+mod libsql;
+#[cfg(feature = "postgres")]
+mod postgres;
 
 const MIN_FIRE_CADENCE: Duration = Duration::from_secs(60);
 const MAX_DUE_TRIGGER_POLL_LIMIT: usize = 128;
@@ -37,8 +43,8 @@ pub enum TriggerError {
     InvalidRecord { reason: String },
     #[error("invalid schedule: {reason}")]
     InvalidSchedule { reason: String },
-    #[error("trigger repository backend unavailable")]
-    Backend,
+    #[error("trigger repository backend unavailable: {reason}")]
+    Backend { reason: String },
     #[error("trigger not found")]
     NotFound,
 }
@@ -52,20 +58,12 @@ impl TriggerId {
         Self(Ulid::new())
     }
 
-    pub fn from_ulid(value: Ulid) -> Self {
-        Self(value)
-    }
-
     pub fn parse(value: &str) -> Result<Self, TriggerError> {
         Ulid::from_str(value)
             .map(Self)
             .map_err(|error| TriggerError::InvalidTriggerId {
                 reason: error.to_string(),
             })
-    }
-
-    pub fn as_ulid(self) -> Ulid {
-        self.0
     }
 }
 
@@ -212,6 +210,8 @@ pub struct TriggerRecord {
     pub last_run_at: Option<Timestamp>,
     pub last_fired_slot: Option<Timestamp>,
     pub last_status: Option<TriggerRunStatus>,
+    pub active_fire_slot: Option<Timestamp>,
+    pub active_run_ref: Option<TurnRunId>,
     pub created_at: Timestamp,
 }
 
@@ -233,6 +233,10 @@ impl TriggerRecord {
 
     pub fn is_due_at(&self, now: Timestamp) -> bool {
         self.state == TriggerState::Scheduled && self.next_run_at <= now
+    }
+
+    pub fn has_active_fire(&self) -> bool {
+        self.active_fire_slot.is_some() || self.active_run_ref.is_some()
     }
 }
 
@@ -337,6 +341,68 @@ pub struct TriggerFire {
     pub prompt: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaimDueFireRequest {
+    pub tenant_id: TenantId,
+    pub trigger_id: TriggerId,
+    pub fire_slot: Timestamp,
+    pub now: Timestamp,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaimedTriggerFire {
+    pub record: TriggerRecord,
+    pub fire_slot: Timestamp,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClaimDueFireOutcome {
+    Claimed(ClaimedTriggerFire),
+    NotFound,
+    NotDue {
+        record: TriggerRecord,
+    },
+    AlreadyActive {
+        active_fire_slot: Option<Timestamp>,
+        active_run_ref: Option<TurnRunId>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FireAcceptedRequest {
+    pub tenant_id: TenantId,
+    pub trigger_id: TriggerId,
+    pub fire_slot: Timestamp,
+    pub run_id: TurnRunId,
+    pub submitted_at: Timestamp,
+    pub next_run_at: Timestamp,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FireReplayedRequest {
+    pub tenant_id: TenantId,
+    pub trigger_id: TriggerId,
+    pub fire_slot: Timestamp,
+    pub original_run_id: TurnRunId,
+    pub replayed_at: Timestamp,
+    pub next_run_at: Timestamp,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FireRetryableFailedRequest {
+    pub tenant_id: TenantId,
+    pub trigger_id: TriggerId,
+    pub fire_slot: Timestamp,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FirePermanentFailedRequest {
+    pub tenant_id: TenantId,
+    pub trigger_id: TriggerId,
+    pub fire_slot: Timestamp,
+    pub next_run_at: Timestamp,
+}
+
 #[async_trait]
 pub trait TriggerSourceProvider: Send + Sync {
     async fn evaluate(
@@ -385,6 +451,10 @@ pub trait TriggerRepository: Send + Sync {
         trigger_id: TriggerId,
     ) -> Result<Option<TriggerRecord>, TriggerError>;
 
+    /// Returns all triggers for a tenant in creation order.
+    ///
+    /// This method is currently unbounded. Callers must apply any product or
+    /// API pagination before exposing user-facing list surfaces.
     async fn list_triggers(&self, tenant_id: TenantId) -> Result<Vec<TriggerRecord>, TriggerError>;
 
     async fn remove_trigger(
@@ -393,12 +463,51 @@ pub trait TriggerRepository: Send + Sync {
         trigger_id: TriggerId,
     ) -> Result<Option<TriggerRecord>, TriggerError>;
 
+    /// Lists due triggers across all tenants for the trusted poller path.
+    ///
+    /// # Safety / Authorization
+    ///
+    /// This is a global query and must not be used for tenant-scoped or
+    /// user-facing list operations. Callers must preserve each returned
+    /// record's tenant/user authority when materializing a fire.
     async fn list_due_triggers(
         &self,
         now: Timestamp,
         limit: usize,
     ) -> Result<Vec<TriggerRecord>, TriggerError>;
+
+    async fn claim_due_fire(
+        &self,
+        request: ClaimDueFireRequest,
+    ) -> Result<ClaimDueFireOutcome, TriggerError>;
+
+    async fn mark_fire_accepted(
+        &self,
+        request: FireAcceptedRequest,
+    ) -> Result<Option<TriggerRecord>, TriggerError>;
+
+    async fn mark_fire_replayed(
+        &self,
+        request: FireReplayedRequest,
+    ) -> Result<Option<TriggerRecord>, TriggerError>;
+
+    async fn mark_fire_retryable_failed(
+        &self,
+        request: FireRetryableFailedRequest,
+    ) -> Result<Option<TriggerRecord>, TriggerError>;
+
+    async fn mark_fire_permanently_failed(
+        &self,
+        request: FirePermanentFailedRequest,
+    ) -> Result<Option<TriggerRecord>, TriggerError>;
 }
+
+/// Feature-gated durable libSQL repository type for composition/test wiring.
+#[cfg(feature = "libsql")]
+pub use libsql::LibSqlTriggerRepository;
+/// Feature-gated durable PostgreSQL repository type for composition/test wiring.
+#[cfg(feature = "postgres")]
+pub use postgres::PostgresTriggerRepository;
 
 #[derive(Clone, Default)]
 pub struct InMemoryTriggerRepository {
@@ -479,21 +588,171 @@ impl TriggerRepository for InMemoryTriggerRepository {
             return Ok(Vec::new());
         }
         let limit = limit.min(MAX_DUE_TRIGGER_POLL_LIMIT);
-        let mut keys = {
-            let state = self.lock_state()?;
-            state
-                .iter()
-                .filter(|(_, record)| record.is_due_at(now))
-                .map(|(key, record)| (record.next_run_at, record.trigger_id, key.clone()))
-                .collect::<Vec<_>>()
-        };
-        keys.sort_by_key(|(next_run_at, trigger_id, _)| (*next_run_at, *trigger_id));
-        keys.truncate(limit);
         let state = self.lock_state()?;
-        Ok(keys
+        let mut selected_keys = state
+            .iter()
+            .filter(|(_, record)| record.is_due_at(now) && !record.has_active_fire())
+            .map(|(key, record)| {
+                (
+                    record.next_run_at,
+                    record.tenant_id.clone(),
+                    record.trigger_id,
+                    key.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        selected_keys.sort_by_key(|(next_run_at, tenant_id, trigger_id, _)| {
+            (*next_run_at, tenant_id.clone(), *trigger_id)
+        });
+        selected_keys.truncate(limit);
+        Ok(selected_keys
             .into_iter()
-            .filter_map(|(_, _, key)| state.get(&key).cloned())
+            .filter_map(|(_, _, _, key)| state.get(&key).cloned())
             .collect())
+    }
+
+    async fn claim_due_fire(
+        &self,
+        request: ClaimDueFireRequest,
+    ) -> Result<ClaimDueFireOutcome, TriggerError> {
+        let mut state = self.lock_state()?;
+        let key = TriggerRepositoryKey::new(&request.tenant_id, request.trigger_id);
+        let Some(record) = state.get_mut(&key) else {
+            return Ok(ClaimDueFireOutcome::NotFound);
+        };
+
+        if record.state != TriggerState::Scheduled
+            || record.next_run_at != request.fire_slot
+            || request.fire_slot > request.now
+        {
+            return Ok(ClaimDueFireOutcome::NotDue {
+                record: record.clone(),
+            });
+        }
+
+        if record.has_active_fire() {
+            return Ok(ClaimDueFireOutcome::AlreadyActive {
+                active_fire_slot: record.active_fire_slot,
+                active_run_ref: record.active_run_ref,
+            });
+        }
+
+        record.active_fire_slot = Some(request.fire_slot);
+        record.active_run_ref = None;
+        Ok(ClaimDueFireOutcome::Claimed(ClaimedTriggerFire {
+            record: record.clone(),
+            fire_slot: request.fire_slot,
+        }))
+    }
+
+    async fn mark_fire_accepted(
+        &self,
+        request: FireAcceptedRequest,
+    ) -> Result<Option<TriggerRecord>, TriggerError> {
+        let Some(record) = self.update_claimed_fire(
+            &request.tenant_id,
+            request.trigger_id,
+            request.fire_slot,
+            |record| {
+                if let Some(active_run_ref) = record.active_run_ref {
+                    reject_run_ref_rewrite(active_run_ref, request.run_id)?;
+                    return Ok(());
+                }
+                reject_non_future_next_run_at(request.fire_slot, request.next_run_at)?;
+                record.last_run_at = Some(request.submitted_at);
+                record.last_fired_slot = Some(request.fire_slot);
+                record.last_status = Some(TriggerRunStatus::Ok);
+                record.next_run_at = request.next_run_at;
+                record.active_fire_slot = Some(request.fire_slot);
+                record.active_run_ref = Some(request.run_id);
+                Ok(())
+            },
+        )?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(record))
+    }
+
+    async fn mark_fire_replayed(
+        &self,
+        request: FireReplayedRequest,
+    ) -> Result<Option<TriggerRecord>, TriggerError> {
+        let Some(record) = self.update_claimed_fire(
+            &request.tenant_id,
+            request.trigger_id,
+            request.fire_slot,
+            |record| {
+                if let Some(active_run_ref) = record.active_run_ref {
+                    reject_run_ref_rewrite(active_run_ref, request.original_run_id)?;
+                    return Ok(());
+                }
+                reject_non_future_next_run_at(request.fire_slot, request.next_run_at)?;
+                record.last_run_at = Some(request.replayed_at);
+                record.last_fired_slot = Some(request.fire_slot);
+                record.last_status = Some(TriggerRunStatus::Ok);
+                record.next_run_at = request.next_run_at;
+                record.active_fire_slot = Some(request.fire_slot);
+                record.active_run_ref = Some(request.original_run_id);
+                Ok(())
+            },
+        )?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(record))
+    }
+
+    async fn mark_fire_retryable_failed(
+        &self,
+        request: FireRetryableFailedRequest,
+    ) -> Result<Option<TriggerRecord>, TriggerError> {
+        let Some(record) = self.update_claimed_fire(
+            &request.tenant_id,
+            request.trigger_id,
+            request.fire_slot,
+            |record| {
+                reject_failed_result_after_active_run(record.active_run_ref)?;
+                if record.next_run_at > request.fire_slot {
+                    return Err(TriggerError::InvalidRecord {
+                        reason: "retryable fire failure must leave next_run_at at or before the failed fire slot"
+                            .to_string(),
+                    });
+                }
+                record.last_status = Some(TriggerRunStatus::Error);
+                record.active_fire_slot = None;
+                record.active_run_ref = None;
+                Ok(())
+            },
+        )?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(record))
+    }
+
+    async fn mark_fire_permanently_failed(
+        &self,
+        request: FirePermanentFailedRequest,
+    ) -> Result<Option<TriggerRecord>, TriggerError> {
+        let Some(record) = self.update_claimed_fire(
+            &request.tenant_id,
+            request.trigger_id,
+            request.fire_slot,
+            |record| {
+                reject_failed_result_after_active_run(record.active_run_ref)?;
+                reject_non_future_next_run_at(request.fire_slot, request.next_run_at)?;
+                record.last_status = Some(TriggerRunStatus::Error);
+                record.next_run_at = request.next_run_at;
+                record.active_fire_slot = None;
+                record.active_run_ref = None;
+                Ok(())
+            },
+        )?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(record))
     }
 }
 
@@ -502,8 +761,64 @@ impl InMemoryTriggerRepository {
         &self,
     ) -> Result<std::sync::MutexGuard<'_, HashMap<TriggerRepositoryKey, TriggerRecord>>, TriggerError>
     {
-        self.state.lock().map_err(|_| TriggerError::Backend)
+        self.state.lock().map_err(|_| TriggerError::Backend {
+            reason: "trigger repository mutex poisoned".to_string(),
+        })
     }
+
+    fn update_claimed_fire(
+        &self,
+        tenant_id: &TenantId,
+        trigger_id: TriggerId,
+        fire_slot: Timestamp,
+        update: impl FnOnce(&mut TriggerRecord) -> Result<(), TriggerError>,
+    ) -> Result<Option<TriggerRecord>, TriggerError> {
+        let mut state = self.lock_state()?;
+        let key = TriggerRepositoryKey::new(tenant_id, trigger_id);
+        let Some(record) = state.get_mut(&key) else {
+            return Ok(None);
+        };
+        if record.active_fire_slot != Some(fire_slot) {
+            return Ok(None);
+        }
+        update(record)?;
+        Ok(Some(record.clone()))
+    }
+}
+
+pub(crate) fn reject_non_future_next_run_at(
+    fire_slot: Timestamp,
+    next_run_at: Timestamp,
+) -> Result<(), TriggerError> {
+    if next_run_at > fire_slot {
+        return Ok(());
+    }
+    Err(TriggerError::InvalidRecord {
+        reason: "fire result next_run_at must be after the claimed fire slot".to_string(),
+    })
+}
+
+pub(crate) fn reject_run_ref_rewrite(
+    active_run_ref: TurnRunId,
+    incoming_run_ref: TurnRunId,
+) -> Result<(), TriggerError> {
+    if active_run_ref == incoming_run_ref {
+        return Ok(());
+    }
+    Err(TriggerError::InvalidRecord {
+        reason: "fire result must not rewrite an existing active_run_ref".to_string(),
+    })
+}
+
+pub(crate) fn reject_failed_result_after_active_run(
+    active_run_ref: Option<TurnRunId>,
+) -> Result<(), TriggerError> {
+    if active_run_ref.is_none() {
+        return Ok(());
+    }
+    Err(TriggerError::InvalidRecord {
+        reason: "fire failure result must not clear an accepted active_run_ref".to_string(),
+    })
 }
 
 fn normalize_cron_expression(expression: &str) -> Result<String, TriggerError> {
@@ -649,6 +964,8 @@ mod tests {
             last_run_at: None,
             last_fired_slot: None,
             last_status: None,
+            active_fire_slot: None,
+            active_run_ref: None,
             created_at: ts(1_704_067_200),
         }
     }
@@ -1027,6 +1344,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn in_memory_repository_list_due_triggers_orders_same_slot_by_tenant_then_trigger_id() {
+        let repo = InMemoryTriggerRepository::default();
+        let due_slot = ts(1_704_067_200);
+        let tenant_a_high = sample_record(
+            TriggerId::parse("01J00000000000000000000000").expect("ulid"),
+            tenant("tenant-a"),
+            due_slot,
+        );
+        let tenant_b_low = sample_record(
+            TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid"),
+            tenant("tenant-b"),
+            due_slot,
+        );
+        let tenant_a_low = sample_record(
+            TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZY").expect("ulid"),
+            tenant("tenant-a"),
+            due_slot,
+        );
+        repo.upsert_trigger(tenant_b_low.clone())
+            .await
+            .expect("insert tenant b");
+        repo.upsert_trigger(tenant_a_high.clone())
+            .await
+            .expect("insert tenant a high");
+        repo.upsert_trigger(tenant_a_low.clone())
+            .await
+            .expect("insert tenant a low");
+
+        let due_records = repo
+            .list_due_triggers(due_slot, 10)
+            .await
+            .expect("list due");
+
+        assert_eq!(
+            due_records
+                .iter()
+                .map(|record| (record.tenant_id.clone(), record.trigger_id))
+                .collect::<Vec<_>>(),
+            vec![
+                (tenant_a_low.tenant_id.clone(), tenant_a_low.trigger_id),
+                (tenant_a_high.tenant_id.clone(), tenant_a_high.trigger_id),
+                (tenant_b_low.tenant_id.clone(), tenant_b_low.trigger_id),
+            ]
+        );
+    }
+
+    #[tokio::test]
     async fn in_memory_repository_list_due_triggers_clamps_large_limit() {
         let repo = InMemoryTriggerRepository::default();
         for _ in 0..=MAX_DUE_TRIGGER_POLL_LIMIT {
@@ -1058,6 +1422,53 @@ mod tests {
         let error = repo
             .lock_state()
             .expect_err("poisoned mutex maps to backend");
-        assert!(matches!(error, TriggerError::Backend));
+        assert!(matches!(error, TriggerError::Backend { .. }));
+    }
+
+    #[tokio::test]
+    async fn in_memory_repository_claim_due_fire_returns_backend_error_when_mutex_is_poisoned() {
+        let repo = InMemoryTriggerRepository::default();
+        let poison_repo = repo.clone();
+        let _ = std::panic::catch_unwind(move || {
+            let _guard = poison_repo.state.lock().expect("lock before poison");
+            panic!("poison trigger repository mutex");
+        });
+
+        let error = repo
+            .claim_due_fire(ClaimDueFireRequest {
+                tenant_id: tenant("tenant-a"),
+                trigger_id: TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid"),
+                fire_slot: ts(1_704_067_200),
+                now: ts(1_704_067_200),
+            })
+            .await
+            .expect_err("poisoned mutex maps to backend through claim API");
+        assert!(matches!(error, TriggerError::Backend { .. }));
+    }
+
+    #[tokio::test]
+    async fn in_memory_repository_mark_fire_accepted_returns_backend_error_when_mutex_is_poisoned()
+    {
+        let repo = InMemoryTriggerRepository::default();
+        let poison_repo = repo.clone();
+        let _ = std::panic::catch_unwind(move || {
+            let _guard = poison_repo.state.lock().expect("lock before poison");
+            panic!("poison trigger repository mutex");
+        });
+
+        let fire_slot = ts(1_704_067_200);
+        let error = repo
+            .mark_fire_accepted(FireAcceptedRequest {
+                tenant_id: tenant("tenant-a"),
+                trigger_id: TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid"),
+                fire_slot,
+                run_id: TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5a")
+                    .expect("valid run"),
+                submitted_at: fire_slot,
+                next_run_at: ts(1_704_067_260),
+            })
+            .await
+            .expect_err("poisoned mutex maps to backend through accepted-result API");
+        assert!(matches!(error, TriggerError::Backend { .. }));
     }
 }

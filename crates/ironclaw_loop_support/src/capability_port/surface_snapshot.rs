@@ -276,21 +276,15 @@ impl SyntheticSurfaceCapabilitySnapshot {
                 )?;
                 super::validate_provider_arguments(&normalized_arguments)?;
                 let request = capability_info::CapabilityInfoRequest::parse(&normalized_arguments)?;
-                let target = snapshot
-                    .capability_info(request.requested_name())
-                    .ok_or_else(|| {
-                        AgentLoopHostError::new(
-                            AgentLoopHostErrorKind::InvalidInvocation,
-                            "capability_info target is not on the visible surface",
-                        )
-                    })?;
+                let mut effective_capability_ids = Vec::with_capacity(2);
+                effective_capability_ids.push(capability_id.clone());
+                if let Some(target) = snapshot.capability_info(request.requested_name()) {
+                    effective_capability_ids.push(target.capability_id.clone());
+                }
                 Ok(PreparedSurfaceCapabilityCall {
                     capability_id: capability_id.clone(),
                     normalized_arguments,
-                    effective_capability_ids: vec![
-                        capability_id.clone(),
-                        target.capability_id.clone(),
-                    ],
+                    effective_capability_ids,
                 })
             }
         }

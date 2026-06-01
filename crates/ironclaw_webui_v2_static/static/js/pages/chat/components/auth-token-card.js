@@ -49,6 +49,13 @@ export function AuthTokenCard({ gate, onSubmit, onCancel }) {
           ${gate?.headline || t("authGate.title")}
         </span>
       </div>
+      ${(gate?.provider || gate?.accountLabel) && html`
+        <div className="mb-2 text-xs text-iron-300">
+          ${gate.accountLabel
+            ? html`<span>${gate.accountLabel}</span>`
+            : html`<span>${gate.provider}</span>`}
+        </div>
+      `}
       ${gate?.body &&
       html`<div className="mb-3 text-sm text-iron-200">${gate.body}</div>`}
       <div className="mb-3">

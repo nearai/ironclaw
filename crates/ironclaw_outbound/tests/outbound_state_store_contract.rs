@@ -401,6 +401,21 @@ async fn durable_policy_subscription_delivery_flow(store: &impl OutboundStateSto
         .unwrap();
     assert_eq!(
         targets(&progress_plan),
+        vec![progress_target.clone(), default_reply.clone()]
+    );
+
+    let auth_prompt_plan = store
+        .plan_push_targets(OutboundPushTargetRequest {
+            scope: scope.clone(),
+            turn_run_id: None,
+            reply_target: default_reply.clone(),
+            kind: OutboundPushKind::AuthPrompt,
+            projection_ref: ProjectionUpdateRef::new("projection:auth-prompt-1").unwrap(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        targets(&auth_prompt_plan),
         vec![progress_target, default_reply.clone()]
     );
 

@@ -254,6 +254,18 @@ pub trait AuthFlowRecordSource: Send + Sync {
     /// current scope. Any consumer that projects these records into
     /// product/user-facing views must scope-filter before exposing them.
     fn flow_records_snapshot(&self) -> Vec<AuthFlowRecord>;
+
+    /// Returns the first flow record matching `predicate`.
+    ///
+    /// Implementations with an indexed or locked in-memory backing store can
+    /// avoid cloning unrelated flow records for single-record projection
+    /// lookups. The default keeps the trait backward-compatible.
+    fn flow_record_matching(
+        &self,
+        predicate: &mut dyn FnMut(&AuthFlowRecord) -> bool,
+    ) -> Option<AuthFlowRecord> {
+        self.flow_records_snapshot().into_iter().find(predicate)
+    }
 }
 
 pub fn credential_status_for_completed_flow() -> CredentialAccountStatus {

@@ -11,6 +11,7 @@ mod error;
 mod filesystem_store;
 mod ids;
 mod memory;
+mod resolution_engine;
 mod service;
 mod store;
 mod types;
@@ -21,10 +22,10 @@ pub use communication_preferences::{
 };
 pub use delivery_resolution::{
     CommunicationDeliveryCandidate, CommunicationDeliveryIntent, CommunicationDeliveryKind,
-    CommunicationDeliveryResolutionRequest, CommunicationModality, DeliveryTargetCapabilities,
-    RequestedOutboundContext, RequestedOutboundKind, RunNotificationContext,
-    RunNotificationEventKind, RunNotificationOrigin, SourceRouteContext, SystemEventReasonCode,
-    TriggerCommunicationContext, TriggerSourceKind,
+    CommunicationDeliveryResolution, CommunicationDeliveryResolutionRequest, CommunicationModality,
+    DeliveryTargetCapabilities, RequestedOutboundContext, RequestedOutboundKind,
+    RunNotificationContext, RunNotificationEventKind, RunNotificationOrigin, SourceRouteContext,
+    SystemEventReasonCode, TriggerCommunicationContext, TriggerSourceKind,
 };
 pub use error::OutboundError;
 pub use filesystem_store::FilesystemOutboundStateStore;
@@ -41,8 +42,9 @@ pub use types::{
     AdvanceSubscriptionCursorRequest, DeliveryFailureKind, LoadSubscriptionCursorRequest,
     OutboundDeliveryAttempt, OutboundDeliveryDecision, OutboundDeliveryStatus,
     OutboundPushCandidate, OutboundPushKind, OutboundPushPlan, OutboundPushTargetRequest,
-    PrepareOutboundDeliveryRequest, ProjectionSubscriptionRecord, ProjectionSubscriptionRequest,
-    ReplyTargetBindingClaim, ReplyTargetValidationRequest, ThreadNotificationPolicy,
-    ThreadNotificationTarget, ThreadProjectionAccessClaim, ThreadProjectionAccessGrant,
-    ThreadProjectionAccessRequest, UpdateDeliveryStatusRequest, ValidatedReplyTargetBinding,
+    PrepareCommunicationDeliveryRequest, PrepareOutboundDeliveryRequest,
+    ProjectionSubscriptionRecord, ProjectionSubscriptionRequest, ReplyTargetBindingClaim,
+    ReplyTargetValidationRequest, ThreadNotificationPolicy, ThreadNotificationTarget,
+    ThreadProjectionAccessClaim, ThreadProjectionAccessGrant, ThreadProjectionAccessRequest,
+    UpdateDeliveryStatusRequest, ValidatedReplyTargetBinding,
 };

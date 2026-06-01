@@ -1,5 +1,7 @@
 import { React, html } from "../../lib/html.js";
 import { ApprovalCard } from "./components/approval-card.js";
+import { AuthGenericCard } from "./components/auth-generic-card.js";
+import { AuthOauthCard } from "./components/auth-oauth-card.js";
 import { AuthTokenCard } from "./components/auth-token-card.js";
 import { ChatInput } from "./components/chat-input.js";
 import { ConnectionStatus } from "./components/connection-status.js";
@@ -114,14 +116,30 @@ export function Chat({
             ${isProcessing && !pendingGate && html`<${TypingIndicator} />`}
             ${pendingGate &&
             (pendingGate.kind === "auth_required"
-              ? html`
-                <${AuthTokenCard}
-                  gate=${pendingGate}
-                  onSubmit=${submitAuthToken}
-                  onCancel=${() =>
-                    approve(pendingGate.requestId, "cancel", pendingGate.kind)}
-                />
-              `
+              ? (pendingGate.challengeKind === "oauth_url"
+                ? html`
+                  <${AuthOauthCard}
+                    gate=${pendingGate}
+                    onCancel=${() =>
+                      approve(pendingGate.requestId, "cancel", pendingGate.kind)}
+                  />
+                `
+                : pendingGate.challengeKind === "manual_token"
+                  ? html`
+                  <${AuthTokenCard}
+                    gate=${pendingGate}
+                    onSubmit=${submitAuthToken}
+                    onCancel=${() =>
+                      approve(pendingGate.requestId, "cancel", pendingGate.kind)}
+                  />
+                `
+                  : html`
+                  <${AuthGenericCard}
+                    gate=${pendingGate}
+                    onCancel=${() =>
+                      approve(pendingGate.requestId, "cancel", pendingGate.kind)}
+                  />
+                `)
               : html`
               <${ApprovalCard}
                 gate=${pendingGate}
