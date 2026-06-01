@@ -273,7 +273,7 @@ async fn assert_due_query_clamps_limit_and_respects_state_gate(repo: &impl Trigg
         due_slot,
     );
     let same_tenant_low = sample_record(
-        TriggerId::parse("01J00000000000000000000002").expect("ulid"),
+        TriggerId::parse("01J00000000000000000000001").expect("ulid"),
         tenant("tenant-d"),
         due_slot,
     );
@@ -636,39 +636,44 @@ async fn postgres_repository_rejects_malformed_persisted_rows() {
     }
 }
 
-fn malformed_row_cases() -> Vec<(&'static str, &'static str, &'static str, &'static str)> {
+#[derive(Clone, Copy)]
+enum ReadMode {
+    Get,
+    List,
+    Due,
+    Remove,
+}
+
+fn malformed_row_cases() -> Vec<(&'static str, &'static str, &'static str, ReadMode)> {
+    use ReadMode::{Due, Get, List, Remove};
+
     [
-        ("trigger_id", "not-a-ulid", "invalid length", "list"),
-        ("tenant_id", "", "tenant_id", "due"),
-        ("creator_user_id", "", "creator_user_id", "remove"),
-        ("creator_user_id", "", "creator_user_id", "get"),
-        ("agent_id", "", "agent_id", "get"),
-        ("project_id", "", "project_id", "get"),
-        ("name", "", "name", "get"),
-        ("name", "   ", "name", "get"),
-        ("source", "webhook", "source", "get"),
-        ("schedule_expression", "*/30 * * * * *", "schedule", "get"),
-        ("state", "unknown", "state", "get"),
-        ("completion_policy", "once", "completion_policy", "get"),
-        ("prompt", "", "prompt", "get"),
-        ("prompt", "\t  ", "prompt", "get"),
-        ("next_run_at", "not-a-timestamp", "next_run_at", "get"),
-        ("last_run_at", "not-a-timestamp", "last_run_at", "get"),
-        (
-            "last_fired_slot",
-            "not-a-timestamp",
-            "last_fired_slot",
-            "get",
-        ),
+        ("trigger_id", "not-a-ulid", "invalid length", List),
+        ("tenant_id", "", "tenant_id", Due),
+        ("creator_user_id", "", "creator_user_id", Remove),
+        ("creator_user_id", "", "creator_user_id", Get),
+        ("agent_id", "", "agent_id", Get),
+        ("project_id", "", "project_id", Get),
+        ("name", "", "name", Get),
+        ("name", "   ", "name", Get),
+        ("source", "webhook", "source", Get),
+        ("schedule_expression", "*/30 * * * * *", "schedule", Get),
+        ("state", "unknown", "state", Get),
+        ("completion_policy", "once", "completion_policy", Get),
+        ("prompt", "", "prompt", Get),
+        ("prompt", "\t  ", "prompt", Get),
+        ("next_run_at", "not-a-timestamp", "next_run_at", Get),
+        ("last_run_at", "not-a-timestamp", "last_run_at", Get),
+        ("last_fired_slot", "not-a-timestamp", "last_fired_slot", Get),
         (
             "active_fire_slot",
             "not-a-timestamp",
             "active_fire_slot",
-            "get",
+            Get,
         ),
-        ("active_run_ref", "not-a-uuid", "active_run_ref", "get"),
-        ("last_status", "timed_out", "last_status", "get"),
-        ("created_at", "not-a-timestamp", "created_at", "get"),
+        ("active_run_ref", "not-a-uuid", "active_run_ref", Get),
+        ("last_status", "timed_out", "last_status", Get),
+        ("created_at", "not-a-timestamp", "created_at", Get),
     ]
     .into()
 }
@@ -678,20 +683,19 @@ async fn assert_malformed_row_error(
     tenant_id: TenantId,
     trigger_id: TriggerId,
     expected_field: &str,
-    read_mode: &str,
+    read_mode: ReadMode,
 ) {
     let error = match read_mode {
-        "get" => repo.get_trigger(tenant_id.clone(), trigger_id).await,
-        "list" => repo
+        ReadMode::Get => repo.get_trigger(tenant_id.clone(), trigger_id).await,
+        ReadMode::List => repo
             .list_triggers(tenant_id.clone())
             .await
             .map(|records| records.first().cloned()),
-        "due" => repo
+        ReadMode::Due => repo
             .list_due_triggers(ts(1_704_067_260), 10)
             .await
             .map(|records| records.first().cloned()),
-        "remove" => repo.remove_trigger(tenant_id.clone(), trigger_id).await,
-        _ => unreachable!("known read mode"),
+        ReadMode::Remove => repo.remove_trigger(tenant_id.clone(), trigger_id).await,
     }
     .expect_err("malformed row must fail hydration");
     assert!(

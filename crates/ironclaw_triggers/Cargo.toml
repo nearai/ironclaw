@@ -8,8 +8,8 @@ publish = false
 
 [features]
 default = []
-postgres = ["dep:deadpool-postgres", "dep:tokio-postgres"]
 libsql = ["dep:libsql"]
+postgres = ["dep:deadpool-postgres", "dep:tokio-postgres"]
 
 [dependencies]
 async-trait = "0.1"

@@ -15,6 +15,7 @@ const TRIGGER_COLUMNS: &str = "\
     name, source, schedule_expression, completion_policy, prompt, \
     state, next_run_at, last_run_at, last_fired_slot, last_status, \
     active_fire_slot, active_run_ref, created_at";
+const TRIGGER_MIGRATION_ADVISORY_LOCK: i64 = 717_263_529;
 
 /// PostgreSQL-backed [`TriggerRepository`] storing trigger records.
 pub struct PostgresTriggerRepository {
@@ -32,6 +33,12 @@ impl PostgresTriggerRepository {
             .transaction()
             .await
             .map_err(|error| backend_error("begin trigger migration", error))?;
+        tx.execute(
+            "SELECT pg_advisory_xact_lock($1)",
+            &[&TRIGGER_MIGRATION_ADVISORY_LOCK],
+        )
+        .await
+        .map_err(|error| backend_error("acquire trigger migration advisory lock", error))?;
         tx.batch_execute(POSTGRES_TRIGGER_SCHEMA)
             .await
             .map_err(|error| backend_error("run trigger migrations", error))?;
@@ -54,16 +61,10 @@ impl TriggerRepository for PostgresTriggerRepository {
         record.validate()?;
         let client = self.connect().await?;
         let trigger_id = record.trigger_id.to_string();
-        let tenant_id = record.tenant_id.as_str().to_string();
-        let creator_user_id = record.creator_user_id.as_str().to_string();
-        let agent_id = record
-            .agent_id
-            .as_ref()
-            .map(|value| value.as_str().to_string());
-        let project_id = record
-            .project_id
-            .as_ref()
-            .map(|value| value.as_str().to_string());
+        let tenant_id = record.tenant_id.as_str();
+        let creator_user_id = record.creator_user_id.as_str();
+        let agent_id = record.agent_id.as_ref().map(AgentId::as_str);
+        let project_id = record.project_id.as_ref().map(ProjectId::as_str);
         let source = source_kind_text(record.source);
         let schedule_expression = schedule_expression_text(&record.schedule);
         let completion_policy = completion_policy_text(record.completion_policy);
