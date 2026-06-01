@@ -188,32 +188,32 @@ pub async fn prepare_and_render_product_outbound(
         }
     };
 
-    if matches!(
-        render_outcome,
-        ProductRenderOutcome::DeliveryRecorded | ProductRenderOutcome::SynchronousResponse(_)
-    ) {
-        let status_update_error = outbound_policy
-            .update_delivery_status(UpdateDeliveryStatusRequest {
-                delivery_id: attempt.delivery_id,
-                scope: attempt.scope.clone(),
-                status: OutboundDeliveryStatus::Delivered,
-                updated_at: chrono::Utc::now(),
-                failure_kind: None,
-            })
-            .await
-            .err()
-            .map(ProductOutboundStatusUpdateFailure::from);
-        if let Some(status_update_error) = status_update_error {
-            return Ok(ProductOutboundDeliveryOutcome::RenderedStatusUpdateFailed {
-                attempt,
-                render_outcome,
-                status_update_error,
-            });
+    match render_outcome {
+        ProductRenderOutcome::DeliveryRecorded | ProductRenderOutcome::SynchronousResponse(_) => {
+            let status_update_error = outbound_policy
+                .update_delivery_status(UpdateDeliveryStatusRequest {
+                    delivery_id: attempt.delivery_id,
+                    scope: attempt.scope.clone(),
+                    status: OutboundDeliveryStatus::Delivered,
+                    updated_at: chrono::Utc::now(),
+                    failure_kind: None,
+                })
+                .await
+                .err()
+                .map(ProductOutboundStatusUpdateFailure::from);
+            if let Some(status_update_error) = status_update_error {
+                return Ok(ProductOutboundDeliveryOutcome::RenderedStatusUpdateFailed {
+                    attempt,
+                    render_outcome,
+                    status_update_error,
+                });
+            }
         }
-        return Ok(ProductOutboundDeliveryOutcome::Rendered {
-            attempt,
-            render_outcome,
-        });
+        ProductRenderOutcome::Deferred => {
+            // Deferred means the adapter accepted the outbound attempt and will complete
+            // it later through a product-specific completion or reconciliation path.
+            // Leave the attempt Pending here so that later flow owns the final status.
+        }
     }
 
     Ok(ProductOutboundDeliveryOutcome::Rendered {

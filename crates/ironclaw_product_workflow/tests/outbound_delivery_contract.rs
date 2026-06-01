@@ -372,6 +372,63 @@ impl ProductAdapter for SynchronousResponseAdapter {
     }
 }
 
+struct DeferredAdapter {
+    adapter_id: ProductAdapterId,
+    installation_id: AdapterInstallationId,
+}
+
+impl DeferredAdapter {
+    fn new() -> Self {
+        Self {
+            adapter_id: ProductAdapterId::new("deferred_test").expect("valid adapter id"),
+            installation_id: AdapterInstallationId::new("deferred_install").expect("valid install"),
+        }
+    }
+}
+
+#[async_trait]
+impl ProductAdapter for DeferredAdapter {
+    fn adapter_id(&self) -> &ProductAdapterId {
+        &self.adapter_id
+    }
+
+    fn installation_id(&self) -> &AdapterInstallationId {
+        &self.installation_id
+    }
+
+    fn surface_kind(&self) -> ProductSurfaceKind {
+        ProductSurfaceKind::SynchronousApi
+    }
+
+    fn capabilities(&self) -> &ProductAdapterCapabilities {
+        &SYNC_ADAPTER_CAPABILITIES
+    }
+
+    fn auth_requirement(&self) -> &AuthRequirement {
+        static AUTH_REQUIREMENT: AuthRequirement = AuthRequirement::BearerToken;
+        &AUTH_REQUIREMENT
+    }
+
+    fn parse_inbound(
+        &self,
+        _raw_payload: &[u8],
+        _auth_evidence: &ironclaw_product_adapters::ProtocolAuthEvidence,
+    ) -> Result<ironclaw_product_adapters::ParsedProductInbound, ProductAdapterError> {
+        Err(ProductAdapterError::Internal {
+            detail: ironclaw_product_adapters::RedactedString::new("not used"),
+        })
+    }
+
+    async fn render_outbound(
+        &self,
+        _envelope: ProductOutboundEnvelope,
+        _egress: &dyn ProtocolHttpEgress,
+        _delivery_sink: &dyn OutboundDeliverySink,
+    ) -> Result<ProductRenderOutcome, ProductAdapterError> {
+        Ok(ProductRenderOutcome::Deferred)
+    }
+}
+
 fn scope() -> TurnScope {
     TurnScope::new(
         TenantId::new("tenant-product-outbound").expect("valid tenant"),
@@ -635,6 +692,54 @@ async fn synchronous_response_marks_attempt_delivered() {
     assert_eq!(
         attempts[0].status,
         ironclaw_outbound::OutboundDeliveryStatus::Delivered
+    );
+}
+
+#[tokio::test]
+async fn deferred_render_keeps_attempt_pending_and_skips_delivery_status_side_effects() {
+    let scope = scope();
+    let store = InMemoryOutboundStateStore::default();
+    let validator = FakeReplyTargetBindingValidator::default();
+    validator.allow(validated_reply_target());
+    let preferences = FakePreferenceRepository::default();
+    seed_preference(&preferences, &scope);
+    let resolver = FakeProductOutboundTargetResolver::default();
+    let policy = configured_policy(&store, &validator);
+    let adapter = DeferredAdapter::new();
+    let egress = FakeProtocolHttpEgress::new(["api.telegram.org".to_string()]);
+    let sink = FakeOutboundDeliverySink::new();
+
+    let outcome = prepare_and_render_product_outbound(
+        &policy,
+        &preferences,
+        &resolver,
+        ProductOutboundDeliveryRequest {
+            delivery: delivery_request(scope.clone()),
+            payload: final_reply_payload(),
+            projection_cursor: ProjectionCursor::new("cursor:outbound:deferred")
+                .expect("valid cursor"),
+            adapter: &adapter,
+            egress: &egress,
+            delivery_sink: &sink,
+        },
+    )
+    .await
+    .expect("delivery succeeds");
+
+    let ProductOutboundDeliveryOutcome::Rendered { render_outcome, .. } = outcome else {
+        panic!("expected rendered outcome");
+    };
+    assert!(matches!(render_outcome, ProductRenderOutcome::Deferred));
+    assert_eq!(validator.calls(), 1);
+    assert_eq!(preferences.load_calls(), 1);
+    assert_eq!(resolver.calls(), 1);
+    assert!(egress.calls().is_empty());
+    assert!(sink.statuses().is_empty());
+    let attempts = store.list_delivery_attempts(scope).await.unwrap();
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(
+        attempts[0].status,
+        ironclaw_outbound::OutboundDeliveryStatus::Pending
     );
 }
 
