@@ -40,7 +40,6 @@ mod local_dev_capability_policy;
 mod local_dev_mounts;
 mod local_runtime_profile;
 mod mcp;
-mod mcp_router;
 mod nearai_mcp;
 mod product_auth_durable;
 mod product_auth_runtime_credentials;
