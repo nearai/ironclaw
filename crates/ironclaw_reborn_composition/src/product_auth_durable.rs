@@ -15,12 +15,14 @@ use ironclaw_secrets::SecretStore;
 use serde::{Serialize, de::DeserializeOwned};
 
 use ironclaw_auth::{
-    AuthFlowId, AuthFlowRecord, AuthProductError, CredentialAccount, CredentialAccountId,
-    NewCredentialAccount,
+    AuthFlowId, AuthFlowOwnerScope, AuthFlowRecord, AuthProductError, AuthSessionId, AuthSurface,
+    CredentialAccount, CredentialAccountId, NewCredentialAccount,
 };
 
 use self::domain::validate_new_credential_account;
-use self::paths::{account_path, account_root, flow_path, fs_error, join_scoped};
+use self::paths::{
+    account_path, account_root, flow_path, flow_root, fs_error, join_scoped, surface_sessions_root,
+};
 
 mod accounts;
 mod cleanup;
@@ -68,6 +70,7 @@ where
 {
     filesystem: Arc<ScopedFilesystem<F>>,
     secret_store: Arc<dyn SecretStore>,
+    flow_projection_scope: Option<ResourceScope>,
     locks: Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>,
 }
 
@@ -82,6 +85,20 @@ where
         Self {
             filesystem,
             secret_store,
+            flow_projection_scope: None,
+            locks: Mutex::new(HashMap::new()),
+        }
+    }
+
+    pub(crate) fn new_with_flow_projection_scope(
+        filesystem: Arc<ScopedFilesystem<F>>,
+        secret_store: Arc<dyn SecretStore>,
+        flow_projection_scope: ResourceScope,
+    ) -> Self {
+        Self {
+            filesystem,
+            secret_store,
+            flow_projection_scope: Some(flow_projection_scope),
             locks: Mutex::new(HashMap::new()),
         }
     }
@@ -153,6 +170,114 @@ where
             .await
     }
 
+    async fn flows_for_scope(
+        &self,
+        scope: &ironclaw_auth::AuthProductScope,
+    ) -> Result<Vec<(AuthFlowRecord, RecordVersion)>, AuthProductError> {
+        let mut flows = self.flow_records_under_scope_root(scope).await?;
+        flows.retain(|(flow, _)| scope_matches(scope, &flow.scope));
+        flows.sort_by_key(|(flow, _)| flow.id);
+        Ok(flows)
+    }
+
+    async fn flow_records_under_scope_root(
+        &self,
+        scope: &ironclaw_auth::AuthProductScope,
+    ) -> Result<Vec<(AuthFlowRecord, RecordVersion)>, AuthProductError> {
+        let root = flow_root(scope)?;
+        let entries = match self.filesystem.list_dir(&scope.resource, &root).await {
+            Ok(entries) => entries,
+            Err(FilesystemError::NotFound { .. }) => return Ok(Vec::new()),
+            Err(error) => return Err(fs_error(error)),
+        };
+        const MAX_CONCURRENT_READS: usize = 16;
+        let mut flows: Vec<(AuthFlowRecord, RecordVersion)> = stream::iter(
+            entries
+                .into_iter()
+                .filter(|e| e.name.ends_with(".json"))
+                .map(|entry| {
+                    let path = join_scoped(&root, &entry.name);
+                    async move {
+                        let path = path?;
+                        self.read_record::<AuthFlowRecord>(&scope.resource, &path)
+                            .await
+                    }
+                }),
+        )
+        .buffer_unordered(MAX_CONCURRENT_READS)
+        .try_collect::<Vec<_>>()
+        .await?
+        .into_iter()
+        .flatten()
+        .collect();
+        flows.sort_by_key(|(flow, _)| flow.id);
+        Ok(flows)
+    }
+
+    async fn flow_records_for_projection_scope(
+        &self,
+        resource: &ResourceScope,
+    ) -> Result<Vec<AuthFlowRecord>, AuthProductError> {
+        self.flow_records_for_owner(resource, None).await
+    }
+
+    async fn flow_records_for_owner(
+        &self,
+        resource: &ResourceScope,
+        owner: Option<&AuthFlowOwnerScope>,
+    ) -> Result<Vec<AuthFlowRecord>, AuthProductError> {
+        let mut flows = Vec::new();
+        for surface in AuthSurface::ALL {
+            let scope = ironclaw_auth::AuthProductScope::new(resource.clone(), surface);
+            flows.extend(
+                self.flow_records_under_scope_root(&scope)
+                    .await?
+                    .into_iter()
+                    .map(|(flow, _)| flow)
+                    .filter(|flow| owner.is_none_or(|owner| owner.matches(flow))),
+            );
+            let sessions_root = surface_sessions_root(resource, surface)?;
+            let entries = match self.filesystem.list_dir(resource, &sessions_root).await {
+                Ok(entries) => entries,
+                Err(FilesystemError::NotFound { .. }) => continue,
+                Err(error) => return Err(fs_error(error)),
+            };
+            for entry in entries {
+                let session_id = AuthSessionId::new(entry.name)
+                    .map_err(|_| AuthProductError::BackendUnavailable)?;
+                let mut session_scope =
+                    ironclaw_auth::AuthProductScope::new(resource.clone(), surface);
+                session_scope.session_id = Some(session_id);
+                flows.extend(
+                    self.flow_records_under_scope_root(&session_scope)
+                        .await?
+                        .into_iter()
+                        .map(|(flow, _)| flow)
+                        .filter(|flow| owner.is_none_or(|owner| owner.matches(flow))),
+                );
+            }
+        }
+        flows.sort_by_key(|flow| flow.id);
+        flows.dedup_by_key(|flow| flow.id);
+        Ok(flows)
+    }
+
+    async fn flows_for_owner_scope(
+        &self,
+        owner: &AuthFlowOwnerScope,
+    ) -> Result<Vec<AuthFlowRecord>, AuthProductError> {
+        let resource = ResourceScope {
+            tenant_id: owner.tenant_id.clone(),
+            user_id: owner.user_id.clone(),
+            agent_id: owner.agent_id.clone(),
+            project_id: owner.project_id.clone(),
+            mission_id: None,
+            thread_id: Some(owner.thread_id.clone()),
+            invocation_id: ironclaw_host_api::InvocationId::new(),
+        };
+        self.flow_records_for_owner(&resource, Some(owner)).await
+    }
+
     async fn read_account(
         &self,
         scope: &ironclaw_auth::AuthProductScope,
@@ -178,6 +303,26 @@ where
 
     /// Returns all credential accounts for `scope`, reading records concurrently.
     async fn accounts_for_scope(
+        &self,
+        scope: &ironclaw_auth::AuthProductScope,
+    ) -> Result<Vec<CredentialAccount>, AuthProductError> {
+        let mut accounts = self
+            .account_records_under_scope_root(scope)
+            .await?
+            .into_iter()
+            .filter(|account| scope_matches(scope, &account.scope))
+            .collect::<Vec<_>>();
+        accounts.sort_by_key(|account| account.id);
+        Ok(accounts)
+    }
+
+    /// Returns all credential accounts stored under `scope`'s durable root.
+    ///
+    /// Normal product-auth lookups still apply exact `AuthProductScope`
+    /// filtering through `accounts_for_scope`; runtime credential selection uses
+    /// this lower-level scan because setup and runtime invocations necessarily
+    /// carry different invocation ids.
+    async fn account_records_under_scope_root(
         &self,
         scope: &ironclaw_auth::AuthProductScope,
     ) -> Result<Vec<CredentialAccount>, AuthProductError> {
@@ -208,7 +353,7 @@ where
         .await?
         .into_iter()
         .flatten()
-        .filter_map(|(account, _)| scope_matches(scope, &account.scope).then_some(account))
+        .map(|(account, _)| account)
         .collect();
         accounts.sort_by_key(|account| account.id);
         Ok(accounts)
