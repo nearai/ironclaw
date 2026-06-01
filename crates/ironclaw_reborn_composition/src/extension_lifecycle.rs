@@ -81,7 +81,26 @@ pub(crate) async fn restore_extension_lifecycle_state(
             installation.extension_id().as_str(),
         )?;
         let available = catalog.resolve(&package_ref)?;
-        validate_restored_manifest_hash(&installation, available)?;
+        if let Err(hash_error) = validate_restored_manifest_hash(&installation, available) {
+            // For host-bundled (first-party) extensions, a manifest hash mismatch means
+            // the binary was updated and the manifest changed. Migrate the stored installation
+            // and manifest record to the new hash, preserving activation state and bindings.
+            tracing::warn!(
+                extension_id = %installation.extension_id(),
+                "bundled extension manifest hash changed; migrating stored installation to new manifest hash"
+            );
+            let migration_plan =
+                prepare_manifest_migration(available, &installation)
+                    .map_err(|_| hash_error)?;
+            installation_store
+                .upsert_manifest(migration_plan.manifest_record)
+                .await
+                .map_err(map_extension_installation_error)?;
+            installation_store
+                .upsert_installation(migration_plan.installation)
+                .await
+                .map_err(map_extension_installation_error)?;
+        }
         materialize_available_extension(filesystem.as_ref(), available).await?;
         {
             let mut lifecycle = lifecycle_service.lock().await;
@@ -720,6 +739,48 @@ fn prepare_install(
         ExtensionActivationState::Installed,
         ExtensionManifestRef::new(available.package.id.clone(), Some(manifest_hash)),
         Vec::new(),
+        chrono::Utc::now(),
+    )
+    .map_err(map_extension_installation_error)?;
+    Ok(ExtensionInstallPlan {
+        manifest_record,
+        installation,
+    })
+}
+
+/// Build an [`ExtensionInstallPlan`] that carries the new manifest hash from `available`
+/// while preserving the activation state and credential bindings from `existing`.
+/// Used during restore to migrate a stored installation when the bundled manifest changes.
+fn prepare_manifest_migration(
+    available: &AvailableExtensionPackage,
+    existing: &ExtensionInstallation,
+) -> Result<ExtensionInstallPlan, ProductWorkflowError> {
+    let manifest_hash = available_manifest_hash(available)?;
+    let host_ports = ironclaw_host_runtime::default_host_port_catalog().map_err(|error| {
+        ProductWorkflowError::InvalidBindingRequest {
+            reason: format!("host port catalog rejected manifest migration: {error}"),
+        }
+    })?;
+    let contracts =
+        ironclaw_host_runtime::default_host_api_contract_registry().map_err(|error| {
+            ProductWorkflowError::InvalidBindingRequest {
+                reason: format!("host API contract registry rejected manifest migration: {error}"),
+            }
+        })?;
+    let manifest_record = ExtensionManifestRecord::from_toml_with_contracts(
+        &available.manifest_toml,
+        ManifestSource::HostBundled,
+        &host_ports,
+        Some(manifest_hash.clone()),
+        &contracts,
+    )
+    .map_err(map_extension_installation_error)?;
+    let installation = ExtensionInstallation::new(
+        existing.installation_id().clone(),
+        existing.extension_id().clone(),
+        existing.activation_state(),
+        ExtensionManifestRef::new(existing.extension_id().clone(), Some(manifest_hash)),
+        existing.credential_bindings().to_vec(),
         chrono::Utc::now(),
     )
     .map_err(map_extension_installation_error)?;
