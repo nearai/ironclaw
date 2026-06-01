@@ -4,7 +4,7 @@ use ironclaw_turns::{ReplyTargetBindingRef, TurnActor, TurnRunId, TurnScope};
 use serde::{Deserialize, Serialize};
 
 use crate::delivery_resolution::{
-    CommunicationDeliveryKind, CommunicationDeliveryResolutionRequest,
+    CommunicationDeliveryKind, CommunicationDeliveryResolutionRequest, CommunicationModality,
 };
 use crate::{OutboundDeliveryId, OutboundError, ProjectionSubscriptionId, ProjectionUpdateRef};
 
@@ -225,6 +225,8 @@ pub enum DeliveryFailureKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReplyTargetValidationRequest {
     pub scope: TurnScope,
+    pub actor: TurnActor,
+    pub modality: CommunicationModality,
     pub candidate: OutboundPushCandidate,
 }
 
@@ -289,6 +291,8 @@ impl ValidatedReplyTargetBinding {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PrepareOutboundDeliveryRequest {
     pub scope: TurnScope,
+    pub actor: TurnActor,
+    pub modality: CommunicationModality,
     pub candidate: OutboundPushCandidate,
     pub attempted_at: Timestamp,
 }

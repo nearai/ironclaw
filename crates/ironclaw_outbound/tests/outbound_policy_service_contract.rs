@@ -88,11 +88,7 @@ async fn delivery_preparation_revalidates_each_push_and_records_auth_failure_wit
 
     validator.allow(candidate.target.clone());
     let first = service
-        .prepare_delivery_attempt(PrepareOutboundDeliveryRequest {
-            scope: scope.clone(),
-            candidate: candidate.clone(),
-            attempted_at: now(),
-        })
+        .prepare_delivery_attempt(prepare_outbound_request(scope.clone(), candidate.clone()))
         .await
         .expect("first authorized delivery attempt");
     let OutboundDeliveryDecision::Authorized { attempt, target } = first else {
@@ -102,11 +98,7 @@ async fn delivery_preparation_revalidates_each_push_and_records_auth_failure_wit
     assert_eq!(target.target(), &candidate.target);
 
     let second = service
-        .prepare_delivery_attempt(PrepareOutboundDeliveryRequest {
-            scope: scope.clone(),
-            candidate: candidate.clone(),
-            attempted_at: now(),
-        })
+        .prepare_delivery_attempt(prepare_outbound_request(scope.clone(), candidate.clone()))
         .await
         .expect("second authorized delivery attempt");
     assert!(matches!(
@@ -121,11 +113,7 @@ async fn delivery_preparation_revalidates_each_push_and_records_auth_failure_wit
 
     validator.deny(candidate.target.clone());
     let rejected = service
-        .prepare_delivery_attempt(PrepareOutboundDeliveryRequest {
-            scope: scope.clone(),
-            candidate: candidate.clone(),
-            attempted_at: now(),
-        })
+        .prepare_delivery_attempt(prepare_outbound_request(scope.clone(), candidate.clone()))
         .await
         .expect("authorization failure is recorded, not surfaced as send target");
     let OutboundDeliveryDecision::Rejected { attempt } = rejected else {
@@ -169,11 +157,7 @@ async fn delivery_preparation_rejects_validator_target_substitution() {
     validator.redirect(candidate.target.clone(), reply_ref("reply-other"));
 
     let err = service
-        .prepare_delivery_attempt(PrepareOutboundDeliveryRequest {
-            scope: scope.clone(),
-            candidate,
-            attempted_at: now(),
-        })
+        .prepare_delivery_attempt(prepare_outbound_request(scope.clone(), candidate))
         .await
         .expect_err("validator must not substitute a different send target");
     assert!(matches!(err, OutboundError::InvalidRequest { .. }));
@@ -202,11 +186,7 @@ async fn delivery_preparation_rejects_scope_candidate_mismatch_before_validator_
     let candidate = candidate(&other_scope, "reply-default", OutboundPushKind::FinalReply);
 
     let err = service
-        .prepare_delivery_attempt(PrepareOutboundDeliveryRequest {
-            scope: scope.clone(),
-            candidate,
-            attempted_at: now(),
-        })
+        .prepare_delivery_attempt(prepare_outbound_request(scope.clone(), candidate))
         .await
         .expect_err("scope/candidate mismatch must fail before validator IO");
     assert!(matches!(err, OutboundError::InvalidRequest { .. }));
@@ -232,11 +212,7 @@ async fn delivery_preparation_fails_closed_when_candidate_skips_revalidation() {
     candidate.requires_reply_target_revalidation = false;
 
     let err = service
-        .prepare_delivery_attempt(PrepareOutboundDeliveryRequest {
-            scope: scope.clone(),
-            candidate,
-            attempted_at: now(),
-        })
+        .prepare_delivery_attempt(prepare_outbound_request(scope.clone(), candidate))
         .await
         .expect_err("delivery must fail closed without revalidation marker");
     assert!(matches!(err, OutboundError::InvalidRequest { .. }));
@@ -260,11 +236,7 @@ async fn delivery_preparation_records_transient_validator_error_separately_from_
     validator.fail_transient(candidate.target.clone());
 
     let rejected = service
-        .prepare_delivery_attempt(PrepareOutboundDeliveryRequest {
-            scope: scope.clone(),
-            candidate: candidate.clone(),
-            attempted_at: now(),
-        })
+        .prepare_delivery_attempt(prepare_outbound_request(scope.clone(), candidate.clone()))
         .await
         .expect("transient validator error is classified, not propagated");
     let OutboundDeliveryDecision::Rejected { attempt } = rejected else {
@@ -298,11 +270,7 @@ async fn delivery_preparation_propagates_validator_caller_bug_errors() {
     let candidate = candidate(&scope, "reply-default", OutboundPushKind::FinalReply);
 
     let err = service
-        .prepare_delivery_attempt(PrepareOutboundDeliveryRequest {
-            scope: scope.clone(),
-            candidate,
-            attempted_at: now(),
-        })
+        .prepare_delivery_attempt(prepare_outbound_request(scope.clone(), candidate))
         .await
         .expect_err("caller-bug validator errors must propagate, not be cached as transient");
     assert!(matches!(err, OutboundError::InvalidRequest { .. }));
@@ -717,6 +685,98 @@ async fn communication_delivery_exact_owner_validation_rejects_target_substituti
 }
 
 #[tokio::test]
+async fn communication_delivery_validator_can_enforce_prompt_actor_context() {
+    let store = InMemoryOutboundStateStore::default();
+    let access_policy = FakeThreadProjectionAccessPolicy::default();
+    let validator = FakeReplyTargetBindingValidator::default();
+    let service = OutboundPolicyService::new(&store, &access_policy, &validator);
+    let scope = turn_scope("thread-1");
+    let request = run_notification_request_with_scope(
+        scope.clone(),
+        RunNotificationEventKind::ApprovalNeeded,
+        RunNotificationOrigin::Triggered {
+            trigger: trigger_context(),
+        },
+    );
+    validator.allow(reply_ref("reply:approval-target"));
+    validator.require_actor(actor("exact-owner"));
+    store
+        .put_communication_preference(preference_record(
+            Some("reply:final"),
+            Some("reply:progress"),
+            Some("reply:approval-target"),
+            Some("reply:auth"),
+        ))
+        .await
+        .expect("seed preference");
+
+    let decision = service
+        .prepare_communication_delivery_attempt(prepare_communication_request(request), &store)
+        .await
+        .expect("actor mismatch is a validator rejection, not a service error")
+        .expect("approval prompt has a delivery target");
+
+    let OutboundDeliveryDecision::Rejected { attempt } = decision else {
+        panic!("expected rejected delivery");
+    };
+    assert_eq!(attempt.status, OutboundDeliveryStatus::Failed);
+    assert_eq!(
+        attempt.failure_kind,
+        Some(DeliveryFailureKind::AuthorizationRevoked)
+    );
+    assert_eq!(validator.calls(), 1);
+    assert_eq!(
+        store
+            .list_delivery_attempts(scope)
+            .await
+            .expect("list delivery attempts")
+            .as_slice(),
+        std::slice::from_ref(&attempt)
+    );
+}
+
+#[tokio::test]
+async fn communication_delivery_validator_can_enforce_requested_modality() {
+    let store = InMemoryOutboundStateStore::default();
+    let access_policy = FakeThreadProjectionAccessPolicy::default();
+    let validator = FakeReplyTargetBindingValidator::default();
+    let service = OutboundPolicyService::new(&store, &access_policy, &validator);
+    let scope = turn_scope("thread-1");
+    let mut request = requested_outbound_request_with_scope(
+        scope.clone(),
+        "reply:requested",
+        RequestedOutboundKind::ProductMessage,
+    );
+    request.modality = CommunicationModality::Voice;
+    validator.allow(reply_ref("reply:requested"));
+    validator.require_modality(CommunicationModality::Text);
+
+    let decision = service
+        .prepare_communication_delivery_attempt(prepare_communication_request(request), &store)
+        .await
+        .expect("modality mismatch is a validator rejection, not a service error")
+        .expect("requested outbound has a delivery target");
+
+    let OutboundDeliveryDecision::Rejected { attempt } = decision else {
+        panic!("expected rejected delivery");
+    };
+    assert_eq!(attempt.status, OutboundDeliveryStatus::Failed);
+    assert_eq!(
+        attempt.failure_kind,
+        Some(DeliveryFailureKind::AuthorizationRevoked)
+    );
+    assert_eq!(validator.calls(), 1);
+    assert_eq!(
+        store
+            .list_delivery_attempts(scope)
+            .await
+            .expect("list delivery attempts")
+            .as_slice(),
+        std::slice::from_ref(&attempt)
+    );
+}
+
+#[tokio::test]
 async fn communication_delivery_scope_candidate_mismatch_rejects_before_validator_io() {
     let store = InMemoryOutboundStateStore::default();
     let access_policy = FakeThreadProjectionAccessPolicy::default();
@@ -736,11 +796,7 @@ async fn communication_delivery_scope_candidate_mismatch_rejects_before_validato
     );
 
     let err = service
-        .prepare_delivery_attempt(PrepareOutboundDeliveryRequest {
-            scope: scope.clone(),
-            candidate,
-            attempted_at: now(),
-        })
+        .prepare_delivery_attempt(prepare_outbound_request(scope.clone(), candidate))
         .await
         .expect_err("scope mismatch must fail before validator IO");
     assert!(matches!(err, OutboundError::InvalidRequest { .. }));
@@ -830,6 +886,8 @@ struct FakeReplyTargetBindingValidator {
     denied: Mutex<HashSet<ReplyTargetBindingRef>>,
     transient: Mutex<HashSet<ReplyTargetBindingRef>>,
     redirects: Mutex<HashMap<ReplyTargetBindingRef, ReplyTargetBindingRef>>,
+    required_actor: Mutex<Option<TurnActor>>,
+    required_modality: Mutex<Option<CommunicationModality>>,
     calls: Mutex<usize>,
 }
 
@@ -862,6 +920,20 @@ impl FakeReplyTargetBindingValidator {
             .insert(from, to);
     }
 
+    fn require_actor(&self, actor: TurnActor) {
+        *self
+            .required_actor
+            .lock()
+            .expect("fake validator lock poisoned") = Some(actor);
+    }
+
+    fn require_modality(&self, modality: CommunicationModality) {
+        *self
+            .required_modality
+            .lock()
+            .expect("fake validator lock poisoned") = Some(modality);
+    }
+
     fn calls(&self) -> usize {
         *self.calls.lock().expect("fake validator lock poisoned")
     }
@@ -874,6 +946,23 @@ impl ReplyTargetBindingValidator for FakeReplyTargetBindingValidator {
         request: ReplyTargetValidationRequest,
     ) -> Result<ReplyTargetBindingClaim, OutboundError> {
         *self.calls.lock().expect("fake validator lock poisoned") += 1;
+        if self
+            .required_actor
+            .lock()
+            .expect("fake validator lock poisoned")
+            .as_ref()
+            .is_some_and(|actor| actor != &request.actor)
+        {
+            return Err(OutboundError::AccessDenied);
+        }
+        if self
+            .required_modality
+            .lock()
+            .expect("fake validator lock poisoned")
+            .is_some_and(|modality| modality != request.modality)
+        {
+            return Err(OutboundError::AccessDenied);
+        }
         if self
             .transient
             .lock()
@@ -924,6 +1013,19 @@ fn candidate(scope: &TurnScope, target: &str, kind: OutboundPushKind) -> Outboun
         projection_ref: ProjectionUpdateRef::new("projection:update-1")
             .expect("valid projection ref"),
         requires_reply_target_revalidation: true,
+    }
+}
+
+fn prepare_outbound_request(
+    scope: TurnScope,
+    candidate: OutboundPushCandidate,
+) -> PrepareOutboundDeliveryRequest {
+    PrepareOutboundDeliveryRequest {
+        scope,
+        actor: actor("user-a"),
+        modality: CommunicationModality::Text,
+        candidate,
+        attempted_at: now(),
     }
 }
 

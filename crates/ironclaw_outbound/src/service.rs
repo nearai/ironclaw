@@ -98,6 +98,8 @@ impl<'a> OutboundPolicyService<'a> {
             .reply_target_validator
             .validate_reply_target(ReplyTargetValidationRequest {
                 scope: request.scope.clone(),
+                actor: request.actor.clone(),
+                modality: request.modality,
                 candidate: request.candidate.clone(),
             })
             .await;
@@ -185,6 +187,8 @@ fn lower_communication_delivery_resolution(
     let kind = OutboundPushKind::from(candidate.kind);
 
     let scope = resolution_request.scope;
+    let actor = resolution_request.actor;
+    let modality = resolution_request.modality;
     let candidate = OutboundPushCandidate {
         tenant_id: scope.tenant_id.clone(),
         agent_id: scope.agent_id.clone(),
@@ -200,6 +204,8 @@ fn lower_communication_delivery_resolution(
     };
     Some(PrepareOutboundDeliveryRequest {
         scope,
+        actor,
+        modality,
         candidate,
         attempted_at,
     })
