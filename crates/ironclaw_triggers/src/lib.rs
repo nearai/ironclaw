@@ -478,38 +478,28 @@ pub trait TriggerRepository: Send + Sync {
 
     async fn claim_due_fire(
         &self,
-        _request: ClaimDueFireRequest,
-    ) -> Result<ClaimDueFireOutcome, TriggerError> {
-        Err(unimplemented_durable_backend_error())
-    }
+        request: ClaimDueFireRequest,
+    ) -> Result<ClaimDueFireOutcome, TriggerError>;
 
     async fn mark_fire_accepted(
         &self,
-        _request: FireAcceptedRequest,
-    ) -> Result<Option<TriggerRecord>, TriggerError> {
-        Err(unimplemented_durable_backend_error())
-    }
+        request: FireAcceptedRequest,
+    ) -> Result<Option<TriggerRecord>, TriggerError>;
 
     async fn mark_fire_replayed(
         &self,
-        _request: FireReplayedRequest,
-    ) -> Result<Option<TriggerRecord>, TriggerError> {
-        Err(unimplemented_durable_backend_error())
-    }
+        request: FireReplayedRequest,
+    ) -> Result<Option<TriggerRecord>, TriggerError>;
 
     async fn mark_fire_retryable_failed(
         &self,
-        _request: FireRetryableFailedRequest,
-    ) -> Result<Option<TriggerRecord>, TriggerError> {
-        Err(unimplemented_durable_backend_error())
-    }
+        request: FireRetryableFailedRequest,
+    ) -> Result<Option<TriggerRecord>, TriggerError>;
 
     async fn mark_fire_permanently_failed(
         &self,
-        _request: FirePermanentFailedRequest,
-    ) -> Result<Option<TriggerRecord>, TriggerError> {
-        Err(unimplemented_durable_backend_error())
-    }
+        request: FirePermanentFailedRequest,
+    ) -> Result<Option<TriggerRecord>, TriggerError>;
 }
 
 /// Feature-gated durable libSQL repository type for composition/test wiring.
@@ -796,13 +786,7 @@ impl InMemoryTriggerRepository {
     }
 }
 
-fn unimplemented_durable_backend_error() -> TriggerError {
-    TriggerError::Backend {
-        reason: "atomic trigger fire claim persistence for this backend lands in PR 13".to_string(),
-    }
-}
-
-fn reject_non_future_next_run_at(
+pub(crate) fn reject_non_future_next_run_at(
     fire_slot: Timestamp,
     next_run_at: Timestamp,
 ) -> Result<(), TriggerError> {
@@ -814,7 +798,7 @@ fn reject_non_future_next_run_at(
     })
 }
 
-fn reject_run_ref_rewrite(
+pub(crate) fn reject_run_ref_rewrite(
     active_run_ref: TurnRunId,
     incoming_run_ref: TurnRunId,
 ) -> Result<(), TriggerError> {
@@ -826,7 +810,7 @@ fn reject_run_ref_rewrite(
     })
 }
 
-fn reject_failed_result_after_active_run(
+pub(crate) fn reject_failed_result_after_active_run(
     active_run_ref: Option<TurnRunId>,
 ) -> Result<(), TriggerError> {
     if active_run_ref.is_none() {

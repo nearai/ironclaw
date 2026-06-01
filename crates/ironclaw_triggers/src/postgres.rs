@@ -5,8 +5,11 @@ use ironclaw_turns::TurnRunId;
 use tokio_postgres::Row;
 
 use crate::{
+    ClaimDueFireOutcome, ClaimDueFireRequest, ClaimedTriggerFire, FireAcceptedRequest,
+    FirePermanentFailedRequest, FireReplayedRequest, FireRetryableFailedRequest,
     TriggerCompletionPolicy, TriggerError, TriggerId, TriggerRecord, TriggerRepository,
     TriggerRunStatus, TriggerSchedule, TriggerSourceKind, TriggerState,
+    reject_failed_result_after_active_run, reject_non_future_next_run_at, reject_run_ref_rewrite,
 };
 
 const TRIGGER_TABLE: &str = "trigger_records";
@@ -229,6 +232,334 @@ impl TriggerRepository for PostgresTriggerRepository {
             .map_err(|error| backend_error("query due trigger records", error))?;
         rows.into_iter().map(|row| row_to_record(&row)).collect()
     }
+
+    async fn claim_due_fire(
+        &self,
+        request: ClaimDueFireRequest,
+    ) -> Result<ClaimDueFireOutcome, TriggerError> {
+        let mut client = self.connect().await?;
+        let tx = client
+            .transaction()
+            .await
+            .map_err(|error| backend_error("begin trigger fire claim", error))?;
+        let trigger_id = request.trigger_id.to_string();
+        let Some(record) = locked_record(&tx, request.tenant_id.as_str(), &trigger_id).await?
+        else {
+            tx.commit()
+                .await
+                .map_err(|error| backend_error("commit missing trigger fire claim", error))?;
+            return Ok(ClaimDueFireOutcome::NotFound);
+        };
+
+        if record.state != TriggerState::Scheduled
+            || record.next_run_at != request.fire_slot
+            || request.fire_slot > request.now
+        {
+            tx.commit()
+                .await
+                .map_err(|error| backend_error("commit not-due trigger fire claim", error))?;
+            return Ok(ClaimDueFireOutcome::NotDue { record });
+        }
+
+        if record.has_active_fire() {
+            tx.commit()
+                .await
+                .map_err(|error| backend_error("commit active trigger fire claim", error))?;
+            return Ok(ClaimDueFireOutcome::AlreadyActive {
+                active_fire_slot: record.active_fire_slot,
+                active_run_ref: record.active_run_ref,
+            });
+        }
+
+        let fire_slot = fmt_ts(&request.fire_slot);
+        let row = tx
+            .query_one(
+                &format!(
+                    "UPDATE {TRIGGER_TABLE}
+                     SET active_fire_slot = $3,
+                         active_run_ref = NULL
+                     WHERE tenant_id = $1 AND trigger_id = $2
+                     RETURNING {TRIGGER_COLUMNS}"
+                ),
+                &[&request.tenant_id.as_str(), &trigger_id, &fire_slot],
+            )
+            .await
+            .map_err(|error| backend_error("claim trigger fire", error))?;
+        let record = row_to_record(&row)?;
+        tx.commit()
+            .await
+            .map_err(|error| backend_error("commit trigger fire claim", error))?;
+        Ok(ClaimDueFireOutcome::Claimed(ClaimedTriggerFire {
+            record,
+            fire_slot: request.fire_slot,
+        }))
+    }
+
+    async fn mark_fire_accepted(
+        &self,
+        request: FireAcceptedRequest,
+    ) -> Result<Option<TriggerRecord>, TriggerError> {
+        let mut client = self.connect().await?;
+        let tx = client
+            .transaction()
+            .await
+            .map_err(|error| backend_error("begin accepted trigger fire update", error))?;
+        let trigger_id = request.trigger_id.to_string();
+        let Some(record) = locked_record(&tx, request.tenant_id.as_str(), &trigger_id).await?
+        else {
+            tx.commit()
+                .await
+                .map_err(|error| backend_error("commit missing accepted trigger fire", error))?;
+            return Ok(None);
+        };
+        if record.active_fire_slot != Some(request.fire_slot) {
+            tx.commit()
+                .await
+                .map_err(|error| backend_error("commit stale accepted trigger fire", error))?;
+            return Ok(None);
+        }
+        if let Some(active_run_ref) = record.active_run_ref {
+            reject_run_ref_rewrite(active_run_ref, request.run_id)?;
+            tx.commit()
+                .await
+                .map_err(|error| backend_error("commit idempotent accepted trigger fire", error))?;
+            return Ok(Some(record));
+        }
+        reject_non_future_next_run_at(request.fire_slot, request.next_run_at)?;
+
+        let submitted_at = fmt_ts(&request.submitted_at);
+        let fire_slot = fmt_ts(&request.fire_slot);
+        let next_run_at = fmt_ts(&request.next_run_at);
+        let active_run_ref = request.run_id.to_string();
+        let last_status = status_text(TriggerRunStatus::Ok);
+        let row = tx
+            .query_one(
+                &format!(
+                    "UPDATE {TRIGGER_TABLE}
+                     SET last_run_at = $3,
+                         last_fired_slot = $4,
+                         last_status = $5,
+                         next_run_at = $6,
+                         active_fire_slot = $4,
+                         active_run_ref = $7
+                     WHERE tenant_id = $1 AND trigger_id = $2
+                     RETURNING {TRIGGER_COLUMNS}"
+                ),
+                &[
+                    &request.tenant_id.as_str(),
+                    &trigger_id,
+                    &submitted_at,
+                    &fire_slot,
+                    &last_status,
+                    &next_run_at,
+                    &active_run_ref,
+                ],
+            )
+            .await
+            .map_err(|error| backend_error("mark accepted trigger fire", error))?;
+        let record = row_to_record(&row)?;
+        tx.commit()
+            .await
+            .map_err(|error| backend_error("commit accepted trigger fire", error))?;
+        Ok(Some(record))
+    }
+
+    async fn mark_fire_replayed(
+        &self,
+        request: FireReplayedRequest,
+    ) -> Result<Option<TriggerRecord>, TriggerError> {
+        let mut client = self.connect().await?;
+        let tx = client
+            .transaction()
+            .await
+            .map_err(|error| backend_error("begin replayed trigger fire update", error))?;
+        let trigger_id = request.trigger_id.to_string();
+        let Some(record) = locked_record(&tx, request.tenant_id.as_str(), &trigger_id).await?
+        else {
+            tx.commit()
+                .await
+                .map_err(|error| backend_error("commit missing replayed trigger fire", error))?;
+            return Ok(None);
+        };
+        if record.active_fire_slot != Some(request.fire_slot) {
+            tx.commit()
+                .await
+                .map_err(|error| backend_error("commit stale replayed trigger fire", error))?;
+            return Ok(None);
+        }
+        if let Some(active_run_ref) = record.active_run_ref {
+            reject_run_ref_rewrite(active_run_ref, request.original_run_id)?;
+            tx.commit()
+                .await
+                .map_err(|error| backend_error("commit idempotent replayed trigger fire", error))?;
+            return Ok(Some(record));
+        }
+        reject_non_future_next_run_at(request.fire_slot, request.next_run_at)?;
+
+        let replayed_at = fmt_ts(&request.replayed_at);
+        let fire_slot = fmt_ts(&request.fire_slot);
+        let next_run_at = fmt_ts(&request.next_run_at);
+        let active_run_ref = request.original_run_id.to_string();
+        let last_status = status_text(TriggerRunStatus::Ok);
+        let row = tx
+            .query_one(
+                &format!(
+                    "UPDATE {TRIGGER_TABLE}
+                     SET last_run_at = $3,
+                         last_fired_slot = $4,
+                         last_status = $5,
+                         next_run_at = $6,
+                         active_fire_slot = $4,
+                         active_run_ref = $7
+                     WHERE tenant_id = $1 AND trigger_id = $2
+                     RETURNING {TRIGGER_COLUMNS}"
+                ),
+                &[
+                    &request.tenant_id.as_str(),
+                    &trigger_id,
+                    &replayed_at,
+                    &fire_slot,
+                    &last_status,
+                    &next_run_at,
+                    &active_run_ref,
+                ],
+            )
+            .await
+            .map_err(|error| backend_error("mark replayed trigger fire", error))?;
+        let record = row_to_record(&row)?;
+        tx.commit()
+            .await
+            .map_err(|error| backend_error("commit replayed trigger fire", error))?;
+        Ok(Some(record))
+    }
+
+    async fn mark_fire_retryable_failed(
+        &self,
+        request: FireRetryableFailedRequest,
+    ) -> Result<Option<TriggerRecord>, TriggerError> {
+        let mut client = self.connect().await?;
+        let tx = client
+            .transaction()
+            .await
+            .map_err(|error| backend_error("begin retryable trigger fire failure", error))?;
+        let trigger_id = request.trigger_id.to_string();
+        let Some(record) = locked_record(&tx, request.tenant_id.as_str(), &trigger_id).await?
+        else {
+            tx.commit()
+                .await
+                .map_err(|error| backend_error("commit missing retryable trigger fire", error))?;
+            return Ok(None);
+        };
+        if record.active_fire_slot != Some(request.fire_slot) {
+            tx.commit()
+                .await
+                .map_err(|error| backend_error("commit stale retryable trigger fire", error))?;
+            return Ok(None);
+        }
+        reject_failed_result_after_active_run(record.active_run_ref)?;
+        if record.next_run_at > request.fire_slot {
+            return Err(TriggerError::InvalidRecord {
+                reason: "retryable fire failure must leave next_run_at at or before the failed fire slot"
+                    .to_string(),
+            });
+        }
+
+        let last_status = status_text(TriggerRunStatus::Error);
+        let row = tx
+            .query_one(
+                &format!(
+                    "UPDATE {TRIGGER_TABLE}
+                     SET last_status = $3,
+                         active_fire_slot = NULL,
+                         active_run_ref = NULL
+                     WHERE tenant_id = $1 AND trigger_id = $2
+                     RETURNING {TRIGGER_COLUMNS}"
+                ),
+                &[&request.tenant_id.as_str(), &trigger_id, &last_status],
+            )
+            .await
+            .map_err(|error| backend_error("mark retryable trigger fire failure", error))?;
+        let record = row_to_record(&row)?;
+        tx.commit()
+            .await
+            .map_err(|error| backend_error("commit retryable trigger fire failure", error))?;
+        Ok(Some(record))
+    }
+
+    async fn mark_fire_permanently_failed(
+        &self,
+        request: FirePermanentFailedRequest,
+    ) -> Result<Option<TriggerRecord>, TriggerError> {
+        let mut client = self.connect().await?;
+        let tx = client
+            .transaction()
+            .await
+            .map_err(|error| backend_error("begin permanent trigger fire failure", error))?;
+        let trigger_id = request.trigger_id.to_string();
+        let Some(record) = locked_record(&tx, request.tenant_id.as_str(), &trigger_id).await?
+        else {
+            tx.commit()
+                .await
+                .map_err(|error| backend_error("commit missing permanent trigger fire", error))?;
+            return Ok(None);
+        };
+        if record.active_fire_slot != Some(request.fire_slot) {
+            tx.commit()
+                .await
+                .map_err(|error| backend_error("commit stale permanent trigger fire", error))?;
+            return Ok(None);
+        }
+        reject_failed_result_after_active_run(record.active_run_ref)?;
+        reject_non_future_next_run_at(request.fire_slot, request.next_run_at)?;
+
+        let last_status = status_text(TriggerRunStatus::Error);
+        let next_run_at = fmt_ts(&request.next_run_at);
+        let row = tx
+            .query_one(
+                &format!(
+                    "UPDATE {TRIGGER_TABLE}
+                     SET last_status = $3,
+                         next_run_at = $4,
+                         active_fire_slot = NULL,
+                         active_run_ref = NULL
+                     WHERE tenant_id = $1 AND trigger_id = $2
+                     RETURNING {TRIGGER_COLUMNS}"
+                ),
+                &[
+                    &request.tenant_id.as_str(),
+                    &trigger_id,
+                    &last_status,
+                    &next_run_at,
+                ],
+            )
+            .await
+            .map_err(|error| backend_error("mark permanent trigger fire failure", error))?;
+        let record = row_to_record(&row)?;
+        tx.commit()
+            .await
+            .map_err(|error| backend_error("commit permanent trigger fire failure", error))?;
+        Ok(Some(record))
+    }
+}
+
+async fn locked_record(
+    tx: &tokio_postgres::Transaction<'_>,
+    tenant_id: &str,
+    trigger_id: &str,
+) -> Result<Option<TriggerRecord>, TriggerError> {
+    let row = tx
+        .query_opt(
+            &format!(
+                "SELECT {TRIGGER_COLUMNS}
+                 FROM {TRIGGER_TABLE}
+                 WHERE tenant_id = $1 AND trigger_id = $2
+                 FOR UPDATE"
+            ),
+            &[&tenant_id, &trigger_id],
+        )
+        .await
+        .map_err(|error| backend_error("lock trigger record", error))?;
+    row.map(|row| row_to_record(&row)).transpose()
 }
 
 fn row_to_record(row: &Row) -> Result<TriggerRecord, TriggerError> {
