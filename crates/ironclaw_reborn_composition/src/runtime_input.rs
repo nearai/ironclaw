@@ -183,6 +183,17 @@ impl RebornRuntimeInput {
         self
     }
 
+    /// Override the runtime owner id after the input (and its host-access
+    /// disclosure gate) has been built. The WebChat v2 serve path uses this to
+    /// align the runtime owner with the authenticated WebUI user. No-op when
+    /// the services input is absent.
+    pub fn with_owner_id(mut self, owner_id: impl Into<String>) -> Self {
+        self.services = self
+            .services
+            .map(|services| services.with_owner_id(owner_id));
+        self
+    }
+
     pub fn with_skill_context_source(mut self, source: Arc<dyn HostSkillContextSource>) -> Self {
         self.skill_context_source = Some(source);
         self
