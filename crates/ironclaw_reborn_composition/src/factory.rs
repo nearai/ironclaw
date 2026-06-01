@@ -257,6 +257,22 @@ where
     ))))
 }
 
+fn attach_wasm_runtime<F, G, S, R>(
+    services: HostRuntimeServices<F, G, S, R>,
+) -> Result<HostRuntimeServices<F, G, S, R>, RebornBuildError>
+where
+    F: ironclaw_filesystem::RootFilesystem + 'static,
+    G: ironclaw_resources::ResourceGovernor + 'static,
+    S: ironclaw_processes::ProcessStore + 'static,
+    R: ironclaw_processes::ProcessResultStore + 'static,
+{
+    services
+        .try_with_default_wasm_runtime()
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("WASM runtime could not be initialized: {error}"),
+        })
+}
+
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub(crate) fn apply_production_runtime_process_binding<F, G, S, R>(
     services: HostRuntimeServices<F, G, S, R>,
@@ -536,6 +552,7 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     }
     services = apply_runtime_process_binding(services, runtime_process_binding);
     services = attach_hosted_mcp_runtime(services)?;
+    services = attach_wasm_runtime(services)?;
     let product_auth_runtime_ports = require_product_auth_runtime_ports(&services)?;
     let google_provider_client = google_oauth_config
         .map(|config| {
@@ -1865,6 +1882,7 @@ where
         services,
         production_wiring.runtime_process_binding,
     );
+    let services = attach_wasm_runtime(services)?;
 
     let turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator> =
         Arc::new(services.turn_coordinator_for_production()?);
