@@ -36,7 +36,7 @@ where
         }
         let now = Utc::now();
         let record = AuthFlowRecord {
-            id: AuthFlowId::new(),
+            id: request.id.unwrap_or_default(),
             scope: request.scope,
             kind: request.kind,
             status: AuthFlowStatus::AwaitingUser,

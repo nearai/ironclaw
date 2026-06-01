@@ -449,7 +449,7 @@ tenant/user fields.
 | `POST` | `/api/reborn/product-auth/oauth/start` | Open an OAuth setup flow; returns redacted authorization URL + invocation scope. |
 | `GET`  | `/api/reborn/product-auth/oauth/callback/{flow_id}` | Public OAuth callback; validates scope/state hash before any product effect. |
 | `POST` | `/api/reborn/product-auth/oauth/google/start` | Open a Google product-auth setup flow from configured Reborn Google OAuth client metadata; returns a Google authorization URL with PKCE/offline consent and invocation scope. |
-| `GET`  | `/api/reborn/product-auth/oauth/google/callback` | Public static Google OAuth callback; resolves flow/scope from stored state, validates state/PKCE, and completes through `RebornProductAuthServices`. |
+| `GET`  | `/api/reborn/product-auth/oauth/google/callback` | Public static Google OAuth callback; resolves flow/scope from auth-owned encoded state, validates the durable state hash/PKCE claim, and completes through `RebornProductAuthServices`. |
 | `POST` | `/api/reborn/product-auth/manual-token/submit` | One-shot manual-token setup + secret-submit (legacy WebUI shape, compatibility). |
 | `POST` | `/api/reborn/product-auth/manual-token/setup` | Mint a manual-token interaction challenge; returns `interaction_id` + `invocation_id`. |
 | `POST` | `/api/reborn/product-auth/manual-token/secret-submit` | Submit the raw token for an existing `interaction_id`; model transcript, tool arguments, logs, and durable events only ever see the redacted `credential_submitted` / `auth_failed` projection. |
@@ -472,10 +472,12 @@ Rules:
   values: `IRONCLAW_REBORN_GOOGLE_CLIENT_ID`,
   `IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI`, optional
   `IRONCLAW_REBORN_GOOGLE_CLIENT_SECRET`, and optional
-  `IRONCLAW_REBORN_GOOGLE_ALLOWED_HD`. For bootstrap compatibility, Reborn
+  `IRONCLAW_REBORN_GOOGLE_HOSTED_DOMAIN_HINT`. For bootstrap compatibility, Reborn
   also accepts `GOOGLE_CLIENT_ID`, `GOOGLE_OAUTH_REDIRECT_URI`,
-  `GOOGLE_CLIENT_SECRET`, and `GOOGLE_ALLOWED_HD` when the redirect URI opt-in
-  is present. The redirect URI must match the static Google callback route
+  `GOOGLE_CLIENT_SECRET`, and `GOOGLE_ALLOWED_HD` as a hosted-domain hint when
+  the redirect URI opt-in is present. The hint only adds Google's `hd=`
+  authorization parameter; product-auth setup does not treat it as a server-side
+  domain allowlist. The redirect URI must match the static Google callback route
   exposed by the WebUI listener.
 - All routes project only adapter-safe DTOs (`CredentialAccountProjection`,
   `CredentialAccountListPage`, `CredentialRecoveryProjection`,

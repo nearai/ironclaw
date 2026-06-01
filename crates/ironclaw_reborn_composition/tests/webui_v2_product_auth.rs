@@ -1024,7 +1024,8 @@ async fn product_auth_google_oauth_start_builds_provider_authorization_url() {
                 "http://127.0.0.1:3000/api/reborn/product-auth/oauth/google/callback",
             )
             .expect("google oauth route config")
-            .with_hosted_domain_hint("example.com"),
+            .with_hosted_domain_hint("example.com")
+            .expect("hosted-domain hint"),
         ),
     );
 
@@ -1154,9 +1155,9 @@ async fn product_auth_google_oauth_callback_unknown_state_is_sanitized() {
         .await
         .expect("oneshot");
 
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let body = read_body_string(response).await;
-    assert!(body.contains("\"code\":\"unknown_or_expired_flow\""));
+    assert!(body.contains("\"code\":\"malformed_callback\""));
     assert!(!body.contains("unknown-google-state"));
     assert!(!body.contains("access_denied"));
     assert!(dispatcher.events().is_empty());

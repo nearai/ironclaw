@@ -32,12 +32,11 @@ use ironclaw_auth::{
     CredentialAccountLabel, CredentialAccountListPage, CredentialAccountListRequest,
     CredentialAccountProjection, CredentialAccountStatus, CredentialRecoveryProjection,
     CredentialRecoveryRequest, CredentialRefreshReport, CredentialRefreshRequest,
-    GOOGLE_CALENDAR_EVENTS_SCOPE, GOOGLE_CALENDAR_READONLY_SCOPE, GOOGLE_GMAIL_MODIFY_SCOPE,
-    GOOGLE_GMAIL_READONLY_SCOPE, GOOGLE_GMAIL_SEND_SCOPE, GOOGLE_PROVIDER_ID,
-    OAuthAuthorizationCode, OAuthAuthorizationUrl, OAuthClientId, OAuthProviderCallbackRequest,
-    OAuthRedirectUri, OpaqueStateHash, PkceVerifierHash, PkceVerifierSecret, ProviderScope,
-    SecretCleanupAction, SecretCleanupReport, SecretCleanupRequest, Timestamp, TurnRunRef,
-    build_google_authorization_url, pkce_s256_challenge,
+    GOOGLE_PROVIDER_ID, GoogleOAuthCallbackState, GoogleOAuthRouteConfig, OAuthAuthorizationCode,
+    OAuthAuthorizationUrl, OAuthProviderCallbackRequest, OpaqueStateHash, PkceVerifierHash,
+    PkceVerifierSecret, ProviderScope, SecretCleanupAction, SecretCleanupReport,
+    SecretCleanupRequest, Timestamp, TurnRunRef, build_google_authorization_url,
+    parse_google_callback_scopes, parse_google_requested_scopes, pkce_s256_challenge,
 };
 use ironclaw_host_api::NetworkMethod;
 use ironclaw_host_api::ingress::{
@@ -57,9 +56,9 @@ use uuid::Uuid;
 
 use crate::auth::RebornOAuthStartFlowRequest;
 use crate::{
-    OAuthClientConfig, RebornManualTokenSetupRequest, RebornManualTokenSubmitRequest,
-    RebornManualTokenSubmitResponse, RebornOAuthCallbackError, RebornOAuthCallbackOutcome,
-    RebornOAuthCallbackRequest, RebornOAuthCallbackResponse, RebornProductAuthServices,
+    RebornManualTokenSetupRequest, RebornManualTokenSubmitRequest, RebornManualTokenSubmitResponse,
+    RebornOAuthCallbackError, RebornOAuthCallbackOutcome, RebornOAuthCallbackRequest,
+    RebornOAuthCallbackResponse, RebornProductAuthServices,
 };
 
 pub(crate) const OAUTH_START_PATH: &str = "/api/reborn/product-auth/oauth/start";
@@ -140,7 +139,6 @@ pub(crate) struct ProductAuthRouteState {
     // HA must replace this with a host-owned encrypted verifier store before
     // routing callbacks across replicas or restarts.
     pkce_verifiers: ExpiringLruCache<AuthFlowId, StoredPkceVerifier>,
-    pending_google_oauth: ExpiringLruCache<OpaqueStateHash, PendingGoogleOAuthFlow>,
 }
 
 impl ProductAuthRouteState {
@@ -159,10 +157,6 @@ impl ProductAuthRouteState {
             pkce_verifiers: ExpiringLruCache::new(
                 OAUTH_PKCE_VERIFIER_CACHE_CAPACITY,
                 StoredPkceVerifier::expires_at,
-            ),
-            pending_google_oauth: ExpiringLruCache::new(
-                OAUTH_PKCE_VERIFIER_CACHE_CAPACITY,
-                PendingGoogleOAuthFlow::expires_at,
             ),
         }
     }
@@ -206,27 +200,6 @@ impl ProductAuthRouteState {
     fn remove_pkce_verifier(&self, flow_id: AuthFlowId) {
         self.pkce_verifiers.remove(&flow_id);
     }
-
-    fn store_pending_google_oauth(
-        &self,
-        state_hash: OpaqueStateHash,
-        pending: PendingGoogleOAuthFlow,
-    ) -> Result<(), ProductAuthRouteFailure> {
-        self.pending_google_oauth.store(state_hash, pending)
-    }
-
-    fn pending_google_oauth_flow(
-        &self,
-        state_hash: &OpaqueStateHash,
-    ) -> Result<PendingGoogleOAuthFlow, ProductAuthRouteFailure> {
-        self.pending_google_oauth
-            .get(state_hash)
-            .ok_or_else(ProductAuthRouteFailure::unknown_or_expired_flow)
-    }
-
-    fn remove_pending_google_oauth(&self, state_hash: &OpaqueStateHash) {
-        self.pending_google_oauth.remove(state_hash);
-    }
 }
 
 impl std::fmt::Debug for ProductAuthRouteState {
@@ -239,54 +212,6 @@ impl std::fmt::Debug for ProductAuthRouteState {
             .field("default_project_id", &self.default_project_id)
             .field("google_oauth", &self.google_oauth.is_some())
             .field("pkce_verifiers", &"ExpiringLruCache<...>")
-            .field("pending_google_oauth", &"ExpiringLruCache<...>")
-            .finish()
-    }
-}
-
-#[derive(Clone)]
-pub struct GoogleOAuthRouteConfig {
-    client_id: OAuthClientId,
-    redirect_uri: OAuthRedirectUri,
-    hosted_domain_hint: Option<String>,
-}
-
-impl GoogleOAuthRouteConfig {
-    pub fn new(
-        client_id: impl Into<String>,
-        redirect_uri: impl Into<String>,
-    ) -> Result<Self, AuthProductError> {
-        Ok(Self {
-            client_id: OAuthClientId::new(client_id)?,
-            redirect_uri: OAuthRedirectUri::new(redirect_uri)?,
-            hosted_domain_hint: None,
-        })
-    }
-
-    pub fn from_oauth_client_config(config: &OAuthClientConfig) -> Self {
-        Self {
-            client_id: config.client_id.clone(),
-            redirect_uri: config.redirect_uri.clone(),
-            hosted_domain_hint: None,
-        }
-    }
-
-    pub fn with_hosted_domain_hint(mut self, hosted_domain: impl Into<String>) -> Self {
-        self.hosted_domain_hint = Some(hosted_domain.into());
-        self
-    }
-}
-
-impl std::fmt::Debug for GoogleOAuthRouteConfig {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("GoogleOAuthRouteConfig")
-            .field("client_id", &self.client_id.as_str())
-            .field("redirect_uri", &self.redirect_uri)
-            .field(
-                "hosted_domain_hint",
-                &self.hosted_domain_hint.as_ref().map(|_| "[REDACTED]"),
-            )
             .finish()
     }
 }
@@ -356,21 +281,6 @@ pub(super) struct StoredPkceVerifier {
 }
 
 impl StoredPkceVerifier {
-    fn expires_at(&self) -> Timestamp {
-        self.expires_at
-    }
-}
-
-#[derive(Clone)]
-pub(super) struct PendingGoogleOAuthFlow {
-    flow_id: AuthFlowId,
-    scope: AuthProductScope,
-    account_label: CredentialAccountLabel,
-    requested_scopes: Vec<ProviderScope>,
-    expires_at: Timestamp,
-}
-
-impl PendingGoogleOAuthFlow {
     fn expires_at(&self) -> Timestamp {
         self.expires_at
     }

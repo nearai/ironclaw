@@ -100,6 +100,7 @@ pub struct RebornOAuthCallbackRequest {
 /// product-auth semantics stay here with the auth service boundary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RebornOAuthStartFlowRequest {
+    pub(crate) flow_id: Option<AuthFlowId>,
     pub(crate) scope: AuthProductScope,
     pub(crate) provider: AuthProviderId,
     pub(crate) authorization_url: OAuthAuthorizationUrl,
@@ -913,6 +914,7 @@ impl RebornProductAuthServices {
     ) -> Result<AuthFlowRecord, AuthProductError> {
         self.flow_manager
             .create_flow(NewAuthFlow {
+                id: request.flow_id,
                 scope: request.scope,
                 kind: AuthFlowKind::IntegrationCredential,
                 provider: request.provider,

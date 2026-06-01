@@ -369,7 +369,7 @@ fn resolve_google_oauth_config(
     let reborn_client_id = lookup("IRONCLAW_REBORN_GOOGLE_CLIENT_ID");
     let reborn_redirect_uri = lookup("IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI");
     let reborn_client_secret = lookup("IRONCLAW_REBORN_GOOGLE_CLIENT_SECRET");
-    let reborn_hosted_domain_hint = lookup("IRONCLAW_REBORN_GOOGLE_ALLOWED_HD");
+    let reborn_hosted_domain_hint = lookup("IRONCLAW_REBORN_GOOGLE_HOSTED_DOMAIN_HINT");
     let legacy_client_id = lookup("GOOGLE_CLIENT_ID");
     let legacy_client_secret = lookup("GOOGLE_CLIENT_SECRET");
     let legacy_redirect_uri = lookup("GOOGLE_OAUTH_REDIRECT_URI");
@@ -818,7 +818,10 @@ default_project = "project-alpha"
                 "IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI",
                 "http://127.0.0.1:3000/api/reborn/product-auth/oauth/google/callback",
             ),
-            ("IRONCLAW_REBORN_GOOGLE_ALLOWED_HD", "reborn.example.com"),
+            (
+                "IRONCLAW_REBORN_GOOGLE_HOSTED_DOMAIN_HINT",
+                "reborn.example.com",
+            ),
             (
                 "GOOGLE_CLIENT_ID",
                 "legacy-client.apps.googleusercontent.com",

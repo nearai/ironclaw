@@ -278,10 +278,15 @@ impl ServeCommand {
             if let Some(google_oauth) = resolve_google_oauth_config_from_env()
                 .context("failed to resolve Google OAuth setup config for WebUI")?
             {
-                let mut route_config =
-                    GoogleOAuthRouteConfig::from_oauth_client_config(&google_oauth.client);
+                let mut route_config = GoogleOAuthRouteConfig::new(
+                    google_oauth.client.client_id.as_str(),
+                    google_oauth.client.redirect_uri.as_str(),
+                )
+                .context("invalid Google OAuth route config for WebUI")?;
                 if let Some(hosted_domain_hint) = google_oauth.hosted_domain_hint {
-                    route_config = route_config.with_hosted_domain_hint(hosted_domain_hint);
+                    route_config = route_config
+                        .with_hosted_domain_hint(hosted_domain_hint)
+                        .context("invalid Google OAuth hosted-domain hint for WebUI")?;
                 }
                 serve_config = serve_config.with_google_oauth(route_config);
             }

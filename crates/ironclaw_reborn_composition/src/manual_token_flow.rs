@@ -176,6 +176,7 @@ async fn request_manual_token_flow_with(
     };
     if let Err(error) = flow_manager
         .create_flow(NewAuthFlow {
+            id: None,
             scope: flow_scope.clone(),
             kind: AuthFlowKind::IntegrationCredential,
             provider: flow_provider,

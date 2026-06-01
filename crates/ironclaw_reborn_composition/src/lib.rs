@@ -87,6 +87,8 @@ pub use extension_lifecycle_command::{
 pub use factory::{RebornServices, build_reborn_services};
 pub use gsuite::{bundled_gsuite_extension_packages, bundled_gsuite_first_party_handlers};
 pub use input::{OAuthClientConfig, RebornBuildInput, RebornRuntimeProcessBinding};
+#[cfg(feature = "webui-v2-beta")]
+pub use ironclaw_auth::GoogleOAuthRouteConfig;
 pub use ironclaw_product_workflow::{
     LifecycleExtensionSource, LifecycleExtensionSummary, LifecyclePhase, LifecycleProductPayload,
     LifecycleProductResponse,
@@ -105,8 +107,6 @@ pub use local_runtime_profile::{
     local_dev_yolo_runtime_policy, local_runtime_build_input,
     local_runtime_build_input_with_options,
 };
-#[cfg(feature = "webui-v2-beta")]
-pub use product_auth_serve::GoogleOAuthRouteConfig;
 pub use product_live_adapters::{
     ProductLiveCapabilityAuthorityResolver, ProductLiveCapabilityIo, ProductLiveModelRouteSettings,
     ProductLivePlannedRuntimeAdapterConfig, ProductLivePlannedRuntimeAdapterError,
