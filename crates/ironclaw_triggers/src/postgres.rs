@@ -309,40 +309,19 @@ impl TriggerRepository for PostgresTriggerRepository {
         }
         reject_non_future_next_run_at(request.fire_slot, request.next_run_at)?;
 
-        let submitted_at = fmt_ts(&request.submitted_at);
-        let fire_slot = fmt_ts(&request.fire_slot);
-        let next_run_at = fmt_ts(&request.next_run_at);
-        let active_run_ref = request.run_id.to_string();
-        let last_status = status_text(TriggerRunStatus::Ok);
-        let row = tx
-            .query_one(
-                &format!(
-                    "UPDATE {TRIGGER_TABLE}
-                     SET last_run_at = $3,
-                         last_fired_slot = $4,
-                         last_status = $5,
-                         next_run_at = $6,
-                         active_fire_slot = $4,
-                         active_run_ref = $7
-                     WHERE tenant_id = $1
-                       AND trigger_id = $2
-                       AND active_fire_slot = $4
-                       AND active_run_ref IS NULL
-                     RETURNING {TRIGGER_COLUMNS}"
-                ),
-                &[
-                    &request.tenant_id.as_str(),
-                    &trigger_id,
-                    &submitted_at,
-                    &fire_slot,
-                    &last_status,
-                    &next_run_at,
-                    &active_run_ref,
-                ],
-            )
-            .await
-            .map_err(|error| backend_error("mark accepted trigger fire", error))?;
-        let record = row_to_record(&row)?;
+        let record = mark_successful_fire_result(
+            &tx,
+            SuccessfulFireResultUpdate {
+                tenant_id: request.tenant_id.as_str(),
+                trigger_id: &trigger_id,
+                fire_slot: request.fire_slot,
+                run_id: request.run_id,
+                result_at: request.submitted_at,
+                next_run_at: request.next_run_at,
+                operation: "mark accepted trigger fire",
+            },
+        )
+        .await?;
         tx.commit()
             .await
             .map_err(|error| backend_error("commit accepted trigger fire", error))?;
@@ -372,40 +351,19 @@ impl TriggerRepository for PostgresTriggerRepository {
         }
         reject_non_future_next_run_at(request.fire_slot, request.next_run_at)?;
 
-        let replayed_at = fmt_ts(&request.replayed_at);
-        let fire_slot = fmt_ts(&request.fire_slot);
-        let next_run_at = fmt_ts(&request.next_run_at);
-        let active_run_ref = request.original_run_id.to_string();
-        let last_status = status_text(TriggerRunStatus::Ok);
-        let row = tx
-            .query_one(
-                &format!(
-                    "UPDATE {TRIGGER_TABLE}
-                     SET last_run_at = $3,
-                         last_fired_slot = $4,
-                         last_status = $5,
-                         next_run_at = $6,
-                         active_fire_slot = $4,
-                         active_run_ref = $7
-                     WHERE tenant_id = $1
-                       AND trigger_id = $2
-                       AND active_fire_slot = $4
-                       AND active_run_ref IS NULL
-                     RETURNING {TRIGGER_COLUMNS}"
-                ),
-                &[
-                    &request.tenant_id.as_str(),
-                    &trigger_id,
-                    &replayed_at,
-                    &fire_slot,
-                    &last_status,
-                    &next_run_at,
-                    &active_run_ref,
-                ],
-            )
-            .await
-            .map_err(|error| backend_error("mark replayed trigger fire", error))?;
-        let record = row_to_record(&row)?;
+        let record = mark_successful_fire_result(
+            &tx,
+            SuccessfulFireResultUpdate {
+                tenant_id: request.tenant_id.as_str(),
+                trigger_id: &trigger_id,
+                fire_slot: request.fire_slot,
+                run_id: request.original_run_id,
+                result_at: request.replayed_at,
+                next_run_at: request.next_run_at,
+                operation: "mark replayed trigger fire",
+            },
+        )
+        .await?;
         tx.commit()
             .await
             .map_err(|error| backend_error("commit replayed trigger fire", error))?;
@@ -542,6 +500,56 @@ async fn locked_record(
         .await
         .map_err(|error| backend_error("lock trigger record", error))?;
     row.map(|row| row_to_record(&row)).transpose()
+}
+
+async fn mark_successful_fire_result(
+    tx: &tokio_postgres::Transaction<'_>,
+    update: SuccessfulFireResultUpdate<'_>,
+) -> Result<TriggerRecord, TriggerError> {
+    let result_at = fmt_ts(&update.result_at);
+    let fire_slot = fmt_ts(&update.fire_slot);
+    let next_run_at = fmt_ts(&update.next_run_at);
+    let active_run_ref = update.run_id.to_string();
+    let last_status = status_text(TriggerRunStatus::Ok);
+    let row = tx
+        .query_one(
+            &format!(
+                "UPDATE {TRIGGER_TABLE}
+                 SET last_run_at = $3,
+                     last_fired_slot = $4,
+                     last_status = $5,
+                     next_run_at = $6,
+                     active_fire_slot = $4,
+                     active_run_ref = $7
+                 WHERE tenant_id = $1
+                   AND trigger_id = $2
+                   AND active_fire_slot = $4
+                   AND active_run_ref IS NULL
+                 RETURNING {TRIGGER_COLUMNS}"
+            ),
+            &[
+                &update.tenant_id,
+                &update.trigger_id,
+                &result_at,
+                &fire_slot,
+                &last_status,
+                &next_run_at,
+                &active_run_ref,
+            ],
+        )
+        .await
+        .map_err(|error| backend_error(update.operation, error))?;
+    row_to_record(&row)
+}
+
+struct SuccessfulFireResultUpdate<'a> {
+    tenant_id: &'a str,
+    trigger_id: &'a str,
+    fire_slot: Timestamp,
+    run_id: TurnRunId,
+    result_at: Timestamp,
+    next_run_at: Timestamp,
+    operation: &'static str,
 }
 
 fn row_to_record(row: &Row) -> Result<TriggerRecord, TriggerError> {
