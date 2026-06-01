@@ -52,8 +52,8 @@ pub(crate) fn validate_path_segment(s: &str) -> bool {
 pub(crate) fn validate_repo_path(path: &str) -> Result<(), String> {
     validate_input_length(path, "path")?;
     for segment in path.split('/') {
-        if segment == ".." {
-            return Err("Invalid path: path traversal not allowed".into());
+        if segment == ".." || segment == "." {
+            return Err("Invalid path: relative path segments not allowed".into());
         }
         if segment.is_empty() {
             return Err("Invalid path: empty segment not allowed".into());

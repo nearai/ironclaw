@@ -164,7 +164,9 @@ pub(crate) fn create_issue(
             }
             validate_input_length(label, "labels")?;
             if label.chars().count() > 100 {
-                return Err("Invalid labels: label exceeds maximum length of 100 characters".into());
+                return Err(
+                    "Invalid labels: label exceeds maximum length of 100 characters".into(),
+                );
             }
         }
     }

@@ -53,7 +53,7 @@ mod tests {
     use crate::exports::near::agent::tool::Guest;
     use crate::request::sanitize_host_error;
     use crate::types::GitHubWebhookRequest;
-    use crate::validation::normalize_ref_lookup;
+    use crate::validation::{normalize_ref_lookup, validate_repo_path};
     use crate::webhook::handle_webhook;
     use serde_json::json;
     use std::collections::HashMap;
@@ -145,7 +145,10 @@ mod tests {
         );
         assert_eq!(normalize_ref_lookup("heads/dev").unwrap(), "heads/dev");
         assert_eq!(normalize_ref_lookup("tags/v2").unwrap(), "tags/v2");
-        assert_eq!(normalize_ref_lookup("feature/reborn").unwrap(), "heads/feature/reborn");
+        assert_eq!(
+            normalize_ref_lookup("feature/reborn").unwrap(),
+            "heads/feature/reborn"
+        );
         assert_eq!(
             normalize_ref_lookup("refs/remotes/origin/main").unwrap_err(),
             "Unsupported from_ref: only refs/heads/* and refs/tags/* are supported"
@@ -154,6 +157,23 @@ mod tests {
             normalize_ref_lookup("0123456789abcdef0123456789abcdef01234567").unwrap_err(),
             "Unsupported from_ref: use a branch or tag ref, not a raw commit SHA"
         );
+    }
+
+    #[test]
+    fn validate_repo_path_rejects_relative_segments() {
+        assert_eq!(
+            validate_repo_path("../src/main.rs").unwrap_err(),
+            "Invalid path: relative path segments not allowed"
+        );
+        assert_eq!(
+            validate_repo_path("src/./main.rs").unwrap_err(),
+            "Invalid path: relative path segments not allowed"
+        );
+        assert_eq!(
+            validate_repo_path("src//main.rs").unwrap_err(),
+            "Invalid path: empty segment not allowed"
+        );
+        assert!(validate_repo_path("src/main.rs").is_ok());
     }
 
     #[test]
@@ -177,6 +197,79 @@ mod tests {
             .unwrap_err(),
             "Missing webhook.body_json"
         );
+    }
+
+    #[test]
+    fn handle_webhook_normalizes_pull_request_opened_event() {
+        let mut headers = HashMap::new();
+        headers.insert("X-GitHub-Event".to_string(), "pull_request".to_string());
+
+        let response = handle_webhook(GitHubWebhookRequest {
+            headers,
+            body_json: Some(json!({
+                "action": "opened",
+                "repository": {
+                    "full_name": "nearai/ironclaw",
+                    "owner": {"login": "nearai"}
+                },
+                "pull_request": {
+                    "number": 4280,
+                    "state": "open",
+                    "merged": false,
+                    "draft": true,
+                    "base": {"ref": "reborn-integration"},
+                    "head": {"ref": "codex/reborn-github-capabilities"}
+                },
+                "sender": {"login": "reviewer"}
+            })),
+        })
+        .expect("pull_request webhook should normalize");
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&response).expect("webhook response should be JSON");
+        let payload = &parsed["emit_events"][0]["payload"];
+        assert_eq!(parsed["emit_events"][0]["event_type"], json!("pr.opened"));
+        assert_eq!(payload["pr_number"], json!(4280));
+        assert_eq!(payload["pr_state"], json!("open"));
+        assert_eq!(payload["pr_merged"], json!(false));
+        assert_eq!(payload["pr_draft"], json!(true));
+        assert_eq!(payload["base_branch"], json!("reborn-integration"));
+        assert_eq!(
+            payload["head_branch"],
+            json!("codex/reborn-github-capabilities")
+        );
+    }
+
+    #[test]
+    fn handle_webhook_normalizes_check_run_event() {
+        let mut headers = HashMap::new();
+        headers.insert("X-GitHub-Event".to_string(), "check_run".to_string());
+
+        let response = handle_webhook(GitHubWebhookRequest {
+            headers,
+            body_json: Some(json!({
+                "action": "completed",
+                "repository": {
+                    "full_name": "nearai/ironclaw",
+                    "owner": {"login": "nearai"}
+                },
+                "check_run": {
+                    "status": "completed",
+                    "conclusion": "success"
+                }
+            })),
+        })
+        .expect("check_run webhook should normalize");
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&response).expect("webhook response should be JSON");
+        let payload = &parsed["emit_events"][0]["payload"];
+        assert_eq!(
+            parsed["emit_events"][0]["event_type"],
+            json!("ci.check_run.completed")
+        );
+        assert_eq!(payload["ci_status"], json!("completed"));
+        assert_eq!(payload["ci_conclusion"], json!("success"));
     }
 
     #[test]

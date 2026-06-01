@@ -515,6 +515,79 @@ async fn bundled_github_wasm_builds_create_repo_fork_and_release_requests() {
 }
 
 #[tokio::test]
+async fn bundled_github_wasm_rejects_relative_file_path_segments_before_egress() {
+    let http = Arc::new(RecordingWasmHostHttp::ok(WasmHttpResponse {
+        status: 200,
+        headers_json: "{}".to_string(),
+        body: br#"{"content":"Zm9v"}"#.to_vec(),
+    }));
+    let file = execute_bundled_github_wasm(
+        "github.get_file_content",
+        json!({
+            "owner": "nearai",
+            "repo": "ironclaw",
+            "path": "src/./main.rs"
+        }),
+        Arc::clone(&http),
+    );
+
+    assert_eq!(
+        file.error.as_deref(),
+        Some("Invalid path: relative path segments not allowed")
+    );
+    assert!(
+        http.requests().unwrap().is_empty(),
+        "relative path segment validation should fail before GitHub egress"
+    );
+}
+
+#[tokio::test]
+async fn bundled_github_wasm_rejects_invalid_review_event_and_merge_method() {
+    let review_http = Arc::new(RecordingWasmHostHttp::ok(WasmHttpResponse {
+        status: 200,
+        headers_json: "{}".to_string(),
+        body: br#"{"id":1}"#.to_vec(),
+    }));
+    let review = execute_bundled_github_wasm(
+        "github.create_pr_review",
+        json!({
+            "owner": "nearai",
+            "repo": "ironclaw",
+            "pr_number": 4280,
+            "body": "review body",
+            "event": "approve"
+        }),
+        Arc::clone(&review_http),
+    );
+    assert_eq!(review.error.as_deref(), Some("invalid_parameters"));
+    assert!(
+        review_http.requests().unwrap().is_empty(),
+        "invalid review event should fail before GitHub egress"
+    );
+
+    let merge_http = Arc::new(RecordingWasmHostHttp::ok(WasmHttpResponse {
+        status: 200,
+        headers_json: "{}".to_string(),
+        body: br#"{"merged":true}"#.to_vec(),
+    }));
+    let merge = execute_bundled_github_wasm(
+        "github.merge_pull_request",
+        json!({
+            "owner": "nearai",
+            "repo": "ironclaw",
+            "pr_number": 4280,
+            "merge_method": "fast-forward"
+        }),
+        Arc::clone(&merge_http),
+    );
+    assert_eq!(merge.error.as_deref(), Some("invalid_parameters"));
+    assert!(
+        merge_http.requests().unwrap().is_empty(),
+        "invalid merge method should fail before GitHub egress"
+    );
+}
+
+#[tokio::test]
 async fn bundled_github_wasm_sanitizes_host_http_and_api_failures() {
     let cases = [
         (
