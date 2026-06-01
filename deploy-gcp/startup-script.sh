@@ -112,6 +112,10 @@ services:
       T3N_MCP_DASHBOARD_URL: ${T3N_MCP_DASHBOARD_URL:-}
       PRIVATE_KEY: ${T3N_MCP_PRIVATE_KEY:-}
       T3N_MCP_AGENT_SECRET_HEX: ${T3N_MCP_AGENT_SECRET_HEX:-}
+      # Optional static headers (JSON string->string) the SDK attaches to every
+      # /api/rpc request. Staging gates /api/rpc behind a Cloud Armor bypass
+      # header, so set T3N_RPC_EXTRA_HEADERS={"x-staging-bypass":"…"} in .env.
+      T3N_RPC_EXTRA_HEADERS: ${T3N_RPC_EXTRA_HEADERS:-}
       MCP_SOCKET_PATH: /var/run/t3n-mcp/t3n-mcp.sock
     volumes:
       - t3n_mcp_socket:/var/run/t3n-mcp
