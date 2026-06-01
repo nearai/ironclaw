@@ -843,6 +843,7 @@ mod tests {
             tags: Vec::new(),
             url: None,
             auth: None,
+            hidden: false,
         }
     }
 

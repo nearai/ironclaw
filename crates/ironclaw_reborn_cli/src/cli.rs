@@ -8,9 +8,9 @@ use crate::commands::Command;
     about = "Standalone IronClaw Reborn runtime",
     version
 )]
-struct Cli {
+pub(crate) struct Cli {
     #[command(subcommand)]
-    command: Command,
+    pub(crate) command: Command,
 }
 
 pub(crate) fn command() -> clap::Command {

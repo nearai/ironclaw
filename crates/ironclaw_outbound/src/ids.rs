@@ -1,6 +1,26 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+/// Maximum length for bounded references, measured in bytes.
+const MAX_BOUNDED_REF_LEN: usize = 256;
+
+/// Validates that a bounded reference is non-empty, fits within the maximum
+/// length in bytes, and contains no control characters.
+fn validate_bounded_ref(kind: &'static str, value: &str) -> Result<(), String> {
+    if value.is_empty() {
+        return Err(format!("{kind} must not be empty"));
+    }
+    if value.len() > MAX_BOUNDED_REF_LEN {
+        return Err(format!(
+            "{kind} must be at most {MAX_BOUNDED_REF_LEN} bytes"
+        ));
+    }
+    if value.chars().any(|c| c == '\0' || c.is_control()) {
+        return Err(format!("{kind} must not contain control characters"));
+    }
+    Ok(())
+}
+
 macro_rules! bounded_ref {
     ($name:ident, $kind:literal) => {
         #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -47,19 +67,8 @@ macro_rules! bounded_ref {
 
 bounded_ref!(ProjectionSubscriptionId, "projection_subscription_id");
 bounded_ref!(ProjectionUpdateRef, "projection_update_ref");
-
-fn validate_bounded_ref(kind: &'static str, value: &str) -> Result<(), String> {
-    if value.is_empty() {
-        return Err(format!("{kind} must not be empty"));
-    }
-    if value.len() > 256 {
-        return Err(format!("{kind} must be at most 256 bytes"));
-    }
-    if value.chars().any(|c| c == '\0' || c.is_control()) {
-        return Err(format!("{kind} must not contain control characters"));
-    }
-    Ok(())
-}
+bounded_ref!(TriggerOriginRef, "trigger_origin_ref");
+bounded_ref!(TriggerFireSlot, "trigger_fire_slot");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -98,12 +107,38 @@ impl std::fmt::Display for OutboundDeliveryId {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::from_str;
+
+    macro_rules! assert_invalid_inputs {
+        ($ty:ty, $kind:literal) => {{
+            let empty = "\"\"";
+            let overlong = format!("\"{}\"", "x".repeat(MAX_BOUNDED_REF_LEN + 1));
+            let control = "\"bad\\nvalue\"";
+
+            assert!(
+                <$ty>::new("").is_err(),
+                concat!($kind, " should reject empty values")
+            );
+            assert!(
+                from_str::<$ty>(empty).is_err(),
+                concat!($kind, " should reject empty JSON input")
+            );
+            assert!(
+                from_str::<$ty>(&overlong).is_err(),
+                concat!($kind, " should reject overlong JSON input")
+            );
+            assert!(
+                from_str::<$ty>(control).is_err(),
+                concat!($kind, " should reject control characters")
+            );
+        }};
+    }
 
     #[test]
-    fn bounded_refs_reject_control_characters() {
-        assert!(ProjectionSubscriptionId::new("sub\n1").is_err());
-        assert!(ProjectionUpdateRef::new("update\0").is_err());
-        assert!(serde_json::from_str::<ProjectionSubscriptionId>("\"sub\\n1\"").is_err());
-        assert!(serde_json::from_str::<ProjectionUpdateRef>("\"\"").is_err());
+    fn bounded_refs_reject_invalid_inputs() {
+        assert_invalid_inputs!(ProjectionSubscriptionId, "projection_subscription_id");
+        assert_invalid_inputs!(ProjectionUpdateRef, "projection_update_ref");
+        assert_invalid_inputs!(TriggerOriginRef, "trigger_origin_ref");
+        assert_invalid_inputs!(TriggerFireSlot, "trigger_fire_slot");
     }
 }

@@ -12,9 +12,10 @@
 //!   waiting on submitted turns to finish.
 //! - **Runtime identity** — tenant/agent and source/reply binding identifiers
 //!   supplied by the caller so this composition root stays channel-agnostic.
-//! - **Skill context source** — optional caller-supplied source for
-//!   model-visible skill instructions, preserving the no-skill behavior when
-//!   absent.
+//! - **Skill context source** — optional caller-supplied override for
+//!   model-visible skill instructions. When absent, supported runtime profiles
+//!   wire the first-party filesystem skill source from scoped Reborn skill
+//!   roots.
 //!
 //! The CLI builds this struct from env vars / config; it does not call into
 //! `ironclaw_reborn` or `ironclaw_llm` directly.
@@ -22,7 +23,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 use ironclaw_loop_support::HostManagedModelGateway;
 use ironclaw_loop_support::HostSkillContextSource;
 
@@ -58,81 +59,15 @@ impl Default for RebornRuntimeIdentity {
     }
 }
 
-/// Configuration for the host-managed LLM model gateway wired into the
-/// composed Reborn runtime.
-///
-/// Only available when this crate is built with the `root-llm-provider`
-/// feature. Mirrors `ironclaw_llm::RegistryProviderConfig` but stays in
-/// composition-owned types so callers (the CLI) never name `ironclaw_llm`
-/// directly.
-#[cfg(feature = "root-llm-provider")]
-pub const DEFAULT_LLM_REQUEST_TIMEOUT_SECS: u64 = 120;
-
 pub const DEFAULT_TURN_RUNNER_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 pub const DEFAULT_TURN_RUNNER_POLL_INTERVAL: Duration = Duration::from_millis(200);
-
-#[cfg(feature = "root-llm-provider")]
-#[derive(Debug, Clone)]
-pub struct RebornLlmConfig {
-    /// Provider id (e.g. `"openai"`, `"anthropic"`, `"ollama"`).
-    pub provider_id: String,
-    /// Model id passed to the provider (e.g. `"gpt-4o-mini"`).
-    pub model: String,
-    /// Provider API base URL.
-    pub base_url: String,
-    /// API key, if the provider requires one. `None` for keyless providers
-    /// like Ollama.
-    pub api_key: Option<secrecy::SecretString>,
-    /// API protocol identifier — maps onto
-    /// `ironclaw_llm::ProviderProtocol`. Canonical accepted values:
-    /// `"open_ai_completions"`, `"anthropic"`, `"ollama"`, `"deep_seek"`,
-    /// `"gemini"`, `"open_router"`, `"github_copilot"`.
-    /// Legacy aliases `"openai"`, `"openai_completions"`, `"deepseek"`,
-    /// and `"openrouter"` are also accepted.
-    pub protocol: String,
-    /// Request timeout in seconds passed to the underlying HTTP client.
-    pub request_timeout_secs: u64,
-    /// Extra HTTP headers injected on every request.
-    pub extra_headers: Vec<(String, String)>,
-}
-
-#[cfg(feature = "root-llm-provider")]
-impl RebornLlmConfig {
-    /// Convenience constructor for the common OpenAI Chat Completions case.
-    pub fn openai_compat(
-        provider_id: impl Into<String>,
-        base_url: impl Into<String>,
-        model: impl Into<String>,
-        api_key: secrecy::SecretString,
-    ) -> Self {
-        Self {
-            provider_id: provider_id.into(),
-            model: model.into(),
-            base_url: base_url.into(),
-            api_key: Some(api_key),
-            protocol: "open_ai_completions".to_string(),
-            request_timeout_secs: DEFAULT_LLM_REQUEST_TIMEOUT_SECS,
-            extra_headers: Vec::new(),
-        }
-    }
-}
 
 #[cfg(feature = "root-llm-provider")]
 #[derive(Debug, Clone)]
 pub struct ResolvedRebornLlm {
     provider_id: String,
     model: String,
-    pub(crate) source: ResolvedRebornLlmSource,
-}
-
-#[cfg(feature = "root-llm-provider")]
-#[derive(Debug, Clone)]
-pub(crate) enum ResolvedRebornLlmSource {
-    Catalog(RebornLlmConfig),
-    RegistryProvider {
-        config: ironclaw_llm::RegistryProviderConfig,
-        request_timeout_secs: u64,
-    },
+    pub(crate) config: ironclaw_llm::LlmConfig,
 }
 
 #[cfg(feature = "root-llm-provider")]
@@ -145,25 +80,11 @@ impl ResolvedRebornLlm {
         &self.model
     }
 
-    pub fn from_catalog(config: RebornLlmConfig) -> Self {
+    pub fn from_llm_config(config: ironclaw_llm::LlmConfig) -> Self {
         Self {
-            provider_id: config.provider_id.clone(),
-            model: config.model.clone(),
-            source: ResolvedRebornLlmSource::Catalog(config),
-        }
-    }
-
-    pub(crate) fn from_registry_provider(
-        config: ironclaw_llm::RegistryProviderConfig,
-        request_timeout_secs: u64,
-    ) -> Self {
-        Self {
-            provider_id: config.provider_id.clone(),
-            model: config.model.clone(),
-            source: ResolvedRebornLlmSource::RegistryProvider {
-                config,
-                request_timeout_secs,
-            },
+            provider_id: config.active_provider_id(),
+            model: config.active_model_name(),
+            config,
         }
     }
 }
@@ -210,8 +131,9 @@ pub struct RebornRuntimeInput {
     pub runner: TurnRunnerSettings,
     pub poll: PollSettings,
     pub identity: RebornRuntimeIdentity,
+    pub regex_skill_activation_enabled: bool,
     pub skill_context_source: Option<Arc<dyn HostSkillContextSource>>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) model_gateway_override: Option<Arc<dyn HostManagedModelGateway>>,
 }
 
@@ -228,16 +150,11 @@ impl RebornRuntimeInput {
             runner: TurnRunnerSettings::default(),
             poll: PollSettings::default(),
             identity: RebornRuntimeIdentity::default(),
+            regex_skill_activation_enabled: true,
             skill_context_source: None,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             model_gateway_override: None,
         }
-    }
-
-    #[cfg(feature = "root-llm-provider")]
-    pub fn with_llm(mut self, llm: RebornLlmConfig) -> Self {
-        self.llm = Some(ResolvedRebornLlm::from_catalog(llm));
-        self
     }
 
     #[cfg(feature = "root-llm-provider")]
@@ -261,13 +178,40 @@ impl RebornRuntimeInput {
         self
     }
 
+    pub fn with_regex_skill_activation_enabled(mut self, enabled: bool) -> Self {
+        self.regex_skill_activation_enabled = enabled;
+        self
+    }
+
+    /// Override the runtime owner id after the input (and its host-access
+    /// disclosure gate) has been built. The WebChat v2 serve path uses this to
+    /// align the runtime owner with the authenticated WebUI user. No-op when
+    /// the services input is absent.
+    pub fn with_owner_id(mut self, owner_id: impl Into<String>) -> Self {
+        self.services = self
+            .services
+            .map(|services| services.with_owner_id(owner_id));
+        self
+    }
+
     pub fn with_skill_context_source(mut self, source: Arc<dyn HostSkillContextSource>) -> Self {
         self.skill_context_source = Some(source);
         self
     }
 
-    #[cfg(test)]
-    pub(crate) fn with_model_gateway_override(
+    pub fn grants_trusted_laptop_access(&self) -> bool {
+        self.services
+            .as_ref()
+            .is_some_and(|services| services.grants_trusted_laptop_access())
+    }
+
+    /// Inject a custom `HostManagedModelGateway` in place of whatever the
+    /// build flow would otherwise derive from `[llm]` config. Exposed for
+    /// the crate's own tests plus downstream integration tests that need
+    /// to drive `build_reborn_runtime` against a recording / replay gateway
+    /// without standing up a live provider.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_model_gateway_override(
         mut self,
         gateway: Arc<dyn HostManagedModelGateway>,
     ) -> Self {

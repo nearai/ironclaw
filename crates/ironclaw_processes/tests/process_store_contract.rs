@@ -711,19 +711,24 @@ async fn resource_managed_store_denies_before_process_record_creation() {
         .set_limit(
             ResourceAccount::tenant(scope.tenant_id.clone()),
             ResourceLimits {
-                max_process_count: Some(0),
+                max_process_count: Some(1),
                 ..ResourceLimits::default()
             },
         )
         .unwrap();
     let store = ResourceManagedProcessStore::new(InMemoryProcessStore::new(), governor.clone());
 
+    let exceeding_estimate = ResourceEstimate {
+        process_count: Some(2),
+        concurrency_slots: Some(1),
+        ..ResourceEstimate::default()
+    };
     let err = store
         .start(process_start_with_estimate(
             process_id,
             invocation_id,
             scope.clone(),
-            process_estimate(),
+            exceeding_estimate,
         ))
         .await
         .unwrap_err();
@@ -2033,21 +2038,22 @@ impl ResourceGovernor for ReleaseFailingGovernor {
         self.inner.set_limit(account, limits)
     }
 
-    fn reserve(
+    fn reserve_with_outcome(
         &self,
         scope: ResourceScope,
         estimate: ResourceEstimate,
-    ) -> Result<ironclaw_resources::ResourceReservation, ResourceError> {
-        self.inner.reserve(scope, estimate)
+    ) -> Result<ironclaw_resources::ReservationOutcome, ResourceError> {
+        self.inner.reserve_with_outcome(scope, estimate)
     }
 
-    fn reserve_with_id(
+    fn reserve_with_id_and_outcome(
         &self,
         scope: ResourceScope,
         estimate: ResourceEstimate,
         reservation_id: ResourceReservationId,
-    ) -> Result<ironclaw_resources::ResourceReservation, ResourceError> {
-        self.inner.reserve_with_id(scope, estimate, reservation_id)
+    ) -> Result<ironclaw_resources::ReservationOutcome, ResourceError> {
+        self.inner
+            .reserve_with_id_and_outcome(scope, estimate, reservation_id)
     }
 
     fn reconcile(
@@ -2063,6 +2069,13 @@ impl ResourceGovernor for ReleaseFailingGovernor {
         reservation_id: ResourceReservationId,
     ) -> Result<ironclaw_resources::ResourceReceipt, ResourceError> {
         Err(ResourceError::UnknownReservation { id: reservation_id })
+    }
+
+    fn account_snapshot(
+        &self,
+        account: &ResourceAccount,
+    ) -> Result<Option<ironclaw_resources::AccountSnapshot>, ResourceError> {
+        self.inner.account_snapshot(account)
     }
 }
 
@@ -2080,21 +2093,22 @@ impl ResourceGovernor for ReconcileFailingGovernor {
         self.inner.set_limit(account, limits)
     }
 
-    fn reserve(
+    fn reserve_with_outcome(
         &self,
         scope: ResourceScope,
         estimate: ResourceEstimate,
-    ) -> Result<ironclaw_resources::ResourceReservation, ResourceError> {
-        self.inner.reserve(scope, estimate)
+    ) -> Result<ironclaw_resources::ReservationOutcome, ResourceError> {
+        self.inner.reserve_with_outcome(scope, estimate)
     }
 
-    fn reserve_with_id(
+    fn reserve_with_id_and_outcome(
         &self,
         scope: ResourceScope,
         estimate: ResourceEstimate,
         reservation_id: ResourceReservationId,
-    ) -> Result<ironclaw_resources::ResourceReservation, ResourceError> {
-        self.inner.reserve_with_id(scope, estimate, reservation_id)
+    ) -> Result<ironclaw_resources::ReservationOutcome, ResourceError> {
+        self.inner
+            .reserve_with_id_and_outcome(scope, estimate, reservation_id)
     }
 
     fn reconcile(
@@ -2110,6 +2124,13 @@ impl ResourceGovernor for ReconcileFailingGovernor {
         reservation_id: ResourceReservationId,
     ) -> Result<ironclaw_resources::ResourceReceipt, ResourceError> {
         self.inner.release(reservation_id)
+    }
+
+    fn account_snapshot(
+        &self,
+        account: &ResourceAccount,
+    ) -> Result<Option<ironclaw_resources::AccountSnapshot>, ResourceError> {
+        self.inner.account_snapshot(account)
     }
 }
 

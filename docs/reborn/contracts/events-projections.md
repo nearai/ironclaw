@@ -2,7 +2,7 @@
 
 **Date:** 2026-04-25
 **Status:** Draft contract
-**Depends on:** `docs/reborn/contracts/run-state.md`, `docs/reborn/contracts/host-api.md`
+**Depends on:** `docs/reborn/contracts/run-state.md`, `docs/reborn/contracts/host-api.md`, `docs/reborn/contracts/communication-delivery-resolution.md`
 
 ---
 
@@ -94,6 +94,7 @@ Examples:
 
 - conversation sidebar
 - active run progress
+- capability/tool activity lifecycle metadata
 - job list
 - project/thread visibility
 - extension capability surface
@@ -105,8 +106,34 @@ Reducer rules:
 - deterministic for the same input state/events
 - side-effect free
 - rebuildable after restart
+- product-facing capability activity projections expose only metadata-safe
+  lifecycle facts; raw tool arguments, raw output, command strings, host paths,
+  and provider payloads stay outside the projection contract
+- product-facing model reasoning projections must use model-visible-sanitized
+  reasoning deltas only. They are live UI hints, not canonical transcript,
+  checkpoint, audit, or replay state.
+- product-facing work summary projections must use sanitized driver
+  `LoopSafeSummary` text only. They describe host/driver progress phases such
+  as planning, waiting, retrying, or context work, and remain distinct from raw
+  model reasoning and durable transcript content.
+- transport adapters may bound activity fan-out per projection item; bounded
+  snapshots must prefer the most recently updated activity facts and keep
+  reconnect cursors resumable
 - may cache output, but cache is not source of truth
 - must tolerate unknown future event types by ignoring or preserving them according to version policy
+
+Projection crates may consume typed domain-event contracts from the owning
+domain crate when the read model is explicitly about that domain. For example,
+`ironclaw_event_projections` may consume `ironclaw_turns::TurnLifecycleEvent`
+to derive pending-gate rows from blocked/resumed/terminal turn facts. That does
+not make projections the source of truth for turn state, and it does not permit
+imports from product composition, root `src/`, or legacy engine pending-gate
+types.
+
+Read-model keys must preserve the full scope needed to enforce read isolation.
+Turn-derived pending-gate rows preserve tenant, agent, project, owner, thread,
+and run identity; a sink must not collapse rows to tenant/thread when the source
+`TurnScope` carries narrower agent/project boundaries.
 
 ---
 
@@ -122,20 +149,55 @@ client reconnects with last_event_id
 -> transport resumes live tail
 ```
 
-`EventStreamManager` is the transport-agnostic facade over domain projection
-services. It routes scoped runtime and audit replay requests through their
-owning projection services and preserves their domain-specific DTOs/cursors;
-it must not flatten runtime, audit, transcript, or future memory facts into a
-single generic event payload. Resume helpers return domain-specific updates
-when a cursor is valid, or an explicit snapshot/rebase response when retention
-has made replay impossible. A cursor minted under a different scope remains an
-authority failure and must not be silently converted into a snapshot.
+`ironclaw_event_projections::EventStreamManager` is the lower-level
+transport-agnostic facade over domain projection services. It routes scoped
+runtime and audit replay requests through their owning projection services and
+preserves their domain-specific DTOs/cursors. Resume helpers return
+domain-specific updates when a cursor is valid, or an explicit snapshot/rebase
+response when retention has made replay impossible. A cursor minted under a
+different scope remains an authority failure and must not be silently converted
+into a snapshot.
+
+`ironclaw_event_streams::EventStreamManager` is the product-facing stream
+manager slice. It composes projection snapshots/replay with actor+scope access
+policy, stream admission, bounded live update buffering, stream-boundary
+redaction validation, transport-neutral stream items (`Snapshot`, `Update`,
+`RebaseRequired`, `Lagged`, `KeepAlive`), and separate outbound push-candidate
+selection through `ironclaw_outbound`. It consumes projection DTOs and outbound
+policy ports only; it must not read durable event/audit stores directly, own
+reducers, render transport frames, or infer external push permission from
+subscription visibility.
 
 Rules:
 
 - event ids are scoped; a user cannot replay another user's stream
 - replay gaps produce an explicit snapshot/rebase, not silent data loss
+- truncated snapshot/replay pages produce an explicit lag signal before live tailing, not a cursor treated as complete
+- access policy runs before snapshot, replay, or live subscription
+- long-lived subscriptions pass admission policy and use bounded buffering
+- external push/fanout candidates are selected separately from subscribers and require projection access authorization for the actor/scope/target being fanned out
 - transport-specific reconnect details do not leak into core runtime services
+
+### Communication delivery resolution
+
+Outbound communication selection is downstream of event capture, durable
+projection, and access policy. It is not a projection source of truth.
+
+The outbound path is:
+
+```text
+durable event or projection fact
+  -> outbound candidate selection through ironclaw_outbound::OutboundPolicyService
+  -> ironclaw_outbound::OutboundPolicyService validation and delivery-attempt record
+  -> product adapter render and host transport send
+```
+
+Rules:
+
+- projection and event-store services may surface the facts that trigger a user-visible notification, but they do not choose the final outbound target;
+- external push and fan-out candidates are separate from subscribers and require projection access authorization for the actor, scope, and target being fanned out;
+- delivery resolution is not required for trigger event execution, only for the external delivery of a trigger result or other run notification;
+- the outbound candidate is still a candidate after projection; send authority only begins after `OutboundPolicyService` revalidates it.
 
 ---
 

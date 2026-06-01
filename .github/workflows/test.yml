@@ -30,6 +30,13 @@ concurrency:
   group: test-${{ github.event_name }}-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
 
+env:
+  # Tests must never touch the real OS keychain (macOS Keychain auth dialog /
+  # Linux Secret Service). Guarded by src/secrets/keychain.rs::os_keychain_suppressed:
+  # cfg!(test) covers unit tests; this covers integration/e2e that link the
+  # non-cfg(test) library.
+  IRONCLAW_DISABLE_OS_KEYCHAIN: "1"
+
 jobs:
   changes:
     name: Detect code changes
@@ -115,7 +122,7 @@ jobs:
             echo "has_web_risk=false" >> "$GITHUB_OUTPUT"
           fi
 
-          if has_match '^(wit/|crates/ironclaw_common/|src/(channels/wasm|extensions|registry|tools/mcp|tools/wasm)/|channels-src/|tools-src/|registry/|scripts/build-wasm-extensions\.sh$|scripts/check-version-bumps\.sh$|tests/wit_compat\.rs$|tests/wasm_channel_integration\.rs$|tests/e2e_wasm_.*|Cargo\.toml$|Cargo\.lock$|\.github/workflows/(test|nightly-deep-ci)\.yml$)'; then
+          if has_match '^(wit/|crates/ironclaw_common/|crates/ironclaw_first_party_extensions/assets/.*/(manifest\.toml|wasm-src/)|src/(channels/wasm|extensions|registry|tools/mcp|tools/wasm)/|channels-src/|tools-src/|registry/|scripts/build-wasm-extensions\.sh$|scripts/check-version-bumps\.sh$|tests/wit_compat\.rs$|tests/wasm_channel_integration\.rs$|tests/e2e_wasm_.*|Cargo\.toml$|Cargo\.lock$|\.github/workflows/(test|nightly-deep-ci)\.yml$)'; then
             echo "has_wasm_abi_risk=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_wasm_abi_risk=false" >> "$GITHUB_OUTPUT"
@@ -187,8 +194,10 @@ jobs:
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: Install cargo-component
         uses: ./.github/actions/install-cargo-component
-      - name: Build WASM channels (for integration tests)
-        run: ./scripts/build-wasm-extensions.sh --channels
+      - name: Build WASM artifacts for integration tests
+        run: |
+          ./scripts/build-wasm-extensions.sh --channels
+          ./scripts/build-wasm-extensions.sh --first-party
       - name: Run Tests
         run: |
           timeout --signal=INT --kill-after=30s 40m \

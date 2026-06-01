@@ -125,7 +125,7 @@ fn config_stub() -> String {
 #
 # Layout:
 #   - This file (config.toml) carries the SELECTION layer:
-#     identity, policy, drivers, runner timing, and LLM-slot
+#     identity, policy, drivers, runner timing, skills, and LLM-slot
 #     selection by id.
 #   - providers.json (next to this file) carries the CATALOG layer:
 #     provider definitions known to the binary. The compiled-in
@@ -143,8 +143,9 @@ fn config_stub() -> String {
 api_version = "{api_version}"
 
 [boot]
-# Composition profile. One of: local-dev, production, migration-dry-run.
-# Today only local-dev is wired end-to-end.
+# Composition profile. One of: local-dev, local-dev-yolo, production, migration-dry-run.
+# Today local-dev and local-dev-yolo are wired end-to-end.
+# local-dev-yolo also requires --confirm-host-access at runtime.
 profile = "local-dev"
 
 [identity]
@@ -178,6 +179,12 @@ default_owner  = "reborn-cli"
 [runner]
 heartbeat_interval_secs = 5
 poll_interval_ms        = 200
+
+[skills]
+# When false, regex activation criteria do not auto-load full skill
+# context. Keyword/tag activation and explicit skill mentions such as
+# `$code-review` still activate skills.
+regex_activation_enabled = true
 
 [llm.default]
 # LLM slot selection. `provider_id` references an entry in

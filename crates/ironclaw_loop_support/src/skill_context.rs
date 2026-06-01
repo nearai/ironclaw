@@ -11,6 +11,8 @@ pub(crate) use ironclaw_turns::run_profile::{
 };
 use thiserror::Error;
 
+use crate::SkillSourceKind;
+
 /// Host-owned source for production skill context candidates.
 ///
 /// Implementations own storage/policy lookups. This trait intentionally returns
@@ -72,6 +74,11 @@ impl HostSkillContextCandidate {
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum HostSkillContextBuildError {
+    #[error("ambiguous skill context activation for '{name}': {sources:?}")]
+    AmbiguousSkill {
+        name: String,
+        sources: Vec<SkillSourceKind>,
+    },
     #[error("skill context source unavailable")]
     SourceUnavailable,
     #[error("skill context parse failed")]
@@ -92,7 +99,8 @@ pub enum HostSkillContextBuildError {
 
 impl HostSkillContextBuildError {
     pub fn into_host_error(self) -> AgentLoopHostError {
-        let kind = match self {
+        let kind = match &self {
+            Self::AmbiguousSkill { .. } => AgentLoopHostErrorKind::PolicyDenied,
             Self::SourceUnavailable => AgentLoopHostErrorKind::Unavailable,
             Self::ParseFailed => AgentLoopHostErrorKind::InvalidInvocation,
             Self::TrustDataMissing
@@ -190,6 +198,13 @@ fn skill_trust_level(trust: SkillTrust) -> SkillTrustLevel {
 }
 
 fn skill_context_error_to_host_error(error: SkillContextError) -> AgentLoopHostError {
+    tracing::warn!(
+        component = "skill_context",
+        operation = "map_context_error",
+        error = %error,
+        error_debug = ?error,
+        "skill context error mapped to safe host error"
+    );
     let build_error = match error {
         SkillContextError::TrustDataMissing => HostSkillContextBuildError::TrustDataMissing,
         SkillContextError::VisibilityDataMissing => {

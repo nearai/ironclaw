@@ -5,19 +5,24 @@ use std::{
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use ironclaw_host_api::{CapabilityId, ExtensionId, RuntimeKind, ThreadId};
+use ironclaw_host_api::{
+    CapabilityId, ExtensionId, RuntimeCredentialAuthRequirement, RuntimeKind, ThreadId,
+};
 use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 
 use crate::{
-    LoopDiagnosticRef, LoopGateRef, LoopMessageRef, LoopResultRef, RedactedCheckpointPayload,
-    RunProfileVersion, TurnActor, TurnCheckpointId, TurnId, TurnRunId, TurnScope,
+    AcceptedMessageRef, LoopDiagnosticRef, LoopGateRef, LoopMessageRef, LoopResultRef,
+    RedactedCheckpointPayload, RunProfileVersion, TurnActor, TurnCheckpointId, TurnId, TurnRunId,
+    TurnScope,
 };
 
 use super::{
+    compaction::{CompactionInitiator, LoopCompactionPort},
     instruction_bundle::InstructionBundleFingerprint,
     refs::{CheckpointSchemaId, LoopDriverId, ModelProfileId},
     snapshot::ResolvedRunProfile,
+    system_inference::SystemInferenceTaskId,
 };
 
 const FORBIDDEN_MODEL_ROUTE_MARKERS: &[&str] = &[
@@ -61,6 +66,21 @@ fn validate_prefixed_loop_ref(
     let value = validate_bounded_loop_string(value, label, max_bytes)?;
     if !value.starts_with(prefix) {
         return Err(format!("{label} must start with `{prefix}`"));
+    }
+    Ok(value)
+}
+
+fn validate_prefixed_path_safe_loop_ref(
+    label: &'static str,
+    prefix: &'static str,
+    max_bytes: usize,
+    value: String,
+) -> Result<String, String> {
+    let value = validate_prefixed_loop_ref(label, prefix, max_bytes, value)?;
+    if value.contains('/') || value.contains('\\') || value.contains("..") {
+        return Err(format!(
+            "{label} must not contain path separators or parent-directory markers"
+        ));
     }
     Ok(value)
 }
@@ -214,12 +234,6 @@ macro_rules! bounded_loop_ref {
 
 bounded_loop_ref!(CapabilityInputRef, "capability input ref", "input:", 256);
 bounded_loop_ref!(
-    LoopCheckpointStateRef,
-    "loop checkpoint state ref",
-    "checkpoint:",
-    256
-);
-bounded_loop_ref!(
     LoopInputCursorToken,
     "loop input cursor token",
     "input-cursor:",
@@ -227,6 +241,48 @@ bounded_loop_ref!(
 );
 bounded_loop_ref!(LoopInputAckToken, "loop input ack token", "input-ack:", 256);
 bounded_loop_ref!(LoopProcessRef, "loop process ref", "process:", 256);
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+#[serde(transparent)]
+pub struct LoopCheckpointStateRef(String);
+
+impl LoopCheckpointStateRef {
+    pub fn new(value: impl Into<String>) -> Result<Self, String> {
+        validate_prefixed_path_safe_loop_ref(
+            "loop checkpoint state ref",
+            "checkpoint:",
+            256,
+            value.into(),
+        )
+        .map(Self)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl AsRef<str> for LoopCheckpointStateRef {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl std::fmt::Display for LoopCheckpointStateRef {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for LoopCheckpointStateRef {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::new(value).map_err(serde::de::Error::custom)
+    }
+}
 
 impl LoopCheckpointStateRef {
     pub(crate) fn legacy_unknown() -> Self {
@@ -478,6 +534,8 @@ pub struct LoopRunContext {
     pub scope: TurnScope,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub actor: Option<TurnActor>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accepted_message_ref: Option<AcceptedMessageRef>,
     pub thread_id: ThreadId,
     pub turn_id: TurnId,
     pub run_id: TurnRunId,
@@ -505,6 +563,7 @@ impl LoopRunContext {
         Self {
             scope,
             actor: None,
+            accepted_message_ref: None,
             thread_id,
             turn_id,
             run_id,
@@ -519,6 +578,11 @@ impl LoopRunContext {
 
     pub fn with_actor(mut self, actor: TurnActor) -> Self {
         self.actor = Some(actor);
+        self
+    }
+
+    pub fn with_accepted_message_ref(mut self, accepted_message_ref: AcceptedMessageRef) -> Self {
+        self.accepted_message_ref = Some(accepted_message_ref);
         self
     }
 
@@ -548,6 +612,15 @@ pub enum AgentLoopHostErrorKind {
     Invalid,
     PolicyDenied,
     BudgetExceeded,
+    /// The model call would push utilization past the configured pause
+    /// threshold. Callers surface an approval gate (foreground or
+    /// background) and retry after the user resolves it.
+    BudgetApprovalRequired,
+    /// Durable budget accounting (reservation read/write/reconcile)
+    /// failed. Distinct from `BudgetExceeded`/`BudgetApprovalRequired`
+    /// because the failure is in the governor itself, not in the budget
+    /// outcome — callers must fail closed.
+    BudgetAccountingFailed,
     Unavailable,
     Cancelled,
     CheckpointRejected,
@@ -566,6 +639,8 @@ impl AgentLoopHostErrorKind {
             Self::Invalid => "invalid",
             Self::PolicyDenied => "policy_denied",
             Self::BudgetExceeded => "budget_exceeded",
+            Self::BudgetApprovalRequired => "budget_approval_required",
+            Self::BudgetAccountingFailed => "budget_accounting_failed",
             Self::Unavailable => "unavailable",
             Self::Cancelled => "cancelled",
             Self::CheckpointRejected => "checkpoint_rejected",
@@ -614,42 +689,66 @@ fn default_prompt_mode() -> PromptMode {
     PromptMode::TextOnly
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub const LOOP_CONTEXT_SNIPPET_MODEL_CONTENT_MAX_BYTES: usize = 64 * 1024;
+pub const LOOP_CONTEXT_TOTAL_MODEL_CONTENT_MAX_BYTES: usize = 256 * 1024;
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LoopContextBundle {
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub identity_messages: Vec<LoopContextMessage>,
     pub messages: Vec<LoopContextMessage>,
     pub instruction_snippets: Vec<LoopContextSnippet>,
     pub memory_snippets: Vec<LoopContextSnippet>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoopContextMessage {
     /// Reference to the persisted message content.
     ///
     /// `None` means "summary-only entry; prompt port MUST NOT resolve content —
     /// use `safe_summary` verbatim instead." Mirrors the
     /// `SkillTrustLevel::Installed` carrying `prompt_content: None` pattern.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message_ref: Option<LoopMessageRef>,
     pub role: String,
     pub safe_summary: String,
+    pub compaction: Option<LoopContextCompactionMetadata>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LoopContextCompactionMetadata {
+    pub sequence: u64,
+    pub kind: LoopContextCompactionKind,
+    pub estimated_tokens: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LoopContextCompactionKind {
+    User,
+    Assistant,
+    System,
+    Summary,
+    Other,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoopContextSnippetMetadata {
     pub source_name: String,
     pub trust_level: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoopContextSnippet {
     pub snippet_ref: String,
+    /// Full model-visible content for this context snippet.
+    ///
+    /// This is intentionally distinct from `safe_summary`: prompt assembly must
+    /// materialize this field, while summaries remain short metadata for
+    /// fingerprints, transcript displays, and diagnostics.
+    pub model_content: String,
     pub safe_summary: String,
     /// Safe metadata for prompt milestones. Skill snippet producers using the
     /// `skill:` ref namespace must populate this so telemetry can record active
     /// skill name/trust without leaking prompt content.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<LoopContextSnippetMetadata>,
 }
 
@@ -877,6 +976,8 @@ pub struct LoopPromptBundle {
     pub bundle_ref: LoopPromptBundleRef,
     pub messages: Vec<LoopModelMessage>,
     pub surface_version: Option<CapabilitySurfaceVersion>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub compaction_message_index: Vec<LoopContextCompactionMetadata>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instruction_fingerprint: Option<InstructionBundleFingerprint>,
     #[serde(default)]
@@ -1000,6 +1101,8 @@ pub trait LoopPromptPort: Send + Sync {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LoopModelResponse {
     pub chunks: Vec<ModelStreamChunk>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub safe_reasoning_deltas: Vec<String>,
     pub output: ParentLoopOutput,
     pub effective_model_profile_id: ModelProfileId,
 }
@@ -1069,8 +1172,28 @@ pub struct CapabilityCallCandidate {
     pub surface_version: CapabilitySurfaceVersion,
     pub capability_id: CapabilityId,
     pub input_ref: CapabilityInputRef,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub effective_capability_ids: Vec<CapabilityId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_replay: Option<ProviderToolCallReplay>,
+}
+
+/// Capability ids a provider tool call may touch before it is staged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderToolCallCapabilityIds {
+    /// Canonical capability id backing the provider-facing tool name.
+    pub provider_capability_id: CapabilityId,
+    /// Capabilities whose policy surface is used by this call.
+    pub effective_capability_ids: Vec<CapabilityId>,
+}
+
+impl ProviderToolCallCapabilityIds {
+    pub fn single(capability_id: CapabilityId) -> Self {
+        Self {
+            provider_capability_id: capability_id.clone(),
+            effective_capability_ids: vec![capability_id],
+        }
+    }
 }
 
 /// Provider-originated tool-call metadata needed to replay tool results back to the same provider.
@@ -1242,6 +1365,8 @@ pub enum CapabilityOutcome {
     },
     AuthRequired {
         gate_ref: LoopGateRef,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        credential_requirements: Vec<RuntimeCredentialAuthRequirement>,
         safe_summary: String,
     },
     ResourceBlocked {
@@ -1249,6 +1374,16 @@ pub enum CapabilityOutcome {
         safe_summary: String,
     },
     SpawnedProcess(ProcessHandleSummary),
+    AwaitDependentRun {
+        gate_ref: LoopGateRef,
+        result_ref: LoopResultRef,
+        safe_summary: String,
+    },
+    SpawnedChildRun {
+        child_run_id: TurnRunId,
+        result_ref: LoopResultRef,
+        safe_summary: String,
+    },
     Denied(CapabilityDenied),
     Failed(CapabilityFailure),
 }
@@ -1260,6 +1395,7 @@ impl CapabilityOutcome {
             Self::ApprovalRequired { .. }
                 | Self::AuthRequired { .. }
                 | Self::ResourceBlocked { .. }
+                | Self::AwaitDependentRun { .. }
                 | Self::SpawnedProcess(_)
         )
     }
@@ -1363,8 +1499,10 @@ pub enum CapabilityFailureKind {
     Cancelled,
     Dispatcher,
     InvalidInput,
+    InvalidOutput,
     MissingRuntime,
     Network,
+    OperationFailed,
     OutputTooLarge,
     PolicyDenied,
     Process,
@@ -1401,8 +1539,10 @@ impl CapabilityFailureKind {
             Self::Cancelled => "cancelled",
             Self::Dispatcher => "dispatcher",
             Self::InvalidInput => "invalid_input",
+            Self::InvalidOutput => "invalid_output",
             Self::MissingRuntime => "missing_runtime",
             Self::Network => "network",
+            Self::OperationFailed => "operation_failed",
             Self::OutputTooLarge => "output_too_large",
             Self::PolicyDenied => "policy_denied",
             Self::Process => "process",
@@ -1443,8 +1583,10 @@ impl<'de> Deserialize<'de> for CapabilityFailureKind {
             "cancelled" => Ok(Self::Cancelled),
             "dispatcher" => Ok(Self::Dispatcher),
             "invalid_input" => Ok(Self::InvalidInput),
+            "invalid_output" => Ok(Self::InvalidOutput),
             "missing_runtime" => Ok(Self::MissingRuntime),
             "network" => Ok(Self::Network),
+            "operation_failed" => Ok(Self::OperationFailed),
             "output_too_large" => Ok(Self::OutputTooLarge),
             "policy_denied" => Ok(Self::PolicyDenied),
             "process" => Ok(Self::Process),
@@ -1462,6 +1604,25 @@ impl<'de> Deserialize<'de> for CapabilityFailureKind {
 pub trait LoopCapabilityPort: Send + Sync {
     fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
         Ok(Vec::new())
+    }
+
+    fn provider_tool_call_capability_ids(
+        &self,
+        tool_call: &ProviderToolCall,
+    ) -> Result<ProviderToolCallCapabilityIds, AgentLoopHostError> {
+        let Some(definition) = self
+            .tool_definitions()?
+            .into_iter()
+            .find(|definition| definition.name == tool_call.name)
+        else {
+            return Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::InvalidInvocation,
+                "provider tool call is outside the visible capability surface",
+            ));
+        };
+        Ok(ProviderToolCallCapabilityIds::single(
+            definition.capability_id,
+        ))
     }
 
     fn validate_provider_tool_call(
@@ -1551,6 +1712,11 @@ pub trait LoopTranscriptPort: Send + Sync {
 pub struct LoopCheckpointRequest {
     pub kind: LoopCheckpointKind,
     pub state_ref: LoopCheckpointStateRef,
+    /// Gate identity for `BeforeBlock` checkpoints; `None` for other kinds.
+    /// Defaults to `None` for backward-compatible deserialization of older
+    /// records that predate this field.
+    #[serde(default)]
+    pub gate_ref: Option<crate::ids::LoopGateRef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1651,6 +1817,7 @@ pub trait LoopCheckpointPort: Send + Sync {
     }
 }
 
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LoopProgressEvent {
@@ -1690,6 +1857,36 @@ pub enum LoopProgressEvent {
         iteration: u32,
         kind: LoopCheckpointKind,
     },
+    CompactionStarted {
+        task_id: SystemInferenceTaskId,
+        initiator: CompactionInitiator,
+    },
+    CompactionCompleted {
+        task_id: SystemInferenceTaskId,
+        compression_ratio_ppm: u32,
+    },
+    CompactionFailed {
+        task_id: SystemInferenceTaskId,
+        reason_kind: LoopSafeSummary,
+    },
+    CompactionLeakDetected {
+        task_id: SystemInferenceTaskId,
+        reason_kind: LoopSafeSummary,
+    },
+    GoalRefreshStarted {
+        task_id: SystemInferenceTaskId,
+    },
+    GoalRefreshCompleted {
+        task_id: SystemInferenceTaskId,
+    },
+    GoalRefreshFailed {
+        task_id: SystemInferenceTaskId,
+        reason_kind: LoopSafeSummary,
+    },
+    GoalRefreshLeakDetected {
+        task_id: SystemInferenceTaskId,
+        reason_kind: LoopSafeSummary,
+    },
 }
 
 impl LoopProgressEvent {
@@ -1712,6 +1909,14 @@ impl LoopProgressEvent {
             Self::CapabilityBatchCompleted { .. } => "capability_batch_completed",
             Self::GateBlocked { .. } => "gate_blocked",
             Self::CheckpointWritten { .. } => "checkpoint_written",
+            Self::CompactionStarted { .. } => "compaction_started",
+            Self::CompactionCompleted { .. } => "compaction_completed",
+            Self::CompactionFailed { .. } => "compaction_failed",
+            Self::CompactionLeakDetected { .. } => "compaction_leak_detected",
+            Self::GoalRefreshStarted { .. } => "goal_refresh_started",
+            Self::GoalRefreshCompleted { .. } => "goal_refresh_completed",
+            Self::GoalRefreshFailed { .. } => "goal_refresh_failed",
+            Self::GoalRefreshLeakDetected { .. } => "goal_refresh_leak_detected",
         }
     }
 }
@@ -1723,12 +1928,14 @@ pub enum BatchPolicyKind {
     Parallel,
 }
 
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LoopGateKind {
     Approval,
     Auth,
     ResourceWait,
+    AwaitDependentRun,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1738,6 +1945,12 @@ pub enum LoopDriverNoteKind {
     Planning,
     Waiting,
     Retrying,
+    /// An event-triggered hook subscription stopped before the run did —
+    /// typically because the durable event log reported a replay gap that
+    /// the subscription cannot bridge without losing events. Surfaced as
+    /// an operator-visible note so the missing telemetry isn't silently
+    /// invisible (NOTE(#3640)).
+    EventSubscriptionTerminated,
 }
 
 #[async_trait]
@@ -1758,20 +1971,22 @@ pub trait LoopProgressPort: Send + Sync {
 /// intentionally synchronous and non-blocking: implementations should expose a
 /// cheap snapshot, usually backed by an atomic flag plus immutable signal data.
 ///
-/// **Cancellation is cooperative and boundary-observation only — it is not
-/// preempted across in-flight host calls.** `build_prompt_bundle`,
-/// `stream_model`, and `invoke_capability` are awaited to completion before
-/// the next observation point is reached. A stuck model stream or long-running
-/// capability call will not observe cancellation until control returns to the
-/// executor. Implementations of those host methods that need finer-grained
-/// cancellation must integrate their own abort signal internally; this port
-/// only covers the between-call boundaries that the executor controls.
+/// Cancellation is cooperative. Most executor stages observe it only at
+/// explicit boundaries via [`LoopCancellationPort::observe_cancellation`].
+/// Executor-owned waits that can safely race host work, such as prompt
+/// compaction, may also wait on
+/// [`LoopCancellationPort::cancellation_requested`] to avoid timer polling.
+#[async_trait]
 pub trait LoopCancellationPort: Send + Sync {
     /// Returns `Some(signal)` once cancellation has been requested for this run.
     ///
     /// Implementations must be idempotent across reads. After the request fires,
     /// repeated calls must keep returning the same signal.
     fn observe_cancellation(&self) -> Option<LoopCancellationSignal>;
+
+    /// Waits until cancellation has been requested for this run and returns the
+    /// same stable signal reported by [`Self::observe_cancellation`].
+    async fn cancellation_requested(&self) -> LoopCancellationSignal;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1790,6 +2005,7 @@ pub trait AgentLoopDriverHost:
     + LoopTranscriptPort
     + LoopCheckpointPort
     + LoopProgressPort
+    + LoopCompactionPort
     + LoopCancellationPort
     + Send
     + Sync
@@ -1806,6 +2022,7 @@ impl<T> AgentLoopDriverHost for T where
         + LoopTranscriptPort
         + LoopCheckpointPort
         + LoopProgressPort
+        + LoopCompactionPort
         + LoopCancellationPort
         + Send
         + Sync
@@ -1821,4 +2038,73 @@ fn unsupported_host_method(method: &'static str) -> AgentLoopHostError {
         AgentLoopHostErrorKind::Unavailable,
         format!("agent loop host method {method} is unavailable"),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct DefinitionPort {
+        definitions: Vec<ProviderToolDefinition>,
+    }
+
+    #[async_trait]
+    impl LoopCapabilityPort for DefinitionPort {
+        fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
+            Ok(self.definitions.clone())
+        }
+
+        async fn visible_capabilities(
+            &self,
+            _request: VisibleCapabilityRequest,
+        ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
+            unreachable!("not used by this test")
+        }
+
+        async fn invoke_capability(
+            &self,
+            _request: CapabilityInvocation,
+        ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+            unreachable!("not used by this test")
+        }
+
+        async fn invoke_capability_batch(
+            &self,
+            _request: CapabilityBatchInvocation,
+        ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
+            unreachable!("not used by this test")
+        }
+    }
+
+    fn provider_tool_call(name: &str) -> ProviderToolCall {
+        ProviderToolCall {
+            provider_id: "provider".to_string(),
+            provider_model_id: "model".to_string(),
+            turn_id: Some("turn".to_string()),
+            id: "call".to_string(),
+            name: name.to_string(),
+            arguments: serde_json::json!({}),
+            response_reasoning: None,
+            reasoning: None,
+            signature: None,
+        }
+    }
+
+    #[test]
+    fn provider_tool_call_capability_ids_rejects_unknown_tool_name() {
+        let port = DefinitionPort {
+            definitions: vec![ProviderToolDefinition {
+                capability_id: CapabilityId::new("demo.allowed").expect("valid capability id"),
+                name: "demo__allowed".to_string(),
+                description: "allowed".to_string(),
+                parameters: serde_json::json!({"type": "object"}),
+            }],
+        };
+
+        let error = port
+            .provider_tool_call_capability_ids(&provider_tool_call("demo__missing"))
+            .expect_err("unknown provider tool must fail closed");
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+    }
 }

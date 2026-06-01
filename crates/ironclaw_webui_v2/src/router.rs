@@ -14,7 +14,8 @@ use ironclaw_product_workflow::RebornServicesApi;
 
 use crate::descriptors::{
     WEBUI_V2_PATTERN_CANCEL_RUN, WEBUI_V2_PATTERN_CREATE_THREAD, WEBUI_V2_PATTERN_GET_TIMELINE,
-    WEBUI_V2_PATTERN_RESOLVE_GATE, WEBUI_V2_PATTERN_SEND_MESSAGE, WEBUI_V2_PATTERN_STREAM_EVENTS,
+    WEBUI_V2_PATTERN_RESOLVE_GATE, WEBUI_V2_PATTERN_SEND_MESSAGE, WEBUI_V2_PATTERN_SETUP_EXTENSION,
+    WEBUI_V2_PATTERN_STREAM_EVENTS, WEBUI_V2_PATTERN_STREAM_EVENTS_WS,
 };
 use crate::handlers;
 use crate::sse_capacity::{DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER, SseCapacity};
@@ -67,14 +68,26 @@ impl WebUiV2State {
 /// of this router.
 pub fn webui_v2_router(state: WebUiV2State) -> Router {
     Router::new()
+        // GET and POST share the `/api/webchat/v2/threads` path
+        // (`WEBUI_V2_PATTERN_CREATE_THREAD == WEBUI_V2_PATTERN_LIST_THREADS`);
+        // mount both verbs in one `.route()` so axum's matcher
+        // dispatches by method.
         .route(
             WEBUI_V2_PATTERN_CREATE_THREAD,
-            post(handlers::create_thread),
+            post(handlers::create_thread).get(handlers::list_threads),
         )
         .route(WEBUI_V2_PATTERN_SEND_MESSAGE, post(handlers::send_message))
         .route(WEBUI_V2_PATTERN_GET_TIMELINE, get(handlers::get_timeline))
         .route(WEBUI_V2_PATTERN_STREAM_EVENTS, get(handlers::stream_events))
+        .route(
+            WEBUI_V2_PATTERN_STREAM_EVENTS_WS,
+            get(handlers::stream_events_ws),
+        )
         .route(WEBUI_V2_PATTERN_CANCEL_RUN, post(handlers::cancel_run))
         .route(WEBUI_V2_PATTERN_RESOLVE_GATE, post(handlers::resolve_gate))
+        .route(
+            WEBUI_V2_PATTERN_SETUP_EXTENSION,
+            post(handlers::setup_extension),
+        )
         .with_state(state)
 }

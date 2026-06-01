@@ -141,6 +141,7 @@ impl LlmProvider for BedrockProvider {
             output_tokens,
             finish_reason: map_stop_reason(response.stop_reason()),
             cache_creation_input_tokens: 0,
+            reasoning: None,
             cache_read_input_tokens: 0,
         })
     }

@@ -3,6 +3,7 @@
 use chrono::{DateTime, Utc};
 use ironclaw_turns::{AcceptedMessageRef, TurnRunId};
 use serde::{Deserialize, Deserializer, Serialize};
+use serde_json::Value;
 
 use crate::auth::{ProtocolAuthEvidence, VerifiedAuthClaim};
 use crate::error::ProductAdapterError;
@@ -42,6 +43,19 @@ fn validate_token_string(
     max: usize,
 ) -> Result<(), ProductAdapterError> {
     validate_bounded_string(kind, value, max, false, false)
+}
+
+fn validate_command_name(value: &str) -> Result<(), ProductAdapterError> {
+    validate_token_string("command", value, COMMAND_MAX_BYTES)?;
+    if value
+        .chars()
+        .any(|c| c.is_whitespace() || c == '/' || c == '\\')
+    {
+        return Err(malformed(
+            "command contains unsupported whitespace or slash characters",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_bounded_string(
@@ -139,7 +153,7 @@ impl InboundCommandPayload {
     ) -> Result<Self, ProductAdapterError> {
         let command = command.into();
         let arguments = arguments.into();
-        validate_token_string("command", &command, COMMAND_MAX_BYTES)?;
+        validate_command_name(&command)?;
         validate_payload_string("command arguments", &arguments, COMMAND_ARGUMENTS_MAX_BYTES)?;
         Ok(Self {
             command,
@@ -147,6 +161,51 @@ impl InboundCommandPayload {
             trigger,
         })
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ProductSlashCommandParseError {
+    #[error("slash command is empty")]
+    Empty,
+    #[error("slash command payload is invalid: {0}")]
+    InvalidPayload(String),
+}
+
+/// Parse a raw slash command into a normalized command payload. Returns
+/// `Ok(None)` when the input is ordinary user text.
+pub fn parse_product_slash_command(
+    input: &str,
+    trigger: ProductTriggerReason,
+) -> Result<Option<InboundCommandPayload>, ProductSlashCommandParseError> {
+    let trimmed = input.trim();
+    let Some(without_slash) = trimmed.strip_prefix('/') else {
+        return Ok(None);
+    };
+    let without_slash = without_slash.trim_start();
+    if without_slash.is_empty() {
+        return Err(ProductSlashCommandParseError::Empty);
+    }
+
+    let command_end = without_slash
+        .char_indices()
+        .find_map(|(idx, c)| c.is_whitespace().then_some(idx))
+        .unwrap_or(without_slash.len());
+    let command_slice = &without_slash[..command_end];
+    let arguments_slice = without_slash[command_end..].trim_start();
+    validate_command_name(command_slice)
+        .map_err(|error| ProductSlashCommandParseError::InvalidPayload(error.to_string()))?;
+    validate_payload_string(
+        "command arguments",
+        arguments_slice,
+        COMMAND_ARGUMENTS_MAX_BYTES,
+    )
+    .map_err(|error| ProductSlashCommandParseError::InvalidPayload(error.to_string()))?;
+
+    let command = command_slice.to_ascii_lowercase();
+    let arguments = arguments_slice.to_string();
+    InboundCommandPayload::new(command, arguments, trigger)
+        .map(Some)
+        .map_err(|error| ProductSlashCommandParseError::InvalidPayload(error.to_string()))
 }
 
 #[derive(Deserialize)]
@@ -515,6 +574,7 @@ pub enum ProductRejectionKind {
     BindingRequired,
     AccessDenied,
     UnknownInstallation,
+    InvalidRequest,
     PolicyDenied,
 }
 
@@ -562,6 +622,22 @@ pub enum InboundRetryDisposition {
     ReplayPrior,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ProductCommandResultPayload(Value);
+
+impl Eq for ProductCommandResultPayload {}
+
+impl ProductCommandResultPayload {
+    pub fn new(value: Value) -> Self {
+        Self(value)
+    }
+
+    pub fn as_value(&self) -> &Value {
+        &self.0
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProductInboundAck {
@@ -574,6 +650,10 @@ pub enum ProductInboundAck {
         active_run_id: TurnRunId,
     },
     Rejected(ProductRejection),
+    CommandResult {
+        command: String,
+        payload: ProductCommandResultPayload,
+    },
     Duplicate {
         prior: Box<ProductInboundAck>,
     },
@@ -586,6 +666,7 @@ impl ProductInboundAck {
             Self::Accepted { .. }
             | Self::DeferredBusy { .. }
             | Self::Duplicate { .. }
+            | Self::CommandResult { .. }
             | Self::NoOp => true,
             Self::Rejected(rejection) => {
                 rejection.disposition == ProductRejectionDisposition::Permanent
@@ -648,6 +729,30 @@ mod tests {
     }
 
     #[test]
+    fn user_message_text_length_bounded_through_serde() {
+        let empty = serde_json::json!({
+            "text": "",
+            "attachments": [],
+            "trigger": "direct_chat"
+        });
+        assert!(serde_json::from_value::<UserMessagePayload>(empty).is_ok());
+
+        let at_limit = serde_json::json!({
+            "text": "a".repeat(USER_MESSAGE_TEXT_MAX_BYTES),
+            "attachments": [],
+            "trigger": "direct_chat"
+        });
+        assert!(serde_json::from_value::<UserMessagePayload>(at_limit).is_ok());
+
+        let forged = serde_json::json!({
+            "text": "a".repeat(USER_MESSAGE_TEXT_MAX_BYTES + 1),
+            "attachments": [],
+            "trigger": "direct_chat"
+        });
+        assert!(serde_json::from_value::<UserMessagePayload>(forged).is_err());
+    }
+
+    #[test]
     fn command_payload_bounds_are_enforced_through_serde() {
         assert!(
             InboundCommandPayload::new(
@@ -657,12 +762,39 @@ mod tests {
             )
             .is_err()
         );
+        assert!(
+            InboundCommandPayload::new("bad name", "", ProductTriggerReason::BotCommand).is_err()
+        );
+        assert!(
+            InboundCommandPayload::new("bad/name", "", ProductTriggerReason::BotCommand).is_err()
+        );
+        let empty_command = serde_json::json!({
+            "command": "",
+            "arguments": "",
+            "trigger": "bot_command"
+        });
+        assert!(serde_json::from_value::<InboundCommandPayload>(empty_command).is_err());
+
+        let at_limit = serde_json::json!({
+            "command": "h".repeat(COMMAND_MAX_BYTES),
+            "arguments": "",
+            "trigger": "bot_command"
+        });
+        assert!(serde_json::from_value::<InboundCommandPayload>(at_limit).is_ok());
+
         let forged = serde_json::json!({
             "command": "h".repeat(COMMAND_MAX_BYTES + 1),
             "arguments": "",
             "trigger": "bot_command"
         });
         assert!(serde_json::from_value::<InboundCommandPayload>(forged).is_err());
+
+        let forged_slash = serde_json::json!({
+            "command": "bad/name",
+            "arguments": "",
+            "trigger": "bot_command"
+        });
+        assert!(serde_json::from_value::<InboundCommandPayload>(forged_slash).is_err());
     }
 
     #[test]
@@ -721,6 +853,15 @@ mod tests {
             .is_durable_outcome()
         );
         assert!(ProductInboundAck::NoOp.is_durable_outcome());
+        assert!(
+            ProductInboundAck::CommandResult {
+                command: "extension_install".to_string(),
+                payload: ProductCommandResultPayload::new(serde_json::json!({
+                    "phase": "installed",
+                })),
+            }
+            .is_durable_outcome()
+        );
         assert!(
             ProductInboundAck::Rejected(ProductRejection::permanent(
                 ProductRejectionKind::PolicyDenied,

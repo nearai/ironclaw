@@ -1231,6 +1231,7 @@ fn descriptor(id: CapabilityId) -> CapabilityDescriptor {
         parameters_schema: serde_json::json!({"type": "object"}),
         effects: vec![EffectKind::DispatchCapability],
         default_permission: PermissionMode::Deny,
+        runtime_credentials: Vec::new(),
         resource_profile: None,
     }
 }

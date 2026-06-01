@@ -18,6 +18,7 @@
 
 pub mod app_loop_family;
 pub mod driver_registry;
+pub mod hook_gate_refs;
 pub mod loop_driver_host;
 pub mod loop_exit_applier;
 pub mod milestone_events;
@@ -26,6 +27,7 @@ pub mod planned_driver;
 pub mod planned_driver_factory;
 pub mod production_readiness;
 pub mod runtime;
+pub mod subagent;
 pub mod text_loop_driver;
 pub mod turn_runner;
 

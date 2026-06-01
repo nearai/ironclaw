@@ -439,6 +439,7 @@ fn adapter_result(
         .map_err(|_| dispatch_error_for_runtime(runtime, RuntimeDispatchErrorKind::Resource))?;
     Ok(RuntimeAdapterResult {
         output,
+        display_preview: None,
         output_bytes: usage.output_bytes,
         usage,
         receipt,

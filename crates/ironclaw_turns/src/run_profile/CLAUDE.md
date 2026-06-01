@@ -17,8 +17,10 @@ Owns neutral run-profile and agent-loop host contracts.
 - This directory defines contracts only. It must not construct concrete
   capability hosts, dispatchers, host runtime services, workspace readers, DB
   backends, product adapters, or provider clients.
-- Port DTOs carry refs, bounded safe summaries, typed ids, versions, cursors,
-  and sanitized errors.
+- Public/wire DTOs carry refs, bounded safe summaries, typed ids, versions,
+  cursors, and sanitized errors. Transient prompt-construction types may carry
+  bounded, host-approved model-visible content, but they must not be serde
+  wire/public DTOs.
 - Raw prompt text, raw assistant content, tool input JSON, secrets, host paths,
   and backend errors must stay behind host implementations.
 

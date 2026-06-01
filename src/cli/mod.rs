@@ -36,7 +36,6 @@ mod service;
 mod skills;
 pub mod status;
 mod tool;
-mod traces;
 
 pub use acp::{AcpCommand, run_acp_command};
 pub use channels::{ChannelsCommand, run_channels_command};
@@ -59,7 +58,6 @@ pub use service::{ServiceCommand, run_service_command};
 pub use skills::{SkillsCommand, run_skills_command};
 pub use status::run_status_command;
 pub use tool::{ToolCommand, run_tool_command};
-pub use traces::{TracesCommand, run_traces_command};
 
 use std::sync::Arc;
 
@@ -310,14 +308,6 @@ pub enum Command {
     )]
     Models(ModelsCommand),
 
-    /// Manage opt-in trace contributions
-    #[command(
-        subcommand,
-        about = "Manage trace contributions",
-        long_about = "Create local redacted trace contribution previews, explicitly submit or revoke them, and operate private Trace Commons reviewer/admin APIs.\nExamples:\n  ironclaw traces preview --recorded-trace trace.json --output contribution.json\n  ironclaw traces submit --envelope contribution.json --endpoint https://example.internal/v1/traces\n  ironclaw traces ingest-health --endpoint https://example.internal"
-    )]
-    Traces(Box<TracesCommand>),
-
     /// Probe external dependencies and validate configuration
     #[command(
         about = "Run diagnostics (check if everything is configured correctly)",
@@ -482,20 +472,29 @@ pub async fn run_memory_command(mem_cmd: &MemoryCommand) -> anyhow::Result<()> {
 
     let session = ironclaw_llm::create_session_manager(config.llm.session.clone()).await;
 
-    let embeddings = config
-        .embeddings
-        .create_provider(
-            &config.llm.nearai.base_url,
+    let bedrock_setup =
+        config
+            .llm
+            .bedrock
+            .as_ref()
+            .map(|b| ironclaw_embeddings::BedrockEmbeddingSetup {
+                region: b.region.clone(),
+                profile: b.profile.clone(),
+            });
+    let embeddings = ironclaw_embeddings::create_provider(
+        &config.embeddings,
+        ironclaw_embeddings::ProviderDeps {
             session,
-            config.llm.bedrock.as_ref(),
-        )
-        .await;
+            bedrock_setup,
+        },
+    )
+    .await;
 
     let db: Arc<dyn crate::db::Database> = crate::db::connect_from_config(&config.database)
         .await
         .map_err(|e| anyhow::anyhow!("{}", e))?;
 
-    let cache_config = crate::workspace::EmbeddingCacheConfig {
+    let cache_config = ironclaw_embeddings::EmbeddingCacheConfig {
         max_entries: config.embeddings.cache_size,
     };
     run_memory_command_with_db(mem_cmd.clone(), db, embeddings, cache_config).await

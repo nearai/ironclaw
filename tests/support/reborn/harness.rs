@@ -10,12 +10,12 @@
 //! Documented test-support substitutions:
 //! - the model gateway is scripted trace replay;
 //! - the capability port is a local recording echo/approval port;
-//! - external network, delivery, OAuth, and sandbox process execution are not
-//!   exercised by this harness.
+//! - external internet, delivery, and OAuth are not exercised by this harness.
 
 #![allow(dead_code)] // Shared by staged Reborn binary-E2E validation ports.
 
 use std::{
+    collections::VecDeque,
     path::PathBuf,
     sync::{
         Arc, Mutex,
@@ -25,27 +25,38 @@ use std::{
 };
 
 use async_trait::async_trait;
-use ironclaw_authorization::GrantAuthorizer;
+use ironclaw_authorization::{GrantAuthorizer, TrustAwareCapabilityDispatchAuthorizer};
 use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_filesystem::{LocalFilesystem, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
-    AgentId, CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind,
-    ExtensionId, GrantConstraints, HostPath, MountAlias, MountGrant, MountPermissions, MountView,
-    NetworkPolicy, NetworkScheme, NetworkTargetPattern, PackageId, Principal, ProjectId,
-    ResourceScope, RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
-    RuntimeHttpEgressResponse, RuntimeKind, TenantId, ThreadId, TrustClass, UserId, VirtualPath,
+    AgentId, CapabilityDescriptor, CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet,
+    CredentialStageError, Decision, EffectKind, ExecutionContext, ExtensionId, GrantConstraints,
+    HostPath, MountAlias, MountGrant, MountPermissions, MountView, NetworkPolicy, NetworkScheme,
+    NetworkTargetPattern, Obligation, Obligations, PackageId, Principal, ProjectId,
+    ResourceEstimate, ResourceScope, RuntimeCredentialAccountProviderId, RuntimeHttpEgress,
+    RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, RuntimeKind,
+    SecretHandle, TenantId, ThreadId, TrustClass, UserId, VirtualPath,
 };
 use ironclaw_host_runtime::{
     APPLY_PATCH_CAPABILITY_ID, BUILTIN_FIRST_PARTY_PROVIDER, CapabilitySurfacePolicy,
-    CapabilitySurfaceVersion as HostRuntimeCapabilitySurfaceVersion, GLOB_CAPABILITY_ID,
-    GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID, HostRuntime, HostRuntimeServices, JSON_CAPABILITY_ID,
-    LIST_DIR_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, SurfaceKind, TIME_CAPABILITY_ID,
-    WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers, builtin_first_party_package,
+    CapabilitySurfaceVersion as HostRuntimeCapabilitySurfaceVersion, ECHO_CAPABILITY_ID,
+    GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID, HostRuntime, HostRuntimeServices,
+    JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, READ_FILE_CAPABILITY_ID,
+    RuntimeCredentialAccountRequest, RuntimeCredentialAccountResolver, SHELL_CAPABILITY_ID,
+    SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID, SurfaceKind,
+    TIME_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers,
+    builtin_first_party_package,
 };
 use ironclaw_loop_support::{
-    CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
+    CapabilityAllowSet, CapabilityResolveError, CapabilityResultWrite,
+    CapabilitySurfaceProfileResolver, DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID,
     HostIdentityContextBuildError, HostIdentityContextCandidate, HostIdentityContextSource,
-    HostManagedModelRequest, HostRuntimeLoopCapabilityPortFactory, LoopCapabilityResultWriter,
+    HostManagedModelRequest, HostRuntimeLoopCapabilityPortFactory, JsonSpawnSubagentInputCodec,
+    LoopCapabilityResultWriter,
+};
+use ironclaw_network::{
+    NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
+    PolicyNetworkHttpEgress, ReqwestNetworkTransport,
 };
 use ironclaw_product_adapters::{
     ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload, ProductTriggerReason,
@@ -55,6 +66,10 @@ use ironclaw_product_workflow::{
     ConversationBindingService, DefaultInboundTurnService, DefaultProductWorkflow,
     IdempotencyLedger, InboundTurnService, ProductConversationRouteKind, ResolveBindingRequest,
     ResolvedBinding,
+};
+use ironclaw_reborn::subagent::{
+    flavors::StaticSubagentDefinitionResolver, gate_resolution::BoundedSubagentGateResolutionStore,
+    goal_store::InMemoryBoundedSubagentGoalStore,
 };
 use ironclaw_reborn::{
     loop_driver_host::LoopCapabilityPortFactory,
@@ -73,18 +88,23 @@ use ironclaw_reborn_composition::{
     build_reborn_services, visible_capability_request_for_run,
 };
 use ironclaw_resources::InMemoryResourceGovernor;
+use ironclaw_secrets::{
+    InMemorySecretStore, SecretLease, SecretLeaseId, SecretLeaseStatus, SecretMaterial,
+    SecretMetadata, SecretStore, SecretStoreError,
+};
 use ironclaw_threads::{
     FilesystemSessionThreadService, SessionThreadService, ThreadHistoryRequest,
     ThreadMessageRecord, ThreadScope,
 };
-use ironclaw_trust::EffectiveTrustClass;
 use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy};
+use ironclaw_trust::{EffectiveTrustClass, TrustDecision};
 use ironclaw_turns::{
-    CancelRunRequest, DefaultTurnCoordinator, FilesystemTurnStateStore, GateRef,
-    GetLoopCheckpointRequest, GetRunStateRequest, IdempotencyKey, InMemoryCheckpointStateStore,
-    LoopBlockedKind, LoopCheckpointKind, LoopCheckpointStore, LoopGateRef, LoopResultRef,
-    ReplyTargetBindingRef, ResumeTurnRequest, SanitizedCancelReason, SourceBindingRef, TurnActor,
-    TurnCoordinator, TurnError, TurnRunId, TurnRunState, TurnScope, TurnStateStore, TurnStatus,
+    CancelRunRequest, FilesystemTurnStateStore, GateRef, GetLoopCheckpointRequest,
+    GetRunStateRequest, IdempotencyKey, InMemoryCheckpointStateStore, LoopBlockedKind,
+    LoopCheckpointKind, LoopCheckpointStore, LoopGateRef, LoopResultRef, ReplyTargetBindingRef,
+    ResumeTurnRequest, SanitizedCancelReason, SourceBindingRef, TurnActor, TurnCoordinator,
+    TurnError, TurnRunId, TurnRunRecord, TurnRunState, TurnScope, TurnSpawnTreeStateStore,
+    TurnStateStore, TurnStatus,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation,
         CapabilityBatchOutcome, CapabilityCallCandidate, CapabilityDescriptorView,
@@ -95,6 +115,7 @@ use ironclaw_turns::{
         VisibleCapabilitySurface,
     },
 };
+use ironclaw_wasm::{WitToolHost, WitToolRuntimeConfig};
 use serde_json::json;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -102,6 +123,7 @@ use tokio_util::sync::CancellationToken;
 use super::{
     config::WaitConfig,
     filesystem::local_filesystem,
+    github as github_support,
     model_replay::RebornTraceReplayModelGateway,
     product_workflow::{RebornProductWorkflowHarness, resource_scope},
     session_thread::RebornThreadHarness,
@@ -112,11 +134,15 @@ pub type HarnessWaitConfig = WaitConfig;
 
 const TEST_CAPABILITY_ID: &str = "test.echo";
 const TEST_CAPABILITY_SURFACE_VERSION: &str = "trace_replay_v1";
+const SPAWN_SUBAGENT_TOOL_NAME: &str = "spawn_subagent";
+const SUBAGENT_ALLOWED_TEST_TOOL_NAME: &str = "test_read_file";
 
 type HarnessResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 type HarnessCapabilityParts = (
     Arc<dyn LoopCapabilityPortFactory>,
     Arc<dyn CapabilitySurfaceProfileResolver>,
+    Arc<dyn ironclaw_loop_support::LoopCapabilityInputResolver>,
+    Arc<dyn LoopCapabilityResultWriter>,
     HarnessCapabilityRecorder,
 );
 
@@ -128,7 +154,7 @@ pub struct RebornBinaryE2EHarness {
     thread_scope: ThreadScope,
     turn_scope: TurnScope,
     turn_store: Arc<FilesystemTurnStateStore<LocalFilesystem>>,
-    coordinator: Arc<DefaultTurnCoordinator<FilesystemTurnStateStore<LocalFilesystem>>>,
+    coordinator: Arc<dyn TurnCoordinator>,
     _product_harness: RebornProductWorkflowHarness,
     thread_harness: RebornThreadHarness,
     model_gateway: RebornTraceReplayModelGateway,
@@ -136,7 +162,7 @@ pub struct RebornBinaryE2EHarness {
     milestone_sink: Arc<ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink>,
     worker: Arc<TurnRunnerWorker>,
     cancel: CancellationToken,
-    worker_task: Option<JoinHandle<()>>,
+    worker_tasks: Vec<JoinHandle<()>>,
     _turn_root: Arc<tempfile::TempDir>,
     _wake_sender: TurnRunnerWakeSender,
 }
@@ -214,6 +240,20 @@ impl HarnessCapabilityRecorder {
             Self::HostRuntime(harness) => harness.capability_results(),
         }
     }
+
+    fn runtime_http_requests(&self) -> Vec<RuntimeHttpEgressRequest> {
+        match self {
+            Self::Recording(_) => Vec::new(),
+            Self::HostRuntime(harness) => harness.runtime_http_requests(),
+        }
+    }
+
+    fn network_http_requests(&self) -> Vec<NetworkHttpRequest> {
+        match self {
+            Self::Recording(_) => Vec::new(),
+            Self::HostRuntime(harness) => harness.network_http_requests(),
+        }
+    }
 }
 
 impl RebornBinaryE2EHarness {
@@ -250,6 +290,21 @@ impl RebornBinaryE2EHarness {
             model_gateway,
             capability_port,
             false,
+            false,
+        )
+        .await
+    }
+
+    pub async fn with_harness_blocked_evidence_unscoped_worker(
+        conversation_id: &str,
+        model_gateway: RebornTraceReplayModelGateway,
+        capability_port: RecordingTestCapabilityPort,
+    ) -> HarnessResult<Self> {
+        Self::with_model_gateway_options_and_worker_scope(
+            conversation_id,
+            model_gateway,
+            capability_port,
+            true,
             false,
         )
         .await
@@ -438,6 +493,84 @@ impl RebornBinaryE2EHarness {
         model_gateway: RebornTraceReplayModelGateway,
     ) -> HarnessResult<Self> {
         let host_runtime = Arc::new(HostRuntimeCapabilityHarness::core_builtin_tools().await?);
+        Self::with_model_gateway_capability_mode(
+            conversation_id,
+            model_gateway,
+            HarnessCapabilityMode::HostRuntime(host_runtime),
+            false,
+        )
+        .await
+    }
+
+    pub async fn with_host_runtime_process_capabilities(
+        conversation_id: &str,
+        model_gateway: RebornTraceReplayModelGateway,
+    ) -> HarnessResult<Self> {
+        let host_runtime = Arc::new(HostRuntimeCapabilityHarness::process_tools().await?);
+        Self::with_model_gateway_capability_mode(
+            conversation_id,
+            model_gateway,
+            HarnessCapabilityMode::HostRuntime(host_runtime),
+            false,
+        )
+        .await
+    }
+
+    pub async fn with_host_runtime_skill_management_capabilities(
+        conversation_id: &str,
+        model_gateway: RebornTraceReplayModelGateway,
+    ) -> HarnessResult<Self> {
+        let host_runtime = Arc::new(HostRuntimeCapabilityHarness::skill_management_tools().await?);
+        Self::with_model_gateway_capability_mode(
+            conversation_id,
+            model_gateway,
+            HarnessCapabilityMode::HostRuntime(host_runtime),
+            false,
+        )
+        .await
+    }
+
+    pub async fn with_host_runtime_core_builtin_capabilities_network_policy(
+        conversation_id: &str,
+        model_gateway: RebornTraceReplayModelGateway,
+        network_policy: NetworkPolicy,
+    ) -> HarnessResult<Self> {
+        let host_runtime = Arc::new(
+            HostRuntimeCapabilityHarness::core_builtin_tools_with_network_policy(network_policy)
+                .await?,
+        );
+        Self::with_model_gateway_capability_mode(
+            conversation_id,
+            model_gateway,
+            HarnessCapabilityMode::HostRuntime(host_runtime),
+            false,
+        )
+        .await
+    }
+
+    pub async fn with_host_runtime_core_builtin_capabilities_live_http_egress(
+        conversation_id: &str,
+        model_gateway: RebornTraceReplayModelGateway,
+        network_policy: NetworkPolicy,
+    ) -> HarnessResult<Self> {
+        let host_runtime = Arc::new(
+            HostRuntimeCapabilityHarness::core_builtin_tools_with_live_http_egress(network_policy)
+                .await?,
+        );
+        Self::with_model_gateway_capability_mode(
+            conversation_id,
+            model_gateway,
+            HarnessCapabilityMode::HostRuntime(host_runtime),
+            false,
+        )
+        .await
+    }
+
+    pub async fn with_host_runtime_github_issue_capabilities(
+        conversation_id: &str,
+        model_gateway: RebornTraceReplayModelGateway,
+    ) -> HarnessResult<Self> {
+        let host_runtime = Arc::new(HostRuntimeCapabilityHarness::github_issue_tools().await?);
         Self::with_model_gateway_capability_mode(
             conversation_id,
             model_gateway,
@@ -682,8 +815,13 @@ impl RebornBinaryE2EHarness {
         let loop_checkpoint_store: Arc<dyn LoopCheckpointStore> = turn_store.clone();
         let milestone_sink =
             Arc::new(ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink::default());
-        let (capability_factory, capability_surface_resolver, capability_recorder) =
-            capability_mode.into_parts(milestone_sink.clone())?;
+        let (
+            capability_factory,
+            capability_surface_resolver,
+            capability_input_resolver,
+            capability_result_writer,
+            capability_recorder,
+        ) = capability_mode.into_parts(milestone_sink.clone())?;
         let turn_state_for_evidence: Arc<dyn TurnStateStore> = turn_store.clone();
         let evidence = Arc::new(HarnessLoopExitEvidencePort {
             inner: ThreadCheckpointLoopExitEvidencePort::new_with_thread_scope(
@@ -697,7 +835,8 @@ impl RebornBinaryE2EHarness {
         });
         let composition = build_default_planned_runtime(DefaultPlannedRuntimeParts {
             turn_state: Arc::clone(&turn_store),
-            thread_service: thread_harness.service.clone(),
+            thread_service: thread_harness.service.clone()
+                as Arc<dyn ironclaw_threads::SessionThreadService>,
             thread_scope: thread_scope.clone(),
             model_gateway: Arc::new(model_gateway.clone()),
             checkpoint_state_store,
@@ -705,6 +844,14 @@ impl RebornBinaryE2EHarness {
             milestone_sink: milestone_sink.clone(),
             capability_factory,
             capability_surface_resolver,
+            capability_result_writer,
+            subagent_goal_store: Arc::new(InMemoryBoundedSubagentGoalStore::new()),
+            subagent_gate_store: Arc::new(BoundedSubagentGateResolutionStore::new()),
+            subagent_definition_resolver: Arc::new(StaticSubagentDefinitionResolver),
+            subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(
+                capability_input_resolver,
+            )),
+            subagent_spawn_limits: ironclaw_loop_support::SubagentSpawnLimits::default(),
             loop_exit_evidence: evidence,
             config: DefaultPlannedRuntimeConfig {
                 worker: TurnRunnerWorkerConfig {
@@ -722,6 +869,7 @@ impl RebornBinaryE2EHarness {
             model_policy_guard: None,
             model_budget_accountant: None,
             safety_context: None,
+            turn_event_sink: None,
         })?;
         let binding_service: Arc<dyn ConversationBindingService> =
             Arc::new(product_harness.binding_service()?);
@@ -767,7 +915,7 @@ impl RebornBinaryE2EHarness {
         milestone_sink: Arc<ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink>,
         composition: RebornRuntimeLoopComposition<
             FilesystemTurnStateStore<LocalFilesystem>,
-            FilesystemSessionThreadService<LocalFilesystem>,
+            dyn SessionThreadService,
             RebornTraceReplayModelGateway,
         >,
         turn_root: Arc<tempfile::TempDir>,
@@ -789,26 +937,32 @@ impl RebornBinaryE2EHarness {
             milestone_sink,
             worker: composition.worker,
             cancel: CancellationToken::new(),
-            worker_task: None,
+            worker_tasks: Vec::new(),
             _turn_root: turn_root,
             _wake_sender: composition.wake_sender,
         }
     }
 
     pub fn start(&mut self) {
-        if self.worker_task.is_some() {
+        self.start_workers(1);
+    }
+
+    pub fn start_workers(&mut self, count: usize) {
+        if !self.worker_tasks.is_empty() {
             return;
         }
-        let worker = Arc::clone(&self.worker);
-        let cancel = self.cancel.clone();
-        self.worker_task = Some(tokio::spawn(async move {
-            worker.run(cancel).await;
-        }));
+        for _ in 0..count.max(1) {
+            let worker = Arc::clone(&self.worker);
+            let cancel = self.cancel.clone();
+            self.worker_tasks.push(tokio::spawn(async move {
+                worker.run(cancel).await;
+            }));
+        }
     }
 
     pub async fn shutdown(&mut self) {
         self.cancel.cancel();
-        if let Some(task) = self.worker_task.take() {
+        for task in self.worker_tasks.drain(..) {
             let _ = task.await;
         }
     }
@@ -893,6 +1047,21 @@ impl RebornBinaryE2EHarness {
         self.resume_with_gate(run_id, blocked).await
     }
 
+    pub async fn resume_blocked_turn_in_scope(
+        &self,
+        scope: TurnScope,
+        actor: TurnActor,
+        run_id: TurnRunId,
+    ) -> HarnessResult<()> {
+        let blocked = self
+            .run_state_in_scope(scope.clone(), run_id)
+            .await?
+            .gate_ref
+            .ok_or("blocked run missing gate ref")?;
+        self.resume_with_gate_as(scope, actor, run_id, blocked, format!("resume-{run_id}"))
+            .await
+    }
+
     pub async fn resume_with_gate(
         &self,
         run_id: TurnRunId,
@@ -923,6 +1092,7 @@ impl RebornBinaryE2EHarness {
                 actor,
                 run_id,
                 gate_resolution_ref: gate_ref,
+                precondition: ironclaw_turns::ResumeTurnPrecondition::AnyBlockedGate,
                 source_binding_ref: SourceBindingRef::new("src:resume")?,
                 reply_target_binding_ref: ReplyTargetBindingRef::new("reply:resume")?,
                 idempotency_key: IdempotencyKey::new(idempotency_key.into())?,
@@ -979,7 +1149,17 @@ impl RebornBinaryE2EHarness {
         run_id: TurnRunId,
         expected: TurnStatus,
     ) -> HarnessResult<TurnRunState> {
-        self.wait_for_status_in_scope(self.turn_scope.clone(), run_id, expected)
+        self.wait_for_status_with_config(run_id, expected, WaitConfig::default())
+            .await
+    }
+
+    pub async fn wait_for_status_with_config(
+        &self,
+        run_id: TurnRunId,
+        expected: TurnStatus,
+        wait: WaitConfig,
+    ) -> HarnessResult<TurnRunState> {
+        self.wait_for_status_in_scope_with_config(self.turn_scope.clone(), run_id, expected, wait)
             .await
     }
 
@@ -998,7 +1178,17 @@ impl RebornBinaryE2EHarness {
         run_id: TurnRunId,
         expected: TurnStatus,
     ) -> HarnessResult<TurnRunState> {
-        let wait = WaitConfig::default();
+        self.wait_for_status_in_scope_with_config(scope, run_id, expected, WaitConfig::default())
+            .await
+    }
+
+    pub async fn wait_for_status_in_scope_with_config(
+        &self,
+        scope: TurnScope,
+        run_id: TurnRunId,
+        expected: TurnStatus,
+        wait: WaitConfig,
+    ) -> HarnessResult<TurnRunState> {
         let deadline = tokio::time::Instant::now() + wait.timeout;
         loop {
             let state = self.run_state_in_scope(scope.clone(), run_id).await?;
@@ -1076,6 +1266,14 @@ impl RebornBinaryE2EHarness {
             .messages)
     }
 
+    pub async fn children_of(
+        &self,
+        scope: &TurnScope,
+        run_id: TurnRunId,
+    ) -> HarnessResult<Vec<TurnRunRecord>> {
+        Ok(self.turn_store.children_of(scope, run_id).await?)
+    }
+
     pub fn model_requests(&self) -> Vec<HostManagedModelRequest> {
         self.model_gateway.requests()
     }
@@ -1094,6 +1292,14 @@ impl RebornBinaryE2EHarness {
 
     pub fn capability_results(&self) -> Vec<RecordedCapabilityResult> {
         self.capability_recorder.capability_results()
+    }
+
+    pub fn runtime_http_requests(&self) -> Vec<RuntimeHttpEgressRequest> {
+        self.capability_recorder.runtime_http_requests()
+    }
+
+    pub fn network_http_requests(&self) -> Vec<NetworkHttpRequest> {
+        self.capability_recorder.network_http_requests()
     }
 
     pub fn host_workspace_file_path(&self, relative: &str) -> HarnessResult<PathBuf> {
@@ -1145,8 +1351,10 @@ impl LoopExitEvidencePort for HarnessLoopExitEvidencePort {
         if !self.accept_harness_blocked_evidence {
             return Ok(false);
         }
-        if request.blocked.kind != LoopBlockedKind::Approval
-            || GateRef::new(request.blocked.gate_ref.as_str()).is_err()
+        if !matches!(
+            request.blocked.kind,
+            LoopBlockedKind::Approval | LoopBlockedKind::AwaitDependentRun
+        ) || GateRef::new(request.blocked.gate_ref.as_str()).is_err()
         {
             return Ok(false);
         }
@@ -1205,15 +1413,16 @@ impl HarnessCapabilityMode {
         match self {
             Self::Recording(port) => {
                 let port = Arc::new(port);
+                let capability_io = Arc::new(ProductLiveCapabilityIo::default());
                 Ok((
                     Arc::new(HarnessCapabilityPortFactory {
                         port: Arc::clone(&port),
                     }),
                     Arc::new(StaticCapabilitySurfaceProfileResolver {
-                        allow_set: CapabilityAllowSet::allowlist([CapabilityId::new(
-                            TEST_CAPABILITY_ID,
-                        )?]),
+                        allow_set: CapabilityAllowSet::allowlist(port.capability_allowlist()),
                     }),
+                    capability_io.clone(),
+                    capability_io,
                     HarnessCapabilityRecorder::Recording(port),
                 ))
             }
@@ -1222,6 +1431,8 @@ impl HarnessCapabilityMode {
                 Arc::new(StaticCapabilitySurfaceProfileResolver {
                     allow_set: CapabilityAllowSet::allowlist(harness.capability_ids.clone()),
                 }),
+                harness.io.clone(),
+                harness.capability_result_writer(),
                 HarnessCapabilityRecorder::HostRuntime(harness),
             )),
         }
@@ -1235,11 +1446,16 @@ struct HostRuntimeCapabilityHarness {
     workspace_root: PathBuf,
     mounts: MountView,
     capability_ids: Vec<CapabilityId>,
+    runtime_kind: RuntimeKind,
     effect_kinds: Vec<EffectKind>,
     network_policy: NetworkPolicy,
+    secrets: Vec<SecretHandle>,
+    provider_id: ExtensionId,
     user_id: UserId,
     invocations: Arc<Mutex<Vec<CapabilityInvocation>>>,
     results: Arc<Mutex<Vec<RecordedCapabilityResult>>>,
+    http_egress: Option<Arc<RecordingRuntimeHttpEgress>>,
+    network_egress: Option<Arc<RecordingNetworkHttpEgress>>,
 }
 
 impl HostRuntimeCapabilityHarness {
@@ -1251,6 +1467,8 @@ impl HostRuntimeCapabilityHarness {
                 CapabilityId::new(READ_FILE_CAPABILITY_ID)?,
             ],
             vec![EffectKind::ReadFilesystem, EffectKind::WriteFilesystem],
+            Vec::new(),
+            ExtensionId::new(BUILTIN_FIRST_PARTY_PROVIDER)?,
             UserId::new("reborn-e2e-builtin-user")?,
         )
         .await
@@ -1261,6 +1479,8 @@ impl HostRuntimeCapabilityHarness {
             "reborn-e2e-write-only",
             vec![CapabilityId::new(WRITE_FILE_CAPABILITY_ID)?],
             vec![EffectKind::WriteFilesystem],
+            Vec::new(),
+            ExtensionId::new(BUILTIN_FIRST_PARTY_PROVIDER)?,
             UserId::new("reborn-e2e-write-only-user")?,
         )
         .await
@@ -1275,7 +1495,49 @@ impl HostRuntimeCapabilityHarness {
                 CapabilityId::new(GREP_CAPABILITY_ID)?,
             ],
             vec![EffectKind::ReadFilesystem],
+            Vec::new(),
+            ExtensionId::new(BUILTIN_FIRST_PARTY_PROVIDER)?,
             UserId::new("reborn-e2e-coding-read-user")?,
+        )
+        .await
+    }
+
+    async fn process_tools() -> HarnessResult<Self> {
+        Self::new_with_mounts(
+            "reborn-e2e-process-tools",
+            vec![
+                CapabilityId::new(ECHO_CAPABILITY_ID)?,
+                CapabilityId::new(SHELL_CAPABILITY_ID)?,
+            ],
+            vec![
+                EffectKind::DispatchCapability,
+                EffectKind::ReadFilesystem,
+                EffectKind::WriteFilesystem,
+                EffectKind::Network,
+                EffectKind::SpawnProcess,
+                EffectKind::ExecuteCode,
+            ],
+            Vec::new(),
+            ExtensionId::new(BUILTIN_FIRST_PARTY_PROVIDER)?,
+            UserId::new("reborn-e2e-process-user")?,
+            MountView::default(),
+        )
+        .await
+    }
+
+    async fn skill_management_tools() -> HarnessResult<Self> {
+        Self::new_with_mounts(
+            "reborn-e2e-skill-management-tools",
+            vec![
+                CapabilityId::new(SKILL_LIST_CAPABILITY_ID)?,
+                CapabilityId::new(SKILL_INSTALL_CAPABILITY_ID)?,
+                CapabilityId::new(SKILL_REMOVE_CAPABILITY_ID)?,
+            ],
+            vec![EffectKind::ReadFilesystem, EffectKind::WriteFilesystem],
+            Vec::new(),
+            ExtensionId::new(BUILTIN_FIRST_PARTY_PROVIDER)?,
+            UserId::new("reborn-e2e-skill-management-user")?,
+            skill_mounts()?,
         )
         .await
     }
@@ -1284,7 +1546,30 @@ impl HostRuntimeCapabilityHarness {
         service_label: &'static str,
         capability_ids: Vec<CapabilityId>,
         effect_kinds: Vec<EffectKind>,
+        secrets: Vec<SecretHandle>,
+        provider_id: ExtensionId,
         user_id: UserId,
+    ) -> HarnessResult<Self> {
+        Self::new_with_mounts(
+            service_label,
+            capability_ids,
+            effect_kinds,
+            secrets,
+            provider_id,
+            user_id,
+            workspace_mounts(MountPermissions::read_write_list_delete())?,
+        )
+        .await
+    }
+
+    async fn new_with_mounts(
+        service_label: &'static str,
+        capability_ids: Vec<CapabilityId>,
+        effect_kinds: Vec<EffectKind>,
+        secrets: Vec<SecretHandle>,
+        provider_id: ExtensionId,
+        user_id: UserId,
+        mounts: MountView,
     ) -> HarnessResult<Self> {
         let root = Arc::new(tempfile::tempdir()?);
         let storage_root = root.path().join("local-dev");
@@ -1295,7 +1580,6 @@ impl HostRuntimeCapabilityHarness {
         let runtime = services
             .host_runtime
             .ok_or("local-dev Reborn services missing host runtime")?;
-        let mounts = workspace_mounts(MountPermissions::read_write_list_delete())?;
         Ok(Self {
             runtime,
             io: Arc::new(ProductLiveCapabilityIo::default()),
@@ -1303,25 +1587,63 @@ impl HostRuntimeCapabilityHarness {
             workspace_root,
             mounts,
             capability_ids,
+            runtime_kind: RuntimeKind::FirstParty,
             effect_kinds,
             network_policy: NetworkPolicy::default(),
+            secrets,
+            provider_id,
             user_id,
             invocations: Arc::new(Mutex::new(Vec::new())),
             results: Arc::new(Mutex::new(Vec::new())),
+            http_egress: None,
+            network_egress: None,
         })
     }
 
     async fn core_builtin_tools() -> HarnessResult<Self> {
-        let root = Arc::new(tempfile::tempdir()?);
-        let storage_root = root.path().join("local-dev");
-        let workspace_root = storage_root.join("workspace");
-        std::fs::create_dir_all(&workspace_root)?;
+        Self::core_builtin_tools_with_network_policy(http_test_policy()).await
+    }
+
+    async fn core_builtin_tools_with_network_policy(
+        network_policy: NetworkPolicy,
+    ) -> HarnessResult<Self> {
+        let (root, storage_root, workspace_root) = host_runtime_storage_roots()?;
         let runtime = local_dev_host_runtime_with_http_egress(
             storage_root.clone(),
             Arc::new(RecordingRuntimeHttpEgress::with_body(
                 br#"{"accepted":true}"#.to_vec(),
             )),
         )?;
+        Self::core_builtin_tools_from_runtime(
+            root,
+            workspace_root,
+            runtime,
+            network_policy,
+            UserId::new("reborn-e2e-core-builtins-user")?,
+        )
+    }
+
+    async fn core_builtin_tools_with_live_http_egress(
+        network_policy: NetworkPolicy,
+    ) -> HarnessResult<Self> {
+        let (root, storage_root, workspace_root) = host_runtime_storage_roots()?;
+        let runtime = local_dev_host_runtime_with_live_http_egress(storage_root.clone())?;
+        Self::core_builtin_tools_from_runtime(
+            root,
+            workspace_root,
+            runtime,
+            network_policy,
+            UserId::new("reborn-e2e-core-builtins-live-http-user")?,
+        )
+    }
+
+    fn core_builtin_tools_from_runtime(
+        root: Arc<tempfile::TempDir>,
+        workspace_root: PathBuf,
+        runtime: Arc<dyn HostRuntime>,
+        network_policy: NetworkPolicy,
+        user_id: UserId,
+    ) -> HarnessResult<Self> {
         let mounts = workspace_mounts(MountPermissions::read_write_list_delete())?;
         Ok(Self {
             runtime,
@@ -1336,16 +1658,61 @@ impl HostRuntimeCapabilityHarness {
                 CapabilityId::new(READ_FILE_CAPABILITY_ID)?,
                 CapabilityId::new(APPLY_PATCH_CAPABILITY_ID)?,
             ],
+            runtime_kind: RuntimeKind::FirstParty,
             effect_kinds: vec![
                 EffectKind::DispatchCapability,
                 EffectKind::ReadFilesystem,
                 EffectKind::WriteFilesystem,
                 EffectKind::Network,
             ],
-            network_policy: http_test_policy(),
-            user_id: UserId::new("reborn-e2e-core-builtins-user")?,
+            network_policy,
+            secrets: Vec::new(),
+            provider_id: ExtensionId::new(BUILTIN_FIRST_PARTY_PROVIDER)?,
+            user_id,
             invocations: Arc::new(Mutex::new(Vec::new())),
             results: Arc::new(Mutex::new(Vec::new())),
+            http_egress: None,
+            network_egress: None,
+        })
+    }
+
+    async fn github_issue_tools() -> HarnessResult<Self> {
+        let root = Arc::new(tempfile::tempdir()?);
+        let storage_root = root.path().join("local-dev");
+        let workspace_root = storage_root.join("workspace");
+        std::fs::create_dir_all(&workspace_root)?;
+        let github_fixture_response =
+            br#"{"object":{"sha":"abc123def4567890abc123def4567890abc123de"},"ok":true}"#.to_vec();
+        let runtime_http_egress = Arc::new(RecordingRuntimeHttpEgress::with_body(
+            github_fixture_response.clone(),
+        ));
+        let network_egress = Arc::new(RecordingNetworkHttpEgress::with_body(
+            github_fixture_response,
+        ));
+        let runtime = local_dev_host_runtime_with_registry_and_egress(
+            storage_root.clone(),
+            github_support::extension_registry()?,
+            runtime_http_egress.clone(),
+            network_egress.clone(),
+        )?;
+        let mounts = workspace_mounts(MountPermissions::read_write_list_delete())?;
+        Ok(Self {
+            runtime,
+            io: Arc::new(ProductLiveCapabilityIo::default()),
+            root,
+            workspace_root,
+            mounts,
+            capability_ids: github_support::capability_ids()?,
+            runtime_kind: RuntimeKind::Wasm,
+            effect_kinds: github_support::effect_kinds(),
+            network_policy: github_support::api_policy(),
+            secrets: github_support::secret_handles()?,
+            provider_id: github_support::provider_id()?,
+            user_id: UserId::new("reborn-e2e-github-user")?,
+            invocations: Arc::new(Mutex::new(Vec::new())),
+            results: Arc::new(Mutex::new(Vec::new())),
+            http_egress: Some(runtime_http_egress),
+            network_egress: Some(network_egress),
         })
     }
 
@@ -1359,12 +1726,33 @@ impl HostRuntimeCapabilityHarness {
         })
     }
 
+    fn capability_result_writer(self: &Arc<Self>) -> Arc<dyn LoopCapabilityResultWriter> {
+        Arc::new(RecordingCapabilityResultWriter {
+            inner: self.io.clone(),
+            results: Arc::clone(&self.results),
+        })
+    }
+
     fn invocations(&self) -> Vec<CapabilityInvocation> {
         self.invocations.lock().unwrap().clone()
     }
 
     fn capability_results(&self) -> Vec<RecordedCapabilityResult> {
         self.results.lock().unwrap().clone()
+    }
+
+    fn runtime_http_requests(&self) -> Vec<RuntimeHttpEgressRequest> {
+        self.http_egress
+            .as_ref()
+            .map(|egress| egress.requests())
+            .unwrap_or_default()
+    }
+
+    fn network_http_requests(&self) -> Vec<NetworkHttpRequest> {
+        self.network_egress
+            .as_ref()
+            .map(|egress| egress.requests())
+            .unwrap_or_default()
     }
 
     fn workspace_file_path(&self, relative: &str) -> PathBuf {
@@ -1385,7 +1773,7 @@ impl LoopCapabilityPortFactory for HostRuntimeHarnessCapabilityPortFactory {
     ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
         let authority = ProductLiveVisibleCapabilityRequestConfig::new(
             self.harness.user_id.clone(),
-            RuntimeKind::FirstParty,
+            self.harness.runtime_kind,
             TrustClass::FirstParty,
             SurfaceKind::new("agent_loop").map_err(host_runtime_harness_error)?,
             CapabilitySurfacePolicy::allow_all(),
@@ -1397,9 +1785,10 @@ impl LoopCapabilityPortFactory for HostRuntimeHarnessCapabilityPortFactory {
             self.harness.effect_kinds.clone(),
             self.harness.mounts.clone(),
             self.harness.network_policy.clone(),
+            self.harness.secrets.clone(),
         ))
         .with_provider_trust_for_effects(
-            ExtensionId::new(BUILTIN_FIRST_PARTY_PROVIDER).map_err(host_runtime_harness_error)?,
+            self.harness.provider_id.clone(),
             EffectiveTrustClass::user_trusted(),
             self.harness.effect_kinds.clone(),
         );
@@ -1416,7 +1805,7 @@ impl LoopCapabilityPortFactory for HostRuntimeHarnessCapabilityPortFactory {
             visible_request,
             self.harness.io.clone(),
             result_writer,
-            Some(milestone_sink),
+            milestone_sink,
         )
         .with_execution_mounts(execution_mounts)
         .for_run_context(run_context.clone());
@@ -1483,14 +1872,104 @@ fn local_dev_host_runtime_with_http_egress(
     storage_root: PathBuf,
     egress: Arc<RecordingRuntimeHttpEgress>,
 ) -> HarnessResult<Arc<dyn HostRuntime>> {
+    let mut registry = ExtensionRegistry::new();
+    registry.insert(builtin_first_party_package()?)?;
+    local_dev_host_runtime_with_registry_and_runtime_http_egress(storage_root, registry, egress)
+}
+
+fn host_runtime_storage_roots() -> HarnessResult<(Arc<tempfile::TempDir>, PathBuf, PathBuf)> {
+    let root = Arc::new(tempfile::tempdir()?);
+    let storage_root = root.path().join("local-dev");
+    let workspace_root = storage_root.join("workspace");
+    std::fs::create_dir_all(&workspace_root)?;
+    Ok((root, storage_root, workspace_root))
+}
+
+fn local_dev_host_runtime_with_registry_and_runtime_http_egress(
+    storage_root: PathBuf,
+    registry: ExtensionRegistry,
+    egress: Arc<RecordingRuntimeHttpEgress>,
+) -> HarnessResult<Arc<dyn HostRuntime>> {
     let mut filesystem = LocalFilesystem::new();
     filesystem.mount_local(
         VirtualPath::new("/projects")?,
         HostPath::from_path_buf(storage_root),
     )?;
+    let services = HostRuntimeServices::new(
+        Arc::new(registry),
+        Arc::new(filesystem),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ironclaw_processes::ProcessServices::in_memory(),
+        HostRuntimeCapabilitySurfaceVersion::new("reborn-app-v1")?,
+    )
+    .with_secret_store(Arc::new(StaticSecretStore::new(
+        SecretHandle::new("github_manual_access")?,
+        SecretMaterial::from("ghp_fake_fixture_token"),
+    )))
+    .with_runtime_credential_account_resolver(Arc::new(FixedRuntimeCredentialAccountResolver {
+        result: Ok(SecretHandle::new("github_manual_access")?),
+    }))
+    .with_first_party_capabilities(Arc::new(builtin_first_party_handlers()?))
+    .with_runtime_http_egress(egress)
+    .with_trust_policy(Arc::new(first_party_trust_policy()?));
 
+    Ok(Arc::new(services.host_runtime_for_local_testing()))
+}
+
+fn local_dev_host_runtime_with_registry_and_egress(
+    storage_root: PathBuf,
+    registry: ExtensionRegistry,
+    runtime_http_egress: Arc<RecordingRuntimeHttpEgress>,
+    network_egress: Arc<RecordingNetworkHttpEgress>,
+) -> HarnessResult<Arc<dyn HostRuntime>> {
+    let mut filesystem = LocalFilesystem::new();
+    filesystem.mount_local(
+        VirtualPath::new("/projects")?,
+        HostPath::from_path_buf(storage_root),
+    )?;
+    filesystem.mount_local(
+        VirtualPath::new("/system/extensions/github")?,
+        HostPath::from_path_buf(github_support::asset_root()),
+    )?;
+
+    let services = HostRuntimeServices::new(
+        Arc::new(registry),
+        Arc::new(filesystem),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GithubHarnessAuthorizer::new()?),
+        ironclaw_processes::ProcessServices::in_memory(),
+        HostRuntimeCapabilitySurfaceVersion::new("reborn-app-v1")?,
+    )
+    .with_secret_store(Arc::new(StaticSecretStore::new(
+        SecretHandle::new("github_manual_access")?,
+        SecretMaterial::from("ghp_fake_fixture_token"),
+    )))
+    .with_runtime_credential_account_resolver(Arc::new(FixedRuntimeCredentialAccountResolver {
+        result: Ok(SecretHandle::new("github_manual_access")?),
+    }))
+    .with_first_party_capabilities(Arc::new(builtin_first_party_handlers()?))
+    .with_runtime_http_egress(runtime_http_egress)
+    .with_trust_policy(Arc::new(github_first_party_trust_policy()?))
+    .try_with_host_http_egress((*network_egress).clone())
+    .map_err(|report| std::io::Error::other(format!("host HTTP egress failed: {report:?}")))?
+    .try_with_wasm_runtime(WitToolRuntimeConfig::default(), WitToolHost::deny_all())
+    .map_err(|report| std::io::Error::other(format!("WASM runtime failed: {report:?}")))?;
+
+    Ok(Arc::new(services.host_runtime_for_local_testing()))
+}
+
+fn local_dev_host_runtime_with_live_http_egress(
+    storage_root: PathBuf,
+) -> HarnessResult<Arc<dyn HostRuntime>> {
     let mut registry = ExtensionRegistry::new();
     registry.insert(builtin_first_party_package()?)?;
+
+    let mut filesystem = LocalFilesystem::new();
+    filesystem.mount_local(
+        VirtualPath::new("/projects")?,
+        HostPath::from_path_buf(storage_root),
+    )?;
 
     let services = HostRuntimeServices::new(
         Arc::new(registry),
@@ -1500,8 +1979,16 @@ fn local_dev_host_runtime_with_http_egress(
         ironclaw_processes::ProcessServices::in_memory(),
         HostRuntimeCapabilitySurfaceVersion::new("reborn-app-v1")?,
     )
+    .with_secret_store(Arc::new(InMemorySecretStore::new()))
     .with_first_party_capabilities(Arc::new(builtin_first_party_handlers()?))
-    .with_runtime_http_egress(egress)
+    .try_with_host_http_egress(PolicyNetworkHttpEgress::new(ReqwestNetworkTransport::new(
+        Duration::from_secs(2),
+    )))
+    .map_err(|report| {
+        std::io::Error::other(format!(
+            "live HTTP egress production wiring failed: {report:?}"
+        ))
+    })?
     .with_trust_policy(Arc::new(first_party_trust_policy()?));
 
     Ok(Arc::new(services.host_runtime_for_local_testing()))
@@ -1525,6 +2012,24 @@ fn first_party_trust_policy() -> HarnessResult<HostTrustPolicy> {
     )])?)
 }
 
+fn github_first_party_trust_policy() -> HarnessResult<HostTrustPolicy> {
+    Ok(HostTrustPolicy::new(vec![Box::new(
+        AdminConfig::with_entries(vec![AdminEntry::for_local_manifest(
+            PackageId::new("github")?,
+            "/system/extensions/github/manifest.toml".to_string(),
+            None,
+            HostTrustAssignment::first_party(),
+            vec![
+                EffectKind::DispatchCapability,
+                EffectKind::Network,
+                EffectKind::UseSecret,
+                EffectKind::ExternalWrite,
+            ],
+            None,
+        )]),
+    )])?)
+}
+
 fn http_test_policy() -> NetworkPolicy {
     NetworkPolicy {
         allowed_targets: vec![NetworkTargetPattern {
@@ -1537,29 +2042,251 @@ fn http_test_policy() -> NetworkPolicy {
     }
 }
 
+#[derive(Debug)]
+struct FixedRuntimeCredentialAccountResolver {
+    result: Result<SecretHandle, CredentialStageError>,
+}
+
+#[async_trait]
+impl RuntimeCredentialAccountResolver for FixedRuntimeCredentialAccountResolver {
+    async fn resolve_access_secret(
+        &self,
+        request: RuntimeCredentialAccountRequest<'_>,
+    ) -> Result<SecretHandle, CredentialStageError> {
+        assert_eq!(request.provider.as_str(), "github");
+        assert_eq!(request.requester_extension.as_str(), "github");
+        self.result.clone()
+    }
+}
+
+struct StaticSecretStore {
+    handle: SecretHandle,
+    material: SecretMaterial,
+}
+
+impl StaticSecretStore {
+    fn new(handle: SecretHandle, material: SecretMaterial) -> Self {
+        Self { handle, material }
+    }
+}
+
+#[async_trait]
+impl SecretStore for StaticSecretStore {
+    async fn put(
+        &self,
+        scope: ResourceScope,
+        handle: SecretHandle,
+        _material: SecretMaterial,
+    ) -> Result<SecretMetadata, SecretStoreError> {
+        Ok(SecretMetadata { scope, handle })
+    }
+
+    async fn metadata(
+        &self,
+        scope: &ResourceScope,
+        handle: &SecretHandle,
+    ) -> Result<Option<SecretMetadata>, SecretStoreError> {
+        Ok((handle == &self.handle).then(|| SecretMetadata {
+            scope: scope.clone(),
+            handle: handle.clone(),
+        }))
+    }
+
+    async fn delete(
+        &self,
+        _scope: &ResourceScope,
+        _handle: &SecretHandle,
+    ) -> Result<bool, SecretStoreError> {
+        Ok(false)
+    }
+
+    async fn lease_once(
+        &self,
+        scope: &ResourceScope,
+        handle: &SecretHandle,
+    ) -> Result<SecretLease, SecretStoreError> {
+        if handle != &self.handle {
+            return Err(SecretStoreError::UnknownSecret {
+                scope: Box::new(scope.clone()),
+                handle: handle.clone(),
+            });
+        }
+        Ok(SecretLease {
+            id: SecretLeaseId::new(),
+            scope: scope.clone(),
+            handle: handle.clone(),
+            status: SecretLeaseStatus::Active,
+        })
+    }
+
+    async fn consume(
+        &self,
+        _scope: &ResourceScope,
+        _lease_id: SecretLeaseId,
+    ) -> Result<SecretMaterial, SecretStoreError> {
+        Ok(self.material.clone())
+    }
+
+    async fn revoke(
+        &self,
+        scope: &ResourceScope,
+        lease_id: SecretLeaseId,
+    ) -> Result<SecretLease, SecretStoreError> {
+        Ok(SecretLease {
+            id: lease_id,
+            scope: scope.clone(),
+            handle: self.handle.clone(),
+            status: SecretLeaseStatus::Revoked,
+        })
+    }
+
+    async fn leases_for_scope(
+        &self,
+        _scope: &ResourceScope,
+    ) -> Result<Vec<SecretLease>, SecretStoreError> {
+        Ok(Vec::new())
+    }
+}
+
+struct GithubHarnessAuthorizer {
+    obligations: Obligations,
+}
+
+impl GithubHarnessAuthorizer {
+    fn new() -> HarnessResult<Self> {
+        Ok(Self {
+            obligations: Obligations::new(vec![
+                Obligation::ApplyNetworkPolicy {
+                    policy: github_support::api_policy(),
+                },
+                Obligation::InjectCredentialAccountOnce {
+                    handle: SecretHandle::new("github_runtime_token")?,
+                    provider: RuntimeCredentialAccountProviderId::new("github")?,
+                    requester_extension: ExtensionId::new("github")?,
+                },
+            ])?,
+        })
+    }
+}
+
+#[async_trait]
+impl TrustAwareCapabilityDispatchAuthorizer for GithubHarnessAuthorizer {
+    async fn authorize_dispatch_with_trust(
+        &self,
+        _context: &ExecutionContext,
+        _descriptor: &CapabilityDescriptor,
+        _estimate: &ResourceEstimate,
+        _trust_decision: &TrustDecision,
+    ) -> Decision {
+        Decision::Allow {
+            obligations: self.obligations.clone(),
+        }
+    }
+
+    async fn authorize_spawn_with_trust(
+        &self,
+        _context: &ExecutionContext,
+        _descriptor: &CapabilityDescriptor,
+        _estimate: &ResourceEstimate,
+        _trust_decision: &TrustDecision,
+    ) -> Decision {
+        Decision::Allow {
+            obligations: self.obligations.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct RecordingRuntimeHttpEgress {
-    body: Vec<u8>,
+    default_body: Vec<u8>,
+    response_bodies: Arc<Mutex<VecDeque<Vec<u8>>>>,
+    requests: Arc<Mutex<Vec<RuntimeHttpEgressRequest>>>,
 }
 
 impl RecordingRuntimeHttpEgress {
     fn with_body(body: Vec<u8>) -> Self {
-        Self { body }
+        Self {
+            default_body: body,
+            response_bodies: Arc::new(Mutex::new(VecDeque::new())),
+            requests: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn requests(&self) -> Vec<RuntimeHttpEgressRequest> {
+        self.requests.lock().unwrap().clone()
     }
 }
 
+#[async_trait::async_trait]
 impl RuntimeHttpEgress for RecordingRuntimeHttpEgress {
-    fn execute(
+    async fn execute(
         &self,
         request: RuntimeHttpEgressRequest,
     ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
+        let request_bytes = request.body.len() as u64;
+        self.requests.lock().unwrap().push(request);
+        let body = self
+            .response_bodies
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_else(|| self.default_body.clone());
         Ok(RuntimeHttpEgressResponse {
             status: 200,
             headers: vec![("content-type".to_string(), "application/json".to_string())],
-            body: self.body.clone(),
-            request_bytes: request.body.len() as u64,
-            response_bytes: self.body.len() as u64,
+            body: body.clone(),
+            saved_body: None,
+            request_bytes,
+            response_bytes: body.len() as u64,
             redaction_applied: false,
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+struct RecordingNetworkHttpEgress {
+    default_body: Vec<u8>,
+    response_bodies: Arc<Mutex<VecDeque<Vec<u8>>>>,
+    requests: Arc<Mutex<Vec<NetworkHttpRequest>>>,
+}
+
+impl RecordingNetworkHttpEgress {
+    fn with_body(body: Vec<u8>) -> Self {
+        Self {
+            default_body: body,
+            response_bodies: Arc::new(Mutex::new(VecDeque::new())),
+            requests: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn requests(&self) -> Vec<NetworkHttpRequest> {
+        self.requests.lock().unwrap().clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl NetworkHttpEgress for RecordingNetworkHttpEgress {
+    async fn execute(
+        &self,
+        request: NetworkHttpRequest,
+    ) -> Result<NetworkHttpResponse, NetworkHttpError> {
+        let request_bytes = request.body.len() as u64;
+        self.requests.lock().unwrap().push(request);
+        let body = self
+            .response_bodies
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_else(|| self.default_body.clone());
+        Ok(NetworkHttpResponse {
+            status: 200,
+            headers: vec![("content-type".to_string(), "application/json".to_string())],
+            body: body.clone(),
+            usage: NetworkUsage {
+                request_bytes,
+                response_bytes: body.len() as u64,
+                resolved_ip: None,
+            },
         })
     }
 }
@@ -1573,19 +2300,37 @@ struct RecordingCapabilityResultWriter {
 impl LoopCapabilityResultWriter for RecordingCapabilityResultWriter {
     async fn write_capability_result(
         &self,
-        run_context: &LoopRunContext,
-        capability_id: &CapabilityId,
-        output: serde_json::Value,
+        write: CapabilityResultWrite<'_>,
     ) -> Result<LoopResultRef, AgentLoopHostError> {
-        let result_ref = self
-            .inner
-            .write_capability_result(run_context, capability_id, output.clone())
-            .await?;
+        let capability_id = write.capability_id.clone();
+        let output = write.output.clone();
+        let result_ref = self.inner.write_capability_result(write).await?;
         self.results.lock().unwrap().push(RecordedCapabilityResult {
-            capability_id: capability_id.clone(),
+            capability_id,
             output,
         });
         Ok(result_ref)
+    }
+
+    async fn update_capability_result(
+        &self,
+        run_context: &LoopRunContext,
+        result_ref: &LoopResultRef,
+        output: serde_json::Value,
+    ) -> Result<(), AgentLoopHostError> {
+        self.inner
+            .update_capability_result(run_context, result_ref, output.clone())
+            .await?;
+        self.results.lock().unwrap().push(RecordedCapabilityResult {
+            capability_id: CapabilityId::new(
+                ironclaw_loop_support::DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID,
+            )
+            .map_err(|error| {
+                AgentLoopHostError::new(AgentLoopHostErrorKind::Internal, error.to_string())
+            })?,
+            output,
+        });
+        Ok(())
     }
 }
 
@@ -1597,12 +2342,28 @@ fn workspace_mounts(permissions: MountPermissions) -> HarnessResult<MountView> {
     )])?)
 }
 
+fn skill_mounts() -> HarnessResult<MountView> {
+    Ok(MountView::new(vec![
+        MountGrant::new(
+            MountAlias::new("/skills")?,
+            VirtualPath::new("/projects/skills")?,
+            MountPermissions::read_write_list_delete(),
+        ),
+        MountGrant::new(
+            MountAlias::new("/system/skills")?,
+            VirtualPath::new("/projects/system/skills")?,
+            MountPermissions::read_only(),
+        ),
+    ])?)
+}
+
 fn capability_grants(
     grantee: Principal,
     capabilities: &[CapabilityId],
     allowed_effects: Vec<EffectKind>,
     mounts: MountView,
     network: NetworkPolicy,
+    secrets: Vec<SecretHandle>,
 ) -> CapabilitySet {
     CapabilitySet {
         grants: capabilities
@@ -1616,7 +2377,7 @@ fn capability_grants(
                     allowed_effects: allowed_effects.clone(),
                     mounts: mounts.clone(),
                     network: network.clone(),
-                    secrets: Vec::new(),
+                    secrets: secrets.clone(),
                     resource_ceiling: None,
                     expires_at: None,
                     max_invocations: None,
@@ -1633,6 +2394,8 @@ fn host_runtime_harness_error(error: impl std::fmt::Display) -> AgentLoopHostErr
 #[derive(Clone)]
 pub struct RecordingTestCapabilityPort {
     mode: CapabilityMode,
+    expose_spawn_subagent: bool,
+    use_subagent_allowed_tool: bool,
     invocations: Arc<Mutex<Vec<CapabilityInvocation>>>,
     next_result: Arc<AtomicUsize>,
     approval_calls: Arc<AtomicUsize>,
@@ -1642,23 +2405,63 @@ pub struct RecordingTestCapabilityPort {
 enum CapabilityMode {
     Echo,
     ApprovalThenEcho,
+    SpawnAuthThenApprovalThenEcho,
 }
 
 impl RecordingTestCapabilityPort {
     pub fn echo() -> Self {
-        Self::new(CapabilityMode::Echo)
+        Self::new(CapabilityMode::Echo, false, false)
+    }
+
+    pub fn echo_with_spawn_subagent() -> Self {
+        Self::new(CapabilityMode::Echo, true, false)
     }
 
     pub fn approval_then_echo() -> Self {
-        Self::new(CapabilityMode::ApprovalThenEcho)
+        Self::new(CapabilityMode::ApprovalThenEcho, false, false)
     }
 
-    fn new(mode: CapabilityMode) -> Self {
+    pub fn approval_then_echo_with_spawn_subagent() -> Self {
+        Self::new(CapabilityMode::ApprovalThenEcho, true, false)
+    }
+
+    pub fn spawn_auth_then_approval_then_echo_with_spawn_subagent() -> Self {
+        Self::new(CapabilityMode::SpawnAuthThenApprovalThenEcho, true, false)
+    }
+
+    pub fn spawn_auth_then_approval_then_allowed_tool_with_spawn_subagent() -> Self {
+        Self::new(CapabilityMode::SpawnAuthThenApprovalThenEcho, true, true)
+    }
+
+    fn new(
+        mode: CapabilityMode,
+        expose_spawn_subagent: bool,
+        use_subagent_allowed_tool: bool,
+    ) -> Self {
         Self {
             mode,
+            expose_spawn_subagent,
+            use_subagent_allowed_tool,
             invocations: Arc::new(Mutex::new(Vec::new())),
             next_result: Arc::new(AtomicUsize::new(1)),
             approval_calls: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    fn primary_capability_id(&self) -> CapabilityId {
+        let id = if self.use_subagent_allowed_tool {
+            READ_FILE_CAPABILITY_ID
+        } else {
+            TEST_CAPABILITY_ID
+        };
+        CapabilityId::new(id).expect("valid capability id")
+    }
+
+    fn primary_tool_name(&self) -> &'static str {
+        if self.use_subagent_allowed_tool {
+            SUBAGENT_ALLOWED_TEST_TOOL_NAME
+        } else {
+            "test_echo"
         }
     }
 
@@ -1668,6 +2471,17 @@ impl RecordingTestCapabilityPort {
 
     pub fn invocation_count(&self) -> usize {
         self.invocations.lock().unwrap().len()
+    }
+
+    fn capability_allowlist(&self) -> Vec<CapabilityId> {
+        let mut allowlist = vec![self.primary_capability_id()];
+        if self.expose_spawn_subagent {
+            allowlist.push(
+                CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID)
+                    .expect("valid capability id"),
+            );
+        }
+        allowlist
     }
 
     fn completed_result(&self) -> CapabilityOutcome {
@@ -1684,9 +2498,9 @@ impl RecordingTestCapabilityPort {
 #[async_trait]
 impl LoopCapabilityPort for RecordingTestCapabilityPort {
     fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
-        Ok(vec![ProviderToolDefinition {
-            capability_id: CapabilityId::new(TEST_CAPABILITY_ID).expect("valid capability id"),
-            name: "test_echo".to_string(),
+        let mut definitions = vec![ProviderToolDefinition {
+            capability_id: self.primary_capability_id(),
+            name: self.primary_tool_name().to_string(),
             description: "Echo a test payload".to_string(),
             parameters: json!({
                 "type": "object",
@@ -1694,17 +2508,41 @@ impl LoopCapabilityPort for RecordingTestCapabilityPort {
                     "message": {"type": "string"}
                 }
             }),
-        }])
+        }];
+        if self.expose_spawn_subagent {
+            definitions.push(ProviderToolDefinition {
+                capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID)
+                    .expect("valid capability id"),
+                name: SPAWN_SUBAGENT_TOOL_NAME.to_string(),
+                description: "Spawn a subagent child run".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "flavor_id": {"type": "string"},
+                        "task": {"type": "string"},
+                        "handoff": {"type": "string"}
+                    },
+                    "required": ["flavor_id", "task"]
+                }),
+            });
+        }
+        Ok(definitions)
     }
 
     async fn register_provider_tool_call(
         &self,
         call: ProviderToolCall,
     ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
+        let capability_id = if self.expose_spawn_subagent && call.name == SPAWN_SUBAGENT_TOOL_NAME {
+            CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).expect("valid capability id")
+        } else {
+            self.primary_capability_id()
+        };
         Ok(CapabilityCallCandidate {
             surface_version: CapabilitySurfaceVersion::new(TEST_CAPABILITY_SURFACE_VERSION)
                 .expect("valid surface version"),
-            capability_id: CapabilityId::new(TEST_CAPABILITY_ID).expect("valid capability id"),
+            capability_id: capability_id.clone(),
+            effective_capability_ids: vec![capability_id],
             input_ref: CapabilityInputRef::new(format!("input:{}", call.id))
                 .expect("valid input ref"),
             provider_replay: Some(ProviderToolCallReplay {
@@ -1725,18 +2563,31 @@ impl LoopCapabilityPort for RecordingTestCapabilityPort {
         &self,
         _request: VisibleCapabilityRequest,
     ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
+        let mut descriptors = vec![CapabilityDescriptorView {
+            capability_id: self.primary_capability_id(),
+            provider: Some(ExtensionId::new("test").expect("valid provider")),
+            runtime: RuntimeKind::FirstParty,
+            safe_name: self.primary_tool_name().to_string(),
+            safe_description: "Echo a test payload".to_string(),
+            concurrency_hint: ConcurrencyHint::SafeForParallel,
+            parameters_schema: json!({"type": "object"}),
+        }];
+        if self.expose_spawn_subagent {
+            descriptors.push(CapabilityDescriptorView {
+                capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID)
+                    .expect("valid capability id"),
+                provider: Some(ExtensionId::new("test").expect("valid provider")),
+                runtime: RuntimeKind::FirstParty,
+                safe_name: SPAWN_SUBAGENT_TOOL_NAME.to_string(),
+                safe_description: "Spawn a subagent child run".to_string(),
+                concurrency_hint: ConcurrencyHint::Exclusive,
+                parameters_schema: json!({"type": "object"}),
+            });
+        }
         Ok(VisibleCapabilitySurface {
             version: CapabilitySurfaceVersion::new(TEST_CAPABILITY_SURFACE_VERSION)
                 .expect("valid surface version"),
-            descriptors: vec![CapabilityDescriptorView {
-                capability_id: CapabilityId::new(TEST_CAPABILITY_ID).expect("valid capability id"),
-                provider: Some(ExtensionId::new("test").expect("valid provider")),
-                runtime: RuntimeKind::FirstParty,
-                safe_name: "test_echo".to_string(),
-                safe_description: "Echo a test payload".to_string(),
-                concurrency_hint: ConcurrencyHint::SafeForParallel,
-                parameters_schema: json!({"type": "object"}),
-            }],
+            descriptors,
         })
     }
 
@@ -1752,6 +2603,18 @@ impl LoopCapabilityPort for RecordingTestCapabilityPort {
                 gate_ref: LoopGateRef::new("gate:test-approval").expect("valid gate ref"),
                 safe_summary: "test approval required".to_string(),
             });
+        }
+        if matches!(self.mode, CapabilityMode::SpawnAuthThenApprovalThenEcho) {
+            match self.approval_calls.fetch_add(1, Ordering::SeqCst) {
+                0 => return Ok(self.completed_result()),
+                1 => {
+                    return Ok(CapabilityOutcome::ApprovalRequired {
+                        gate_ref: LoopGateRef::new("gate:test-approval").expect("valid gate ref"),
+                        safe_summary: "test approval required".to_string(),
+                    });
+                }
+                _ => {}
+            }
         }
         Ok(self.completed_result())
     }
@@ -1944,10 +2807,14 @@ where
 pub fn trace_tool_call_response() -> ironclaw_loop_support::HostManagedModelResponse {
     ironclaw_loop_support::HostManagedModelResponse {
         safe_text_deltas: Vec::new(),
+        safe_reasoning_deltas: Vec::new(),
         output: ParentLoopOutput::CapabilityCalls(vec![CapabilityCallCandidate {
             surface_version: CapabilitySurfaceVersion::new(TEST_CAPABILITY_SURFACE_VERSION)
                 .expect("valid surface version"),
             capability_id: CapabilityId::new(TEST_CAPABILITY_ID).expect("valid capability id"),
+            effective_capability_ids: vec![
+                CapabilityId::new(TEST_CAPABILITY_ID).expect("valid capability id"),
+            ],
             input_ref: CapabilityInputRef::new("input:trace-call-1").expect("valid input ref"),
             provider_replay: Some(ProviderToolCallReplay {
                 provider_id: "trace_replay".to_string(),

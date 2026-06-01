@@ -9,14 +9,13 @@
 use std::{collections::HashMap, fmt, sync::Arc};
 
 use async_trait::async_trait;
-use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
-    CapabilityId, MountView, ResourceEstimate, ResourceScope, ResourceUsage,
-    RuntimeDispatchErrorKind, RuntimeHttpEgress,
+    CapabilityDisplayOutputPreview, CapabilityId, MountView, ResourceEstimate, ResourceScope,
+    ResourceUsage, RuntimeDispatchErrorKind, SecretHandle,
 };
 use serde_json::Value;
 
-use crate::RuntimeProcessPort;
+use crate::InvocationServices;
 
 /// Already-authorized first-party capability dispatch input.
 ///
@@ -30,9 +29,7 @@ pub struct FirstPartyCapabilityRequest {
     pub scope: ResourceScope,
     pub estimate: ResourceEstimate,
     pub mounts: Option<MountView>,
-    pub filesystem: Arc<dyn RootFilesystem>,
-    pub runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
-    pub process: Arc<dyn RuntimeProcessPort>,
+    pub services: InvocationServices,
     pub input: Value,
 }
 
@@ -44,15 +41,7 @@ impl fmt::Debug for FirstPartyCapabilityRequest {
             .field("scope", &self.scope)
             .field("estimate", &self.estimate)
             .field("mounts", &self.mounts)
-            .field("filesystem", &"<root filesystem>")
-            .field(
-                "runtime_http_egress",
-                &self
-                    .runtime_http_egress
-                    .as_ref()
-                    .map(|_| "<runtime http egress>"),
-            )
-            .field("process", &"<runtime process port>")
+            .field("services", &self.services)
             .field("input", &self.input)
             .finish()
     }
@@ -68,44 +57,146 @@ impl PartialEq for FirstPartyCapabilityRequest {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
+impl FirstPartyCapabilityRequest {
+    #[doc(hidden)]
+    pub fn request_for_test(
+        capability_id: CapabilityId,
+        scope: ResourceScope,
+        input: Value,
+        runtime_http_egress: Option<Arc<dyn ironclaw_host_api::RuntimeHttpEgress>>,
+    ) -> Self {
+        Self {
+            capability_id,
+            scope,
+            estimate: ResourceEstimate::default(),
+            mounts: None,
+            services: InvocationServices {
+                filesystem: Arc::new(ironclaw_filesystem::InMemoryBackend::new()),
+                runtime_http_egress,
+                process: Arc::new(crate::LocalHostProcessPort::new()),
+                secret_store: None,
+                unsafe_raw_diagnostics_allowed: false,
+            },
+            input,
+        }
+    }
+}
+
 /// Normalized first-party capability output before resource reconciliation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct FirstPartyCapabilityResult {
     pub output: Value,
+    pub display_preview: Option<CapabilityDisplayOutputPreview>,
     pub usage: ResourceUsage,
 }
 
 impl FirstPartyCapabilityResult {
     pub fn new(output: Value, usage: ResourceUsage) -> Self {
-        Self { output, usage }
+        Self {
+            output,
+            display_preview: None,
+            usage,
+        }
+    }
+
+    pub fn with_display_preview(
+        mut self,
+        display_preview: Option<CapabilityDisplayOutputPreview>,
+    ) -> Self {
+        self.display_preview = display_preview;
+        self
     }
 }
 
 /// Stable redacted first-party handler failure.
+///
+/// Two distinct outcomes are modelled as enum variants rather than optional
+/// fields so that the compiler enforces exhaustive handling and the `Display`
+/// impl produces a meaningful message for both paths.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("first-party capability dispatch failed: {kind}")]
-pub struct FirstPartyCapabilityError {
-    kind: RuntimeDispatchErrorKind,
-    usage: Option<ResourceUsage>,
+pub enum FirstPartyCapabilityError {
+    /// Runtime dispatch failed for a non-auth reason.
+    #[error("first-party capability dispatch failed: {kind}")]
+    Dispatch {
+        kind: RuntimeDispatchErrorKind,
+        usage: Option<ResourceUsage>,
+    },
+    /// Dispatch was blocked because a staged credential is missing or expired.
+    #[error("first-party capability requires authentication")]
+    AuthRequired {
+        /// Specific secret handles the runtime auth gate must prompt for.
+        /// May be empty when the obligation layer does not know which handle failed.
+        required_secrets: Vec<SecretHandle>,
+        usage: Option<ResourceUsage>,
+    },
 }
 
 impl FirstPartyCapabilityError {
+    /// Construct a dispatch failure with no auth context.
     pub fn new(kind: RuntimeDispatchErrorKind) -> Self {
-        Self { kind, usage: None }
+        Self::Dispatch { kind, usage: None }
     }
 
-    pub fn with_usage(mut self, usage: ResourceUsage) -> Self {
-        self.usage = Some(usage);
-        self
+    /// Construct an auth-required failure with no specific secret handles.
+    pub fn auth_required() -> Self {
+        Self::AuthRequired {
+            required_secrets: Vec::new(),
+            usage: None,
+        }
     }
 
-    pub fn kind(&self) -> RuntimeDispatchErrorKind {
-        self.kind
+    /// Construct an auth-required failure naming the handles to re-authorize.
+    pub fn auth_required_with(required_secrets: Vec<SecretHandle>) -> Self {
+        Self::AuthRequired {
+            required_secrets,
+            usage: None,
+        }
+    }
+
+    /// Attach resource usage. Builder-style for use in handler return expressions.
+    pub fn with_usage(self, usage: ResourceUsage) -> Self {
+        match self {
+            Self::Dispatch { kind, .. } => Self::Dispatch {
+                kind,
+                usage: Some(usage),
+            },
+            Self::AuthRequired {
+                required_secrets, ..
+            } => Self::AuthRequired {
+                required_secrets,
+                usage: Some(usage),
+            },
+        }
+    }
+
+    /// Runtime dispatch error kind. Returns `None` for `AuthRequired` variants.
+    pub fn kind(&self) -> Option<RuntimeDispatchErrorKind> {
+        match self {
+            Self::Dispatch { kind, .. } => Some(*kind),
+            Self::AuthRequired { .. } => None,
+        }
     }
 
     pub fn usage(&self) -> Option<&ResourceUsage> {
-        self.usage.as_ref()
+        match self {
+            Self::Dispatch { usage, .. } | Self::AuthRequired { usage, .. } => usage.as_ref(),
+        }
+    }
+
+    /// Secret handles required for re-authentication, if this is an auth failure.
+    pub fn required_secrets(&self) -> Option<&Vec<SecretHandle>> {
+        match self {
+            Self::AuthRequired {
+                required_secrets, ..
+            } => Some(required_secrets),
+            Self::Dispatch { .. } => None,
+        }
+    }
+
+    pub fn is_auth_required(&self) -> bool {
+        matches!(self, Self::AuthRequired { .. })
     }
 }
 
@@ -158,5 +249,65 @@ impl FirstPartyCapabilityRegistry {
 
     pub fn is_empty(&self) -> bool {
         self.handlers.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ironclaw_host_api::{ResourceUsage, SecretHandle};
+
+    #[test]
+    fn first_party_capability_error_kind_returns_none_for_auth_required() {
+        // kind() must return None for both auth_required() and auth_required_with().
+        assert_eq!(FirstPartyCapabilityError::auth_required().kind(), None);
+        let handle = SecretHandle::new("google-access-token").unwrap();
+        assert_eq!(
+            FirstPartyCapabilityError::auth_required_with(vec![handle.clone()]).kind(),
+            None
+        );
+        assert!(FirstPartyCapabilityError::auth_required().is_auth_required());
+    }
+
+    #[test]
+    fn first_party_capability_error_with_usage_preserves_required_secrets() {
+        let handle = SecretHandle::new("google-access-token").unwrap();
+        let usage = ResourceUsage {
+            network_egress_bytes: 42,
+            ..ResourceUsage::default()
+        };
+        let error = FirstPartyCapabilityError::auth_required_with(vec![handle.clone()])
+            .with_usage(usage.clone());
+
+        assert!(error.is_auth_required());
+        assert_eq!(
+            error.kind(),
+            None,
+            "kind() must remain None for AuthRequired after with_usage"
+        );
+        assert_eq!(
+            error.required_secrets(),
+            Some(&vec![handle]),
+            "required_secrets must survive with_usage"
+        );
+        assert_eq!(
+            error.usage().map(|u| u.network_egress_bytes),
+            Some(42),
+            "usage must be set"
+        );
+    }
+
+    #[test]
+    fn first_party_capability_error_with_usage_on_dispatch_variant() {
+        use ironclaw_host_api::RuntimeDispatchErrorKind;
+        let error = FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::Backend).with_usage(
+            ResourceUsage {
+                network_egress_bytes: 10,
+                ..ResourceUsage::default()
+            },
+        );
+        assert_eq!(error.kind(), Some(RuntimeDispatchErrorKind::Backend));
+        assert_eq!(error.required_secrets(), None);
+        assert!(!error.is_auth_required());
     }
 }

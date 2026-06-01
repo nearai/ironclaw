@@ -34,7 +34,8 @@
 
 use std::borrow::Cow;
 use std::fs;
-use std::path::Path;
+use std::io::Write as _;
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 use thiserror::Error;
@@ -64,11 +65,23 @@ pub struct RebornConfigFile {
     pub drivers: Option<DriversSection>,
     pub harness: Option<HarnessSection>,
     pub runner: Option<RunnerSection>,
+    /// Skill activation selection settings for local-dev runtime skill context.
+    pub skills: Option<SkillsSection>,
     /// Per-slot LLM selection. Keyed by Reborn model slot name. Today
     /// composition wires only the `default` slot; the `mission` slot
     /// becomes live when the planned driver lands. Operators are free
     /// to populate `mission` ahead of time.
     pub llm: Option<std::collections::BTreeMap<String, LlmSlotSelection>>,
+    /// WebChat v2 HTTP gateway settings. Consumed by
+    /// `ironclaw_reborn_webui_ingress` when the standalone CLI's
+    /// `serve` subcommand is invoked. Optional — sparse configs
+    /// fall back to compiled defaults documented on each field.
+    pub webui: Option<WebuiSection>,
+    /// Cost-based budgets. Composition seeds defaults on first reservation
+    /// for each user/project; per-account overrides happen through the
+    /// `budget_set` tool or CLI at runtime. Setting any limit to `0` means
+    /// "unlimited" for that dimension.
+    pub budget: Option<BudgetSection>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -76,7 +89,7 @@ pub struct RebornConfigFile {
 pub struct BootSection {
     /// Composition profile name. Stringly typed; composition validates
     /// against `RebornCompositionProfile`. Examples: `"local-dev"`,
-    /// `"production"`, `"migration-dry-run"`.
+    /// `"local-dev-yolo"`, `"production"`, `"migration-dry-run"`.
     pub profile: Option<String>,
 }
 
@@ -129,6 +142,113 @@ pub struct RunnerSection {
     pub poll_interval_ms: Option<u64>,
 }
 
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SkillsSection {
+    /// When false, regex activation criteria no longer auto-load full skill context.
+    /// Keyword/tag activation and explicit skill mentions still work.
+    pub regex_activation_enabled: Option<bool>,
+}
+
+/// WebChat v2 HTTP gateway configuration.
+///
+/// Composition reads this section when wiring the `serve` subcommand.
+/// Stringly typed by design — the `ironclaw_reborn_config` crate stays
+/// free of workspace deps, so concrete validation (origin parsing,
+/// listen-address resolution) lives in the consuming ingress crate.
+///
+/// Secrets are env-only: `env_token_var` is the **NAME** of an
+/// environment variable, never a token value. The `secrets_guard`
+/// inline-secret check fires at parse time if an operator pastes a
+/// token-shaped string into either field documented as a name.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebuiSection {
+    /// IP address the WebChat v2 listener binds. Default `127.0.0.1`
+    /// (loopback only — operators MUST opt in to `0.0.0.0` or a
+    /// specific interface to expose the gateway).
+    pub listen_host: Option<String>,
+    /// TCP port the listener binds. Default `3000`. `0` is rejected
+    /// at composition time (`ironclaw-reborn serve` accepts `0` only
+    /// via an explicit `--port 0` CLI flag, intended for tests).
+    pub listen_port: Option<u16>,
+    /// Name of the environment variable holding the host-installation
+    /// bearer token (used by the env-bearer authenticator). Default
+    /// `IRONCLAW_REBORN_WEBUI_TOKEN`. The token VALUE never appears in
+    /// this config file — `secrets_guard` rejects inline secrets.
+    pub env_token_var: Option<String>,
+    /// Name of the environment variable holding the `UserId` that an
+    /// env-bearer-authenticated caller maps to. Default
+    /// `IRONCLAW_REBORN_WEBUI_USER_ID`. Stringly typed; composition
+    /// resolves to a real `UserId` and rejects malformed values.
+    pub env_user_id_var: Option<String>,
+    /// CORS allow-origin list (e.g.
+    /// `["http://localhost:3000", "https://app.example.com"]`).
+    /// Default empty — composition then fails-closed on every
+    /// cross-origin preflight, never echoing an attacker-supplied
+    /// `Origin` header. Operators MUST opt in to whichever origins
+    /// the host installation actually serves.
+    pub allowed_origins: Option<Vec<String>>,
+    /// Override the default Content-Security-Policy header. Default
+    /// `None` → composition applies its locked-down default
+    /// (`default-src 'self'; object-src 'none'; frame-ancestors 'none';
+    /// base-uri 'self'`). Operators serving a real SPA may need to
+    /// override.
+    pub csp_header_override: Option<String>,
+    /// Maximum per-request body bytes for paths that do NOT match a
+    /// declared v2 descriptor (i.e. the 404 fallback path). v2 routes
+    /// are individually capped from their `BodyLimitPolicy`
+    /// descriptor and are strictly tighter than this outer fallback.
+    /// Default `14 * 1024 * 1024` (14 MiB). `0` is rejected.
+    pub max_body_bytes_fallback: Option<u64>,
+    /// Canonical host this listener is reachable on (e.g.
+    /// `"app.example.com"` or `"127.0.0.1:3000"`). When set, the WS
+    /// same-origin middleware compares the request `Origin` against
+    /// this operator-trusted value instead of trusting the
+    /// client-supplied `Host` header. Critical when running behind a
+    /// reverse proxy that may forward an attacker-controlled Host —
+    /// without `canonical_host`, a forged Host + matching Origin
+    /// would pass `SameOriginRequired`. Format: `host` or
+    /// `host:port`; composition does not parse further. Default
+    /// `None` (fall back to Host-header compare + allowlist).
+    pub canonical_host: Option<String>,
+}
+
+/// `[budget]` section. All limits in USD. **0 = unlimited.**
+///
+/// Composition uses these as defaults when first seeding a user/project
+/// account. Runtime tools can install per-account overrides at any time.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BudgetSection {
+    /// Per-user daily ceiling. Default in composition is `5.00`.
+    pub user_daily_usd: Option<f64>,
+    /// Per-project daily ceiling. Default in composition is `2.00`.
+    pub project_daily_usd: Option<f64>,
+    /// Per-tick budget for background missions. Default `0.50`.
+    pub mission_per_tick_usd: Option<f64>,
+    /// Per-tick budget for heartbeat ticks. Default `0.05`.
+    pub heartbeat_per_tick_usd: Option<f64>,
+    /// Per-fire budget for lightweight routines. Default `0.02`.
+    pub routine_lightweight_usd: Option<f64>,
+    /// Per-fire budget for standard routines. Default `0.10`.
+    pub routine_standard_usd: Option<f64>,
+    /// Default per-job budget for one-shot container jobs. Default `1.00`.
+    pub background_job_default_usd: Option<f64>,
+    /// IANA timezone for calendar-period rollover (e.g. `"UTC"`,
+    /// `"America/Los_Angeles"`). Default `"UTC"`.
+    pub default_tz: Option<String>,
+    /// Warn threshold as a fraction in `[0.0, 1.0]`. Default `0.75`.
+    pub warn_at: Option<f64>,
+    /// Pause-with-approval threshold as a fraction in `[0.0, 1.0]`.
+    /// Must be `>= warn_at`. Default `0.90`.
+    pub pause_at: Option<f64>,
+    /// Multiplier applied to upfront cost estimates before reserving.
+    /// Default `1.20` (20% safety margin); reconcile releases the
+    /// overshoot.
+    pub overestimate_factor: Option<f64>,
+}
+
 /// One `[llm.<slot>]` entry. The slot name (typically `"default"` or
 /// `"mission"`) is the TOML table key.
 ///
@@ -149,6 +269,79 @@ pub struct LlmSlotSelection {
     pub api_key_env: Option<String>,
     /// Override the provider's `default_base_url`. Optional.
     pub base_url: Option<String>,
+}
+
+/// Field update for an existing LLM slot selection.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum LlmSlotFieldUpdate {
+    /// Preserve the field exactly as it appears in the current document.
+    #[default]
+    Keep,
+    /// Set the field to a new string value.
+    Set(String),
+    /// Remove the field from the slot selection.
+    Remove,
+}
+
+/// Typed patch for `[llm.default]` in the operator config file.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DefaultLlmSlotUpdate {
+    pub provider_id: LlmSlotFieldUpdate,
+    pub model: LlmSlotFieldUpdate,
+    pub api_key_env: LlmSlotFieldUpdate,
+    pub base_url: LlmSlotFieldUpdate,
+}
+
+/// Held exclusive lock plus editable config document for one config update.
+pub struct DefaultLlmSlotUpdateSession {
+    path: PathBuf,
+    doc: toml_edit::DocumentMut,
+    _lock_file: fs::File,
+}
+
+impl DefaultLlmSlotUpdateSession {
+    pub fn default_llm_slot(
+        &self,
+    ) -> Result<Option<LlmSlotSelection>, RebornConfigFileUpdateError> {
+        let Some(default_slot) = self
+            .doc
+            .get("llm")
+            .and_then(|llm| llm.get("default"))
+            .and_then(toml_edit::Item::as_table_like)
+        else {
+            return Ok(None);
+        };
+
+        Ok(Some(LlmSlotSelection {
+            provider_id: default_slot
+                .get("provider_id")
+                .and_then(toml_edit::Item::as_str)
+                .map(str::to_string),
+            model: default_slot
+                .get("model")
+                .and_then(toml_edit::Item::as_str)
+                .map(str::to_string),
+            api_key_env: default_slot
+                .get("api_key_env")
+                .and_then(toml_edit::Item::as_str)
+                .map(str::to_string),
+            base_url: default_slot
+                .get("base_url")
+                .and_then(toml_edit::Item::as_str)
+                .map(str::to_string),
+        }))
+    }
+
+    pub fn apply(
+        mut self,
+        update: &DefaultLlmSlotUpdate,
+    ) -> Result<(), RebornConfigFileUpdateError> {
+        apply_llm_slot_field(&mut self.doc, "provider_id", &update.provider_id);
+        apply_llm_slot_field(&mut self.doc, "model", &update.model);
+        apply_llm_slot_field(&mut self.doc, "api_key_env", &update.api_key_env);
+        apply_llm_slot_field(&mut self.doc, "base_url", &update.base_url);
+        write_edit_document(&self.path, &self.doc)
+    }
 }
 
 // ─── Errors ─────────────────────────────────────────────────────────────────
@@ -187,6 +380,35 @@ pub enum RebornConfigFileError {
         path: String,
         found: String,
         reason: String,
+    },
+}
+
+#[derive(Debug, Error)]
+pub enum RebornConfigFileUpdateError {
+    #[error("lock Reborn config `{}`: {source}", path.display())]
+    Lock {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    #[error("read Reborn config `{}`: {source}", path.display())]
+    Read {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    #[error("parse Reborn config `{}` as TOML: {source}", path.display())]
+    Parse {
+        path: PathBuf,
+        source: toml_edit::TomlError,
+    },
+    #[error("validate Reborn config `{}`: {source}", path.display())]
+    Validate {
+        path: PathBuf,
+        source: Box<RebornConfigFileError>,
+    },
+    #[error("write Reborn config `{}`: {source}", path.display())]
+    Write {
+        path: PathBuf,
+        source: std::io::Error,
     },
 }
 
@@ -305,6 +527,91 @@ impl RebornConfigFile {
                 }
             }
         }
+        if let Some(webui) = &self.webui {
+            if let Some(host) = &webui.listen_host {
+                check(Cow::Borrowed("webui.listen_host"), host)?;
+            }
+            if let Some(env_token_var) = &webui.env_token_var {
+                // Secrets guard: rejects token-shaped values pasted
+                // here instead of an env-var name.
+                check(Cow::Borrowed("webui.env_token_var"), env_token_var)?;
+            }
+            if let Some(env_user_id_var) = &webui.env_user_id_var {
+                check(Cow::Borrowed("webui.env_user_id_var"), env_user_id_var)?;
+            }
+            if let Some(allowed_origins) = &webui.allowed_origins {
+                for origin in allowed_origins {
+                    check(Cow::Borrowed("webui.allowed_origins"), origin)?;
+                }
+            }
+            if let Some(csp) = &webui.csp_header_override {
+                check(Cow::Borrowed("webui.csp_header_override"), csp)?;
+            }
+            if let Some(host) = &webui.canonical_host {
+                check(Cow::Borrowed("webui.canonical_host"), host)?;
+            }
+        }
+        if let Some(budget) = &self.budget {
+            if let Some(tz) = &budget.default_tz {
+                check(Cow::Borrowed("budget.default_tz"), tz)?;
+            }
+            // 0 is a legitimate sentinel for "unlimited". Negative values
+            // are rejected outright so a bad number doesn't masquerade as a
+            // disabled cap.
+            for (label, value) in [
+                ("budget.user_daily_usd", budget.user_daily_usd),
+                ("budget.project_daily_usd", budget.project_daily_usd),
+                ("budget.mission_per_tick_usd", budget.mission_per_tick_usd),
+                (
+                    "budget.heartbeat_per_tick_usd",
+                    budget.heartbeat_per_tick_usd,
+                ),
+                (
+                    "budget.routine_lightweight_usd",
+                    budget.routine_lightweight_usd,
+                ),
+                ("budget.routine_standard_usd", budget.routine_standard_usd),
+                (
+                    "budget.background_job_default_usd",
+                    budget.background_job_default_usd,
+                ),
+                ("budget.overestimate_factor", budget.overestimate_factor),
+            ] {
+                if let Some(v) = value
+                    && v.is_finite()
+                    && v < 0.0
+                {
+                    return Err(RebornConfigFileError::InvalidApiVersion {
+                        path: path_str(),
+                        found: format!("{label} = {v}"),
+                        reason: "must be >= 0 (use 0 for unlimited)".to_string(),
+                    });
+                }
+            }
+            for (label, value) in [
+                ("budget.warn_at", budget.warn_at),
+                ("budget.pause_at", budget.pause_at),
+            ] {
+                if let Some(v) = value
+                    && !(0.0..=1.0).contains(&v)
+                {
+                    return Err(RebornConfigFileError::InvalidApiVersion {
+                        path: path_str(),
+                        found: format!("{label} = {v}"),
+                        reason: "thresholds must be in [0.0, 1.0]".to_string(),
+                    });
+                }
+            }
+            if let (Some(w), Some(p)) = (budget.warn_at, budget.pause_at)
+                && p < w
+            {
+                return Err(RebornConfigFileError::InvalidApiVersion {
+                    path: path_str(),
+                    found: format!("warn_at={w}, pause_at={p}"),
+                    reason: "pause_at must be >= warn_at".to_string(),
+                });
+            }
+        }
         Ok(())
     }
 
@@ -314,8 +621,151 @@ impl RebornConfigFile {
     }
 }
 
+/// Apply a typed patch to `[llm.default]` while preserving unrelated TOML.
+pub fn update_default_llm_slot(
+    path: &Path,
+    update: &DefaultLlmSlotUpdate,
+) -> Result<(), RebornConfigFileUpdateError> {
+    begin_default_llm_slot_update(path)?.apply(update)
+}
+
 fn llm_slot_field_label(slot: &str, field: &str) -> Cow<'static, str> {
     Cow::Owned(format!("llm.{slot}.{field}"))
+}
+
+pub fn begin_default_llm_slot_update(
+    path: &Path,
+) -> Result<DefaultLlmSlotUpdateSession, RebornConfigFileUpdateError> {
+    let lock_file = acquire_update_lock(path)?;
+    let doc = load_edit_document(path)?;
+    Ok(DefaultLlmSlotUpdateSession {
+        path: path.to_path_buf(),
+        doc,
+        _lock_file: lock_file,
+    })
+}
+
+fn acquire_update_lock(path: &Path) -> Result<fs::File, RebornConfigFileUpdateError> {
+    use fs4::FileExt as _;
+
+    let lock_path = config_update_lock_path(path);
+    if let Some(parent) = lock_path.parent() {
+        fs::create_dir_all(parent).map_err(|source| RebornConfigFileUpdateError::Lock {
+            path: lock_path.clone(),
+            source,
+        })?;
+    }
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .map_err(|source| RebornConfigFileUpdateError::Lock {
+            path: lock_path.clone(),
+            source,
+        })?;
+    file.lock_exclusive()
+        .map_err(|source| RebornConfigFileUpdateError::Lock {
+            path: lock_path,
+            source,
+        })?;
+    Ok(file)
+}
+
+fn config_update_lock_path(path: &Path) -> PathBuf {
+    let Some(file_name) = path.file_name() else {
+        return path.with_extension("lock");
+    };
+    let mut lock_name = file_name.to_os_string();
+    lock_name.push(".lock");
+    path.with_file_name(lock_name)
+}
+
+fn load_edit_document(path: &Path) -> Result<toml_edit::DocumentMut, RebornConfigFileUpdateError> {
+    match fs::read_to_string(path) {
+        Ok(text) => text.parse::<toml_edit::DocumentMut>().map_err(|source| {
+            RebornConfigFileUpdateError::Parse {
+                path: path.to_path_buf(),
+                source,
+            }
+        }),
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+            Ok(toml_edit::DocumentMut::new())
+        }
+        Err(source) => Err(RebornConfigFileUpdateError::Read {
+            path: path.to_path_buf(),
+            source,
+        }),
+    }
+}
+
+fn apply_llm_slot_field(
+    doc: &mut toml_edit::DocumentMut,
+    field: &str,
+    update: &LlmSlotFieldUpdate,
+) {
+    match update {
+        LlmSlotFieldUpdate::Keep => {}
+        LlmSlotFieldUpdate::Set(value) => {
+            ensure_llm_default_table(doc);
+            doc["llm"]["default"][field] = toml_edit::value(value);
+        }
+        LlmSlotFieldUpdate::Remove => {
+            ensure_llm_default_table(doc);
+            if let Some(table) = doc["llm"]["default"].as_table_like_mut() {
+                table.remove(field);
+            }
+        }
+    }
+}
+
+fn ensure_llm_default_table(doc: &mut toml_edit::DocumentMut) {
+    let root = doc.as_table_mut();
+    if root.get("llm").is_none_or(|item| !item.is_table()) {
+        root.insert("llm", toml_edit::Item::Table(toml_edit::Table::new()));
+    }
+    if let Some(llm) = doc["llm"].as_table_mut()
+        && llm.get("default").is_none_or(|item| !item.is_table())
+    {
+        llm.insert("default", toml_edit::Item::Table(toml_edit::Table::new()));
+    }
+}
+
+fn write_edit_document(
+    path: &Path,
+    doc: &toml_edit::DocumentMut,
+) -> Result<(), RebornConfigFileUpdateError> {
+    let text = doc.to_string();
+    RebornConfigFile::parse_text(&text, path).map_err(|source| {
+        RebornConfigFileUpdateError::Validate {
+            path: path.to_path_buf(),
+            source: Box::new(source),
+        }
+    })?;
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|source| RebornConfigFileUpdateError::Write {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
+    let mut tmp = tempfile::NamedTempFile::new_in(path.parent().unwrap_or_else(|| Path::new(".")))
+        .map_err(|source| RebornConfigFileUpdateError::Write {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    tmp.write_all(text.as_bytes())
+        .map_err(|source| RebornConfigFileUpdateError::Write {
+            path: tmp.path().to_path_buf(),
+            source,
+        })?;
+    tmp.persist(path)
+        .map_err(|error| RebornConfigFileUpdateError::Write {
+            path: path.to_path_buf(),
+            source: error.error,
+        })?;
+    Ok(())
 }
 
 fn validate_api_version(found: &str, path: &Path) -> Result<(), RebornConfigFileError> {
@@ -394,6 +844,7 @@ mod tests {
         assert!(cfg.drivers.is_none());
         assert!(cfg.harness.is_none());
         assert!(cfg.runner.is_none());
+        assert!(cfg.skills.is_none());
         assert!(cfg.llm.is_none());
     }
 
@@ -426,6 +877,9 @@ id = "red-team"
 heartbeat_interval_secs = 5
 poll_interval_ms = 200
 
+[skills]
+regex_activation_enabled = false
+
 [llm.default]
 provider_id = "openai"
 model = "gpt-4o-mini"
@@ -450,12 +904,112 @@ api_key_env = "ANTHROPIC_API_KEY"
             cfg.drivers.as_ref().unwrap().additional.as_deref(),
             Some(&["planned".to_string()][..])
         );
+        assert_eq!(
+            cfg.skills.as_ref().unwrap().regex_activation_enabled,
+            Some(false)
+        );
         let default_slot = cfg.default_llm_slot().expect("default slot present");
         assert_eq!(default_slot.provider_id.as_deref(), Some("openai"));
         assert_eq!(default_slot.model.as_deref(), Some("gpt-4o-mini"));
         assert_eq!(default_slot.api_key_env.as_deref(), Some("OPENAI_API_KEY"));
         let llm = cfg.llm.as_ref().unwrap();
         assert!(llm.contains_key("mission"));
+    }
+
+    #[test]
+    fn default_llm_update_preserves_unrelated_config() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("config.toml");
+        fs::write(
+            &path,
+            r#"
+[identity]
+tenant = "acme"
+
+[llm.default]
+provider_id = "openai"
+model = "gpt-5-mini"
+api_key_env = "OPENAI_API_KEY"
+base_url = "https://example.test/v1"
+
+[llm.mission]
+provider_id = "anthropic"
+"#,
+        )
+        .expect("write config");
+
+        update_default_llm_slot(
+            &path,
+            &DefaultLlmSlotUpdate {
+                provider_id: LlmSlotFieldUpdate::Keep,
+                model: LlmSlotFieldUpdate::Set("gpt-5.3-codex".to_string()),
+                api_key_env: LlmSlotFieldUpdate::Keep,
+                base_url: LlmSlotFieldUpdate::Remove,
+            },
+        )
+        .expect("update config");
+
+        let text = fs::read_to_string(&path).expect("read config");
+        assert!(text.contains("[identity]"), "config: {text}");
+        assert!(text.contains("tenant = \"acme\""), "config: {text}");
+        assert!(text.contains("[llm.mission]"), "config: {text}");
+        assert!(text.contains("model = \"gpt-5.3-codex\""), "config: {text}");
+        assert!(
+            text.contains("api_key_env = \"OPENAI_API_KEY\""),
+            "config: {text}"
+        );
+        assert!(!text.contains("base_url"), "config: {text}");
+        RebornConfigFile::load(&path)
+            .expect("valid config")
+            .expect("config present");
+    }
+
+    #[test]
+    fn default_llm_update_rejects_malformed_existing_toml() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("config.toml");
+        fs::write(&path, "[llm.default\nprovider_id = \"openai\"").expect("write config");
+
+        let err = update_default_llm_slot(
+            &path,
+            &DefaultLlmSlotUpdate {
+                model: LlmSlotFieldUpdate::Set("gpt-5-mini".to_string()),
+                ..Default::default()
+            },
+        )
+        .expect_err("malformed existing TOML should reject");
+
+        assert!(matches!(err, RebornConfigFileUpdateError::Parse { .. }));
+    }
+
+    #[test]
+    fn default_llm_update_rejects_inline_secret_value_without_writing() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("config.toml");
+        fs::write(
+            &path,
+            r#"
+[llm.default]
+provider_id = "openai"
+model = "gpt-5-mini"
+"#,
+        )
+        .expect("write config");
+        let before = fs::read_to_string(&path).expect("read config");
+
+        let err = update_default_llm_slot(
+            &path,
+            &DefaultLlmSlotUpdate {
+                api_key_env: LlmSlotFieldUpdate::Set(
+                    "sk-proj-1234567890abcdef1234567890".to_string(),
+                ),
+                ..Default::default()
+            },
+        )
+        .expect_err("inline secret should reject");
+
+        assert!(matches!(err, RebornConfigFileUpdateError::Validate { .. }));
+        assert_eq!(fs::read_to_string(&path).expect("read config"), before);
     }
 
     #[test]
@@ -611,5 +1165,89 @@ api_version = "ironclaw.runtime/v1.not-a-number"
             err,
             RebornConfigFileError::InvalidApiVersion { .. }
         ));
+    }
+
+    #[test]
+    fn parses_valid_budget_section() {
+        let toml = r#"
+[budget]
+user_daily_usd = 7.50
+project_daily_usd = 0.00
+mission_per_tick_usd = 0.25
+heartbeat_per_tick_usd = 0.05
+routine_lightweight_usd = 0.01
+routine_standard_usd = 0.20
+background_job_default_usd = 2.00
+default_tz = "America/Los_Angeles"
+warn_at = 0.60
+pause_at = 0.85
+overestimate_factor = 1.50
+"#;
+        let cfg = RebornConfigFile::parse_text(toml, &attributed())
+            .expect("valid budget section must parse");
+        let budget = cfg.budget.as_ref().expect("budget section present");
+        assert_eq!(budget.user_daily_usd, Some(7.50));
+        assert_eq!(budget.project_daily_usd, Some(0.00));
+        assert_eq!(budget.default_tz.as_deref(), Some("America/Los_Angeles"));
+        assert_eq!(budget.warn_at, Some(0.60));
+        assert_eq!(budget.pause_at, Some(0.85));
+        assert_eq!(budget.overestimate_factor, Some(1.50));
+    }
+
+    #[test]
+    fn rejects_negative_budget_usd_field() {
+        let toml = r#"
+[budget]
+user_daily_usd = -1.0
+"#;
+        let err = RebornConfigFile::parse_text(toml, &attributed())
+            .expect_err("negative USD must be rejected");
+        assert!(matches!(
+            err,
+            RebornConfigFileError::InvalidApiVersion { .. }
+        ));
+        assert!(err.to_string().contains("user_daily_usd"));
+    }
+
+    #[test]
+    fn rejects_budget_threshold_out_of_range() {
+        let toml = r#"
+[budget]
+warn_at = 1.5
+"#;
+        let err = RebornConfigFile::parse_text(toml, &attributed())
+            .expect_err("out-of-range threshold must be rejected");
+        assert!(matches!(
+            err,
+            RebornConfigFileError::InvalidApiVersion { .. }
+        ));
+        assert!(err.to_string().contains("warn_at"));
+    }
+
+    #[test]
+    fn rejects_budget_pause_below_warn() {
+        let toml = r#"
+[budget]
+warn_at = 0.90
+pause_at = 0.50
+"#;
+        let err = RebornConfigFile::parse_text(toml, &attributed())
+            .expect_err("pause_at < warn_at must be rejected");
+        assert!(matches!(
+            err,
+            RebornConfigFileError::InvalidApiVersion { .. }
+        ));
+        assert!(err.to_string().contains("pause_at"));
+    }
+
+    #[test]
+    fn rejects_unknown_budget_section_key() {
+        let toml = r#"
+[budget]
+not_a_field = 1.0
+"#;
+        let err = RebornConfigFile::parse_text(toml, &attributed())
+            .expect_err("deny_unknown_fields must catch typos in [budget]");
+        assert!(matches!(err, RebornConfigFileError::Toml { .. }));
     }
 }

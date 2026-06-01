@@ -29,7 +29,8 @@ use ironclaw_turns::{
     TurnRunWakeNotifyError, TurnRunnerId, TurnScope, TurnStatus,
     runner::{
         ClaimRunRequest, ClaimedTurnRun, HeartbeatRequest, RecordModelRouteSnapshotRequest,
-        RecordRecoveryRequiredRequest, RecoverExpiredLeasesRequest, TurnRunTransitionPort,
+        RecordRunnerFailureRequest, RecoverExpiredLeasesRequest, RelinquishRunRequest,
+        TurnRunTransitionPort,
     },
 };
 
@@ -91,7 +92,7 @@ pub trait HostFactory: Send + Sync {
     /// Construct a host for the given claimed run.
     ///
     /// The returned host must be valid for the entire duration of the driver
-    /// invocation. Errors here result in `RecoveryRequired` for the run.
+    /// invocation. Errors here result in a terminal failed/cancelled transition.
     async fn create_host(
         &self,
         claimed: &ClaimedTurnRun,
@@ -322,6 +323,10 @@ impl TurnRunnerWorker {
             runner_id = ?self.runner_id,
             run_id = ?run_id,
             status = ?status,
+            resolved_run_profile_id = claimed.resolved_run_profile.profile_id.as_str(),
+            resolved_run_profile_version = claimed.resolved_run_profile.profile_version.as_u64(),
+            loop_driver_id = claimed.resolved_run_profile.loop_driver.id.as_str(),
+            loop_driver_version = claimed.resolved_run_profile.loop_driver.version.as_u64(),
             "claimed turn run"
         );
 
@@ -335,37 +340,42 @@ impl TurnRunnerWorker {
         let runner_id = claimed.runner_id;
         let lease_token = claimed.lease_token;
 
-        let heartbeat_cancel = CancellationToken::new();
-        let heartbeat = heartbeat_loop(
-            Arc::clone(&self.transition_port),
-            run_id,
-            runner_id,
-            lease_token,
-            self.config.heartbeat_interval,
-            heartbeat_cancel.clone(),
-        );
-        tokio::pin!(heartbeat);
+        let exit_result = {
+            let heartbeat_cancel = CancellationToken::new();
+            let heartbeat = heartbeat_loop(
+                Arc::clone(&self.transition_port),
+                run_id,
+                runner_id,
+                lease_token,
+                self.config.heartbeat_interval,
+                heartbeat_cancel.clone(),
+            );
+            tokio::pin!(heartbeat);
 
-        // Resolve driver from registry and invoke it. Driver panics indicate
-        // unknown partial state, so convert them to RecoveryRequired.
-        let driver = AssertUnwindSafe(self.invoke_driver(&claimed)).catch_unwind();
-        tokio::pin!(driver);
+            // Resolve driver from registry and invoke it. Driver panics indicate
+            // unknown partial state, so fail the active run with a sanitized category.
+            let driver = AssertUnwindSafe(self.invoke_driver(&claimed)).catch_unwind();
+            tokio::pin!(driver);
 
-        let exit_result = tokio::select! {
-            result = &mut driver => match result {
-                Ok(result) => result,
-                Err(_) => Err(DriverInvocationError::DriverPanic),
-            },
-            heartbeat_result = &mut heartbeat => match heartbeat_result {
-                Ok(()) => Err(DriverInvocationError::HeartbeatStopped),
-                Err(err) => Err(DriverInvocationError::HeartbeatFailed(err)),
-            },
-            () = cancel.cancelled() => Err(DriverInvocationError::WorkerCancelled),
+            let exit_result = tokio::select! {
+                result = &mut driver => match result {
+                    Ok(result) => result,
+                    Err(_) => Err(DriverInvocationError::DriverPanic),
+                },
+                heartbeat_result = &mut heartbeat => match heartbeat_result {
+                    Ok(()) => Err(DriverInvocationError::HeartbeatStopped),
+                    Err(err) => Err(DriverInvocationError::HeartbeatFailed(err)),
+                },
+                () = cancel.cancelled() => Err(DriverInvocationError::WorkerCancelled),
+            };
+
+            heartbeat_cancel.cancel();
+            exit_result
         };
+        // Keep heartbeat scoped above so a losing heartbeat future is dropped
+        // before exit application re-enters the same turn-state store.
 
-        heartbeat_cancel.cancel();
-
-        // Apply the exit or record recovery
+        // Apply the exit or fail/cancel the claimed run through the compatibility transition.
         match exit_result {
             Ok(exit) => {
                 self.apply_exit(&claimed, exit).await;
@@ -375,9 +385,9 @@ impl TurnRunnerWorker {
                     runner_id = ?runner_id,
                     run_id = ?run_id,
                     error = %err,
-                    "driver invocation failed, recording recovery required"
+                    "driver invocation failed, recording terminal failure"
                 );
-                self.record_recovery(run_id, runner_id, lease_token, &err)
+                self.record_terminal_failure(run_id, runner_id, lease_token, &err)
                     .await;
             }
         }
@@ -403,6 +413,14 @@ impl TurnRunnerWorker {
         })?;
 
         let driver = registered.driver();
+        debug!(
+            runner_id = ?self.runner_id,
+            run_id = %claimed.state.run_id,
+            resolved_run_profile_id = claimed.resolved_run_profile.profile_id.as_str(),
+            loop_driver_id = descriptor.id.as_str(),
+            loop_driver_version = descriptor.version.as_u64(),
+            "reborn turn runner resolved loop driver"
+        );
 
         // Create host for this run
         let host = self
@@ -504,40 +522,67 @@ impl TurnRunnerWorker {
                     error = %err,
                     "failed to apply loop exit"
                 );
-                // If exit application fails, try recording recovery
+                // If exit application fails, try recording terminal failure through
+                // the compatibility transition.
                 let Some(failure) = sanitized_failure("exit_application_failed") else {
                     return;
                 };
-                let recovery_request = RecordRecoveryRequiredRequest {
+                let failure_request = RecordRunnerFailureRequest {
                     run_id,
                     runner_id,
                     lease_token,
                     failure,
                 };
-                if let Err(recovery_err) = self
+                if let Err(record_err) = self
                     .transition_port
-                    .record_recovery_required(recovery_request)
+                    .record_runner_failure(failure_request)
                     .await
                 {
-                    log_recovery_record_failure(
+                    log_runner_failure_record_error(
                         runner_id,
                         run_id,
-                        &recovery_err,
-                        "failed to record recovery after exit application failure",
+                        &record_err,
+                        "failed to record terminal failure after exit application failure",
                     );
                 }
             }
         }
     }
 
-    /// Record recovery required for a failed driver invocation.
-    async fn record_recovery(
+    /// Handle a failed driver invocation.
+    ///
+    /// Transient worker events (`WorkerCancelled`, `HeartbeatStopped`) relinquish the
+    /// lease so another worker can retry.  All other errors record a terminal failure.
+    async fn record_terminal_failure(
         &self,
         run_id: TurnRunId,
         runner_id: TurnRunnerId,
         lease_token: TurnLeaseToken,
         error: &DriverInvocationError,
     ) {
+        // Errors that warrant relinquish (re-queue) rather than terminal failure.
+        let relinquish = matches!(
+            error,
+            DriverInvocationError::WorkerCancelled | DriverInvocationError::HeartbeatStopped
+        );
+
+        if relinquish {
+            let request = RelinquishRunRequest {
+                run_id,
+                runner_id,
+                lease_token,
+            };
+            if let Err(err) = self.transition_port.relinquish_run(request).await {
+                log_runner_failure_record_error(
+                    runner_id,
+                    run_id,
+                    &err,
+                    "failed to relinquish run",
+                );
+            }
+            return;
+        }
+
         let category = match error {
             DriverInvocationError::DriverNotFound { .. } => "driver_not_found",
             DriverInvocationError::HostCreationFailed { .. } => "host_creation_failed",
@@ -554,40 +599,41 @@ impl TurnRunnerWorker {
                 "driver_failed"
             }
             DriverInvocationError::DriverPanic => "driver_panic",
-            DriverInvocationError::HeartbeatFailed(_) | DriverInvocationError::HeartbeatStopped => {
-                "heartbeat_failed"
+            DriverInvocationError::HeartbeatFailed(_) => "heartbeat_failed",
+            // WorkerCancelled and HeartbeatStopped handled by relinquish branch above.
+            DriverInvocationError::WorkerCancelled | DriverInvocationError::HeartbeatStopped => {
+                unreachable!("relinquish branch handles these")
             }
-            DriverInvocationError::WorkerCancelled => "worker_cancelled",
         };
 
         let Some(failure) = sanitized_failure(category) else {
             return;
         };
-        let request = RecordRecoveryRequiredRequest {
+        let request = RecordRunnerFailureRequest {
             run_id,
             runner_id,
             lease_token,
             failure,
         };
 
-        if let Err(err) = self.transition_port.record_recovery_required(request).await {
-            log_recovery_record_failure(
+        if let Err(err) = self.transition_port.record_runner_failure(request).await {
+            log_runner_failure_record_error(
                 runner_id,
                 run_id,
                 &err,
-                "failed to record recovery required",
+                "failed to record terminal failure",
             );
         }
     }
 }
 
-fn log_recovery_record_failure(
+fn log_runner_failure_record_error(
     runner_id: TurnRunnerId,
     run_id: TurnRunId,
     error: &TurnError,
     message: &'static str,
 ) {
-    if recovery_record_rejection_is_expected(error) {
+    if runner_failure_rejection_is_expected(error) {
         debug!(
             runner_id = ?runner_id,
             run_id = ?run_id,
@@ -604,7 +650,7 @@ fn log_recovery_record_failure(
     }
 }
 
-fn recovery_record_rejection_is_expected(error: &TurnError) -> bool {
+fn runner_failure_rejection_is_expected(error: &TurnError) -> bool {
     matches!(error, TurnError::LeaseMismatch)
         || matches!(
             error,
@@ -616,7 +662,7 @@ fn recovery_record_rejection_is_expected(error: &TurnError) -> bool {
                     | TurnStatus::BlockedAuth
                     | TurnStatus::BlockedResource
                     | TurnStatus::RecoveryRequired,
-                to: TurnStatus::RecoveryRequired,
+                to: TurnStatus::Failed,
             }
         )
 }

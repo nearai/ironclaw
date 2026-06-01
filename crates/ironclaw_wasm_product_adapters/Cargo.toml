@@ -24,7 +24,7 @@ subtle = "2"
 thiserror = "2"
 tokio = { version = "1", features = ["rt", "sync", "time"] }
 tracing = "0.1"
-wasmtime = { version = "43.0.2", features = ["component-model"] }
+wasmtime = { version = "44.0.2", features = ["component-model"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt", "sync"] }

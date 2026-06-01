@@ -1,0 +1,146 @@
+name: Reborn Integration Binary Crate Tests
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Commit SHA or ref to test
+        required: false
+        type: string
+  pull_request:
+    branches:
+      - reborn-integration
+  merge_group:
+    branches:
+      - reborn-integration
+    types:
+      - checks_requested
+  push:
+    branches:
+      - reborn-integration
+
+permissions:
+  contents: read
+
+concurrency:
+  group: reborn-integration-${{ github.event_name }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Tests must never touch the real OS keychain (macOS Keychain auth dialog /
+  # Linux Secret Service). Guarded by src/secrets/keychain.rs::os_keychain_suppressed:
+  # cfg!(test) covers unit tests; this covers integration/e2e that link the
+  # non-cfg(test) library.
+  IRONCLAW_DISABLE_OS_KEYCHAIN: "1"
+
+jobs:
+  package-matrix:
+    name: Discover Reborn binary crates
+    runs-on: ubuntu-latest
+    outputs:
+      packages: ${{ steps.packages.outputs.packages }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - id: packages
+        name: Build package matrix from ironclaw_reborn_cli manifest
+        run: |
+          packages="$(
+            cargo metadata --no-deps --format-version 1 \
+              | jq -c '
+                  (
+                    .packages[]
+                    | select(.name == "ironclaw_reborn_cli")
+                    | (
+                        [.name]
+                        + [
+                            .dependencies[]
+                            | select(
+                                .source == null
+                                and (.path // "" | contains("/crates/"))
+                                and (.name | startswith("ironclaw_"))
+                              )
+                            | .name
+                          ]
+                      )
+                  )
+                  | unique
+                '
+          )"
+
+          if [ -z "${packages}" ] || [ "${packages}" = "[]" ]; then
+            echo "No Reborn workspace crates discovered from crates/ironclaw_reborn_cli/Cargo.toml" >&2
+            exit 1
+          fi
+
+          echo "packages=${packages}" >> "$GITHUB_OUTPUT"
+          echo "Testing packages from crates/ironclaw_reborn_cli/Cargo.toml:"
+          printf '%s\n' "${packages}" | jq -r '.[] | "- " + .'
+
+  crate-tests:
+    name: Test ${{ matrix.package }}
+    needs: package-matrix
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      ANTHROPIC_API_KEY: ""
+      LLM_BACKEND: ""
+      LLM_USE_CODEX_AUTH: "false"
+      OLLAMA_BASE_URL: ""
+      OPENAI_API_KEY: ""
+    strategy:
+      fail-fast: false
+      matrix:
+        package: ${{ fromJSON(needs.package-matrix.outputs.packages) }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: reborn-integration-${{ matrix.package }}
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/reborn-integration' }}
+
+      - name: Run crate tests
+        run: |
+          feature_flags=""
+          if [ "${{ matrix.package }}" = "ironclaw_reborn_cli" ]; then
+            feature_flags="--features webui-v2-beta"
+          fi
+
+          # shellcheck disable=SC2086 # feature_flags intentionally expands to zero or more Cargo args.
+          timeout --signal=INT --kill-after=30s 28m \
+            cargo test -p "${{ matrix.package }}" ${feature_flags} --all-targets -- --nocapture
+
+  reborn-integration-crate-tests:
+    name: Reborn Integration Binary Crate Tests
+    runs-on: ubuntu-latest
+    if: always()
+    needs:
+      - package-matrix
+      - crate-tests
+    steps:
+      - name: Check matrix result
+        run: |
+          if [[ "${{ needs.package-matrix.result }}" != "success" ]]; then
+            echo "Reborn package matrix discovery failed"
+            exit 1
+          fi
+          if [[ "${{ needs.crate-tests.result }}" != "success" ]]; then
+            echo "One or more Reborn binary crate tests failed"
+            exit 1
+          fi

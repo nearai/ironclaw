@@ -1,4 +1,5 @@
 use chrono::{DateTime, Utc};
+use ironclaw_common::ExtensionName;
 use ironclaw_host_api::ThreadId;
 use ironclaw_product_adapters::{ProductOutboundEnvelope, ProjectionCursor};
 use ironclaw_threads::{SessionThreadRecord, SummaryArtifact, ThreadMessageRecord};
@@ -7,6 +8,10 @@ use ironclaw_turns::{
     SanitizedFailure, TurnCheckpointId, TurnRunId, TurnRunState, TurnStatus,
 };
 use serde::{Deserialize, Serialize};
+
+use crate::{
+    LifecyclePackageRef, LifecyclePhase, LifecycleProductPayload, LifecycleReadinessBlocker,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebornCreateThreadResponse {
@@ -180,4 +185,29 @@ impl From<TurnRunState> for RebornGetRunStateResponse {
             failure: value.failure,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornListThreadsResponse {
+    pub threads: Vec<SessionThreadRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+}
+
+/// WebUI v2 setup projection for extension lifecycle.
+///
+/// This intentionally uses the v2 `phase`/`blockers` lifecycle contract and
+/// omits the legacy `status` field from the earlier unimplemented route shape.
+/// The live browser consumer still uses the v1 setup route, so this v2 contract
+/// can become lifecycle-native before it has compatibility consumers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornSetupExtensionResponse {
+    pub extension_name: ExtensionName,
+    pub phase: LifecyclePhase,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blockers: Vec<LifecycleReadinessBlocker>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package_ref: Option<LifecyclePackageRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload: Option<LifecycleProductPayload>,
 }

@@ -5,6 +5,134 @@ use rust_decimal_macros::dec;
 use serde_json::json;
 
 #[test]
+fn runtime_credential_targets_validate_declaration_shape() {
+    assert!(
+        RuntimeCredentialTarget::Header {
+            name: "authorization".to_string(),
+            prefix: Some("Bearer ".to_string()),
+        }
+        .validate_declaration()
+        .is_ok()
+    );
+    assert!(
+        RuntimeCredentialTarget::Header {
+            name: "bad header".to_string(),
+            prefix: None,
+        }
+        .validate_declaration()
+        .is_err()
+    );
+    assert!(
+        RuntimeCredentialTarget::Header {
+            name: "authorization".to_string(),
+            prefix: Some("Bearer\r\nx-evil: ".to_string()),
+        }
+        .validate_declaration()
+        .is_err()
+    );
+    assert!(
+        RuntimeCredentialTarget::QueryParam {
+            name: "access_token".to_string(),
+        }
+        .validate_declaration()
+        .is_ok()
+    );
+    assert!(
+        RuntimeCredentialTarget::QueryParam {
+            name: " ".to_string(),
+        }
+        .validate_declaration()
+        .is_err()
+    );
+    assert!(
+        RuntimeCredentialTarget::PathPlaceholder {
+            placeholder: "__credential__".to_string(),
+        }
+        .validate_declaration()
+        .is_ok()
+    );
+    for invalid in ["", ".", "..", "bad/placeholder", "bad\nplaceholder"] {
+        assert!(
+            RuntimeCredentialTarget::PathPlaceholder {
+                placeholder: invalid.to_string(),
+            }
+            .validate_declaration()
+            .is_err(),
+            "{invalid:?} should be rejected"
+        );
+    }
+}
+
+#[test]
+fn network_target_patterns_validate_declaration_shape() {
+    let pattern = NetworkTargetPattern {
+        scheme: Some(NetworkScheme::Https),
+        host_pattern: "*.example.test".to_string(),
+        port: Some(443),
+    };
+    assert!(pattern.validate_declaration().is_ok());
+    assert!(
+        NetworkTargetPattern {
+            scheme: None,
+            host_pattern: "*".to_string(),
+            port: None,
+        }
+        .validate_declaration()
+        .is_ok()
+    );
+    assert!(
+        NetworkTargetPattern {
+            scheme: Some(NetworkScheme::Https),
+            host_pattern: "".to_string(),
+            port: None,
+        }
+        .validate_declaration()
+        .is_err()
+    );
+}
+
+#[test]
+fn network_target_patterns_reject_control_and_invalid_label_characters() {
+    for invalid in [
+        "api.example.test\0",
+        "api.example.test\n",
+        ".example.test",
+        "example.test.",
+        "api..example.test",
+        "api example.test",
+        "api/example.test",
+    ] {
+        assert!(
+            NetworkTargetPattern {
+                scheme: Some(NetworkScheme::Https),
+                host_pattern: invalid.to_string(),
+                port: None,
+            }
+            .validate_declaration()
+            .is_err(),
+            "{invalid:?} should be rejected"
+        );
+    }
+}
+
+#[test]
+fn runtime_credential_target_serializes_path_placeholder() {
+    let target = RuntimeCredentialTarget::PathPlaceholder {
+        placeholder: "__credential__".to_string(),
+    };
+    let wire = json!({
+        "type": "path_placeholder",
+        "placeholder": "__credential__"
+    });
+
+    assert_eq!(serde_json::to_value(&target).unwrap(), wire);
+    assert_eq!(
+        serde_json::from_value::<RuntimeCredentialTarget>(wire).unwrap(),
+        target
+    );
+}
+
+#[test]
 fn extension_id_rejects_path_like_or_uppercase_values() {
     assert!(ExtensionId::new("github").is_ok());
     assert!(ExtensionId::new("github-mcp.v1").is_ok());
@@ -152,6 +280,45 @@ fn dispatch_errors_preserve_typed_failure_kind() {
         .failure_kind(),
         DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Guest)
     );
+    let required_secrets = vec![SecretHandle::new("google-access-token").unwrap()];
+    assert_eq!(
+        DispatchError::AuthRequired {
+            capability: CapabilityId::new("test.cap").unwrap(),
+            required_secrets: required_secrets.clone(),
+        }
+        .failure_kind(),
+        DispatchFailureKind::AuthRequired
+    );
+    // Empty required_secrets must classify the same way.
+    assert_eq!(
+        DispatchError::AuthRequired {
+            capability: CapabilityId::new("test.cap").unwrap(),
+            required_secrets: Vec::new(),
+        }
+        .failure_kind(),
+        DispatchFailureKind::AuthRequired
+    );
+}
+
+#[test]
+fn runtime_credential_injection_rejects_missing_source() {
+    let missing_source = json!({
+        "handle": "api-token",
+        "target": {
+            "type": "header",
+            "name": "authorization",
+            "prefix": "Bearer "
+        },
+        "required": true
+    });
+
+    let error = serde_json::from_value::<RuntimeCredentialInjection>(missing_source)
+        .expect_err("credential injection source is authority-bearing and must be explicit");
+
+    assert!(
+        error.to_string().contains("missing field `source`"),
+        "unexpected deserialization error: {error}"
+    );
 }
 
 #[test]
@@ -175,6 +342,11 @@ fn dispatch_failure_kind_display_preserves_stable_literals() {
     assert_eq!(
         DispatchFailureKind::UnsupportedRuntime.as_str(),
         "UnsupportedRuntime"
+    );
+    assert_eq!(DispatchFailureKind::AuthRequired.as_str(), "AuthRequired");
+    assert_eq!(
+        DispatchFailureKind::AuthRequired.to_string(),
+        "AuthRequired"
     );
     assert_eq!(
         DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::NetworkDenied).as_str(),
@@ -208,9 +380,15 @@ fn runtime_dispatch_error_kinds_have_safe_event_tokens() {
         (RuntimeDispatchErrorKind::Memory, "memory"),
         (RuntimeDispatchErrorKind::MethodMissing, "method_missing"),
         (RuntimeDispatchErrorKind::NetworkDenied, "network_denied"),
+        (
+            RuntimeDispatchErrorKind::OperationFailed,
+            "operation_failed",
+        ),
         (RuntimeDispatchErrorKind::OutputDecode, "output_decode"),
         (RuntimeDispatchErrorKind::OutputTooLarge, "output_too_large"),
+        (RuntimeDispatchErrorKind::PolicyDenied, "policy_denied"),
         (RuntimeDispatchErrorKind::Resource, "resource"),
+        (RuntimeDispatchErrorKind::SecretDenied, "secret_denied"),
         (
             RuntimeDispatchErrorKind::UndeclaredCapability,
             "undeclared_capability",
@@ -314,6 +492,27 @@ fn scoped_path_rejects_raw_host_paths_urls_and_traversal() {
             "{invalid:?} should be rejected"
         );
     }
+}
+
+#[test]
+fn scoped_path_accepts_raw_host_path_only_when_mount_alias_matches() {
+    let view = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/Users/alice").unwrap(),
+        VirtualPath::new("/projects/host").unwrap(),
+        MountPermissions::read_write(),
+    )])
+    .unwrap();
+
+    let path = view.scoped_path("/Users/alice/project/README.md").unwrap();
+    assert_eq!(path.as_str(), "/Users/alice/project/README.md");
+    assert_eq!(
+        view.resolve(&path).unwrap().as_str(),
+        "/projects/host/project/README.md"
+    );
+
+    assert!(view.scoped_path("/Users/bob/project/README.md").is_err());
+    assert!(view.scoped_path("/Users/alice2/private.txt").is_err()); // safety: test-only assertion.
+    assert!(view.scoped_path("/etc/passwd").is_err());
 }
 
 #[test]
@@ -790,6 +989,39 @@ fn obligations_are_unique_and_canonicalized() {
     );
 
     assert!(Obligations::new(vec![Obligation::AuditBefore, Obligation::AuditBefore]).is_err());
+    let first_secret = SecretHandle::new("first_token").unwrap();
+    let second_secret = SecretHandle::new("second_token").unwrap();
+    let multi_secret = Obligations::new(vec![
+        Obligation::InjectSecretOnce {
+            handle: second_secret.clone(),
+        },
+        Obligation::InjectSecretOnce {
+            handle: first_secret.clone(),
+        },
+    ])
+    .unwrap();
+    assert_eq!(
+        multi_secret.as_slice(),
+        &[
+            Obligation::InjectSecretOnce {
+                handle: second_secret.clone(),
+            },
+            Obligation::InjectSecretOnce {
+                handle: first_secret.clone(),
+            }
+        ]
+    );
+    assert!(
+        Obligations::new(vec![
+            Obligation::InjectSecretOnce {
+                handle: first_secret.clone()
+            },
+            Obligation::InjectSecretOnce {
+                handle: first_secret
+            },
+        ])
+        .is_err()
+    );
 
     let duplicate_json = json!([
         {"type":"audit_before"},
@@ -813,6 +1045,86 @@ fn privileged_runtime_and_trust_classes_cannot_be_self_asserted_from_json() {
     assert!(serde_json::from_value::<RuntimeKind>(json!("system")).is_err());
     assert!(serde_json::from_value::<TrustClass>(json!("first_party")).is_err());
     assert!(serde_json::from_value::<TrustClass>(json!("system")).is_err());
+}
+
+#[test]
+fn runtime_http_egress_request_defaults_optional_body_controls() {
+    let mut value = serde_json::to_value(RuntimeHttpEgressRequest {
+        runtime: RuntimeKind::Wasm,
+        scope: sample_context().resource_scope,
+        capability_id: CapabilityId::new("http.fetch").unwrap(),
+        method: NetworkMethod::Get,
+        url: "https://api.example.test/v1/items".to_string(),
+        headers: vec![],
+        body: vec![],
+        network_policy: sample_network_policy(),
+        credential_injections: vec![],
+        response_body_limit: Some(4096),
+        save_body_to: Some(RuntimeHttpSaveTarget {
+            path: ScopedPath::new("/workspace/body.json").unwrap(),
+            mount_grant: None,
+        }),
+        timeout_ms: None,
+    })
+    .unwrap();
+
+    let fields = value.as_object_mut().unwrap();
+    fields.remove("response_body_limit");
+    fields.remove("save_body_to");
+
+    let request: RuntimeHttpEgressRequest = serde_json::from_value(value).unwrap();
+    assert_eq!(request.response_body_limit, None);
+    assert_eq!(request.save_body_to, None);
+}
+
+#[test]
+fn runtime_http_save_target_skips_mount_grant_on_wire() {
+    let mount_grant = MountGrant::new(
+        MountAlias::new("/workspace").unwrap(),
+        VirtualPath::new("/projects/workspace").unwrap(),
+        MountPermissions::read_write(),
+    );
+    let target = RuntimeHttpSaveTarget {
+        path: ScopedPath::new("/workspace/body.json").unwrap(),
+        mount_grant: Some(mount_grant),
+    };
+
+    let value = serde_json::to_value(&target).unwrap();
+    assert_eq!(value, json!({ "path": "/workspace/body.json" }));
+
+    let decoded: RuntimeHttpSaveTarget = serde_json::from_value(json!({
+        "path": "/workspace/body.json",
+        "mount_grant": {
+            "alias": "/workspace",
+            "target": "/projects/workspace",
+            "permissions": { "read": true, "write": true }
+        }
+    }))
+    .unwrap();
+    assert_eq!(decoded.path.as_str(), "/workspace/body.json");
+    assert_eq!(decoded.mount_grant, None);
+}
+
+#[test]
+fn runtime_http_egress_response_defaults_optional_saved_body() {
+    let mut value = serde_json::to_value(RuntimeHttpEgressResponse {
+        status: 200,
+        headers: vec![],
+        body: b"ok".to_vec(),
+        saved_body: Some(RuntimeHttpSavedBody {
+            path: ScopedPath::new("/workspace/body.json").unwrap(),
+            bytes_written: 2,
+        }),
+        request_bytes: 0,
+        response_bytes: 2,
+        redaction_applied: false,
+    })
+    .unwrap();
+
+    value.as_object_mut().unwrap().remove("saved_body");
+
+    let response: RuntimeHttpEgressResponse = serde_json::from_value(value).unwrap();
+    assert_eq!(response.saved_body, None);
 }
 
 #[test]
@@ -1364,4 +1676,70 @@ fn sample_context() -> ExecutionContext {
             invocation_id,
         },
     }
+}
+
+fn sample_network_policy() -> NetworkPolicy {
+    NetworkPolicy {
+        allowed_targets: vec![NetworkTargetPattern {
+            scheme: Some(NetworkScheme::Https),
+            host_pattern: "api.example.test".to_string(),
+            port: None,
+        }],
+        deny_private_ip_ranges: true,
+        max_egress_bytes: Some(1024 * 1024),
+    }
+}
+
+#[test]
+fn dispatch_error_event_kind_pins_auth_required_token() {
+    // "auth_required" is a stable observability token used in tracing and metrics.
+    // Regressions (typos, missing match arms) must be caught here.
+    let cap = || CapabilityId::new("test.cap").unwrap();
+    let handle = SecretHandle::new("google-access-token").unwrap();
+
+    assert_eq!(
+        DispatchError::AuthRequired {
+            capability: cap(),
+            required_secrets: vec![handle],
+        }
+        .event_kind(),
+        "auth_required"
+    );
+    // Empty required_secrets must produce the same token.
+    assert_eq!(
+        DispatchError::AuthRequired {
+            capability: cap(),
+            required_secrets: Vec::new(),
+        }
+        .event_kind(),
+        "auth_required"
+    );
+}
+
+#[test]
+fn dispatch_error_auth_required_debug_redacts_required_secrets() {
+    let handle = SecretHandle::new("google-access-token").unwrap();
+    let error = DispatchError::AuthRequired {
+        capability: CapabilityId::new("test.cap").unwrap(),
+        required_secrets: vec![handle],
+    };
+    let debug = format!("{error:?}");
+    assert!(
+        !debug.contains("google-access-token"),
+        "handle name must not appear in Debug output; got: {debug}"
+    );
+    assert!(
+        debug.contains("1 handle(s) redacted"),
+        "redaction count must appear in Debug output; got: {debug}"
+    );
+    // Empty list variant.
+    let empty = DispatchError::AuthRequired {
+        capability: CapabilityId::new("test.cap").unwrap(),
+        required_secrets: Vec::new(),
+    };
+    let debug_empty = format!("{empty:?}");
+    assert!(
+        debug_empty.contains("0 handle(s) redacted"),
+        "zero redaction count must appear; got: {debug_empty}"
+    );
 }

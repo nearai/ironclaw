@@ -343,10 +343,16 @@ block by default: attempts to escape workspace or exfiltrate known secrets unles
 ### `local-yolo`
 
 ```text
-allow: workspace reads/writes, local shell, normal network
+allow: workspace reads/writes, confirmed host-home reads/writes through /host and the raw confirmed HOME path for local CLI, local shell, normal network
 ask: optional only for catastrophic/outside-root actions depending on user config
+block by default for file built-ins: known credential-bearing paths such as .ssh, .aws, .config/gh/hosts.yml, .env, and key material
 require: explicit startup confirmation and visible warning
 ```
+
+The file built-in sensitive-path block is not a runtime-wide credential
+sandbox. `local-yolo` shell runs as the local user with inherited environment
+and direct network, so operators must treat it as equivalent to granting local
+user shell access.
 
 Even `local-yolo` should keep audit, timeout, cancellation, output caps, path normalization, and redaction of obvious secrets from logs.
 

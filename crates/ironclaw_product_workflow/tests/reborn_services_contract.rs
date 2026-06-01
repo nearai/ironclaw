@@ -4,34 +4,45 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use chrono::Utc;
-use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
+use ironclaw_auth::CredentialAccountId;
+use ironclaw_host_api::{AgentId, ApprovalRequestId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_product_adapters::{
     ProductAdapterError, ProductOutboundEnvelope, ProductWorkflowRejectionKind, ProjectionCursor,
     ProjectionStream, ProjectionSubscriptionRequest, ProtocolAuthFailure, RedactedString,
 };
 use ironclaw_product_workflow::{
+    ApprovalInteractionDecision, ApprovalInteractionService, AuthInteractionDecision,
+    AuthInteractionService, LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase,
+    LifecycleProductContext, LifecycleProductFacade, LifecycleProductResponse,
+    LifecycleReadinessBlocker, ListPendingApprovalsRequest, ListPendingApprovalsResponse,
+    ListPendingAuthInteractionsRequest, ListPendingAuthInteractionsResponse,
     RebornGetRunStateRequest, RebornResolveGateResponse, RebornServices, RebornServicesApi,
     RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
     RebornStreamEventsRequest, RebornSubmitTurnResponse, RebornTimelineRequest,
-    WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
-    WebUiInboundValidationCode, WebUiResolveGateRequest, WebUiSendMessageRequest,
+    ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
+    ResolveAuthInteractionRequest, ResolveAuthInteractionResponse, WebUiAuthenticatedCaller,
+    WebUiCancelRunRequest, WebUiCreateThreadRequest, WebUiInboundValidationCode,
+    WebUiListThreadsRequest, WebUiResolveGateRequest, WebUiSendMessageRequest,
+    WebUiSetupExtensionRequest, approval_gate_ref,
 };
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
-    AppendAssistantDraftRequest, AppendToolResultReferenceRequest, ContextMessages, ContextWindow,
-    CreateSummaryArtifactRequest, EnsureThreadRequest, InMemorySessionThreadService,
-    LoadContextMessagesRequest, LoadContextWindowRequest, MessageContent, MessageKind,
-    MessageStatus, RedactMessageRequest, ReplayAcceptedInboundMessageRequest, SessionThreadError,
-    SessionThreadRecord, SessionThreadService, SummaryArtifact, ThreadHistory,
-    ThreadHistoryRequest, ThreadMessageId, ThreadMessageRecord, ThreadScope,
-    UpdateAssistantDraftRequest,
+    AppendAssistantDraftRequest, AppendCapabilityDisplayPreviewRequest,
+    AppendToolResultReferenceRequest, ContextMessages, ContextWindow, CreateSummaryArtifactRequest,
+    EnsureThreadRequest, InMemorySessionThreadService, LoadContextMessagesRequest,
+    LoadContextWindowRequest, MessageContent, MessageKind, MessageStatus, RedactMessageRequest,
+    ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadRecord,
+    SessionThreadService, SummaryArtifact, ThreadHistory, ThreadHistoryRequest, ThreadMessageId,
+    ThreadMessageRecord, ThreadScope, UpdateAssistantDraftRequest,
+    UpdateToolResultReferenceRequest,
 };
 use ironclaw_turns::{
     AcceptedMessageRef, AdmissionRejection, AdmissionRejectionReason, CancelRunRequest,
     CancelRunResponse, DefaultTurnCoordinator, EventCursor, GateRef, GetRunStateRequest,
-    InMemoryTurnStateStore, ReplyTargetBindingRef, ResumeTurnRequest, ResumeTurnResponse,
-    RunProfileId, RunProfileVersion, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse,
-    TurnCoordinator, TurnError, TurnId, TurnRunId, TurnRunState, TurnStatus,
+    InMemoryTurnStateStore, ReplyTargetBindingRef, ResumeTurnPrecondition, ResumeTurnRequest,
+    ResumeTurnResponse, RunProfileId, RunProfileVersion, SourceBindingRef, SubmitTurnRequest,
+    SubmitTurnResponse, TurnActor, TurnCapacityResource, TurnCoordinator, TurnError, TurnId,
+    TurnRunId, TurnRunState, TurnScope, TurnStatus,
 };
 use serde_json::json;
 
@@ -41,6 +52,10 @@ fn caller() -> WebUiAuthenticatedCaller {
 
 fn caller_for_user(user_id: &str) -> WebUiAuthenticatedCaller {
     caller_for_user_with_project(user_id, Some("project-alpha"))
+}
+
+fn turn_actor_for_user(user_id: &str) -> TurnActor {
+    TurnActor::new(UserId::new(user_id).expect("valid user"))
 }
 
 fn caller_with_project(project_id: Option<&str>) -> WebUiAuthenticatedCaller {
@@ -79,6 +94,7 @@ fn fake_thread_history(owner: &WebUiAuthenticatedCaller, thread_id: &str) -> Thr
             created_by_actor_id: owner.user_id.as_str().to_string(),
             title: Some("M2 facade contract thread".to_string()),
             metadata_json: None,
+            goal: None,
         },
         messages: vec![ThreadMessageRecord {
             message_id: ThreadMessageId::new(),
@@ -141,7 +157,6 @@ async fn setup_owned_thread(
     create_thread_for(services, owner, thread_id).await;
 }
 
-#[derive(Default)]
 struct FakeTurnCoordinator {
     submissions: Mutex<Vec<SubmitTurnRequest>>,
     cancellations: Mutex<Vec<CancelRunRequest>>,
@@ -149,7 +164,29 @@ struct FakeTurnCoordinator {
     run_state_requests: Mutex<Vec<GetRunStateRequest>>,
     submit_error: Mutex<Option<TurnError>>,
     run_state_error: Mutex<Option<TurnError>>,
+    run_state_actor: Mutex<Option<TurnActor>>,
+    explicit_run_status: Mutex<Option<TurnStatus>>,
     parked_gate_ref: Mutex<Option<GateRef>>,
+    parked_auth_gate: Mutex<bool>,
+    parked_approval_gate: Mutex<bool>,
+}
+
+impl Default for FakeTurnCoordinator {
+    fn default() -> Self {
+        Self {
+            submissions: Mutex::default(),
+            cancellations: Mutex::default(),
+            resumptions: Mutex::default(),
+            run_state_requests: Mutex::default(),
+            submit_error: Mutex::default(),
+            run_state_error: Mutex::default(),
+            run_state_actor: Mutex::new(Some(turn_actor_for_user("user-alpha"))),
+            explicit_run_status: Mutex::default(),
+            parked_gate_ref: Mutex::default(),
+            parked_auth_gate: Mutex::default(),
+            parked_approval_gate: Mutex::default(),
+        }
+    }
 }
 
 impl FakeTurnCoordinator {
@@ -173,6 +210,28 @@ impl FakeTurnCoordinator {
     /// on the supplied gate before issuing cancellation.
     fn set_parked_gate(&self, gate_ref: GateRef) {
         *self.parked_gate_ref.lock().expect("lock") = Some(gate_ref);
+        *self.parked_auth_gate.lock().expect("lock") = false;
+        *self.parked_approval_gate.lock().expect("lock") = false;
+    }
+
+    fn set_parked_auth_gate(&self, gate_ref: GateRef) {
+        *self.parked_gate_ref.lock().expect("lock") = Some(gate_ref);
+        *self.parked_auth_gate.lock().expect("lock") = true;
+        *self.parked_approval_gate.lock().expect("lock") = false;
+    }
+
+    fn set_parked_approval_gate(&self, gate_ref: GateRef) {
+        *self.parked_gate_ref.lock().expect("lock") = Some(gate_ref);
+        *self.parked_auth_gate.lock().expect("lock") = false;
+        *self.parked_approval_gate.lock().expect("lock") = true;
+    }
+
+    fn set_run_state_actor(&self, actor: Option<TurnActor>) {
+        *self.run_state_actor.lock().expect("lock") = actor;
+    }
+
+    fn set_run_state_status(&self, status: TurnStatus) {
+        *self.explicit_run_status.lock().expect("lock") = Some(status);
     }
 
     fn submission_count(&self) -> usize {
@@ -199,6 +258,14 @@ impl FakeTurnCoordinator {
             .map(|request| request.source_binding_ref.as_str().to_string())
     }
 
+    fn last_resumption_precondition(&self) -> Option<ResumeTurnPrecondition> {
+        self.resumptions
+            .lock()
+            .expect("lock")
+            .last()
+            .map(|request| request.precondition)
+    }
+
     fn last_submission_scope(&self) -> Option<ironclaw_turns::TurnScope> {
         self.submissions
             .lock()
@@ -210,6 +277,10 @@ impl FakeTurnCoordinator {
 
 #[async_trait]
 impl TurnCoordinator for FakeTurnCoordinator {
+    async fn prepare_turn(&self, _scope: TurnScope) -> Result<TurnRunId, TurnError> {
+        Ok(TurnRunId::new())
+    }
+
     async fn submit_turn(
         &self,
         request: SubmitTurnRequest,
@@ -250,6 +321,7 @@ impl TurnCoordinator for FakeTurnCoordinator {
             status: TurnStatus::Cancelled,
             event_cursor: EventCursor(13),
             already_terminal: false,
+            actor: None,
         })
     }
 
@@ -257,16 +329,30 @@ impl TurnCoordinator for FakeTurnCoordinator {
         if let Some(error) = self.run_state_error.lock().expect("lock").take() {
             return Err(error);
         }
+        let actor = self.run_state_actor.lock().expect("lock").clone();
         let gate_ref = self.parked_gate_ref.lock().expect("lock").clone();
+        let status = self
+            .explicit_run_status
+            .lock()
+            .expect("lock")
+            .unwrap_or_else(|| {
+                if *self.parked_auth_gate.lock().expect("lock") {
+                    TurnStatus::BlockedAuth
+                } else if *self.parked_approval_gate.lock().expect("lock") {
+                    TurnStatus::BlockedApproval
+                } else {
+                    TurnStatus::Queued
+                }
+            });
         let scope = request.scope.clone();
         let run_id = request.run_id;
         self.run_state_requests.lock().expect("lock").push(request);
         Ok(TurnRunState {
             scope,
-            actor: None,
+            actor,
             turn_id: TurnId::new(),
             run_id,
-            status: TurnStatus::Queued,
+            status,
             accepted_message_ref: AcceptedMessageRef::new("msg:replayed").expect("valid ref"),
             source_binding_ref: SourceBindingRef::new("webui-src:replayed").expect("valid ref"),
             reply_target_binding_ref: ReplyTargetBindingRef::new("webui-reply:replayed")
@@ -277,9 +363,165 @@ impl TurnCoordinator for FakeTurnCoordinator {
             received_at: Utc::now(),
             checkpoint_id: None,
             gate_ref,
+            credential_requirements: Vec::new(),
             failure: None,
             event_cursor: EventCursor(17),
         })
+    }
+}
+
+#[derive(Default)]
+struct RecordingApprovalInteractionService {
+    resolutions: Mutex<Vec<ResolveApprovalInteractionRequest>>,
+}
+
+impl RecordingApprovalInteractionService {
+    fn resolution_count(&self) -> usize {
+        self.resolutions.lock().expect("lock").len()
+    }
+
+    fn last_resolution(&self) -> Option<ResolveApprovalInteractionRequest> {
+        self.resolutions.lock().expect("lock").last().cloned()
+    }
+}
+
+#[async_trait]
+impl ApprovalInteractionService for RecordingApprovalInteractionService {
+    async fn list_pending(
+        &self,
+        _request: ListPendingApprovalsRequest,
+    ) -> Result<ListPendingApprovalsResponse, ironclaw_product_workflow::ProductWorkflowError> {
+        Ok(ListPendingApprovalsResponse { approvals: vec![] })
+    }
+
+    async fn resolve(
+        &self,
+        request: ResolveApprovalInteractionRequest,
+    ) -> Result<ResolveApprovalInteractionResponse, ironclaw_product_workflow::ProductWorkflowError>
+    {
+        let run_id = request.run_id_hint.expect("webui passes run_id");
+        let decision = request.decision;
+        self.resolutions.lock().expect("lock").push(request);
+        Ok(match decision {
+            ApprovalInteractionDecision::ApproveOnce => {
+                ResolveApprovalInteractionResponse::Approved(ResumeTurnResponse {
+                    run_id,
+                    status: TurnStatus::Queued,
+                    event_cursor: EventCursor(19),
+                })
+            }
+            ApprovalInteractionDecision::Deny => {
+                ResolveApprovalInteractionResponse::Denied(CancelRunResponse {
+                    run_id,
+                    status: TurnStatus::Cancelled,
+                    event_cursor: EventCursor(23),
+                    already_terminal: false,
+                    actor: None,
+                })
+            }
+        })
+    }
+}
+
+#[derive(Default)]
+struct RecordingAuthInteractionService {
+    resolutions: Mutex<Vec<ResolveAuthInteractionRequest>>,
+}
+
+impl RecordingAuthInteractionService {
+    fn resolution_count(&self) -> usize {
+        self.resolutions.lock().expect("lock").len()
+    }
+
+    fn last_resolution(&self) -> Option<ResolveAuthInteractionRequest> {
+        self.resolutions.lock().expect("lock").last().cloned()
+    }
+}
+
+#[async_trait]
+impl AuthInteractionService for RecordingAuthInteractionService {
+    async fn list_pending(
+        &self,
+        _request: ListPendingAuthInteractionsRequest,
+    ) -> Result<ListPendingAuthInteractionsResponse, ironclaw_product_workflow::ProductWorkflowError>
+    {
+        Ok(ListPendingAuthInteractionsResponse {
+            auth_interactions: vec![],
+        })
+    }
+
+    async fn resolve(
+        &self,
+        request: ResolveAuthInteractionRequest,
+    ) -> Result<ResolveAuthInteractionResponse, ironclaw_product_workflow::ProductWorkflowError>
+    {
+        let run_id = request.run_id_hint.expect("webui passes run_id");
+        let decision = request.decision.clone();
+        self.resolutions.lock().expect("lock").push(request);
+        Ok(match decision {
+            AuthInteractionDecision::CredentialProvided { .. }
+            | AuthInteractionDecision::CallbackCompleted { .. } => {
+                ResolveAuthInteractionResponse::Resumed(ResumeTurnResponse {
+                    run_id,
+                    status: TurnStatus::Queued,
+                    event_cursor: EventCursor(29),
+                })
+            }
+            AuthInteractionDecision::Deny => {
+                ResolveAuthInteractionResponse::Canceled(CancelRunResponse {
+                    run_id,
+                    status: TurnStatus::Cancelled,
+                    event_cursor: EventCursor(31),
+                    already_terminal: false,
+                    actor: None,
+                })
+            }
+        })
+    }
+}
+
+struct RecordingLifecycleFacade {
+    package_refs: Mutex<Vec<LifecyclePackageRef>>,
+}
+
+impl RecordingLifecycleFacade {
+    fn new() -> Self {
+        Self {
+            package_refs: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn package_refs(&self) -> Vec<LifecyclePackageRef> {
+        self.package_refs.lock().expect("lock").clone()
+    }
+}
+
+#[async_trait]
+impl LifecycleProductFacade for RecordingLifecycleFacade {
+    async fn execute(
+        &self,
+        _context: LifecycleProductContext,
+        _action: ironclaw_product_workflow::LifecycleProductAction,
+    ) -> Result<LifecycleProductResponse, ironclaw_product_workflow::ProductWorkflowError> {
+        panic!("setup_extension should project package state, not execute lifecycle actions")
+    }
+
+    async fn project_package(
+        &self,
+        _context: LifecycleProductContext,
+        package_ref: LifecyclePackageRef,
+    ) -> Result<LifecycleProductResponse, ironclaw_product_workflow::ProductWorkflowError> {
+        self.package_refs
+            .lock()
+            .expect("lock")
+            .push(package_ref.clone());
+        Ok(LifecycleProductResponse::projection(
+            Some(package_ref),
+            LifecyclePhase::UnsupportedOrLegacy,
+            vec![LifecycleReadinessBlocker::runtime(Some(
+                "extension_lifecycle_store_unwired".to_string(),
+            ))?],
+        ))
     }
 }
 
@@ -440,6 +682,20 @@ impl SessionThreadService for ScopeMismatchThreadStub {
         panic!("ScopeMismatchThreadStub::append_tool_result_reference should not be reached")
     }
 
+    async fn append_capability_display_preview(
+        &self,
+        _request: AppendCapabilityDisplayPreviewRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        panic!("ScopeMismatchThreadStub::append_capability_display_preview should not be reached")
+    }
+
+    async fn update_tool_result_reference(
+        &self,
+        _request: UpdateToolResultReferenceRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        panic!("ScopeMismatchThreadStub::update_tool_result_reference should not be reached")
+    }
+
     async fn update_assistant_draft(
         &self,
         _request: UpdateAssistantDraftRequest,
@@ -546,6 +802,7 @@ impl SessionThreadService for ScriptedThreadService {
                     created_by_actor_id: "user-alpha".to_string(),
                     title: None,
                     metadata_json: None,
+                    goal: None,
                 },
                 messages: Vec::new(),
                 summary_artifacts: Vec::new(),
@@ -623,6 +880,20 @@ impl SessionThreadService for ScriptedThreadService {
         _request: AppendToolResultReferenceRequest,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
         scripted_stub_unreachable("append_tool_result_reference")
+    }
+
+    async fn append_capability_display_preview(
+        &self,
+        _request: AppendCapabilityDisplayPreviewRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        scripted_stub_unreachable("append_capability_display_preview")
+    }
+
+    async fn update_tool_result_reference(
+        &self,
+        _request: UpdateToolResultReferenceRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        scripted_stub_unreachable("update_tool_result_reference")
     }
 
     async fn update_assistant_draft(
@@ -869,6 +1140,165 @@ async fn submit_turn_uses_facade_and_thread_history_without_route_store_access()
 }
 
 #[tokio::test]
+async fn submit_turn_records_skill_activation_message_before_turn_wake() {
+    let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+    let recorded_for_hook = Arc::clone(&recorded);
+    let services = RebornServices::new(threads, coordinator.clone())
+        .with_skill_activation_recorder(move |scope, accepted_message_ref, message| {
+            recorded_for_hook.lock().expect("lock").push((
+                scope.thread_id.as_str().to_string(),
+                accepted_message_ref.as_str().to_string(),
+                message.to_string(),
+            ));
+            Ok(())
+        });
+    create_thread_for(&services, caller(), "thread-alpha").await;
+
+    let submitted = services
+        .submit_turn(
+            caller(),
+            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+                "client_action_id": "send-skill-activation",
+                "thread_id": "thread-alpha",
+                "content": "/code-review inspect this"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("submit succeeds");
+    let RebornSubmitTurnResponse::Submitted {
+        accepted_message_ref,
+        ..
+    } = submitted
+    else {
+        panic!("first submit should be accepted")
+    };
+
+    assert_eq!(coordinator.submission_count(), 1);
+    assert_eq!(
+        recorded.lock().expect("lock").as_slice(),
+        &[(
+            "thread-alpha".to_string(),
+            accepted_message_ref.as_str().to_string(),
+            "/code-review inspect this".to_string()
+        )]
+    );
+}
+
+#[tokio::test]
+async fn busy_submit_clears_skill_activation_message() {
+    let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
+    let active_run_id = TurnRunId::new();
+    let coordinator = Arc::new(FakeTurnCoordinator::with_submit_error(
+        TurnError::ThreadBusy(ironclaw_turns::ThreadBusy {
+            active_run_id,
+            status: TurnStatus::Running,
+            event_cursor: EventCursor(17),
+        }),
+    ));
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+    let cleared = Arc::new(Mutex::new(Vec::new()));
+    let recorded_for_hook = Arc::clone(&recorded);
+    let cleared_for_hook = Arc::clone(&cleared);
+    let services = RebornServices::new(threads, coordinator.clone()).with_skill_activation_hooks(
+        move |scope, accepted_message_ref, message| {
+            recorded_for_hook.lock().expect("lock").push((
+                scope.thread_id.as_str().to_string(),
+                accepted_message_ref.as_str().to_string(),
+                message.to_string(),
+            ));
+            Ok(())
+        },
+        move |scope, accepted_message_ref| {
+            cleared_for_hook.lock().expect("lock").push((
+                scope.thread_id.as_str().to_string(),
+                accepted_message_ref.as_str().to_string(),
+            ));
+            Ok(())
+        },
+    );
+    create_thread_for(&services, caller(), "thread-alpha").await;
+
+    let deferred = services
+        .submit_turn(
+            caller(),
+            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+                "client_action_id": "send-skill-activation-busy",
+                "thread_id": "thread-alpha",
+                "content": "/code-review inspect this"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("busy submit is deferred");
+
+    assert!(matches!(
+        deferred,
+        RebornSubmitTurnResponse::DeferredBusy {
+            active_run_id: id,
+            ..
+        } if id == active_run_id
+    ));
+    assert_eq!(coordinator.submission_count(), 0);
+    let recorded = recorded.lock().expect("lock");
+    let cleared = cleared.lock().expect("lock");
+    assert_eq!(recorded.len(), 1);
+    assert_eq!(
+        cleared.as_slice(),
+        &[(recorded[0].0.clone(), recorded[0].1.clone())],
+        "deferred submissions must clear their activation input before returning"
+    );
+}
+
+#[tokio::test]
+async fn submit_turn_returns_internal_when_skill_activation_recorder_fails() {
+    let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let services = RebornServices::new(threads, coordinator.clone())
+        .with_skill_activation_recorder(|_, _, _| {
+            Err(ironclaw_product_workflow::RebornServicesError {
+                code: RebornServicesErrorCode::Internal,
+                kind: RebornServicesErrorKind::Internal,
+                status_code: 500,
+                retryable: false,
+                field: None,
+                validation_code: None,
+            })
+        });
+    create_thread_for(&services, caller(), "thread-alpha").await;
+
+    let err = services
+        .submit_turn(
+            caller(),
+            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+                "client_action_id": "send-recorder-fails",
+                "thread_id": "thread-alpha",
+                "content": "/code-review inspect this"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect_err("recorder failure is surfaced");
+
+    assert_eq!(err.code, RebornServicesErrorCode::Internal);
+    assert_eq!(coordinator.submission_count(), 0);
+    let timeline = services
+        .get_timeline(
+            caller(),
+            RebornTimelineRequest {
+                thread_id: "thread-alpha".to_string(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("timeline");
+    assert_eq!(timeline.messages.len(), 1);
+    assert_eq!(timeline.messages[0].status, MessageStatus::Accepted);
+}
+
+#[tokio::test]
 async fn m2_facade_timeline_contract_uses_fake_thread_port_with_authenticated_scope() {
     let web_caller = caller();
     let expected_tenant_id = web_caller.tenant_id.clone();
@@ -1033,6 +1463,34 @@ async fn submit_turn_rejects_missing_thread_before_turn_submission() {
 
     assert_eq!(err.code, RebornServicesErrorCode::NotFound);
     assert_eq!(err.status_code, 404);
+    assert_eq!(coordinator.submission_count(), 0);
+}
+
+#[tokio::test]
+async fn submit_turn_maps_capacity_exceeded_to_non_retryable_rate_limit() {
+    let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
+    let coordinator = Arc::new(FakeTurnCoordinator::with_submit_error(
+        TurnError::capacity_exceeded(TurnCapacityResource::SubmitTurn, 1),
+    ));
+    let services = RebornServices::new(threads, coordinator.clone());
+    create_thread_for(&services, caller(), "thread-alpha").await;
+
+    let err = services
+        .submit_turn(
+            caller(),
+            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+                "client_action_id": "send-capacity",
+                "thread_id": "thread-alpha",
+                "content": "capacity denied"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect_err("capacity error must map through facade");
+
+    assert_eq!(err.code, RebornServicesErrorCode::RateLimited);
+    assert_eq!(err.status_code, 429);
+    assert!(!err.retryable);
     assert_eq!(coordinator.submission_count(), 0);
 }
 
@@ -1957,11 +2415,366 @@ async fn approved_gate_resolution_resumes_turn() {
 
     assert!(matches!(response, RebornResolveGateResponse::Resumed(_)));
     assert_eq!(coordinator.resumption_count(), 1);
+    assert_eq!(
+        coordinator.last_resumption_precondition(),
+        Some(ResumeTurnPrecondition::AnyBlockedGate)
+    );
     assert!(
         coordinator
             .last_resumption_source_binding_ref()
             .expect("resume source binding")
             .contains("gate-alpha")
+    );
+}
+
+#[tokio::test]
+async fn resolve_gate_rejects_missing_run_state_actor() {
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        coordinator.clone(),
+    );
+    create_thread_for(&services, caller(), "thread-alpha").await;
+    coordinator.set_parked_gate(GateRef::new("gate-alpha").expect("gate"));
+    coordinator.set_run_state_actor(None);
+
+    let err = services
+        .resolve_gate(
+            caller(),
+            serde_json::from_value::<WebUiResolveGateRequest>(json!({
+                "client_action_id": "gate-missing-actor",
+                "thread_id": "thread-alpha",
+                "run_id": run_id_string(),
+                "gate_ref": "gate-alpha",
+                "resolution": "denied"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect_err("missing run-state actor must fail closed");
+
+    assert_eq!(err.code, RebornServicesErrorCode::Forbidden);
+    assert_eq!(err.kind, RebornServicesErrorKind::ParticipantDenied);
+    assert_eq!(err.status_code, 403);
+    assert_eq!(coordinator.cancellation_count(), 0);
+}
+
+#[tokio::test]
+async fn resolve_gate_rejects_mismatched_run_state_actor() {
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        coordinator.clone(),
+    );
+    create_thread_for(&services, caller(), "thread-alpha").await;
+    coordinator.set_parked_gate(GateRef::new("gate-alpha").expect("gate"));
+    coordinator.set_run_state_actor(Some(turn_actor_for_user("user-beta")));
+
+    let err = services
+        .resolve_gate(
+            caller(),
+            serde_json::from_value::<WebUiResolveGateRequest>(json!({
+                "client_action_id": "gate-mismatched-actor",
+                "thread_id": "thread-alpha",
+                "run_id": run_id_string(),
+                "gate_ref": "gate-alpha",
+                "resolution": "denied"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect_err("mismatched run-state actor must be rejected");
+
+    assert_eq!(err.code, RebornServicesErrorCode::Forbidden);
+    assert_eq!(err.kind, RebornServicesErrorKind::ParticipantDenied);
+    assert_eq!(err.status_code, 403);
+    assert_eq!(coordinator.cancellation_count(), 0);
+}
+
+#[tokio::test]
+async fn generic_gate_resolution_rejects_blocked_auth_run() {
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        coordinator.clone(),
+    );
+    create_thread_for(&services, caller(), "thread-alpha").await;
+    coordinator.set_parked_auth_gate(GateRef::new("custom-auth-gate").expect("gate"));
+
+    let err = services
+        .resolve_gate(
+            caller(),
+            serde_json::from_value::<WebUiResolveGateRequest>(json!({
+                "client_action_id": "gate-auth-fallback",
+                "thread_id": "thread-alpha",
+                "run_id": run_id_string(),
+                "gate_ref": "custom-auth-gate",
+                "resolution": "approved"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect_err("generic resolver must not resume auth gate");
+
+    assert_eq!(err.code, RebornServicesErrorCode::Unavailable);
+    assert_eq!(err.kind, RebornServicesErrorKind::BlockedAuthentication);
+    assert_eq!(coordinator.resumption_count(), 0);
+}
+
+#[tokio::test]
+async fn blocked_auth_run_routes_non_prefixed_gate_to_auth_interaction_service() {
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let auth_interactions = Arc::new(RecordingAuthInteractionService::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        coordinator.clone(),
+    )
+    .with_auth_interactions(auth_interactions.clone());
+    create_thread_for(&services, caller(), "thread-alpha").await;
+    coordinator.set_parked_auth_gate(GateRef::new("custom-auth-gate").expect("gate"));
+
+    let response = services
+        .resolve_gate(
+            caller(),
+            serde_json::from_value::<WebUiResolveGateRequest>(json!({
+                "client_action_id": "gate-auth-state-routed",
+                "thread_id": "thread-alpha",
+                "run_id": run_id_string(),
+                "gate_ref": "custom-auth-gate",
+                "resolution": "denied"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("blocked auth status routes to auth interaction service");
+
+    assert!(matches!(response, RebornResolveGateResponse::Cancelled(_)));
+    assert_eq!(auth_interactions.resolution_count(), 1);
+    let resolution = auth_interactions.last_resolution().expect("resolution");
+    assert_eq!(resolution.gate_ref.as_str(), "custom-auth-gate");
+    assert_eq!(resolution.decision, AuthInteractionDecision::Deny);
+    assert_eq!(coordinator.cancellation_count(), 0);
+}
+
+#[tokio::test]
+async fn blocked_auth_run_with_stale_gate_ref_returns_conflict() {
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let auth_interactions = Arc::new(RecordingAuthInteractionService::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        coordinator.clone(),
+    )
+    .with_auth_interactions(auth_interactions.clone());
+    create_thread_for(&services, caller(), "thread-alpha").await;
+    coordinator.set_parked_auth_gate(GateRef::new("gate-current").expect("gate"));
+
+    let err = services
+        .resolve_gate(
+            caller(),
+            serde_json::from_value::<WebUiResolveGateRequest>(json!({
+                "client_action_id": "gate-auth-stale",
+                "thread_id": "thread-alpha",
+                "run_id": run_id_string(),
+                "gate_ref": "gate-stale",
+                "resolution": "approved"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect_err("stale auth gate_ref must produce Conflict");
+
+    assert_eq!(err.code, RebornServicesErrorCode::Conflict);
+    assert_eq!(err.kind, RebornServicesErrorKind::BlockedAuthentication);
+    assert_eq!(err.status_code, 409);
+    assert_eq!(coordinator.resumption_count(), 0);
+    assert_eq!(coordinator.cancellation_count(), 0);
+    assert_eq!(auth_interactions.resolution_count(), 0);
+}
+
+#[tokio::test]
+async fn blocked_approval_run_routes_non_prefixed_gate_to_approval_interaction_service() {
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let approval_interactions = Arc::new(RecordingApprovalInteractionService::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        coordinator.clone(),
+    )
+    .with_approval_interactions(approval_interactions.clone());
+    create_thread_for(&services, caller(), "thread-alpha").await;
+    coordinator.set_parked_approval_gate(GateRef::new("custom-approval-gate").expect("gate"));
+
+    let response = services
+        .resolve_gate(
+            caller(),
+            serde_json::from_value::<WebUiResolveGateRequest>(json!({
+                "client_action_id": "gate-approval-state-routed",
+                "thread_id": "thread-alpha",
+                "run_id": run_id_string(),
+                "gate_ref": "custom-approval-gate",
+                "resolution": "approved"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("blocked approval status routes to approval interaction service");
+
+    assert!(matches!(response, RebornResolveGateResponse::Resumed(_)));
+    assert_eq!(approval_interactions.resolution_count(), 1);
+    let resolution = approval_interactions.last_resolution().expect("resolution");
+    assert_eq!(resolution.gate_ref.as_str(), "custom-approval-gate");
+    assert_eq!(
+        resolution.decision,
+        ApprovalInteractionDecision::ApproveOnce
+    );
+    assert_eq!(coordinator.resumption_count(), 0);
+}
+
+#[tokio::test]
+async fn blocked_approval_run_with_stale_gate_ref_returns_conflict() {
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let approval_interactions = Arc::new(RecordingApprovalInteractionService::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        coordinator.clone(),
+    )
+    .with_approval_interactions(approval_interactions.clone());
+    create_thread_for(&services, caller(), "thread-alpha").await;
+    coordinator.set_parked_approval_gate(GateRef::new("gate-current").expect("gate"));
+
+    let err = services
+        .resolve_gate(
+            caller(),
+            serde_json::from_value::<WebUiResolveGateRequest>(json!({
+                "client_action_id": "gate-approval-stale",
+                "thread_id": "thread-alpha",
+                "run_id": run_id_string(),
+                "gate_ref": "gate-stale",
+                "resolution": "denied"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect_err("stale approval gate_ref must produce Conflict");
+
+    assert_eq!(err.code, RebornServicesErrorCode::Conflict);
+    assert_eq!(err.kind, RebornServicesErrorKind::BlockedApproval);
+    assert_eq!(err.status_code, 409);
+    assert_eq!(coordinator.resumption_count(), 0);
+    assert_eq!(coordinator.cancellation_count(), 0);
+    assert_eq!(approval_interactions.resolution_count(), 0);
+}
+
+#[tokio::test]
+async fn terminal_run_state_rejects_gate_resolution_before_shape_fallback() {
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let approval_interactions = Arc::new(RecordingApprovalInteractionService::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        coordinator.clone(),
+    )
+    .with_approval_interactions(approval_interactions.clone());
+    create_thread_for(&services, caller(), "thread-alpha").await;
+    coordinator.set_run_state_status(TurnStatus::Completed);
+    let gate_ref = approval_gate_ref(ApprovalRequestId::new()).expect("approval gate ref");
+
+    let err = services
+        .resolve_gate(
+            caller(),
+            serde_json::from_value::<WebUiResolveGateRequest>(json!({
+                "client_action_id": "gate-terminal",
+                "thread_id": "thread-alpha",
+                "run_id": run_id_string(),
+                "gate_ref": gate_ref.as_str(),
+                "resolution": "approved"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect_err("terminal run must fail closed before shape fallback");
+
+    assert_eq!(err.code, RebornServicesErrorCode::Conflict);
+    assert_eq!(err.kind, RebornServicesErrorKind::Conflict);
+    assert_eq!(err.status_code, 409);
+    assert_eq!(coordinator.resumption_count(), 0);
+    assert_eq!(coordinator.cancellation_count(), 0);
+    assert_eq!(approval_interactions.resolution_count(), 0);
+}
+
+#[tokio::test]
+async fn approval_gate_resolution_uses_approval_interaction_service() {
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let approval_interactions = Arc::new(RecordingApprovalInteractionService::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        coordinator.clone(),
+    )
+    .with_approval_interactions(approval_interactions.clone());
+    create_thread_for(&services, caller(), "thread-alpha").await;
+    let gate_ref = approval_gate_ref(ApprovalRequestId::new()).expect("approval gate ref");
+
+    let response = services
+        .resolve_gate(
+            caller(),
+            serde_json::from_value::<WebUiResolveGateRequest>(json!({
+                "client_action_id": "approval-gate-1",
+                "thread_id": "thread-alpha",
+                "run_id": run_id_string(),
+                "gate_ref": gate_ref.as_str(),
+                "resolution": "approved"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("approval gate resolution succeeds");
+
+    assert!(matches!(response, RebornResolveGateResponse::Resumed(_)));
+    assert_eq!(approval_interactions.resolution_count(), 1);
+    assert_eq!(coordinator.resumption_count(), 0);
+    assert_eq!(
+        approval_interactions
+            .last_resolution()
+            .expect("resolution")
+            .gate_ref,
+        gate_ref
+    );
+}
+
+#[tokio::test]
+async fn approval_gate_denial_uses_approval_interaction_service_and_returns_cancelled() {
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let approval_interactions = Arc::new(RecordingApprovalInteractionService::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        coordinator.clone(),
+    )
+    .with_approval_interactions(approval_interactions.clone());
+    create_thread_for(&services, caller(), "thread-alpha").await;
+    let gate_ref = approval_gate_ref(ApprovalRequestId::new()).expect("approval gate ref");
+
+    let response = services
+        .resolve_gate(
+            caller(),
+            serde_json::from_value::<WebUiResolveGateRequest>(json!({
+                "client_action_id": "approval-gate-deny",
+                "thread_id": "thread-alpha",
+                "run_id": run_id_string(),
+                "gate_ref": gate_ref.as_str(),
+                "resolution": "denied"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("approval gate denial succeeds");
+
+    assert!(matches!(response, RebornResolveGateResponse::Cancelled(_)));
+    assert_eq!(approval_interactions.resolution_count(), 1);
+    assert_eq!(coordinator.cancellation_count(), 0);
+    assert_eq!(
+        approval_interactions
+            .last_resolution()
+            .expect("resolution")
+            .decision,
+        ApprovalInteractionDecision::Deny
     );
 }
 
@@ -1973,6 +2786,7 @@ async fn credential_gate_resolution_returns_sanitized_stable_error_until_gate_po
         coordinator.clone(),
     );
     create_thread_for(&services, caller(), "thread-alpha").await;
+    let credential_ref = CredentialAccountId::new();
 
     let err = services
         .resolve_gate(
@@ -1983,7 +2797,7 @@ async fn credential_gate_resolution_returns_sanitized_stable_error_until_gate_po
                 "run_id": run_id_string(),
                 "gate_ref": "gate-alpha",
                 "resolution": "credential_provided",
-                "credential_ref": "credential-alpha"
+                "credential_ref": credential_ref.to_string()
             }))
             .expect("request"),
         )
@@ -1995,7 +2809,121 @@ async fn credential_gate_resolution_returns_sanitized_stable_error_until_gate_po
     assert_eq!(err.status_code, 503);
     assert_eq!(coordinator.resumption_count(), 0);
     let rendered = format!("{err:?} {}", serde_json::to_string(&err).expect("json"));
-    assert!(!rendered.contains("credential-alpha"));
+    assert!(!rendered.contains(credential_ref.to_string().as_str()));
+}
+
+#[tokio::test]
+async fn auth_gate_credential_resolution_uses_auth_interaction_service() {
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let auth_interactions = Arc::new(RecordingAuthInteractionService::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        coordinator.clone(),
+    )
+    .with_auth_interactions(auth_interactions.clone());
+    create_thread_for(&services, caller(), "thread-alpha").await;
+    let credential_ref = CredentialAccountId::new();
+
+    let response = services
+        .resolve_gate(
+            caller(),
+            serde_json::from_value::<WebUiResolveGateRequest>(json!({
+                "client_action_id": "gate-credential",
+                "thread_id": "thread-alpha",
+                "run_id": run_id_string(),
+                "gate_ref": "gate:auth-alpha",
+                "resolution": "credential_provided",
+                "credential_ref": credential_ref.to_string()
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("credential resolution routes through auth interaction service");
+
+    assert!(matches!(response, RebornResolveGateResponse::Resumed(_)));
+    assert_eq!(auth_interactions.resolution_count(), 1);
+    let resolution = auth_interactions.last_resolution().expect("resolution");
+    assert_eq!(resolution.gate_ref.as_str(), "gate:auth-alpha");
+    assert_eq!(
+        resolution.decision,
+        AuthInteractionDecision::CredentialProvided { credential_ref }
+    );
+    assert_eq!(coordinator.resumption_count(), 0);
+}
+
+#[tokio::test]
+async fn hook_auth_gate_denial_uses_auth_interaction_service() {
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let auth_interactions = Arc::new(RecordingAuthInteractionService::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        coordinator.clone(),
+    )
+    .with_auth_interactions(auth_interactions.clone());
+    create_thread_for(&services, caller(), "thread-alpha").await;
+
+    let response = services
+        .resolve_gate(
+            caller(),
+            serde_json::from_value::<WebUiResolveGateRequest>(json!({
+                "client_action_id": "gate-auth-deny",
+                "thread_id": "thread-alpha",
+                "run_id": run_id_string(),
+                "gate_ref": "gate:hook-auth-alpha",
+                "resolution": "denied"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("auth denial routes through auth interaction service");
+
+    assert!(matches!(response, RebornResolveGateResponse::Cancelled(_)));
+    assert_eq!(auth_interactions.resolution_count(), 1);
+    let resolution = auth_interactions.last_resolution().expect("resolution");
+    assert_eq!(resolution.gate_ref.as_str(), "gate:hook-auth-alpha");
+    assert_eq!(resolution.decision, AuthInteractionDecision::Deny);
+    assert_eq!(coordinator.cancellation_count(), 0);
+}
+
+#[tokio::test]
+async fn missing_run_state_for_auth_gate_still_routes_to_auth_interaction_service() {
+    let coordinator = Arc::new(FakeTurnCoordinator::with_run_state_error(
+        TurnError::ScopeNotFound,
+    ));
+    let auth_interactions = Arc::new(RecordingAuthInteractionService::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        coordinator.clone(),
+    )
+    .with_auth_interactions(auth_interactions.clone());
+    create_thread_for(&services, caller(), "thread-alpha").await;
+
+    let response = services
+        .resolve_gate(
+            caller(),
+            serde_json::from_value::<WebUiResolveGateRequest>(json!({
+                "client_action_id": "gate-auth-missing-run",
+                "thread_id": "thread-alpha",
+                "run_id": run_id_string(),
+                "gate_ref": "gate:hook-auth-missing",
+                "resolution": "denied"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("typed auth gate routes to auth interaction service when run-state is gone");
+
+    assert!(matches!(response, RebornResolveGateResponse::Cancelled(_)));
+    assert_eq!(auth_interactions.resolution_count(), 1);
+    assert_eq!(
+        auth_interactions
+            .last_resolution()
+            .expect("resolution")
+            .gate_ref
+            .as_str(),
+        "gate:hook-auth-missing"
+    );
+    assert_eq!(coordinator.cancellation_count(), 0);
 }
 
 #[tokio::test]
@@ -2312,6 +3240,74 @@ async fn approved_gate_resolution_with_persistent_flag_is_rejected() {
         coordinator.resumption_count(),
         0,
         "resume_turn must NOT be called for unsupported persistent approval"
+    );
+}
+
+#[tokio::test]
+async fn approval_gate_resolution_with_persistent_flag_is_rejected_without_approval_interaction() {
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let approval_interactions = Arc::new(RecordingApprovalInteractionService::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        coordinator.clone(),
+    )
+    .with_approval_interactions(approval_interactions.clone());
+    create_thread_for(&services, caller(), "thread-alpha").await;
+    let gate_ref = approval_gate_ref(ApprovalRequestId::new()).expect("approval gate ref");
+
+    let err = services
+        .resolve_gate(
+            caller(),
+            serde_json::from_value::<WebUiResolveGateRequest>(json!({
+                "client_action_id": "approval-gate-always",
+                "thread_id": "thread-alpha",
+                "run_id": run_id_string(),
+                "gate_ref": gate_ref.as_str(),
+                "resolution": "approved",
+                "always": true,
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect_err("persistent approval must be rejected");
+
+    assert_eq!(err.code, RebornServicesErrorCode::Unavailable);
+    assert_eq!(err.kind, RebornServicesErrorKind::BlockedApproval);
+    assert_eq!(err.status_code, 503);
+    assert_eq!(approval_interactions.resolution_count(), 0);
+    assert_eq!(coordinator.resumption_count(), 0);
+}
+
+#[tokio::test]
+async fn setup_extension_projects_through_configured_lifecycle_facade() {
+    let lifecycle_facade = Arc::new(RecordingLifecycleFacade::new());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_lifecycle_product_facade(lifecycle_facade.clone());
+
+    let response = services
+        .setup_extension(
+            caller(),
+            ironclaw_common::ExtensionName::new("github").expect("valid extension"),
+            WebUiSetupExtensionRequest::default(),
+        )
+        .await
+        .expect("setup extension response");
+
+    assert_eq!(response.phase, LifecyclePhase::UnsupportedOrLegacy);
+    assert!(response.blockers.iter().any(|blocker| matches!(
+        blocker,
+        LifecycleReadinessBlocker::Runtime { ref_id: Some(ref_id) }
+            if ref_id.as_str() == "extension_lifecycle_store_unwired"
+    )));
+    assert_eq!(
+        lifecycle_facade.package_refs(),
+        vec![
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github")
+                .expect("valid package ref")
+        ]
     );
 }
 
@@ -2700,4 +3696,54 @@ fn facade_source_avoids_forbidden_runtime_dependencies() {
     }
 
     let _ = Utc::now();
+}
+
+// Regression for the missing-error-path-test review (Medium): the
+// new `list_threads` facade path must fail closed until a backend
+// override for `list_threads_for_scope` is wired. The default
+// `SessionThreadService` impl returns `Backend(...)`, and the
+// facade is supposed to translate that into a retryable
+// `service_unavailable` (HTTP 503) — never an empty thread list
+// that pretends the caller owns nothing. This test pins the wire
+// contract so a future regression that quietly returns Ok([]) on a
+// missing backend would break the test, not silently mislead
+// callers.
+#[tokio::test]
+async fn list_threads_unimplemented_backend_returns_service_unavailable() {
+    // `ScopeMismatchThreadStub` is reused here because it
+    // intentionally does NOT override the trait's default
+    // `list_threads_for_scope` impl, so the facade sees the
+    // unimplemented-enumeration error path. The in-memory backend
+    // grew a real enumeration impl (local-dev needed working
+    // sidebar listing), so it can no longer stand in for a backend
+    // without enumeration support.
+    let services = RebornServices::new(
+        Arc::new(ScopeMismatchThreadStub),
+        Arc::new(FakeTurnCoordinator::default()),
+    );
+
+    let error = services
+        .list_threads(caller(), WebUiListThreadsRequest::default())
+        .await
+        .expect_err(
+            "list_threads must fail closed when the SessionThreadService backend \
+             does not implement list_threads_for_scope",
+        );
+    assert_eq!(error.code, RebornServicesErrorCode::Unavailable);
+    assert_eq!(error.status_code, 503);
+    assert!(
+        error.retryable,
+        "Backend errors are retryable so the browser can re-poll once a v2-aware \
+         backend overrides list_threads_for_scope",
+    );
+
+    // Confirm the wire shape is the snake_case enum the WebUi handler maps
+    // to its `error` field; matching on the variant alone would still pass
+    // if someone changed `#[serde(rename_all = ...)]` to PascalCase.
+    let json = serde_json::to_value(&error).expect("serialize");
+    assert_eq!(
+        json["code"], "unavailable",
+        "wire code must be snake_case `unavailable`; got: {json}"
+    );
+    assert_eq!(json["retryable"], true);
 }

@@ -16,6 +16,7 @@ pub enum RebornReadinessState {
 pub struct RebornFacadeReadiness {
     pub host_runtime: bool,
     pub turn_coordinator: bool,
+    pub product_auth: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -33,6 +34,7 @@ impl RebornReadiness {
             facades: RebornFacadeReadiness {
                 host_runtime: false,
                 turn_coordinator: false,
+                product_auth: false,
             },
         }
     }

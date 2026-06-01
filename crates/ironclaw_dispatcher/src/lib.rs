@@ -9,15 +9,19 @@ use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
 use ironclaw_events::{EventSink, RuntimeEvent};
-use ironclaw_extensions::{ExtensionPackage, ExtensionRegistry};
+use ironclaw_extensions::{ExtensionPackage, ExtensionRegistry, SharedExtensionRegistry};
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
     CapabilityDescriptor, CapabilityId, ExtensionId, MountView, ResourceEstimate, ResourceReceipt,
     ResourceReservation, ResourceScope, ResourceUsage, RuntimeKind,
+    runtime_policy::{
+        ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
+        NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
+    },
 };
 pub use ironclaw_host_api::{
-    CapabilityDispatchRequest, CapabilityDispatchResult, CapabilityDispatcher, DispatchError,
-    RuntimeDispatchErrorKind,
+    CapabilityDispatchRequest, CapabilityDispatchResult, CapabilityDispatcher,
+    CapabilityDisplayOutputPreview, DispatchError, RuntimeDispatchErrorKind,
 };
 use ironclaw_resources::ResourceGovernor;
 use serde_json::Value;
@@ -58,6 +62,7 @@ where
     pub descriptor: &'a CapabilityDescriptor,
     pub filesystem: &'a F,
     pub governor: &'a G,
+    pub runtime_policy: &'a EffectiveRuntimePolicy,
     pub capability_id: &'a CapabilityId,
     pub scope: ResourceScope,
     pub estimate: ResourceEstimate,
@@ -70,6 +75,7 @@ where
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeAdapterResult {
     pub output: Value,
+    pub display_preview: Option<CapabilityDisplayOutputPreview>,
     pub usage: ResourceUsage,
     pub receipt: ResourceReceipt,
     pub output_bytes: u64,
@@ -98,9 +104,10 @@ where
     F: RootFilesystem,
     G: ResourceGovernor,
 {
-    registry: ServiceHandle<'a, ExtensionRegistry>,
+    registry: Arc<SharedExtensionRegistry>,
     filesystem: ServiceHandle<'a, F>,
     governor: ServiceHandle<'a, G>,
+    runtime_policy: EffectiveRuntimePolicy,
     runtime_adapters: HashMap<RuntimeKind, ServiceHandle<'a, dyn RuntimeAdapter<F, G> + 'a>>,
     event_sink: Option<ServiceHandle<'a, dyn EventSink + 'a>>,
 }
@@ -112,9 +119,10 @@ where
 {
     pub fn new(registry: &'a ExtensionRegistry, filesystem: &'a F, governor: &'a G) -> Self {
         Self {
-            registry: ServiceHandle::Borrowed(registry),
+            registry: Arc::new(SharedExtensionRegistry::new(registry.clone())),
             filesystem: ServiceHandle::Borrowed(filesystem),
             governor: ServiceHandle::Borrowed(governor),
+            runtime_policy: default_runtime_policy(),
             runtime_adapters: HashMap::new(),
             event_sink: None,
         }
@@ -129,13 +137,39 @@ where
         F: 'static,
         G: 'static,
     {
+        Self::from_shared_registry(
+            Arc::new(SharedExtensionRegistry::new((*registry).clone())),
+            filesystem,
+            governor,
+        )
+    }
+
+    pub fn from_shared_registry(
+        registry: Arc<SharedExtensionRegistry>,
+        filesystem: Arc<F>,
+        governor: Arc<G>,
+    ) -> RuntimeDispatcher<'static, F, G>
+    where
+        F: 'static,
+        G: 'static,
+    {
         RuntimeDispatcher {
-            registry: ServiceHandle::Shared(registry),
+            registry,
             filesystem: ServiceHandle::Shared(filesystem),
             governor: ServiceHandle::Shared(governor),
+            runtime_policy: default_runtime_policy(),
             runtime_adapters: HashMap::new(),
             event_sink: None,
         }
+    }
+
+    /// Replaces the effective runtime policy passed to runtime adapters.
+    ///
+    /// The dispatcher does not resolve profiles; callers must supply the
+    /// concrete policy that should govern each dispatch request.
+    pub fn with_runtime_policy(mut self, runtime_policy: EffectiveRuntimePolicy) -> Self {
+        self.runtime_policy = runtime_policy;
+        self
     }
 
     pub fn with_runtime_adapter<T>(mut self, runtime: RuntimeKind, adapter: &'a T) -> Self
@@ -170,42 +204,50 @@ where
         self
     }
 
+    #[tracing::instrument(
+        level = "debug",
+        skip(self, request),
+        fields(
+            capability_id = %request.capability_id,
+            scope = ?request.scope,
+        )
+    )]
     pub async fn dispatch_json(
         &self,
         request: CapabilityDispatchRequest,
     ) -> Result<CapabilityDispatchResult, DispatchError> {
+        let mut request = request;
         let scope = request.scope.clone();
         let capability_id = request.capability_id.clone();
+        let mut reservation_guard = DispatchReservationGuard::new(
+            self.governor.as_ref(),
+            request.resource_reservation.take(),
+        );
         self.emit_event(RuntimeEvent::dispatch_requested(
             scope.clone(),
             capability_id.clone(),
         ))
         .await?;
 
-        let descriptor = match self
-            .registry
-            .as_ref()
-            .get_capability(&request.capability_id)
-        {
+        let registry = self.registry.snapshot();
+        let descriptor = match registry.get_capability(&request.capability_id).cloned() {
             Some(descriptor) => descriptor,
             None => {
                 let error = DispatchError::UnknownCapability {
                     capability: capability_id.clone(),
                 };
-                self.release_request_reservation(&request);
                 self.emit_dispatch_failure(scope, capability_id, None, None, &error)
                     .await?;
                 return Err(error);
             }
         };
-        let package = match self.registry.as_ref().get_extension(&descriptor.provider) {
+        let package = match registry.get_extension(&descriptor.provider).cloned() {
             Some(package) => package,
             None => {
                 let error = DispatchError::UnknownProvider {
                     capability: capability_id.clone(),
                     provider: descriptor.provider.clone(),
                 };
-                self.release_request_reservation(&request);
                 self.emit_dispatch_failure(
                     scope,
                     capability_id,
@@ -224,7 +266,6 @@ where
                 descriptor_runtime: descriptor.runtime,
                 package_runtime,
             };
-            self.release_request_reservation(&request);
             self.emit_dispatch_failure(
                 scope,
                 capability_id,
@@ -239,7 +280,6 @@ where
         let runtime = descriptor.runtime;
         let Some(adapter) = self.runtime_adapters.get(&runtime) else {
             let error = DispatchError::MissingRuntimeBackend { runtime };
-            self.release_request_reservation(&request);
             self.emit_dispatch_failure(
                 scope,
                 capability_id,
@@ -262,15 +302,16 @@ where
         let execution = match adapter
             .as_ref()
             .dispatch_json(RuntimeAdapterRequest {
-                package,
-                descriptor,
+                package: &package,
+                descriptor: &descriptor,
                 filesystem: self.filesystem.as_ref(),
                 governor: self.governor.as_ref(),
+                runtime_policy: &self.runtime_policy,
                 capability_id: &request.capability_id,
                 scope: request.scope,
                 estimate: request.estimate,
                 mounts: request.mounts,
-                resource_reservation: request.resource_reservation,
+                resource_reservation: reservation_guard.take(),
                 input: request.input,
             })
             .await
@@ -303,21 +344,10 @@ where
             provider: descriptor.provider.clone(),
             runtime,
             output: execution.output,
+            display_preview: execution.display_preview,
             usage: execution.usage,
             receipt: execution.receipt,
         })
-    }
-
-    fn release_request_reservation(&self, request: &CapabilityDispatchRequest) {
-        if let Some(reservation) = &request.resource_reservation
-            && let Err(error) = self.governor.as_ref().release(reservation.id)
-        {
-            tracing::warn!(
-                reservation_id = %reservation.id,
-                error = %error,
-                "failed to release prepared resource reservation after dispatcher validation failure"
-            );
-        }
     }
 
     async fn emit_dispatch_failure(
@@ -333,16 +363,80 @@ where
             capability_id,
             provider,
             runtime,
-            dispatch_error_kind(error),
+            error.event_kind(),
         ))
         .await
     }
 
     async fn emit_event(&self, event: RuntimeEvent) -> Result<(), DispatchError> {
+        tracing::debug!(
+            event_kind = ?event.kind,
+            capability_id = %event.capability_id,
+            provider = event.provider.as_ref().map(|provider| provider.as_str()).unwrap_or(""),
+            runtime = ?event.runtime,
+            output_bytes = event.output_bytes,
+            error_kind = event.error_kind.as_deref().unwrap_or(""),
+            "runtime dispatcher observed event"
+        );
         if let Some(sink) = self.event_sink.as_ref() {
             let _ = sink.as_ref().emit(event).await;
         }
         Ok(())
+    }
+}
+
+struct DispatchReservationGuard<'a, G>
+where
+    G: ResourceGovernor,
+{
+    governor: &'a G,
+    reservation: Option<ResourceReservation>,
+}
+
+impl<'a, G> DispatchReservationGuard<'a, G>
+where
+    G: ResourceGovernor,
+{
+    fn new(governor: &'a G, reservation: Option<ResourceReservation>) -> Self {
+        Self {
+            governor,
+            reservation,
+        }
+    }
+
+    fn take(&mut self) -> Option<ResourceReservation> {
+        self.reservation.take()
+    }
+}
+
+impl<G> Drop for DispatchReservationGuard<'_, G>
+where
+    G: ResourceGovernor,
+{
+    fn drop(&mut self) {
+        if let Some(reservation) = &self.reservation
+            && let Err(error) = self.governor.release(reservation.id)
+        {
+            tracing::warn!(
+                reservation_id = %reservation.id,
+                error = %error,
+                "failed to release prepared resource reservation after dispatcher validation failure"
+            );
+        }
+    }
+}
+
+fn default_runtime_policy() -> EffectiveRuntimePolicy {
+    EffectiveRuntimePolicy {
+        deployment: DeploymentMode::LocalSingleUser,
+        requested_profile: RuntimeProfile::SecureDefault,
+        resolved_profile: RuntimeProfile::SecureDefault,
+        filesystem_backend: FilesystemBackendKind::ScopedVirtual,
+        process_backend: ProcessBackendKind::None,
+        network_mode: NetworkMode::Deny,
+        secret_mode: SecretMode::BrokeredHandles,
+        approval_policy: ApprovalPolicy::AskAlways,
+        audit_mode: AuditMode::LocalMinimal,
     }
 }
 
@@ -360,16 +454,5 @@ where
     }
 }
 
-fn dispatch_error_kind(error: &DispatchError) -> &'static str {
-    match error {
-        DispatchError::UnknownCapability { .. } => "unknown_capability",
-        DispatchError::UnknownProvider { .. } => "unknown_provider",
-        DispatchError::RuntimeMismatch { .. } => "runtime_mismatch",
-        DispatchError::MissingRuntimeBackend { .. } => "missing_runtime_backend",
-        DispatchError::UnsupportedRuntime { .. } => "unsupported_runtime",
-        DispatchError::Mcp { kind }
-        | DispatchError::Script { kind }
-        | DispatchError::Wasm { kind }
-        | DispatchError::FirstParty { kind } => kind.event_kind(),
-    }
-}
+// Removed: dispatch_error_kind was a local copy of DispatchError::event_kind() from ironclaw_host_api.
+// Call error.event_kind() directly instead.

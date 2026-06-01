@@ -15,19 +15,16 @@ use std::{
 use async_trait::async_trait;
 use ironclaw_host_api::sha256_digest_token;
 use ironclaw_llm::{
-    ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmProvider,
-    ToolCall, ToolCompletionRequest, ToolCompletionResponse, ToolDefinition,
+    ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmProvider, Role,
+    ToolCall, ToolCompletionRequest, ToolCompletionResponse, ToolDefinition, clean_response,
 };
 use ironclaw_loop_support::{
     HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
     HostManagedModelMessage, HostManagedModelMessageRole, HostManagedModelRequest,
-    HostManagedModelResponse, HostManagedModelRouteSnapshot, ThreadBackedLoopContextPort,
-    ThreadBackedLoopModelPort,
+    HostManagedModelResponse, HostManagedModelRouteSnapshot, HostManagedToolResultContent,
+    ThreadBackedLoopContextPort, ThreadBackedLoopModelPort,
 };
-use ironclaw_threads::{
-    ProviderToolCallReferenceEnvelope, SessionThreadService, ThreadScope,
-    ToolResultReferenceEnvelope,
-};
+use ironclaw_threads::{ProviderToolCallReferenceEnvelope, SessionThreadService, ThreadScope};
 use ironclaw_turns::{
     TurnId, TurnRunId,
     run_profile::{
@@ -38,6 +35,7 @@ use ironclaw_turns::{
         PromptMode, ProviderToolCall, ProviderToolDefinition,
     },
 };
+use tracing::debug;
 
 use crate::model_routes::{
     ModelRoute, ModelRouteError, ModelRouteErrorKind, ModelRouteProviderKey, ModelRouteResolver,
@@ -717,6 +715,15 @@ fn validate_replay_identity_text(
     Ok(())
 }
 
+#[tracing::instrument(
+    level = "debug",
+    skip(provider, completion, capabilities, replay_identity),
+    fields(
+        provider_id = %replay_identity.provider_id,
+        provider_model_id = %replay_identity.provider_model_id,
+        provider_turn_scope = provider_turn_scope.as_deref().unwrap_or("model_call=unknown"),
+    )
+)]
 async fn complete_model_request<P>(
     provider: &P,
     completion: CompletionRequest,
@@ -731,6 +738,18 @@ where
         let tool_definitions = capabilities
             .tool_definitions()
             .map_err(map_capability_host_error)?;
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            let tool_name_sample = tool_definitions
+                .iter()
+                .take(20)
+                .map(|definition| definition.name.as_str())
+                .collect::<Vec<_>>();
+            debug!(
+                tool_definition_count = tool_definitions.len(),
+                tool_name_sample = ?tool_name_sample,
+                "reborn model gateway resolved provider tool definitions"
+            );
+        }
         if !tool_definitions.is_empty() {
             let tool_request = ToolCompletionRequest::from_completion_request(
                 completion,
@@ -739,6 +758,7 @@ where
                     .map(provider_tool_definition_to_llm)
                     .collect(),
             );
+            debug!("reborn model gateway dispatching tool-capable provider request");
             let response = provider
                 .complete_with_tools(tool_request)
                 .await
@@ -753,12 +773,24 @@ where
             )
             .await;
         }
+        debug!(
+            "reborn model gateway falling back to text-only provider request because no provider tool definitions were available"
+        );
+    } else {
+        debug!(
+            "reborn model gateway dispatching text-only provider request because no capability port was supplied"
+        );
     }
 
     let response = provider
         .complete(completion)
         .await
         .map_err(map_provider_error)?;
+    debug!(
+        finish_reason = ?response.finish_reason,
+        content_bytes = response.content.len(),
+        "reborn model gateway received text-only provider response"
+    );
     response_to_host_reply(response)
 }
 
@@ -770,12 +802,36 @@ fn provider_tool_definition_to_llm(definition: ProviderToolDefinition) -> ToolDe
     }
 }
 
+#[tracing::instrument(
+    level = "debug",
+    skip(response, capabilities, replay_identity),
+    fields(
+        provider_id = %replay_identity.provider_id,
+        provider_model_id = %replay_identity.provider_model_id,
+        provider_turn_scope,
+    )
+)]
 async fn tool_response_to_host(
     response: ToolCompletionResponse,
     capabilities: Arc<dyn ironclaw_turns::run_profile::LoopCapabilityPort>,
     provider_turn_scope: &str,
     replay_identity: &ProviderReplayIdentity,
 ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+    if tracing::enabled!(tracing::Level::DEBUG) {
+        let tool_call_name_sample = response
+            .tool_calls
+            .iter()
+            .take(20)
+            .map(|tool_call| tool_call.name.as_str())
+            .collect::<Vec<_>>();
+        debug!(
+            finish_reason = ?response.finish_reason,
+            tool_call_count = response.tool_calls.len(),
+            tool_call_name_sample = ?tool_call_name_sample,
+            content_bytes = response.content.as_ref().map(|content| content.len()).unwrap_or(0),
+            "reborn model gateway received tool-capable provider response"
+        );
+    }
     if !response.tool_calls.is_empty()
         && matches!(
             response.finish_reason,
@@ -794,7 +850,7 @@ async fn tool_response_to_host(
             .any(|tool_call| !advertised_tool_names.contains(&tool_call.name))
         {
             return Err(HostManagedModelError::safe(
-                HostManagedModelErrorKind::InvalidRequest,
+                HostManagedModelErrorKind::InvalidOutput,
                 "model returned a tool call outside the advertised capability surface",
             ));
         }
@@ -824,16 +880,29 @@ async fn tool_response_to_host(
                 .map_err(map_capability_host_error)?;
             candidates.push(candidate);
         }
-        return Ok(HostManagedModelResponse::capability_calls(
+        debug!(
+            capability_call_count = candidates.len(),
+            "reborn model gateway classified provider response as capability calls"
+        );
+        return Ok(HostManagedModelResponse::capability_calls_with_reasoning(
             candidates,
             response.content.unwrap_or_default(),
+            response.reasoning,
         ));
     }
 
     match response.finish_reason {
-        FinishReason::Stop => Ok(HostManagedModelResponse::assistant_reply(
-            response.content.unwrap_or_default(),
-        )),
+        FinishReason::Stop => {
+            let content = clean_response(&response.content.unwrap_or_default());
+            debug!(
+                content_bytes = content.len(),
+                "reborn model gateway classified tool-capable provider response as assistant reply"
+            );
+            Ok(HostManagedModelResponse::assistant_reply_with_reasoning(
+                content,
+                response.reasoning,
+            ))
+        }
         FinishReason::Length => Err(HostManagedModelError::safe(
             HostManagedModelErrorKind::BudgetExceeded,
             "model response was truncated before completion",
@@ -843,7 +912,7 @@ async fn tool_response_to_host(
             "model response was blocked by provider policy",
         )),
         FinishReason::ToolUse => Err(HostManagedModelError::safe(
-            HostManagedModelErrorKind::InvalidRequest,
+            HostManagedModelErrorKind::InvalidOutput,
             "model returned tool-use finish without tool calls",
         )),
         FinishReason::Unknown => Err(HostManagedModelError::safe(
@@ -899,7 +968,13 @@ fn response_to_host_reply(
     response: CompletionResponse,
 ) -> Result<HostManagedModelResponse, HostManagedModelError> {
     match response.finish_reason {
-        FinishReason::Stop => Ok(HostManagedModelResponse::assistant_reply(response.content)),
+        FinishReason::Stop => {
+            let content = clean_response(&response.content);
+            Ok(HostManagedModelResponse::assistant_reply_with_reasoning(
+                content,
+                response.reasoning,
+            ))
+        }
         FinishReason::Length => Err(HostManagedModelError::safe(
             HostManagedModelErrorKind::BudgetExceeded,
             "model response was truncated before completion",
@@ -909,7 +984,7 @@ fn response_to_host_reply(
             "model response was blocked by provider policy",
         )),
         FinishReason::ToolUse => Err(HostManagedModelError::safe(
-            HostManagedModelErrorKind::InvalidRequest,
+            HostManagedModelErrorKind::InvalidOutput,
             "model returned unsupported tool calls for a text-only loop",
         )),
         FinishReason::Unknown => Err(HostManagedModelError::safe(
@@ -927,7 +1002,11 @@ fn map_capability_host_error(error: AgentLoopHostError) -> HostManagedModelError
         AgentLoopHostErrorKind::Unauthorized | AgentLoopHostErrorKind::PolicyDenied => {
             HostManagedModelErrorKind::PolicyDenied
         }
-        AgentLoopHostErrorKind::BudgetExceeded => HostManagedModelErrorKind::BudgetExceeded,
+        AgentLoopHostErrorKind::BudgetExceeded
+        | AgentLoopHostErrorKind::BudgetApprovalRequired
+        | AgentLoopHostErrorKind::BudgetAccountingFailed => {
+            HostManagedModelErrorKind::BudgetExceeded
+        }
         AgentLoopHostErrorKind::Cancelled => HostManagedModelErrorKind::Cancelled,
         AgentLoopHostErrorKind::Invalid
         | AgentLoopHostErrorKind::InvalidInvocation
@@ -962,49 +1041,99 @@ fn convert_messages(
             HostManagedModelMessageRole::ToolResult => {
                 let replay = tool_result_replay_message(message)?;
                 let Some(provider_call) = replay.provider_call else {
-                    converted.push(ChatMessage::system(replay.safe_summary));
+                    converted.push(ChatMessage::user(tool_summary_message(replay.safe_summary)));
                     index += 1;
                     continue;
                 };
+                if !provider_replay_matches_identity(&provider_call, replay_identity) {
+                    converted.push(ChatMessage::user(tool_summary_message(replay.safe_summary)));
+                    index += 1;
+                    continue;
+                }
                 validate_provider_replay_identity(&provider_call, replay_identity)?;
                 let provider_turn_id = provider_call.provider_turn_id.clone();
-                let mut provider_results = vec![(provider_call, replay.safe_summary)];
-                let mut plain_tool_summaries = Vec::new();
+                let mut provider_results = vec![(provider_call, replay.model_content)];
+                let mut plain_tool_results = Vec::new();
                 index += 1;
                 while index < messages.len()
                     && messages[index].role == HostManagedModelMessageRole::ToolResult
                 {
                     let next = tool_result_replay_message(&messages[index])?;
                     let Some(next_provider_call) = next.provider_call else {
-                        plain_tool_summaries.push(next.safe_summary);
+                        plain_tool_results.push(next.safe_summary);
                         index += 1;
                         continue;
                     };
+                    if !provider_replay_matches_identity(&next_provider_call, replay_identity) {
+                        plain_tool_results.push(next.safe_summary);
+                        index += 1;
+                        continue;
+                    }
                     validate_provider_replay_identity(&next_provider_call, replay_identity)?;
                     if next_provider_call.provider_turn_id != provider_turn_id {
                         break;
                     }
-                    provider_results.push((next_provider_call, next.safe_summary));
+                    provider_results.push((next_provider_call, next.model_content));
                     index += 1;
                 }
                 converted.extend(provider_tool_roundtrip_messages(provider_results));
-                converted.extend(plain_tool_summaries.into_iter().map(ChatMessage::system));
+                converted.extend(
+                    plain_tool_results
+                        .into_iter()
+                        .map(tool_summary_message)
+                        .map(ChatMessage::user),
+                );
                 continue;
             }
         }
         index += 1;
     }
-    Ok(converted)
+    Ok(coalesce_system_messages_at_start(converted))
+}
+
+fn coalesce_system_messages_at_start(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
+    let mut system_content = Vec::new();
+    let mut transcript = Vec::with_capacity(messages.len());
+    for message in messages {
+        if message.role == Role::System {
+            system_content.push(message.content);
+        } else {
+            transcript.push(message);
+        }
+    }
+    if system_content.is_empty() {
+        return transcript;
+    }
+
+    let mut normalized = Vec::with_capacity(transcript.len() + 1);
+    normalized.push(ChatMessage::system(system_content.join("\n\n")));
+    normalized.extend(transcript);
+    normalized
+}
+
+fn tool_summary_message(summary: String) -> String {
+    format!("[Tool result summary]: {summary}")
+}
+
+fn provider_replay_matches_identity(
+    provider_call: &ProviderToolCallReferenceEnvelope,
+    expected: &ProviderReplayIdentity,
+) -> bool {
+    provider_call.provider_id == expected.provider_id
+        && provider_call.provider_model_id == expected.provider_model_id
 }
 
 fn validate_provider_replay_identity(
     provider_call: &ProviderToolCallReferenceEnvelope,
     expected: &ProviderReplayIdentity,
 ) -> Result<(), HostManagedModelError> {
-    provider_call.validate().map_err(|_| {
-        HostManagedModelError::safe(
+    provider_call.validate().map_err(|error| {
+        ironclaw_loop_support::raw_host_managed_model_error(
+            "provider_tool_replay",
+            "validate_provider_call",
             HostManagedModelErrorKind::InvalidRequest,
             "provider tool-call replay metadata is invalid",
+            error,
         )
     })?;
     if provider_call.provider_id != expected.provider_id
@@ -1021,21 +1150,35 @@ fn validate_provider_replay_identity(
 struct ToolResultReplayMessage {
     provider_call: Option<ProviderToolCallReferenceEnvelope>,
     safe_summary: String,
+    model_content: String,
 }
 
 fn tool_result_replay_message(
     message: &HostManagedModelMessage,
 ) -> Result<ToolResultReplayMessage, HostManagedModelError> {
-    let envelope: ToolResultReferenceEnvelope =
-        serde_json::from_str(&message.content).map_err(|_| {
-            HostManagedModelError::safe(
+    let (safe_summary, model_content) = match message.tool_result_content.as_ref() {
+        Some(HostManagedToolResultContent::Reference { envelope }) => {
+            debug!(
+                result_ref = %envelope.result_ref,
+                "tool result resolved content unavailable; replaying safe summary fallback"
+            );
+            let safe_summary = envelope.safe_summary.as_str().to_string();
+            (safe_summary.clone(), safe_summary)
+        }
+        Some(HostManagedToolResultContent::Resolved { safe_summary }) => {
+            (safe_summary.as_str().to_string(), message.content.clone())
+        }
+        None => {
+            return Err(HostManagedModelError::safe(
                 HostManagedModelErrorKind::InvalidRequest,
-                "tool result reference transcript content is invalid",
-            )
-        })?;
+                "tool result replay content is missing",
+            ));
+        }
+    };
     Ok(ToolResultReplayMessage {
         provider_call: message.tool_result_provider_call.clone(),
-        safe_summary: envelope.safe_summary.as_str().to_string(),
+        safe_summary,
+        model_content,
     })
 }
 
@@ -1081,6 +1224,13 @@ fn provider_tool_call_from_reference(
 }
 
 fn map_provider_error(error: LlmError) -> HostManagedModelError {
+    tracing::warn!(
+        component = "model_provider",
+        operation = "complete",
+        error = %error,
+        error_debug = ?error,
+        "reborn model provider error mapped to safe summary"
+    );
     match error {
         LlmError::ContextLengthExceeded { .. } => HostManagedModelError::safe(
             HostManagedModelErrorKind::BudgetExceeded,

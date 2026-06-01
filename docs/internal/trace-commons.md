@@ -50,6 +50,23 @@ ironclaw traces opt-in \
   --upload-token-tenant-id tenant-a \
   --upload-token-workload-token-env IRONCLAW_TRACE_WORKLOAD_TOKEN
 
+# Pilot deployments add an operator-issued invite code. The issuer's
+# allowlist gate refuses claim requests whose invite code is not in the
+# active allowlist snapshot — see trace-commons-server's
+# docs/operator/pilot-allowlist.md for the operator side. When the issuer
+# refuses, the client surfaces the typed label
+# (PilotAllowlistNotMatched / PilotAllowlistInviteCodeMissing /
+# PilotAllowlistStale / PilotAllowlistMalformed) so you can act on it
+# directly.
+ironclaw traces opt-in \
+  --endpoint https://trace-ingest.internal/v1/traces \
+  --upload-token-issuer-url https://issuer.near.com/v1/trace-upload-claim \
+  --upload-token-issuer-allowed-hosts issuer.near.com \
+  --upload-token-audience trace-commons \
+  --upload-token-tenant-id tenant-a \
+  --upload-token-workload-token-env IRONCLAW_TRACE_WORKLOAD_TOKEN \
+  --upload-token-invite-code INV-PILOT-001
+
 # Create a local redacted envelope from an existing recorded trace.
 ironclaw traces preview \
   --recorded-trace trace.json \

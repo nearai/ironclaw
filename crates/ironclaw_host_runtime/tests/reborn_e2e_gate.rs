@@ -595,29 +595,33 @@ async fn reborn_e2e_gate_host_http_consumes_staged_policy_and_secret_once() {
             required: true,
         }],
         response_body_limit: Some(4096),
+        save_body_to: None,
         timeout_ms: None,
     };
 
     let response = service
         .execute(request.clone())
+        .await
         .expect("host HTTP egress should use staged Reborn policy and secret material");
     assert_eq!(response.status, 200);
-    let recorded = network_recorder.lock().unwrap();
-    assert_eq!(recorded.len(), 1);
-    assert_eq!(recorded[0].policy, staged_policy);
-    assert_eq!(
-        recorded[0]
-            .headers
-            .iter()
-            .find(|(name, _)| name == "authorization"),
-        Some(&(
-            "authorization".to_string(),
-            "Bearer sk-reborn-e2e-staged-secret".to_string()
-        ))
-    );
-    drop(recorded);
+    {
+        let recorded = network_recorder.lock().unwrap();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].policy, staged_policy);
+        assert_eq!(
+            recorded[0]
+                .headers
+                .iter()
+                .find(|(name, _)| name == "authorization"),
+            Some(&(
+                "authorization".to_string(),
+                "Bearer sk-reborn-e2e-staged-secret".to_string()
+            ))
+        );
+    }
     let replay = service
         .execute(request)
+        .await
         .expect_err("consumed staged secret must not be reusable");
     assert!(matches!(replay, RuntimeHttpEgressError::Credential { .. }));
     assert_eq!(
@@ -810,8 +814,9 @@ impl RecordingNetwork {
     }
 }
 
+#[async_trait::async_trait]
 impl NetworkHttpEgress for RecordingNetwork {
-    fn execute(
+    async fn execute(
         &self,
         request: NetworkHttpRequest,
     ) -> Result<NetworkHttpResponse, NetworkHttpError> {

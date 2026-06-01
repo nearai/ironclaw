@@ -1,5 +1,5 @@
 use ironclaw_authorization::TrustAwareCapabilityDispatchAuthorizer;
-use ironclaw_extensions::ExtensionRegistry;
+use ironclaw_extensions::{CapabilityVisibility, ExtensionRegistry};
 use ironclaw_host_api::{
     CapabilityDescriptor, CapabilityGrant, Decision, EffectKind, ResourceEstimate, RuntimeKind,
     canonical_json_v1, runtime_policy::EffectiveRuntimePolicy, sha256_digest_token,
@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 
 use crate::{
     CapabilitySurfaceVersion, HostRuntimeError, VisibleCapabilityRequest, VisibleCapabilitySurface,
+    first_party_tools::{BUILTIN_FIRST_PARTY_PROVIDER, resolve_builtin_input_schema_ref},
     plan_capability,
 };
 
@@ -149,7 +150,8 @@ impl<'a> CapabilityCatalog<'a> {
             if capabilities.len() >= max_capabilities {
                 break;
             }
-            if !request.policy.allows_runtime(descriptor.runtime)
+            if !self.is_model_visible(descriptor)
+                || !request.policy.allows_runtime(descriptor.runtime)
                 || !request.policy.allows_effects(&descriptor.effects)
             {
                 continue;
@@ -180,7 +182,7 @@ impl<'a> CapabilityCatalog<'a> {
             };
 
             capabilities.push(VisibleCapability {
-                descriptor: descriptor.clone(),
+                descriptor: surface_descriptor(descriptor)?,
                 access,
                 estimated_resources: estimate,
             });
@@ -197,6 +199,41 @@ impl<'a> CapabilityCatalog<'a> {
             capabilities,
         })
     }
+
+    fn is_model_visible(&self, descriptor: &CapabilityDescriptor) -> bool {
+        self.registry
+            .capability_visibility(&descriptor.id)
+            .unwrap_or(CapabilityVisibility::Model)
+            == CapabilityVisibility::Model
+    }
+}
+
+fn surface_descriptor(
+    descriptor: &CapabilityDescriptor,
+) -> Result<CapabilityDescriptor, HostRuntimeError> {
+    let mut descriptor = descriptor.clone();
+    if descriptor.provider.as_str() != BUILTIN_FIRST_PARTY_PROVIDER {
+        return Ok(descriptor);
+    }
+    let Some(reference) = descriptor
+        .parameters_schema
+        .get("$ref")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+    else {
+        return Err(HostRuntimeError::invalid_request(format!(
+            "built-in capability {} must publish from an input schema ref",
+            descriptor.id
+        )));
+    };
+    descriptor.parameters_schema =
+        resolve_builtin_input_schema_ref(&reference).ok_or_else(|| {
+            HostRuntimeError::invalid_request(format!(
+                "built-in capability {} references unknown input schema {}",
+                descriptor.id, reference
+            ))
+        })?;
+    Ok(descriptor)
 }
 
 fn surface_version(
@@ -380,4 +417,34 @@ fn stable_json_string(value: &Value) -> Result<String, HostRuntimeError> {
 
 fn host_api_error(error: ironclaw_host_api::HostApiError) -> HostRuntimeError {
     HostRuntimeError::invalid_request(error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ironclaw_host_api::{CapabilityId, ExtensionId, PermissionMode, TrustClass};
+
+    #[test]
+    fn builtin_surface_descriptor_requires_input_schema_ref() {
+        let descriptor = CapabilityDescriptor {
+            id: CapabilityId::new("builtin.bad").unwrap(),
+            provider: ExtensionId::new(BUILTIN_FIRST_PARTY_PROVIDER).unwrap(),
+            runtime: RuntimeKind::FirstParty,
+            trust_ceiling: TrustClass::UserTrusted,
+            description: "bad built-in descriptor".to_string(),
+            parameters_schema: json!({"type": "object"}),
+            effects: vec![EffectKind::DispatchCapability],
+            default_permission: PermissionMode::Allow,
+            runtime_credentials: Vec::new(),
+            resource_profile: None,
+        };
+
+        let error = surface_descriptor(&descriptor).expect_err("built-in schema refs are required");
+
+        assert!(
+            matches!(error, HostRuntimeError::InvalidRequest { ref reason }
+                if reason.contains("must publish from an input schema ref")),
+            "unexpected error: {error:?}"
+        );
+    }
 }

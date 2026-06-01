@@ -38,7 +38,7 @@ These are logical service contracts. They do not all need to become crates immed
 | `CapabilityCatalog` | Capability descriptors, provider mapping, schema metadata, model-visible names/descriptions | Action-time authorization, runtime execution, resource accounting |
 | `CapabilityAccessManager` | Visible capability surface, grants, scope filtering, action-time authorization inputs | Capability execution, manifest parsing, model prompting |
 | `ApprovalManager` | Approval requests, stable request ids, approve/deny/always decisions, replay-safe resolution | Chat transcript ownership, auth flows, runtime execution |
-| `AuthFlowManager` | Auth-required state, OAuth/token prompting, callback completion, retry-after-auth | Approval semantics, raw secret display, runtime dispatch |
+| `AuthFlowManager` | Auth-required state, OAuth/token prompting, callback completion, retry-after-auth | Approval semantics, auth prompt delivery policy, raw secret display, runtime dispatch |
 | `RunStateManager` | One-active-run-per-thread, blocked states, cancel/interrupt/resume, terminal transitions, checkpoints | Transcript storage, stream delivery, capability execution |
 | `RuntimeDispatcher` | Runtime lane selection and fail-closed handoff to configured backends | Manifest discovery, runtime-specific implementation, product workflows |
 | `EventStreamManager` | Realtime delivery, event ids, reconnect semantics, keepalives, fanout | Durable audit/history ownership, business policy |
@@ -56,7 +56,7 @@ Reply | CapabilityCalls
 
 Where:
 
-- `Reply` = user-visible assistant output for the active thread. Loop implementations may internally classify a reply as `FinalReply` vs `AskUser`, but that classification stays loop-owned metadata rather than becoming a new host-wide protocol branch.
+- `Reply` = user-visible assistant output for the active thread. Loop implementations may internally run reply admission such as `AcceptFinal` vs `RejectFinal`, but that classification stays loop-owned metadata rather than becoming a new host-wide protocol branch.
 - `CapabilityCalls` = one or more explicit capability invocations against the visible capability surface. Provider-native tool calls are normalized into this host contract before action-time authorization and dispatch.
 
 The parent model can reply or request explicit capabilities. It cannot switch the entire engine protocol into an ad hoc execution mode.
@@ -140,6 +140,7 @@ CapabilityCall
 Key rules:
 
 - auth-required state is not approval-required state
+- presenting the auth prompt is a transport/outbound concern; `AuthFlowManager.begin` and callback completion stay separate from prompt delivery and token storage
 - raw secrets are never written to model-visible output or transcript text
 - retry-after-auth must be replay-safe
 - secret leases are scoped and auditable

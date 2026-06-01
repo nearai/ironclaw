@@ -10,8 +10,9 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    CapabilityGrantId, CapabilityId, ExtensionId, MountView, NetworkPolicy, Principal,
-    ResourceCeiling, ResourceProfile, RuntimeKind, SecretHandle, Timestamp, TrustClass,
+    CapabilityGrantId, CapabilityId, ExtensionId, MountView, NetworkPolicy, NetworkTargetPattern,
+    Principal, ResourceCeiling, ResourceProfile, RuntimeCredentialAccountProviderId,
+    RuntimeCredentialTarget, RuntimeKind, SecretHandle, Timestamp, TrustClass,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -32,6 +33,25 @@ pub enum EffectKind {
     Financial,
 }
 
+impl EffectKind {
+    pub fn is_write(self) -> bool {
+        match self {
+            Self::ReadFilesystem | Self::Network | Self::UseSecret | Self::DispatchCapability => {
+                false
+            }
+            Self::WriteFilesystem
+            | Self::DeleteFilesystem
+            | Self::ExecuteCode
+            | Self::SpawnProcess
+            | Self::ModifyExtension
+            | Self::ModifyApproval
+            | Self::ModifyBudget
+            | Self::ExternalWrite
+            | Self::Financial => true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PermissionMode {
@@ -50,7 +70,28 @@ pub struct CapabilityDescriptor {
     pub parameters_schema: serde_json::Value,
     pub effects: Vec<EffectKind>,
     pub default_permission: PermissionMode,
+    pub runtime_credentials: Vec<RuntimeCredentialRequirement>,
     pub resource_profile: Option<ResourceProfile>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeCredentialRequirement {
+    pub handle: SecretHandle,
+    #[serde(default)]
+    pub source: RuntimeCredentialRequirementSource,
+    pub audience: NetworkTargetPattern,
+    pub target: RuntimeCredentialTarget,
+    pub required: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "type")]
+pub enum RuntimeCredentialRequirementSource {
+    #[default]
+    SecretHandle,
+    ProductAuthAccount {
+        provider: RuntimeCredentialAccountProviderId,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

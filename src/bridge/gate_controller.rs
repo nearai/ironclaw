@@ -509,21 +509,52 @@ impl BridgeGateController {
             ); // projection-exempt: bridge dispatcher, inline-await gate prompt for live VM waiting on user input
         }
 
-        if let ResumeKind::Approval { allow_always } = &pending.resume_kind {
-            let _ = self
-                .channels
-                .send_status(
-                    &pending.source_channel,
-                    StatusUpdate::ApprovalNeeded {
-                        request_id: pending.request_id.to_string(),
-                        tool_name: pending.action_name.clone(),
-                        description: pending.description.clone(),
-                        parameters: display_parameters,
-                        allow_always: *allow_always,
-                    },
-                    channel_metadata,
-                )
-                .await;
+        match &pending.resume_kind {
+            ResumeKind::Approval { allow_always } => {
+                let _ = self
+                    .channels
+                    .send_status(
+                        &pending.source_channel,
+                        StatusUpdate::ApprovalNeeded {
+                            request_id: pending.request_id.to_string(),
+                            tool_name: pending.action_name.clone(),
+                            description: pending.description.clone(),
+                            parameters: display_parameters,
+                            allow_always: *allow_always,
+                        },
+                        channel_metadata,
+                    )
+                    .await;
+            }
+            ResumeKind::Authentication {
+                instructions,
+                auth_url,
+                ..
+            } => {
+                let Some(extension_name) = extension_name else {
+                    debug!(
+                        gate = %pending.gate_name,
+                        request_id = %pending.request_id,
+                        "Authentication gate reached emit_gate_prompt without a resolved extension name"
+                    );
+                    return;
+                };
+                let _ = self
+                    .channels
+                    .send_status(
+                        &pending.source_channel,
+                        StatusUpdate::AuthRequired {
+                            extension_name,
+                            instructions: Some(instructions.clone()),
+                            auth_url: auth_url.clone(),
+                            setup_url: None,
+                            request_id: Some(pending.request_id.to_string()),
+                        },
+                        channel_metadata,
+                    )
+                    .await;
+            }
+            ResumeKind::External { .. } => {}
         }
     }
 }

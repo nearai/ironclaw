@@ -82,6 +82,44 @@ impl ResourceScope {
     }
 }
 
+/// Origin of a background reservation. Distinguishes heartbeats, routines,
+/// missions, container jobs, and user-initiated work so per-kind budgets
+/// can be tracked separately within the same user's daily budget.
+///
+/// **Contract-only for now:** schedulers that pre-date this enum still
+/// open reservations through plain [`ResourceScope`]. As the Reborn
+/// runtime grows native heartbeats/routines, those call sites will pass
+/// the kind through.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BackgroundKind {
+    /// Periodic heartbeat tick (proactive memory / status checks).
+    HeartbeatTick,
+    /// User-defined lightweight routine.
+    RoutineLightweight,
+    /// User-defined standard routine (heavier per-fire budget).
+    RoutineStandard,
+    /// Multi-step mission tick.
+    MissionTick,
+    /// One-shot container job (e.g., sandboxed shell).
+    ContainerJob,
+    /// Explicitly user-triggered work that is not scheduled.
+    UserInitiated,
+}
+
+impl BackgroundKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::HeartbeatTick => "heartbeat_tick",
+            Self::RoutineLightweight => "routine_lightweight",
+            Self::RoutineStandard => "routine_standard",
+            Self::MissionTick => "mission_tick",
+            Self::ContainerJob => "container_job",
+            Self::UserInitiated => "user_initiated",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResourceEstimate {
     pub usd: Option<Decimal>,

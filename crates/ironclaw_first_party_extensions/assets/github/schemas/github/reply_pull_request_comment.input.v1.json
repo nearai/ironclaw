@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "GitHub reply_pull_request_comment input",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "owner": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 100,
+      "pattern": "^[^\\s/?#]+$",
+      "not": {
+        "pattern": "\\.\\."
+      },
+      "description": "Repository owner or organization."
+    },
+    "repo": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 100,
+      "pattern": "^[^\\s/?#]+$",
+      "not": {
+        "pattern": "\\.\\."
+      },
+      "description": "Repository name."
+    },
+    "pr_number": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Pull request number."
+    },
+    "comment_id": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Pull request review comment id."
+    },
+    "body": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 65536,
+      "description": "Reply body."
+    }
+  },
+  "required": [
+    "owner",
+    "repo",
+    "pr_number",
+    "comment_id",
+    "body"
+  ]
+}
