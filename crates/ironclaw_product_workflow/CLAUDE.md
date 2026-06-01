@@ -111,6 +111,15 @@ resolved binding only; they are not authority to switch threads or tenants.
 Projection/subscription resolution is lookup-only and must not create bindings,
 threads, or external-event route reservations.
 
+Outbound delivery orchestration starts only after `ironclaw_outbound` resolves
+and validates a communication delivery candidate. `OutboundPolicyService`
+remains the authority for reply-target validation and delivery-attempt metadata.
+Product workflow may attach trusted product target metadata from conversation
+binding and call `ProductAdapter::render_outbound`, but it must not choose a
+different reply target, read outbound preferences itself, or render anything
+before policy approval. Target metadata resolvers must be lookup-only and keyed
+by the sealed validated reply-target binding.
+
 ## Test support
 
 Enable `test-support` feature for in-memory fakes:
