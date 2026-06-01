@@ -263,6 +263,7 @@ async fn assert_due_query_clamps_limit_and_respects_state_gate(repo: &impl Trigg
             tenant("tenant-active-run"),
             due_slot,
         );
+        record.active_fire_slot = Some(due_slot);
         record.active_run_ref =
             Some(TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5a").expect("valid run"));
         record
@@ -401,6 +402,122 @@ async fn assert_due_query_clamps_limit_and_respects_state_gate(repo: &impl Trigg
     );
 }
 
+async fn assert_active_query_lists_active_records_in_deterministic_order(
+    repo: &impl TriggerRepository,
+) {
+    let early_slot = ts(1_704_067_200);
+    let later_slot = ts(1_704_067_260);
+    let inactive = sample_record(
+        TriggerId::parse("01J00000000000000000000001").expect("ulid"),
+        tenant("tenant-inactive"),
+        early_slot,
+    );
+    let inactive_trigger_id = inactive.trigger_id;
+    let active_later = {
+        let mut record = sample_record(
+            TriggerId::parse("01J00000000000000000000002").expect("ulid"),
+            tenant("tenant-active-later"),
+            later_slot,
+        );
+        record.active_fire_slot = Some(later_slot);
+        record
+    };
+    let active_early_a = {
+        let mut record = sample_record(
+            TriggerId::parse("01J00000000000000000000003").expect("ulid"),
+            tenant("tenant-active-a"),
+            later_slot,
+        );
+        record.active_fire_slot = Some(early_slot);
+        record.active_run_ref =
+            Some(TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5a").expect("valid run"));
+        record
+    };
+    let active_early_b = {
+        let mut record = sample_record(
+            TriggerId::parse("01J00000000000000000000004").expect("ulid"),
+            tenant("tenant-active-b"),
+            later_slot,
+        );
+        record.active_fire_slot = Some(early_slot);
+        record.active_run_ref =
+            Some(TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5b").expect("valid run"));
+        record
+    };
+    let mut overflow_records = Vec::new();
+    for index in 0..130 {
+        let mut record = sample_record(
+            TriggerId::new(),
+            tenant(&format!("tenant-overflow-{index:03}")),
+            later_slot,
+        );
+        record.active_fire_slot = Some(later_slot);
+        overflow_records.push(record);
+    }
+
+    repo.upsert_trigger(inactive)
+        .await
+        .expect("insert inactive");
+    repo.upsert_trigger(active_later.clone())
+        .await
+        .expect("insert active later");
+    repo.upsert_trigger(active_early_b.clone())
+        .await
+        .expect("insert active early b");
+    repo.upsert_trigger(active_early_a.clone())
+        .await
+        .expect("insert active early a");
+    for record in &overflow_records {
+        repo.upsert_trigger(record.clone())
+            .await
+            .expect("insert overflow active");
+    }
+
+    assert!(
+        repo.list_active_triggers(0)
+            .await
+            .expect("zero active limit")
+            .is_empty()
+    );
+
+    let active = repo
+        .list_active_triggers(128 + 10)
+        .await
+        .expect("list active triggers");
+    assert_eq!(active.len(), 128);
+    assert!(
+        active
+            .iter()
+            .all(|record| record.active_fire_slot.is_some()),
+        "active query must only return rows with an active fire slot"
+    );
+    assert!(
+        active
+            .iter()
+            .all(|record| record.trigger_id != inactive_trigger_id),
+        "inactive rows must not appear in the active cleanup query"
+    );
+    assert_eq!(
+        active
+            .iter()
+            .take(3)
+            .map(|record| (record.tenant_id.clone(), record.trigger_id))
+            .collect::<Vec<_>>(),
+        vec![
+            (active_early_a.tenant_id.clone(), active_early_a.trigger_id),
+            (active_early_b.tenant_id.clone(), active_early_b.trigger_id),
+            (active_later.tenant_id.clone(), active_later.trigger_id),
+        ]
+    );
+
+    let limited = repo
+        .list_active_triggers(1)
+        .await
+        .expect("list active limited");
+    assert_eq!(limited.len(), 1);
+    assert_eq!(limited[0].trigger_id, active_early_a.trigger_id);
+}
+
 async fn assert_rejects_validation_failures_before_persistence(repo: &impl TriggerRepository) {
     let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid");
     let tenant_id = tenant("tenant-a");
@@ -518,6 +635,9 @@ async fn libsql_repository_contract_parity() {
     assert_due_query_clamps_limit_and_respects_state_gate(&repo).await;
 
     let (_dir, repo) = build_libsql_repo().await;
+    assert_active_query_lists_active_records_in_deterministic_order(&repo).await;
+
+    let (_dir, repo) = build_libsql_repo().await;
     assert_rejects_validation_failures_before_persistence(&repo).await;
 
     let (_dir, repo) = build_libsql_repo().await;
@@ -605,6 +725,9 @@ async fn postgres_repository_contract_parity() {
 
     clear_postgres_triggers(&pool).await;
     assert_due_query_clamps_limit_and_respects_state_gate(&repo).await;
+
+    clear_postgres_triggers(&pool).await;
+    assert_active_query_lists_active_records_in_deterministic_order(&repo).await;
 
     clear_postgres_triggers(&pool).await;
     assert_rejects_validation_failures_before_persistence(&repo).await;
@@ -710,6 +833,12 @@ fn malformed_row_cases() -> Vec<(&'static str, &'static str, &'static str, ReadM
             Get,
         ),
         ("active_run_ref", "not-a-uuid", "active_run_ref", Get),
+        (
+            "active_run_ref",
+            "01890f0f-9b6f-7a85-9e5b-9f21a93c4f5a",
+            "active_run_ref",
+            Get,
+        ),
         ("last_status", "timed_out", "last_status", Get),
         ("created_at", "not-a-timestamp", "created_at", Get),
     ]
@@ -1642,21 +1771,18 @@ mod fire_claim_contract {
         run_only.active_run_ref =
             Some(TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5e").expect("valid run"));
         assert!(run_only.has_active_fire());
-        let expected_run_only_ref = run_only.active_run_ref;
-        repo.upsert_trigger(run_only)
+        let error = repo
+            .upsert_trigger(run_only)
             .await
-            .expect("persist active row with run ref only");
+            .expect_err("active_run_ref without fire slot must be rejected");
+        assert_error_contains(error, "active_run_ref requires active_fire_slot");
+
         assert!(
-            repo.claim_due_fire(ClaimDueFireRequest {
-                tenant_id: run_only_tenant_id,
-                trigger_id: run_only_trigger_id,
-                fire_slot,
-                now: fire_slot,
-            })
-            .await
-            .expect("active run-ref-only claim")
-            .matches_already_active(None, expected_run_only_ref),
-            "active run ref without fire slot must block a second claim"
+            repo.get_trigger(run_only_tenant_id, run_only_trigger_id)
+                .await
+                .expect("run-only row lookup")
+                .is_none(),
+            "invalid run-ref-only row must not be persisted"
         );
 
         let mut status_only = sample_record(

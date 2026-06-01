@@ -587,6 +587,9 @@ Add the heavier caller-level tests separately from the worker core:
 - proof that a second due fire is skipped while one fire for the same trigger
   is active
 - concurrent poller claim attempts cannot both submit the same trigger/slot
+- claim-only active-fire recovery must require a composition-owned lease or
+  age signal before retrying, so a freshly claimed slot is never misclassified
+  as abandoned and submitted twice
 - retryable submit failure leaves `next_run_at` retryable
 - terminal run failure for an already accepted/submitted slot does not mint a
   second V1 turn for the same fire identity
@@ -624,6 +627,9 @@ Wire the trigger poller into Reborn composition:
 - background task bundle or worker-supervisor type that owns both turn-runner
   and trigger-poller handles, cancellation, await/shutdown ordering, and panic
   or early-exit reporting.
+- background trigger poller lifecycle should apply bounded startup and per-tick
+  wake jitter to reduce replica stampedes, but it must not jitter trigger
+  schedule calculation, fire identity, `fire_slot`, or `next_run_at`.
 - readiness semantics for whether a disabled trigger poller is allowed and
   whether a failed trigger worker marks Reborn runtime readiness degraded.
 - architecture tests for `ironclaw_triggers` dependency edges

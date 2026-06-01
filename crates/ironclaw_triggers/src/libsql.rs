@@ -293,6 +293,36 @@ impl TriggerRepository for LibSqlTriggerRepository {
         Ok(records)
     }
 
+    async fn list_active_triggers(&self, limit: usize) -> Result<Vec<TriggerRecord>, TriggerError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let limit = limit.min(super::MAX_DUE_TRIGGER_POLL_LIMIT);
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                &format!(
+                    "SELECT {TRIGGER_COLUMNS}
+                     FROM {TRIGGER_TABLE}
+                     WHERE active_fire_slot IS NOT NULL
+                     ORDER BY COALESCE(active_fire_slot, next_run_at), tenant_id, trigger_id
+                     LIMIT ?1"
+                ),
+                params![limit as i64],
+            )
+            .await
+            .map_err(|error| backend_error("query active trigger records", error))?;
+        let mut records = Vec::new();
+        loop {
+            match rows.next().await {
+                Ok(Some(row)) => records.push(row_to_record(&row)?),
+                Ok(None) => break,
+                Err(error) => return Err(backend_error("read active trigger record row", error)),
+            }
+        }
+        Ok(records)
+    }
+
     async fn claim_due_fire(
         &self,
         request: ClaimDueFireRequest,

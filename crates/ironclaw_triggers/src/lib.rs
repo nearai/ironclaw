@@ -26,6 +26,7 @@ use ulid::Ulid;
 mod libsql;
 #[cfg(feature = "postgres")]
 mod postgres;
+mod worker;
 
 const MIN_FIRE_CADENCE: Duration = Duration::from_secs(60);
 const MAX_DUE_TRIGGER_POLL_LIMIT: usize = 128;
@@ -41,6 +42,8 @@ pub enum TriggerError {
     InvalidFireIdentityComponent { label: String, reason: String },
     #[error("invalid trigger record: {reason}")]
     InvalidRecord { reason: String },
+    #[error("invalid trigger poller configuration: {reason}")]
+    InvalidPollerConfig { reason: String },
     #[error("invalid schedule: {reason}")]
     InvalidSchedule { reason: String },
     #[error("invalid trigger materialization: {reason}")]
@@ -291,6 +294,11 @@ impl TriggerRecord {
         if self.prompt.trim().is_empty() {
             return Err(TriggerError::InvalidRecord {
                 reason: "trigger prompt must not be empty".to_string(),
+            });
+        }
+        if self.active_run_ref.is_some() && self.active_fire_slot.is_none() {
+            return Err(TriggerError::InvalidRecord {
+                reason: "active_run_ref requires active_fire_slot".to_string(),
             });
         }
         self.schedule.validate()?;
@@ -558,6 +566,13 @@ pub trait TriggerRepository: Send + Sync {
         limit: usize,
     ) -> Result<Vec<TriggerRecord>, TriggerError>;
 
+    /// Lists active trigger fires across all tenants for trusted poller cleanup.
+    ///
+    /// This is a global query and must not be used for tenant-scoped or
+    /// user-facing list operations. It exists so the poller can clear completed
+    /// active fires before future schedule slots become eligible.
+    async fn list_active_triggers(&self, limit: usize) -> Result<Vec<TriggerRecord>, TriggerError>;
+
     async fn claim_due_fire(
         &self,
         request: ClaimDueFireRequest,
@@ -595,6 +610,12 @@ pub use libsql::LibSqlTriggerRepository;
 /// Feature-gated durable PostgreSQL repository type for composition/test wiring.
 #[cfg(feature = "postgres")]
 pub use postgres::PostgresTriggerRepository;
+pub use worker::{
+    TriggerActiveRunLookup, TriggerActiveRunState, TriggerActiveRunStateRequest,
+    TriggerPollerFireOutcome, TriggerPollerFireReport, TriggerPollerTickReport,
+    TriggerPollerWorker, TriggerPollerWorkerConfig, TriggerPollerWorkerDeps,
+    TrustedTriggerFireSubmitOutcome, TrustedTriggerFireSubmitter, TrustedTriggerSubmitRequest,
+};
 
 #[derive(Clone, Default)]
 pub struct InMemoryTriggerRepository {
@@ -690,6 +711,34 @@ impl TriggerRepository for InMemoryTriggerRepository {
             .collect::<Vec<_>>();
         selected_keys.sort_by_key(|(next_run_at, tenant_id, trigger_id, _)| {
             (*next_run_at, tenant_id.clone(), *trigger_id)
+        });
+        selected_keys.truncate(limit);
+        Ok(selected_keys
+            .into_iter()
+            .filter_map(|(_, _, _, key)| state.get(&key).cloned())
+            .collect())
+    }
+
+    async fn list_active_triggers(&self, limit: usize) -> Result<Vec<TriggerRecord>, TriggerError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let limit = limit.min(MAX_DUE_TRIGGER_POLL_LIMIT);
+        let state = self.lock_state()?;
+        let mut selected_keys = state
+            .iter()
+            .filter(|(_, record)| record.active_fire_slot.is_some())
+            .map(|(key, record)| {
+                (
+                    record.active_fire_slot.unwrap_or(record.next_run_at),
+                    record.tenant_id.clone(),
+                    record.trigger_id,
+                    key.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        selected_keys.sort_by_key(|(active_fire_slot, tenant_id, trigger_id, _)| {
+            (*active_fire_slot, tenant_id.clone(), *trigger_id)
         });
         selected_keys.truncate(limit);
         Ok(selected_keys
