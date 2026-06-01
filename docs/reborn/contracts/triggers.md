@@ -175,6 +175,22 @@ must not be surfaced as an active scheduled fire.
 
 The skip policy is per-trigger, not global. Other triggers may continue to fire on the same tick.
 
+### 5.1 Trusted poller scope
+
+The global due/active repository queries are intentionally host-owned poller
+plumbing, not capability APIs.
+
+- `list_due_triggers` and `list_active_triggers` are the raw repository
+  queries used by the trusted poller path.
+- Trigger-owned poller code must cross the boundary through a sealed
+  `TrustedTriggerPollerScope` witness so the call site stays explicit about the
+  trust transition.
+- Product adapters, first-party capability code, and other untrusted callers
+  must not mint that witness or treat the global list methods as a user-facing
+  surface.
+- The poller may continue to use the raw repository methods internally, but the
+  contract treats them as implementation plumbing, not a capability contract.
+
 ---
 
 ## 6. Trusted inbound and turn execution

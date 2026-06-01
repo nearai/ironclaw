@@ -1,16 +1,20 @@
 // arch-exempt: large_file, deterministic tick core + ports + reports + tests co-located for PR15, plan #4303
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use ironclaw_host_api::{TenantId, Timestamp};
 use ironclaw_turns::TurnRunId;
 
 use crate::{
-    ClaimDueFireOutcome, ClaimDueFireRequest, ClearActiveFireRequest, FireAcceptedRequest,
-    FirePermanentFailedRequest, FireReplayedRequest, FireRetryableFailedRequest,
-    FireTerminalFailedRequest, TriggerError, TriggerFire, TriggerId, TriggerInboundContentRef,
-    TriggerPromptMaterializer, TriggerRecord, TriggerRepository, TriggerSourceProvider,
+    ActiveTriggerScanCursor, ClaimDueFireOutcome, ClaimDueFireRequest, ClearActiveFireRequest,
+    FireAcceptedRequest, FirePermanentFailedRequest, FireReplayedRequest,
+    FireRetryableFailedRequest, FireTerminalFailedRequest, TriggerError, TriggerFire, TriggerId,
+    TriggerInboundContentRef, TriggerPromptMaterializer, TriggerRecord, TriggerRepository,
+    TriggerSourceProvider, TrustedTriggerPollerRepository, TrustedTriggerPollerScope,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,6 +67,7 @@ pub struct TriggerPollerWorkerDeps {
 pub struct TriggerPollerWorker {
     config: TriggerPollerWorkerConfig,
     deps: TriggerPollerWorkerDeps,
+    active_scan_cursor: Mutex<Option<ActiveTriggerScanCursor>>,
 }
 
 impl TriggerPollerWorker {
@@ -71,7 +76,11 @@ impl TriggerPollerWorker {
         deps: TriggerPollerWorkerDeps,
     ) -> Result<Self, TriggerError> {
         config.validate()?;
-        Ok(Self { config, deps })
+        Ok(Self {
+            config,
+            deps,
+            active_scan_cursor: Mutex::new(None),
+        })
     }
 
     pub async fn tick_once(&self, now: Timestamp) -> Result<TriggerPollerTickReport, TriggerError> {
@@ -80,7 +89,12 @@ impl TriggerPollerWorker {
         let due_records = self
             .deps
             .repository
-            .list_due_triggers(now, self.config.fires_per_tick)
+            .as_ref()
+            .list_due_triggers_trusted(
+                TrustedTriggerPollerScope::mint(),
+                now,
+                self.config.fires_per_tick,
+            )
             .await?;
         report.due_records = due_records.len();
         for record in due_records {
@@ -116,12 +130,33 @@ impl TriggerPollerWorker {
         &self,
         report: &mut TriggerPollerTickReport,
     ) -> Result<(), TriggerError> {
-        let active_records = self
+        let mut cursor = self.active_scan_cursor()?;
+        let mut active_records = self
             .deps
             .repository
-            .list_active_triggers(self.config.fires_per_tick)
+            .as_ref()
+            .list_active_triggers_after_trusted(
+                TrustedTriggerPollerScope::mint(),
+                cursor.clone(),
+                self.config.fires_per_tick,
+            )
             .await?;
+        if active_records.is_empty() && cursor.is_some() {
+            cursor = None;
+            active_records = self
+                .deps
+                .repository
+                .as_ref()
+                .list_active_triggers_after_trusted(
+                    TrustedTriggerPollerScope::mint(),
+                    cursor.clone(),
+                    self.config.fires_per_tick,
+                )
+                .await?;
+        }
         report.active_records = active_records.len();
+        let mut next_cursor = cursor;
+        let mut advance_cursor = true;
         for record in active_records {
             debug_assert!(
                 record.active_fire_slot.is_some(),
@@ -129,6 +164,11 @@ impl TriggerPollerWorker {
             );
             let Some(fire_slot) = record.active_fire_slot else {
                 continue;
+            };
+            let record_cursor = ActiveTriggerScanCursor {
+                active_fire_slot: fire_slot,
+                tenant_id: record.tenant_id.clone(),
+                trigger_id: record.trigger_id,
             };
             let Some(run_id) = record.active_run_ref else {
                 // Keep claim-only rows blocked until recovery has lease or age
@@ -142,6 +182,9 @@ impl TriggerPollerWorker {
                         active_run_ref: None,
                     },
                 });
+                if advance_cursor {
+                    next_cursor = Some(record_cursor);
+                }
                 continue;
             };
             let state = match self
@@ -166,6 +209,7 @@ impl TriggerPollerWorker {
                             reason: TriggerPollerFailureReason::ActiveRunLookup,
                         },
                     });
+                    advance_cursor = false;
                     continue;
                 }
             };
@@ -212,7 +256,33 @@ impl TriggerPollerWorker {
                     });
                 }
             }
+            if advance_cursor {
+                next_cursor = Some(record_cursor);
+            }
         }
+        self.set_active_scan_cursor(next_cursor)?;
+        Ok(())
+    }
+
+    fn active_scan_cursor(&self) -> Result<Option<ActiveTriggerScanCursor>, TriggerError> {
+        self.active_scan_cursor
+            .lock()
+            .map(|cursor| cursor.clone())
+            .map_err(|_| TriggerError::Backend {
+                reason: "trigger poller active scan cursor mutex poisoned".to_string(),
+            })
+    }
+
+    fn set_active_scan_cursor(
+        &self,
+        cursor: Option<ActiveTriggerScanCursor>,
+    ) -> Result<(), TriggerError> {
+        *self
+            .active_scan_cursor
+            .lock()
+            .map_err(|_| TriggerError::Backend {
+                reason: "trigger poller active scan cursor mutex poisoned".to_string(),
+            })? = cursor;
         Ok(())
     }
 
@@ -818,8 +888,26 @@ mod tests {
         submitter: Arc<RecordingSubmitter>,
         active_lookup: Arc<RecordingActiveRunLookup>,
     ) -> TriggerPollerWorker {
-        TriggerPollerWorker::new(
+        worker_with_config(
+            repo,
+            source_provider,
+            materializer,
+            submitter,
+            active_lookup,
             TriggerPollerWorkerConfig::default(),
+        )
+    }
+
+    fn worker_with_config(
+        repo: Arc<dyn TriggerRepository>,
+        source_provider: Arc<dyn TriggerSourceProvider>,
+        materializer: Arc<RecordingMaterializer>,
+        submitter: Arc<RecordingSubmitter>,
+        active_lookup: Arc<RecordingActiveRunLookup>,
+        config: TriggerPollerWorkerConfig,
+    ) -> TriggerPollerWorker {
+        TriggerPollerWorker::new(
+            config,
             TriggerPollerWorkerDeps {
                 repository: repo,
                 source_provider,
@@ -1070,6 +1158,180 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tick_active_cleanup_cursor_reaches_terminal_rows_after_blocked_page() {
+        let repo = Arc::new(InMemoryTriggerRepository::default());
+        let first_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid");
+        let second_id = TriggerId::parse("01J00000000000000000000000").expect("ulid");
+        let third_id = TriggerId::parse("01J00000000000000000000001").expect("ulid");
+        let fourth_id = TriggerId::parse("01J00000000000000000000002").expect("ulid");
+        let terminal_id = TriggerId::parse("01J00000000000000000000003").expect("ulid");
+        let first_slot = ts(1_704_067_200);
+        let second_slot = ts(1_704_067_260);
+        let third_slot = ts(1_704_067_320);
+        let fourth_slot = ts(1_704_067_380);
+        let terminal_slot = ts(1_704_067_440);
+        let first_run = TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5a").expect("run id");
+        let second_run = TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5b").expect("run id");
+        let third_run = TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5c").expect("run id");
+        let fourth_run = TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5d").expect("run id");
+        let terminal_run =
+            TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5e").expect("run id");
+
+        let mut first = sample_record(first_id, tenant("tenant-a"), ts(1_704_067_800));
+        first.active_fire_slot = Some(first_slot);
+        first.active_run_ref = Some(first_run);
+        let mut second = sample_record(second_id, tenant("tenant-a"), ts(1_704_067_800));
+        second.active_fire_slot = Some(second_slot);
+        second.active_run_ref = Some(second_run);
+        let mut third = sample_record(third_id, tenant("tenant-a"), ts(1_704_067_800));
+        third.active_fire_slot = Some(third_slot);
+        third.active_run_ref = Some(third_run);
+        let mut fourth = sample_record(fourth_id, tenant("tenant-a"), ts(1_704_067_800));
+        fourth.active_fire_slot = Some(fourth_slot);
+        fourth.active_run_ref = Some(fourth_run);
+        let mut terminal = sample_record(terminal_id, tenant("tenant-a"), ts(1_704_067_800));
+        terminal.active_fire_slot = Some(terminal_slot);
+        terminal.active_run_ref = Some(terminal_run);
+        repo.upsert_trigger(first).await.expect("insert first");
+        repo.upsert_trigger(second).await.expect("insert second");
+        repo.upsert_trigger(third).await.expect("insert third");
+        repo.upsert_trigger(fourth).await.expect("insert fourth");
+        repo.upsert_trigger(terminal)
+            .await
+            .expect("insert terminal");
+
+        let active_lookup = Arc::new(RecordingActiveRunLookup::with_results(vec![
+            Ok(TriggerActiveRunState::Nonterminal),
+            Ok(TriggerActiveRunState::Nonterminal),
+            Ok(TriggerActiveRunState::Nonterminal),
+            Ok(TriggerActiveRunState::Nonterminal),
+            Ok(TriggerActiveRunState::Terminal),
+        ]));
+        let worker = worker_with_config(
+            repo.clone(),
+            Arc::new(crate::ScheduleTriggerSourceProvider),
+            Arc::new(RecordingMaterializer::success("content:trigger-fire")),
+            Arc::new(RecordingSubmitter::with_outcomes(Vec::new())),
+            active_lookup.clone(),
+            TriggerPollerWorkerConfig {
+                fires_per_tick: 2,
+                ..TriggerPollerWorkerConfig::default()
+            },
+        );
+
+        let first_report = worker.tick_once(first_slot).await.expect("first tick");
+        assert_eq!(first_report.active_records, 2);
+        assert!(
+            first_report
+                .results
+                .iter()
+                .all(|result| result.trigger_id != terminal_id)
+        );
+
+        let second_report = worker.tick_once(second_slot).await.expect("second tick");
+        assert_eq!(second_report.active_records, 2);
+        assert!(
+            second_report
+                .results
+                .iter()
+                .all(|result| result.trigger_id != terminal_id)
+        );
+
+        let third_report = worker.tick_once(third_slot).await.expect("third tick");
+        assert_eq!(third_report.active_records, 1);
+        assert!(
+            third_report
+                .results
+                .iter()
+                .any(|result| result.trigger_id == terminal_id
+                    && result.outcome
+                        == TriggerPollerFireOutcome::ClearedTerminalActive {
+                            run_id: terminal_run
+                        })
+        );
+        assert_eq!(active_lookup.requests().len(), 5);
+        let persisted = repo
+            .get_trigger(tenant("tenant-a"), terminal_id)
+            .await
+            .expect("load terminal")
+            .expect("terminal record");
+        assert_eq!(persisted.active_fire_slot, None);
+        assert_eq!(persisted.active_run_ref, None);
+    }
+
+    #[tokio::test]
+    async fn tick_retries_active_page_when_clear_fails_before_advancing_cursor() {
+        let first_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid");
+        let second_id = TriggerId::parse("01J00000000000000000000000").expect("ulid");
+        let third_id = TriggerId::parse("01J00000000000000000000001").expect("ulid");
+        let first_slot = ts(1_704_067_200);
+        let second_slot = ts(1_704_067_260);
+        let third_slot = ts(1_704_067_320);
+        let first_run = TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5a").expect("run id");
+        let second_run = TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5b").expect("run id");
+        let third_run = TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5c").expect("run id");
+
+        let mut first = sample_record(first_id, tenant("tenant-a"), ts(1_704_067_800));
+        first.active_fire_slot = Some(first_slot);
+        first.active_run_ref = Some(first_run);
+        let mut second = sample_record(second_id, tenant("tenant-a"), ts(1_704_067_800));
+        second.active_fire_slot = Some(second_slot);
+        second.active_run_ref = Some(second_run);
+        let mut third = sample_record(third_id, tenant("tenant-a"), ts(1_704_067_800));
+        third.active_fire_slot = Some(third_slot);
+        third.active_run_ref = Some(third_run);
+
+        let repo = Arc::new(ActiveClearFailsOnceRepository::new(
+            vec![first, second, third],
+            second_id,
+        ));
+        let active_lookup = Arc::new(RecordingActiveRunLookup::with_results(vec![
+            Ok(TriggerActiveRunState::Terminal),
+            Ok(TriggerActiveRunState::Terminal),
+            Ok(TriggerActiveRunState::Terminal),
+            Ok(TriggerActiveRunState::Terminal),
+        ]));
+        let worker = worker_with_config(
+            repo.clone(),
+            Arc::new(crate::ScheduleTriggerSourceProvider),
+            Arc::new(RecordingMaterializer::success("content:trigger-fire")),
+            Arc::new(RecordingSubmitter::with_outcomes(Vec::new())),
+            active_lookup,
+            TriggerPollerWorkerConfig {
+                fires_per_tick: 2,
+                ..TriggerPollerWorkerConfig::default()
+            },
+        );
+
+        let first_error = worker.tick_once(first_slot).await.expect_err("clear fails");
+        assert!(matches!(first_error, TriggerError::Backend { .. }));
+
+        let second_report = worker.tick_once(second_slot).await.expect("retry tick");
+
+        assert_eq!(second_report.active_records, 2);
+        assert_eq!(
+            repo.clear_requests(),
+            vec![first_id, second_id, second_id, third_id]
+        );
+        assert!(
+            second_report
+                .results
+                .iter()
+                .any(|result| result.trigger_id == second_id
+                    && result.outcome
+                        == TriggerPollerFireOutcome::ClearedTerminalActive { run_id: second_run })
+        );
+        assert!(
+            second_report
+                .results
+                .iter()
+                .any(|result| result.trigger_id == third_id
+                    && result.outcome
+                        == TriggerPollerFireOutcome::ClearedTerminalActive { run_id: third_run })
+        );
+    }
+
+    #[tokio::test]
     async fn tick_reports_terminal_active_clear_race() {
         let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid");
         let fire_slot = ts(1_704_067_200);
@@ -1199,6 +1461,191 @@ mod tests {
                 .any(|result| result.trigger_id == due_id
                     && result.outcome
                         == TriggerPollerFireOutcome::Submitted { run_id: due_run_id })
+        );
+    }
+
+    #[tokio::test]
+    async fn tick_retries_active_lookup_error_before_advancing_cursor() {
+        let repo = Arc::new(InMemoryTriggerRepository::default());
+        let failed_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid");
+        let terminal_id = TriggerId::parse("01J00000000000000000000000").expect("ulid");
+        let failed_slot = ts(1_704_067_200);
+        let terminal_slot = ts(1_704_067_260);
+        let failed_run = TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5a").expect("run id");
+        let terminal_run =
+            TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5b").expect("run id");
+        let mut failed = sample_record(failed_id, tenant("tenant-a"), ts(1_704_067_800));
+        failed.active_fire_slot = Some(failed_slot);
+        failed.active_run_ref = Some(failed_run);
+        let mut terminal = sample_record(terminal_id, tenant("tenant-a"), ts(1_704_067_800));
+        terminal.active_fire_slot = Some(terminal_slot);
+        terminal.active_run_ref = Some(terminal_run);
+        repo.upsert_trigger(failed).await.expect("insert failed");
+        repo.upsert_trigger(terminal)
+            .await
+            .expect("insert terminal");
+
+        let active_lookup = Arc::new(RecordingActiveRunLookup::with_results(vec![
+            Err(TriggerError::Backend {
+                reason: "turn state unavailable".to_string(),
+            }),
+            Ok(TriggerActiveRunState::Terminal),
+            Ok(TriggerActiveRunState::Terminal),
+        ]));
+        let worker = worker_with_config(
+            repo.clone(),
+            Arc::new(crate::ScheduleTriggerSourceProvider),
+            Arc::new(RecordingMaterializer::success("content:trigger-fire")),
+            Arc::new(RecordingSubmitter::with_outcomes(Vec::new())),
+            active_lookup.clone(),
+            TriggerPollerWorkerConfig {
+                fires_per_tick: 2,
+                ..TriggerPollerWorkerConfig::default()
+            },
+        );
+
+        let first_report = worker.tick_once(failed_slot).await.expect("first tick");
+        assert!(
+            first_report
+                .results
+                .iter()
+                .any(|result| result.trigger_id == failed_id
+                    && matches!(
+                        result.outcome,
+                        TriggerPollerFireOutcome::ActiveRunLookupFailed { .. }
+                    ))
+        );
+        assert!(
+            first_report
+                .results
+                .iter()
+                .any(|result| result.trigger_id == terminal_id
+                    && result.outcome
+                        == TriggerPollerFireOutcome::ClearedTerminalActive {
+                            run_id: terminal_run
+                        })
+        );
+
+        let second_report = worker.tick_once(terminal_slot).await.expect("second tick");
+        assert_eq!(second_report.active_records, 1);
+        assert!(
+            second_report
+                .results
+                .iter()
+                .any(|result| result.trigger_id == failed_id
+                    && result.outcome
+                        == TriggerPollerFireOutcome::ClearedTerminalActive { run_id: failed_run })
+        );
+        assert_eq!(
+            active_lookup
+                .requests()
+                .into_iter()
+                .map(|request| request.trigger_id)
+                .collect::<Vec<_>>(),
+            vec![failed_id, terminal_id, failed_id]
+        );
+    }
+
+    #[tokio::test]
+    async fn tick_replayed_submit_can_be_cleared_on_a_later_tick_without_stopping_due_work() {
+        let repo = Arc::new(InMemoryTriggerRepository::default());
+        let replayed_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid");
+        let due_id = TriggerId::parse("01J00000000000000000000000").expect("ulid");
+        let fire_slot = ts(1_704_067_200);
+        let replayed_run_id =
+            TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5a").expect("run id");
+        repo.upsert_trigger(sample_record(replayed_id, tenant("tenant-a"), fire_slot))
+            .await
+            .expect("insert replayed candidate");
+        let first_worker = worker(
+            repo.clone(),
+            Arc::new(RecordingMaterializer::success("content:trigger-fire")),
+            Arc::new(RecordingSubmitter::with_outcomes(vec![Ok(
+                TrustedTriggerFireSubmitOutcome::Replayed {
+                    original_run_id: replayed_run_id,
+                    replayed_at: ts(1_704_067_205),
+                },
+            )])),
+            Arc::new(RecordingActiveRunLookup::default()),
+        );
+
+        let first_report = first_worker.tick_once(fire_slot).await.expect("first tick");
+        assert_eq!(
+            first_report.results.last().map(|result| &result.outcome),
+            Some(&TriggerPollerFireOutcome::Replayed {
+                original_run_id: replayed_run_id
+            })
+        );
+        let persisted_after_replay = repo
+            .get_trigger(tenant("tenant-a"), replayed_id)
+            .await
+            .expect("reload replayed")
+            .expect("replayed record");
+        assert_eq!(persisted_after_replay.active_fire_slot, Some(fire_slot));
+        assert_eq!(persisted_after_replay.active_run_ref, Some(replayed_run_id));
+
+        repo.upsert_trigger(sample_record(due_id, tenant("tenant-a"), fire_slot))
+            .await
+            .expect("insert later due");
+
+        let second_due_run_id =
+            TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5c").expect("run id");
+        let second_worker = worker(
+            repo.clone(),
+            Arc::new(RecordingMaterializer::success("content:trigger-fire")),
+            Arc::new(RecordingSubmitter::with_outcomes(vec![Ok(
+                TrustedTriggerFireSubmitOutcome::Accepted {
+                    run_id: second_due_run_id,
+                    submitted_at: fire_slot,
+                },
+            )])),
+            Arc::new(RecordingActiveRunLookup::with_results(vec![Ok(
+                TriggerActiveRunState::Terminal,
+            )])),
+        );
+
+        let second_report = second_worker
+            .tick_once(fire_slot)
+            .await
+            .expect("second tick");
+
+        assert_eq!(second_report.active_records, 1);
+        assert_eq!(second_report.due_records, 1);
+        assert!(
+            second_report
+                .results
+                .iter()
+                .any(|result| result.trigger_id == replayed_id
+                    && result.outcome
+                        == TriggerPollerFireOutcome::ClearedTerminalActive {
+                            run_id: replayed_run_id,
+                        })
+        );
+        assert!(
+            second_report
+                .results
+                .iter()
+                .any(|result| result.trigger_id == due_id
+                    && result.outcome
+                        == TriggerPollerFireOutcome::Submitted {
+                            run_id: second_due_run_id
+                        })
+        );
+        assert_eq!(
+            repo.get_trigger(tenant("tenant-a"), replayed_id)
+                .await
+                .expect("reload replayed after cleanup")
+                .expect("replayed record after cleanup")
+                .active_fire_slot,
+            None
+        );
+        assert_eq!(
+            repo.get_trigger(tenant("tenant-a"), replayed_id)
+                .await
+                .expect("reload replayed after cleanup")
+                .expect("replayed record after cleanup")
+                .active_run_ref,
+            None
         );
     }
 
@@ -2115,6 +2562,191 @@ mod tests {
             _request: ClearActiveFireRequest,
         ) -> Result<Option<TriggerRecord>, TriggerError> {
             Ok(None)
+        }
+    }
+
+    struct ActiveClearFailsOnceRepository {
+        records: Mutex<Vec<TriggerRecord>>,
+        clear_requests: Mutex<Vec<TriggerId>>,
+        fail_once_trigger_id: TriggerId,
+        failed_once: Mutex<bool>,
+    }
+
+    impl ActiveClearFailsOnceRepository {
+        fn new(records: Vec<TriggerRecord>, fail_once_trigger_id: TriggerId) -> Self {
+            Self {
+                records: Mutex::new(records),
+                clear_requests: Mutex::new(Vec::new()),
+                fail_once_trigger_id,
+                failed_once: Mutex::new(false),
+            }
+        }
+
+        fn clear_requests(&self) -> Vec<TriggerId> {
+            self.clear_requests
+                .lock()
+                .expect("clear requests lock")
+                .clone()
+        }
+    }
+
+    #[async_trait]
+    impl TriggerRepository for ActiveClearFailsOnceRepository {
+        async fn upsert_trigger(&self, _record: TriggerRecord) -> Result<(), TriggerError> {
+            unreachable!("active-clear-fails-once repository is read-only")
+        }
+
+        async fn get_trigger(
+            &self,
+            _tenant_id: TenantId,
+            _trigger_id: TriggerId,
+        ) -> Result<Option<TriggerRecord>, TriggerError> {
+            unreachable!("active-clear-fails-once repository does not load records")
+        }
+
+        async fn list_triggers(
+            &self,
+            _tenant_id: TenantId,
+        ) -> Result<Vec<TriggerRecord>, TriggerError> {
+            unreachable!("active-clear-fails-once repository does not list tenant records")
+        }
+
+        async fn remove_trigger(
+            &self,
+            _tenant_id: TenantId,
+            _trigger_id: TriggerId,
+        ) -> Result<Option<TriggerRecord>, TriggerError> {
+            unreachable!("active-clear-fails-once repository does not remove records")
+        }
+
+        async fn list_due_triggers(
+            &self,
+            _now: Timestamp,
+            _limit: usize,
+        ) -> Result<Vec<TriggerRecord>, TriggerError> {
+            Ok(Vec::new())
+        }
+
+        async fn list_active_triggers(
+            &self,
+            limit: usize,
+        ) -> Result<Vec<TriggerRecord>, TriggerError> {
+            self.list_active_triggers_after(None, limit).await
+        }
+
+        async fn list_active_triggers_after(
+            &self,
+            after: Option<ActiveTriggerScanCursor>,
+            limit: usize,
+        ) -> Result<Vec<TriggerRecord>, TriggerError> {
+            let mut records = self
+                .records
+                .lock()
+                .expect("active records lock")
+                .iter()
+                .filter_map(|record| {
+                    let active_fire_slot = record.active_fire_slot?;
+                    Some((
+                        active_fire_slot,
+                        record.tenant_id.clone(),
+                        record.trigger_id,
+                        record.clone(),
+                    ))
+                })
+                .filter(
+                    |(active_fire_slot, tenant_id, trigger_id, _)| match after.as_ref() {
+                        Some(cursor) => {
+                            (*active_fire_slot, tenant_id, *trigger_id)
+                                > (
+                                    cursor.active_fire_slot,
+                                    &cursor.tenant_id,
+                                    cursor.trigger_id,
+                                )
+                        }
+                        None => true,
+                    },
+                )
+                .collect::<Vec<_>>();
+            records.sort_by_key(|(active_fire_slot, tenant_id, trigger_id, _)| {
+                (*active_fire_slot, tenant_id.clone(), *trigger_id)
+            });
+            records.truncate(limit);
+            Ok(records
+                .into_iter()
+                .map(|(_, _, _, record)| record)
+                .collect())
+        }
+
+        async fn claim_due_fire(
+            &self,
+            _request: ClaimDueFireRequest,
+        ) -> Result<ClaimDueFireOutcome, TriggerError> {
+            unreachable!("active-clear-fails-once repository should not claim fires")
+        }
+
+        async fn mark_fire_accepted(
+            &self,
+            _request: FireAcceptedRequest,
+        ) -> Result<Option<TriggerRecord>, TriggerError> {
+            unreachable!("active-clear-fails-once repository should not persist accepted fires")
+        }
+
+        async fn mark_fire_replayed(
+            &self,
+            _request: FireReplayedRequest,
+        ) -> Result<Option<TriggerRecord>, TriggerError> {
+            unreachable!("active-clear-fails-once repository should not persist replayed fires")
+        }
+
+        async fn mark_fire_retryable_failed(
+            &self,
+            _request: FireRetryableFailedRequest,
+        ) -> Result<Option<TriggerRecord>, TriggerError> {
+            unreachable!("active-clear-fails-once repository should not persist retryable failures")
+        }
+
+        async fn mark_fire_permanently_failed(
+            &self,
+            _request: FirePermanentFailedRequest,
+        ) -> Result<Option<TriggerRecord>, TriggerError> {
+            unreachable!("active-clear-fails-once repository should not persist permanent failures")
+        }
+
+        async fn mark_fire_terminally_failed(
+            &self,
+            _request: FireTerminalFailedRequest,
+        ) -> Result<Option<TriggerRecord>, TriggerError> {
+            unreachable!("active-clear-fails-once repository should not persist terminal failures")
+        }
+
+        async fn clear_active_fire(
+            &self,
+            request: ClearActiveFireRequest,
+        ) -> Result<Option<TriggerRecord>, TriggerError> {
+            self.clear_requests
+                .lock()
+                .expect("clear requests lock")
+                .push(request.trigger_id);
+            if request.trigger_id == self.fail_once_trigger_id {
+                let mut failed_once = self.failed_once.lock().expect("failed-once lock");
+                if !*failed_once {
+                    *failed_once = true;
+                    return Err(TriggerError::Backend {
+                        reason: "clear failed once".to_string(),
+                    });
+                }
+            }
+
+            let mut records = self.records.lock().expect("active records lock");
+            let Some(record) = records.iter_mut().find(|record| {
+                record.tenant_id == request.tenant_id && record.trigger_id == request.trigger_id
+            }) else {
+                return Ok(None);
+            };
+            let updated = record.clone();
+            record.active_fire_slot = None;
+            record.active_run_ref = None;
+            Ok(Some(updated))
         }
     }
 

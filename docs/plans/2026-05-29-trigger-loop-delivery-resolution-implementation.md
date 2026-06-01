@@ -647,13 +647,11 @@ Wire the trigger poller into Reborn composition:
 - a dedicated `TriggerPollerWorkerConfig` or equivalent composition-owned type
   for poll interval, fires per tick, and per-trigger active-run cap. Do not
   reuse `RebornRuntimeInput::PollSettings`, which is request-completion polling.
-- add a sealed `TrustedTriggerPollerScope` or equivalent host-owned token before
-  exposing the real background poller lifecycle. Global trigger scans should
-  require that token or return a wrapper type such as `GlobalActiveTriggerRecord`
-  so product adapters, first-party capabilities, and tenant-scoped APIs cannot
-  accidentally treat cross-tenant poller rows as ordinary caller-scoped lists.
-  Keep tenant-scoped `list_triggers(tenant_id)` as the only user/API listing
-  path.
+- preserve the sealed `TrustedTriggerPollerScope` added in PR 16 when exposing
+  the real background poller lifecycle. Product adapters, first-party
+  capabilities, and tenant-scoped APIs must not receive access to cross-tenant
+  poller scans; keep tenant-scoped `list_triggers(tenant_id)` as the only
+  user/API listing path.
 - background task bundle or worker-supervisor type that owns both turn-runner
   and trigger-poller handles, cancellation, await/shutdown ordering, and panic
   or early-exit reporting.
