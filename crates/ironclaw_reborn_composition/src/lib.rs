@@ -64,6 +64,8 @@ mod readiness;
 mod runtime;
 mod runtime_input;
 mod skill_listing;
+#[cfg(feature = "slack-v2-host-beta")]
+mod slack_serve;
 #[cfg(feature = "test-support")]
 pub mod test_support;
 mod web_access;
@@ -146,6 +148,11 @@ pub use runtime_input::{
     RebornRuntimeIdentity, RebornRuntimeInput, TurnRunnerSettings,
 };
 pub use skill_listing::{RebornSkillListError, list_reborn_local_skills};
+#[cfg(feature = "slack-v2-host-beta")]
+pub use slack_serve::{
+    SLACK_EVENTS_PATH, SlackEventsRouteState, slack_events_route_descriptors,
+    slack_events_route_mount,
+};
 pub use webui::{RebornWebuiBundle, build_webui_services};
 #[cfg(feature = "webui-v2-beta")]
 pub use webui_rate_limit::RateLimitConfigError;

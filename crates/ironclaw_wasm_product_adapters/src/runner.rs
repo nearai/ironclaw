@@ -80,6 +80,11 @@ pub enum WebhookProcessOutcome {
     /// Parsed `ProductInboundPayload::NoOp` events still flow through
     /// `ProductWorkflow` and return `Acknowledged` with a no-op ack.
     Acknowledged { ack: ProductInboundAck },
+    /// Auth succeeded, adapter parsed an envelope, and workflow dispatch was
+    /// scheduled outside the protocol response path. Public webhook protocols
+    /// such as Slack require an immediate 2xx acknowledgement, so callers must
+    /// not wait for a durable workflow ack before replying.
+    AcceptedForAsyncDispatch,
 }
 
 /// Webhook auth strategy.
@@ -246,11 +251,15 @@ impl NativeProductAdapterRunner {
         self.config
     }
 
-    pub async fn process_webhook(
+    /// Verify a webhook request against the adapter's declared auth requirement
+    /// and mint host-owned [`ProtocolAuthEvidence`]. Protocol-specific host
+    /// handlers use this when they must inspect a verified payload before the
+    /// normal adapter parse path, e.g. Slack URL-verification challenge echo.
+    pub fn verify_webhook_auth(
         &self,
         headers: &http::HeaderMap,
         body: &[u8],
-    ) -> Result<WebhookProcessOutcome, RunnerError> {
+    ) -> Result<ProtocolAuthEvidence, RunnerError> {
         if !self
             .auth
             .matches_requirement(self.adapter.auth_requirement())
@@ -263,12 +272,20 @@ impl NativeProductAdapterRunner {
                 },
             });
         }
-        let evidence = match self.auth.verify(headers, body) {
-            VerificationOutcome::Verified { subject } => self.auth.mint_evidence(subject),
+        match self.auth.verify(headers, body) {
+            VerificationOutcome::Verified { subject } => Ok(self.auth.mint_evidence(subject)),
             VerificationOutcome::Failed { failure } => {
-                return Err(RunnerError::AuthenticationFailed { failure });
+                Err(RunnerError::AuthenticationFailed { failure })
             }
-        };
+        }
+    }
+
+    pub async fn process_webhook(
+        &self,
+        headers: &http::HeaderMap,
+        body: &[u8],
+    ) -> Result<WebhookProcessOutcome, RunnerError> {
+        let evidence = self.verify_webhook_auth(headers, body)?;
         let _permit = self.admission.clone().try_acquire_owned().map_err(|_| {
             RunnerError::TooManyInFlight {
                 max_in_flight: self.config.max_in_flight(),
@@ -315,6 +332,69 @@ impl NativeProductAdapterRunner {
             .into());
         }
         Ok(WebhookProcessOutcome::Acknowledged { ack })
+    }
+
+    /// Verify, parse, stamp, and schedule workflow dispatch without waiting for
+    /// the workflow result. This is the path for protocols that require an
+    /// immediate webhook ACK after authentication and syntactic normalization.
+    pub fn process_webhook_immediate_ack(
+        &self,
+        headers: &http::HeaderMap,
+        body: &[u8],
+    ) -> Result<WebhookProcessOutcome, RunnerError> {
+        let evidence = self.verify_webhook_auth(headers, body)?;
+        self.process_verified_webhook_immediate_ack(body, &evidence)
+    }
+
+    /// Schedule a previously verified webhook payload. Exposed for
+    /// protocol-specific handlers that must verify once, handle a special
+    /// synchronous protocol handshake, and then continue into the normal async
+    /// ProductWorkflow dispatch path for ordinary events.
+    pub fn process_verified_webhook_immediate_ack(
+        &self,
+        body: &[u8],
+        evidence: &ProtocolAuthEvidence,
+    ) -> Result<WebhookProcessOutcome, RunnerError> {
+        let permit = self.admission.clone().try_acquire_owned().map_err(|_| {
+            RunnerError::TooManyInFlight {
+                max_in_flight: self.config.max_in_flight(),
+            }
+        })?;
+        let parse_result = catch_unwind(AssertUnwindSafe(|| {
+            self.adapter.parse_inbound(body, evidence)
+        }));
+        let parsed = match parse_result {
+            Ok(result) => result?,
+            Err(_) => return Err(RunnerError::AdapterPanicked),
+        };
+        let context = TrustedInboundContext::from_verified_evidence(
+            self.adapter.adapter_id().clone(),
+            self.adapter.installation_id().clone(),
+            chrono::Utc::now(),
+            evidence,
+        )?;
+        let envelope = ProductInboundEnvelope::from_trusted_parse(context, parsed)?;
+        let workflow = Arc::clone(&self.workflow);
+        tokio::spawn(async move {
+            let _permit = permit;
+            match workflow.accept_inbound(envelope).await {
+                Ok(ack) if ack.retry_disposition() == InboundRetryDisposition::Retry => {
+                    tracing::warn!(
+                        target = "ironclaw::product_adapter::runner",
+                        "async webhook workflow dispatch requested retry after protocol ack"
+                    );
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        target = "ironclaw::product_adapter::runner",
+                        error = %error,
+                        "async webhook workflow dispatch failed after protocol ack"
+                    );
+                }
+            }
+        });
+        Ok(WebhookProcessOutcome::AcceptedForAsyncDispatch)
     }
 }
 
