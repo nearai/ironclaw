@@ -11,7 +11,11 @@
 
 ## What This Crate Owns
 
-- Network policy boundary and hardened host/provider HTTP transport substrate.
+- Network policy boundary and hardened host/provider HTTP transport substrate, currently:
+- Policy enforcement: `NetworkPolicyEnforcer`, `StaticNetworkPolicyEnforcer` (`policy`) and internal URL targeting / private-IP checks (`url_target`).
+- Address resolution: `NetworkResolver` (`resolver`).
+- Hardened transport: `ReqwestNetworkTransport` (`transport`) and the egress facade `NetworkHttpEgress` / `PolicyNetworkHttpEgress` / `NetworkHttpTransport` (`egress`).
+- Request/response/usage types: `NetworkRequest`, `NetworkHttpRequest`, `NetworkHttpResponse`, `NetworkTransportRequest`, `NetworkUsage`, `DEFAULT_RESPONSE_BODY_LIMIT` (`types`); `NetworkHttpError` (`error`).
 - Crate-local public API, tests, and fixtures needed to prove that ownership.
 
 ## Do Not Move In Here
