@@ -43,7 +43,7 @@ Every crate has `AGENTS.md`; treat it as first file to load even if this table b
 Keep lower layers neutral. Product and runtime composition flows downward through typed contracts, not concrete shortcuts.
 
 ```text
-common / host_api / storage
+common / host_api
   -> filesystem / memory / events / event_projections / extensions / trust / resources
   -> secrets / network / outbound / run_state / authorization / approvals / runtime_policy
   -> host_runtime / processes / dispatcher / runtime lanes (scripts, mcp, wasm)
@@ -62,7 +62,6 @@ Boundary rule: if you need an upstream crate in a low-level crate, stop and chec
 | --- | --- | --- | --- |
 | `ironclaw_common` | `ironclaw_common/AGENTS.md`, `Cargo.toml` | Low-dependency shared types/utilities: app events, identity, trust-boundary helpers, paths, platform/env/timezone, attachment helpers. | Runtime orchestration, persistence, clients, policy, product domain logic. |
 | `ironclaw_host_api` | `ironclaw_host_api/AGENTS.md`, `ironclaw_host_api/CLAUDE.md`, `docs/reborn/contracts/host-api.md` | Neutral authority vocabulary: IDs, scopes, paths, actions, decisions, resources, approvals, audit, HTTP, dispatch, runtime-policy, trust types. | Runtime execution, persistence, HTTP clients, product workflow, policy engines. |
-| `ironclaw_storage` | `ironclaw_storage/AGENTS.md`, `ironclaw_storage/CLAUDE.md` | Generic storage substrate: backend identity, redacted errors, migration descriptors, pagination, serialization, primitive blob/record store traits. | Domain schemas/semantics for turns, threads, outbound, secrets, events. |
 | `ironclaw_architecture` | `ironclaw_architecture/AGENTS.md`, `ironclaw_architecture/CLAUDE.md` | Workspace architecture tests, Reborn dependency boundaries, composition-boundary checks. | Production runtime code or production deps. |
 
 ### Files, memory, events, projections
@@ -141,7 +140,6 @@ Boundary rule: if you need an upstream crate in a low-level crate, stop and chec
 ## Common Change Routes
 
 - Host API shape: `ironclaw_host_api` -> matching `docs/reborn/contracts/*.md` -> affected service/runtime crates -> `ironclaw_architecture`.
-- Storage abstraction: `ironclaw_storage` for generic mechanics; owning domain crate for schemas/queries; preserve libSQL/PostgreSQL parity.
 - Files/memory: `ironclaw_filesystem` for mount/path authority; `ironclaw_memory` for memory documents/search/chunking/indexing.
 - Events/projections/outbound: `ironclaw_events` for canonical redacted events; `ironclaw_event_projections` for projection model; `ironclaw_outbound` for metadata-only delivery/subscription policy; adapters for concrete delivery.
 - Trust/auth/approval: `ironclaw_trust` -> `ironclaw_authorization` -> `ironclaw_run_state`/`ironclaw_approvals` -> `ironclaw_capabilities` as needed.
