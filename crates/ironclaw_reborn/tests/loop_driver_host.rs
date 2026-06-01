@@ -285,6 +285,68 @@ async fn text_only_host_factory_builds_complete_agent_loop_driver_host() {
 }
 
 #[tokio::test]
+async fn host_factory_anchors_claimed_accepted_message_as_turn_objective() {
+    let mut fixture =
+        HostFixture::new("thread-host-turn-objective", "complete the requested fix").await;
+    fixture.claimed.state.accepted_message_ref =
+        AcceptedMessageRef::new(format!("msg:{}", fixture.accepted_message_id)).unwrap();
+    fixture
+        .thread_service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: fixture.thread_scope.clone(),
+            thread_id: fixture.thread_id.clone(),
+            actor_id: "user-text-host".to_string(),
+            source_binding_id: Some("source-web".to_string()),
+            reply_target_binding_id: Some("reply-web".to_string()),
+            external_event_id: Some("event-thread-host-turn-objective-follow-up".to_string()),
+            content: MessageContent::text("newer message in context window"),
+        })
+        .await
+        .unwrap();
+    let host = fixture
+        .factory()
+        .create_host(&fixture.claimed)
+        .await
+        .unwrap();
+
+    let prompt_bundle = host
+        .build_prompt_bundle(LoopPromptBundleRequest {
+            mode: PromptMode::TextOnly,
+            context_cursor: None,
+            surface_version: None,
+            checkpoint_state_ref: None,
+            max_messages: Some(1),
+            inline_messages: Vec::new(),
+            capability_view: None,
+        })
+        .await
+        .unwrap();
+
+    host.stream_model(LoopModelRequest {
+        messages: prompt_bundle.messages,
+        surface_version: None,
+        model_preference: None,
+        capability_view: None,
+    })
+    .await
+    .unwrap();
+
+    let calls = fixture.gateway.requests();
+    let contents = calls[0]
+        .messages
+        .iter()
+        .map(|message| message.content.as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        contents
+            .iter()
+            .any(|content| content.contains("turn objective"))
+    );
+    assert!(contents.contains(&"complete the requested fix"));
+    assert!(contents.contains(&"newer message in context window"));
+}
+
+#[tokio::test]
 async fn text_only_host_factory_sanitizes_gateway_error_summaries() {
     let fixture = HostFixture::new(
         "thread-host-model-error-redaction",

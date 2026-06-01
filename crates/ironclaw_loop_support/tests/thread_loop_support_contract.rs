@@ -33,8 +33,8 @@ use ironclaw_threads::{
     UpdateAssistantDraftRequest, UpdateToolResultReferenceRequest,
 };
 use ironclaw_turns::{
-    LoopMessageRef, LoopResultRef, RunProfileResolutionRequest, RunProfileResolver, TurnActor,
-    TurnId, TurnRunId, TurnScope,
+    AcceptedMessageRef, LoopMessageRef, LoopResultRef, RunProfileResolutionRequest,
+    RunProfileResolver, TurnActor, TurnId, TurnRunId, TurnScope,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, AppendCapabilityResultRef, AssistantReply,
         BeginAssistantDraft, CapabilityBatchInvocation, CapabilityBatchOutcome, CapabilityDenied,
@@ -93,6 +93,195 @@ async fn thread_context_port_loads_policy_filtered_transcript_messages() {
     assert_eq!(compaction.kind, LoopContextCompactionKind::User);
     assert!(compaction.estimated_tokens > 0);
     assert!(bundle.memory_snippets.is_empty());
+}
+
+#[tokio::test]
+async fn thread_context_port_marks_accepted_message_as_turn_objective() {
+    let fixture = ThreadFixture::new().await;
+    let accepted_message_ref =
+        AcceptedMessageRef::new(format!("msg:{}", fixture.user_message_id)).unwrap();
+    let run_context = fixture
+        .run_context
+        .clone()
+        .with_accepted_message_ref(accepted_message_ref.clone());
+    let adapter = ThreadBackedLoopContextPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        run_context,
+        16,
+    );
+
+    let bundle = adapter
+        .load_loop_context(LoopContextRequest {
+            after: None,
+            limit: 16,
+            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(bundle.messages.len(), 1);
+    assert_eq!(
+        bundle.messages[0].message_ref.as_ref().unwrap().as_str(),
+        accepted_message_ref.as_str()
+    );
+    assert_eq!(bundle.instruction_snippets.len(), 1);
+    assert_eq!(
+        bundle.instruction_snippets[0].snippet_ref,
+        "instruction:system.turn_objective"
+    );
+    assert!(
+        bundle.instruction_snippets[0]
+            .safe_summary
+            .contains("turn objective")
+    );
+}
+
+#[tokio::test]
+async fn thread_context_port_keeps_opaque_accepted_ref_as_instruction_only_objective() {
+    let fixture = ThreadFixture::new().await;
+    let run_context = fixture
+        .run_context
+        .clone()
+        .with_accepted_message_ref(AcceptedMessageRef::new("accepted-opaque").unwrap());
+    let adapter = ThreadBackedLoopContextPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        run_context,
+        16,
+    );
+
+    let bundle = adapter
+        .load_loop_context(LoopContextRequest {
+            after: None,
+            limit: 16,
+            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(bundle.messages.len(), 1);
+    assert_eq!(bundle.instruction_snippets.len(), 1);
+    assert!(
+        bundle.instruction_snippets[0]
+            .safe_summary
+            .contains("turn objective")
+    );
+}
+
+#[tokio::test]
+async fn thread_context_port_rejects_malformed_transcript_objective_ref() {
+    let fixture = ThreadFixture::new().await;
+    let run_context = fixture
+        .run_context
+        .clone()
+        .with_accepted_message_ref(AcceptedMessageRef::new("msg:not-a-uuid").unwrap());
+    let adapter = ThreadBackedLoopContextPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        run_context,
+        16,
+    );
+
+    let error = adapter
+        .load_loop_context(LoopContextRequest {
+            after: None,
+            limit: 16,
+            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+        })
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+    assert_eq!(
+        error.safe_summary,
+        "accepted turn objective message id is invalid"
+    );
+}
+
+#[tokio::test]
+async fn prompt_and_model_ports_pin_accepted_message_when_outside_context_window() {
+    let fixture = ThreadFixture::new().await;
+    let accepted_message_ref =
+        AcceptedMessageRef::new(format!("msg:{}", fixture.user_message_id)).unwrap();
+    let run_context = fixture
+        .run_context
+        .clone()
+        .with_accepted_message_ref(accepted_message_ref);
+    fixture
+        .thread_service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: fixture.thread_scope.clone(),
+            thread_id: fixture.thread_id.clone(),
+            actor_id: "user-loop-support".to_string(),
+            source_binding_id: Some("source-web".to_string()),
+            reply_target_binding_id: Some("reply-web".to_string()),
+            external_event_id: Some("event-2".to_string()),
+            content: MessageContent::text("newer follow-up"),
+        })
+        .await
+        .unwrap();
+
+    let context_port = Arc::new(ThreadBackedLoopContextPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        run_context.clone(),
+        1,
+    ));
+    let materialization_store = Arc::new(InMemoryInstructionMaterializationStore::default());
+    let prompt_port = HostManagedLoopPromptPort::new(
+        run_context.clone(),
+        context_port,
+        Arc::new(InMemoryLoopHostMilestoneSink::default()),
+    )
+    .with_instruction_materialization_store(materialization_store.clone())
+    .with_default_message_limit(1);
+    let prompt_bundle = prompt_port
+        .build_prompt_bundle(ironclaw_turns::run_profile::LoopPromptBundleRequest {
+            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+            context_cursor: None,
+            surface_version: None,
+            checkpoint_state_ref: None,
+            max_messages: Some(1),
+            inline_messages: Vec::new(),
+            capability_view: None,
+        })
+        .await
+        .unwrap();
+
+    let gateway = Arc::new(RecordingGateway::reply("model says hi"));
+    let model_port = ThreadBackedLoopModelPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        run_context,
+        gateway.clone(),
+        1,
+    )
+    .with_instruction_materialization_store(materialization_store);
+
+    model_port
+        .stream_model(LoopModelRequest {
+            messages: prompt_bundle.messages,
+            surface_version: None,
+            model_preference: None,
+            capability_view: None,
+        })
+        .await
+        .unwrap();
+
+    let calls = gateway.calls.lock().unwrap();
+    let contents = calls[0]
+        .messages
+        .iter()
+        .map(|message| message.content.as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        contents
+            .iter()
+            .any(|content| content.contains("turn objective"))
+    );
+    assert!(contents.contains(&"hello reborn"));
+    assert!(contents.contains(&"newer follow-up"));
 }
 
 #[tokio::test]

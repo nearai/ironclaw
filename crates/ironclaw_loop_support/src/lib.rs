@@ -33,6 +33,7 @@ mod subagent_spawn_port;
 mod system_inference;
 mod token_estimator;
 mod turn_event_publisher;
+mod turn_objective_context;
 
 pub use budget_accountant::{
     BudgetSeedingPolicy, GovernorBackedAccountant, ModelCost, ModelCostTable, ZeroCostTable,
@@ -307,7 +308,7 @@ where
             .await
             .map_err(context_read_error)?;
 
-        let instruction_snippets = match self.skill_context_source.as_deref() {
+        let mut instruction_snippets = match self.skill_context_source.as_deref() {
             Some(source) => {
                 skill_context::build_skill_instruction_snippets(source, &self.run_context).await?
             }
@@ -341,13 +342,23 @@ where
             None => Vec::new(),
         };
 
+        let mut messages = context
+            .messages
+            .into_iter()
+            .filter_map(context_message_to_loop_message)
+            .collect::<Vec<_>>();
+        turn_objective_context::apply_turn_objective_context(
+            self.thread_service.as_ref(),
+            &self.thread_scope,
+            &self.run_context,
+            &mut messages,
+            &mut instruction_snippets,
+        )
+        .await?;
+
         Ok(LoopContextBundle {
             identity_messages,
-            messages: context
-                .messages
-                .into_iter()
-                .filter_map(context_message_to_loop_message)
-                .collect(),
+            messages,
             instruction_snippets,
             memory_snippets: Vec::new(),
         })
