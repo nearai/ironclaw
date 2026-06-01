@@ -30,7 +30,6 @@ pub(super) async fn oauth_start_handler(
     let opaque_state_hash = opaque_state_hash(opaque_state.as_str())?;
     let pkce_verifier_hash = pkce_verifier_hash(pkce_verifier_value.expose_secret())?;
     let pkce_verifier = pkce_verifier_value.clone_secret();
-    state.ensure_pkce_verifier_capacity()?;
 
     let flow = run_with_backend_timeout(
         state
@@ -103,8 +102,6 @@ pub(super) async fn google_oauth_start_handler(
         config.hosted_domain_hint.as_deref(),
     )
     .map_err(ProductAuthRouteFailure::from)?;
-    state.ensure_pkce_verifier_capacity()?;
-    state.ensure_pending_google_oauth_capacity()?;
 
     let flow = run_with_backend_timeout(state.product_auth.start_setup_oauth_flow(
         RebornOAuthStartFlowRequest {
@@ -118,7 +115,7 @@ pub(super) async fn google_oauth_start_handler(
     ))
     .await?;
     state.store_pkce_verifier(flow.id, pkce_verifier_secret, flow.expires_at)?;
-    state.store_pending_google_oauth(
+    if let Err(error) = state.store_pending_google_oauth(
         opaque_state_hash,
         PendingGoogleOAuthFlow {
             flow_id: flow.id,
@@ -127,7 +124,10 @@ pub(super) async fn google_oauth_start_handler(
             requested_scopes: requested_scopes.clone(),
             expires_at: flow.expires_at,
         },
-    )?;
+    ) {
+        state.remove_pkce_verifier(flow.id);
+        return Err(error);
+    }
 
     Ok(Json(GoogleOAuthStartResponse {
         flow_id: flow.id,
@@ -235,12 +235,17 @@ pub(super) async fn google_oauth_callback_handler(
         return response.map(Json);
     }
 
-    run_with_backend_timeout(
+    if let Err(error) = run_with_backend_timeout(
         state
             .product_auth
             .ensure_oauth_callback_flow_known(&pending.scope, pending.flow_id),
     )
-    .await?;
+    .await
+    {
+        state.remove_pkce_verifier(pending.flow_id);
+        state.remove_pending_google_oauth(&state_hash);
+        return Err(error);
+    }
     let code = query
         .code
         .as_ref()
@@ -249,6 +254,8 @@ pub(super) async fn google_oauth_callback_handler(
     let callback_scopes = parse_google_callback_scopes(query.scopes.as_deref())?
         .unwrap_or_else(|| pending.requested_scopes.clone());
     if callback_scopes.is_empty() {
+        state.remove_pkce_verifier(pending.flow_id);
+        state.remove_pending_google_oauth(&state_hash);
         return Err(ProductAuthRouteFailure::malformed_callback());
     }
     let authorization_code_hash = authorization_code_hash(code.expose_secret())?;

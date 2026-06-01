@@ -11,6 +11,7 @@ mod manual_token;
 mod oauth;
 
 use std::{
+    hash::Hash,
     num::{NonZeroU32, NonZeroU64, NonZeroUsize},
     sync::{Arc, Mutex},
     time::Duration,
@@ -138,8 +139,8 @@ pub(crate) struct ProductAuthRouteState {
     // because `AuthFlowRecord` deliberately serializes hashes only. Production
     // HA must replace this with a host-owned encrypted verifier store before
     // routing callbacks across replicas or restarts.
-    pkce_verifiers: Arc<Mutex<LruCache<AuthFlowId, StoredPkceVerifier>>>,
-    pending_google_oauth: Arc<Mutex<LruCache<OpaqueStateHash, PendingGoogleOAuthFlow>>>,
+    pkce_verifiers: ExpiringLruCache<AuthFlowId, StoredPkceVerifier>,
+    pending_google_oauth: ExpiringLruCache<OpaqueStateHash, PendingGoogleOAuthFlow>,
 }
 
 impl ProductAuthRouteState {
@@ -155,12 +156,14 @@ impl ProductAuthRouteState {
             default_agent_id,
             default_project_id,
             google_oauth: None,
-            pkce_verifiers: Arc::new(Mutex::new(LruCache::new(
+            pkce_verifiers: ExpiringLruCache::new(
                 OAUTH_PKCE_VERIFIER_CACHE_CAPACITY,
-            ))),
-            pending_google_oauth: Arc::new(Mutex::new(LruCache::new(
+                StoredPkceVerifier::expires_at,
+            ),
+            pending_google_oauth: ExpiringLruCache::new(
                 OAUTH_PKCE_VERIFIER_CACHE_CAPACITY,
-            ))),
+                PendingGoogleOAuthFlow::expires_at,
+            ),
         }
     }
 
@@ -181,53 +184,27 @@ impl ProductAuthRouteState {
         verifier: SecretString,
         expires_at: Timestamp,
     ) -> Result<(), ProductAuthRouteFailure> {
-        let mut verifiers = self.lock_pkce_verifiers();
-        remove_expired_pkce_verifiers(&mut verifiers);
-        if verifiers.len() >= verifiers.cap().get() && !verifiers.contains(&flow_id) {
-            return Err(ProductAuthRouteFailure::backend_unavailable());
-        }
-        verifiers.put(
+        self.pkce_verifiers.store(
             flow_id,
             StoredPkceVerifier {
                 verifier,
                 expires_at,
             },
-        );
-        Ok(())
-    }
-
-    fn ensure_pkce_verifier_capacity(&self) -> Result<(), ProductAuthRouteFailure> {
-        let mut verifiers = self.lock_pkce_verifiers();
-        remove_expired_pkce_verifiers(&mut verifiers);
-        if verifiers.len() >= verifiers.cap().get() {
-            return Err(ProductAuthRouteFailure::backend_unavailable());
-        }
-        Ok(())
+        )
     }
 
     fn pkce_verifier_for_callback(
         &self,
         flow_id: AuthFlowId,
     ) -> Result<SecretString, ProductAuthRouteFailure> {
-        let mut verifiers = self.lock_pkce_verifiers();
-        remove_expired_pkce_verifiers(&mut verifiers);
-        verifiers
+        self.pkce_verifiers
             .get(&flow_id)
             .map(|stored| stored.verifier.clone())
             .ok_or_else(ProductAuthRouteFailure::unknown_or_expired_flow)
     }
 
     fn remove_pkce_verifier(&self, flow_id: AuthFlowId) {
-        self.lock_pkce_verifiers().pop(&flow_id);
-    }
-
-    fn ensure_pending_google_oauth_capacity(&self) -> Result<(), ProductAuthRouteFailure> {
-        let mut pending_flows = self.lock_pending_google_oauth();
-        remove_expired_pending_google_oauth(&mut pending_flows);
-        if pending_flows.len() >= pending_flows.cap().get() {
-            return Err(ProductAuthRouteFailure::backend_unavailable());
-        }
-        Ok(())
+        self.pkce_verifiers.remove(&flow_id);
     }
 
     fn store_pending_google_oauth(
@@ -235,46 +212,20 @@ impl ProductAuthRouteState {
         state_hash: OpaqueStateHash,
         pending: PendingGoogleOAuthFlow,
     ) -> Result<(), ProductAuthRouteFailure> {
-        let mut pending_flows = self.lock_pending_google_oauth();
-        remove_expired_pending_google_oauth(&mut pending_flows);
-        if pending_flows.len() >= pending_flows.cap().get() && !pending_flows.contains(&state_hash)
-        {
-            return Err(ProductAuthRouteFailure::backend_unavailable());
-        }
-        pending_flows.put(state_hash, pending);
-        Ok(())
+        self.pending_google_oauth.store(state_hash, pending)
     }
 
     fn pending_google_oauth_flow(
         &self,
         state_hash: &OpaqueStateHash,
     ) -> Result<PendingGoogleOAuthFlow, ProductAuthRouteFailure> {
-        let mut pending_flows = self.lock_pending_google_oauth();
-        remove_expired_pending_google_oauth(&mut pending_flows);
-        pending_flows
+        self.pending_google_oauth
             .get(state_hash)
-            .cloned()
             .ok_or_else(ProductAuthRouteFailure::unknown_or_expired_flow)
     }
 
     fn remove_pending_google_oauth(&self, state_hash: &OpaqueStateHash) {
-        self.lock_pending_google_oauth().pop(state_hash);
-    }
-
-    fn lock_pkce_verifiers(
-        &self,
-    ) -> std::sync::MutexGuard<'_, LruCache<AuthFlowId, StoredPkceVerifier>> {
-        self.pkce_verifiers
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-
-    fn lock_pending_google_oauth(
-        &self,
-    ) -> std::sync::MutexGuard<'_, LruCache<OpaqueStateHash, PendingGoogleOAuthFlow>> {
-        self.pending_google_oauth
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.pending_google_oauth.remove(state_hash);
     }
 }
 
@@ -287,8 +238,8 @@ impl std::fmt::Debug for ProductAuthRouteState {
             .field("default_agent_id", &self.default_agent_id)
             .field("default_project_id", &self.default_project_id)
             .field("google_oauth", &self.google_oauth.is_some())
-            .field("pkce_verifiers", &"Arc<Mutex<LruCache<...>>>")
-            .field("pending_google_oauth", &"Arc<Mutex<LruCache<...>>>")
+            .field("pkce_verifiers", &"ExpiringLruCache<...>")
+            .field("pending_google_oauth", &"ExpiringLruCache<...>")
             .finish()
     }
 }
@@ -330,16 +281,84 @@ impl std::fmt::Debug for GoogleOAuthRouteConfig {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("GoogleOAuthRouteConfig")
-            .field("client_id", &"[REDACTED]")
+            .field("client_id", &self.client_id.as_str())
             .field("redirect_uri", &self.redirect_uri)
-            .field("hosted_domain_hint", &self.hosted_domain_hint)
+            .field(
+                "hosted_domain_hint",
+                &self.hosted_domain_hint.as_ref().map(|_| "[REDACTED]"),
+            )
             .finish()
     }
 }
 
+#[derive(Clone)]
+struct ExpiringLruCache<K, V> {
+    entries: Arc<Mutex<LruCache<K, V>>>,
+    expires_at: fn(&V) -> Timestamp,
+}
+
+impl<K, V> ExpiringLruCache<K, V>
+where
+    K: Clone + Eq + Hash,
+{
+    fn new(capacity: NonZeroUsize, expires_at: fn(&V) -> Timestamp) -> Self {
+        Self {
+            entries: Arc::new(Mutex::new(LruCache::new(capacity))),
+            expires_at,
+        }
+    }
+
+    fn store(&self, key: K, value: V) -> Result<(), ProductAuthRouteFailure> {
+        let mut entries = self.lock();
+        self.remove_expired(&mut entries);
+        if entries.len() >= entries.cap().get() && !entries.contains(&key) {
+            return Err(ProductAuthRouteFailure::backend_unavailable());
+        }
+        entries.put(key, value);
+        Ok(())
+    }
+
+    fn get(&self, key: &K) -> Option<V>
+    where
+        V: Clone,
+    {
+        let mut entries = self.lock();
+        self.remove_expired(&mut entries);
+        entries.get(key).cloned()
+    }
+
+    fn remove(&self, key: &K) {
+        self.lock().pop(key);
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, LruCache<K, V>> {
+        self.entries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn remove_expired(&self, entries: &mut LruCache<K, V>) {
+        let now = Utc::now();
+        let expired = entries
+            .iter()
+            .filter_map(|(key, value)| ((self.expires_at)(value) <= now).then_some(key.clone()))
+            .collect::<Vec<_>>();
+        for key in expired {
+            entries.pop(&key);
+        }
+    }
+}
+
+#[derive(Clone)]
 pub(super) struct StoredPkceVerifier {
     verifier: SecretString,
     expires_at: Timestamp,
+}
+
+impl StoredPkceVerifier {
+    fn expires_at(&self) -> Timestamp {
+        self.expires_at
+    }
 }
 
 #[derive(Clone)]
@@ -351,31 +370,9 @@ pub(super) struct PendingGoogleOAuthFlow {
     expires_at: Timestamp,
 }
 
-pub(super) fn remove_expired_pkce_verifiers(
-    verifiers: &mut LruCache<AuthFlowId, StoredPkceVerifier>,
-) {
-    let now = Utc::now();
-    let expired = verifiers
-        .iter()
-        .filter_map(|(flow_id, stored)| (stored.expires_at <= now).then_some(*flow_id))
-        .collect::<Vec<_>>();
-    for flow_id in expired {
-        verifiers.pop(&flow_id);
-    }
-}
-
-pub(super) fn remove_expired_pending_google_oauth(
-    pending_flows: &mut LruCache<OpaqueStateHash, PendingGoogleOAuthFlow>,
-) {
-    let now = Utc::now();
-    let expired = pending_flows
-        .iter()
-        .filter_map(|(state_hash, pending)| {
-            (pending.expires_at <= now).then_some(state_hash.clone())
-        })
-        .collect::<Vec<_>>();
-    for state_hash in expired {
-        pending_flows.pop(&state_hash);
+impl PendingGoogleOAuthFlow {
+    fn expires_at(&self) -> Timestamp {
+        self.expires_at
     }
 }
 

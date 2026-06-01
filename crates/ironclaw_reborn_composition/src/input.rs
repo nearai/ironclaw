@@ -42,7 +42,7 @@ impl std::fmt::Debug for OAuthClientConfig {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("OAuthClientConfig")
-            .field("client_id", &self.client_id)
+            .field("client_id", &self.client_id.as_str())
             .field(
                 "client_secret",
                 &self.client_secret.as_ref().map(|_| "[REDACTED]"),
