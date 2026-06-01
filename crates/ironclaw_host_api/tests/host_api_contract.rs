@@ -970,6 +970,9 @@ fn obligations_are_unique_and_canonicalized() {
         Obligation::AuditAfter,
         Obligation::EnforceResourceCeiling { ceiling },
         Obligation::ReserveResources { reservation_id },
+        Obligation::FirstPartyCredentialStagedViaHostPort {
+            capability_id: CapabilityId::new("gmail.list_messages").unwrap(),
+        },
         Obligation::AuditBefore,
     ])
     .unwrap();
@@ -982,6 +985,7 @@ fn obligations_are_unique_and_canonicalized() {
             .collect::<Vec<_>>(),
         vec![
             ObligationKind::ReserveResources,
+            ObligationKind::FirstPartyCredentialStagedViaHostPort,
             ObligationKind::AuditBefore,
             ObligationKind::EnforceResourceCeiling,
             ObligationKind::AuditAfter,

@@ -1623,6 +1623,7 @@ fn obligation_supported_before_dispatch(
     match obligation {
         Obligation::AuditBefore
         | Obligation::ApplyNetworkPolicy { .. }
+        | Obligation::FirstPartyCredentialStagedViaHostPort { .. }
         | Obligation::InjectCredentialAccountOnce { .. }
         | Obligation::InjectSecretOnce { .. }
         | Obligation::ReserveResources { .. }
@@ -1656,6 +1657,7 @@ fn obligation_supported_after_dispatch(
     match obligation {
         Obligation::AuditBefore
         | Obligation::ApplyNetworkPolicy { .. }
+        | Obligation::FirstPartyCredentialStagedViaHostPort { .. }
         | Obligation::InjectCredentialAccountOnce { .. }
         | Obligation::InjectSecretOnce { .. }
         | Obligation::ReserveResources { .. }
@@ -2132,6 +2134,9 @@ fn obligation_label(obligation: &Obligation) -> Option<&'static str> {
         Obligation::ApplyNetworkPolicy { .. } => Some("apply_network_policy"),
         Obligation::InjectSecretOnce { .. } => Some("inject_secret_once"),
         Obligation::InjectCredentialAccountOnce { .. } => Some("inject_credential_account_once"),
+        Obligation::FirstPartyCredentialStagedViaHostPort { .. } => {
+            Some("first_party_credential_staged_via_host_port")
+        }
         Obligation::EnforceOutputLimit { .. } => Some("enforce_output_limit"),
         Obligation::ReserveResources { .. } => Some("reserve_resources"),
         Obligation::UseScopedMounts { .. } => Some("use_scoped_mounts"),

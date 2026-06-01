@@ -192,6 +192,51 @@ async fn capability_access_allows_first_party_dynamic_secret_consumers_without_s
             .iter()
             .any(|obligation| matches!(obligation, Obligation::InjectSecretOnce { .. }))
     );
+    assert!(obligations.as_slice().iter().any(|obligation| matches!(
+        obligation,
+        Obligation::FirstPartyCredentialStagedViaHostPort { capability_id }
+            if capability_id == &descriptor.id
+    )));
+}
+
+#[tokio::test]
+async fn first_party_use_secret_with_non_empty_static_secret_still_injects_obligation() {
+    let descriptor = CapabilityDescriptor {
+        runtime: RuntimeKind::FirstParty,
+        effects: vec![EffectKind::DispatchCapability, EffectKind::UseSecret],
+        ..wasm_descriptor()
+    };
+    let secret = SecretHandle::new("static-google-secret").unwrap();
+    let mut grant = grant_for(
+        descriptor.id.clone(),
+        Principal::Extension(ExtensionId::new("caller").unwrap()),
+        vec![EffectKind::DispatchCapability, EffectKind::UseSecret],
+    );
+    grant.constraints.secrets = vec![secret.clone()];
+
+    let decision = GrantAuthorizer::new()
+        .authorize_dispatch(
+            &execution_context(CapabilitySet {
+                grants: vec![grant],
+            }),
+            &descriptor,
+            &ResourceEstimate::default(),
+        )
+        .await;
+
+    let Decision::Allow { obligations } = decision else {
+        panic!("expected allow decision with injected static secret, got {decision:?}");
+    };
+    assert!(
+        obligations
+            .as_slice()
+            .iter()
+            .any(|obligation| matches!(obligation, Obligation::InjectSecretOnce { handle } if handle == &secret))
+    );
+    assert!(!obligations.as_slice().iter().any(|obligation| matches!(
+        obligation,
+        Obligation::FirstPartyCredentialStagedViaHostPort { .. }
+    )));
 }
 
 #[tokio::test]

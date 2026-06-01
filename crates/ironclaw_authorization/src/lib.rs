@@ -1188,8 +1188,11 @@ fn obligations_for_grant(
         // Some first-party handlers choose account-scoped credentials at
         // dispatch time and stage the selected secret through their own
         // host-runtime port, so there is no static grant handle to inject here.
-        if !(descriptor.runtime == RuntimeKind::FirstParty && grant.constraints.secrets.is_empty())
-        {
+        if descriptor.runtime == RuntimeKind::FirstParty && grant.constraints.secrets.is_empty() {
+            obligations.push(Obligation::FirstPartyCredentialStagedViaHostPort {
+                capability_id: descriptor.id.clone(),
+            });
+        } else {
             match grant.constraints.secrets.as_slice() {
                 [handle] => obligations.push(Obligation::InjectSecretOnce {
                     handle: handle.clone(),
