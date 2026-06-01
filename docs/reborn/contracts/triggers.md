@@ -251,7 +251,11 @@ Slot bookkeeping is tied to acceptance, not merely polling:
 - permanent validation or authorization failures write `last_status = Error`,
   clear `active_fire_slot` and `active_run_ref`, leave `last_fired_slot` and
   `last_run_at` unchanged, and advance `next_run_at` beyond the failed
-  fire_slot.
+  fire_slot;
+- permanent failures on a schedule with no future fire slot mark the trigger
+  `Completed`, write `last_status = Error`, clear active-fire fields, and leave
+  `next_run_at` at the failed fire slot. The `Completed` state, not a sentinel
+  timestamp, removes the trigger from future due queries.
 
 Turn terminal lookup and clearing are a narrow seam layered above fire-claim
 and submit-result bookkeeping:
@@ -262,6 +266,18 @@ and submit-result bookkeeping:
   `TriggerRepository::clear_active_fire` clears only the exact matching
   `(tenant_id, trigger_id, active_fire_slot, active_run_ref)` after the caller
   has observed a terminal turn outcome.
+
+The poller treats per-record due-fire processing and active-run terminal lookup
+errors as structured tick report outcomes so one bad record does not block other
+eligible triggers in the same tick. Batch-level repository list failures remain
+fail-fast because the worker cannot know which records were safely observed.
+
+Approval waits are owned by the normal turn pipeline. While a submitted trigger
+turn is waiting for approval, the trigger remains active through
+`active_run_ref` back-pressure. Later lifecycle/notification work must define
+durable approval expiry, stale approval rejection, reminder throttling, and
+user/admin notification paths without making the trigger poller deliver outbound
+messages directly.
 
 ---
 

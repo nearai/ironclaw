@@ -9,8 +9,8 @@
 use chrono::{DateTime, Utc};
 
 use crate::{
-    BudgetApprovalGate, BudgetGateOutcome, BudgetWarning, ResourceAccount, ResourceApprovalNeeded,
-    ResourceDenial, ResourceReceipt, ResourceReservation,
+    BudgetApprovalGate, BudgetGateId, BudgetGateOutcome, BudgetWarning, ResourceAccount,
+    ResourceApprovalNeeded, ResourceDenial, ResourceReceipt, ResourceReservation,
 };
 
 /// One observable budget event.
@@ -43,7 +43,25 @@ pub enum BudgetEvent {
         denial: ResourceDenial,
         at: DateTime<Utc>,
     },
+    /// The governor's cascade said approval is needed but no gate has been
+    /// opened yet. Internal signal from the governor — the accountant
+    /// (or any other handler that holds a [`BudgetGateStore`]) reacts to
+    /// this by opening a gate and emitting [`BudgetEvent::GateOpened`]
+    /// with the real `BudgetGateId`.
+    ///
+    /// SSE projection consumers should ignore this variant and listen
+    /// for `GateOpened` instead (review feedback: invented-gate-id bug).
     ApprovalRequested {
+        needed: ResourceApprovalNeeded,
+        at: DateTime<Utc>,
+    },
+    /// A pending approval gate has been opened in the
+    /// [`BudgetGateStore`]. Carries the real `BudgetGateId` so the
+    /// SSE projection / audit log can route the user to a resolvable
+    /// gate. Produced by `GovernorBackedAccountant` after a successful
+    /// `BudgetGateStore::open`.
+    GateOpened {
+        gate_id: BudgetGateId,
         needed: ResourceApprovalNeeded,
         at: DateTime<Utc>,
     },
@@ -109,6 +127,80 @@ impl BudgetEventSink for InMemoryBudgetEventSink {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push(event);
+    }
+}
+
+/// Sink that publishes every event onto a `tokio::sync::broadcast`
+/// channel. Production composition wires this so downstream consumers
+/// (SSE projection, audit log, observability) subscribe via
+/// [`BroadcastBudgetEventSink::subscribe`] and project events without
+/// the governor knowing about them (review feedback #3841 A2).
+///
+/// `emit` is best-effort and non-blocking: when no receiver is active
+/// (or the broadcast buffer is full) the send returns an error which
+/// we discard. The governor's mutation path stays synchronous.
+#[derive(Debug, Clone)]
+pub struct BroadcastBudgetEventSink {
+    sender: tokio::sync::broadcast::Sender<BudgetEvent>,
+}
+
+impl BroadcastBudgetEventSink {
+    /// Construct a sink with the given broadcast capacity. A value of
+    /// 256 covers a comfortable burst of events without blocking; very
+    /// slow subscribers may miss events under sustained load, which
+    /// matches the audit/SSE "best-effort observability" shape.
+    pub fn new(capacity: usize) -> Self {
+        let (sender, _) = tokio::sync::broadcast::channel(capacity);
+        Self { sender }
+    }
+
+    /// Open a new subscriber. Each subscriber gets every event emitted
+    /// after the moment of subscription.
+    pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<BudgetEvent> {
+        self.sender.subscribe()
+    }
+
+    /// Number of active subscribers — handy for tests asserting that
+    /// production composition wired through to the projection task.
+    pub fn subscriber_count(&self) -> usize {
+        self.sender.receiver_count()
+    }
+}
+
+impl Default for BroadcastBudgetEventSink {
+    fn default() -> Self {
+        Self::new(256)
+    }
+}
+
+impl BudgetEventSink for BroadcastBudgetEventSink {
+    fn emit(&self, event: BudgetEvent) {
+        // `send` returns Err only when there are no active receivers —
+        // a perfectly valid state (nobody is projecting yet). Drop
+        // silently.
+        let _ = self.sender.send(event);
+    }
+}
+
+/// Composite sink that fans out to every wrapped sink in order. Lets
+/// composition keep the `InMemoryBudgetEventSink` for tests while also
+/// publishing to a `BroadcastBudgetEventSink` for SSE projection.
+#[derive(Debug)]
+pub struct CompositeBudgetEventSink {
+    sinks: Vec<std::sync::Arc<dyn BudgetEventSink>>,
+}
+
+impl CompositeBudgetEventSink {
+    pub fn new(sinks: Vec<std::sync::Arc<dyn BudgetEventSink>>) -> Self {
+        Self { sinks }
+    }
+}
+
+impl BudgetEventSink for CompositeBudgetEventSink {
+    fn emit(&self, event: BudgetEvent) {
+        for sink in &self.sinks {
+            sink.emit(event.clone());
+        }
     }
 }
 

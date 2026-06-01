@@ -26,6 +26,7 @@ use ulid::Ulid;
 mod libsql;
 #[cfg(feature = "postgres")]
 mod postgres;
+mod worker;
 
 const MIN_FIRE_CADENCE: Duration = Duration::from_secs(60);
 const MAX_DUE_TRIGGER_POLL_LIMIT: usize = 128;
@@ -41,6 +42,8 @@ pub enum TriggerError {
     InvalidFireIdentityComponent { label: String, reason: String },
     #[error("invalid trigger record: {reason}")]
     InvalidRecord { reason: String },
+    #[error("invalid trigger poller configuration: {reason}")]
+    InvalidPollerConfig { reason: String },
     #[error("invalid schedule: {reason}")]
     InvalidSchedule { reason: String },
     #[error("invalid trigger materialization: {reason}")]
@@ -293,6 +296,11 @@ impl TriggerRecord {
                 reason: "trigger prompt must not be empty".to_string(),
             });
         }
+        if self.active_run_ref.is_some() && self.active_fire_slot.is_none() {
+            return Err(TriggerError::InvalidRecord {
+                reason: "active_run_ref requires active_fire_slot".to_string(),
+            });
+        }
         self.schedule.validate()?;
         Ok(())
     }
@@ -478,6 +486,13 @@ pub struct FirePermanentFailedRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FireTerminalFailedRequest {
+    pub tenant_id: TenantId,
+    pub trigger_id: TriggerId,
+    pub fire_slot: Timestamp,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClearActiveFireRequest {
     pub tenant_id: TenantId,
     pub trigger_id: TriggerId,
@@ -558,6 +573,17 @@ pub trait TriggerRepository: Send + Sync {
         limit: usize,
     ) -> Result<Vec<TriggerRecord>, TriggerError>;
 
+    /// Lists active trigger fires across all tenants for trusted poller cleanup.
+    ///
+    /// # Safety / Authorization
+    ///
+    /// This is a global query and must not be used for tenant-scoped or
+    /// user-facing list operations. It exists so the poller can clear completed
+    /// active fires before future schedule slots become eligible. Callers must
+    /// preserve each returned record's tenant authority when checking or
+    /// clearing active fire state.
+    async fn list_active_triggers(&self, limit: usize) -> Result<Vec<TriggerRecord>, TriggerError>;
+
     async fn claim_due_fire(
         &self,
         request: ClaimDueFireRequest,
@@ -583,6 +609,19 @@ pub trait TriggerRepository: Send + Sync {
         request: FirePermanentFailedRequest,
     ) -> Result<Option<TriggerRecord>, TriggerError>;
 
+    /// Marks a trusted poller-owned claimed fire as terminally failed.
+    ///
+    /// # Safety / Authorization
+    ///
+    /// This clears active-fire state and completes the trigger when a claimed
+    /// fire cannot advance to another schedule slot. Callers must derive the
+    /// tenant, trigger id, and fire slot from a trusted claimed record, not from
+    /// user input or a tenant-scoped list path.
+    async fn mark_fire_terminally_failed(
+        &self,
+        request: FireTerminalFailedRequest,
+    ) -> Result<Option<TriggerRecord>, TriggerError>;
+
     async fn clear_active_fire(
         &self,
         request: ClearActiveFireRequest,
@@ -595,6 +634,13 @@ pub use libsql::LibSqlTriggerRepository;
 /// Feature-gated durable PostgreSQL repository type for composition/test wiring.
 #[cfg(feature = "postgres")]
 pub use postgres::PostgresTriggerRepository;
+pub use worker::{
+    TriggerActiveRunLookup, TriggerActiveRunState, TriggerActiveRunStateRequest,
+    TriggerPollerFailureReason, TriggerPollerFireOutcome, TriggerPollerFireReport,
+    TriggerPollerTickReport, TriggerPollerWorker, TriggerPollerWorkerConfig,
+    TriggerPollerWorkerDeps, TrustedTriggerFireSubmitOutcome, TrustedTriggerFireSubmitter,
+    TrustedTriggerSubmitFailureReason, TrustedTriggerSubmitRequest,
+};
 
 #[derive(Clone, Default)]
 pub struct InMemoryTriggerRepository {
@@ -690,6 +736,34 @@ impl TriggerRepository for InMemoryTriggerRepository {
             .collect::<Vec<_>>();
         selected_keys.sort_by_key(|(next_run_at, tenant_id, trigger_id, _)| {
             (*next_run_at, tenant_id.clone(), *trigger_id)
+        });
+        selected_keys.truncate(limit);
+        Ok(selected_keys
+            .into_iter()
+            .filter_map(|(_, _, _, key)| state.get(&key).cloned())
+            .collect())
+    }
+
+    async fn list_active_triggers(&self, limit: usize) -> Result<Vec<TriggerRecord>, TriggerError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let limit = limit.min(MAX_DUE_TRIGGER_POLL_LIMIT);
+        let state = self.lock_state()?;
+        let mut selected_keys = state
+            .iter()
+            .filter_map(|(key, record)| {
+                let active_fire_slot = record.active_fire_slot?;
+                Some((
+                    active_fire_slot,
+                    record.tenant_id.clone(),
+                    record.trigger_id,
+                    key.clone(),
+                ))
+            })
+            .collect::<Vec<_>>();
+        selected_keys.sort_by_key(|(active_fire_slot, tenant_id, trigger_id, _)| {
+            (*active_fire_slot, tenant_id.clone(), *trigger_id)
         });
         selected_keys.truncate(limit);
         Ok(selected_keys
@@ -831,6 +905,29 @@ impl TriggerRepository for InMemoryTriggerRepository {
                 reject_non_future_next_run_at(request.fire_slot, request.next_run_at)?;
                 record.last_status = Some(TriggerRunStatus::Error);
                 record.next_run_at = request.next_run_at;
+                record.active_fire_slot = None;
+                record.active_run_ref = None;
+                Ok(())
+            },
+        )?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(record))
+    }
+
+    async fn mark_fire_terminally_failed(
+        &self,
+        request: FireTerminalFailedRequest,
+    ) -> Result<Option<TriggerRecord>, TriggerError> {
+        let Some(record) = self.update_claimed_fire(
+            &request.tenant_id,
+            request.trigger_id,
+            request.fire_slot,
+            |record| {
+                reject_failed_result_after_active_run(record.active_run_ref)?;
+                record.state = TriggerState::Completed;
+                record.last_status = Some(TriggerRunStatus::Error);
                 record.active_fire_slot = None;
                 record.active_run_ref = None;
                 Ok(())

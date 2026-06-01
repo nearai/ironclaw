@@ -2808,6 +2808,7 @@ pub fn trace_tool_call_response() -> ironclaw_loop_support::HostManagedModelResp
     ironclaw_loop_support::HostManagedModelResponse {
         safe_text_deltas: Vec::new(),
         safe_reasoning_deltas: Vec::new(),
+        usage: None,
         output: ParentLoopOutput::CapabilityCalls(vec![CapabilityCallCandidate {
             surface_version: CapabilitySurfaceVersion::new(TEST_CAPABILITY_SURFACE_VERSION)
                 .expect("valid surface version"),

@@ -22,6 +22,8 @@ use std::sync::Arc;
 
 mod auth;
 mod available_extensions;
+mod budget;
+mod budget_events;
 mod bundled_skills;
 mod default_system_prompt;
 mod error;
@@ -62,6 +64,8 @@ mod readiness;
 mod runtime;
 mod runtime_input;
 mod skill_listing;
+#[cfg(feature = "test-support")]
+pub mod test_support;
 mod web_access;
 mod webui;
 #[cfg(feature = "webui-v2-beta")]
@@ -82,6 +86,8 @@ pub use auth::{
     RebornOAuthCallbackOutcome, RebornOAuthCallbackRequest, RebornOAuthCallbackResponse,
     RebornProductAuthServicePorts, RebornProductAuthServices,
 };
+pub use budget::build_default_budget_accountant;
+pub use budget_events::{BudgetEventObserver, TracingBudgetEventObserver};
 pub use error::RebornBuildError;
 pub use extension_lifecycle_command::{
     RebornExtensionLifecycleCommand, RebornExtensionLifecycleCommandError,

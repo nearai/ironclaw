@@ -305,6 +305,37 @@ pub(crate) struct RebornLocalRuntimeServices {
     pub(crate) checkpoint_state_store: Arc<dyn CheckpointStateStore>,
     pub(crate) loop_checkpoint_store: Arc<dyn LoopCheckpointStore>,
     pub(crate) thread_service: Arc<dyn SessionThreadService>,
+    /// Resource governor handle used by the budget accountant. Kept here
+    /// separately from the type-erased `dyn HostRuntime` so the runtime
+    /// composer can construct a `GovernorBackedAccountant` without losing
+    /// the concrete governor type. Wired through #3841 follow-up "A1: wire
+    /// GovernorBackedAccountant into production composition".
+    pub(crate) resource_governor: Arc<dyn ironclaw_resources::ResourceGovernor>,
+    /// Sink that receives `BudgetEvent`s from the governor. Composition
+    /// hands this to downstream consumers (audit log, SSE projection)
+    /// without forcing the governor to know about them. Wired through
+    /// #3841 follow-up "A2: project BudgetEvent into the gateway event
+    /// stream".
+    #[allow(dead_code)]
+    pub(crate) budget_event_sink: Arc<dyn ironclaw_resources::BudgetEventSink>,
+    /// Same sink as `budget_event_sink` but typed as the concrete
+    /// `InMemoryBudgetEventSink` so the runtime can expose `drain()` /
+    /// `snapshot()` to tests without leaking the concrete type into the
+    /// production `BudgetEventSink` boundary.
+    pub(crate) in_memory_budget_event_sink: Arc<ironclaw_resources::InMemoryBudgetEventSink>,
+    /// Broadcast sink production callers can subscribe against once a
+    /// real projection caller lands (review feedback Thermo-Nuclear
+    /// #3: the speculative `src/bridge/budget_events.rs` helper plus
+    /// `AppEvent::Budget` variant were removed pending an owner that
+    /// actually spawns a projection task with shutdown cancellation).
+    /// Composition fans every BudgetEvent through this alongside the
+    /// in-memory sink so tests can still inspect history.
+    pub(crate) broadcast_budget_event_sink: Arc<ironclaw_resources::BroadcastBudgetEventSink>,
+    /// Approval-gate store used to surface `BudgetApprovalRequired` to a
+    /// user. Stays in-memory in local-dev; production composition will
+    /// swap in the filesystem-backed `FilesystemBudgetGateStore`.
+    #[allow(dead_code)]
+    pub(crate) budget_gate_store: Arc<dyn ironclaw_resources::BudgetGateStore>,
     pub(crate) skill_management: Arc<RebornLocalSkillManagementPort>,
     // LocalSingleUser-only for now. Production and multi-tenant lifecycle
     // wiring need scoped storage/registry ownership before this is reused
@@ -720,6 +751,18 @@ fn build_local_dev_store_graph(
     let thread_service: Arc<dyn SessionThreadService> = Arc::new(
         FilesystemSessionThreadService::new(Arc::clone(&scoped_filesystem)),
     );
+    let BudgetSinks {
+        budget_event_sink,
+        in_memory_budget_event_sink,
+        broadcast_budget_event_sink,
+        budget_gate_store,
+    } = build_budget_sinks();
+    let resource_governor: Arc<LocalDevResourceGovernor> = Arc::new(
+        PersistentResourceGovernor::new(FilesystemResourceGovernorStore::new(Arc::clone(
+            &scoped_filesystem,
+        )))
+        .with_event_sink(Arc::clone(&budget_event_sink)),
+    );
     let skill_mounts =
         skill_management_mount_view().map_err(|error| RebornBuildError::InvalidConfig {
             reason: error.to_string(),
@@ -732,6 +775,12 @@ fn build_local_dev_store_graph(
         checkpoint_state_store,
         loop_checkpoint_store,
         thread_service,
+        resource_governor: Arc::clone(&resource_governor)
+            as Arc<dyn ironclaw_resources::ResourceGovernor>,
+        budget_event_sink,
+        in_memory_budget_event_sink,
+        broadcast_budget_event_sink,
+        budget_gate_store,
         skill_management,
         extension_management: None,
         skill_mounts,
@@ -744,10 +793,6 @@ fn build_local_dev_store_graph(
         event_log,
         audit_log,
     });
-    let resource_governor: Arc<LocalDevResourceGovernor> =
-        Arc::new(PersistentResourceGovernor::new(
-            FilesystemResourceGovernorStore::new(Arc::clone(&scoped_filesystem)),
-        ));
     let process_services = ProcessServices::filesystem(Arc::clone(&scoped_filesystem));
 
     Ok(RebornLocalDevStoreGraph {
@@ -785,6 +830,14 @@ fn build_local_dev_store_graph(
         Arc::new(InMemoryLoopCheckpointStore::default());
     let thread_service: Arc<dyn SessionThreadService> =
         Arc::new(InMemorySessionThreadService::default());
+    let BudgetSinks {
+        budget_event_sink,
+        in_memory_budget_event_sink,
+        broadcast_budget_event_sink,
+        budget_gate_store,
+    } = build_budget_sinks();
+    let resource_governor: Arc<LocalDevResourceGovernor> =
+        Arc::new(InMemoryResourceGovernor::new().with_event_sink(Arc::clone(&budget_event_sink)));
     let skill_mounts =
         skill_management_mount_view().map_err(|error| RebornBuildError::InvalidConfig {
             reason: error.to_string(),
@@ -797,6 +850,12 @@ fn build_local_dev_store_graph(
         checkpoint_state_store,
         loop_checkpoint_store,
         thread_service,
+        resource_governor: Arc::clone(&resource_governor)
+            as Arc<dyn ironclaw_resources::ResourceGovernor>,
+        budget_event_sink,
+        in_memory_budget_event_sink,
+        broadcast_budget_event_sink,
+        budget_gate_store,
         skill_management,
         extension_management: None,
         skill_mounts,
@@ -810,8 +869,6 @@ fn build_local_dev_store_graph(
         event_log,
         audit_log,
     });
-    let resource_governor: Arc<LocalDevResourceGovernor> =
-        Arc::new(InMemoryResourceGovernor::new());
     let process_services = ProcessServices::in_memory();
 
     Ok(RebornLocalDevStoreGraph {
@@ -823,6 +880,34 @@ fn build_local_dev_store_graph(
         resource_governor,
         process_services,
     })
+}
+
+struct BudgetSinks {
+    budget_event_sink: Arc<dyn ironclaw_resources::BudgetEventSink>,
+    in_memory_budget_event_sink: Arc<ironclaw_resources::InMemoryBudgetEventSink>,
+    broadcast_budget_event_sink: Arc<ironclaw_resources::BroadcastBudgetEventSink>,
+    budget_gate_store: Arc<dyn ironclaw_resources::BudgetGateStore>,
+}
+
+fn build_budget_sinks() -> BudgetSinks {
+    let in_memory_budget_event_sink = Arc::new(ironclaw_resources::InMemoryBudgetEventSink::new());
+    let broadcast_budget_event_sink =
+        Arc::new(ironclaw_resources::BroadcastBudgetEventSink::default());
+    let budget_event_sink: Arc<dyn ironclaw_resources::BudgetEventSink> =
+        Arc::new(ironclaw_resources::CompositeBudgetEventSink::new(vec![
+            Arc::clone(&in_memory_budget_event_sink)
+                as Arc<dyn ironclaw_resources::BudgetEventSink>,
+            Arc::clone(&broadcast_budget_event_sink)
+                as Arc<dyn ironclaw_resources::BudgetEventSink>,
+        ]));
+    let budget_gate_store: Arc<dyn ironclaw_resources::BudgetGateStore> =
+        Arc::new(ironclaw_resources::InMemoryBudgetGateStore::new());
+    BudgetSinks {
+        budget_event_sink,
+        in_memory_budget_event_sink,
+        broadcast_budget_event_sink,
+        budget_gate_store,
+    }
 }
 
 #[cfg(feature = "libsql")]

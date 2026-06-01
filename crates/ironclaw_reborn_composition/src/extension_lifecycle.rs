@@ -81,7 +81,15 @@ pub(crate) async fn restore_extension_lifecycle_state(
             installation.extension_id().as_str(),
         )?;
         let available = catalog.resolve(&package_ref)?;
-        validate_restored_manifest_hash(&installation, available)?;
+        if let Err(hash_error) = validate_restored_manifest_hash(&installation, available) {
+            migrate_host_bundled_manifest_hash(
+                installation_store,
+                available,
+                &installation,
+                hash_error,
+            )
+            .await?;
+        }
         materialize_available_extension(filesystem.as_ref(), available).await?;
         {
             let mut lifecycle = lifecycle_service.lock().await;
@@ -729,6 +737,83 @@ fn prepare_install(
     })
 }
 
+/// Build an [`ExtensionInstallPlan`] that carries the new manifest hash from `available`
+/// while preserving the activation state and credential bindings from `existing`.
+/// Used during restore to migrate a stored installation when the bundled manifest changes.
+fn prepare_manifest_migration(
+    available: &AvailableExtensionPackage,
+    existing: &ExtensionInstallation,
+) -> Result<ExtensionInstallPlan, ProductWorkflowError> {
+    let manifest_hash = available_manifest_hash(available)?;
+    let host_ports = ironclaw_host_runtime::default_host_port_catalog().map_err(|error| {
+        ProductWorkflowError::InvalidBindingRequest {
+            reason: format!("host port catalog rejected manifest migration: {error}"),
+        }
+    })?;
+    let contracts =
+        ironclaw_host_runtime::default_host_api_contract_registry().map_err(|error| {
+            ProductWorkflowError::InvalidBindingRequest {
+                reason: format!("host API contract registry rejected manifest migration: {error}"),
+            }
+        })?;
+    let manifest_record = ExtensionManifestRecord::from_toml_with_contracts(
+        &available.manifest_toml,
+        ManifestSource::HostBundled,
+        &host_ports,
+        Some(manifest_hash.clone()),
+        &contracts,
+    )
+    .map_err(map_extension_installation_error)?;
+    let installation = ExtensionInstallation::new(
+        existing.installation_id().clone(),
+        existing.extension_id().clone(),
+        existing.activation_state(),
+        ExtensionManifestRef::new(existing.extension_id().clone(), Some(manifest_hash)),
+        existing.credential_bindings().to_vec(),
+        chrono::Utc::now(),
+    )
+    .map_err(map_extension_installation_error)?;
+    Ok(ExtensionInstallPlan {
+        manifest_record,
+        installation,
+    })
+}
+
+async fn migrate_host_bundled_manifest_hash(
+    installation_store: &Arc<dyn ExtensionInstallationStore>,
+    available: &AvailableExtensionPackage,
+    installation: &ExtensionInstallation,
+    hash_error: ProductWorkflowError,
+) -> Result<(), ProductWorkflowError> {
+    let stored_manifest = match installation_store
+        .get_manifest(installation.extension_id())
+        .await
+        .map_err(map_extension_installation_error)?
+    {
+        Some(stored_manifest) => stored_manifest,
+        None => return Err(hash_error),
+    };
+    if stored_manifest.manifest().source != ManifestSource::HostBundled {
+        return Err(hash_error);
+    }
+
+    // For host-bundled (first-party) extensions, a manifest hash mismatch means
+    // the binary was updated and the bundled manifest changed. Migrate the stored
+    // records to the new hash while preserving activation state and bindings.
+    tracing::warn!(
+        extension_id = %installation.extension_id(),
+        "bundled extension manifest hash changed; migrating stored installation to new manifest hash"
+    );
+    let migration_plan = prepare_manifest_migration(available, installation)?;
+    installation_store
+        .upsert_manifest_and_installation(
+            migration_plan.manifest_record,
+            migration_plan.installation,
+        )
+        .await
+        .map_err(map_extension_installation_error)
+}
+
 fn validate_restored_manifest_hash(
     installation: &ExtensionInstallation,
     available: &AvailableExtensionPackage,
@@ -1170,7 +1255,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn restore_enabled_extension_rejects_manifest_hash_mismatch_without_trusting_package() {
+    async fn restore_enabled_host_bundled_extension_migrates_manifest_hash_and_trust_policy() {
         let (_dir, _storage_root, port, _active_registry, installation_store, _trust_policy) =
             extension_management_port_fixture_with_catalog_service_and_trust(
                 AvailableExtensionCatalog::from_packages(vec![fixture_extension_package()]),
@@ -1185,11 +1270,12 @@ mod tests {
             .await
             .expect("activate fixture extension");
 
-        let changed_catalog = AvailableExtensionCatalog::from_packages(vec![
-            fixture_extension_package_with_description(
-                "Lifecycle fixture extension with changed manifest",
-            ),
-        ]);
+        let changed_available = fixture_extension_package_with_description(
+            "Lifecycle fixture extension with changed manifest",
+        );
+        let changed_hash = available_manifest_hash(&changed_available).expect("changed hash");
+        let changed_package = changed_available.package.clone();
+        let changed_catalog = AvailableExtensionCatalog::from_packages(vec![changed_available]);
         let restored_lifecycle = Arc::new(Mutex::new(ExtensionLifecycleService::new(
             ExtensionRegistry::new(),
         )));
@@ -1202,7 +1288,7 @@ mod tests {
         );
         let installation_store: Arc<dyn ExtensionInstallationStore> = installation_store;
 
-        let error = restore_extension_lifecycle_state(
+        restore_extension_lifecycle_state(
             &changed_catalog,
             &port.filesystem,
             &installation_store,
@@ -1210,47 +1296,62 @@ mod tests {
             &restored_active_extensions,
         )
         .await
-        .expect_err("manifest hash mismatch fails closed");
+        .expect("host-bundled manifest hash mismatch migrates");
 
-        assert!(matches!(
-            error,
-            ProductWorkflowError::InvalidBindingRequest { .. }
-        ));
-        let changed_package = fixture_extension_package_with_description(
-            "Lifecycle fixture extension with changed manifest",
-        )
-        .package;
+        let extension_id = ExtensionId::new("fixture").expect("valid extension id");
+        let installation_id = ExtensionInstallationId::new("fixture").expect("valid installation");
+        let stored_manifest = installation_store
+            .get_manifest(&extension_id)
+            .await
+            .expect("read migrated manifest")
+            .expect("migrated manifest");
+        assert_eq!(stored_manifest.manifest_hash(), Some(&changed_hash));
+        let stored_installation = installation_store
+            .get_installation(&installation_id)
+            .await
+            .expect("read migrated installation")
+            .expect("migrated installation");
+        assert_eq!(
+            stored_installation.manifest_ref().manifest_hash(),
+            Some(&changed_hash)
+        );
         let trust_input = extension_trust_policy_input(&changed_package).expect("trust input");
         assert_eq!(
             restored_trust_policy
                 .evaluate(&trust_input)
-                .expect("mismatched extension trust")
+                .expect("migrated extension trust")
                 .effective_trust
                 .class(),
-            TrustClass::Sandbox
+            TrustClass::UserTrusted
         );
         assert!(
             restored_active_registry
                 .snapshot()
-                .get_extension(&ExtensionId::new("fixture").unwrap())
-                .is_none()
+                .get_extension(&extension_id)
+                .is_some()
         );
     }
 
     #[tokio::test]
-    async fn restore_enabled_extension_rejects_missing_manifest_hash_without_trusting_package() {
-        let available = fixture_extension_package();
-        let package = available.package.clone();
-        let catalog = AvailableExtensionCatalog::from_packages(vec![available]);
+    async fn restore_enabled_local_extension_rejects_manifest_hash_mismatch() {
+        let changed_available = fixture_extension_package_with_description(
+            "Lifecycle fixture extension with changed manifest",
+        );
+        let package = changed_available.package.clone();
+        let catalog = AvailableExtensionCatalog::from_packages(vec![changed_available]);
         let installation_store = Arc::new(InMemoryExtensionInstallationStore::default());
-        let manifest_record = fixture_manifest_record(fixture_extension_manifest(), None);
+        let manifest_record = fixture_manifest_record_with_source(
+            fixture_installed_local_manifest(),
+            ManifestSource::InstalledLocal,
+            Some("sha256:old".to_string()),
+        );
         installation_store
             .upsert_manifest(manifest_record)
             .await
             .expect("upsert manifest");
         installation_store
             .upsert_installation(fixture_installation(
-                None,
+                Some("sha256:old".to_string()),
                 ExtensionActivationState::Enabled,
             ))
             .await
@@ -1276,7 +1377,7 @@ mod tests {
             &restored_active_extensions,
         )
         .await
-        .expect_err("missing manifest hash fails closed");
+        .expect_err("non-host-bundled manifest hash mismatch fails closed");
 
         assert!(matches!(
             error,
@@ -2312,6 +2413,16 @@ mod tests {
             self.inner.upsert_manifest(manifest).await
         }
 
+        async fn upsert_manifest_and_installation(
+            &self,
+            manifest: ExtensionManifestRecord,
+            installation: ExtensionInstallation,
+        ) -> Result<(), ExtensionInstallationError> {
+            self.inner
+                .upsert_manifest_and_installation(manifest, installation)
+                .await
+        }
+
         async fn list_installations(
             &self,
         ) -> Result<Vec<ExtensionInstallation>, ExtensionInstallationError> {
@@ -2519,6 +2630,36 @@ output_schema_ref = "schemas/write.output.json"
 "#
     }
 
+    fn fixture_installed_local_manifest() -> &'static str {
+        r#"
+schema_version = "reborn.extension_manifest.v2"
+id = "fixture"
+name = "Fixture Extension"
+version = "0.1.0"
+description = "Installed local fixture extension"
+trust = "third_party"
+
+[runtime]
+kind = "wasm"
+module = "wasm/fixture.wasm"
+
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
+id = "fixture.search"
+description = "Search fixture data"
+effects = ["network"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/search.input.json"
+output_schema_ref = "schemas/search.output.json"
+"#
+    }
+
     fn fixture_extension_package_from_manifest(manifest_toml: &str) -> AvailableExtensionPackage {
         fixture_extension_package_from_manifest_with_root(manifest_toml, "fixture")
     }
@@ -2557,18 +2698,24 @@ output_schema_ref = "schemas/write.output.json"
         }
     }
 
-    fn fixture_manifest_record(
+    fn fixture_manifest_record_with_source(
         manifest_toml: &str,
+        source: ManifestSource,
         manifest_hash: Option<String>,
     ) -> ExtensionManifestRecord {
-        ExtensionManifestRecord::from_toml(
+        let host_ports =
+            ironclaw_host_runtime::default_host_port_catalog().expect("host port catalog");
+        let contracts = ironclaw_host_runtime::default_host_api_contract_registry()
+            .expect("host API contracts");
+        ExtensionManifestRecord::from_toml_with_contracts(
             manifest_toml,
-            ManifestSource::HostBundled,
-            &HostPortCatalog::empty(),
+            source,
+            &host_ports,
             manifest_hash
                 .map(ManifestHash::new)
                 .transpose()
                 .expect("valid manifest hash"),
+            &contracts,
         )
         .expect("fixture manifest record")
     }
