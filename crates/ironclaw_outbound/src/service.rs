@@ -1,9 +1,12 @@
 use async_trait::async_trait;
 
+use crate::resolution_engine::OutboundResolutionEngine;
 use crate::validation::validate_delivery_scope_candidate;
 use crate::{
+    CommunicationDeliveryKind, CommunicationDeliveryResolution, CommunicationPreferenceRepository,
     DeliveryFailureKind, OutboundDeliveryAttempt, OutboundDeliveryDecision, OutboundDeliveryId,
-    OutboundDeliveryStatus, OutboundError, OutboundStateStore, PrepareOutboundDeliveryRequest,
+    OutboundDeliveryStatus, OutboundError, OutboundPushCandidate, OutboundPushKind,
+    OutboundStateStore, PrepareCommunicationDeliveryRequest, PrepareOutboundDeliveryRequest,
     ProjectionSubscriptionRecord, ProjectionSubscriptionRequest, ReplyTargetBindingClaim,
     ReplyTargetValidationRequest, ThreadProjectionAccessClaim, ThreadProjectionAccessGrant,
     ThreadProjectionAccessRequest, ValidatedReplyTargetBinding,
@@ -141,6 +144,72 @@ impl<'a> OutboundPolicyService<'a> {
             Err(error) => Err(error),
         }
     }
+
+    pub async fn prepare_communication_delivery_attempt(
+        &self,
+        request: PrepareCommunicationDeliveryRequest,
+        communication_preferences: &dyn CommunicationPreferenceRepository,
+    ) -> Result<Option<OutboundDeliveryDecision>, OutboundError> {
+        let engine = OutboundResolutionEngine::new(communication_preferences);
+        let resolution = engine.resolve(&request.resolution_request).await?;
+        self.prepare_communication_delivery_attempt_from_resolution(request, resolution)
+            .await
+    }
+
+    async fn prepare_communication_delivery_attempt_from_resolution(
+        &self,
+        request: PrepareCommunicationDeliveryRequest,
+        resolution: CommunicationDeliveryResolution,
+    ) -> Result<Option<OutboundDeliveryDecision>, OutboundError> {
+        let Some(request) = lower_communication_delivery_resolution(request, resolution)? else {
+            return Ok(None);
+        };
+
+        self.prepare_delivery_attempt(request).await.map(Some)
+    }
+}
+
+fn lower_communication_delivery_resolution(
+    request: PrepareCommunicationDeliveryRequest,
+    resolution: CommunicationDeliveryResolution,
+) -> Result<Option<PrepareOutboundDeliveryRequest>, OutboundError> {
+    let PrepareCommunicationDeliveryRequest {
+        resolution_request,
+        turn_run_id,
+        projection_ref,
+        attempted_at,
+    } = request;
+    let CommunicationDeliveryResolution::Candidate { candidate } = resolution else {
+        return Ok(None);
+    };
+    let kind = outbound_push_kind(candidate.kind)?;
+
+    let scope = resolution_request.scope;
+    Ok(Some(PrepareOutboundDeliveryRequest {
+        scope: scope.clone(),
+        candidate: OutboundPushCandidate {
+            tenant_id: scope.tenant_id,
+            agent_id: scope.agent_id,
+            project_id: scope.project_id,
+            thread_id: scope.thread_id,
+            turn_run_id,
+            target: candidate.target,
+            kind,
+            projection_ref,
+            requires_reply_target_revalidation: true,
+        },
+        attempted_at,
+    }))
+}
+
+fn outbound_push_kind(kind: CommunicationDeliveryKind) -> Result<OutboundPushKind, OutboundError> {
+    match kind {
+        CommunicationDeliveryKind::FinalReply => Ok(OutboundPushKind::FinalReply),
+        CommunicationDeliveryKind::ProgressUpdate => Ok(OutboundPushKind::Progress),
+        CommunicationDeliveryKind::ApprovalPrompt => Ok(OutboundPushKind::GateRequired),
+        CommunicationDeliveryKind::AuthPrompt => Ok(OutboundPushKind::AuthPrompt),
+        CommunicationDeliveryKind::DeliveryStatus => Ok(OutboundPushKind::DeliveryStatus),
+    }
 }
 
 fn validate_access_claim(
@@ -176,5 +245,225 @@ fn is_transient_validator_error(error: &OutboundError) -> bool {
         | OutboundError::SubscriptionScopeMismatch
         | OutboundError::AccessDenied
         | OutboundError::DeliveryNotFound => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+    use std::sync::Mutex;
+
+    use async_trait::async_trait;
+    use chrono::Utc;
+    use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
+    use ironclaw_turns::{ReplyTargetBindingRef, TurnActor, TurnScope};
+
+    use super::*;
+    use crate::{
+        CommunicationDeliveryIntent, CommunicationDeliveryResolutionRequest, CommunicationModality,
+        CommunicationPreferenceRecord, InMemoryOutboundStateStore, OutboundPushKind,
+        RunNotificationContext, RunNotificationEventKind, RunNotificationOrigin,
+        SourceRouteContext, SystemEventReasonCode,
+    };
+
+    #[tokio::test]
+    async fn prepare_communication_delivery_attempt_returns_none_for_no_delivery() {
+        let store = InMemoryOutboundStateStore::default();
+        let validator = TestReplyTargetBindingValidator::default();
+        let access_policy = AllowAllProjectionAccessPolicy;
+        let service = OutboundPolicyService::new(&store, &access_policy, &validator);
+        let scope = turn_scope("thread-no-delivery");
+        let request = PrepareCommunicationDeliveryRequest {
+            resolution_request: CommunicationDeliveryResolutionRequest {
+                scope: scope.clone(),
+                actor: actor("alice"),
+                modality: CommunicationModality::Text,
+                intent: CommunicationDeliveryIntent::RunNotification(RunNotificationContext {
+                    event_kind: RunNotificationEventKind::DeliveryStatus,
+                    origin: RunNotificationOrigin::SystemEvent {
+                        reason: SystemEventReasonCode::Generic,
+                    },
+                }),
+            },
+            turn_run_id: None,
+            projection_ref: projection_ref("projection:no-delivery"),
+            attempted_at: now(),
+        };
+
+        let decision = service
+            .prepare_communication_delivery_attempt(request, &store)
+            .await
+            .expect("no-delivery resolution succeeds");
+
+        assert!(decision.is_none());
+        assert!(
+            store
+                .list_delivery_attempts(scope)
+                .await
+                .expect("list delivery attempts")
+                .is_empty()
+        );
+        assert_eq!(validator.calls(), 0);
+    }
+
+    #[tokio::test]
+    async fn prepare_communication_delivery_attempt_lowers_prompt_kinds_to_gate_required() {
+        let store = InMemoryOutboundStateStore::default();
+        let validator = TestReplyTargetBindingValidator::default();
+        let access_policy = AllowAllProjectionAccessPolicy;
+        let service = OutboundPolicyService::new(&store, &access_policy, &validator);
+        let scope = turn_scope("thread-approval");
+        let approval_target = reply_ref("reply:approval");
+        validator.allow(approval_target.clone());
+        store
+            .put_communication_preference(preference_record(
+                &scope,
+                Some("reply:final"),
+                Some("reply:progress"),
+                Some("reply:approval"),
+                Some("reply:auth"),
+            ))
+            .await
+            .expect("seed preferences");
+
+        let request = PrepareCommunicationDeliveryRequest {
+            resolution_request: CommunicationDeliveryResolutionRequest {
+                scope: scope.clone(),
+                actor: actor("alice"),
+                modality: CommunicationModality::Text,
+                intent: CommunicationDeliveryIntent::RunNotification(RunNotificationContext {
+                    event_kind: RunNotificationEventKind::ApprovalNeeded,
+                    origin: RunNotificationOrigin::LiveSourceRoute {
+                        source_route: SourceRouteContext {
+                            reply_target_binding_ref: reply_ref("reply:source"),
+                        },
+                    },
+                }),
+            },
+            turn_run_id: None,
+            projection_ref: projection_ref("projection:approval"),
+            attempted_at: now(),
+        };
+
+        let decision = service
+            .prepare_communication_delivery_attempt(request, &store)
+            .await
+            .expect("approval prompt resolves");
+        let Some(OutboundDeliveryDecision::Authorized { attempt, target }) = decision else {
+            panic!("expected an authorized delivery decision");
+        };
+
+        assert_eq!(attempt.candidate.kind, OutboundPushKind::GateRequired);
+        assert_eq!(target.target(), &approval_target);
+        assert_eq!(validator.calls(), 1);
+        assert_eq!(
+            store
+                .list_delivery_attempts(scope)
+                .await
+                .expect("list delivery attempts")
+                .len(),
+            1
+        );
+    }
+
+    #[derive(Default)]
+    struct TestReplyTargetBindingValidator {
+        allowed: Mutex<HashSet<ReplyTargetBindingRef>>,
+        calls: Mutex<usize>,
+    }
+
+    #[async_trait]
+    impl ReplyTargetBindingValidator for TestReplyTargetBindingValidator {
+        async fn validate_reply_target(
+            &self,
+            request: ReplyTargetValidationRequest,
+        ) -> Result<ReplyTargetBindingClaim, OutboundError> {
+            *self.calls.lock().expect("lock calls") += 1;
+            if self
+                .allowed
+                .lock()
+                .expect("lock allowed")
+                .contains(&request.candidate.target)
+            {
+                Ok(ReplyTargetBindingClaim::new(request.candidate.target))
+            } else {
+                Err(OutboundError::AccessDenied)
+            }
+        }
+    }
+
+    impl TestReplyTargetBindingValidator {
+        fn allow(&self, target: ReplyTargetBindingRef) {
+            self.allowed.lock().expect("lock allowed").insert(target);
+        }
+
+        fn calls(&self) -> usize {
+            *self.calls.lock().expect("lock calls")
+        }
+    }
+
+    struct AllowAllProjectionAccessPolicy;
+
+    #[async_trait]
+    impl ThreadProjectionAccessPolicy for AllowAllProjectionAccessPolicy {
+        async fn authorize_projection_access(
+            &self,
+            request: ThreadProjectionAccessRequest,
+        ) -> Result<ThreadProjectionAccessClaim, OutboundError> {
+            Ok(ThreadProjectionAccessClaim {
+                actor: request.actor,
+                scope: request.scope,
+                thread_id: request.thread_id,
+            })
+        }
+    }
+
+    fn preference_record(
+        scope: &TurnScope,
+        final_reply_target: Option<&str>,
+        progress_target: Option<&str>,
+        approval_prompt_target: Option<&str>,
+        auth_prompt_target: Option<&str>,
+    ) -> CommunicationPreferenceRecord {
+        CommunicationPreferenceRecord {
+            tenant_id: scope.tenant_id.clone(),
+            user_id: user_id("alice"),
+            final_reply_target: final_reply_target.map(reply_ref),
+            progress_target: progress_target.map(reply_ref),
+            approval_prompt_target: approval_prompt_target.map(reply_ref),
+            auth_prompt_target: auth_prompt_target.map(reply_ref),
+            default_modality: Some(CommunicationModality::Text),
+            updated_at: now(),
+            updated_by: user_id("alice"),
+        }
+    }
+
+    fn turn_scope(thread_id: &str) -> TurnScope {
+        TurnScope::new(
+            TenantId::new("tenant-a").expect("valid tenant"),
+            Some(AgentId::new("agent-a").expect("valid agent")),
+            Some(ProjectId::new("project-a").expect("valid project")),
+            ThreadId::new(thread_id).expect("valid thread"),
+        )
+    }
+
+    fn actor(user_id_value: &str) -> TurnActor {
+        TurnActor::new(user_id(user_id_value))
+    }
+
+    fn user_id(value: &str) -> UserId {
+        UserId::new(value).expect("valid user")
+    }
+
+    fn reply_ref(value: &str) -> ReplyTargetBindingRef {
+        ReplyTargetBindingRef::new(value).expect("valid reply target")
+    }
+
+    fn projection_ref(value: &str) -> crate::ProjectionUpdateRef {
+        crate::ProjectionUpdateRef::new(value).expect("valid projection ref")
+    }
+
+    fn now() -> chrono::DateTime<Utc> {
+        Utc::now()
     }
 }
