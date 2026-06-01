@@ -889,10 +889,7 @@ mod tests {
                 .is_some_and(|summary| summary.contains("path: src/main.rs"))
         );
         assert_eq!(record.output_preview.as_deref(), Some("fn main() {}"));
-        assert_eq!(
-            record.output_kind.as_ref().map(|k| k.as_str()),
-            Some("text")
-        );
+        assert_eq!(record.output_kind.as_deref(), Some("text"));
         let rendered = serde_json::to_string(&record.input_summary).unwrap();
         assert!(!rendered.contains("sk-secret"));
     }

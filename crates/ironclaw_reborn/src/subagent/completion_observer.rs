@@ -782,7 +782,7 @@ mod tests {
     use std::sync::Mutex;
 
     use async_trait::async_trait;
-    use ironclaw_host_api::{AgentId, CapabilityId, InvocationId, TenantId, ThreadId, UserId};
+    use ironclaw_host_api::{AgentId, CapabilityId, TenantId, ThreadId, UserId};
     use ironclaw_loop_support::{
         AwaitedChildSetRecord, CapabilityResultWrite, SubagentGateResolutionStore, SubagentKindId,
     };

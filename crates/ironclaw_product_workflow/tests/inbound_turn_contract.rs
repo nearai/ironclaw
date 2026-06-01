@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::Utc;
-use ironclaw_host_api::{AgentId, CapabilityId, InvocationId, TenantId, ThreadId, UserId};
+use ironclaw_host_api::{AgentId, TenantId, ThreadId, UserId};
 use ironclaw_loop_support::{
     CapabilityAllowSet, CapabilityResolveError, CapabilityResultWrite,
     CapabilitySurfaceProfileResolver, EmptyLoopCapabilityPort, HostIdentityContextBuildError,
@@ -49,9 +49,9 @@ use ironclaw_turns::{
     TurnActor, TurnCoordinator, TurnError, TurnId, TurnRunId, TurnRunState, TurnRunWake, TurnScope,
     TurnStateStore, TurnStatus,
     run_profile::{
-        AgentLoopHostError, CapabilityInputRef, InMemoryLoopHostMilestoneSink,
-        InstructionSafetyContext, LoopCancelReasonKind, LoopCapabilityPort, LoopInputAckToken,
-        LoopInputCursorToken, LoopRunContext, NoOpBudgetAccountant, NoOpPolicyGuard, PromptMode,
+        AgentLoopHostError, InMemoryLoopHostMilestoneSink, InstructionSafetyContext,
+        LoopCancelReasonKind, LoopCapabilityPort, LoopInputAckToken, LoopInputCursorToken,
+        LoopRunContext, NoOpBudgetAccountant, NoOpPolicyGuard, PromptMode,
     },
 };
 use tokio::time::{sleep, timeout};
