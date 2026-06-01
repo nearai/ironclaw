@@ -42,9 +42,12 @@ use ironclaw_turns::{
 };
 use tracing::debug;
 
-use crate::model_routes::{
-    ModelRoute, ModelRouteError, ModelRouteErrorKind, ModelRouteProviderKey, ModelRouteResolver,
-    ModelSelectionMode, ModelSlot, ResolvedModelRouteSnapshot,
+use crate::{
+    failure_categories::MODEL_CREDITS_EXHAUSTED_SUMMARY,
+    model_routes::{
+        ModelRoute, ModelRouteError, ModelRouteErrorKind, ModelRouteProviderKey,
+        ModelRouteResolver, ModelSelectionMode, ModelSlot, ResolvedModelRouteSnapshot,
+    },
 };
 
 /// Fail-closed routing policy from resolved Reborn model profile ids to the
@@ -1352,6 +1355,12 @@ fn map_provider_error(error: LlmError) -> HostManagedModelError {
         error_debug = ?error,
         "reborn model provider error mapped to safe summary"
     );
+    if is_credit_exhaustion_error(&error) {
+        return HostManagedModelError::safe(
+            HostManagedModelErrorKind::CredentialUnavailable,
+            MODEL_CREDITS_EXHAUSTED_SUMMARY,
+        );
+    }
     match error {
         LlmError::ContextLengthExceeded { .. } => HostManagedModelError::safe(
             HostManagedModelErrorKind::BudgetExceeded,
@@ -1372,4 +1381,22 @@ fn map_provider_error(error: LlmError) -> HostManagedModelError {
             "model service is unavailable",
         ),
     }
+}
+
+fn is_credit_exhaustion_error(error: &LlmError) -> bool {
+    let LlmError::RequestFailed { reason, .. } = error else {
+        return false;
+    };
+    let lower = reason.to_ascii_lowercase();
+    lower.contains("http 402")
+        || lower.contains("402 payment required")
+        || lower.contains("payment required")
+        || lower.contains("insufficient credit")
+        || lower.contains("insufficient credits")
+        || lower.contains("not enough credit")
+        || lower.contains("not enough credits")
+        || lower.contains("credits exhausted")
+        || lower.contains("credit balance")
+        || lower.contains("quota exceeded")
+        || lower.contains("out of credits")
 }

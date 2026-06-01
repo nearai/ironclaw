@@ -1760,6 +1760,32 @@ async fn gateway_sanitizes_provider_errors() {
 }
 
 #[tokio::test]
+async fn gateway_maps_nearai_credit_exhaustion_to_safe_summary() {
+    let provider = Arc::new(RecordingLlmProvider::fail(LlmError::RequestFailed {
+        provider: "nearai_chat".to_string(),
+        reason: "HTTP 402 Payment Required: insufficient credits RAW_PROVIDER_SECRET".to_string(),
+    }));
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider,
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+
+    let error = gateway
+        .stream_model(model_request(interactive_model()))
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.kind, HostManagedModelErrorKind::CredentialUnavailable);
+    assert_eq!(
+        error.safe_summary,
+        "model provider account is out of credits"
+    );
+    assert!(!format!("{error:?}").contains("RAW_PROVIDER_SECRET"));
+}
+
+#[tokio::test]
 async fn routed_gateway_uses_provider_pool_route_not_request_model_override() {
     let route = ModelRoute::new("rig-openai", "gpt-4.1").unwrap();
     let provider = Arc::new(RecordingLlmProvider::reply_for_model(

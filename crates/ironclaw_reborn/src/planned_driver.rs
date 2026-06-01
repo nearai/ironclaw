@@ -25,6 +25,10 @@ use ironclaw_turns::{
     },
 };
 
+use crate::failure_categories::{
+    MODEL_CREDITS_EXHAUSTED_CATEGORY, MODEL_CREDITS_EXHAUSTED_SUMMARY,
+};
+
 pub const PLANNED_DRIVER_DEFAULT_ID: &str = "reborn:planned-default";
 const PLANNED_DRIVER_VERSION: u64 = 1;
 
@@ -240,6 +244,12 @@ pub(crate) fn map_executor_error(error: AgentLoopExecutorError) -> AgentLoopDriv
                 safe_summary = %safe_summary,
                 "planned driver host stage unavailable"
             );
+            if stage == HostStage::Model && safe_summary.as_str() == MODEL_CREDITS_EXHAUSTED_SUMMARY
+            {
+                return AgentLoopDriverError::Failed {
+                    reason_kind: MODEL_CREDITS_EXHAUSTED_CATEGORY.to_string(),
+                };
+            }
             AgentLoopDriverError::Unavailable {
                 reason: format!("{}: {safe_summary}", host_stage_name(stage)),
             }
@@ -435,6 +445,23 @@ mod tests {
             mapped,
             AgentLoopDriverError::Unavailable {
                 reason: "Model: model credentials are unavailable".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn executor_host_diagnostics_preserve_model_credit_exhaustion_category() {
+        let mapped = map_executor_error(AgentLoopExecutorError::HostUnavailableWithDiagnostics {
+            stage: HostStage::Model,
+            kind: AgentLoopHostErrorKind::CredentialUnavailable,
+            safe_summary: LoopSafeSummary::new(MODEL_CREDITS_EXHAUSTED_SUMMARY).expect("safe"),
+            diagnostic_ref: None,
+        });
+
+        assert_eq!(
+            mapped,
+            AgentLoopDriverError::Failed {
+                reason_kind: MODEL_CREDITS_EXHAUSTED_CATEGORY.to_string()
             }
         );
     }

@@ -17,6 +17,10 @@ use ironclaw_turns::{
     },
 };
 
+use crate::failure_categories::{
+    MODEL_CREDITS_EXHAUSTED_CATEGORY, MODEL_CREDITS_EXHAUSTED_SUMMARY,
+};
+
 pub(crate) const TEXT_ONLY_DRIVER_ID: &str = "reborn:text-only-model-reply";
 pub(crate) const TEXT_ONLY_DRIVER_VERSION: u64 = 1;
 const DEFAULT_CONTEXT_LIMIT: usize = 16;
@@ -174,6 +178,12 @@ fn map_host_error(stage: &'static str, error: AgentLoopHostError) -> AgentLoopDr
         "loop host port returned sanitized error"
     );
 
+    if stage == "model" && error.safe_summary == MODEL_CREDITS_EXHAUSTED_SUMMARY {
+        return AgentLoopDriverError::Failed {
+            reason_kind: MODEL_CREDITS_EXHAUSTED_CATEGORY.to_string(),
+        };
+    }
+
     match error.kind {
         AgentLoopHostErrorKind::InvalidInvocation
         | AgentLoopHostErrorKind::Invalid
@@ -250,6 +260,24 @@ mod tests {
             }
         );
         assert_driver_error_hides_raw_payloads(&mapped);
+    }
+
+    #[test]
+    fn model_credit_exhaustion_maps_to_sanitized_failure_category() {
+        let mapped = map_host_error(
+            "model",
+            AgentLoopHostError::new(
+                AgentLoopHostErrorKind::CredentialUnavailable,
+                MODEL_CREDITS_EXHAUSTED_SUMMARY,
+            ),
+        );
+
+        assert_eq!(
+            mapped,
+            AgentLoopDriverError::Failed {
+                reason_kind: MODEL_CREDITS_EXHAUSTED_CATEGORY.to_string()
+            }
+        );
     }
 
     fn assert_driver_error_hides_raw_payloads(error: &AgentLoopDriverError) {

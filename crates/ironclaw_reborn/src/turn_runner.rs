@@ -36,6 +36,7 @@ use ironclaw_turns::{
 
 use crate::{
     driver_registry::{DriverRegistry, LoopDriverRegistryKey},
+    failure_categories::MODEL_CREDITS_EXHAUSTED_CATEGORY,
     loop_exit_applier::LoopExitApplier,
 };
 
@@ -58,6 +59,23 @@ fn sanitized_failure(category: &'static str) -> Option<SanitizedFailure> {
             }
         }
     }
+}
+
+fn sanitized_driver_failure(reason_kind: &str) -> Option<SanitizedFailure> {
+    if reason_kind == MODEL_CREDITS_EXHAUSTED_CATEGORY {
+        return match SanitizedFailure::new(reason_kind.to_string()) {
+            Ok(failure) => Some(failure),
+            Err(error) => {
+                debug!(
+                    reason_kind,
+                    %error,
+                    "model credit exhaustion failure category failed validation; using generic driver failure"
+                );
+                sanitized_failure("driver_failed")
+            }
+        };
+    }
+    sanitized_failure("driver_failed")
 }
 
 /// Configuration for the turn-runner worker.
@@ -583,30 +601,39 @@ impl TurnRunnerWorker {
             return;
         }
 
-        let category = match error {
-            DriverInvocationError::DriverNotFound { .. } => "driver_not_found",
-            DriverInvocationError::HostCreationFailed { .. } => "host_creation_failed",
-            DriverInvocationError::RouteSnapshotPersistenceFailed(_) => {
-                "route_snapshot_persistence_failed"
+        let failure = match error {
+            DriverInvocationError::DriverError(AgentLoopDriverError::Failed { reason_kind }) => {
+                sanitized_driver_failure(reason_kind)
             }
-            DriverInvocationError::DriverError(AgentLoopDriverError::InvalidRequest { .. }) => {
-                "driver_invalid_request"
-            }
-            DriverInvocationError::DriverError(AgentLoopDriverError::Unavailable { .. }) => {
-                "driver_unavailable"
-            }
-            DriverInvocationError::DriverError(AgentLoopDriverError::Failed { .. }) => {
-                "driver_failed"
-            }
-            DriverInvocationError::DriverPanic => "driver_panic",
-            DriverInvocationError::HeartbeatFailed(_) => "heartbeat_failed",
-            // WorkerCancelled and HeartbeatStopped handled by relinquish branch above.
-            DriverInvocationError::WorkerCancelled | DriverInvocationError::HeartbeatStopped => {
-                unreachable!("relinquish branch handles these")
+            other => {
+                let category = match other {
+                    DriverInvocationError::DriverNotFound { .. } => "driver_not_found",
+                    DriverInvocationError::HostCreationFailed { .. } => "host_creation_failed",
+                    DriverInvocationError::RouteSnapshotPersistenceFailed(_) => {
+                        "route_snapshot_persistence_failed"
+                    }
+                    DriverInvocationError::DriverError(AgentLoopDriverError::InvalidRequest {
+                        ..
+                    }) => "driver_invalid_request",
+                    DriverInvocationError::DriverError(AgentLoopDriverError::Unavailable {
+                        ..
+                    }) => "driver_unavailable",
+                    DriverInvocationError::DriverError(AgentLoopDriverError::Failed { .. }) => {
+                        unreachable!("failed driver errors handled above")
+                    }
+                    DriverInvocationError::DriverPanic => "driver_panic",
+                    DriverInvocationError::HeartbeatFailed(_) => "heartbeat_failed",
+                    // WorkerCancelled and HeartbeatStopped handled by relinquish branch above.
+                    DriverInvocationError::WorkerCancelled
+                    | DriverInvocationError::HeartbeatStopped => {
+                        unreachable!("relinquish branch handles these")
+                    }
+                };
+                sanitized_failure(category)
             }
         };
 
-        let Some(failure) = sanitized_failure(category) else {
+        let Some(failure) = failure else {
             return;
         };
         let request = RecordRunnerFailureRequest {
