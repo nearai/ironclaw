@@ -136,7 +136,7 @@ async fn auth_flow_record_source_returns_stable_sorted_snapshot() {
     let alice = oauth_flow(&services, scope("alice")).await;
     let bob = oauth_flow(&services, scope("bob")).await;
 
-    let snapshot = ironclaw_auth::AuthFlowRecordSource::flow_records_snapshot(&services);
+    let snapshot = services.flow_records_snapshot();
 
     let ids = snapshot.iter().map(|flow| flow.id).collect::<Vec<_>>();
     let mut sorted = ids.clone();
