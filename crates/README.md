@@ -66,7 +66,6 @@ A good rule of thumb: if a change adds new authority or persistence, put it in t
 | `ironclaw_conversations` | `ironclaw_conversations` | Conversation binding and session-thread contracts that connect product conversation concepts to Reborn threads. |
 | `ironclaw_memory` | `ironclaw_memory` | Memory document service adapters. This is for workspace/memory document semantics, not arbitrary transcript deletion. |
 | `ironclaw_outbound` | `ironclaw_outbound` | Metadata-only outbound state: notification policy, projection subscription cursors, and delivery status. It does not own transport delivery or payload content. |
-| `ironclaw_storage` | `ironclaw_storage` | Shared storage primitives used by event/state backends (pool wiring, migrations helpers). Keeps low-level storage glue out of vocabulary crates. |
 
 ### Product, agent loop, and user surfaces
 
