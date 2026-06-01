@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "GitHub comment_issue input",
+  "title": "GitHub create_pull_request input",
   "type": "object",
   "additionalProperties": false,
   "properties": {
@@ -24,22 +24,39 @@
       },
       "description": "Repository name."
     },
-    "issue_number": {
-      "type": "integer",
-      "minimum": 1,
-      "description": "Issue or pull request number."
-    },
-    "body": {
+    "title": {
       "type": "string",
       "minLength": 1,
       "maxLength": 65536,
-      "description": "Markdown comment body."
+      "description": "Pull request title."
+    },
+    "head": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255,
+      "description": "Head branch or ref."
+    },
+    "base": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255,
+      "description": "Base branch."
+    },
+    "body": {
+      "type": "string",
+      "maxLength": 65536,
+      "description": "Pull request body."
+    },
+    "draft": {
+      "type": "boolean",
+      "default": false
     }
   },
   "required": [
     "owner",
     "repo",
-    "issue_number",
-    "body"
+    "title",
+    "head",
+    "base"
   ]
 }

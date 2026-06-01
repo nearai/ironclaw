@@ -1,26 +1,14 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "GitHub search_issues input",
+  "title": "GitHub list_repos input",
   "type": "object",
   "additionalProperties": false,
   "properties": {
-    "query": {
+    "username": {
       "type": "string",
       "minLength": 1,
-      "maxLength": 512,
-      "description": "GitHub search query."
-    },
-    "sort": {
-      "type": "string",
-      "description": "Optional GitHub sort field."
-    },
-    "order": {
-      "type": "string",
-      "enum": [
-        "asc",
-        "desc"
-      ],
-      "default": "desc"
+      "maxLength": 100,
+      "description": "GitHub username."
     },
     "page": {
       "type": "integer",
@@ -36,6 +24,6 @@
     }
   },
   "required": [
-    "query"
+    "username"
   ]
 }

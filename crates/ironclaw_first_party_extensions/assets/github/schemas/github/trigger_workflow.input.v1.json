@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "GitHub comment_issue input",
+  "title": "GitHub trigger_workflow input",
   "type": "object",
   "additionalProperties": false,
   "properties": {
@@ -24,22 +24,27 @@
       },
       "description": "Repository name."
     },
-    "issue_number": {
-      "type": "integer",
-      "minimum": 1,
-      "description": "Issue or pull request number."
-    },
-    "body": {
+    "workflow_id": {
       "type": "string",
       "minLength": 1,
-      "maxLength": 65536,
-      "description": "Markdown comment body."
+      "maxLength": 255,
+      "description": "Workflow file name or numeric id."
+    },
+    "ref": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255,
+      "description": "Branch, tag, or SHA to run on."
+    },
+    "inputs": {
+      "type": "object",
+      "additionalProperties": true
     }
   },
   "required": [
     "owner",
     "repo",
-    "issue_number",
-    "body"
+    "workflow_id",
+    "ref"
   ]
 }

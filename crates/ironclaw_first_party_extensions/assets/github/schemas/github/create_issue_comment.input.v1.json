@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "GitHub comment_issue input",
+  "title": "GitHub create_issue_comment input",
   "type": "object",
   "additionalProperties": false,
   "properties": {

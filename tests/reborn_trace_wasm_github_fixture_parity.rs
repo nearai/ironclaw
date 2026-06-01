@@ -3,7 +3,6 @@
 mod reborn_support;
 mod support;
 
-use ironclaw_host_api::CapabilityId;
 use ironclaw_loop_support::{HostManagedModelMessageRole, HostManagedModelResponse};
 use ironclaw_turns::TurnStatus;
 use reborn_support::{
@@ -13,11 +12,8 @@ use reborn_support::{
 
 #[tokio::test]
 async fn reborn_trace_advertises_github_v2_wasm_capabilities() {
-    let expected_capabilities = vec![
-        CapabilityId::new("github.search_issues").expect("valid capability id"),
-        CapabilityId::new("github.get_issue").expect("valid capability id"),
-        CapabilityId::new("github.comment_issue").expect("valid capability id"),
-    ];
+    let expected_capabilities =
+        reborn_support::github::capability_ids().expect("valid GitHub capability ids");
     let model_gateway = RebornTraceReplayModelGateway::with_scripted_steps([
         RebornModelReplayStep::AssertProviderToolsThenResponse {
             capability_ids: expected_capabilities,

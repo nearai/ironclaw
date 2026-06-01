@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "GitHub comment_issue input",
+  "title": "GitHub fork_repo input",
   "type": "object",
   "additionalProperties": false,
   "properties": {
@@ -24,22 +24,22 @@
       },
       "description": "Repository name."
     },
-    "issue_number": {
-      "type": "integer",
-      "minimum": 1,
-      "description": "Issue or pull request number."
-    },
-    "body": {
+    "organization": {
       "type": "string",
-      "minLength": 1,
-      "maxLength": 65536,
-      "description": "Markdown comment body."
+      "maxLength": 100,
+      "description": "Optional destination organization."
+    },
+    "name": {
+      "type": "string",
+      "maxLength": 100,
+      "description": "Optional fork repository name."
+    },
+    "default_branch_only": {
+      "type": "boolean"
     }
   },
   "required": [
     "owner",
-    "repo",
-    "issue_number",
-    "body"
+    "repo"
   ]
 }

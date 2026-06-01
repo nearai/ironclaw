@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "GitHub comment_issue input",
+  "title": "GitHub get_file_content input",
   "type": "object",
   "additionalProperties": false,
   "properties": {
@@ -24,22 +24,21 @@
       },
       "description": "Repository name."
     },
-    "issue_number": {
-      "type": "integer",
-      "minimum": 1,
-      "description": "Issue or pull request number."
-    },
-    "body": {
+    "path": {
       "type": "string",
       "minLength": 1,
       "maxLength": 65536,
-      "description": "Markdown comment body."
+      "description": "Repository file path."
+    },
+    "ref": {
+      "type": "string",
+      "maxLength": 255,
+      "description": "Branch, tag, or commit SHA."
     }
   },
   "required": [
     "owner",
     "repo",
-    "issue_number",
-    "body"
+    "path"
   ]
 }

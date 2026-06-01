@@ -1,4 +1,4 @@
-Use `github.get_issue` to fetch one issue or pull request by issue number.
+Use `github.list_pull_request_comments` to list pull request review comments.
 
 Pass the required fields exactly as requested by the user. If the user provides a GitHub URL, extract the owner, repository, and number/path/ref fields before calling this capability.
 

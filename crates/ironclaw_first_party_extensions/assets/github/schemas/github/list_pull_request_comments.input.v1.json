@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "GitHub comment_issue input",
+  "title": "GitHub list_pull_request_comments input",
   "type": "object",
   "additionalProperties": false,
   "properties": {
@@ -24,22 +24,27 @@
       },
       "description": "Repository name."
     },
-    "issue_number": {
+    "pr_number": {
       "type": "integer",
       "minimum": 1,
-      "description": "Issue or pull request number."
+      "description": "Pull request number."
     },
-    "body": {
-      "type": "string",
-      "minLength": 1,
-      "maxLength": 65536,
-      "description": "Markdown comment body."
+    "page": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 100,
+      "default": 1
+    },
+    "limit": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 100,
+      "default": 30
     }
   },
   "required": [
     "owner",
     "repo",
-    "issue_number",
-    "body"
+    "pr_number"
   ]
 }

@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "GitHub comment_issue input",
+  "title": "GitHub create_issue input",
   "type": "object",
   "additionalProperties": false,
   "properties": {
@@ -24,22 +24,30 @@
       },
       "description": "Repository name."
     },
-    "issue_number": {
-      "type": "integer",
-      "minimum": 1,
-      "description": "Issue or pull request number."
-    },
-    "body": {
+    "title": {
       "type": "string",
       "minLength": 1,
       "maxLength": 65536,
-      "description": "Markdown comment body."
+      "description": "Issue title."
+    },
+    "body": {
+      "type": "string",
+      "maxLength": 65536,
+      "description": "Issue body."
+    },
+    "labels": {
+      "type": "array",
+      "maxItems": 100,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 100
+      }
     }
   },
   "required": [
     "owner",
     "repo",
-    "issue_number",
-    "body"
+    "title"
   ]
 }

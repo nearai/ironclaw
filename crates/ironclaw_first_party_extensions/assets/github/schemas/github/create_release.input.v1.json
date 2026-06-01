@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "GitHub comment_issue input",
+  "title": "GitHub create_release input",
   "type": "object",
   "additionalProperties": false,
   "properties": {
@@ -24,22 +24,43 @@
       },
       "description": "Repository name."
     },
-    "issue_number": {
-      "type": "integer",
-      "minimum": 1,
-      "description": "Issue or pull request number."
+    "tag_name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255,
+      "description": "Release tag name."
+    },
+    "target_commitish": {
+      "type": "string",
+      "maxLength": 255,
+      "description": "Target commitish."
+    },
+    "name": {
+      "type": "string",
+      "maxLength": 65536,
+      "description": "Release display name."
     },
     "body": {
       "type": "string",
-      "minLength": 1,
       "maxLength": 65536,
-      "description": "Markdown comment body."
+      "description": "Release notes."
+    },
+    "draft": {
+      "type": "boolean",
+      "default": false
+    },
+    "prerelease": {
+      "type": "boolean",
+      "default": false
+    },
+    "generate_release_notes": {
+      "type": "boolean",
+      "default": false
     }
   },
   "required": [
     "owner",
     "repo",
-    "issue_number",
-    "body"
+    "tag_name"
   ]
 }

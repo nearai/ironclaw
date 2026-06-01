@@ -261,6 +261,260 @@ async fn bundled_github_wasm_executes_search_get_and_comment_operations() {
 }
 
 #[tokio::test]
+async fn bundled_github_wasm_replies_to_pull_request_comment_under_pr_path() {
+    let http = Arc::new(RecordingWasmHostHttp::ok(WasmHttpResponse {
+        status: 201,
+        headers_json: "{}".to_string(),
+        body: br##"{"id":45,"body":"Reply from Reborn"}"##.to_vec(),
+    }));
+
+    let reply = execute_bundled_github_wasm(
+        "github.reply_pull_request_comment",
+        json!({
+            "owner": "nearai",
+            "repo": "ironclaw",
+            "pr_number": 4280,
+            "comment_id": 123456789_u64,
+            "body": "Reply from Reborn",
+        }),
+        Arc::clone(&http),
+    );
+
+    assert_eq!(reply.error, None);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(reply.output_json.as_deref().unwrap()).unwrap()["body"],
+        json!("Reply from Reborn")
+    );
+    assert_single_wasm_request(
+        &http,
+        "POST",
+        "https://api.github.com/repos/nearai/ironclaw/pulls/4280/comments/123456789/replies",
+        Some(br#"{"body":"Reply from Reborn"}"#),
+    );
+}
+
+#[tokio::test]
+async fn bundled_github_wasm_returns_json_for_empty_success_responses() {
+    let http = Arc::new(RecordingWasmHostHttp::ok(WasmHttpResponse {
+        status: 204,
+        headers_json: "{}".to_string(),
+        body: Vec::new(),
+    }));
+
+    let dispatch = execute_bundled_github_wasm(
+        "github.trigger_workflow",
+        json!({
+            "owner": "nearai",
+            "repo": "ironclaw",
+            "workflow_id": "ci.yml",
+            "ref": "main",
+            "inputs": {"suite": "smoke"}
+        }),
+        Arc::clone(&http),
+    );
+
+    assert_eq!(dispatch.error, None);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(dispatch.output_json.as_deref().unwrap())
+            .unwrap(),
+        json!({"status": 204})
+    );
+    assert_single_wasm_request(
+        &http,
+        "POST",
+        "https://api.github.com/repos/nearai/ironclaw/actions/workflows/ci.yml/dispatches",
+        Some(br#"{"inputs":{"suite":"smoke"},"ref":"main"}"#),
+    );
+}
+
+#[tokio::test]
+async fn bundled_github_wasm_create_branch_rejects_source_ref_without_sha() {
+    let http = Arc::new(RecordingWasmHostHttp::ok(WasmHttpResponse {
+        status: 200,
+        headers_json: "{}".to_string(),
+        body: br#"{"object":{"type":"commit"}}"#.to_vec(),
+    }));
+
+    let create = execute_bundled_github_wasm(
+        "github.create_branch",
+        json!({
+            "owner": "nearai",
+            "repo": "ironclaw",
+            "branch": "feature/reborn-github",
+            "from_ref": "main"
+        }),
+        Arc::clone(&http),
+    );
+
+    assert_eq!(
+        create.error.as_deref(),
+        Some("Source ref response missing object.sha")
+    );
+    let requests = http.requests().unwrap();
+    assert_eq!(
+        requests.len(),
+        1,
+        "malformed source ref response must not create the branch ref"
+    );
+    assert_eq!(
+        requests[0].url,
+        "https://api.github.com/repos/nearai/ironclaw/git/ref/heads/main"
+    );
+}
+
+#[tokio::test]
+async fn bundled_github_wasm_create_branch_propagates_missing_source_ref() {
+    let http = Arc::new(RecordingWasmHostHttp::ok(WasmHttpResponse {
+        status: 404,
+        headers_json: "{}".to_string(),
+        body: br#"{"message":"Not Found"}"#.to_vec(),
+    }));
+
+    let create = execute_bundled_github_wasm(
+        "github.create_branch",
+        json!({
+            "owner": "nearai",
+            "repo": "ironclaw",
+            "branch": "feature/reborn-github",
+            "from_ref": "missing-branch"
+        }),
+        Arc::clone(&http),
+    );
+
+    assert_eq!(create.error.as_deref(), Some("github_api_error_status_404"));
+    let requests = http.requests().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].url,
+        "https://api.github.com/repos/nearai/ironclaw/git/ref/heads/missing-branch"
+    );
+}
+
+#[tokio::test]
+async fn bundled_github_wasm_rejects_raw_sha_as_create_branch_source_ref() {
+    let http = Arc::new(RecordingWasmHostHttp::ok(WasmHttpResponse {
+        status: 200,
+        headers_json: "{}".to_string(),
+        body: br#"{"object":{"sha":"abc"}}"#.to_vec(),
+    }));
+
+    let create = execute_bundled_github_wasm(
+        "github.create_branch",
+        json!({
+            "owner": "nearai",
+            "repo": "ironclaw",
+            "branch": "feature/reborn-github",
+            "from_ref": "0123456789abcdef0123456789abcdef01234567"
+        }),
+        Arc::clone(&http),
+    );
+
+    assert_eq!(
+        create.error.as_deref(),
+        Some("Unsupported from_ref: use a branch or tag ref, not a raw commit SHA")
+    );
+    assert!(
+        http.requests().unwrap().is_empty(),
+        "raw SHA validation should fail before GitHub egress"
+    );
+}
+
+#[tokio::test]
+async fn bundled_github_wasm_builds_create_repo_fork_and_release_requests() {
+    let create_repo_http = Arc::new(RecordingWasmHostHttp::ok(WasmHttpResponse {
+        status: 201,
+        headers_json: "{}".to_string(),
+        body: br#"{"name":"reborn-fixture"}"#.to_vec(),
+    }));
+    let create_repo = execute_bundled_github_wasm(
+        "github.create_repo",
+        json!({
+            "name": "reborn-fixture",
+            "description": "fixture repo",
+            "private": true,
+            "auto_init": true
+        }),
+        Arc::clone(&create_repo_http),
+    );
+    assert_eq!(create_repo.error, None);
+    assert_single_wasm_request_json_body(
+        &create_repo_http,
+        "POST",
+        "https://api.github.com/user/repos",
+        json!({
+            "name": "reborn-fixture",
+            "description": "fixture repo",
+            "private": true,
+            "auto_init": true
+        }),
+    );
+
+    let fork_http = Arc::new(RecordingWasmHostHttp::ok(WasmHttpResponse {
+        status: 202,
+        headers_json: "{}".to_string(),
+        body: br#"{"name":"ironclaw-fork"}"#.to_vec(),
+    }));
+    let fork = execute_bundled_github_wasm(
+        "github.fork_repo",
+        json!({
+            "owner": "nearai",
+            "repo": "ironclaw",
+            "organization": "nearai-labs",
+            "name": "ironclaw-fork",
+            "default_branch_only": true
+        }),
+        Arc::clone(&fork_http),
+    );
+    assert_eq!(fork.error, None);
+    assert_single_wasm_request_json_body(
+        &fork_http,
+        "POST",
+        "https://api.github.com/repos/nearai/ironclaw/forks",
+        json!({
+            "organization": "nearai-labs",
+            "name": "ironclaw-fork",
+            "default_branch_only": true
+        }),
+    );
+
+    let release_http = Arc::new(RecordingWasmHostHttp::ok(WasmHttpResponse {
+        status: 201,
+        headers_json: "{}".to_string(),
+        body: br#"{"tag_name":"v1.2.3"}"#.to_vec(),
+    }));
+    let release = execute_bundled_github_wasm(
+        "github.create_release",
+        json!({
+            "owner": "nearai",
+            "repo": "ironclaw",
+            "tag_name": "v1.2.3",
+            "target_commitish": "main",
+            "name": "v1.2.3",
+            "body": "release notes",
+            "draft": true,
+            "prerelease": false,
+            "generate_release_notes": true
+        }),
+        Arc::clone(&release_http),
+    );
+    assert_eq!(release.error, None);
+    assert_single_wasm_request_json_body(
+        &release_http,
+        "POST",
+        "https://api.github.com/repos/nearai/ironclaw/releases",
+        json!({
+            "tag_name": "v1.2.3",
+            "target_commitish": "main",
+            "name": "v1.2.3",
+            "body": "release notes",
+            "draft": true,
+            "prerelease": false,
+            "generate_release_notes": true
+        }),
+    );
+}
+
+#[tokio::test]
 async fn bundled_github_wasm_sanitizes_host_http_and_api_failures() {
     let cases = [
         (
@@ -610,6 +864,28 @@ fn assert_single_wasm_request(
     assert_eq!(request.url, expected_url);
     assert_eq!(request.timeout_ms, Some(10_000));
     assert_eq!(request.body.as_deref(), expected_body);
+
+    let headers: serde_json::Value = serde_json::from_str(&request.headers_json).unwrap();
+    assert_eq!(headers["User-Agent"], "IronClaw-GitHub-Reborn-WASM");
+    assert_eq!(headers["X-GitHub-Api-Version"], "2026-03-10");
+}
+
+fn assert_single_wasm_request_json_body(
+    http: &RecordingWasmHostHttp,
+    expected_method: &str,
+    expected_url: &str,
+    expected_body: serde_json::Value,
+) {
+    let requests = http.requests().unwrap();
+    assert_eq!(requests.len(), 1);
+    let request = &requests[0];
+    assert_eq!(request.method, expected_method);
+    assert_eq!(request.url, expected_url);
+    assert_eq!(request.timeout_ms, Some(10_000));
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(request.body.as_deref().unwrap()).unwrap(),
+        expected_body
+    );
 
     let headers: serde_json::Value = serde_json::from_str(&request.headers_json).unwrap();
     assert_eq!(headers["User-Agent"], "IronClaw-GitHub-Reborn-WASM");

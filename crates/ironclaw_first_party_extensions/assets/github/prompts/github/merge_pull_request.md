@@ -1,4 +1,4 @@
-Use `github.comment_issue` to add an issue or pull request comment.
+Use `github.merge_pull_request` to merge a pull request.
 
 Pass the required fields exactly as requested by the user. If the user provides a GitHub URL, extract the owner, repository, and number/path/ref fields before calling this capability.
 

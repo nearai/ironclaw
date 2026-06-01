@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "GitHub comment_issue input",
+  "title": "GitHub reply_pull_request_comment input",
   "type": "object",
   "additionalProperties": false,
   "properties": {
@@ -24,22 +24,28 @@
       },
       "description": "Repository name."
     },
-    "issue_number": {
+    "pr_number": {
       "type": "integer",
       "minimum": 1,
-      "description": "Issue or pull request number."
+      "description": "Pull request number."
+    },
+    "comment_id": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Pull request review comment id."
     },
     "body": {
       "type": "string",
       "minLength": 1,
       "maxLength": 65536,
-      "description": "Markdown comment body."
+      "description": "Reply body."
     }
   },
   "required": [
     "owner",
     "repo",
-    "issue_number",
+    "pr_number",
+    "comment_id",
     "body"
   ]
 }

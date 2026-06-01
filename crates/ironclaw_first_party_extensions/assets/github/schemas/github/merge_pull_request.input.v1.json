@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "GitHub comment_issue input",
+  "title": "GitHub merge_pull_request input",
   "type": "object",
   "additionalProperties": false,
   "properties": {
@@ -24,22 +24,34 @@
       },
       "description": "Repository name."
     },
-    "issue_number": {
+    "pr_number": {
       "type": "integer",
       "minimum": 1,
-      "description": "Issue or pull request number."
+      "description": "Pull request number."
     },
-    "body": {
+    "commit_title": {
       "type": "string",
-      "minLength": 1,
       "maxLength": 65536,
-      "description": "Markdown comment body."
+      "description": "Merge commit title."
+    },
+    "commit_message": {
+      "type": "string",
+      "maxLength": 65536,
+      "description": "Merge commit message."
+    },
+    "merge_method": {
+      "type": "string",
+      "enum": [
+        "merge",
+        "squash",
+        "rebase"
+      ],
+      "default": "merge"
     }
   },
   "required": [
     "owner",
     "repo",
-    "issue_number",
-    "body"
+    "pr_number"
   ]
 }
