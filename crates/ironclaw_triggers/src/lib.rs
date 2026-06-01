@@ -677,18 +677,15 @@ pub trait TriggerRepository: Send + Sync {
     /// This has the same trusted-poller-only authorization constraints as
     /// [`TriggerRepository::list_active_triggers`]. The cursor must be derived
     /// from a previous trusted active scan result, not from user input.
+    ///
+    /// Cursor pagination is required for every repository implementation so the
+    /// poller cannot advance successfully on the first tick and then fail when
+    /// it resumes from a stored cursor.
     async fn list_active_triggers_after(
         &self,
         after: Option<ActiveTriggerScanCursor>,
         limit: usize,
-    ) -> Result<Vec<TriggerRecord>, TriggerError> {
-        if after.is_some() {
-            return Err(TriggerError::Backend {
-                reason: "trigger repository does not support active scan cursors".to_string(),
-            });
-        }
-        self.list_active_triggers(limit).await
-    }
+    ) -> Result<Vec<TriggerRecord>, TriggerError>;
 
     async fn claim_due_fire(
         &self,

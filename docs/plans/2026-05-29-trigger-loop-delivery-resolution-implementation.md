@@ -585,6 +585,11 @@ Expected size: less than 1000 lines.
 Add the heavier caller-level tests separately from the worker core:
 
 - repository + provider + inbound service + turn coordinator test path
+- integration and E2E-style harnesses should intercept external infrastructure
+  and endpoints only. Use real domain classes and composition-owned ports for
+  trigger repositories, source providers, materialization, turn submission, and
+  turn-state lookup whenever those implementations exist, so tests exercise the
+  full in-process path instead of replacing internal behavior with mocks.
 - one new canonical thread per fire
 - trusted scope reaches binding resolution
 - same scheduled slot replays instead of double-submitting

@@ -67,6 +67,8 @@ pub struct TriggerPollerWorkerDeps {
 pub struct TriggerPollerWorker {
     config: TriggerPollerWorkerConfig,
     deps: TriggerPollerWorkerDeps,
+    // This guard is held only around synchronous cursor clone/set operations,
+    // never across repository, materialization, submit, or lookup awaits.
     active_scan_cursor: Mutex<Option<ActiveTriggerScanCursor>>,
 }
 
@@ -83,6 +85,11 @@ impl TriggerPollerWorker {
         })
     }
 
+    /// Executes one serialized poller tick.
+    ///
+    /// Production lifecycle wiring must not run overlapping ticks for the same
+    /// worker instance. The active-scan cursor is a per-worker progress marker
+    /// and is advanced by the single supervisor-owned tick loop.
     pub async fn tick_once(&self, now: Timestamp) -> Result<TriggerPollerTickReport, TriggerError> {
         let mut report = TriggerPollerTickReport::new(now);
         self.clear_terminal_active_fires(&mut report).await?;
@@ -2512,6 +2519,14 @@ mod tests {
 
         async fn list_active_triggers(
             &self,
+            limit: usize,
+        ) -> Result<Vec<TriggerRecord>, TriggerError> {
+            self.list_active_triggers_after(None, limit).await
+        }
+
+        async fn list_active_triggers_after(
+            &self,
+            _after: Option<ActiveTriggerScanCursor>,
             _limit: usize,
         ) -> Result<Vec<TriggerRecord>, TriggerError> {
             Err(TriggerError::Backend {
@@ -2753,8 +2768,19 @@ mod tests {
 
         async fn list_active_triggers(
             &self,
+            limit: usize,
+        ) -> Result<Vec<TriggerRecord>, TriggerError> {
+            self.list_active_triggers_after(None, limit).await
+        }
+
+        async fn list_active_triggers_after(
+            &self,
+            after: Option<ActiveTriggerScanCursor>,
             _limit: usize,
         ) -> Result<Vec<TriggerRecord>, TriggerError> {
+            if after.is_some() {
+                return Ok(Vec::new());
+            }
             Ok(vec![self.active_record.clone()])
         }
 
@@ -3037,6 +3063,14 @@ mod tests {
 
         async fn list_active_triggers(
             &self,
+            limit: usize,
+        ) -> Result<Vec<TriggerRecord>, TriggerError> {
+            self.list_active_triggers_after(None, limit).await
+        }
+
+        async fn list_active_triggers_after(
+            &self,
+            _after: Option<ActiveTriggerScanCursor>,
             _limit: usize,
         ) -> Result<Vec<TriggerRecord>, TriggerError> {
             Ok(Vec::new())
@@ -3139,6 +3173,14 @@ mod tests {
 
         async fn list_active_triggers(
             &self,
+            limit: usize,
+        ) -> Result<Vec<TriggerRecord>, TriggerError> {
+            self.list_active_triggers_after(None, limit).await
+        }
+
+        async fn list_active_triggers_after(
+            &self,
+            _after: Option<ActiveTriggerScanCursor>,
             _limit: usize,
         ) -> Result<Vec<TriggerRecord>, TriggerError> {
             Ok(Vec::new())
@@ -3245,6 +3287,14 @@ mod tests {
 
         async fn list_active_triggers(
             &self,
+            limit: usize,
+        ) -> Result<Vec<TriggerRecord>, TriggerError> {
+            self.list_active_triggers_after(None, limit).await
+        }
+
+        async fn list_active_triggers_after(
+            &self,
+            _after: Option<ActiveTriggerScanCursor>,
             _limit: usize,
         ) -> Result<Vec<TriggerRecord>, TriggerError> {
             Ok(Vec::new())
@@ -3361,6 +3411,14 @@ mod tests {
 
         async fn list_active_triggers(
             &self,
+            limit: usize,
+        ) -> Result<Vec<TriggerRecord>, TriggerError> {
+            self.list_active_triggers_after(None, limit).await
+        }
+
+        async fn list_active_triggers_after(
+            &self,
+            _after: Option<ActiveTriggerScanCursor>,
             _limit: usize,
         ) -> Result<Vec<TriggerRecord>, TriggerError> {
             Ok(Vec::new())
