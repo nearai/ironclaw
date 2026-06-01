@@ -40,21 +40,6 @@ fn submit_request_for(
     }
 }
 
-#[test]
-fn turn_active_run_ref_state_helper_flags_cover_all_variants() {
-    assert!(TurnActiveRunRefState::Missing.is_missing());
-    assert!(!TurnActiveRunRefState::Missing.is_nonterminal());
-    assert!(!TurnActiveRunRefState::Missing.is_terminal());
-
-    assert!(!TurnActiveRunRefState::Nonterminal.is_missing());
-    assert!(TurnActiveRunRefState::Nonterminal.is_nonterminal());
-    assert!(!TurnActiveRunRefState::Nonterminal.is_terminal());
-
-    assert!(!TurnActiveRunRefState::Terminal.is_missing());
-    assert!(!TurnActiveRunRefState::Terminal.is_nonterminal());
-    assert!(TurnActiveRunRefState::Terminal.is_terminal());
-}
-
 #[tokio::test]
 async fn active_run_ref_state_classifies_missing_nonterminal_and_terminal() {
     let store = ironclaw_turns::InMemoryTurnStateStore::default();

@@ -531,6 +531,7 @@ impl TriggerRepository for PostgresTriggerRepository {
         let trigger_id = request.trigger_id.to_string();
         let fire_slot = fmt_ts(&request.fire_slot);
         let run_id = request.run_id.to_string();
+        // Keep active-fire clearing atomic as one predicate-guarded write.
         let row = client
             .query_opt(
                 &format!(

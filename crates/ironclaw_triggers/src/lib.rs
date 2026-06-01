@@ -155,11 +155,19 @@ impl TryFrom<String> for TriggerExternalEventId {
     }
 }
 
+/// Opaque reference to materialized trigger prompt content.
+///
+/// Values must be non-empty, at most 512 bytes, and free of control
+/// characters. The concrete content store is owned by composition.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 #[serde(transparent)]
 pub struct TriggerInboundContentRef(String);
 
 impl TriggerInboundContentRef {
+    /// Create a validated inbound content reference.
+    ///
+    /// Validation is byte-based: the value must be non-empty, at most 512
+    /// bytes, and free of control characters.
     pub fn new(value: impl Into<String>) -> Result<Self, TriggerError> {
         let value = value.into();
         validate_inbound_content_ref(&value)?;
@@ -456,15 +464,6 @@ pub struct ClearActiveFireRequest {
     pub trigger_id: TriggerId,
     pub fire_slot: Timestamp,
     pub run_id: TurnRunId,
-}
-
-impl ClearActiveFireRequest {
-    pub fn matches_record_active_fire(&self, record: &TriggerRecord) -> bool {
-        record.tenant_id == self.tenant_id
-            && record.trigger_id == self.trigger_id
-            && record.active_fire_slot == Some(self.fire_slot)
-            && record.active_run_ref == Some(self.run_id)
-    }
 }
 
 #[async_trait]
@@ -833,7 +832,11 @@ impl TriggerRepository for InMemoryTriggerRepository {
         let Some(record) = state.get_mut(&key) else {
             return Ok(None);
         };
-        if !request.matches_record_active_fire(record) {
+        if record.tenant_id != request.tenant_id
+            || record.trigger_id != request.trigger_id
+            || record.active_fire_slot != Some(request.fire_slot)
+            || record.active_run_ref != Some(request.run_id)
+        {
             return Ok(None);
         }
         record.active_fire_slot = None;
@@ -1271,6 +1274,10 @@ mod tests {
         assert!(TriggerInboundContentRef::new("").is_err());
         assert!(TriggerInboundContentRef::new("content:\ntrigger").is_err());
         assert!(TriggerInboundContentRef::new("x".repeat(513)).is_err());
+
+        assert!(from_value::<TriggerInboundContentRef>(json!("")).is_err());
+        assert!(from_value::<TriggerInboundContentRef>(json!("content:\ntrigger")).is_err());
+        assert!(from_value::<TriggerInboundContentRef>(json!("x".repeat(513))).is_err());
     }
 
     #[tokio::test]
@@ -1311,37 +1318,6 @@ mod tests {
             materialized.as_str(),
             format!("content:{}", fire.identity.external_event_id)
         );
-    }
-
-    #[test]
-    fn clear_active_fire_request_matches_only_the_active_fire_and_run_ref() {
-        let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid");
-        let fire_slot = ts(1_704_067_200);
-        let run_id = TurnRunId::new();
-        let mut record = sample_record(trigger_id, tenant("tenant-a"), fire_slot);
-        record.active_fire_slot = Some(fire_slot);
-        record.active_run_ref = Some(run_id);
-        record.last_status = Some(TriggerRunStatus::Error);
-        let request = ClearActiveFireRequest {
-            tenant_id: record.tenant_id.clone(),
-            trigger_id,
-            fire_slot,
-            run_id,
-        };
-
-        assert!(request.matches_record_active_fire(&record));
-
-        let mut wrong_slot = record.clone();
-        wrong_slot.active_fire_slot = Some(fire_slot + chrono::Duration::minutes(1));
-        assert!(!request.matches_record_active_fire(&wrong_slot));
-
-        let mut wrong_run = record.clone();
-        wrong_run.active_run_ref = Some(TurnRunId::new());
-        assert!(!request.matches_record_active_fire(&wrong_run));
-
-        let mut unaccepted_claim = record;
-        unaccepted_claim.active_run_ref = None;
-        assert!(!request.matches_record_active_fire(&unaccepted_claim));
     }
 
     #[tokio::test]

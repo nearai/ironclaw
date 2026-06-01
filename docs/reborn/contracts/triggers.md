@@ -204,11 +204,11 @@ Trusted trigger ingress request fields are:
 - `actor`: `TurnActor` for `creator_user_id`;
 - `content_ref`: materialized trigger prompt.
 
-PR 14 adds the trigger-owned materialization seam without making
-`ironclaw_triggers` depend on conversation or product-workflow crates:
-`TriggerPromptMaterializer` accepts a `TriggerFire` and returns an opaque
-`TriggerInboundContentRef`. Composition owns the concrete adapter that writes or
-resolves that content ref for the trusted inbound path.
+The trigger-owned materialization seam keeps `ironclaw_triggers` free of
+conversation and product-workflow dependencies: `TriggerPromptMaterializer`
+accepts a `TriggerFire` and returns an opaque `TriggerInboundContentRef`.
+Composition owns the concrete adapter that writes or resolves that content ref
+for the trusted inbound path.
 
 The sealed marker/installation/actor/conversation tuple must resolve to the same
 `SourceBindingRef` on every retry of the same tenant-scoped fire identity. Replay
@@ -253,11 +253,8 @@ Slot bookkeeping is tied to acceptance, not merely polling:
   `last_run_at` unchanged, and advance `next_run_at` beyond the failed
   fire_slot.
 
-Turn terminal lookup and clearing stay on the later PR 14+ seam; PR 12 and
-PR 13 define the fire-claim contract and submit-result bookkeeping but do not
-consult turn state yet.
-
-PR 14 provides that seam as two narrow pieces:
+Turn terminal lookup and clearing are a narrow seam layered above fire-claim
+and submit-result bookkeeping:
 
 - `ironclaw_turns::active_run_ref_state` classifies
   `active_run_ref` through `get_run_state` and `TurnStatus::is_terminal`;
