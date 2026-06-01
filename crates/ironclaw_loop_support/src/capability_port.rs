@@ -3259,7 +3259,10 @@ mod tests {
 
             assert_eq!(
                 candidate.effective_capability_ids,
-                vec![CapabilityId::new(capability_info::CAPABILITY_ID).expect("synthetic id")]
+                vec![
+                    CapabilityId::new(capability_info::CAPABILITY_ID).expect("synthetic id"),
+                    capability_id.clone()
+                ]
             );
 
             let outcome = port
@@ -3398,6 +3401,16 @@ mod tests {
         let error = port
             .provider_tool_call_capability_ids(&call)
             .expect_err("approval-time capability id lookup should reject unknown targets");
+        assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+
+        let mut malformed_call = provider_tool_call();
+        malformed_call.id = "call_malformed_unknown_target".to_string();
+        malformed_call.name = capability_info::TOOL_NAME.to_string();
+        malformed_call.arguments =
+            serde_json::json!({ "name": "demo.missing", "detail": "everything" });
+        let error = port
+            .provider_tool_call_capability_ids(&malformed_call)
+            .expect_err("approval-time target lookup should still reject unknown targets");
         assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
 
         let candidate = port

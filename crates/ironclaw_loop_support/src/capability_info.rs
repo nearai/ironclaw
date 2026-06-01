@@ -153,7 +153,7 @@ pub(super) fn output<'a>(
     Ok(output)
 }
 
-fn requested_name(input: &serde_json::Value) -> Result<&str, AgentLoopHostError> {
+pub(super) fn requested_name(input: &serde_json::Value) -> Result<&str, AgentLoopHostError> {
     let requested = input
         .get("name")
         .or_else(|| input.get("capability_id"))

@@ -280,10 +280,9 @@ impl SyntheticSurfaceCapabilitySnapshot {
                 let mut effective_capability_ids = Vec::with_capacity(2);
                 effective_capability_ids.push(capability_id.clone());
                 let capability_info_target_missing =
-                    match capability_info::CapabilityInfoRequest::parse(&normalized_arguments) {
-                        Ok(request) => {
-                            if let Some(target) = snapshot.capability_info(request.requested_name())
-                            {
+                    match capability_info::requested_name(&normalized_arguments) {
+                        Ok(requested_name) => {
+                            if let Some(target) = snapshot.capability_info(requested_name) {
                                 effective_capability_ids.push(target.capability_id.clone());
                                 false
                             } else {
