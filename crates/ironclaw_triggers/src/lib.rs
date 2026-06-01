@@ -16,6 +16,7 @@ use async_trait::async_trait;
 use chrono::{SecondsFormat, Utc};
 use cron::Schedule;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, Timestamp, UserId};
+use ironclaw_turns::TurnRunId;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -215,6 +216,8 @@ pub struct TriggerRecord {
     pub last_run_at: Option<Timestamp>,
     pub last_fired_slot: Option<Timestamp>,
     pub last_status: Option<TriggerRunStatus>,
+    pub active_fire_slot: Option<Timestamp>,
+    pub active_run_ref: Option<TurnRunId>,
     pub created_at: Timestamp,
 }
 
@@ -675,6 +678,8 @@ mod tests {
             last_run_at: None,
             last_fired_slot: None,
             last_status: None,
+            active_fire_slot: None,
+            active_run_ref: None,
             created_at: ts(1_704_067_200),
         }
     }

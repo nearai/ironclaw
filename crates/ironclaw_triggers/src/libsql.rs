@@ -8,6 +8,8 @@ use chrono::{DateTime, SecondsFormat, Utc};
 #[cfg(feature = "libsql")]
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, Timestamp, UserId};
 #[cfg(feature = "libsql")]
+use ironclaw_turns::TurnRunId;
+#[cfg(feature = "libsql")]
 use libsql::params;
 
 #[cfg(feature = "libsql")]
@@ -24,7 +26,7 @@ const TRIGGER_COLUMNS: &str = "\
     trigger_id, tenant_id, creator_user_id, agent_id, project_id, \
     name, source, schedule_expression, completion_policy, prompt, \
     state, next_run_at, last_run_at, last_fired_slot, last_status, \
-    created_at";
+    active_fire_slot, active_run_ref, created_at";
 
 #[cfg(feature = "libsql")]
 const TRIGGER_ID_COL: usize = 0;
@@ -57,7 +59,11 @@ const LAST_FIRED_SLOT_COL: usize = 13;
 #[cfg(feature = "libsql")]
 const LAST_STATUS_COL: usize = 14;
 #[cfg(feature = "libsql")]
-const CREATED_AT_COL: usize = 15;
+const ACTIVE_FIRE_SLOT_COL: usize = 15;
+#[cfg(feature = "libsql")]
+const ACTIVE_RUN_REF_COL: usize = 16;
+#[cfg(feature = "libsql")]
+const CREATED_AT_COL: usize = 17;
 
 /// Durable libSQL trigger repository.
 #[cfg(feature = "libsql")]
@@ -96,6 +102,8 @@ impl LibSqlTriggerRepository {
                         last_run_at TEXT,
                         last_fired_slot TEXT,
                         last_status TEXT,
+                        active_fire_slot TEXT,
+                        active_run_ref TEXT,
                         created_at TEXT NOT NULL,
                         PRIMARY KEY (tenant_id, trigger_id)
                     )"
@@ -161,8 +169,8 @@ impl TriggerRepository for LibSqlTriggerRepository {
                     trigger_id, tenant_id, creator_user_id, agent_id, project_id,
                     name, source, schedule_expression, completion_policy, prompt,
                     state, next_run_at, last_run_at, last_fired_slot, last_status,
-                    created_at
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+                    active_fire_slot, active_run_ref, created_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
                 ON CONFLICT (tenant_id, trigger_id) DO UPDATE SET
                     creator_user_id = excluded.creator_user_id,
                     agent_id = excluded.agent_id,
@@ -176,7 +184,9 @@ impl TriggerRepository for LibSqlTriggerRepository {
                     next_run_at = excluded.next_run_at,
                     last_run_at = excluded.last_run_at,
                     last_fired_slot = excluded.last_fired_slot,
-                    last_status = excluded.last_status"
+                    last_status = excluded.last_status,
+                    active_fire_slot = excluded.active_fire_slot,
+                    active_run_ref = excluded.active_run_ref"
                 ),
                 params![
                     record.trigger_id.to_string(),
@@ -194,6 +204,8 @@ impl TriggerRepository for LibSqlTriggerRepository {
                     opt_ts(record.last_run_at.as_ref()),
                     opt_ts(record.last_fired_slot.as_ref()),
                     opt_status(record.last_status),
+                    opt_ts(record.active_fire_slot.as_ref()),
+                    opt_turn_run_id(record.active_run_ref.as_ref()),
                     fmt_ts(&record.created_at),
                 ],
             )
@@ -347,6 +359,12 @@ fn row_to_record(row: &libsql::Row) -> Result<TriggerRecord, TriggerError> {
     let last_status = optional_text(row, LAST_STATUS_COL, "last_status")?
         .map(|value| parse_run_status(&value))
         .transpose()?;
+    let active_fire_slot = optional_text(row, ACTIVE_FIRE_SLOT_COL, "active_fire_slot")?
+        .map(|value| parse_timestamp(&value, "active_fire_slot"))
+        .transpose()?;
+    let active_run_ref = optional_text(row, ACTIVE_RUN_REF_COL, "active_run_ref")?
+        .map(|value| parse_turn_run_id(&value))
+        .transpose()?;
 
     let record = TriggerRecord {
         trigger_id,
@@ -371,6 +389,8 @@ fn row_to_record(row: &libsql::Row) -> Result<TriggerRecord, TriggerError> {
         last_run_at,
         last_fired_slot,
         last_status,
+        active_fire_slot,
+        active_run_ref,
         created_at: parse_timestamp(
             &required_text(row, CREATED_AT_COL, "created_at")?,
             "created_at",
@@ -404,6 +424,11 @@ fn parse_timestamp(value: &str, field: &str) -> Result<Timestamp, TriggerError> 
 }
 
 #[cfg(feature = "libsql")]
+fn parse_turn_run_id(value: &str) -> Result<TurnRunId, TriggerError> {
+    TurnRunId::parse(value).map_err(|error| invalid_record("active_run_ref", error.to_string()))
+}
+
+#[cfg(feature = "libsql")]
 fn fmt_ts(value: &Timestamp) -> String {
     value.to_rfc3339_opts(SecondsFormat::Nanos, true)
 }
@@ -428,6 +453,14 @@ fn opt_text(value: Option<&str>) -> libsql::Value {
 fn opt_status(value: Option<TriggerRunStatus>) -> libsql::Value {
     match value {
         Some(value) => libsql::Value::Text(status_text(value).to_string()),
+        None => libsql::Value::Null,
+    }
+}
+
+#[cfg(feature = "libsql")]
+fn opt_turn_run_id(value: Option<&TurnRunId>) -> libsql::Value {
+    match value {
+        Some(value) => libsql::Value::Text(value.to_string()),
         None => libsql::Value::Null,
     }
 }

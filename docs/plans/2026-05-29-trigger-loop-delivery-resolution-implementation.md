@@ -444,6 +444,9 @@ Add the first durable `TriggerRepository` backend:
   be derived from `state == Scheduled`, not written as independent fire state
 - `active_fire_slot` and `active_run_ref` persistence fields separate from
   `last_status`
+- `active_run_ref` is persisted and round-tripped as the submitted Reborn
+  `TurnRunId`; it is not an auth-layer `TurnRunRef` or a trigger-local opaque
+  wrapper, and PR 10 does not interpret it as a claim/clear decision
 - due-trigger query with limit
 - scoped list/remove behavior
 - backend-specific tests
@@ -497,6 +500,8 @@ Add the backend-agnostic repository claim/lease API that makes
 - write-order contract for `last_run_at`, `last_fired_slot`, `last_status`,
   `next_run_at`, `active_fire_slot`, and `active_run_ref`.
 - active-fire claim never uses `last_status` as the in-flight sentinel.
+- claim/clear code reads `active_run_ref` as a `TurnRunId` and consults the
+  turn-state system for terminal status; PR 10 only persists the field.
 
 Expected size: less than 600 lines.
 

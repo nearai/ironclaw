@@ -16,6 +16,7 @@ chrono = { version = "0.4", features = ["serde"] }
 cron = "0.13"
 hex = "0.4"
 ironclaw_host_api = { path = "../ironclaw_host_api" }
+ironclaw_turns = { path = "../ironclaw_turns" }
 libsql = { version = "0.6", optional = true, default-features = false, features = ["core", "replication", "remote", "tls"] }
 serde = { version = "1", features = ["derive"] }
 sha2 = "0.10"

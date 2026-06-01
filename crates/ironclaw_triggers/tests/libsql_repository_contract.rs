@@ -8,6 +8,7 @@ use ironclaw_triggers::{
     LibSqlTriggerRepository, TriggerCompletionPolicy, TriggerError, TriggerId, TriggerRecord,
     TriggerRepository, TriggerRunStatus, TriggerSchedule, TriggerSourceKind, TriggerState,
 };
+use ironclaw_turns::TurnRunId;
 use libsql::params;
 use tempfile::tempdir;
 
@@ -44,6 +45,8 @@ fn sample_record(
         last_run_at: None,
         last_fired_slot: None,
         last_status: None,
+        active_fire_slot: None,
+        active_run_ref: None,
         created_at: ts(1_704_067_200),
     }
 }
@@ -174,6 +177,8 @@ async fn libsql_repository_round_trip_preserves_optional_run_metadata_and_comple
     record.last_run_at = Some(ts(1_704_067_200));
     record.last_fired_slot = Some(ts(1_704_067_140));
     record.last_status = Some(TriggerRunStatus::Error);
+    record.active_fire_slot = Some(ts(1_704_067_260));
+    record.active_run_ref = Some(TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5a").unwrap());
 
     repo.upsert_trigger(record.clone())
         .await
@@ -273,6 +278,13 @@ async fn libsql_repository_rejects_malformed_persisted_rows() {
             "last_fired_slot",
             "get",
         ),
+        (
+            "active_fire_slot",
+            "not-a-timestamp",
+            "active_fire_slot",
+            "get",
+        ),
+        ("active_run_ref", "not-a-uuid", "active_run_ref", "get"),
         ("last_status", "timed_out", "last_status", "get"),
     ] {
         conn.execute(
