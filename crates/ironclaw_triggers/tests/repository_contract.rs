@@ -1430,6 +1430,35 @@ mod fire_claim_contract {
             .expect("record present");
         assert_eq!(reloaded, stale_permanent_record);
 
+        let stale_terminal_trigger_id =
+            TriggerId::parse("01J00000000000000000000014").expect("ulid");
+        let stale_terminal_tenant_id = tenant("tenant-stale-terminal");
+        let mut stale_terminal_record = sample_record(
+            stale_terminal_trigger_id,
+            stale_terminal_tenant_id.clone(),
+            fire_slot,
+        );
+        stale_terminal_record.active_fire_slot = Some(fire_slot);
+        repo.upsert_trigger(stale_terminal_record.clone())
+            .await
+            .expect("insert stale terminal record");
+        assert!(
+            repo.mark_fire_terminally_failed(FireTerminalFailedRequest {
+                tenant_id: stale_terminal_tenant_id.clone(),
+                trigger_id: stale_terminal_trigger_id,
+                fire_slot: stale_fire_slot,
+            })
+            .await
+            .expect("stale terminal update")
+            .is_none()
+        );
+        let reloaded = repo
+            .get_trigger(stale_terminal_tenant_id, stale_terminal_trigger_id)
+            .await
+            .expect("reload stale terminal")
+            .expect("record present");
+        assert_eq!(reloaded, stale_terminal_record);
+
         let accepted_trigger_id = TriggerId::parse("01J0000000000000000000000E").expect("ulid");
         let accepted_tenant_id = tenant("tenant-invalid-accepted");
         let mut accepted_record =

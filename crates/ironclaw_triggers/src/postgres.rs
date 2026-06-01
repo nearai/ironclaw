@@ -527,7 +527,7 @@ impl TriggerRepository for PostgresTriggerRepository {
         let completed = state_text(TriggerState::Completed);
         let fire_slot = fmt_ts(&request.fire_slot);
         let row = tx
-            .query_one(
+            .query_opt(
                 &format!(
                     "UPDATE {TRIGGER_TABLE}
                      SET state = $3,
@@ -550,6 +550,12 @@ impl TriggerRepository for PostgresTriggerRepository {
             )
             .await
             .map_err(|error| backend_error("mark terminal trigger fire failure", error))?;
+        let Some(row) = row else {
+            tx.commit()
+                .await
+                .map_err(|error| backend_error("commit terminal trigger fire failure", error))?;
+            return Ok(None);
+        };
         let record = row_to_record(&row)?;
         tx.commit()
             .await

@@ -550,18 +550,10 @@ impl TriggerRepository for LibSqlTriggerRepository {
             trigger_id,
             fire_slot,
         } = request;
-        let conn = self.connect().await?;
-        let Some(record) = fetch_record(&conn, &tenant_id, trigger_id).await? else {
-            return Ok(None);
-        };
-        if record.active_fire_slot != Some(fire_slot) {
-            return Ok(None);
-        }
-        reject_failed_result_after_active_run(record.active_run_ref)?;
-
         let fire_slot_text = fmt_ts(&fire_slot);
         let last_status = status_text(TriggerRunStatus::Error);
         let completed = state_text(TriggerState::Completed);
+        let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 &format!(

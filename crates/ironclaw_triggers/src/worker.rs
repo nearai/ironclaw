@@ -100,10 +100,10 @@ impl TriggerPollerWorker {
                 }
             };
             report.results.push(TriggerPollerFireReport {
-                tenant_id: outcome.0,
-                trigger_id: outcome.1,
+                tenant_id,
+                trigger_id,
                 fire_slot,
-                outcome: outcome.2,
+                outcome,
             });
         }
         Ok(report)
@@ -120,11 +120,11 @@ impl TriggerPollerWorker {
             .await?;
         report.active_records = active_records.len();
         for record in active_records {
+            debug_assert!(
+                record.active_fire_slot.is_some(),
+                "list_active_triggers returned a record without active_fire_slot"
+            );
             let Some(fire_slot) = record.active_fire_slot else {
-                debug_assert!(
-                    record.active_fire_slot.is_some(),
-                    "list_active_triggers returned a record without active_fire_slot"
-                );
                 continue;
             };
             let Some(run_id) = record.active_run_ref else {
@@ -213,7 +213,7 @@ impl TriggerPollerWorker {
         &self,
         record: TriggerRecord,
         now: Timestamp,
-    ) -> Result<(TenantId, TriggerId, TriggerPollerFireOutcome), TriggerError> {
+    ) -> Result<TriggerPollerFireOutcome, TriggerError> {
         let tenant_id = record.tenant_id.clone();
         let trigger_id = record.trigger_id;
         let fire_slot = record.next_run_at;
@@ -242,7 +242,7 @@ impl TriggerPollerWorker {
             ClaimDueFireOutcome::NotDue { .. } => TriggerPollerFireOutcome::SkippedNotDue,
             ClaimDueFireOutcome::NotFound => TriggerPollerFireOutcome::SkippedNotFound,
         };
-        Ok((tenant_id, trigger_id, outcome))
+        Ok(outcome)
     }
 
     async fn process_claimed_fire(
@@ -690,11 +690,27 @@ mod tests {
         submitter: Arc<RecordingSubmitter>,
         active_lookup: Arc<RecordingActiveRunLookup>,
     ) -> TriggerPollerWorker {
+        worker_with_source_provider(
+            repo,
+            Arc::new(crate::ScheduleTriggerSourceProvider),
+            materializer,
+            submitter,
+            active_lookup,
+        )
+    }
+
+    fn worker_with_source_provider(
+        repo: Arc<dyn TriggerRepository>,
+        source_provider: Arc<dyn TriggerSourceProvider>,
+        materializer: Arc<RecordingMaterializer>,
+        submitter: Arc<RecordingSubmitter>,
+        active_lookup: Arc<RecordingActiveRunLookup>,
+    ) -> TriggerPollerWorker {
         TriggerPollerWorker::new(
             TriggerPollerWorkerConfig::default(),
             TriggerPollerWorkerDeps {
                 repository: repo,
-                source_provider: Arc::new(crate::ScheduleTriggerSourceProvider),
+                source_provider,
                 materializer,
                 trusted_submitter: submitter,
                 active_run_lookup: active_lookup,
@@ -1397,6 +1413,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tick_source_provider_none_persists_permanent_failure_with_next_slot() {
+        let repo = Arc::new(InMemoryTriggerRepository::default());
+        let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid");
+        let fire_slot = ts(1_704_067_200);
+        let record = sample_record(trigger_id, tenant("tenant-a"), fire_slot);
+        let expected_next_run_at = record
+            .schedule
+            .next_slot_after(fire_slot)
+            .expect("next run")
+            .expect("future run");
+        repo.upsert_trigger(record).await.expect("insert");
+        let worker = worker_with_source_provider(
+            repo.clone(),
+            Arc::new(NullSourceProvider),
+            Arc::new(RecordingMaterializer::success("content:trigger-fire")),
+            Arc::new(RecordingSubmitter::with_outcomes(Vec::new())),
+            Arc::new(RecordingActiveRunLookup::default()),
+        );
+
+        let report = worker.tick_once(fire_slot).await.expect("tick succeeds");
+
+        assert!(matches!(
+            report.results.last().map(|result| &result.outcome),
+            Some(TriggerPollerFireOutcome::PermanentFailed { .. })
+        ));
+        let persisted = repo
+            .get_trigger(tenant("tenant-a"), trigger_id)
+            .await
+            .expect("load")
+            .expect("record present");
+        assert_eq!(persisted.last_status, Some(TriggerRunStatus::Error));
+        assert_eq!(persisted.next_run_at, expected_next_run_at);
+        assert_eq!(persisted.active_fire_slot, None);
+        assert_eq!(persisted.active_run_ref, None);
+    }
+
+    #[tokio::test]
     async fn tick_permanent_failure_without_next_slot_completes_trigger() {
         let repo = Arc::new(InMemoryTriggerRepository::default());
         let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid");
@@ -1431,6 +1484,19 @@ mod tests {
     struct RecordingMaterializer {
         result: Mutex<Option<Result<TriggerInboundContentRef, TriggerError>>>,
         fires: Mutex<Vec<TriggerFire>>,
+    }
+
+    struct NullSourceProvider;
+
+    #[async_trait]
+    impl TriggerSourceProvider for NullSourceProvider {
+        async fn evaluate(
+            &self,
+            _record: &TriggerRecord,
+            _now: Timestamp,
+        ) -> Result<Option<TriggerFire>, TriggerError> {
+            Ok(None)
+        }
     }
 
     impl RecordingMaterializer {
