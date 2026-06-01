@@ -197,12 +197,13 @@ async fn blocked_prompt_payload(
         TurnStatus::BlockedAuth => {
             // Enrich the prompt with auth-flow metadata when the provider is
             // available. Missing = backward-compatible (fields omitted as None).
+            let owner_user_id = event.owner_user_id.as_ref().unwrap_or(caller_user_id);
             let challenge = match auth_challenges {
                 Some(provider) => {
                     provider
                         .challenge_for_gate(
                             &event.scope,
-                            caller_user_id,
+                            owner_user_id,
                             event.run_id,
                             &gate_ref_str,
                         )

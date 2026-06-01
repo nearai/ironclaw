@@ -1452,6 +1452,10 @@ async fn inject_credential_account_once_maps_unknown_resolved_secret_to_auth_req
     };
     assert_eq!(credential_requirements.len(), 1);
     assert_eq!(credential_requirements[0].provider.as_str(), "github");
+    assert_eq!(
+        credential_requirements[0].requester_extension.as_str(),
+        "github"
+    );
 }
 
 const ECHO_MANIFEST: &str = r#"

@@ -23,9 +23,12 @@ pub(super) async fn manual_token_submit_handler(
         .token
         .into_validated()
         .map_err(|_| ProductAuthRouteFailure::invalid_request())?;
-    // This route only persists a scoped credential and returns its account id.
-    // The browser must still call WebUI v2 resolve_gate, where the turn
-    // coordinator verifies the caller, run id, and gate ref before resuming.
+    // This legacy combined submit route only persists a scoped credential and
+    // returns its account id. It intentionally does not resume the gate: the
+    // browser must still call WebUI v2 resolve_gate, where the turn coordinator
+    // validates the authenticated caller against the run id and gate ref before
+    // any turn can continue. New callers should prefer the setup + secret-submit
+    // split route, which binds submissions to the invocation returned by setup.
     let continuation = AuthContinuationRef::TurnGateResume {
         turn_run_ref: TurnRunRef::new(request.run_id)
             .map_err(|_| ProductAuthRouteFailure::invalid_request())?,

@@ -1467,7 +1467,8 @@ async fn filesystem_select_configured_account_validates_provider_and_rejects_mis
         .expect_err("missing account must return CredentialMissing");
     assert_eq!(err, AuthProductError::CredentialMissing);
 
-    // Wrong provider.
+    // Wrong provider is intentionally indistinguishable from a missing account
+    // at the public boundary, so account ids cannot be used as provider oracles.
     let err = service
         .select_configured_account(CredentialAccountChoiceRequest::new(
             scope.clone(),
@@ -1475,8 +1476,8 @@ async fn filesystem_select_configured_account_validates_provider_and_rejects_mis
             account.id,
         ))
         .await
-        .expect_err("wrong provider must return CrossScopeDenied");
-    assert_eq!(err, AuthProductError::CrossScopeDenied);
+        .expect_err("wrong provider must return CredentialMissing");
+    assert_eq!(err, AuthProductError::CredentialMissing);
 }
 
 // ─── tests: cancel_flow, fail_oauth_callback, complete_credential_selection ───
