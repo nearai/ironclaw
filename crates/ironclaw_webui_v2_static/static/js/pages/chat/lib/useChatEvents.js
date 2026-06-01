@@ -227,6 +227,10 @@ function applyProjectionItems({
       }
       if (TERMINAL_RUN_STATUSES.has(status)) {
         setIsProcessing(false);
+        setPendingGate(null);
+        setActiveRun?.(null);
+        activeRunId = null;
+        if (latestRunIdRef) latestRunIdRef.current = null;
         if (
           SUCCESS_RUN_STATUSES.has(status) &&
           onRunCompleted &&

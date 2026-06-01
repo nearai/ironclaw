@@ -77,4 +77,21 @@ mod tests {
         assert!(use_chat.contains("credentialRef"));
         assert!(use_chat.contains("safeAuthGateCode"));
     }
+
+    #[test]
+    fn chat_cancelled_gate_resolution_exits_processing_state() {
+        let use_chat = asset_text("js/pages/chat/hooks/useChat.js");
+        assert!(
+            use_chat
+                .contains("resolution === \"approved\" || resolution === \"credential_provided\"")
+        );
+        assert!(use_chat.contains("setIsProcessing(shouldContinueProcessing);"));
+        assert!(use_chat.contains("setActiveRun(null);"));
+
+        let events = asset_text("js/pages/chat/lib/useChatEvents.js");
+        assert!(events.contains("TERMINAL_RUN_STATUSES.has(status)"));
+        assert!(events.contains("setPendingGate(null);"));
+        assert!(events.contains("setActiveRun?.(null);"));
+        assert!(events.contains("latestRunIdRef.current = null;"));
+    }
 }
