@@ -541,9 +541,10 @@ async fn product_auth_manual_token_submit_returns_credential_ref_without_exposin
         json["continuation"]["turn_run_ref"].as_str(),
         Some("11111111-1111-1111-1111-111111111111")
     );
-    assert!(
-        dispatcher.events().is_empty(),
-        "manual token submit should return credential_ref; resolve_gate owns turn resumption"
+    assert_eq!(
+        dispatcher.events().len(),
+        1,
+        "manual token submit should dispatch the completed turn-gate continuation"
     );
 }
 
