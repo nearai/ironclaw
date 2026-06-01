@@ -35,6 +35,11 @@ pub trait TurnStateStore: Send + Sync {
         request: CancelRunRequest,
     ) -> Result<CancelRunResponse, TurnError>;
 
+    /// Return the run state when the run exists in the supplied exact scope.
+    ///
+    /// Missing runs and runs outside the supplied scope must both return
+    /// [`TurnError::ScopeNotFound`]. This keeps scoped lookups non-enumerating
+    /// and gives higher-level helpers one canonical missing-run shape.
     async fn get_run_state(&self, request: GetRunStateRequest) -> Result<TurnRunState, TurnError>;
 }
 
