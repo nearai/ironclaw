@@ -306,7 +306,7 @@ impl TriggerRepository for LibSqlTriggerRepository {
                     "SELECT {TRIGGER_COLUMNS}
                      FROM {TRIGGER_TABLE}
                      WHERE active_fire_slot IS NOT NULL
-                     ORDER BY COALESCE(active_fire_slot, next_run_at), tenant_id, trigger_id
+                     ORDER BY active_fire_slot, tenant_id, trigger_id
                      LIMIT ?1"
                 ),
                 params![limit as i64],

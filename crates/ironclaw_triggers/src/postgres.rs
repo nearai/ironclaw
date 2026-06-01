@@ -246,7 +246,7 @@ impl TriggerRepository for PostgresTriggerRepository {
                     "SELECT {TRIGGER_COLUMNS}
                      FROM {TRIGGER_TABLE}
                      WHERE active_fire_slot IS NOT NULL
-                     ORDER BY COALESCE(active_fire_slot, next_run_at), tenant_id, trigger_id
+                     ORDER BY active_fire_slot, tenant_id, trigger_id
                      LIMIT $1"
                 ),
                 &[&limit],
@@ -321,9 +321,15 @@ impl TriggerRepository for PostgresTriggerRepository {
         let trigger_id = request.trigger_id.to_string();
         let Some(record) = locked_record(&tx, request.tenant_id.as_str(), &trigger_id).await?
         else {
+            tx.rollback()
+                .await
+                .map_err(|error| backend_error("rollback terminal trigger fire failure", error))?;
             return Ok(None);
         };
         if record.active_fire_slot != Some(request.fire_slot) {
+            tx.rollback()
+                .await
+                .map_err(|error| backend_error("rollback terminal trigger fire failure", error))?;
             return Ok(None);
         }
         if let Some(active_run_ref) = record.active_run_ref {
