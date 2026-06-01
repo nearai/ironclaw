@@ -3,8 +3,8 @@
 use chrono::{TimeZone, Utc};
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, Timestamp, UserId};
 use ironclaw_triggers::{
-    TriggerCompletionPolicy, TriggerError, TriggerId, TriggerRecord, TriggerRepository,
-    TriggerRunStatus, TriggerSchedule, TriggerSourceKind, TriggerState,
+    InMemoryTriggerRepository, TriggerCompletionPolicy, TriggerError, TriggerId, TriggerRecord,
+    TriggerRepository, TriggerRunStatus, TriggerSchedule, TriggerSourceKind, TriggerState,
 };
 use ironclaw_turns::TurnRunId;
 
@@ -804,4 +804,671 @@ async fn clear_postgres_triggers(pool: &deadpool_postgres::Pool) {
         .execute("DELETE FROM trigger_records", &[])
         .await
         .expect("clear trigger records");
+}
+
+mod pr12_fire_claim_contract {
+    use super::*;
+
+    use ironclaw_triggers::{
+        ClaimDueFireOutcome, ClaimDueFireRequest, FireAcceptedRequest, FirePermanentFailedRequest,
+        FireReplayedRequest, FireRetryableFailedRequest,
+    };
+
+    async fn assert_fire_claim_and_update_contract(repo: &impl TriggerRepository) {
+        let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid");
+        let tenant_id = tenant("tenant-a");
+        let fire_slot = ts(1_704_067_200);
+        let accepted_at = ts(1_704_067_205);
+        let mut record = sample_record(trigger_id, tenant_id.clone(), fire_slot);
+        let expected_next_run_at = record
+            .schedule
+            .next_slot_after(fire_slot)
+            .expect("next slot calculation")
+            .expect("future slot");
+        record.last_status = Some(TriggerRunStatus::Error);
+        repo.upsert_trigger(record.clone())
+            .await
+            .expect("insert record");
+
+        let claimed = repo
+            .claim_due_fire(ClaimDueFireRequest {
+                tenant_id: tenant_id.clone(),
+                trigger_id,
+                fire_slot,
+                now: fire_slot,
+            })
+            .await
+            .expect("claim due fire");
+        let ClaimDueFireOutcome::Claimed(claimed) = claimed else {
+            panic!("record should be claimable, got {claimed:?}");
+        };
+        assert_eq!(claimed.record.active_fire_slot, Some(fire_slot));
+        assert_eq!(claimed.record.active_run_ref, None);
+
+        let persisted = repo
+            .get_trigger(tenant_id.clone(), trigger_id)
+            .await
+            .expect("reload claimed record")
+            .expect("record present");
+        assert_eq!(persisted.active_fire_slot, Some(fire_slot));
+        assert_eq!(persisted.active_run_ref, None);
+        assert_eq!(persisted.last_status, Some(TriggerRunStatus::Error));
+
+        let accepted_run_id =
+            TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5a").expect("valid run");
+        let accepted = repo
+            .mark_fire_accepted(FireAcceptedRequest {
+                tenant_id: tenant_id.clone(),
+                trigger_id,
+                fire_slot,
+                run_id: accepted_run_id,
+                submitted_at: accepted_at,
+                next_run_at: expected_next_run_at,
+            })
+            .await
+            .expect("mark accepted")
+            .expect("accepted fire should persist");
+        assert_eq!(accepted.last_run_at, Some(accepted_at));
+        assert_eq!(accepted.last_fired_slot, Some(fire_slot));
+        assert_eq!(accepted.last_status, Some(TriggerRunStatus::Ok));
+        assert_eq!(accepted.active_fire_slot, Some(fire_slot));
+        assert_eq!(accepted.active_run_ref, Some(accepted_run_id));
+        assert_eq!(accepted.next_run_at, expected_next_run_at);
+
+        let accepted_again = repo
+            .mark_fire_accepted(FireAcceptedRequest {
+                tenant_id: tenant_id.clone(),
+                trigger_id,
+                fire_slot,
+                run_id: accepted_run_id,
+                submitted_at: ts(1_704_067_206),
+                next_run_at: expected_next_run_at,
+            })
+            .await
+            .expect("idempotent accepted result")
+            .expect("accepted result returns existing record");
+        assert_eq!(accepted_again, accepted);
+
+        let different_accepted_run_id =
+            TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5c").expect("valid run");
+        let error = repo
+            .mark_fire_accepted(FireAcceptedRequest {
+                tenant_id: tenant_id.clone(),
+                trigger_id,
+                fire_slot,
+                run_id: different_accepted_run_id,
+                submitted_at: accepted_at,
+                next_run_at: expected_next_run_at,
+            })
+            .await
+            .expect_err("different accepted run id must not rewrite active_run_ref");
+        assert_error_contains(error, "must not rewrite an existing active_run_ref");
+
+        let error = repo
+            .mark_fire_retryable_failed(FireRetryableFailedRequest {
+                tenant_id: tenant_id.clone(),
+                trigger_id,
+                fire_slot,
+            })
+            .await
+            .expect_err("stale retryable failure must not clear accepted run ref");
+        assert_error_contains(error, "must not clear an accepted active_run_ref");
+
+        let replayed_trigger_id = TriggerId::parse("01J00000000000000000000006").expect("ulid");
+        let replayed_tenant_id = tenant("tenant-replayed");
+        let replayed_record =
+            sample_record(replayed_trigger_id, replayed_tenant_id.clone(), fire_slot);
+        repo.upsert_trigger(replayed_record)
+            .await
+            .expect("insert replayed record");
+        let replayed_claim = repo
+            .claim_due_fire(ClaimDueFireRequest {
+                tenant_id: replayed_tenant_id.clone(),
+                trigger_id: replayed_trigger_id,
+                fire_slot,
+                now: fire_slot,
+            })
+            .await
+            .expect("claim replayed record");
+        assert!(matches!(replayed_claim, ClaimDueFireOutcome::Claimed(_)));
+
+        let replayed_run_id =
+            TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5b").expect("valid run");
+        let replayed = repo
+            .mark_fire_replayed(FireReplayedRequest {
+                tenant_id: replayed_tenant_id.clone(),
+                trigger_id: replayed_trigger_id,
+                fire_slot,
+                original_run_id: replayed_run_id,
+                replayed_at: accepted_at,
+                next_run_at: expected_next_run_at,
+            })
+            .await
+            .expect("mark replayed")
+            .expect("replayed fire should persist");
+        assert_eq!(replayed.last_run_at, Some(accepted_at));
+        assert_eq!(replayed.last_fired_slot, Some(fire_slot));
+        assert_eq!(replayed.last_status, Some(TriggerRunStatus::Ok));
+        assert_eq!(replayed.active_fire_slot, Some(fire_slot));
+        assert_eq!(replayed.active_run_ref, Some(replayed_run_id));
+        assert_eq!(replayed.next_run_at, expected_next_run_at);
+
+        let replayed_again = repo
+            .mark_fire_replayed(FireReplayedRequest {
+                tenant_id: replayed_tenant_id.clone(),
+                trigger_id: replayed_trigger_id,
+                fire_slot,
+                original_run_id: replayed_run_id,
+                replayed_at: ts(1_704_067_207),
+                next_run_at: expected_next_run_at,
+            })
+            .await
+            .expect("idempotent replayed result")
+            .expect("replayed result returns existing record");
+        assert_eq!(replayed_again, replayed);
+
+        let different_replayed_run_id =
+            TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5d").expect("valid run");
+        let error = repo
+            .mark_fire_replayed(FireReplayedRequest {
+                tenant_id: replayed_tenant_id.clone(),
+                trigger_id: replayed_trigger_id,
+                fire_slot,
+                original_run_id: different_replayed_run_id,
+                replayed_at: accepted_at,
+                next_run_at: expected_next_run_at,
+            })
+            .await
+            .expect_err("different replayed run id must not rewrite active_run_ref");
+        assert_error_contains(error, "must not rewrite an existing active_run_ref");
+
+        let error = repo
+            .mark_fire_permanently_failed(FirePermanentFailedRequest {
+                tenant_id: replayed_tenant_id,
+                trigger_id: replayed_trigger_id,
+                fire_slot,
+                next_run_at: expected_next_run_at,
+            })
+            .await
+            .expect_err("stale permanent failure must not clear replayed run ref");
+        assert_error_contains(error, "must not clear an accepted active_run_ref");
+
+        let failure_previous_run_at = ts(1_704_066_900);
+        let failure_previous_slot = ts(1_704_066_840);
+        let retryable_trigger_id = TriggerId::parse("01J00000000000000000000004").expect("ulid");
+        let retryable_tenant_id = tenant("tenant-retryable");
+        let mut retryable_record =
+            sample_record(retryable_trigger_id, retryable_tenant_id.clone(), fire_slot);
+        retryable_record.last_run_at = Some(failure_previous_run_at);
+        retryable_record.last_fired_slot = Some(failure_previous_slot);
+        repo.upsert_trigger(retryable_record)
+            .await
+            .expect("insert retryable record");
+        let retryable_claim = repo
+            .claim_due_fire(ClaimDueFireRequest {
+                tenant_id: retryable_tenant_id.clone(),
+                trigger_id: retryable_trigger_id,
+                fire_slot,
+                now: fire_slot,
+            })
+            .await
+            .expect("claim retryable record");
+        assert!(matches!(retryable_claim, ClaimDueFireOutcome::Claimed(_)));
+
+        let retryable_failed = repo
+            .mark_fire_retryable_failed(FireRetryableFailedRequest {
+                tenant_id: retryable_tenant_id,
+                trigger_id: retryable_trigger_id,
+                fire_slot,
+            })
+            .await
+            .expect("mark retryable failed")
+            .expect("retryable failure should persist");
+        assert_eq!(retryable_failed.last_run_at, Some(failure_previous_run_at));
+        assert_eq!(
+            retryable_failed.last_fired_slot,
+            Some(failure_previous_slot)
+        );
+        assert_eq!(retryable_failed.last_status, Some(TriggerRunStatus::Error));
+        assert_eq!(retryable_failed.active_fire_slot, None);
+        assert_eq!(retryable_failed.active_run_ref, None);
+        assert!(retryable_failed.next_run_at <= fire_slot);
+
+        let permanent_trigger_id = TriggerId::parse("01J00000000000000000000005").expect("ulid");
+        let permanent_tenant_id = tenant("tenant-permanent");
+        let mut permanent_record =
+            sample_record(permanent_trigger_id, permanent_tenant_id.clone(), fire_slot);
+        permanent_record.last_run_at = Some(failure_previous_run_at);
+        permanent_record.last_fired_slot = Some(failure_previous_slot);
+        repo.upsert_trigger(permanent_record)
+            .await
+            .expect("insert permanent-failure record");
+        let permanent_claim = repo
+            .claim_due_fire(ClaimDueFireRequest {
+                tenant_id: permanent_tenant_id.clone(),
+                trigger_id: permanent_trigger_id,
+                fire_slot,
+                now: fire_slot,
+            })
+            .await
+            .expect("claim permanent-failure record");
+        assert!(matches!(permanent_claim, ClaimDueFireOutcome::Claimed(_)));
+
+        let permanent_failed = repo
+            .mark_fire_permanently_failed(FirePermanentFailedRequest {
+                tenant_id: permanent_tenant_id,
+                trigger_id: permanent_trigger_id,
+                fire_slot,
+                next_run_at: expected_next_run_at,
+            })
+            .await
+            .expect("mark permanently failed")
+            .expect("permanent failure should persist");
+        assert_eq!(permanent_failed.last_run_at, Some(failure_previous_run_at));
+        assert_eq!(
+            permanent_failed.last_fired_slot,
+            Some(failure_previous_slot)
+        );
+        assert_eq!(permanent_failed.last_status, Some(TriggerRunStatus::Error));
+        assert_eq!(permanent_failed.active_fire_slot, None);
+        assert_eq!(permanent_failed.active_run_ref, None);
+        assert!(permanent_failed.next_run_at > fire_slot);
+    }
+
+    async fn assert_fire_result_rejects_invalid_next_run_at(repo: &impl TriggerRepository) {
+        let fire_slot = ts(1_704_067_200);
+
+        let retryable_trigger_id = TriggerId::parse("01J00000000000000000000007").expect("ulid");
+        let retryable_tenant_id = tenant("tenant-invalid-retryable");
+        let mut retryable_record =
+            sample_record(retryable_trigger_id, retryable_tenant_id.clone(), fire_slot);
+        retryable_record.active_fire_slot = Some(fire_slot);
+        retryable_record.next_run_at = ts(1_704_067_260);
+        repo.upsert_trigger(retryable_record)
+            .await
+            .expect("insert invalid retryable record");
+        let error = repo
+            .mark_fire_retryable_failed(FireRetryableFailedRequest {
+                tenant_id: retryable_tenant_id,
+                trigger_id: retryable_trigger_id,
+                fire_slot,
+            })
+            .await
+            .expect_err("retryable failure rejects advanced next_run_at");
+        assert_error_contains(error, "at or before the failed fire slot");
+
+        let permanent_trigger_id = TriggerId::parse("01J00000000000000000000008").expect("ulid");
+        let permanent_tenant_id = tenant("tenant-invalid-permanent");
+        let mut permanent_record =
+            sample_record(permanent_trigger_id, permanent_tenant_id.clone(), fire_slot);
+        permanent_record.active_fire_slot = Some(fire_slot);
+        repo.upsert_trigger(permanent_record)
+            .await
+            .expect("insert invalid permanent record");
+        let error = repo
+            .mark_fire_permanently_failed(FirePermanentFailedRequest {
+                tenant_id: permanent_tenant_id,
+                trigger_id: permanent_trigger_id,
+                fire_slot,
+                next_run_at: fire_slot,
+            })
+            .await
+            .expect_err("permanent failure rejects non-future next_run_at");
+        assert_error_contains(error, "must be after the claimed fire slot");
+    }
+
+    async fn assert_fire_claim_exclusions_and_active_gate_contract(repo: &impl TriggerRepository) {
+        let fire_slot = ts(1_704_067_200);
+        let tenant_id = tenant("tenant-a");
+
+        let base_trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid");
+        let base = sample_record(base_trigger_id, tenant_id.clone(), fire_slot);
+        repo.upsert_trigger(base.clone())
+            .await
+            .expect("insert base");
+
+        let paused = {
+            let mut record = sample_record(
+                TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZY").expect("ulid"),
+                tenant("tenant-paused"),
+                fire_slot,
+            );
+            record.state = TriggerState::Paused;
+            record
+        };
+        repo.upsert_trigger(paused.clone())
+            .await
+            .expect("insert paused");
+
+        let completed = {
+            let mut record = sample_record(
+                TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZX").expect("ulid"),
+                tenant("tenant-completed"),
+                fire_slot,
+            );
+            record.state = TriggerState::Completed;
+            record
+        };
+        repo.upsert_trigger(completed.clone())
+            .await
+            .expect("insert completed");
+
+        let future = sample_record(
+            TriggerId::parse("01J00000000000000000000002").expect("ulid"),
+            tenant("tenant-future"),
+            ts(1_704_067_320),
+        );
+        repo.upsert_trigger(future.clone())
+            .await
+            .expect("insert future");
+
+        assert!(
+            repo.claim_due_fire(ClaimDueFireRequest {
+                tenant_id: tenant_id.clone(),
+                trigger_id: base_trigger_id,
+                fire_slot: ts(1_704_067_260),
+                now: fire_slot,
+            })
+            .await
+            .expect("wrong fire slot claim")
+            .matches_not_due(),
+            "wrong fire slot must not be claimable"
+        );
+
+        assert!(
+            repo.claim_due_fire(ClaimDueFireRequest {
+                tenant_id: tenant_id.clone(),
+                trigger_id: TriggerId::parse("01J00000000000000000000009").expect("ulid"),
+                fire_slot,
+                now: fire_slot,
+            })
+            .await
+            .expect("missing row claim")
+            .matches_not_found(),
+            "missing row must not be claimable"
+        );
+
+        assert!(
+            repo.claim_due_fire(ClaimDueFireRequest {
+                tenant_id: paused.tenant_id.clone(),
+                trigger_id: paused.trigger_id,
+                fire_slot,
+                now: fire_slot,
+            })
+            .await
+            .expect("paused claim")
+            .matches_not_due(),
+            "paused row must not be claimable"
+        );
+
+        assert!(
+            repo.claim_due_fire(ClaimDueFireRequest {
+                tenant_id: completed.tenant_id.clone(),
+                trigger_id: completed.trigger_id,
+                fire_slot,
+                now: fire_slot,
+            })
+            .await
+            .expect("completed claim")
+            .matches_not_due(),
+            "completed row must not be claimable"
+        );
+
+        assert!(
+            repo.claim_due_fire(ClaimDueFireRequest {
+                tenant_id: future.tenant_id.clone(),
+                trigger_id: future.trigger_id,
+                fire_slot: future.next_run_at,
+                now: fire_slot,
+            })
+            .await
+            .expect("future claim")
+            .matches_not_due(),
+            "future next_run_at must not be claimable"
+        );
+
+        let claimed = repo
+            .claim_due_fire(ClaimDueFireRequest {
+                tenant_id: tenant_id.clone(),
+                trigger_id: base_trigger_id,
+                fire_slot,
+                now: fire_slot,
+            })
+            .await
+            .expect("claim base row");
+        let ClaimDueFireOutcome::Claimed(claimed) = claimed else {
+            panic!("base row should be claimable, got {claimed:?}");
+        };
+        assert_eq!(claimed.record.active_fire_slot, Some(fire_slot));
+        assert_eq!(claimed.record.active_run_ref, None);
+
+        let mut active_fire = claimed.record.clone();
+        active_fire.last_status = Some(TriggerRunStatus::Error);
+        repo.upsert_trigger(active_fire)
+            .await
+            .expect("persist active row with error status");
+        assert!(
+            repo.claim_due_fire(ClaimDueFireRequest {
+                tenant_id: tenant_id.clone(),
+                trigger_id: base_trigger_id,
+                fire_slot,
+                now: fire_slot,
+            })
+            .await
+            .expect("active fire slot claim")
+            .matches_already_active(Some(fire_slot), None),
+            "active fire slot must block a second claim"
+        );
+
+        let active_run_ref =
+            Some(TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5a").expect("valid run"));
+        let mut active_run = claimed.record.clone();
+        active_run.active_run_ref = active_run_ref;
+        repo.upsert_trigger(active_run)
+            .await
+            .expect("persist active row with run ref");
+        assert!(
+            repo.claim_due_fire(ClaimDueFireRequest {
+                tenant_id: tenant_id.clone(),
+                trigger_id: base_trigger_id,
+                fire_slot,
+                now: fire_slot,
+            })
+            .await
+            .expect("active run ref claim")
+            .matches_already_active(Some(fire_slot), active_run_ref),
+            "active run ref must block a second claim"
+        );
+
+        let run_only_trigger_id = TriggerId::parse("01J0000000000000000000000A").expect("ulid");
+        let run_only_tenant_id = tenant("tenant-run-only");
+        let mut run_only =
+            sample_record(run_only_trigger_id, run_only_tenant_id.clone(), fire_slot);
+        run_only.active_fire_slot = None;
+        run_only.active_run_ref =
+            Some(TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5e").expect("valid run"));
+        assert!(run_only.has_active_fire());
+        let expected_run_only_ref = run_only.active_run_ref;
+        repo.upsert_trigger(run_only)
+            .await
+            .expect("persist active row with run ref only");
+        assert!(
+            repo.claim_due_fire(ClaimDueFireRequest {
+                tenant_id: run_only_tenant_id,
+                trigger_id: run_only_trigger_id,
+                fire_slot,
+                now: fire_slot,
+            })
+            .await
+            .expect("active run-ref-only claim")
+            .matches_already_active(None, expected_run_only_ref),
+            "active run ref without fire slot must block a second claim"
+        );
+
+        let mut status_only = sample_record(
+            TriggerId::parse("01J00000000000000000000003").expect("ulid"),
+            tenant("tenant-status"),
+            fire_slot,
+        );
+        status_only.last_status = Some(TriggerRunStatus::Error);
+        repo.upsert_trigger(status_only.clone())
+            .await
+            .expect("insert status-only record");
+        let status_claim = repo
+            .claim_due_fire(ClaimDueFireRequest {
+                tenant_id: status_only.tenant_id.clone(),
+                trigger_id: status_only.trigger_id,
+                fire_slot,
+                now: fire_slot,
+            })
+            .await
+            .expect("status-only claim");
+        let ClaimDueFireOutcome::Claimed(status_claim) = status_claim else {
+            panic!("status-only row should still be claimable, got {status_claim:?}");
+        };
+        assert_eq!(status_claim.record.active_fire_slot, Some(fire_slot));
+        assert_eq!(status_claim.record.active_run_ref, None);
+        assert_eq!(
+            status_claim.record.last_status,
+            Some(TriggerRunStatus::Error)
+        );
+    }
+
+    trait ClaimDueFireOutcomeAssertions {
+        fn matches_not_found(&self) -> bool;
+        fn matches_not_due(&self) -> bool;
+        fn matches_already_active(
+            &self,
+            active_fire_slot: Option<Timestamp>,
+            active_run_ref: Option<TurnRunId>,
+        ) -> bool;
+    }
+
+    impl ClaimDueFireOutcomeAssertions for ClaimDueFireOutcome {
+        fn matches_not_found(&self) -> bool {
+            matches!(self, Self::NotFound)
+        }
+
+        fn matches_not_due(&self) -> bool {
+            matches!(self, Self::NotDue { .. })
+        }
+
+        fn matches_already_active(
+            &self,
+            active_fire_slot: Option<Timestamp>,
+            active_run_ref: Option<TurnRunId>,
+        ) -> bool {
+            matches!(
+                self,
+                Self::AlreadyActive {
+                    active_fire_slot: actual_fire_slot,
+                    active_run_ref: actual_run_ref,
+                } if *actual_fire_slot == active_fire_slot && *actual_run_ref == active_run_ref
+            )
+        }
+    }
+
+    async fn assert_durable_fire_claim_defaults_to_pr13(repo: &impl TriggerRepository) {
+        let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid");
+        let tenant_id = tenant("tenant-a");
+        let fire_slot = ts(1_704_067_200);
+        assert_pr13_backend_error(
+            repo.claim_due_fire(ClaimDueFireRequest {
+                tenant_id: tenant_id.clone(),
+                trigger_id,
+                fire_slot,
+                now: fire_slot,
+            })
+            .await
+            .expect_err("durable claim implementation lands in PR13"),
+        );
+        assert_pr13_backend_error(
+            repo.mark_fire_accepted(FireAcceptedRequest {
+                tenant_id: tenant_id.clone(),
+                trigger_id,
+                fire_slot,
+                run_id: TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5a")
+                    .expect("valid run"),
+                submitted_at: fire_slot,
+                next_run_at: ts(1_704_067_260),
+            })
+            .await
+            .expect_err("durable accepted implementation lands in PR13"),
+        );
+        assert_pr13_backend_error(
+            repo.mark_fire_replayed(FireReplayedRequest {
+                tenant_id: tenant_id.clone(),
+                trigger_id,
+                fire_slot,
+                original_run_id: TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5a")
+                    .expect("valid run"),
+                replayed_at: fire_slot,
+                next_run_at: ts(1_704_067_260),
+            })
+            .await
+            .expect_err("durable replayed implementation lands in PR13"),
+        );
+        assert_pr13_backend_error(
+            repo.mark_fire_retryable_failed(FireRetryableFailedRequest {
+                tenant_id: tenant_id.clone(),
+                trigger_id,
+                fire_slot,
+            })
+            .await
+            .expect_err("durable retryable failure implementation lands in PR13"),
+        );
+        assert_pr13_backend_error(
+            repo.mark_fire_permanently_failed(FirePermanentFailedRequest {
+                tenant_id,
+                trigger_id,
+                fire_slot,
+                next_run_at: ts(1_704_067_260),
+            })
+            .await
+            .expect_err("durable permanent failure implementation lands in PR13"),
+        );
+    }
+
+    fn assert_pr13_backend_error(error: TriggerError) {
+        assert!(
+            error
+                .to_string()
+                .contains("atomic trigger fire claim persistence for this backend lands in PR 13"),
+            "unexpected durable default error: {error}"
+        );
+    }
+
+    fn assert_error_contains(error: TriggerError, expected: &str) {
+        assert!(
+            error.to_string().contains(expected),
+            "expected error to contain {expected:?}, got {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn in_memory_repository_fire_claim_contract() {
+        let repo = InMemoryTriggerRepository::default();
+        assert_fire_claim_and_update_contract(&repo).await;
+        assert_fire_claim_exclusions_and_active_gate_contract(&repo).await;
+        assert_fire_result_rejects_invalid_next_run_at(&repo).await;
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn libsql_repository_fire_claim_contract() {
+        let (_dir, repo) = build_libsql_repo().await;
+        assert_durable_fire_claim_defaults_to_pr13(&repo).await;
+    }
+
+    #[cfg(feature = "postgres")]
+    #[tokio::test]
+    async fn postgres_repository_fire_claim_contract() {
+        let Some((_container, pool)) = postgres_pool_or_skip().await else {
+            return;
+        };
+        let repo = PostgresTriggerRepository::new(pool.clone());
+        repo.run_migrations().await.expect("run migrations");
+        assert_durable_fire_claim_defaults_to_pr13(&repo).await;
+        clear_postgres_triggers(&pool).await;
+    }
 }

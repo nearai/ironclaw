@@ -234,6 +234,10 @@ impl TriggerRecord {
     pub fn is_due_at(&self, now: Timestamp) -> bool {
         self.state == TriggerState::Scheduled && self.next_run_at <= now
     }
+
+    pub fn has_active_fire(&self) -> bool {
+        self.active_fire_slot.is_some() || self.active_run_ref.is_some()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -337,6 +341,68 @@ pub struct TriggerFire {
     pub prompt: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaimDueFireRequest {
+    pub tenant_id: TenantId,
+    pub trigger_id: TriggerId,
+    pub fire_slot: Timestamp,
+    pub now: Timestamp,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaimedTriggerFire {
+    pub record: TriggerRecord,
+    pub fire_slot: Timestamp,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClaimDueFireOutcome {
+    Claimed(ClaimedTriggerFire),
+    NotFound,
+    NotDue {
+        record: TriggerRecord,
+    },
+    AlreadyActive {
+        active_fire_slot: Option<Timestamp>,
+        active_run_ref: Option<TurnRunId>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FireAcceptedRequest {
+    pub tenant_id: TenantId,
+    pub trigger_id: TriggerId,
+    pub fire_slot: Timestamp,
+    pub run_id: TurnRunId,
+    pub submitted_at: Timestamp,
+    pub next_run_at: Timestamp,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FireReplayedRequest {
+    pub tenant_id: TenantId,
+    pub trigger_id: TriggerId,
+    pub fire_slot: Timestamp,
+    pub original_run_id: TurnRunId,
+    pub replayed_at: Timestamp,
+    pub next_run_at: Timestamp,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FireRetryableFailedRequest {
+    pub tenant_id: TenantId,
+    pub trigger_id: TriggerId,
+    pub fire_slot: Timestamp,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FirePermanentFailedRequest {
+    pub tenant_id: TenantId,
+    pub trigger_id: TriggerId,
+    pub fire_slot: Timestamp,
+    pub next_run_at: Timestamp,
+}
+
 #[async_trait]
 pub trait TriggerSourceProvider: Send + Sync {
     async fn evaluate(
@@ -409,6 +475,41 @@ pub trait TriggerRepository: Send + Sync {
         now: Timestamp,
         limit: usize,
     ) -> Result<Vec<TriggerRecord>, TriggerError>;
+
+    async fn claim_due_fire(
+        &self,
+        _request: ClaimDueFireRequest,
+    ) -> Result<ClaimDueFireOutcome, TriggerError> {
+        Err(fire_claim_pr13_backend_error())
+    }
+
+    async fn mark_fire_accepted(
+        &self,
+        _request: FireAcceptedRequest,
+    ) -> Result<Option<TriggerRecord>, TriggerError> {
+        Err(fire_claim_pr13_backend_error())
+    }
+
+    async fn mark_fire_replayed(
+        &self,
+        _request: FireReplayedRequest,
+    ) -> Result<Option<TriggerRecord>, TriggerError> {
+        Err(fire_claim_pr13_backend_error())
+    }
+
+    async fn mark_fire_retryable_failed(
+        &self,
+        _request: FireRetryableFailedRequest,
+    ) -> Result<Option<TriggerRecord>, TriggerError> {
+        Err(fire_claim_pr13_backend_error())
+    }
+
+    async fn mark_fire_permanently_failed(
+        &self,
+        _request: FirePermanentFailedRequest,
+    ) -> Result<Option<TriggerRecord>, TriggerError> {
+        Err(fire_claim_pr13_backend_error())
+    }
 }
 
 /// Feature-gated durable libSQL repository type for composition/test wiring.
@@ -519,6 +620,150 @@ impl TriggerRepository for InMemoryTriggerRepository {
             .filter_map(|(_, _, _, key)| state.get(&key).cloned())
             .collect())
     }
+
+    async fn claim_due_fire(
+        &self,
+        request: ClaimDueFireRequest,
+    ) -> Result<ClaimDueFireOutcome, TriggerError> {
+        let mut state = self.lock_state()?;
+        let key = TriggerRepositoryKey::new(&request.tenant_id, request.trigger_id);
+        let Some(record) = state.get_mut(&key) else {
+            return Ok(ClaimDueFireOutcome::NotFound);
+        };
+
+        if record.has_active_fire() {
+            return Ok(ClaimDueFireOutcome::AlreadyActive {
+                active_fire_slot: record.active_fire_slot,
+                active_run_ref: record.active_run_ref,
+            });
+        }
+
+        if record.state != TriggerState::Scheduled
+            || record.next_run_at != request.fire_slot
+            || request.fire_slot > request.now
+        {
+            return Ok(ClaimDueFireOutcome::NotDue {
+                record: record.clone(),
+            });
+        }
+
+        record.active_fire_slot = Some(request.fire_slot);
+        record.active_run_ref = None;
+        Ok(ClaimDueFireOutcome::Claimed(ClaimedTriggerFire {
+            record: record.clone(),
+            fire_slot: request.fire_slot,
+        }))
+    }
+
+    async fn mark_fire_accepted(
+        &self,
+        request: FireAcceptedRequest,
+    ) -> Result<Option<TriggerRecord>, TriggerError> {
+        let Some(record) = self.update_claimed_fire(
+            &request.tenant_id,
+            request.trigger_id,
+            request.fire_slot,
+            |record| {
+                if let Some(active_run_ref) = record.active_run_ref {
+                    reject_run_ref_rewrite(active_run_ref, request.run_id)?;
+                    return Ok(());
+                }
+                reject_non_future_next_run_at(request.fire_slot, request.next_run_at)?;
+                record.last_run_at = Some(request.submitted_at);
+                record.last_fired_slot = Some(request.fire_slot);
+                record.last_status = Some(TriggerRunStatus::Ok);
+                record.next_run_at = request.next_run_at;
+                record.active_fire_slot = Some(request.fire_slot);
+                record.active_run_ref = Some(request.run_id);
+                Ok(())
+            },
+        )?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(record))
+    }
+
+    async fn mark_fire_replayed(
+        &self,
+        request: FireReplayedRequest,
+    ) -> Result<Option<TriggerRecord>, TriggerError> {
+        let Some(record) = self.update_claimed_fire(
+            &request.tenant_id,
+            request.trigger_id,
+            request.fire_slot,
+            |record| {
+                if let Some(active_run_ref) = record.active_run_ref {
+                    reject_run_ref_rewrite(active_run_ref, request.original_run_id)?;
+                    return Ok(());
+                }
+                reject_non_future_next_run_at(request.fire_slot, request.next_run_at)?;
+                record.last_run_at = Some(request.replayed_at);
+                record.last_fired_slot = Some(request.fire_slot);
+                record.last_status = Some(TriggerRunStatus::Ok);
+                record.next_run_at = request.next_run_at;
+                record.active_fire_slot = Some(request.fire_slot);
+                record.active_run_ref = Some(request.original_run_id);
+                Ok(())
+            },
+        )?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(record))
+    }
+
+    async fn mark_fire_retryable_failed(
+        &self,
+        request: FireRetryableFailedRequest,
+    ) -> Result<Option<TriggerRecord>, TriggerError> {
+        let Some(record) = self.update_claimed_fire(
+            &request.tenant_id,
+            request.trigger_id,
+            request.fire_slot,
+            |record| {
+                reject_failed_result_after_active_run(record.active_run_ref)?;
+                if record.next_run_at > request.fire_slot {
+                    return Err(TriggerError::InvalidRecord {
+                        reason: "retryable fire failure must leave next_run_at at or before the failed fire slot"
+                            .to_string(),
+                    });
+                }
+                record.last_status = Some(TriggerRunStatus::Error);
+                record.active_fire_slot = None;
+                record.active_run_ref = None;
+                Ok(())
+            },
+        )?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(record))
+    }
+
+    async fn mark_fire_permanently_failed(
+        &self,
+        request: FirePermanentFailedRequest,
+    ) -> Result<Option<TriggerRecord>, TriggerError> {
+        let Some(record) = self.update_claimed_fire(
+            &request.tenant_id,
+            request.trigger_id,
+            request.fire_slot,
+            |record| {
+                reject_failed_result_after_active_run(record.active_run_ref)?;
+                reject_non_future_next_run_at(request.fire_slot, request.next_run_at)?;
+                record.last_status = Some(TriggerRunStatus::Error);
+                record.next_run_at = request.next_run_at;
+                record.active_fire_slot = None;
+                record.active_run_ref = None;
+                Ok(())
+            },
+        )?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(record))
+    }
 }
 
 impl InMemoryTriggerRepository {
@@ -530,6 +775,66 @@ impl InMemoryTriggerRepository {
             reason: "trigger repository mutex poisoned".to_string(),
         })
     }
+
+    fn update_claimed_fire(
+        &self,
+        tenant_id: &TenantId,
+        trigger_id: TriggerId,
+        fire_slot: Timestamp,
+        update: impl FnOnce(&mut TriggerRecord) -> Result<(), TriggerError>,
+    ) -> Result<Option<TriggerRecord>, TriggerError> {
+        let mut state = self.lock_state()?;
+        let key = TriggerRepositoryKey::new(tenant_id, trigger_id);
+        let Some(record) = state.get_mut(&key) else {
+            return Ok(None);
+        };
+        if record.active_fire_slot != Some(fire_slot) {
+            return Ok(None);
+        }
+        update(record)?;
+        Ok(Some(record.clone()))
+    }
+}
+
+fn fire_claim_pr13_backend_error() -> TriggerError {
+    TriggerError::Backend {
+        reason: "atomic trigger fire claim persistence for this backend lands in PR 13".to_string(),
+    }
+}
+
+fn reject_non_future_next_run_at(
+    fire_slot: Timestamp,
+    next_run_at: Timestamp,
+) -> Result<(), TriggerError> {
+    if next_run_at > fire_slot {
+        return Ok(());
+    }
+    Err(TriggerError::InvalidRecord {
+        reason: "fire result next_run_at must be after the claimed fire slot".to_string(),
+    })
+}
+
+fn reject_run_ref_rewrite(
+    active_run_ref: TurnRunId,
+    incoming_run_ref: TurnRunId,
+) -> Result<(), TriggerError> {
+    if active_run_ref == incoming_run_ref {
+        return Ok(());
+    }
+    Err(TriggerError::InvalidRecord {
+        reason: "fire result must not rewrite an existing active_run_ref".to_string(),
+    })
+}
+
+fn reject_failed_result_after_active_run(
+    active_run_ref: Option<TurnRunId>,
+) -> Result<(), TriggerError> {
+    if active_run_ref.is_none() {
+        return Ok(());
+    }
+    Err(TriggerError::InvalidRecord {
+        reason: "fire failure result must not clear an accepted active_run_ref".to_string(),
+    })
 }
 
 fn normalize_cron_expression(expression: &str) -> Result<String, TriggerError> {

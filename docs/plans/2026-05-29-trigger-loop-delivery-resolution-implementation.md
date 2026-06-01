@@ -491,37 +491,46 @@ Expected size: less than 1000 lines.
 Add the backend-agnostic repository claim/lease API that makes
 `max_concurrent_fires_per_trigger = 1` enforceable across concurrent pollers:
 
-- `claim_due_fire`-style request/response types and trait method.
-- claim operation contract covers due-row read, trigger state check,
-  active-fire check, and claim write in one database transaction or equivalent
-  backend primitive.
+- `claim_due_fire` request/response types and trait method, plus the in-memory
+  default behavior used by tests and non-durable harnesses.
+- claim operation contract atomically covers due-row read, trigger state
+  check, active-fire check, and claim write; durable PostgreSQL/libSQL
+  transaction or CAS implementations land in PR 13.
 - explicit submit-result update methods for accepted, replayed, retryable
   failed, and permanent failed outcomes.
-- write-order contract for `last_run_at`, `last_fired_slot`, `last_status`,
-  `next_run_at`, `active_fire_slot`, and `active_run_ref`.
+- write-order contract for accepted/replayed fires:
+  `last_run_at`, `last_fired_slot`, `last_status = Ok`, `next_run_at`,
+  `active_fire_slot`, `active_run_ref`.
+- `active_fire_slot` is written before turn submission; `active_run_ref` is
+  populated only after the accepted/replayed submit result returns a
+  `TurnRunId`.
+- retryable failed writes `last_status = Error`, clears active fields, leaves
+  `last_fired_slot` and `last_run_at` unchanged, and keeps `next_run_at` at or
+  before the failed fire slot.
+- permanent failed writes `last_status = Error`, clears active fields, leaves
+  `last_fired_slot` and `last_run_at` unchanged, and advances `next_run_at`
+  beyond the failed fire slot.
 - active-fire claim never uses `last_status` as the in-flight sentinel.
-- claim/clear code reads `active_run_ref` as a `TurnRunId` and consults the
-  turn-state system for terminal status; PR 10 only persists the field.
+- turn terminal lookup and clearing remain on the later PR 14+ seam; PR 12 and
+  PR 13 do not consult turn state yet.
 
 Expected size: less than 600 lines.
 
 ### PR 13 — Atomic Claim Backend Implementations
 
-Implement the atomic claim API for both durable backends:
+Implement the durable backend versions of the PR 12 claim API and prove the
+concurrency invariant:
 
 - PostgreSQL implementation with transaction/row-lock or compare-and-swap
   semantics.
 - libSQL implementation with equivalent transaction/compare-and-swap semantics.
 - in-memory implementation only for tests; it is not proof of the durable
   invariant.
-- retryable submit failure keeps `last_fired_slot` unchanged, leaves active
-  claim unset, and keeps `next_run_at` at or before the failed slot's scheduled
-  time.
+- backend parity tests for concurrent claim attempts, accepted/replayed write
+  order, retryable failure bookkeeping, and permanent failure bookkeeping.
 - duplicate replay for the same fire identity returns the original accepted
   message and turn submission; terminal run failure does not mint a second V1
   turn for the same fire slot.
-- PostgreSQL/libSQL parity tests for concurrent claim attempts and retryable
-  failure bookkeeping.
 
 Expected size: less than 1000 lines; split by backend if implementation or
 tests exceed the line budget.

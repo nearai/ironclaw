@@ -161,11 +161,13 @@ V1 has one provider: a schedule provider.
 - A skipped tick does not create a second fire, does not create a second thread, and does not fork a parallel trigger loop.
 - Active means the previous fire has not yet reached a terminal turn outcome.
 
-`last_status` is not the active-fire sentinel. Active-fire state is tracked by
-the separate `active_fire_slot` / `active_run_ref` claim fields and cleared only
-after the referenced turn reaches a terminal outcome. PostgreSQL and libSQL
-backends must provide equivalent atomic claim semantics; in-memory tests are
-not sufficient evidence for this invariant.
+`last_status` is not the active-fire sentinel. Active means either
+`active_fire_slot` or `active_run_ref` is set; `last_status` never marks a
+trigger active. PR 12 defines the backend-agnostic `claim_due_fire`
+request/response contract and in-memory default behavior; the request/response
+atomically covers due-row read, trigger-state check, active-fire check, and
+claim write, and PR 13 owns the durable PostgreSQL/libSQL transaction/CAS
+implementations plus concurrency proof.
 
 The skip policy is per-trigger, not global. Other triggers may continue to fire on the same tick.
 
@@ -227,15 +229,23 @@ identity policy.
 
 Slot bookkeeping is tied to acceptance, not merely polling:
 
-- accepted or replayed fires advance `last_fired_slot`, set `last_status = Ok`,
-  set the active-fire claim to the accepted/submitted turn reference, and
-  compute the next future slot;
-- retryable submit failures leave `last_fired_slot` unchanged, set
-  `last_status = Error`, leave the active-fire claim unset, and leave the slot
-  retryable. `next_run_at` must remain at or before the failed slot's scheduled
-  time so the poller can retry it on the next tick;
-- permanent validation or authorization failures set `last_status = Error` and
-  must not silently create a different route, actor, or scope.
+- accepted or replayed fires write `last_run_at`, `last_fired_slot`,
+  `last_status = Ok`, `next_run_at`, `active_fire_slot`, and `active_run_ref`
+  in that order; `active_fire_slot` is written before turn submission and
+  `active_run_ref` is populated only after the accepted/replayed submit result
+  returns a `TurnRunId`;
+- retryable submit failures write `last_status = Error`, clear
+  `active_fire_slot` and `active_run_ref`, leave `last_fired_slot` and
+  `last_run_at` unchanged, and keep `next_run_at` at or before the failed
+  fire_slot so the poller can retry it on the next tick;
+- permanent validation or authorization failures write `last_status = Error`,
+  clear `active_fire_slot` and `active_run_ref`, leave `last_fired_slot` and
+  `last_run_at` unchanged, and advance `next_run_at` beyond the failed
+  fire_slot.
+
+Turn terminal lookup and clearing stay on the later PR 14+ seam; PR 12 and
+PR 13 define the fire-claim contract and submit-result bookkeeping but do not
+consult turn state yet.
 
 ---
 
