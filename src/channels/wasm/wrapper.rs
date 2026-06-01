@@ -77,12 +77,17 @@ const WEBSOCKET_EVENT_QUEUE_MAX_ITEMS: usize = 100;
 const WEBSOCKET_OUTBOUND_QUEUE_CAPACITY: usize = 32;
 const WEBSOCKET_OUTBOUND_MAX_FRAME_BYTES: usize = 2 * 1024 * 1024;
 const FEISHU_WS_ENDPOINT_PATH: &str = "/callback/ws/endpoint";
-const FEISHU_WS_DEFAULT_PING_INTERVAL_MS: u64 = 120_000;
+const FEISHU_WS_DEFAULT_PING_INTERVAL_SECS: u64 = 120;
 const FEISHU_WS_DEFAULT_RECONNECT_COUNT: i32 = -1;
-const FEISHU_WS_DEFAULT_RECONNECT_INTERVAL_MS: u64 = 120_000;
-const FEISHU_WS_DEFAULT_RECONNECT_NONCE_MS: u64 = 30_000;
+const FEISHU_WS_DEFAULT_RECONNECT_INTERVAL_SECS: u64 = 120;
+const FEISHU_WS_DEFAULT_RECONNECT_NONCE_SECS: u64 = 30;
 const FEISHU_WS_FRAME_CACHE_TTL_MS: u64 = 10_000;
+const FEISHU_WS_MAX_FRAME_FRAGMENTS: usize = 256;
+const FEISHU_WS_MAX_FRAME_CACHE_ENTRIES: usize = 512;
+const FEISHU_WS_MAX_MERGED_PAYLOAD_BYTES: usize = 1024 * 1024;
+const FEISHU_WS_MAX_HEADERS: usize = 64;
 const FEISHU_WS_ACK_OK: u16 = 200;
+const FEISHU_WS_ACK_INTERNAL_ERROR: u16 = 500;
 const FEISHU_WS_ENDPOINT_INTERNAL_ERROR_CODE: i64 = 1_000_040_343;
 const WECHAT_CHANNEL_NAME: &str = "wechat";
 const CHANNEL_BOUND_USER_ID_CONFIG_KEY: &str = "bound_user_id";
@@ -1997,7 +2002,7 @@ impl WasmChannel {
                                     {
                                         let code = u16::from(frame.code);
                                         if let WebsocketCloseDisposition::Terminal { reason } =
-                                            classify_websocket_close_code(code, &config.url)
+                                            classify_websocket_close_code(code, &connect_url)
                                         {
                                             tracing::warn!(
                                                 channel = %channel_name,
@@ -5328,10 +5333,10 @@ struct FeishuWsClientConfig {
 impl Default for FeishuWsClientConfig {
     fn default() -> Self {
         Self {
-            ping_interval: FEISHU_WS_DEFAULT_PING_INTERVAL_MS / 1000,
+            ping_interval: FEISHU_WS_DEFAULT_PING_INTERVAL_SECS,
             reconnect_count: FEISHU_WS_DEFAULT_RECONNECT_COUNT,
-            reconnect_interval: FEISHU_WS_DEFAULT_RECONNECT_INTERVAL_MS / 1000,
-            reconnect_nonce: FEISHU_WS_DEFAULT_RECONNECT_NONCE_MS / 1000,
+            reconnect_interval: FEISHU_WS_DEFAULT_RECONNECT_INTERVAL_SECS,
+            reconnect_nonce: FEISHU_WS_DEFAULT_RECONNECT_NONCE_SECS,
         }
     }
 }
@@ -5340,6 +5345,7 @@ impl Default for FeishuWsClientConfig {
 struct FeishuFrameCacheEntry {
     parts: Vec<Option<Vec<u8>>>,
     trace_id: String,
+    ack_frame: FeishuWsFrame,
     created_at_ms: u64,
 }
 
@@ -5421,9 +5427,13 @@ impl FeishuEventSessionState {
             .send()
             .await
             .map_err(|error| {
-                WebsocketConnectPreparationError::retryable(format!(
-                    "Feishu websocket endpoint request failed: {error}"
-                ))
+                tracing::debug!(
+                    error = %error,
+                    "Feishu websocket endpoint request failed"
+                );
+                WebsocketConnectPreparationError::retryable(
+                    "Feishu websocket endpoint request failed",
+                )
             })?;
 
         let status = response.status();
@@ -5433,10 +5443,14 @@ impl FeishuEventSessionState {
             ))
         })?;
         if !status.is_success() {
+            tracing::debug!(
+                status = status.as_u16(),
+                body = %String::from_utf8_lossy(&body),
+                "Feishu websocket endpoint returned non-success response"
+            );
             let message = format!(
-                "Feishu websocket endpoint returned HTTP {}: {}",
-                status.as_u16(),
-                String::from_utf8_lossy(&body)
+                "Feishu websocket endpoint returned HTTP {}",
+                status.as_u16()
             );
             return if status.is_server_error() {
                 Err(WebsocketConnectPreparationError::retryable(message))
@@ -5507,8 +5521,7 @@ impl FeishuEventSessionState {
             }
         };
 
-        let headers = frame.header_map();
-        match (frame.method, headers.get("type").map(String::as_str)) {
+        match (frame.method, frame.header_value("type")) {
             (0, Some("ping")) => Vec::new(),
             (0, Some("pong")) => {
                 if let Some(payload) = frame.payload.as_ref()
@@ -5518,24 +5531,27 @@ impl FeishuEventSessionState {
                 }
                 Vec::new()
             }
-            (1, Some("event")) | (1, Some("card")) => match self.merge_event_frame(frame) {
-                Ok(Some(merged)) => vec![
-                    WebsocketFrameAction::Enqueue(merged.raw_json),
-                    WebsocketFrameAction::SendBinary(build_feishu_ws_ack_frame(
-                        &merged.ack_frame,
-                        FEISHU_WS_ACK_OK,
-                    )),
-                ],
-                Ok(None) => Vec::new(),
-                Err(error) => {
-                    tracing::warn!(
-                        channel = %channel_name,
-                        error = %error,
-                        "Failed to merge Feishu websocket event frame"
-                    );
-                    Vec::new()
+            (1, Some("event")) | (1, Some("card")) => {
+                let error_ack = build_feishu_ws_ack_frame(&frame, FEISHU_WS_ACK_INTERNAL_ERROR);
+                match self.merge_event_frame(frame) {
+                    Ok(Some(merged)) => vec![
+                        WebsocketFrameAction::Enqueue(merged.raw_json),
+                        WebsocketFrameAction::SendBinary(build_feishu_ws_ack_frame(
+                            &merged.ack_frame,
+                            FEISHU_WS_ACK_OK,
+                        )),
+                    ],
+                    Ok(None) => Vec::new(),
+                    Err(error) => {
+                        tracing::warn!(
+                            channel = %channel_name,
+                            error = %error,
+                            "Failed to merge Feishu websocket event frame"
+                        );
+                        vec![WebsocketFrameAction::SendBinary(error_ack)]
+                    }
                 }
-            },
+            }
             _ => Vec::new(),
         }
     }
@@ -5545,66 +5561,118 @@ impl FeishuEventSessionState {
         frame: FeishuWsFrame,
     ) -> Result<Option<FeishuMergedFrame>, String> {
         self.prune_expired_cache();
-        let headers = frame.header_map();
-        let message_id = headers
-            .get("message_id")
-            .cloned()
+        let message_id = frame
+            .header_value("message_id")
             .filter(|value| !value.is_empty())
+            .map(str::to_string)
             .unwrap_or_else(|| frame.seq_id.to_string());
-        let sum = headers
-            .get("sum")
-            .and_then(|value| value.parse::<usize>().ok())
-            .filter(|sum| *sum > 0)
-            .unwrap_or(1);
-        let seq = headers
-            .get("seq")
-            .and_then(|value| value.parse::<usize>().ok())
-            .unwrap_or(0);
-        let trace_id = headers.get("trace_id").cloned().unwrap_or_default();
+        let sum = parse_feishu_fragment_sum(&frame)?;
+        let seq = parse_feishu_fragment_seq(&frame)?;
+        let trace_id = frame
+            .header_value("trace_id")
+            .unwrap_or_default()
+            .to_string();
 
         if seq >= sum {
             return Err(format!("fragment seq {seq} is outside sum {sum}"));
         }
 
-        let payload = frame.payload.clone().unwrap_or_default();
-        let entry = self
-            .frame_cache
-            .entry(message_id.clone())
-            .or_insert_with(|| FeishuFrameCacheEntry {
-                parts: vec![None; sum],
-                trace_id,
-                created_at_ms: current_unix_millis(),
-            });
-        if entry.parts.len() != sum {
+        let ack_frame = frame.clone();
+        let payload = frame.payload.unwrap_or_default();
+        if payload.len() > FEISHU_WS_MAX_MERGED_PAYLOAD_BYTES {
             return Err(format!(
-                "fragment sum changed for message {message_id}: {} -> {sum}",
-                entry.parts.len()
+                "Feishu websocket payload exceeds {} byte limit",
+                FEISHU_WS_MAX_MERGED_PAYLOAD_BYTES
             ));
         }
-        entry.parts[seq] = Some(payload);
 
-        if !entry.parts.iter().all(Option::is_some) {
-            return Ok(None);
+        if let Some(entry) = self.frame_cache.get(&message_id)
+            && entry.parts.len() != sum
+        {
+            let existing = entry.parts.len();
+            self.frame_cache.remove(&message_id);
+            return Err(format!(
+                "fragment sum changed for message {message_id}: {existing} -> {sum}"
+            ));
         }
 
-        let mut merged = Vec::new();
-        for part in entry.parts.iter().flatten() {
-            merged.extend_from_slice(part);
+        if !self.frame_cache.contains_key(&message_id) {
+            if self.frame_cache.len() >= FEISHU_WS_MAX_FRAME_CACHE_ENTRIES {
+                return Err(format!(
+                    "Feishu websocket frame cache is full (max {} entries)",
+                    FEISHU_WS_MAX_FRAME_CACHE_ENTRIES
+                ));
+            }
+            self.frame_cache.insert(
+                message_id.clone(),
+                FeishuFrameCacheEntry {
+                    parts: vec![None; sum],
+                    trace_id,
+                    ack_frame,
+                    created_at_ms: current_unix_millis(),
+                },
+            );
         }
-        let raw_json = String::from_utf8(merged)
-            .map_err(|error| format!("Feishu websocket payload is not UTF-8: {error}"))?;
-        serde_json::from_str::<serde_json::Value>(&raw_json)
-            .map_err(|error| format!("Feishu websocket payload is not JSON: {error}"))?;
+
+        let merged_total = {
+            let entry = self
+                .frame_cache
+                .get(&message_id)
+                .ok_or_else(|| format!("missing frame cache entry for message {message_id}"))?;
+            let old_part_len = entry.parts[seq].as_ref().map_or(0, Vec::len);
+            let existing_total = entry.parts.iter().flatten().map(Vec::len).sum::<usize>();
+            existing_total
+                .saturating_sub(old_part_len)
+                .saturating_add(payload.len())
+        };
+        if merged_total > FEISHU_WS_MAX_MERGED_PAYLOAD_BYTES {
+            self.frame_cache.remove(&message_id);
+            return Err(format!(
+                "Feishu websocket merged payload exceeds {} byte limit",
+                FEISHU_WS_MAX_MERGED_PAYLOAD_BYTES
+            ));
+        }
+
+        let (merged, trace_id, ack_frame) = {
+            let entry = self
+                .frame_cache
+                .get_mut(&message_id)
+                .ok_or_else(|| format!("missing frame cache entry for message {message_id}"))?;
+            entry.parts[seq] = Some(payload);
+
+            if !entry.parts.iter().all(Option::is_some) {
+                return Ok(None);
+            }
+
+            let mut merged = Vec::with_capacity(merged_total);
+            for part in entry.parts.iter().flatten() {
+                merged.extend_from_slice(part);
+            }
+            (merged, entry.trace_id.clone(), entry.ack_frame.clone())
+        };
+
+        let raw_json = match String::from_utf8(merged) {
+            Ok(raw_json) => raw_json,
+            Err(error) => {
+                self.frame_cache.remove(&message_id);
+                return Err(format!("Feishu websocket payload is not UTF-8: {error}"));
+            }
+        };
+        if let Err(error) = serde_json::from_str::<serde_json::Value>(&raw_json) {
+            self.frame_cache.remove(&message_id);
+            return Err(format!("Feishu websocket payload is not JSON: {error}"));
+        }
+
         tracing::trace!(
             message_id = %message_id,
-            trace_id = %entry.trace_id,
+            trace_id = %trace_id,
             "Merged Feishu websocket event frame"
         );
         self.frame_cache.remove(&message_id);
 
         Ok(Some(FeishuMergedFrame {
             raw_json,
-            ack_frame: frame,
+            ack_frame,
         }))
     }
 
@@ -5636,12 +5704,47 @@ struct FeishuWsFrame {
 }
 
 impl FeishuWsFrame {
+    fn header_value(&self, key: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|header| header.key == key)
+            .map(|header| header.value.as_str())
+    }
+
+    #[cfg(test)]
     fn header_map(&self) -> HashMap<String, String> {
         self.headers
             .iter()
             .map(|header| (header.key.clone(), header.value.clone()))
             .collect()
     }
+}
+
+fn parse_feishu_fragment_sum(frame: &FeishuWsFrame) -> Result<usize, String> {
+    let Some(raw) = frame.header_value("sum") else {
+        return Ok(1);
+    };
+    let sum = raw
+        .parse::<usize>()
+        .map_err(|_| format!("invalid Feishu websocket fragment sum '{raw}'"))?;
+    if sum == 0 {
+        return Err("Feishu websocket fragment sum must be greater than zero".to_string());
+    }
+    if sum > FEISHU_WS_MAX_FRAME_FRAGMENTS {
+        return Err(format!(
+            "Feishu websocket fragment sum {sum} exceeds max {}",
+            FEISHU_WS_MAX_FRAME_FRAGMENTS
+        ));
+    }
+    Ok(sum)
+}
+
+fn parse_feishu_fragment_seq(frame: &FeishuWsFrame) -> Result<usize, String> {
+    let Some(raw) = frame.header_value("seq") else {
+        return Ok(0);
+    };
+    raw.parse::<usize>()
+        .map_err(|_| format!("invalid Feishu websocket fragment seq '{raw}'"))
 }
 
 fn current_unix_millis() -> u64 {
@@ -5828,15 +5931,23 @@ fn decode_feishu_ws_frame(bytes: &[u8]) -> Result<FeishuWsFrame, String> {
                 has_log_id = true;
             }
             (3, 0) => {
-                frame.service = cursor.read_varint()? as i32;
+                frame.service = i32::try_from(cursor.read_varint()?)
+                    .map_err(|_| "Feishu websocket service field exceeds i32".to_string())?;
                 has_service = true;
             }
             (4, 0) => {
-                frame.method = cursor.read_varint()? as i32;
+                frame.method = i32::try_from(cursor.read_varint()?)
+                    .map_err(|_| "Feishu websocket method field exceeds i32".to_string())?;
                 has_method = true;
             }
             (5, 2) => {
                 let data = cursor.read_length_delimited()?;
+                if frame.headers.len() >= FEISHU_WS_MAX_HEADERS {
+                    return Err(format!(
+                        "Feishu websocket header count exceeds max {}",
+                        FEISHU_WS_MAX_HEADERS
+                    ));
+                }
                 frame.headers.push(decode_feishu_ws_header(data)?);
             }
             (6, 2) => {
@@ -8100,7 +8211,134 @@ mod tests {
             headers.get("message_id").map(String::as_str),
             Some("fragmented-message")
         );
-        assert_eq!(headers.get("seq").map(String::as_str), Some("1"));
+        assert_eq!(headers.get("seq").map(String::as_str), Some("0"));
+    }
+
+    #[test]
+    fn test_feishu_websocket_merge_errors_emit_error_ack() {
+        let mut frame = feishu_event_frame("bad-sum", 0, 1, b"{}");
+        for header in &mut frame.headers {
+            if header.key == "sum" {
+                header.value = "not-a-number".to_string();
+            }
+        }
+        let encoded = encode_feishu_ws_frame(&frame);
+        let mut state = FeishuEventSessionState::new();
+
+        let ack_bytes = take_feishu_ack_action(state.process_binary_frame(&encoded, "feishu"));
+
+        assert_eq!(
+            feishu_ack_code(&ack_bytes),
+            u64::from(super::FEISHU_WS_ACK_INTERNAL_ERROR)
+        );
+    }
+
+    #[test]
+    fn test_feishu_websocket_fragment_sum_is_capped_before_allocation() {
+        let mut frame = feishu_event_frame(
+            "too-many-fragments",
+            0,
+            super::FEISHU_WS_MAX_FRAME_FRAGMENTS + 1,
+            b"{}",
+        );
+        for header in &mut frame.headers {
+            if header.key == "sum" {
+                header.value = (super::FEISHU_WS_MAX_FRAME_FRAGMENTS + 1).to_string();
+            }
+        }
+        let encoded = encode_feishu_ws_frame(&frame);
+        let mut state = FeishuEventSessionState::new();
+
+        let ack_bytes = take_feishu_ack_action(state.process_binary_frame(&encoded, "feishu"));
+
+        assert_eq!(
+            feishu_ack_code(&ack_bytes),
+            u64::from(super::FEISHU_WS_ACK_INTERNAL_ERROR)
+        );
+        assert!(state.frame_cache.is_empty());
+    }
+
+    #[test]
+    fn test_feishu_websocket_cache_entry_count_is_capped() {
+        let mut state = FeishuEventSessionState::new();
+        for index in 0..super::FEISHU_WS_MAX_FRAME_CACHE_ENTRIES {
+            let frame = feishu_event_frame(&format!("cache-{index}"), 0, 2, b"{");
+            let encoded = encode_feishu_ws_frame(&frame);
+            assert!(state.process_binary_frame(&encoded, "feishu").is_empty());
+        }
+
+        let overflow = feishu_event_frame("cache-overflow", 0, 2, b"{");
+        let encoded = encode_feishu_ws_frame(&overflow);
+        let ack_bytes = take_feishu_ack_action(state.process_binary_frame(&encoded, "feishu"));
+
+        assert_eq!(
+            feishu_ack_code(&ack_bytes),
+            u64::from(super::FEISHU_WS_ACK_INTERNAL_ERROR)
+        );
+        assert_eq!(
+            state.frame_cache.len(),
+            super::FEISHU_WS_MAX_FRAME_CACHE_ENTRIES
+        );
+    }
+
+    #[test]
+    fn test_feishu_websocket_sum_change_clears_cached_fragments_and_acks_error() {
+        let first = feishu_event_frame("sum-change", 0, 2, b"{");
+        let mut second = feishu_event_frame("sum-change", 1, 3, b"}");
+        for header in &mut second.headers {
+            if header.key == "sum" {
+                header.value = "3".to_string();
+            }
+        }
+        let mut state = FeishuEventSessionState::new();
+
+        assert!(
+            state
+                .process_binary_frame(&encode_feishu_ws_frame(&first), "feishu")
+                .is_empty()
+        );
+        let ack_bytes = take_feishu_ack_action(
+            state.process_binary_frame(&encode_feishu_ws_frame(&second), "feishu"),
+        );
+
+        assert_eq!(
+            feishu_ack_code(&ack_bytes),
+            u64::from(super::FEISHU_WS_ACK_INTERNAL_ERROR)
+        );
+        assert!(state.frame_cache.is_empty());
+    }
+
+    #[test]
+    fn test_feishu_websocket_merged_payload_size_is_capped() {
+        let payload = vec![b'x'; super::FEISHU_WS_MAX_MERGED_PAYLOAD_BYTES + 1];
+        let frame = feishu_event_frame("oversized-payload", 0, 1, &payload);
+        let encoded = encode_feishu_ws_frame(&frame);
+        let mut state = FeishuEventSessionState::new();
+
+        let ack_bytes = take_feishu_ack_action(state.process_binary_frame(&encoded, "feishu"));
+
+        assert_eq!(
+            feishu_ack_code(&ack_bytes),
+            u64::from(super::FEISHU_WS_ACK_INTERNAL_ERROR)
+        );
+        assert!(state.frame_cache.is_empty());
+    }
+
+    #[test]
+    fn test_feishu_websocket_decode_rejects_too_many_headers() {
+        let mut frame = feishu_event_frame("many-headers", 0, 1, b"{}");
+        for index in 0..super::FEISHU_WS_MAX_HEADERS {
+            frame.headers.push(FeishuWsHeader {
+                key: format!("extra-{index}"),
+                value: "v".to_string(),
+            });
+        }
+        let encoded = encode_feishu_ws_frame(&frame);
+
+        let error =
+            decode_feishu_ws_frame(&encoded).expect_err("header count above limit should fail");
+
+        assert!(error.contains("header count exceeds"));
     }
 
     #[test]
@@ -8353,6 +8591,22 @@ mod tests {
             enqueued.expect("Feishu event should be enqueued"),
             ack.expect("Feishu event should be acked"),
         )
+    }
+
+    fn take_feishu_ack_action(actions: Vec<WebsocketFrameAction>) -> Vec<u8> {
+        assert_eq!(actions.len(), 1);
+        match actions.into_iter().next().expect("one action") {
+            WebsocketFrameAction::SendBinary(bytes) => bytes,
+            _ => panic!("expected Feishu websocket ack action"),
+        }
+    }
+
+    fn feishu_ack_code(ack_bytes: &[u8]) -> u64 {
+        let ack_frame = decode_feishu_ws_frame(ack_bytes).expect("decode Feishu ack frame");
+        let payload: serde_json::Value =
+            serde_json::from_slice(ack_frame.payload.as_deref().expect("ack payload"))
+                .expect("ack payload json");
+        payload["code"].as_u64().expect("numeric ack code")
     }
 
     /// Regression test for #2557: websocket preflight must report
