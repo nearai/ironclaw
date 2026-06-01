@@ -1445,4 +1445,30 @@ mod tests {
             .expect_err("poisoned mutex maps to backend through claim API");
         assert!(matches!(error, TriggerError::Backend { .. }));
     }
+
+    #[tokio::test]
+    async fn in_memory_repository_mark_fire_accepted_returns_backend_error_when_mutex_is_poisoned()
+    {
+        let repo = InMemoryTriggerRepository::default();
+        let poison_repo = repo.clone();
+        let _ = std::panic::catch_unwind(move || {
+            let _guard = poison_repo.state.lock().expect("lock before poison");
+            panic!("poison trigger repository mutex");
+        });
+
+        let fire_slot = ts(1_704_067_200);
+        let error = repo
+            .mark_fire_accepted(FireAcceptedRequest {
+                tenant_id: tenant("tenant-a"),
+                trigger_id: TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid"),
+                fire_slot,
+                run_id: TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5a")
+                    .expect("valid run"),
+                submitted_at: fire_slot,
+                next_run_at: ts(1_704_067_260),
+            })
+            .await
+            .expect_err("poisoned mutex maps to backend through accepted-result API");
+        assert!(matches!(error, TriggerError::Backend { .. }));
+    }
 }

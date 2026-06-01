@@ -245,9 +245,6 @@ impl TriggerRepository for PostgresTriggerRepository {
         let trigger_id = request.trigger_id.to_string();
         let Some(record) = locked_record(&tx, request.tenant_id.as_str(), &trigger_id).await?
         else {
-            tx.commit()
-                .await
-                .map_err(|error| backend_error("commit missing trigger fire claim", error))?;
             return Ok(ClaimDueFireOutcome::NotFound);
         };
 
@@ -255,16 +252,10 @@ impl TriggerRepository for PostgresTriggerRepository {
             || record.next_run_at != request.fire_slot
             || request.fire_slot > request.now
         {
-            tx.commit()
-                .await
-                .map_err(|error| backend_error("commit not-due trigger fire claim", error))?;
             return Ok(ClaimDueFireOutcome::NotDue { record });
         }
 
         if record.has_active_fire() {
-            tx.commit()
-                .await
-                .map_err(|error| backend_error("commit active trigger fire claim", error))?;
             return Ok(ClaimDueFireOutcome::AlreadyActive {
                 active_fire_slot: record.active_fire_slot,
                 active_run_ref: record.active_run_ref,
@@ -307,22 +298,13 @@ impl TriggerRepository for PostgresTriggerRepository {
         let trigger_id = request.trigger_id.to_string();
         let Some(record) = locked_record(&tx, request.tenant_id.as_str(), &trigger_id).await?
         else {
-            tx.commit()
-                .await
-                .map_err(|error| backend_error("commit missing accepted trigger fire", error))?;
             return Ok(None);
         };
         if record.active_fire_slot != Some(request.fire_slot) {
-            tx.commit()
-                .await
-                .map_err(|error| backend_error("commit stale accepted trigger fire", error))?;
             return Ok(None);
         }
         if let Some(active_run_ref) = record.active_run_ref {
             reject_run_ref_rewrite(active_run_ref, request.run_id)?;
-            tx.commit()
-                .await
-                .map_err(|error| backend_error("commit idempotent accepted trigger fire", error))?;
             return Ok(Some(record));
         }
         reject_non_future_next_run_at(request.fire_slot, request.next_run_at)?;
@@ -342,7 +324,10 @@ impl TriggerRepository for PostgresTriggerRepository {
                          next_run_at = $6,
                          active_fire_slot = $4,
                          active_run_ref = $7
-                     WHERE tenant_id = $1 AND trigger_id = $2
+                     WHERE tenant_id = $1
+                       AND trigger_id = $2
+                       AND active_fire_slot = $4
+                       AND active_run_ref IS NULL
                      RETURNING {TRIGGER_COLUMNS}"
                 ),
                 &[
@@ -376,22 +361,13 @@ impl TriggerRepository for PostgresTriggerRepository {
         let trigger_id = request.trigger_id.to_string();
         let Some(record) = locked_record(&tx, request.tenant_id.as_str(), &trigger_id).await?
         else {
-            tx.commit()
-                .await
-                .map_err(|error| backend_error("commit missing replayed trigger fire", error))?;
             return Ok(None);
         };
         if record.active_fire_slot != Some(request.fire_slot) {
-            tx.commit()
-                .await
-                .map_err(|error| backend_error("commit stale replayed trigger fire", error))?;
             return Ok(None);
         }
         if let Some(active_run_ref) = record.active_run_ref {
             reject_run_ref_rewrite(active_run_ref, request.original_run_id)?;
-            tx.commit()
-                .await
-                .map_err(|error| backend_error("commit idempotent replayed trigger fire", error))?;
             return Ok(Some(record));
         }
         reject_non_future_next_run_at(request.fire_slot, request.next_run_at)?;
@@ -411,7 +387,10 @@ impl TriggerRepository for PostgresTriggerRepository {
                          next_run_at = $6,
                          active_fire_slot = $4,
                          active_run_ref = $7
-                     WHERE tenant_id = $1 AND trigger_id = $2
+                     WHERE tenant_id = $1
+                       AND trigger_id = $2
+                       AND active_fire_slot = $4
+                       AND active_run_ref IS NULL
                      RETURNING {TRIGGER_COLUMNS}"
                 ),
                 &[
@@ -445,15 +424,9 @@ impl TriggerRepository for PostgresTriggerRepository {
         let trigger_id = request.trigger_id.to_string();
         let Some(record) = locked_record(&tx, request.tenant_id.as_str(), &trigger_id).await?
         else {
-            tx.commit()
-                .await
-                .map_err(|error| backend_error("commit missing retryable trigger fire", error))?;
             return Ok(None);
         };
         if record.active_fire_slot != Some(request.fire_slot) {
-            tx.commit()
-                .await
-                .map_err(|error| backend_error("commit stale retryable trigger fire", error))?;
             return Ok(None);
         }
         reject_failed_result_after_active_run(record.active_run_ref)?;
@@ -465,6 +438,7 @@ impl TriggerRepository for PostgresTriggerRepository {
         }
 
         let last_status = status_text(TriggerRunStatus::Error);
+        let fire_slot = fmt_ts(&request.fire_slot);
         let row = tx
             .query_one(
                 &format!(
@@ -472,10 +446,19 @@ impl TriggerRepository for PostgresTriggerRepository {
                      SET last_status = $3,
                          active_fire_slot = NULL,
                          active_run_ref = NULL
-                     WHERE tenant_id = $1 AND trigger_id = $2
+                     WHERE tenant_id = $1
+                       AND trigger_id = $2
+                       AND active_fire_slot = $4
+                       AND active_run_ref IS NULL
+                       AND next_run_at <= $4
                      RETURNING {TRIGGER_COLUMNS}"
                 ),
-                &[&request.tenant_id.as_str(), &trigger_id, &last_status],
+                &[
+                    &request.tenant_id.as_str(),
+                    &trigger_id,
+                    &last_status,
+                    &fire_slot,
+                ],
             )
             .await
             .map_err(|error| backend_error("mark retryable trigger fire failure", error))?;
@@ -498,15 +481,9 @@ impl TriggerRepository for PostgresTriggerRepository {
         let trigger_id = request.trigger_id.to_string();
         let Some(record) = locked_record(&tx, request.tenant_id.as_str(), &trigger_id).await?
         else {
-            tx.commit()
-                .await
-                .map_err(|error| backend_error("commit missing permanent trigger fire", error))?;
             return Ok(None);
         };
         if record.active_fire_slot != Some(request.fire_slot) {
-            tx.commit()
-                .await
-                .map_err(|error| backend_error("commit stale permanent trigger fire", error))?;
             return Ok(None);
         }
         reject_failed_result_after_active_run(record.active_run_ref)?;
@@ -514,6 +491,7 @@ impl TriggerRepository for PostgresTriggerRepository {
 
         let last_status = status_text(TriggerRunStatus::Error);
         let next_run_at = fmt_ts(&request.next_run_at);
+        let fire_slot = fmt_ts(&request.fire_slot);
         let row = tx
             .query_one(
                 &format!(
@@ -522,7 +500,10 @@ impl TriggerRepository for PostgresTriggerRepository {
                          next_run_at = $4,
                          active_fire_slot = NULL,
                          active_run_ref = NULL
-                     WHERE tenant_id = $1 AND trigger_id = $2
+                     WHERE tenant_id = $1
+                       AND trigger_id = $2
+                       AND active_fire_slot = $5
+                       AND active_run_ref IS NULL
                      RETURNING {TRIGGER_COLUMNS}"
                 ),
                 &[
@@ -530,6 +511,7 @@ impl TriggerRepository for PostgresTriggerRepository {
                     &trigger_id,
                     &last_status,
                     &next_run_at,
+                    &fire_slot,
                 ],
             )
             .await
