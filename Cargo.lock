@@ -4580,6 +4580,7 @@ dependencies = [
  "ironclaw_threads",
  "ironclaw_trust",
  "ironclaw_turns",
+ "jsonschema",
  "parking_lot",
  "rust_decimal",
  "rust_decimal_macros",

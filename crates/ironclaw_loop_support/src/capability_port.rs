@@ -30,9 +30,11 @@ use ironclaw_turns::{
 };
 use tokio::sync::Notify;
 
+mod provider_input;
 mod provider_validation;
 mod surface_snapshot;
 
+use self::provider_input::{normalize_provider_arguments, prepare_provider_arguments};
 use self::provider_validation::{
     PROVIDER_TOOL_NAME_MAX_BYTES, validate_provider_arguments, validate_provider_tool_call,
 };
@@ -1053,6 +1055,8 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
             .input_resolver
             .resolve_capability_input(&self.run_context, &request.input_ref)
             .await?;
+        let input =
+            prepare_provider_arguments(&input, &capability.parameters_schema, "capability input")?;
         let input = host_runtime_input_for_capability(&request.capability_id, input)?;
         let invocation_context = invocation_context_from_visible(
             &self.visible_request.context,
@@ -1203,226 +1207,6 @@ fn provider_schema_is_usable(schema: &serde_json::Value) -> bool {
     ) && object
         .get("properties")
         .is_none_or(serde_json::Value::is_object)
-}
-
-fn normalize_provider_arguments(
-    arguments: &serde_json::Value,
-    schema: &serde_json::Value,
-    label: &'static str,
-) -> Result<serde_json::Value, AgentLoopHostError> {
-    normalize_provider_value(arguments, schema, label)
-}
-
-fn normalize_provider_value(
-    value: &serde_json::Value,
-    schema: &serde_json::Value,
-    label: &'static str,
-) -> Result<serde_json::Value, AgentLoopHostError> {
-    // `oneOf` / `anyOf`: pick the variant whose declared `type` matches the
-    // value's shape, after attempting to coerce stringified containers. This
-    // lets schemas like `{ oneOf: [{type:object}, {type:array}] }` accept both
-    // a real array and a stringified array (e.g. an LLM that double-encoded
-    // the argument). Without this, the variant-less top-level schema slips
-    // through the type-matched branches below as a no-op and the stringified
-    // container is forwarded raw to the tool.
-    if let Some(variants) = schema_variants(schema) {
-        return normalize_one_of_variants(value, variants, label);
-    }
-
-    if schema_type_matches(schema, "object") {
-        let object_value = coerce_json_string(value, label)?;
-        let Some(object) = object_value.as_object() else {
-            if is_json_container_string(value) {
-                return Err(provider_coercion_error(label, "object"));
-            }
-            return Ok(object_value);
-        };
-        let Some(properties) = schema
-            .get("properties")
-            .and_then(serde_json::Value::as_object)
-        else {
-            return Ok(object_value);
-        };
-        let mut normalized = object.clone();
-        for (property, property_schema) in properties {
-            if let Some(property_value) = normalized.get(property).cloned() {
-                normalized.insert(
-                    property.clone(),
-                    normalize_provider_value(&property_value, property_schema, label)?,
-                );
-            }
-        }
-        return Ok(serde_json::Value::Object(normalized));
-    }
-
-    if schema_type_matches(schema, "array") {
-        let array_value = coerce_json_string(value, label)?;
-        let Some(array) = array_value.as_array() else {
-            if is_json_container_string(value) {
-                return Err(provider_coercion_error(label, "array"));
-            }
-            return Ok(array_value);
-        };
-        let Some(items) = schema.get("items") else {
-            return Ok(array_value);
-        };
-        return array
-            .iter()
-            .map(|item| normalize_provider_value(item, items, label))
-            .collect::<Result<Vec<_>, _>>()
-            .map(serde_json::Value::Array);
-    }
-
-    if schema_type_matches(schema, "integer") {
-        return coerce_integer_string(value, label);
-    }
-
-    if schema_type_matches(schema, "number") {
-        return coerce_number_string(value, label);
-    }
-
-    if schema_type_matches(schema, "boolean") {
-        return coerce_boolean_string(value, label);
-    }
-
-    Ok(value.clone())
-}
-
-fn schema_variants(schema: &serde_json::Value) -> Option<&Vec<serde_json::Value>> {
-    schema
-        .get("oneOf")
-        .or_else(|| schema.get("anyOf"))
-        .and_then(serde_json::Value::as_array)
-}
-
-fn normalize_one_of_variants(
-    value: &serde_json::Value,
-    variants: &[serde_json::Value],
-    label: &'static str,
-) -> Result<serde_json::Value, AgentLoopHostError> {
-    // Coerce stringified containers up front so we match by parsed shape.
-    // Coerce stringified containers up front so we match by parsed shape.
-    // Use `unwrap_or_else` rather than `?` so that an unparseable string
-    // (e.g. a plain string that starts with `{` or `[` but is not valid
-    // JSON) can still fall through to a `string` variant in the schema
-    // instead of producing a false-positive `InvalidInvocation` error.
-    let candidate = coerce_json_string(value, label).unwrap_or_else(|_| value.clone());
-    let shape = value_shape(&candidate);
-    for variant in variants {
-        // In JSON Schema every `integer` is also a valid `number`, so allow
-        // integer-shaped values to match `number` variants as well.
-        if schema_type_matches(variant, shape)
-            || (shape == "integer" && schema_type_matches(variant, "number"))
-        {
-            return normalize_provider_value(&candidate, variant, label);
-        }
-    }
-    // No declared variant matches the value's shape; leave the original value
-    // alone so the tool's own input validation can produce a precise error.
-    Ok(value.clone())
-}
-
-fn value_shape(value: &serde_json::Value) -> &'static str {
-    match value {
-        serde_json::Value::Object(_) => "object",
-        serde_json::Value::Array(_) => "array",
-        serde_json::Value::String(_) => "string",
-        serde_json::Value::Number(number) if number.is_i64() || number.is_u64() => "integer",
-        serde_json::Value::Number(_) => "number",
-        serde_json::Value::Bool(_) => "boolean",
-        serde_json::Value::Null => "null",
-    }
-}
-
-fn schema_type_matches(schema: &serde_json::Value, expected: &str) -> bool {
-    match schema.get("type") {
-        Some(serde_json::Value::String(actual)) => actual == expected,
-        Some(serde_json::Value::Array(types)) => {
-            types.iter().any(|actual| actual.as_str() == Some(expected))
-        }
-        _ => false,
-    }
-}
-
-fn is_json_container_string(value: &serde_json::Value) -> bool {
-    value
-        .as_str()
-        .map(str::trim)
-        .is_some_and(|text| text.starts_with('{') || text.starts_with('['))
-}
-
-fn coerce_json_string(
-    value: &serde_json::Value,
-    label: &'static str,
-) -> Result<serde_json::Value, AgentLoopHostError> {
-    let Some(text) = value.as_str() else {
-        return Ok(value.clone());
-    };
-    let trimmed = text.trim();
-    if !(trimmed.starts_with('{') || trimmed.starts_with('[')) {
-        return Ok(value.clone());
-    }
-    serde_json::from_str(trimmed).map_err(|_| {
-        AgentLoopHostError::new(
-            AgentLoopHostErrorKind::InvalidInvocation,
-            format!("{label} could not be parsed as schema-declared JSON"),
-        )
-    })
-}
-
-fn coerce_integer_string(
-    value: &serde_json::Value,
-    label: &'static str,
-) -> Result<serde_json::Value, AgentLoopHostError> {
-    let Some(text) = value.as_str() else {
-        return Ok(value.clone());
-    };
-    let trimmed = text.trim();
-    if trimmed.is_empty() || trimmed.contains('.') || trimmed.contains('e') || trimmed.contains('E')
-    {
-        return Err(provider_coercion_error(label, "integer"));
-    }
-    let parsed = trimmed
-        .parse::<i64>()
-        .map_err(|_| provider_coercion_error(label, "integer"))?;
-    Ok(serde_json::Value::Number(parsed.into()))
-}
-
-fn coerce_number_string(
-    value: &serde_json::Value,
-    label: &'static str,
-) -> Result<serde_json::Value, AgentLoopHostError> {
-    let Some(text) = value.as_str() else {
-        return Ok(value.clone());
-    };
-    let parsed = text
-        .trim()
-        .parse::<f64>()
-        .map_err(|_| provider_coercion_error(label, "number"))?;
-    let number = serde_json::Number::from_f64(parsed)
-        .ok_or_else(|| provider_coercion_error(label, "number"))?;
-    Ok(serde_json::Value::Number(number))
-}
-
-fn coerce_boolean_string(
-    value: &serde_json::Value,
-    label: &'static str,
-) -> Result<serde_json::Value, AgentLoopHostError> {
-    let Some(text) = value.as_str() else {
-        return Ok(value.clone());
-    };
-    match text.trim().to_ascii_lowercase().as_str() {
-        "true" => Ok(serde_json::Value::Bool(true)),
-        "false" => Ok(serde_json::Value::Bool(false)),
-        _ => Err(provider_coercion_error(label, "boolean")),
-    }
-}
-
-fn provider_coercion_error(label: &'static str, expected: &'static str) -> AgentLoopHostError {
-    AgentLoopHostError::new(
-        AgentLoopHostErrorKind::InvalidInvocation,
-        format!("{label} could not be coerced to schema-declared {expected}"),
-    )
 }
 
 fn provider_tool_name(
@@ -2609,6 +2393,102 @@ mod tests {
         .expect("anyOf array variant should accept stringified array");
 
         assert_eq!(normalized, serde_json::json!({ "payload": ["a", "b"] }));
+    }
+
+    #[test]
+    fn provider_argument_preparation_validates_required_fields_before_dispatch() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "owner": { "type": "string" },
+                "repo": { "type": "string" },
+                "pr_number": { "type": "integer", "minimum": 1 }
+            },
+            "required": ["owner", "repo", "pr_number"]
+        });
+
+        let error = prepare_provider_arguments(
+            &serde_json::json!({ "owner": "nearai", "repo": "ironclaw" }),
+            &schema,
+            "provider arguments",
+        )
+        .expect_err("missing required fields should fail before dispatch");
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+        assert!(error.safe_summary.contains("schema validation"));
+    }
+
+    #[test]
+    fn provider_argument_preparation_rejects_unknown_fields_before_dispatch() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "owner": { "type": "string" },
+                "repo": { "type": "string" },
+                "pr_number": { "type": "integer" }
+            },
+            "required": ["owner", "repo", "pr_number"]
+        });
+
+        let error = prepare_provider_arguments(
+            &serde_json::json!({
+                "owner": "nearai",
+                "repo": "ironclaw",
+                "pr_number": 4286,
+                "number": 4286
+            }),
+            &schema,
+            "provider arguments",
+        )
+        .expect_err("additional properties should fail before dispatch");
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+        assert!(error.safe_summary.contains("schema validation"));
+    }
+
+    #[test]
+    fn provider_argument_preparation_validates_composed_object_schema_after_normalization() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "query": { "type": "string" },
+                "page": { "type": "integer", "minimum": 1 },
+                "owner": { "type": "string" },
+                "repo": { "type": "string" }
+            },
+            "allOf": [
+                {
+                    "if": { "required": ["owner"] },
+                    "then": { "required": ["repo"] }
+                }
+            ],
+            "anyOf": [
+                { "required": ["query"] },
+                { "required": ["owner", "repo"] }
+            ]
+        });
+
+        let normalized = prepare_provider_arguments(
+            &serde_json::json!({ "query": "repo:nearai/ironclaw", "page": "2" }),
+            &schema,
+            "provider arguments",
+        )
+        .expect("top-level anyOf object schema should still normalize properties");
+        assert_eq!(
+            normalized,
+            serde_json::json!({ "query": "repo:nearai/ironclaw", "page": 2 })
+        );
+
+        let error = prepare_provider_arguments(
+            &serde_json::json!({ "owner": "nearai" }),
+            &schema,
+            "provider arguments",
+        )
+        .expect_err("composed schema constraints should fail before dispatch");
+        assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
     }
 
     /// Regression for Gemini review comment: a plain string that starts with
@@ -3852,6 +3732,112 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn runtime_capability_invocation_validates_schema_before_dispatch() {
+        let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
+        let provider_id = ExtensionId::new("demo").expect("valid provider id");
+        let mut visible = visible_capability(capability_id.clone(), provider_id.clone());
+        visible.descriptor.parameters_schema = serde_json::json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "message": { "type": "string" }
+            },
+            "required": ["message"]
+        });
+        let runtime = Arc::new(RecordingHostRuntime::new(vec![visible]));
+        let mut context = execution_context("thread-runtime-schema-validation");
+        let run_context = loop_run_context(&context).await;
+        let loop_driver_extension =
+            loop_driver_execution_extension_id(&run_context).expect("valid extension id");
+        context.grants.grants.push(dispatch_capability_grant(
+            &capability_id,
+            &loop_driver_extension,
+        ));
+        let port = HostRuntimeLoopCapabilityPortFactory::new(
+            runtime.clone(),
+            visible_request(context).with_provider_trust(std::collections::BTreeMap::from([(
+                provider_id.clone(),
+                dispatch_trust_decision(),
+            )])),
+            Arc::new(JsonInputResolver(serde_json::json!({"number": 4286}))),
+            Arc::new(RecordingResultWriter::default()),
+            dummy_milestone_sink(),
+        )
+        .port_for_run_context(run_context);
+        let surface = port
+            .visible_capabilities(VisibleCapabilityRequest {})
+            .await
+            .expect("visible capabilities load");
+
+        let error = port
+            .invoke_capability(CapabilityInvocation {
+                surface_version: surface.version,
+                capability_id,
+                input_ref: CapabilityInputRef::new("input:direct-invalid")
+                    .expect("valid input ref"),
+            })
+            .await
+            .expect_err("invalid direct input should fail before runtime dispatch");
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+        assert!(error.safe_summary.contains("schema validation"));
+        assert!(
+            runtime.take_requests().is_empty(),
+            "invalid direct input must not reach the runtime"
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_capability_invocation_normalizes_input_before_dispatch() {
+        let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
+        let provider_id = ExtensionId::new("demo").expect("valid provider id");
+        let mut visible = visible_capability(capability_id.clone(), provider_id.clone());
+        visible.descriptor.parameters_schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "limit": { "type": "integer" }
+            },
+            "required": ["limit"]
+        });
+        let runtime = Arc::new(RecordingHostRuntime::new(vec![visible]));
+        let mut context = execution_context("thread-runtime-input-normalization");
+        let run_context = loop_run_context(&context).await;
+        let loop_driver_extension =
+            loop_driver_execution_extension_id(&run_context).expect("valid extension id");
+        context.grants.grants.push(dispatch_capability_grant(
+            &capability_id,
+            &loop_driver_extension,
+        ));
+        let port = HostRuntimeLoopCapabilityPortFactory::new(
+            runtime.clone(),
+            visible_request(context).with_provider_trust(std::collections::BTreeMap::from([(
+                provider_id.clone(),
+                dispatch_trust_decision(),
+            )])),
+            Arc::new(JsonInputResolver(serde_json::json!({"limit": "10"}))),
+            Arc::new(RecordingResultWriter::default()),
+            dummy_milestone_sink(),
+        )
+        .port_for_run_context(run_context);
+        let surface = port
+            .visible_capabilities(VisibleCapabilityRequest {})
+            .await
+            .expect("visible capabilities load");
+
+        port.invoke_capability(CapabilityInvocation {
+            surface_version: surface.version,
+            capability_id,
+            input_ref: CapabilityInputRef::new("input:direct-normalized").expect("valid input ref"),
+        })
+        .await
+        .expect("valid direct input should dispatch");
+
+        let requests = runtime.take_requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].input, serde_json::json!({"limit": 10}));
+    }
+
+    #[tokio::test]
     async fn process_sandbox_capability_rejects_invalid_plan_before_runtime_spawn() {
         let capability_id =
             CapabilityId::new(ironclaw_process_sandbox::PROCESS_SANDBOX_CAPABILITY_ID)
@@ -4637,6 +4623,19 @@ mod tests {
             _input_ref: &CapabilityInputRef,
         ) -> Result<serde_json::Value, AgentLoopHostError> {
             Ok(serde_json::json!({"ok": true}))
+        }
+    }
+
+    struct JsonInputResolver(serde_json::Value);
+
+    #[async_trait]
+    impl LoopCapabilityInputResolver for JsonInputResolver {
+        async fn resolve_capability_input(
+            &self,
+            _run_context: &LoopRunContext,
+            _input_ref: &CapabilityInputRef,
+        ) -> Result<serde_json::Value, AgentLoopHostError> {
+            Ok(self.0.clone())
         }
     }
 

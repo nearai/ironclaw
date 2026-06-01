@@ -82,18 +82,21 @@ pub(crate) enum GitHubAction {
     GetPullRequest {
         owner: String,
         repo: String,
+        #[serde(alias = "number", alias = "pull_number")]
         pr_number: u32,
     },
     #[serde(rename = "get_pull_request_files")]
     GetPullRequestFiles {
         owner: String,
         repo: String,
+        #[serde(alias = "number", alias = "pull_number")]
         pr_number: u32,
     },
     #[serde(rename = "create_pr_review")]
     CreatePrReview {
         owner: String,
         repo: String,
+        #[serde(alias = "number", alias = "pull_number")]
         pr_number: u32,
         body: String,
         event: PrReviewEvent,
@@ -102,6 +105,7 @@ pub(crate) enum GitHubAction {
     ListPullRequestComments {
         owner: String,
         repo: String,
+        #[serde(alias = "number", alias = "pull_number")]
         pr_number: u32,
         page: Option<u32>,
         limit: Option<u32>,
@@ -110,6 +114,7 @@ pub(crate) enum GitHubAction {
     ReplyPullRequestComment {
         owner: String,
         repo: String,
+        #[serde(alias = "number", alias = "pull_number")]
         pr_number: u32,
         comment_id: u64,
         body: String,
@@ -118,6 +123,7 @@ pub(crate) enum GitHubAction {
     GetPullRequestReviews {
         owner: String,
         repo: String,
+        #[serde(alias = "number", alias = "pull_number")]
         pr_number: u32,
         page: Option<u32>,
         limit: Option<u32>,
@@ -132,6 +138,7 @@ pub(crate) enum GitHubAction {
     MergePullRequest {
         owner: String,
         repo: String,
+        #[serde(alias = "number", alias = "pull_number")]
         pr_number: u32,
         commit_title: Option<String>,
         commit_message: Option<String>,

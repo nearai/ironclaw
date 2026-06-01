@@ -1,5 +1,5 @@
 Use `github.list_releases` to list repository releases.
 
-Pass the required fields exactly as requested by the user. If the user provides a GitHub URL, extract the owner, repository, and number/path/ref fields before calling this capability.
+Use the exact JSON field names from this capability schema. If the user provides a GitHub URL, extract the owner and repo fields plus the schema-specific number, path, or ref key; for pull-request tools, use `pr_number`; for issue tools, use `issue_number`.
 
 This capability reads from the GitHub API through host HTTP egress and requires a configured GitHub product-auth account.

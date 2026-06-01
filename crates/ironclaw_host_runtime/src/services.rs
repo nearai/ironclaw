@@ -495,6 +495,7 @@ where
             .runtime_policy
             .clone()
             .unwrap_or_else(local_testing_runtime_policy);
+        let surface_filesystem: Arc<dyn RootFilesystem> = self.filesystem.clone();
 
         let mut runtime = DefaultHostRuntime::from_shared_registry(
             Arc::clone(&self.registry),
@@ -503,6 +504,7 @@ where
             self.surface_version.clone(),
             runtime_policy,
         )
+        .with_surface_filesystem(surface_filesystem)
         .with_trust_policy_dyn(Arc::clone(&self.trust_policy))
         .with_process_manager(process_manager)
         .with_process_store(process_store)

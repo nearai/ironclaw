@@ -99,7 +99,7 @@ mod tests {
     use crate::dispatch::{action_from_context, execute_inner};
     use crate::exports::near::agent::tool::Guest;
     use crate::request::sanitize_host_error;
-    use crate::types::GitHubWebhookRequest;
+    use crate::types::{GitHubAction, GitHubWebhookRequest};
     use crate::validation::{normalize_ref_lookup, validate_repo_path};
     use crate::webhook::handle_webhook;
     use serde_json::json;
@@ -139,6 +139,39 @@ mod tests {
             .unwrap_err(),
             "invalid_parameters"
         );
+    }
+
+    #[test]
+    fn serde_accepts_common_pr_number_aliases() {
+        let action: GitHubAction = serde_json::from_value(json!({
+            "action": "get_pull_request",
+            "owner": "nearai",
+            "repo": "ironclaw",
+            "number": 4286
+        }))
+        .expect("number should be accepted as a pull request number alias");
+        assert!(matches!(
+            action,
+            GitHubAction::GetPullRequest {
+                pr_number: 4286,
+                ..
+            }
+        ));
+
+        let action: GitHubAction = serde_json::from_value(json!({
+            "action": "get_pull_request_files",
+            "owner": "nearai",
+            "repo": "ironclaw",
+            "pull_number": 4286
+        }))
+        .expect("pull_number should be accepted as a pull request number alias");
+        assert!(matches!(
+            action,
+            GitHubAction::GetPullRequestFiles {
+                pr_number: 4286,
+                ..
+            }
+        ));
     }
 
     #[test]

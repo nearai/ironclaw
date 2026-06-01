@@ -619,6 +619,44 @@ async fn visible_surface_resolves_builtin_first_party_input_schema_refs() {
 }
 
 #[tokio::test]
+async fn visible_surface_resolves_extension_package_input_schema_refs() {
+    let (_storage, fs, registry) = hot_catalog_fixture(
+        Some(
+            r#"{"type":"object","properties":{"message":{"type":"string"}},"required":["message"],"additionalProperties":false}"#,
+        ),
+        r#"{"type":"object"}"#,
+        "Prompt docs exist.",
+    );
+    let runtime =
+        runtime_with(registry, Arc::new(GrantAuthorizer)).with_surface_filesystem(Arc::new(fs));
+
+    let surface = runtime
+        .visible_capabilities(visible_request(context_with_grants([(
+            capability_id("echo.say"),
+            vec![EffectKind::DispatchCapability],
+        )])))
+        .await
+        .unwrap();
+
+    assert_eq!(visible_ids(&surface), vec![capability_id("echo.say")]);
+    let schema = &surface.capabilities[0].descriptor.parameters_schema;
+    assert!(
+        schema.get("$ref").is_none(),
+        "extension capabilities should expose concrete input schemas, got {schema:?}"
+    );
+    assert_eq!(schema["properties"]["message"]["type"], "string");
+
+    let validator = jsonschema::validator_for(schema).expect("resolved extension schema is valid");
+    validator
+        .validate(&json!({"message": "hello"}))
+        .expect("resolved schema should accept valid inputs");
+    assert!(
+        validator.validate(&json!({"body": "hello"})).is_err(),
+        "resolved schema should reject fields outside the capability input contract"
+    );
+}
+
+#[tokio::test]
 async fn visible_surface_filters_by_grants_provider_trust_and_preserves_registry_order() {
     let registry = registry_from_manifests([
         (ECHO_MANIFEST, "/system/extensions/echo"),

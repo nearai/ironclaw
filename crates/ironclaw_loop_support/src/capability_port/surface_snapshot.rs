@@ -210,7 +210,7 @@ impl RuntimeSurfaceCapabilitySnapshot {
                 "provider tool call was not advertised to the model",
             ));
         }
-        let normalized_arguments = super::normalize_provider_arguments(
+        let normalized_arguments = super::prepare_provider_arguments(
             &tool_call.arguments,
             &self.parameters_schema,
             "provider arguments",
