@@ -79,7 +79,7 @@ impl exports::near::agent::tool::Guest for GitHubTool {
             },
             Err(error) => exports::near::agent::tool::Response {
                 output: None,
-                error: Some(error),
+                error: Some(guest_error_payload(&error)),
             },
         }
     }
@@ -169,6 +169,9 @@ fn search_issues(params: SearchIssuesParams) -> Result<String, String> {
 
 fn search_query(params: &SearchIssuesParams) -> Result<String, String> {
     let mut parts = Vec::new();
+    if params.repository.is_some() && (params.owner.is_some() || params.repo.is_some()) {
+        return Err("invalid_repository".to_string());
+    }
     if let Some(query) = params
         .query
         .as_deref()
@@ -350,6 +353,7 @@ fn validate_path_segment(value: &str) -> bool {
         && value.len() <= MAX_REPOSITORY_SEGMENT_LENGTH
         && !value.contains('/')
         && !value.contains("..")
+        && !value.contains(':')
         && !value.contains('?')
         && !value.contains('#')
         && !value
@@ -361,7 +365,47 @@ fn validate_search_qualifier_value(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= MAX_REPOSITORY_SEGMENT_LENGTH
         && !value.contains(char::is_whitespace)
-        && !value.chars().any(|ch| ch.is_control())
+        && !value
+            .chars()
+            .any(|ch| ch.is_control() || matches!(ch, ':' | '"' | '(' | ')'))
+}
+
+fn guest_error_payload(code: &str) -> String {
+    serde_json::json!({
+        "code": code,
+        "kind": guest_error_kind(code),
+    })
+    .to_string()
+}
+
+fn guest_error_kind(code: &str) -> &'static str {
+    match code {
+        "AuthRequired" => "auth_required",
+        "missing_invocation_context"
+        | "invalid_invocation_context"
+        | "unsupported_capability"
+        | "invalid_parameters"
+        | "invalid_repository"
+        | "invalid_query_empty"
+        | "invalid_query_too_large"
+        | "invalid_author"
+        | "invalid_assignee"
+        | "invalid_involves"
+        | "invalid_state"
+        | "invalid_type"
+        | "invalid_sort"
+        | "invalid_order"
+        | "invalid_page"
+        | "invalid_limit"
+        | "invalid_issue_number"
+        | "invalid_body_empty"
+        | "invalid_body_too_large" => "input",
+        "host_http_body_limit" => "output_too_large",
+        "host_http_timeout" => "executor",
+        "host_http_network_denied" => "network_denied",
+        "host_http_forbidden" | "host_http_rate_limited" => "client",
+        _ => "operation_failed",
+    }
 }
 
 fn validate_search_state(state: &str) -> Result<(), String> {
@@ -564,26 +608,66 @@ mod tests {
 
     #[test]
     fn builds_query_from_structured_search_fields() {
-        let query = search_query(&SearchIssuesParams {
-            query: None,
-            repository: None,
-            owner: None,
-            repo: Some("nearai/ironclaw".to_string()),
-            author: Some("serrrfirat".to_string()),
-            assignee: None,
-            involves: None,
-            state: Some("open".to_string()),
-            issue_type: Some("issue".to_string()),
-            page: None,
-            limit: None,
-            sort: None,
-            order: None,
-        })
-        .expect("structured fields build search query");
+        let mut params = empty_search_params();
+        params.repo = Some("nearai/ironclaw".to_string());
+        params.author = Some("serrrfirat".to_string());
+        params.state = Some("open".to_string());
+        params.issue_type = Some("issue".to_string());
+        let query = search_query(&params).expect("structured fields build search query");
 
         assert_eq!(
             query,
             "repo:nearai/ironclaw author:serrrfirat state:open is:issue"
+        );
+    }
+
+    #[test]
+    fn search_query_rejects_duplicate_repository_inputs() {
+        let mut params = empty_search_params();
+        params.repository = Some("nearai/ironclaw".to_string());
+        params.owner = Some("nearai".to_string());
+        params.repo = Some("ironclaw".to_string());
+
+        assert_eq!(search_query(&params).unwrap_err(), "invalid_repository");
+    }
+
+    #[test]
+    fn search_query_rejects_owner_without_repo() {
+        let mut params = empty_search_params();
+        params.owner = Some("nearai".to_string());
+
+        assert_eq!(search_query(&params).unwrap_err(), "invalid_repository");
+    }
+
+    #[test]
+    fn search_query_rejects_repository_without_slash() {
+        let mut params = empty_search_params();
+        params.repository = Some("ironclaw".to_string());
+
+        assert_eq!(search_query(&params).unwrap_err(), "invalid_repository");
+    }
+
+    #[test]
+    fn push_qualifier_validates_structured_qualifier_values() {
+        let mut parts = vec!["repo:nearai/ironclaw".to_string()];
+        push_qualifier(&mut parts, "author", Some("   ")).unwrap();
+        assert_eq!(parts, vec!["repo:nearai/ironclaw"]);
+
+        assert_eq!(
+            push_qualifier(&mut parts, "author", Some("bad user")).unwrap_err(),
+            "invalid_author"
+        );
+        assert_eq!(
+            push_qualifier(&mut parts, "author", Some("bad\nuser")).unwrap_err(),
+            "invalid_author"
+        );
+        assert_eq!(
+            push_qualifier(&mut parts, "author", Some("user:label")).unwrap_err(),
+            "invalid_author"
+        );
+        assert_eq!(
+            push_qualifier(&mut parts, "author", Some(r#"user"label"#)).unwrap_err(),
+            "invalid_author"
         );
     }
 
@@ -640,5 +724,27 @@ mod tests {
             sanitize_host_error("connection reset with token ghp_secret_value"),
             "AuthRequired"
         );
+        assert_eq!(
+            sanitize_host_error("connection reset"),
+            "host_http_request_failed"
+        );
+    }
+
+    fn empty_search_params() -> SearchIssuesParams {
+        SearchIssuesParams {
+            query: None,
+            repository: None,
+            owner: None,
+            repo: None,
+            author: None,
+            assignee: None,
+            involves: None,
+            state: None,
+            issue_type: None,
+            page: None,
+            limit: None,
+            sort: None,
+            order: None,
+        }
     }
 }

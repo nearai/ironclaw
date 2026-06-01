@@ -482,13 +482,13 @@ async fn bundled_github_wasm_sanitizes_host_http_and_api_failures() {
         ),
     ];
 
-    for (http, expected_error) in cases {
+    for (http, expected_code) in cases {
         let execution = execute_bundled_github_wasm(
             "github.search_issues",
             json!({"query": "repo:nearai/ironclaw is:issue", "limit": 1}),
             Arc::new(http),
         );
-        assert_eq!(execution.error.as_deref(), Some(expected_error));
+        assert_structured_wasm_error_code(&execution, expected_code);
         assert!(
             !format!("{execution:?}").contains("ghp_fake_fixture_token"),
             "guest-visible failure must not leak credential material"
@@ -569,6 +569,17 @@ fn assert_failed_outcome(outcome: RuntimeCapabilityOutcome, expected_kind: Runti
         RuntimeCapabilityOutcome::Failed(failure) => assert_eq!(failure.kind, expected_kind),
         other => panic!("expected failed outcome {expected_kind:?}, got {other:?}"),
     }
+}
+
+fn assert_structured_wasm_error_code(execution: &WitToolExecution, expected_code: &str) {
+    let error = execution.error.as_deref().expect("expected WASM error");
+    let parsed: serde_json::Value =
+        serde_json::from_str(error).expect("WASM guest errors are structured JSON");
+    assert_eq!(parsed["code"], json!(expected_code));
+    assert!(
+        parsed["kind"].as_str().is_some_and(|kind| !kind.is_empty()),
+        "structured WASM guest error must include a non-empty kind"
+    );
 }
 
 struct ObligatingAuthorizer {

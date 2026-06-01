@@ -6,6 +6,7 @@ use std::{
 
 use async_trait::async_trait;
 use futures_util::FutureExt;
+use serde::Deserialize;
 
 use super::{
     CapabilityId, DenyWasmHostHttp, DispatchError, ExtensionRuntime, FirstPartyCapabilityRegistry,
@@ -601,15 +602,7 @@ where
             reservation.id,
             &execution.usage,
         )?;
-        if error == "AuthRequired" {
-            return Err(DispatchError::AuthRequired {
-                capability: request.capability_id.clone(),
-                required_secrets: Vec::new(),
-            });
-        }
-        return Err(DispatchError::Wasm {
-            kind: wasm_guest_error_kind(&error),
-        });
+        return Err(wasm_guest_dispatch_error(&error, request.capability_id));
     }
     let Some(output_json) = execution.output_json else {
         account_or_release_failed_wasm_execution(
@@ -774,19 +767,100 @@ fn dispatch_error_for_runtime(
     }
 }
 
-fn wasm_guest_error_kind(error: &str) -> RuntimeDispatchErrorKind {
-    if error.starts_with("invalid_") {
-        return RuntimeDispatchErrorKind::InputEncode;
+fn wasm_guest_dispatch_error(error: &str, capability: &CapabilityId) -> DispatchError {
+    match wasm_guest_error_kind(error) {
+        WasmGuestErrorKind::AuthRequired => DispatchError::AuthRequired {
+            capability: capability.clone(),
+            required_secrets: Vec::new(),
+        },
+        WasmGuestErrorKind::Runtime(kind) => DispatchError::Wasm { kind },
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WasmGuestErrorKind {
+    AuthRequired,
+    Runtime(RuntimeDispatchErrorKind),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum StructuredWasmGuestErrorKind {
+    AuthRequired,
+    Input,
+    OutputTooLarge,
+    Executor,
+    NetworkDenied,
+    Client,
+    OperationFailed,
+}
+
+#[derive(Debug, Deserialize)]
+struct StructuredWasmGuestError {
+    #[allow(dead_code)]
+    code: String,
+    kind: StructuredWasmGuestErrorKind,
+}
+
+fn wasm_guest_error_kind(error: &str) -> WasmGuestErrorKind {
+    if let Ok(payload) = serde_json::from_str::<StructuredWasmGuestError>(error) {
+        return match payload.kind {
+            StructuredWasmGuestErrorKind::AuthRequired => WasmGuestErrorKind::AuthRequired,
+            StructuredWasmGuestErrorKind::Input => {
+                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::InputEncode)
+            }
+            StructuredWasmGuestErrorKind::OutputTooLarge => {
+                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::OutputTooLarge)
+            }
+            StructuredWasmGuestErrorKind::Executor => {
+                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::Executor)
+            }
+            StructuredWasmGuestErrorKind::NetworkDenied => {
+                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::NetworkDenied)
+            }
+            StructuredWasmGuestErrorKind::Client => {
+                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::Client)
+            }
+            StructuredWasmGuestErrorKind::OperationFailed => {
+                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::OperationFailed)
+            }
+        };
+    }
+
     match error {
-        "missing_invocation_context" | "unsupported_capability" => {
-            RuntimeDispatchErrorKind::InputEncode
+        "AuthRequired" => WasmGuestErrorKind::AuthRequired,
+        "missing_invocation_context"
+        | "invalid_invocation_context"
+        | "unsupported_capability"
+        | "invalid_parameters"
+        | "invalid_repository"
+        | "invalid_query_empty"
+        | "invalid_query_too_large"
+        | "invalid_author"
+        | "invalid_assignee"
+        | "invalid_involves"
+        | "invalid_state"
+        | "invalid_type"
+        | "invalid_sort"
+        | "invalid_order"
+        | "invalid_page"
+        | "invalid_limit"
+        | "invalid_issue_number"
+        | "invalid_body_empty"
+        | "invalid_body_too_large" => {
+            WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::InputEncode)
         }
-        "host_http_body_limit" => RuntimeDispatchErrorKind::OutputTooLarge,
-        "host_http_timeout" => RuntimeDispatchErrorKind::Executor,
-        "host_http_network_denied" => RuntimeDispatchErrorKind::NetworkDenied,
-        "host_http_forbidden" | "host_http_rate_limited" => RuntimeDispatchErrorKind::Client,
-        _ => RuntimeDispatchErrorKind::OperationFailed,
+        "host_http_body_limit" => {
+            WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::OutputTooLarge)
+        }
+        "host_http_timeout" => WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::Executor),
+        "host_http_network_denied" => {
+            WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::NetworkDenied)
+        }
+        "host_http_forbidden" | "host_http_rate_limited" => {
+            WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::Client)
+        }
+        _ => WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::OperationFailed),
     }
 }
 
@@ -848,5 +922,99 @@ fn wasm_error_kind(error: &WasmError) -> RuntimeDispatchErrorKind {
         WasmError::InstantiationFailed(_) => RuntimeDispatchErrorKind::MethodMissing,
         WasmError::ExecutionFailed { .. } => RuntimeDispatchErrorKind::Guest,
         WasmError::InvalidSchema(_) => RuntimeDispatchErrorKind::Manifest,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wasm_guest_error_kind_maps_structured_payloads() {
+        let cases = [
+            (
+                r#"{"code":"AuthRequired","kind":"auth_required"}"#,
+                WasmGuestErrorKind::AuthRequired,
+            ),
+            (
+                r#"{"code":"invalid_repository","kind":"input"}"#,
+                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::InputEncode),
+            ),
+            (
+                r#"{"code":"host_http_body_limit","kind":"output_too_large"}"#,
+                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::OutputTooLarge),
+            ),
+            (
+                r#"{"code":"host_http_timeout","kind":"executor"}"#,
+                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::Executor),
+            ),
+            (
+                r#"{"code":"host_http_network_denied","kind":"network_denied"}"#,
+                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::NetworkDenied),
+            ),
+            (
+                r#"{"code":"host_http_forbidden","kind":"client"}"#,
+                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::Client),
+            ),
+            (
+                r#"{"code":"host_http_request_failed","kind":"operation_failed"}"#,
+                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::OperationFailed),
+            ),
+        ];
+
+        for (error, expected) in cases {
+            assert_eq!(wasm_guest_error_kind(error), expected);
+        }
+    }
+
+    #[test]
+    fn wasm_guest_error_kind_preserves_legacy_error_mapping_without_prefix_catch_all() {
+        let cases = [
+            ("AuthRequired", WasmGuestErrorKind::AuthRequired),
+            (
+                "invalid_repository",
+                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::InputEncode),
+            ),
+            (
+                "missing_invocation_context",
+                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::InputEncode),
+            ),
+            (
+                "unsupported_capability",
+                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::InputEncode),
+            ),
+            (
+                "host_http_body_limit",
+                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::OutputTooLarge),
+            ),
+            (
+                "host_http_timeout",
+                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::Executor),
+            ),
+            (
+                "host_http_network_denied",
+                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::NetworkDenied),
+            ),
+            (
+                "host_http_forbidden",
+                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::Client),
+            ),
+            (
+                "host_http_rate_limited",
+                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::Client),
+            ),
+            (
+                "invalid_internal_state",
+                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::OperationFailed),
+            ),
+            (
+                "unknown_error",
+                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::OperationFailed),
+            ),
+        ];
+
+        for (error, expected) in cases {
+            assert_eq!(wasm_guest_error_kind(error), expected);
+        }
     }
 }

@@ -27,6 +27,7 @@
       "type": "string",
       "minLength": 1,
       "maxLength": 201,
+      "pattern": "^[^/:\\s]+(/?[^/:\\s]+)?$",
       "description": "Optional repository name when paired with owner, or owner/repo shorthand when owner is omitted."
     },
     "author": {
