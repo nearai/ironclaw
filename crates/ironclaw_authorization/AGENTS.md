@@ -11,7 +11,9 @@
 
 ## What This Crate Owns
 
-- Grant matching and trust-aware authorization decisions for capability dispatch.
+- Grant matching, capability-lease state, and dispatch/spawn authorization decisions (default-deny), currently:
+- Authorizer ports and implementations: `CapabilityDispatchAuthorizer` / `TrustAwareCapabilityDispatchAuthorizer` traits, `GrantAuthorizer`, `LeaseBackedAuthorizer`, and the `grant_exceeds_authority_ceiling` check.
+- Capability-lease state: `CapabilityLease` (+ `CapabilityLeaseStatus`/`CapabilityLeaseError`), the `CapabilityLeaseStore` trait, and its `InMemoryCapabilityLeaseStore` / `FilesystemCapabilityLeaseStore` backends (the filesystem backend is process-local, not a cross-process CAS).
 - Crate-local public API, tests, and fixtures needed to prove that ownership.
 
 ## Do Not Move In Here
