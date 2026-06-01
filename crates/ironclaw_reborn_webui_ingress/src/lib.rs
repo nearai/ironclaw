@@ -36,7 +36,9 @@ pub use oidc::{
     AudienceClaim, ClaimToUserIdFn, IdTokenClaims, OidcAuthenticator, OidcAuthenticatorConfig,
     OidcAuthenticatorError,
 };
-pub use session::{SessionAuthenticator, SessionRecord, SessionStore, SessionStoreError};
+pub use session::{
+    SessionAuthenticator, SessionId, SessionRecord, SessionStore, SessionStoreError,
+};
 // `InMemorySessionStore` is gated behind `dev-in-memory-session` so a
 // production binary cannot accidentally wire a process-local store as
 // a `SessionStore` impl. Local dev and tests opt in via the feature.

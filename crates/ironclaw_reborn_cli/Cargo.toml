@@ -31,13 +31,24 @@ root-llm-provider = [
 # binaries that genuinely expose v2 over HTTP must opt in. Pulls in
 # `webui-v2-beta` on the composition crate plus the ingress crate
 # that owns the serve loop.
+# Compiles the WebChat v2 SSO login surface (Google / GitHub OAuth) into
+# the `serve` command. The session bearers it mints are stateless,
+# HMAC-signed tokens (see `commands/serve_sso.rs`), so no session store
+# is persisted and the login surface works in a normal build — no
+# dev-only feature required.
 webui-v2-beta = [
     "ironclaw_reborn_composition/webui-v2-beta",
     "dep:ironclaw_reborn_webui_ingress",
+    "dep:async-trait",
+    "dep:hmac",
+    "dep:base64",
 ]
 
 [dependencies]
 anyhow = "1"
+async-trait = { version = "0.1", optional = true }
+base64 = { version = "0.22", optional = true }
+hmac = { version = "0.12", optional = true }
 chrono = { version = "0.4", features = ["serde"] }
 hex = "0.4.3"
 clap = { version = "4", features = ["derive", "env"] }
