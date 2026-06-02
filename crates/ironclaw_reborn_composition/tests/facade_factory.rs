@@ -18,10 +18,13 @@ use ironclaw_host_api::{
 #[cfg(feature = "libsql")]
 use ironclaw_host_api::{
     CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, ExecutionContext, ExtensionId,
-    GrantConstraints, MountView, NetworkPolicy, Principal, TrustClass, UserId,
+    GrantConstraints, MountView, NetworkPolicy, Principal, ResourceEstimate, TrustClass, UserId,
 };
 #[cfg(feature = "libsql")]
-use ironclaw_host_runtime::{CapabilitySurfacePolicy, SurfaceKind, VisibleCapabilityRequest};
+use ironclaw_host_runtime::{
+    CapabilitySurfacePolicy, RuntimeCapabilityOutcome, RuntimeCapabilityRequest, SurfaceKind,
+    VisibleCapabilityRequest,
+};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_host_runtime::{
     SchedulerTurnRunWakeNotifier, TurnRunExecutor, TurnRunExecutorError, TurnRunScheduler,
@@ -47,6 +50,8 @@ use ironclaw_turns::{
     runner::{ClaimedTurnRun, TurnRunTransitionPort},
 };
 use secrecy::SecretString;
+#[cfg(feature = "libsql")]
+use serde_json::{Value, json};
 #[cfg(feature = "libsql")]
 use tokio::sync::Mutex;
 
@@ -237,6 +242,70 @@ fn local_dev_grant(capability: &str, allowed_effects: Vec<EffectKind>) -> Capabi
             expires_at: None,
             max_invocations: None,
         },
+    }
+}
+
+#[cfg(feature = "libsql")]
+async fn invoke_trigger_management(
+    runtime: &dyn ironclaw_host_runtime::HostRuntime,
+    capability: &str,
+    input: Value,
+) -> Value {
+    let outcome = runtime
+        .invoke_capability(RuntimeCapabilityRequest::new(
+            trigger_management_execution_context(),
+            CapabilityId::new(capability).unwrap(),
+            ResourceEstimate::default(),
+            input,
+            trigger_management_trust_decision(),
+        ))
+        .await
+        .expect("trigger management capability invoke");
+    let RuntimeCapabilityOutcome::Completed(completed) = outcome else {
+        panic!("expected completed trigger management invocation, got {outcome:?}");
+    };
+    completed.output
+}
+
+#[cfg(feature = "libsql")]
+fn trigger_management_execution_context() -> ExecutionContext {
+    let grants = CapabilitySet {
+        grants: vec![
+            local_dev_grant(
+                ironclaw_host_runtime::TRIGGER_CREATE_CAPABILITY_ID,
+                vec![EffectKind::DispatchCapability, EffectKind::ExternalWrite],
+            ),
+            local_dev_grant(
+                ironclaw_host_runtime::TRIGGER_LIST_CAPABILITY_ID,
+                vec![EffectKind::DispatchCapability],
+            ),
+            local_dev_grant(
+                ironclaw_host_runtime::TRIGGER_REMOVE_CAPABILITY_ID,
+                vec![EffectKind::DispatchCapability, EffectKind::ExternalWrite],
+            ),
+        ],
+    };
+    ExecutionContext::local_default(
+        UserId::new("trigger-user").unwrap(),
+        ExtensionId::new("caller").unwrap(),
+        RuntimeKind::FirstParty,
+        TrustClass::UserTrusted,
+        grants,
+        MountView::default(),
+    )
+    .unwrap()
+}
+
+#[cfg(feature = "libsql")]
+fn trigger_management_trust_decision() -> TrustDecision {
+    TrustDecision {
+        effective_trust: EffectiveTrustClass::user_trusted(),
+        authority_ceiling: AuthorityCeiling {
+            allowed_effects: vec![EffectKind::DispatchCapability, EffectKind::ExternalWrite],
+            max_resource_ceiling: None,
+        },
+        provenance: TrustProvenance::AdminConfig,
+        evaluated_at: Utc::now(),
     }
 }
 
@@ -934,6 +1003,70 @@ async fn production_libsql_services_migrate_trigger_repository_before_runtime_in
         .expect("trigger table count row");
     let count: i64 = row.get(0).expect("trigger table count");
     assert_eq!(count, 0);
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn local_dev_services_dispatch_trigger_management_through_composed_runtime() {
+    let dir = tempfile::tempdir().unwrap();
+    let services = build_reborn_services(
+        RebornBuildInput::local_dev("test-owner", dir.path().to_path_buf())
+            .with_runtime_policy(local_only_runtime_policy()),
+    )
+    .await
+    .expect("local-dev services should build with trigger management runtime");
+
+    let runtime = services
+        .host_runtime
+        .as_deref()
+        .expect("local-dev build exposes host runtime");
+    let created = invoke_trigger_management(
+        runtime,
+        ironclaw_host_runtime::TRIGGER_CREATE_CAPABILITY_ID,
+        json!({
+            "name": "Daily production summary",
+            "prompt": "Summarize production state",
+            "cron": "0 8 * * *"
+        }),
+    )
+    .await;
+    let trigger_id = created["trigger"]["trigger_id"]
+        .as_str()
+        .expect("created trigger id")
+        .to_string();
+
+    let listed = invoke_trigger_management(
+        runtime,
+        ironclaw_host_runtime::TRIGGER_LIST_CAPABILITY_ID,
+        json!({}),
+    )
+    .await;
+    assert_eq!(
+        listed["triggers"].as_array().expect("trigger list").len(),
+        1
+    );
+
+    let removed = invoke_trigger_management(
+        runtime,
+        ironclaw_host_runtime::TRIGGER_REMOVE_CAPABILITY_ID,
+        json!({ "trigger_id": trigger_id }),
+    )
+    .await;
+    assert_eq!(removed["removed"], json!(true));
+
+    let listed_after_remove = invoke_trigger_management(
+        runtime,
+        ironclaw_host_runtime::TRIGGER_LIST_CAPABILITY_ID,
+        json!({}),
+    )
+    .await;
+    assert_eq!(
+        listed_after_remove["triggers"]
+            .as_array()
+            .expect("trigger list after remove")
+            .len(),
+        0
+    );
 }
 
 #[cfg(feature = "postgres")]

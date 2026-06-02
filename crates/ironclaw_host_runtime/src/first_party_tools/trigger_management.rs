@@ -24,8 +24,7 @@ use super::{
     first_party_capability_manifest, input_error, resource_profile,
 };
 
-const DEFAULT_TRIGGER_LIST_LIMIT: usize = 100;
-const MAX_TRIGGER_LIST_LIMIT: usize = 100;
+const TRIGGER_LIST_LIMIT: usize = 100;
 
 pub const TRIGGER_CREATE_CAPABILITY_ID: &str = "builtin.trigger_create";
 pub const TRIGGER_LIST_CAPABILITY_ID: &str = "builtin.trigger_list";
@@ -134,7 +133,7 @@ impl FirstPartyCapabilityHandler for TriggerManagementToolHandler {
         let output_bytes = bounded_output_bytes(&output, FIRST_PARTY_MAX_OUTPUT_BYTES)?;
         Ok(FirstPartyCapabilityResult::new(
             output,
-            usage_with_elapsed(started, output_bytes),
+            elapsed_usage_with_bytes(started, output_bytes),
         ))
     }
 }
@@ -203,8 +202,8 @@ async fn list_triggers(
     let input: TriggerListInput = serde_json::from_value(input).map_err(|_| input_error())?;
     let limit = input
         .limit
-        .unwrap_or(DEFAULT_TRIGGER_LIST_LIMIT)
-        .min(MAX_TRIGGER_LIST_LIMIT);
+        .unwrap_or(TRIGGER_LIST_LIMIT)
+        .min(TRIGGER_LIST_LIMIT);
     let records = repository
         .list_scoped_triggers(
             scope.tenant_id.clone(),
@@ -282,13 +281,14 @@ fn trigger_input_error(_error: TriggerError) -> FirstPartyCapabilityError {
 
 fn trigger_repository_error(error: TriggerError) -> FirstPartyCapabilityError {
     tracing::debug!(
-        trigger_error = %error,
+        runtime_dispatch_error_kind = %RuntimeDispatchErrorKind::Backend,
+        error = %error,
         "trigger management capability repository operation failed"
     );
     FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::Backend)
 }
 
-fn usage_with_elapsed(started: Instant, output_bytes: u64) -> ResourceUsage {
+fn elapsed_usage_with_bytes(started: Instant, output_bytes: u64) -> ResourceUsage {
     ResourceUsage {
         wall_clock_ms: started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
         output_bytes,

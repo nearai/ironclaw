@@ -314,6 +314,38 @@ async fn assert_round_trip_preserves_null_optional_scope_fields(repo: &impl Trig
         .expect("list nonmatching scoped triggers")
         .is_empty()
     );
+
+    assert_eq!(
+        repo.remove_scoped_trigger(
+            tenant("tenant-a"),
+            user("user-a"),
+            None,
+            None,
+            TriggerId::parse("01J00000000000000000000009").expect("ulid"),
+        )
+        .await
+        .expect("missing null-scoped remove"),
+        None
+    );
+
+    let scoped_null_removed = repo
+        .remove_scoped_trigger(
+            tenant("tenant-a"),
+            user("user-a"),
+            None,
+            None,
+            record.trigger_id,
+        )
+        .await
+        .expect("matching null-scoped remove")
+        .expect("null-scoped removed record");
+    assert_eq!(scoped_null_removed.trigger_id, record.trigger_id);
+    assert!(
+        repo.get_trigger(tenant("tenant-a"), record.trigger_id)
+            .await
+            .expect("lookup removed null-scoped record")
+            .is_none()
+    );
 }
 
 async fn assert_upsert_preserves_original_created_at(repo: &impl TriggerRepository) {

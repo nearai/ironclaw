@@ -418,6 +418,7 @@ mod tests {
                 EffectKind::SpawnProcess,
                 EffectKind::ExecuteCode,
                 EffectKind::Network,
+                EffectKind::ExternalWrite,
             ]
         );
         assert!(
@@ -450,6 +451,34 @@ mod tests {
                 .grant(&CapabilityId::new("builtin.skill_install").expect("capability id"))
                 .is_ok()
         );
+        assert_trigger_grant(
+            &policy,
+            "builtin.trigger_create",
+            &[EffectKind::DispatchCapability, EffectKind::ExternalWrite],
+        );
+        assert_trigger_grant(
+            &policy,
+            "builtin.trigger_list",
+            &[EffectKind::DispatchCapability],
+        );
+        assert_trigger_grant(
+            &policy,
+            "builtin.trigger_remove",
+            &[EffectKind::DispatchCapability, EffectKind::ExternalWrite],
+        );
+    }
+
+    fn assert_trigger_grant(
+        policy: &LocalDevCapabilityPolicy,
+        capability: &str,
+        effects: &[EffectKind],
+    ) {
+        let grant = policy
+            .grant(&CapabilityId::new(capability).expect("capability id"))
+            .expect("trigger grant");
+        assert_eq!(grant.effects, effects);
+        assert_eq!(grant.mounts, LocalDevMountProfile::Ambient);
+        assert_eq!(grant.network, LocalDevNetworkProfile::Default);
     }
 
     #[test]
