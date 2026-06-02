@@ -67,6 +67,7 @@ pub struct TriggerPollerWorkerDeps {
 pub struct TriggerPollerWorker {
     config: TriggerPollerWorkerConfig,
     deps: TriggerPollerWorkerDeps,
+    tick_guard: tokio::sync::Mutex<()>,
     // This guard is held only around synchronous cursor clone/set operations,
     // never across repository, materialization, submit, or lookup awaits.
     active_scan_cursor: Mutex<Option<ActiveTriggerScanCursor>>,
@@ -81,6 +82,7 @@ impl TriggerPollerWorker {
         Ok(Self {
             config,
             deps,
+            tick_guard: tokio::sync::Mutex::new(()),
             active_scan_cursor: Mutex::new(None),
         })
     }
@@ -91,6 +93,7 @@ impl TriggerPollerWorker {
     /// worker instance. The active-scan cursor is a per-worker progress marker
     /// and is advanced by the single supervisor-owned tick loop.
     pub async fn tick_once(&self, now: Timestamp) -> Result<TriggerPollerTickReport, TriggerError> {
+        let _tick_guard = self.tick_guard.lock().await;
         let mut report = TriggerPollerTickReport::new(now);
         self.clear_terminal_active_fires(&mut report).await?;
         let due_records = self
@@ -137,30 +140,7 @@ impl TriggerPollerWorker {
         &self,
         report: &mut TriggerPollerTickReport,
     ) -> Result<(), TriggerError> {
-        let mut cursor = self.active_scan_cursor()?;
-        let mut active_records = self
-            .deps
-            .repository
-            .as_ref()
-            .list_active_triggers_after_trusted(
-                TrustedTriggerPollerScope::mint(),
-                cursor.clone(),
-                self.config.fires_per_tick,
-            )
-            .await?;
-        if active_records.is_empty() && cursor.is_some() {
-            cursor = None;
-            active_records = self
-                .deps
-                .repository
-                .as_ref()
-                .list_active_triggers_after_trusted(
-                    TrustedTriggerPollerScope::mint(),
-                    cursor.clone(),
-                    self.config.fires_per_tick,
-                )
-                .await?;
-        }
+        let (cursor, active_records) = self.list_active_cleanup_page().await?;
         report.active_records = active_records.len();
         let mut next_cursor = cursor;
         let mut first_unadvanced_cursor: Option<ActiveTriggerScanCursor> = None;
@@ -267,6 +247,36 @@ impl TriggerPollerWorker {
         }
         self.set_active_scan_cursor(next_cursor)?;
         Ok(())
+    }
+
+    async fn list_active_cleanup_page(
+        &self,
+    ) -> Result<(Option<ActiveTriggerScanCursor>, Vec<TriggerRecord>), TriggerError> {
+        let mut cursor = self.active_scan_cursor()?;
+        let mut active_records = self
+            .deps
+            .repository
+            .as_ref()
+            .list_active_triggers_after_trusted(
+                TrustedTriggerPollerScope::mint(),
+                cursor.clone(),
+                self.config.fires_per_tick,
+            )
+            .await?;
+        if active_records.is_empty() && cursor.is_some() {
+            cursor = None;
+            active_records = self
+                .deps
+                .repository
+                .as_ref()
+                .list_active_triggers_after_trusted(
+                    TrustedTriggerPollerScope::mint(),
+                    cursor.clone(),
+                    self.config.fires_per_tick,
+                )
+                .await?;
+        }
+        Ok((cursor, active_records))
     }
 
     fn active_scan_cursor(&self) -> Result<Option<ActiveTriggerScanCursor>, TriggerError> {
@@ -922,6 +932,28 @@ mod tests {
             },
         )
         .expect("valid worker")
+    }
+
+    #[tokio::test]
+    async fn tick_once_serializes_overlapping_calls_for_one_worker() {
+        let repo = Arc::new(TickConcurrencyRepository::default());
+        let worker = Arc::new(worker(
+            repo.clone(),
+            Arc::new(RecordingMaterializer::success("content:trigger-fire")),
+            Arc::new(RecordingSubmitter::with_outcomes(Vec::new())),
+            Arc::new(RecordingActiveRunLookup::default()),
+        ));
+        let first = worker.clone();
+        let second = worker;
+
+        let (first_result, second_result) = tokio::join!(
+            async move { first.tick_once(ts(1_704_067_200)).await },
+            async move { second.tick_once(ts(1_704_067_260)).await },
+        );
+
+        first_result.expect("first tick");
+        second_result.expect("second tick");
+        assert_eq!(repo.max_concurrent_due_scans(), 1);
     }
 
     #[tokio::test]
@@ -2475,6 +2507,140 @@ mod tests {
             self.results.lock().expect("results lock").pop().expect(
                 "RecordingActiveRunLookup: more active_run_state calls than configured outcomes",
             )
+        }
+    }
+
+    #[derive(Default)]
+    struct TickConcurrencyRepository {
+        current_due_scans: Mutex<usize>,
+        max_concurrent_due_scans: Mutex<usize>,
+    }
+
+    impl TickConcurrencyRepository {
+        fn max_concurrent_due_scans(&self) -> usize {
+            *self
+                .max_concurrent_due_scans
+                .lock()
+                .expect("max concurrent due scans lock")
+        }
+    }
+
+    #[async_trait]
+    impl TriggerRepository for TickConcurrencyRepository {
+        async fn upsert_trigger(&self, _record: TriggerRecord) -> Result<(), TriggerError> {
+            unreachable!("tick-concurrency repository is read-only")
+        }
+
+        async fn get_trigger(
+            &self,
+            _tenant_id: TenantId,
+            _trigger_id: TriggerId,
+        ) -> Result<Option<TriggerRecord>, TriggerError> {
+            unreachable!("tick-concurrency repository does not load records")
+        }
+
+        async fn list_triggers(
+            &self,
+            _tenant_id: TenantId,
+        ) -> Result<Vec<TriggerRecord>, TriggerError> {
+            unreachable!("tick-concurrency repository does not list tenant records")
+        }
+
+        async fn remove_trigger(
+            &self,
+            _tenant_id: TenantId,
+            _trigger_id: TriggerId,
+        ) -> Result<Option<TriggerRecord>, TriggerError> {
+            unreachable!("tick-concurrency repository does not remove records")
+        }
+
+        async fn list_due_triggers(
+            &self,
+            _now: Timestamp,
+            _limit: usize,
+        ) -> Result<Vec<TriggerRecord>, TriggerError> {
+            {
+                let mut current = self
+                    .current_due_scans
+                    .lock()
+                    .expect("current due scans lock");
+                *current += 1;
+                let mut max = self
+                    .max_concurrent_due_scans
+                    .lock()
+                    .expect("max concurrent due scans lock");
+                *max = (*max).max(*current);
+            }
+            tokio::task::yield_now().await;
+            *self
+                .current_due_scans
+                .lock()
+                .expect("current due scans lock") -= 1;
+            Ok(Vec::new())
+        }
+
+        async fn list_active_triggers(
+            &self,
+            limit: usize,
+        ) -> Result<Vec<TriggerRecord>, TriggerError> {
+            self.list_active_triggers_after(None, limit).await
+        }
+
+        async fn list_active_triggers_after(
+            &self,
+            _after: Option<ActiveTriggerScanCursor>,
+            _limit: usize,
+        ) -> Result<Vec<TriggerRecord>, TriggerError> {
+            Ok(Vec::new())
+        }
+
+        async fn claim_due_fire(
+            &self,
+            _request: ClaimDueFireRequest,
+        ) -> Result<ClaimDueFireOutcome, TriggerError> {
+            unreachable!("tick-concurrency repository should not claim fires")
+        }
+
+        async fn mark_fire_accepted(
+            &self,
+            _request: FireAcceptedRequest,
+        ) -> Result<Option<TriggerRecord>, TriggerError> {
+            unreachable!("tick-concurrency repository should not persist accepted fires")
+        }
+
+        async fn mark_fire_replayed(
+            &self,
+            _request: FireReplayedRequest,
+        ) -> Result<Option<TriggerRecord>, TriggerError> {
+            unreachable!("tick-concurrency repository should not persist replayed fires")
+        }
+
+        async fn mark_fire_retryable_failed(
+            &self,
+            _request: FireRetryableFailedRequest,
+        ) -> Result<Option<TriggerRecord>, TriggerError> {
+            unreachable!("tick-concurrency repository should not persist retryable failures")
+        }
+
+        async fn mark_fire_permanently_failed(
+            &self,
+            _request: FirePermanentFailedRequest,
+        ) -> Result<Option<TriggerRecord>, TriggerError> {
+            unreachable!("tick-concurrency repository should not persist permanent failures")
+        }
+
+        async fn mark_fire_terminally_failed(
+            &self,
+            _request: FireTerminalFailedRequest,
+        ) -> Result<Option<TriggerRecord>, TriggerError> {
+            unreachable!("tick-concurrency repository should not persist terminal failures")
+        }
+
+        async fn clear_active_fire(
+            &self,
+            _request: ClearActiveFireRequest,
+        ) -> Result<Option<TriggerRecord>, TriggerError> {
+            unreachable!("tick-concurrency repository should not clear active fires")
         }
     }
 

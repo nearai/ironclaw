@@ -631,6 +631,75 @@ async fn assert_active_query_lists_active_records_in_deterministic_order(
     assert_eq!(limited[0].trigger_id, blocked_oldest_a.trigger_id);
 }
 
+async fn assert_active_query_paginates_same_slot_same_tenant_by_trigger_id(
+    repo: &impl TriggerRepository,
+) {
+    let active_slot = ts(1_704_067_260);
+    let tenant_id = tenant("tenant-tie");
+    let first = {
+        let mut record = sample_record(
+            TriggerId::parse("01J00000000000000000000000").expect("ulid"),
+            tenant_id.clone(),
+            ts(1_704_067_800),
+        );
+        record.active_fire_slot = Some(active_slot);
+        record
+    };
+    let second = {
+        let mut record = sample_record(
+            TriggerId::parse("01J00000000000000000000001").expect("ulid"),
+            tenant_id.clone(),
+            ts(1_704_067_800),
+        );
+        record.active_fire_slot = Some(active_slot);
+        record
+    };
+    let third = {
+        let mut record = sample_record(
+            TriggerId::parse("01J00000000000000000000002").expect("ulid"),
+            tenant_id,
+            ts(1_704_067_800),
+        );
+        record.active_fire_slot = Some(active_slot);
+        record
+    };
+
+    repo.upsert_trigger(first.clone())
+        .await
+        .expect("insert first tie row");
+    repo.upsert_trigger(second.clone())
+        .await
+        .expect("insert second tie row");
+    repo.upsert_trigger(third.clone())
+        .await
+        .expect("insert third tie row");
+
+    let first_page = repo
+        .list_active_triggers(2)
+        .await
+        .expect("list first tie page");
+    assert_eq!(
+        first_page
+            .iter()
+            .map(|record| record.trigger_id)
+            .collect::<Vec<_>>(),
+        vec![first.trigger_id, second.trigger_id]
+    );
+    let cursor =
+        ActiveTriggerScanCursor::from_active_record(&first_page[1]).expect("tie page cursor");
+    let second_page = repo
+        .list_active_triggers_after(Some(cursor), 2)
+        .await
+        .expect("list second tie page");
+    assert_eq!(
+        second_page
+            .iter()
+            .map(|record| record.trigger_id)
+            .collect::<Vec<_>>(),
+        vec![third.trigger_id]
+    );
+}
+
 async fn assert_rejects_validation_failures_before_persistence(repo: &impl TriggerRepository) {
     let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid");
     let tenant_id = tenant("tenant-a");
@@ -751,6 +820,9 @@ async fn libsql_repository_contract_parity() {
     assert_active_query_lists_active_records_in_deterministic_order(&repo).await;
 
     let (_dir, repo) = build_libsql_repo().await;
+    assert_active_query_paginates_same_slot_same_tenant_by_trigger_id(&repo).await;
+
+    let (_dir, repo) = build_libsql_repo().await;
     assert_rejects_validation_failures_before_persistence(&repo).await;
 
     let (_dir, repo) = build_libsql_repo().await;
@@ -841,6 +913,9 @@ async fn postgres_repository_contract_parity() {
 
     clear_postgres_triggers(&pool).await;
     assert_active_query_lists_active_records_in_deterministic_order(&repo).await;
+
+    clear_postgres_triggers(&pool).await;
+    assert_active_query_paginates_same_slot_same_tenant_by_trigger_id(&repo).await;
 
     clear_postgres_triggers(&pool).await;
     assert_rejects_validation_failures_before_persistence(&repo).await;
