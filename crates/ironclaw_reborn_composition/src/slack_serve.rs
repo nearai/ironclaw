@@ -36,18 +36,9 @@ use crate::webui_serve::{PublicRouteDrain, PublicRouteMount};
 
 pub const SLACK_EVENTS_PATH: &str = "/webhooks/slack/events";
 const SLACK_EVENTS_ROUTE_ID: &str = "slack.events";
-const SLACK_EVENTS_BODY_LIMIT_BYTES: NonZeroU64 = {
-    // SAFETY: 1 MiB is a non-zero literal.
-    unsafe { NonZeroU64::new_unchecked(1024 * 1024) }
-};
-const SLACK_EVENTS_MAX_REQUESTS: NonZeroU32 = {
-    // SAFETY: 120 requests is a non-zero literal.
-    unsafe { NonZeroU32::new_unchecked(120) }
-};
-const SLACK_EVENTS_RATE_WINDOW_SECONDS: NonZeroU32 = {
-    // SAFETY: 60 seconds is a non-zero literal.
-    unsafe { NonZeroU32::new_unchecked(60) }
-};
+const SLACK_EVENTS_BODY_LIMIT_BYTES: NonZeroU64 = NonZeroU64::new(1024 * 1024).unwrap(); // safety: 1 MiB is a non-zero literal.
+const SLACK_EVENTS_MAX_REQUESTS: NonZeroU32 = NonZeroU32::new(120).unwrap(); // safety: 120 requests is a non-zero literal.
+const SLACK_EVENTS_RATE_WINDOW_SECONDS: NonZeroU32 = NonZeroU32::new(60).unwrap(); // safety: 60 seconds is a non-zero literal.
 
 pub trait SlackEventsWebhookDispatcher: Send + Sync {
     fn verify_webhook_auth(
