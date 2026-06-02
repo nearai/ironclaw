@@ -35,8 +35,9 @@ ironclaw_turns = { path = "../ironclaw_turns", version = "0.1.0" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 secrecy = "0.10"
+sha2 = "0.10"
 thiserror = "2"
-tokio = { version = "1", features = ["time"] }
+tokio = { version = "1", features = ["macros", "time"] }
 tracing = "0.1"
 uuid = { version = "1", features = ["v4", "v5", "serde"] }
 

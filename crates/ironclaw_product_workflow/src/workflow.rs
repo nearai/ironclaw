@@ -16,6 +16,7 @@ use ironclaw_turns::{
     AcceptedMessageRef, AdmissionRejectionReason, GateRef, IdempotencyKey, TurnActor, TurnError,
     TurnErrorCategory, TurnRunId, TurnScope,
 };
+use sha2::{Digest, Sha256};
 use tracing::debug;
 
 use crate::action::{ActionDispatchKind, ActionFingerprintKey, SourceBindingKey};
@@ -509,18 +510,35 @@ fn interaction_accepted_message_ref(
     kind: &str,
     envelope: &ProductInboundEnvelope,
 ) -> Result<AcceptedMessageRef, ProductWorkflowError> {
-    let raw = format!(
-        "{}:{}:{}",
-        kind,
-        envelope.installation_id().as_str(),
-        envelope.external_event_id().as_str()
-    );
-    let stable_ref = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, raw.as_bytes());
+    let mut digest_input = Vec::new();
+    digest_input
+        .extend_from_slice(b"ironclaw_product_workflow:interaction_accepted_message_ref:v1");
+    push_length_prefixed_component(&mut digest_input, kind);
+    push_length_prefixed_component(&mut digest_input, envelope.installation_id().as_str());
+    push_length_prefixed_component(&mut digest_input, envelope.external_event_id().as_str());
+
+    let stable_ref = lower_hex(&Sha256::digest(&digest_input));
     AcceptedMessageRef::new(format!("interaction:{kind}:{stable_ref}")).map_err(|reason| {
         ProductWorkflowError::TurnSubmissionRejected {
             reason: format!("invalid interaction accepted message ref: {reason}"),
         }
     })
+}
+
+fn push_length_prefixed_component(bytes: &mut Vec<u8>, component: &str) {
+    let component_bytes = component.as_bytes();
+    bytes.extend_from_slice(&(component_bytes.len() as u64).to_be_bytes());
+    bytes.extend_from_slice(component_bytes);
+}
+
+fn lower_hex(bytes: &[u8]) -> String {
+    const LOWER_HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        encoded.push(char::from(LOWER_HEX[(byte >> 4) as usize]));
+        encoded.push(char::from(LOWER_HEX[(byte & 0x0f) as usize]));
+    }
+    encoded
 }
 
 fn approval_resolution_idempotency_key(

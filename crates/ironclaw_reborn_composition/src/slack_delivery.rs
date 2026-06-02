@@ -106,6 +106,11 @@ impl SlackFinalReplyDeliveryObserver {
                     .read_latest_assistant_text(&thread_scope, &binding, run_id)
                     .await?
                 else {
+                    tracing::warn!(
+                        %run_id,
+                        ?route_kind,
+                        "completed Slack run has no finalized assistant message; skipping final reply delivery"
+                    );
                     return Ok(());
                 };
                 (
@@ -119,6 +124,10 @@ impl SlackFinalReplyDeliveryObserver {
             }
             TurnStatus::BlockedApproval => {
                 let Some(gate_ref) = actionable_state.gate_ref.as_ref() else {
+                    tracing::warn!(
+                        %run_id,
+                        "Slack run is blocked on approval without a gate ref; skipping approval prompt delivery"
+                    );
                     return Ok(());
                 };
                 (
@@ -134,6 +143,10 @@ impl SlackFinalReplyDeliveryObserver {
             }
             TurnStatus::BlockedAuth => {
                 let Some(gate_ref) = actionable_state.gate_ref.as_ref() else {
+                    tracing::warn!(
+                        %run_id,
+                        "Slack run is blocked on auth without a gate ref; skipping auth prompt delivery"
+                    );
                     return Ok(());
                 };
                 (
