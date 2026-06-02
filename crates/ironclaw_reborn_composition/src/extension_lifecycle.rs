@@ -1528,6 +1528,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn commit_activation_publish_failure_preserves_previously_enabled_extension() {
+        let lifecycle_sink = Arc::new(RecordingLifecycleSink::default());
+        let lifecycle_service = ExtensionLifecycleService::new(ExtensionRegistry::new())
+            .with_event_sink(lifecycle_sink.clone());
+        let (_dir, _storage_root, port, _active_registry, installation_store) =
+            extension_management_port_fixture_with_catalog_service_and_trust_policy(
+                AvailableExtensionCatalog::from_packages(vec![fixture_extension_package()]),
+                lifecycle_service,
+                Arc::new(HostTrustPolicy::fail_closed()),
+            );
+        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
+            .expect("valid ref");
+        let extension_id = ExtensionId::new("fixture").expect("valid extension id");
+        let installation_id = ExtensionInstallationId::new("fixture").expect("valid installation");
+
+        port.install(package_ref.clone())
+            .await
+            .expect("install extension");
+        installation_store
+            .set_activation_state(&installation_id, ExtensionActivationState::Enabled)
+            .await
+            .expect("seed enabled installation");
+        let error = port
+            .commit_activation(
+                package_ref,
+                &extension_id,
+                &installation_id,
+                ExtensionActivationState::Enabled,
+                fixture_extension_package().package,
+            )
+            .await
+            .expect_err("publish failure is reported");
+
+        assert!(matches!(
+            error,
+            ProductWorkflowError::InvalidBindingRequest { .. }
+        ));
+        assert_eq!(
+            fixture_installation_state(installation_store.as_ref()).await,
+            ExtensionActivationState::Enabled
+        );
+        let operations = lifecycle_sink.operations();
+        assert!(operations.contains(&ExtensionLifecycleOperation::Enable));
+        assert!(!operations.contains(&ExtensionLifecycleOperation::Disable));
+    }
+
+    #[tokio::test]
     async fn active_extension_trust_policy_is_digest_pinned() {
         let (_dir, _storage_root, port, _active_registry, _installation_store, trust_policy) =
             extension_management_port_fixture_with_catalog_service_and_trust(
