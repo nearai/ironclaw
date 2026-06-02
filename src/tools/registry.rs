@@ -310,7 +310,7 @@ impl ToolRegistry {
             return;
         }
         if self.is_disabled(&name) {
-            tracing::warn!(
+            tracing::debug!(
                 tool = %name,
                 reason = "DISABLE_TOOLS_LIST",
                 "Rejected tool registration: name is on the kill-switch deny-list"
@@ -343,7 +343,7 @@ impl ToolRegistry {
             return;
         }
         if self.is_disabled(&name) {
-            tracing::warn!(
+            tracing::debug!(
                 tool = %name,
                 reason = "DISABLE_TOOLS_LIST",
                 "Rejected tool registration: name is on the kill-switch deny-list"
@@ -927,7 +927,7 @@ impl ToolRegistry {
         let tool = Arc::new(tool);
         let name = tool.name().to_string();
         if self.is_disabled(&name) {
-            tracing::warn!(
+            tracing::debug!(
                 tool = %name,
                 reason = "DISABLE_TOOLS_LIST",
                 "Rejected message tool registration: name is on the kill-switch deny-list"

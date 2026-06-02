@@ -267,6 +267,8 @@ impl ToolDispatcher {
             crate::tools::registry::DISABLE_TOOLS_DENIAL_PREFIX
         );
 
+        let source_label = source.to_string();
+
         // `debug!` not `warn!`: dispatch reachable from REPL/TUI where
         // warn corrupts terminal. Alerting surface = persisted ActionRecord
         // with `DISABLE_TOOLS_DENIAL_PREFIX`. Params raw here (tool
@@ -274,7 +276,7 @@ impl ToolDispatcher {
         debug!(
             tool = %tool_name,
             user_id = %user_id,
-            source = %source,
+            source = %source_label,
             reason = "DISABLE_TOOLS_LIST",
             "tool dispatch denied by operator kill-switch"
         );
@@ -284,7 +286,6 @@ impl ToolDispatcher {
         // declared) — we record only the raw input shape, which is bounded
         // by JSON-Schema validation on legitimate callers and by the agent
         // tool-call surface on LLM callers.
-        let source_label = source.to_string();
         match self.store.create_system_job(user_id, &source_label).await {
             Ok(job_id) => {
                 let action = ActionRecord::new(0, tool_name, params.clone())
