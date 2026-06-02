@@ -63,3 +63,24 @@ extension boundaries.
 - Phase 3/4: `cargo test -p ironclaw_first_party_extensions`
 - Port contract changes: `cargo test -p ironclaw_first_party_extension_ports`
 - Dependency changes: `cargo test -p ironclaw_architecture reborn_crate_dependency_boundaries_hold`
+
+## 2026-06-02 Reborn WASM Parity Slice
+
+- Drive, Docs, Sheets, and Slides now port as host-bundled WASM packages under
+  `crates/ironclaw_first_party_extensions/assets/`.
+- Each product exposes operation-level Reborn capability IDs instead of a mixed
+  `*.execute` tool. The WASM wrappers derive the hidden v1 action discriminator
+  from the host invocation context, so model input cannot select a different
+  operation.
+- Read capabilities omit `external_write`; mutating capabilities include it.
+  The lifecycle summary therefore exposes read-only GSuite operations without
+  granting writes.
+- Each operation has a schema/prompt asset and declares the required Google
+  provider scope in `runtime_credentials.provider_scopes`:
+  Drive `drive`, Docs `documents`, Sheets `spreadsheets`, Slides
+  `presentations`.
+- Host-runtime credential obligations now preserve provider scopes into product
+  auth account selection and auth-required recovery. Caller-level coverage
+  exercises `google-drive.list_files` through `HostRuntimeServices`, staged
+  product-auth credential resolution, host-mediated HTTP egress, and bearer
+  injection.

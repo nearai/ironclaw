@@ -1,0 +1,31 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Google Docs insert_table",
+  "description": "Insert a table.",
+  "type": "object",
+  "required": [
+    "document_id",
+    "rows",
+    "columns",
+    "index"
+  ],
+  "properties": {
+    "document_id": {
+      "type": "string",
+      "description": "The document ID."
+    },
+    "rows": {
+      "type": "integer",
+      "description": "Number of rows."
+    },
+    "columns": {
+      "type": "integer",
+      "description": "Number of columns."
+    },
+    "index": {
+      "type": "integer",
+      "description": "Character index."
+    }
+  },
+  "additionalProperties": false
+}

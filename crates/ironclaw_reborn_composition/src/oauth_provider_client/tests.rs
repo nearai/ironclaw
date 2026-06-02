@@ -112,6 +112,36 @@ async fn google_exchange_fails_closed_when_response_omits_scope() {
 }
 
 #[tokio::test]
+async fn exchange_maps_provider_5xx_to_retryable_backend_unavailable() {
+    let egress = Arc::new(RecordingEgress::with_status(
+        503,
+        br#"{"error":"temporarily_unavailable"}"#.to_vec(),
+    ));
+    let client = HostOAuthProviderClient::new(
+        google_spec(),
+        egress,
+        Arc::new(RecordingSecretStore::recording()),
+        Arc::new(NoopObligationHandler),
+        OAuthClientId::new("google-client").unwrap(),
+        OAuthRedirectUri::new("https://app.example/callback").unwrap(),
+    )
+    .unwrap();
+
+    let error = client
+        .exchange_callback(
+            exchange_context(),
+            callback_request("google", "work google", &["gmail.readonly"]),
+        )
+        .await
+        .expect_err("provider 5xx should be retryable");
+
+    assert_eq!(
+        error.code(),
+        ironclaw_auth::AuthErrorCode::BackendUnavailable
+    );
+}
+
+#[tokio::test]
 async fn exchange_request_includes_client_secret_and_derived_network_policy_host() {
     let egress = Arc::new(RecordingEgress::ok(
             br#"{"access_token":"access-token","refresh_token":"refresh-token","scope":"gmail.readonly","expires_in":3600}"#.to_vec(),
@@ -149,6 +179,43 @@ async fn exchange_request_includes_client_secret_and_derived_network_policy_host
     assert_eq!(
         body.get("client_secret").map(String::as_str),
         Some("google-secret")
+    );
+}
+
+#[tokio::test]
+async fn exchange_uses_dynamic_client_material_and_binds_refresh_secret() {
+    let egress = Arc::new(RecordingEgress::ok(
+        br#"{"access_token":"access-token","refresh_token":"refresh-token","expires_in":3600}"#
+            .to_vec(),
+    ));
+    let material_source = Arc::new(RecordingMaterialSource::new());
+    let client = HostOAuthProviderClient::new_with_client_material(
+        notion_spec(),
+        egress.clone(),
+        Arc::new(InMemorySecretStore::new()),
+        Arc::new(NoopObligationHandler),
+        material_source.clone(),
+    )
+    .unwrap();
+    let context = exchange_context();
+    let flow_id = context.flow_id;
+
+    client
+        .exchange_callback(context, callback_request("notion", "notion", &[]))
+        .await
+        .expect("exchange succeeds");
+
+    let request = egress.single_request();
+    assert_eq!(request.url, "https://issuer.example/token");
+    let body = form_params(&request.body);
+    assert_eq!(
+        body.get("client_id").map(String::as_str),
+        Some("dcr-client")
+    );
+    assert_eq!(
+        material_source.bound_flow_ids(),
+        vec![flow_id],
+        "refresh-capable exchanges must bind the DCR client material to the refresh secret"
     );
 }
 
@@ -209,11 +276,11 @@ async fn refresh_request_uses_stored_refresh_token_and_preserves_scope_fallback(
 #[test]
 fn token_endpoint_host_is_derived_and_rejects_non_https_endpoints() {
     assert_eq!(
-        token_endpoint_host("https://oauth2.googleapis.com/token").unwrap(),
+        oauth_endpoint_host("https://oauth2.googleapis.com/token").unwrap(),
         "oauth2.googleapis.com"
     );
     assert_eq!(
-        token_endpoint_host("http://oauth2.googleapis.com/token")
+        oauth_endpoint_host("http://oauth2.googleapis.com/token")
             .expect_err("http endpoints are rejected")
             .code(),
         ironclaw_auth::AuthErrorCode::BackendUnavailable
@@ -426,13 +493,82 @@ impl RuntimeHttpEgress for NoopEgress {
 
 #[derive(Debug)]
 struct RecordingEgress {
+    status: u16,
     response_body: Vec<u8>,
     requests: Mutex<Vec<RuntimeHttpEgressRequest>>,
 }
 
+#[derive(Debug)]
+struct RecordingMaterialSource {
+    bound_flow_ids: Mutex<Vec<AuthFlowId>>,
+}
+
+impl RecordingMaterialSource {
+    fn new() -> Self {
+        Self {
+            bound_flow_ids: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn bound_flow_ids(&self) -> Vec<AuthFlowId> {
+        self.bound_flow_ids.lock().unwrap().clone()
+    }
+
+    fn material(&self) -> OAuthClientMaterial {
+        OAuthClientMaterial {
+            client_id: OAuthClientId::new("dcr-client").unwrap(),
+            client_secret: None,
+            redirect_uri: OAuthRedirectUri::new("https://app.example/callback").unwrap(),
+            token_endpoint: "https://issuer.example/token".to_string(),
+        }
+    }
+}
+
+#[async_trait]
+impl OAuthClientMaterialSource for RecordingMaterialSource {
+    async fn exchange_material(
+        &self,
+        _scope: &ResourceScope,
+        _flow_id: AuthFlowId,
+    ) -> Result<OAuthClientMaterial, AuthProductError> {
+        Ok(self.material())
+    }
+
+    async fn refresh_material(
+        &self,
+        _scope: &ResourceScope,
+        _refresh_secret: &SecretHandle,
+    ) -> Result<OAuthClientMaterial, AuthProductError> {
+        Ok(self.material())
+    }
+
+    async fn bind_refresh_material(
+        &self,
+        _scope: &ResourceScope,
+        flow_id: AuthFlowId,
+        _refresh_secret: &SecretHandle,
+    ) -> Result<(), AuthProductError> {
+        self.bound_flow_ids.lock().unwrap().push(flow_id);
+        Ok(())
+    }
+
+    async fn cleanup_exchange_material(
+        &self,
+        _scope: &ResourceScope,
+        _flow_id: AuthFlowId,
+    ) -> Result<(), AuthProductError> {
+        Ok(())
+    }
+}
+
 impl RecordingEgress {
     fn ok(response_body: Vec<u8>) -> Self {
+        Self::with_status(200, response_body)
+    }
+
+    fn with_status(status: u16, response_body: Vec<u8>) -> Self {
         Self {
+            status,
             response_body,
             requests: Mutex::new(Vec::new()),
         }
@@ -453,7 +589,7 @@ impl RuntimeHttpEgress for RecordingEgress {
     ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
         self.requests.lock().unwrap().push(request);
         Ok(RuntimeHttpEgressResponse {
-            status: 200,
+            status: self.status,
             headers: vec![("content-type".to_string(), "application/json".to_string())],
             body: self.response_body.clone(),
             saved_body: None,

@@ -1,0 +1,21 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Google Sheets clear_values",
+  "description": "Clear values from a range.",
+  "type": "object",
+  "required": [
+    "spreadsheet_id",
+    "range"
+  ],
+  "properties": {
+    "spreadsheet_id": {
+      "type": "string",
+      "description": "The spreadsheet ID."
+    },
+    "range": {
+      "type": "string",
+      "description": "A1 notation range to clear."
+    }
+  },
+  "additionalProperties": false
+}

@@ -408,6 +408,7 @@ async fn runtime_auth_gate_forwards_credential_requirements() {
     let requirement = RuntimeCredentialAuthRequirement {
         provider: RuntimeCredentialAccountProviderId::new("github").unwrap(),
         requester_extension: provider_id.clone(),
+        provider_scopes: Vec::new(),
     };
     let port = runtime_capability_port(
         &capability_id,

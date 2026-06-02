@@ -13,16 +13,25 @@ use ironclaw_host_runtime::ProductAuthProviderRuntimePorts;
 use ironclaw_secrets::SecretStore;
 
 use crate::RebornBuildError;
-use crate::input::OAuthProviderBackendConfig;
+use crate::input::{OAuthDcrProviderBackendConfig, OAuthProviderBackendConfig};
+use crate::oauth_dcr::{OAuthDcrProvider, OAuthDcrProviderRegistry};
 use crate::oauth_provider_client::HostOAuthProviderClient;
+
+#[derive(Clone)]
+pub(crate) struct OAuthProviderComposition {
+    pub(crate) client: Option<Arc<dyn AuthProviderClient>>,
+    pub(crate) dcr_registry: Option<Arc<OAuthDcrProviderRegistry>>,
+}
 
 pub(crate) fn compose_provider_client(
     configs: Vec<OAuthProviderBackendConfig>,
+    dcr_configs: Vec<OAuthDcrProviderBackendConfig>,
     secret_store: Arc<dyn SecretStore>,
     runtime_ports: ProductAuthProviderRuntimePorts,
-) -> Result<Option<Arc<dyn AuthProviderClient>>, RebornBuildError> {
+) -> Result<OAuthProviderComposition, RebornBuildError> {
     compose_provider_client_with_runtime(
         configs,
+        dcr_configs,
         secret_store,
         OAuthProviderRuntimePorts::from_product_auth_ports(runtime_ports),
     )
@@ -30,9 +39,10 @@ pub(crate) fn compose_provider_client(
 
 fn compose_provider_client_with_runtime(
     configs: Vec<OAuthProviderBackendConfig>,
+    dcr_configs: Vec<OAuthDcrProviderBackendConfig>,
     secret_store: Arc<dyn SecretStore>,
     runtime_ports: OAuthProviderRuntimePorts,
-) -> Result<Option<Arc<dyn AuthProviderClient>>, RebornBuildError> {
+) -> Result<OAuthProviderComposition, RebornBuildError> {
     let mut clients = Vec::new();
     for config in configs {
         let provider_id = config.spec.provider_id;
@@ -54,7 +64,43 @@ fn compose_provider_client_with_runtime(
         }
         clients.push((provider_id, Arc::new(client) as Arc<dyn AuthProviderClient>));
     }
-    Ok(compose_provider_clients(clients))
+    let mut dcr_providers = Vec::new();
+    for config in dcr_configs {
+        let provider_id = config.config.spec.provider_id;
+        let provider = Arc::new(
+            OAuthDcrProvider::new(
+                config.config,
+                runtime_ports.runtime_http_egress(),
+                Arc::clone(&secret_store),
+                runtime_ports.obligation_handler(),
+            )
+            .map_err(|error| RebornBuildError::InvalidConfig {
+                reason: format!(
+                    "{provider_id} DCR OAuth provider backend could not be configured: {error}"
+                ),
+            })?,
+        );
+        let client = HostOAuthProviderClient::new_with_client_material(
+            provider.spec().clone(),
+            runtime_ports.runtime_http_egress(),
+            Arc::clone(&secret_store),
+            runtime_ports.obligation_handler(),
+            provider.clone(),
+        )
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!(
+                "{provider_id} DCR OAuth provider backend could not be configured: {error}"
+            ),
+        })?;
+        clients.push((provider_id, Arc::new(client) as Arc<dyn AuthProviderClient>));
+        dcr_providers.push(provider);
+    }
+    let dcr_registry =
+        (!dcr_providers.is_empty()).then(|| Arc::new(OAuthDcrProviderRegistry::new(dcr_providers)));
+    Ok(OAuthProviderComposition {
+        client: compose_provider_clients(clients),
+        dcr_registry,
+    })
 }
 
 #[derive(Clone)]
@@ -222,10 +268,12 @@ mod tests {
                     client: oauth_client("notion-client", "https://app.example/oauth/notion"),
                 },
             ],
+            Vec::new(),
             Arc::new(InMemorySecretStore::new()),
             OAuthProviderRuntimePorts::new(egress.clone(), Arc::new(NoopObligationHandler)),
         )
         .expect("provider client composition")
+        .client
         .expect("mux client");
 
         client

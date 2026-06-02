@@ -2,7 +2,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::{StreamExt, stream};
-use ironclaw_auth::{AuthProviderId, CredentialAccountLabel, OAuthAuthorizationUrl};
+use ironclaw_auth::{
+    AuthProductError, AuthProviderId, CredentialAccountLabel, OAuthAuthorizationUrl,
+};
 #[cfg(test)]
 use ironclaw_event_projections::CapabilityActivityProjection;
 use ironclaw_event_projections::{
@@ -94,13 +96,16 @@ pub trait AuthChallengeProvider: Send + Sync {
     /// Return the projection-safe challenge view for the given gate ref and
     /// caller scope, or `None` if the auth flow cannot be found (already
     /// consumed, not yet created, wrong scope, or record source unavailable).
+    /// Fallible challenge creation, such as DCR discovery/registration, must
+    /// surface errors instead of silently degrading to a missing challenge.
     async fn challenge_for_gate(
         &self,
         scope: &TurnScope,
         owner_user_id: &UserId,
         run_id: TurnRunId,
         gate_ref: &str,
-    ) -> Option<AuthChallengeView>;
+        credential_requirements: &[ironclaw_host_api::RuntimeCredentialAuthRequirement],
+    ) -> Result<Option<AuthChallengeView>, AuthProductError>;
 }
 
 pub(crate) use display_preview::{CapabilityDisplayPreviewResult, CapabilityDisplayPreviewStore};
