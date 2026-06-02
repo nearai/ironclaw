@@ -35,10 +35,14 @@ use crate::webui_serve::{PublicRouteDrain, PublicRouteMount};
 
 mod installation;
 pub use installation::{
-    ResolvedSlackInstallation, SlackEnvelopeMetadata, SlackIngressError, SlackIngressService,
-    SlackInstallationRateLimitConfig, SlackInstallationRecord, SlackInstallationResolver,
-    SlackInstallationSelector, StaticSlackInstallationResolver,
+    ResolvedSlackIngress, ResolvedSlackInstallation, SlackApiAppId, SlackChannelId,
+    SlackEnterpriseId, SlackEnvelopeMetadata, SlackIngressError, SlackInstallationRateLimitConfig,
+    SlackInstallationRateLimiter, SlackInstallationRecord, SlackInstallationResolver,
+    SlackInstallationSelector, SlackTeamId, SlackUserId, StaticSlackInstallationResolver,
 };
+
+#[cfg(test)]
+mod handler_tests;
 
 pub const SLACK_EVENTS_PATH: &str = "/webhooks/slack/events";
 const SLACK_EVENTS_ROUTE_ID: &str = "slack.events";
@@ -85,6 +89,66 @@ impl SlackEventsWebhookDispatcher for NativeProductAdapterRunner {
 
     fn drain_immediate_ack_tasks<'a>(&'a self) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
         Box::pin(NativeProductAdapterRunner::drain_immediate_ack_tasks(self))
+    }
+}
+
+#[derive(Clone)]
+pub struct SlackIngressService {
+    resolver: Arc<dyn SlackInstallationResolver>,
+    installation_rate_limiter: SlackInstallationRateLimiter,
+}
+
+impl SlackIngressService {
+    pub fn new(resolver: Arc<dyn SlackInstallationResolver>) -> Self {
+        Self::with_rate_limit_config(resolver, SlackInstallationRateLimitConfig::default())
+    }
+
+    pub fn with_rate_limit_config(
+        resolver: Arc<dyn SlackInstallationResolver>,
+        rate_limit: SlackInstallationRateLimitConfig,
+    ) -> Self {
+        Self {
+            resolver,
+            installation_rate_limiter: SlackInstallationRateLimiter::new(rate_limit),
+        }
+    }
+
+    async fn handle_events(&self, headers: HeaderMap, body: Bytes) -> Response {
+        let ingress = match self.resolver.resolve_ingress(&headers, body.as_ref()).await {
+            Ok(ingress) => ingress,
+            Err(error) => return ingress_error_response(error),
+        };
+        if let Err(error) = self.installation_rate_limiter.check(ingress.installation()) {
+            return ingress_error_response(error);
+        }
+
+        match ingress {
+            ResolvedSlackIngress::UrlVerification { challenge, .. } => {
+                (StatusCode::OK, challenge).into_response()
+            }
+            ResolvedSlackIngress::Event { installation, .. } => match installation
+                .dispatcher()
+                .process_verified_webhook_immediate_ack(body.as_ref(), installation.evidence())
+                .await
+            {
+                Ok(_) => (StatusCode::OK, "ok").into_response(),
+                Err(error) => runner_error_response(error),
+            },
+        }
+    }
+
+    pub async fn drain_installations(&self) {
+        self.resolver.drain_installations().await;
+    }
+}
+
+impl std::fmt::Debug for SlackIngressService {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SlackIngressService")
+            .field("resolver", &"Arc<dyn SlackInstallationResolver>")
+            .field("installation_rate_limiter", &self.installation_rate_limiter)
+            .finish()
     }
 }
 
@@ -296,12 +360,10 @@ mod tests {
 
     use async_trait::async_trait;
     use axum::body::Body;
-    use axum::http::{HeaderValue, Request};
+    use axum::http::Request;
     use http_body_util::BodyExt;
     use ironclaw_host_api::TenantId;
-    use ironclaw_product_adapters::auth::{
-        mark_request_signature_verified, mark_shared_secret_header_verified,
-    };
+    use ironclaw_product_adapters::auth::mark_request_signature_verified;
     use ironclaw_product_adapters::capabilities::ProductAdapterCapabilities;
     use ironclaw_product_adapters::external::{
         ExternalActorRef, ExternalConversationRef, ExternalEventId,
@@ -316,6 +378,7 @@ mod tests {
         ProjectionSubscriptionRequest, ProtocolAuthEvidence, ProtocolAuthFailure,
         ProtocolHttpEgress, UserMessagePayload,
     };
+    use ironclaw_slack_v2_adapter::SlackPayloadParseError;
     use ironclaw_wasm_product_adapters::{
         NativeProductAdapterRunnerConfig, SharedSecretHeaderAuth, WebhookAuth,
     };
@@ -388,33 +451,51 @@ mod tests {
     }
 
     impl SlackInstallationResolver for FakeSlackResolver {
-        fn resolve_installation<'a>(
+        fn resolve_ingress<'a>(
             &'a self,
             headers: &'a HeaderMap,
             body: &'a [u8],
         ) -> Pin<
-            Box<
-                dyn Future<Output = Result<ResolvedSlackInstallation, SlackIngressError>>
-                    + Send
-                    + 'a,
-            >,
+            Box<dyn Future<Output = Result<ResolvedSlackIngress, SlackIngressError>> + Send + 'a>,
         > {
             Box::pin(async move {
                 let evidence = self.dispatcher.verify_webhook_auth(headers, body)?;
-                Ok(ResolvedSlackInstallation::new(
+                let installation = ResolvedSlackInstallation::new(
                     tenant_id("tenant-alpha"),
                     installation_id("install-alpha"),
-                    SlackEnvelopeMetadata {
-                        team_id: Some("T-alpha".to_string()),
-                        enterprise_id: None,
-                        api_app_id: Some("A-alpha".to_string()),
-                        install_user_id: Some("U-install-alpha".to_string()),
-                        event_user_id: Some("U123".to_string()),
-                        event_channel_id: Some("D123".to_string()),
-                    },
                     evidence,
                     Arc::clone(&self.dispatcher),
-                ))
+                );
+                let value: serde_json::Value = serde_json::from_slice(body).map_err(|err| {
+                    SlackIngressError::Envelope(SlackPayloadParseError::InvalidJson {
+                        reason: err.to_string(),
+                    })
+                })?;
+                if value.get("type").and_then(|kind| kind.as_str()) == Some("url_verification") {
+                    let challenge = value
+                        .get("challenge")
+                        .and_then(|challenge| challenge.as_str())
+                        .ok_or_else(|| {
+                            SlackIngressError::Envelope(SlackPayloadParseError::InvalidJson {
+                                reason: "missing challenge".into(),
+                            })
+                        })?;
+                    return Ok(ResolvedSlackIngress::UrlVerification {
+                        installation,
+                        challenge: challenge.to_string(),
+                    });
+                }
+                Ok(ResolvedSlackIngress::Event {
+                    installation,
+                    metadata: SlackEnvelopeMetadata::new(
+                        Some(SlackTeamId::new("T-alpha")),
+                        None,
+                        Some(SlackApiAppId::new("A-alpha")),
+                        Some(SlackUserId::new("U-install-alpha")),
+                        Some(SlackUserId::new("U123")),
+                        Some(SlackChannelId::new("D123")),
+                    ),
+                })
             })
         }
 
@@ -422,60 +503,6 @@ mod tests {
             Box::pin(async move {
                 self.dispatcher.drain_immediate_ack_tasks().await;
             })
-        }
-    }
-
-    struct HeaderSecretDispatcher {
-        expected_secret: &'static str,
-        subject: &'static str,
-        dispatch_calls: Arc<AtomicUsize>,
-    }
-
-    impl HeaderSecretDispatcher {
-        fn new(expected_secret: &'static str, subject: &'static str) -> Self {
-            Self {
-                expected_secret,
-                subject,
-                dispatch_calls: Arc::new(AtomicUsize::new(0)),
-            }
-        }
-    }
-
-    impl SlackEventsWebhookDispatcher for HeaderSecretDispatcher {
-        fn verify_webhook_auth(
-            &self,
-            headers: &HeaderMap,
-            _body: &[u8],
-        ) -> Result<ProtocolAuthEvidence, RunnerError> {
-            if headers
-                .get("X-Test-Secret")
-                .and_then(|value| value.to_str().ok())
-                == Some(self.expected_secret)
-            {
-                return Ok(mark_shared_secret_header_verified(
-                    "X-Test-Secret",
-                    self.subject,
-                ));
-            }
-            Err(RunnerError::AuthenticationFailed {
-                failure: ProtocolAuthFailure::SignatureMismatch,
-            })
-        }
-
-        fn process_verified_webhook_immediate_ack<'a>(
-            &'a self,
-            _body: &'a [u8],
-            _evidence: &'a ProtocolAuthEvidence,
-        ) -> Pin<Box<dyn Future<Output = Result<WebhookProcessOutcome, RunnerError>> + Send + 'a>>
-        {
-            self.dispatch_calls.fetch_add(1, Ordering::SeqCst);
-            Box::pin(async { Ok(WebhookProcessOutcome::AcceptedForAsyncDispatch) })
-        }
-
-        fn drain_immediate_ack_tasks<'a>(
-            &'a self,
-        ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
-            Box::pin(async {})
         }
     }
 
@@ -649,83 +676,6 @@ mod tests {
             .expect("router should respond")
     }
 
-    const TEAM_A_BODY: &str = r#"{
-        "type": "event_callback",
-        "team_id": "T-A",
-        "api_app_id": "A-slack",
-        "event_id": "Ev-A",
-        "event": {
-            "type": "message",
-            "channel_type": "im",
-            "user": "U123",
-            "channel": "D-A",
-            "text": "hello from A",
-            "ts": "1710000000.000001"
-        }
-    }"#;
-
-    const TEAM_B_BODY: &str = r#"{
-        "type": "event_callback",
-        "team_id": "T-B",
-        "api_app_id": "A-slack",
-        "event_id": "Ev-B",
-        "event": {
-            "type": "message",
-            "channel_type": "im",
-            "user": "U123",
-            "channel": "D-B",
-            "text": "hello from B",
-            "ts": "1710000000.000002"
-        }
-    }"#;
-
-    fn secret_headers(secret: &'static str) -> Vec<(&'static str, &'static str)> {
-        vec![("X-Test-Secret", secret)]
-    }
-
-    fn header_map(secret: &'static str) -> HeaderMap {
-        let mut headers = HeaderMap::new();
-        headers.insert("X-Test-Secret", HeaderValue::from_static(secret));
-        headers
-    }
-
-    fn static_resolver_fixture() -> (
-        StaticSlackInstallationResolver,
-        Arc<HeaderSecretDispatcher>,
-        Arc<HeaderSecretDispatcher>,
-    ) {
-        let dispatcher_a = Arc::new(HeaderSecretDispatcher::new("secret-a", "install-a"));
-        let dispatcher_b = Arc::new(HeaderSecretDispatcher::new("secret-b", "install-b"));
-        let resolver = StaticSlackInstallationResolver::new(vec![
-            SlackInstallationRecord::new(
-                tenant_id("tenant-a"),
-                installation_id("install-a"),
-                SlackInstallationSelector::team("T-A"),
-                dispatcher_a.clone(),
-            ),
-            SlackInstallationRecord::new(
-                tenant_id("tenant-b"),
-                installation_id("install-b"),
-                SlackInstallationSelector::team("T-B"),
-                dispatcher_b.clone(),
-            ),
-        ]);
-        (resolver, dispatcher_a, dispatcher_b)
-    }
-
-    fn static_resolver_mount(
-        rate_limit: SlackInstallationRateLimitConfig,
-    ) -> (
-        PublicRouteMount,
-        Arc<HeaderSecretDispatcher>,
-        Arc<HeaderSecretDispatcher>,
-    ) {
-        let (resolver, dispatcher_a, dispatcher_b) = static_resolver_fixture();
-        let service = SlackIngressService::with_rate_limit_config(Arc::new(resolver), rate_limit);
-        let mount = slack_events_route_mount(SlackEventsRouteState::new(service));
-        (mount, dispatcher_a, dispatcher_b)
-    }
-
     async fn assert_error_body(response: Response, expected: &str) {
         let bytes = response
             .into_body()
@@ -827,70 +777,6 @@ mod tests {
             .to_bytes();
         assert_eq!(&bytes[..], b"ok");
         assert_eq!(calls.load(Ordering::SeqCst), 1);
-    }
-
-    #[tokio::test]
-    async fn static_resolver_routes_same_slack_user_by_verified_workspace_installation() {
-        let (resolver, _, _) = static_resolver_fixture();
-
-        let install_a = resolver
-            .resolve_installation(&header_map("secret-a"), TEAM_A_BODY.as_bytes())
-            .await
-            .expect("team A resolves");
-        let install_b = resolver
-            .resolve_installation(&header_map("secret-b"), TEAM_B_BODY.as_bytes())
-            .await
-            .expect("team B resolves");
-
-        assert_eq!(install_a.tenant_id().as_str(), "tenant-a");
-        assert_eq!(install_a.adapter_installation_id().as_str(), "install-a");
-        assert_eq!(install_a.metadata().event_user_id.as_deref(), Some("U123"));
-        assert_eq!(install_b.tenant_id().as_str(), "tenant-b");
-        assert_eq!(install_b.adapter_installation_id().as_str(), "install-b");
-        assert_eq!(install_b.metadata().event_user_id.as_deref(), Some("U123"));
-    }
-
-    #[tokio::test]
-    async fn slack_events_handler_dispatches_workspace_b_to_install_b_runner() {
-        let (mount, dispatcher_a, dispatcher_b) =
-            static_resolver_mount(SlackInstallationRateLimitConfig::default());
-        let response = post_to_mount(&mount, TEAM_B_BODY, secret_headers("secret-b")).await;
-
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(dispatcher_a.dispatch_calls.load(Ordering::SeqCst), 0);
-        assert_eq!(dispatcher_b.dispatch_calls.load(Ordering::SeqCst), 1);
-    }
-
-    #[tokio::test]
-    async fn slack_events_handler_rejects_workspace_b_with_install_a_secret_context() {
-        let (mount, dispatcher_a, dispatcher_b) =
-            static_resolver_mount(SlackInstallationRateLimitConfig::default());
-        let response = post_to_mount(&mount, TEAM_B_BODY, secret_headers("secret-a")).await;
-
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-        assert_error_body(response, "authentication").await;
-        assert_eq!(dispatcher_a.dispatch_calls.load(Ordering::SeqCst), 0);
-        assert_eq!(dispatcher_b.dispatch_calls.load(Ordering::SeqCst), 0);
-    }
-
-    #[tokio::test]
-    async fn slack_events_handler_rate_limits_after_auth_by_installation() {
-        let rate_limit = SlackInstallationRateLimitConfig::new(
-            NonZeroU32::new(1).expect("nonzero"),
-            Duration::from_secs(60),
-        );
-        let (mount, dispatcher_a, dispatcher_b) = static_resolver_mount(rate_limit);
-
-        let first_a = post_to_mount(&mount, TEAM_A_BODY, secret_headers("secret-a")).await;
-        let second_a = post_to_mount(&mount, TEAM_A_BODY, secret_headers("secret-a")).await;
-        let first_b = post_to_mount(&mount, TEAM_B_BODY, secret_headers("secret-b")).await;
-
-        assert_eq!(first_a.status(), StatusCode::OK);
-        assert_eq!(second_a.status(), StatusCode::TOO_MANY_REQUESTS);
-        assert_error_body(second_a, "capacity").await;
-        assert_eq!(first_b.status(), StatusCode::OK);
-        assert_eq!(dispatcher_a.dispatch_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(dispatcher_b.dispatch_calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

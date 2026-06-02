@@ -66,7 +66,7 @@ mod runtime;
 mod runtime_input;
 mod skill_listing;
 #[cfg(feature = "slack-v2-host-beta")]
-mod slack_serve;
+pub mod slack_serve;
 #[cfg(feature = "test-support")]
 pub mod test_support;
 mod web_access;
@@ -151,11 +151,8 @@ pub use runtime_input::{
 pub use skill_listing::{RebornSkillListError, list_reborn_local_skills};
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack_serve::{
-    ResolvedSlackInstallation, SLACK_EVENTS_PATH, SlackEnvelopeMetadata, SlackEventsRouteState,
-    SlackEventsWebhookDispatcher, SlackIngressError, SlackIngressService,
-    SlackInstallationRateLimitConfig, SlackInstallationRecord, SlackInstallationResolver,
-    SlackInstallationSelector, StaticSlackInstallationResolver, slack_events_route_descriptors,
-    slack_events_route_mount,
+    SLACK_EVENTS_PATH, SlackEventsRouteState, SlackEventsWebhookDispatcher,
+    slack_events_route_descriptors, slack_events_route_mount,
 };
 pub use webui::{RebornWebuiBundle, build_webui_services};
 #[cfg(feature = "webui-v2-beta")]
