@@ -1544,10 +1544,7 @@ async fn public_route_mount_is_merged_without_bearer_auth_and_keeps_descriptor_p
     )
     .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
     .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
-    .with_public_route_mount(PublicRouteMount {
-        router: public,
-        descriptors: vec![descriptor],
-    });
+    .with_public_route_mount(PublicRouteMount::new(public, vec![descriptor]));
     let app = webui_v2_app(bundle, config).expect("webui v2 app");
 
     // No Authorization header — `with_public_route_mount` MUST

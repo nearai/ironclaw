@@ -180,10 +180,7 @@ pub fn webui_v2_auth_router(config: OAuthRouterConfig) -> PublicRouteMount {
         .route(PATH_LOGOUT, post(logout_handler))
         .with_state(state);
 
-    PublicRouteMount {
-        router,
-        descriptors: sso_route_descriptors(),
-    }
+    PublicRouteMount::new(router, sso_route_descriptors())
 }
 
 // ── descriptors ───────────────────────────────────────────────────────

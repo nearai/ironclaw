@@ -4,6 +4,16 @@
 //! result is available. This extension keeps the verified parse/stamp/admission
 //! preparation shared with the synchronous runner path, then schedules bounded
 //! workflow dispatch after the protocol ACK is safe to return.
+//!
+//! # Delivery contract
+//!
+//! Immediate-ACK dispatch deliberately changes retry semantics. Once this path
+//! returns a protocol-level 2xx, transports such as Slack will not redeliver the
+//! event even if the asynchronous workflow later returns
+//! [`InboundRetryDisposition::Retry`]. The runner logs that case as a potential
+//! permanent drop, but hosts that need post-ACK retry guarantees must first land
+//! the event in a durable queue/tracked runtime before acknowledging the
+//! transport.
 
 use std::sync::Arc;
 

@@ -33,6 +33,8 @@
 //! surfaces to keep host auth host-owned and route/body/CORS security
 //! in gateway-owned code; the Reborn binary owns this stack itself.
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use axum::{
@@ -163,6 +165,12 @@ pub struct WebuiServeConfig {
     pub(crate) google_oauth: Option<GoogleOAuthRouteConfig>,
 }
 
+/// Async drain hook for public route mounts that schedule work outside the
+/// request/response future.
+pub trait PublicRouteDrain: Send + Sync {
+    fn drain<'a>(&'a self) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
+}
+
 /// A host-supplied public sub-router plus the descriptors composition
 /// needs to install the per-route policy middleware around it.
 /// Mirrors the shape `ProductAuthRouteMount` uses internally so the
@@ -171,6 +179,56 @@ pub struct WebuiServeConfig {
 pub struct PublicRouteMount {
     pub router: Router,
     pub descriptors: Vec<IngressRouteDescriptor>,
+    pub drain: Option<Arc<dyn PublicRouteDrain>>,
+}
+
+impl PublicRouteMount {
+    pub fn new(router: Router, descriptors: Vec<IngressRouteDescriptor>) -> Self {
+        Self {
+            router,
+            descriptors,
+            drain: None,
+        }
+    }
+
+    pub fn with_drain(mut self, drain: Arc<dyn PublicRouteDrain>) -> Self {
+        self.drain = Some(drain);
+        self
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct PublicRouteDrains {
+    drains: Arc<Vec<Arc<dyn PublicRouteDrain>>>,
+}
+
+impl PublicRouteDrains {
+    fn new(drains: Vec<Arc<dyn PublicRouteDrain>>) -> Self {
+        Self {
+            drains: Arc::new(drains),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.drains.is_empty()
+    }
+
+    pub async fn drain(&self) {
+        for drain in self.drains.iter() {
+            drain.drain().await;
+        }
+    }
+}
+
+pub struct WebuiV2App {
+    router: Router,
+    public_route_drains: PublicRouteDrains,
+}
+
+impl WebuiV2App {
+    pub fn into_parts(self) -> (Router, PublicRouteDrains) {
+        (self.router, self.public_route_drains)
+    }
 }
 
 impl WebuiServeConfig {
@@ -348,6 +406,13 @@ pub fn webui_v2_app(
     bundle: RebornWebuiBundle,
     config: WebuiServeConfig,
 ) -> Result<Router, WebuiServeError> {
+    Ok(webui_v2_app_with_lifecycle(bundle, config)?.into_parts().0)
+}
+
+pub fn webui_v2_app_with_lifecycle(
+    bundle: RebornWebuiBundle,
+    config: WebuiServeConfig,
+) -> Result<WebuiV2App, WebuiServeError> {
     let csp_value = config.csp_header.clone().map(Ok).unwrap_or_else(|| {
         HeaderValue::from_str(DEFAULT_WEBUI_CSP)
             .map_err(|err| WebuiServeError::InvalidCspHeader(err.to_string()))
@@ -388,6 +453,12 @@ pub fn webui_v2_app(
         product_auth_route_mount(state)
     });
     let public_mounts = config.public_mounts;
+    let public_route_drains = PublicRouteDrains::new(
+        public_mounts
+            .iter()
+            .filter_map(|mount| mount.drain.clone())
+            .collect(),
+    );
     let mut descriptors = ironclaw_webui_v2::webui_v2_routes();
     if let Some(mount) = &product_auth_mount {
         descriptors.extend(mount.descriptors.iter().cloned());
@@ -517,7 +588,10 @@ pub fn webui_v2_app(
             HeaderValue::from_static("no-referrer"),
         ));
 
-    Ok(app)
+    Ok(WebuiV2App {
+        router: app,
+        public_route_drains,
+    })
 }
 
 // ─── auth middleware ──────────────────────────────────────────────────

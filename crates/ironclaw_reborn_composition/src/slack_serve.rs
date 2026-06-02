@@ -31,7 +31,7 @@ use ironclaw_wasm_product_adapters::{
     NativeProductAdapterRunner, RunnerError, WebhookProcessOutcome,
 };
 
-use crate::webui_serve::PublicRouteMount;
+use crate::webui_serve::{PublicRouteDrain, PublicRouteMount};
 
 pub const SLACK_EVENTS_PATH: &str = "/webhooks/slack/events";
 const SLACK_EVENTS_ROUTE_ID: &str = "slack.events";
@@ -60,6 +60,8 @@ pub trait SlackEventsWebhookDispatcher: Send + Sync {
         body: &'a [u8],
         evidence: &'a ProtocolAuthEvidence,
     ) -> Pin<Box<dyn Future<Output = Result<WebhookProcessOutcome, RunnerError>> + Send + 'a>>;
+
+    fn drain_immediate_ack_tasks<'a>(&'a self) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
 }
 
 impl SlackEventsWebhookDispatcher for NativeProductAdapterRunner {
@@ -82,6 +84,10 @@ impl SlackEventsWebhookDispatcher for NativeProductAdapterRunner {
             ),
         )
     }
+
+    fn drain_immediate_ack_tasks<'a>(&'a self) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+        Box::pin(NativeProductAdapterRunner::drain_immediate_ack_tasks(self))
+    }
 }
 
 #[derive(Clone)]
@@ -92,6 +98,16 @@ pub struct SlackEventsRouteState {
 impl SlackEventsRouteState {
     pub fn new(dispatcher: Arc<dyn SlackEventsWebhookDispatcher>) -> Self {
         Self { dispatcher }
+    }
+
+    pub async fn drain_immediate_ack_tasks(&self) {
+        self.dispatcher.drain_immediate_ack_tasks().await;
+    }
+}
+
+impl PublicRouteDrain for SlackEventsRouteState {
+    fn drain<'a>(&'a self) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+        Box::pin(self.drain_immediate_ack_tasks())
     }
 }
 
@@ -105,12 +121,13 @@ impl std::fmt::Debug for SlackEventsRouteState {
 }
 
 pub fn slack_events_route_mount(state: SlackEventsRouteState) -> PublicRouteMount {
-    PublicRouteMount {
-        router: Router::new()
+    PublicRouteMount::new(
+        Router::new()
             .route(SLACK_EVENTS_PATH, post(slack_events_handler))
-            .with_state(state),
-        descriptors: slack_events_route_descriptors(),
-    }
+            .with_state(state.clone()),
+        slack_events_route_descriptors(),
+    )
+    .with_drain(Arc::new(state))
 }
 
 pub fn slack_events_route_descriptors() -> Vec<IngressRouteDescriptor> {
@@ -135,6 +152,13 @@ fn slack_events_policy() -> IngressPolicy {
             max_bytes: SLACK_EVENTS_BODY_LIMIT_BYTES,
         },
         rate_limit: RateLimitPolicy::Limited {
+            // Interim pre-auth guard. The descriptor-driven limiter runs before
+            // Slack signature verification, so it cannot yet bucket by verified
+            // installation/workspace. `PerIp` is also not a safe substitute for
+            // Slack because events arrive from shared Slack egress pools. A
+            // verified-installation limiter belongs in a follow-up extension to
+            // the ingress rate-limit model or a post-verification Slack-specific
+            // limiter.
             scope: RateLimitScope::Global,
             max_requests: SLACK_EVENTS_MAX_REQUESTS,
             window_seconds: SLACK_EVENTS_RATE_WINDOW_SECONDS,
@@ -278,6 +302,12 @@ mod tests {
             self.dispatch_calls.fetch_add(1, Ordering::SeqCst);
             let result = self.dispatch_result.clone();
             Box::pin(async move { result })
+        }
+
+        fn drain_immediate_ack_tasks<'a>(
+            &'a self,
+        ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+            Box::pin(async {})
         }
     }
 
