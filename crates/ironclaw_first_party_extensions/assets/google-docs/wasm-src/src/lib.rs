@@ -74,7 +74,7 @@ impl exports::near::agent::tool::Guest for GoogleDocsTool {
         // Derived from `GoogleDocsAction` via `schemars::JsonSchema` so the
         // advertised schema can never drift from the serde contract.
         let schema = schemars::schema_for!(types::GoogleDocsAction);
-        serde_json::to_string(&schema).expect("schema serialization is infallible")
+        serde_json::to_string(&schema).unwrap_or_else(|_| "{}".to_string())
     }
 
     fn description() -> String {
@@ -98,8 +98,8 @@ fn execute_inner(params: &str, context: Option<&str>) -> Result<String, String> 
         serde_json::from_value(params).map_err(|e| format!("Invalid parameters: {}", e))?;
 
     crate::near::agent::host::log(
-        crate::near::agent::host::LogLevel::Info,
-        &format!("Executing Google Docs action: {:?}", action),
+        crate::near::agent::host::LogLevel::Debug,
+        &format!("Executing Google Docs action: {action_name}"),
     );
 
     let result = match action {
@@ -249,8 +249,11 @@ fn action_from_context(context: Option<&str>) -> Result<&'static str, String> {
 }
 
 fn params_with_action(params: &str, action: &str) -> Result<serde_json::Value, String> {
-    let mut params: serde_json::Value =
-        serde_json::from_str(params).map_err(|_| "invalid_parameters".to_string())?;
+    let mut params: serde_json::Value = if params.trim().is_empty() {
+        serde_json::json!({})
+    } else {
+        serde_json::from_str(params).map_err(|_| "invalid_parameters".to_string())?
+    };
     let obj = params
         .as_object_mut()
         .ok_or_else(|| "invalid_parameters".to_string())?;

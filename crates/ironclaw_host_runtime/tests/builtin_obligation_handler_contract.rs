@@ -1330,10 +1330,11 @@ async fn inject_credential_account_once_fails_when_resolver_returns_auth_require
     let context = execution_context(CapabilitySet::default());
     let capability_id = capability_id();
     let estimate = ResourceEstimate::default();
+    let provider_scopes = vec!["https://www.googleapis.com/auth/drive.readonly".to_string()];
     let obligations = vec![Obligation::InjectCredentialAccountOnce {
         handle: ironclaw_host_api::SecretHandle::new("github_runtime_token").unwrap(),
         provider: ironclaw_host_api::RuntimeCredentialAccountProviderId::new("github").unwrap(),
-        provider_scopes: Vec::new(),
+        provider_scopes: provider_scopes.clone(),
         requester_extension: ironclaw_host_api::ExtensionId::new("github").unwrap(),
     }];
 
@@ -1360,6 +1361,7 @@ async fn inject_credential_account_once_fails_when_resolver_returns_auth_require
         credential_requirements[0].requester_extension.as_str(),
         "github"
     );
+    assert_eq!(credential_requirements[0].provider_scopes, provider_scopes);
 }
 
 #[tokio::test]

@@ -267,6 +267,22 @@ pub(crate) fn google_calendar_manifest_digest() -> String {
     sha256_digest_token(GOOGLE_CALENDAR_MANIFEST.as_bytes())
 }
 
+pub(crate) fn google_docs_manifest_digest() -> String {
+    sha256_digest_token(GOOGLE_DOCS_MANIFEST.as_bytes())
+}
+
+pub(crate) fn google_drive_manifest_digest() -> String {
+    sha256_digest_token(GOOGLE_DRIVE_MANIFEST.as_bytes())
+}
+
+pub(crate) fn google_sheets_manifest_digest() -> String {
+    sha256_digest_token(GOOGLE_SHEETS_MANIFEST.as_bytes())
+}
+
+pub(crate) fn google_slides_manifest_digest() -> String {
+    sha256_digest_token(GOOGLE_SLIDES_MANIFEST.as_bytes())
+}
+
 pub(crate) fn gmail_manifest_digest() -> String {
     sha256_digest_token(GMAIL_MANIFEST.as_bytes())
 }
@@ -1405,8 +1421,14 @@ mod tests {
     }
 
     #[test]
-    fn bundled_mcp_manifest_digests_are_sha256_tokens() {
+    fn bundled_manifest_digests_are_sha256_tokens() {
         assert!(notion_mcp_manifest_digest().starts_with("sha256:"));
+        assert!(google_calendar_manifest_digest().starts_with("sha256:"));
+        assert!(google_docs_manifest_digest().starts_with("sha256:"));
+        assert!(google_drive_manifest_digest().starts_with("sha256:"));
+        assert!(google_sheets_manifest_digest().starts_with("sha256:"));
+        assert!(google_slides_manifest_digest().starts_with("sha256:"));
+        assert!(gmail_manifest_digest().starts_with("sha256:"));
     }
 
     #[test]

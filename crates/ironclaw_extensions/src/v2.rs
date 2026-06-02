@@ -869,13 +869,15 @@ impl CapabilityDeclV2 {
                     ),
                 })?;
             validate_runtime_credential_audience(&id, &raw_credential.audience)?;
+            let provider_scopes = validate_runtime_credential_provider_scopes(
+                &id,
+                &raw_credential.source,
+                raw_credential.provider_scopes,
+            )?;
             runtime_credentials.push(RuntimeCredentialRequirement {
                 handle,
                 source: raw_credential.source,
-                provider_scopes: validate_runtime_credential_provider_scopes(
-                    &id,
-                    raw_credential.provider_scopes,
-                )?,
+                provider_scopes,
                 audience: raw_credential.audience,
                 target: raw_credential.target,
                 required: raw_credential.required,
@@ -1449,8 +1451,21 @@ fn default_runtime_credential_required() -> bool {
 
 fn validate_runtime_credential_provider_scopes(
     capability_id: &CapabilityId,
+    source: &RuntimeCredentialRequirementSource,
     raw_scopes: Vec<String>,
 ) -> Result<Vec<String>, ManifestV2Error> {
+    if !raw_scopes.is_empty()
+        && !matches!(
+            source,
+            RuntimeCredentialRequirementSource::ProductAuthAccount { .. }
+        )
+    {
+        return Err(ManifestV2Error::Invalid {
+            reason: format!(
+                "capability {capability_id} declares runtime credential provider scopes for a non product-auth credential source"
+            ),
+        });
+    }
     let mut seen = BTreeSet::new();
     let mut scopes = Vec::with_capacity(raw_scopes.len());
     for raw_scope in raw_scopes {

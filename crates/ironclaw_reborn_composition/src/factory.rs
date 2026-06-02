@@ -91,7 +91,8 @@ use crate::{
 use crate::{
     available_extensions::{
         AvailableExtensionCatalog, gmail_manifest_digest, google_calendar_manifest_digest,
-        notion_mcp_manifest_digest, web_access_manifest_digest,
+        google_docs_manifest_digest, google_drive_manifest_digest, google_sheets_manifest_digest,
+        google_slides_manifest_digest, notion_mcp_manifest_digest, web_access_manifest_digest,
     },
     extension_installation_store::FilesystemExtensionInstallationStore,
     extension_lifecycle::{
@@ -1439,6 +1440,46 @@ fn local_dev_first_party_trust_policy() -> Result<HostTrustPolicy, RebornBuildEr
             })?,
             "/system/extensions/google-calendar/manifest.toml".to_string(),
             Some(google_calendar_manifest_digest()),
+            HostTrustAssignment::first_party(),
+            gsuite_allowed_effects(),
+            None,
+        ),
+        AdminEntry::for_local_manifest(
+            PackageId::new("google-docs").map_err(|error| RebornBuildError::InvalidConfig {
+                reason: format!("Google Docs first-party package id is invalid: {error}"),
+            })?,
+            "/system/extensions/google-docs/manifest.toml".to_string(),
+            Some(google_docs_manifest_digest()),
+            HostTrustAssignment::first_party(),
+            gsuite_allowed_effects(),
+            None,
+        ),
+        AdminEntry::for_local_manifest(
+            PackageId::new("google-drive").map_err(|error| RebornBuildError::InvalidConfig {
+                reason: format!("Google Drive first-party package id is invalid: {error}"),
+            })?,
+            "/system/extensions/google-drive/manifest.toml".to_string(),
+            Some(google_drive_manifest_digest()),
+            HostTrustAssignment::first_party(),
+            gsuite_allowed_effects(),
+            None,
+        ),
+        AdminEntry::for_local_manifest(
+            PackageId::new("google-sheets").map_err(|error| RebornBuildError::InvalidConfig {
+                reason: format!("Google Sheets first-party package id is invalid: {error}"),
+            })?,
+            "/system/extensions/google-sheets/manifest.toml".to_string(),
+            Some(google_sheets_manifest_digest()),
+            HostTrustAssignment::first_party(),
+            gsuite_allowed_effects(),
+            None,
+        ),
+        AdminEntry::for_local_manifest(
+            PackageId::new("google-slides").map_err(|error| RebornBuildError::InvalidConfig {
+                reason: format!("Google Slides first-party package id is invalid: {error}"),
+            })?,
+            "/system/extensions/google-slides/manifest.toml".to_string(),
+            Some(google_slides_manifest_digest()),
             HostTrustAssignment::first_party(),
             gsuite_allowed_effects(),
             None,

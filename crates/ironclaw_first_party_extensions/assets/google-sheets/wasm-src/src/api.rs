@@ -509,22 +509,6 @@ pub fn format_cells(opts: FormatOptions<'_>) -> Result<FormatResult, String> {
     })
 }
 
-/// Minimal percent-encoding for URL path segments and query values.
 fn url_encode(s: &str) -> String {
-    let mut encoded = String::with_capacity(s.len());
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                encoded.push(b as char);
-            }
-            _ => {
-                encoded.push('%');
-                encoded.push(char::from(HEX[(b >> 4) as usize]));
-                encoded.push(char::from(HEX[(b & 0x0F) as usize]));
-            }
-        }
-    }
-    encoded
+    urlencoding::encode(s).into_owned()
 }
-
-const HEX: [u8; 16] = *b"0123456789ABCDEF";

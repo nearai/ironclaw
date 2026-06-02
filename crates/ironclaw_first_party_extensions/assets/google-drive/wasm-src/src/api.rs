@@ -9,6 +9,7 @@ use crate::types::*;
 
 const DRIVE_API_BASE: &str = "https://www.googleapis.com/drive/v3";
 const UPLOAD_API_BASE: &str = "https://www.googleapis.com/upload/drive/v3";
+const MAX_DOWNLOAD_TEXT_BYTES: usize = 1_000_000;
 
 /// Standard fields to request for file metadata.
 const FILE_FIELDS: &str = "id,name,mimeType,description,size,createdTime,modifiedTime,\
@@ -198,9 +199,11 @@ pub fn download_file(
         api_call_raw("GET", &url)?
     } else {
         // Regular file, download directly
+        ensure_declared_download_size(meta.file.size.as_deref(), file_id)?;
         let url = format!("{}/files/{}?alt=media", DRIVE_API_BASE, url_encode(file_id));
         api_call_raw("GET", &url)?
     };
+    ensure_download_size(bytes.len(), file_id)?;
 
     let content = String::from_utf8(bytes).map_err(|_| {
         "File content is binary, cannot display as text. Use get_file for metadata only."
@@ -213,6 +216,25 @@ pub fn download_file(
         mime_type: meta.file.mime_type,
         content,
     })
+}
+
+fn ensure_declared_download_size(size: Option<&str>, file_id: &str) -> Result<(), String> {
+    let Some(size) = size else {
+        return Ok(());
+    };
+    let Ok(size) = size.parse::<usize>() else {
+        return Ok(());
+    };
+    ensure_download_size(size, file_id)
+}
+
+fn ensure_download_size(size: usize, file_id: &str) -> Result<(), String> {
+    if size <= MAX_DOWNLOAD_TEXT_BYTES {
+        return Ok(());
+    }
+    Err(format!(
+        "File {file_id} is too large to download into the WASM tool as text ({size} bytes; limit {MAX_DOWNLOAD_TEXT_BYTES} bytes). Use get_file for metadata or request a smaller export."
+    ))
 }
 
 /// Upload a text file using multipart upload.
@@ -493,22 +515,6 @@ pub fn list_shared_drives(page_size: u32) -> Result<ListSharedDrivesResult, Stri
     Ok(ListSharedDrivesResult { drives })
 }
 
-/// Minimal percent-encoding for URL path segments and query values.
 fn url_encode(s: &str) -> String {
-    let mut encoded = String::with_capacity(s.len());
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                encoded.push(b as char);
-            }
-            _ => {
-                encoded.push('%');
-                encoded.push(char::from(HEX[(b >> 4) as usize]));
-                encoded.push(char::from(HEX[(b & 0x0F) as usize]));
-            }
-        }
-    }
-    encoded
+    urlencoding::encode(s).into_owned()
 }
-
-const HEX: [u8; 16] = *b"0123456789ABCDEF";
