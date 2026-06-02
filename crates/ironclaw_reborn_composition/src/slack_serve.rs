@@ -271,11 +271,28 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
+    use async_trait::async_trait;
     use axum::body::Body;
     use axum::http::Request;
     use http_body_util::BodyExt;
-    use ironclaw_product_adapters::ProtocolAuthFailure;
     use ironclaw_product_adapters::auth::mark_request_signature_verified;
+    use ironclaw_product_adapters::capabilities::ProductAdapterCapabilities;
+    use ironclaw_product_adapters::external::{
+        ExternalActorRef, ExternalConversationRef, ExternalEventId,
+    };
+    use ironclaw_product_adapters::identity::{
+        AdapterInstallationId, ProductAdapterId, ProductSurfaceKind,
+    };
+    use ironclaw_product_adapters::{
+        AuthRequirement, OutboundDeliverySink, ParsedProductInbound, ProductAdapter,
+        ProductAdapterError, ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload,
+        ProductOutboundEnvelope, ProductRenderOutcome, ProductTriggerReason,
+        ProjectionSubscriptionRequest, ProtocolAuthEvidence, ProtocolAuthFailure,
+        ProtocolHttpEgress, UserMessagePayload,
+    };
+    use ironclaw_wasm_product_adapters::{
+        NativeProductAdapterRunnerConfig, SharedSecretHeaderAuth, WebhookAuth,
+    };
     use tower::ServiceExt;
 
     use super::*;
@@ -331,6 +348,106 @@ mod tests {
                 dispatch_result: Err(RunnerError::AdapterPanicked),
                 ..Self::verified()
             }
+        }
+    }
+
+    struct StaticAdapter {
+        adapter_id: ProductAdapterId,
+        installation_id: AdapterInstallationId,
+        capabilities: ProductAdapterCapabilities,
+        parse_count: Arc<AtomicUsize>,
+    }
+
+    impl StaticAdapter {
+        fn new(parse_count: Arc<AtomicUsize>) -> Self {
+            Self {
+                adapter_id: ProductAdapterId::new("slack_v2").expect("valid adapter id"),
+                installation_id: AdapterInstallationId::new("install_alpha")
+                    .expect("valid installation id"),
+                capabilities: ProductAdapterCapabilities::empty(),
+                parse_count,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl ProductAdapter for StaticAdapter {
+        fn adapter_id(&self) -> &ProductAdapterId {
+            &self.adapter_id
+        }
+
+        fn installation_id(&self) -> &AdapterInstallationId {
+            &self.installation_id
+        }
+
+        fn surface_kind(&self) -> ProductSurfaceKind {
+            ProductSurfaceKind::ExternalChannel
+        }
+
+        fn capabilities(&self) -> &ProductAdapterCapabilities {
+            &self.capabilities
+        }
+
+        fn auth_requirement(&self) -> &AuthRequirement {
+            static AUTH: std::sync::LazyLock<AuthRequirement> =
+                std::sync::LazyLock::new(|| AuthRequirement::SharedSecretHeader {
+                    header_name: "X-Test-Secret".into(),
+                });
+            &AUTH
+        }
+
+        fn parse_inbound(
+            &self,
+            _raw_payload: &[u8],
+            _auth_evidence: &ProtocolAuthEvidence,
+        ) -> Result<ParsedProductInbound, ProductAdapterError> {
+            self.parse_count.fetch_add(1, Ordering::SeqCst);
+            ParsedProductInbound::new(
+                ExternalEventId::new("slack-event-1").expect("valid event id"),
+                ExternalActorRef::new("slack_user", "U123", None::<String>)
+                    .expect("valid actor ref"),
+                ExternalConversationRef::new(None, "C123", None::<&str>, None::<&str>)
+                    .expect("valid conversation ref"),
+                ProductInboundPayload::UserMessage(
+                    UserMessagePayload::new("hello", Vec::new(), ProductTriggerReason::DirectChat)
+                        .expect("valid user message"),
+                ),
+            )
+        }
+
+        async fn render_outbound(
+            &self,
+            _envelope: ProductOutboundEnvelope,
+            _egress: &dyn ProtocolHttpEgress,
+            _delivery_sink: &dyn OutboundDeliverySink,
+        ) -> Result<ProductRenderOutcome, ProductAdapterError> {
+            Ok(ProductRenderOutcome::DeliveryRecorded)
+        }
+    }
+
+    struct AckWorkflow {
+        accepted_count: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl ironclaw_product_adapters::ProductWorkflow for AckWorkflow {
+        async fn accept_inbound(
+            &self,
+            _envelope: ProductInboundEnvelope,
+        ) -> Result<ProductInboundAck, ProductAdapterError> {
+            self.accepted_count.fetch_add(1, Ordering::SeqCst);
+            Ok(ProductInboundAck::NoOp)
+        }
+
+        async fn resolve_projection_subscription(
+            &self,
+            _envelope: ProductInboundEnvelope,
+        ) -> Result<ProjectionSubscriptionRequest, ProductAdapterError> {
+            Err(ProductAdapterError::Internal {
+                detail: ironclaw_product_adapters::redaction::RedactedString::new(
+                    "test stub: resolve_projection_subscription not supported",
+                ),
+            })
         }
     }
 
@@ -477,6 +594,46 @@ mod tests {
             .to_bytes();
         assert_eq!(&bytes[..], b"ok");
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn slack_events_handler_dispatches_through_native_runner() {
+        let parse_count = Arc::new(AtomicUsize::new(0));
+        let accepted_count = Arc::new(AtomicUsize::new(0));
+        let runner = NativeProductAdapterRunner::with_config(
+            Arc::new(StaticAdapter::new(Arc::clone(&parse_count))),
+            Arc::new(AckWorkflow {
+                accepted_count: Arc::clone(&accepted_count),
+            }),
+            WebhookAuth::SharedSecretHeader(SharedSecretHeaderAuth {
+                header_name: "X-Test-Secret".into(),
+                expected_secret: "topsecret".into(),
+                subject: "slack_install_alpha".into(),
+            }),
+            NativeProductAdapterRunnerConfig::new(
+                Duration::from_secs(1),
+                std::num::NonZeroUsize::new(1).expect("nonzero"),
+            ),
+        );
+        let state = SlackEventsRouteState::new(Arc::new(runner));
+        let mount = slack_events_route_mount(state.clone());
+        let response = mount
+            .router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(SLACK_EVENTS_PATH)
+                    .header("X-Test-Secret", "topsecret")
+                    .body(Body::from(r#"{"type":"event_callback"}"#))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("router should respond");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        state.drain_immediate_ack_tasks().await;
+        assert_eq!(parse_count.load(Ordering::SeqCst), 1);
+        assert_eq!(accepted_count.load(Ordering::SeqCst), 1);
     }
 
     #[test]
