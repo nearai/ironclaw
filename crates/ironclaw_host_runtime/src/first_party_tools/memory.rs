@@ -332,7 +332,7 @@ async fn dispatch_search(
     services: &MemoryServices,
     input: &Value,
 ) -> Result<Value, FirstPartyCapabilityError> {
-    let query = required_str(input, "query")?;
+    let query = search_query(input)?;
     let limit = optional_u64(input, "limit").unwrap_or(5).clamp(1, 20) as usize;
     let request = MemorySearchRequest::new(query)
         .map_err(|_| input_error())?
@@ -361,6 +361,18 @@ async fn dispatch_search(
         "results": result_values,
         "result_count": result_count,
     }))
+}
+
+fn search_query(input: &Value) -> Result<&str, FirstPartyCapabilityError> {
+    for key in ["query", "q", "text", "pattern"] {
+        if let Some(value) = input.get(key).and_then(Value::as_str) {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                return Ok(trimmed);
+            }
+        }
+    }
+    Err(input_error())
 }
 
 async fn dispatch_write(

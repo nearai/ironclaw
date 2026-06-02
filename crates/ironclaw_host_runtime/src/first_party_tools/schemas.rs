@@ -49,7 +49,19 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "Natural language search query for persistent memory"
+                    "description": "Preferred natural language search query for persistent memory"
+                },
+                "q": {
+                    "type": "string",
+                    "description": "Alias for query"
+                },
+                "text": {
+                    "type": "string",
+                    "description": "Alias for query"
+                },
+                "pattern": {
+                    "type": "string",
+                    "description": "Alias for query"
                 },
                 "limit": {
                     "type": "integer",

@@ -1055,6 +1055,48 @@ async fn memory_capabilities_write_read_tree_and_search_native_reborn_memory() {
 }
 
 #[tokio::test]
+async fn memory_search_accepts_common_query_aliases_from_model_tool_calls() {
+    let runtime = runtime_with_filesystem(InMemoryBackend::new());
+    let context = execution_context_with_mounts(
+        [MEMORY_WRITE_CAPABILITY_ID, MEMORY_SEARCH_CAPABILITY_ID],
+        memory_mounts(MountPermissions::read_write_list_delete()),
+    );
+
+    invoke_with_context(
+        &runtime,
+        MEMORY_WRITE_CAPABILITY_ID,
+        json!({
+            "target": "projects/alpha/search-alias.md",
+            "content": "Search alias marker from model tool call.",
+            "append": false
+        }),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+
+    for input in [
+        json!({"q": "alias marker", "limit": 5}),
+        json!({"text": "alias marker", "limit": 5}),
+        json!({"pattern": "alias marker", "limit": 5}),
+    ] {
+        let search = invoke_with_context(
+            &runtime,
+            MEMORY_SEARCH_CAPABILITY_ID,
+            input,
+            context.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(search["result_count"], json!(1));
+        assert_eq!(
+            search["results"][0]["path"],
+            json!("projects/alpha/search-alias.md")
+        );
+    }
+}
+
+#[tokio::test]
 async fn memory_write_metadata_overlay_can_skip_search_indexing() {
     let runtime = runtime_with_filesystem(InMemoryBackend::new());
     let context = execution_context_with_mounts(
