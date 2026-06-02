@@ -24,7 +24,7 @@ import json
 import os
 import re
 from pathlib import Path
-from urllib.parse import parse_qs, urlencode, urlparse
+from urllib.parse import urlparse
 
 import httpx
 import pytest
@@ -43,7 +43,10 @@ from helpers import (
     wait_for_pending_auth_gate,
     wait_for_ready,
 )
-from fixtures.mock_oauth_idp import make_pkce_verifier_and_challenge, start_mock_oauth_idp
+from fixtures.mock_oauth_idp import (
+    issue_oauth_code,
+    start_mock_oauth_idp,
+)
 from fixtures.mock_bearer_api import start_mock_bearer_api
 
 # ---------------------------------------------------------------------------
@@ -154,42 +157,6 @@ async def v2_gsuite_server(ironclaw_binary, mock_llm_server, mock_idp, mock_goog
 
 
 # ---------------------------------------------------------------------------
-# Test helpers
-# ---------------------------------------------------------------------------
-
-async def _issue_oauth_code(
-    mock_idp,
-    *,
-    include_verifier: bool = False,
-) -> tuple[str, str] | tuple[str, str, str]:
-    """Issue a mock OAuth authorization code for token-exchange assertions."""
-    import secrets
-
-    verifier, challenge = make_pkce_verifier_and_challenge()
-    state = secrets.token_urlsafe(16)
-    redirect_uri = "http://127.0.0.1:9999/callback"
-    params = {
-        "response_type": "code",
-        "client_id": "google-client",
-        "redirect_uri": redirect_uri,
-        "state": state,
-        "scope": "openid email",
-        "code_challenge": challenge,
-        "code_challenge_method": "S256",
-    }
-    async with httpx.AsyncClient(follow_redirects=False) as client:
-        r = await client.get(
-            f"{mock_idp.authorize_url}?{urlencode(params)}",
-            timeout=10,
-        )
-    assert r.status_code in (302, 307), f"expected redirect, got {r.status_code}"
-    code = parse_qs(urlparse(r.headers["location"]).query)["code"][0]
-    if include_verifier:
-        return code, redirect_uri, verifier
-    return code, redirect_uri
-
-
-# ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
 
@@ -245,63 +212,29 @@ class TestGSuiteOAuthWireShape:
         )
         gate = await wait_for_pending_auth_gate(v2_gsuite_server, thread_id)
         assert gate.get("request_id"), "gate must have a request_id"
-        # The auth URL should be present for an OAuth challenge.
-        auth_url = gate.get("auth_url") or ""
         # auth_url may or may not be present depending on V1 vs. Reborn path;
         # just assert the gate exists — wire-shape is tested in Rust.
 
     async def test_mock_idp_authorize_endpoint(self, mock_idp):
         """The mock IDP's /authorize endpoint issues an auth code."""
-        import secrets
-
-        _verifier, challenge = make_pkce_verifier_and_challenge()
-        state = secrets.token_urlsafe(16)
-        redirect_uri = "http://127.0.0.1:9999/callback"
-
-        params = {
-            "response_type": "code",
-            "client_id": "test-client",
-            "redirect_uri": redirect_uri,
-            "state": state,
-            "scope": "openid email",
-            "code_challenge": challenge,
-            "code_challenge_method": "S256",
-        }
-        url = f"{mock_idp.authorize_url}?{urlencode(params)}"
-        async with httpx.AsyncClient(follow_redirects=False) as client:
-            r = await client.get(url, timeout=10)
-        assert r.status_code in (302, 307), f"expected redirect, got {r.status_code}"
-        location = r.headers.get("location", "")
-        qs = parse_qs(urlparse(location).query)
-        assert "code" in qs, f"redirect missing code: {location}"
-        assert qs.get("state", [""])[0] == state, "state must round-trip"
-        assert qs["code"][0].startswith("fake_code_")
+        grant = await issue_oauth_code(
+            mock_idp,
+            client_id="test-client",
+            redirect_uri="http://127.0.0.1:9999/callback",
+            scope="openid email",
+        )
+        assert grant.code.startswith("fake_code_")
+        assert grant.state
 
     async def test_mock_idp_token_endpoint(self, mock_idp):
         """The mock IDP's /token endpoint issues fake access/refresh tokens."""
-        import secrets
-        from urllib.parse import urlencode
-
-        verifier, challenge = make_pkce_verifier_and_challenge()
-        state = secrets.token_urlsafe(16)
         redirect_uri = "http://127.0.0.1:9999/callback"
-
-        # First get a code.
-        params = {
-            "response_type": "code",
-            "client_id": "test-client",
-            "redirect_uri": redirect_uri,
-            "state": state,
-            "scope": "openid email",
-            "code_challenge": challenge,
-            "code_challenge_method": "S256",
-        }
-        async with httpx.AsyncClient(follow_redirects=False) as client:
-            r = await client.get(
-                f"{mock_idp.authorize_url}?{urlencode(params)}", timeout=10
-            )
-        location = r.headers["location"]
-        code = parse_qs(urlparse(location).query)["code"][0]
+        grant = await issue_oauth_code(
+            mock_idp,
+            client_id="test-client",
+            redirect_uri=redirect_uri,
+            scope="openid email",
+        )
 
         # Exchange code for tokens.
         async with httpx.AsyncClient() as client:
@@ -309,9 +242,9 @@ class TestGSuiteOAuthWireShape:
                 mock_idp.token_url,
                 data={
                     "grant_type": "authorization_code",
-                    "code": code,
-                    "redirect_uri": redirect_uri,
-                    "code_verifier": verifier,
+                    "code": grant.code,
+                    "redirect_uri": grant.redirect_uri,
+                    "code_verifier": grant.verifier,
                 },
                 timeout=10,
             )
@@ -323,15 +256,19 @@ class TestGSuiteOAuthWireShape:
 
     async def test_mock_idp_rejects_missing_pkce_verifier(self, mock_idp):
         """The mock IDP rejects auth-code exchange when PKCE verifier is missing."""
-        code, redirect_uri = await _issue_oauth_code(mock_idp)
+        grant = await issue_oauth_code(
+            mock_idp,
+            client_id="google-client",
+            redirect_uri="http://127.0.0.1:9999/callback",
+        )
 
         async with httpx.AsyncClient() as client:
             r = await client.post(
                 mock_idp.token_url,
                 data={
                     "grant_type": "authorization_code",
-                    "code": code,
-                    "redirect_uri": redirect_uri,
+                    "code": grant.code,
+                    "redirect_uri": grant.redirect_uri,
                     "client_id": "google-client",
                 },
                 timeout=10,
@@ -341,9 +278,10 @@ class TestGSuiteOAuthWireShape:
 
     async def test_mock_idp_rejects_redirect_uri_mismatch(self, mock_idp):
         """The mock IDP binds auth codes to their original redirect_uri."""
-        code, _redirect_uri, verifier = await _issue_oauth_code(
+        grant = await issue_oauth_code(
             mock_idp,
-            include_verifier=True,
+            client_id="google-client",
+            redirect_uri="http://127.0.0.1:9999/callback",
         )
 
         async with httpx.AsyncClient() as client:
@@ -351,9 +289,9 @@ class TestGSuiteOAuthWireShape:
                 mock_idp.token_url,
                 data={
                     "grant_type": "authorization_code",
-                    "code": code,
+                    "code": grant.code,
                     "redirect_uri": "http://127.0.0.1:9999/wrong-callback",
-                    "code_verifier": verifier,
+                    "code_verifier": grant.verifier,
                     "client_id": "google-client",
                 },
                 timeout=10,
@@ -363,18 +301,19 @@ class TestGSuiteOAuthWireShape:
 
     async def test_mock_idp_refresh_token_is_bound_to_client_id(self, mock_idp):
         """Refresh tokens must be issued and later used by the same client_id."""
-        code, redirect_uri, verifier = await _issue_oauth_code(
+        grant = await issue_oauth_code(
             mock_idp,
-            include_verifier=True,
+            client_id="google-client",
+            redirect_uri="http://127.0.0.1:9999/callback",
         )
         async with httpx.AsyncClient() as client:
             token_r = await client.post(
                 mock_idp.token_url,
                 data={
                     "grant_type": "authorization_code",
-                    "code": code,
-                    "redirect_uri": redirect_uri,
-                    "code_verifier": verifier,
+                    "code": grant.code,
+                    "redirect_uri": grant.redirect_uri,
+                    "code_verifier": grant.verifier,
                     "client_id": "google-client",
                 },
                 timeout=10,

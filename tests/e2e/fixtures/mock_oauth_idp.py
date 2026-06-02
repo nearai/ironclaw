@@ -36,8 +36,9 @@ import base64
 import secrets
 from dataclasses import dataclass, field
 from typing import AsyncIterator
+from urllib.parse import parse_qs, urlparse
 
-import pytest
+import httpx
 from aiohttp import web
 
 
@@ -51,6 +52,14 @@ def make_pkce_verifier_and_challenge() -> tuple[str, str]:
     """Return a random PKCE verifier and its S256 challenge."""
     verifier = secrets.token_urlsafe(32)
     return verifier, pkce_challenge_for(verifier)
+
+
+@dataclass(frozen=True)
+class MockOAuthCodeGrant:
+    code: str
+    redirect_uri: str
+    verifier: str
+    state: str
 
 
 @dataclass
@@ -99,6 +108,41 @@ class MockOAuthIdpHandle:
             params["code_challenge"] = code_challenge
             params["code_challenge_method"] = "S256"
         return f"{self.authorize_url}?{urlencode(params)}"
+
+
+async def issue_oauth_code(
+    handle: MockOAuthIdpHandle,
+    *,
+    client_id: str,
+    redirect_uri: str,
+    scope: str = "openid email",
+) -> MockOAuthCodeGrant:
+    """Issue a PKCE-bound authorization code from the mock IDP."""
+    verifier, challenge = make_pkce_verifier_and_challenge()
+    state = secrets.token_urlsafe(16)
+    auth_url = handle.make_authorization_url(
+        client_id=client_id,
+        redirect_uri=redirect_uri,
+        state=state,
+        code_challenge=challenge,
+        scope=scope,
+    )
+    async with httpx.AsyncClient(follow_redirects=False) as client:
+        response = await client.get(auth_url, timeout=10)
+    assert response.status_code in (302, 307), (
+        f"expected redirect, got {response.status_code}"
+    )
+    location = response.headers.get("location", "")
+    params = parse_qs(urlparse(location).query)
+    assert params.get("state", [""])[0] == state, "state must round-trip"
+    code = params["code"][0]
+    assert code.startswith("fake_code_")
+    return MockOAuthCodeGrant(
+        code=code,
+        redirect_uri=redirect_uri,
+        verifier=verifier,
+        state=state,
+    )
 
 
 async def start_mock_oauth_idp(*, port: int = 0) -> AsyncIterator[MockOAuthIdpHandle]:

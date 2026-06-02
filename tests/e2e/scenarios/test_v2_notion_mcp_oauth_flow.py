@@ -22,7 +22,7 @@ import json
 import os
 import re
 from pathlib import Path
-from urllib.parse import parse_qs, urlencode, urlparse
+from urllib.parse import urlparse
 
 import httpx
 import pytest
@@ -41,7 +41,10 @@ from helpers import (
     wait_for_ready,
 )
 from fixtures.mock_notion_mcp import start_mock_notion_mcp
-from fixtures.mock_oauth_idp import make_pkce_verifier_and_challenge, start_mock_oauth_idp
+from fixtures.mock_oauth_idp import (
+    issue_oauth_code,
+    start_mock_oauth_idp,
+)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -116,42 +119,6 @@ async def v2_notion_server(ironclaw_binary, mock_llm_server, mock_notion, mock_n
         },
     ) as base_url:
         yield base_url
-
-
-# ---------------------------------------------------------------------------
-# Test helpers
-# ---------------------------------------------------------------------------
-
-async def _issue_notion_oauth_code(
-    mock_notion_idp,
-    *,
-    include_verifier: bool = False,
-) -> tuple[str, str] | tuple[str, str, str]:
-    """Issue a mock Notion OAuth authorization code for exchange assertions."""
-    import secrets
-
-    verifier, challenge = make_pkce_verifier_and_challenge()
-    state = secrets.token_urlsafe(16)
-    redirect_uri = "http://127.0.0.1:9999/notion/callback"
-    params = {
-        "response_type": "code",
-        "client_id": "notion-client",
-        "redirect_uri": redirect_uri,
-        "state": state,
-        "scope": "read_content",
-        "code_challenge": challenge,
-        "code_challenge_method": "S256",
-    }
-    async with httpx.AsyncClient(follow_redirects=False) as client:
-        r = await client.get(
-            f"{mock_notion_idp.authorize_url}?{urlencode(params)}",
-            timeout=10,
-        )
-    assert r.status_code in (302, 307), f"expected redirect, got {r.status_code}"
-    code = parse_qs(urlparse(r.headers["location"]).query)["code"][0]
-    if include_verifier:
-        return code, redirect_uri, verifier
-    return code, redirect_uri
 
 
 # ---------------------------------------------------------------------------
@@ -257,43 +224,31 @@ class TestNotionMcpOAuthRoutes:
 
     async def test_mock_idp_authorize_endpoint_for_notion(self, mock_notion_idp):
         """The Notion OAuth IDP authorization URL issues a state-bound code."""
-        import secrets
-
-        _verifier, challenge = make_pkce_verifier_and_challenge()
-        state = secrets.token_urlsafe(16)
-        redirect_uri = "http://127.0.0.1:9999/notion/callback"
-        params = {
-            "response_type": "code",
-            "client_id": "notion-client",
-            "redirect_uri": redirect_uri,
-            "state": state,
-            "scope": "read_content",
-            "code_challenge": challenge,
-            "code_challenge_method": "S256",
-        }
-
-        async with httpx.AsyncClient(follow_redirects=False) as client:
-            r = await client.get(
-                f"{mock_notion_idp.authorize_url}?{urlencode(params)}",
-                timeout=10,
-            )
-        assert r.status_code in (302, 307), f"expected redirect, got {r.status_code}"
-        location = r.headers.get("location", "")
-        qs = parse_qs(urlparse(location).query)
-        assert qs.get("state", [""])[0] == state
-        assert qs["code"][0].startswith("fake_code_")
+        grant = await issue_oauth_code(
+            mock_notion_idp,
+            client_id="notion-client",
+            redirect_uri="http://127.0.0.1:9999/notion/callback",
+            scope="read_content",
+        )
+        assert grant.code.startswith("fake_code_")
+        assert grant.state
 
     async def test_mock_idp_rejects_missing_pkce_verifier_for_notion(self, mock_notion_idp):
         """The Notion OAuth mock rejects auth-code exchange without PKCE verifier."""
-        code, redirect_uri = await _issue_notion_oauth_code(mock_notion_idp)
+        grant = await issue_oauth_code(
+            mock_notion_idp,
+            client_id="notion-client",
+            redirect_uri="http://127.0.0.1:9999/notion/callback",
+            scope="read_content",
+        )
 
         async with httpx.AsyncClient() as client:
             r = await client.post(
                 mock_notion_idp.token_url,
                 data={
                     "grant_type": "authorization_code",
-                    "code": code,
-                    "redirect_uri": redirect_uri,
+                    "code": grant.code,
+                    "redirect_uri": grant.redirect_uri,
                     "client_id": "notion-client",
                 },
                 timeout=10,
@@ -303,9 +258,11 @@ class TestNotionMcpOAuthRoutes:
 
     async def test_mock_idp_rejects_redirect_uri_mismatch_for_notion(self, mock_notion_idp):
         """The Notion OAuth mock binds auth codes to the callback URI."""
-        code, _redirect_uri, verifier = await _issue_notion_oauth_code(
+        grant = await issue_oauth_code(
             mock_notion_idp,
-            include_verifier=True,
+            client_id="notion-client",
+            redirect_uri="http://127.0.0.1:9999/notion/callback",
+            scope="read_content",
         )
 
         async with httpx.AsyncClient() as client:
@@ -313,9 +270,9 @@ class TestNotionMcpOAuthRoutes:
                 mock_notion_idp.token_url,
                 data={
                     "grant_type": "authorization_code",
-                    "code": code,
+                    "code": grant.code,
                     "redirect_uri": "http://127.0.0.1:9999/notion/wrong-callback",
-                    "code_verifier": verifier,
+                    "code_verifier": grant.verifier,
                     "client_id": "notion-client",
                 },
                 timeout=10,
@@ -328,18 +285,20 @@ class TestNotionMcpOAuthRoutes:
         mock_notion_idp,
     ):
         """The Notion OAuth mock rejects unknown or cross-client refresh tokens."""
-        code, redirect_uri, verifier = await _issue_notion_oauth_code(
+        grant = await issue_oauth_code(
             mock_notion_idp,
-            include_verifier=True,
+            client_id="notion-client",
+            redirect_uri="http://127.0.0.1:9999/notion/callback",
+            scope="read_content",
         )
         async with httpx.AsyncClient() as client:
             token_r = await client.post(
                 mock_notion_idp.token_url,
                 data={
                     "grant_type": "authorization_code",
-                    "code": code,
-                    "redirect_uri": redirect_uri,
-                    "code_verifier": verifier,
+                    "code": grant.code,
+                    "redirect_uri": grant.redirect_uri,
+                    "code_verifier": grant.verifier,
                     "client_id": "notion-client",
                 },
                 timeout=10,
