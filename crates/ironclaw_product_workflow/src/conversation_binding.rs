@@ -204,6 +204,18 @@ fn ensure_preconfigured_actor_allowed<'a>(
         })
 }
 
+fn ensure_resolved_actor_matches_preconfigured(
+    expected_user_id: Option<&UserId>,
+    resolution: &ironclaw_conversations::ConversationBindingResolution,
+) -> Result<(), ProductWorkflowError> {
+    if let Some(expected_user_id) = expected_user_id
+        && &resolution.actor.user_id != expected_user_id
+    {
+        return Err(ProductWorkflowError::BindingAccessDenied);
+    }
+    Ok(())
+}
+
 #[async_trait]
 impl ConversationBindingService for ProductConversationBindingService {
     async fn resolve_binding(
@@ -213,17 +225,29 @@ impl ConversationBindingService for ProductConversationBindingService {
         let installation_scope = self
             .installations
             .resolve(&request.adapter_id, &request.installation_id)?;
-        self.apply_preconfigured_actor_binding(&installation_scope, &request)
-            .await?;
-        let resolution = self
-            .conversations
-            .resolve_or_create_binding_with_trusted_scope(
-                conversation_request(&request, installation_scope.tenant_id.clone())?,
-                installation_scope.default_agent_id.clone(),
-                installation_scope.default_project_id.clone(),
-            )
-            .await
-            .map_err(map_conversation_error)?;
+        let expected_user_id =
+            ensure_preconfigured_actor_allowed(&installation_scope, &request)?.cloned();
+        let resolution = if expected_user_id.is_some() {
+            self.apply_preconfigured_actor_binding(&installation_scope, &request)
+                .await?;
+            self.conversations
+                .resolve_or_create_binding_with_trusted_scope(
+                    conversation_request(&request, installation_scope.tenant_id.clone())?,
+                    installation_scope.default_agent_id.clone(),
+                    installation_scope.default_project_id.clone(),
+                )
+                .await
+                .map_err(map_conversation_error)?
+        } else {
+            self.conversations
+                .lookup_binding(conversation_request(
+                    &request,
+                    installation_scope.tenant_id.clone(),
+                )?)
+                .await
+                .map_err(map_conversation_error)?
+        };
+        ensure_resolved_actor_matches_preconfigured(expected_user_id.as_ref(), &resolution)?;
 
         Ok(resolved_binding_from_resolution(resolution))
     }
@@ -235,7 +259,8 @@ impl ConversationBindingService for ProductConversationBindingService {
         let installation_scope = self
             .installations
             .resolve(&request.adapter_id, &request.installation_id)?;
-        ensure_preconfigured_actor_allowed(&installation_scope, &request)?;
+        let expected_user_id =
+            ensure_preconfigured_actor_allowed(&installation_scope, &request)?.cloned();
         let resolution = self
             .conversations
             .lookup_binding(conversation_request(
@@ -244,6 +269,7 @@ impl ConversationBindingService for ProductConversationBindingService {
             )?)
             .await
             .map_err(map_conversation_error)?;
+        ensure_resolved_actor_matches_preconfigured(expected_user_id.as_ref(), &resolution)?;
 
         Ok(resolved_binding_from_resolution(resolution))
     }

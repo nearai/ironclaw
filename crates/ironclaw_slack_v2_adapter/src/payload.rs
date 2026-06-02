@@ -353,14 +353,14 @@ fn parse_interaction_resolution(
         ),
         "auth" => {
             let Some(action) = parts.next() else {
-                return Ok(None);
+                return malformed_interaction_noop("auth");
             };
             if action.eq_ignore_ascii_case("deny") {
                 let Some(auth_request_ref) = parts.next() else {
-                    return Ok(None);
+                    return malformed_interaction_noop("auth deny");
                 };
                 if parts.next().is_some() {
-                    return Ok(None);
+                    return malformed_interaction_noop("auth deny");
                 }
                 AuthResolutionPayload::new(auth_request_ref, AuthResolutionResult::Denied)
                     .map(|payload| payload.with_source_trigger(source_trigger))
@@ -368,7 +368,7 @@ fn parse_interaction_resolution(
                     .map(Some)
                     .map_err(adapter_error_to_payload_error)
             } else {
-                Ok(None)
+                malformed_interaction_noop("auth")
             }
         }
         _ => Ok(None),
@@ -382,7 +382,7 @@ fn parse_approval_resolution(
     source_trigger: ProductTriggerReason,
 ) -> Result<Option<ProductInboundPayload>, SlackPayloadParseError> {
     if extra_token.is_some() {
-        return Ok(None);
+        return malformed_interaction_noop("approval");
     }
 
     match gate_ref {
@@ -397,6 +397,12 @@ fn parse_approval_resolution(
             .map(Some)
             .map_err(adapter_error_to_payload_error),
     }
+}
+
+fn malformed_interaction_noop(
+    _command: &'static str,
+) -> Result<Option<ProductInboundPayload>, SlackPayloadParseError> {
+    Ok(Some(ProductInboundPayload::NoOp))
 }
 
 fn noop_parsed_inbound(

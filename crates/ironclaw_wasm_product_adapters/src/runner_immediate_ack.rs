@@ -85,16 +85,18 @@ impl NativeProductAdapterRunner {
             }
         }
         tasks.spawn(async move {
-            let workflow_result = {
-                let _permit = permit;
-                // Timeout drops the in-flight workflow future. That is the intended
-                // cancellation boundary for this generic async trait call: the
-                // runner does not hold a separate task handle or protocol-specific
-                // resource owner to abort. Workflows that open DB/network resources
-                // must make their own futures cancellation-safe at await points.
+            let _permit = permit;
+            // The admission permit bounds the whole tracked post-ACK task, including
+            // observer follow-up. Otherwise quick workflow acks could release permits
+            // while long-running observers accumulate without backpressure.
+            // Timeout drops the in-flight workflow future. That is the intended
+            // cancellation boundary for this generic async trait call: the
+            // runner does not hold a separate task handle or protocol-specific
+            // resource owner to abort. Workflows that open DB/network resources
+            // must make their own futures cancellation-safe at await points.
+            let workflow_result =
                 tokio::time::timeout(workflow_timeout, workflow.accept_inbound(workflow_envelope))
-                    .await
-            };
+                    .await;
             match workflow_result {
                 Ok(Ok(ack)) => {
                     if ack.retry_disposition() == InboundRetryDisposition::Retry {

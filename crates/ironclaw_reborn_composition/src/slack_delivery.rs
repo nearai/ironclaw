@@ -29,7 +29,7 @@ use ironclaw_product_workflow::{
     route_kind_for_inbound_payload,
 };
 use ironclaw_threads::{
-    LatestThreadMessageRequest, MessageKind, MessageStatus, SessionThreadService, ThreadScope,
+    MessageKind, MessageStatus, SessionThreadService, ThreadHistoryRequest, ThreadScope,
 };
 use ironclaw_turns::{
     GetRunStateRequest, ReplyTargetBindingRef, TurnActor, TurnCoordinator, TurnRunId, TurnScope,
@@ -261,19 +261,24 @@ impl SlackFinalReplyDeliveryObserver {
         binding: &ResolvedBinding,
         run_id: TurnRunId,
     ) -> Result<Option<String>, SlackFinalReplyDeliveryError> {
-        let latest = self
+        let history = self
             .services
             .thread_service
-            .latest_thread_message(LatestThreadMessageRequest {
+            .list_thread_history(ThreadHistoryRequest {
                 scope: thread_scope.clone(),
                 thread_id: binding.thread_id.clone(),
-                kind: MessageKind::Assistant,
-                status: MessageStatus::Finalized,
             })
             .await?;
         let run_id = run_id.to_string();
-        Ok(latest
-            .filter(|message| message.turn_run_id.as_deref() == Some(run_id.as_str()))
+        Ok(history
+            .messages
+            .into_iter()
+            .rev()
+            .find(|message| {
+                message.kind == MessageKind::Assistant
+                    && message.status == MessageStatus::Finalized
+                    && message.turn_run_id.as_deref() == Some(run_id.as_str())
+            })
             .and_then(|message| message.content))
     }
 }
@@ -375,9 +380,14 @@ fn submitted_run_id(ack: &ProductInboundAck) -> Option<TurnRunId> {
 }
 
 fn turn_scope_from_binding(binding: &ResolvedBinding) -> Result<TurnScope, ProductWorkflowError> {
+    let Some(agent_id) = binding.agent_id.clone() else {
+        return Err(ProductWorkflowError::BindingResolutionFailed {
+            reason: "resolved binding missing agent_id required for turn scope".to_string(),
+        });
+    };
     Ok(TurnScope::new(
         binding.tenant_id.clone(),
-        binding.agent_id.clone(),
+        Some(agent_id),
         binding.project_id.clone(),
         binding.thread_id.clone(),
     ))
