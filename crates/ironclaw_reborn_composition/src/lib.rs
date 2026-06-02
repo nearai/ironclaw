@@ -50,6 +50,7 @@ mod nearai_mcp;
 mod notion_oauth;
 mod oauth_dcr;
 mod oauth_dcr_protocol;
+mod oauth_gate;
 mod oauth_provider_client;
 mod product_auth_durable;
 mod product_auth_providers;

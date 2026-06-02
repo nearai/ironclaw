@@ -430,6 +430,9 @@ fn compose_product_auth_services(
     if let Some(registry) = provider_composition.dcr_registry {
         services = services.with_dcr_oauth_registry(registry);
     }
+    if let Some(registry) = provider_composition.gate_registry {
+        services = services.with_oauth_gate_registry(registry);
+    }
     Arc::new(services)
 }
 
@@ -623,6 +626,10 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
                     Some(registry) => services.with_dcr_oauth_registry(registry),
                     None => services,
                 };
+                let services = match provider_composition.gate_registry.clone() {
+                    Some(registry) => services.with_oauth_gate_registry(registry),
+                    None => services,
+                };
                 Arc::new(services)
             }
             #[cfg(not(any(feature = "libsql", feature = "postgres")))]
@@ -634,8 +641,12 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
                     Some(provider_client) => services.with_provider_client(provider_client),
                     None => services,
                 };
-                Arc::new(match provider_composition.dcr_registry.clone() {
+                let services = match provider_composition.dcr_registry.clone() {
                     Some(registry) => services.with_dcr_oauth_registry(registry),
+                    None => services,
+                };
+                Arc::new(match provider_composition.gate_registry.clone() {
+                    Some(registry) => services.with_oauth_gate_registry(registry),
                     None => services,
                 })
             }

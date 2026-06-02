@@ -4,8 +4,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_auth::{
-    AuthProductError, AuthProviderClient, OAuthProviderCallbackRequest, OAuthProviderExchange,
-    OAuthProviderExchangeContext, OAuthProviderRefresh, OAuthProviderRefreshRequest,
+    AuthProductError, AuthProviderClient, GOOGLE_PROVIDER_ID, OAuthProviderCallbackRequest,
+    OAuthProviderExchange, OAuthProviderExchangeContext, OAuthProviderRefresh,
+    OAuthProviderRefreshRequest,
 };
 use ironclaw_capabilities::CapabilityObligationHandler;
 use ironclaw_host_api::RuntimeHttpEgress;
@@ -15,12 +16,14 @@ use ironclaw_secrets::SecretStore;
 use crate::RebornBuildError;
 use crate::input::{OAuthDcrProviderBackendConfig, OAuthProviderBackendConfig};
 use crate::oauth_dcr::{OAuthDcrProvider, OAuthDcrProviderRegistry};
+use crate::oauth_gate::{GoogleOAuthGateProvider, OAuthGateProviderRegistry};
 use crate::oauth_provider_client::HostOAuthProviderClient;
 
 #[derive(Clone)]
 pub(crate) struct OAuthProviderComposition {
     pub(crate) client: Option<Arc<dyn AuthProviderClient>>,
     pub(crate) dcr_registry: Option<Arc<OAuthDcrProviderRegistry>>,
+    pub(crate) gate_registry: Option<Arc<OAuthGateProviderRegistry>>,
 }
 
 pub(crate) fn compose_provider_client(
@@ -44,8 +47,15 @@ fn compose_provider_client_with_runtime(
     runtime_ports: OAuthProviderRuntimePorts,
 ) -> Result<OAuthProviderComposition, RebornBuildError> {
     let mut clients = Vec::new();
+    let mut gate_providers = Vec::new();
     for config in configs {
         let provider_id = config.spec.provider_id;
+        if provider_id == GOOGLE_PROVIDER_ID {
+            gate_providers.push(Arc::new(GoogleOAuthGateProvider::new(
+                config.client.clone(),
+                Arc::clone(&secret_store),
+            )));
+        }
         let mut client = HostOAuthProviderClient::new(
             config.spec,
             runtime_ports.runtime_http_egress(),
@@ -97,9 +107,12 @@ fn compose_provider_client_with_runtime(
     }
     let dcr_registry =
         (!dcr_providers.is_empty()).then(|| Arc::new(OAuthDcrProviderRegistry::new(dcr_providers)));
+    let gate_registry = (!gate_providers.is_empty())
+        .then(|| Arc::new(OAuthGateProviderRegistry::new(gate_providers)));
     Ok(OAuthProviderComposition {
         client: compose_provider_clients(clients),
         dcr_registry,
+        gate_registry,
     })
 }
 

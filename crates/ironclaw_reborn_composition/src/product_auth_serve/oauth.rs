@@ -291,26 +291,38 @@ pub(super) async fn google_oauth_callback_handler(
         return response.map(Json);
     }
 
-    if let Err(error) = run_with_backend_timeout(
+    let provider = match run_with_backend_timeout(
         state
             .product_auth
             .ensure_oauth_callback_flow_known(callback_scope, flow_id),
     )
     .await
     {
-        state.remove_pkce_verifier(flow_id);
-        return Err(error);
-    }
+        Ok(provider) => provider,
+        Err(error) => {
+            state.remove_pkce_verifier(flow_id);
+            return Err(error);
+        }
+    };
     let Some(code) = query.code.as_ref() else {
         state.remove_pkce_verifier(flow_id);
         return Err(ProductAuthRouteFailure::malformed_callback());
     };
     let pkce_verifier = match state.pkce_verifier_for_callback(flow_id) {
         Ok(pkce_verifier) => pkce_verifier,
-        Err(error) => {
-            state.remove_pkce_verifier(flow_id);
-            return Err(error);
-        }
+        Err(_) => match run_with_backend_timeout(state.product_auth.oauth_pkce_verifier_for_flow(
+            callback_scope,
+            &provider,
+            flow_id,
+        ))
+        .await?
+        {
+            Some(pkce_verifier) => pkce_verifier,
+            None => {
+                state.remove_pkce_verifier(flow_id);
+                return Err(ProductAuthRouteFailure::unknown_or_expired_flow());
+            }
+        },
     };
     let callback_scopes = match parse_google_callback_scopes(query.scopes.as_deref()) {
         Ok(callback_scopes) => {
