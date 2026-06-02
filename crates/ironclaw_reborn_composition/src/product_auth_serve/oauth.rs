@@ -42,6 +42,7 @@ pub(super) async fn oauth_start_handler(
                     .map_err(ProductAuthRouteFailure::from)?,
                 opaque_state_hash,
                 pkce_verifier_hash,
+                update_binding: None,
                 expires_at: request.expires_at,
             }),
     )
@@ -84,10 +85,17 @@ pub(super) async fn google_oauth_start_handler(
         &ScopeFields {
             session_id: request.session_id,
             thread_id: request.thread_id,
-            invocation_id: None,
+            invocation_id: request.invocation_id,
         },
     )?;
     let flow_id = AuthFlowId::new();
+    let update_binding = scoped_update_binding_for_requester(
+        &state,
+        scope.clone(),
+        provider.clone(),
+        request.requester_extension.as_deref(),
+    )
+    .await?;
     let opaque_state = GoogleOAuthCallbackState::new(
         flow_id,
         scope.clone(),
@@ -121,6 +129,7 @@ pub(super) async fn google_oauth_start_handler(
             authorization_url: authorization_url.clone(),
             opaque_state_hash: opaque_state_hash.clone(),
             pkce_verifier_hash,
+            update_binding,
             expires_at: request.expires_at,
         },
     ))

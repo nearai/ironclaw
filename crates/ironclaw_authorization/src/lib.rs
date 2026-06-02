@@ -1170,7 +1170,7 @@ fn obligations_for_grant(
                         return None;
                     }
                 }
-                RuntimeCredentialRequirementSource::ProductAuthAccount { provider } => {
+                RuntimeCredentialRequirementSource::ProductAuthAccount { provider, .. } => {
                     // Mirror SecretHandle: only mandate the obligation when the credential is
                     // required. An optional product-auth credential is skipped rather than
                     // injected so that a missing account does not hard-fail dispatch.

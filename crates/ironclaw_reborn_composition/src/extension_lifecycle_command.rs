@@ -239,6 +239,7 @@ mod tests {
                     runtime_kind:
                         ironclaw_product_workflow::LifecycleExtensionRuntimeKind::WasmTool,
                     visible_read_only_capability_ids: Vec::new(),
+                    credential_requirements: Vec::new(),
                 }],
             }),
         };

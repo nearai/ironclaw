@@ -9,6 +9,7 @@ import {
   removeExtension,
   fetchExtensionSetup,
   submitExtensionSetup,
+  startExtensionOauth,
   fetchPairingRequests,
   approvePairingCode,
 } from "../lib/extensions-api.js";
@@ -167,6 +168,21 @@ export function useSetupSubmit(packageRef, onSuccess) {
       queryClient.invalidateQueries({ queryKey: ["extensions"] });
       queryClient.invalidateQueries({ queryKey: ["extension-setup", packageKey] });
       if (onSuccess) onSuccess(res);
+    },
+  });
+}
+
+export function useOauthSetup(packageRef) {
+  const queryClient = useQueryClient();
+  const packageKey = packageRef?.id || packageRef;
+
+  return useMutation({
+    mutationFn: ({ secret }) => startExtensionOauth(packageRef, secret),
+    onSuccess: (res) => {
+      if (res.authorization_url) {
+        window.open(res.authorization_url, "_blank", "noopener,noreferrer");
+      }
+      queryClient.invalidateQueries({ queryKey: ["extension-setup", packageKey] });
     },
   });
 }

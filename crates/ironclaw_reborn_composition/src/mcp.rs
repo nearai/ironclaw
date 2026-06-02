@@ -526,6 +526,7 @@ mod tests {
                                                 provider,
                                             )
                                             .unwrap(),
+                                            setup: Default::default(),
                                         },
                                     audience: NetworkTargetPattern {
                                         scheme: Some(NetworkScheme::Https),

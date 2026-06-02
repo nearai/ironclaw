@@ -11,15 +11,18 @@ use axum::extract::ConnectInfo;
 use axum::http::{HeaderValue, Method, Request, StatusCode, header};
 use chrono::{Duration as ChronoDuration, Utc};
 use ironclaw_auth::{
-    AuthChallenge, AuthContinuationEvent, AuthFlowManager, AuthInteractionId,
-    AuthInteractionService, AuthProductError, AuthProductScope, AuthProviderClient,
-    CredentialAccountService, CredentialSetupService, GOOGLE_CALENDAR_READONLY_SCOPE,
+    AuthChallenge, AuthContinuationEvent, AuthFlowId, AuthFlowManager, AuthInteractionId,
+    AuthInteractionService, AuthProductError, AuthProductScope, AuthProviderClient, AuthProviderId,
+    AuthSurface, CredentialAccountLabel, CredentialAccountService, CredentialAccountStatus,
+    CredentialOwnership, CredentialSetupService, GOOGLE_CALENDAR_READONLY_SCOPE,
     GOOGLE_GMAIL_READONLY_SCOPE, InMemoryAuthProductServices, ManualTokenSetupRequest,
-    OAuthProviderCallbackRequest, OAuthProviderExchange, OAuthProviderExchangeContext,
-    OAuthProviderRefresh, OAuthProviderRefreshRequest, SecretCleanupService, SecretSubmitRequest,
-    SecretSubmitResult,
+    NewCredentialAccount, OAuthProviderCallbackRequest, OAuthProviderExchange,
+    OAuthProviderExchangeContext, OAuthProviderRefresh, OAuthProviderRefreshRequest, ProviderScope,
+    SecretCleanupService, SecretSubmitRequest, SecretSubmitResult,
 };
-use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
+use ironclaw_host_api::{
+    AgentId, InvocationId, ProjectId, ResourceScope, SecretHandle, TenantId, UserId,
+};
 use ironclaw_product_workflow::{
     LifecyclePackageRef, RebornCancelRunResponse, RebornCreateThreadResponse,
     RebornExtensionActionResponse, RebornExtensionListResponse, RebornExtensionRegistryResponse,
@@ -37,6 +40,7 @@ use ironclaw_reborn_composition::{
 };
 use serde_json::json;
 use tower::ServiceExt;
+use uuid::Uuid;
 
 const TENANT: &str = "tenant-alpha";
 const USER: &str = "user-alpha";
@@ -1096,6 +1100,77 @@ async fn product_auth_google_oauth_start_builds_provider_authorization_url() {
         query
             .iter()
             .any(|(name, value)| name == "hd" && value == "example.com")
+    );
+}
+
+#[tokio::test]
+async fn product_auth_google_oauth_start_attaches_update_binding_for_requester_extension() {
+    let shared = Arc::new(InMemoryAuthProductServices::new());
+    let product_auth = Arc::new(RebornProductAuthServices::from_shared(
+        shared.clone(),
+        Arc::new(RecordingAuthDispatcher::default()),
+    ));
+    let app = build_app_with_product_auth_service_and_config(
+        product_auth,
+        Some(google_oauth_route_config()),
+    );
+    let invocation_id = InvocationId::new();
+    let scope = AuthProductScope::new(
+        ResourceScope {
+            tenant_id: TenantId::new(TENANT).expect("tenant id"),
+            user_id: UserId::new(USER).expect("user id"),
+            agent_id: Some(AgentId::new(AGENT).expect("agent id")),
+            project_id: Some(ProjectId::new(PROJECT).expect("project id")),
+            mission_id: None,
+            thread_id: None,
+            invocation_id,
+        },
+        AuthSurface::Callback,
+    );
+    let account = shared
+        .create_account(NewCredentialAccount {
+            scope: scope.clone(),
+            provider: AuthProviderId::new("google").expect("provider id"),
+            label: CredentialAccountLabel::new("google-calendar google").expect("account label"),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: Vec::new(),
+            access_secret: Some(SecretHandle::new("existing-google-access").expect("secret")),
+            refresh_secret: Some(SecretHandle::new("existing-google-refresh").expect("secret")),
+            scopes: vec![
+                ProviderScope::new(GOOGLE_CALENDAR_READONLY_SCOPE.to_string()).expect("scope"),
+            ],
+        })
+        .await
+        .expect("seed credential account");
+
+    let response = post_google_oauth_start(
+        &app,
+        google_oauth_start_body(json!({
+            "invocation_id": invocation_id.to_string(),
+            "requester_extension": "google-calendar",
+            "scopes": [GOOGLE_CALENDAR_READONLY_SCOPE],
+        })),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_body_string(response).await;
+    let json: serde_json::Value = serde_json::from_str(&body).expect("start json");
+    let flow_id = AuthFlowId::from_uuid(
+        Uuid::parse_str(json["flow_id"].as_str().expect("flow id")).expect("flow uuid"),
+    );
+    let flow = shared
+        .get_flow(&scope, flow_id)
+        .await
+        .expect("flow lookup")
+        .expect("created flow");
+    assert_eq!(
+        flow.update_binding
+            .as_ref()
+            .map(|binding| binding.account_id),
+        Some(account.id)
     );
 }
 

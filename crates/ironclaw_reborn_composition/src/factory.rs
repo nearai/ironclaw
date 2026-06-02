@@ -2548,6 +2548,7 @@ mod tests {
             search.runtime_credentials[0].source,
             RuntimeCredentialRequirementSource::ProductAuthAccount {
                 provider: RuntimeCredentialAccountProviderId::new("nearai").unwrap(),
+                setup: Default::default(),
             }
         );
         assert_eq!(

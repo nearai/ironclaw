@@ -5,6 +5,7 @@ use ironclaw_extensions::{
 use ironclaw_filesystem::{FileType, FilesystemError, RootFilesystem};
 use ironclaw_host_api::{CapabilityId, ExtensionId, VirtualPath, sha256_digest_token};
 use ironclaw_product_workflow::{
+    LifecycleExtensionCredentialRequirement, LifecycleExtensionCredentialSetup,
     LifecycleExtensionRuntimeKind, LifecycleExtensionSource, LifecycleExtensionSummary,
     LifecyclePackageKind, LifecyclePackageRef, ProductWorkflowError,
 };
@@ -60,6 +61,7 @@ impl AvailableExtensionPackage {
             source: LifecycleExtensionSource::HostBundled,
             runtime_kind: runtime_kind(&self.package.manifest.runtime),
             visible_read_only_capability_ids,
+            credential_requirements: credential_requirements(self),
         }
     }
 }
@@ -71,6 +73,52 @@ fn runtime_kind(runtime: &ExtensionRuntime) -> LifecycleExtensionRuntimeKind {
         ExtensionRuntime::FirstParty { .. } => LifecycleExtensionRuntimeKind::FirstParty,
         ExtensionRuntime::System { .. } => LifecycleExtensionRuntimeKind::System,
         ExtensionRuntime::Script { .. } => LifecycleExtensionRuntimeKind::Script,
+    }
+}
+
+fn credential_requirements(
+    package: &AvailableExtensionPackage,
+) -> Vec<LifecycleExtensionCredentialRequirement> {
+    let mut requirements = Vec::new();
+    for capability in &package.package.manifest.capabilities {
+        for requirement in &capability.runtime_credentials {
+            let ironclaw_host_api::RuntimeCredentialRequirementSource::ProductAuthAccount {
+                provider,
+                setup,
+            } = &requirement.source
+            else {
+                continue;
+            };
+            let name = requirement.handle.as_str().to_string();
+            if requirements
+                .iter()
+                .any(|seen: &LifecycleExtensionCredentialRequirement| seen.name == name)
+            {
+                continue;
+            }
+            requirements.push(LifecycleExtensionCredentialRequirement {
+                name,
+                provider: provider.as_str().to_string(),
+                required: requirement.required,
+                setup: credential_setup(setup),
+            });
+        }
+    }
+    requirements
+}
+
+fn credential_setup(
+    setup: &ironclaw_host_api::RuntimeCredentialAccountSetup,
+) -> LifecycleExtensionCredentialSetup {
+    match setup {
+        ironclaw_host_api::RuntimeCredentialAccountSetup::ManualToken => {
+            LifecycleExtensionCredentialSetup::ManualToken
+        }
+        ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth { scopes } => {
+            LifecycleExtensionCredentialSetup::OAuth {
+                scopes: scopes.clone(),
+            }
+        }
     }
 }
 

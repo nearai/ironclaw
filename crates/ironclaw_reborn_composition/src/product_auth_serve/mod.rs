@@ -30,9 +30,10 @@ use ironclaw_auth::{
     AuthProductError, AuthProductScope, AuthProviderId, AuthSessionId, AuthSurface,
     AuthorizationCodeHash, CredentialAccountChoiceRequest, CredentialAccountId,
     CredentialAccountLabel, CredentialAccountListPage, CredentialAccountListRequest,
-    CredentialAccountProjection, CredentialAccountStatus, CredentialRecoveryProjection,
-    CredentialRecoveryRequest, CredentialRefreshReport, CredentialRefreshRequest,
-    GOOGLE_PROVIDER_ID, GoogleOAuthCallbackState, GoogleOAuthRouteConfig, OAuthAuthorizationCode,
+    CredentialAccountProjection, CredentialAccountSelectionRequest, CredentialAccountStatus,
+    CredentialAccountUpdateBinding, CredentialRecoveryProjection, CredentialRecoveryRequest,
+    CredentialRefreshReport, CredentialRefreshRequest, GOOGLE_PROVIDER_ID,
+    GoogleOAuthCallbackState, GoogleOAuthRouteConfig, OAuthAuthorizationCode,
     OAuthAuthorizationUrl, OAuthProviderCallbackRequest, OpaqueStateHash, PkceVerifierHash,
     PkceVerifierSecret, ProviderScope, SecretCleanupAction, SecretCleanupReport,
     SecretCleanupRequest, Timestamp, TurnRunRef, build_google_authorization_url,
@@ -497,6 +498,8 @@ pub(super) struct GoogleOAuthStartRequest {
     expires_at: Timestamp,
     session_id: Option<String>,
     thread_id: Option<String>,
+    invocation_id: Option<String>,
+    requester_extension: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -832,6 +835,41 @@ pub(super) fn scope_from_authenticated_caller_parts_requiring_invocation(
         return Err(ProductAuthRouteFailure::invalid_request());
     }
     scope_from_authenticated_caller_parts(caller, fields)
+}
+
+pub(super) async fn scoped_update_binding_for_requester(
+    state: &ProductAuthRouteState,
+    scope: AuthProductScope,
+    provider: AuthProviderId,
+    requester_extension: Option<&str>,
+) -> Result<Option<CredentialAccountUpdateBinding>, ProductAuthRouteFailure> {
+    let Some(requester_extension) = requester_extension else {
+        return Ok(None);
+    };
+    let requester_extension = ExtensionId::new(requester_extension.to_string())
+        .map_err(|_| ProductAuthRouteFailure::invalid_request())?;
+    let account = state
+        .product_auth
+        .runtime_credential_account_selection_service()
+        .select_unique_configured_runtime_account(
+            CredentialAccountSelectionRequest::new(scope, provider)
+                .for_extension(requester_extension),
+        )
+        .await;
+    match account {
+        Ok(account) => Ok(Some(update_binding(account.projection()))),
+        Err(AuthProductError::CredentialMissing) => Ok(None),
+        Err(error) => Err(ProductAuthRouteFailure::from(error)),
+    }
+}
+
+fn update_binding(account: CredentialAccountProjection) -> CredentialAccountUpdateBinding {
+    CredentialAccountUpdateBinding {
+        account_id: account.id,
+        ownership: account.ownership,
+        owner_extension: account.owner_extension,
+        granted_extensions: account.granted_extensions,
+    }
 }
 
 pub(super) fn scope_from_callback_query(

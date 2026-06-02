@@ -177,7 +177,7 @@ fn extension_info(installed: LifecycleInstalledExtensionSummary) -> RebornExtens
             phase,
             LifecyclePhase::Installed | LifecyclePhase::Configured | LifecyclePhase::Failed
         ),
-        has_auth: false,
+        has_auth: !summary.credential_requirements.is_empty(),
         activation_status: Some(phase_status(phase).to_string()),
         activation_error: None,
         version: Some(summary.version),

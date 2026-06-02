@@ -273,4 +273,43 @@ pub struct RebornSetupExtensionResponse {
     pub blockers: Vec<LifecycleReadinessBlocker>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub payload: Option<LifecycleProductPayload>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub secrets: Vec<RebornExtensionSetupSecret>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fields: Vec<RebornExtensionSetupField>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub onboarding: Option<Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornExtensionSetupSecret {
+    pub name: String,
+    pub provider: String,
+    pub prompt: String,
+    pub optional: bool,
+    pub provided: bool,
+    pub setup: RebornExtensionCredentialSetup,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_ref: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RebornExtensionCredentialSetup {
+    ManualToken,
+    #[serde(rename = "oauth")]
+    OAuth {
+        account_label: String,
+        scopes: Vec<String>,
+        invocation_id: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornExtensionSetupField {
+    pub name: String,
+    pub prompt: String,
+    pub optional: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placeholder: Option<String>,
 }

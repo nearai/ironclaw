@@ -8,8 +8,11 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::Utc;
-use ironclaw_auth::CredentialAccountId;
-use ironclaw_host_api::{AgentId, ThreadId};
+use ironclaw_auth::{
+    AuthProductScope, AuthProviderId, CredentialAccountId, CredentialAccountProjection,
+    CredentialAccountUpdateBinding,
+};
+use ironclaw_host_api::{AgentId, ExtensionId, ThreadId};
 use ironclaw_product_adapters::{
     ProductAdapterError, ProductWorkflowRejectionKind, ProjectionStream,
     ProjectionSubscriptionRequest,
@@ -24,6 +27,7 @@ use ironclaw_turns::{
     ResumeTurnRequest, SanitizedCancelReason, SubmitTurnRequest, SubmitTurnResponse, TurnActor,
     TurnCoordinator, TurnError, TurnRunId, TurnScope, TurnStatus,
 };
+use secrecy::SecretString;
 use uuid::Uuid;
 
 use crate::{
@@ -45,6 +49,7 @@ use crate::{
 };
 
 mod error;
+mod extension_setup_credentials;
 mod extensions;
 mod lifecycle_setup;
 mod types;
@@ -52,8 +57,9 @@ mod types;
 pub use error::{RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind};
 pub use types::{
     RebornCancelRunResponse, RebornCreateThreadResponse, RebornExtensionActionResponse,
-    RebornExtensionInfo, RebornExtensionListResponse, RebornExtensionRegistryEntry,
-    RebornExtensionRegistryResponse, RebornGetRunStateRequest, RebornGetRunStateResponse,
+    RebornExtensionCredentialSetup, RebornExtensionInfo, RebornExtensionListResponse,
+    RebornExtensionRegistryEntry, RebornExtensionRegistryResponse, RebornExtensionSetupField,
+    RebornExtensionSetupSecret, RebornGetRunStateRequest, RebornGetRunStateResponse,
     RebornListThreadsResponse, RebornResolveGateResponse, RebornResumeGateResponse,
     RebornSetupExtensionResponse, RebornStreamEventsRequest, RebornStreamEventsResponse,
     RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
@@ -63,6 +69,36 @@ type SkillActivationRecorder =
     dyn Fn(&TurnScope, &AcceptedMessageRef, &str) -> Result<(), RebornServicesError> + Send + Sync;
 type SkillActivationClearer =
     dyn Fn(&TurnScope, &AcceptedMessageRef) -> Result<(), RebornServicesError> + Send + Sync;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtensionCredentialStatusRequest {
+    pub scope: AuthProductScope,
+    pub provider: AuthProviderId,
+    pub requester_extension: ExtensionId,
+}
+
+#[derive(Debug)]
+pub struct ExtensionCredentialSubmitRequest {
+    pub scope: AuthProductScope,
+    pub provider: AuthProviderId,
+    pub label: String,
+    pub requester_extension: ExtensionId,
+    pub existing_account: Option<CredentialAccountUpdateBinding>,
+    pub secret: SecretString,
+}
+
+#[async_trait]
+pub trait ExtensionCredentialSetupService: Send + Sync {
+    async fn credential_status(
+        &self,
+        request: ExtensionCredentialStatusRequest,
+    ) -> Result<Option<CredentialAccountProjection>, RebornServicesError>;
+
+    async fn submit_manual_token(
+        &self,
+        request: ExtensionCredentialSubmitRequest,
+    ) -> Result<CredentialAccountId, RebornServicesError>;
+}
 
 #[derive(Clone, Copy)]
 enum GateResolutionRoute {
@@ -232,6 +268,7 @@ pub struct RebornServices {
     lifecycle_facade: Arc<dyn LifecycleProductFacade>,
     approval_interactions: Arc<dyn ApprovalInteractionService>,
     auth_interactions: Arc<dyn AuthInteractionService>,
+    extension_credentials: Option<Arc<dyn ExtensionCredentialSetupService>>,
     skill_activation_recorder: Option<Arc<SkillActivationRecorder>>,
     skill_activation_clearer: Option<Arc<SkillActivationClearer>>,
 }
@@ -250,6 +287,7 @@ impl RebornServices {
             )),
             approval_interactions: Arc::new(RejectingApprovalInteractionService),
             auth_interactions: Arc::new(RejectingAuthInteractionService),
+            extension_credentials: None,
             skill_activation_recorder: None,
             skill_activation_clearer: None,
         }
@@ -281,6 +319,14 @@ impl RebornServices {
         auth_interactions: Arc<dyn AuthInteractionService>,
     ) -> Self {
         self.auth_interactions = auth_interactions;
+        self
+    }
+
+    pub fn with_extension_credentials(
+        mut self,
+        extension_credentials: Arc<dyn ExtensionCredentialSetupService>,
+    ) -> Self {
+        self.extension_credentials = Some(extension_credentials);
         self
     }
 
@@ -820,6 +866,7 @@ impl RebornServicesApi for RebornServices {
     ) -> Result<RebornSetupExtensionResponse, RebornServicesError> {
         lifecycle_setup::setup_extension(
             self.lifecycle_facade.as_ref(),
+            self.extension_credentials.as_deref(),
             caller,
             package_ref,
             request,
