@@ -903,7 +903,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn static_resolver_allows_url_verification_before_selector_matching() {
+    async fn static_resolver_allows_url_verification_before_selector_matching() -> Result<(), String>
+    {
         let resolver = StaticSlackInstallationResolver::new(vec![SlackInstallationRecord::new(
             tenant_id("tenant-a"),
             installation_id("install-a"),
@@ -919,21 +920,22 @@ mod tests {
             .await
             .expect("url verification resolves before selector matching");
 
-        match ingress {
-            ResolvedSlackIngress::UrlVerification {
-                installation,
-                challenge,
-            } => {
-                assert_eq!(installation.tenant_id().as_str(), "tenant-a");
-                assert_eq!(installation.adapter_installation_id().as_str(), "install-a");
-                assert_eq!(challenge, "challenge-token");
-            }
-            ResolvedSlackIngress::Event { .. } => panic!("expected url verification"),
-        }
+        let ResolvedSlackIngress::UrlVerification {
+            installation,
+            challenge,
+        } = ingress
+        else {
+            return Err("expected url verification".to_string());
+        };
+        assert_eq!(installation.tenant_id().as_str(), "tenant-a");
+        assert_eq!(installation.adapter_installation_id().as_str(), "install-a");
+        assert_eq!(challenge, "challenge-token");
+        Ok(())
     }
 
     #[tokio::test]
-    async fn static_resolver_disambiguates_same_workspace_by_authorization_user() {
+    async fn static_resolver_disambiguates_same_workspace_by_authorization_user()
+    -> Result<(), String> {
         let resolver = StaticSlackInstallationResolver::new(vec![
             SlackInstallationRecord::new(
                 tenant_id("tenant-a"),
@@ -963,16 +965,16 @@ mod tests {
             .await
             .expect("authorization user disambiguates install");
 
-        match ingress {
-            ResolvedSlackIngress::Event {
-                installation,
-                metadata,
-            } => {
-                assert_eq!(installation.tenant_id().as_str(), "tenant-b");
-                assert_eq!(installation.adapter_installation_id().as_str(), "install-b");
-                assert_eq!(metadata.install_user_id.as_deref(), Some("U-install-b"));
-            }
-            ResolvedSlackIngress::UrlVerification { .. } => panic!("expected event"),
-        }
+        let ResolvedSlackIngress::Event {
+            installation,
+            metadata,
+        } = ingress
+        else {
+            return Err("expected event".to_string());
+        };
+        assert_eq!(installation.tenant_id().as_str(), "tenant-b");
+        assert_eq!(installation.adapter_installation_id().as_str(), "install-b");
+        assert_eq!(metadata.install_user_id.as_deref(), Some("U-install-b"));
+        Ok(())
     }
 }
