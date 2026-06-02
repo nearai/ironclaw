@@ -101,7 +101,7 @@ You can configure the WeChat channel through `~/.ironclaw/channels/wechat.capabi
 | `base_url` | `https://ilinkai.weixin.qq.com` | WeChat iLink API base URL |
 | `cdn_base_url` | `https://novac2c.cdn.weixin.qq.com/c2c` | WeChat CDN base URL for media download and upload |
 | `bot_type` | `3` | WeChat iLink bot type used when starting QR login |
-| `poll_interval_ms` | `30000` | Polling interval in milliseconds |
+| `poll_interval_ms` | `30000` | Polling interval in milliseconds (minimum 30,000ms) |
 | `long_poll_timeout_ms` | `35000` | Timeout for each WeChat long-poll request |
 | `inbound_merge_window_ms` | `5000` | Window for merging closely related inbound message parts before emitting them to the agent |
 
