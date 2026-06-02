@@ -96,6 +96,26 @@ mod tests {
     }
 
     #[test]
+    fn chat_projection_text_preserves_pending_gate() {
+        let events = asset_text("js/pages/chat/lib/useChatEvents.js");
+        let text_branch = events
+            .split("if (item.text)")
+            .nth(1)
+            .expect("text projection branch exists")
+            .split("if (item.thinking)")
+            .next()
+            .expect("thinking branch follows text branch");
+        assert!(
+            text_branch.contains("terminal run_status is the only"),
+            "text branch should document that run_status owns gate clearing"
+        );
+        assert!(
+            !text_branch.contains("setPendingGate(null);"),
+            "projection text must not hide a still-blocked auth gate"
+        );
+    }
+
+    #[test]
     fn extensions_onboarding_messages_render_in_cards() {
         let extension_card = asset_text("js/pages/extensions/components/extension-card.js");
 
