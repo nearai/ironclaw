@@ -107,13 +107,22 @@ export function ChatInput({
   const onDrop = React.useCallback(
     (e) => {
       e.preventDefault();
+      setDragOver(false);
       const files = Array.from(e.dataTransfer.files);
       if (files.length > 0) addFiles(files);
     },
     [addFiles]
   );
 
-  const onDragOver = React.useCallback((e) => e.preventDefault(), []);
+  const [dragOver, setDragOver] = React.useState(false);
+  const onDragOver = React.useCallback((e) => {
+    e.preventDefault();
+    setDragOver(true);
+  }, []);
+  const onDragLeave = React.useCallback((e) => {
+    if (e.currentTarget.contains(e.relatedTarget)) return;
+    setDragOver(false);
+  }, []);
 
   const onFileInputChange = React.useCallback(
     (e) => {
@@ -133,7 +142,7 @@ export function ChatInput({
     ? "w-full"
     : "px-4 py-3 sm:px-5 lg:px-8";
   const composerClass = [
-    "mx-auto w-full max-w-5xl rounded-[20px] border border-[var(--v2-panel-border)] bg-[var(--v2-card-bg)] shadow-[var(--v2-card-shadow)] p-2.5",
+    "relative mx-auto w-full max-w-5xl rounded-[20px] border border-[var(--v2-panel-border)] bg-[var(--v2-card-bg)] shadow-[var(--v2-card-shadow)] p-2.5",
     isHero ? "min-h-[120px]" : "",
     disabled ? "opacity-70" : "",
   ].join(" ");
@@ -149,7 +158,14 @@ export function ChatInput({
         className=${composerClass}
         onDrop=${onDrop}
         onDragOver=${onDragOver}
+        onDragLeave=${onDragLeave}
       >
+        ${dragOver &&
+        html`
+          <div className="pointer-events-none absolute inset-1 z-10 flex items-center justify-center rounded-[16px] border border-dashed border-[color-mix(in_srgb,var(--v2-accent)_55%,var(--v2-panel-border))] bg-[color-mix(in_srgb,var(--v2-canvas)_82%,transparent)] text-sm font-medium text-[var(--v2-accent-text)]">
+            ${t("chat.dropToAttach")}
+          </div>
+        `}
         ${(images.length > 0 || attachments.length > 0) &&
         html`
           <div className="mb-3 flex flex-wrap gap-2">

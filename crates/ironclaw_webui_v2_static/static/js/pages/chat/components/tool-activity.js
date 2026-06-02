@@ -257,11 +257,95 @@ function ToolDetailPanel({
         html`<div className="whitespace-pre-wrap text-iron-200">${toolDetail}</div>`}
         ${active === "params" &&
         html`<pre className="overflow-x-auto rounded bg-iron-900 p-2 font-mono text-iron-100">${toolParameters}</pre>`}
-        ${active === "result" &&
-        html`<pre className="overflow-x-auto whitespace-pre-wrap rounded bg-iron-900 p-2 font-mono text-[var(--v2-positive-text)]">${toolResultPreview}</pre>`}
+        ${active === "result" && html`<${ToolResult} text=${toolResultPreview} />`}
         ${active === "error" &&
         html`<pre className="overflow-x-auto whitespace-pre-wrap rounded bg-iron-900 p-2 font-mono text-[var(--v2-danger-text)]">${toolError}</pre>`}
       </div>
     </div>
   `;
+}
+
+/* Rich tool-result rendering: inline image for data URLs, a table for arrays
+   of flat objects, pretty-printed JSON for other structured payloads, and a
+   plain preformatted block otherwise. */
+function ToolResult({ text }) {
+  const value = typeof text === "string" ? text.trim() : "";
+
+  if (/^data:image\//.test(value)) {
+    return html`<img
+      src=${value}
+      alt="Tool result"
+      className="max-h-72 rounded-lg border border-iron-700 object-contain"
+    />`;
+  }
+
+  let parsed;
+  if ((value.startsWith("{") || value.startsWith("[")) && value.length < 200000) {
+    try {
+      parsed = JSON.parse(value);
+    } catch {
+      parsed = undefined;
+    }
+  }
+
+  if (Array.isArray(parsed) && parsed.length > 0 && parsed.every(isFlatRow)) {
+    const columns = Array.from(
+      parsed.reduce((set, row) => {
+        Object.keys(row).forEach((k) => set.add(k));
+        return set;
+      }, new Set())
+    );
+    return html`
+      <div className="overflow-x-auto rounded border border-iron-700/60">
+        <table className="w-full border-collapse text-left font-mono text-[11px]">
+          <thead>
+            <tr>
+              ${columns.map(
+                (col) => html`<th
+                  key=${col}
+                  className="border-b border-iron-700/60 bg-iron-900 px-2 py-1 font-semibold text-iron-100"
+                >${col}</th>`
+              )}
+            </tr>
+          </thead>
+          <tbody>
+            ${parsed.map(
+              (row, i) => html`<tr key=${i}>
+                ${columns.map(
+                  (col) => html`<td
+                    key=${col}
+                    className="border-b border-iron-700/40 px-2 py-1 text-iron-200"
+                  >${formatCell(row[col])}</td>`
+                )}
+              </tr>`
+            )}
+          </tbody>
+        </table>
+      </div>
+    `;
+  }
+
+  if (parsed !== undefined && typeof parsed === "object") {
+    return html`<pre
+      className="overflow-x-auto whitespace-pre-wrap rounded bg-iron-900 p-2 font-mono text-[var(--v2-positive-text)]"
+    >${JSON.stringify(parsed, null, 2)}</pre>`;
+  }
+
+  return html`<pre
+    className="overflow-x-auto whitespace-pre-wrap rounded bg-iron-900 p-2 font-mono text-[var(--v2-positive-text)]"
+  >${text}</pre>`;
+}
+
+function isFlatRow(row) {
+  return (
+    row &&
+    typeof row === "object" &&
+    !Array.isArray(row) &&
+    Object.values(row).every((v) => v === null || typeof v !== "object")
+  );
+}
+
+function formatCell(value) {
+  if (value === null || value === undefined) return "";
+  return String(value);
 }

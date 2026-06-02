@@ -2,6 +2,7 @@ import { React, html } from "../../../lib/html.js";
 import { useT } from "../../../lib/i18n.js";
 import { MessageBubble } from "./message-bubble.js";
 import { ToolRun } from "./tool-activity.js";
+import { Icon } from "../../../design-system/icons.js";
 
 /* Collapse consecutive tool-activity messages into runs so a long burst of
    tool calls can render as a single summary line (see ToolRun). Non-tool
@@ -37,6 +38,7 @@ export function MessageList({
   const t = useT();
   const containerRef = React.useRef(null);
   const shouldScrollRef = React.useRef(true);
+  const [atBottom, setAtBottom] = React.useState(true);
 
   React.useEffect(() => {
     const el = containerRef.current;
@@ -48,15 +50,25 @@ export function MessageList({
     const el = containerRef.current;
     if (!el) return;
     const threshold = 100;
-    shouldScrollRef.current =
-      el.scrollHeight - el.scrollTop - el.clientHeight < threshold;
+    const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
+    shouldScrollRef.current = distance < threshold;
+    setAtBottom(distance < threshold);
 
     if (hasMore && el.scrollTop < threshold && onLoadMore && !isLoading) {
       onLoadMore();
     }
   }, [hasMore, onLoadMore, isLoading]);
 
+  const jumpToBottom = React.useCallback(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+    shouldScrollRef.current = true;
+    setAtBottom(true);
+  }, []);
+
   return html`
+    <div className="relative flex min-h-0 flex-1">
     <div
       ref=${containerRef}
       onScroll=${onScroll}
@@ -88,6 +100,19 @@ export function MessageList({
         )}
         ${children}
       </div>
+    </div>
+    ${!atBottom &&
+    html`
+      <button
+        type="button"
+        onClick=${jumpToBottom}
+        aria-label=${t("chat.jumpToLatest")}
+        className="absolute bottom-4 left-1/2 inline-flex -translate-x-1/2 items-center gap-1.5 rounded-full border border-[var(--v2-panel-border)] bg-[var(--v2-surface)] px-3 py-1.5 text-xs font-medium text-[var(--v2-text-strong)] shadow-[0_10px_30px_-12px_rgba(0,0,0,0.7)] hover:border-[color-mix(in_srgb,var(--v2-accent)_40%,var(--v2-panel-border))]"
+      >
+        <${Icon} name="arrowDown" className="h-3.5 w-3.5" />
+        ${t("chat.jumpToLatest")}
+      </button>
+    `}
     </div>
   `;
 }

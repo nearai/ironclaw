@@ -86,6 +86,13 @@ registerPack("en", {
   "chat.modeAutoReview": "Auto-review",
   "chat.runtimeLocal": "Work locally",
   "chat.statusWorking": "Working",
+  "chat.jumpToLatest": "Jump to latest",
+  "chat.dropToAttach": "Drop files to attach",
+  "shortcuts.title": "Keyboard shortcuts",
+  "shortcuts.send": "Send message",
+  "shortcuts.newline": "New line",
+  "shortcuts.help": "Show this help",
+  "shortcuts.close": "Close",
 
   // Chat — thread sidebar
   "chat.conversations": "Conversations",
