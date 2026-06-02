@@ -42,25 +42,26 @@ impl CapabilitySurfaceProfileResolver for SubagentCapabilitySurfaceResolver {
             .material_for_run(run_context)
             .await
             .map_err(|error| CapabilityResolveError::unavailable(error.safe_summary))?;
-        Ok(intersect_allow_sets(
+        intersect_allow_sets(
             base,
             CapabilityAllowSet::allowlist(material.allowed_capabilities),
-        ))
+        )
     }
 }
 
-fn intersect_allow_sets(left: CapabilityAllowSet, right: CapabilityAllowSet) -> CapabilityAllowSet {
+fn intersect_allow_sets(
+    left: CapabilityAllowSet,
+    right: CapabilityAllowSet,
+) -> Result<CapabilityAllowSet, CapabilityResolveError> {
     match (left, right) {
-        (CapabilityAllowSet::All, other) | (other, CapabilityAllowSet::All) => other,
-        (CapabilityAllowSet::Allowlist(left), CapabilityAllowSet::Allowlist(right)) => {
-            CapabilityAllowSet::allowlist(left.into_iter().filter(|id| right.contains(id)))
-        }
+        (CapabilityAllowSet::All, other) | (other, CapabilityAllowSet::All) => Ok(other),
+        (CapabilityAllowSet::Allowlist(left), CapabilityAllowSet::Allowlist(right)) => Ok(
+            CapabilityAllowSet::allowlist(left.into_iter().filter(|id| right.contains(id))),
+        ),
         unexpected => {
-            error!(
-                ?unexpected,
-                "unhandled CapabilityAllowSet variant in subagent allowlist intersection"
-            );
-            CapabilityAllowSet::allowlist([])
+            let reason = "unhandled CapabilityAllowSet variant in subagent allowlist intersection";
+            error!(?unexpected, "{reason}");
+            Err(CapabilityResolveError::internal(reason))
         }
     }
 }
@@ -136,7 +137,7 @@ mod tests {
     #[test]
     fn intersect_allow_sets_all_all_returns_all() {
         assert_eq!(
-            intersect_allow_sets(CapabilityAllowSet::All, CapabilityAllowSet::All),
+            intersect_allow_sets(CapabilityAllowSet::All, CapabilityAllowSet::All).unwrap(),
             CapabilityAllowSet::All
         );
     }
@@ -144,7 +145,8 @@ mod tests {
     #[test]
     fn intersect_allow_sets_allowlist_all_returns_allowlist() {
         assert_eq!(
-            intersect_allow_sets(allowlist(&["builtin.read_file"]), CapabilityAllowSet::All),
+            intersect_allow_sets(allowlist(&["builtin.read_file"]), CapabilityAllowSet::All)
+                .unwrap(),
             allowlist(&["builtin.read_file"])
         );
     }
@@ -155,7 +157,8 @@ mod tests {
             intersect_allow_sets(
                 allowlist(&["builtin.read_file"]),
                 allowlist(&["builtin.write_file"])
-            ),
+            )
+            .unwrap(),
             CapabilityAllowSet::allowlist(BTreeSet::new())
         );
     }
@@ -178,5 +181,21 @@ mod tests {
             }
             other => panic!("unexpected resolve error: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn resolve_returns_base_allowset_for_non_subagent_runs_without_material_source() {
+        let base = allowlist(&["builtin.read_file", "builtin.write_file"]);
+        let resolver = SubagentCapabilitySurfaceResolver::new(
+            Arc::new(StaticResolver(base.clone())),
+            Arc::new(FailingSource),
+        );
+
+        let resolved = resolver
+            .resolve(&test_run_context("non-subagent-capability-surface"))
+            .await
+            .expect("non-subagent runs should return the base allowset");
+
+        assert_eq!(resolved, base);
     }
 }

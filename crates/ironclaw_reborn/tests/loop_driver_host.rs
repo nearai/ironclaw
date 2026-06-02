@@ -942,12 +942,22 @@ async fn text_only_model_reply_driver_rejects_profiles_not_assigned_to_driver() 
 #[tokio::test]
 async fn text_only_host_factory_includes_safety_context_in_prompt_bundle() {
     let fixture = HostFixture::new("thread-host-safety-context", "hello safety").await;
-    let host = fixture
-        .factory()
-        .with_safety_context(
-            InstructionSafetyContext::new("safety:prompt-write", "prompt write safety enforced")
-                .unwrap(),
-        )
+    let factory = RebornLoopDriverHostFactory::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        Arc::clone(&fixture.gateway),
+        fixture.checkpoint_state_store.clone(),
+        fixture.turn_state_store.clone(),
+        fixture.loop_checkpoint_store.clone(),
+        fixture.milestone_sink.clone(),
+        TextOnlyLoopHostConfig {
+            max_messages: 8,
+            require_model_route_snapshot: false,
+        },
+        InstructionSafetyContext::new("safety:prompt-write", "prompt write safety enforced")
+            .unwrap(),
+    );
+    let host = factory
         .build_text_only_host(RebornLoopDriverHostRequest {
             claimed_run: fixture.claimed.clone(),
             loop_run_context: fixture.context.clone(),

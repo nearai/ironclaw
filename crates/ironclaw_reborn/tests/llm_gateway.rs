@@ -29,13 +29,15 @@ use ironclaw_turns::{
         AgentLoopHostErrorKind, CapabilitySurfaceVersion, HostManagedLoopModelPort,
         HostManagedLoopPromptPort, InMemoryInstructionMaterializationStore,
         InMemoryLoopHostMilestoneSink, InMemoryRunProfileResolver, InstructionSafetyContext,
-        LoopCapabilityPort, LoopHostMilestoneKind, LoopModelMessage, LoopModelPort,
-        LoopModelRequest, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext, ModelProfileId,
-        ParentLoopOutput, PromptMode, ProviderToolCall, ProviderToolCallReplay,
-        ProviderToolDefinition, VisibleCapabilityRequest, VisibleCapabilitySurface,
+        LoopCapabilityPort, LoopHostMilestoneKind, LoopModelGateway, LoopModelGatewayRequest,
+        LoopModelMessage, LoopModelPort, LoopModelRequest, LoopPromptBundleRequest, LoopPromptPort,
+        LoopRunContext, ModelProfileId, ParentLoopOutput, PromptMode, ProviderToolCall,
+        ProviderToolCallReplay, ProviderToolDefinition, VisibleCapabilityRequest,
+        VisibleCapabilitySurface,
     },
 };
 use rust_decimal::Decimal;
+use tokio::sync::Barrier;
 
 const STATIC_PROVIDER_ID: &str = "static-test-provider";
 
@@ -1268,6 +1270,69 @@ async fn production_loop_model_gateway_resolves_thread_refs_and_emits_milestones
 }
 
 #[tokio::test]
+async fn production_loop_model_gateway_keeps_instruction_stores_isolated_across_concurrent_calls() {
+    let fixture = ThreadFixture::new().await;
+    let provider = Arc::new(BarrierRecordingLlmProvider::new(
+        "recording-model",
+        2,
+        "production response",
+    ));
+    let provider_gateway = Arc::new(LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider.clone(),
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    ));
+    let model_gateway = Arc::new(ThreadBackedLoopModelGateway::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        provider_gateway,
+        16,
+        local_development_safety_context(),
+    ));
+
+    let request = production_loop_request(&fixture, None).await;
+    let gateway_request = LoopModelGatewayRequest {
+        context: fixture.run_context.clone(),
+        request,
+    };
+    let first_gateway = Arc::clone(&model_gateway);
+    let second_gateway = Arc::clone(&model_gateway);
+    let first_request = gateway_request.clone();
+    let second_request = gateway_request;
+
+    let (first, second) = tokio::join!(
+        async move { first_gateway.stream_model(first_request).await },
+        async move { second_gateway.stream_model(second_request).await },
+    );
+
+    let first = first.expect("first concurrent call should succeed");
+    let second = second.expect("second concurrent call should succeed");
+    assert_eq!(first.chunks[0].safe_text_delta, "production response");
+    assert_eq!(second.chunks[0].safe_text_delta, "production response");
+
+    let requests = provider.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(requests.iter().all(|request| {
+        request
+            .messages
+            .iter()
+            .any(|message| message.content == "hello production gateway")
+    }));
+    let first_messages = requests[0]
+        .messages
+        .iter()
+        .map(|message| (format!("{:?}", message.role), message.content.clone()))
+        .collect::<Vec<_>>();
+    let second_messages = requests[1]
+        .messages
+        .iter()
+        .map(|message| (format!("{:?}", message.role), message.content.clone()))
+        .collect::<Vec<_>>();
+    assert_eq!(first_messages, second_messages);
+}
+
+#[tokio::test]
 async fn production_loop_model_gateway_includes_configured_safety_context() {
     let fixture = ThreadFixture::new().await;
     let provider = Arc::new(RecordingLlmProvider::reply("production response"));
@@ -2229,6 +2294,67 @@ impl RecordingLlmProvider {
             requests: Mutex::new(Vec::new()),
             response: Mutex::new(Some(Err(error))),
         }
+    }
+}
+
+struct BarrierRecordingLlmProvider {
+    model_name: String,
+    barrier: Arc<Barrier>,
+    requests: Mutex<Vec<CompletionRequest>>,
+    content: String,
+}
+
+impl BarrierRecordingLlmProvider {
+    fn new(model_name: &str, parties: usize, content: &str) -> Self {
+        Self {
+            model_name: model_name.to_string(),
+            barrier: Arc::new(Barrier::new(parties)),
+            requests: Mutex::new(Vec::new()),
+            content: content.to_string(),
+        }
+    }
+}
+
+#[async_trait]
+impl LlmProvider for BarrierRecordingLlmProvider {
+    fn model_name(&self) -> &str {
+        &self.model_name
+    }
+
+    fn active_model_name(&self) -> String {
+        self.model_name.clone()
+    }
+
+    fn effective_model_name(&self, _requested_model: Option<&str>) -> String {
+        self.active_model_name()
+    }
+
+    fn cost_per_token(&self) -> (Decimal, Decimal) {
+        (Decimal::ZERO, Decimal::ZERO)
+    }
+
+    async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+        self.requests.lock().unwrap().push(request);
+        self.barrier.wait().await;
+        Ok(CompletionResponse {
+            content: self.content.clone(),
+            input_tokens: 1,
+            output_tokens: 1,
+            finish_reason: FinishReason::Stop,
+            reasoning: None,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+        })
+    }
+
+    async fn complete_with_tools(
+        &self,
+        _request: ToolCompletionRequest,
+    ) -> Result<ToolCompletionResponse, LlmError> {
+        Err(LlmError::RequestFailed {
+            provider: self.model_name.clone(),
+            reason: "tool completion is not used by the loop support gateway".to_string(),
+        })
     }
 }
 

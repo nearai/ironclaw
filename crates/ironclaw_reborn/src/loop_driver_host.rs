@@ -1078,11 +1078,6 @@ where
         self.with_hook_dispatcher(builder.build_arc())
     }
 
-    pub fn with_safety_context(mut self, safety_context: InstructionSafetyContext) -> Self {
-        self.safety_context = safety_context;
-        self
-    }
-
     // Queue ownership follows the same factory used for capability/context
     // ports. PlannedDriver delegates fully to the host for input port
     // construction.
