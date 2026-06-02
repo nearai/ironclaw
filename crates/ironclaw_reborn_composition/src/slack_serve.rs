@@ -43,7 +43,7 @@ pub use installation::{
 pub const SLACK_EVENTS_PATH: &str = "/webhooks/slack/events";
 const SLACK_EVENTS_ROUTE_ID: &str = "slack.events";
 const SLACK_EVENTS_BODY_LIMIT_BYTES: NonZeroU64 = NonZeroU64::new(1024 * 1024).unwrap(); // safety: 1 MiB is a non-zero literal.
-const SLACK_EVENTS_MAX_REQUESTS: NonZeroU32 = NonZeroU32::new(120).unwrap(); // safety: 120 requests is a non-zero literal.
+const SLACK_EVENTS_MAX_REQUESTS: NonZeroU32 = NonZeroU32::new(12_000).unwrap(); // safety: 12,000 requests is a non-zero literal.
 const SLACK_EVENTS_RATE_WINDOW_SECONDS: NonZeroU32 = NonZeroU32::new(60).unwrap(); // safety: 60 seconds is a non-zero literal.
 
 pub trait SlackEventsWebhookDispatcher: Send + Sync {
@@ -154,7 +154,8 @@ fn slack_events_policy() -> IngressPolicy {
             max_bytes: SLACK_EVENTS_BODY_LIMIT_BYTES,
         },
         rate_limit: RateLimitPolicy::Limited {
-            // Coarse pre-auth abuse guard. The route-level service adds a
+            // Coarse pre-auth abuse guard. Keep this well above the
+            // per-installation quota below: the route-level service adds a
             // second post-verification bucket keyed by the resolved Slack
             // tenant/installation, because Slack events can arrive from shared
             // Slack egress pools and one workspace must not consume the budget
@@ -407,6 +408,7 @@ mod tests {
                         team_id: Some("T-alpha".to_string()),
                         enterprise_id: None,
                         api_app_id: Some("A-alpha".to_string()),
+                        install_user_id: Some("U-install-alpha".to_string()),
                         event_user_id: Some("U123".to_string()),
                         event_channel_id: Some("D123".to_string()),
                     },
