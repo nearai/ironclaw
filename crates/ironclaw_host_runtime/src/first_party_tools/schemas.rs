@@ -286,6 +286,36 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             "required": ["name"],
             "additionalProperties": false
         }),
+        "schemas/builtin/trigger_create.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "name": { "type": "string", "description": "Human-readable trigger name" },
+                "prompt": { "type": "string", "description": "Prompt submitted when the trigger fires" },
+                "cron": { "type": "string", "description": "Five-, six-, or seven-field cron expression; fire cadence must be at least one minute" }
+            },
+            "required": ["name", "prompt", "cron"],
+            "additionalProperties": false
+        }),
+        "schemas/builtin/trigger_list.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "limit": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 100,
+                    "description": "Maximum triggers to return. Defaults to 100."
+                }
+            },
+            "additionalProperties": false
+        }),
+        "schemas/builtin/trigger_remove.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "trigger_id": { "type": "string", "description": "Trigger id returned by trigger_create or trigger_list" }
+            },
+            "required": ["trigger_id"],
+            "additionalProperties": false
+        }),
         _ => return None,
     })
 }

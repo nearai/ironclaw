@@ -63,6 +63,7 @@ libsql = [
     "ironclaw_reborn_event_store/libsql",
     "ironclaw_resources/libsql",
     "ironclaw_run_state/libsql",
+    "ironclaw_triggers/libsql",
 ]
 postgres = [
     "dep:deadpool-postgres",
@@ -72,6 +73,7 @@ postgres = [
     "ironclaw_reborn_event_store/postgres",
     "ironclaw_resources/postgres",
     "ironclaw_run_state/postgres",
+    "ironclaw_triggers/postgres",
 ]
 [dependencies]
 async-trait = "0.1"
@@ -110,6 +112,7 @@ ironclaw_secrets = { path = "../ironclaw_secrets" }
 ironclaw_skills = { path = "../ironclaw_skills" }
 ironclaw_slack_v2_adapter = { path = "../ironclaw_slack_v2_adapter", optional = true }
 ironclaw_threads = { path = "../ironclaw_threads" }
+ironclaw_triggers = { path = "../ironclaw_triggers" }
 ironclaw_trust = { path = "../ironclaw_trust" }
 ironclaw_turns = { path = "../ironclaw_turns" }
 # WebUI v2 route surface — feature-gated; only used by `webui_serve`.

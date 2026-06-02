@@ -38,8 +38,8 @@ use ironclaw_host_api::{
 use ironclaw_host_api::{MountAlias, MountGrant};
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, FirstPartyCapabilityRegistry, HostRuntimeServices,
-    LocalHostProcessPort, ProductAuthProviderRuntimePorts, builtin_first_party_handlers,
-    builtin_first_party_package,
+    LocalHostProcessPort, ProductAuthProviderRuntimePorts,
+    builtin_first_party_handlers_with_trigger_repository, builtin_first_party_package,
 };
 #[cfg(feature = "libsql")]
 use ironclaw_loop_support::FilesystemCheckpointStateStore;
@@ -62,6 +62,7 @@ use ironclaw_threads::FilesystemSessionThreadService;
 #[cfg(not(feature = "libsql"))]
 use ironclaw_threads::InMemorySessionThreadService;
 use ironclaw_threads::SessionThreadService;
+use ironclaw_triggers::TriggerRepository;
 use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy};
 #[cfg(feature = "libsql")]
 use ironclaw_turns::FilesystemTurnStateStore;
@@ -365,6 +366,7 @@ struct RebornLocalDevStoreGraph {
     local_runtime: Arc<RebornLocalRuntimeServices>,
     resource_governor: Arc<LocalDevResourceGovernor>,
     process_services: LocalDevProcessServices,
+    trigger_repository: Arc<dyn TriggerRepository>,
 }
 
 impl std::fmt::Debug for RebornServices {
@@ -556,7 +558,8 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     let secret_store: Arc<dyn SecretStore> = local_dev_secret_store.clone();
     #[cfg(not(any(feature = "libsql", feature = "postgres")))]
     let secret_store: Arc<dyn SecretStore> = Arc::new(ironclaw_secrets::InMemorySecretStore::new());
-    let mut first_party_registry = builtin_first_party_registry()?;
+    let mut first_party_registry =
+        builtin_first_party_registry(Arc::clone(&store_graph.trigger_repository))?;
 
     let local_dev_trust_policy = Arc::new(local_dev_first_party_trust_policy()?);
     let local_dev_trust_invalidation_bus = Arc::new(ironclaw_trust::InvalidationBus::new());
@@ -805,6 +808,8 @@ fn build_local_dev_store_graph(
             }
         })?;
     let skill_management = build_local_skill_management_port(owner_user_id, filesystem)?;
+    let trigger_repository: Arc<dyn TriggerRepository> =
+        Arc::new(ironclaw_triggers::InMemoryTriggerRepository::default());
     let local_runtime = Arc::new(RebornLocalRuntimeServices {
         approval_requests: Arc::clone(&approval_requests),
         capability_leases: Arc::clone(&capability_leases),
@@ -841,6 +846,7 @@ fn build_local_dev_store_graph(
         local_runtime,
         resource_governor,
         process_services,
+        trigger_repository,
     })
 }
 
@@ -887,6 +893,8 @@ fn build_local_dev_store_graph(
             }
         })?;
     let skill_management = build_local_skill_management_port(owner_user_id, filesystem)?;
+    let trigger_repository: Arc<dyn TriggerRepository> =
+        Arc::new(ironclaw_triggers::InMemoryTriggerRepository::default());
     let local_runtime = Arc::new(RebornLocalRuntimeServices {
         approval_requests: Arc::clone(&approval_requests),
         capability_leases: Arc::clone(&capability_leases),
@@ -924,6 +932,7 @@ fn build_local_dev_store_graph(
         local_runtime,
         resource_governor,
         process_services,
+        trigger_repository,
     })
 }
 
@@ -1424,9 +1433,13 @@ fn builtin_extension_registry() -> Result<ExtensionRegistry, RebornBuildError> {
     Ok(registry)
 }
 
-fn builtin_first_party_registry() -> Result<FirstPartyCapabilityRegistry, RebornBuildError> {
-    builtin_first_party_handlers().map_err(|error| RebornBuildError::InvalidConfig {
-        reason: format!("built-in first-party handlers are invalid: {error}"),
+fn builtin_first_party_registry(
+    trigger_repository: Arc<dyn TriggerRepository>,
+) -> Result<FirstPartyCapabilityRegistry, RebornBuildError> {
+    builtin_first_party_handlers_with_trigger_repository(trigger_repository).map_err(|error| {
+        RebornBuildError::InvalidConfig {
+            reason: format!("built-in first-party handlers are invalid: {error}"),
+        }
     })
 }
 
@@ -1996,6 +2009,7 @@ where
 async fn build_backend_production<F>(
     context: RebornProductionBuildContext,
     stores: ProductionStoreBundle<F>,
+    trigger_repository: Arc<dyn TriggerRepository>,
 ) -> Result<RebornServices, RebornBuildError>
 where
     F: RootFilesystem + 'static,
@@ -2009,7 +2023,7 @@ where
         oauth_dcr_provider_configs,
     } = context;
     let secret_store: Arc<dyn SecretStore> = stores.secret_credentials.secret_store.clone();
-    let mut first_party_registry = builtin_first_party_registry()?;
+    let mut first_party_registry = builtin_first_party_registry(trigger_repository)?;
     let product_auth_filesystem = Arc::clone(&stores.scoped_filesystem);
     let services = HostRuntimeServices::new(
         Arc::new(builtin_extension_registry()?),
@@ -2118,6 +2132,13 @@ async fn build_libsql_production(
 
     let filesystem = Arc::new(LibSqlRootFilesystem::new(Arc::clone(&db)));
     filesystem.run_migrations().await?;
+    let trigger_repository = Arc::new(ironclaw_triggers::LibSqlTriggerRepository::new(db));
+    trigger_repository
+        .run_migrations()
+        .await
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("libSQL trigger repository migrations failed: {error}"),
+        })?;
     let stores = ProductionStoreBundle::new(
         filesystem,
         secret_master_key,
@@ -2127,7 +2148,7 @@ async fn build_libsql_production(
         },
     )?;
 
-    build_backend_production(context, stores).await
+    build_backend_production(context, stores, trigger_repository).await
 }
 
 #[cfg(feature = "postgres")]
@@ -2141,13 +2162,20 @@ async fn build_postgres_production(
 
     let filesystem = Arc::new(PostgresRootFilesystem::new(pool.clone()));
     filesystem.run_migrations().await?;
+    let trigger_repository = Arc::new(ironclaw_triggers::PostgresTriggerRepository::new(pool));
+    trigger_repository
+        .run_migrations()
+        .await
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("PostgreSQL trigger repository migrations failed: {error}"),
+        })?;
     let stores = ProductionStoreBundle::new(
         filesystem,
         secret_master_key,
         ironclaw_reborn_event_store::RebornEventStoreConfig::Postgres { url },
     )?;
 
-    build_backend_production(context, stores).await
+    build_backend_production(context, stores, trigger_repository).await
 }
 
 fn readiness_for(
@@ -2194,6 +2222,7 @@ mod tests {
     use ironclaw_host_runtime::{
         RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeFailureKind,
         SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID,
+        TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID,
     };
     use ironclaw_product_workflow::{LifecyclePackageKind, LifecyclePackageRef};
     use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
@@ -2902,12 +2931,21 @@ mod tests {
         assert!(!ids.contains(&SKILL_ACTIVATE_CAPABILITY_ID));
         assert!(ids.contains(&SKILL_INSTALL_CAPABILITY_ID));
         assert!(ids.contains(&SKILL_REMOVE_CAPABILITY_ID));
+        assert!(ids.contains(&TRIGGER_CREATE_CAPABILITY_ID));
+        assert!(ids.contains(&TRIGGER_LIST_CAPABILITY_ID));
+        assert!(ids.contains(&TRIGGER_REMOVE_CAPABILITY_ID));
 
-        let registry = builtin_first_party_registry().expect("built-in handlers build");
+        let registry = builtin_first_party_registry(Arc::new(
+            ironclaw_triggers::InMemoryTriggerRepository::default(),
+        ))
+        .expect("built-in handlers build");
         for id in [
             SKILL_LIST_CAPABILITY_ID,
             SKILL_INSTALL_CAPABILITY_ID,
             SKILL_REMOVE_CAPABILITY_ID,
+            TRIGGER_CREATE_CAPABILITY_ID,
+            TRIGGER_LIST_CAPABILITY_ID,
+            TRIGGER_REMOVE_CAPABILITY_ID,
         ] {
             assert!(registry.contains_handler(&ironclaw_host_api::CapabilityId::new(id).unwrap()));
         }

@@ -15,6 +15,7 @@ mod skill_management;
 mod skill_url_install;
 mod spawn_subagent;
 mod time;
+mod trigger_management;
 
 use std::{future::Future, panic::AssertUnwindSafe, sync::Arc, time::Instant};
 
@@ -54,6 +55,9 @@ pub use skill_management::{
 };
 pub use spawn_subagent::SPAWN_SUBAGENT_CAPABILITY_ID;
 pub use time::TIME_CAPABILITY_ID;
+pub use trigger_management::{
+    TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID,
+};
 
 pub const BUILTIN_FIRST_PARTY_PROVIDER: &str = "builtin";
 pub const READ_FILE_CAPABILITY_ID: &str = "builtin.read_file";
@@ -157,6 +161,7 @@ pub fn builtin_first_party_package() -> Result<ExtensionPackage, ExtensionError>
                 capabilities.extend(memory::manifests()?);
                 capabilities.extend(coding_manifests()?);
                 capabilities.extend(skill_management::manifests()?);
+                capabilities.extend(trigger_management::manifests()?);
                 capabilities
             },
         },
@@ -181,6 +186,16 @@ fn coding_manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
 
 /// Create handlers for all built-in first-party capabilities.
 pub fn builtin_first_party_handlers() -> Result<FirstPartyCapabilityRegistry, HostApiError> {
+    builtin_first_party_handlers_with_trigger_repository(Arc::new(
+        ironclaw_triggers::InMemoryTriggerRepository::default(),
+    ))
+}
+
+/// Create handlers for all built-in first-party capabilities using an
+/// explicitly composed trigger repository.
+pub fn builtin_first_party_handlers_with_trigger_repository(
+    trigger_repository: Arc<dyn ironclaw_triggers::TriggerRepository>,
+) -> Result<FirstPartyCapabilityRegistry, HostApiError> {
     let handler = Arc::new(BuiltinFirstPartyTools::default());
     let mut registry = FirstPartyCapabilityRegistry::new()
         .with_handler(CapabilityId::new(ECHO_CAPABILITY_ID)?, handler.clone())
@@ -213,6 +228,7 @@ pub fn builtin_first_party_handlers() -> Result<FirstPartyCapabilityRegistry, Ho
         handler.clone(),
     );
     skill_management::insert_handlers(&mut registry)?;
+    trigger_management::insert_handlers(&mut registry, trigger_repository)?;
     Ok(registry)
 }
 

@@ -239,6 +239,54 @@ impl TriggerRepository for LibSqlTriggerRepository {
         Ok(records)
     }
 
+    async fn list_scoped_triggers(
+        &self,
+        tenant_id: TenantId,
+        creator_user_id: UserId,
+        agent_id: Option<AgentId>,
+        project_id: Option<ProjectId>,
+        limit: usize,
+    ) -> Result<Vec<TriggerRecord>, TriggerError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let limit = limit.min(crate::MAX_TRIGGER_LIST_LIMIT) as i64;
+        let conn = self.connect().await?;
+        let agent_id = agent_id.as_ref().map(AgentId::as_str);
+        let project_id = project_id.as_ref().map(ProjectId::as_str);
+        let mut rows = conn
+            .query(
+                &format!(
+                    "SELECT {TRIGGER_COLUMNS}
+                     FROM {TRIGGER_TABLE}
+                     WHERE tenant_id = ?1
+                       AND creator_user_id = ?2
+                       AND (agent_id = ?3 OR (agent_id IS NULL AND ?3 IS NULL))
+                       AND (project_id = ?4 OR (project_id IS NULL AND ?4 IS NULL))
+                     ORDER BY created_at, trigger_id
+                     LIMIT ?5"
+                ),
+                params![
+                    tenant_id.as_str(),
+                    creator_user_id.as_str(),
+                    agent_id,
+                    project_id,
+                    limit
+                ],
+            )
+            .await
+            .map_err(|error| backend_error("query scoped trigger records", error))?;
+        let mut records = Vec::new();
+        loop {
+            match rows.next().await {
+                Ok(Some(row)) => records.push(row_to_record(&row)?),
+                Ok(None) => break,
+                Err(error) => return Err(backend_error("read scoped trigger record row", error)),
+            }
+        }
+        Ok(records)
+    }
+
     async fn remove_trigger(
         &self,
         tenant_id: TenantId,

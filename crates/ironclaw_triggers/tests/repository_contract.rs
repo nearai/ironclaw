@@ -107,6 +107,65 @@ async fn assert_round_trip_and_scoped_isolation(repo: &impl TriggerRepository) {
         vec![due.trigger_id, later.trigger_id]
     );
 
+    let mut other_agent = sample_record(
+        TriggerId::parse("01J00000000000000000000002").expect("ulid"),
+        tenant("tenant-a"),
+        ts(1_704_067_320),
+    );
+    other_agent.agent_id = Some(AgentId::new("agent-b").expect("valid agent"));
+    repo.upsert_trigger(other_agent.clone())
+        .await
+        .expect("insert other agent");
+
+    let first_scoped_record = repo
+        .list_scoped_triggers(
+            tenant("tenant-a"),
+            user("user-a"),
+            Some(AgentId::new("agent-a").expect("valid agent")),
+            Some(ProjectId::new("project-a").expect("valid project")),
+            1,
+        )
+        .await
+        .expect("list first scoped trigger");
+    assert_eq!(
+        first_scoped_record
+            .iter()
+            .map(|record| record.trigger_id)
+            .collect::<Vec<_>>(),
+        vec![due.trigger_id]
+    );
+
+    let scoped_records = repo
+        .list_scoped_triggers(
+            tenant("tenant-a"),
+            user("user-a"),
+            Some(AgentId::new("agent-a").expect("valid agent")),
+            Some(ProjectId::new("project-a").expect("valid project")),
+            10,
+        )
+        .await
+        .expect("list scoped triggers");
+    assert_eq!(
+        scoped_records
+            .iter()
+            .map(|record| record.trigger_id)
+            .collect::<Vec<_>>(),
+        vec![due.trigger_id, later.trigger_id]
+    );
+
+    assert!(
+        repo.list_scoped_triggers(
+            tenant("tenant-a"),
+            user("user-a"),
+            Some(AgentId::new("agent-c").expect("valid agent")),
+            Some(ProjectId::new("project-a").expect("valid project")),
+            10,
+        )
+        .await
+        .expect("list other scoped triggers")
+        .is_empty()
+    );
+
     let removed = repo
         .remove_trigger(tenant("tenant-a"), due.trigger_id)
         .await

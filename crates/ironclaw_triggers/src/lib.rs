@@ -30,6 +30,7 @@ mod worker;
 
 const MIN_FIRE_CADENCE: Duration = Duration::from_secs(60);
 const MAX_DUE_TRIGGER_POLL_LIMIT: usize = 128;
+const MAX_TRIGGER_LIST_LIMIT: usize = 100;
 const IDENTITY_VERSION_LABEL: &str = "ironclaw.trigger-fire.v1";
 const ROUTE_THREAD_DOMAIN: &str = "route-thread";
 const EXTERNAL_EVENT_DOMAIN: &str = "external-event";
@@ -583,6 +584,16 @@ pub trait TriggerRepository: Send + Sync {
     /// API pagination before exposing user-facing list surfaces.
     async fn list_triggers(&self, tenant_id: TenantId) -> Result<Vec<TriggerRecord>, TriggerError>;
 
+    /// Returns caller-scoped triggers in creation order, capped for user-facing surfaces.
+    async fn list_scoped_triggers(
+        &self,
+        tenant_id: TenantId,
+        creator_user_id: UserId,
+        agent_id: Option<AgentId>,
+        project_id: Option<ProjectId>,
+        limit: usize,
+    ) -> Result<Vec<TriggerRecord>, TriggerError>;
+
     async fn remove_trigger(
         &self,
         tenant_id: TenantId,
@@ -741,6 +752,40 @@ impl TriggerRepository for InMemoryTriggerRepository {
                 .collect::<Vec<_>>()
         };
         keys.sort_by_key(|(created_at, trigger_id, _)| (*created_at, *trigger_id));
+        let state = self.lock_state()?;
+        Ok(keys
+            .into_iter()
+            .filter_map(|(_, _, key)| state.get(&key).cloned())
+            .collect())
+    }
+
+    async fn list_scoped_triggers(
+        &self,
+        tenant_id: TenantId,
+        creator_user_id: UserId,
+        agent_id: Option<AgentId>,
+        project_id: Option<ProjectId>,
+        limit: usize,
+    ) -> Result<Vec<TriggerRecord>, TriggerError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let limit = limit.min(MAX_TRIGGER_LIST_LIMIT);
+        let mut keys = {
+            let state = self.lock_state()?;
+            state
+                .iter()
+                .filter(|(_, record)| {
+                    record.tenant_id == tenant_id
+                        && record.creator_user_id == creator_user_id
+                        && record.agent_id == agent_id
+                        && record.project_id == project_id
+                })
+                .map(|(key, record)| (record.created_at, record.trigger_id, key.clone()))
+                .collect::<Vec<_>>()
+        };
+        keys.sort_by_key(|(created_at, trigger_id, _)| (*created_at, *trigger_id));
+        keys.truncate(limit);
         let state = self.lock_state()?;
         Ok(keys
             .into_iter()

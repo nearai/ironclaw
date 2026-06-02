@@ -1897,6 +1897,17 @@ impl TriggerRepository for TickConcurrencyRepository {
         unreachable!("tick-concurrency repository does not list tenant records")
     }
 
+    async fn list_scoped_triggers(
+        &self,
+        _tenant_id: TenantId,
+        _creator_user_id: UserId,
+        _agent_id: Option<AgentId>,
+        _project_id: Option<ProjectId>,
+        _limit: usize,
+    ) -> Result<Vec<TriggerRecord>, TriggerError> {
+        unreachable!("tick-concurrency repository does not list scoped records")
+    }
+
     async fn remove_trigger(
         &self,
         _tenant_id: TenantId,
@@ -2013,6 +2024,17 @@ impl TriggerRepository for ActiveListErrorRepository {
         _tenant_id: TenantId,
     ) -> Result<Vec<TriggerRecord>, TriggerError> {
         unreachable!("active-list-error repository does not list tenant records")
+    }
+
+    async fn list_scoped_triggers(
+        &self,
+        _tenant_id: TenantId,
+        _creator_user_id: UserId,
+        _agent_id: Option<AgentId>,
+        _project_id: Option<ProjectId>,
+        _limit: usize,
+    ) -> Result<Vec<TriggerRecord>, TriggerError> {
+        unreachable!("active-list-error repository does not list scoped records")
     }
 
     async fn remove_trigger(
@@ -2137,6 +2159,17 @@ impl TriggerRepository for ActiveWrapRefetchErrorRepository {
         unreachable!("active-wrap-refetch-error repository does not list tenant records")
     }
 
+    async fn list_scoped_triggers(
+        &self,
+        _tenant_id: TenantId,
+        _creator_user_id: UserId,
+        _agent_id: Option<AgentId>,
+        _project_id: Option<ProjectId>,
+        _limit: usize,
+    ) -> Result<Vec<TriggerRecord>, TriggerError> {
+        unreachable!("active-wrap-refetch-error repository does not list scoped records")
+    }
+
     async fn remove_trigger(
         &self,
         _tenant_id: TenantId,
@@ -2250,6 +2283,17 @@ impl TriggerRepository for ActiveClearRaceRepository {
         _tenant_id: TenantId,
     ) -> Result<Vec<TriggerRecord>, TriggerError> {
         unreachable!("active-clear-race repository does not list tenant records")
+    }
+
+    async fn list_scoped_triggers(
+        &self,
+        _tenant_id: TenantId,
+        _creator_user_id: UserId,
+        _agent_id: Option<AgentId>,
+        _project_id: Option<ProjectId>,
+        _limit: usize,
+    ) -> Result<Vec<TriggerRecord>, TriggerError> {
+        unreachable!("active-clear-race repository does not list scoped records")
     }
 
     async fn remove_trigger(
@@ -2377,6 +2421,17 @@ impl TriggerRepository for ActiveClearFailsOnceRepository {
         _tenant_id: TenantId,
     ) -> Result<Vec<TriggerRecord>, TriggerError> {
         unreachable!("active-clear-fails-once repository does not list tenant records")
+    }
+
+    async fn list_scoped_triggers(
+        &self,
+        _tenant_id: TenantId,
+        _creator_user_id: UserId,
+        _agent_id: Option<AgentId>,
+        _project_id: Option<ProjectId>,
+        _limit: usize,
+    ) -> Result<Vec<TriggerRecord>, TriggerError> {
+        unreachable!("active-clear-fails-once repository does not list scoped records")
     }
 
     async fn remove_trigger(
@@ -2541,6 +2596,17 @@ impl TriggerRepository for AcceptedMissingRepository {
         unreachable!("accepted-missing repository does not list tenant records")
     }
 
+    async fn list_scoped_triggers(
+        &self,
+        _tenant_id: TenantId,
+        _creator_user_id: UserId,
+        _agent_id: Option<AgentId>,
+        _project_id: Option<ProjectId>,
+        _limit: usize,
+    ) -> Result<Vec<TriggerRecord>, TriggerError> {
+        unreachable!("accepted-missing repository does not list scoped records")
+    }
+
     async fn remove_trigger(
         &self,
         _tenant_id: TenantId,
@@ -2646,6 +2712,17 @@ impl TriggerRepository for ReplayedMissingRepository {
         _tenant_id: TenantId,
     ) -> Result<Vec<TriggerRecord>, TriggerError> {
         unreachable!("replayed-missing repository does not list tenant records")
+    }
+
+    async fn list_scoped_triggers(
+        &self,
+        _tenant_id: TenantId,
+        _creator_user_id: UserId,
+        _agent_id: Option<AgentId>,
+        _project_id: Option<ProjectId>,
+        _limit: usize,
+    ) -> Result<Vec<TriggerRecord>, TriggerError> {
+        unreachable!("replayed-missing repository does not list scoped records")
     }
 
     async fn remove_trigger(
@@ -2754,6 +2831,17 @@ impl TriggerRepository for DueErrorThenSuccessRepository {
         _tenant_id: TenantId,
     ) -> Result<Vec<TriggerRecord>, TriggerError> {
         unreachable!("due-error repository does not list tenant records")
+    }
+
+    async fn list_scoped_triggers(
+        &self,
+        _tenant_id: TenantId,
+        _creator_user_id: UserId,
+        _agent_id: Option<AgentId>,
+        _project_id: Option<ProjectId>,
+        _limit: usize,
+    ) -> Result<Vec<TriggerRecord>, TriggerError> {
+        unreachable!("due-error repository does not list scoped records")
     }
 
     async fn remove_trigger(
@@ -2878,6 +2966,17 @@ impl TriggerRepository for ClaimRaceRepository {
         _tenant_id: TenantId,
     ) -> Result<Vec<TriggerRecord>, TriggerError> {
         unreachable!("claim-race repository does not list tenant records")
+    }
+
+    async fn list_scoped_triggers(
+        &self,
+        _tenant_id: TenantId,
+        _creator_user_id: UserId,
+        _agent_id: Option<AgentId>,
+        _project_id: Option<ProjectId>,
+        _limit: usize,
+    ) -> Result<Vec<TriggerRecord>, TriggerError> {
+        unreachable!("claim-race repository does not list scoped records")
     }
 
     async fn remove_trigger(

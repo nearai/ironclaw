@@ -180,6 +180,46 @@ impl TriggerRepository for PostgresTriggerRepository {
         rows.into_iter().map(|row| row_to_record(&row)).collect()
     }
 
+    async fn list_scoped_triggers(
+        &self,
+        tenant_id: TenantId,
+        creator_user_id: UserId,
+        agent_id: Option<AgentId>,
+        project_id: Option<ProjectId>,
+        limit: usize,
+    ) -> Result<Vec<TriggerRecord>, TriggerError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let client = self.connect().await?;
+        let limit = limit.min(crate::MAX_TRIGGER_LIST_LIMIT) as i64;
+        let agent_id = agent_id.as_ref().map(AgentId::as_str);
+        let project_id = project_id.as_ref().map(ProjectId::as_str);
+        let rows = client
+            .query(
+                &format!(
+                    "SELECT {TRIGGER_COLUMNS}
+                     FROM {TRIGGER_TABLE}
+                     WHERE tenant_id = $1
+                       AND creator_user_id = $2
+                       AND agent_id IS NOT DISTINCT FROM $3
+                       AND project_id IS NOT DISTINCT FROM $4
+                     ORDER BY created_at, trigger_id
+                     LIMIT $5"
+                ),
+                &[
+                    &tenant_id.as_str(),
+                    &creator_user_id.as_str(),
+                    &agent_id,
+                    &project_id,
+                    &limit,
+                ],
+            )
+            .await
+            .map_err(|error| backend_error("query scoped trigger records", error))?;
+        rows.into_iter().map(|row| row_to_record(&row)).collect()
+    }
+
     async fn remove_trigger(
         &self,
         tenant_id: TenantId,
