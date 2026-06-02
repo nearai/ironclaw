@@ -95,6 +95,7 @@
                       "channels/discord",
                       "channels/telegram",
                       "channels/wechat",
+                      "channels/wecom",
                       "channels/webhook",
                       "channels/signal"
                     ]

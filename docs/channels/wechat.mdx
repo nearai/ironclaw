@@ -10,7 +10,7 @@ If you haven't set up your agent yet, follow our [Quickstart guide](../quickstar
 </Note>
 
 <Warning>
-The WeChat channel currently supports a single connected account and direct-message conversations. Group chats and multi-account management are not available yet.
+The WeChat channel supports a single connected account and direct-message conversations. Group chats and multi-account management are not available yet.
 </Warning>
 
 ---
@@ -67,10 +67,15 @@ Send a direct message to the connected WeChat iLink bot account. IronClaw receiv
 |------------|--------|
 | Direct-message text chat | Supported |
 | QR-code login | Supported |
+| Inbound text | Supported |
 | Inbound images | Supported |
+| Inbound voice notes | Supported |
+| Inbound videos | Supported |
+| Outbound text replies | Supported |
 | Outbound images | Supported |
-| Inbound files, voice notes, and videos | Supported |
-| Outbound files and videos | Supported |
+| Outbound voice notes | Not supported yet |
+| Outbound videos | Not supported yet |
+| Outbound files | Not supported yet |
 | Typing indicators | Supported |
 | Group chats | Not supported yet |
 | Multiple WeChat accounts | Not supported yet |
@@ -78,6 +83,10 @@ Send a direct message to the connected WeChat iLink bot account. IronClaw receiv
 <Info>
 Voice notes use WeChat's `audio/silk` format. IronClaw can still receive the raw attachment without extra setup. To transcribe voice notes into WAV, build and install the optional `ironclaw-silk-decoder` helper, or set `IRONCLAW_SILK_DECODER` to its path.
 </Info>
+
+<Note>
+Outbound media is limited to images. Voice, video, and file sends are not available yet.
+</Note>
 
 ---
 
