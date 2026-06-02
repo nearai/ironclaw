@@ -154,7 +154,7 @@ urlencoding = "2"
 #
 # NOTE: This pilot tracks a pinned matrix-rust-sdk commit until the released SDK line includes
 # the vodozemac contributory-behavior checks and the recursion-limit fix needed for this feature set.
-matrix-sdk = { git = "https://github.com/matrix-org/matrix-rust-sdk", rev = "211c9a7e05dc108d235a6c8301f503f4f77fa028", optional = true, default-features = false, features = [
+matrix-sdk = { version = "0.16.0", git = "https://github.com/matrix-org/matrix-rust-sdk", rev = "211c9a7e05dc108d235a6c8301f503f4f77fa028", optional = true, default-features = false, features = [
     "sqlite",
     "e2e-encryption",
 ] }
