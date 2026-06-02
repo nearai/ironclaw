@@ -176,8 +176,8 @@ impl NetworkHttpTransport for ReqwestNetworkTransport {
         let mut req = client
             .request(reqwest_method(request.method), url)
             .body(std::mem::take(&mut request.body));
-        for (name, value) in std::mem::take(&mut request.headers) {
-            req = req.header(name, value);
+        for (name, value) in &request.headers {
+            req = req.header(name.as_str(), value.as_str());
         }
         let mut response = req
             .send()
