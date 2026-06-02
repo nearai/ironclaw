@@ -1555,6 +1555,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn activated_gmail_provider_tool_call_without_account_returns_oauth_gate() {
+        let harness = gsuite_surface_harness(
+            "local-dev-gmail-auth-owner",
+            "gmail-auth-gate",
+            "local-dev-gmail-auth-user",
+            GsuiteExtensionState::Activated,
+        )
+        .await;
+        let port = harness
+            .wiring
+            .capability_factory
+            .create_capability_port(&harness.run_context)
+            .await
+            .expect("capability port");
+        port.visible_capabilities(VisibleCapabilityRequest {})
+            .await
+            .expect("visible surface");
+        let tool_definition = port
+            .tool_definitions()
+            .expect("tool definitions")
+            .into_iter()
+            .find(|definition| definition.capability_id.as_str() == "gmail.list_messages")
+            .expect("gmail.list_messages tool definition");
+        assert_eq!(tool_definition.name, "gmail__list_messages");
+
+        let candidate = port
+            .register_provider_tool_call(ProviderToolCall {
+                provider_id: "test-provider".to_string(),
+                provider_model_id: "test-model".to_string(),
+                turn_id: Some("provider-turn-gmail-auth".to_string()),
+                id: "call-gmail-list-messages".to_string(),
+                name: tool_definition.name,
+                arguments: serde_json::json!({}),
+                response_reasoning: None,
+                reasoning: None,
+                signature: None,
+            })
+            .await
+            .expect("gmail provider tool call stages");
+
+        let outcome = port
+            .invoke_capability(CapabilityInvocation {
+                surface_version: candidate.surface_version,
+                capability_id: candidate.capability_id,
+                input_ref: candidate.input_ref,
+            })
+            .await
+            .expect("gmail provider tool call invokes");
+
+        let CapabilityOutcome::AuthRequired {
+            credential_requirements,
+            ..
+        } = outcome
+        else {
+            panic!("expected Gmail provider tool call to return AuthRequired, got {outcome:?}");
+        };
+        assert_eq!(credential_requirements.len(), 1);
+        let requirement = &credential_requirements[0];
+        assert_eq!(
+            requirement.provider.as_str(),
+            ironclaw_auth::GOOGLE_PROVIDER_ID
+        );
+        assert_eq!(requirement.requester_extension.as_str(), "gmail");
+        assert_eq!(
+            requirement.provider_scopes,
+            vec![ironclaw_auth::GOOGLE_GMAIL_READONLY_SCOPE.to_string()]
+        );
+    }
+
+    #[tokio::test]
     async fn deactivated_gsuite_extension_capabilities_not_exposed_to_model() {
         let harness = gsuite_surface_harness(
             "local-dev-gsuite-inactive-surface-owner",

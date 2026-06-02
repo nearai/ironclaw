@@ -19,6 +19,8 @@ pub struct GsuitePackageSpec {
     pub description: &'static str,
     pub service: &'static str,
     pub schema_prefix: &'static str,
+    pub credential_handle: &'static str,
+    pub credential_host_pattern: &'static str,
     pub capabilities: &'static [GsuiteCapabilitySpec],
 }
 
@@ -236,6 +238,8 @@ pub const fn calendar_package_spec() -> GsuitePackageSpec {
         description: "First-party Google Calendar capabilities for Reborn.",
         service: "google-calendar",
         schema_prefix: "google-calendar",
+        credential_handle: "google_calendar_account",
+        credential_host_pattern: "www.googleapis.com",
         capabilities: CALENDAR_CAPABILITIES,
     }
 }
@@ -247,6 +251,8 @@ pub const fn gmail_package_spec() -> GsuitePackageSpec {
         description: "First-party Gmail capabilities for Reborn.",
         service: "gmail",
         schema_prefix: "gmail",
+        credential_handle: "gmail_account",
+        credential_host_pattern: "gmail.googleapis.com",
         capabilities: GMAIL_CAPABILITIES,
     }
 }

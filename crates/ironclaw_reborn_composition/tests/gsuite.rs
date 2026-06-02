@@ -12,7 +12,8 @@ use ironclaw_first_party_extensions::{
     google_provider_id, gsuite_package_specs,
 };
 use ironclaw_host_api::{
-    CapabilityId, InvocationId, ResourceScope, RuntimeCredentialSource, RuntimeDispatchErrorKind,
+    CapabilityId, InvocationId, ResourceScope, RuntimeCredentialAccountSetup,
+    RuntimeCredentialRequirementSource, RuntimeCredentialSource, RuntimeDispatchErrorKind,
     RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse,
     SecretHandle, TrustClass, UserId,
 };
@@ -230,6 +231,32 @@ async fn bundled_gsuite_asset_manifests_match_package_specs() {
                         .prompt_doc_ref
                         .as_ref()
                         .map(|prompt| prompt.as_str().to_string()),
+                    capability
+                        .runtime_credentials
+                        .iter()
+                        .map(|credential| {
+                            let RuntimeCredentialRequirementSource::ProductAuthAccount {
+                                provider,
+                                setup:
+                                    RuntimeCredentialAccountSetup::OAuth {
+                                        scopes: setup_scopes,
+                                    },
+                            } = &credential.source
+                            else {
+                                panic!(
+                                    "GSuite capability {} must use product-auth OAuth credentials",
+                                    capability.id.as_str()
+                                );
+                            };
+                            (
+                                credential.handle.as_str().to_string(),
+                                provider.as_str().to_string(),
+                                setup_scopes.clone(),
+                                credential.provider_scopes.clone(),
+                                credential.audience.host_pattern.clone(),
+                            )
+                        })
+                        .collect::<Vec<_>>(),
                 )
             })
             .collect::<Vec<_>>();
@@ -253,6 +280,21 @@ async fn bundled_gsuite_asset_manifests_match_package_specs() {
                         "prompts/{}/{}.md",
                         spec.schema_prefix, capability.short_name
                     )),
+                    vec![(
+                        spec.credential_handle.to_string(),
+                        ironclaw_auth::GOOGLE_PROVIDER_ID.to_string(),
+                        capability
+                            .required_scopes
+                            .iter()
+                            .map(|scope| (*scope).to_string())
+                            .collect::<Vec<_>>(),
+                        capability
+                            .required_scopes
+                            .iter()
+                            .map(|scope| (*scope).to_string())
+                            .collect::<Vec<_>>(),
+                        spec.credential_host_pattern.to_string(),
+                    )],
                 )
             })
             .collect::<Vec<_>>();
