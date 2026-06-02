@@ -2,14 +2,14 @@
 //! production-suitable counterpart to the dev-only
 //! [`InMemorySessionStore`](crate::session::InMemorySessionStore).
 //!
-//! [`build_signed_session_login`] assembles the pieces a single-operator
-//! host (the standalone `ironclaw-reborn serve` binary) needs to mount
-//! the OAuth login surface, so the CLI only has to supply env/boot
-//! config (provider client ids/secrets, base URL, operator identity +
-//! secret) and call the builder — it does not own the auth/session
-//! model. That keeps the rule from this crate's guardrails intact:
-//! `WebuiAuthenticator` / `SessionStore` implementations live here, not
-//! in the command crate.
+//! [`build_signed_session_login`] assembles the pieces the
+//! `ironclaw-reborn serve` binary needs to mount the OAuth login
+//! surface, so the CLI only supplies env/boot config (provider client
+//! ids/secrets, base URL, operator secret) plus a host-owned
+//! [`UserDirectory`] and calls the builder — it does not own the
+//! auth/session model. That keeps the rule from this crate's guardrails
+//! intact: `WebuiAuthenticator` / `SessionStore` implementations live
+//! here, not in the command crate.
 //!
 //! - [`SignedTokenSessionStore`] — a `SessionStore` whose bearer token
 //!   carries the tenant/user/expiry, HMAC-SHA256-signed with a key
@@ -21,9 +21,11 @@
 //!   denylist is process-local and clears on restart, after which a
 //!   not-yet-expired revoked token would validate again; a deployment
 //!   needing durable revocation supplies a DB-backed `SessionStore`.
-//! - [`FixedUserDirectory`] — maps every successful login to the single
-//!   operator identity, keeping the v2 thread scope aligned with the
-//!   serve runtime's pinned owner.
+//! - The `user_directory` (host-supplied via `SignedSessionLoginConfig`)
+//!   maps each authenticated OAuth profile to a `UserId`. A multi-user
+//!   host injects a DB-backed directory (a distinct user per identity);
+//!   a single-operator host injects one that always resolves to the
+//!   operator. Each session bearer then carries that per-user identity.
 //! - [`CompositeAuthenticator`] — accepts EITHER a minted session token
 //!   OR the host's existing env-bearer operator token.
 
