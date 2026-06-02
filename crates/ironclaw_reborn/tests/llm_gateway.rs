@@ -448,7 +448,7 @@ async fn gateway_rejects_invalid_provider_tool_batch_before_any_registration() {
         .await
         .unwrap_err();
 
-    assert_eq!(error.kind, HostManagedModelErrorKind::InvalidRequest);
+    assert_eq!(error.kind, HostManagedModelErrorKind::InvalidOutput);
     assert!(capabilities.registered.lock().unwrap().is_empty());
 }
 
