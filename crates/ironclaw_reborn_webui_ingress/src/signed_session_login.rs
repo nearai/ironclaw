@@ -147,7 +147,7 @@ impl SignedTokenSessionStore {
     /// Fresh keyed MAC. `new_from_slice` is infallible for HMAC — it
     /// accepts a key of any length — so the `expect` can never fire.
     fn mac(&self) -> HmacSha256 {
-        HmacSha256::new_from_slice(&self.key).expect("HMAC-SHA256 accepts a key of any length")
+        HmacSha256::new_from_slice(&self.key).expect("HMAC-SHA256 accepts a key of any length") // safety: HMAC new_from_slice is infallible — it accepts a key of any length
     }
 
     fn sign(&self, payload_b64: &str) -> String {

@@ -26,7 +26,7 @@ use super::config::GitHubOAuthConfig;
 use super::error::{OAuthError, ProviderInitError};
 use super::profile::OAuthUserProfile;
 use super::provider::OAuthProvider;
-use super::provider_http::{read_capped_body, sanitize_error_code};
+use super::provider_http::{describe_transport_error, read_capped_body, sanitize_error_code};
 use super::provider_name::OAuthProviderName;
 
 const GITHUB_AUTH_URL: &str = "https://github.com/login/oauth/authorize";
@@ -369,7 +369,7 @@ impl GitHubProvider {
             ])
             .send()
             .await
-            .map_err(|err| OAuthError::CodeExchange(err.to_string()))?;
+            .map_err(|err| OAuthError::CodeExchange(describe_transport_error(&err)))?;
 
         if !resp.status().is_success() {
             // Deliberately do NOT read the body: it is untrusted
@@ -425,7 +425,7 @@ impl GitHubProvider {
             .bearer_auth(access_token.expose_secret())
             .send()
             .await
-            .map_err(|err| OAuthError::ProfileFetch(err.to_string()))?;
+            .map_err(|err| OAuthError::ProfileFetch(describe_transport_error(&err)))?;
         if !resp.status().is_success() {
             return Err(OAuthError::ProfileFetch(format!(
                 "GitHub user endpoint returned {}",
@@ -452,7 +452,7 @@ impl GitHubProvider {
             .bearer_auth(access_token.expose_secret())
             .send()
             .await
-            .map_err(|err| OAuthError::ProfileFetch(err.to_string()))?;
+            .map_err(|err| OAuthError::ProfileFetch(describe_transport_error(&err)))?;
         if !resp.status().is_success() {
             return Err(OAuthError::ProfileFetch(format!(
                 "GitHub emails endpoint returned {}",

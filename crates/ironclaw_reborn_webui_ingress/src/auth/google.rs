@@ -25,7 +25,7 @@ use super::config::GoogleOAuthConfig;
 use super::error::{OAuthError, ProviderInitError};
 use super::profile::OAuthUserProfile;
 use super::provider::OAuthProvider;
-use super::provider_http::sanitize_error_code;
+use super::provider_http::{describe_transport_error, sanitize_error_code};
 use super::provider_name::OAuthProviderName;
 
 const GOOGLE_AUTH_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
@@ -169,7 +169,7 @@ impl OAuthProvider for GoogleProvider {
             ])
             .send()
             .await
-            .map_err(|err| OAuthError::CodeExchange(err.to_string()))?;
+            .map_err(|err| OAuthError::CodeExchange(describe_transport_error(&err)))?;
 
         if !resp.status().is_success() {
             let status = resp.status();

@@ -310,7 +310,7 @@ impl ServeCommand {
                         providers: sso.providers,
                         env_authenticator: env_authenticator.clone(),
                     })
-                    .expect("non-empty providers always produce login wiring");
+                    .expect("non-empty providers always produce login wiring"); // safety: this arm only runs for Some(sso), and sso_startup_config_from_env returns None when providers is empty, so build_signed_session_login never returns None here
                     eprintln!(
                         "ironclaw-reborn: WebChat v2 SSO login mounted — \
                          see GET /auth/providers for the enabled set"
