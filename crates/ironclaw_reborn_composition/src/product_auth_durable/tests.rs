@@ -15,7 +15,7 @@ use tokio::task::JoinSet;
 use super::*;
 use crate::product_auth_runtime_credentials::{
     ProductAuthRuntimeCredentialAccountSelector, ProductAuthRuntimeCredentialResolver,
-    RuntimeCredentialAccountSelectionService,
+    RuntimeCredentialAccountSelectionRequest, RuntimeCredentialAccountSelectionService,
 };
 use ironclaw_auth::{
     AuthChallenge, AuthContinuationRef, AuthFlowKind, AuthFlowManager, AuthFlowOwnerScope,
@@ -205,9 +205,9 @@ async fn filesystem_runtime_account_selection_matches_setup_invocation_account()
 
     let selector = ProductAuthRuntimeCredentialAccountSelector::new(service.clone());
     let selected = selector
-        .select_unique_configured_runtime_account(CredentialAccountSelectionRequest::new(
+        .select_unique_configured_runtime_account(RuntimeCredentialAccountSelectionRequest::new(
+            CredentialAccountSelectionRequest::new(runtime_scope.clone(), google_provider()),
             runtime_scope,
-            google_provider(),
         ))
         .await
         .unwrap();
