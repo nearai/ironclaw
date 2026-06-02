@@ -463,6 +463,20 @@ async fn bundled_gsuite_handler_projects_stage_auth_required_to_first_party_auth
         None,
         "AuthRequired variant must have no dispatch kind"
     );
+    let credential_requirements = error
+        .credential_requirements()
+        .expect("stage AuthRequired should surface OAuth requirements");
+    assert_eq!(credential_requirements.len(), 1);
+    let requirement = &credential_requirements[0];
+    assert_eq!(
+        requirement.provider.as_str(),
+        ironclaw_auth::GOOGLE_PROVIDER_ID
+    );
+    assert_eq!(requirement.requester_extension.as_str(), "gmail");
+    assert_eq!(
+        requirement.provider_scopes,
+        vec![GOOGLE_GMAIL_SEND_SCOPE.to_string()]
+    );
 }
 
 #[tokio::test]

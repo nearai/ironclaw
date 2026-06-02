@@ -1752,4 +1752,31 @@ fn dispatch_error_auth_required_debug_redacts_required_secrets() {
         debug_empty.contains("0 handle(s) redacted"),
         "zero redaction count must appear; got: {debug_empty}"
     );
+    let requirement = RuntimeCredentialAuthRequirement {
+        provider: RuntimeCredentialAccountProviderId::new("google").unwrap(),
+        requester_extension: ExtensionId::new("gmail").unwrap(),
+        provider_scopes: vec!["https://www.googleapis.com/auth/gmail.readonly".to_string()],
+    };
+    let with_requirement = DispatchError::AuthRequired {
+        capability: CapabilityId::new("test.cap").unwrap(),
+        required_secrets: Vec::new(),
+        credential_requirements: vec![requirement],
+    };
+    let debug_with_requirement = format!("{with_requirement:?}");
+    assert!(
+        debug_with_requirement.contains("1 requirement(s) redacted"),
+        "credential requirement redaction count must appear; got: {debug_with_requirement}"
+    );
+    assert!(
+        !debug_with_requirement.contains("gmail"),
+        "requester extension must not appear in Debug output; got: {debug_with_requirement}"
+    );
+    assert!(
+        !debug_with_requirement.contains("gmail.readonly"),
+        "provider scope must not appear in Debug output; got: {debug_with_requirement}"
+    );
+    assert!(
+        !debug_with_requirement.contains("google"),
+        "provider id must not appear in Debug output; got: {debug_with_requirement}"
+    );
 }

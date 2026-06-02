@@ -124,7 +124,15 @@ impl From<DispatchError> for CapabilityInvocationError {
                 required_secrets,
                 credential_requirements,
             },
-            other => Self::Dispatch {
+            other @ (DispatchError::UnknownCapability { .. }
+            | DispatchError::UnknownProvider { .. }
+            | DispatchError::RuntimeMismatch { .. }
+            | DispatchError::MissingRuntimeBackend { .. }
+            | DispatchError::UnsupportedRuntime { .. }
+            | DispatchError::Mcp { .. }
+            | DispatchError::Script { .. }
+            | DispatchError::Wasm { .. }
+            | DispatchError::FirstParty { .. }) => Self::Dispatch {
                 kind: dispatch_error_kind(&other),
             },
         }

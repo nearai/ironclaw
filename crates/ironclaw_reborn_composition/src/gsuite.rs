@@ -13,7 +13,8 @@ use ironclaw_first_party_extensions::{
 };
 use ironclaw_host_api::{
     CapabilityId, CapabilityProfileSchemaRef, ExtensionId, HostApiError, RequestedTrustClass,
-    RuntimeCredentialAccountProviderId, RuntimeCredentialAuthRequirement, TrustClass, VirtualPath,
+    RuntimeCredentialAccountProviderId, RuntimeCredentialAuthRequirement, RuntimeDispatchErrorKind,
+    TrustClass, VirtualPath,
 };
 use ironclaw_host_runtime::{
     FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
@@ -158,10 +159,13 @@ fn gsuite_error(
 ) -> FirstPartyCapabilityError {
     let usage = error.usage().cloned();
     let base = match error.auth_requirement() {
-        Some(required_secrets) => FirstPartyCapabilityError::auth_required_with_context(
-            required_secrets,
-            gsuite_credential_requirements(capability_id),
-        ),
+        Some(required_secrets) => match gsuite_credential_requirements(capability_id) {
+            Ok(credential_requirements) => FirstPartyCapabilityError::auth_required_with_context(
+                required_secrets,
+                credential_requirements,
+            ),
+            Err(error) => error,
+        },
         None => FirstPartyCapabilityError::new(error.kind()),
     };
     match usage {
@@ -172,18 +176,16 @@ fn gsuite_error(
 
 fn gsuite_credential_requirements(
     capability_id: &CapabilityId,
-) -> Vec<RuntimeCredentialAuthRequirement> {
-    let Some((package, capability)) = find_gsuite_capability(capability_id.as_str()) else {
-        return Vec::new();
-    };
-    let Ok(provider) = RuntimeCredentialAccountProviderId::new(ironclaw_auth::GOOGLE_PROVIDER_ID)
-    else {
-        return Vec::new();
-    };
-    let Ok(requester_extension) = ExtensionId::new(package.extension_id) else {
-        return Vec::new();
-    };
-    vec![RuntimeCredentialAuthRequirement {
+) -> Result<Vec<RuntimeCredentialAuthRequirement>, FirstPartyCapabilityError> {
+    let (package, capability) =
+        find_gsuite_capability(capability_id.as_str()).ok_or_else(|| {
+            FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::UndeclaredCapability)
+        })?;
+    let provider = RuntimeCredentialAccountProviderId::new(ironclaw_auth::GOOGLE_PROVIDER_ID)
+        .map_err(|_| FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::Backend))?;
+    let requester_extension = ExtensionId::new(package.extension_id)
+        .map_err(|_| FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::Backend))?;
+    Ok(vec![RuntimeCredentialAuthRequirement {
         provider,
         requester_extension,
         provider_scopes: capability
@@ -191,7 +193,7 @@ fn gsuite_credential_requirements(
             .iter()
             .map(|scope| (*scope).to_string())
             .collect(),
-    }]
+    }])
 }
 
 pub(crate) struct ProductAuthRuntimeGsuiteCredentialStager {
