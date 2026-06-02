@@ -99,6 +99,8 @@ const paths = {
     />`,
 
   chevron: html`<path d="m6 9 6 6 6-6" />`,
+
+  more: html`<path d="M12 5.6h.01M12 12h.01M12 18.4h.01" />`,
 };
 
 export function Icon({ name, className = "", strokeWidth = 1.7 }) {

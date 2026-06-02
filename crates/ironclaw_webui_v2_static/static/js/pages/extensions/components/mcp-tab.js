@@ -36,18 +36,20 @@ export function McpTab({
           >
             Installed MCP servers
           </h3>
-          ${mcpServers.map(
-            (ext) => html`
-              <${ExtensionCard}
-                key=${packageId(ext)}
-                ext=${ext}
-                onActivate=${onActivate}
-                onConfigure=${onConfigure}
-                onRemove=${onRemove}
-                isBusy=${isBusy}
-              />
-            `
-          )}
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 2xl:grid-cols-3">
+            ${mcpServers.map(
+              (ext) => html`
+                <${ExtensionCard}
+                  key=${packageId(ext)}
+                  ext=${ext}
+                  onActivate=${onActivate}
+                  onConfigure=${onConfigure}
+                  onRemove=${onRemove}
+                  isBusy=${isBusy}
+                />
+              `
+            )}
+          </div>
         </div>
       `}
       ${mcpRegistry.length > 0 &&
@@ -58,16 +60,18 @@ export function McpTab({
           >
             Available MCP servers
           </h3>
-          ${mcpRegistry.map(
-            (entry) => html`
-              <${RegistryCard}
-                key=${packageId(entry)}
-                entry=${entry}
-                onInstall=${onInstall}
-                isBusy=${isBusy}
-              />
-            `
-          )}
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 2xl:grid-cols-3">
+            ${mcpRegistry.map(
+              (entry) => html`
+                <${RegistryCard}
+                  key=${packageId(entry)}
+                  entry=${entry}
+                  onInstall=${onInstall}
+                  isBusy=${isBusy}
+                />
+              `
+            )}
+          </div>
         </div>
       `}
     </div>
