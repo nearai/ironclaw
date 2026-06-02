@@ -10,6 +10,7 @@ use std::{
 
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
+#[cfg(feature = "test-support")]
 use chrono::{DateTime, Datelike, TimeZone, Utc};
 use ironclaw_authorization::GrantAuthorizer;
 use ironclaw_events::InMemoryAuditSink;
@@ -33,9 +34,12 @@ use ironclaw_host_runtime::{
     SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID,
     SPAWN_SUBAGENT_CAPABILITY_ID, SandboxCommandTransport, SurfaceKind, TIME_CAPABILITY_ID,
     TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID,
-    TenantSandboxProcessPort, TriggerManagementClock, VisibleCapabilityAccess,
-    VisibleCapabilityRequest, WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers,
-    builtin_first_party_handlers_with_trigger_clock, builtin_first_party_package,
+    TenantSandboxProcessPort, VisibleCapabilityAccess, VisibleCapabilityRequest,
+    WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers, builtin_first_party_package,
+};
+#[cfg(feature = "test-support")]
+use ironclaw_host_runtime::{
+    TriggerManagementClock, builtin_first_party_handlers_with_trigger_clock,
 };
 use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpResponse, NetworkHttpTransport,
@@ -50,6 +54,7 @@ use ironclaw_trust::{
     AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
     HostTrustPolicy, TrustDecision, TrustProvenance,
 };
+use ironclaw_turns::TurnRunId;
 use serde_json::{Value, json};
 
 #[tokio::test]
@@ -289,19 +294,15 @@ async fn builtin_trigger_create_stamps_caller_scope_and_persists_record() {
     assert_eq!(trigger["source"], json!("schedule"));
     assert_eq!(trigger["completion_policy"], json!("recurring"));
     assert_eq!(trigger["state"], json!("scheduled"));
-    assert_eq!(
-        trigger["tenant_id"],
-        json!(context.resource_scope.tenant_id.as_str())
-    );
-    assert_eq!(
-        trigger["creator_user_id"],
-        json!(context.resource_scope.user_id.as_str())
-    );
+    assert!(trigger.get("tenant_id").is_none());
+    assert!(trigger.get("creator_user_id").is_none());
     assert_eq!(trigger["agent_id"], json!("default"));
     assert_eq!(trigger["project_id"], json!("bootstrap"));
     assert_eq!(trigger["last_status"], Value::Null);
-    assert_eq!(trigger["active_fire_slot"], Value::Null);
-    assert_eq!(trigger["active_run_ref"], Value::Null);
+    assert_eq!(trigger["is_active"], json!(false));
+    assert!(trigger.get("last_fired_slot").is_none());
+    assert!(trigger.get("active_fire_slot").is_none());
+    assert!(trigger.get("active_run_ref").is_none());
 
     let records = repository
         .list_triggers(context.resource_scope.tenant_id.clone())
@@ -343,6 +344,7 @@ async fn builtin_trigger_create_rejects_sub_minute_schedule_before_persistence()
     );
 }
 
+#[cfg(feature = "test-support")]
 #[tokio::test]
 async fn builtin_trigger_create_rejects_schedule_with_no_future_slot_before_persistence() {
     let repository = Arc::new(InMemoryTriggerRepository::default());
@@ -572,7 +574,13 @@ async fn builtin_trigger_list_and_remove_are_caller_scoped() {
     .unwrap();
     assert_eq!(owner_list["triggers"].as_array().unwrap().len(), 1);
     assert!(owner_list["triggers"][0].get("last_status").is_some());
+    assert_eq!(owner_list["triggers"][0]["is_active"], json!(false));
     assert!(owner_list["triggers"][0].get("prompt").is_none());
+    assert!(owner_list["triggers"][0].get("tenant_id").is_none());
+    assert!(owner_list["triggers"][0].get("creator_user_id").is_none());
+    assert!(owner_list["triggers"][0].get("last_fired_slot").is_none());
+    assert!(owner_list["triggers"][0].get("active_fire_slot").is_none());
+    assert!(owner_list["triggers"][0].get("active_run_ref").is_none());
 
     let owner_remove = invoke_with_context(
         &runtime,
@@ -583,13 +591,58 @@ async fn builtin_trigger_list_and_remove_are_caller_scoped() {
     .await
     .unwrap();
     assert_eq!(owner_remove["removed"], json!(true));
+    assert_eq!(owner_remove["trigger"]["trigger_id"], json!(trigger_id));
+    assert_eq!(owner_remove["trigger"]["name"], json!("Owned trigger"));
     assert!(owner_remove["trigger"].get("prompt").is_none());
+    assert!(owner_remove["trigger"].get("tenant_id").is_none());
+    assert!(owner_remove["trigger"].get("creator_user_id").is_none());
+    assert!(owner_remove["trigger"].get("active_fire_slot").is_none());
+    assert!(owner_remove["trigger"].get("active_run_ref").is_none());
 
     let records = repository
         .list_triggers(owner_context.resource_scope.tenant_id)
         .await
         .unwrap();
     assert!(records.is_empty());
+}
+
+#[tokio::test]
+async fn builtin_trigger_list_shows_active_state_without_run_identifiers() {
+    let repository = Arc::new(InMemoryTriggerRepository::default());
+    let runtime = runtime_with_trigger_repository(repository.clone());
+    let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID]);
+
+    let created = invoke_with_context(
+        &runtime,
+        TRIGGER_CREATE_CAPABILITY_ID,
+        json!({
+            "name": "Active trigger",
+            "prompt": "Run active work",
+            "cron": "0 8 * * *"
+        }),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(created["trigger"]["is_active"], json!(false));
+
+    let mut records = repository
+        .list_triggers(context.resource_scope.tenant_id.clone())
+        .await
+        .unwrap();
+    assert_eq!(records.len(), 1);
+    records[0].active_fire_slot = Some(records[0].next_run_at);
+    records[0].active_run_ref =
+        Some(TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5a").unwrap());
+    repository.upsert_trigger(records.remove(0)).await.unwrap();
+
+    let listed = invoke_with_context(&runtime, TRIGGER_LIST_CAPABILITY_ID, json!({}), context)
+        .await
+        .unwrap();
+    let trigger = &listed["triggers"][0];
+    assert_eq!(trigger["is_active"], json!(true));
+    assert!(trigger.get("active_fire_slot").is_none());
+    assert!(trigger.get("active_run_ref").is_none());
 }
 
 #[tokio::test]
@@ -634,11 +687,15 @@ async fn builtin_trigger_create_list_and_remove_use_full_request_scope() {
     .await
     .unwrap();
     let trigger = &created["trigger"];
-    assert_eq!(trigger["tenant_id"], json!("scoped-tenant"));
-    assert_eq!(trigger["creator_user_id"], json!("scoped-user"));
+    assert!(trigger.get("tenant_id").is_none());
+    assert!(trigger.get("creator_user_id").is_none());
     assert_eq!(trigger["agent_id"], json!("scoped-agent"));
     assert_eq!(trigger["project_id"], json!("scoped-project"));
+    assert_eq!(trigger["is_active"], json!(false));
     assert!(trigger.get("prompt").is_none());
+    assert!(trigger.get("last_fired_slot").is_none());
+    assert!(trigger.get("active_fire_slot").is_none());
+    assert!(trigger.get("active_run_ref").is_none());
     let trigger_id = trigger["trigger_id"].as_str().unwrap();
 
     let other_agent_list = invoke_with_context(
@@ -680,7 +737,13 @@ async fn builtin_trigger_create_list_and_remove_use_full_request_scope() {
     .await
     .unwrap();
     assert_eq!(owner_remove["removed"], json!(true));
+    assert_eq!(owner_remove["trigger"]["trigger_id"], json!(trigger_id));
+    assert_eq!(owner_remove["trigger"]["name"], json!("Scoped trigger"));
     assert!(owner_remove["trigger"].get("prompt").is_none());
+    assert!(owner_remove["trigger"].get("agent_id").is_none());
+    assert!(owner_remove["trigger"].get("project_id").is_none());
+    assert!(owner_remove["trigger"].get("active_fire_slot").is_none());
+    assert!(owner_remove["trigger"].get("active_run_ref").is_none());
 }
 
 #[tokio::test]
@@ -708,6 +771,7 @@ async fn builtin_trigger_create_round_trips_nullable_agent_and_project_scope() {
 
     assert_eq!(created["trigger"]["agent_id"], Value::Null);
     assert_eq!(created["trigger"]["project_id"], Value::Null);
+    assert_eq!(created["trigger"]["is_active"], json!(false));
 }
 
 #[tokio::test]
@@ -716,7 +780,7 @@ async fn builtin_trigger_list_applies_user_surface_limit_boundaries() {
     let runtime = runtime_with_trigger_repository(repository);
     let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID]);
 
-    for index in 0..100 {
+    for index in 0..101 {
         invoke_with_context(
             &runtime,
             TRIGGER_CREATE_CAPABILITY_ID,
@@ -751,6 +815,16 @@ async fn builtin_trigger_list_applies_user_surface_limit_boundaries() {
     .unwrap();
 
     assert_eq!(listed["triggers"].as_array().unwrap().len(), 2);
+
+    let defaulted = invoke_with_context(
+        &runtime,
+        TRIGGER_LIST_CAPABILITY_ID,
+        json!({}),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(defaulted["triggers"].as_array().unwrap().len(), 100);
 
     let clamped = invoke_with_context(
         &runtime,
@@ -5028,6 +5102,7 @@ fn runtime_with_trigger_repository(repository: Arc<dyn TriggerRepository>) -> im
     )
 }
 
+#[cfg(feature = "test-support")]
 fn runtime_with_trigger_repository_and_clock(
     trigger_repository: Arc<dyn TriggerRepository>,
     trigger_clock: Arc<dyn TriggerManagementClock>,
@@ -5077,8 +5152,10 @@ where
 }
 
 #[derive(Debug)]
+#[cfg(feature = "test-support")]
 struct FixedTriggerClock(DateTime<Utc>);
 
+#[cfg(feature = "test-support")]
 impl TriggerManagementClock for FixedTriggerClock {
     fn now(&self) -> DateTime<Utc> {
         self.0

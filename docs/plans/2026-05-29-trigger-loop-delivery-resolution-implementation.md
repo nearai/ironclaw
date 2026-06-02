@@ -655,6 +655,10 @@ PR 17 follow-ups that must not be lost:
   only if it preserves that malformed-row behavior, for example by introducing
   an explicit stored-schedule hydration constructor plus backend hydration
   validation tests.
+- `trigger_create` currently parses/validates the cron expression, then computes
+  `next_run_at` through a second parse. Collapse that to a single parse in a
+  later performance pass without weakening schedule validation or malformed-row
+  hydration guarantees.
 - PostgreSQL NULL-scope planner tuning is deferred. The durable schemas include
   the scoped-list composite index; add a NULL-specific partial index only after
   `EXPLAIN` or production-like benchmark evidence shows Postgres is not using

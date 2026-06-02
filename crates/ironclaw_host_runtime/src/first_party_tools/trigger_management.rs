@@ -60,15 +60,31 @@ pub(super) fn insert_handlers(
     registry: &mut FirstPartyCapabilityRegistry,
     repository: Arc<dyn TriggerRepository>,
 ) -> Result<(), HostApiError> {
-    insert_handlers_with_clock(registry, repository, Arc::new(SystemTriggerManagementClock))
+    insert_trigger_handlers(
+        registry,
+        Arc::new(TriggerManagementToolHandler {
+            repository,
+            clock: Arc::new(SystemTriggerManagementClock),
+        }),
+    )
 }
 
+#[cfg(any(test, feature = "test-support"))]
 pub(super) fn insert_handlers_with_clock(
     registry: &mut FirstPartyCapabilityRegistry,
     repository: Arc<dyn TriggerRepository>,
     clock: Arc<dyn TriggerManagementClock>,
 ) -> Result<(), HostApiError> {
-    let handler = Arc::new(TriggerManagementToolHandler { repository, clock });
+    insert_trigger_handlers(
+        registry,
+        Arc::new(TriggerManagementToolHandler { repository, clock }),
+    )
+}
+
+fn insert_trigger_handlers(
+    registry: &mut FirstPartyCapabilityRegistry,
+    handler: Arc<TriggerManagementToolHandler>,
+) -> Result<(), HostApiError> {
     registry.insert_handler(
         CapabilityId::new(TRIGGER_CREATE_CAPABILITY_ID)?,
         handler.clone(),
@@ -81,8 +97,14 @@ pub(super) fn insert_handlers_with_clock(
     Ok(())
 }
 
+#[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub trait TriggerManagementClock: Send + Sync {
+    fn now(&self) -> DateTime<Utc>;
+}
+
+#[cfg(not(any(test, feature = "test-support")))]
+trait TriggerManagementClock: Send + Sync {
     fn now(&self) -> DateTime<Utc>;
 }
 
@@ -188,7 +210,7 @@ async fn create_trigger(
     repository
         .upsert_trigger(record.clone())
         .await
-        .map_err(trigger_repository_error)?;
+        .map_err(|error| trigger_repository_error("upsert_trigger", error))?;
     Ok(json!({
         "trigger": trigger_output(&record),
     }))
@@ -213,7 +235,7 @@ async fn list_triggers(
             limit,
         )
         .await
-        .map_err(trigger_repository_error)?
+        .map_err(|error| trigger_repository_error("list_scoped_triggers", error))?
         .into_iter()
         .map(|record| trigger_output(&record))
         .collect::<Vec<_>>();
@@ -236,18 +258,16 @@ async fn remove_trigger(
             trigger_id,
         )
         .await
-        .map_err(trigger_repository_error)?;
+        .map_err(|error| trigger_repository_error("remove_scoped_trigger", error))?;
     Ok(json!({
         "removed": removed.is_some(),
-        "trigger": removed.as_ref().map(trigger_output),
+        "trigger": removed.as_ref().map(trigger_remove_output),
     }))
 }
 
 fn trigger_output(record: &TriggerRecord) -> Value {
     json!({
         "trigger_id": record.trigger_id.to_string(),
-        "tenant_id": record.tenant_id.as_str(),
-        "creator_user_id": record.creator_user_id.as_str(),
         "agent_id": record.agent_id.as_ref().map(|id| id.as_str()),
         "project_id": record.project_id.as_ref().map(|id| id.as_str()),
         "name": record.name,
@@ -257,11 +277,16 @@ fn trigger_output(record: &TriggerRecord) -> Value {
         "state": record.state,
         "next_run_at": record.next_run_at,
         "last_run_at": record.last_run_at,
-        "last_fired_slot": record.last_fired_slot,
         "last_status": record.last_status,
-        "active_fire_slot": record.active_fire_slot,
-        "active_run_ref": record.active_run_ref.as_ref().map(ToString::to_string),
+        "is_active": record.has_active_fire(),
         "created_at": record.created_at,
+    })
+}
+
+fn trigger_remove_output(record: &TriggerRecord) -> Value {
+    json!({
+        "trigger_id": record.trigger_id.to_string(),
+        "name": record.name,
     })
 }
 
@@ -275,17 +300,39 @@ fn next_run_at_for_schedule(
         .ok_or_else(input_error)
 }
 
-fn trigger_input_error(_error: TriggerError) -> FirstPartyCapabilityError {
+fn trigger_input_error(error: TriggerError) -> FirstPartyCapabilityError {
+    tracing::debug!(
+        runtime_dispatch_error_kind = %RuntimeDispatchErrorKind::InputEncode,
+        trigger_error_kind = trigger_error_kind(&error),
+        "trigger management capability input validation failed"
+    );
     input_error()
 }
 
-fn trigger_repository_error(error: TriggerError) -> FirstPartyCapabilityError {
+fn trigger_repository_error(
+    repository_operation: &'static str,
+    error: TriggerError,
+) -> FirstPartyCapabilityError {
     tracing::debug!(
         runtime_dispatch_error_kind = %RuntimeDispatchErrorKind::Backend,
-        error = %error,
+        repository_operation,
+        trigger_error_kind = trigger_error_kind(&error),
         "trigger management capability repository operation failed"
     );
     FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::Backend)
+}
+
+fn trigger_error_kind(error: &TriggerError) -> &'static str {
+    match error {
+        TriggerError::InvalidTriggerId { .. } => "invalid_trigger_id",
+        TriggerError::InvalidFireIdentityComponent { .. } => "invalid_fire_identity_component",
+        TriggerError::InvalidRecord { .. } => "invalid_record",
+        TriggerError::InvalidPollerConfig { .. } => "invalid_poller_config",
+        TriggerError::InvalidSchedule { .. } => "invalid_schedule",
+        TriggerError::InvalidMaterialization { .. } => "invalid_materialization",
+        TriggerError::Backend { .. } => "backend",
+        TriggerError::NotFound => "not_found",
+    }
 }
 
 fn elapsed_usage_with_bytes(started: Instant, output_bytes: u64) -> ResourceUsage {
