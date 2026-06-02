@@ -5,12 +5,18 @@ use uuid::Uuid;
 use crate::{
     LifecycleExtensionCredentialRequirement, LifecyclePackageRef, LifecycleProductContext,
     LifecycleProductFacade, LifecycleProductResponse, LifecycleProductSurfaceContext,
-    ProductWorkflowError, RebornExtensionSetupSecret, RebornServicesError, RebornServicesErrorCode,
+    ProductWorkflowError, RebornServicesError, RebornServicesErrorCode,
     RebornSetupExtensionResponse, WebUiAuthenticatedCaller, WebUiInboundValidationCode,
     WebUiInboundValidationError, WebUiSetupExtensionRequest,
 };
 
 use super::{ExtensionCredentialSetupService, extension_setup_credentials};
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SetupAction {
+    View,
+    Submit,
+}
 
 pub(super) async fn setup_extension(
     facade: &dyn LifecycleProductFacade,
@@ -19,23 +25,19 @@ pub(super) async fn setup_extension(
     package_ref: LifecyclePackageRef,
     request: WebUiSetupExtensionRequest,
 ) -> Result<RebornSetupExtensionResponse, RebornServicesError> {
+    let action = setup_action(&request)?;
     let scope = setup_scope(&caller, &package_ref);
     let extension_id = ExtensionId::new(package_ref.id.as_str())
         .map_err(|_| RebornServicesError::internal_invariant())?;
-    let lifecycle = facade
-        .project_package(
-            LifecycleProductContext::Surface(LifecycleProductSurfaceContext {
-                tenant_id: caller.tenant_id.clone(),
-                user_id: caller.user_id.clone(),
-                agent_id: caller.agent_id.clone(),
-                project_id: caller.project_id.clone(),
-            }),
-            package_ref.clone(),
-        )
-        .await
-        .map_err(map_lifecycle_error)?;
+    let context = LifecycleProductContext::Surface(LifecycleProductSurfaceContext {
+        tenant_id: caller.tenant_id,
+        user_id: caller.user_id,
+        agent_id: caller.agent_id,
+        project_id: caller.project_id,
+    });
+    let lifecycle = project_package(facade, context.clone(), package_ref.clone()).await?;
     let requirements = extension_setup_credentials::requirements(&lifecycle);
-    if request.action.as_deref() == Some("submit") {
+    if action == SetupAction::Submit {
         extension_setup_credentials::submit_manual_tokens(
             extension_credentials,
             scope.clone(),
@@ -44,28 +46,36 @@ pub(super) async fn setup_extension(
             request,
         )
         .await?;
-        let refreshed = facade
-            .project_package(
-                LifecycleProductContext::Surface(LifecycleProductSurfaceContext {
-                    tenant_id: caller.tenant_id,
-                    user_id: caller.user_id,
-                    agent_id: caller.agent_id,
-                    project_id: caller.project_id,
-                }),
-                package_ref,
-            )
-            .await
-            .map_err(map_lifecycle_error)?;
-        return setup_extension_response(extension_credentials, scope, &extension_id, refreshed)
-            .await;
+        let refreshed = project_package(facade, context, package_ref).await?;
+        let refreshed_requirements = extension_setup_credentials::requirements(&refreshed);
+        return setup_extension_response(
+            extension_credentials,
+            scope,
+            &extension_id,
+            refreshed,
+            &refreshed_requirements,
+        )
+        .await;
     }
-    if request.action.is_some() {
-        return Err(validation_error(
-            "action",
-            WebUiInboundValidationCode::InvalidValue,
-        ));
-    }
-    setup_extension_response(extension_credentials, scope, &extension_id, lifecycle).await
+    setup_extension_response(
+        extension_credentials,
+        scope,
+        &extension_id,
+        lifecycle,
+        &requirements,
+    )
+    .await
+}
+
+async fn project_package(
+    facade: &dyn LifecycleProductFacade,
+    context: LifecycleProductContext,
+    package_ref: LifecyclePackageRef,
+) -> Result<LifecycleProductResponse, RebornServicesError> {
+    facade
+        .project_package(context, package_ref)
+        .await
+        .map_err(map_lifecycle_error)
 }
 
 async fn setup_extension_response(
@@ -73,16 +83,17 @@ async fn setup_extension_response(
     scope: AuthProductScope,
     extension_id: &ExtensionId,
     lifecycle: LifecycleProductResponse,
+    requirements: &[LifecycleExtensionCredentialRequirement],
 ) -> Result<RebornSetupExtensionResponse, RebornServicesError> {
     let package_ref = lifecycle
         .package_ref
         .clone()
         .ok_or_else(RebornServicesError::internal_invariant)?;
-    let secrets = setup_secrets(
+    let secrets = extension_setup_credentials::project(
         extension_credentials,
         scope,
         extension_id,
-        &extension_setup_credentials::requirements(&lifecycle),
+        requirements,
     )
     .await?;
     Ok(RebornSetupExtensionResponse {
@@ -94,16 +105,6 @@ async fn setup_extension_response(
         fields: Vec::new(),
         onboarding: None,
     })
-}
-
-async fn setup_secrets(
-    extension_credentials: Option<&dyn ExtensionCredentialSetupService>,
-    scope: AuthProductScope,
-    extension_id: &ExtensionId,
-    requirements: &[LifecycleExtensionCredentialRequirement],
-) -> Result<Vec<RebornExtensionSetupSecret>, RebornServicesError> {
-    extension_setup_credentials::project(extension_credentials, scope, extension_id, requirements)
-        .await
 }
 
 fn setup_scope(
@@ -137,6 +138,17 @@ fn setup_scope(
         },
         AuthSurface::Web,
     )
+}
+
+fn setup_action(request: &WebUiSetupExtensionRequest) -> Result<SetupAction, RebornServicesError> {
+    match request.action.as_deref() {
+        None => Ok(SetupAction::View),
+        Some("submit") => Ok(SetupAction::Submit),
+        Some(_) => Err(validation_error(
+            "action",
+            WebUiInboundValidationCode::InvalidValue,
+        )),
+    }
 }
 
 fn validation_error(field: &'static str, code: WebUiInboundValidationCode) -> RebornServicesError {

@@ -464,6 +464,27 @@ async fn post_google_oauth_start(
         .expect("oneshot")
 }
 
+async fn post_extension_oauth_start(
+    app: &axum::Router,
+    package_id: &str,
+    body: serde_json::Value,
+) -> axum::response::Response {
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!(
+                    "/api/webchat/v2/extensions/{package_id}/setup/oauth/start"
+                ))
+                .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot")
+}
+
 async fn start_google_oauth_flow(app: &axum::Router) -> (serde_json::Value, String) {
     let start_response = post_google_oauth_start(
         app,
@@ -1104,7 +1125,7 @@ async fn product_auth_google_oauth_start_builds_provider_authorization_url() {
 }
 
 #[tokio::test]
-async fn product_auth_google_oauth_start_attaches_update_binding_for_requester_extension() {
+async fn extension_oauth_start_attaches_update_binding_for_package_extension() {
     let shared = Arc::new(InMemoryAuthProductServices::new());
     let product_auth = Arc::new(RebornProductAuthServices::from_shared(
         shared.clone(),
@@ -1145,13 +1166,16 @@ async fn product_auth_google_oauth_start_attaches_update_binding_for_requester_e
         .await
         .expect("seed credential account");
 
-    let response = post_google_oauth_start(
+    let response = post_extension_oauth_start(
         &app,
-        google_oauth_start_body(json!({
+        "google-calendar",
+        json!({
+            "provider": "google",
+            "account_label": "work google",
             "invocation_id": invocation_id.to_string(),
-            "requester_extension": "google-calendar",
             "scopes": [GOOGLE_CALENDAR_READONLY_SCOPE],
-        })),
+            "expires_at": (Utc::now() + ChronoDuration::minutes(5)).to_rfc3339(),
+        }),
     )
     .await;
 

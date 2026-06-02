@@ -39,23 +39,19 @@ export function submitExtensionSetup(packageRef, secrets, fields) {
 export function startExtensionOauth(packageRef, secret) {
   const setup = secret?.setup || {};
   const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
-  return apiFetch(oauthStartEndpoint(secret.provider), {
-    method: "POST",
-    body: JSON.stringify({
-      account_label: setup.account_label || `${secret.provider} credential`,
-      scopes: setup.scopes || [],
-      expires_at: expiresAt,
-      requester_extension: packageId(packageRef),
-      invocation_id: setup.invocation_id,
-    }),
-  });
-}
-
-function oauthStartEndpoint(provider) {
-  if (provider === "google") {
-    return "/api/reborn/product-auth/oauth/google/start";
-  }
-  throw new Error(`OAuth setup is not available for ${provider}`);
+  return apiFetch(
+    `/api/webchat/v2/extensions/${encodeURIComponent(packageId(packageRef))}/setup/oauth/start`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        provider: secret.provider,
+        account_label: setup.account_label || `${secret.provider} credential`,
+        scopes: setup.scopes || [],
+        expires_at: expiresAt,
+        invocation_id: setup.invocation_id,
+      }),
+    }
+  );
 }
 export function fetchPairingRequests() {
   return Promise.resolve({ requests: [] });

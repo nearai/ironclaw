@@ -1,8 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
 
-use ironclaw_auth::{
-    AuthProductScope, AuthProviderId, CredentialAccountProjection, CredentialAccountUpdateBinding,
-};
+use ironclaw_auth::{AuthProductScope, AuthProviderId, CredentialAccountUpdateBinding};
 use ironclaw_host_api::ExtensionId;
 use secrecy::SecretString;
 use serde::Deserialize;
@@ -171,7 +169,9 @@ async fn submit_manual_token_requirement(
             provider,
             label: credential_label(extension_id, requirement),
             requester_extension: extension_id.clone(),
-            existing_account: existing.map(update_binding),
+            existing_account: existing
+                .as_ref()
+                .map(CredentialAccountUpdateBinding::from_projection),
             secret: SecretString::from(trimmed.to_string()),
         })
         .await?;
@@ -206,15 +206,6 @@ fn credential_label(
     requirement: &LifecycleExtensionCredentialRequirement,
 ) -> String {
     format!("{} {}", extension_id.as_str(), requirement.provider)
-}
-
-fn update_binding(account: CredentialAccountProjection) -> CredentialAccountUpdateBinding {
-    CredentialAccountUpdateBinding {
-        account_id: account.id,
-        ownership: account.ownership,
-        owner_extension: account.owner_extension,
-        granted_extensions: account.granted_extensions,
-    }
 }
 
 fn validation_error(field: &'static str, code: WebUiInboundValidationCode) -> RebornServicesError {

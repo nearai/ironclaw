@@ -71,6 +71,7 @@ mod web_access;
 mod webui;
 #[cfg(feature = "webui-v2-beta")]
 mod webui_body_limit;
+mod webui_extension_credentials;
 #[cfg(feature = "webui-v2-beta")]
 mod webui_rate_limit;
 #[cfg(feature = "webui-v2-beta")]

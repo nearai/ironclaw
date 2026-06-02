@@ -67,6 +67,8 @@ pub(crate) const OAUTH_CALLBACK_PATH: &str = "/api/reborn/product-auth/oauth/cal
 pub(crate) const GOOGLE_OAUTH_START_PATH: &str = "/api/reborn/product-auth/oauth/google/start";
 pub(crate) const GOOGLE_OAUTH_CALLBACK_PATH: &str =
     "/api/reborn/product-auth/oauth/google/callback";
+pub(crate) const EXTENSION_OAUTH_START_PATH: &str =
+    "/api/webchat/v2/extensions/{package_id}/setup/oauth/start";
 pub(crate) const MANUAL_TOKEN_SUBMIT_PATH: &str = "/api/reborn/product-auth/manual-token/submit";
 pub(crate) const MANUAL_TOKEN_SETUP_PATH: &str = "/api/reborn/product-auth/manual-token/setup";
 pub(crate) const MANUAL_TOKEN_SECRET_SUBMIT_PATH: &str =
@@ -81,6 +83,7 @@ const OAUTH_START_ROUTE_ID: &str = "product_auth.oauth.start";
 const OAUTH_CALLBACK_ROUTE_ID: &str = "product_auth.oauth.callback";
 const GOOGLE_OAUTH_START_ROUTE_ID: &str = "product_auth.oauth.google.start";
 const GOOGLE_OAUTH_CALLBACK_ROUTE_ID: &str = "product_auth.oauth.google.callback";
+const EXTENSION_OAUTH_START_ROUTE_ID: &str = "webui_v2.extensions.oauth.start";
 const MANUAL_TOKEN_SUBMIT_ROUTE_ID: &str = "product_auth.manual_token.submit";
 const MANUAL_TOKEN_SETUP_ROUTE_ID: &str = "product_auth.manual_token.setup";
 const MANUAL_TOKEN_SECRET_SUBMIT_ROUTE_ID: &str = "product_auth.manual_token.secret_submit";
@@ -307,6 +310,10 @@ pub(crate) fn product_auth_route_mount(state: ProductAuthRouteState) -> ProductA
                 post(oauth::google_oauth_start_handler),
             )
             .route(
+                EXTENSION_OAUTH_START_PATH,
+                post(oauth::extension_oauth_start_handler),
+            )
+            .route(
                 MANUAL_TOKEN_SUBMIT_PATH,
                 post(manual_token::manual_token_submit_handler),
             )
@@ -354,6 +361,7 @@ pub(crate) fn product_auth_route_descriptors() -> Vec<IngressRouteDescriptor> {
     const PROTECTED_MUTATIONS: &[(&str, &str)] = &[
         (OAUTH_START_ROUTE_ID, OAUTH_START_PATH),
         (GOOGLE_OAUTH_START_ROUTE_ID, GOOGLE_OAUTH_START_PATH),
+        (EXTENSION_OAUTH_START_ROUTE_ID, EXTENSION_OAUTH_START_PATH),
         (MANUAL_TOKEN_SUBMIT_ROUTE_ID, MANUAL_TOKEN_SUBMIT_PATH),
         (MANUAL_TOKEN_SETUP_ROUTE_ID, MANUAL_TOKEN_SETUP_PATH),
         (
@@ -499,7 +507,15 @@ pub(super) struct GoogleOAuthStartRequest {
     session_id: Option<String>,
     thread_id: Option<String>,
     invocation_id: Option<String>,
-    requester_extension: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub(super) struct ExtensionOAuthStartRequest {
+    provider: String,
+    account_label: String,
+    scopes: Vec<String>,
+    expires_at: Timestamp,
+    invocation_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -841,34 +857,25 @@ pub(super) async fn scoped_update_binding_for_requester(
     state: &ProductAuthRouteState,
     scope: AuthProductScope,
     provider: AuthProviderId,
-    requester_extension: Option<&str>,
+    requester_extension: Option<&ExtensionId>,
 ) -> Result<Option<CredentialAccountUpdateBinding>, ProductAuthRouteFailure> {
     let Some(requester_extension) = requester_extension else {
         return Ok(None);
     };
-    let requester_extension = ExtensionId::new(requester_extension.to_string())
-        .map_err(|_| ProductAuthRouteFailure::invalid_request())?;
     let account = state
         .product_auth
         .runtime_credential_account_selection_service()
         .select_unique_configured_runtime_account(
             CredentialAccountSelectionRequest::new(scope, provider)
-                .for_extension(requester_extension),
+                .for_extension(requester_extension.clone()),
         )
         .await;
     match account {
-        Ok(account) => Ok(Some(update_binding(account.projection()))),
+        Ok(account) => Ok(Some(CredentialAccountUpdateBinding::from_projection(
+            &account.projection(),
+        ))),
         Err(AuthProductError::CredentialMissing) => Ok(None),
         Err(error) => Err(ProductAuthRouteFailure::from(error)),
-    }
-}
-
-fn update_binding(account: CredentialAccountProjection) -> CredentialAccountUpdateBinding {
-    CredentialAccountUpdateBinding {
-        account_id: account.id,
-        ownership: account.ownership,
-        owner_extension: account.owner_extension,
-        granted_extensions: account.granted_extensions,
     }
 }
 
