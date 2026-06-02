@@ -8,8 +8,8 @@ use ironclaw_host_api::{
     RuntimeDispatchErrorKind,
 };
 use ironclaw_triggers::{
-    MAX_TRIGGER_NAME_BYTES, MAX_TRIGGER_PROMPT_BYTES, TriggerCompletionPolicy, TriggerError,
-    TriggerId, TriggerRecord, TriggerRepository, TriggerSchedule, TriggerSourceKind, TriggerState,
+    TriggerCompletionPolicy, TriggerError, TriggerId, TriggerRecord, TriggerRepository,
+    TriggerSchedule, TriggerSourceKind, TriggerState,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -26,7 +26,6 @@ use super::{
 
 const DEFAULT_TRIGGER_LIST_LIMIT: usize = 100;
 const MAX_TRIGGER_LIST_LIMIT: usize = 100;
-const MAX_TRIGGER_SCOPE_TRIGGER_COUNT: usize = 100;
 
 pub const TRIGGER_CREATE_CAPABILITY_ID: &str = "builtin.trigger_create";
 pub const TRIGGER_LIST_CAPABILITY_ID: &str = "builtin.trigger_list";
@@ -134,13 +133,6 @@ async fn create_trigger(
     input: Value,
 ) -> Result<Value, FirstPartyCapabilityError> {
     let input: TriggerCreateInput = serde_json::from_value(input).map_err(|_| input_error())?;
-    if input.name.trim().is_empty() || input.prompt.trim().is_empty() {
-        return Err(input_error());
-    }
-    if input.name.len() > MAX_TRIGGER_NAME_BYTES || input.prompt.len() > MAX_TRIGGER_PROMPT_BYTES {
-        return Err(input_error());
-    }
-    reject_scope_trigger_quota_exceeded(repository, scope).await?;
     let schedule = TriggerSchedule::cron(input.cron).map_err(trigger_input_error)?;
     let now = Utc::now();
     let next_run_at = schedule
@@ -167,6 +159,7 @@ async fn create_trigger(
         active_run_ref: None,
         created_at: now,
     };
+    record.validate().map_err(trigger_input_error)?;
     repository
         .upsert_trigger(record.clone())
         .await
@@ -223,28 +216,6 @@ async fn remove_trigger(
         "removed": removed.is_some(),
         "trigger": removed.as_ref().map(trigger_output),
     }))
-}
-
-async fn reject_scope_trigger_quota_exceeded(
-    repository: &dyn TriggerRepository,
-    scope: &ResourceScope,
-) -> Result<(), FirstPartyCapabilityError> {
-    let records = repository
-        .list_scoped_triggers(
-            scope.tenant_id.clone(),
-            scope.user_id.clone(),
-            scope.agent_id.clone(),
-            scope.project_id.clone(),
-            MAX_TRIGGER_SCOPE_TRIGGER_COUNT,
-        )
-        .await
-        .map_err(trigger_repository_error)?;
-    if records.len() >= MAX_TRIGGER_SCOPE_TRIGGER_COUNT {
-        return Err(FirstPartyCapabilityError::new(
-            RuntimeDispatchErrorKind::Resource,
-        ));
-    }
-    Ok(())
 }
 
 fn trigger_output(record: &TriggerRecord) -> Value {

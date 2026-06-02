@@ -721,48 +721,6 @@ async fn builtin_trigger_list_applies_user_surface_limit_boundaries() {
 }
 
 #[tokio::test]
-async fn builtin_trigger_create_rejects_per_scope_quota_exhaustion() {
-    let repository = Arc::new(InMemoryTriggerRepository::default());
-    let runtime = runtime_with_trigger_repository(repository.clone());
-    let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID]);
-
-    for index in 0..100 {
-        invoke_with_context(
-            &runtime,
-            TRIGGER_CREATE_CAPABILITY_ID,
-            json!({
-                "name": format!("Trigger {index}"),
-                "prompt": "Run work",
-                "cron": "0 8 * * *"
-            }),
-            context.clone(),
-        )
-        .await
-        .unwrap();
-    }
-
-    let error = invoke_with_context(
-        &runtime,
-        TRIGGER_CREATE_CAPABILITY_ID,
-        json!({
-            "name": "Over quota",
-            "prompt": "Run work",
-            "cron": "0 8 * * *"
-        }),
-        context.clone(),
-    )
-    .await
-    .unwrap_err();
-    assert_eq!(error, RuntimeFailureKind::Resource);
-
-    let records = repository
-        .list_triggers(context.resource_scope.tenant_id)
-        .await
-        .unwrap();
-    assert_eq!(records.len(), 100);
-}
-
-#[tokio::test]
 async fn builtin_trigger_remove_rejects_invalid_trigger_id() {
     let repository = Arc::new(InMemoryTriggerRepository::default());
     let runtime = runtime_with_trigger_repository(repository);
@@ -778,6 +736,51 @@ async fn builtin_trigger_remove_rejects_invalid_trigger_id() {
     .unwrap_err();
 
     assert_eq!(error, RuntimeFailureKind::InvalidInput);
+}
+
+#[tokio::test]
+async fn builtin_trigger_list_rejects_non_integer_limit() {
+    let repository = Arc::new(InMemoryTriggerRepository::default());
+    let runtime = runtime_with_trigger_repository(repository.clone());
+    let context = execution_context([TRIGGER_LIST_CAPABILITY_ID]);
+
+    let error = invoke_with_context(
+        &runtime,
+        TRIGGER_LIST_CAPABILITY_ID,
+        json!({ "limit": "many" }),
+        context.clone(),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error, RuntimeFailureKind::InvalidInput);
+    assert!(
+        repository
+            .list_triggers(context.resource_scope.tenant_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn builtin_trigger_remove_rejects_malformed_input() {
+    let repository = Arc::new(InMemoryTriggerRepository::default());
+    let runtime = runtime_with_trigger_repository(repository);
+    let context = execution_context([TRIGGER_REMOVE_CAPABILITY_ID]);
+
+    for input in [json!({}), json!({ "trigger_id": 123 })] {
+        let error = invoke_with_context(
+            &runtime,
+            TRIGGER_REMOVE_CAPABILITY_ID,
+            input,
+            context.clone(),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error, RuntimeFailureKind::InvalidInput);
+    }
 }
 
 #[tokio::test]

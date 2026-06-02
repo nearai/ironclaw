@@ -809,9 +809,7 @@ fn row_to_record(row: &Row) -> Result<TriggerRecord, TriggerError> {
             ProjectId::new(value).map_err(|error| invalid_record("project_id", error.to_string()))
         })
         .transpose()?;
-    let schedule = TriggerSchedule::Cron {
-        expression: required_text(row, "schedule_expression")?,
-    };
+    let schedule = TriggerSchedule::cron(required_text(row, "schedule_expression")?)?;
     let last_run_at = optional_text(row, "last_run_at")?
         .map(|value| parse_timestamp(&value, "last_run_at"))
         .transpose()?;
