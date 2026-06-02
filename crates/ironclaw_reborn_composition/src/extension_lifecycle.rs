@@ -8,8 +8,8 @@ use ironclaw_extensions::{
 };
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
-    CapabilityDescriptor, CapabilityId, EffectKind, ExtensionId, RuntimeCredentialRequirement,
-    VirtualPath, sha256_digest_token,
+    CapabilityDescriptor, CapabilityId, EffectKind, ExtensionId, ResourceScope,
+    RuntimeCredentialRequirement, RuntimeHttpEgress, VirtualPath, sha256_digest_token,
 };
 use ironclaw_product_workflow::{
     LifecycleInstalledExtensionSummary, LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase,
@@ -18,12 +18,15 @@ use ironclaw_product_workflow::{
 use tokio::sync::Mutex;
 
 mod active_publication;
+#[cfg(test)]
+mod hosted_mcp_test_support;
 
 use crate::available_extensions::{
     AvailableExtensionCatalog, AvailableExtensionPackage, materialize_available_extension,
     visible_capability_ids,
 };
 use crate::lifecycle::response_with_payload;
+use crate::mcp_discovery::{discover_hosted_mcp_package, is_hosted_http_mcp_package};
 
 pub(crate) use active_publication::ActiveExtensionPublisher;
 #[cfg(test)]
@@ -51,6 +54,15 @@ pub(crate) struct ActiveExtensionCapability {
     pub(crate) provider: ExtensionId,
     pub(crate) effects: Vec<EffectKind>,
     pub(crate) runtime_credentials: Vec<RuntimeCredentialRequirement>,
+}
+
+#[derive(Clone)]
+pub(crate) enum ExtensionActivationMode {
+    Static,
+    HostedMcpDiscovery {
+        scope: ResourceScope,
+        runtime_http_egress: Arc<dyn RuntimeHttpEgress>,
+    },
 }
 
 impl ActiveExtensionCapability {
@@ -303,28 +315,91 @@ impl RebornLocalExtensionManagementPort {
     pub(crate) async fn activate(
         &self,
         package_ref: LifecyclePackageRef,
+        mode: ExtensionActivationMode,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
         let (extension_id, installation_id) = extension_ids_from_package_ref(&package_ref)?;
+
+        let discovery = {
+            let _operation_guard = self.operation_lock.lock().await;
+            let installation = self
+                .load_installation(&extension_id, &installation_id)
+                .await?;
+            let package = self.lifecycle_package(&extension_id).await?;
+            match mode {
+                ExtensionActivationMode::HostedMcpDiscovery {
+                    scope,
+                    runtime_http_egress,
+                } if is_hosted_http_mcp_package(&package) => HostedMcpDiscoveryRequest {
+                    base_package: package,
+                    scope,
+                    runtime_http_egress,
+                },
+                _ => {
+                    return self
+                        .commit_activation(
+                            package_ref,
+                            &extension_id,
+                            &installation_id,
+                            installation.activation_state(),
+                            package,
+                        )
+                        .await;
+                }
+            }
+        };
+
+        let active_package = discover_hosted_mcp_package(
+            &discovery.base_package,
+            discovery.scope,
+            discovery.runtime_http_egress,
+        )
+        .await
+        .map_err(hosted_mcp_discovery_error)?;
+
         let _operation_guard = self.operation_lock.lock().await;
         let installation = self
             .load_installation(&extension_id, &installation_id)
             .await?;
-        let previous_state = installation.activation_state();
-        let package = self.lifecycle_package(&extension_id).await?;
-        self.enable_lifecycle_package(&extension_id).await?;
+        let current_package = self.lifecycle_package(&extension_id).await?;
+        if current_package != discovery.base_package {
+            return Err(ProductWorkflowError::Transient {
+                reason:
+                    "extension changed while hosted MCP discovery was running; retry activation"
+                        .to_string(),
+            });
+        };
+        self.commit_activation(
+            package_ref,
+            &extension_id,
+            &installation_id,
+            installation.activation_state(),
+            active_package,
+        )
+        .await
+    }
+
+    async fn commit_activation(
+        &self,
+        package_ref: LifecyclePackageRef,
+        extension_id: &ExtensionId,
+        installation_id: &ExtensionInstallationId,
+        previous_state: ExtensionActivationState,
+        active_package: ExtensionPackage,
+    ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+        self.enable_lifecycle_package(extension_id).await?;
         if let Err(error) = self
             .installation_store
-            .set_activation_state(&installation_id, ExtensionActivationState::Enabled)
+            .set_activation_state(installation_id, ExtensionActivationState::Enabled)
             .await
         {
-            self.disable_lifecycle_package(&extension_id).await;
+            self.disable_lifecycle_package(extension_id).await;
             return Err(map_extension_installation_error(error));
         }
-        if let Err(error) = self.active_extensions.publish(&package) {
-            self.disable_lifecycle_package(&extension_id).await;
+        if let Err(error) = self.active_extensions.publish(&active_package) {
+            self.disable_lifecycle_package(extension_id).await;
             if let Err(cleanup_error) = self
                 .installation_store
-                .set_activation_state(&installation_id, previous_state)
+                .set_activation_state(installation_id, previous_state)
                 .await
             {
                 return Err(compensation_failure(
@@ -757,6 +832,12 @@ impl RebornLocalExtensionManagementPort {
     }
 }
 
+struct HostedMcpDiscoveryRequest {
+    base_package: ExtensionPackage,
+    scope: ResourceScope,
+    runtime_http_egress: Arc<dyn RuntimeHttpEgress>,
+}
+
 struct ExtensionInstallPlan {
     manifest_record: ExtensionManifestRecord,
     installation: ExtensionInstallation,
@@ -944,6 +1025,12 @@ fn map_extension_installation_error(error: ExtensionInstallationError) -> Produc
     }
 }
 
+fn hosted_mcp_discovery_error(error: String) -> ProductWorkflowError {
+    ProductWorkflowError::InvalidBindingRequest {
+        reason: format!("hosted MCP discovery failed: {error}"),
+    }
+}
+
 fn compensation_failure(
     context: &str,
     original: impl std::fmt::Display,
@@ -958,6 +1045,7 @@ fn compensation_failure(
 
 #[cfg(test)]
 mod tests {
+    use super::hosted_mcp_test_support::HostedMcpDiscoveryEgress;
     use super::*;
     use crate::available_extensions::{
         AvailableExtensionAsset, AvailableExtensionAssetContent, AvailableExtensionPackage,
@@ -972,8 +1060,9 @@ mod tests {
         DirEntry, FileStat, FilesystemError, FilesystemOperation, LocalFilesystem,
     };
     use ironclaw_host_api::{
-        CapabilityId, ExtensionLifecycleOperation, HostPath, HostPortCatalog, MountAlias,
-        MountGrant, MountPermissions, MountView, TenantId, TrustClass, UserId,
+        CapabilityId, ExtensionLifecycleOperation, HostPath, HostPortCatalog, InvocationId,
+        MountAlias, MountGrant, MountPermissions, MountView, ResourceScope, TenantId, TrustClass,
+        UserId,
     };
     use ironclaw_host_runtime::{SPAWN_SUBAGENT_CAPABILITY_ID, builtin_first_party_package};
     use ironclaw_product_workflow::{
@@ -1106,7 +1195,7 @@ mod tests {
         port.install(package_ref.clone())
             .await
             .expect("install fixture extension");
-        port.activate(package_ref)
+        port.activate(package_ref, ExtensionActivationMode::Static)
             .await
             .expect("activate fixture extension");
 
@@ -1123,6 +1212,64 @@ mod tests {
         assert!(
             !capability_ids.contains(&CapabilityId::new(SPAWN_SUBAGENT_CAPABILITY_ID).unwrap())
         );
+    }
+
+    #[tokio::test]
+    async fn hosted_mcp_activation_publishes_discovered_tool_schemas() {
+        let catalog =
+            AvailableExtensionCatalog::from_first_party_assets().expect("first-party assets");
+        let (_dir, _storage_root, port, active_registry, _installation_store) =
+            extension_management_port_fixture_with_catalog_and_service(
+                catalog,
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+            );
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "notion").expect("valid ref");
+        let egress = Arc::new(HostedMcpDiscoveryEgress::default());
+
+        port.install(package_ref.clone())
+            .await
+            .expect("install Notion MCP");
+        port.activate(
+            package_ref,
+            ExtensionActivationMode::HostedMcpDiscovery {
+                scope: ResourceScope::local_default(
+                    UserId::new("hosted-mcp-user").unwrap(),
+                    InvocationId::new(),
+                )
+                .unwrap(),
+                runtime_http_egress: egress.clone(),
+            },
+        )
+        .await
+        .expect("activate with discovery");
+
+        let snapshot = active_registry.snapshot();
+        assert!(
+            snapshot
+                .get_capability(&CapabilityId::new("notion.notion-fetch").unwrap())
+                .is_none()
+        );
+        let search = snapshot
+            .get_capability(&CapabilityId::new("notion.live-search").unwrap())
+            .expect("discovered capability");
+        assert_eq!(
+            search.parameters_schema,
+            serde_json::json!({
+                "type": "object",
+                "properties": {"query": {"type": "string"}},
+                "required": ["query"]
+            })
+        );
+        assert_eq!(
+            egress.methods(),
+            vec![
+                "initialize".to_string(),
+                "notifications/initialized".to_string(),
+                "tools/list".to_string(),
+            ]
+        );
+        assert_eq!(egress.credential_counts(), vec![0, 0, 1]);
     }
 
     #[tokio::test]
@@ -1149,7 +1296,7 @@ mod tests {
         port.install(package_ref.clone())
             .await
             .expect("install fixture extension");
-        port.activate(package_ref.clone())
+        port.activate(package_ref.clone(), ExtensionActivationMode::Static)
             .await
             .expect("activate fixture extension");
         let active_decision = trust_policy
@@ -1199,7 +1346,7 @@ mod tests {
         port.install(package_ref.clone())
             .await
             .expect("install fixture extension");
-        port.activate(package_ref)
+        port.activate(package_ref, ExtensionActivationMode::Static)
             .await
             .expect("activate fixture extension");
 
@@ -1234,7 +1381,7 @@ mod tests {
         port.install(package_ref.clone())
             .await
             .expect("install fixture extension");
-        port.activate(package_ref)
+        port.activate(package_ref, ExtensionActivationMode::Static)
             .await
             .expect("activate fixture extension");
 
@@ -1292,7 +1439,7 @@ mod tests {
         port.install(package_ref.clone())
             .await
             .expect("install fixture extension");
-        port.activate(package_ref)
+        port.activate(package_ref, ExtensionActivationMode::Static)
             .await
             .expect("activate fixture extension");
 
@@ -1339,7 +1486,7 @@ mod tests {
         port.install(package_ref.clone())
             .await
             .expect("install fixture extension");
-        port.activate(package_ref)
+        port.activate(package_ref, ExtensionActivationMode::Static)
             .await
             .expect("activate fixture extension");
 
@@ -1837,7 +1984,7 @@ mod tests {
             .expect("valid ref");
 
         let error = port
-            .activate(package_ref)
+            .activate(package_ref, ExtensionActivationMode::Static)
             .await
             .expect_err("activation requires an installation record");
 
@@ -1965,7 +2112,7 @@ mod tests {
         port.install(package_ref.clone())
             .await
             .expect("install extension");
-        port.activate(package_ref.clone())
+        port.activate(package_ref.clone(), ExtensionActivationMode::Static)
             .await
             .expect("activate extension");
         let package = fixture_extension_package().package;
@@ -2025,7 +2172,7 @@ mod tests {
         port.install(package_ref.clone())
             .await
             .expect("install extension");
-        port.activate(package_ref.clone())
+        port.activate(package_ref.clone(), ExtensionActivationMode::Static)
             .await
             .expect("activate extension");
         let package = fixture_extension_package().package;
@@ -2061,7 +2208,7 @@ mod tests {
         port.install(package_ref.clone())
             .await
             .expect("install extension");
-        port.activate(package_ref.clone())
+        port.activate(package_ref.clone(), ExtensionActivationMode::Static)
             .await
             .expect("activate extension");
         let package = fixture_extension_package().package;

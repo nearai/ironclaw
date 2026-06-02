@@ -267,7 +267,12 @@ impl RebornLocalLifecycleFacade {
                 let Some(extension_management) = &self.extension_management else {
                     return unsupported_projection(Some(package_ref));
                 };
-                extension_management.activate(package_ref).await
+                extension_management
+                    .activate(
+                        package_ref,
+                        crate::extension_lifecycle::ExtensionActivationMode::Static,
+                    )
+                    .await
             }
             LifecycleProductAction::ExtensionRemove { package_ref } => {
                 let Some(extension_management) = &self.extension_management else {

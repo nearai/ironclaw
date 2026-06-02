@@ -2107,7 +2107,9 @@ mod tests {
     #[cfg(feature = "libsql")]
     use secrecy::ExposeSecret;
 
-    use crate::runtime::SKILL_ACTIVATE_CAPABILITY_ID;
+    use crate::{
+        extension_lifecycle::ExtensionActivationMode, runtime::SKILL_ACTIVATE_CAPABILITY_ID,
+    };
 
     #[tokio::test]
     async fn local_dev_services_include_repl_runtime_substrate() {
@@ -2295,7 +2297,7 @@ mod tests {
             .await
             .expect("install Gmail");
         extension_management
-            .activate(gmail_ref)
+            .activate(gmail_ref, ExtensionActivationMode::Static)
             .await
             .expect("activate Gmail");
         extension_management
@@ -2303,7 +2305,7 @@ mod tests {
             .await
             .expect("install Google Calendar");
         extension_management
-            .activate(calendar_ref)
+            .activate(calendar_ref, ExtensionActivationMode::Static)
             .await
             .expect("activate Google Calendar");
 
@@ -2421,7 +2423,7 @@ mod tests {
             .await
             .expect("install Notion MCP");
         extension_management
-            .activate(notion_ref)
+            .activate(notion_ref, ExtensionActivationMode::Static)
             .await
             .expect("activate Notion MCP");
 
@@ -2468,7 +2470,7 @@ mod tests {
             .await
             .expect("install Web Access");
         extension_management
-            .activate(web_access_ref)
+            .activate(web_access_ref, ExtensionActivationMode::Static)
             .await
             .expect("activate Web Access");
 
@@ -2518,7 +2520,7 @@ mod tests {
             .await
             .expect("install NEAR AI MCP");
         extension_management
-            .activate(nearai_ref)
+            .activate(nearai_ref, ExtensionActivationMode::Static)
             .await
             .expect("activate NEAR AI MCP");
 

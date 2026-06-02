@@ -588,6 +588,74 @@ async fn concrete_mcp_sse_client_parses_event_stream_through_shared_egress() {
 }
 
 #[tokio::test]
+async fn concrete_mcp_http_client_discovers_tool_schemas_through_shared_egress() {
+    let egress = RecordingRuntimeEgress::json_rpc();
+    let planner = RecordingEgressPlanner::new(host_http_plan());
+    let client = McpHostHttpClient::new(
+        McpRuntimeHttpAdapter::new(Arc::new(egress.clone())),
+        planner.clone(),
+    );
+
+    let output = client
+        .discover_tools(McpClientRequest {
+            provider: ExtensionId::new("github-mcp").unwrap(),
+            capability_id: CapabilityId::new("github-mcp.search").unwrap(),
+            scope: sample_scope(),
+            transport: "http".to_string(),
+            command: None,
+            args: vec![],
+            url: Some("https://mcp.example.test/mcp".to_string()),
+            input: json!({}),
+            max_output_bytes: 4096,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(output.tools.len(), 2);
+    assert_eq!(output.tools[0].name, "search");
+    assert_eq!(output.tools[0].description, "Search GitHub issues");
+    assert_eq!(
+        output.tools[0].input_schema,
+        json!({
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"}
+            },
+            "required": ["query"]
+        })
+    );
+    assert_eq!(output.tools[1].name, "issue.create");
+
+    let requests = egress.requests();
+    assert_eq!(
+        requests
+            .iter()
+            .map(|request| json_rpc_method(&request.body))
+            .collect::<Vec<_>>(),
+        vec!["initialize", "notifications/initialized", "tools/list"]
+    );
+    assert!(
+        requests[..2]
+            .iter()
+            .all(|request| request.credential_injections.is_empty()),
+        "schema discovery handshake must stay credential-free"
+    );
+    assert_eq!(
+        requests[2].credential_injections,
+        host_http_plan().credential_injections
+    );
+
+    let planner_calls = planner.calls();
+    assert_eq!(
+        planner_calls
+            .iter()
+            .map(|call| call.json_rpc_method.as_str())
+            .collect::<Vec<_>>(),
+        vec!["tools/list", "initialize", "notifications/initialized"]
+    );
+}
+
+#[tokio::test]
 async fn concrete_mcp_http_client_caps_missing_plan_limit_to_client_output_limit() {
     let mut plan = host_http_plan();
     plan.response_body_limit = None;
@@ -1106,6 +1174,35 @@ impl RuntimeHttpEgress for RecordingRuntimeEgress {
                     )),
                 }
             }
+            "tools/list" => Ok(runtime_json_response(
+                json_rpc_id(&request.body),
+                json!({
+                    "tools": [
+                        {
+                            "name": "search",
+                            "description": "Search GitHub issues",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {
+                                    "query": {"type": "string"}
+                                },
+                                "required": ["query"]
+                            }
+                        },
+                        {
+                            "name": "issue.create",
+                            "description": "Create an issue",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {
+                                    "title": {"type": "string"}
+                                }
+                            }
+                        }
+                    ]
+                }),
+                vec![],
+            )),
             other => panic!("unexpected MCP JSON-RPC method {other}"),
         }
     }

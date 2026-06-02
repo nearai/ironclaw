@@ -15,6 +15,7 @@ use ironclaw_host_runtime::{
 use ironclaw_product_workflow::{LifecyclePackageKind, LifecyclePackageRef, ProductWorkflowError};
 use serde::Deserialize;
 
+use crate::extension_lifecycle::ExtensionActivationMode;
 use crate::extension_lifecycle::RebornLocalExtensionManagementPort;
 
 pub(crate) const EXTENSION_SEARCH_CAPABILITY_ID: &str = "builtin.extension_search";
@@ -147,9 +148,22 @@ impl FirstPartyCapabilityHandler for ExtensionLifecycleToolHandler {
             }
             EXTENSION_ACTIVATE_CAPABILITY_ID => {
                 let input: ExtensionIdInput = parse_input(request.input)?;
-                self.extension_management
-                    .activate(extension_package_ref(input.extension_id)?)
-                    .await
+                let package_ref = extension_package_ref(input.extension_id)?;
+                if let Some(runtime_http_egress) = request.services.runtime_http_egress.clone() {
+                    self.extension_management
+                        .activate(
+                            package_ref,
+                            ExtensionActivationMode::HostedMcpDiscovery {
+                                scope: request.scope.clone(),
+                                runtime_http_egress,
+                            },
+                        )
+                        .await
+                } else {
+                    self.extension_management
+                        .activate(package_ref, ExtensionActivationMode::Static)
+                        .await
+                }
             }
             EXTENSION_REMOVE_CAPABILITY_ID => {
                 let input: ExtensionIdInput = parse_input(request.input)?;

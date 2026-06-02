@@ -12,7 +12,7 @@ use ironclaw_mcp::{
     McpHostHttpEgressPlanner, McpRuntime, McpRuntimeConfig, McpRuntimeHttpAdapter,
 };
 
-const MCP_RESPONSE_BODY_LIMIT: u64 = 2 * 1024 * 1024;
+pub(crate) const MCP_RESPONSE_BODY_LIMIT: u64 = 2 * 1024 * 1024;
 const MCP_NETWORK_EGRESS_LIMIT: u64 = 2 * 1024 * 1024;
 const MCP_TIMEOUT_MS: u32 = 60_000;
 
@@ -85,9 +85,6 @@ impl McpHostHttpEgressPlanner for RegistryMcpEgressPlanner {
         }
         let credential_injections =
             self.credential_injections(request.provider, request.capability_id, &endpoint);
-        if credential_injections.is_empty() {
-            return McpHostHttpEgressPlan::default();
-        }
         McpHostHttpEgressPlan {
             // Must match the bundled manifest's network policy
             // (deny_private_ip_ranges: true) or the dispatcher rejects the
@@ -101,7 +98,7 @@ impl McpHostHttpEgressPlanner for RegistryMcpEgressPlanner {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct HostedMcpEndpoint {
+pub(crate) struct HostedMcpEndpoint {
     host_pattern: String,
     port: Option<u16>,
     path: String,
@@ -136,7 +133,7 @@ impl HostedMcpEndpoint {
     }
 }
 
-fn hosted_http_mcp_endpoint(package: &ExtensionPackage) -> Option<HostedMcpEndpoint> {
+pub(crate) fn hosted_http_mcp_endpoint(package: &ExtensionPackage) -> Option<HostedMcpEndpoint> {
     if package.manifest.source != ManifestSource::HostBundled {
         return None;
     }
