@@ -573,7 +573,8 @@ mod tests {
                 EffectKind::DeleteFilesystem,
                 EffectKind::SpawnProcess,
                 EffectKind::ExecuteCode,
-                EffectKind::Network
+                EffectKind::Network,
+                EffectKind::ExternalWrite
             ]
         );
 
