@@ -2,6 +2,10 @@ import { React, html } from "../../../lib/html.js";
 import { useT } from "../../../lib/i18n.js";
 import { RegistryCard } from "./extension-card.js";
 
+function packageId(entry) {
+  return entry.package_ref?.id || "";
+}
+
 export function RegistryTab({
   toolRegistry,
   channelRegistry,
@@ -16,7 +20,7 @@ export function RegistryTab({
   const filtered = filter
     ? allAvailable.filter(
         (e) =>
-          (e.display_name || e.name)
+          (e.display_name || packageId(e))
             .toLowerCase()
             .includes(filter.toLowerCase()) ||
           (e.description || "").toLowerCase().includes(filter.toLowerCase()) ||
@@ -67,7 +71,7 @@ export function RegistryTab({
           : filtered.map(
               (entry) => html`
                 <${RegistryCard}
-                  key=${entry.name}
+                  key=${packageId(entry)}
                   entry=${entry}
                   onInstall=${onInstall}
                   isBusy=${isBusy}

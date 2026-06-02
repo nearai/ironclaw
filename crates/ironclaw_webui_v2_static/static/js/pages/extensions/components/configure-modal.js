@@ -3,13 +3,14 @@ import { Icon } from "../../../design-system/icons.js";
 import { React, html } from "../../../lib/html.js";
 import { useExtensionSetup, useSetupSubmit } from "../hooks/useExtensions.js";
 
-export function ConfigureModal({ extensionName, onClose, onSaved }) {
+export function ConfigureModal({ extension, onClose, onSaved }) {
+  const extensionName = extension?.displayName || extension?.packageRef?.id || "Extension";
   const { secrets, fields, onboarding, isLoading, error } =
-    useExtensionSetup(extensionName);
+    useExtensionSetup(extension?.packageRef);
   const [values, setValues] = React.useState({});
   const [fieldValues, setFieldValues] = React.useState({});
 
-  const submitMutation = useSetupSubmit(extensionName, (res) => {
+  const submitMutation = useSetupSubmit(extension?.packageRef, (res) => {
     if (res.success !== false) {
       if (onSaved) onSaved(res);
       onClose();

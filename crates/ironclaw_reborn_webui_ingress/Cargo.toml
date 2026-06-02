@@ -60,7 +60,7 @@ http-body-util = "0.1"
 # together. The runtime `ironclaw_reborn_composition` dep already
 # enables `webui-v2-beta`; the three crates below supply the trait
 # + DTO shapes the stub implements.
-ironclaw_product_workflow = { path = "../ironclaw_product_workflow" }
+ironclaw_product_workflow = { path = "../ironclaw_product_workflow", features = ["test-support"] }
 ironclaw_threads = { path = "../ironclaw_threads" }
 ironclaw_turns = { path = "../ironclaw_turns" }
 tower = { version = "0.5", features = ["util"] }

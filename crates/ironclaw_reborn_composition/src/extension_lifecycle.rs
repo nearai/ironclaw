@@ -12,8 +12,8 @@ use ironclaw_host_api::{
     VirtualPath, sha256_digest_token,
 };
 use ironclaw_product_workflow::{
-    LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase, LifecycleProductPayload,
-    LifecycleProductResponse, ProductWorkflowError,
+    LifecycleInstalledExtensionSummary, LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase,
+    LifecycleProductPayload, LifecycleProductResponse, ProductWorkflowError,
 };
 use tokio::sync::Mutex;
 
@@ -157,6 +157,44 @@ impl RebornLocalExtensionManagementPort {
         ))
     }
 
+    pub(crate) async fn list_installed(
+        &self,
+    ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+        let summaries = self.installed_summaries().await?;
+        let count = summaries.len();
+        Ok(response_with_payload(
+            None,
+            LifecyclePhase::Installed,
+            LifecycleProductPayload::ExtensionList {
+                extensions: summaries,
+                count,
+            },
+        ))
+    }
+
+    pub(crate) async fn project(
+        &self,
+        package_ref: LifecyclePackageRef,
+    ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+        let (_, installation_id) = extension_ids_from_package_ref(&package_ref)?;
+        let phase = self
+            .installation_store
+            .get_installation(&installation_id)
+            .await
+            .map_err(map_extension_installation_error)?
+            .map(|installation| phase_for_activation_state(installation.activation_state()))
+            .unwrap_or(LifecyclePhase::Discovered);
+        let summary = self.catalog.resolve(&package_ref)?.summary();
+        Ok(response_with_payload(
+            Some(package_ref),
+            phase,
+            LifecycleProductPayload::ExtensionList {
+                extensions: vec![LifecycleInstalledExtensionSummary { summary, phase }],
+                count: 1,
+            },
+        ))
+    }
+
     pub(crate) async fn active_model_visible_capabilities(
         &self,
     ) -> Result<Vec<ActiveExtensionCapability>, ProductWorkflowError> {
@@ -180,6 +218,33 @@ impl RebornLocalExtensionManagementPort {
             })
             .map(ActiveExtensionCapability::from_descriptor)
             .collect())
+    }
+
+    async fn installed_summaries(
+        &self,
+    ) -> Result<Vec<LifecycleInstalledExtensionSummary>, ProductWorkflowError> {
+        let installations = self
+            .installation_store
+            .list_installations()
+            .await
+            .map_err(map_extension_installation_error)?;
+        let mut summaries = Vec::with_capacity(installations.len());
+        for installation in installations {
+            let Ok(package_ref) = LifecyclePackageRef::new(
+                LifecyclePackageKind::Extension,
+                installation.extension_id().as_str(),
+            ) else {
+                continue;
+            };
+            let Ok(available) = self.catalog.resolve(&package_ref) else {
+                continue;
+            };
+            summaries.push(LifecycleInstalledExtensionSummary {
+                summary: available.summary(),
+                phase: phase_for_activation_state(installation.activation_state()),
+            });
+        }
+        Ok(summaries)
     }
 
     pub(crate) async fn install(
@@ -848,6 +913,14 @@ fn extension_ids_from_package_ref(
     let installation_id = ExtensionInstallationId::new(extension_id.as_str().to_string())
         .map_err(map_extension_installation_error)?;
     Ok((extension_id, installation_id))
+}
+
+fn phase_for_activation_state(state: ExtensionActivationState) -> LifecyclePhase {
+    match state {
+        ExtensionActivationState::Enabled => LifecyclePhase::Active,
+        ExtensionActivationState::Disabled => LifecyclePhase::Disabled,
+        ExtensionActivationState::Installed => LifecyclePhase::Installed,
+    }
 }
 
 fn map_extension_error(error: ExtensionError) -> ProductWorkflowError {
@@ -2039,7 +2112,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn project_package_returns_unsupported() {
+    async fn project_package_returns_available_extension_projection() {
         let (_dir, _storage_root, facade, _active_registry, _installation_store) =
             extension_lifecycle_fixture();
         let response = facade
@@ -2048,12 +2121,15 @@ mod tests {
                 LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture").unwrap(),
             )
             .await
-            .expect("unsupported projection");
+            .expect("extension projection");
 
-        assert_unsupported_extension_response(
-            response,
-            "extension_lifecycle_local_runtime_unwired",
-        );
+        assert_eq!(response.phase, LifecyclePhase::Discovered);
+        let Some(LifecycleProductPayload::ExtensionList { extensions, count }) = response.payload
+        else {
+            panic!("expected extension list projection");
+        };
+        assert_eq!(count, 1);
+        assert_eq!(extensions[0].summary.package_ref.id.as_str(), "fixture");
     }
 
     fn extension_lifecycle_fixture() -> (

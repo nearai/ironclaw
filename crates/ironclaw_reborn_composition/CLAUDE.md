@@ -246,7 +246,7 @@ rows are inventoried here, not implemented in the current PR.
 | Resolve gate | `POST /api/chat/gate/resolve` | `POST /api/webchat/v2/threads/{tid}/runs/{run_id}/gates/{gate_ref}/resolve` | Mapped |
 | Approval shim | `POST /api/chat/approval` | (Subsumed by `resolve_gate`) | Mapped |
 | Auth-token / auth-cancel | `POST /api/chat/auth-{token,cancel}` | (Engine v1 compatibility shim; delete with v1) | v1-only (legacy) |
-| Extensions onboarding | `GET\|POST /api/extensions/{name}/setup` | `POST /api/webchat/v2/extensions/{name}/setup` | Mapped to lifecycle projection; no production setup side effects yet |
+| Extensions registry/list/install/activate/remove/setup | `GET\|POST /api/extensions/*` | `GET /api/webchat/v2/extensions`, `GET /api/webchat/v2/extensions/registry`, `POST /api/webchat/v2/extensions/install`, `POST /api/webchat/v2/extensions/{package_id}/{activate,remove,setup}` | Mapped to lifecycle package refs and registry projections; setup still has no production setup side effects yet |
 | SSO login (Google) | `GET /auth/providers`, `GET /auth/login/{p}`, `GET /auth/callback/{p}`, `POST /auth/logout` | Same paths on the v2 listener via `ironclaw_reborn_webui_ingress::webui_v2_auth_router`, merged into `webui_v2_app` through [`WebuiServeConfig::with_public_route_mount`] (typed `{ router, descriptors }` so the per-route body-limit / rate-limit middleware applies) | Mapped (Google); GitHub + NEAR follow under #4116 |
 
 ### Security invariants on every "Mapped" row

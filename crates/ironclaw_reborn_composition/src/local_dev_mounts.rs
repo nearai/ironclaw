@@ -8,6 +8,8 @@ const WORKSPACE_ALIAS: &str = "/workspace";
 const WORKSPACE_TARGET: &str = "/projects/workspace";
 const HOST_ALIAS: &str = "/host";
 const HOST_TARGET: &str = "/projects/host";
+const MEMORY_ALIAS: &str = "/memory";
+const MEMORY_TARGET: &str = "/memory";
 
 pub(crate) fn workspace_mount_view(
     permissions: MountPermissions,
@@ -80,6 +82,10 @@ pub(crate) fn skill_management_mount_view() -> Result<MountView, HostApiError> {
             MountPermissions::read_only(),
         )?,
     ])
+}
+
+pub(crate) fn memory_mount_view(permissions: MountPermissions) -> Result<MountView, HostApiError> {
+    MountView::new(vec![grant(MEMORY_ALIAS, MEMORY_TARGET, permissions)?])
 }
 
 fn grant(

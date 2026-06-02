@@ -251,6 +251,12 @@ impl RebornLocalLifecycleFacade {
                 };
                 extension_management.search(&query).await
             }
+            LifecycleProductAction::ExtensionList => {
+                let Some(extension_management) = &self.extension_management else {
+                    return unsupported_projection(None);
+                };
+                extension_management.list_installed().await
+            }
             LifecycleProductAction::ExtensionInstall { package_ref } => {
                 let Some(extension_management) = &self.extension_management else {
                     return unsupported_projection(Some(package_ref));
@@ -292,6 +298,12 @@ impl LifecycleProductFacade for RebornLocalLifecycleFacade {
         _context: LifecycleProductContext,
         package_ref: LifecyclePackageRef,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+        if package_ref.kind == LifecyclePackageKind::Extension {
+            let Some(extension_management) = &self.extension_management else {
+                return unsupported_projection(Some(package_ref));
+            };
+            return extension_management.project(package_ref).await;
+        }
         unsupported_projection(Some(package_ref))
     }
 }

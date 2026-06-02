@@ -1046,17 +1046,15 @@ pub async fn build_reborn_runtime(
     //    accountant can fire against a stub gateway too.
     #[cfg(any(test, feature = "test-support"))]
     let test_model_gateway_override = model_gateway_override;
-    #[cfg(not(any(test, feature = "test-support")))]
-    let test_model_gateway_override: Option<
-        Arc<dyn ironclaw_loop_support::HostManagedModelGateway>,
-    > = None;
-
     #[cfg(feature = "root-llm-provider")]
     let (production_gateway, llm_cost_table) = build_production_model_gateway(llm).await?;
     #[cfg(not(feature = "root-llm-provider"))]
     let (production_gateway, llm_cost_table) = build_production_model_gateway()?;
 
+    #[cfg(any(test, feature = "test-support"))]
     let model_gateway = test_model_gateway_override.unwrap_or(production_gateway);
+    #[cfg(not(any(test, feature = "test-support")))]
+    let model_gateway = production_gateway;
 
     // Resolved cost table is either: the LLM-policy-derived table (real
     // LLM wired), a test override (so tests can drive deterministic
@@ -1308,6 +1306,7 @@ pub async fn build_reborn_runtime(
                 local_dev_capability_policy,
                 local_runtime.workspace_mounts.clone(),
                 local_runtime.skill_mounts.clone(),
+                local_runtime.memory_mounts.clone(),
             )),
             approval_resolver,
             Arc::clone(&planned_turn_coordinator),
@@ -1734,7 +1733,8 @@ mod tests {
     };
     use ironclaw_product_adapters::{ProductOutboundPayload, ProductProjectionItem};
     use ironclaw_product_workflow::{
-        ExtensionName, LifecycleReadinessBlocker, RebornServicesErrorCode, RebornServicesErrorKind,
+        LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase, LifecycleProductPayload,
+        LifecycleReadinessBlocker, RebornServicesErrorCode, RebornServicesErrorKind,
         RebornStreamEventsRequest, RebornSubmitTurnResponse, WebUiAuthenticatedCaller,
         WebUiCreateThreadRequest, WebUiResolveGateRequest, WebUiSendMessageRequest,
         WebUiSetupExtensionRequest, approval_gate_ref,
@@ -3388,19 +3388,25 @@ mod tests {
             .api
             .setup_extension(
                 caller,
-                ExtensionName::new("github").expect("valid extension name"),
+                LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github")
+                    .expect("valid package ref"),
                 WebUiSetupExtensionRequest::default(),
             )
             .await
             .expect("setup extension lifecycle projection");
 
+        assert_eq!(setup.package_ref.id.as_str(), "github");
+        assert_eq!(setup.phase, LifecyclePhase::Discovered);
+        assert!(setup.blockers.is_empty());
         assert!(
-            setup.blockers.iter().any(|blocker| matches!(
-                blocker,
-                LifecycleReadinessBlocker::Runtime { ref_id: Some(ref_id) }
-                    if ref_id.as_str() == "extension_lifecycle_local_runtime_unwired"
-            )),
-            "local webui bundle should use the local lifecycle facade projection"
+            matches!(
+                setup.payload,
+                Some(LifecycleProductPayload::ExtensionList { extensions, count })
+                    if count == 1
+                        && extensions.len() == 1
+                        && extensions[0].summary.package_ref.id.as_str() == "github"
+            ),
+            "local webui bundle should use the local lifecycle facade package projection"
         );
         assert!(
             !setup.blockers.iter().any(|blocker| matches!(

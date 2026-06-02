@@ -11,9 +11,10 @@ mod tests {
     };
     use ironclaw_host_runtime::{
         APPLY_PATCH_CAPABILITY_ID, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID,
-        HTTP_SAVE_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, READ_FILE_CAPABILITY_ID,
-        SHELL_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID,
-        SKILL_REMOVE_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID,
+        HTTP_SAVE_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
+        READ_FILE_CAPABILITY_ID, SHELL_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID,
+        SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID,
+        WRITE_FILE_CAPABILITY_ID,
     };
     use ironclaw_loop_support::{HostManagedModelMessage, HostSkillContextSource};
     use ironclaw_product_workflow::{
@@ -581,6 +582,9 @@ mod tests {
                 .expect("workspace mounts build");
         let skill_mounts =
             crate::local_dev_mounts::skill_management_mount_view().expect("skill mounts build");
+        let memory_mounts =
+            crate::local_dev_mounts::memory_mount_view(MountPermissions::read_write_list_delete())
+                .expect("memory mounts build");
         assert!(workspace_mounts.mounts.iter().all(|mount| {
             mount.alias.as_str() != "/skills" && mount.alias.as_str() != "/system/skills"
         }));
@@ -603,6 +607,7 @@ mod tests {
             &ExtensionId::new("loop-driver").expect("valid extension id"),
             &workspace_mounts,
             &skill_mounts,
+            &memory_mounts,
         );
         let grant_for = |capability_id: &str| {
             grants
@@ -654,6 +659,21 @@ mod tests {
         assert_eq!(
             http_save_grant.constraints.network,
             local_dev_shell_network_policy
+        );
+
+        let memory_write_grant = grant_for(MEMORY_WRITE_CAPABILITY_ID);
+        assert_eq!(
+            memory_write_grant.constraints.allowed_effects,
+            vec![
+                EffectKind::DispatchCapability,
+                EffectKind::ReadFilesystem,
+                EffectKind::WriteFilesystem
+            ]
+        );
+        assert_eq!(memory_write_grant.constraints.mounts, memory_mounts);
+        assert_eq!(
+            memory_write_grant.constraints.network,
+            NetworkPolicy::default()
         );
 
         let extension_search_grant = grant_for(EXTENSION_SEARCH_CAPABILITY_ID);
@@ -785,6 +805,7 @@ mod tests {
             policy,
             workspace_mounts: local_runtime.workspace_mounts.clone(),
             skill_mounts,
+            memory_mounts: local_runtime.memory_mounts.clone(),
             extension_surface_source: LocalDevExtensionSurfaceSource::default(),
             input_resolver,
             result_writer,
@@ -978,6 +999,7 @@ mod tests {
             policy,
             workspace_mounts,
             skill_mounts,
+            memory_mounts: local_runtime.memory_mounts.clone(),
             extension_surface_source: LocalDevExtensionSurfaceSource::default(),
             input_resolver,
             result_writer,
@@ -1193,6 +1215,7 @@ mod tests {
             policy,
             workspace_mounts,
             skill_mounts,
+            memory_mounts: local_runtime.memory_mounts.clone(),
             extension_surface_source: LocalDevExtensionSurfaceSource::default(),
             input_resolver,
             result_writer,
@@ -1278,6 +1301,7 @@ mod tests {
             policy,
             workspace_mounts,
             skill_mounts,
+            memory_mounts: local_runtime.memory_mounts.clone(),
             extension_surface_source: LocalDevExtensionSurfaceSource::default(),
             input_resolver,
             result_writer,

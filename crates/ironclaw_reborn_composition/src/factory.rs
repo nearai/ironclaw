@@ -78,8 +78,8 @@ use crate::input::{RebornRuntimeProcessBinding, RebornStorageInput};
 use crate::lifecycle::{RebornLocalSkillManagementPort, build_local_skill_management_port};
 use crate::local_dev_capability_policy::local_dev_capability_policy;
 use crate::local_dev_mounts::{
-    ambient_workspace_mount_view, skill_context_mount_view, skill_management_mount_view,
-    workspace_mount_view,
+    ambient_workspace_mount_view, memory_mount_view, skill_context_mount_view,
+    skill_management_mount_view, workspace_mount_view,
 };
 use crate::mcp::hosted_http_mcp_runtime;
 use crate::product_auth_providers::compose_provider_client;
@@ -322,6 +322,7 @@ pub(crate) struct RebornLocalRuntimeServices {
     /// `InMemoryBudgetEventSink` so the runtime can expose `drain()` /
     /// `snapshot()` to tests without leaking the concrete type into the
     /// production `BudgetEventSink` boundary.
+    #[allow(dead_code)]
     pub(crate) in_memory_budget_event_sink: Arc<ironclaw_resources::InMemoryBudgetEventSink>,
     /// Broadcast sink production callers can subscribe against once a
     /// real projection caller lands (review feedback Thermo-Nuclear
@@ -342,6 +343,7 @@ pub(crate) struct RebornLocalRuntimeServices {
     // outside local-dev composition. Tracked in #4091.
     pub(crate) extension_management: Option<Arc<RebornLocalExtensionManagementPort>>,
     pub(crate) skill_mounts: MountView,
+    pub(crate) memory_mounts: MountView,
     pub(crate) skill_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
     pub(crate) workspace_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
     #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -767,6 +769,12 @@ fn build_local_dev_store_graph(
         skill_management_mount_view().map_err(|error| RebornBuildError::InvalidConfig {
             reason: error.to_string(),
         })?;
+    let memory_mounts =
+        memory_mount_view(MountPermissions::read_write_list_delete()).map_err(|error| {
+            RebornBuildError::InvalidConfig {
+                reason: error.to_string(),
+            }
+        })?;
     let skill_management = build_local_skill_management_port(owner_user_id, filesystem)?;
     let local_runtime = Arc::new(RebornLocalRuntimeServices {
         approval_requests: Arc::clone(&approval_requests),
@@ -784,6 +792,7 @@ fn build_local_dev_store_graph(
         skill_management,
         extension_management: None,
         skill_mounts,
+        memory_mounts,
         skill_filesystem,
         workspace_filesystem,
         subagent_goal_filesystem: Arc::clone(&scoped_filesystem),
@@ -842,6 +851,12 @@ fn build_local_dev_store_graph(
         skill_management_mount_view().map_err(|error| RebornBuildError::InvalidConfig {
             reason: error.to_string(),
         })?;
+    let memory_mounts =
+        memory_mount_view(MountPermissions::read_write_list_delete()).map_err(|error| {
+            RebornBuildError::InvalidConfig {
+                reason: error.to_string(),
+            }
+        })?;
     let skill_management = build_local_skill_management_port(owner_user_id, filesystem)?;
     let local_runtime = Arc::new(RebornLocalRuntimeServices {
         approval_requests: Arc::clone(&approval_requests),
@@ -859,6 +874,7 @@ fn build_local_dev_store_graph(
         skill_management,
         extension_management: None,
         skill_mounts,
+        memory_mounts,
         skill_filesystem,
         workspace_filesystem,
         #[cfg(feature = "postgres")]

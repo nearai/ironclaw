@@ -117,6 +117,11 @@ impl LifecyclePackageRef {
             ),
         })
     }
+
+    pub fn require_extension(self) -> Result<Self, ProductWorkflowError> {
+        self.require_kind(LifecyclePackageKind::Extension)?;
+        Ok(self)
+    }
 }
 
 /// Browser lifecycle contract phases.
@@ -168,6 +173,7 @@ pub enum LifecycleProductAction {
     ExtensionSearch {
         query: String,
     },
+    ExtensionList,
     ExtensionInstall {
         package_ref: LifecyclePackageRef,
     },
@@ -202,6 +208,7 @@ pub enum LifecycleProductAction {
 #[serde(rename_all = "snake_case")]
 pub enum LifecycleCommandKind {
     ExtensionSearch,
+    ExtensionList,
     ExtensionInstall,
     ExtensionAuth,
     ExtensionActivate,
@@ -213,8 +220,9 @@ pub enum LifecycleCommandKind {
 }
 
 impl LifecycleCommandKind {
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
         Self::ExtensionSearch,
+        Self::ExtensionList,
         Self::ExtensionInstall,
         Self::ExtensionAuth,
         Self::ExtensionActivate,
@@ -228,6 +236,7 @@ impl LifecycleCommandKind {
     pub const fn command_name(self) -> &'static str {
         match self {
             Self::ExtensionSearch => "extension_search",
+            Self::ExtensionList => "extension_list",
             Self::ExtensionInstall => "extension_install",
             Self::ExtensionAuth => "extension_auth",
             Self::ExtensionActivate => "extension_activate",
@@ -251,6 +260,7 @@ impl LifecycleProductAction {
     pub fn command_kind(&self) -> LifecycleCommandKind {
         match self {
             Self::ExtensionSearch { .. } => LifecycleCommandKind::ExtensionSearch,
+            Self::ExtensionList => LifecycleCommandKind::ExtensionList,
             Self::ExtensionInstall { .. } => LifecycleCommandKind::ExtensionInstall,
             Self::ExtensionAuth { .. } => LifecycleCommandKind::ExtensionAuth,
             Self::ExtensionActivate { .. } => LifecycleCommandKind::ExtensionActivate,
@@ -279,6 +289,7 @@ impl LifecycleProductAction {
             Self::ExtensionSearch { .. } | Self::SkillSearch { .. } | Self::SkillInstall { .. } => {
                 None
             }
+            Self::ExtensionList => None,
         }
     }
 }
@@ -288,6 +299,10 @@ impl LifecycleProductAction {
 pub enum LifecycleProductPayload {
     ExtensionSearch {
         extensions: Vec<LifecycleExtensionSummary>,
+        count: usize,
+    },
+    ExtensionList {
+        extensions: Vec<LifecycleInstalledExtensionSummary>,
         count: usize,
     },
     ExtensionInstall {
@@ -323,13 +338,41 @@ pub struct LifecycleExtensionSummary {
     pub version: String,
     pub description: String,
     pub source: LifecycleExtensionSource,
+    pub runtime_kind: LifecycleExtensionRuntimeKind,
     pub visible_read_only_capability_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LifecycleInstalledExtensionSummary {
+    pub summary: LifecycleExtensionSummary,
+    pub phase: LifecyclePhase,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LifecycleExtensionSource {
     HostBundled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LifecycleExtensionRuntimeKind {
+    WasmTool,
+    McpServer,
+    FirstParty,
+    System,
+    Script,
+}
+
+impl LifecycleExtensionRuntimeKind {
+    pub fn wire_kind(self) -> &'static str {
+        match self {
+            Self::McpServer => "mcp_server",
+            Self::FirstParty => "first_party",
+            Self::System => "system",
+            Self::WasmTool | Self::Script => "wasm_tool",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

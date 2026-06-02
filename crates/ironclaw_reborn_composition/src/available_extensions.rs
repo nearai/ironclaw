@@ -5,8 +5,8 @@ use ironclaw_extensions::{
 use ironclaw_filesystem::{FileType, FilesystemError, RootFilesystem};
 use ironclaw_host_api::{CapabilityId, ExtensionId, VirtualPath, sha256_digest_token};
 use ironclaw_product_workflow::{
-    LifecycleExtensionSource, LifecycleExtensionSummary, LifecyclePackageKind, LifecyclePackageRef,
-    ProductWorkflowError,
+    LifecycleExtensionRuntimeKind, LifecycleExtensionSource, LifecycleExtensionSummary,
+    LifecyclePackageKind, LifecyclePackageRef, ProductWorkflowError,
 };
 use toml::Value;
 
@@ -58,8 +58,19 @@ impl AvailableExtensionPackage {
             version: self.package.manifest.version.clone(),
             description: self.package.manifest.description.clone(),
             source: LifecycleExtensionSource::HostBundled,
+            runtime_kind: runtime_kind(&self.package.manifest.runtime),
             visible_read_only_capability_ids,
         }
+    }
+}
+
+fn runtime_kind(runtime: &ExtensionRuntime) -> LifecycleExtensionRuntimeKind {
+    match runtime {
+        ExtensionRuntime::Mcp { .. } => LifecycleExtensionRuntimeKind::McpServer,
+        ExtensionRuntime::Wasm { .. } => LifecycleExtensionRuntimeKind::WasmTool,
+        ExtensionRuntime::FirstParty { .. } => LifecycleExtensionRuntimeKind::FirstParty,
+        ExtensionRuntime::System { .. } => LifecycleExtensionRuntimeKind::System,
+        ExtensionRuntime::Script { .. } => LifecycleExtensionRuntimeKind::Script,
     }
 }
 
