@@ -8,16 +8,14 @@ pub(crate) fn is_exact_compaction_summary_replay(
     request: &CreateSummaryArtifactRequest,
     content: &str,
 ) -> bool {
-    request.summary_kind == SummaryKind::Compaction
-        && request.model_context_policy == Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected)
-        && summary.thread_id == request.thread_id
+    summary.thread_id == request.thread_id
         && summary.start_sequence == request.start_sequence
         && summary.end_sequence == request.end_sequence
-        && summary.summary_kind == SummaryKind::Compaction
-        && summary.model_context_policy == Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected)
         && summary.content == content
 }
 
+/// Callers with `model_context_policy != ReplaceRangeWhenSelected` skip overlap
+/// checks by design.
 pub(crate) fn find_overlapping_summary<'a>(
     summaries: &'a [SummaryArtifact],
     request: &CreateSummaryArtifactRequest,
@@ -32,6 +30,7 @@ pub(crate) fn find_overlapping_summary<'a>(
         .filter(|summary| {
             summary.model_context_policy
                 == Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected)
+                && summary.summary_kind == SummaryKind::Compaction
                 && ranges_overlap(
                     request.start_sequence,
                     request.end_sequence,
@@ -118,7 +117,7 @@ mod tests {
     }
 
     #[test]
-    fn exact_compaction_summary_replay_matches_on_all_fields() {
+    fn exact_compaction_summary_replay_matches_on_coordinates_and_content() {
         let request = request();
         let summary = summary();
 
@@ -172,31 +171,6 @@ mod tests {
         let request = request();
         let mut summary = summary();
         summary.thread_id = ThreadId::new("other-thread").unwrap();
-
-        assert!(!is_exact_compaction_summary_replay(
-            &summary,
-            &request,
-            "summary content"
-        ));
-    }
-
-    #[test]
-    fn exact_compaction_summary_replay_rejects_policy_mismatch() {
-        let mut request = request();
-        request.model_context_policy = None;
-
-        assert!(!is_exact_compaction_summary_replay(
-            &summary(),
-            &request,
-            "summary content"
-        ));
-    }
-
-    #[test]
-    fn exact_compaction_summary_replay_rejects_summary_policy_mismatch() {
-        let request = request();
-        let mut summary = summary();
-        summary.model_context_policy = None;
 
         assert!(!is_exact_compaction_summary_replay(
             &summary,
