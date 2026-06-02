@@ -264,6 +264,11 @@ async fn bundled_gsuite_asset_manifests_match_package_specs() {
             .capabilities
             .iter()
             .map(|capability| {
+                let required_scopes = capability
+                    .required_scopes
+                    .iter()
+                    .map(|scope| (*scope).to_string())
+                    .collect::<Vec<_>>();
                 (
                     capability.id.to_string(),
                     capability.effects.to_vec(),
@@ -283,16 +288,8 @@ async fn bundled_gsuite_asset_manifests_match_package_specs() {
                     vec![(
                         spec.credential_handle.to_string(),
                         ironclaw_auth::GOOGLE_PROVIDER_ID.to_string(),
-                        capability
-                            .required_scopes
-                            .iter()
-                            .map(|scope| (*scope).to_string())
-                            .collect::<Vec<_>>(),
-                        capability
-                            .required_scopes
-                            .iter()
-                            .map(|scope| (*scope).to_string())
-                            .collect::<Vec<_>>(),
+                        required_scopes.clone(),
+                        required_scopes,
                         spec.credential_host_pattern.to_string(),
                     )],
                 )

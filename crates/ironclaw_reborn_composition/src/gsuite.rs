@@ -158,23 +158,16 @@ fn runtime_credentials(
     capability: &GsuiteCapabilitySpec,
     spec: &GsuitePackageSpec,
 ) -> Result<Vec<RuntimeCredentialRequirement>, ExtensionError> {
+    let provider_scopes = required_provider_scopes(capability);
     Ok(vec![RuntimeCredentialRequirement {
         handle: SecretHandle::new(spec.credential_handle)?,
         source: RuntimeCredentialRequirementSource::ProductAuthAccount {
             provider: RuntimeCredentialAccountProviderId::new(ironclaw_auth::GOOGLE_PROVIDER_ID)?,
             setup: RuntimeCredentialAccountSetup::OAuth {
-                scopes: capability
-                    .required_scopes
-                    .iter()
-                    .map(|scope| (*scope).to_string())
-                    .collect(),
+                scopes: provider_scopes.clone(),
             },
         },
-        provider_scopes: capability
-            .required_scopes
-            .iter()
-            .map(|scope| (*scope).to_string())
-            .collect(),
+        provider_scopes,
         audience: NetworkTargetPattern {
             scheme: Some(NetworkScheme::Https),
             host_pattern: spec.credential_host_pattern.to_string(),
@@ -186,6 +179,14 @@ fn runtime_credentials(
         },
         required: true,
     }])
+}
+
+fn required_provider_scopes(capability: &GsuiteCapabilitySpec) -> Vec<String> {
+    capability
+        .required_scopes
+        .iter()
+        .map(|scope| (*scope).to_string())
+        .collect()
 }
 
 /// Convert a [`GsuiteDispatchError`] into the neutral [`FirstPartyCapabilityError`].
@@ -224,11 +225,7 @@ fn gsuite_credential_requirements(
     Ok(vec![RuntimeCredentialAuthRequirement {
         provider,
         requester_extension,
-        provider_scopes: capability
-            .required_scopes
-            .iter()
-            .map(|scope| (*scope).to_string())
-            .collect(),
+        provider_scopes: required_provider_scopes(capability),
     }])
 }
 

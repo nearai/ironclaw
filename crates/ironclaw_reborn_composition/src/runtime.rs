@@ -1679,6 +1679,7 @@ mod tests {
     use std::time::Duration;
 
     use async_trait::async_trait;
+    use ironclaw_auth::GOOGLE_CALENDAR_READONLY_SCOPE;
 
     /// Wiring guard: the `regex_skill_activation_enabled` flag from
     /// [`RebornRuntimeInput`] must reach
@@ -3493,7 +3494,7 @@ mod tests {
             RebornExtensionCredentialSetup::OAuth {
                 scopes,
                 ..
-            } if scopes == &vec!["https://www.googleapis.com/auth/calendar.events".to_string()]
+            } if scopes == &vec![GOOGLE_CALENDAR_READONLY_SCOPE.to_string()]
         ));
         let google_setup_json =
             serde_json::to_value(&google_setup.secrets[0]).expect("serialize setup secret");

@@ -59,18 +59,25 @@ mod tests {
         )
     }
 
-    fn provider_tool_call(arguments: serde_json::Value) -> ProviderToolCall {
+    fn provider_tool_call_with_name(
+        name: impl Into<String>,
+        arguments: serde_json::Value,
+    ) -> ProviderToolCall {
         ProviderToolCall {
             provider_id: "test-provider".to_string(),
             provider_model_id: "test-model".to_string(),
             turn_id: Some("provider-turn-1".to_string()),
             id: "call-1".to_string(),
-            name: "builtin_echo".to_string(),
+            name: name.into(),
             arguments,
             response_reasoning: None,
             reasoning: None,
             signature: None,
         }
+    }
+
+    fn provider_tool_call(arguments: serde_json::Value) -> ProviderToolCall {
+        provider_tool_call_with_name("builtin_echo", arguments)
     }
 
     fn skill_md(name: &str, description: &str, prompt: &str) -> String {
@@ -1581,17 +1588,10 @@ mod tests {
         assert_eq!(tool_definition.name, "gmail__list_messages");
 
         let candidate = port
-            .register_provider_tool_call(ProviderToolCall {
-                provider_id: "test-provider".to_string(),
-                provider_model_id: "test-model".to_string(),
-                turn_id: Some("provider-turn-gmail-auth".to_string()),
-                id: "call-gmail-list-messages".to_string(),
-                name: tool_definition.name,
-                arguments: serde_json::json!({}),
-                response_reasoning: None,
-                reasoning: None,
-                signature: None,
-            })
+            .register_provider_tool_call(provider_tool_call_with_name(
+                tool_definition.name,
+                serde_json::json!({}),
+            ))
             .await
             .expect("gmail provider tool call stages");
 
