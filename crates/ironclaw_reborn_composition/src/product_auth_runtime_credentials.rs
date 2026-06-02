@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use ironclaw_auth::{
     AuthProductError, AuthProductScope, AuthProviderId, AuthSurface, CredentialAccount,
     CredentialAccountRecordSource, CredentialAccountSelectionRequest, CredentialAccountStatus,
-    CredentialOwnership,
+    CredentialOwnership, ProviderScope,
 };
 use ironclaw_host_api::{CredentialStageError, SecretHandle};
 use ironclaw_host_runtime::{RuntimeCredentialAccountRequest, RuntimeCredentialAccountResolver};
@@ -31,16 +31,19 @@ pub(crate) trait RuntimeCredentialAccountSelectionService: Send + Sync {
 pub(crate) struct RuntimeCredentialAccountSelectionRequest {
     lookup: CredentialAccountSelectionRequest,
     runtime_scope: AuthProductScope,
+    provider_scopes: Vec<ProviderScope>,
 }
 
 impl RuntimeCredentialAccountSelectionRequest {
     pub(crate) fn new(
         lookup: CredentialAccountSelectionRequest,
         runtime_scope: AuthProductScope,
+        provider_scopes: Vec<ProviderScope>,
     ) -> Self {
         Self {
             lookup,
             runtime_scope,
+            provider_scopes,
         }
     }
 }
@@ -78,6 +81,7 @@ impl RuntimeCredentialAccountSelectionService for ProductAuthRuntimeCredentialAc
             .filter(|account| {
                 account.provider == request.lookup.provider
                     && account.status == CredentialAccountStatus::Configured
+                    && account_has_provider_scopes(account, &request.provider_scopes)
                     && account_visible_from_runtime_scope(account, &request.runtime_scope)
             })
             .collect::<Vec<_>>();
@@ -123,6 +127,20 @@ impl RuntimeCredentialAccountResolver for ProductAuthRuntimeCredentialResolver {
             );
             CredentialStageError::Backend
         })?;
+        let provider_scopes = request
+            .provider_scopes
+            .iter()
+            .map(|scope| {
+                ProviderScope::new(scope.clone()).map_err(|e| {
+                    tracing::debug!(
+                        scope = %scope,
+                        err = %e,
+                        "runtime credential provider scope is invalid"
+                    );
+                    CredentialStageError::Backend
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let account = self
             .accounts
             .select_unique_configured_runtime_account(
@@ -130,6 +148,7 @@ impl RuntimeCredentialAccountResolver for ProductAuthRuntimeCredentialResolver {
                     CredentialAccountSelectionRequest::new(auth_scope, provider)
                         .for_extension(request.requester_extension.clone()),
                     AuthProductScope::new(request.scope.clone(), AuthSurface::Api),
+                    provider_scopes,
                 ),
             )
             .await
@@ -145,6 +164,15 @@ impl RuntimeCredentialAccountResolver for ProductAuthRuntimeCredentialResolver {
         // Backend so the caller does not loop through re-auth.
         account.access_secret.ok_or(CredentialStageError::Backend)
     }
+}
+
+fn account_has_provider_scopes(
+    account: &CredentialAccount,
+    required_scopes: &[ProviderScope],
+) -> bool {
+    required_scopes
+        .iter()
+        .all(|required| account.scopes.iter().any(|scope| scope == required))
 }
 
 fn account_visible_from_runtime_scope(
@@ -227,6 +255,7 @@ mod tests {
             .resolve_access_secret(RuntimeCredentialAccountRequest {
                 scope: &scope,
                 provider: &RuntimeCredentialAccountProviderId::new("github").unwrap(),
+                provider_scopes: &[],
                 requester_extension: &ExtensionId::new("github").unwrap(),
             })
             .await
@@ -268,6 +297,7 @@ mod tests {
             .resolve_access_secret(RuntimeCredentialAccountRequest {
                 scope: &runtime_scope,
                 provider: &RuntimeCredentialAccountProviderId::new("github").unwrap(),
+                provider_scopes: &[],
                 requester_extension: &ExtensionId::new("github").unwrap(),
             })
             .await
@@ -310,6 +340,7 @@ mod tests {
             .resolve_access_secret(RuntimeCredentialAccountRequest {
                 scope: &runtime_scope,
                 provider: &RuntimeCredentialAccountProviderId::new("github").unwrap(),
+                provider_scopes: &[],
                 requester_extension: &ExtensionId::new("github").unwrap(),
             })
             .await
@@ -352,6 +383,7 @@ mod tests {
             .resolve_access_secret(RuntimeCredentialAccountRequest {
                 scope: &runtime_scope,
                 provider: &RuntimeCredentialAccountProviderId::new("github").unwrap(),
+                provider_scopes: &[],
                 requester_extension: &ExtensionId::new("github").unwrap(),
             })
             .await
@@ -393,6 +425,7 @@ mod tests {
             .resolve_access_secret(RuntimeCredentialAccountRequest {
                 scope: &runtime_scope,
                 provider: &RuntimeCredentialAccountProviderId::new("github").unwrap(),
+                provider_scopes: &[],
                 requester_extension: &ExtensionId::new("github").unwrap(),
             })
             .await
@@ -415,7 +448,50 @@ mod tests {
             .resolve_access_secret(RuntimeCredentialAccountRequest {
                 scope: &scope,
                 provider: &RuntimeCredentialAccountProviderId::new("github").unwrap(),
+                provider_scopes: &[],
                 requester_extension: &ExtensionId::new("github").unwrap(),
+            })
+            .await
+            .unwrap_err();
+
+        assert_eq!(error, CredentialStageError::AuthRequired);
+    }
+
+    #[tokio::test]
+    async fn resolver_requires_requested_provider_scopes() {
+        let accounts = Arc::new(InMemoryAuthProductServices::new());
+        let scope =
+            ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new())
+                .unwrap();
+        let auth_scope = AuthProductScope::new(scope.clone(), AuthSurface::Api);
+        accounts
+            .create_account(NewCredentialAccount {
+                scope: auth_scope,
+                provider: AuthProviderId::new("google").unwrap(),
+                label: CredentialAccountLabel::new("work google").unwrap(),
+                status: CredentialAccountStatus::Configured,
+                ownership: CredentialOwnership::UserReusable,
+                owner_extension: None,
+                granted_extensions: Vec::new(),
+                access_secret: Some(SecretHandle::new("google_manual_access").unwrap()),
+                refresh_secret: None,
+                scopes: vec![
+                    ProviderScope::new("https://www.googleapis.com/auth/gmail.send").unwrap(),
+                ],
+            })
+            .await
+            .unwrap();
+        let resolver = ProductAuthRuntimeCredentialResolver::new(Arc::new(
+            ProductAuthRuntimeCredentialAccountSelector::new(accounts),
+        ));
+        let required_scopes = vec!["https://www.googleapis.com/auth/drive".to_string()];
+
+        let error = resolver
+            .resolve_access_secret(RuntimeCredentialAccountRequest {
+                scope: &scope,
+                provider: &RuntimeCredentialAccountProviderId::new("google").unwrap(),
+                provider_scopes: &required_scopes,
+                requester_extension: &ExtensionId::new("google-drive").unwrap(),
             })
             .await
             .unwrap_err();
@@ -453,6 +529,7 @@ mod tests {
             .resolve_access_secret(RuntimeCredentialAccountRequest {
                 scope: &scope,
                 provider: &RuntimeCredentialAccountProviderId::new("github").unwrap(),
+                provider_scopes: &[],
                 requester_extension: &ExtensionId::new("github").unwrap(),
             })
             .await
@@ -491,6 +568,7 @@ mod tests {
             .resolve_access_secret(RuntimeCredentialAccountRequest {
                 scope: &scope,
                 provider: &RuntimeCredentialAccountProviderId::new("github").unwrap(),
+                provider_scopes: &[],
                 requester_extension: &ExtensionId::new("github").unwrap(),
             })
             .await
@@ -536,6 +614,7 @@ mod tests {
             .resolve_access_secret(RuntimeCredentialAccountRequest {
                 scope: &scope,
                 provider: &RuntimeCredentialAccountProviderId::new("github").unwrap(),
+                provider_scopes: &[],
                 requester_extension: &ExtensionId::new("github").unwrap(),
             })
             .await

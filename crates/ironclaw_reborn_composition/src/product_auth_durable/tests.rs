@@ -208,6 +208,7 @@ async fn filesystem_runtime_account_selection_matches_setup_invocation_account()
         .select_unique_configured_runtime_account(RuntimeCredentialAccountSelectionRequest::new(
             CredentialAccountSelectionRequest::new(runtime_scope.clone(), google_provider()),
             runtime_scope,
+            Vec::new(),
         ))
         .await
         .unwrap();
@@ -252,6 +253,7 @@ async fn filesystem_runtime_account_selection_matches_new_thread_reusable_accoun
         .resolve_access_secret(RuntimeCredentialAccountRequest {
             scope: &runtime_scope.resource,
             provider: &RuntimeCredentialAccountProviderId::new("google").unwrap(),
+            provider_scopes: &[],
             requester_extension: &ExtensionId::new("google-calendar").unwrap(),
         })
         .await

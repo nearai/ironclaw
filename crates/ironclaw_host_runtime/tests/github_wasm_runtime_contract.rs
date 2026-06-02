@@ -60,6 +60,7 @@ async fn host_runtime_services_routes_structured_github_wasm_search_through_runt
             Obligation::InjectCredentialAccountOnce {
                 handle: slot_handle,
                 provider: RuntimeCredentialAccountProviderId::new("github").unwrap(),
+                provider_scopes: Vec::new(),
                 requester_extension: ExtensionId::new("github").unwrap(),
             },
         ])),
@@ -123,6 +124,96 @@ async fn host_runtime_services_routes_structured_github_wasm_search_through_runt
 }
 
 #[tokio::test]
+async fn host_runtime_services_routes_google_drive_wasm_list_files_with_scoped_google_credential() {
+    let capability_id = CapabilityId::new("google-drive.list_files").unwrap();
+    let scope = sample_scope(InvocationId::new());
+    let policy = google_drive_policy();
+    let network = RecordingNetworkHttpEgress::with_body(br#"{"files":[]}"#.to_vec());
+    let secret_store = Arc::new(InMemorySecretStore::new());
+    let slot_handle = SecretHandle::new("google_runtime_token").unwrap();
+    let account_access_secret = SecretHandle::new("google_manual_access").unwrap();
+    let required_scopes = vec!["https://www.googleapis.com/auth/drive".to_string()];
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_google_drive_package()),
+        Arc::new(filesystem_with_google_drive_package()),
+        Arc::new(governor_with_default_limit(sample_account())),
+        Arc::new(ObligatingAuthorizer::new(vec![
+            Obligation::ApplyNetworkPolicy {
+                policy: policy.clone(),
+            },
+            Obligation::InjectCredentialAccountOnce {
+                handle: slot_handle,
+                provider: RuntimeCredentialAccountProviderId::new("google").unwrap(),
+                provider_scopes: required_scopes.clone(),
+                requester_extension: ExtensionId::new("google-drive").unwrap(),
+            },
+        ])),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_secret_store(Arc::clone(&secret_store))
+    .with_runtime_credential_account_resolver(Arc::new(
+        FixedGoogleRuntimeCredentialAccountResolver {
+            expected_scopes: required_scopes,
+            result: Ok(account_access_secret.clone()),
+        },
+    ))
+    .with_trust_policy(Arc::new(google_drive_first_party_trust_policy()))
+    .try_with_host_http_egress(network.clone())
+    .unwrap()
+    .try_with_wasm_runtime(WitToolRuntimeConfig::default(), WitToolHost::deny_all())
+    .unwrap();
+    secret_store
+        .put(
+            scope.clone(),
+            account_access_secret,
+            SecretMaterial::from("ya29.fake_fixture_token"),
+        )
+        .await
+        .unwrap();
+
+    let outcome = services
+        .host_runtime_for_local_testing()
+        .invoke_capability(wasm_runtime_request_for_scope(
+            capability_id.clone(),
+            scope,
+            json!({"query": "name contains 'report'"}),
+        ))
+        .await
+        .unwrap();
+
+    match outcome {
+        RuntimeCapabilityOutcome::Completed(completed) => {
+            assert_eq!(completed.capability_id, capability_id);
+            assert_eq!(completed.output, json!({"files":[]}));
+        }
+        other => panic!("expected completed outcome, got {other:?}"),
+    }
+    let requests = network.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].method, NetworkMethod::Get);
+    assert!(
+        requests[0]
+            .url
+            .starts_with("https://www.googleapis.com/drive/v3/files?")
+    );
+    assert!(requests[0].url.contains("pageSize=25"));
+    assert!(requests[0].url.contains("q=name%20contains%20%27report%27"));
+    assert_eq!(requests[0].body, Vec::<u8>::new());
+    assert_eq!(requests[0].policy, policy);
+    assert_eq!(
+        requests[0]
+            .headers
+            .iter()
+            .find(|(name, _)| name == "authorization"),
+        Some(&(
+            "authorization".to_string(),
+            "Bearer ya29.fake_fixture_token".to_string(),
+        ))
+    );
+}
+
+#[tokio::test]
 async fn host_runtime_services_maps_github_wasm_input_errors_to_invalid_input() {
     let capability_id = CapabilityId::new("github.search_issues").unwrap();
     let scope = sample_scope(InvocationId::new());
@@ -143,6 +234,7 @@ async fn host_runtime_services_maps_github_wasm_input_errors_to_invalid_input() 
             Obligation::InjectCredentialAccountOnce {
                 handle: slot_handle,
                 provider: RuntimeCredentialAccountProviderId::new("github").unwrap(),
+                provider_scopes: Vec::new(),
                 requester_extension: ExtensionId::new("github").unwrap(),
             },
         ])),
@@ -204,6 +296,7 @@ async fn host_runtime_services_missing_github_runtime_secret_blocks_on_auth() {
             Obligation::InjectCredentialAccountOnce {
                 handle: slot_handle,
                 provider: RuntimeCredentialAccountProviderId::new("github").unwrap(),
+                provider_scopes: Vec::new(),
                 requester_extension: ExtensionId::new("github").unwrap(),
             },
         ])),
@@ -880,6 +973,25 @@ impl RuntimeCredentialAccountResolver for FixedRuntimeCredentialAccountResolver 
     }
 }
 
+#[derive(Debug)]
+struct FixedGoogleRuntimeCredentialAccountResolver {
+    expected_scopes: Vec<String>,
+    result: Result<SecretHandle, CredentialStageError>,
+}
+
+#[async_trait]
+impl RuntimeCredentialAccountResolver for FixedGoogleRuntimeCredentialAccountResolver {
+    async fn resolve_access_secret(
+        &self,
+        request: RuntimeCredentialAccountRequest<'_>,
+    ) -> Result<SecretHandle, CredentialStageError> {
+        assert_eq!(request.provider.as_str(), "google");
+        assert_eq!(request.requester_extension.as_str(), "google-drive");
+        assert_eq!(request.provider_scopes, self.expected_scopes.as_slice());
+        self.result.clone()
+    }
+}
+
 fn registry_with_github_package() -> ExtensionRegistry {
     let manifest = ExtensionManifest::parse_with_host_api_contracts(
         &std::fs::read_to_string(github_asset_root().join("manifest.toml")).unwrap(),
@@ -898,6 +1010,24 @@ fn registry_with_github_package() -> ExtensionRegistry {
     registry
 }
 
+fn registry_with_google_drive_package() -> ExtensionRegistry {
+    let manifest = ExtensionManifest::parse_with_host_api_contracts(
+        &std::fs::read_to_string(google_drive_asset_root().join("manifest.toml")).unwrap(),
+        ManifestSource::HostBundled,
+        &default_host_port_catalog().unwrap(),
+        &default_host_api_contract_registry().unwrap(),
+    )
+    .unwrap();
+    let package = ExtensionPackage::from_manifest(
+        manifest,
+        VirtualPath::new("/system/extensions/google-drive").unwrap(),
+    )
+    .unwrap();
+    let mut registry = ExtensionRegistry::new();
+    registry.insert(package).unwrap();
+    registry
+}
+
 fn filesystem_with_github_package() -> LocalFilesystem {
     let mut filesystem = LocalFilesystem::new();
     filesystem
@@ -909,14 +1039,43 @@ fn filesystem_with_github_package() -> LocalFilesystem {
     filesystem
 }
 
+fn filesystem_with_google_drive_package() -> LocalFilesystem {
+    let mut filesystem = LocalFilesystem::new();
+    filesystem
+        .mount_local(
+            VirtualPath::new("/system/extensions").unwrap(),
+            HostPath::from_path_buf(google_drive_asset_root().parent().unwrap().to_path_buf()),
+        )
+        .unwrap();
+    filesystem
+}
+
 fn github_asset_root() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .join("crates/ironclaw_first_party_extensions/assets/github")
 }
 
+fn google_drive_asset_root() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("crates/ironclaw_first_party_extensions/assets/google-drive")
+}
+
 fn github_wasm_path() -> std::path::PathBuf {
     github_asset_root().join("wasm/github_tool.wasm")
+}
+
+fn google_drive_policy() -> NetworkPolicy {
+    NetworkPolicy {
+        allowed_targets: vec![NetworkTargetPattern {
+            scheme: Some(NetworkScheme::Https),
+            host_pattern: "www.googleapis.com".to_string(),
+            port: None,
+        }],
+        deny_private_ip_ranges: true,
+        max_egress_bytes: Some(10_000),
+    }
 }
 
 fn github_first_party_trust_policy() -> HostTrustPolicy {
@@ -924,6 +1083,25 @@ fn github_first_party_trust_policy() -> HostTrustPolicy {
         AdminEntry::for_local_manifest(
             PackageId::new("github").unwrap(),
             "/system/extensions/github/manifest.toml".to_string(),
+            None,
+            HostTrustAssignment::first_party(),
+            vec![
+                EffectKind::DispatchCapability,
+                EffectKind::Network,
+                EffectKind::UseSecret,
+                EffectKind::ExternalWrite,
+            ],
+            None,
+        ),
+    ]))])
+    .unwrap()
+}
+
+fn google_drive_first_party_trust_policy() -> HostTrustPolicy {
+    HostTrustPolicy::new(vec![Box::new(AdminConfig::with_entries(vec![
+        AdminEntry::for_local_manifest(
+            PackageId::new("google-drive").unwrap(),
+            "/system/extensions/google-drive/manifest.toml".to_string(),
             None,
             HostTrustAssignment::first_party(),
             vec![

@@ -2162,6 +2162,7 @@ impl GithubHarnessAuthorizer {
                 Obligation::InjectCredentialAccountOnce {
                     handle: SecretHandle::new("github_runtime_token")?,
                     provider: RuntimeCredentialAccountProviderId::new("github")?,
+                    provider_scopes: Vec::new(),
                     requester_extension: ExtensionId::new("github")?,
                 },
             ])?,

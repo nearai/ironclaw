@@ -872,6 +872,10 @@ impl CapabilityDeclV2 {
             runtime_credentials.push(RuntimeCredentialRequirement {
                 handle,
                 source: raw_credential.source,
+                provider_scopes: validate_runtime_credential_provider_scopes(
+                    &id,
+                    raw_credential.provider_scopes,
+                )?,
                 audience: raw_credential.audience,
                 target: raw_credential.target,
                 required: raw_credential.required,
@@ -1431,6 +1435,8 @@ struct RawRuntimeCredentialV2 {
     handle: String,
     #[serde(default)]
     source: RuntimeCredentialRequirementSource,
+    #[serde(default)]
+    provider_scopes: Vec<String>,
     audience: NetworkTargetPattern,
     target: RuntimeCredentialTarget,
     #[serde(default = "default_runtime_credential_required")]
@@ -1439,4 +1445,30 @@ struct RawRuntimeCredentialV2 {
 
 fn default_runtime_credential_required() -> bool {
     true
+}
+
+fn validate_runtime_credential_provider_scopes(
+    capability_id: &CapabilityId,
+    raw_scopes: Vec<String>,
+) -> Result<Vec<String>, ManifestV2Error> {
+    let mut seen = BTreeSet::new();
+    let mut scopes = Vec::with_capacity(raw_scopes.len());
+    for raw_scope in raw_scopes {
+        if raw_scope.trim() != raw_scope || raw_scope.is_empty() {
+            return Err(ManifestV2Error::Invalid {
+                reason: format!(
+                    "capability {capability_id} declares invalid runtime credential provider scope"
+                ),
+            });
+        }
+        if !seen.insert(raw_scope.clone()) {
+            return Err(ManifestV2Error::Invalid {
+                reason: format!(
+                    "capability {capability_id} declares duplicate runtime credential provider scope {raw_scope}"
+                ),
+            });
+        }
+        scopes.push(raw_scope);
+    }
+    Ok(scopes)
 }
