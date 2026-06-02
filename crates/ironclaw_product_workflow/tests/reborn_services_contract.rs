@@ -14,15 +14,17 @@ use ironclaw_product_workflow::{
     ApprovalInteractionDecision, ApprovalInteractionService, AuthInteractionDecision,
     AuthInteractionService, ExtensionCredentialSetupService, ExtensionCredentialStatusRequest,
     ExtensionCredentialSubmitRequest, LifecycleExtensionCredentialRequirement,
-    LifecycleExtensionCredentialSetup, LifecycleExtensionRuntimeKind, LifecycleExtensionSource,
-    LifecycleExtensionSummary, LifecycleInstalledExtensionSummary, LifecyclePackageKind,
-    LifecyclePackageRef, LifecyclePhase, LifecycleProductContext, LifecycleProductFacade,
-    LifecycleProductPayload, LifecycleProductResponse, LifecycleReadinessBlocker,
-    ListPendingApprovalsRequest, ListPendingApprovalsResponse, ListPendingAuthInteractionsRequest,
-    ListPendingAuthInteractionsResponse, RebornGetRunStateRequest, RebornResolveGateResponse,
-    RebornServices, RebornServicesApi, RebornServicesError, RebornServicesErrorCode,
-    RebornServicesErrorKind, RebornStreamEventsRequest, RebornSubmitTurnResponse,
-    RebornTimelineRequest, ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
+    LifecycleExtensionCredentialSetup, LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind,
+    LifecycleExtensionSource, LifecycleExtensionSummary, LifecycleInstalledExtensionSummary,
+    LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase, LifecycleProductAction,
+    LifecycleProductContext, LifecycleProductFacade, LifecycleProductPayload,
+    LifecycleProductResponse, LifecycleReadinessBlocker, ListPendingApprovalsRequest,
+    ListPendingApprovalsResponse, ListPendingAuthInteractionsRequest,
+    ListPendingAuthInteractionsResponse, ProductWorkflowError, RebornExtensionOnboardingState,
+    RebornGetRunStateRequest, RebornResolveGateResponse, RebornServices, RebornServicesApi,
+    RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
+    RebornStreamEventsRequest, RebornSubmitTurnResponse, RebornTimelineRequest,
+    ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
     ResolveAuthInteractionRequest, ResolveAuthInteractionResponse, WebUiAuthenticatedCaller,
     WebUiCancelRunRequest, WebUiCreateThreadRequest, WebUiInboundValidationCode,
     WebUiListThreadsRequest, WebUiResolveGateRequest, WebUiSendMessageRequest,
@@ -486,6 +488,7 @@ impl AuthInteractionService for RecordingAuthInteractionService {
 struct RecordingLifecycleFacade {
     package_refs: Mutex<Vec<LifecyclePackageRef>>,
     credential_requirements: Vec<LifecycleExtensionCredentialRequirement>,
+    onboarding: Option<LifecycleExtensionOnboarding>,
 }
 
 impl RecordingLifecycleFacade {
@@ -493,6 +496,7 @@ impl RecordingLifecycleFacade {
         Self {
             package_refs: Mutex::new(Vec::new()),
             credential_requirements: Vec::new(),
+            onboarding: None,
         }
     }
 
@@ -502,6 +506,18 @@ impl RecordingLifecycleFacade {
         Self {
             package_refs: Mutex::new(Vec::new()),
             credential_requirements,
+            onboarding: None,
+        }
+    }
+
+    fn with_credential_requirements_and_onboarding(
+        credential_requirements: Vec<LifecycleExtensionCredentialRequirement>,
+        onboarding: LifecycleExtensionOnboarding,
+    ) -> Self {
+        Self {
+            package_refs: Mutex::new(Vec::new()),
+            credential_requirements,
+            onboarding: Some(onboarding),
         }
     }
 
@@ -525,6 +541,7 @@ impl RecordingLifecycleFacade {
             runtime_kind: LifecycleExtensionRuntimeKind::FirstParty,
             visible_read_only_capability_ids: Vec::new(),
             credential_requirements: self.credential_requirements.clone(),
+            onboarding: self.onboarding.clone(),
         };
         Some(LifecycleProductPayload::ExtensionList {
             extensions: vec![LifecycleInstalledExtensionSummary {
@@ -555,15 +572,53 @@ impl LifecycleProductFacade for RecordingLifecycleFacade {
             .lock()
             .expect("lock")
             .push(package_ref.clone());
+        let phase = if self.credential_requirements.is_empty() {
+            LifecyclePhase::UnsupportedOrLegacy
+        } else {
+            LifecyclePhase::Configured
+        };
         let mut response = LifecycleProductResponse::projection(
             Some(package_ref),
-            LifecyclePhase::UnsupportedOrLegacy,
+            phase,
             vec![LifecycleReadinessBlocker::runtime(Some(
                 "extension_lifecycle_store_unwired".to_string(),
             ))?],
         );
         response.payload = self.extension_list_payload(response.package_ref.as_ref().expect("ref"));
         Ok(response)
+    }
+}
+
+struct ListingLifecycleFacade {
+    extension: LifecycleInstalledExtensionSummary,
+}
+
+#[async_trait]
+impl LifecycleProductFacade for ListingLifecycleFacade {
+    async fn execute(
+        &self,
+        _context: LifecycleProductContext,
+        action: LifecycleProductAction,
+    ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+        assert!(matches!(action, LifecycleProductAction::ExtensionList));
+        Ok(LifecycleProductResponse {
+            package_ref: None,
+            phase: self.extension.phase,
+            blockers: Vec::new(),
+            message: None,
+            payload: Some(LifecycleProductPayload::ExtensionList {
+                extensions: vec![self.extension.clone()],
+                count: 1,
+            }),
+        })
+    }
+
+    async fn project_package(
+        &self,
+        _context: LifecycleProductContext,
+        _package_ref: LifecyclePackageRef,
+    ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+        panic!("list_extensions should execute the list action, not project one package")
     }
 }
 
@@ -3395,6 +3450,78 @@ async fn setup_extension_projects_through_configured_lifecycle_facade() {
 }
 
 #[tokio::test]
+async fn list_extensions_projects_onboarding_payload_through_reborn_services() {
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_lifecycle_product_facade(Arc::new(ListingLifecycleFacade {
+        extension: LifecycleInstalledExtensionSummary {
+            summary: extension_summary(
+                "github",
+                vec![manual_credential_requirement("github_runtime_token", true)],
+                Some(onboarding_fixture()),
+            ),
+            phase: LifecyclePhase::Installed,
+        },
+    }));
+
+    let response = services
+        .list_extensions(caller())
+        .await
+        .expect("extension list response");
+    let extension = response.extensions.first().expect("one extension");
+
+    assert_eq!(
+        extension.onboarding_state,
+        Some(RebornExtensionOnboardingState::SetupRequired)
+    );
+    let onboarding = extension.onboarding.as_ref().expect("onboarding payload");
+    assert_eq!(
+        onboarding.credential_instructions.as_deref(),
+        Some("Paste the GitHub token IronClaw should use.")
+    );
+    assert_eq!(
+        onboarding.credential_next_step.as_deref(),
+        Some("After saving the token, activate GitHub to publish its tools.")
+    );
+}
+
+#[tokio::test]
+async fn setup_extension_returns_post_setup_onboarding_payload() {
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_lifecycle_product_facade(Arc::new(
+        RecordingLifecycleFacade::with_credential_requirements_and_onboarding(
+            vec![manual_credential_requirement("github_runtime_token", true)],
+            onboarding_fixture(),
+        ),
+    ));
+
+    let response = services
+        .setup_extension(
+            caller(),
+            lifecycle_package_ref("github"),
+            WebUiSetupExtensionRequest::default(),
+        )
+        .await
+        .expect("setup extension response");
+
+    let onboarding = response.onboarding.as_ref().expect("onboarding payload");
+    assert_eq!(response.phase, LifecyclePhase::Configured);
+    assert_eq!(
+        onboarding.credential_instructions.as_deref(),
+        Some("github is installed. Activate it to make its tools available.")
+    );
+    assert_eq!(
+        onboarding.credential_next_step.as_deref(),
+        Some("After saving the token, activate GitHub to publish its tools.")
+    );
+}
+
+#[tokio::test]
 async fn setup_extension_rejects_blank_required_manual_secret() {
     let credentials = Arc::new(RecordingExtensionCredentialSetupService::default());
     let services =
@@ -3493,6 +3620,35 @@ fn setup_services_with_requirements(
 fn lifecycle_package_ref(package_id: &str) -> LifecyclePackageRef {
     LifecyclePackageRef::new(LifecyclePackageKind::Extension, package_id)
         .expect("valid package ref")
+}
+
+fn extension_summary(
+    package_id: &str,
+    credential_requirements: Vec<LifecycleExtensionCredentialRequirement>,
+    onboarding: Option<LifecycleExtensionOnboarding>,
+) -> LifecycleExtensionSummary {
+    LifecycleExtensionSummary {
+        package_ref: lifecycle_package_ref(package_id),
+        name: package_id.to_string(),
+        version: "1.0.0".to_string(),
+        description: "test extension".to_string(),
+        source: LifecycleExtensionSource::HostBundled,
+        runtime_kind: LifecycleExtensionRuntimeKind::FirstParty,
+        visible_read_only_capability_ids: Vec::new(),
+        credential_requirements,
+        onboarding,
+    }
+}
+
+fn onboarding_fixture() -> LifecycleExtensionOnboarding {
+    LifecycleExtensionOnboarding {
+        instructions: "GitHub needs a token before its tools can run.".to_string(),
+        credential_instructions: Some("Paste the GitHub token IronClaw should use.".to_string()),
+        setup_url: Some("https://github.com/settings/personal-access-tokens/new".to_string()),
+        credential_next_step: Some(
+            "After saving the token, activate GitHub to publish its tools.".to_string(),
+        ),
+    }
 }
 
 fn manual_credential_requirement(

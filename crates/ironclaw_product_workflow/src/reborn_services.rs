@@ -49,6 +49,7 @@ use crate::{
 };
 
 mod error;
+mod extension_onboarding;
 mod extension_setup_credentials;
 mod extensions;
 mod lifecycle_setup;
@@ -58,11 +59,12 @@ pub use error::{RebornServicesError, RebornServicesErrorCode, RebornServicesErro
 pub use types::{
     RebornCancelRunResponse, RebornCreateThreadResponse, RebornExtensionActionResponse,
     RebornExtensionCredentialSetup, RebornExtensionInfo, RebornExtensionListResponse,
-    RebornExtensionRegistryEntry, RebornExtensionRegistryResponse, RebornExtensionSetupField,
-    RebornExtensionSetupSecret, RebornGetRunStateRequest, RebornGetRunStateResponse,
-    RebornListThreadsResponse, RebornResolveGateResponse, RebornResumeGateResponse,
-    RebornSetupExtensionResponse, RebornStreamEventsRequest, RebornStreamEventsResponse,
-    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
+    RebornExtensionOnboardingPayload, RebornExtensionOnboardingState, RebornExtensionRegistryEntry,
+    RebornExtensionRegistryResponse, RebornExtensionSetupField, RebornExtensionSetupSecret,
+    RebornGetRunStateRequest, RebornGetRunStateResponse, RebornListThreadsResponse,
+    RebornResolveGateResponse, RebornResumeGateResponse, RebornSetupExtensionResponse,
+    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
+    RebornTimelineRequest, RebornTimelineResponse,
 };
 
 type SkillActivationRecorder =

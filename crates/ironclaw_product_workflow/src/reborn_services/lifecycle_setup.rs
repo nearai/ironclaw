@@ -10,7 +10,7 @@ use crate::{
     WebUiInboundValidationError, WebUiSetupExtensionRequest,
 };
 
-use super::{ExtensionCredentialSetupService, extension_setup_credentials};
+use super::{ExtensionCredentialSetupService, extension_onboarding, extension_setup_credentials};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SetupAction {
@@ -96,14 +96,15 @@ async fn setup_extension_response(
         requirements,
     )
     .await?;
+    let onboarding = extension_onboarding::from_lifecycle(&lifecycle).onboarding;
     Ok(RebornSetupExtensionResponse {
         package_ref,
         phase: lifecycle.phase,
         blockers: lifecycle.blockers,
+        onboarding,
         payload: lifecycle.payload,
         secrets,
         fields: Vec::new(),
-        onboarding: None,
     })
 }
 
