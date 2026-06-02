@@ -11,7 +11,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use axum::{
-    Router,
+    Json, Router,
     body::Bytes,
     extract::State,
     http::{HeaderMap, StatusCode},
@@ -30,22 +30,23 @@ use ironclaw_slack_v2_adapter::parse_slack_url_verification_challenge;
 use ironclaw_wasm_product_adapters::{
     NativeProductAdapterRunner, RunnerError, WebhookProcessOutcome,
 };
+use serde::Serialize;
 
 use crate::webui_serve::{PublicRouteDrain, PublicRouteMount};
 
 pub const SLACK_EVENTS_PATH: &str = "/webhooks/slack/events";
 const SLACK_EVENTS_ROUTE_ID: &str = "slack.events";
-const SLACK_EVENTS_BODY_LIMIT_BYTES: NonZeroU64 = match NonZeroU64::new(1024 * 1024) {
-    Some(value) => value,
-    None => NonZeroU64::MIN,
+const SLACK_EVENTS_BODY_LIMIT_BYTES: NonZeroU64 = {
+    // SAFETY: 1 MiB is a non-zero literal.
+    unsafe { NonZeroU64::new_unchecked(1024 * 1024) }
 };
-const SLACK_EVENTS_MAX_REQUESTS: NonZeroU32 = match NonZeroU32::new(120) {
-    Some(value) => value,
-    None => NonZeroU32::MIN,
+const SLACK_EVENTS_MAX_REQUESTS: NonZeroU32 = {
+    // SAFETY: 120 requests is a non-zero literal.
+    unsafe { NonZeroU32::new_unchecked(120) }
 };
-const SLACK_EVENTS_RATE_WINDOW_SECONDS: NonZeroU32 = match NonZeroU32::new(60) {
-    Some(value) => value,
-    None => NonZeroU32::MIN,
+const SLACK_EVENTS_RATE_WINDOW_SECONDS: NonZeroU32 = {
+    // SAFETY: 60 seconds is a non-zero literal.
+    unsafe { NonZeroU32::new_unchecked(60) }
 };
 
 pub trait SlackEventsWebhookDispatcher: Send + Sync {
@@ -194,7 +195,10 @@ async fn slack_events_handler(
                 error = %error,
                 "Slack URL verification parse failed"
             );
-            return StatusCode::BAD_REQUEST.into_response();
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                SlackWebhookErrorCategory::MalformedPayload,
+            );
         }
     }
 
@@ -209,17 +213,27 @@ async fn slack_events_handler(
 }
 
 fn runner_error_response(error: RunnerError) -> Response {
-    let status = match &error {
-        RunnerError::AuthenticationFailed { .. } => StatusCode::UNAUTHORIZED,
-        RunnerError::TooManyInFlight { .. } => StatusCode::TOO_MANY_REQUESTS,
-        RunnerError::Adapter(adapter_error) if adapter_error.is_retryable() => {
-            StatusCode::SERVICE_UNAVAILABLE
-        }
+    let (status, category) = match &error {
+        RunnerError::AuthenticationFailed { .. } => (
+            StatusCode::UNAUTHORIZED,
+            SlackWebhookErrorCategory::Authentication,
+        ),
+        RunnerError::TooManyInFlight { .. } => (
+            StatusCode::TOO_MANY_REQUESTS,
+            SlackWebhookErrorCategory::Capacity,
+        ),
+        RunnerError::Adapter(adapter_error) if adapter_error.is_retryable() => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            SlackWebhookErrorCategory::TemporarilyUnavailable,
+        ),
         RunnerError::WorkflowTimeout { .. }
         | RunnerError::WorkflowJoinFailed
         | RunnerError::WorkflowPanicked
-        | RunnerError::AdapterPanicked => StatusCode::SERVICE_UNAVAILABLE,
-        RunnerError::Adapter(_) => StatusCode::BAD_REQUEST,
+        | RunnerError::AdapterPanicked => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            SlackWebhookErrorCategory::TemporarilyUnavailable,
+        ),
+        RunnerError::Adapter(_) => (StatusCode::BAD_REQUEST, SlackWebhookErrorCategory::Adapter),
     };
     tracing::debug!(
         target = "ironclaw::reborn::slack_events",
@@ -227,7 +241,26 @@ fn runner_error_response(error: RunnerError) -> Response {
         error = %error,
         "Slack Events API webhook rejected"
     );
-    status.into_response()
+    error_response(status, category)
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum SlackWebhookErrorCategory {
+    Authentication,
+    Capacity,
+    MalformedPayload,
+    Adapter,
+    TemporarilyUnavailable,
+}
+
+#[derive(Debug, Serialize)]
+struct SlackWebhookErrorBody {
+    error: SlackWebhookErrorCategory,
+}
+
+fn error_response(status: StatusCode, category: SlackWebhookErrorCategory) -> Response {
+    (status, Json(SlackWebhookErrorBody { error: category })).into_response()
 }
 
 #[cfg(test)]
@@ -236,6 +269,7 @@ mod tests {
     use std::pin::Pin;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
 
     use axum::body::Body;
     use axum::http::Request;
@@ -279,6 +313,22 @@ mod tests {
         fn at_capacity() -> Self {
             Self {
                 dispatch_result: Err(RunnerError::TooManyInFlight { max_in_flight: 1 }),
+                ..Self::verified()
+            }
+        }
+
+        fn workflow_timeout() -> Self {
+            Self {
+                dispatch_result: Err(RunnerError::WorkflowTimeout {
+                    timeout: Duration::from_secs(1),
+                }),
+                ..Self::verified()
+            }
+        }
+
+        fn adapter_panicked() -> Self {
+            Self {
+                dispatch_result: Err(RunnerError::AdapterPanicked),
                 ..Self::verified()
             }
         }
@@ -326,6 +376,17 @@ mod tests {
             .expect("router should respond")
     }
 
+    async fn assert_error_body(response: Response, expected: &str) {
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body should collect")
+            .to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json error body");
+        assert_eq!(body["error"], expected);
+    }
+
     #[tokio::test]
     async fn slack_events_handler_returns_401_on_auth_failure() {
         let dispatcher = FakeSlackDispatcher::auth_failure();
@@ -364,6 +425,7 @@ mod tests {
         let response = post_slack_events(dispatcher, r#"{"type":"url_verification"}"#).await;
 
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_error_body(response, "malformed_payload").await;
         assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 
@@ -374,6 +436,29 @@ mod tests {
         let response = post_slack_events(dispatcher, r#"{"type":"event_callback"}"#).await;
 
         assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_error_body(response, "capacity").await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn slack_events_handler_returns_503_on_workflow_timeout() {
+        let dispatcher = FakeSlackDispatcher::workflow_timeout();
+        let calls = Arc::clone(&dispatcher.dispatch_calls);
+        let response = post_slack_events(dispatcher, r#"{"type":"event_callback"}"#).await;
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_error_body(response, "temporarily_unavailable").await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn slack_events_handler_returns_503_on_adapter_panic() {
+        let dispatcher = FakeSlackDispatcher::adapter_panicked();
+        let calls = Arc::clone(&dispatcher.dispatch_calls);
+        let response = post_slack_events(dispatcher, r#"{"type":"event_callback"}"#).await;
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_error_body(response, "temporarily_unavailable").await;
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
@@ -399,6 +484,19 @@ mod tests {
         let response = runner_error_response(RunnerError::AdapterPanicked);
 
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[test]
+    fn slack_events_route_uses_limited_body_policy() {
+        let descriptors = slack_events_route_descriptors();
+        let [descriptor] = descriptors.as_slice() else {
+            panic!("expected exactly one Slack Events route descriptor")
+        };
+        let BodyLimitPolicy::Limited { max_bytes } = descriptor.policy().body_limit() else {
+            panic!("Slack Events route should have a body limit")
+        };
+
+        assert_eq!(*max_bytes, SLACK_EVENTS_BODY_LIMIT_BYTES);
     }
 
     #[test]

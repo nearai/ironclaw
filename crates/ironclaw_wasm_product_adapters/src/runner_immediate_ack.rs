@@ -59,6 +59,11 @@ impl NativeProductAdapterRunner {
         }
         tasks.spawn(async move {
             let _permit = permit;
+            // Timeout drops the in-flight workflow future. That is the intended
+            // cancellation boundary for this generic async trait call: the
+            // runner does not hold a separate task handle or protocol-specific
+            // resource owner to abort. Workflows that open DB/network resources
+            // must make their own futures cancellation-safe at await points.
             match tokio::time::timeout(workflow_timeout, workflow.accept_inbound(envelope)).await {
                 Ok(Ok(ack)) if ack.retry_disposition() == InboundRetryDisposition::Retry => {
                     tracing::warn!(
@@ -124,6 +129,7 @@ mod tests {
         ProjectionSubscriptionRequest, ProtocolAuthEvidence, ProtocolAuthFailure,
         ProtocolHttpEgress, UserMessagePayload,
     };
+    use tokio::sync::Notify;
 
     use crate::auth_verifier::SharedSecretHeaderAuth;
     use crate::runner::{
@@ -228,10 +234,46 @@ mod tests {
         }
     }
 
+    struct BlockingWorkflow {
+        entered: Arc<AtomicUsize>,
+        release: Arc<Notify>,
+    }
+
+    #[async_trait]
+    impl ironclaw_product_adapters::ProductWorkflow for BlockingWorkflow {
+        async fn accept_inbound(
+            &self,
+            _envelope: ProductInboundEnvelope,
+        ) -> Result<ProductInboundAck, ProductAdapterError> {
+            self.entered.fetch_add(1, Ordering::SeqCst);
+            self.release.notified().await;
+            Ok(ProductInboundAck::NoOp)
+        }
+
+        async fn resolve_projection_subscription(
+            &self,
+            _envelope: ProductInboundEnvelope,
+        ) -> Result<ProjectionSubscriptionRequest, ProductAdapterError> {
+            Err(ProductAdapterError::Internal {
+                detail: ironclaw_product_adapters::redaction::RedactedString::new(
+                    "test stub: resolve_projection_subscription not supported",
+                ),
+            })
+        }
+    }
+
     fn runner(parse_count: Arc<AtomicUsize>) -> NativeProductAdapterRunner {
+        runner_with_workflow(parse_count, Arc::new(AckWorkflow), 1)
+    }
+
+    fn runner_with_workflow(
+        parse_count: Arc<AtomicUsize>,
+        workflow: Arc<dyn ironclaw_product_adapters::ProductWorkflow>,
+        max_in_flight: usize,
+    ) -> NativeProductAdapterRunner {
         NativeProductAdapterRunner::with_config(
             Arc::new(StaticAdapter::new(parse_count)),
-            Arc::new(AckWorkflow),
+            workflow,
             WebhookAuth::SharedSecretHeader(SharedSecretHeaderAuth {
                 header_name: "X-Test-Secret".into(),
                 expected_secret: "topsecret".into(),
@@ -239,9 +281,105 @@ mod tests {
             }),
             NativeProductAdapterRunnerConfig::new(
                 Duration::from_secs(1),
-                std::num::NonZeroUsize::new(1).expect("nonzero"),
+                std::num::NonZeroUsize::new(max_in_flight).expect("nonzero"),
             ),
         )
+    }
+
+    fn verified_evidence(runner: &NativeProductAdapterRunner) -> ProtocolAuthEvidence {
+        let mut headers = http::HeaderMap::new();
+        headers.insert("X-Test-Secret", "topsecret".parse().expect("header value"));
+        runner
+            .verify_webhook_auth(&headers, b"{}")
+            .expect("webhook auth should verify")
+    }
+
+    #[tokio::test]
+    async fn process_verified_webhook_immediate_ack_dispatches_workflow() {
+        let parse_count = Arc::new(AtomicUsize::new(0));
+        let runner = runner(Arc::clone(&parse_count));
+        let evidence = verified_evidence(&runner);
+        let outcome = runner
+            .process_verified_webhook_immediate_ack(b"{}", &evidence)
+            .await
+            .expect("verified webhook should dispatch");
+
+        assert_eq!(outcome, WebhookProcessOutcome::AcceptedForAsyncDispatch);
+        runner.drain_immediate_ack_tasks().await;
+        assert_eq!(parse_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn process_verified_webhook_immediate_ack_rejects_when_at_capacity() {
+        let parse_count = Arc::new(AtomicUsize::new(0));
+        let entered = Arc::new(AtomicUsize::new(0));
+        let release = Arc::new(Notify::new());
+        let runner = runner_with_workflow(
+            Arc::clone(&parse_count),
+            Arc::new(BlockingWorkflow {
+                entered: Arc::clone(&entered),
+                release: Arc::clone(&release),
+            }),
+            1,
+        );
+        let evidence = verified_evidence(&runner);
+        let first = runner
+            .process_verified_webhook_immediate_ack(b"{}", &evidence)
+            .await
+            .expect("first webhook should dispatch");
+        assert_eq!(first, WebhookProcessOutcome::AcceptedForAsyncDispatch);
+        while entered.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+
+        let err = runner
+            .process_verified_webhook_immediate_ack(b"{}", &evidence)
+            .await
+            .expect_err("second webhook should be rejected while permit is held");
+        assert!(matches!(
+            err,
+            RunnerError::TooManyInFlight { max_in_flight: 1 }
+        ));
+        release.notify_waiters();
+        runner.drain_immediate_ack_tasks().await;
+        assert_eq!(parse_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn drain_immediate_ack_tasks_waits_for_all_tasks() {
+        let parse_count = Arc::new(AtomicUsize::new(0));
+        let entered = Arc::new(AtomicUsize::new(0));
+        let release = Arc::new(Notify::new());
+        let runner = Arc::new(runner_with_workflow(
+            Arc::clone(&parse_count),
+            Arc::new(BlockingWorkflow {
+                entered: Arc::clone(&entered),
+                release: Arc::clone(&release),
+            }),
+            2,
+        ));
+        let evidence = verified_evidence(&runner);
+        runner
+            .process_verified_webhook_immediate_ack(b"{}", &evidence)
+            .await
+            .expect("first webhook should dispatch");
+        runner
+            .process_verified_webhook_immediate_ack(b"{}", &evidence)
+            .await
+            .expect("second webhook should dispatch");
+        while entered.load(Ordering::SeqCst) < 2 {
+            tokio::task::yield_now().await;
+        }
+
+        let drain_runner = Arc::clone(&runner);
+        let drain = tokio::spawn(async move {
+            drain_runner.drain_immediate_ack_tasks().await;
+        });
+        tokio::task::yield_now().await;
+        assert!(!drain.is_finished());
+        release.notify_waiters();
+        drain.await.expect("drain task should finish");
+        assert_eq!(parse_count.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]
