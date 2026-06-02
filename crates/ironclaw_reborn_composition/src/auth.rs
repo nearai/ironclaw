@@ -15,9 +15,9 @@ use ironclaw_auth::{
     InMemoryAuthProductServices, ManualTokenSetupRequest, NewAuthFlow, OAuthAuthorizationUrl,
     OAuthCallbackClaimRequest, OAuthCallbackFailureInput, OAuthCallbackInput,
     OAuthProviderCallbackRequest, OAuthProviderExchangeContext, OpaqueStateHash, PkceVerifierHash,
-    ProviderBackedCredentialAccountService, ProviderCallbackOutcome, SecretCleanupReport,
-    SecretCleanupRequest, SecretCleanupService, SecretSubmitRequest, SecretSubmitResult, Timestamp,
-    TurnGateAuthFlowQuery, TurnRunRef, scope_matches,
+    ProviderBackedCredentialAccountService, ProviderCallbackOutcome, ProviderScope,
+    SecretCleanupReport, SecretCleanupRequest, SecretCleanupService, SecretSubmitRequest,
+    SecretSubmitResult, Timestamp, TurnGateAuthFlowQuery, TurnRunRef, scope_matches,
 };
 use ironclaw_product_adapters::AuthPromptChallengeKind;
 use ironclaw_product_workflow::ProductAuthTurnGateResumeDispatcher;
@@ -28,7 +28,7 @@ use ironclaw_host_api::UserId;
 use ironclaw_turns::{TurnRunId, TurnScope};
 
 use crate::manual_token_flow::{PortBackedManualTokenFlowService, RebornManualTokenFlowService};
-use crate::oauth_dcr::{DcrGateChallengeRequest, OAuthDcrProviderRegistry};
+use crate::oauth_dcr::{DcrGateChallengeRequest, DcrSetupFlowRequest, OAuthDcrProviderRegistry};
 use crate::oauth_gate::{GoogleOAuthGateProviderRegistry, OAuthGateChallengeRequest};
 use crate::product_auth_runtime_credentials::{
     ProductAuthRuntimeCredentialAccountSelector, RuntimeCredentialAccountSelectionService,
@@ -108,6 +108,16 @@ pub(crate) struct RebornOAuthStartFlowRequest {
     pub(crate) authorization_url: OAuthAuthorizationUrl,
     pub(crate) opaque_state_hash: OpaqueStateHash,
     pub(crate) pkce_verifier_hash: PkceVerifierHash,
+    pub(crate) update_binding: Option<CredentialAccountUpdateBinding>,
+    pub(crate) expires_at: ironclaw_auth::Timestamp,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RebornDcrOAuthStartFlowRequest {
+    pub(crate) scope: AuthProductScope,
+    pub(crate) provider: AuthProviderId,
+    pub(crate) account_label: CredentialAccountLabel,
+    pub(crate) provider_scopes: Vec<ProviderScope>,
     pub(crate) update_binding: Option<CredentialAccountUpdateBinding>,
     pub(crate) expires_at: ironclaw_auth::Timestamp,
 }
@@ -978,6 +988,28 @@ impl RebornProductAuthServices {
                 pkce_verifier_hash: Some(request.pkce_verifier_hash),
                 expires_at: request.expires_at,
             })
+            .await
+    }
+
+    pub(crate) async fn start_dcr_setup_oauth_flow(
+        &self,
+        request: RebornDcrOAuthStartFlowRequest,
+    ) -> Result<Option<AuthFlowRecord>, AuthProductError> {
+        let Some(registry) = &self.dcr_oauth_registry else {
+            return Ok(None);
+        };
+        registry
+            .start_setup_flow(
+                &self.flow_manager,
+                DcrSetupFlowRequest {
+                    scope: request.scope,
+                    provider: request.provider,
+                    account_label: request.account_label,
+                    provider_scopes: request.provider_scopes,
+                    update_binding: request.update_binding,
+                    expires_at: request.expires_at,
+                },
+            )
             .await
     }
 

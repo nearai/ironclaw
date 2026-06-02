@@ -107,7 +107,7 @@ fn map_auth_error(error: crate::RebornAuthProductError) -> RebornServicesError {
             403,
             false,
         ),
-        AuthErrorCode::BackendUnavailable => services_error(
+        AuthErrorCode::BackendUnavailable | AuthErrorCode::MalformedConfig => services_error(
             RebornServicesErrorCode::Unavailable,
             RebornServicesErrorKind::ServiceUnavailable,
             503,
