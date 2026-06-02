@@ -1070,9 +1070,11 @@ pub async fn build_reborn_runtime(
     let resolved_cost_table = llm_cost_table_arc;
 
     // Build the model budget accountant from the resolved cost table plus
-    // the local-dev governor. When neither an LLM policy nor a test
-    // override supplies a cost table we deliberately skip the accountant
-    // — there's no spend to track and the cascade would never fire.
+    // the local-dev governor. `local-dev-yolo` is the explicit local
+    // exception: it inherits host trust and must not pause on budget gates.
+    // When neither an LLM policy nor a test override supplies a cost table
+    // we deliberately skip the accountant — there's no spend to track and
+    // the cascade would never fire.
     //
     // The accountant is wired with a seeding policy derived from the
     // caller-supplied `BudgetDefaults` (or `compiled_defaults().with_env()`
@@ -1085,33 +1087,34 @@ pub async fn build_reborn_runtime(
     // Nuclear #1: defaults resolve once at the composition root with
     // explicit precedence and a `validate()` call instead of being
     // re-read by the wiring helper).
-    let resolved_budget_defaults = match budget_defaults {
-        Some(defaults) => {
-            defaults
-                .validate()
-                .map_err(|error| RebornRuntimeError::InvalidArgument {
-                    reason: format!("supplied budget defaults invalid: {error}"),
-                })?;
-            defaults
-        }
-        None => {
-            let defaults = ironclaw_reborn_config::BudgetDefaults::compiled_defaults()
-                .with_env()
-                .map_err(|error| RebornRuntimeError::InvalidArgument {
-                    reason: format!("budget defaults env-override invalid: {error}"),
-                })?;
-            defaults
-                .validate()
-                .map_err(|error| RebornRuntimeError::InvalidArgument {
-                    reason: format!("resolved budget defaults invalid: {error}"),
-                })?;
-            defaults
-        }
-    };
     let model_budget_accountant: Option<
         Arc<dyn ironclaw_turns::run_profile::LoopModelBudgetAccountant>,
-    > = match resolved_cost_table {
-        Some(cost_table) => {
+    > = match (profile, resolved_cost_table) {
+        (RebornCompositionProfile::LocalDevYolo, _) => None,
+        (_, Some(cost_table)) => {
+            let resolved_budget_defaults = match budget_defaults {
+                Some(defaults) => {
+                    defaults
+                        .validate()
+                        .map_err(|error| RebornRuntimeError::InvalidArgument {
+                            reason: format!("supplied budget defaults invalid: {error}"),
+                        })?;
+                    defaults
+                }
+                None => {
+                    let defaults = ironclaw_reborn_config::BudgetDefaults::compiled_defaults()
+                        .with_env()
+                        .map_err(|error| RebornRuntimeError::InvalidArgument {
+                            reason: format!("budget defaults env-override invalid: {error}"),
+                        })?;
+                    defaults
+                        .validate()
+                        .map_err(|error| RebornRuntimeError::InvalidArgument {
+                            reason: format!("resolved budget defaults invalid: {error}"),
+                        })?;
+                    defaults
+                }
+            };
             // Shared helper — same wiring shape used by any production
             // loop composer that wants the accountant.
             // The accountant uses the same broadcast-backed sink that
@@ -1130,7 +1133,7 @@ pub async fn build_reborn_runtime(
             );
             Some(accountant)
         }
-        None => None,
+        (_, None) => None,
     };
 
     let loop_exit_evidence = Arc::new(ThreadCheckpointLoopExitEvidencePort::new_with_thread_scope(
@@ -1729,7 +1732,7 @@ mod tests {
     use ironclaw_loop_support::{
         HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
         HostManagedModelMessageRole, HostManagedModelRequest, HostManagedModelResponse,
-        HostSkillContextBuildError, HostSkillContextCandidate, HostSkillContextSource,
+        HostSkillContextBuildError, HostSkillContextCandidate, HostSkillContextSource, ModelCost,
     };
     use ironclaw_product_adapters::{ProductOutboundPayload, ProductProjectionItem};
     use ironclaw_product_workflow::{
@@ -1748,11 +1751,12 @@ mod tests {
         TurnRunId, TurnRunnerId, TurnStatus,
         run_profile::{
             InMemoryRunProfileResolver, LoopCapabilityPort, LoopCheckpointStateRef, LoopRunContext,
-            ProviderToolCall, RunProfileResolutionRequest, RunProfileResolver, SkillVisibility,
-            VisibleCapabilityRequest,
+            ModelProfileId, ProviderToolCall, RunProfileResolutionRequest, RunProfileResolver,
+            SkillVisibility, VisibleCapabilityRequest,
         },
         runner::{BlockRunRequest, ClaimRunRequest, TurnRunTransitionPort},
     };
+    use rust_decimal_macros::dec;
 
     use crate::RebornReadinessState;
     use crate::input::RebornBuildInput;
@@ -2288,6 +2292,70 @@ mod tests {
         );
         assert_eq!(audit.decision.kind, "allowed");
         runtime.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test]
+    async fn local_dev_yolo_message_flow_ignores_model_budget_gate() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let host_home = root.path().join("host-home");
+        std::fs::create_dir_all(&host_home).expect("host home");
+        let requests = Arc::new(StdMutex::new(Vec::new()));
+        let gateway = Arc::new(RecordingGateway {
+            reply: "yolo budget bypass reply".to_string(),
+            requests: Arc::clone(&requests),
+        });
+        let cost_table = ironclaw_loop_support::StaticModelCostTable::new().with_entry(
+            ModelProfileId::new("interactive_model").expect("model profile id"),
+            ModelCost {
+                input_per_token: dec!(1.00),
+                output_per_token: dec!(1.00),
+                max_output_tokens: 8_192,
+            },
+        );
+
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev_with_profile(
+                crate::RebornCompositionProfile::LocalDevYolo,
+                "runtime-yolo-budget-owner",
+                root.path().join("local-dev"),
+            )
+            .with_runtime_policy(
+                crate::local_dev_yolo_runtime_policy(true).expect("local-yolo policy resolves"),
+            )
+            .with_local_dev_confirmed_host_home_root(host_home),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-yolo-budget-tenant".to_string(),
+            agent_id: "runtime-yolo-budget-agent".to_string(),
+            source_binding_id: "runtime-yolo-budget-source".to_string(),
+            reply_target_binding_id: "runtime-yolo-budget-reply".to_string(),
+        })
+        .with_poll_settings(PollSettings {
+            interval: Duration::from_millis(10),
+            max_total: Duration::from_secs(3),
+        })
+        .with_model_gateway_override(gateway)
+        .with_model_cost_table_override(Arc::new(cost_table));
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        let conversation = runtime.new_conversation().await.expect("conversation");
+        let reply = tokio::time::timeout(
+            Duration::from_secs(3),
+            runtime.send_user_message(&conversation, "ping"),
+        )
+        .await
+        .expect("runtime send should finish")
+        .expect("runtime send should succeed");
+
+        assert_eq!(reply.status, TurnStatus::Completed);
+        assert_eq!(reply.text.as_deref(), Some("yolo budget bypass reply"));
+        assert_eq!(
+            recorded_request_count(&requests),
+            1,
+            "local-dev-yolo must reach the model gateway even when a paid cost table is present"
+        );
+
+        runtime.shutdown().await.expect("runtime shutdown");
     }
 
     #[tokio::test]
