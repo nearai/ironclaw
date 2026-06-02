@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use ironclaw_auth::{AuthProductError, OAuthClientId, OAuthRedirectUri};
+use ironclaw_auth::{AuthProductError, CredentialAccountLabel, OAuthClientId, OAuthRedirectUri};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_host_api::runtime_policy::ProcessBackendKind;
 use ironclaw_host_api::runtime_policy::{
@@ -13,6 +13,7 @@ use secrecy::SecretString;
 
 use crate::google_oauth::google_provider_spec;
 use crate::notion_oauth::notion_provider_spec;
+use crate::oauth_dcr::OAuthDcrProviderConfig;
 use crate::oauth_provider_client::HostOAuthProviderSpec;
 use crate::{RebornCompositionProfile, RebornProductAuthServicePorts};
 
@@ -59,6 +60,11 @@ impl std::fmt::Debug for OAuthClientConfig {
 pub(crate) struct OAuthProviderBackendConfig {
     pub(crate) spec: HostOAuthProviderSpec,
     pub(crate) client: OAuthClientConfig,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct OAuthDcrProviderBackendConfig {
+    pub(crate) config: OAuthDcrProviderConfig,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -137,6 +143,7 @@ pub struct RebornBuildInput {
     pub(crate) require_wasm_credentials: bool,
     pub(crate) product_auth_ports: Option<RebornProductAuthServicePorts>,
     pub(crate) oauth_provider_configs: Vec<OAuthProviderBackendConfig>,
+    pub(crate) oauth_dcr_provider_configs: Vec<OAuthDcrProviderBackendConfig>,
 }
 
 pub(crate) enum RebornStorageInput {
@@ -406,6 +413,26 @@ impl RebornBuildInput {
         self
     }
 
+    /// Enable Dynamic Client Registration for the bundled Notion MCP OAuth provider.
+    ///
+    /// Callers provide the public origin that serves the Reborn product-auth
+    /// callback route. Local loopback HTTP origins are accepted; non-loopback
+    /// deployments must use HTTPS.
+    pub fn with_notion_dcr_oauth_backend(
+        mut self,
+        callback_origin: impl Into<String>,
+        client_name: impl Into<String>,
+    ) -> Result<Self, ironclaw_auth::AuthProductError> {
+        self.push_oauth_dcr_provider_config(OAuthDcrProviderConfig {
+            spec: notion_provider_spec(),
+            callback_origin: callback_origin.into(),
+            client_name: client_name.into(),
+            account_label: CredentialAccountLabel::new("notion")?,
+            scopes: Vec::new(),
+        });
+        Ok(self)
+    }
+
     fn push_oauth_provider_config(
         &mut self,
         spec: HostOAuthProviderSpec,
@@ -422,6 +449,19 @@ impl RebornBuildInput {
         }
         self.oauth_provider_configs
             .push(OAuthProviderBackendConfig { spec, client });
+    }
+
+    fn push_oauth_dcr_provider_config(&mut self, config: OAuthDcrProviderConfig) {
+        if let Some(existing) = self
+            .oauth_dcr_provider_configs
+            .iter_mut()
+            .find(|existing| existing.config.spec.provider_id == config.spec.provider_id)
+        {
+            existing.config = config;
+            return;
+        }
+        self.oauth_dcr_provider_configs
+            .push(OAuthDcrProviderBackendConfig { config });
     }
 
     fn new(
@@ -442,6 +482,7 @@ impl RebornBuildInput {
             require_wasm_credentials: false,
             product_auth_ports: None,
             oauth_provider_configs: Vec::new(),
+            oauth_dcr_provider_configs: Vec::new(),
         }
     }
 }

@@ -28,6 +28,7 @@ use ironclaw_host_api::UserId;
 use ironclaw_turns::{TurnRunId, TurnScope};
 
 use crate::manual_token_flow::{PortBackedManualTokenFlowService, RebornManualTokenFlowService};
+use crate::oauth_dcr::OAuthDcrProviderRegistry;
 use crate::product_auth_runtime_credentials::{
     ProductAuthRuntimeCredentialAccountSelector, RuntimeCredentialAccountSelectionService,
 };
@@ -434,6 +435,7 @@ pub struct RebornProductAuthServices {
     provider_client: Arc<dyn AuthProviderClient>,
     cleanup_service: Arc<dyn SecretCleanupService>,
     continuation_dispatcher: Arc<dyn RebornAuthContinuationDispatcher>,
+    dcr_oauth_registry: Option<Arc<OAuthDcrProviderRegistry>>,
     /// Optional read projection for WebUI/local-dev auth interactions.
     ///
     /// `RebornProductAuthServices` may still support OAuth callbacks,
@@ -477,6 +479,7 @@ impl std::fmt::Debug for RebornProductAuthServices {
                 &"Arc<dyn RebornAuthContinuationDispatcher>",
             )
             .field("flow_record_source", &self.flow_record_source.is_some())
+            .field("dcr_oauth_registry", &self.dcr_oauth_registry.is_some())
             .finish()
     }
 }
@@ -506,6 +509,7 @@ impl RebornProductAuthServices {
             provider_client,
             cleanup_service,
             continuation_dispatcher,
+            dcr_oauth_registry: None,
             flow_record_source: None,
         }
     }
@@ -624,6 +628,14 @@ impl RebornProductAuthServices {
             provider_client.clone(),
         ));
         self.provider_client = provider_client;
+        self
+    }
+
+    pub(crate) fn with_dcr_oauth_registry(
+        mut self,
+        registry: Arc<OAuthDcrProviderRegistry>,
+    ) -> Self {
+        self.dcr_oauth_registry = Some(registry);
         self
     }
 
@@ -907,6 +919,25 @@ impl RebornProductAuthServices {
         Ok(())
     }
 
+    #[allow(
+        dead_code,
+        reason = "used by the webui-v2-beta OAuth callback route when DCR fallback PKCE storage is enabled"
+    )]
+    pub(crate) async fn oauth_pkce_verifier_for_flow(
+        &self,
+        scope: &AuthProductScope,
+        provider: &AuthProviderId,
+        flow_id: AuthFlowId,
+    ) -> Result<Option<SecretString>, RebornOAuthCallbackError> {
+        let Some(registry) = &self.dcr_oauth_registry else {
+            return Ok(None);
+        };
+        registry
+            .pkce_verifier_for_flow(scope, provider, flow_id)
+            .await
+            .map_err(RebornOAuthCallbackError::from)
+    }
+
     #[allow(dead_code, reason = "used by upcoming Reborn OAuth setup route wiring")]
     pub(crate) async fn start_setup_oauth_flow(
         &self,
@@ -1169,11 +1200,30 @@ impl AuthChallengeProvider for RebornProductAuthServices {
         owner_user_id: &UserId,
         run_id: TurnRunId,
         gate_ref: &str,
-    ) -> Option<AuthChallengeView> {
-        let source = self.flow_record_source.as_ref()?;
+        credential_requirements: &[ironclaw_host_api::RuntimeCredentialAuthRequirement],
+    ) -> Result<Option<AuthChallengeView>, AuthProductError> {
+        let gate_ref = AuthGateRef::new(gate_ref.to_string())
+            .map_err(|_| AuthProductError::BackendUnavailable)?;
+        let Some(source) = self.flow_record_source.as_ref() else {
+            return Ok(None);
+        };
+        if let Some(registry) = &self.dcr_oauth_registry
+            && let Some(view) = registry
+                .challenge_for_blocked_gate(
+                    &self.flow_manager,
+                    source,
+                    credential_requirements,
+                    scope,
+                    owner_user_id,
+                    run_id,
+                    &gate_ref,
+                )
+                .await?
+        {
+            return Ok(Some(view));
+        }
         // The flow source may include records from multiple product surfaces;
         // query by stable owner and gate continuation before exposing metadata.
-        let gate_ref = AuthGateRef::new(gate_ref.to_string()).ok()?;
         let flow = source
             .flow_for_turn_gate(TurnGateAuthFlowQuery {
                 owner: AuthFlowOwnerScope {
@@ -1183,14 +1233,19 @@ impl AuthChallengeProvider for RebornProductAuthServices {
                     project_id: scope.project_id.clone(),
                     thread_id: scope.thread_id.clone(),
                 },
-                turn_run_ref: TurnRunRef::new(run_id.to_string()).ok()?,
+                turn_run_ref: TurnRunRef::new(run_id.to_string())
+                    .map_err(|_| AuthProductError::BackendUnavailable)?,
                 gate_ref,
                 include_terminal: false,
             })
-            .await
-            .ok()??;
-        let challenge = flow.challenge.as_ref()?;
-        Some(auth_challenge_to_view(challenge, &flow))
+            .await?;
+        let Some(flow) = flow else {
+            return Ok(None);
+        };
+        let Some(challenge) = flow.challenge.as_ref() else {
+            return Ok(None);
+        };
+        Ok(Some(auth_challenge_to_view(challenge, &flow)))
     }
 }
 
