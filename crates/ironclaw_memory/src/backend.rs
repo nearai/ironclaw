@@ -171,9 +171,9 @@ pub trait MemoryBackend: Send + Sync {
         context: &MemoryContext,
         path: &MemoryDocumentPath,
         bytes: &[u8],
-        options: &MemoryBackendWriteOptions,
+        backend_options: &MemoryBackendWriteOptions,
     ) -> Result<(), FilesystemError> {
-        let _ = options;
+        let _ = backend_options;
         self.write_document(context, path, bytes).await
     }
 
@@ -224,9 +224,9 @@ pub trait MemoryBackend: Send + Sync {
         path: &MemoryDocumentPath,
         expected_previous_hash: Option<&str>,
         bytes: &[u8],
-        options: &MemoryBackendWriteOptions,
+        backend_options: &MemoryBackendWriteOptions,
     ) -> Result<MemoryAppendOutcome, FilesystemError> {
-        let _ = options;
+        let _ = backend_options;
         self.compare_and_append_document(context, path, expected_previous_hash, bytes)
             .await
     }
@@ -237,9 +237,9 @@ pub trait MemoryBackend: Send + Sync {
         path: &MemoryDocumentPath,
         expected_previous_hash: Option<&str>,
         bytes: &[u8],
-        options: &MemoryBackendWriteOptions,
+        backend_options: &MemoryBackendWriteOptions,
     ) -> Result<MemoryWriteOutcome, FilesystemError> {
-        let _ = (expected_previous_hash, options);
+        let _ = (expected_previous_hash, backend_options);
         self.write_document(context, path, bytes)
             .await
             .map(|_| MemoryWriteOutcome::Written)
@@ -250,7 +250,7 @@ pub trait MemoryBackend: Send + Sync {
         context: &MemoryContext,
         path: &MemoryDocumentPath,
         bytes: &[u8],
-        options: &MemoryBackendWriteOptions,
+        backend_options: &MemoryBackendWriteOptions,
     ) -> Result<(), FilesystemError> {
         for _ in 0..8 {
             let previous = self.read_document(context, path).await?;
@@ -261,7 +261,7 @@ pub trait MemoryBackend: Send + Sync {
                     path,
                     expected.as_deref(),
                     bytes,
-                    options,
+                    backend_options,
                 )
                 .await?;
             if outcome == MemoryAppendOutcome::Appended {
@@ -474,7 +474,7 @@ where
         context: &MemoryContext,
         path: &MemoryDocumentPath,
         bytes: &[u8],
-        options: &MemoryBackendWriteOptions,
+        backend_options: &MemoryBackendWriteOptions,
     ) -> Result<(), FilesystemError> {
         ensure_file_documents_supported(
             context,
@@ -525,7 +525,7 @@ where
             .await?;
         }
         let (metadata, metadata_to_persist) =
-            resolve_write_metadata(self.repository.as_ref(), path, options).await?;
+            resolve_write_metadata(self.repository.as_ref(), path, backend_options).await?;
         if let Some(schema) = &metadata.schema {
             validate_content_against_schema(path, content, schema)?;
         }
@@ -582,7 +582,7 @@ where
         path: &MemoryDocumentPath,
         expected_previous_hash: Option<&str>,
         bytes: &[u8],
-        options: &MemoryBackendWriteOptions,
+        backend_options: &MemoryBackendWriteOptions,
     ) -> Result<MemoryAppendOutcome, FilesystemError> {
         ensure_file_documents_supported(
             context,
@@ -639,7 +639,7 @@ where
             .await?;
         }
         let (metadata, metadata_to_persist) =
-            resolve_write_metadata(self.repository.as_ref(), path, options).await?;
+            resolve_write_metadata(self.repository.as_ref(), path, backend_options).await?;
         if let Some(schema) = &metadata.schema {
             validate_content_against_schema(path, content, schema)?;
         }
@@ -681,7 +681,7 @@ where
         context: &MemoryContext,
         path: &MemoryDocumentPath,
         bytes: &[u8],
-        options: &MemoryBackendWriteOptions,
+        backend_options: &MemoryBackendWriteOptions,
     ) -> Result<(), FilesystemError> {
         for _ in 0..8 {
             ensure_file_documents_supported(
@@ -737,7 +737,7 @@ where
                 .await?;
             }
             let (metadata, metadata_to_persist) =
-                resolve_write_metadata(self.repository.as_ref(), path, options).await?;
+                resolve_write_metadata(self.repository.as_ref(), path, backend_options).await?;
             if let Some(schema) = &metadata.schema {
                 validate_content_against_schema(path, content, schema)?;
             }
@@ -792,7 +792,7 @@ where
         path: &MemoryDocumentPath,
         expected_previous_hash: Option<&str>,
         bytes: &[u8],
-        options: &MemoryBackendWriteOptions,
+        backend_options: &MemoryBackendWriteOptions,
     ) -> Result<MemoryWriteOutcome, FilesystemError> {
         ensure_file_documents_supported(
             context,
@@ -847,7 +847,7 @@ where
             .await?;
         }
         let (metadata, metadata_to_persist) =
-            resolve_write_metadata(self.repository.as_ref(), path, options).await?;
+            resolve_write_metadata(self.repository.as_ref(), path, backend_options).await?;
         if let Some(schema) = &metadata.schema {
             validate_content_against_schema(path, content, schema)?;
         }
