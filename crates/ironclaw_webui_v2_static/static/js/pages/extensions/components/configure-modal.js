@@ -9,7 +9,7 @@ import {
 
 export function ConfigureModal({ extension, onClose, onSaved }) {
   const extensionName = extension?.displayName || extension?.packageRef?.id || "Extension";
-  const { secrets, fields, onboarding, isLoading, error } =
+  const { secrets = [], fields = [], onboarding, isLoading, error } =
     useExtensionSetup(extension?.packageRef);
   const [values, setValues] = React.useState({});
   const [fieldValues, setFieldValues] = React.useState({});
@@ -30,6 +30,14 @@ export function ConfigureModal({ extension, onClose, onSaved }) {
     }
     submitMutation.mutate({ secrets: secretPayload, fields: fieldValues });
   }, [values, fieldValues, submitMutation]);
+  const handleOauth = React.useCallback(
+    (secret) => {
+      const popup = window.open("about:blank", "_blank", "width=600,height=600");
+      if (popup) popup.opener = null;
+      oauthMutation.mutate({ secret, popup });
+    },
+    [oauthMutation]
+  );
   const manualSecrets = secrets.filter(
     (secret) => (secret.setup?.kind || "manual_token") === "manual_token"
   );
@@ -123,7 +131,7 @@ export function ConfigureModal({ extension, onClose, onSaved }) {
                       </span>
                       <${Button}
                         variant=${secret.provided ? "secondary" : "primary"}
-                        onClick=${() => oauthMutation.mutate({ secret })}
+                        onClick=${() => handleOauth(secret)}
                         disabled=${oauthMutation.isPending}
                       >
                         ${oauthMutation.isPending

@@ -177,12 +177,21 @@ export function useOauthSetup(packageRef) {
   const packageKey = packageRef?.id || packageRef;
 
   return useMutation({
-    mutationFn: ({ secret }) => startExtensionOauth(packageRef, secret),
-    onSuccess: (res) => {
-      if (res.authorization_url) {
+    mutationFn: ({ secret, popup }) =>
+      startExtensionOauth(packageRef, secret).then((res) => ({ res, popup })),
+    onSuccess: ({ res, popup }) => {
+      if (res.authorization_url && popup && !popup.closed) {
+        popup.location.href = res.authorization_url;
+      } else if (res.authorization_url) {
         window.open(res.authorization_url, "_blank", "noopener,noreferrer");
+      } else if (popup && !popup.closed) {
+        popup.close();
       }
       queryClient.invalidateQueries({ queryKey: ["extension-setup", packageKey] });
+    },
+    onError: (_err, variables) => {
+      const popup = variables?.popup;
+      if (popup && !popup.closed) popup.close();
     },
   });
 }

@@ -9,12 +9,12 @@ use crate::{
     LifecycleExtensionCredentialRequirement, LifecycleExtensionCredentialSetup,
     LifecycleProductPayload, LifecycleProductResponse, RebornExtensionCredentialSetup,
     RebornExtensionSetupSecret, RebornServicesError, WebUiInboundValidationCode,
-    WebUiInboundValidationError, WebUiSetupExtensionRequest,
+    WebUiSetupExtensionRequest,
 };
 
 use super::{
     ExtensionCredentialSetupService, ExtensionCredentialStatusRequest,
-    ExtensionCredentialSubmitRequest,
+    ExtensionCredentialSubmitRequest, lifecycle_setup::validation_error,
 };
 
 pub(super) fn requirements(
@@ -206,10 +206,6 @@ fn credential_label(
     requirement: &LifecycleExtensionCredentialRequirement,
 ) -> String {
     format!("{} {}", extension_id.as_str(), requirement.provider)
-}
-
-fn validation_error(field: &'static str, code: WebUiInboundValidationCode) -> RebornServicesError {
-    RebornServicesError::from(WebUiInboundValidationError::new(field, code))
 }
 
 #[derive(Debug, Default, Deserialize)]

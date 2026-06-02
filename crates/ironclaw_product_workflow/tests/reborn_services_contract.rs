@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use chrono::Utc;
-use ironclaw_auth::CredentialAccountId;
+use ironclaw_auth::{CredentialAccountId, CredentialAccountProjection};
 use ironclaw_host_api::{AgentId, ApprovalRequestId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_product_adapters::{
     ProductAdapterError, ProductOutboundEnvelope, ProductWorkflowRejectionKind, ProjectionCursor,
@@ -12,14 +12,17 @@ use ironclaw_product_adapters::{
 };
 use ironclaw_product_workflow::{
     ApprovalInteractionDecision, ApprovalInteractionService, AuthInteractionDecision,
-    AuthInteractionService, LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase,
-    LifecycleProductContext, LifecycleProductFacade, LifecycleProductResponse,
-    LifecycleReadinessBlocker, ListPendingApprovalsRequest, ListPendingApprovalsResponse,
-    ListPendingAuthInteractionsRequest, ListPendingAuthInteractionsResponse,
-    RebornGetRunStateRequest, RebornResolveGateResponse, RebornServices, RebornServicesApi,
-    RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
-    RebornStreamEventsRequest, RebornSubmitTurnResponse, RebornTimelineRequest,
-    ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
+    AuthInteractionService, ExtensionCredentialSetupService, ExtensionCredentialStatusRequest,
+    ExtensionCredentialSubmitRequest, LifecycleExtensionCredentialRequirement,
+    LifecycleExtensionCredentialSetup, LifecycleExtensionRuntimeKind, LifecycleExtensionSource,
+    LifecycleExtensionSummary, LifecycleInstalledExtensionSummary, LifecyclePackageKind,
+    LifecyclePackageRef, LifecyclePhase, LifecycleProductContext, LifecycleProductFacade,
+    LifecycleProductPayload, LifecycleProductResponse, LifecycleReadinessBlocker,
+    ListPendingApprovalsRequest, ListPendingApprovalsResponse, ListPendingAuthInteractionsRequest,
+    ListPendingAuthInteractionsResponse, RebornGetRunStateRequest, RebornResolveGateResponse,
+    RebornServices, RebornServicesApi, RebornServicesError, RebornServicesErrorCode,
+    RebornServicesErrorKind, RebornStreamEventsRequest, RebornSubmitTurnResponse,
+    RebornTimelineRequest, ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
     ResolveAuthInteractionRequest, ResolveAuthInteractionResponse, WebUiAuthenticatedCaller,
     WebUiCancelRunRequest, WebUiCreateThreadRequest, WebUiInboundValidationCode,
     WebUiListThreadsRequest, WebUiResolveGateRequest, WebUiSendMessageRequest,
@@ -482,17 +485,54 @@ impl AuthInteractionService for RecordingAuthInteractionService {
 
 struct RecordingLifecycleFacade {
     package_refs: Mutex<Vec<LifecyclePackageRef>>,
+    credential_requirements: Vec<LifecycleExtensionCredentialRequirement>,
 }
 
 impl RecordingLifecycleFacade {
     fn new() -> Self {
         Self {
             package_refs: Mutex::new(Vec::new()),
+            credential_requirements: Vec::new(),
+        }
+    }
+
+    fn with_credential_requirements(
+        credential_requirements: Vec<LifecycleExtensionCredentialRequirement>,
+    ) -> Self {
+        Self {
+            package_refs: Mutex::new(Vec::new()),
+            credential_requirements,
         }
     }
 
     fn package_refs(&self) -> Vec<LifecyclePackageRef> {
         self.package_refs.lock().expect("lock").clone()
+    }
+
+    fn extension_list_payload(
+        &self,
+        package_ref: &LifecyclePackageRef,
+    ) -> Option<LifecycleProductPayload> {
+        if self.credential_requirements.is_empty() {
+            return None;
+        }
+        let summary = LifecycleExtensionSummary {
+            package_ref: package_ref.clone(),
+            name: package_ref.id.as_str().to_string(),
+            version: "1.0.0".to_string(),
+            description: "test extension".to_string(),
+            source: LifecycleExtensionSource::HostBundled,
+            runtime_kind: LifecycleExtensionRuntimeKind::FirstParty,
+            visible_read_only_capability_ids: Vec::new(),
+            credential_requirements: self.credential_requirements.clone(),
+        };
+        Some(LifecycleProductPayload::ExtensionList {
+            extensions: vec![LifecycleInstalledExtensionSummary {
+                summary,
+                phase: LifecyclePhase::Configured,
+            }],
+            count: 1,
+        })
     }
 }
 
@@ -515,13 +555,50 @@ impl LifecycleProductFacade for RecordingLifecycleFacade {
             .lock()
             .expect("lock")
             .push(package_ref.clone());
-        Ok(LifecycleProductResponse::projection(
+        let mut response = LifecycleProductResponse::projection(
             Some(package_ref),
             LifecyclePhase::UnsupportedOrLegacy,
             vec![LifecycleReadinessBlocker::runtime(Some(
                 "extension_lifecycle_store_unwired".to_string(),
             ))?],
-        ))
+        );
+        response.payload = self.extension_list_payload(response.package_ref.as_ref().expect("ref"));
+        Ok(response)
+    }
+}
+
+#[derive(Default)]
+struct RecordingExtensionCredentialSetupService {
+    status_requests: Mutex<Vec<ExtensionCredentialStatusRequest>>,
+    submit_requests: Mutex<Vec<ExtensionCredentialSubmitRequest>>,
+}
+
+impl RecordingExtensionCredentialSetupService {
+    fn status_count(&self) -> usize {
+        self.status_requests.lock().expect("lock").len()
+    }
+
+    fn submit_count(&self) -> usize {
+        self.submit_requests.lock().expect("lock").len()
+    }
+}
+
+#[async_trait]
+impl ExtensionCredentialSetupService for RecordingExtensionCredentialSetupService {
+    async fn credential_status(
+        &self,
+        request: ExtensionCredentialStatusRequest,
+    ) -> Result<Option<CredentialAccountProjection>, RebornServicesError> {
+        self.status_requests.lock().expect("lock").push(request);
+        Ok(None)
+    }
+
+    async fn submit_manual_token(
+        &self,
+        request: ExtensionCredentialSubmitRequest,
+    ) -> Result<CredentialAccountId, RebornServicesError> {
+        self.submit_requests.lock().expect("lock").push(request);
+        Ok(CredentialAccountId::new())
     }
 }
 
@@ -3315,6 +3392,144 @@ async fn setup_extension_projects_through_configured_lifecycle_facade() {
                 .expect("valid package ref")
         ]
     );
+}
+
+#[tokio::test]
+async fn setup_extension_rejects_blank_required_manual_secret() {
+    let credentials = Arc::new(RecordingExtensionCredentialSetupService::default());
+    let services =
+        setup_services_with_requirements(vec![manual_credential_requirement("api_token", true)])
+            .with_extension_credentials(credentials.clone());
+
+    let err = services
+        .setup_extension(
+            caller(),
+            lifecycle_package_ref("github"),
+            WebUiSetupExtensionRequest {
+                action: Some("submit".to_string()),
+                payload: Some(json!({
+                    "secrets": {
+                        "api_token": "   "
+                    }
+                })),
+            },
+        )
+        .await
+        .expect_err("blank required token is rejected");
+
+    assert_setup_validation(err, "secrets", WebUiInboundValidationCode::Blank);
+    assert_eq!(credentials.status_count(), 1);
+    assert_eq!(credentials.submit_count(), 0);
+}
+
+#[tokio::test]
+async fn setup_extension_rejects_unknown_secret_name() {
+    let credentials = Arc::new(RecordingExtensionCredentialSetupService::default());
+    let services =
+        setup_services_with_requirements(vec![manual_credential_requirement("api_token", true)])
+            .with_extension_credentials(credentials.clone());
+
+    let err = services
+        .setup_extension(
+            caller(),
+            lifecycle_package_ref("github"),
+            WebUiSetupExtensionRequest {
+                action: Some("submit".to_string()),
+                payload: Some(json!({
+                    "secrets": {
+                        "unknown_name": "value"
+                    }
+                })),
+            },
+        )
+        .await
+        .expect_err("unknown secret name is rejected");
+
+    assert_setup_validation(err, "secrets", WebUiInboundValidationCode::InvalidValue);
+    assert_eq!(credentials.status_count(), 0);
+    assert_eq!(credentials.submit_count(), 0);
+}
+
+#[tokio::test]
+async fn setup_extension_rejects_oauth_secret_via_manual_submit() {
+    let credentials = Arc::new(RecordingExtensionCredentialSetupService::default());
+    let services =
+        setup_services_with_requirements(vec![oauth_credential_requirement("google_oauth", true)])
+            .with_extension_credentials(credentials.clone());
+
+    let err = services
+        .setup_extension(
+            caller(),
+            lifecycle_package_ref("google"),
+            WebUiSetupExtensionRequest {
+                action: Some("submit".to_string()),
+                payload: Some(json!({
+                    "secrets": {
+                        "google_oauth": "value"
+                    }
+                })),
+            },
+        )
+        .await
+        .expect_err("oauth credential cannot be submitted as a manual token");
+
+    assert_setup_validation(err, "secrets", WebUiInboundValidationCode::InvalidValue);
+    assert_eq!(credentials.status_count(), 0);
+    assert_eq!(credentials.submit_count(), 0);
+}
+
+fn setup_services_with_requirements(
+    requirements: Vec<LifecycleExtensionCredentialRequirement>,
+) -> RebornServices {
+    RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_lifecycle_product_facade(Arc::new(
+        RecordingLifecycleFacade::with_credential_requirements(requirements),
+    ))
+}
+
+fn lifecycle_package_ref(package_id: &str) -> LifecyclePackageRef {
+    LifecyclePackageRef::new(LifecyclePackageKind::Extension, package_id)
+        .expect("valid package ref")
+}
+
+fn manual_credential_requirement(
+    name: &str,
+    required: bool,
+) -> LifecycleExtensionCredentialRequirement {
+    LifecycleExtensionCredentialRequirement {
+        name: name.to_string(),
+        provider: "github".to_string(),
+        required,
+        setup: LifecycleExtensionCredentialSetup::ManualToken,
+    }
+}
+
+fn oauth_credential_requirement(
+    name: &str,
+    required: bool,
+) -> LifecycleExtensionCredentialRequirement {
+    LifecycleExtensionCredentialRequirement {
+        name: name.to_string(),
+        provider: "google".to_string(),
+        required,
+        setup: LifecycleExtensionCredentialSetup::OAuth {
+            scopes: vec!["https://www.googleapis.com/auth/gmail.readonly".to_string()],
+        },
+    }
+}
+
+fn assert_setup_validation(
+    err: RebornServicesError,
+    field: &str,
+    code: WebUiInboundValidationCode,
+) {
+    assert_eq!(err.kind, RebornServicesErrorKind::Validation);
+    assert_eq!(err.status_code, 400);
+    assert_eq!(err.field.as_deref(), Some(field));
+    assert_eq!(err.validation_code, Some(code));
 }
 
 #[tokio::test]

@@ -151,7 +151,10 @@ fn setup_action(request: &WebUiSetupExtensionRequest) -> Result<SetupAction, Reb
     }
 }
 
-fn validation_error(field: &'static str, code: WebUiInboundValidationCode) -> RebornServicesError {
+pub(super) fn validation_error(
+    field: &'static str,
+    code: WebUiInboundValidationCode,
+) -> RebornServicesError {
     RebornServicesError::from(WebUiInboundValidationError::new(field, code))
 }
 
