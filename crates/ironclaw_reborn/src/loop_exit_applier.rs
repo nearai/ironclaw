@@ -221,13 +221,33 @@ where
         if request.reply_message_refs.is_empty() && request.result_refs.is_empty() {
             return Ok(true);
         }
-        let thread_scope = match &self.thread_scope {
+        let mut thread_scope = match &self.thread_scope {
             Some(thread_scope) => {
                 ensure_thread_scope_matches_turn_scope(thread_scope, request.scope)?;
                 thread_scope.clone()
             }
             None => thread_scope_from_turn_scope(request.scope)?,
         };
+        // Multi-user: the loop host wrote this thread under the run's
+        // authenticated owner (`owners/<caller>`), so the completion-ref
+        // read must use the same owner — otherwise it looks in the wrong
+        // subtree and fails with `unknown thread`. Resolve the owner from
+        // the run's actor, mirroring the loop host's per-caller scoping.
+        // Only when the base scope is owner-scoped (the serve path pins a
+        // runtime owner); an owner-less applier keeps its shared/system
+        // slot, so single-owner and owner-agnostic flows are unchanged.
+        if thread_scope.owner_user_id.is_some() {
+            let run_state = self
+                .turn_state_store
+                .get_run_state(GetRunStateRequest {
+                    scope: request.scope.clone(),
+                    run_id: request.run_id,
+                })
+                .await?;
+            if let Some(actor) = run_state.actor {
+                thread_scope.owner_user_id = Some(actor.user_id);
+            }
+        }
         let history = self
             .thread_service
             .list_thread_history(ThreadHistoryRequest {
