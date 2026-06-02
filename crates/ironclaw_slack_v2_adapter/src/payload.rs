@@ -182,7 +182,7 @@ fn try_parse_user_message(
         attachments,
         trigger,
     };
-    if let Some(payload) = parse_interaction_resolution(parts.text.as_str())? {
+    if let Some(payload) = parse_interaction_resolution(parts.text.as_str(), parts.trigger)? {
         return build_payload_message(event_id, &parts, payload);
     }
     build_user_message(event_id, parts)
@@ -242,6 +242,7 @@ fn build_payload_message(
 
 fn parse_interaction_resolution(
     text: &str,
+    source_trigger: ProductTriggerReason,
 ) -> Result<Option<ProductInboundPayload>, SlackPayloadParseError> {
     let mut parts = text.split_whitespace();
     let Some(first) = parts.next() else {
@@ -256,6 +257,7 @@ fn parse_interaction_resolution(
                 return Ok(None);
             }
             ApprovalResolutionPayload::new(gate_ref, ApprovalDecision::ApproveOnce)
+                .map(|payload| payload.with_source_trigger(source_trigger))
                 .map(ProductInboundPayload::ApprovalResolution)
                 .map(Some)
                 .map_err(adapter_error_to_payload_error)
@@ -268,6 +270,7 @@ fn parse_interaction_resolution(
                 return Ok(None);
             }
             ApprovalResolutionPayload::new(gate_ref, ApprovalDecision::Deny)
+                .map(|payload| payload.with_source_trigger(source_trigger))
                 .map(ProductInboundPayload::ApprovalResolution)
                 .map(Some)
                 .map_err(adapter_error_to_payload_error)
@@ -284,6 +287,7 @@ fn parse_interaction_resolution(
                     return Ok(None);
                 }
                 AuthResolutionPayload::new(auth_request_ref, AuthResolutionResult::Denied)
+                    .map(|payload| payload.with_source_trigger(source_trigger))
                     .map(ProductInboundPayload::AuthResolution)
                     .map(Some)
                     .map_err(adapter_error_to_payload_error)

@@ -699,13 +699,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn gate_prompts_are_deferred_to_approval_service() {
+    async fn auth_prompts_render_to_slack_http_egress() {
         let adapter = SlackV2Adapter::new(config());
         let egress = FakeProtocolHttpEgress::new(vec![SLACK_API_HOST.to_string()]);
+        egress.allow_credential_handle("slack_bot_token");
         let sink = FakeOutboundDeliverySink::new();
+        let run_id = TurnRunId::new();
         let payload =
             ProductOutboundPayload::AuthPrompt(ironclaw_product_adapters::AuthPromptView {
-                turn_run_id: TurnRunId::new(),
+                turn_run_id: run_id,
                 auth_request_ref: "auth-1".to_string(),
                 headline: "Auth required".to_string(),
                 body: "Open WebUI".to_string(),
@@ -719,13 +721,22 @@ mod tests {
         let outcome = adapter
             .render_outbound(envelope(payload), &egress, &sink)
             .await
-            .expect("deferred");
+            .expect("auth prompt renders");
 
-        assert_eq!(outcome, ProductRenderOutcome::Deferred);
-        assert!(egress.calls().is_empty());
+        assert_eq!(outcome, ProductRenderOutcome::DeliveryRecorded);
+        let calls = egress.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].path, "/api/chat.postMessage");
+        let body: serde_json::Value = serde_json::from_slice(&calls[0].body).expect("body json");
+        assert_eq!(body["channel"], "C123");
+        assert_eq!(
+            body["text"],
+            "Auth required\n\nOpen WebUI\n\nReply `auth deny auth-1` to cancel this blocked run."
+        );
+        assert_eq!(body["thread_ts"], "1710000000.000001");
         assert!(matches!(
             sink.statuses().as_slice(),
-            [DeliveryStatus::Deferred { reason, .. }] if reason.to_string() == RedactedString::placeholder()
+            [DeliveryStatus::Delivered { run_id: Some(delivered), .. }] if delivered == &run_id
         ));
     }
 

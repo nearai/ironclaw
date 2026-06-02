@@ -803,7 +803,7 @@ mod tests {
 
     use axum::http::HeaderMap;
     use ironclaw_product_adapters::auth::mark_request_signature_verified;
-    use ironclaw_wasm_product_adapters::WebhookProcessOutcome;
+    use ironclaw_wasm_product_adapters::{ImmediateAckWorkflowObserver, WebhookProcessOutcome};
 
     use super::*;
 
@@ -828,6 +828,7 @@ mod tests {
             &'a self,
             _body: &'a [u8],
             _evidence: &'a ProtocolAuthEvidence,
+            _observer: Option<Arc<dyn ImmediateAckWorkflowObserver>>,
         ) -> Pin<Box<dyn Future<Output = Result<WebhookProcessOutcome, RunnerError>> + Send + 'a>>
         {
             Box::pin(async { Ok(WebhookProcessOutcome::AcceptedForAsyncDispatch) })

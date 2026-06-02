@@ -287,21 +287,29 @@ fn resolve_binding_request(envelope: &ProductInboundEnvelope) -> ResolveBindingR
 
 fn route_kind_for_payload(payload: &ProductInboundPayload) -> ProductConversationRouteKind {
     match payload {
-        ProductInboundPayload::UserMessage(message) => match message.trigger {
-            ProductTriggerReason::DirectChat => ProductConversationRouteKind::Direct,
-            ProductTriggerReason::BotMention
-            | ProductTriggerReason::ReplyToBot
-            | ProductTriggerReason::BotCommand
-            | ProductTriggerReason::LinkedThreadAction => ProductConversationRouteKind::Shared,
-        },
-        ProductInboundPayload::Command(command) => match command.trigger {
-            ProductTriggerReason::DirectChat => ProductConversationRouteKind::Direct,
-            ProductTriggerReason::BotMention
-            | ProductTriggerReason::ReplyToBot
-            | ProductTriggerReason::BotCommand
-            | ProductTriggerReason::LinkedThreadAction => ProductConversationRouteKind::Shared,
-        },
-        _ => ProductConversationRouteKind::Direct,
+        ProductInboundPayload::UserMessage(message) => route_kind_for_trigger(message.trigger),
+        ProductInboundPayload::Command(command) => route_kind_for_trigger(command.trigger),
+        ProductInboundPayload::ApprovalResolution(resolution) => resolution
+            .source_trigger
+            .map(route_kind_for_trigger)
+            .unwrap_or(ProductConversationRouteKind::Direct),
+        ProductInboundPayload::AuthResolution(resolution) => resolution
+            .source_trigger
+            .map(route_kind_for_trigger)
+            .unwrap_or(ProductConversationRouteKind::Direct),
+        ProductInboundPayload::SubscriptionRequest(_)
+        | ProductInboundPayload::LinkedThreadAction(_)
+        | ProductInboundPayload::NoOp => ProductConversationRouteKind::Direct,
+    }
+}
+
+fn route_kind_for_trigger(trigger: ProductTriggerReason) -> ProductConversationRouteKind {
+    match trigger {
+        ProductTriggerReason::DirectChat => ProductConversationRouteKind::Direct,
+        ProductTriggerReason::BotMention
+        | ProductTriggerReason::ReplyToBot
+        | ProductTriggerReason::BotCommand
+        | ProductTriggerReason::LinkedThreadAction => ProductConversationRouteKind::Shared,
     }
 }
 

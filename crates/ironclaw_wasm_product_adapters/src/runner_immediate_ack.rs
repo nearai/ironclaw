@@ -85,25 +85,24 @@ impl NativeProductAdapterRunner {
             }
         }
         tasks.spawn(async move {
-            let _permit = permit;
-            // Timeout drops the in-flight workflow future. That is the intended
-            // cancellation boundary for this generic async trait call: the
-            // runner does not hold a separate task handle or protocol-specific
-            // resource owner to abort. Workflows that open DB/network resources
-            // must make their own futures cancellation-safe at await points.
-            match tokio::time::timeout(workflow_timeout, workflow.accept_inbound(workflow_envelope))
-                .await
-            {
-                Ok(Ok(ack)) if ack.retry_disposition() == InboundRetryDisposition::Retry => {
-                    tracing::warn!(
-                        target = "ironclaw::product_adapter::runner",
-                        "async webhook workflow dispatch requested retry after protocol ack; event was not retried by protocol transport"
-                    );
-                    if let Some(observer) = observer {
-                        observer.observe_workflow_ack(envelope, ack).await;
-                    }
-                }
+            let workflow_result = {
+                let _permit = permit;
+                // Timeout drops the in-flight workflow future. That is the intended
+                // cancellation boundary for this generic async trait call: the
+                // runner does not hold a separate task handle or protocol-specific
+                // resource owner to abort. Workflows that open DB/network resources
+                // must make their own futures cancellation-safe at await points.
+                tokio::time::timeout(workflow_timeout, workflow.accept_inbound(workflow_envelope))
+                    .await
+            };
+            match workflow_result {
                 Ok(Ok(ack)) => {
+                    if ack.retry_disposition() == InboundRetryDisposition::Retry {
+                        tracing::warn!(
+                            target = "ironclaw::product_adapter::runner",
+                            "async webhook workflow dispatch requested retry after protocol ack; event was not retried by protocol transport"
+                        );
+                    }
                     if let Some(observer) = observer {
                         observer.observe_workflow_ack(envelope, ack).await;
                     }
