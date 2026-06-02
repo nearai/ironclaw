@@ -1371,7 +1371,7 @@ mod tests {
         let list_files = capabilities["google-drive.list_files"];
         assert_eq!(
             list_files.runtime_credentials[0].provider_scopes,
-            vec!["https://www.googleapis.com/auth/drive".to_string()]
+            vec!["https://www.googleapis.com/auth/drive.readonly".to_string()]
         );
         assert!(
             !list_files
