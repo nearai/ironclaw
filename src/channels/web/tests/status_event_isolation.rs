@@ -312,6 +312,7 @@ fn _compile_time_appevent_variant_check(e: AppEvent) {
         | AppEvent::LeaseRevoked { .. }
         | AppEvent::LeaseExpired { .. }
         | AppEvent::SelfImprovement { .. }
-        | AppEvent::OrchestratorRollback { .. } => {}
+        | AppEvent::OrchestratorRollback { .. }
+        | AppEvent::ExternalToolCall { .. } => {}
     }
 }

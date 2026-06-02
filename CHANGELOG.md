@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.29.0](https://github.com/nearai/ironclaw/compare/ironclaw-v0.28.2...ironclaw-v0.29.0) - 2026-05-26
+
+### Added
+
+- *(channels)* add WeCom channel ([#2394](https://github.com/nearai/ironclaw/pull/2394))
+- *(web)* support externally-provided tools in Responses API ([#3122](https://github.com/nearai/ironclaw/pull/3122))
+- *(gateway)* add logs download button ([#3588](https://github.com/nearai/ironclaw/pull/3588))
+- *(tui)* add Ctrl-S log download from the Logs tab ([#3658](https://github.com/nearai/ironclaw/pull/3658))
+- *(engine)* add `IRONCLAW_DISABLE_CODEACT` flag for disabling v2 CodeAct ([#3665](https://github.com/nearai/ironclaw/pull/3665))
+
+### Fixed
+
+- *(markdown)* avoid converting emphasis inside generated Slack angle links ([#3532](https://github.com/nearai/ironclaw/pull/3532))
+- *(web)* restore NEAR AI API Key and Fetch Models in configure UI ([#3742](https://github.com/nearai/ironclaw/pull/3742))
+
+### Changed
+
+- *(embeddings)* extract embeddings into `ironclaw_embeddings` crate ([#3739](https://github.com/nearai/ironclaw/pull/3739))
+- *(deps)* bump dependencies to address security advisories ([#3719](https://github.com/nearai/ironclaw/pull/3719))
+- *(deps)* update Wasmtime to clear cargo-deny advisory ([#4028](https://github.com/nearai/ironclaw/pull/4028))
+
+### CI / Release
+
+- *(canary)* improve live canary counts, chat-install probe, and strict xfails ([#3682](https://github.com/nearai/ironclaw/pull/3682))
+- *(ci)* add `/benchmark` slash-command dispatcher ([#3808](https://github.com/nearai/ironclaw/pull/3808))
+- *(ci)* grant `pull-requests: write` for `/benchmark` reactions endpoint ([#3835](https://github.com/nearai/ironclaw/pull/3835))
+- *(ci)* post benchmark "started" comment with dispatcher run link ([#3836](https://github.com/nearai/ironclaw/pull/3836))
+
+### Documentation
+
+- *(api)* document the Responses API end-to-end ([#3709](https://github.com/nearai/ironclaw/pull/3709))
+
 ## [0.28.2](https://github.com/nearai/ironclaw/compare/ironclaw-v0.28.1...ironclaw-v0.28.2) - 2026-05-14
 
 ### Fixed

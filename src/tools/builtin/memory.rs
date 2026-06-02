@@ -1683,7 +1683,7 @@ mod tests {
             let pool = crate::channels::web::platform::state::WorkspacePool::new(
                 db,
                 None,
-                crate::workspace::EmbeddingCacheConfig::default(),
+                ironclaw_embeddings::EmbeddingCacheConfig::default(),
                 crate::config::WorkspaceSearchConfig::default(),
                 crate::config::WorkspaceConfig::default(),
             );
@@ -1704,7 +1704,7 @@ mod tests {
             let pool = crate::channels::web::platform::state::WorkspacePool::new(
                 db,
                 None,
-                crate::workspace::EmbeddingCacheConfig::default(),
+                ironclaw_embeddings::EmbeddingCacheConfig::default(),
                 crate::config::WorkspaceSearchConfig::default(),
                 crate::config::WorkspaceConfig::default(),
             );

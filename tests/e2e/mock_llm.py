@@ -1255,6 +1255,16 @@ def match_tool_call(messages: list[dict], has_tools: bool) -> list[dict] | None:
     # Turn 4 (after OAuth completes): mock LLM falls through to the
     #         tool-result-summary path returning the "Quarterly update" text.
     if "check gmail unread" in lower or "gmail unread" in lower:
+        # Three engine paths can surface gmail-unavailable depending on
+        # whether gmail is in the registry, installed-but-blocked, or
+        # entirely unknown:
+        #   * "Extension not installed: gmail"           — registry has it, not installed
+        #   * "is not callable in this execution context" — installed but engine-v2 blocked
+        #   * "Tool gmail not found"                      — not even in the dispatcher (workflow-canary stack)
+        # A real LLM would treat all three the same way and reach for
+        # `tool_install`. Mirror that — restricting to the first two
+        # made the workflow-canary `tool_install_chat` probe fall
+        # through to text and never recover.
         gmail_error = next(
             (
                 tr
@@ -1263,6 +1273,7 @@ def match_tool_call(messages: list[dict], has_tools: bool) -> list[dict] | None:
                 and (
                     "Extension not installed:" in tr["content"]
                     or "is not callable in this execution context" in tr["content"]
+                    or "Tool gmail not found" in tr["content"]
                 )
             ),
             None,
@@ -1280,6 +1291,7 @@ def match_tool_call(messages: list[dict], has_tools: bool) -> list[dict] | None:
         if install_done and not any(
             tr["name"] == "gmail" and "is not callable" not in tr["content"]
             and "Extension not installed" not in tr["content"]
+            and "Tool gmail not found" not in tr["content"]
             for tr in recent_tool_results
         ):
             # Retry gmail after install — the engine's auth preflight will

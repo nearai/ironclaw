@@ -411,43 +411,75 @@ fn check_workspace_dir() -> CheckResult {
 // ── Embeddings ──────────────────────────────────────────────
 
 fn check_embeddings(settings: &Settings) -> CheckResult {
-    match crate::config::EmbeddingsConfig::resolve(settings) {
-        Ok(config) => {
-            if !config.enabled {
-                return CheckResult::Skip("disabled (set EMBEDDING_ENABLED=true)".into());
-            }
-            let has_creds = match config.provider.as_str() {
-                "openai" => config.openai_api_key().is_some(),
-                "nearai" => {
-                    // NearAiEmbeddings uses SessionManager::get_token() which
-                    // only returns session tokens, NOT NEARAI_API_KEY
-                    // (src/workspace/embeddings.rs:309, src/llm/session.rs:132).
-                    let session_path = crate::config::llm::default_session_path();
-                    session_path.exists()
-                        && std::fs::read_to_string(&session_path)
-                            .map(|s| !s.trim().is_empty())
-                            .unwrap_or(false)
-                }
-                "ollama" => true, // local, no creds needed
-                _ => config.openai_api_key().is_some(),
-            };
-            if has_creds {
-                CheckResult::Pass(format!(
-                    "provider={}, model={}",
-                    config.provider, config.model
-                ))
-            } else {
-                let hint = match config.provider.as_str() {
-                    "nearai" => "run `ironclaw onboard` to create a session",
-                    _ => "set OPENAI_API_KEY",
-                };
-                CheckResult::Fail(format!(
-                    "provider={} but credentials missing ({})",
-                    config.provider, hint
-                ))
-            }
+    // Resolve embeddings with a placeholder URL first. The URL field is
+    // only consulted at runtime by the NEAR AI provider, so a non-NEAR AI
+    // provider — even an enabled one — must not report a broken LLM config
+    // as an embeddings failure.
+    let placeholder_url = "https://placeholder.invalid";
+    let initial =
+        match crate::config::embeddings::resolve_embeddings_config(settings, placeholder_url) {
+            Ok(c) => c,
+            Err(e) => return CheckResult::Fail(format!("config error: {e}")),
+        };
+    if !initial.enabled {
+        return CheckResult::Skip("disabled (set EMBEDDING_ENABLED=true)".into());
+    }
+
+    // Only re-resolve with the real NEAR AI base URL when the provider
+    // actually needs it — otherwise an unrelated LLM resolve error would
+    // be reported as an embeddings failure.
+    let config = if initial.provider == "nearai" {
+        let nearai_base_url = match crate::config::llm::resolve(settings) {
+            Ok(llm) => llm.nearai.base_url,
+            Err(e) => return CheckResult::Fail(format!("could not resolve LLM config: {e}")),
+        };
+        match crate::config::embeddings::resolve_embeddings_config(settings, &nearai_base_url) {
+            Ok(c) => c,
+            Err(e) => return CheckResult::Fail(format!("config error: {e}")),
         }
-        Err(e) => CheckResult::Fail(format!("config error: {e}")),
+    } else {
+        initial
+    };
+
+    let has_creds = match config.provider.as_str() {
+        "openai" => config.openai_api_key().is_some(),
+        "nearai" => {
+            // NearAiEmbeddings uses SessionManager::get_token() which only
+            // returns session tokens, NOT NEARAI_API_KEY.
+            let session_path = crate::config::llm::default_session_path();
+            session_path.exists()
+                && std::fs::read_to_string(&session_path)
+                    .map(|s| !s.trim().is_empty())
+                    .unwrap_or(false)
+        }
+        "ollama" => true, // local, no creds needed
+        "bedrock" => {
+            // AWS SDK credential chain — accept a named profile or static
+            // access-key + secret. Instance-role / IMDS credentials aren't
+            // visible from env and will surface here as Fail; that's
+            // acceptable for a static self-check. Mirrors the gateway's
+            // Bedrock setup-hint logic in `web/handlers/llm.rs`.
+            std::env::var("AWS_PROFILE").is_ok()
+                || (std::env::var("AWS_ACCESS_KEY_ID").is_ok()
+                    && std::env::var("AWS_SECRET_ACCESS_KEY").is_ok())
+        }
+        _ => config.openai_api_key().is_some(),
+    };
+    if has_creds {
+        CheckResult::Pass(format!(
+            "provider={}, model={}",
+            config.provider, config.model
+        ))
+    } else {
+        let hint = match config.provider.as_str() {
+            "nearai" => "run `ironclaw onboard` to create a session",
+            "bedrock" => "set AWS_PROFILE or AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY",
+            _ => "set OPENAI_API_KEY",
+        };
+        CheckResult::Fail(format!(
+            "provider={} but credentials missing ({})",
+            config.provider, hint
+        ))
     }
 }
 
@@ -1064,6 +1096,188 @@ mod tests {
             }
             other => panic!(
                 "expected Skip for disabled embeddings, got: {}",
+                format_result(&other)
+            ),
+        }
+    }
+
+    /// Regression: PR #3739 review (P2 #5). The doctor used to resolve LLM
+    /// config to extract `nearai.base_url` before consulting the
+    /// `enabled` flag — so a broken LLM env (e.g., public-HTTP NEAR AI
+    /// base URL that fails SSRF validation) reported the Embeddings
+    /// check as Fail even when embeddings were disabled.
+    /// Regression: PR #3739 Copilot review. Once the disabled-skip
+    /// short-circuit was fixed, an *enabled* non-`nearai` provider
+    /// (e.g. `ollama`) still resolved LLM config to extract the NEAR AI
+    /// base URL — so an invalid LLM env reported the Embeddings check
+    /// as Fail even though embeddings wouldn't have used the URL. The
+    /// LLM resolve must only run when `provider == "nearai"`.
+    #[test]
+    fn check_embeddings_non_nearai_ignores_invalid_llm_config() {
+        let _guard = crate::config::helpers::lock_env();
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
+        unsafe {
+            std::env::set_var("EMBEDDING_ENABLED", "true");
+            std::env::set_var("EMBEDDING_PROVIDER", "ollama");
+            // Public-HTTP base URL — `validate_operator_base_url` in the
+            // LLM resolver rejects this. The Ollama embeddings path
+            // does not consult LLM config, so the doctor must not
+            // surface this as an embeddings failure.
+            std::env::set_var("NEARAI_BASE_URL", "http://8.8.8.8/v1");
+        }
+        let settings = Settings::default();
+        let result = check_embeddings(&settings);
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("EMBEDDING_ENABLED");
+            std::env::remove_var("EMBEDDING_PROVIDER");
+            std::env::remove_var("NEARAI_BASE_URL");
+        }
+        match result {
+            CheckResult::Pass(msg) => {
+                assert!(
+                    msg.contains("ollama"),
+                    "expected Pass mentioning ollama, got: {msg}"
+                );
+            }
+            other => panic!(
+                "expected Pass for Ollama embeddings regardless of broken LLM env, got: {}",
+                format_result(&other)
+            ),
+        }
+    }
+
+    #[test]
+    fn check_embeddings_disabled_skips_even_when_llm_config_invalid() {
+        let _guard = crate::config::helpers::lock_env();
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
+        unsafe {
+            std::env::remove_var("EMBEDDING_ENABLED");
+            // Public-HTTP base URL — `validate_operator_base_url` in the
+            // LLM resolver rejects this. The doctor must not see the
+            // resulting error, because embeddings are disabled.
+            std::env::set_var("NEARAI_BASE_URL", "http://8.8.8.8/v1");
+        }
+        let settings = Settings::default();
+        let result = check_embeddings(&settings);
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("NEARAI_BASE_URL");
+        }
+        match result {
+            CheckResult::Skip(msg) => {
+                assert!(
+                    msg.contains("disabled"),
+                    "expected 'disabled' Skip even with broken LLM env, got: {msg}"
+                );
+            }
+            other => panic!(
+                "expected Skip for disabled embeddings with broken LLM, got: {}",
+                format_result(&other)
+            ),
+        }
+    }
+
+    /// Snapshot and restore an env var across a single test body — needed
+    /// because the AWS SDK env vars (`AWS_PROFILE`, `AWS_ACCESS_KEY_ID`,
+    /// `AWS_SECRET_ACCESS_KEY`) may be set on dev/CI hosts and would
+    /// otherwise leak between the two Bedrock tests below.
+    struct EnvSnapshot {
+        name: &'static str,
+        prev: Option<String>,
+    }
+    impl EnvSnapshot {
+        fn take(name: &'static str) -> Self {
+            let prev = std::env::var(name).ok();
+            // SAFETY: Under ENV_MUTEX, no concurrent env access.
+            unsafe { std::env::remove_var(name) };
+            Self { name, prev }
+        }
+    }
+    impl Drop for EnvSnapshot {
+        fn drop(&mut self) {
+            // SAFETY: Under ENV_MUTEX.
+            unsafe {
+                match &self.prev {
+                    Some(v) => std::env::set_var(self.name, v),
+                    None => std::env::remove_var(self.name),
+                }
+            }
+        }
+    }
+
+    /// Regression: PR #3739 Copilot review. `check_embeddings` used to
+    /// fall through to the `_` arm for `provider=bedrock`, treating
+    /// missing `OPENAI_API_KEY` as the credential failure. Bedrock has
+    /// its own credential chain (AWS profile or static access-key +
+    /// secret); the doctor must recognise it.
+    #[test]
+    fn check_embeddings_bedrock_with_aws_profile_passes() {
+        let _guard = crate::config::helpers::lock_env();
+        // Snapshot ambient AWS env so we restore it after the test.
+        let _aws_profile = EnvSnapshot::take("AWS_PROFILE");
+        let _aws_access = EnvSnapshot::take("AWS_ACCESS_KEY_ID");
+        let _aws_secret = EnvSnapshot::take("AWS_SECRET_ACCESS_KEY");
+        let _embed_enabled = EnvSnapshot::take("EMBEDDING_ENABLED");
+        let _embed_provider = EnvSnapshot::take("EMBEDDING_PROVIDER");
+        let _openai_key = EnvSnapshot::take("OPENAI_API_KEY");
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::set_var("EMBEDDING_ENABLED", "true");
+            std::env::set_var("EMBEDDING_PROVIDER", "bedrock");
+            std::env::set_var("AWS_PROFILE", "default");
+        }
+
+        let settings = Settings::default();
+        let result = check_embeddings(&settings);
+        match result {
+            CheckResult::Pass(msg) => {
+                assert!(
+                    msg.contains("bedrock"),
+                    "expected Pass mentioning bedrock, got: {msg}"
+                );
+            }
+            other => panic!(
+                "expected Pass for Bedrock with AWS_PROFILE set, got: {}",
+                format_result(&other)
+            ),
+        }
+    }
+
+    /// Regression: PR #3739 Copilot review. The credential-missing hint
+    /// used to suggest `set OPENAI_API_KEY` for any non-nearai provider,
+    /// including Bedrock. Confirm Bedrock now surfaces an AWS-specific
+    /// hint.
+    #[test]
+    fn check_embeddings_bedrock_without_aws_creds_fails_with_aws_hint() {
+        let _guard = crate::config::helpers::lock_env();
+        let _aws_profile = EnvSnapshot::take("AWS_PROFILE");
+        let _aws_access = EnvSnapshot::take("AWS_ACCESS_KEY_ID");
+        let _aws_secret = EnvSnapshot::take("AWS_SECRET_ACCESS_KEY");
+        let _embed_enabled = EnvSnapshot::take("EMBEDDING_ENABLED");
+        let _embed_provider = EnvSnapshot::take("EMBEDDING_PROVIDER");
+        let _openai_key = EnvSnapshot::take("OPENAI_API_KEY");
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::set_var("EMBEDDING_ENABLED", "true");
+            std::env::set_var("EMBEDDING_PROVIDER", "bedrock");
+        }
+
+        let settings = Settings::default();
+        let result = check_embeddings(&settings);
+        match result {
+            CheckResult::Fail(msg) => {
+                assert!(
+                    msg.contains("AWS_PROFILE") && msg.contains("AWS_ACCESS_KEY_ID"),
+                    "expected Bedrock-specific hint, got: {msg}"
+                );
+                assert!(
+                    !msg.contains("OPENAI_API_KEY"),
+                    "Bedrock failure must not mention OPENAI_API_KEY: {msg}"
+                );
+            }
+            other => panic!(
+                "expected Fail for Bedrock with no AWS creds, got: {}",
                 format_result(&other)
             ),
         }

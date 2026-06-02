@@ -505,7 +505,8 @@ async fn async_main() -> anyhow::Result<()> {
         Arc<WasmChannelRouter>,
     )> = None;
 
-    // Create CLI channel (REPL or TUI — mutually exclusive, both claim stdin)
+    // Create stdin channel (REPL or TUI — mutually exclusive, both claim stdin).
+    // TUI has its own config, so it must not depend on the CLI channel being enabled.
     let tui_mode = config.channels.tui.is_some();
 
     #[cfg(feature = "tui")]
@@ -616,7 +617,7 @@ async fn async_main() -> anyhow::Result<()> {
     #[cfg(not(feature = "tui"))]
     if tui_mode {
         tracing::warn!(
-            "CLI_MODE=tui requested but the 'tui' feature is not enabled. Falling back to REPL."
+            "TUI mode is configured but the 'tui' feature is not enabled. Falling back to REPL if CLI is enabled."
         );
     }
 
