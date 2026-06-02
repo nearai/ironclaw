@@ -86,7 +86,8 @@ pub use reasoning::{
 };
 pub use reasoning::{
     clean_response, contains_codex_text_tool_call_syntax,
-    recover_codex_text_tool_calls_from_content, recover_tool_calls_from_content,
+    recover_codex_text_tool_calls_from_content, recover_codex_text_tool_calls_from_tool_names,
+    recover_tool_calls_from_content,
 };
 pub use recording::{MemorySnapshotEntry, RecordingLlm};
 pub use registry::{ProviderDefinition, ProviderProtocol, ProviderRegistry};

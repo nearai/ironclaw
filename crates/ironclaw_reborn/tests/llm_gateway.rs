@@ -375,7 +375,7 @@ async fn gateway_rejects_empty_tool_capable_stop_response_without_text_only_retr
 #[tokio::test]
 async fn gateway_recovers_capability_calls_from_textual_tool_syntax() {
     let provider = Arc::new(ToolAwareProvider::tool_stop_reply(
-        "Searching now.to=demo__echo weirdjson\n{\"message\":\"hello\"}",
+        "Searching now.\nto=demo__echo weirdjson\n{\"message\":\"hello\"}",
     ));
     let gateway = LlmProviderModelGateway::with_provider_identity(
         STATIC_PROVIDER_ID,
@@ -413,7 +413,7 @@ async fn gateway_recovers_capability_calls_from_textual_tool_syntax() {
 #[tokio::test]
 async fn gateway_rejects_unrecovered_textual_tool_syntax() {
     let provider = Arc::new(ToolAwareProvider::tool_stop_reply(
-        "Searching now.to=hidden.tool weirdjson\n{\"message\":\"hello\"}",
+        "Searching now.\nto=hidden.tool weirdjson\n{\"message\":\"hello\"}",
     ));
     let gateway = LlmProviderModelGateway::with_provider_identity(
         STATIC_PROVIDER_ID,

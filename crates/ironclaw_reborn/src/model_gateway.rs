@@ -19,7 +19,7 @@ use ironclaw_llm::{
     ToolCall, ToolCompletionRequest, ToolCompletionResponse, ToolDefinition, clean_response,
     contains_codex_text_tool_call_syntax,
     costs::{default_cost, model_cost},
-    recover_codex_text_tool_calls_from_content,
+    recover_codex_text_tool_calls_from_tool_names,
 };
 use ironclaw_loop_support::{
     HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
@@ -784,11 +784,14 @@ where
             );
         }
         if !tool_definitions.is_empty() {
+            let mut recovery_tool_names = Vec::with_capacity(tool_definitions.len());
             let llm_tool_definitions = tool_definitions
                 .into_iter()
-                .map(provider_tool_definition_to_llm)
+                .map(|definition| {
+                    recovery_tool_names.push(definition.name.clone());
+                    provider_tool_definition_to_llm(definition)
+                })
                 .collect::<Vec<_>>();
-            let recovery_tool_definitions = llm_tool_definitions.clone();
             let tool_request =
                 ToolCompletionRequest::from_completion_request(completion, llm_tool_definitions);
             debug!("reborn model gateway dispatching tool-capable provider request");
@@ -796,10 +799,8 @@ where
                 .complete_with_tools(tool_request)
                 .await
                 .map_err(map_provider_error)?;
-            let response = recover_textual_tool_calls_from_tool_response(
-                response,
-                &recovery_tool_definitions,
-            )?;
+            let response =
+                recover_textual_tool_calls_from_tool_response(response, &recovery_tool_names)?;
             return tool_response_to_host(
                 response,
                 capabilities,
@@ -833,7 +834,7 @@ where
 
 fn recover_textual_tool_calls_from_tool_response(
     response: ToolCompletionResponse,
-    tool_definitions: &[ToolDefinition],
+    tool_names: &[String],
 ) -> Result<ToolCompletionResponse, HostManagedModelError> {
     if !response.tool_calls.is_empty() {
         return Ok(response);
@@ -841,8 +842,7 @@ fn recover_textual_tool_calls_from_tool_response(
     let Some(content) = response.content.as_deref() else {
         return Ok(response);
     };
-    let recovered_tool_calls =
-        recover_codex_text_tool_calls_from_content(content, tool_definitions);
+    let recovered_tool_calls = recover_codex_text_tool_calls_from_tool_names(content, tool_names);
     if recovered_tool_calls.is_empty() {
         if contains_codex_text_tool_call_syntax(content) {
             debug!("reborn model gateway rejected unrecovered textual provider tool-call syntax");

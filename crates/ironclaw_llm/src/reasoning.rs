@@ -1854,10 +1854,30 @@ pub fn recover_codex_text_tool_calls_from_content(
     content: &str,
     available_tools: &[ToolDefinition],
 ) -> Vec<ToolCall> {
-    let tool_names: std::collections::HashSet<&str> =
-        available_tools.iter().map(|t| t.name.as_str()).collect();
+    let tool_names = available_tools
+        .iter()
+        .map(|tool| tool.name.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    recover_codex_text_tool_calls_from_name_set(content, &tool_names)
+}
+
+pub fn recover_codex_text_tool_calls_from_tool_names(
+    content: &str,
+    tool_names: &[String],
+) -> Vec<ToolCall> {
+    let tool_names = tool_names
+        .iter()
+        .map(String::as_str)
+        .collect::<std::collections::HashSet<_>>();
+    recover_codex_text_tool_calls_from_name_set(content, &tool_names)
+}
+
+fn recover_codex_text_tool_calls_from_name_set(
+    content: &str,
+    tool_names: &std::collections::HashSet<&str>,
+) -> Vec<ToolCall> {
     let mut calls = Vec::new();
-    recover_codex_text_tool_calls(content, &tool_names, &mut calls);
+    recover_codex_text_tool_calls(content, tool_names, &mut calls);
     calls
 }
 
@@ -1866,6 +1886,7 @@ fn recover_codex_text_tool_calls(
     tool_names: &std::collections::HashSet<&str>,
     calls: &mut Vec<ToolCall>,
 ) {
+    let code_regions = find_code_regions(content);
     let mut search_from = 0;
     while let Some(offset) = content[search_from..].find("to=") {
         let start = search_from + offset;
@@ -1874,6 +1895,10 @@ fn recover_codex_text_tool_calls(
             continue;
         };
         search_from = end.max(start + 1);
+
+        if !is_recoverable_tool_call_segment(content, start, end, &code_regions) {
+            continue;
+        }
 
         if !tool_names.contains(name.as_str()) {
             continue;
@@ -1890,10 +1915,13 @@ fn recover_codex_text_tool_calls(
 }
 
 pub fn contains_codex_text_tool_call_syntax(content: &str) -> bool {
+    let code_regions = find_code_regions(content);
     let mut search_from = 0;
     while let Some(offset) = content[search_from..].find("to=") {
         let start = search_from + offset;
-        if parse_codex_text_tool_call_at(content, start).is_some() {
+        if let Some((_, _, end)) = parse_codex_text_tool_call_at(content, start)
+            && is_recoverable_tool_call_segment(content, start, end, &code_regions)
+        {
             return true;
         }
         search_from = start + "to=".len();
@@ -1920,7 +1948,12 @@ fn parse_codex_text_tool_call_at(
         return None;
     }
 
-    let brace_start = name_end + content[name_end..].find('{')?;
+    let separator = &content[name_end..];
+    let brace_relative = separator.find('{')?;
+    if !separator[..brace_relative].trim_end().ends_with("json") {
+        return None;
+    }
+    let brace_start = name_end + brace_relative;
     let mut json_stream = serde_json::Deserializer::from_str(&content[brace_start..])
         .into_iter::<serde_json::Value>();
     let arguments = json_stream.next()?.ok()?;
@@ -1995,11 +2028,14 @@ pub fn clean_response(text: &str) -> String {
 }
 
 fn strip_codex_text_tool_calls(text: &str) -> String {
+    let code_regions = find_code_regions(text);
     let mut result = String::with_capacity(text.len());
     let mut cursor = 0;
     while let Some(offset) = text[cursor..].find("to=") {
         let start = cursor + offset;
-        if let Some((_, _, end)) = parse_codex_text_tool_call_at(text, start) {
+        if let Some((_, _, end)) = parse_codex_text_tool_call_at(text, start)
+            && is_recoverable_tool_call_segment(text, start, end, &code_regions)
+        {
             result.push_str(&text[cursor..start]);
             if result.chars().last().is_some_and(|ch| !ch.is_whitespace())
                 && text[end..]
@@ -3211,7 +3247,8 @@ That's my plan."#;
     #[test]
     fn test_recover_codex_text_tool_call() {
         let tools = make_tools(&["notion.notion-search"]);
-        let content = "Searching now.to=notion.notion-search weirdjson\n{\"query\":\"\",\"query_type\":\"internal\"}";
+        let content =
+            "to=notion.notion-search weirdjson\n{\"query\":\"\",\"query_type\":\"internal\"}";
         let calls = recover_tool_calls_from_content(content, &tools);
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].name, "notion.notion-search");
@@ -3225,7 +3262,7 @@ That's my plan."#;
     fn test_recover_multiple_codex_text_tool_calls() {
         let tools = make_tools(&["demo__echo"]);
         let content =
-            "to=demo__echo json\n{\"message\":\"one\"}to=demo__echo json\n{\"message\":\"two\"}";
+            "to=demo__echo json\n{\"message\":\"one\"}\nto=demo__echo json\n{\"message\":\"two\"}";
         let calls = recover_tool_calls_from_content(content, &tools);
         assert_eq!(calls.len(), 2);
         assert_eq!(calls[0].arguments, serde_json::json!({"message":"one"}));
@@ -3241,6 +3278,22 @@ That's my plan."#;
     }
 
     #[test]
+    fn test_recover_codex_text_inline_prose_ignored() {
+        let tools = make_tools(&["demo__echo"]);
+        let content = "Here is an example: to=demo__echo json\n{\"message\":\"hello\"}";
+        let calls = recover_tool_calls_from_content(content, &tools);
+        assert!(calls.is_empty());
+    }
+
+    #[test]
+    fn test_recover_codex_text_in_fenced_code_ignored() {
+        let tools = make_tools(&["demo__echo"]);
+        let content = "```text\nto=demo__echo json\n{\"message\":\"hello\"}\n```";
+        let calls = recover_tool_calls_from_content(content, &tools);
+        assert!(calls.is_empty());
+    }
+
+    #[test]
     fn test_clean_response_strips_bracket_tool_calls() {
         let input = "Let me fetch that.\n[Called tool `http` with arguments: {\"method\":\"GET\",\"url\":\"https://example.com\"}]\nHere are the results.";
         let cleaned = clean_response(input);
@@ -3251,7 +3304,7 @@ That's my plan."#;
 
     #[test]
     fn test_clean_response_strips_codex_text_tool_calls() {
-        let input = "Searching now.to=notion.notion-search weirdjson\n{\"query\":\"\",\"query_type\":\"internal\"}I am waiting for results.";
+        let input = "Searching now.\nto=notion.notion-search weirdjson\n{\"query\":\"\",\"query_type\":\"internal\"}\nI am waiting for results.";
         let cleaned = clean_response(input);
         assert!(!cleaned.contains("to=notion.notion-search"));
         assert!(!cleaned.contains("\"query_type\""));

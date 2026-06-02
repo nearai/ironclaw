@@ -1217,6 +1217,30 @@ data: {"response":{"usage":{"input_tokens":20,"output_tokens":15}}}
     }
 
     #[test]
+    fn test_parse_sse_tool_call_done_events() {
+        let sse = r#"event: response.output_item.added
+data: {"item":{"id":"fc_1","type":"function_call","call_id":"call_1","name":"search"}}
+
+event: response.function_call_arguments.done
+data: {"item_id":"fc_1","arguments":"{\"query\":\"rust\"}"}
+
+event: response.output_item.done
+data: {"item":{"id":"fc_1","type":"function_call","call_id":"call_1","name":"search"}}
+
+event: response.completed
+data: {"response":{"usage":{"input_tokens":20,"output_tokens":15}}}
+
+"#;
+        let result = CodexChatGptProvider::parse_sse_response(sse).unwrap();
+        assert!(result.text.is_empty());
+        assert_eq!(result.pending_tool_calls.len(), 1);
+        let tc = result.pending_tool_calls.get("fc_1").unwrap();
+        assert_eq!(tc.call_id, "call_1");
+        assert_eq!(tc.name, "search");
+        assert_eq!(tc.arguments, "{\"query\":\"rust\"}");
+    }
+
+    #[test]
     fn test_parse_sse_completed_response_output_tool_call_without_deltas() {
         let sse = r#"data: {"type":"response.completed","response":{"output":[{"type":"function_call","id":"fc_1","call_id":"call_1","name":"search","arguments":"{\"query\":\"rust\"}"}],"usage":{"input_tokens":20,"output_tokens":15}}}
 
@@ -1272,6 +1296,33 @@ data: {"response":{"usage":{"input_tokens":20,"output_tokens":15}}}
         assert_eq!(result.text, "Hello world");
         assert_eq!(result.input_tokens, 3);
         assert_eq!(result.output_tokens, 2);
+    }
+
+    #[tokio::test]
+    async fn test_parse_sse_done_marker_stops_parsing() {
+        let sse = r#"data: {"type":"response.output_text.delta","delta":"hello"}
+
+data: [DONE]
+
+data: {"type":"response.output_text.delta","delta":" ignored"}
+
+"#;
+        let result = CodexChatGptProvider::parse_sse_response(sse).unwrap();
+        assert_eq!(result.text, "hello");
+
+        let stream = stream::iter(vec![
+            Ok(Bytes::from_static(
+                b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n",
+            )),
+            Ok(Bytes::from_static(b"data: [DONE]\n\n")),
+            Ok(Bytes::from_static(
+                b"data: {\"type\":\"response.output_text.delta\",\"delta\":\" ignored\"}\n\n",
+            )),
+        ]);
+        let result = CodexChatGptProvider::parse_sse_stream(stream, Duration::from_secs(1))
+            .await
+            .unwrap();
+        assert_eq!(result.text, "hello");
     }
 
     #[tokio::test]
