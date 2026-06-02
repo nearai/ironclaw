@@ -9,7 +9,7 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use crate::identifiers::SummaryArtifactId;
-use crate::summary_artifacts::is_exact_compaction_summary_replay;
+use crate::summary_artifacts::find_overlapping_summary;
 use crate::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
     AppendAssistantDraftRequest, AppendCapabilityDisplayPreviewRequest,
@@ -580,26 +580,10 @@ impl SessionThreadService for InMemorySessionThreadService {
             });
         }
         let content = request.content.as_text().to_string();
-        if request.model_context_policy == Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected)
+        if let Some(overlapping) =
+            find_overlapping_summary(&thread.summary_artifacts, &request, &content)?
         {
-            if let Some(overlapping) = thread.summary_artifacts.iter().find(|summary| {
-                summary.model_context_policy
-                    == Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected)
-                    && ranges_overlap(
-                        request.start_sequence,
-                        request.end_sequence,
-                        summary.start_sequence,
-                        summary.end_sequence,
-                    )
-            }) {
-                if is_exact_compaction_summary_replay(overlapping, &request, &content) {
-                    return Ok(overlapping.clone());
-                }
-                return Err(SessionThreadError::OverlappingSummaryRange {
-                    start_sequence: request.start_sequence,
-                    end_sequence: request.end_sequence,
-                });
-            }
+            return Ok(overlapping.clone());
         }
         let artifact = SummaryArtifact {
             summary_id: SummaryArtifactId::new(),
@@ -808,10 +792,6 @@ fn ensure_user_accepted(
         from: message.status,
         attempted,
     })
-}
-
-fn ranges_overlap(left_start: u64, left_end: u64, right_start: u64, right_end: u64) -> bool {
-    left_start <= right_end && right_start <= left_end
 }
 
 fn context_messages_with_summary_replacements(thread: &StoredThread) -> Vec<ContextMessage> {
