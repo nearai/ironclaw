@@ -8,8 +8,8 @@
  * click. The OAuth callback is handled server-side
  * (`/api/reborn/product-auth/oauth/callback/{flow_id}`), which resumes the
  * paused run. The WebUI observes the resume via the next projection_update
- * (run_status flip) which causes `setPendingGate(null)` via the `item.text`
- * path in useChatEvents.js — so this card unmounts automatically.
+ * (terminal run_status flip), so this card unmounts automatically only after
+ * the run leaves the blocked auth state.
  *
  * Security invariants (issue #4112):
  * - No raw token, PKCE verifier, opaque state, or auth code is ever handled
