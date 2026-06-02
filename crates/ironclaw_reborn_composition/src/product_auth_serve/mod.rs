@@ -891,6 +891,7 @@ pub(super) async fn scoped_update_binding_for_requester(
         Ok(_) => Ok(None),
         Err(AuthProductError::CredentialMissing) => Ok(None),
         Err(AuthProductError::CrossScopeDenied) => Ok(None),
+        Err(AuthProductError::AccountSelectionRequired) => Ok(None),
         Err(error) => Err(ProductAuthRouteFailure::from(error)),
     }
 }
@@ -1468,7 +1469,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn extension_oauth_start_handler_does_not_bind_cross_scope_reconnect_account() {
+    async fn extension_oauth_start_handler_does_not_bind_reconnect_accounts_outside_exact_scope() {
         let secret_store = Arc::new(InMemorySecretStore::new());
         let dcr_provider = Arc::new(
             OAuthDcrProvider::new(
@@ -1516,6 +1517,21 @@ mod tests {
             })
             .await
             .expect("seed stale account");
+        shared
+            .create_account(NewCredentialAccount {
+                scope: AuthProductScope::new(test_resource_scope(), AuthSurface::Callback),
+                provider: AuthProviderId::new("notion").expect("provider"),
+                label: CredentialAccountLabel::new("personal notion").expect("label"),
+                status: CredentialAccountStatus::Configured,
+                ownership: CredentialOwnership::UserReusable,
+                owner_extension: None,
+                granted_extensions: Vec::new(),
+                access_secret: Some(SecretHandle::new("other-notion-access").expect("secret")),
+                refresh_secret: Some(SecretHandle::new("other-notion-refresh").expect("secret")),
+                scopes: Vec::new(),
+            })
+            .await
+            .expect("seed second stale account");
         let flow_invocation_id = InvocationId::new();
 
         let response = app

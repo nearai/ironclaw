@@ -50,7 +50,9 @@ impl ExtensionCredentialSetupService for ProductAuthExtensionCredentialSetup {
             )
             .await
             .map_err(|error| match error {
-                AuthProductError::CredentialMissing => None,
+                AuthProductError::CredentialMissing
+                | AuthProductError::CrossScopeDenied
+                | AuthProductError::AccountSelectionRequired => None,
                 other => Some(map_auth_error(other.into())),
             });
         match account {
@@ -156,5 +158,137 @@ fn services_error(
         retryable,
         field: None,
         validation_code: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::ProductAuthExtensionCredentialSetup;
+    use async_trait::async_trait;
+    use ironclaw_auth::{
+        AuthContinuationEvent, AuthProductError, AuthProductScope, AuthProviderId, AuthSurface,
+        CredentialAccountLabel, CredentialAccountService, CredentialAccountStatus,
+        CredentialOwnership, InMemoryAuthProductServices, NewCredentialAccount,
+    };
+    use ironclaw_host_api::{
+        ExtensionId, InvocationId, ResourceScope, SecretHandle, TenantId, UserId,
+    };
+    use ironclaw_product_workflow::{
+        ExtensionCredentialSetupService, ExtensionCredentialStatusRequest,
+    };
+
+    use crate::{RebornAuthContinuationDispatcher, RebornProductAuthServices};
+
+    struct NoopDispatcher;
+
+    #[async_trait]
+    impl RebornAuthContinuationDispatcher for NoopDispatcher {
+        async fn dispatch_auth_continuation(
+            &self,
+            _event: AuthContinuationEvent,
+        ) -> Result<(), AuthProductError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn credential_status_treats_ambiguous_accounts_as_reconnectable() {
+        let shared = Arc::new(InMemoryAuthProductServices::new());
+        let service = ProductAuthExtensionCredentialSetup::new(Arc::new(
+            RebornProductAuthServices::from_shared(shared.clone(), Arc::new(NoopDispatcher)),
+        ));
+        let scope = test_scope();
+        seed_account(&shared, scope.clone(), "notion primary").await;
+        seed_account(&shared, scope.clone(), "notion secondary").await;
+
+        let status = service
+            .credential_status(ExtensionCredentialStatusRequest {
+                scope,
+                provider: AuthProviderId::new("notion").expect("provider"),
+                provider_scopes: Vec::new(),
+                requester_extension: ExtensionId::new("notion").expect("extension"),
+            })
+            .await
+            .expect("status lookup should not block setup");
+
+        assert!(status.is_none());
+    }
+
+    #[tokio::test]
+    async fn credential_status_treats_unauthorized_accounts_as_reconnectable() {
+        let shared = Arc::new(InMemoryAuthProductServices::new());
+        let service = ProductAuthExtensionCredentialSetup::new(Arc::new(
+            RebornProductAuthServices::from_shared(shared.clone(), Arc::new(NoopDispatcher)),
+        ));
+        let scope = test_scope();
+        shared
+            .create_account(NewCredentialAccount {
+                scope: scope.clone(),
+                provider: AuthProviderId::new("notion").expect("provider"),
+                label: CredentialAccountLabel::new("admin notion").expect("label"),
+                status: CredentialAccountStatus::Configured,
+                ownership: CredentialOwnership::SharedAdminManaged,
+                owner_extension: None,
+                granted_extensions: vec![ExtensionId::new("other-extension").expect("extension")],
+                access_secret: Some(SecretHandle::new("admin-notion-access").expect("secret")),
+                refresh_secret: None,
+                scopes: Vec::new(),
+            })
+            .await
+            .expect("seed admin account");
+
+        let status = service
+            .credential_status(ExtensionCredentialStatusRequest {
+                scope,
+                provider: AuthProviderId::new("notion").expect("provider"),
+                provider_scopes: Vec::new(),
+                requester_extension: ExtensionId::new("notion").expect("extension"),
+            })
+            .await
+            .expect("status lookup should not block setup");
+
+        assert!(status.is_none());
+    }
+
+    async fn seed_account(
+        shared: &InMemoryAuthProductServices,
+        scope: AuthProductScope,
+        label: &str,
+    ) {
+        let handle_label = label.replace(' ', "-");
+        shared
+            .create_account(NewCredentialAccount {
+                scope,
+                provider: AuthProviderId::new("notion").expect("provider"),
+                label: CredentialAccountLabel::new(label.to_string()).expect("label"),
+                status: CredentialAccountStatus::Configured,
+                ownership: CredentialOwnership::UserReusable,
+                owner_extension: None,
+                granted_extensions: Vec::new(),
+                access_secret: Some(
+                    SecretHandle::new(format!("{handle_label}-access")).expect("secret"),
+                ),
+                refresh_secret: None,
+                scopes: Vec::new(),
+            })
+            .await
+            .expect("seed account");
+    }
+
+    fn test_scope() -> AuthProductScope {
+        AuthProductScope::new(
+            ResourceScope {
+                tenant_id: TenantId::new("tenant-alpha").expect("tenant"),
+                user_id: UserId::new("user-alpha").expect("user"),
+                agent_id: None,
+                project_id: None,
+                mission_id: None,
+                thread_id: None,
+                invocation_id: InvocationId::new(),
+            },
+            AuthSurface::Callback,
+        )
     }
 }
