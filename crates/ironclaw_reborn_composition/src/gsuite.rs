@@ -9,11 +9,11 @@ use ironclaw_extensions::{
 use ironclaw_first_party_extensions::{
     GsuiteCapabilitySpec, GsuiteCredentialStageError, GsuiteCredentialStageRequest,
     GsuiteCredentialStager, GsuiteDispatchError, GsuiteDispatchRequest, GsuiteExecutor,
-    GsuitePackageSpec, gsuite_package_specs, gsuite_resource_profile,
+    GsuitePackageSpec, find_gsuite_capability, gsuite_package_specs, gsuite_resource_profile,
 };
 use ironclaw_host_api::{
     CapabilityId, CapabilityProfileSchemaRef, ExtensionId, HostApiError, RequestedTrustClass,
-    TrustClass, VirtualPath,
+    RuntimeCredentialAccountProviderId, RuntimeCredentialAuthRequirement, TrustClass, VirtualPath,
 };
 use ironclaw_host_runtime::{
     FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
@@ -91,7 +91,7 @@ impl FirstPartyCapabilityHandler for GsuiteFirstPartyHandler {
                 runtime_http_egress: egress,
             })
             .await
-            .map_err(gsuite_error)?;
+            .map_err(|error| gsuite_error(error, &request.capability_id))?;
         Ok(FirstPartyCapabilityResult::new(result.output, result.usage))
     }
 }
@@ -152,24 +152,46 @@ fn capability_manifest(
 }
 
 /// Convert a [`GsuiteDispatchError`] into the neutral [`FirstPartyCapabilityError`].
-///
-/// Recovery context carried by [`GsuiteCredentialDispatchReason::Recovery`] and
-/// [`GsuiteCredentialDispatchReason::MissingScopes`] (recovery kind, provider id,
-/// available accounts, missing OAuth scopes) is intentionally dropped here:
-/// [`FirstPartyCapabilityError`] has no recovery-payload field.  Upper services
-/// receive a generic `AuthRequired` gate.  To thread structured recovery hints
-/// through to the runtime, `FirstPartyCapabilityError::AuthRequired` must be
-/// extended with an opaque reason payload (tracked as a follow-up).
-fn gsuite_error(error: GsuiteDispatchError) -> FirstPartyCapabilityError {
+fn gsuite_error(
+    error: GsuiteDispatchError,
+    capability_id: &CapabilityId,
+) -> FirstPartyCapabilityError {
     let usage = error.usage().cloned();
     let base = match error.auth_requirement() {
-        Some(required_secrets) => FirstPartyCapabilityError::auth_required_with(required_secrets),
+        Some(required_secrets) => FirstPartyCapabilityError::auth_required_with_context(
+            required_secrets,
+            gsuite_credential_requirements(capability_id),
+        ),
         None => FirstPartyCapabilityError::new(error.kind()),
     };
     match usage {
         Some(u) => base.with_usage(u),
         None => base,
     }
+}
+
+fn gsuite_credential_requirements(
+    capability_id: &CapabilityId,
+) -> Vec<RuntimeCredentialAuthRequirement> {
+    let Some((package, capability)) = find_gsuite_capability(capability_id.as_str()) else {
+        return Vec::new();
+    };
+    let Ok(provider) = RuntimeCredentialAccountProviderId::new(ironclaw_auth::GOOGLE_PROVIDER_ID)
+    else {
+        return Vec::new();
+    };
+    let Ok(requester_extension) = ExtensionId::new(package.extension_id) else {
+        return Vec::new();
+    };
+    vec![RuntimeCredentialAuthRequirement {
+        provider,
+        requester_extension,
+        provider_scopes: capability
+            .required_scopes
+            .iter()
+            .map(|scope| (*scope).to_string())
+            .collect(),
+    }]
 }
 
 pub(crate) struct ProductAuthRuntimeGsuiteCredentialStager {
@@ -193,5 +215,45 @@ impl GsuiteCredentialStager for ProductAuthRuntimeGsuiteCredentialStager {
         self.runtime_ports
             .stage_secret_once(request.scope, request.capability_id, request.access_secret)
             .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ironclaw_first_party_extensions::{
+        GMAIL_LIST_MESSAGES_CAPABILITY_ID, GsuiteCredentialDispatchReason,
+    };
+    use ironclaw_host_api::RuntimeDispatchErrorKind;
+
+    use super::*;
+
+    #[test]
+    fn gmail_auth_failure_maps_to_google_oauth_requirement() {
+        let capability_id = CapabilityId::new(GMAIL_LIST_MESSAGES_CAPABILITY_ID).unwrap();
+        let error = GsuiteDispatchError::new(RuntimeDispatchErrorKind::Client)
+            .with_reason(GsuiteCredentialDispatchReason::MissingAccessSecret);
+
+        let mapped = gsuite_error(error, &capability_id);
+
+        let FirstPartyCapabilityError::AuthRequired {
+            required_secrets,
+            credential_requirements,
+            ..
+        } = mapped
+        else {
+            panic!("expected Gmail auth failure to map to FirstParty AuthRequired");
+        };
+        assert!(required_secrets.is_empty());
+        assert_eq!(credential_requirements.len(), 1);
+        let requirement = &credential_requirements[0];
+        assert_eq!(
+            requirement.provider.as_str(),
+            ironclaw_auth::GOOGLE_PROVIDER_ID
+        );
+        assert_eq!(requirement.requester_extension.as_str(), "gmail");
+        assert_eq!(
+            requirement.provider_scopes,
+            vec![ironclaw_auth::GOOGLE_GMAIL_READONLY_SCOPE.to_string()]
+        );
     }
 }

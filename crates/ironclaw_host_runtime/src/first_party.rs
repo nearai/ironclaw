@@ -11,7 +11,7 @@ use std::{collections::HashMap, fmt, sync::Arc};
 use async_trait::async_trait;
 use ironclaw_host_api::{
     CapabilityDisplayOutputPreview, CapabilityId, MountView, ResourceEstimate, ResourceScope,
-    ResourceUsage, RuntimeDispatchErrorKind, SecretHandle,
+    ResourceUsage, RuntimeCredentialAuthRequirement, RuntimeDispatchErrorKind, SecretHandle,
 };
 use serde_json::Value;
 
@@ -130,6 +130,8 @@ pub enum FirstPartyCapabilityError {
         /// Specific secret handles the runtime auth gate must prompt for.
         /// May be empty when the obligation layer does not know which handle failed.
         required_secrets: Vec<SecretHandle>,
+        /// Structured credential requirements the runtime auth gate can turn into OAuth.
+        credential_requirements: Vec<RuntimeCredentialAuthRequirement>,
         usage: Option<ResourceUsage>,
     },
 }
@@ -144,16 +146,33 @@ impl FirstPartyCapabilityError {
     pub fn auth_required() -> Self {
         Self::AuthRequired {
             required_secrets: Vec::new(),
+            credential_requirements: Vec::new(),
             usage: None,
         }
     }
 
     /// Construct an auth-required failure naming the handles to re-authorize.
     pub fn auth_required_with(required_secrets: Vec<SecretHandle>) -> Self {
+        Self::auth_required_with_context(required_secrets, Vec::new())
+    }
+
+    /// Construct an auth-required failure naming both secret handles and OAuth requirements.
+    pub fn auth_required_with_context(
+        required_secrets: Vec<SecretHandle>,
+        credential_requirements: Vec<RuntimeCredentialAuthRequirement>,
+    ) -> Self {
         Self::AuthRequired {
             required_secrets,
+            credential_requirements,
             usage: None,
         }
+    }
+
+    /// Construct an auth-required failure naming the OAuth credential requirements.
+    pub fn auth_required_for_credentials(
+        credential_requirements: Vec<RuntimeCredentialAuthRequirement>,
+    ) -> Self {
+        Self::auth_required_with_context(Vec::new(), credential_requirements)
     }
 
     /// Attach resource usage. Builder-style for use in handler return expressions.
@@ -164,9 +183,12 @@ impl FirstPartyCapabilityError {
                 usage: Some(usage),
             },
             Self::AuthRequired {
-                required_secrets, ..
+                required_secrets,
+                credential_requirements,
+                ..
             } => Self::AuthRequired {
                 required_secrets,
+                credential_requirements,
                 usage: Some(usage),
             },
         }
@@ -192,6 +214,17 @@ impl FirstPartyCapabilityError {
             Self::AuthRequired {
                 required_secrets, ..
             } => Some(required_secrets),
+            Self::Dispatch { .. } => None,
+        }
+    }
+
+    /// Structured credential requirements, if this is an auth failure.
+    pub fn credential_requirements(&self) -> Option<&Vec<RuntimeCredentialAuthRequirement>> {
+        match self {
+            Self::AuthRequired {
+                credential_requirements,
+                ..
+            } => Some(credential_requirements),
             Self::Dispatch { .. } => None,
         }
     }

@@ -285,6 +285,7 @@ fn dispatch_errors_preserve_typed_failure_kind() {
         DispatchError::AuthRequired {
             capability: CapabilityId::new("test.cap").unwrap(),
             required_secrets: required_secrets.clone(),
+            credential_requirements: Vec::new(),
         }
         .failure_kind(),
         DispatchFailureKind::AuthRequired
@@ -294,6 +295,7 @@ fn dispatch_errors_preserve_typed_failure_kind() {
         DispatchError::AuthRequired {
             capability: CapabilityId::new("test.cap").unwrap(),
             required_secrets: Vec::new(),
+            credential_requirements: Vec::new(),
         }
         .failure_kind(),
         DispatchFailureKind::AuthRequired
@@ -1705,6 +1707,7 @@ fn dispatch_error_event_kind_pins_auth_required_token() {
         DispatchError::AuthRequired {
             capability: cap(),
             required_secrets: vec![handle],
+            credential_requirements: Vec::new(),
         }
         .event_kind(),
         "auth_required"
@@ -1714,6 +1717,7 @@ fn dispatch_error_event_kind_pins_auth_required_token() {
         DispatchError::AuthRequired {
             capability: cap(),
             required_secrets: Vec::new(),
+            credential_requirements: Vec::new(),
         }
         .event_kind(),
         "auth_required"
@@ -1726,6 +1730,7 @@ fn dispatch_error_auth_required_debug_redacts_required_secrets() {
     let error = DispatchError::AuthRequired {
         capability: CapabilityId::new("test.cap").unwrap(),
         required_secrets: vec![handle],
+        credential_requirements: Vec::new(),
     };
     let debug = format!("{error:?}");
     assert!(
@@ -1740,6 +1745,7 @@ fn dispatch_error_auth_required_debug_redacts_required_secrets() {
     let empty = DispatchError::AuthRequired {
         capability: CapabilityId::new("test.cap").unwrap(),
         required_secrets: Vec::new(),
+        credential_requirements: Vec::new(),
     };
     let debug_empty = format!("{empty:?}");
     assert!(
