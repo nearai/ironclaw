@@ -192,9 +192,17 @@ impl ServeCommand {
         // provider configured, the listener keeps the plain env-bearer
         // auth and mounts no public login routes.
         let (authenticator, public_mount): (Arc<dyn WebuiAuthenticator>, Option<PublicRouteMount>) = {
-            let base_url = env::var("OAUTH_BASE_URL")
+            // Prefer the WebChat-login-scoped base URL; fall back to the
+            // shared `OAUTH_BASE_URL` (also read by the v1 gateway) and
+            // finally to the bound listener address.
+            let base_url = env::var("IRONCLAW_REBORN_WEBUI_BASE_URL")
                 .ok()
                 .filter(|raw| !raw.trim().is_empty())
+                .or_else(|| {
+                    env::var("OAUTH_BASE_URL")
+                        .ok()
+                        .filter(|raw| !raw.trim().is_empty())
+                })
                 .unwrap_or_else(|| format!("http://{listen_addr}"));
             // Every SSO login maps to this operator identity (the same
             // one pinned as the runtime owner above), so a logged-in turn

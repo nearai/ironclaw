@@ -2,7 +2,8 @@
 //!
 //! Compiled under the `webui-v2-beta` feature (the same feature that
 //! compiles the `serve` command). When a Google/GitHub OAuth provider
-//! is configured via env (`GOOGLE_CLIENT_ID=…`, `GITHUB_CLIENT_ID=…`),
+//! is configured via env (`IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_ID=…`,
+//! `IRONCLAW_REBORN_WEBUI_GITHUB_CLIENT_ID=…`),
 //! this builds the host-owned `webui_v2_auth_router` and the
 //! authenticator the protected v2 routes need so the SSO-minted session
 //! bearer is accepted alongside the env operator token. The serve
@@ -277,27 +278,46 @@ pub(crate) fn build_oauth_login(
 }
 
 /// Collect the configured OAuth providers from env. A provider is
-/// opted in by setting its `*_CLIENT_ID`; the matching `*_CLIENT_SECRET`
-/// is read alongside (both are required for the real code exchange to
-/// succeed, but the button surfaces as soon as the client id is present
-/// so the login UI can be exercised locally).
+/// opted in by setting its `IRONCLAW_REBORN_WEBUI_*_CLIENT_ID`; the
+/// matching `*_CLIENT_SECRET` is read alongside (both are required for
+/// the real code exchange to succeed, but the button surfaces as soon
+/// as the client id is present so the login UI can be exercised
+/// locally).
+///
+/// These WebChat-login vars live in the `IRONCLAW_REBORN_WEBUI_*`
+/// namespace — the same one as `IRONCLAW_REBORN_WEBUI_TOKEN` /
+/// `IRONCLAW_REBORN_WEBUI_USER_ID` — deliberately separate from the
+/// bare `GOOGLE_CLIENT_ID` / `IRONCLAW_REBORN_GOOGLE_*` vars that the
+/// product-auth credential-connection flow reads. Sharing the bare
+/// names would couple two unrelated surfaces: setting `GOOGLE_CLIENT_ID`
+/// just to enable login would also activate the product-auth Google
+/// resolver, which hard-errors when its required redirect URI is
+/// absent and would take down every `ironclaw-reborn` command. The
+/// distinct namespace keeps SSO login and product-auth independently
+/// configurable. (The browser-user *login* client and the product
+/// *credential* client are usually distinct OAuth clients anyway —
+/// different registered redirect URIs.)
 fn oauth_providers_from_env() -> anyhow::Result<Vec<Arc<dyn OAuthProvider>>> {
     let mut providers: Vec<Arc<dyn OAuthProvider>> = Vec::new();
 
-    if let Some(client_id) = non_empty_env("GOOGLE_CLIENT_ID") {
+    if let Some(client_id) = non_empty_env("IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_ID") {
         let provider = GoogleProvider::new(GoogleOAuthConfig {
             client_id,
-            client_secret: SecretString::from(env::var("GOOGLE_CLIENT_SECRET").unwrap_or_default()),
-            allowed_hd: non_empty_env("GOOGLE_ALLOWED_HD"),
+            client_secret: SecretString::from(
+                env::var("IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_SECRET").unwrap_or_default(),
+            ),
+            allowed_hd: non_empty_env("IRONCLAW_REBORN_WEBUI_GOOGLE_ALLOWED_HD"),
         })
         .context("failed to build Google OAuth provider")?;
         providers.push(Arc::new(provider));
     }
 
-    if let Some(client_id) = non_empty_env("GITHUB_CLIENT_ID") {
+    if let Some(client_id) = non_empty_env("IRONCLAW_REBORN_WEBUI_GITHUB_CLIENT_ID") {
         let provider = GitHubProvider::new(GitHubOAuthConfig {
             client_id,
-            client_secret: SecretString::from(env::var("GITHUB_CLIENT_SECRET").unwrap_or_default()),
+            client_secret: SecretString::from(
+                env::var("IRONCLAW_REBORN_WEBUI_GITHUB_CLIENT_SECRET").unwrap_or_default(),
+            ),
         })
         .context("failed to build GitHub OAuth provider")?;
         providers.push(Arc::new(provider));
