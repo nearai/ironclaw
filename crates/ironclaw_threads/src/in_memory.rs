@@ -9,6 +9,7 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use crate::identifiers::SummaryArtifactId;
+use crate::summary_artifacts::is_exact_compaction_summary_replay;
 use crate::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
     AppendAssistantDraftRequest, AppendCapabilityDisplayPreviewRequest,
@@ -578,8 +579,10 @@ impl SessionThreadService for InMemorySessionThreadService {
                 end_sequence: request.end_sequence,
             });
         }
+        let content = request.content.as_text().to_string();
         if request.model_context_policy == Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected)
-            && thread.summary_artifacts.iter().any(|summary| {
+        {
+            if let Some(overlapping) = thread.summary_artifacts.iter().find(|summary| {
                 summary.model_context_policy
                     == Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected)
                     && ranges_overlap(
@@ -588,12 +591,15 @@ impl SessionThreadService for InMemorySessionThreadService {
                         summary.start_sequence,
                         summary.end_sequence,
                     )
-            })
-        {
-            return Err(SessionThreadError::OverlappingSummaryRange {
-                start_sequence: request.start_sequence,
-                end_sequence: request.end_sequence,
-            });
+            }) {
+                if is_exact_compaction_summary_replay(overlapping, &request, &content) {
+                    return Ok(overlapping.clone());
+                }
+                return Err(SessionThreadError::OverlappingSummaryRange {
+                    start_sequence: request.start_sequence,
+                    end_sequence: request.end_sequence,
+                });
+            }
         }
         let artifact = SummaryArtifact {
             summary_id: SummaryArtifactId::new(),
@@ -601,7 +607,7 @@ impl SessionThreadService for InMemorySessionThreadService {
             start_sequence: request.start_sequence,
             end_sequence: request.end_sequence,
             summary_kind: request.summary_kind,
-            content: request.content.into_text(),
+            content,
             model_context_policy: request.model_context_policy,
         };
         thread.summary_artifacts.push(artifact.clone());

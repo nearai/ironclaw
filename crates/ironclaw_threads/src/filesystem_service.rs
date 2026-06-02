@@ -51,6 +51,7 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::identifiers::SummaryArtifactId;
+use crate::summary_artifacts::is_exact_compaction_summary_replay;
 use crate::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
     AppendAssistantDraftRequest, AppendCapabilityDisplayPreviewRequest,
@@ -1304,8 +1305,10 @@ where
         let existing_summaries = self
             .list_thread_summaries(&request.scope, &request.thread_id)
             .await?;
+        let content = request.content.as_text().to_string();
         if request.model_context_policy == Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected)
-            && existing_summaries.iter().any(|summary| {
+        {
+            if let Some(overlapping) = existing_summaries.iter().find(|summary| {
                 summary.model_context_policy
                     == Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected)
                     && ranges_overlap(
@@ -1314,12 +1317,15 @@ where
                         summary.start_sequence,
                         summary.end_sequence,
                     )
-            })
-        {
-            return Err(SessionThreadError::OverlappingSummaryRange {
-                start_sequence: request.start_sequence,
-                end_sequence: request.end_sequence,
-            });
+            }) {
+                if is_exact_compaction_summary_replay(overlapping, &request, &content) {
+                    return Ok(overlapping.clone());
+                }
+                return Err(SessionThreadError::OverlappingSummaryRange {
+                    start_sequence: request.start_sequence,
+                    end_sequence: request.end_sequence,
+                });
+            }
         }
         let artifact = SummaryArtifact {
             summary_id: SummaryArtifactId::new(),
@@ -1327,7 +1333,7 @@ where
             start_sequence: request.start_sequence,
             end_sequence: request.end_sequence,
             summary_kind: request.summary_kind,
-            content: request.content.into_text(),
+            content,
             model_context_policy: request.model_context_policy,
         };
         let path = summary_record_path(&request.scope, &request.thread_id, artifact.summary_id)?;
