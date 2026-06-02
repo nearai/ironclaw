@@ -1,169 +1,344 @@
 name: Pilot Linux Artifact
 
 on:
+  push:
+    branches:
+      - deployment-target
   workflow_dispatch:
     inputs:
       source_ref:
-        description: Branch, tag, or commit SHA to build
-        required: true
+        description: Branch, tag, or commit SHA to build. Must be reachable from deployment-target.
+        required: false
+        default: deployment-target
         type: string
       release_tag:
         description: GitHub release tag to create or update
-        required: true
+        required: false
+        default: pilot-native-matrix-channel-pilot
         type: string
       cargo_features:
         description: Comma-separated Cargo features to enable
-        required: true
+        required: false
         default: postgres,html-to-markdown,matrix-e2ee
         type: string
       target:
         description: Rust target triple
-        required: true
+        required: false
         default: x86_64-unknown-linux-gnu
         type: string
 
 permissions:
   contents: write
 
+env:
+  DEFAULT_CARGO_FEATURES: postgres,html-to-markdown,matrix-e2ee
+  DEFAULT_RELEASE_TAG: pilot-native-matrix-channel-pilot
+  DEFAULT_TARGET: x86_64-unknown-linux-gnu
+  DEPLOYMENT_BRANCH: deployment-target
+  RUST_TOOLCHAIN: 1.93.0
+
 concurrency:
-  group: pilot-linux-artifact-${{ inputs.release_tag }}
+  group: pilot-linux-artifact-native-matrix-channel-pilot-x86_64-unknown-linux-gnu
   cancel-in-progress: true
 
 jobs:
   build:
     name: Build pilot artifact
+    if: github.repository == 'enjimi/ironclaw'
     runs-on: ubuntu-22.04
     steps:
-      - name: Check out requested source
+      - name: Check out deployment source
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
-          ref: ${{ inputs.source_ref }}
+          fetch-depth: 0
           persist-credentials: false
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # stable
-        with:
-          toolchain: 1.93.0
-          targets: ${{ inputs.target }}
-
-      - name: Normalize cache key inputs
-        id: cache_key
+      - name: Resolve source inputs
+        id: source
+        env:
+          INPUT_CARGO_FEATURES: ${{ inputs.cargo_features }}
+          INPUT_RELEASE_TAG: ${{ inputs.release_tag }}
+          INPUT_SOURCE_REF: ${{ inputs.source_ref }}
+          INPUT_TARGET: ${{ inputs.target }}
         shell: bash
         run: |
           set -euo pipefail
-          SAFE_FEATURES="$(printf '%s' '${{ inputs.cargo_features }}' | sed -E 's/[^A-Za-z0-9._-]+/-/g')"
-          echo "safe_features=${SAFE_FEATURES}" >> "$GITHUB_OUTPUT"
+
+          git fetch --no-tags origin "+refs/heads/${DEPLOYMENT_BRANCH}:refs/remotes/origin/${DEPLOYMENT_BRANCH}"
+
+          if [[ "${GITHUB_EVENT_NAME}" == "push" ]]; then
+            source_ref="${GITHUB_SHA}"
+          else
+            source_ref="${INPUT_SOURCE_REF:-${DEPLOYMENT_BRANCH}}"
+          fi
+
+          source_sha="$(git rev-parse "${source_ref}^{commit}")"
+          if ! git merge-base --is-ancestor "${source_sha}" "origin/${DEPLOYMENT_BRANCH}"; then
+            echo "::error::source_ref ${source_ref} (${source_sha}) is not reachable from ${DEPLOYMENT_BRANCH}"
+            exit 1
+          fi
+
+          release_tag="${INPUT_RELEASE_TAG:-${DEFAULT_RELEASE_TAG}}"
+          cargo_features="${INPUT_CARGO_FEATURES:-${DEFAULT_CARGO_FEATURES}}"
+          target="${INPUT_TARGET:-${DEFAULT_TARGET}}"
+          short_sha="$(git rev-parse --short=12 "${source_sha}")"
+          safe_features="$(printf '%s' "${cargo_features}" | sed -E 's/[^A-Za-z0-9._-]+/-/g')"
+          manifest_name="ironclaw-${target}.json"
+          archive_name="ironclaw-${short_sha}-${target}.tar.gz"
+
+          {
+            echo "archive_name=${archive_name}"
+            echo "cargo_features=${cargo_features}"
+            echo "manifest_name=${manifest_name}"
+            echo "release_tag=${release_tag}"
+            echo "safe_features=${safe_features}"
+            echo "short_sha=${short_sha}"
+            echo "source_ref=${source_ref}"
+            echo "source_sha=${source_sha}"
+            echo "target=${target}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Check existing channel manifest
+        id: preflight
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CARGO_FEATURES: ${{ steps.source.outputs.cargo_features }}
+          MANIFEST_NAME: ${{ steps.source.outputs.manifest_name }}
+          RELEASE_TAG: ${{ steps.source.outputs.release_tag }}
+          SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
+          TARGET: ${{ steps.source.outputs.target }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          manifest_dir="${RUNNER_TEMP}/existing-manifest"
+          mkdir -p "${manifest_dir}"
+
+          if gh release download "${RELEASE_TAG}" --pattern "${MANIFEST_NAME}" --dir "${manifest_dir}" >/dev/null 2>&1; then
+            manifest_path="${manifest_dir}/${MANIFEST_NAME}"
+            existing_source_sha="$(jq -r '.source_sha // ""' "${manifest_path}")"
+            existing_target="$(jq -r '.target // ""' "${manifest_path}")"
+            existing_features="$(jq -r '.cargo_features | join(",") // ""' "${manifest_path}")"
+            existing_toolchain="$(jq -r '.rust_toolchain // ""' "${manifest_path}")"
+
+            if [[ "${existing_source_sha}" == "${SOURCE_SHA}" && \
+                  "${existing_target}" == "${TARGET}" && \
+                  "${existing_features}" == "${CARGO_FEATURES}" && \
+                  "${existing_toolchain}" == "${RUST_TOOLCHAIN}" ]]; then
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              echo "Existing ${RELEASE_TAG}/${MANIFEST_NAME} already describes ${SOURCE_SHA}"
+              exit 0
+            fi
+          fi
+
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust toolchain
+        if: steps.preflight.outputs.skip != 'true'
+        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: ${{ steps.source.outputs.target }}
 
       - name: Cache Rust build outputs
+        if: steps.preflight.outputs.skip != 'true'
         uses: swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
-          key: pilot-${{ inputs.target }}-${{ steps.cache_key.outputs.safe_features }}
+          key: pilot-${{ steps.source.outputs.target }}-${{ steps.source.outputs.safe_features }}
+
+      - name: Check out exact source SHA
+        if: steps.preflight.outputs.skip != 'true'
+        run: git checkout --detach "${{ steps.source.outputs.source_sha }}"
 
       - name: Build IronClaw
+        if: steps.preflight.outputs.skip != 'true'
         run: |
           cargo build \
             --locked \
             --release \
             --no-default-features \
-            --target "${{ inputs.target }}" \
-            --features "${{ inputs.cargo_features }}"
+            --target "${{ steps.source.outputs.target }}" \
+            --features "${{ steps.source.outputs.cargo_features }}"
 
       - name: Package release artifact
+        if: steps.preflight.outputs.skip != 'true'
         id: package
+        env:
+          ARCHIVE_NAME: ${{ steps.source.outputs.archive_name }}
+          CARGO_FEATURES: ${{ steps.source.outputs.cargo_features }}
+          MANIFEST_NAME: ${{ steps.source.outputs.manifest_name }}
+          RELEASE_TAG: ${{ steps.source.outputs.release_tag }}
+          SOURCE_REF: ${{ steps.source.outputs.source_ref }}
+          SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
+          TARGET: ${{ steps.source.outputs.target }}
         shell: bash
         run: |
           set -euo pipefail
 
-          SHORT_SHA="$(git rev-parse --short=12 HEAD)"
-          ARCHIVE_NAME="ironclaw-${SHORT_SHA}-${{ inputs.target }}.tar.gz"
-          DIST_DIR="$RUNNER_TEMP/pilot-dist"
-          STAGE_DIR="$DIST_DIR/stage"
-          mkdir -p "$STAGE_DIR"
+          dist_dir="${RUNNER_TEMP}/pilot-dist"
+          stage_dir="${dist_dir}/stage"
+          mkdir -p "${stage_dir}"
 
-          cp "target/${{ inputs.target }}/release/ironclaw" "$STAGE_DIR/ironclaw"
-          chmod 0755 "$STAGE_DIR/ironclaw"
+          cp "target/${TARGET}/release/ironclaw" "${stage_dir}/ironclaw"
+          chmod 0755 "${stage_dir}/ironclaw"
 
-          cat > "$STAGE_DIR/BUILD-INFO.txt" <<EOF
-          source_ref=${{ inputs.source_ref }}
-          source_sha=$(git rev-parse HEAD)
-          release_tag=${{ inputs.release_tag }}
-          cargo_features=${{ inputs.cargo_features }}
-          target=${{ inputs.target }}
-          built_at=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          cat > "${stage_dir}/BUILD-INFO.txt" <<EOF
+          source_ref=${SOURCE_REF}
+          source_sha=${SOURCE_SHA}
+          release_tag=${RELEASE_TAG}
+          cargo_features=${CARGO_FEATURES}
+          target=${TARGET}
+          rust_toolchain=${RUST_TOOLCHAIN}
           EOF
 
-          tar czf "$DIST_DIR/$ARCHIVE_NAME" -C "$STAGE_DIR" ironclaw BUILD-INFO.txt
-          sha256sum "$DIST_DIR/$ARCHIVE_NAME" > "$DIST_DIR/$ARCHIVE_NAME.sha256"
+          tar --sort=name --owner=0 --group=0 --numeric-owner --mtime="@$(git show -s --format=%ct "${SOURCE_SHA}")" \
+            -czf "${dist_dir}/${ARCHIVE_NAME}" -C "${stage_dir}" ironclaw BUILD-INFO.txt
 
-          echo "archive_name=$ARCHIVE_NAME" >> "$GITHUB_OUTPUT"
-          echo "archive_path=$DIST_DIR/$ARCHIVE_NAME" >> "$GITHUB_OUTPUT"
-          echo "checksum_path=$DIST_DIR/$ARCHIVE_NAME.sha256" >> "$GITHUB_OUTPUT"
-          echo "source_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-          echo "download_url=https://github.com/${{ github.repository }}/releases/download/${{ inputs.release_tag }}/$ARCHIVE_NAME" >> "$GITHUB_OUTPUT"
+          (
+            cd "${dist_dir}"
+            sha256sum "${ARCHIVE_NAME}" > "${ARCHIVE_NAME}.sha256"
+          )
+          archive_sha256="$(cut -d' ' -f1 "${dist_dir}/${ARCHIVE_NAME}.sha256")"
+
+          archive_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}/${ARCHIVE_NAME}"
+          jq -n \
+            --arg name "ironclaw" \
+            --arg channel "native-matrix-channel-pilot" \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg source_sha "${SOURCE_SHA}" \
+            --arg source_ref "refs/heads/${DEPLOYMENT_BRANCH}" \
+            --arg release_tag "${RELEASE_TAG}" \
+            --arg target "${TARGET}" \
+            --arg rust_toolchain "${RUST_TOOLCHAIN}" \
+            --arg archive_name "${ARCHIVE_NAME}" \
+            --arg archive_url "${archive_url}" \
+            --arg sha256 "${archive_sha256}" \
+            --arg workflow_run_id "${GITHUB_RUN_ID}" \
+            --arg workflow_run_url "https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            --arg published_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+            --argjson cargo_features "$(printf '%s' "${CARGO_FEATURES}" | jq -R 'split(",")')" \
+            '{
+              name: $name,
+              channel: $channel,
+              repository: $repository,
+              source_sha: $source_sha,
+              source_ref: $source_ref,
+              release_tag: $release_tag,
+              target: $target,
+              rust_toolchain: $rust_toolchain,
+              cargo_features: $cargo_features,
+              archive_name: $archive_name,
+              archive_url: $archive_url,
+              sha256: $sha256,
+              artifact_checksum: ("sha256:" + $sha256),
+              workflow_run_id: $workflow_run_id,
+              workflow_run_url: $workflow_run_url,
+              published_at: $published_at
+            }' > "${dist_dir}/${MANIFEST_NAME}"
+
+          {
+            echo "archive_path=${dist_dir}/${ARCHIVE_NAME}"
+            echo "checksum_path=${dist_dir}/${ARCHIVE_NAME}.sha256"
+            echo "download_url=${archive_url}"
+            echo "manifest_path=${dist_dir}/${MANIFEST_NAME}"
+            echo "sha256=${archive_sha256}"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Upload workflow artifact
+        if: steps.preflight.outputs.skip != 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: pilot-linux-artifact-${{ steps.package.outputs.archive_name }}
+          name: pilot-linux-artifact-${{ steps.source.outputs.archive_name }}
           path: |
             ${{ steps.package.outputs.archive_path }}
             ${{ steps.package.outputs.checksum_path }}
+            ${{ steps.package.outputs.manifest_path }}
           retention-days: 30
 
+      - name: Verify source is still current before publish
+        if: steps.preflight.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin "+refs/heads/${DEPLOYMENT_BRANCH}:refs/remotes/origin/${DEPLOYMENT_BRANCH}"
+          current_sha="$(git rev-parse "origin/${DEPLOYMENT_BRANCH}^{commit}")"
+          if [[ "${current_sha}" != "${{ steps.source.outputs.source_sha }}" ]]; then
+            echo "::error::Refusing to publish stale artifact for ${{ steps.source.outputs.source_sha }}; ${DEPLOYMENT_BRANCH} is now ${current_sha}"
+            exit 1
+          fi
+
       - name: Create or update prerelease
+        if: steps.preflight.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ inputs.release_tag }}
-          SOURCE_SHA: ${{ steps.package.outputs.source_sha }}
-          SOURCE_REF: ${{ inputs.source_ref }}
-          CARGO_FEATURES: ${{ inputs.cargo_features }}
-          TARGET: ${{ inputs.target }}
+          ARCHIVE_NAME: ${{ steps.source.outputs.archive_name }}
           ARCHIVE_PATH: ${{ steps.package.outputs.archive_path }}
           CHECKSUM_PATH: ${{ steps.package.outputs.checksum_path }}
-          ARCHIVE_NAME: ${{ steps.package.outputs.archive_name }}
+          CARGO_FEATURES: ${{ steps.source.outputs.cargo_features }}
+          DOWNLOAD_URL: ${{ steps.package.outputs.download_url }}
+          MANIFEST_PATH: ${{ steps.package.outputs.manifest_path }}
+          RELEASE_TAG: ${{ steps.source.outputs.release_tag }}
+          SHA256: ${{ steps.package.outputs.sha256 }}
+          SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
+          TARGET: ${{ steps.source.outputs.target }}
         shell: bash
         run: |
           set -euo pipefail
 
-          NOTES_FILE="$RUNNER_TEMP/pilot-release-notes.md"
+          notes_file="${RUNNER_TEMP}/pilot-release-notes.md"
           {
-            echo "Pilot Linux build artifact for branch/ref deployment."
+            echo "Pilot Linux build artifact for the deployment target branch."
             echo
-            echo "- source ref: \`$SOURCE_REF\`"
-            echo "- source sha: \`$SOURCE_SHA\`"
-            echo "- target: \`$TARGET\`"
-            echo "- cargo features: \`$CARGO_FEATURES\`"
-          } > "$NOTES_FILE"
+            echo "- source branch: \`${DEPLOYMENT_BRANCH}\`"
+            echo "- source sha: \`${SOURCE_SHA}\`"
+            echo "- target: \`${TARGET}\`"
+            echo "- cargo features: \`${CARGO_FEATURES}\`"
+            echo "- sha256: \`${SHA256}\`"
+            echo "- download URL: \`${DOWNLOAD_URL}\`"
+          } > "${notes_file}"
 
-          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            gh release edit "$RELEASE_TAG" \
-              --target "$SOURCE_SHA" \
-              --title "Pilot artifact $RELEASE_TAG" \
-              --notes-file "$NOTES_FILE" \
+          if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
+            gh release edit "${RELEASE_TAG}" \
+              --target "${SOURCE_SHA}" \
+              --title "Pilot artifact ${RELEASE_TAG}" \
+              --notes-file "${notes_file}" \
               --prerelease
-            gh release upload "$RELEASE_TAG" "$ARCHIVE_PATH" "$CHECKSUM_PATH" --clobber
+
+            existing_assets="$(
+              gh release view "${RELEASE_TAG}" \
+                --json assets \
+                --jq '.assets[].name'
+            )"
+            archive_checksum_name="${ARCHIVE_NAME}.sha256"
+            if ! grep -Fxq "${ARCHIVE_NAME}" <<<"${existing_assets}"; then
+              gh release upload "${RELEASE_TAG}" "${ARCHIVE_PATH}"
+            fi
+            if ! grep -Fxq "${archive_checksum_name}" <<<"${existing_assets}"; then
+              gh release upload "${RELEASE_TAG}" "${CHECKSUM_PATH}"
+            fi
+            gh release upload "${RELEASE_TAG}" "${MANIFEST_PATH}" --clobber
           else
-            gh release create "$RELEASE_TAG" \
-              --target "$SOURCE_SHA" \
-              --title "Pilot artifact $RELEASE_TAG" \
-              --notes-file "$NOTES_FILE" \
+            gh release create "${RELEASE_TAG}" \
+              --target "${SOURCE_SHA}" \
+              --title "Pilot artifact ${RELEASE_TAG}" \
+              --notes-file "${notes_file}" \
               --prerelease \
-              "$ARCHIVE_PATH" \
-              "$CHECKSUM_PATH"
+              "${ARCHIVE_PATH}" \
+              "${CHECKSUM_PATH}" \
+              "${MANIFEST_PATH}"
           fi
 
       - name: Summary
         env:
-          RELEASE_TAG: ${{ inputs.release_tag }}
-          SOURCE_REF: ${{ inputs.source_ref }}
-          SOURCE_SHA: ${{ steps.package.outputs.source_sha }}
+          RELEASE_TAG: ${{ steps.source.outputs.release_tag }}
+          SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
           DOWNLOAD_URL: ${{ steps.package.outputs.download_url }}
+          SKIPPED: ${{ steps.preflight.outputs.skip }}
         run: |
           {
             echo "## Pilot Linux Artifact"
             echo
-            echo "- source ref: \`${SOURCE_REF}\`"
+            echo "- skipped: \`${SKIPPED}\`"
             echo "- source sha: \`${SOURCE_SHA}\`"
             echo "- release tag: \`${RELEASE_TAG}\`"
-            echo "- download URL: \`${DOWNLOAD_URL}\`"
+            echo "- download URL: \`${DOWNLOAD_URL:-already published}\`"
           } >> "$GITHUB_STEP_SUMMARY"
