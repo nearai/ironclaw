@@ -17,7 +17,9 @@ use ironclaw_host_api::sha256_digest_token;
 use ironclaw_llm::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmProvider, Role,
     ToolCall, ToolCompletionRequest, ToolCompletionResponse, ToolDefinition, clean_response,
+    contains_codex_text_tool_call_syntax,
     costs::{default_cost, model_cost},
+    recover_codex_text_tool_calls_from_content,
 };
 use ironclaw_loop_support::{
     HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
@@ -782,18 +784,22 @@ where
             );
         }
         if !tool_definitions.is_empty() {
-            let tool_request = ToolCompletionRequest::from_completion_request(
-                completion,
-                tool_definitions
-                    .into_iter()
-                    .map(provider_tool_definition_to_llm)
-                    .collect(),
-            );
+            let llm_tool_definitions = tool_definitions
+                .into_iter()
+                .map(provider_tool_definition_to_llm)
+                .collect::<Vec<_>>();
+            let recovery_tool_definitions = llm_tool_definitions.clone();
+            let tool_request =
+                ToolCompletionRequest::from_completion_request(completion, llm_tool_definitions);
             debug!("reborn model gateway dispatching tool-capable provider request");
             let response = provider
                 .complete_with_tools(tool_request)
                 .await
                 .map_err(map_provider_error)?;
+            let response = recover_textual_tool_calls_from_tool_response(
+                response,
+                &recovery_tool_definitions,
+            )?;
             return tool_response_to_host(
                 response,
                 capabilities,
@@ -823,6 +829,45 @@ where
         "reborn model gateway received text-only provider response"
     );
     response_to_host_reply(response)
+}
+
+fn recover_textual_tool_calls_from_tool_response(
+    response: ToolCompletionResponse,
+    tool_definitions: &[ToolDefinition],
+) -> Result<ToolCompletionResponse, HostManagedModelError> {
+    if !response.tool_calls.is_empty() {
+        return Ok(response);
+    }
+    let Some(content) = response.content.as_deref() else {
+        return Ok(response);
+    };
+    let recovered_tool_calls =
+        recover_codex_text_tool_calls_from_content(content, tool_definitions);
+    if recovered_tool_calls.is_empty() {
+        if contains_codex_text_tool_call_syntax(content) {
+            debug!("reborn model gateway rejected unrecovered textual provider tool-call syntax");
+            return Err(HostManagedModelError::safe(
+                HostManagedModelErrorKind::InvalidOutput,
+                "model returned textual tool-call syntax instead of structured tool calls",
+            ));
+        }
+        return Ok(response);
+    }
+
+    debug!(
+        recovered_tool_call_count = recovered_tool_calls.len(),
+        "reborn model gateway recovered capability calls from textual provider response"
+    );
+    Ok(ToolCompletionResponse {
+        content: Some(clean_response(content)),
+        tool_calls: recovered_tool_calls,
+        input_tokens: response.input_tokens,
+        output_tokens: response.output_tokens,
+        finish_reason: FinishReason::ToolUse,
+        cache_read_input_tokens: response.cache_read_input_tokens,
+        cache_creation_input_tokens: response.cache_creation_input_tokens,
+        reasoning: response.reasoning,
+    })
 }
 
 fn provider_tool_definition_to_llm(definition: ProviderToolDefinition) -> ToolDefinition {
@@ -929,6 +974,12 @@ async fn tool_response_to_host(
     match response.finish_reason {
         FinishReason::Stop => {
             let content = clean_response(&response.content.unwrap_or_default());
+            if content.trim().is_empty() {
+                return Err(HostManagedModelError::safe(
+                    HostManagedModelErrorKind::InvalidOutput,
+                    "model returned an empty assistant response",
+                ));
+            }
             debug!(
                 content_bytes = content.len(),
                 "reborn model gateway classified tool-capable provider response as assistant reply"

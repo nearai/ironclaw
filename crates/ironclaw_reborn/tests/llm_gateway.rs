@@ -342,6 +342,99 @@ async fn gateway_with_tool_surface_calls_complete_with_tools_and_returns_capabil
 }
 
 #[tokio::test]
+async fn gateway_rejects_empty_tool_capable_stop_response_without_text_only_retry() {
+    let provider = Arc::new(ToolAwareProvider::tool_response(ToolCompletionResponse {
+        content: None,
+        tool_calls: Vec::new(),
+        input_tokens: 1,
+        output_tokens: 1,
+        finish_reason: FinishReason::Stop,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+        reasoning: None,
+    }));
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider.clone(),
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+    let capabilities = Arc::new(GatewayCapabilityPort::with_tool_surface());
+
+    let error = gateway
+        .stream_model_with_capabilities(model_request(interactive_model()), capabilities.clone())
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.kind, HostManagedModelErrorKind::InvalidOutput);
+    assert!(capabilities.registered.lock().unwrap().is_empty());
+    assert_eq!(provider.tool_requests.lock().unwrap().len(), 1);
+    assert!(provider.complete_requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn gateway_recovers_capability_calls_from_textual_tool_syntax() {
+    let provider = Arc::new(ToolAwareProvider::tool_stop_reply(
+        "Searching now.to=demo__echo weirdjson\n{\"message\":\"hello\"}",
+    ));
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider.clone(),
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+    let capabilities = Arc::new(GatewayCapabilityPort::with_tool_surface());
+
+    let response = gateway
+        .stream_model_with_capabilities(model_request(interactive_model()), capabilities.clone())
+        .await
+        .unwrap();
+
+    let ParentLoopOutput::CapabilityCalls(calls) = response.output else {
+        panic!("expected capability calls");
+    };
+    assert_eq!(calls.len(), 1);
+    assert_eq!(
+        calls[0].capability_id,
+        CapabilityId::new("demo.echo").unwrap()
+    );
+    assert_eq!(provider.tool_requests.lock().unwrap().len(), 1);
+    assert!(provider.complete_requests.lock().unwrap().is_empty());
+
+    let registered = capabilities.registered.lock().unwrap();
+    assert_eq!(registered.len(), 1);
+    assert_eq!(registered[0].name, "demo__echo");
+    assert_eq!(
+        registered[0].arguments,
+        serde_json::json!({"message":"hello"})
+    );
+}
+
+#[tokio::test]
+async fn gateway_rejects_unrecovered_textual_tool_syntax() {
+    let provider = Arc::new(ToolAwareProvider::tool_stop_reply(
+        "Searching now.to=hidden.tool weirdjson\n{\"message\":\"hello\"}",
+    ));
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider.clone(),
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+    let capabilities = Arc::new(GatewayCapabilityPort::with_tool_surface());
+
+    let error = gateway
+        .stream_model_with_capabilities(model_request(interactive_model()), capabilities.clone())
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.kind, HostManagedModelErrorKind::InvalidOutput);
+    assert!(capabilities.registered.lock().unwrap().is_empty());
+    assert_eq!(provider.tool_requests.lock().unwrap().len(), 1);
+    assert!(provider.complete_requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn gateway_preserves_structured_tool_calls_when_content_has_legacy_marker() {
     let provider = Arc::new(ToolAwareProvider::tool_response(ToolCompletionResponse {
         content: Some(
