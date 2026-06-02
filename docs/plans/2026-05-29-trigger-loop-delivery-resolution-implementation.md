@@ -585,6 +585,11 @@ Expected size: less than 1000 lines.
 Add the heavier caller-level tests separately from the worker core:
 
 - repository + provider + inbound service + turn coordinator test path
+- integration and E2E-style harnesses should intercept external infrastructure
+  and endpoints only. Use real domain classes and composition-owned ports for
+  trigger repositories, source providers, materialization, turn submission, and
+  turn-state lookup whenever those implementations exist, so tests exercise the
+  full in-process path instead of replacing internal behavior with mocks.
 - one new canonical thread per fire
 - trusted scope reaches binding resolution
 - same scheduled slot replays instead of double-submitting
@@ -647,13 +652,11 @@ Wire the trigger poller into Reborn composition:
 - a dedicated `TriggerPollerWorkerConfig` or equivalent composition-owned type
   for poll interval, fires per tick, and per-trigger active-run cap. Do not
   reuse `RebornRuntimeInput::PollSettings`, which is request-completion polling.
-- add a sealed `TrustedTriggerPollerScope` or equivalent host-owned token before
-  exposing the real background poller lifecycle. Global trigger scans should
-  require that token or return a wrapper type such as `GlobalActiveTriggerRecord`
-  so product adapters, first-party capabilities, and tenant-scoped APIs cannot
-  accidentally treat cross-tenant poller rows as ordinary caller-scoped lists.
-  Keep tenant-scoped `list_triggers(tenant_id)` as the only user/API listing
-  path.
+- preserve PR 16's explicit worker-local trusted poller scan call sites when
+  exposing the real background poller lifecycle. Product adapters, first-party
+  capabilities, and tenant-scoped APIs must not receive access to cross-tenant
+  poller scans; keep tenant-scoped `list_triggers(tenant_id)` as the only
+  user/API listing path.
 - background task bundle or worker-supervisor type that owns both turn-runner
   and trigger-poller handles, cancellation, await/shutdown ordering, and panic
   or early-exit reporting.

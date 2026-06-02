@@ -5,8 +5,8 @@ use ironclaw_turns::TurnRunId;
 use tokio_postgres::Row;
 
 use crate::{
-    ClaimDueFireOutcome, ClaimDueFireRequest, ClaimedTriggerFire, ClearActiveFireRequest,
-    FireAcceptedRequest, FirePermanentFailedRequest, FireReplayedRequest,
+    ActiveTriggerScanCursor, ClaimDueFireOutcome, ClaimDueFireRequest, ClaimedTriggerFire,
+    ClearActiveFireRequest, FireAcceptedRequest, FirePermanentFailedRequest, FireReplayedRequest,
     FireRetryableFailedRequest, FireTerminalFailedRequest, TriggerCompletionPolicy, TriggerError,
     TriggerId, TriggerRecord, TriggerRepository, TriggerRunStatus, TriggerSchedule,
     TriggerSourceKind, TriggerState, reject_failed_result_after_active_run,
@@ -235,24 +235,62 @@ impl TriggerRepository for PostgresTriggerRepository {
     }
 
     async fn list_active_triggers(&self, limit: usize) -> Result<Vec<TriggerRecord>, TriggerError> {
+        self.list_active_triggers_after(None, limit).await
+    }
+
+    async fn list_active_triggers_after(
+        &self,
+        after: Option<ActiveTriggerScanCursor>,
+        limit: usize,
+    ) -> Result<Vec<TriggerRecord>, TriggerError> {
         if limit == 0 {
             return Ok(Vec::new());
         }
         let limit = limit.min(super::MAX_DUE_TRIGGER_POLL_LIMIT) as i64;
         let client = self.connect().await?;
-        let rows = client
-            .query(
-                &format!(
-                    "SELECT {TRIGGER_COLUMNS}
-                     FROM {TRIGGER_TABLE}
-                     WHERE active_fire_slot IS NOT NULL
-                     ORDER BY active_fire_slot, tenant_id, trigger_id
-                     LIMIT $1"
-                ),
-                &[&limit],
-            )
-            .await
-            .map_err(|error| backend_error("query active trigger records", error))?;
+        let rows = match after {
+            Some(cursor) => {
+                let active_fire_slot = fmt_ts(&cursor.active_fire_slot());
+                let trigger_id = cursor.trigger_id().to_string();
+                client
+                    .query(
+                        &format!(
+                            "SELECT {TRIGGER_COLUMNS}
+                             FROM {TRIGGER_TABLE}
+                             WHERE active_fire_slot IS NOT NULL
+                               AND (
+                                 active_fire_slot > $1
+                                 OR (active_fire_slot = $1 AND tenant_id > $2)
+                                 OR (active_fire_slot = $1 AND tenant_id = $2 AND trigger_id > $3)
+                               )
+                             ORDER BY active_fire_slot, tenant_id, trigger_id
+                             LIMIT $4"
+                        ),
+                        &[
+                            &active_fire_slot,
+                            &cursor.tenant_id().as_str(),
+                            &trigger_id,
+                            &limit,
+                        ],
+                    )
+                    .await
+            }
+            None => {
+                client
+                    .query(
+                        &format!(
+                            "SELECT {TRIGGER_COLUMNS}
+                             FROM {TRIGGER_TABLE}
+                             WHERE active_fire_slot IS NOT NULL
+                             ORDER BY active_fire_slot, tenant_id, trigger_id
+                             LIMIT $1"
+                        ),
+                        &[&limit],
+                    )
+                    .await
+            }
+        }
+        .map_err(|error| backend_error("query active trigger records", error))?;
         rows.into_iter().map(|row| row_to_record(&row)).collect()
     }
 
@@ -875,4 +913,8 @@ CREATE INDEX IF NOT EXISTS trigger_records_state_next_run_at_idx
 
 CREATE INDEX IF NOT EXISTS trigger_records_tenant_created_at_idx
     ON trigger_records (tenant_id, created_at, trigger_id);
+
+CREATE INDEX IF NOT EXISTS trigger_records_active_fire_slot_idx
+    ON trigger_records (active_fire_slot, tenant_id, trigger_id)
+    WHERE active_fire_slot IS NOT NULL;
 "#;

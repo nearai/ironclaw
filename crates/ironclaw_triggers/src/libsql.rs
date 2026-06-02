@@ -14,8 +14,8 @@ use libsql::params;
 
 #[cfg(feature = "libsql")]
 use crate::{
-    ClaimDueFireOutcome, ClaimDueFireRequest, ClaimedTriggerFire, ClearActiveFireRequest,
-    FireAcceptedRequest, FirePermanentFailedRequest, FireReplayedRequest,
+    ActiveTriggerScanCursor, ClaimDueFireOutcome, ClaimDueFireRequest, ClaimedTriggerFire,
+    ClearActiveFireRequest, FireAcceptedRequest, FirePermanentFailedRequest, FireReplayedRequest,
     FireRetryableFailedRequest, FireTerminalFailedRequest, TriggerCompletionPolicy, TriggerError,
     TriggerId, TriggerRecord, TriggerRepository, TriggerRunStatus, TriggerSchedule,
     TriggerSourceKind, TriggerState, reject_failed_result_after_active_run,
@@ -134,6 +134,16 @@ impl LibSqlTriggerRepository {
             )
             .await
             .map_err(|error| backend_error("create trigger tenant list index", error))?;
+            conn.execute(
+                &format!(
+                    "CREATE INDEX IF NOT EXISTS trigger_records_active_fire_slot_idx
+                     ON {TRIGGER_TABLE} (active_fire_slot, tenant_id, trigger_id)
+                     WHERE active_fire_slot IS NOT NULL"
+                ),
+                (),
+            )
+            .await
+            .map_err(|error| backend_error("create trigger active scan index", error))?;
             Ok::<(), TriggerError>(())
         }
         .await;
@@ -295,24 +305,58 @@ impl TriggerRepository for LibSqlTriggerRepository {
     }
 
     async fn list_active_triggers(&self, limit: usize) -> Result<Vec<TriggerRecord>, TriggerError> {
+        self.list_active_triggers_after(None, limit).await
+    }
+
+    async fn list_active_triggers_after(
+        &self,
+        after: Option<ActiveTriggerScanCursor>,
+        limit: usize,
+    ) -> Result<Vec<TriggerRecord>, TriggerError> {
         if limit == 0 {
             return Ok(Vec::new());
         }
         let limit = limit.min(super::MAX_DUE_TRIGGER_POLL_LIMIT);
         let conn = self.connect().await?;
-        let mut rows = conn
-            .query(
-                &format!(
-                    "SELECT {TRIGGER_COLUMNS}
-                     FROM {TRIGGER_TABLE}
-                     WHERE active_fire_slot IS NOT NULL
-                     ORDER BY active_fire_slot, tenant_id, trigger_id
-                     LIMIT ?1"
-                ),
-                params![limit as i64],
-            )
-            .await
-            .map_err(|error| backend_error("query active trigger records", error))?;
+        let mut rows = match after {
+            Some(cursor) => {
+                conn.query(
+                    &format!(
+                        "SELECT {TRIGGER_COLUMNS}
+                         FROM {TRIGGER_TABLE}
+                         WHERE active_fire_slot IS NOT NULL
+                           AND (
+                             active_fire_slot > ?1
+                             OR (active_fire_slot = ?1 AND tenant_id > ?2)
+                             OR (active_fire_slot = ?1 AND tenant_id = ?2 AND trigger_id > ?3)
+                           )
+                         ORDER BY active_fire_slot, tenant_id, trigger_id
+                         LIMIT ?4"
+                    ),
+                    params![
+                        fmt_ts(&cursor.active_fire_slot()),
+                        cursor.tenant_id().as_str(),
+                        cursor.trigger_id().to_string(),
+                        limit as i64,
+                    ],
+                )
+                .await
+            }
+            None => {
+                conn.query(
+                    &format!(
+                        "SELECT {TRIGGER_COLUMNS}
+                         FROM {TRIGGER_TABLE}
+                         WHERE active_fire_slot IS NOT NULL
+                         ORDER BY active_fire_slot, tenant_id, trigger_id
+                         LIMIT ?1"
+                    ),
+                    params![limit as i64],
+                )
+                .await
+            }
+        }
+        .map_err(|error| backend_error("query active trigger records", error))?;
         let mut records = Vec::new();
         loop {
             match rows.next().await {

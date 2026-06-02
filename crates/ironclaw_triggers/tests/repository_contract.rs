@@ -3,9 +3,9 @@
 use chrono::{TimeZone, Utc};
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, Timestamp, UserId};
 use ironclaw_triggers::{
-    ClearActiveFireRequest, InMemoryTriggerRepository, TriggerCompletionPolicy, TriggerError,
-    TriggerId, TriggerRecord, TriggerRepository, TriggerRunStatus, TriggerSchedule,
-    TriggerSourceKind, TriggerState,
+    ActiveTriggerScanCursor, ClearActiveFireRequest, InMemoryTriggerRepository,
+    TriggerCompletionPolicy, TriggerError, TriggerId, TriggerRecord, TriggerRepository,
+    TriggerRunStatus, TriggerSchedule, TriggerSourceKind, TriggerState,
 };
 use ironclaw_turns::TurnRunId;
 
@@ -413,42 +413,60 @@ async fn assert_active_query_lists_active_records_in_deterministic_order(
         early_slot,
     );
     let inactive_trigger_id = inactive.trigger_id;
-    let active_later = {
+    let blocked_oldest_a = {
         let mut record = sample_record(
             TriggerId::parse("01J00000000000000000000002").expect("ulid"),
-            tenant("tenant-active-later"),
+            tenant("tenant-blocked-a"),
+            later_slot,
+        );
+        record.active_fire_slot = Some(early_slot);
+        record
+    };
+    let blocked_oldest_b = {
+        let mut record = sample_record(
+            TriggerId::parse("01J00000000000000000000003").expect("ulid"),
+            tenant("tenant-blocked-b"),
+            later_slot,
+        );
+        record.active_fire_slot = Some(early_slot);
+        record
+    };
+    let blocked_oldest_c = {
+        let mut record = sample_record(
+            TriggerId::parse("01J00000000000000000000004").expect("ulid"),
+            tenant("tenant-blocked-c"),
+            later_slot,
+        );
+        record.active_fire_slot = Some(early_slot);
+        record
+    };
+    let active_terminal_later_a = {
+        let mut record = sample_record(
+            TriggerId::parse("01J00000000000000000000005").expect("ulid"),
+            tenant("tenant-terminal-a"),
             later_slot,
         );
         record.active_fire_slot = Some(later_slot);
+        record.active_run_ref =
+            Some(TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5c").expect("valid run"));
         record
     };
-    let active_early_a = {
+    let active_terminal_later_b = {
         let mut record = sample_record(
-            TriggerId::parse("01J00000000000000000000003").expect("ulid"),
-            tenant("tenant-active-a"),
+            TriggerId::parse("01J00000000000000000000006").expect("ulid"),
+            tenant("tenant-terminal-b"),
             later_slot,
         );
-        record.active_fire_slot = Some(early_slot);
+        record.active_fire_slot = Some(later_slot);
         record.active_run_ref =
-            Some(TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5a").expect("valid run"));
-        record
-    };
-    let active_early_b = {
-        let mut record = sample_record(
-            TriggerId::parse("01J00000000000000000000004").expect("ulid"),
-            tenant("tenant-active-b"),
-            later_slot,
-        );
-        record.active_fire_slot = Some(early_slot);
-        record.active_run_ref =
-            Some(TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5b").expect("valid run"));
+            Some(TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5d").expect("valid run"));
         record
     };
     let mut overflow_records = Vec::new();
-    for index in 0..130 {
+    for index in 0..126 {
         let mut record = sample_record(
             TriggerId::new(),
-            tenant(&format!("tenant-overflow-{index:03}")),
+            tenant(&format!("tenant-z-overflow-{index:03}")),
             later_slot,
         );
         record.active_fire_slot = Some(later_slot);
@@ -458,15 +476,21 @@ async fn assert_active_query_lists_active_records_in_deterministic_order(
     repo.upsert_trigger(inactive)
         .await
         .expect("insert inactive");
-    repo.upsert_trigger(active_later.clone())
+    repo.upsert_trigger(blocked_oldest_a.clone())
         .await
-        .expect("insert active later");
-    repo.upsert_trigger(active_early_b.clone())
+        .expect("insert blocked oldest a");
+    repo.upsert_trigger(blocked_oldest_b.clone())
         .await
-        .expect("insert active early b");
-    repo.upsert_trigger(active_early_a.clone())
+        .expect("insert blocked oldest b");
+    repo.upsert_trigger(blocked_oldest_c.clone())
         .await
-        .expect("insert active early a");
+        .expect("insert blocked oldest c");
+    repo.upsert_trigger(active_terminal_later_a.clone())
+        .await
+        .expect("insert active terminal later a");
+    repo.upsert_trigger(active_terminal_later_b.clone())
+        .await
+        .expect("insert active terminal later b");
     for record in &overflow_records {
         repo.upsert_trigger(record.clone())
             .await
@@ -478,6 +502,74 @@ async fn assert_active_query_lists_active_records_in_deterministic_order(
             .await
             .expect("zero active limit")
             .is_empty()
+    );
+
+    let first_page = repo
+        .list_active_triggers(3)
+        .await
+        .expect("list first active page");
+    assert_eq!(
+        first_page
+            .iter()
+            .map(|record| (record.tenant_id.clone(), record.trigger_id))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                blocked_oldest_a.tenant_id.clone(),
+                blocked_oldest_a.trigger_id,
+            ),
+            (
+                blocked_oldest_b.tenant_id.clone(),
+                blocked_oldest_b.trigger_id,
+            ),
+            (
+                blocked_oldest_c.tenant_id.clone(),
+                blocked_oldest_c.trigger_id,
+            ),
+        ]
+    );
+
+    let cursor =
+        ActiveTriggerScanCursor::from_active_record(&first_page[2]).expect("active cursor");
+    assert!(
+        repo.list_active_triggers_after(Some(cursor.clone()), 0)
+            .await
+            .expect("list active cursor with zero limit")
+            .is_empty()
+    );
+    let second_page = repo
+        .list_active_triggers_after(Some(cursor.clone()), 3)
+        .await
+        .expect("list second active page");
+    assert_eq!(
+        second_page
+            .iter()
+            .map(|record| (record.tenant_id.clone(), record.trigger_id))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                active_terminal_later_a.tenant_id.clone(),
+                active_terminal_later_a.trigger_id,
+            ),
+            (
+                active_terminal_later_b.tenant_id.clone(),
+                active_terminal_later_b.trigger_id,
+            ),
+            (
+                overflow_records[0].tenant_id.clone(),
+                overflow_records[0].trigger_id,
+            ),
+        ]
+    );
+    let cursor_at_last =
+        ActiveTriggerScanCursor::from_active_record(overflow_records.last().expect("overflow row"))
+            .expect("last active cursor");
+    assert!(
+        repo.list_active_triggers_after(Some(cursor_at_last), 3)
+            .await
+            .expect("list after last active row")
+            .is_empty(),
+        "cursor at the last active row must return an empty page"
     );
 
     let active = repo
@@ -500,14 +592,41 @@ async fn assert_active_query_lists_active_records_in_deterministic_order(
     assert_eq!(
         active
             .iter()
-            .take(3)
+            .take(6)
             .map(|record| (record.tenant_id.clone(), record.trigger_id))
             .collect::<Vec<_>>(),
         vec![
-            (active_early_a.tenant_id.clone(), active_early_a.trigger_id),
-            (active_early_b.tenant_id.clone(), active_early_b.trigger_id),
-            (active_later.tenant_id.clone(), active_later.trigger_id),
+            (
+                blocked_oldest_a.tenant_id.clone(),
+                blocked_oldest_a.trigger_id,
+            ),
+            (
+                blocked_oldest_b.tenant_id.clone(),
+                blocked_oldest_b.trigger_id,
+            ),
+            (
+                blocked_oldest_c.tenant_id.clone(),
+                blocked_oldest_c.trigger_id,
+            ),
+            (
+                active_terminal_later_a.tenant_id.clone(),
+                active_terminal_later_a.trigger_id,
+            ),
+            (
+                active_terminal_later_b.tenant_id.clone(),
+                active_terminal_later_b.trigger_id,
+            ),
+            (
+                overflow_records[0].tenant_id.clone(),
+                overflow_records[0].trigger_id,
+            ),
         ]
+    );
+    assert!(
+        active
+            .iter()
+            .any(|record| record.trigger_id == active_terminal_later_a.trigger_id),
+        "later terminal active rows should still be reachable"
     );
 
     let limited = repo
@@ -515,7 +634,76 @@ async fn assert_active_query_lists_active_records_in_deterministic_order(
         .await
         .expect("list active limited");
     assert_eq!(limited.len(), 1);
-    assert_eq!(limited[0].trigger_id, active_early_a.trigger_id);
+    assert_eq!(limited[0].trigger_id, blocked_oldest_a.trigger_id);
+}
+
+async fn assert_active_query_paginates_same_slot_same_tenant_by_trigger_id(
+    repo: &impl TriggerRepository,
+) {
+    let active_slot = ts(1_704_067_260);
+    let tenant_id = tenant("tenant-tie");
+    let first = {
+        let mut record = sample_record(
+            TriggerId::parse("01J00000000000000000000000").expect("ulid"),
+            tenant_id.clone(),
+            ts(1_704_067_800),
+        );
+        record.active_fire_slot = Some(active_slot);
+        record
+    };
+    let second = {
+        let mut record = sample_record(
+            TriggerId::parse("01J00000000000000000000001").expect("ulid"),
+            tenant_id.clone(),
+            ts(1_704_067_800),
+        );
+        record.active_fire_slot = Some(active_slot);
+        record
+    };
+    let third = {
+        let mut record = sample_record(
+            TriggerId::parse("01J00000000000000000000002").expect("ulid"),
+            tenant_id,
+            ts(1_704_067_800),
+        );
+        record.active_fire_slot = Some(active_slot);
+        record
+    };
+
+    repo.upsert_trigger(first.clone())
+        .await
+        .expect("insert first tie row");
+    repo.upsert_trigger(second.clone())
+        .await
+        .expect("insert second tie row");
+    repo.upsert_trigger(third.clone())
+        .await
+        .expect("insert third tie row");
+
+    let first_page = repo
+        .list_active_triggers(2)
+        .await
+        .expect("list first tie page");
+    assert_eq!(
+        first_page
+            .iter()
+            .map(|record| record.trigger_id)
+            .collect::<Vec<_>>(),
+        vec![first.trigger_id, second.trigger_id]
+    );
+    let cursor =
+        ActiveTriggerScanCursor::from_active_record(&first_page[1]).expect("tie page cursor");
+    let second_page = repo
+        .list_active_triggers_after(Some(cursor), 2)
+        .await
+        .expect("list second tie page");
+    assert_eq!(
+        second_page
+            .iter()
+            .map(|record| record.trigger_id)
+            .collect::<Vec<_>>(),
+        vec![third.trigger_id]
+    );
 }
 
 async fn assert_rejects_validation_failures_before_persistence(repo: &impl TriggerRepository) {
@@ -638,6 +826,9 @@ async fn libsql_repository_contract_parity() {
     assert_active_query_lists_active_records_in_deterministic_order(&repo).await;
 
     let (_dir, repo) = build_libsql_repo().await;
+    assert_active_query_paginates_same_slot_same_tenant_by_trigger_id(&repo).await;
+
+    let (_dir, repo) = build_libsql_repo().await;
     assert_rejects_validation_failures_before_persistence(&repo).await;
 
     let (_dir, repo) = build_libsql_repo().await;
@@ -728,6 +919,9 @@ async fn postgres_repository_contract_parity() {
 
     clear_postgres_triggers(&pool).await;
     assert_active_query_lists_active_records_in_deterministic_order(&repo).await;
+
+    clear_postgres_triggers(&pool).await;
+    assert_active_query_paginates_same_slot_same_tenant_by_trigger_id(&repo).await;
 
     clear_postgres_triggers(&pool).await;
     assert_rejects_validation_failures_before_persistence(&repo).await;
@@ -1668,6 +1862,7 @@ mod fire_claim_contract {
                 fire_slot,
             );
             record.state = TriggerState::Paused;
+            record.active_fire_slot = Some(fire_slot);
             record.active_run_ref =
                 Some(TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5f").expect("valid run"));
             record

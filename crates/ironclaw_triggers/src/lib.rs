@@ -1,7 +1,7 @@
 //! Scheduled trigger domain contracts for IronClaw Reborn.
 //!
 //! This crate owns trigger records, source-provider evaluation, deterministic
-//! fire identity, and in-memory test behavior. Durable persistence, poller
+//! fire identity, trusted poller call sites, and in-memory test behavior. Poller
 //! lifecycle wiring, first-party capabilities, and outbound delivery are owned
 //! by later slices.
 
@@ -500,6 +500,35 @@ pub struct ClearActiveFireRequest {
     pub run_id: TurnRunId,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActiveTriggerScanCursor {
+    active_fire_slot: Timestamp,
+    tenant_id: TenantId,
+    trigger_id: TriggerId,
+}
+
+impl ActiveTriggerScanCursor {
+    pub fn from_active_record(record: &TriggerRecord) -> Option<Self> {
+        Some(Self {
+            active_fire_slot: record.active_fire_slot?,
+            tenant_id: record.tenant_id.clone(),
+            trigger_id: record.trigger_id,
+        })
+    }
+
+    pub fn active_fire_slot(&self) -> Timestamp {
+        self.active_fire_slot
+    }
+
+    pub fn tenant_id(&self) -> &TenantId {
+        &self.tenant_id
+    }
+
+    pub fn trigger_id(&self) -> TriggerId {
+        self.trigger_id
+    }
+}
+
 #[async_trait]
 pub trait TriggerSourceProvider: Send + Sync {
     async fn evaluate(
@@ -564,9 +593,10 @@ pub trait TriggerRepository: Send + Sync {
     ///
     /// # Safety / Authorization
     ///
-    /// This is a global query and must not be used for tenant-scoped or
-    /// user-facing list operations. Callers must preserve each returned
-    /// record's tenant/user authority when materializing a fire.
+    /// This is a global repository query and must not be surfaced as a
+    /// tenant-scoped or user-facing capability. Host-owned poller code should
+    /// keep this call on explicit worker-local trusted poller call sites so the
+    /// trust boundary remains visible.
     async fn list_due_triggers(
         &self,
         now: Timestamp,
@@ -577,12 +607,28 @@ pub trait TriggerRepository: Send + Sync {
     ///
     /// # Safety / Authorization
     ///
-    /// This is a global query and must not be used for tenant-scoped or
-    /// user-facing list operations. It exists so the poller can clear completed
-    /// active fires before future schedule slots become eligible. Callers must
-    /// preserve each returned record's tenant authority when checking or
-    /// clearing active fire state.
+    /// This is a global repository query and must not be surfaced as a
+    /// tenant-scoped or user-facing capability. Host-owned poller code should
+    /// keep this call on explicit worker-local trusted poller call sites so the
+    /// trust boundary remains visible.
     async fn list_active_triggers(&self, limit: usize) -> Result<Vec<TriggerRecord>, TriggerError>;
+
+    /// Lists active trigger fires after a previous scan cursor.
+    ///
+    /// # Safety / Authorization
+    ///
+    /// This has the same trusted-poller-only authorization constraints as
+    /// [`TriggerRepository::list_active_triggers`]. The cursor must be derived
+    /// from a previous trusted active scan result, not from user input.
+    ///
+    /// Cursor pagination is required for every repository implementation so the
+    /// poller cannot advance successfully on the first tick and then fail when
+    /// it resumes from a stored cursor.
+    async fn list_active_triggers_after(
+        &self,
+        after: Option<ActiveTriggerScanCursor>,
+        limit: usize,
+    ) -> Result<Vec<TriggerRecord>, TriggerError>;
 
     async fn claim_due_fire(
         &self,
@@ -745,30 +791,53 @@ impl TriggerRepository for InMemoryTriggerRepository {
     }
 
     async fn list_active_triggers(&self, limit: usize) -> Result<Vec<TriggerRecord>, TriggerError> {
+        self.list_active_triggers_after(None, limit).await
+    }
+
+    async fn list_active_triggers_after(
+        &self,
+        after: Option<ActiveTriggerScanCursor>,
+        limit: usize,
+    ) -> Result<Vec<TriggerRecord>, TriggerError> {
         if limit == 0 {
             return Ok(Vec::new());
         }
         let limit = limit.min(MAX_DUE_TRIGGER_POLL_LIMIT);
-        let state = self.lock_state()?;
-        let mut selected_keys = state
-            .iter()
-            .filter_map(|(key, record)| {
-                let active_fire_slot = record.active_fire_slot?;
-                Some((
-                    active_fire_slot,
-                    record.tenant_id.clone(),
-                    record.trigger_id,
-                    key.clone(),
-                ))
-            })
-            .collect::<Vec<_>>();
-        selected_keys.sort_by_key(|(active_fire_slot, tenant_id, trigger_id, _)| {
+        let mut selected_records = {
+            let state = self.lock_state()?;
+            state
+                .values()
+                .filter_map(|record| {
+                    let active_fire_slot = record.active_fire_slot?;
+                    Some((
+                        active_fire_slot,
+                        record.tenant_id.clone(),
+                        record.trigger_id,
+                        record.clone(),
+                    ))
+                })
+                .filter(
+                    |(active_fire_slot, tenant_id, trigger_id, _record)| match after.as_ref() {
+                        Some(cursor) => {
+                            (*active_fire_slot, tenant_id, *trigger_id)
+                                > (
+                                    cursor.active_fire_slot(),
+                                    cursor.tenant_id(),
+                                    cursor.trigger_id(),
+                                )
+                        }
+                        None => true,
+                    },
+                )
+                .collect::<Vec<_>>()
+        };
+        selected_records.sort_by_key(|(active_fire_slot, tenant_id, trigger_id, _record)| {
             (*active_fire_slot, tenant_id.clone(), *trigger_id)
         });
-        selected_keys.truncate(limit);
-        Ok(selected_keys
+        selected_records.truncate(limit);
+        Ok(selected_records
             .into_iter()
-            .filter_map(|(_, _, _, key)| state.get(&key).cloned())
+            .map(|(_, _, _, record)| record)
             .collect())
     }
 
