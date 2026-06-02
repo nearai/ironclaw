@@ -44,16 +44,16 @@ impl GoogleOAuthGateProviderRegistry {
         &self,
         request: OAuthGateChallengeRequest<'_>,
     ) -> Result<Option<AuthChallengeView>, AuthProductError> {
-        let [requirement] = request.requirements else {
-            return Ok(None);
-        };
-        let Some(provider) = self.providers.get(requirement.provider.as_str()) else {
-            return Ok(None);
-        };
-        provider
-            .challenge_for_blocked_gate(request, requirement)
-            .await
-            .map(Some)
+        for requirement in request.requirements {
+            let Some(provider) = self.providers.get(requirement.provider.as_str()) else {
+                continue;
+            };
+            return provider
+                .challenge_for_blocked_gate(request, requirement)
+                .await
+                .map(Some);
+        }
+        Ok(None)
     }
 
     pub(crate) async fn pkce_verifier_for_flow(
@@ -437,6 +437,36 @@ mod tests {
                 .query_pairs()
                 .any(|(name, value)| name == "hd" && value == "example.com")
         );
+    }
+
+    #[tokio::test]
+    async fn google_oauth_gate_registry_uses_registered_requirement_when_multiple_present() {
+        let fixture = GateFixture::new(None);
+        let registry =
+            GoogleOAuthGateProviderRegistry::new(vec![Arc::new(fixture.provider.clone())]);
+        let unsupported_requirement = RuntimeCredentialAuthRequirement {
+            provider: RuntimeCredentialAccountProviderId::new("github").unwrap(),
+            requester_extension: ExtensionId::new("github").unwrap(),
+            provider_scopes: Vec::new(),
+        };
+        let requirements = vec![unsupported_requirement, fixture.requirement.clone()];
+
+        let challenge = registry
+            .challenge_for_blocked_gate(OAuthGateChallengeRequest {
+                flow_manager: &fixture.flow_manager,
+                flow_source: &fixture.flow_source,
+                requirements: &requirements,
+                scope: &fixture.scope,
+                owner_user_id: &fixture.owner_user_id,
+                run_id: fixture.run_id,
+                gate_ref: &fixture.gate_ref,
+            })
+            .await
+            .unwrap()
+            .expect("google requirement should produce a challenge");
+
+        assert_eq!(challenge.kind, AuthPromptChallengeKind::OAuthUrl);
+        assert_eq!(fixture.active_gate_flows().await.len(), 1);
     }
 
     struct GateFixture {
