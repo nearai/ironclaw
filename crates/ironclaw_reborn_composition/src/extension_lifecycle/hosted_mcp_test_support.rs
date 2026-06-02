@@ -12,13 +12,16 @@ pub(super) struct HostedMcpDiscoveryEgress {
 
 impl HostedMcpDiscoveryEgress {
     pub(super) fn methods(&self) -> Vec<String> {
-        self.methods.lock().expect("methods lock").clone()
+        self.methods
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     pub(super) fn credential_counts(&self) -> Vec<usize> {
         self.credential_counts
             .lock()
-            .expect("credential counts lock")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
     }
 }
@@ -29,19 +32,37 @@ impl RuntimeHttpEgress for HostedMcpDiscoveryEgress {
         &self,
         request: RuntimeHttpEgressRequest,
     ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
-        assert_eq!(request.method, NetworkMethod::Post);
-        let body: serde_json::Value = serde_json::from_slice(&request.body).expect("JSON-RPC body");
-        let method = body["method"].as_str().expect("JSON-RPC method");
+        if request.method != NetworkMethod::Post {
+            return Err(RuntimeHttpEgressError::Request {
+                reason: "unexpected_method".to_string(),
+                request_bytes: request.body.len() as u64,
+                response_bytes: 0,
+            });
+        }
+        let body: serde_json::Value =
+            serde_json::from_slice(&request.body).map_err(|_| RuntimeHttpEgressError::Request {
+                reason: "invalid_json_rpc_body".to_string(),
+                request_bytes: request.body.len() as u64,
+                response_bytes: 0,
+            })?;
+        let method = body
+            .get("method")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| RuntimeHttpEgressError::Request {
+                reason: "missing_json_rpc_method".to_string(),
+                request_bytes: request.body.len() as u64,
+                response_bytes: 0,
+            })?;
         self.methods
             .lock()
-            .expect("methods lock")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push(method.to_string());
         self.credential_counts
             .lock()
-            .expect("credential counts lock")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push(request.credential_injections.len());
         match method {
-            "initialize" => Ok(runtime_json_response(
+            "initialize" => runtime_json_response(
                 body["id"].as_u64(),
                 serde_json::json!({
                     "protocolVersion": "2024-11-05",
@@ -49,13 +70,11 @@ impl RuntimeHttpEgress for HostedMcpDiscoveryEgress {
                     "serverInfo": {"name": "notion-test", "version": "1.0.0"}
                 }),
                 vec![("Mcp-Session-Id".to_string(), "session-1".to_string())],
-            )),
-            "notifications/initialized" => Ok(runtime_json_response(
-                None,
-                serde_json::json!({}),
-                Vec::new(),
-            )),
-            "tools/list" => Ok(runtime_json_response(
+            ),
+            "notifications/initialized" => {
+                runtime_json_response(None, serde_json::json!({}), Vec::new())
+            }
+            "tools/list" => runtime_json_response(
                 body["id"].as_u64(),
                 serde_json::json!({
                     "tools": [
@@ -71,7 +90,7 @@ impl RuntimeHttpEgress for HostedMcpDiscoveryEgress {
                     ]
                 }),
                 Vec::new(),
-            )),
+            ),
             _ => Err(RuntimeHttpEgressError::Request {
                 reason: "unexpected_method".to_string(),
                 request_bytes: request.body.len() as u64,
@@ -85,7 +104,7 @@ fn runtime_json_response(
     id: Option<u64>,
     result: serde_json::Value,
     extra_headers: Vec<(String, String)>,
-) -> RuntimeHttpEgressResponse {
+) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
     let mut headers = vec![("content-type".to_string(), "application/json".to_string())];
     headers.extend(extra_headers);
     let body = serde_json::to_vec(&serde_json::json!({
@@ -93,8 +112,12 @@ fn runtime_json_response(
         "id": id,
         "result": result,
     }))
-    .expect("serialize JSON-RPC response");
-    RuntimeHttpEgressResponse {
+    .map_err(|_| RuntimeHttpEgressError::Request {
+        reason: "serialize_json_rpc_response".to_string(),
+        request_bytes: 0,
+        response_bytes: 0,
+    })?;
+    Ok(RuntimeHttpEgressResponse {
         status: 200,
         headers,
         response_bytes: body.len() as u64,
@@ -102,5 +125,5 @@ fn runtime_json_response(
         saved_body: None,
         request_bytes: 0,
         redaction_applied: false,
-    }
+    })
 }

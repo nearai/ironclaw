@@ -267,6 +267,19 @@ impl RebornLocalLifecycleFacade {
                 let Some(extension_management) = &self.extension_management else {
                     return unsupported_projection(Some(package_ref));
                 };
+                if extension_management
+                    .package_requires_hosted_mcp_discovery(&package_ref)
+                    .await?
+                {
+                    return Err(ProductWorkflowError::InvalidBindingRequest {
+                        reason: format!(
+                            "extension {} requires hosted MCP schema discovery and cannot be activated through the static lifecycle facade",
+                            package_ref.id
+                        ),
+                    });
+                }
+                // This projection facade has no runtime egress services, so it
+                // intentionally only supports static extension activation.
                 extension_management
                     .activate(
                         package_ref,

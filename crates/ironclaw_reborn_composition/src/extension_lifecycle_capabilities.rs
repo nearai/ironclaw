@@ -149,21 +149,11 @@ impl FirstPartyCapabilityHandler for ExtensionLifecycleToolHandler {
             EXTENSION_ACTIVATE_CAPABILITY_ID => {
                 let input: ExtensionIdInput = parse_input(request.input)?;
                 let package_ref = extension_package_ref(input.extension_id)?;
-                if let Some(runtime_http_egress) = request.services.runtime_http_egress.clone() {
-                    self.extension_management
-                        .activate(
-                            package_ref,
-                            ExtensionActivationMode::HostedMcpDiscovery {
-                                scope: request.scope.clone(),
-                                runtime_http_egress,
-                            },
-                        )
-                        .await
-                } else {
-                    self.extension_management
-                        .activate(package_ref, ExtensionActivationMode::Static)
-                        .await
-                }
+                let mode = ExtensionActivationMode::from_dispatch_context(
+                    request.scope.clone(),
+                    request.services.runtime_http_egress.clone(),
+                );
+                self.extension_management.activate(package_ref, mode).await
             }
             EXTENSION_REMOVE_CAPABILITY_ID => {
                 let input: ExtensionIdInput = parse_input(request.input)?;

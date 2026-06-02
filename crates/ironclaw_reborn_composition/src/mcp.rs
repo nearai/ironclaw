@@ -86,6 +86,11 @@ impl McpHostHttpEgressPlanner for RegistryMcpEgressPlanner {
         let credential_injections =
             self.credential_injections(request.provider, request.capability_id, &endpoint);
         McpHostHttpEgressPlan {
+            // Credential-free hosted MCP providers are valid: the manifest may
+            // expose a public/unauthenticated server, and host network policy
+            // is still enforced below. Missing credentials for providers that
+            // should authenticate are a manifest/catalog validation concern,
+            // not an egress-planning reason to block the HTTP request.
             // Must match the bundled manifest's network policy
             // (deny_private_ip_ranges: true) or the dispatcher rejects the
             // request.

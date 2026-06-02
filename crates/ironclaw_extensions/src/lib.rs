@@ -403,6 +403,7 @@ fn descriptors_match_except_schema(
 }
 
 pub mod host_api;
+mod hosted_mcp_discovery;
 mod installations;
 mod lifecycle;
 mod registry;
@@ -410,6 +411,10 @@ pub mod v2;
 
 pub use host_api::capability_provider::{
     CAPABILITY_PROVIDER_HOST_API_ID, CAPABILITY_PROVIDER_SECTION, CapabilityProviderHostApiContract,
+};
+pub use hosted_mcp_discovery::{
+    HostedMcpDiscoveredTool, HostedMcpDiscoveredToolAnnotations, is_hosted_http_mcp_package,
+    package_with_discovered_hosted_mcp_tools,
 };
 pub use v2::{
     CapabilityDeclV2, CapabilityVisibility, ExtensionManifestV2, ExtensionRuntimeV2,

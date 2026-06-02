@@ -26,7 +26,9 @@ use crate::available_extensions::{
     visible_capability_ids,
 };
 use crate::lifecycle::response_with_payload;
-use crate::mcp_discovery::{discover_hosted_mcp_package, is_hosted_http_mcp_package};
+use crate::mcp_discovery::{
+    HostedMcpDiscoveryError, discover_hosted_mcp_package, is_hosted_http_mcp_package,
+};
 
 pub(crate) use active_publication::ActiveExtensionPublisher;
 #[cfg(test)]
@@ -72,6 +74,21 @@ impl ActiveExtensionCapability {
             provider: descriptor.provider.clone(),
             effects: descriptor.effects.clone(),
             runtime_credentials: descriptor.runtime_credentials.clone(),
+        }
+    }
+}
+
+impl ExtensionActivationMode {
+    pub(crate) fn from_dispatch_context(
+        scope: ResourceScope,
+        runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
+    ) -> Self {
+        match runtime_http_egress {
+            Some(runtime_http_egress) => Self::HostedMcpDiscovery {
+                scope,
+                runtime_http_egress,
+            },
+            None => Self::Static,
         }
     }
 }
@@ -359,14 +376,14 @@ impl RebornLocalExtensionManagementPort {
         let _operation_guard = self.operation_lock.lock().await;
         let installation = self
             .load_installation(&extension_id, &installation_id)
-            .await?;
-        let current_package = self.lifecycle_package(&extension_id).await?;
+            .await
+            .map_err(|_| hosted_mcp_changed_during_discovery_error())?;
+        let current_package = self
+            .lifecycle_package(&extension_id)
+            .await
+            .map_err(|_| hosted_mcp_changed_during_discovery_error())?;
         if current_package != discovery.base_package {
-            return Err(ProductWorkflowError::Transient {
-                reason:
-                    "extension changed while hosted MCP discovery was running; retry activation"
-                        .to_string(),
-            });
+            return Err(hosted_mcp_changed_during_discovery_error());
         };
         self.commit_activation(
             package_ref,
@@ -396,7 +413,9 @@ impl RebornLocalExtensionManagementPort {
             return Err(map_extension_installation_error(error));
         }
         if let Err(error) = self.active_extensions.publish(&active_package) {
-            self.disable_lifecycle_package(extension_id).await;
+            if previous_state != ExtensionActivationState::Enabled {
+                self.disable_lifecycle_package(extension_id).await;
+            }
             if let Err(cleanup_error) = self
                 .installation_store
                 .set_activation_state(installation_id, previous_state)
@@ -416,6 +435,16 @@ impl RebornLocalExtensionManagementPort {
             LifecyclePhase::Active,
             LifecycleProductPayload::ExtensionActivate { activated: true },
         ))
+    }
+
+    pub(crate) async fn package_requires_hosted_mcp_discovery(
+        &self,
+        package_ref: &LifecyclePackageRef,
+    ) -> Result<bool, ProductWorkflowError> {
+        let (extension_id, _) = extension_ids_from_package_ref(package_ref)?;
+        let _operation_guard = self.operation_lock.lock().await;
+        let package = self.lifecycle_package(&extension_id).await?;
+        Ok(is_hosted_http_mcp_package(&package))
     }
 
     pub(crate) async fn remove(
@@ -1025,9 +1054,21 @@ fn map_extension_installation_error(error: ExtensionInstallationError) -> Produc
     }
 }
 
-fn hosted_mcp_discovery_error(error: String) -> ProductWorkflowError {
-    ProductWorkflowError::InvalidBindingRequest {
-        reason: format!("hosted MCP discovery failed: {error}"),
+fn hosted_mcp_discovery_error(error: HostedMcpDiscoveryError) -> ProductWorkflowError {
+    match error {
+        HostedMcpDiscoveryError::Transient(reason) => ProductWorkflowError::Transient {
+            reason: format!("hosted MCP discovery failed: {reason}"),
+        },
+        HostedMcpDiscoveryError::Permanent(reason) => ProductWorkflowError::InvalidBindingRequest {
+            reason: format!("hosted MCP discovery failed: {reason}"),
+        },
+    }
+}
+
+fn hosted_mcp_changed_during_discovery_error() -> ProductWorkflowError {
+    ProductWorkflowError::Transient {
+        reason: "extension changed while hosted MCP discovery was running; retry activation"
+            .to_string(),
     }
 }
 
@@ -1061,8 +1102,9 @@ mod tests {
     };
     use ironclaw_host_api::{
         CapabilityId, ExtensionLifecycleOperation, HostPath, HostPortCatalog, InvocationId,
-        MountAlias, MountGrant, MountPermissions, MountView, ResourceScope, TenantId, TrustClass,
-        UserId,
+        MountAlias, MountGrant, MountPermissions, MountView, NetworkMethod, ResourceScope,
+        RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
+        RuntimeHttpEgressResponse, TenantId, TrustClass, UserId,
     };
     use ironclaw_host_runtime::{SPAWN_SUBAGENT_CAPABILITY_ID, builtin_first_party_package};
     use ironclaw_product_workflow::{
@@ -1273,6 +1315,84 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn hosted_mcp_activation_returns_transient_when_discovery_returns_no_tools() {
+        let catalog =
+            AvailableExtensionCatalog::from_first_party_assets().expect("first-party assets");
+        let (_dir, _storage_root, port, _active_registry, _installation_store) =
+            extension_management_port_fixture_with_catalog_and_service(
+                catalog,
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+            );
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "notion").expect("valid ref");
+
+        port.install(package_ref.clone())
+            .await
+            .expect("install Notion MCP");
+        let error = port
+            .activate(
+                package_ref,
+                ExtensionActivationMode::HostedMcpDiscovery {
+                    scope: hosted_mcp_scope("hosted-mcp-empty-tools"),
+                    runtime_http_egress: Arc::new(EmptyToolsHostedMcpEgress),
+                },
+            )
+            .await
+            .expect_err("empty tools/list should be retryable");
+
+        assert!(matches!(error, ProductWorkflowError::Transient { .. }));
+    }
+
+    #[tokio::test]
+    async fn hosted_mcp_activation_returns_transient_when_package_removed_during_discovery() {
+        let catalog =
+            AvailableExtensionCatalog::from_first_party_assets().expect("first-party assets");
+        let (_dir, _storage_root, port, _active_registry, _installation_store) =
+            extension_management_port_fixture_with_catalog_and_service(
+                catalog,
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+            );
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "notion").expect("valid ref");
+        let (egress, tools_list_started, release_tools_list) =
+            BlockingToolsListHostedMcpEgress::new();
+
+        port.install(package_ref.clone())
+            .await
+            .expect("install Notion MCP");
+        let activation = tokio::spawn({
+            let port = Arc::clone(&port);
+            let package_ref = package_ref.clone();
+            async move {
+                port.activate(
+                    package_ref,
+                    ExtensionActivationMode::HostedMcpDiscovery {
+                        scope: hosted_mcp_scope("hosted-mcp-remove-race"),
+                        runtime_http_egress: egress,
+                    },
+                )
+                .await
+            }
+        });
+        tools_list_started
+            .await
+            .expect("tools/list request should start");
+
+        port.remove(package_ref)
+            .await
+            .expect("remove can proceed while discovery is in flight");
+        release_tools_list
+            .send(())
+            .expect("release blocked tools/list response");
+        let error = activation
+            .await
+            .expect("activation task joins")
+            .expect_err("remove during discovery should be retryable");
+
+        assert!(matches!(error, ProductWorkflowError::Transient { .. }));
+    }
+
+    #[tokio::test]
     async fn extension_activation_updates_local_dev_host_trust_policy() {
         let (_dir, _storage_root, port, _active_registry, _installation_store, trust_policy) =
             extension_management_port_fixture_with_catalog_service_and_trust(
@@ -1330,6 +1450,80 @@ mod tests {
                 .authority_ceiling
                 .allowed_effects
                 .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn commit_activation_rolls_back_when_set_activation_state_fails() {
+        let lifecycle_sink = Arc::new(RecordingLifecycleSink::default());
+        let lifecycle_service = ExtensionLifecycleService::new(ExtensionRegistry::new())
+            .with_event_sink(lifecycle_sink.clone());
+        let (_dir, port, active_registry, failing_store, _trust_policy) =
+            extension_port_with_set_activation_failing_store(lifecycle_service);
+        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
+            .expect("valid ref");
+
+        port.install(package_ref.clone())
+            .await
+            .expect("install extension");
+        let error = port
+            .activate(package_ref, ExtensionActivationMode::Static)
+            .await
+            .expect_err("activation-state persistence failure is reported");
+
+        assert!(matches!(
+            error,
+            ProductWorkflowError::InvalidBindingRequest { .. }
+        ));
+        assert!(
+            active_registry
+                .snapshot()
+                .get_extension(&ExtensionId::new("fixture").unwrap())
+                .is_none()
+        );
+        assert_eq!(
+            fixture_installation_state(failing_store.as_ref()).await,
+            ExtensionActivationState::Installed
+        );
+        assert!(
+            lifecycle_sink
+                .operations()
+                .contains(&ExtensionLifecycleOperation::Disable)
+        );
+    }
+
+    #[tokio::test]
+    async fn commit_activation_rolls_back_when_publish_fails() {
+        let (_dir, _storage_root, port, active_registry, installation_store) =
+            extension_management_port_fixture_with_catalog_service_and_trust_policy(
+                AvailableExtensionCatalog::from_packages(vec![fixture_extension_package()]),
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+                Arc::new(HostTrustPolicy::fail_closed()),
+            );
+        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
+            .expect("valid ref");
+
+        port.install(package_ref.clone())
+            .await
+            .expect("install extension");
+        let error = port
+            .activate(package_ref, ExtensionActivationMode::Static)
+            .await
+            .expect_err("publish failure is reported");
+
+        assert!(matches!(
+            error,
+            ProductWorkflowError::InvalidBindingRequest { .. }
+        ));
+        assert!(
+            active_registry
+                .snapshot()
+                .get_extension(&ExtensionId::new("fixture").unwrap())
+                .is_none()
+        );
+        assert_eq!(
+            fixture_installation_state(installation_store.as_ref()).await,
+            ExtensionActivationState::Installed
         );
     }
 
@@ -1744,6 +1938,39 @@ mod tests {
                 .join("system/extensions/github/wasm/github_tool.wasm")
                 .exists()
         );
+    }
+
+    #[tokio::test]
+    async fn lifecycle_facade_rejects_static_activation_for_hosted_mcp_packages() {
+        let (_dir, _storage_root, facade, _active_registry, _installation_store) =
+            extension_lifecycle_fixture_with_catalog_and_service(
+                AvailableExtensionCatalog::from_first_party_assets().expect("first-party assets"),
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+            );
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "notion").expect("valid ref");
+
+        facade
+            .execute(
+                lifecycle_surface_context(),
+                LifecycleProductAction::ExtensionInstall {
+                    package_ref: package_ref.clone(),
+                },
+            )
+            .await
+            .expect("install Notion MCP");
+        let error = facade
+            .execute(
+                lifecycle_surface_context(),
+                LifecycleProductAction::ExtensionActivate { package_ref },
+            )
+            .await
+            .expect_err("hosted MCP activation needs runtime egress services");
+
+        assert!(matches!(
+            error,
+            ProductWorkflowError::InvalidBindingRequest { .. }
+        ));
     }
 
     #[tokio::test]
@@ -2356,6 +2583,34 @@ mod tests {
         Arc<InMemoryExtensionInstallationStore>,
         Arc<HostTrustPolicy>,
     ) {
+        let trust_policy = test_extension_trust_policy();
+        let (dir, storage_root, extension_management, active_registry, installation_store) =
+            extension_management_port_fixture_with_catalog_service_and_trust_policy(
+                catalog,
+                lifecycle_service,
+                Arc::clone(&trust_policy),
+            );
+        (
+            dir,
+            storage_root,
+            extension_management,
+            active_registry,
+            installation_store,
+            trust_policy,
+        )
+    }
+
+    fn extension_management_port_fixture_with_catalog_service_and_trust_policy(
+        catalog: AvailableExtensionCatalog,
+        lifecycle_service: ExtensionLifecycleService,
+        trust_policy: Arc<HostTrustPolicy>,
+    ) -> (
+        tempfile::TempDir,
+        std::path::PathBuf,
+        Arc<RebornLocalExtensionManagementPort>,
+        Arc<SharedExtensionRegistry>,
+        Arc<InMemoryExtensionInstallationStore>,
+    ) {
         let dir = tempfile::tempdir().expect("tempdir");
         let storage_root = dir.path().join("local-dev");
         std::fs::create_dir_all(storage_root.join("system/extensions")).expect("storage root");
@@ -2377,7 +2632,6 @@ mod tests {
         let root_filesystem: Arc<dyn RootFilesystem> = filesystem.clone();
         let active_registry = Arc::new(SharedExtensionRegistry::new(ExtensionRegistry::new()));
         let installation_store = Arc::new(InMemoryExtensionInstallationStore::default());
-        let trust_policy = test_extension_trust_policy();
         let extension_management = Arc::new(RebornLocalExtensionManagementPort::new(
             root_filesystem,
             catalog,
@@ -2394,7 +2648,6 @@ mod tests {
             extension_management,
             active_registry,
             installation_store,
-            trust_policy,
         )
     }
 
@@ -2488,9 +2741,43 @@ mod tests {
         )
     }
 
+    fn extension_port_with_set_activation_failing_store(
+        lifecycle_service: ExtensionLifecycleService,
+    ) -> (
+        tempfile::TempDir,
+        RebornLocalExtensionManagementPort,
+        Arc<SharedExtensionRegistry>,
+        Arc<DeleteInstallationFailingStore>,
+        Arc<HostTrustPolicy>,
+    ) {
+        extension_port_with_failing_store(
+            ExtensionRegistry::new(),
+            DeleteInstallationFailingStore::fail_set_activation_enabled(),
+            lifecycle_service,
+        )
+    }
+
     fn extension_port_with_delete_failing_store(
         initial_active_registry: ExtensionRegistry,
         failing_store: DeleteInstallationFailingStore,
+    ) -> (
+        tempfile::TempDir,
+        RebornLocalExtensionManagementPort,
+        Arc<SharedExtensionRegistry>,
+        Arc<DeleteInstallationFailingStore>,
+        Arc<HostTrustPolicy>,
+    ) {
+        extension_port_with_failing_store(
+            initial_active_registry,
+            failing_store,
+            ExtensionLifecycleService::new(ExtensionRegistry::new()),
+        )
+    }
+
+    fn extension_port_with_failing_store(
+        initial_active_registry: ExtensionRegistry,
+        failing_store: DeleteInstallationFailingStore,
+        lifecycle_service: ExtensionLifecycleService,
     ) -> (
         tempfile::TempDir,
         RebornLocalExtensionManagementPort,
@@ -2524,9 +2811,7 @@ mod tests {
             root_filesystem,
             AvailableExtensionCatalog::from_packages(vec![fixture_extension_package()]),
             installation_store,
-            Arc::new(Mutex::new(ExtensionLifecycleService::new(
-                ExtensionRegistry::new(),
-            ))),
+            Arc::new(Mutex::new(lifecycle_service)),
             test_active_extension_publisher(
                 Arc::clone(&active_registry),
                 Arc::clone(&trust_policy),
@@ -2600,9 +2885,38 @@ mod tests {
     }
 
     #[derive(Default)]
+    struct RecordingLifecycleSink {
+        operations: std::sync::Mutex<Vec<ExtensionLifecycleOperation>>,
+    }
+
+    impl RecordingLifecycleSink {
+        fn operations(&self) -> Vec<ExtensionLifecycleOperation> {
+            self.operations
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        }
+    }
+
+    #[async_trait]
+    impl ExtensionLifecycleEventSink for RecordingLifecycleSink {
+        async fn record_extension_lifecycle_event(
+            &self,
+            event: ExtensionLifecycleEvent,
+        ) -> Result<(), ExtensionError> {
+            self.operations
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(event.operation);
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
     struct DeleteInstallationFailingStore {
         inner: InMemoryExtensionInstallationStore,
         fail_manifest_delete: bool,
+        fail_set_activation_enabled: bool,
     }
 
     impl DeleteInstallationFailingStore {
@@ -2610,6 +2924,15 @@ mod tests {
             Self {
                 inner: InMemoryExtensionInstallationStore::default(),
                 fail_manifest_delete: true,
+                fail_set_activation_enabled: false,
+            }
+        }
+
+        fn fail_set_activation_enabled() -> Self {
+            Self {
+                inner: InMemoryExtensionInstallationStore::default(),
+                fail_manifest_delete: false,
+                fail_set_activation_enabled: true,
             }
         }
     }
@@ -2677,6 +3000,11 @@ mod tests {
             installation_id: &ExtensionInstallationId,
             state: ExtensionActivationState,
         ) -> Result<(), ExtensionInstallationError> {
+            if self.fail_set_activation_enabled && state == ExtensionActivationState::Enabled {
+                return Err(ExtensionInstallationError::InvalidInstallation {
+                    reason: "set activation state failed".to_string(),
+                });
+            }
             self.inner
                 .set_activation_state(installation_id, state)
                 .await
@@ -2715,6 +3043,19 @@ mod tests {
         ) -> Result<(), ExtensionInstallationError> {
             self.inner.update_health(installation_id, health).await
         }
+    }
+
+    async fn fixture_installation_state<S>(store: &S) -> ExtensionActivationState
+    where
+        S: ExtensionInstallationStore + ?Sized,
+    {
+        let installation_id = ExtensionInstallationId::new("fixture").expect("valid installation");
+        store
+            .get_installation(&installation_id)
+            .await
+            .expect("read fixture installation")
+            .expect("fixture installation remains")
+            .activation_state()
     }
 
     struct DeleteFailingRootFilesystem {
@@ -2779,6 +3120,180 @@ mod tests {
                 .get_extension(&extension_id)
                 .is_some()
         );
+    }
+
+    fn hosted_mcp_scope(user_id: &str) -> ResourceScope {
+        ResourceScope::local_default(
+            UserId::new(user_id).expect("valid user"),
+            InvocationId::new(),
+        )
+        .expect("valid local scope")
+    }
+
+    struct EmptyToolsHostedMcpEgress;
+
+    #[async_trait]
+    impl RuntimeHttpEgress for EmptyToolsHostedMcpEgress {
+        async fn execute(
+            &self,
+            request: RuntimeHttpEgressRequest,
+        ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
+            hosted_mcp_response_for_request(request, serde_json::json!({ "tools": [] })).await
+        }
+    }
+
+    struct BlockingToolsListHostedMcpEgress {
+        started: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+        release: tokio::sync::Mutex<tokio::sync::oneshot::Receiver<()>>,
+    }
+
+    impl BlockingToolsListHostedMcpEgress {
+        fn new() -> (
+            Arc<Self>,
+            tokio::sync::oneshot::Receiver<()>,
+            tokio::sync::oneshot::Sender<()>,
+        ) {
+            let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+            let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+            (
+                Arc::new(Self {
+                    started: std::sync::Mutex::new(Some(started_tx)),
+                    release: tokio::sync::Mutex::new(release_rx),
+                }),
+                started_rx,
+                release_tx,
+            )
+        }
+    }
+
+    #[async_trait]
+    impl RuntimeHttpEgress for BlockingToolsListHostedMcpEgress {
+        async fn execute(
+            &self,
+            request: RuntimeHttpEgressRequest,
+        ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
+            let body = parse_test_json_rpc_body(&request)?;
+            if body.get("method").and_then(serde_json::Value::as_str) == Some("tools/list") {
+                if let Some(started) = self
+                    .started
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take()
+                {
+                    let _ = started.send(());
+                }
+                let mut release = self.release.lock().await;
+                let _ = (&mut *release).await;
+            }
+            hosted_mcp_response_for_body(
+                body,
+                request.body.len() as u64,
+                discovered_tools_payload(),
+            )
+        }
+    }
+
+    async fn hosted_mcp_response_for_request(
+        request: RuntimeHttpEgressRequest,
+        tools_list_result: serde_json::Value,
+    ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
+        let request_bytes = request.body.len() as u64;
+        let body = parse_test_json_rpc_body(&request)?;
+        hosted_mcp_response_for_body(body, request_bytes, tools_list_result)
+    }
+
+    fn parse_test_json_rpc_body(
+        request: &RuntimeHttpEgressRequest,
+    ) -> Result<serde_json::Value, RuntimeHttpEgressError> {
+        if request.method != NetworkMethod::Post {
+            return Err(RuntimeHttpEgressError::Request {
+                reason: "unexpected_method".to_string(),
+                request_bytes: request.body.len() as u64,
+                response_bytes: 0,
+            });
+        }
+        serde_json::from_slice(&request.body).map_err(|_| RuntimeHttpEgressError::Request {
+            reason: "invalid_json_rpc_body".to_string(),
+            request_bytes: request.body.len() as u64,
+            response_bytes: 0,
+        })
+    }
+
+    fn hosted_mcp_response_for_body(
+        body: serde_json::Value,
+        request_bytes: u64,
+        tools_list_result: serde_json::Value,
+    ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
+        let method = body
+            .get("method")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| RuntimeHttpEgressError::Request {
+                reason: "missing_json_rpc_method".to_string(),
+                request_bytes,
+                response_bytes: 0,
+            })?;
+        match method {
+            "initialize" => test_runtime_json_response(
+                body["id"].as_u64(),
+                serde_json::json!({
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {"tools": {}},
+                    "serverInfo": {"name": "notion-test", "version": "1.0.0"}
+                }),
+                vec![("Mcp-Session-Id".to_string(), "session-1".to_string())],
+            ),
+            "notifications/initialized" => {
+                test_runtime_json_response(None, serde_json::json!({}), Vec::new())
+            }
+            "tools/list" => {
+                test_runtime_json_response(body["id"].as_u64(), tools_list_result, Vec::new())
+            }
+            _ => Err(RuntimeHttpEgressError::Request {
+                reason: "unexpected_method".to_string(),
+                request_bytes,
+                response_bytes: 0,
+            }),
+        }
+    }
+
+    fn discovered_tools_payload() -> serde_json::Value {
+        serde_json::json!({
+            "tools": [
+                {
+                    "name": "live-search",
+                    "description": "Search live Notion content",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {"query": {"type": "string"}},
+                        "required": ["query"]
+                    }
+                }
+            ]
+        })
+    }
+
+    fn test_runtime_json_response(
+        id: Option<u64>,
+        result: serde_json::Value,
+        extra_headers: Vec<(String, String)>,
+    ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
+        let mut headers = vec![("content-type".to_string(), "application/json".to_string())];
+        headers.extend(extra_headers);
+        let body = serde_json::to_vec(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": result,
+        }))
+        .expect("serialize test JSON-RPC response");
+        Ok(RuntimeHttpEgressResponse {
+            status: 200,
+            headers,
+            response_bytes: body.len() as u64,
+            body,
+            saved_body: None,
+            request_bytes: 0,
+            redaction_applied: false,
+        })
     }
 
     fn lifecycle_surface_context() -> LifecycleProductContext {

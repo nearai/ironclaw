@@ -850,7 +850,9 @@ fn parse_mcp_sse_response(
         let Some(payload) = line.strip_prefix("data:") else {
             continue;
         };
-        let value = serde_json::from_str::<Value>(payload.trim()).map_err(|_| response_error())?;
+        let Ok(value) = serde_json::from_str::<Value>(payload.trim()) else {
+            continue;
+        };
         let parsed_id = json_rpc_id(&value);
         if expected_id.is_none() || parsed_id == expected_id {
             return parse_mcp_json_rpc_value(&value, expected_id);
@@ -879,6 +881,9 @@ fn parse_tools_list_result(value: &Value) -> Result<Vec<McpDiscoveredTool>, Stri
     const MAX_DISCOVERED_TOOLS: usize = 128;
     const MAX_TOOL_NAME_BYTES: usize = 128;
     const MAX_TOOL_DESCRIPTION_BYTES: usize = 2048;
+    const MAX_SCHEMA_DEPTH: u8 = 8;
+    const MAX_SCHEMA_NODES: usize = 512;
+    const MAX_SCHEMA_STRING_BYTES: usize = 1024;
 
     let tools = value
         .get("tools")
@@ -913,6 +918,14 @@ fn parse_tools_list_result(value: &Value) -> Result<Vec<McpDiscoveredTool>, Stri
                 .filter(|schema| schema.is_object())
                 .cloned()
                 .ok_or_else(response_error)?;
+            if !is_supported_mcp_input_schema(
+                &input_schema,
+                MAX_SCHEMA_DEPTH,
+                MAX_SCHEMA_NODES,
+                MAX_SCHEMA_STRING_BYTES,
+            ) {
+                return Err(response_error());
+            }
             let annotations = parse_tool_annotations(tool.get("annotations"))?;
             Ok(McpDiscoveredTool {
                 name: name.to_string(),
@@ -922,6 +935,66 @@ fn parse_tools_list_result(value: &Value) -> Result<Vec<McpDiscoveredTool>, Stri
             })
         })
         .collect()
+}
+
+fn is_supported_mcp_input_schema(
+    schema: &Value,
+    max_depth: u8,
+    max_nodes: usize,
+    max_string_bytes: usize,
+) -> bool {
+    let mut nodes = 0usize;
+    validate_mcp_schema_value(
+        schema,
+        0,
+        max_depth,
+        max_nodes,
+        max_string_bytes,
+        &mut nodes,
+    )
+}
+
+fn validate_mcp_schema_value(
+    value: &Value,
+    depth: u8,
+    max_depth: u8,
+    max_nodes: usize,
+    max_string_bytes: usize,
+    nodes: &mut usize,
+) -> bool {
+    if depth > max_depth {
+        return false;
+    }
+    *nodes = nodes.saturating_add(1);
+    if *nodes > max_nodes {
+        return false;
+    }
+    match value {
+        Value::String(value) => {
+            value.len() <= max_string_bytes && !value.chars().any(is_unsupported_description_char)
+        }
+        Value::Array(values) => values.iter().all(|value| {
+            validate_mcp_schema_value(
+                value,
+                depth + 1,
+                max_depth,
+                max_nodes,
+                max_string_bytes,
+                nodes,
+            )
+        }),
+        Value::Object(values) => values.values().all(|value| {
+            validate_mcp_schema_value(
+                value,
+                depth + 1,
+                max_depth,
+                max_nodes,
+                max_string_bytes,
+                nodes,
+            )
+        }),
+        _ => true,
+    }
 }
 
 fn is_unsupported_description_char(value: char) -> bool {
@@ -1271,4 +1344,120 @@ where
 {
     let _ = governor.release(reservation_id);
     original
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn parse_tools_list_result_rejects_oversized_tool_list() {
+        let tools = (0..129)
+            .map(|index| valid_tool(&format!("tool-{index}"), json!({"type": "object"})))
+            .collect::<Vec<_>>();
+
+        let error = parse_tools_list_result(&json!({ "tools": tools }))
+            .expect_err("tool discovery must cap returned tools");
+
+        assert_eq!(error, "response_error");
+    }
+
+    #[test]
+    fn parse_tools_list_result_rejects_unsupported_description_control_char() {
+        let mut tool = valid_tool("search", json!({"type": "object"}));
+        tool["description"] = json!("bad\u{0000}description");
+
+        let error = parse_tools_list_result(&json!({ "tools": [tool] }))
+            .expect_err("unsupported description control characters must fail");
+
+        assert_eq!(error, "response_error");
+    }
+
+    #[test]
+    fn parse_tools_list_result_rejects_missing_or_non_object_schema() {
+        let mut missing_schema = valid_tool("missing-schema", json!({"type": "object"}));
+        missing_schema
+            .as_object_mut()
+            .expect("test tool object")
+            .remove("inputSchema");
+        let non_object_schema = valid_tool("bad-schema", json!("object please"));
+
+        for tool in [missing_schema, non_object_schema] {
+            let error = parse_tools_list_result(&json!({ "tools": [tool] }))
+                .expect_err("schema must be present and object-shaped");
+
+            assert_eq!(error, "response_error");
+        }
+    }
+
+    #[test]
+    fn parse_tools_list_result_rejects_unsafe_schema_strings_and_shape() {
+        let cases = [
+            valid_tool(
+                "control",
+                json!({"type": "object", "description": "bad\u{0008}schema"}),
+            ),
+            valid_tool(
+                "long-string",
+                json!({"type": "object", "description": "a".repeat(1025)}),
+            ),
+            valid_tool("too-deep", nested_schema(9)),
+            valid_tool("too-many-nodes", wide_schema(513)),
+        ];
+
+        for tool in cases {
+            let error = parse_tools_list_result(&json!({ "tools": [tool] }))
+                .expect_err("unsafe schema strings and shape must fail");
+
+            assert_eq!(error, "response_error");
+        }
+    }
+
+    #[test]
+    fn is_supported_mcp_tool_name_boundary_cases() {
+        let exactly_128 = "a".repeat(128);
+        let too_long = "a".repeat(129);
+
+        assert!(!is_supported_mcp_tool_name("", 128));
+        assert!(is_supported_mcp_tool_name(&exactly_128, 128));
+        assert!(!is_supported_mcp_tool_name(&too_long, 128));
+        assert!(!is_supported_mcp_tool_name("search..issues", 128));
+        assert!(!is_supported_mcp_tool_name("Search", 128));
+        assert!(!is_supported_mcp_tool_name("search._private", 128));
+    }
+
+    #[test]
+    fn parse_mcp_sse_response_skips_empty_data_keepalives() {
+        let body = b"event: ping\ndata:\n\nevent: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"ok\":true}}\n\n";
+
+        let response = parse_mcp_sse_response(body, Some(7))
+            .expect("empty SSE data lines should not abort parsing");
+
+        assert_eq!(response.result, Some(json!({"ok": true})));
+        assert!(!response.error);
+    }
+
+    fn valid_tool(name: &str, input_schema: Value) -> Value {
+        json!({
+            "name": name,
+            "description": "Search hosted data",
+            "inputSchema": input_schema
+        })
+    }
+
+    fn nested_schema(depth: usize) -> Value {
+        let mut value = json!({"type": "string"});
+        for _ in 0..depth {
+            value = json!({"type": "object", "properties": {"next": value}});
+        }
+        value
+    }
+
+    fn wide_schema(nodes: usize) -> Value {
+        let properties = (0..nodes)
+            .map(|index| (format!("field_{index}"), json!({"type": "string"})))
+            .collect::<serde_json::Map<_, _>>();
+        json!({"type": "object", "properties": properties})
+    }
 }
