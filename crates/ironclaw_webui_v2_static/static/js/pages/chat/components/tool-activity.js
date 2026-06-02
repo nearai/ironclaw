@@ -12,62 +12,96 @@ const DOT_STYLE = {
 
 const STATUS_WORD = { success: "ok", error: "err", running: "run" };
 
+/* Runs longer than this collapse into a single summary line. Runs of this
+   length or shorter render each call as its own row. */
+export const TOOL_RUN_COLLAPSE_AFTER = 3;
+
 export function ToolActivity({ activity }) {
   if (activity.toolCalls && activity.toolCalls.length > 0) {
-    return html`<${ToolActivityGroup} toolCalls=${activity.toolCalls} />`;
+    return html`<${ToolRun} tools=${activity.toolCalls} />`;
   }
   return html`<${ToolActivityCard} activity=${activity} />`;
 }
 
-function ToolActivityGroup({ toolCalls }) {
-  const hasError = toolCalls.some((tool) => tool.toolStatus === "error");
+/* Categorise tool calls into files / searches / commands / other and build a
+   compact human summary like "Explored 9 files, 5 searches, ran 2 commands".
+   Best-effort keyword heuristic on the tool name. */
+function summarizeTools(t, tools) {
+  let files = 0;
+  let searches = 0;
+  let commands = 0;
+  let others = 0;
+  for (const tool of tools) {
+    const name = String(tool.toolName || "").toLowerCase();
+    if (/(grep|search|find|lookup|query)/.test(name)) searches += 1;
+    else if (/(bash|shell|exec|run|command|terminal|spawn|process)/.test(name)) commands += 1;
+    else if (/(read|file|content|cat|view|open|glob|list|ls|tree|fetch|get|inspect|diff)/.test(name)) files += 1;
+    else others += 1;
+  }
+  const segs = [];
+  if (files) segs.push(t(files === 1 ? "tool.runFile" : "tool.runFiles", { n: files }));
+  if (searches) segs.push(t(searches === 1 ? "tool.runSearch" : "tool.runSearches", { n: searches }));
+  if (commands) segs.push(t(commands === 1 ? "tool.runCommand" : "tool.runCommands", { n: commands }));
+  if (others) segs.push(t(others === 1 ? "tool.runOther" : "tool.runOthers", { n: others }));
+  const text = segs.join(", ");
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
+/* Renders a run of tool calls. <= TOOL_RUN_COLLAPSE_AFTER → one row each.
+   More than that → a collapsed summary line that expands to the full rows. */
+export function ToolRun({ tools }) {
+  const t = useT();
+  const hasError = tools.some((tool) => tool.toolStatus === "error");
   const [expanded, setExpanded] = React.useState(hasError);
   React.useEffect(() => {
     if (hasError) setExpanded(true);
   }, [hasError]);
-  const toolWord = toolCalls.length === 1 ? "tool" : "tools";
+
+  if (tools.length <= TOOL_RUN_COLLAPSE_AFTER) {
+    return html`
+      <div className="flex flex-col gap-3">
+        ${tools.map(
+          (tool, index) => html`<${ToolActivity}
+            key=${tool.id || tool.callId || `${tool.toolName}-${index}`}
+            activity=${tool}
+          />`
+        )}
+      </div>
+    `;
+  }
+
+  const summary = summarizeTools(t, tools);
 
   return html`
-    <div className="flex gap-3">
-      <div
-        className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-white/10 bg-iron-800 text-iron-100"
+    <div className="flex flex-col">
+      <button
+        type="button"
+        onClick=${() => setExpanded((value) => !value)}
+        aria-expanded=${expanded ? "true" : "false"}
+        className=${[
+          "v2-button flex w-full items-center gap-2 border-0 bg-transparent px-1 py-1.5 text-left text-sm",
+          hasError ? "text-[var(--v2-danger-text)]" : "text-iron-400 hover:text-iron-200",
+        ].join(" ")}
       >
-        <${Icon} name="tool" className="h-4 w-4" />
-      </div>
-      <div className="min-w-0 max-w-[85%] flex-1">
-        <button
-          type="button"
-          onClick=${() => setExpanded((value) => !value)}
-          aria-expanded=${expanded ? "true" : "false"}
-          className="v2-button flex w-full items-center gap-2 rounded-lg border-0 bg-transparent px-1 py-1.5 text-left text-sm text-iron-200"
-        >
-          <span
-            className=${["h-2 w-2 shrink-0 rounded-full", hasError ? DOT_STYLE.error : DOT_STYLE.success].join(" ")}
-          />
-          <span className="font-medium text-iron-100"
-            >Used ${toolCalls.length} ${toolWord}</span
-          >
-          <${Icon}
-            name="chevron"
-            className=${["ml-auto h-4 w-4 shrink-0", expanded ? "rotate-180" : ""].join(" ")}
-          />
-        </button>
+        <${Icon} name="layers" className="h-4 w-4 shrink-0" />
+        <span className="truncate">${summary}</span>
+        <${Icon}
+          name="chevron"
+          className=${["ml-auto h-3.5 w-3.5 shrink-0", expanded ? "rotate-180" : ""].join(" ")}
+        />
+      </button>
 
-        ${expanded &&
-        html`
-          <div className="mt-1 flex flex-col">
-            ${toolCalls.map(
-              (tool, index) => html`
-                <${ToolActivityCard}
-                  key=${tool.callId || `${tool.toolName}-${index}`}
-                  activity=${tool}
-                  nested=${true}
-                />
-              `
-            )}
-          </div>
-        `}
-      </div>
+      ${expanded &&
+      html`
+        <div className="mt-2 flex flex-col gap-3">
+          ${tools.map(
+            (tool, index) => html`<${ToolActivity}
+              key=${tool.id || tool.callId || `${tool.toolName}-${index}`}
+              activity=${tool}
+            />`
+          )}
+        </div>
+      `}
     </div>
   `;
 }
