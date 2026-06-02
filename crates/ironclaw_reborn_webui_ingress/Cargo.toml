@@ -26,6 +26,7 @@ axum = "0.8"
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
 hex = "0.4.3"
+hmac = "0.12"
 ironclaw_host_api = { path = "../ironclaw_host_api" }
 ironclaw_reborn_composition = { path = "../ironclaw_reborn_composition", features = ["webui-v2-beta"] }
 jsonwebtoken = "9"

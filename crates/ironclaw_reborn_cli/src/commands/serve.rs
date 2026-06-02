@@ -12,7 +12,8 @@ use ironclaw_reborn_composition::{
 };
 use ironclaw_reborn_config::IdentitySection;
 use ironclaw_reborn_webui_ingress::{
-    EnvBearerAuthenticator, RebornWebuiServeOptions, serve_webui_v2,
+    EnvBearerAuthenticator, RebornWebuiServeOptions, SignedSessionLoginConfig,
+    build_signed_session_login, serve_webui_v2,
 };
 use secrecy::SecretString;
 
@@ -199,17 +200,13 @@ impl ServeCommand {
             if providers.is_empty() {
                 (env_authenticator, None)
             } else {
-                // Prefer the WebChat-login-scoped base URL; fall back to the
-                // shared `OAUTH_BASE_URL` (also read by the v1 gateway) and
-                // finally to the bound listener address.
+                // Reborn-scoped base URL only — deliberately NOT falling
+                // back to the v1 gateway's `OAUTH_BASE_URL`, so a legacy v1
+                // setting can never silently rewrite Reborn WebChat callback
+                // URLs. Absent the Reborn var, use the bound listener address.
                 let base_url = env::var("IRONCLAW_REBORN_WEBUI_BASE_URL")
                     .ok()
                     .filter(|raw| !raw.trim().is_empty())
-                    .or_else(|| {
-                        env::var("OAUTH_BASE_URL")
-                            .ok()
-                            .filter(|raw| !raw.trim().is_empty())
-                    })
                     .unwrap_or_else(|| format!("http://{listen_addr}"));
                 // Refuse cleartext OAuth on a public interface: http://
                 // redirect URIs leak authorization codes in transit (and
@@ -222,19 +219,20 @@ impl ServeCommand {
                          cleartext. Set IRONCLAW_REBORN_WEBUI_BASE_URL to an https:// URL."
                     );
                 }
+                // Hand host config to the ingress builder, which owns the
+                // session store / authenticator / user-directory model.
                 // Every SSO login maps to this operator identity (the same
-                // one pinned as the runtime owner above), so a logged-in
-                // turn runs under the owner the loop host expects. Reuses
+                // one pinned as the runtime owner above) so a logged-in
+                // turn runs under the owner the loop host expects; reuses
                 // the already-validated `user_id` rather than re-parsing.
-                let owner_user_id = user_id.clone();
-                match crate::commands::serve_sso::build_oauth_login(
-                    tenant_id.clone(),
-                    owner_user_id,
-                    &session_signing_secret,
+                match build_signed_session_login(SignedSessionLoginConfig {
+                    tenant_id: tenant_id.clone(),
+                    operator_user_id: user_id.clone(),
+                    operator_secret: session_signing_secret,
                     base_url,
                     providers,
-                    env_authenticator.clone(),
-                ) {
+                    env_authenticator: env_authenticator.clone(),
+                }) {
                     Some(wiring) => {
                         eprintln!(
                             "ironclaw-reborn: WebChat v2 SSO login mounted — \

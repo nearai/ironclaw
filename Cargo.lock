@@ -4849,14 +4849,11 @@ name = "ironclaw_reborn_cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-trait",
- "base64 0.22.1",
  "chrono",
  "clap",
  "clap_complete",
  "dotenvy",
  "hex",
- "hmac 0.12.1",
  "ironclaw_reborn_composition",
  "ironclaw_reborn_config",
  "ironclaw_reborn_traces",
@@ -5018,6 +5015,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "hex",
+ "hmac 0.12.1",
  "http 1.4.1",
  "http-body-util",
  "ironclaw_host_api",
