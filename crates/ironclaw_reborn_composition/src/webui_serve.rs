@@ -33,6 +33,8 @@
 //! surfaces to keep host auth host-owned and route/body/CORS security
 //! in gateway-owned code; the Reborn binary owns this stack itself.
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use axum::{
@@ -147,22 +149,26 @@ pub struct WebuiServeConfig {
     /// flows; supply it when the host installation has a single
     /// canonical project.
     pub(crate) default_project_id: Option<ProjectId>,
-    /// Host-supplied public (unauthenticated) route mount merged
+    /// Host-supplied public (unauthenticated) route mounts merged
     /// into the composed app outside the bearer auth layer. Used
     /// by `ironclaw_reborn_webui_ingress::webui_v2_auth_router`
-    /// to mount the WebChat v2 OAuth login surface
-    /// (`/auth/providers`, `/auth/login/{provider}`,
-    /// `/auth/callback/{provider}`, `/auth/logout`). Both the
-    /// `Router` and the `Vec<IngressRouteDescriptor>` are required
-    /// so the descriptor-driven per-route rate-limit and
-    /// body-limit middlewares apply to these routes just like
-    /// they do to the v2 facade and the product-auth callback —
-    /// no side door. Defaults to `None`.
-    pub(crate) public_mount: Option<PublicRouteMount>,
+    /// to mount the WebChat v2 OAuth login surface and by protocol
+    /// webhooks such as Slack Events API. Both the `Router` and the
+    /// `Vec<IngressRouteDescriptor>` are required so the descriptor-driven
+    /// per-route rate-limit and body-limit middlewares apply to these routes
+    /// just like they do to the v2 facade and the product-auth callback —
+    /// no side door. Defaults to an empty list.
+    pub(crate) public_mounts: Vec<PublicRouteMount>,
     /// Optional Google OAuth setup config for Reborn product-auth
     /// credential onboarding. When absent, the mounted Google setup
     /// route fails closed with a sanitized service-unavailable response.
     pub(crate) google_oauth: Option<GoogleOAuthRouteConfig>,
+}
+
+/// Async drain hook for public route mounts that schedule work outside the
+/// request/response future.
+pub trait PublicRouteDrain: Send + Sync {
+    fn drain<'a>(&'a self) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
 }
 
 /// A host-supplied public sub-router plus the descriptors composition
@@ -173,6 +179,56 @@ pub struct WebuiServeConfig {
 pub struct PublicRouteMount {
     pub router: Router,
     pub descriptors: Vec<IngressRouteDescriptor>,
+    pub drain: Option<Arc<dyn PublicRouteDrain>>,
+}
+
+impl PublicRouteMount {
+    pub fn new(router: Router, descriptors: Vec<IngressRouteDescriptor>) -> Self {
+        Self {
+            router,
+            descriptors,
+            drain: None,
+        }
+    }
+
+    pub fn with_drain(mut self, drain: Arc<dyn PublicRouteDrain>) -> Self {
+        self.drain = Some(drain);
+        self
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct PublicRouteDrains {
+    drains: Arc<Vec<Arc<dyn PublicRouteDrain>>>,
+}
+
+impl PublicRouteDrains {
+    fn new(drains: Vec<Arc<dyn PublicRouteDrain>>) -> Self {
+        Self {
+            drains: Arc::new(drains),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.drains.is_empty()
+    }
+
+    pub async fn drain(&self) {
+        for drain in self.drains.iter() {
+            drain.drain().await;
+        }
+    }
+}
+
+pub struct WebuiV2App {
+    router: Router,
+    public_route_drains: PublicRouteDrains,
+}
+
+impl WebuiV2App {
+    pub fn into_parts(self) -> (Router, PublicRouteDrains) {
+        (self.router, self.public_route_drains)
+    }
 }
 
 impl WebuiServeConfig {
@@ -192,7 +248,7 @@ impl WebuiServeConfig {
             canonical_host: None,
             default_agent_id: None,
             default_project_id: None,
-            public_mount: None,
+            public_mounts: Vec::new(),
             google_oauth: None,
         }
     }
@@ -208,7 +264,9 @@ impl WebuiServeConfig {
     /// the same per-route rate-limit / body-limit middlewares the
     /// v2 facade and the product-auth callback already use, so
     /// the public surface rides on the canonical policy stack —
-    /// no descriptor-less side door.
+    /// no descriptor-less side door. Multiple public mounts are
+    /// allowed so OAuth/login routes and protocol webhooks can coexist
+    /// on the same Reborn listener.
     ///
     /// Today this is the seam
     /// `ironclaw_reborn_webui_ingress::webui_v2_auth_router` plugs
@@ -228,7 +286,7 @@ impl WebuiServeConfig {
     /// `webui_v2_auth_router` (and any future host-native public
     /// surface that follows the same boundary rules).
     pub fn with_public_route_mount(mut self, mount: PublicRouteMount) -> Self {
-        self.public_mount = Some(mount);
+        self.public_mounts.push(mount);
         self
     }
 
@@ -348,6 +406,13 @@ pub fn webui_v2_app(
     bundle: RebornWebuiBundle,
     config: WebuiServeConfig,
 ) -> Result<Router, WebuiServeError> {
+    Ok(webui_v2_app_with_lifecycle(bundle, config)?.into_parts().0)
+}
+
+pub fn webui_v2_app_with_lifecycle(
+    bundle: RebornWebuiBundle,
+    config: WebuiServeConfig,
+) -> Result<WebuiV2App, WebuiServeError> {
     let csp_value = config.csp_header.clone().map(Ok).unwrap_or_else(|| {
         HeaderValue::from_str(DEFAULT_WEBUI_CSP)
             .map_err(|err| WebuiServeError::InvalidCspHeader(err.to_string()))
@@ -387,12 +452,18 @@ pub fn webui_v2_app(
         }
         product_auth_route_mount(state)
     });
-    let public_mount = config.public_mount;
+    let public_mounts = config.public_mounts;
+    let public_route_drains = PublicRouteDrains::new(
+        public_mounts
+            .iter()
+            .filter_map(|mount| mount.drain.clone())
+            .collect(),
+    );
     let mut descriptors = ironclaw_webui_v2::webui_v2_routes();
     if let Some(mount) = &product_auth_mount {
         descriptors.extend(mount.descriptors.iter().cloned());
     }
-    if let Some(mount) = &public_mount {
+    for mount in &public_mounts {
         descriptors.extend(mount.descriptors.iter().cloned());
     }
     let rate_limit_state = build_rate_limit_state(&descriptors)?;
@@ -415,7 +486,7 @@ pub fn webui_v2_app(
         protected_inner = protected_inner.merge(mount.protected);
         public_inner = Some(mount.public);
     }
-    if let Some(mount) = public_mount {
+    for mount in public_mounts {
         public_inner = Some(match public_inner {
             Some(existing) => existing.merge(mount.router),
             None => mount.router,
@@ -517,7 +588,10 @@ pub fn webui_v2_app(
             HeaderValue::from_static("no-referrer"),
         ));
 
-    Ok(app)
+    Ok(WebuiV2App {
+        router: app,
+        public_route_drains,
+    })
 }
 
 // ─── auth middleware ──────────────────────────────────────────────────

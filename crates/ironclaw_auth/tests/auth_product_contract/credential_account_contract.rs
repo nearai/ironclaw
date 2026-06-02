@@ -1,4 +1,6 @@
 use crate::common::*;
+use ironclaw_auth::CredentialAccountRecordSource;
+use ironclaw_host_api::ThreadId;
 
 #[tokio::test]
 async fn credential_setup_updates_only_explicit_authorized_account() {
@@ -490,6 +492,38 @@ async fn credential_account_selection_filters_by_requester_authority() {
         .await
         .expect("granted requester can select shared account");
     assert_eq!(selected_shared.id, shared.id);
+}
+
+#[tokio::test]
+async fn owner_record_source_can_find_reusable_accounts_from_any_thread() {
+    let services = InMemoryAuthProductServices::new();
+    let mut setup_owner = scope("alice-thread-reuse");
+    setup_owner.resource.thread_id = Some(ThreadId::new("thread-auth-1").unwrap());
+    let account = services
+        .create_account(NewCredentialAccount {
+            scope: setup_owner.clone(),
+            provider: provider(),
+            label: label("work"),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: Vec::new(),
+            access_secret: Some(SecretHandle::new("github-work").unwrap()),
+            refresh_secret: None,
+            scopes: Vec::new(),
+        })
+        .await
+        .expect("create reusable account");
+
+    let mut runtime_owner = setup_owner;
+    runtime_owner.resource.thread_id = None;
+    runtime_owner.session_id = None;
+    let accounts = services
+        .accounts_for_owner(&runtime_owner)
+        .await
+        .expect("owner accounts");
+
+    assert!(accounts.iter().any(|candidate| candidate.id == account.id));
 }
 
 #[tokio::test]

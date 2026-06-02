@@ -529,9 +529,9 @@ pub trait CredentialAccountService: Send + Sync {
 }
 
 /// Stable credential-account owner fields used by read models that need to
-/// find accounts across transient invocation ids or product surfaces. A
-/// missing session id matches both global and session-scoped accounts for the
-/// owner; a present session id matches only that exact session.
+/// find accounts across transient invocation ids, product surfaces, or runtime
+/// sub-scopes. Missing mission/thread/session ids match both global and
+/// scoped accounts for the owner; present ids match only that exact scope.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CredentialAccountOwnerScope {
     pub tenant_id: TenantId,
@@ -562,8 +562,14 @@ impl CredentialAccountOwnerScope {
             && resource.user_id == self.user_id
             && resource.agent_id == self.agent_id
             && resource.project_id == self.project_id
-            && resource.mission_id == self.mission_id
-            && resource.thread_id == self.thread_id
+            && self
+                .mission_id
+                .as_ref()
+                .is_none_or(|mission_id| resource.mission_id.as_ref() == Some(mission_id))
+            && self
+                .thread_id
+                .as_ref()
+                .is_none_or(|thread_id| resource.thread_id.as_ref() == Some(thread_id))
             && self
                 .session_id
                 .as_ref()
