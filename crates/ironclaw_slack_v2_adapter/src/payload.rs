@@ -121,16 +121,32 @@ fn parse_message_event(
     team_id: Option<&str>,
     event: &SlackEvent,
 ) -> Result<ParsedProductInbound, SlackPayloadParseError> {
-    try_parse_user_message(event_id, team_id, event, SlackMessageKind::Dm)
+    if is_dm_channel(
+        event.channel.as_deref().unwrap_or_default(),
+        event.channel_type.as_deref(),
+    ) {
+        return try_parse_user_message(event_id, team_id, event, SlackMessageKind::Dm);
+    }
+    if event.thread_ts.is_some() {
+        return try_parse_user_message(
+            event_id,
+            team_id,
+            event,
+            SlackMessageKind::ThreadInteraction,
+        );
+    }
+    noop_parsed_inbound(event_id, team_id, Some(event))
 }
 
-/// Two fixed message routing strategies in this first slice.
+/// Fixed message routing strategies in this first slice.
 /// `AppMention`: public channel, strip leading `@mention`, thread fallback to `ts`.
 /// `Dm`: direct-message channel required, keep text verbatim, no thread fallback.
+/// `ThreadInteraction`: threaded channel reply, parse only approval/auth resolution commands.
 #[derive(Debug, Clone, Copy)]
 enum SlackMessageKind {
     AppMention,
     Dm,
+    ThreadInteraction,
 }
 
 fn try_parse_user_message(
@@ -153,6 +169,9 @@ fn try_parse_user_message(
     {
         return noop_parsed_inbound(event_id, team_id, Some(event));
     }
+    if matches!(kind, SlackMessageKind::ThreadInteraction) && event.thread_ts.is_none() {
+        return noop_parsed_inbound(event_id, team_id, Some(event));
+    }
     let Some(ts) = event.ts.as_deref() else {
         return noop_parsed_inbound(event_id, team_id, Some(event));
     };
@@ -169,6 +188,11 @@ fn try_parse_user_message(
             event.thread_ts.as_deref(),
             ProductTriggerReason::DirectChat,
         ),
+        SlackMessageKind::ThreadInteraction => (
+            raw_text.to_string(),
+            event.thread_ts.as_deref(),
+            ProductTriggerReason::ReplyToBot,
+        ),
     };
 
     let attachments = collect_attachments(&event.files)?;
@@ -184,6 +208,9 @@ fn try_parse_user_message(
     };
     if let Some(payload) = parse_interaction_resolution(parts.text.as_str(), parts.trigger)? {
         return build_payload_message(event_id, &parts, payload);
+    }
+    if matches!(kind, SlackMessageKind::ThreadInteraction) {
+        return noop_parsed_inbound(event_id, team_id, Some(event));
     }
     build_user_message(event_id, parts)
 }
@@ -696,6 +723,39 @@ mod tests {
         }));
 
         assert!(matches!(inbound.payload, ProductInboundPayload::NoOp));
+    }
+
+    #[test]
+    fn channel_thread_interaction_reply_becomes_approval_resolution() {
+        let inbound = parse(serde_json::json!({
+            "type": "event_callback",
+            "team_id": "T123",
+            "event_id": "EvThreadApproval",
+            "event": {
+                "type": "message",
+                "user": "U123",
+                "channel": "C123",
+                "text": "approve gate:abc123",
+                "ts": "1710000000.000011",
+                "thread_ts": "1710000000.000010"
+            }
+        }));
+
+        assert_eq!(inbound.external_conversation_ref.conversation_id(), "C123");
+        assert_eq!(
+            inbound.external_conversation_ref.topic_id(),
+            Some("1710000000.000010")
+        );
+        match inbound.payload {
+            ProductInboundPayload::ApprovalResolution(payload) => {
+                assert_eq!(payload.gate_ref, "gate:abc123");
+                assert_eq!(
+                    payload.source_trigger,
+                    Some(ProductTriggerReason::ReplyToBot)
+                );
+            }
+            other => panic!("expected approval resolution, got {other:?}"),
+        }
     }
 
     #[test]

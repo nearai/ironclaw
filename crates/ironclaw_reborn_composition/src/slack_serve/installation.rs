@@ -12,7 +12,7 @@ use futures::future::join_all;
 use ironclaw_host_api::TenantId;
 use ironclaw_product_adapters::{AdapterInstallationId, ProtocolAuthEvidence};
 use ironclaw_slack_v2_adapter::SlackPayloadParseError;
-use ironclaw_wasm_product_adapters::RunnerError;
+use ironclaw_wasm_product_adapters::{ImmediateAckWorkflowObserver, RunnerError};
 use serde::Deserialize;
 use thiserror::Error;
 
@@ -216,6 +216,7 @@ pub struct ResolvedSlackInstallation {
     adapter_installation_id: AdapterInstallationId,
     evidence: ProtocolAuthEvidence,
     dispatcher: Arc<dyn SlackEventsWebhookDispatcher>,
+    workflow_observer: Option<Arc<dyn ImmediateAckWorkflowObserver>>,
 }
 
 impl ResolvedSlackInstallation {
@@ -224,12 +225,14 @@ impl ResolvedSlackInstallation {
         adapter_installation_id: AdapterInstallationId,
         evidence: ProtocolAuthEvidence,
         dispatcher: Arc<dyn SlackEventsWebhookDispatcher>,
+        workflow_observer: Option<Arc<dyn ImmediateAckWorkflowObserver>>,
     ) -> Self {
         Self {
             tenant_id,
             adapter_installation_id,
             evidence,
             dispatcher,
+            workflow_observer,
         }
     }
 
@@ -248,6 +251,10 @@ impl ResolvedSlackInstallation {
     pub fn dispatcher(&self) -> Arc<dyn SlackEventsWebhookDispatcher> {
         Arc::clone(&self.dispatcher)
     }
+
+    pub fn workflow_observer(&self) -> Option<Arc<dyn ImmediateAckWorkflowObserver>> {
+        self.workflow_observer.clone()
+    }
 }
 
 impl std::fmt::Debug for ResolvedSlackInstallation {
@@ -257,6 +264,7 @@ impl std::fmt::Debug for ResolvedSlackInstallation {
             .field("tenant_id", &self.tenant_id)
             .field("adapter_installation_id", &self.adapter_installation_id)
             .field("dispatcher", &"Arc<dyn SlackEventsWebhookDispatcher>")
+            .field("workflow_observer", &self.workflow_observer.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -337,6 +345,7 @@ pub struct SlackInstallationRecord {
     adapter_installation_id: AdapterInstallationId,
     selector: SlackInstallationSelector,
     dispatcher: Arc<dyn SlackEventsWebhookDispatcher>,
+    workflow_observer: Option<Arc<dyn ImmediateAckWorkflowObserver>>,
 }
 
 impl SlackInstallationRecord {
@@ -351,7 +360,16 @@ impl SlackInstallationRecord {
             adapter_installation_id,
             selector,
             dispatcher,
+            workflow_observer: None,
         }
+    }
+
+    pub fn with_workflow_observer(
+        mut self,
+        workflow_observer: Arc<dyn ImmediateAckWorkflowObserver>,
+    ) -> Self {
+        self.workflow_observer = Some(workflow_observer);
+        self
     }
 }
 
@@ -363,6 +381,7 @@ impl std::fmt::Debug for SlackInstallationRecord {
             .field("adapter_installation_id", &self.adapter_installation_id)
             .field("selector", &self.selector)
             .field("dispatcher", &"Arc<dyn SlackEventsWebhookDispatcher>")
+            .field("workflow_observer", &self.workflow_observer.is_some())
             .finish()
     }
 }
@@ -642,6 +661,7 @@ impl StaticSlackInstallationResolver {
             installation.adapter_installation_id.clone(),
             evidence,
             Arc::clone(&installation.dispatcher),
+            installation.workflow_observer.clone(),
         )
     }
 }

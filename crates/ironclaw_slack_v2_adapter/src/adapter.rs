@@ -731,7 +731,7 @@ mod tests {
         assert_eq!(body["channel"], "C123");
         assert_eq!(
             body["text"],
-            "Auth required\n\nOpen WebUI\n\nReply `auth deny auth-1` to cancel this blocked run."
+            "Auth required\n\nOpen WebUI\n\nMention this app in this Slack thread with `auth deny auth-1` to cancel this blocked run."
         );
         assert_eq!(body["thread_ts"], "1710000000.000001");
         assert!(matches!(

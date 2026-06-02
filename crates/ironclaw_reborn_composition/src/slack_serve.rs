@@ -138,7 +138,7 @@ impl SlackIngressService {
                 .process_verified_webhook_immediate_ack(
                     body.as_ref(),
                     installation.evidence(),
-                    workflow_observer,
+                    installation.workflow_observer().or(workflow_observer),
                 )
                 .await
             {
@@ -492,6 +492,7 @@ mod tests {
                     installation_id("install-alpha"),
                     evidence,
                     Arc::clone(&self.dispatcher),
+                    None,
                 );
                 let value: serde_json::Value = serde_json::from_slice(body).map_err(|err| {
                     SlackIngressError::Envelope(SlackPayloadParseError::InvalidJson {

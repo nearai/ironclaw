@@ -62,8 +62,10 @@ pub fn render_gate_prompt(
     render_text_message(
         target,
         format!(
-            "{}\n\n{}\n\nReply `approve {}` or `deny {}` in this Slack thread.",
-            view.headline, view.body, view.gate_ref, view.gate_ref
+            "{}\n\n{}\n\n{}",
+            view.headline,
+            view.body,
+            gate_prompt_reply_instruction(target, &view.gate_ref)
         ),
         credential_handle,
     )
@@ -75,14 +77,41 @@ pub fn render_auth_prompt(
     credential_handle: EgressCredentialHandle,
 ) -> Result<EgressRequest, SlackRenderError> {
     let mut text = format!(
-        "{}\n\n{}\n\nReply `auth deny {}` to cancel this blocked run.",
-        view.headline, view.body, view.auth_request_ref
+        "{}\n\n{}\n\n{}",
+        view.headline,
+        view.body,
+        auth_prompt_reply_instruction(target, &view.auth_request_ref)
     );
     if let Some(url) = &view.authorization_url {
         text.push_str("\n\nSetup link: ");
         text.push_str(url);
     }
     render_text_message(target, text, credential_handle)
+}
+
+fn gate_prompt_reply_instruction(target: &ProductOutboundTarget, gate_ref: &str) -> String {
+    if requires_app_mention(target) {
+        return format!(
+            "Mention this app in this Slack thread with `approve {gate_ref}` or `deny {gate_ref}`."
+        );
+    }
+    format!("Reply `approve {gate_ref}` or `deny {gate_ref}` in this Slack thread.")
+}
+
+fn auth_prompt_reply_instruction(target: &ProductOutboundTarget, auth_request_ref: &str) -> String {
+    if requires_app_mention(target) {
+        return format!(
+            "Mention this app in this Slack thread with `auth deny {auth_request_ref}` to cancel this blocked run."
+        );
+    }
+    format!("Reply `auth deny {auth_request_ref}` to cancel this blocked run.")
+}
+
+fn requires_app_mention(target: &ProductOutboundTarget) -> bool {
+    !target
+        .external_conversation_ref
+        .conversation_id()
+        .starts_with('D')
 }
 
 fn render_text_message(

@@ -37,6 +37,8 @@ use ironclaw_turns::{
 };
 use ironclaw_wasm_product_adapters::ImmediateAckWorkflowObserver;
 
+const MAX_SLACK_RUN_POLL_INTERVAL: Duration = Duration::from_secs(5);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SlackFinalReplyDeliverySettings {
     pub poll_interval: Duration,
@@ -161,7 +163,7 @@ impl SlackFinalReplyDeliveryObserver {
                             turn_run_id: run_id,
                             gate_ref: gate_ref.clone(),
                             headline: "Approval needed".to_string(),
-                            body: "Reply in this Slack thread with `approve <gate_ref>` or `deny <gate_ref>`.".to_string(),
+                            body: "This run is waiting on your approval.".to_string(),
                         }),
                         Some(BlockedRunKey::Approval(gate_ref)),
                     )
@@ -177,7 +179,7 @@ impl SlackFinalReplyDeliveryObserver {
                             turn_run_id: run_id,
                             auth_request_ref: auth_request_ref.clone(),
                             headline: "Authentication required".to_string(),
-                            body: "Use WebUI setup to connect the missing account, or reply `auth deny <auth_request_ref>` to cancel this blocked run.".to_string(),
+                            body: "Use WebUI setup to connect the missing account.".to_string(),
                             challenge_kind: None,
                             provider: None,
                             account_label: None,
@@ -265,7 +267,7 @@ impl SlackFinalReplyDeliveryObserver {
         scope: &TurnScope,
         run_id: TurnRunId,
     ) -> Result<ironclaw_turns::TurnRunState, SlackFinalReplyDeliveryError> {
-        self.wait_for_actionable_matching(scope, run_id, |_| true)
+        self.wait_for_actionable_matching(scope, run_id, |_| true, Some(self.settings.max_wait))
             .await
     }
 
@@ -275,9 +277,12 @@ impl SlackFinalReplyDeliveryObserver {
         run_id: TurnRunId,
         ignored_block: BlockedRunKey,
     ) -> Result<ironclaw_turns::TurnRunState, SlackFinalReplyDeliveryError> {
-        self.wait_for_actionable_matching(scope, run_id, |state| {
-            blocked_run_key(state).as_ref() != Some(&ignored_block)
-        })
+        self.wait_for_actionable_matching(
+            scope,
+            run_id,
+            |state| blocked_run_key(state).as_ref() != Some(&ignored_block),
+            None,
+        )
         .await
     }
 
@@ -286,8 +291,10 @@ impl SlackFinalReplyDeliveryObserver {
         scope: &TurnScope,
         run_id: TurnRunId,
         mut accept_state: impl FnMut(&ironclaw_turns::TurnRunState) -> bool,
+        timeout: Option<Duration>,
     ) -> Result<ironclaw_turns::TurnRunState, SlackFinalReplyDeliveryError> {
         let start = Instant::now();
+        let mut poll_interval = self.settings.poll_interval;
         loop {
             let state = self
                 .turn_coordinator
@@ -305,10 +312,13 @@ impl SlackFinalReplyDeliveryObserver {
             {
                 return Ok(state);
             }
-            if start.elapsed() >= self.settings.max_wait {
+            if timeout.is_some_and(|timeout| start.elapsed() >= timeout) {
                 return Err(SlackFinalReplyDeliveryError::RunWaitTimedOut { run_id });
             }
-            tokio::time::sleep(self.settings.poll_interval).await;
+            tokio::time::sleep(poll_interval).await;
+            poll_interval = poll_interval
+                .saturating_mul(2)
+                .min(MAX_SLACK_RUN_POLL_INTERVAL);
         }
     }
 

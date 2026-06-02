@@ -136,6 +136,7 @@ impl ProtocolHttpEgress for SlackProtocolHttpEgress {
                 .resolve_slack_egress_credential(handle)
                 .await
                 .map_err(map_credential_error)?;
+            headers.retain(|(name, _)| !name.eq_ignore_ascii_case("authorization"));
             headers.push((
                 "authorization".to_string(),
                 format!("Bearer {}", credential.as_bearer_token()),

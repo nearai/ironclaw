@@ -13,8 +13,8 @@ use ironclaw_product_adapters::{
     ProductWorkflow, ProductWorkflowRejectionKind, ProjectionSubscriptionRequest, RedactedString,
 };
 use ironclaw_turns::{
-    AdmissionRejectionReason, GateRef, IdempotencyKey, TurnActor, TurnError, TurnErrorCategory,
-    TurnScope,
+    AcceptedMessageRef, AdmissionRejectionReason, GateRef, IdempotencyKey, TurnActor, TurnError,
+    TurnErrorCategory, TurnRunId, TurnScope,
 };
 use tracing::debug;
 
@@ -22,10 +22,11 @@ use crate::action::{ActionDispatchKind, ActionFingerprintKey, SourceBindingKey};
 use crate::approval_interaction::{
     ApprovalInteractionDecision, ApprovalInteractionRejectionKind, ApprovalInteractionService,
     RejectingApprovalInteractionService, ResolveApprovalInteractionRequest,
+    ResolveApprovalInteractionResponse,
 };
 use crate::auth_interaction::{
     AuthInteractionDecision, AuthInteractionRejectionKind, AuthInteractionService,
-    RejectingAuthInteractionService, ResolveAuthInteractionRequest,
+    RejectingAuthInteractionService, ResolveAuthInteractionRequest, ResolveAuthInteractionResponse,
 };
 use crate::binding::{
     ConversationBindingService, ProductConversationRouteKind, ResolveBindingRequest,
@@ -458,7 +459,7 @@ async fn dispatch_approval_resolution(
         }
     })?;
     let idempotency_key = approval_resolution_idempotency_key(&action_fingerprint)?;
-    approval_interaction_service
+    let response = approval_interaction_service
         .resolve(ResolveApprovalInteractionRequest {
             scope,
             actor,
@@ -468,8 +469,12 @@ async fn dispatch_approval_resolution(
             idempotency_key,
         })
         .await?;
+    let submitted_run_id = run_id_from_approval_resolution(response);
     Ok(DispatchedAction {
-        ack: ProductInboundAck::NoOp,
+        ack: ProductInboundAck::Accepted {
+            accepted_message_ref: interaction_accepted_message_ref("approval", envelope)?,
+            submitted_run_id,
+        },
         dispatch_kind: ActionDispatchKind::try_from_payload(envelope.payload())?,
     })
 }
@@ -505,7 +510,7 @@ async fn dispatch_auth_resolution(
         }
     })?;
     let idempotency_key = auth_resolution_idempotency_key(&action_fingerprint)?;
-    auth_interaction_service
+    let response = auth_interaction_service
         .resolve(ResolveAuthInteractionRequest {
             scope,
             actor,
@@ -515,9 +520,45 @@ async fn dispatch_auth_resolution(
             idempotency_key,
         })
         .await?;
+    let submitted_run_id = run_id_from_auth_resolution(response);
     Ok(DispatchedAction {
-        ack: ProductInboundAck::NoOp,
+        ack: ProductInboundAck::Accepted {
+            accepted_message_ref: interaction_accepted_message_ref("auth", envelope)?,
+            submitted_run_id,
+        },
         dispatch_kind: ActionDispatchKind::try_from_payload(envelope.payload())?,
+    })
+}
+
+fn run_id_from_approval_resolution(response: ResolveApprovalInteractionResponse) -> TurnRunId {
+    match response {
+        ResolveApprovalInteractionResponse::Approved(response) => response.run_id,
+        ResolveApprovalInteractionResponse::Denied(response) => response.run_id,
+    }
+}
+
+fn run_id_from_auth_resolution(response: ResolveAuthInteractionResponse) -> TurnRunId {
+    match response {
+        ResolveAuthInteractionResponse::Resumed(response) => response.run_id,
+        ResolveAuthInteractionResponse::Canceled(response) => response.run_id,
+    }
+}
+
+fn interaction_accepted_message_ref(
+    kind: &str,
+    envelope: &ProductInboundEnvelope,
+) -> Result<AcceptedMessageRef, ProductWorkflowError> {
+    let raw = format!(
+        "{}:{}:{}",
+        kind,
+        envelope.installation_id().as_str(),
+        envelope.external_event_id().as_str()
+    );
+    let stable_ref = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, raw.as_bytes());
+    AcceptedMessageRef::new(format!("interaction:{kind}:{stable_ref}")).map_err(|reason| {
+        ProductWorkflowError::TurnSubmissionRejected {
+            reason: format!("invalid interaction accepted message ref: {reason}"),
+        }
     })
 }
 
