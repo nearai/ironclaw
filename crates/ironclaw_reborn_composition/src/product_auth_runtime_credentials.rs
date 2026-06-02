@@ -73,7 +73,8 @@ impl RuntimeCredentialAccountResolver for ProductAuthRuntimeCredentialResolver {
         &self,
         request: RuntimeCredentialAccountRequest<'_>,
     ) -> Result<SecretHandle, CredentialStageError> {
-        let auth_scope = AuthProductScope::new(request.scope.clone(), AuthSurface::Api);
+        let auth_scope =
+            AuthProductScope::new(runtime_account_owner_scope(request.scope), AuthSurface::Api);
         let provider = AuthProviderId::new(request.provider.as_str()).map_err(|e| {
             tracing::debug!(
                 provider = %request.provider.as_str(),
@@ -101,6 +102,15 @@ impl RuntimeCredentialAccountResolver for ProductAuthRuntimeCredentialResolver {
         // Backend so the caller does not loop through re-auth.
         account.access_secret.ok_or(CredentialStageError::Backend)
     }
+}
+
+fn runtime_account_owner_scope(
+    scope: &ironclaw_host_api::ResourceScope,
+) -> ironclaw_host_api::ResourceScope {
+    let mut owner = scope.clone();
+    owner.mission_id = None;
+    owner.thread_id = None;
+    owner
 }
 
 fn map_account_error(error: AuthProductError) -> CredentialStageError {
@@ -172,6 +182,48 @@ mod tests {
                 .unwrap();
         setup_scope.thread_id = Some(ThreadId::new("thread-auth-1").unwrap());
         let mut runtime_scope = setup_scope.clone();
+        runtime_scope.invocation_id = InvocationId::new();
+        let access_secret = SecretHandle::new("github_manual_access").unwrap();
+        accounts
+            .create_account(NewCredentialAccount {
+                scope: AuthProductScope::new(setup_scope, AuthSurface::Callback),
+                provider: AuthProviderId::new("github").unwrap(),
+                label: CredentialAccountLabel::new("work github").unwrap(),
+                status: CredentialAccountStatus::Configured,
+                ownership: CredentialOwnership::UserReusable,
+                owner_extension: None,
+                granted_extensions: Vec::new(),
+                access_secret: Some(access_secret.clone()),
+                refresh_secret: None,
+                scopes: Vec::new(),
+            })
+            .await
+            .unwrap();
+        let resolver = ProductAuthRuntimeCredentialResolver::new(Arc::new(
+            ProductAuthRuntimeCredentialAccountSelector::new(accounts),
+        ));
+
+        let resolved = resolver
+            .resolve_access_secret(RuntimeCredentialAccountRequest {
+                scope: &runtime_scope,
+                provider: &RuntimeCredentialAccountProviderId::new("github").unwrap(),
+                requester_extension: &ExtensionId::new("github").unwrap(),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(resolved, access_secret);
+    }
+
+    #[tokio::test]
+    async fn resolver_matches_reusable_setup_account_from_new_thread() {
+        let accounts = Arc::new(InMemoryAuthProductServices::new());
+        let mut setup_scope =
+            ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new())
+                .unwrap();
+        setup_scope.thread_id = Some(ThreadId::new("thread-auth-1").unwrap());
+        let mut runtime_scope = setup_scope.clone();
+        runtime_scope.thread_id = Some(ThreadId::new("thread-auth-2").unwrap());
         runtime_scope.invocation_id = InvocationId::new();
         let access_secret = SecretHandle::new("github_manual_access").unwrap();
         accounts

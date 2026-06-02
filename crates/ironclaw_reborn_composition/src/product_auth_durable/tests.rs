@@ -3,16 +3,19 @@ use std::sync::Arc;
 use chrono::{Duration, Utc};
 use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
 use ironclaw_host_api::{
-    InvocationId, MountAlias, MountGrant, MountPermissions, SecretHandle, ThreadId, UserId,
-    VirtualPath,
+    ExtensionId, InvocationId, MountAlias, MountGrant, MountPermissions,
+    RuntimeCredentialAccountProviderId, SecretHandle, ThreadId, UserId, VirtualPath,
 };
+use ironclaw_host_runtime::RuntimeCredentialAccountRequest;
+use ironclaw_host_runtime::RuntimeCredentialAccountResolver;
 use ironclaw_secrets::{InMemorySecretStore, SecretStore};
 use secrecy::SecretString;
 use tokio::task::JoinSet;
 
 use super::*;
 use crate::product_auth_runtime_credentials::{
-    ProductAuthRuntimeCredentialAccountSelector, RuntimeCredentialAccountSelectionService,
+    ProductAuthRuntimeCredentialAccountSelector, ProductAuthRuntimeCredentialResolver,
+    RuntimeCredentialAccountSelectionService,
 };
 use ironclaw_auth::{
     AuthChallenge, AuthContinuationRef, AuthFlowKind, AuthFlowManager, AuthFlowOwnerScope,
@@ -211,6 +214,51 @@ async fn filesystem_runtime_account_selection_matches_setup_invocation_account()
 
     assert_eq!(selected.id, created.id);
     assert_eq!(selected.access_secret, Some(access_secret));
+}
+
+#[tokio::test]
+async fn filesystem_runtime_account_selection_matches_new_thread_reusable_account() {
+    let filesystem = test_filesystem();
+    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let mut setup_scope = test_scope();
+    setup_scope.surface = AuthSurface::Callback;
+    setup_scope.resource.thread_id = Some(ThreadId::new("thread-auth-1").unwrap());
+    let mut runtime_scope = AuthProductScope::new(setup_scope.resource.clone(), AuthSurface::Api);
+    runtime_scope.resource.thread_id = Some(ThreadId::new("thread-auth-2").unwrap());
+    runtime_scope.resource.invocation_id = InvocationId::new();
+    let service = Arc::new(test_service(filesystem, secret_store));
+    let access_secret = SecretHandle::new("google-access").unwrap();
+
+    let created = service
+        .create_account(NewCredentialAccount {
+            scope: setup_scope,
+            provider: google_provider(),
+            label: account_label(),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: Vec::new(),
+            access_secret: Some(access_secret.clone()),
+            refresh_secret: None,
+            scopes: vec![ProviderScope::new("gmail.readonly").unwrap()],
+        })
+        .await
+        .unwrap();
+
+    let resolver = ProductAuthRuntimeCredentialResolver::new(Arc::new(
+        ProductAuthRuntimeCredentialAccountSelector::new(service),
+    ));
+    let resolved = resolver
+        .resolve_access_secret(RuntimeCredentialAccountRequest {
+            scope: &runtime_scope.resource,
+            provider: &RuntimeCredentialAccountProviderId::new("google").unwrap(),
+            requester_extension: &ExtensionId::new("google-calendar").unwrap(),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(created.access_secret, Some(resolved.clone()));
+    assert_eq!(resolved, access_secret);
 }
 
 #[tokio::test]
