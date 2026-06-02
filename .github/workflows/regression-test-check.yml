@@ -19,7 +19,9 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0
-          persist-credentials: false
+          # This repository is private. The later base-ref fetch needs the
+          # workflow's read token to remain configured.
+          persist-credentials: true
 
       - name: Fetch PR base
         env:
@@ -197,4 +199,3 @@ jobs:
           fi
           echo "::warning::Please add tests exercising the changed behavior, or apply the 'skip-regression-check' label if not feasible."
           exit 1
-
