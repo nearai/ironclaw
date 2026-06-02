@@ -172,6 +172,7 @@ pub struct TurnGateAuthFlowQuery {
 /// Input used to create an auth flow.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewAuthFlow {
+    pub id: Option<AuthFlowId>,
     pub scope: AuthProductScope,
     pub kind: AuthFlowKind,
     pub provider: AuthProviderId,

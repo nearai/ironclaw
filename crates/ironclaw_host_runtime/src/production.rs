@@ -23,6 +23,7 @@ use ironclaw_capabilities::{
     CapabilitySpawnRequest, CapabilitySpawnResult,
 };
 use ironclaw_extensions::{ExtensionPackage, ExtensionRegistry, SharedExtensionRegistry};
+use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
     ApprovalRequestId, CapabilityDispatcher, CapabilityId, DispatchFailureKind, InvocationId,
     PackageSource, ResourceScope, RuntimeDispatchErrorKind, RuntimeKind, SecretHandle,
@@ -65,6 +66,7 @@ pub struct DefaultHostRuntime {
     process_store: Option<Arc<dyn ProcessStore>>,
     process_result_store: Option<Arc<dyn ProcessResultStore>>,
     process_cancellation_registry: Option<Arc<ProcessCancellationRegistry>>,
+    surface_filesystem: Option<Arc<dyn RootFilesystem>>,
     runtime_health: Option<Arc<dyn RuntimeBackendHealth>>,
     obligation_handler: Option<Arc<dyn CapabilityObligationHandler>>,
     surface_version: CapabilitySurfaceVersion,
@@ -128,6 +130,7 @@ impl DefaultHostRuntime {
             process_store: None,
             process_result_store: None,
             process_cancellation_registry: None,
+            surface_filesystem: None,
             runtime_health: None,
             obligation_handler: None,
             surface_version,
@@ -155,6 +158,11 @@ impl DefaultHostRuntime {
     /// capability invocation and visible-capability projection.
     pub fn with_runtime_policy(mut self, policy: EffectiveRuntimePolicy) -> Self {
         self.runtime_policy = policy;
+        self
+    }
+
+    pub fn with_surface_filesystem(mut self, filesystem: Arc<dyn RootFilesystem>) -> Self {
+        self.surface_filesystem = Some(filesystem);
         self
     }
 
@@ -654,14 +662,17 @@ impl HostRuntime for DefaultHostRuntime {
         request: VisibleCapabilityRequest,
     ) -> Result<VisibleCapabilitySurface, HostRuntimeError> {
         let registry = self.registry.snapshot();
-        CapabilityCatalog::new(
+        let catalog = CapabilityCatalog::new(
             &registry,
             self.authorizer.as_ref(),
             &self.surface_version,
             &self.runtime_policy,
-        )
-        .visible_capabilities(request)
-        .await
+        );
+        let catalog = match self.surface_filesystem.as_deref() {
+            Some(filesystem) => catalog.with_filesystem(filesystem),
+            None => catalog,
+        };
+        catalog.visible_capabilities(request).await
     }
 
     /// Best-effort cancellation fanout for active work in one scope.

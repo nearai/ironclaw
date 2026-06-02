@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "GitHub create_repo input",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 100,
+      "description": "New repository name."
+    },
+    "description": {
+      "type": "string",
+      "maxLength": 65536,
+      "description": "Repository description."
+    },
+    "private": {
+      "type": "boolean",
+      "default": false
+    },
+    "auto_init": {
+      "type": "boolean",
+      "default": false
+    },
+    "gitignore_template": {
+      "type": "string",
+      "maxLength": 100,
+      "description": "Gitignore template."
+    },
+    "license_template": {
+      "type": "string",
+      "maxLength": 100,
+      "description": "License template."
+    },
+    "org": {
+      "type": "string",
+      "maxLength": 100,
+      "description": "Organization name."
+    }
+  },
+  "required": [
+    "name"
+  ]
+}

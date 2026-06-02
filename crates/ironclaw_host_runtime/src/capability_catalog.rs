@@ -115,14 +115,14 @@ where
     Ok(())
 }
 
-async fn read_json_ref<F>(
+pub(crate) async fn read_json_ref<F>(
     fs: &F,
     root: &VirtualPath,
     reference: &CapabilityProfileSchemaRef,
     field: &'static str,
 ) -> Result<Value, HostRuntimeError>
 where
-    F: RootFilesystem,
+    F: RootFilesystem + ?Sized,
 {
     let path = resolve_under_root(root, reference)?;
     let bytes = read_bounded(fs, &path, MAX_HOT_SCHEMA_BYTES, field).await?;
@@ -147,7 +147,7 @@ async fn read_text_ref<F>(
     reference: &CapabilityProfileSchemaRef,
 ) -> Result<String, HostRuntimeError>
 where
-    F: RootFilesystem,
+    F: RootFilesystem + ?Sized,
 {
     let path = resolve_under_root(root, reference)?;
     let bytes = read_bounded(fs, &path, MAX_HOT_PROMPT_BYTES, "prompt_doc_ref").await?;
@@ -166,7 +166,7 @@ async fn read_bounded<F>(
     field: &'static str,
 ) -> Result<Vec<u8>, HostRuntimeError>
 where
-    F: RootFilesystem,
+    F: RootFilesystem + ?Sized,
 {
     let bytes = fs
         .read_file_bounded(path, max_bytes)

@@ -152,8 +152,12 @@ impl AuthFlowManager for InMemoryAuthProductServices {
                 .ok_or(AuthProductError::CredentialMissing)?;
             validate_flow_update_binding(account, &request)?;
         }
+        let id = request.id.unwrap_or_default();
+        if state.flows.contains_key(&id) {
+            return Err(AuthProductError::BackendUnavailable);
+        }
         let record = AuthFlowRecord {
-            id: AuthFlowId::new(),
+            id,
             scope: request.scope,
             kind: request.kind,
             status: AuthFlowStatus::AwaitingUser,

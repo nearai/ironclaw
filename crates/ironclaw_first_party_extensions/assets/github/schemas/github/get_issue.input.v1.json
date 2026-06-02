@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "GitHub get issue input",
+  "title": "GitHub get_issue input",
   "type": "object",
   "additionalProperties": false,
   "properties": {
@@ -9,16 +9,20 @@
       "minLength": 1,
       "maxLength": 100,
       "pattern": "^[^\\s/?#]+$",
-      "not": { "pattern": "\\.\\." },
-      "description": "Repository owner or organization. Must not contain whitespace, '/', '?', '#', or '..'."
+      "not": {
+        "pattern": "\\.\\."
+      },
+      "description": "Repository owner or organization."
     },
     "repo": {
       "type": "string",
       "minLength": 1,
       "maxLength": 100,
       "pattern": "^[^\\s/?#]+$",
-      "not": { "pattern": "\\.\\." },
-      "description": "Repository name. Must not contain whitespace, '/', '?', '#', or '..'."
+      "not": {
+        "pattern": "\\.\\."
+      },
+      "description": "Repository name."
     },
     "issue_number": {
       "type": "integer",
@@ -26,5 +30,9 @@
       "description": "Issue or pull request number."
     }
   },
-  "required": ["owner", "repo", "issue_number"]
+  "required": [
+    "owner",
+    "repo",
+    "issue_number"
+  ]
 }

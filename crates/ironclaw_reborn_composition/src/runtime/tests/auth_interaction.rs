@@ -256,6 +256,7 @@ async fn create_auth_flow(
         .expect("product auth")
         .flow_manager()
         .create_flow(NewAuthFlow {
+            id: None,
             scope: auth_scope_for_turn(scope, actor),
             kind: AuthFlowKind::IntegrationCredential,
             provider: AuthProviderId::new("github").expect("provider"),

@@ -94,12 +94,9 @@ impl<'a> CredentialSourceStrategy<'a> {
     {
         match self {
             Self::SecretStoreLease => lease_secret_for_injection(secrets, request, injection),
-            Self::StagedObligation { capability_id } => take_staged_secret_for_injection(
-                secret_injections,
-                request,
-                capability_id,
-                injection,
-            ),
+            Self::StagedObligation { capability_id } => {
+                staged_secret_for_injection(secret_injections, request, capability_id, injection)
+            }
         }
     }
 }
@@ -228,7 +225,7 @@ where
     Ok(cache[pushed_index].value.as_ref())
 }
 
-fn take_staged_secret_for_injection(
+fn staged_secret_for_injection(
     secret_injections: Option<&RuntimeSecretInjectionStore>,
     request: &RuntimeHttpEgressRequest,
     capability_id: &CapabilityId,
@@ -237,7 +234,7 @@ fn take_staged_secret_for_injection(
     let Some(secret_injections) = secret_injections else {
         return missing_runtime_credential(injection.required);
     };
-    match secret_injections.take(&request.scope, capability_id, &injection.handle) {
+    match secret_injections.get(&request.scope, capability_id, &injection.handle) {
         Ok(Some(material)) => Ok(Some(material)),
         Ok(None) => missing_runtime_credential(injection.required),
         Err(_) => Err(RuntimeHttpEgressError::Credential {

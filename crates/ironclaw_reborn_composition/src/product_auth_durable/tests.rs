@@ -108,6 +108,7 @@ async fn create_manual_token_flow(
     };
     service
         .create_flow(NewAuthFlow {
+            id: None,
             scope: scope.clone(),
             kind: AuthFlowKind::IntegrationCredential,
             provider,
@@ -308,6 +309,7 @@ async fn filesystem_manual_token_completion_persists_auth_flow_account() {
 
     let flow = service
         .create_flow(NewAuthFlow {
+            id: None,
             scope: scope.clone(),
             kind: AuthFlowKind::IntegrationCredential,
             provider: google_provider(),
@@ -529,6 +531,7 @@ async fn filesystem_flow_record_source_projects_session_scoped_manual_flows() {
     };
     let flow = service
         .create_flow(NewAuthFlow {
+            id: None,
             scope: scope.clone(),
             kind: AuthFlowKind::IntegrationCredential,
             provider: google_provider(),
@@ -637,6 +640,7 @@ async fn filesystem_oauth_callback_claim_is_one_shot_and_completion_persists() {
 
     let flow = service
         .create_flow(NewAuthFlow {
+            id: None,
             scope: scope.clone(),
             kind: AuthFlowKind::IntegrationCredential,
             provider: google_provider(),
@@ -815,6 +819,7 @@ async fn filesystem_oauth_continuation_marker_is_idempotent() {
 
     let flow = service
         .create_flow(NewAuthFlow {
+            id: None,
             scope: scope.clone(),
             kind: AuthFlowKind::IntegrationCredential,
             provider: google_provider(),
@@ -1323,6 +1328,7 @@ async fn filesystem_oauth_reauth_purges_previous_provider_secrets() {
     // ── Step 1: initial OAuth flow creates a new account ─────────────────────
     let flow1 = service
         .create_flow(NewAuthFlow {
+            id: None,
             scope: scope.clone(),
             kind: AuthFlowKind::IntegrationCredential,
             provider: google_provider(),
@@ -1421,6 +1427,7 @@ async fn filesystem_oauth_reauth_purges_previous_provider_secrets() {
     // ── Step 2: re-auth flow bound to the existing account ───────────────────
     let flow2 = service
         .create_flow(NewAuthFlow {
+            id: None,
             scope: scope.clone(),
             kind: AuthFlowKind::IntegrationCredential,
             provider: google_provider(),
@@ -1642,6 +1649,7 @@ async fn filesystem_oauth_callback_cas_conflict_reuses_concurrent_account() {
 
     let flow = service
         .create_flow(NewAuthFlow {
+            id: None,
             scope: scope.clone(),
             kind: AuthFlowKind::IntegrationCredential,
             provider: google_provider(),
@@ -1935,6 +1943,7 @@ async fn filesystem_cancel_flow_and_terminal_state_rejection() {
 
     let flow = service
         .create_flow(NewAuthFlow {
+            id: None,
             scope: scope.clone(),
             kind: AuthFlowKind::IntegrationCredential,
             provider: google_provider(),
@@ -1973,6 +1982,7 @@ async fn filesystem_fail_oauth_callback_marks_flow_failed() {
 
     let flow = service
         .create_flow(NewAuthFlow {
+            id: None,
             scope: scope.clone(),
             kind: AuthFlowKind::IntegrationCredential,
             provider: google_provider(),
@@ -2044,6 +2054,7 @@ async fn filesystem_complete_credential_selection_completes_flow() {
 
     let flow = service
         .create_flow(NewAuthFlow {
+            id: None,
             scope: scope.clone(),
             kind: AuthFlowKind::IntegrationCredential,
             provider: google_provider(),
@@ -2087,6 +2098,7 @@ async fn filesystem_create_flow_rejects_invalid_update_binding() {
     // Non-existent account in update_binding → CredentialMissing.
     let err = service
         .create_flow(NewAuthFlow {
+            id: None,
             scope: scope.clone(),
             kind: AuthFlowKind::IntegrationCredential,
             provider: google_provider(),
@@ -2374,6 +2386,7 @@ async fn filesystem_expired_flow_status_persisted_before_returning_error() {
 
     let flow = service
         .create_flow(NewAuthFlow {
+            id: None,
             scope: scope.clone(),
             kind: AuthFlowKind::IntegrationCredential,
             provider: google_provider(),
@@ -2446,6 +2459,7 @@ async fn filesystem_expired_flow_status_persisted_before_returning_error() {
     // persist the Expired status before returning error.
     let flow2 = service
         .create_flow(NewAuthFlow {
+            id: None,
             scope: scope.clone(),
             kind: AuthFlowKind::IntegrationCredential,
             provider: google_provider(),
@@ -2507,6 +2521,7 @@ async fn filesystem_oauth_cas_conflict_branch_purges_previous_secrets() {
 
     let flow = service
         .create_flow(NewAuthFlow {
+            id: None,
             scope: scope.clone(),
             kind: AuthFlowKind::IntegrationCredential,
             provider: google_provider(),

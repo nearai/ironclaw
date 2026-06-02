@@ -1,4 +1,17 @@
-use ironclaw_host_api::{NetworkPolicy, NetworkScheme, NetworkTargetPattern};
+use ironclaw_host_api::{ExtensionId, NetworkPolicy, NetworkScheme, NetworkTargetPattern};
+
+use super::manifest::{CALENDAR_EXTENSION_ID, GMAIL_EXTENSION_ID};
+
+pub fn gsuite_network_policy_for(provider: &ExtensionId) -> Option<NetworkPolicy> {
+    if matches!(
+        provider.as_str(),
+        GMAIL_EXTENSION_ID | CALENDAR_EXTENSION_ID
+    ) {
+        Some(google_api_network_policy())
+    } else {
+        None
+    }
+}
 
 pub fn google_api_network_policy() -> NetworkPolicy {
     NetworkPolicy {

@@ -22,6 +22,8 @@ use std::sync::Arc;
 
 mod auth;
 mod available_extensions;
+mod budget;
+mod budget_events;
 mod bundled_skills;
 mod default_system_prompt;
 mod error;
@@ -42,7 +44,10 @@ mod local_runtime_profile;
 mod manual_token_flow;
 mod mcp;
 mod nearai_mcp;
+mod notion_oauth;
+mod oauth_provider_client;
 mod product_auth_durable;
+mod product_auth_providers;
 mod product_auth_runtime_credentials;
 #[cfg(feature = "webui-v2-beta")]
 mod product_auth_serve;
@@ -59,6 +64,8 @@ mod readiness;
 mod runtime;
 mod runtime_input;
 mod skill_listing;
+#[cfg(feature = "test-support")]
+pub mod test_support;
 mod web_access;
 mod webui;
 #[cfg(feature = "webui-v2-beta")]
@@ -79,6 +86,8 @@ pub use auth::{
     RebornOAuthCallbackOutcome, RebornOAuthCallbackRequest, RebornOAuthCallbackResponse,
     RebornProductAuthServicePorts, RebornProductAuthServices,
 };
+pub use budget::build_default_budget_accountant;
+pub use budget_events::{BudgetEventObserver, TracingBudgetEventObserver};
 pub use error::RebornBuildError;
 pub use extension_lifecycle_command::{
     RebornExtensionLifecycleCommand, RebornExtensionLifecycleCommandError,
@@ -87,6 +96,8 @@ pub use extension_lifecycle_command::{
 pub use factory::{RebornServices, build_reborn_services};
 pub use gsuite::{bundled_gsuite_extension_packages, bundled_gsuite_first_party_handlers};
 pub use input::{OAuthClientConfig, RebornBuildInput, RebornRuntimeProcessBinding};
+#[cfg(feature = "webui-v2-beta")]
+pub use ironclaw_auth::GoogleOAuthRouteConfig;
 pub use ironclaw_product_workflow::{
     LifecycleExtensionSource, LifecycleExtensionSummary, LifecyclePhase, LifecycleProductPayload,
     LifecycleProductResponse,

@@ -60,12 +60,13 @@ pub trait RuntimeCredentialAccountResolver: Send + Sync + fmt::Debug {
     ) -> Result<SecretHandle, CredentialStageError>;
 }
 
-/// One-shot runtime secret material staged after `InjectSecretOnce` lease consumption.
+/// Runtime secret material staged after `InjectSecretOnce` lease consumption.
 ///
 /// The store is keyed by scoped invocation, capability, and handle. Runtime adapters
-/// must use `take(...)` so staged material is removed before it can be reused.
-/// Entries also expire after a short TTL so abandoned handoffs from setup
-/// failures, cancellation, or adapter bugs cannot remain usable indefinitely.
+/// borrow staged material during dispatch; `complete_dispatch`/`abort` removes it
+/// after the scoped capability finishes. Entries also expire after a short TTL so
+/// abandoned handoffs from setup failures, cancellation, or adapter bugs cannot
+/// remain usable indefinitely.
 #[derive(Clone)]
 pub(crate) struct RuntimeSecretInjectionStore {
     state: Arc<RuntimeSecretInjectionState>,
@@ -132,6 +133,24 @@ impl RuntimeSecretInjectionStore {
                 handle,
             ))
             .map(|entry| entry.material))
+    }
+
+    pub(crate) fn get(
+        &self,
+        scope: &ResourceScope,
+        capability_id: &CapabilityId,
+        handle: &SecretHandle,
+    ) -> Result<Option<SecretMaterial>, RuntimeSecretInjectionStoreError> {
+        let now = Instant::now();
+        let mut secrets = self.lock()?;
+        prune_expired_entries(&mut secrets, now);
+        Ok(secrets
+            .get(&RuntimeSecretInjectionKey::new(
+                scope,
+                capability_id,
+                handle,
+            ))
+            .map(|entry| entry.material.clone()))
     }
 
     /// Discard all staged secrets for a scoped capability before process ownership exists.
@@ -1623,6 +1642,7 @@ fn obligation_supported_before_dispatch(
     match obligation {
         Obligation::AuditBefore
         | Obligation::ApplyNetworkPolicy { .. }
+        | Obligation::FirstPartyCredentialStagedViaHostPort { .. }
         | Obligation::InjectCredentialAccountOnce { .. }
         | Obligation::InjectSecretOnce { .. }
         | Obligation::ReserveResources { .. }
@@ -1656,6 +1676,7 @@ fn obligation_supported_after_dispatch(
     match obligation {
         Obligation::AuditBefore
         | Obligation::ApplyNetworkPolicy { .. }
+        | Obligation::FirstPartyCredentialStagedViaHostPort { .. }
         | Obligation::InjectCredentialAccountOnce { .. }
         | Obligation::InjectSecretOnce { .. }
         | Obligation::ReserveResources { .. }
@@ -2132,6 +2153,9 @@ fn obligation_label(obligation: &Obligation) -> Option<&'static str> {
         Obligation::ApplyNetworkPolicy { .. } => Some("apply_network_policy"),
         Obligation::InjectSecretOnce { .. } => Some("inject_secret_once"),
         Obligation::InjectCredentialAccountOnce { .. } => Some("inject_credential_account_once"),
+        Obligation::FirstPartyCredentialStagedViaHostPort { .. } => {
+            Some("first_party_credential_staged_via_host_port")
+        }
         Obligation::EnforceOutputLimit { .. } => Some("enforce_output_limit"),
         Obligation::ReserveResources { .. } => Some("reserve_resources"),
         Obligation::UseScopedMounts { .. } => Some("use_scoped_mounts"),

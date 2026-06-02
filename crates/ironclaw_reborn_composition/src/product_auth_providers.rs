@@ -1,0 +1,388 @@
+use std::collections::BTreeMap;
+use std::fmt;
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use ironclaw_auth::{
+    AuthProductError, AuthProviderClient, OAuthProviderCallbackRequest, OAuthProviderExchange,
+    OAuthProviderExchangeContext, OAuthProviderRefresh, OAuthProviderRefreshRequest,
+};
+use ironclaw_capabilities::CapabilityObligationHandler;
+use ironclaw_host_api::RuntimeHttpEgress;
+use ironclaw_host_runtime::ProductAuthProviderRuntimePorts;
+use ironclaw_secrets::SecretStore;
+
+use crate::RebornBuildError;
+use crate::input::OAuthProviderBackendConfig;
+use crate::oauth_provider_client::HostOAuthProviderClient;
+
+pub(crate) fn compose_provider_client(
+    configs: Vec<OAuthProviderBackendConfig>,
+    secret_store: Arc<dyn SecretStore>,
+    runtime_ports: ProductAuthProviderRuntimePorts,
+) -> Result<Option<Arc<dyn AuthProviderClient>>, RebornBuildError> {
+    compose_provider_client_with_runtime(
+        configs,
+        secret_store,
+        OAuthProviderRuntimePorts::from_product_auth_ports(runtime_ports),
+    )
+}
+
+fn compose_provider_client_with_runtime(
+    configs: Vec<OAuthProviderBackendConfig>,
+    secret_store: Arc<dyn SecretStore>,
+    runtime_ports: OAuthProviderRuntimePorts,
+) -> Result<Option<Arc<dyn AuthProviderClient>>, RebornBuildError> {
+    let mut clients = Vec::new();
+    for config in configs {
+        let provider_id = config.spec.provider_id;
+        let mut client = HostOAuthProviderClient::new(
+            config.spec,
+            runtime_ports.runtime_http_egress(),
+            Arc::clone(&secret_store),
+            runtime_ports.obligation_handler(),
+            config.client.client_id,
+            config.client.redirect_uri,
+        )
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!(
+                "{provider_id} OAuth provider backend could not be configured: {error}"
+            ),
+        })?;
+        if let Some(client_secret) = config.client.client_secret {
+            client = client.with_client_secret(client_secret);
+        }
+        clients.push((provider_id, Arc::new(client) as Arc<dyn AuthProviderClient>));
+    }
+    Ok(compose_provider_clients(clients))
+}
+
+#[derive(Clone)]
+struct OAuthProviderRuntimePorts {
+    runtime_http_egress: Arc<dyn RuntimeHttpEgress>,
+    obligation_handler: Arc<dyn CapabilityObligationHandler>,
+}
+
+impl OAuthProviderRuntimePorts {
+    fn from_product_auth_ports(ports: ProductAuthProviderRuntimePorts) -> Self {
+        Self {
+            runtime_http_egress: ports.runtime_http_egress(),
+            obligation_handler: ports.obligation_handler(),
+        }
+    }
+
+    #[cfg(test)]
+    fn new(
+        runtime_http_egress: Arc<dyn RuntimeHttpEgress>,
+        obligation_handler: Arc<dyn CapabilityObligationHandler>,
+    ) -> Self {
+        Self {
+            runtime_http_egress,
+            obligation_handler,
+        }
+    }
+
+    fn runtime_http_egress(&self) -> Arc<dyn RuntimeHttpEgress> {
+        Arc::clone(&self.runtime_http_egress)
+    }
+
+    fn obligation_handler(&self) -> Arc<dyn CapabilityObligationHandler> {
+        Arc::clone(&self.obligation_handler)
+    }
+}
+
+fn compose_provider_clients(
+    clients: Vec<(&'static str, Arc<dyn AuthProviderClient>)>,
+) -> Option<Arc<dyn AuthProviderClient>> {
+    if clients.is_empty() {
+        return None;
+    }
+    Some(Arc::new(MultiplexAuthProviderClient::from_clients(clients)))
+}
+
+#[derive(Default)]
+struct MultiplexAuthProviderClient {
+    providers: BTreeMap<String, Arc<dyn AuthProviderClient>>,
+}
+
+impl MultiplexAuthProviderClient {
+    fn from_clients(clients: Vec<(&'static str, Arc<dyn AuthProviderClient>)>) -> Self {
+        Self {
+            providers: clients
+                .into_iter()
+                .map(|(provider, client)| (provider.to_string(), client))
+                .collect(),
+        }
+    }
+
+    fn client_for(&self, provider: &str) -> Result<Arc<dyn AuthProviderClient>, AuthProductError> {
+        self.providers
+            .get(provider)
+            .cloned()
+            .ok_or(AuthProductError::BackendUnavailable)
+    }
+}
+
+impl fmt::Debug for MultiplexAuthProviderClient {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("MultiplexAuthProviderClient")
+            .field("providers", &self.providers.keys().collect::<Vec<_>>())
+            .finish()
+    }
+}
+
+#[async_trait]
+impl AuthProviderClient for MultiplexAuthProviderClient {
+    async fn exchange_callback(
+        &self,
+        context: OAuthProviderExchangeContext,
+        request: OAuthProviderCallbackRequest,
+    ) -> Result<OAuthProviderExchange, AuthProductError> {
+        self.client_for(request.provider.as_str())?
+            .exchange_callback(context, request)
+            .await
+    }
+
+    async fn refresh_token(
+        &self,
+        request: OAuthProviderRefreshRequest,
+    ) -> Result<OAuthProviderRefresh, AuthProductError> {
+        self.client_for(request.provider.as_str())?
+            .refresh_token(request)
+            .await
+    }
+
+    async fn cleanup_exchange(
+        &self,
+        context: OAuthProviderExchangeContext,
+        exchange: &OAuthProviderExchange,
+    ) -> Result<(), AuthProductError> {
+        self.client_for(exchange.provider.as_str())?
+            .cleanup_exchange(context, exchange)
+            .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::OAuthClientConfig;
+    use crate::google_oauth::google_provider_spec;
+    use crate::notion_oauth::{NOTION_PROVIDER_ID, notion_provider_spec};
+    use ironclaw_auth::{
+        AuthProductScope, AuthProviderId, AuthSurface, AuthorizationCodeHash,
+        CredentialAccountLabel, OAuthAuthorizationCode, OAuthClientId, OAuthRedirectUri,
+        PkceVerifierHash, PkceVerifierSecret, ProviderScope,
+    };
+    use ironclaw_capabilities::{CapabilityObligationError, CapabilityObligationRequest};
+    use ironclaw_host_api::{
+        InvocationId, ResourceScope, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
+        RuntimeHttpEgressResponse, TenantId, UserId,
+    };
+    use ironclaw_secrets::InMemorySecretStore;
+    use secrecy::SecretString;
+    use std::sync::Mutex;
+
+    #[test]
+    fn compose_provider_clients_omits_mux_for_zero_clients() {
+        assert!(compose_provider_clients(Vec::new()).is_none());
+    }
+
+    #[tokio::test]
+    async fn compose_provider_clients_uses_mux_even_for_one_client() {
+        let client = compose_provider_clients(vec![("google", Arc::new(PanicProviderClient))])
+            .expect("one provider still returns mux");
+
+        let error = client
+            .exchange_callback(exchange_context(), callback_request("notion"))
+            .await
+            .expect_err("unknown provider must be rejected by mux before reaching client");
+
+        assert_eq!(
+            error.code(),
+            ironclaw_auth::AuthErrorCode::BackendUnavailable
+        );
+    }
+
+    #[tokio::test]
+    async fn compose_provider_client_routes_notion_to_configured_provider_spec() {
+        let egress = Arc::new(RecordingEgress::ok(
+            br#"{"access_token":"notion-access","refresh_token":"notion-refresh","expires_in":3600}"#
+                .to_vec(),
+        ));
+        let client = compose_provider_client_with_runtime(
+            vec![
+                OAuthProviderBackendConfig {
+                    spec: google_provider_spec(),
+                    client: oauth_client("google-client", "https://app.example/oauth/google"),
+                },
+                OAuthProviderBackendConfig {
+                    spec: notion_provider_spec(),
+                    client: oauth_client("notion-client", "https://app.example/oauth/notion"),
+                },
+            ],
+            Arc::new(InMemorySecretStore::new()),
+            OAuthProviderRuntimePorts::new(egress.clone(), Arc::new(NoopObligationHandler)),
+        )
+        .expect("provider client composition")
+        .expect("mux client");
+
+        client
+            .exchange_callback(exchange_context(), callback_request(NOTION_PROVIDER_ID))
+            .await
+            .expect("notion exchange should route to notion spec");
+
+        let request = egress.single_request();
+        assert_eq!(request.url, "https://mcp.notion.com/token");
+        let body = form_params(&request.body);
+        assert_eq!(
+            body.get("client_id").map(String::as_str),
+            Some("notion-client")
+        );
+        assert_eq!(
+            body.get("resource").map(String::as_str),
+            Some("https://mcp.notion.com/mcp")
+        );
+        assert_eq!(
+            request
+                .network_policy
+                .allowed_targets
+                .first()
+                .map(|target| target.host_pattern.as_str()),
+            Some("mcp.notion.com")
+        );
+    }
+
+    fn oauth_client(client_id: &str, redirect_uri: &str) -> OAuthClientConfig {
+        OAuthClientConfig {
+            client_id: OAuthClientId::new(client_id).unwrap(),
+            client_secret: None,
+            redirect_uri: OAuthRedirectUri::new(redirect_uri).unwrap(),
+        }
+    }
+
+    fn exchange_context() -> OAuthProviderExchangeContext {
+        OAuthProviderExchangeContext {
+            scope: AuthProductScope::new(sample_scope(), AuthSurface::Callback),
+            flow_id: ironclaw_auth::AuthFlowId::new(),
+        }
+    }
+
+    fn callback_request(provider: &str) -> OAuthProviderCallbackRequest {
+        OAuthProviderCallbackRequest {
+            provider: AuthProviderId::new(provider).unwrap(),
+            account_label: CredentialAccountLabel::new("work account").unwrap(),
+            authorization_code: OAuthAuthorizationCode::new(SecretString::from(
+                "raw-auth-code".to_string(),
+            ))
+            .unwrap(),
+            authorization_code_hash: AuthorizationCodeHash::new(fake_digest("code")).unwrap(),
+            pkce_verifier: PkceVerifierSecret::new(SecretString::from(
+                "raw-pkce-verifier".to_string(),
+            ))
+            .unwrap(),
+            pkce_verifier_hash: PkceVerifierHash::new(fake_digest("pkce")).unwrap(),
+            scopes: vec![ProviderScope::new("workspace").unwrap()],
+        }
+    }
+
+    fn sample_scope() -> ResourceScope {
+        ResourceScope {
+            tenant_id: TenantId::new("tenant-a").unwrap(),
+            user_id: UserId::new("user-a").unwrap(),
+            agent_id: None,
+            project_id: None,
+            mission_id: None,
+            thread_id: None,
+            invocation_id: InvocationId::new(),
+        }
+    }
+
+    fn form_params(body: &[u8]) -> std::collections::BTreeMap<String, String> {
+        url::form_urlencoded::parse(body).into_owned().collect()
+    }
+
+    fn fake_digest(value: &str) -> String {
+        format!(
+            "{:064x}",
+            value.bytes().fold(0_u64, |hash, byte| {
+                hash.wrapping_mul(31).wrapping_add(u64::from(byte))
+            })
+        )
+    }
+
+    #[derive(Debug)]
+    struct PanicProviderClient;
+
+    #[async_trait]
+    impl AuthProviderClient for PanicProviderClient {
+        async fn exchange_callback(
+            &self,
+            _context: OAuthProviderExchangeContext,
+            _request: OAuthProviderCallbackRequest,
+        ) -> Result<OAuthProviderExchange, AuthProductError> {
+            panic!("mux should reject unknown provider before invoking single configured client");
+        }
+
+        async fn refresh_token(
+            &self,
+            _request: OAuthProviderRefreshRequest,
+        ) -> Result<OAuthProviderRefresh, AuthProductError> {
+            panic!("not used");
+        }
+    }
+
+    #[derive(Debug)]
+    struct RecordingEgress {
+        response_body: Vec<u8>,
+        requests: Mutex<Vec<RuntimeHttpEgressRequest>>,
+    }
+
+    impl RecordingEgress {
+        fn ok(response_body: Vec<u8>) -> Self {
+            Self {
+                response_body,
+                requests: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn single_request(&self) -> RuntimeHttpEgressRequest {
+            let requests = self.requests.lock().unwrap();
+            assert_eq!(requests.len(), 1);
+            requests[0].clone()
+        }
+    }
+
+    #[async_trait]
+    impl RuntimeHttpEgress for RecordingEgress {
+        async fn execute(
+            &self,
+            request: RuntimeHttpEgressRequest,
+        ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
+            self.requests.lock().unwrap().push(request);
+            Ok(RuntimeHttpEgressResponse {
+                status: 200,
+                headers: vec![("content-type".to_string(), "application/json".to_string())],
+                body: self.response_body.clone(),
+                saved_body: None,
+                request_bytes: 0,
+                response_bytes: 0,
+                redaction_applied: true,
+            })
+        }
+    }
+
+    #[derive(Debug)]
+    struct NoopObligationHandler;
+
+    #[async_trait]
+    impl CapabilityObligationHandler for NoopObligationHandler {
+        async fn satisfy(
+            &self,
+            _request: CapabilityObligationRequest<'_>,
+        ) -> Result<(), CapabilityObligationError> {
+            Ok(())
+        }
+    }
+}
