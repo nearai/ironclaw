@@ -1499,6 +1499,7 @@ mod tests {
     fn product_auth_source() -> RuntimeCredentialRequirementSource {
         RuntimeCredentialRequirementSource::ProductAuthAccount {
             provider: ironclaw_host_api::RuntimeCredentialAccountProviderId::new("google").unwrap(),
+            setup: ironclaw_host_api::RuntimeCredentialAccountSetup::ManualToken,
         }
     }
 
