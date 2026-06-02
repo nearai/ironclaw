@@ -134,7 +134,7 @@ mod tests {
     use crate::auth_verifier::SharedSecretHeaderAuth;
     use crate::runner::{
         NativeProductAdapterRunner, NativeProductAdapterRunnerConfig, RunnerError, WebhookAuth,
-        evidence_from_bearer_subject,
+        WebhookProcessOutcome, evidence_from_bearer_subject,
     };
 
     struct StaticAdapter {
