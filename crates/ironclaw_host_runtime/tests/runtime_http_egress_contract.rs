@@ -185,7 +185,7 @@ fn host_http_egress_records_injected_credentials_in_zeroizing_network_request() 
     );
 }
 
-fn require_zeroize_on_drop<T: ?Sized + secrecy::zeroize::ZeroizeOnDrop>(_: &T) {}
+fn require_zeroize_on_drop<T: ?Sized + zeroize::ZeroizeOnDrop>(_: &T) {}
 
 #[tokio::test]
 async fn host_http_egress_consumes_secret_staged_by_builtin_obligation_handler() {

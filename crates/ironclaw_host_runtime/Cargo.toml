@@ -68,6 +68,7 @@ ironclaw_event_projections = { path = "../ironclaw_event_projections" }
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
 tokio-postgres = "0.7"
+zeroize = "1"
 wat = "1.245.1"
 wit-component = "0.245.1"
 wit-parser = "0.245.1"

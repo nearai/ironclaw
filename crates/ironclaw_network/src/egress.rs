@@ -74,6 +74,8 @@ where
         let target = network_target_for_http_url(&request.url, estimated_request_bytes)?;
         let permit = StaticNetworkPolicyEnforcer::new(request.policy.clone())
             .authorize_blocking(NetworkRequest {
+                // This clone only carries scoped identity metadata; the sensitive
+                // URL/header/body buffers are still moved out below with `mem::take`.
                 scope: request.scope.clone(),
                 target: target.clone(),
                 method: request.method,

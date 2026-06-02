@@ -114,6 +114,22 @@ fn build_reqwest_client(key: &ReqwestClientKey) -> Result<reqwest::Client, reqwe
     builder.build()
 }
 
+fn parse_request_url(
+    request: &mut NetworkTransportRequest,
+    request_bytes: u64,
+) -> Result<url::Url, NetworkHttpError> {
+    // Taking empties the request carrier before reqwest sees the URL. The
+    // parsed Url and reqwest internals still retain plaintext while dispatching.
+    let mut raw_url = std::mem::take(&mut request.url);
+    let parsed = url::Url::parse(&raw_url).map_err(|error| NetworkHttpError::InvalidUrl {
+        reason: error.to_string(),
+        request_bytes,
+        response_bytes: 0,
+    });
+    raw_url.zeroize();
+    parsed
+}
+
 #[async_trait]
 impl NetworkHttpTransport for ReqwestNetworkTransport {
     async fn execute(
@@ -122,11 +138,7 @@ impl NetworkHttpTransport for ReqwestNetworkTransport {
     ) -> Result<NetworkHttpResponse, NetworkHttpError> {
         let request_bytes = request.body.len() as u64;
         reject_caller_host_header(&request.headers)?;
-        let url = url::Url::parse(&request.url).map_err(|error| NetworkHttpError::InvalidUrl {
-            reason: error.to_string(),
-            request_bytes,
-            response_bytes: 0,
-        })?;
+        let url = parse_request_url(&mut request, request_bytes)?;
         let host = url
             .host_str()
             .ok_or_else(|| NetworkHttpError::InvalidUrl {
@@ -142,7 +154,6 @@ impl NetworkHttpTransport for ReqwestNetworkTransport {
                 request_bytes,
                 response_bytes: 0,
             })?;
-        request.url.zeroize();
 
         let resolved_addrs = request
             .resolved_ips
@@ -277,6 +288,24 @@ mod tests {
     use std::net::IpAddr;
 
     use super::*;
+
+    #[test]
+    fn parse_request_url_takes_the_source_string_carrier() {
+        let mut request = NetworkTransportRequest {
+            method: NetworkMethod::Get,
+            url: "https://api.example.test/v1?token=sk-query-secret".to_string(),
+            headers: Vec::new(),
+            body: Vec::new(),
+            resolved_ips: Vec::new(),
+            response_body_limit: None,
+            timeout_ms: None,
+        };
+
+        let parsed = parse_request_url(&mut request, 0).unwrap();
+
+        assert_eq!(parsed.host_str(), Some("api.example.test"));
+        assert!(request.url.is_empty());
+    }
 
     #[test]
     fn effective_request_timeout_clamps_requested_timeout_to_transport_default() {
