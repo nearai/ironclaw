@@ -1663,7 +1663,7 @@ impl HostRuntimeCapabilityHarness {
     ) -> HarnessResult<Self> {
         let mounts = workspace_mounts(MountPermissions::read_write_list_delete())?;
         let memory_mounts = memory_mounts(MountPermissions::read_write_list_delete())?;
-        let memory_capability_ids = vec![
+        let memory_capability_ids = [
             CapabilityId::new(MEMORY_SEARCH_CAPABILITY_ID)?,
             CapabilityId::new(MEMORY_WRITE_CAPABILITY_ID)?,
             CapabilityId::new(MEMORY_READ_CAPABILITY_ID)?,

@@ -57,7 +57,7 @@ async fn builtin_first_party_package_declares_expected_capabilities() {
         .iter()
         .map(|descriptor| descriptor.id.as_str())
         .collect::<Vec<_>>();
-    assert_eq!(ids, all_builtin_capability_ids().to_vec());
+    assert_eq!(ids, all_builtin_capability_ids());
     for descriptor in &package.capabilities {
         let expected_permission = match descriptor.id.as_str() {
             HTTP_CAPABILITY_ID
@@ -195,7 +195,7 @@ async fn builtin_first_party_surface_lists_allowed_tools_in_registry_order() {
         .iter()
         .map(|capability| capability.descriptor.id.as_str())
         .collect::<Vec<_>>();
-    assert_eq!(ids, all_builtin_capability_ids().to_vec());
+    assert_eq!(ids, all_builtin_capability_ids());
     assert!(
         surface
             .capabilities
@@ -496,6 +496,47 @@ async fn memory_write_rejects_local_filesystem_paths() {
         }),
         execution_context_with_mounts(
             [MEMORY_WRITE_CAPABILITY_ID],
+            memory_mounts(MountPermissions::read_write_list_delete()),
+        ),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(failure, RuntimeFailureKind::InvalidInput);
+}
+
+#[tokio::test]
+async fn memory_write_rejects_traversal_paths() {
+    let runtime = runtime_with_filesystem(InMemoryBackend::new());
+    let context = execution_context_with_mounts(
+        [MEMORY_WRITE_CAPABILITY_ID],
+        memory_mounts(MountPermissions::read_write_list_delete()),
+    );
+
+    for target in ["daily/../SECRET.md", r"daily\..\SECRET.md"] {
+        let failure = invoke_with_context(
+            &runtime,
+            MEMORY_WRITE_CAPABILITY_ID,
+            json!({
+                "target": target,
+                "content": "should not write"
+            }),
+            context.clone(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(failure, RuntimeFailureKind::InvalidInput);
+    }
+}
+
+#[tokio::test]
+async fn memory_read_returns_input_error_for_missing_document() {
+    let runtime = runtime_with_filesystem(InMemoryBackend::new());
+    let failure = invoke_with_context(
+        &runtime,
+        MEMORY_READ_CAPABILITY_ID,
+        json!({"path": "projects/alpha/missing.md"}),
+        execution_context_with_mounts(
+            [MEMORY_READ_CAPABILITY_ID],
             memory_mounts(MountPermissions::read_write_list_delete()),
         ),
     )
@@ -1333,6 +1374,9 @@ async fn builtin_skill_install_accepts_content_without_url_fetch() {
     let (filesystem, mounts) = mounted_skill_filesystem(temp.path());
     let runtime = runtime_with_filesystem(filesystem);
 
+    // `skill_install` advertises `EffectKind::Network` because the same
+    // capability handles URL/GitHub installs, so `NetworkMode::Deny` rejects it
+    // before content-only dispatch. This case keeps the non-fetch path covered.
     let installed = invoke_with_context(
         &runtime,
         SKILL_INSTALL_CAPABILITY_ID,
@@ -4218,7 +4262,7 @@ async fn builtin_coding_write_is_denied_by_read_only_mount() {
 async fn builtin_missing_grant_denies_before_handler_dispatch() {
     let outcome = runtime()
         .invoke_capability(RuntimeCapabilityRequest::new(
-            execution_context([]),
+            execution_context(std::iter::empty::<&str>()),
             capability_id(ECHO_CAPABILITY_ID),
             ResourceEstimate::default(),
             json!({"message":"must not run"}),
@@ -4535,8 +4579,8 @@ fn provider_id() -> ExtensionId {
     ExtensionId::new("builtin").unwrap()
 }
 
-fn all_builtin_capability_ids() -> [&'static str; 20] {
-    [
+fn all_builtin_capability_ids() -> Vec<&'static str> {
+    vec![
         ECHO_CAPABILITY_ID,
         TIME_CAPABILITY_ID,
         JSON_CAPABILITY_ID,
@@ -4903,9 +4947,16 @@ impl NetworkResolver for StaticResolver {
     }
 }
 
-fn execution_context<const N: usize>(grants: [&str; N]) -> ExecutionContext {
+fn execution_context<I>(grants: I) -> ExecutionContext
+where
+    I: IntoIterator,
+    I::Item: AsRef<str>,
+{
     let capability_set = CapabilitySet {
-        grants: grants.into_iter().map(dispatch_grant).collect(),
+        grants: grants
+            .into_iter()
+            .map(|grant| dispatch_grant(grant.as_ref()))
+            .collect(),
     };
     ExecutionContext::local_default(
         UserId::new("user").unwrap(),
@@ -4918,14 +4969,15 @@ fn execution_context<const N: usize>(grants: [&str; N]) -> ExecutionContext {
     .unwrap()
 }
 
-fn execution_context_with_mounts<const N: usize>(
-    grants: [&str; N],
-    mounts: MountView,
-) -> ExecutionContext {
+fn execution_context_with_mounts<I>(grants: I, mounts: MountView) -> ExecutionContext
+where
+    I: IntoIterator,
+    I::Item: AsRef<str>,
+{
     let capability_set = CapabilitySet {
         grants: grants
             .into_iter()
-            .map(|grant| dispatch_grant_with_mounts(grant, mounts.clone()))
+            .map(|grant| dispatch_grant_with_mounts(grant.as_ref(), mounts.clone()))
             .collect(),
     };
     ExecutionContext::local_default(
@@ -4939,23 +4991,32 @@ fn execution_context_with_mounts<const N: usize>(
     .unwrap()
 }
 
-fn execution_context_with_network<const N: usize>(
-    grants: [&str; N],
-    network: NetworkPolicy,
-) -> ExecutionContext {
+fn execution_context_with_network<I>(grants: I, network: NetworkPolicy) -> ExecutionContext
+where
+    I: IntoIterator,
+    I::Item: AsRef<str>,
+{
     execution_context_with_mounts_and_network(grants, MountView::default(), network)
 }
 
-fn execution_context_with_mounts_and_network<const N: usize>(
-    grants: [&str; N],
+fn execution_context_with_mounts_and_network<I>(
+    grants: I,
     mounts: MountView,
     network: NetworkPolicy,
-) -> ExecutionContext {
+) -> ExecutionContext
+where
+    I: IntoIterator,
+    I::Item: AsRef<str>,
+{
     let capability_set = CapabilitySet {
         grants: grants
             .into_iter()
             .map(|grant| {
-                dispatch_grant_with_mounts_and_network(grant, mounts.clone(), network.clone())
+                dispatch_grant_with_mounts_and_network(
+                    grant.as_ref(),
+                    mounts.clone(),
+                    network.clone(),
+                )
             })
             .collect(),
     };

@@ -538,7 +538,7 @@ async fn dispatch_read(
         .await
         .map_err(|_| operation_error())?
     else {
-        return Err(operation_error());
+        return Err(input_error());
     };
     let content = String::from_utf8(bytes).map_err(|_| operation_error())?;
     Ok(json!({
@@ -668,7 +668,7 @@ fn optional_u64(input: &Value, key: &'static str) -> Option<u64> {
 }
 
 fn reject_local_or_traversal_path(path: &str) -> Result<(), FirstPartyCapabilityError> {
-    if looks_like_filesystem_path(path) || contains_traversal(path) {
+    if path.contains('\\') || looks_like_filesystem_path(path) || contains_traversal(path) {
         return Err(input_error());
     }
     Ok(())

@@ -96,9 +96,10 @@ impl MemoryContext {
         self
     }
 
-    /// Internal marker set only after the filesystem adapter has already run
-    /// prompt-write safety. Keep crate-private so direct backend callers cannot
-    /// bypass protected-file policy.
+    /// Internal marker set only after `MemoryBackendFilesystemAdapter` has
+    /// already run prompt-write safety. Keep crate-private so direct backend
+    /// callers cannot bypass protected prompt-file policy for files called out
+    /// in zmanian #3180 HIGH, including `SOUL.md` and `BOOTSTRAP.md`.
     pub(crate) fn with_prompt_write_safety_enforced(mut self) -> Self {
         self.prompt_write_safety_enforced = true;
         self
@@ -740,7 +741,7 @@ where
             if let Some(schema) = &metadata.schema {
                 validate_content_against_schema(path, content, schema)?;
             }
-            let options = MemoryWriteOptions {
+            let repository_options = MemoryWriteOptions {
                 metadata,
                 changed_by: Some(scoped_memory_changed_by_key(path.scope())),
             };
@@ -750,7 +751,7 @@ where
                     path,
                     expected_previous_hash.as_deref(),
                     bytes,
-                    &options,
+                    &repository_options,
                 )
                 .await?;
             if outcome == MemoryAppendOutcome::Appended {
@@ -776,6 +777,7 @@ where
                 }
                 return Ok(());
             }
+            std::thread::yield_now();
         }
         Err(memory_error(
             path.virtual_path().unwrap_or_else(|_| valid_memory_path()),
