@@ -475,3 +475,132 @@ pub(super) fn should_forget_pkce_verifier(code: AuthErrorCode) -> bool {
             | AuthErrorCode::AccountSelectionRequired
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::RebornAuthContinuationDispatcher;
+    use crate::input::OAuthClientConfig;
+    use crate::oauth_gate::{GoogleOAuthGateProvider, OAuthGateProviderRegistry};
+    use crate::projection::AuthChallengeProvider;
+    use async_trait::async_trait;
+    use ironclaw_auth::{GOOGLE_CALENDAR_READONLY_SCOPE, InMemoryAuthProductServices};
+    use ironclaw_host_api::{RuntimeCredentialAccountProviderId, RuntimeCredentialAuthRequirement};
+    use ironclaw_secrets::{InMemorySecretStore, SecretStore};
+    use ironclaw_turns::{TurnRunId, TurnScope};
+    use std::sync::{Arc, Mutex};
+
+    #[tokio::test]
+    async fn google_oauth_callback_uses_gate_pkce_store_when_route_cache_misses() {
+        let shared = Arc::new(InMemoryAuthProductServices::new());
+        let secret_store = Arc::new(InMemorySecretStore::new());
+        let secret_store_for_provider: Arc<dyn SecretStore> = secret_store.clone();
+        let dispatcher = Arc::new(RecordingDispatcher::default());
+        let google_gate = Arc::new(GoogleOAuthGateProvider::new(
+            OAuthClientConfig::new(
+                "google-client.apps.googleusercontent.com",
+                "http://127.0.0.1:3000/api/reborn/product-auth/oauth/google/callback",
+                None,
+            )
+            .expect("google oauth client"),
+            secret_store_for_provider,
+        ));
+        let product_auth = Arc::new(
+            RebornProductAuthServices::from_shared(shared.clone(), dispatcher.clone())
+                .with_flow_record_source(shared)
+                .with_oauth_gate_registry(Arc::new(OAuthGateProviderRegistry::new(vec![
+                    google_gate,
+                ]))),
+        );
+        let state = ProductAuthRouteState::new(
+            product_auth.clone(),
+            TenantId::new("tenant-alpha").expect("tenant"),
+            None,
+            None,
+        );
+        let turn_scope = TurnScope::new(
+            TenantId::new("tenant-alpha").expect("tenant"),
+            None,
+            None,
+            ThreadId::new("thread-alpha").expect("thread"),
+        );
+        let owner_user_id = UserId::new("user-alpha").expect("user");
+        let run_id = TurnRunId::new();
+        let gate_ref = "gate:google-auth";
+        let requirements = vec![RuntimeCredentialAuthRequirement {
+            provider: RuntimeCredentialAccountProviderId::new("google").expect("provider"),
+            requester_extension: ExtensionId::new("google-calendar").expect("extension"),
+            provider_scopes: vec![GOOGLE_CALENDAR_READONLY_SCOPE.to_string()],
+        }];
+
+        let challenge = product_auth
+            .challenge_for_gate(&turn_scope, &owner_user_id, run_id, gate_ref, &requirements)
+            .await
+            .expect("challenge lookup")
+            .expect("google oauth challenge");
+        let authorization_url = challenge.authorization_url.expect("authorization url");
+        let state_value = Url::parse(authorization_url.as_str())
+            .expect("authorization url")
+            .query_pairs()
+            .find_map(|(name, value)| (name == "state").then(|| value.into_owned()))
+            .expect("oauth state");
+        let encoded_state =
+            url::form_urlencoded::byte_serialize(state_value.as_bytes()).collect::<String>();
+        let encoded_scope =
+            url::form_urlencoded::byte_serialize(GOOGLE_CALENDAR_READONLY_SCOPE.as_bytes())
+                .collect::<String>();
+        let uri = format!(
+            "{GOOGLE_OAUTH_CALLBACK_PATH}?state={encoded_state}&code=google-auth-code&scope={encoded_scope}"
+        )
+        .parse::<Uri>()
+        .expect("callback uri");
+
+        let response = google_oauth_callback_handler(
+            State(state),
+            RawQuery(uri.query().map(str::to_string)),
+            uri,
+        )
+        .await
+        .expect("google callback")
+        .0;
+
+        assert_eq!(response.status, AuthFlowStatus::Completed);
+        let events = dispatcher.events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].continuation,
+            AuthContinuationRef::TurnGateResume {
+                turn_run_ref: TurnRunRef::new(run_id.to_string()).expect("run ref"),
+                gate_ref: AuthGateRef::new(gate_ref).expect("gate ref"),
+            }
+        );
+    }
+
+    #[derive(Default)]
+    struct RecordingDispatcher {
+        events: Mutex<Vec<ironclaw_auth::AuthContinuationEvent>>,
+    }
+
+    impl RecordingDispatcher {
+        fn events(&self) -> Vec<ironclaw_auth::AuthContinuationEvent> {
+            self.events
+                .lock()
+                .expect("recording dispatcher lock")
+                .clone()
+        }
+    }
+
+    #[async_trait]
+    impl RebornAuthContinuationDispatcher for RecordingDispatcher {
+        async fn dispatch_auth_continuation(
+            &self,
+            event: ironclaw_auth::AuthContinuationEvent,
+        ) -> Result<(), AuthProductError> {
+            self.events
+                .lock()
+                .expect("recording dispatcher lock")
+                .push(event);
+            Ok(())
+        }
+    }
+}

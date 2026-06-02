@@ -26,6 +26,7 @@ pub struct OAuthClientConfig {
     pub client_id: OAuthClientId,
     pub client_secret: Option<SecretString>,
     pub redirect_uri: OAuthRedirectUri,
+    pub hosted_domain_hint: Option<String>,
 }
 
 impl OAuthClientConfig {
@@ -38,7 +39,13 @@ impl OAuthClientConfig {
             client_id: OAuthClientId::new(client_id)?,
             client_secret,
             redirect_uri: OAuthRedirectUri::new(redirect_uri)?,
+            hosted_domain_hint: None,
         })
+    }
+
+    pub fn with_hosted_domain_hint(mut self, hosted_domain_hint: impl Into<String>) -> Self {
+        self.hosted_domain_hint = Some(hosted_domain_hint.into());
+        self
     }
 }
 
@@ -52,6 +59,10 @@ impl std::fmt::Debug for OAuthClientConfig {
                 &self.client_secret.as_ref().map(|_| "[REDACTED]"),
             )
             .field("redirect_uri", &self.redirect_uri)
+            .field(
+                "hosted_domain_hint",
+                &self.hosted_domain_hint.as_ref().map(|_| "[REDACTED]"),
+            )
             .finish()
     }
 }

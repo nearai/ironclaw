@@ -581,6 +581,7 @@ async fn production_google_oauth_config_uses_factory_built_product_auth_ports() 
             client_id: OAuthClientId::new("google-client-123").unwrap(),
             client_secret: None,
             redirect_uri: OAuthRedirectUri::new("https://app.example/oauth/callback").unwrap(),
+            hosted_domain_hint: None,
         })
         .with_production_trust_policy(production_trust_policy())
         .with_runtime_policy(production_runtime_policy())

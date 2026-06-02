@@ -229,17 +229,22 @@ mod tests {
     use crate::OAuthClientConfig;
     use crate::google_oauth::google_provider_spec;
     use crate::notion_oauth::{NOTION_PROVIDER_ID, notion_provider_spec};
+    use crate::oauth_gate::OAuthGateChallengeRequest;
     use ironclaw_auth::{
-        AuthProductScope, AuthProviderId, AuthSurface, AuthorizationCodeHash,
-        CredentialAccountLabel, OAuthAuthorizationCode, OAuthClientId, OAuthRedirectUri,
+        AuthFlowManager, AuthFlowRecordSource, AuthGateRef, AuthProductScope, AuthProviderId,
+        AuthSurface, AuthorizationCodeHash, CredentialAccountLabel, GOOGLE_CALENDAR_READONLY_SCOPE,
+        InMemoryAuthProductServices, OAuthAuthorizationCode, OAuthClientId, OAuthRedirectUri,
         PkceVerifierHash, PkceVerifierSecret, ProviderScope,
     };
     use ironclaw_capabilities::{CapabilityObligationError, CapabilityObligationRequest};
     use ironclaw_host_api::{
-        InvocationId, ResourceScope, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
-        RuntimeHttpEgressResponse, TenantId, UserId,
+        AgentId, ExtensionId, InvocationId, ResourceScope, RuntimeCredentialAccountProviderId,
+        RuntimeCredentialAuthRequirement, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
+        RuntimeHttpEgressResponse, TenantId, ThreadId, UserId,
     };
+    use ironclaw_product_adapters::AuthPromptChallengeKind;
     use ironclaw_secrets::InMemorySecretStore;
+    use ironclaw_turns::{TurnRunId, TurnScope};
     use secrecy::SecretString;
     use std::sync::Mutex;
 
@@ -315,11 +320,69 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn compose_provider_client_registers_google_oauth_gate_provider() {
+        let composition = compose_provider_client_with_runtime(
+            vec![OAuthProviderBackendConfig {
+                spec: google_provider_spec(),
+                client: oauth_client("google-client", "https://app.example/oauth/google"),
+            }],
+            Vec::new(),
+            Arc::new(InMemorySecretStore::new()),
+            OAuthProviderRuntimePorts::new(
+                Arc::new(RecordingEgress::ok(Vec::new())),
+                Arc::new(NoopObligationHandler),
+            ),
+        )
+        .expect("provider composition");
+        let registry = composition.gate_registry.expect("google gate registry");
+        let shared = Arc::new(InMemoryAuthProductServices::new());
+        let flow_manager: Arc<dyn AuthFlowManager> = shared.clone();
+        let flow_source: Arc<dyn AuthFlowRecordSource> = shared;
+        let scope = TurnScope::new(
+            TenantId::new("tenant-a").unwrap(),
+            Some(AgentId::new("agent-a").unwrap()),
+            None,
+            ThreadId::new("thread-a").unwrap(),
+        );
+        let owner_user_id = UserId::new("user-a").unwrap();
+        let run_id = TurnRunId::new();
+        let gate_ref = AuthGateRef::new("gate:google-auth").unwrap();
+        let requirements = vec![RuntimeCredentialAuthRequirement {
+            provider: RuntimeCredentialAccountProviderId::new("google").unwrap(),
+            requester_extension: ExtensionId::new("google-calendar").unwrap(),
+            provider_scopes: vec![GOOGLE_CALENDAR_READONLY_SCOPE.to_string()],
+        }];
+
+        let view = registry
+            .challenge_for_blocked_gate(OAuthGateChallengeRequest {
+                flow_manager: &flow_manager,
+                flow_source: &flow_source,
+                requirements: &requirements,
+                scope: &scope,
+                owner_user_id: &owner_user_id,
+                run_id,
+                gate_ref: &gate_ref,
+            })
+            .await
+            .expect("gate challenge")
+            .expect("google oauth challenge");
+
+        assert_eq!(view.kind, AuthPromptChallengeKind::OAuthUrl);
+        assert_eq!(view.provider.as_str(), "google");
+        assert!(
+            view.authorization_url
+                .as_ref()
+                .is_some_and(|url| url.as_str().starts_with("https://accounts.google.com/"))
+        );
+    }
+
     fn oauth_client(client_id: &str, redirect_uri: &str) -> OAuthClientConfig {
         OAuthClientConfig {
             client_id: OAuthClientId::new(client_id).unwrap(),
             client_secret: None,
             redirect_uri: OAuthRedirectUri::new(redirect_uri).unwrap(),
+            hosted_domain_hint: None,
         }
     }
 
