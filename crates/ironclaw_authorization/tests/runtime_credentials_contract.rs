@@ -180,6 +180,7 @@ async fn capability_access_resolves_product_auth_account_runtime_credentials() {
         runtime_credentials: vec![RuntimeCredentialRequirement {
             source: RuntimeCredentialRequirementSource::ProductAuthAccount {
                 provider: RuntimeCredentialAccountProviderId::new("github").unwrap(),
+                setup: Default::default(),
             },
             provider_scopes: vec!["repo".to_string()],
             ..runtime_credential(slot.clone(), github_audience(), true)

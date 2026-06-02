@@ -94,4 +94,30 @@ mod tests {
         assert!(events.contains("setActiveRun?.(null);"));
         assert!(events.contains("latestRunIdRef.current = null;"));
     }
+
+    #[test]
+    fn extensions_onboarding_messages_render_in_cards() {
+        let extension_card = asset_text("js/pages/extensions/components/extension-card.js");
+
+        assert!(
+            extension_card.contains("state === \"setup_required\" || state === \"auth_required\""),
+            "setup/auth states must prefer credential setup instructions"
+        );
+        assert!(
+            extension_card.contains(
+                "ext.onboarding?.credential_instructions || ext.onboarding?.credential_next_step"
+            ),
+            "setup/auth onboarding should render credential instructions before next-step copy"
+        );
+        assert!(
+            extension_card.contains(
+                "ext.onboarding?.credential_next_step || ext.onboarding?.credential_instructions"
+            ),
+            "configured/no-credential onboarding should render next-step copy before setup copy"
+        );
+        assert!(
+            extension_card.contains("${onboardingHint}"),
+            "extension cards must render the projected onboarding hint"
+        );
+    }
 }

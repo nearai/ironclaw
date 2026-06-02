@@ -107,6 +107,7 @@ pub(crate) struct RebornOAuthStartFlowRequest {
     pub(crate) authorization_url: OAuthAuthorizationUrl,
     pub(crate) opaque_state_hash: OpaqueStateHash,
     pub(crate) pkce_verifier_hash: PkceVerifierHash,
+    pub(crate) update_binding: Option<CredentialAccountUpdateBinding>,
     pub(crate) expires_at: ironclaw_auth::Timestamp,
 }
 
@@ -952,7 +953,7 @@ impl RebornProductAuthServices {
                     expires_at: request.expires_at,
                 },
                 continuation: AuthContinuationRef::SetupOnly,
-                update_binding: None,
+                update_binding: request.update_binding,
                 opaque_state_hash: Some(request.opaque_state_hash),
                 pkce_verifier_hash: Some(request.pkce_verifier_hash),
                 expires_at: request.expires_at,

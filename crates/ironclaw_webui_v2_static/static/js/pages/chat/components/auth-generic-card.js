@@ -18,14 +18,16 @@ export function AuthGenericCard({ gate, onCancel }) {
       headline=${gate?.headline || t("authGate.title")}
       body=${gate?.body || ""}
     >
-      <div className="mb-3 text-sm text-iron-200">
-        ${t("authGate.unsupportedChallenge")}
-      </div>
-      <div className="flex flex-wrap gap-2">
-        <${Button} type="button" variant="secondary" onClick=${() => onCancel?.()}>
-          ${t("authGate.cancel")}
-        <//>
-      </div>
+      <form onSubmit=${(event) => event.preventDefault()}>
+        <div className="mb-3 text-sm text-iron-200">
+          ${t("authGate.unsupportedChallenge")}
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <${Button} type="button" variant="secondary" onClick=${() => onCancel?.()}>
+            ${t("authGate.cancel")}
+          <//>
+        </div>
+      </form>
     <//>
   `;
 }

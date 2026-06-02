@@ -263,6 +263,9 @@ impl RebornServicesApi for StubServices {
             phase: LifecyclePhase::UnsupportedOrLegacy,
             blockers: Vec::new(),
             payload: None,
+            secrets: Vec::new(),
+            fields: Vec::new(),
+            onboarding: None,
         })
     }
 }

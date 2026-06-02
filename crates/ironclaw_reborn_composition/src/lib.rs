@@ -45,6 +45,7 @@ mod local_dev_mounts;
 mod local_runtime_profile;
 mod manual_token_flow;
 mod mcp;
+mod mcp_discovery;
 mod nearai_mcp;
 mod notion_oauth;
 mod oauth_dcr;
@@ -77,6 +78,7 @@ mod web_access;
 mod webui;
 #[cfg(feature = "webui-v2-beta")]
 mod webui_body_limit;
+mod webui_extension_credentials;
 #[cfg(feature = "webui-v2-beta")]
 mod webui_rate_limit;
 #[cfg(feature = "webui-v2-beta")]

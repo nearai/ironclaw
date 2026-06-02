@@ -5,8 +5,9 @@ use ironclaw_extensions::{
 use ironclaw_filesystem::{FileType, FilesystemError, RootFilesystem};
 use ironclaw_host_api::{CapabilityId, ExtensionId, VirtualPath, sha256_digest_token};
 use ironclaw_product_workflow::{
-    LifecycleExtensionRuntimeKind, LifecycleExtensionSource, LifecycleExtensionSummary,
-    LifecyclePackageKind, LifecyclePackageRef, ProductWorkflowError,
+    LifecycleExtensionCredentialRequirement, LifecycleExtensionCredentialSetup,
+    LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind, LifecycleExtensionSource,
+    LifecycleExtensionSummary, LifecyclePackageKind, LifecyclePackageRef, ProductWorkflowError,
 };
 use toml::Value;
 
@@ -80,7 +81,69 @@ impl AvailableExtensionPackage {
             source: LifecycleExtensionSource::HostBundled,
             runtime_kind: runtime_kind(&self.package.manifest.runtime),
             visible_read_only_capability_ids,
+            credential_requirements: credential_requirements(self),
+            onboarding: onboarding(self.package_ref.id.as_str()),
         }
+    }
+}
+
+fn onboarding(package_id: &str) -> Option<LifecycleExtensionOnboarding> {
+    match package_id {
+        "github" => Some(onboarding_message(
+            "GitHub needs a personal access token before its repository and pull request tools can run.",
+            Some(
+                "Create a GitHub personal access token with the repository permissions you want IronClaw to use, then paste it here.",
+            ),
+            Some("https://github.com/settings/personal-access-tokens/new"),
+            "After saving the token, activate GitHub to publish its tools.",
+        )),
+        "gmail" => Some(onboarding_message(
+            "Gmail needs Google OAuth authorization before mail tools can run.",
+            Some("Authorize the Google account that IronClaw should use for Gmail."),
+            None,
+            "After authorization completes, activate Gmail to publish its tools.",
+        )),
+        "google-calendar" => Some(onboarding_message(
+            "Google Calendar needs Google OAuth authorization before calendar tools can run.",
+            Some("Authorize the Google account that IronClaw should use for calendar events."),
+            None,
+            "After authorization completes, activate Google Calendar to publish its tools.",
+        )),
+        "notion" => Some(onboarding_message(
+            "Notion needs a workspace access token before MCP tools can run.",
+            Some(
+                "Create or copy a Notion integration token for the workspace IronClaw should access, then paste it here.",
+            ),
+            Some("https://www.notion.so/profile/integrations"),
+            "After saving the token, activate Notion to publish its MCP tools.",
+        )),
+        "nearai" => Some(onboarding_message(
+            "NEAR AI needs an API key before its MCP tools can run.",
+            Some("Paste the NEAR AI API key IronClaw should use for hosted MCP requests."),
+            None,
+            "After saving the API key, activate NEAR AI to publish its MCP tools.",
+        )),
+        "web-access" => Some(onboarding_message(
+            "Web Access does not need credentials. Activate it to make web search and saved-result retrieval tools available.",
+            Some("No credentials are required for Web Access."),
+            None,
+            "Activate Web Access to publish its tools.",
+        )),
+        _ => None,
+    }
+}
+
+fn onboarding_message(
+    instructions: &str,
+    credential_instructions: Option<&str>,
+    setup_url: Option<&str>,
+    credential_next_step: &str,
+) -> LifecycleExtensionOnboarding {
+    LifecycleExtensionOnboarding {
+        instructions: instructions.to_string(),
+        credential_instructions: credential_instructions.map(str::to_string),
+        setup_url: setup_url.map(str::to_string),
+        credential_next_step: Some(credential_next_step.to_string()),
     }
 }
 
@@ -91,6 +154,52 @@ fn runtime_kind(runtime: &ExtensionRuntime) -> LifecycleExtensionRuntimeKind {
         ExtensionRuntime::FirstParty { .. } => LifecycleExtensionRuntimeKind::FirstParty,
         ExtensionRuntime::System { .. } => LifecycleExtensionRuntimeKind::System,
         ExtensionRuntime::Script { .. } => LifecycleExtensionRuntimeKind::Script,
+    }
+}
+
+fn credential_requirements(
+    package: &AvailableExtensionPackage,
+) -> Vec<LifecycleExtensionCredentialRequirement> {
+    let mut requirements = Vec::new();
+    for capability in &package.package.manifest.capabilities {
+        for requirement in &capability.runtime_credentials {
+            let ironclaw_host_api::RuntimeCredentialRequirementSource::ProductAuthAccount {
+                provider,
+                setup,
+            } = &requirement.source
+            else {
+                continue;
+            };
+            let name = requirement.handle.as_str().to_string();
+            if requirements
+                .iter()
+                .any(|seen: &LifecycleExtensionCredentialRequirement| seen.name == name)
+            {
+                continue;
+            }
+            requirements.push(LifecycleExtensionCredentialRequirement {
+                name,
+                provider: provider.as_str().to_string(),
+                required: requirement.required,
+                setup: credential_setup(setup),
+            });
+        }
+    }
+    requirements
+}
+
+fn credential_setup(
+    setup: &ironclaw_host_api::RuntimeCredentialAccountSetup,
+) -> LifecycleExtensionCredentialSetup {
+    match setup {
+        ironclaw_host_api::RuntimeCredentialAccountSetup::ManualToken => {
+            LifecycleExtensionCredentialSetup::ManualToken
+        }
+        ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth { scopes } => {
+            LifecycleExtensionCredentialSetup::OAuth {
+                scopes: scopes.clone(),
+            }
+        }
     }
 }
 
@@ -1335,6 +1444,41 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn bundled_extension_summaries_include_onboarding_messages() {
+        let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
+
+        for (extension_id, expected_instructions) in [
+            ("github", "GitHub needs a personal access token"),
+            ("gmail", "Gmail needs Google OAuth authorization"),
+            (
+                "google-calendar",
+                "Google Calendar needs Google OAuth authorization",
+            ),
+            ("notion", "Notion needs a workspace access token"),
+            ("nearai", "NEAR AI needs an API key"),
+            ("web-access", "Web Access does not need credentials"),
+        ] {
+            let package_ref =
+                LifecyclePackageRef::new(LifecyclePackageKind::Extension, extension_id).unwrap();
+            let summary = catalog.resolve(&package_ref).unwrap().summary();
+            let onboarding = summary
+                .onboarding
+                .as_ref()
+                .expect("bundled extension onboarding");
+
+            assert!(
+                onboarding.instructions.contains(expected_instructions),
+                "{extension_id} onboarding instructions should include `{expected_instructions}`; got `{}`",
+                onboarding.instructions,
+            );
+            assert!(
+                onboarding.credential_next_step.is_some(),
+                "{extension_id} must include the next user step"
+            );
         }
     }
 

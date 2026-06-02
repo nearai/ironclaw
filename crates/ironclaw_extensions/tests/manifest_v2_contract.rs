@@ -131,6 +131,7 @@ default_permission = "allow""#,
         manifest.capabilities[0].runtime_credentials[0].source,
         RuntimeCredentialRequirementSource::ProductAuthAccount {
             provider: RuntimeCredentialAccountProviderId::new("github").unwrap(),
+            setup: Default::default(),
         }
     );
 }

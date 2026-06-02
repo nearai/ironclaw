@@ -15,25 +15,7 @@ import { useT } from "../../../lib/i18n.js";
 import { Button } from "../../../design-system/button.js";
 import { Badge } from "../../../design-system/badge.js";
 import { Icon } from "../../../design-system/icons.js";
-
-/* Heuristic risk classification from the tool name. Best-effort signal for
-   the operator — not an authorization decision (the backend enforces that). */
-function classifyRisk(toolName, description, parameters) {
-  const text = [toolName, description, parameters]
-    .filter(Boolean)
-    .join(" ")
-    .toLowerCase();
-  if (/(write|edit|delete|remove|patch|create|move|rename|chmod|rm\b)/.test(text)) {
-    return { tone: "danger", key: "tool.riskWrite" };
-  }
-  if (/(bash|shell|exec|run|command|terminal|spawn|process)/.test(text)) {
-    return { tone: "warning", key: "tool.riskExec" };
-  }
-  if (/(curl|http|fetch|web|network|request|api|gh\b|git|download|upload|browse)/.test(text)) {
-    return { tone: "info", key: "tool.riskNetwork" };
-  }
-  return { tone: "muted", key: "tool.riskRead" };
-}
+import { classifyRisk } from "../lib/approval-risk.js";
 
 export function ApprovalCard({ gate, onApprove, onDeny, onAlways }) {
   const t = useT();

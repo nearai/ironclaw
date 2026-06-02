@@ -22,8 +22,6 @@ import { React, html } from "../../../lib/html.js";
 import { useT } from "../../../lib/i18n.js";
 import { Icon } from "../../../design-system/icons.js";
 
-let SHELL_SEQ = 0;
-
 export function AuthGateShell({
   icon = "lock",
   headline,
@@ -37,7 +35,7 @@ export function AuthGateShell({
 }) {
   const t = useT();
   const [expanded, setExpanded] = React.useState(defaultExpanded);
-  const controlsId = React.useMemo(() => `auth-gate-drawer-${++SHELL_SEQ}`, []);
+  const controlsId = React.useId();
   const subtitle = accountLabel || provider || "";
 
   return html`

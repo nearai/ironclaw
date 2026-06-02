@@ -106,10 +106,15 @@ export function ExtensionCard({ ext, onActivate, onConfigure, onRemove, isBusy }
   const tools = ext.tools || [];
   const [capsOpen, setCapsOpen] = React.useState(false);
 
+  const setupState = state === "setup_required" || state === "auth_required";
+  const onboardingHint =
+    (setupState
+      ? ext.onboarding?.credential_instructions || ext.onboarding?.credential_next_step
+      : ext.onboarding?.credential_next_step || ext.onboarding?.credential_instructions) ||
+    null;
+
   const configurePayload = { packageRef: ext.package_ref, displayName };
 
-  /* Compose the same affordances as before; Activate is the primary inline
-     action, everything else routes to the overflow menu. */
   const primaryActions = [];
   const overflowActions = [];
 
@@ -184,6 +189,13 @@ export function ExtensionCard({ ext, onActivate, onConfigure, onRemove, isBusy }
           className="mt-2 rounded-[10px] border border-[color-mix(in_srgb,var(--v2-danger-text)_36%,var(--v2-panel-border))] bg-[var(--v2-danger-soft)] px-3 py-1.5 text-xs text-[var(--v2-danger-text)]"
         >
           ${ext.activation_error}
+        </div>
+      `}
+
+      ${onboardingHint &&
+      html`
+        <div className="mt-2 rounded-md border border-white/12 bg-white/[0.04] px-3 py-2 text-xs leading-5 text-[var(--v2-text-muted)]">
+          ${onboardingHint}
         </div>
       `}
 

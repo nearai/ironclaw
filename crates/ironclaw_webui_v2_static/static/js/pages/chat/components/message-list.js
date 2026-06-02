@@ -3,29 +3,7 @@ import { useT } from "../../../lib/i18n.js";
 import { MessageBubble } from "./message-bubble.js";
 import { ToolRun } from "./tool-activity.js";
 import { Icon } from "../../../design-system/icons.js";
-
-/* Collapse consecutive tool-activity messages into runs so a long burst of
-   tool calls can render as a single summary line (see ToolRun). Non-tool
-   messages pass through unchanged. */
-function groupMessages(messages) {
-  const items = [];
-  let run = null;
-  for (const msg of messages) {
-    const isToolActivity =
-      msg.role === "tool_activity" && !(msg.toolCalls && msg.toolCalls.length > 0);
-    if (isToolActivity) {
-      if (!run) {
-        run = { type: "tool-run", id: `tool-run-${msg.id}`, tools: [] };
-        items.push(run);
-      }
-      run.tools.push(msg);
-    } else {
-      run = null;
-      items.push({ type: "message", id: msg.id, message: msg });
-    }
-  }
-  return items;
-}
+import { groupMessages } from "../lib/message-groups.js";
 
 export function MessageList({
   messages,
@@ -67,6 +45,8 @@ export function MessageList({
     setAtBottom(true);
   }, []);
 
+  const grouped = React.useMemo(() => groupMessages(messages), [messages]);
+
   return html`
     <div className="relative flex min-h-0 flex-1">
     <div
@@ -89,7 +69,7 @@ export function MessageList({
             </button>
           </div>
         `}
-        ${groupMessages(messages).map((item) =>
+        ${grouped.map((item) =>
           item.type === "tool-run"
             ? html`<${ToolRun} key=${item.id} tools=${item.tools} />`
             : html`<${MessageBubble}

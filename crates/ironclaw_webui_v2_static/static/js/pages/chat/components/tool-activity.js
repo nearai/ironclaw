@@ -199,18 +199,22 @@ function ToolDetailPanel({
   toolDurationMs,
 }) {
   const t = useT();
-  const tabs = [];
-  if (toolError) tabs.push({ id: "error", label: t("tool.tabError") });
-  if (toolDetail) tabs.push({ id: "details", label: t("tool.tabDetails") });
-  if (toolParameters) tabs.push({ id: "params", label: t("tool.tabParameters") });
-  if (toolResultPreview) tabs.push({ id: "result", label: t("tool.tabResult") });
+  const tabs = React.useMemo(() => {
+    const next = [];
+    if (toolError) next.push({ id: "error", label: t("tool.tabError") });
+    if (toolDetail) next.push({ id: "details", label: t("tool.tabDetails") });
+    if (toolParameters) next.push({ id: "params", label: t("tool.tabParameters") });
+    if (toolResultPreview) next.push({ id: "result", label: t("tool.tabResult") });
+    return next;
+  }, [t, toolError, toolDetail, toolParameters, toolResultPreview]);
 
-  const [active, setActive] = React.useState(tabs[0]?.id);
+  const [activeState, setActive] = React.useState(null);
+  const active = activeState && tabs.some((tab) => tab.id === activeState)
+    ? activeState
+    : tabs[0]?.id;
   React.useEffect(() => {
-    if (tabs.length && !tabs.some((tab) => tab.id === active)) {
-      setActive(tabs[0].id);
-    }
-  }, [tabs.map((tab) => tab.id).join(","), active]);
+    if (toolError) setActive("error");
+  }, [toolError]);
 
   if (tabs.length === 0) {
     return html`
@@ -249,6 +253,8 @@ function ToolDetailPanel({
         <span className="ml-auto px-1 py-1 font-mono text-[10px] text-iron-500">
           ${toolStatus === "error"
             ? t("tool.exitError")
+            : toolStatus === "running"
+            ? t("tool.exitRunning")
             : t("tool.exitOk")}${toolDurationMs !== null ? ` · ${toolDurationMs}ms` : ""}
         </span>
       </div>
@@ -271,7 +277,7 @@ function ToolDetailPanel({
 function ToolResult({ text }) {
   const value = typeof text === "string" ? text.trim() : "";
 
-  if (/^data:image\//.test(value)) {
+  if (/^data:image\/(?:png|jpe?g|gif|webp|bmp);/i.test(value)) {
     return html`<img
       src=${value}
       alt="Tool result"

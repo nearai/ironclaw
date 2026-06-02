@@ -93,7 +93,18 @@ pub enum RuntimeCredentialRequirementSource {
     SecretHandle,
     ProductAuthAccount {
         provider: RuntimeCredentialAccountProviderId,
+        #[serde(default)]
+        setup: RuntimeCredentialAccountSetup,
     },
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RuntimeCredentialAccountSetup {
+    #[default]
+    ManualToken,
+    #[serde(rename = "oauth")]
+    OAuth { scopes: Vec<String> },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -1737,10 +1737,10 @@ mod tests {
     use ironclaw_product_adapters::{ProductOutboundPayload, ProductProjectionItem};
     use ironclaw_product_workflow::{
         LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase, LifecycleProductPayload,
-        LifecycleReadinessBlocker, RebornServicesErrorCode, RebornServicesErrorKind,
-        RebornStreamEventsRequest, RebornSubmitTurnResponse, WebUiAuthenticatedCaller,
-        WebUiCreateThreadRequest, WebUiResolveGateRequest, WebUiSendMessageRequest,
-        WebUiSetupExtensionRequest, approval_gate_ref,
+        LifecycleReadinessBlocker, RebornExtensionCredentialSetup, RebornServicesErrorCode,
+        RebornServicesErrorKind, RebornStreamEventsRequest, RebornSubmitTurnResponse,
+        WebUiAuthenticatedCaller, WebUiCreateThreadRequest, WebUiResolveGateRequest,
+        WebUiSendMessageRequest, WebUiSetupExtensionRequest, approval_gate_ref,
     };
     use ironclaw_run_state::ApprovalRequestStore;
     use ironclaw_skills::SkillTrust;
@@ -3455,7 +3455,7 @@ mod tests {
         let setup = bundle
             .api
             .setup_extension(
-                caller,
+                caller.clone(),
                 LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github")
                     .expect("valid package ref"),
                 WebUiSetupExtensionRequest::default(),
@@ -3466,13 +3466,46 @@ mod tests {
         assert_eq!(setup.package_ref.id.as_str(), "github");
         assert_eq!(setup.phase, LifecyclePhase::Discovered);
         assert!(setup.blockers.is_empty());
+        assert_eq!(setup.secrets.len(), 1);
+        assert_eq!(setup.secrets[0].name, "github_runtime_token");
+        assert_eq!(setup.secrets[0].provider, "github");
+        assert!(!setup.secrets[0].optional);
+        assert!(!setup.secrets[0].provided);
+        assert!(matches!(
+            setup.secrets[0].setup,
+            RebornExtensionCredentialSetup::ManualToken
+        ));
+        let google_setup = bundle
+            .api
+            .setup_extension(
+                caller.clone(),
+                LifecyclePackageRef::new(LifecyclePackageKind::Extension, "google-calendar")
+                    .expect("valid package ref"),
+                WebUiSetupExtensionRequest::default(),
+            )
+            .await
+            .expect("google setup extension lifecycle projection");
+        assert_eq!(google_setup.secrets.len(), 1);
+        assert_eq!(google_setup.secrets[0].provider, "google");
+        assert!(!google_setup.secrets[0].provided);
+        assert!(matches!(
+            &google_setup.secrets[0].setup,
+            RebornExtensionCredentialSetup::OAuth {
+                scopes,
+                ..
+            } if scopes == &vec!["https://www.googleapis.com/auth/calendar.events".to_string()]
+        ));
+        let google_setup_json =
+            serde_json::to_value(&google_setup.secrets[0]).expect("serialize setup secret");
+        assert_eq!(google_setup_json["setup"]["kind"], "oauth");
         assert!(
             matches!(
-                setup.payload,
+                setup.payload.as_ref(),
                 Some(LifecycleProductPayload::ExtensionList { extensions, count })
-                    if count == 1
+                    if *count == 1
                         && extensions.len() == 1
                         && extensions[0].summary.package_ref.id.as_str() == "github"
+                        && extensions[0].summary.credential_requirements.len() == 1
             ),
             "local webui bundle should use the local lifecycle facade package projection"
         );
@@ -3483,6 +3516,95 @@ mod tests {
                     if ref_id.as_str() == "reborn_lifecycle_facade_unwired"
             )),
             "local webui bundle must not fall back to the default unwired facade"
+        );
+
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    #[tokio::test]
+    async fn local_dev_webui_setup_extension_stores_and_rotates_runtime_credentials() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let gateway = Arc::new(RecordingGateway {
+            reply: "webui lifecycle ok".to_string(),
+            requests: Arc::new(StdMutex::new(Vec::new())),
+        });
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev(
+                "runtime-webui-credential-owner",
+                root.path().join("local-dev"),
+            )
+            .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-webui-credential-tenant".to_string(),
+            agent_id: "runtime-webui-credential-agent".to_string(),
+            source_binding_id: "runtime-webui-credential-source".to_string(),
+            reply_target_binding_id: "runtime-webui-credential-reply".to_string(),
+        })
+        .with_poll_settings(PollSettings {
+            interval: Duration::from_millis(10),
+            max_total: Duration::from_secs(3),
+        })
+        .with_model_gateway_override(gateway);
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        let bundle = build_webui_services(&runtime, None).expect("webui bundle");
+        let caller = WebUiAuthenticatedCaller::new(
+            TenantId::new("runtime-webui-credential-tenant").unwrap(),
+            UserId::new("runtime-webui-credential-owner").unwrap(),
+            Some(AgentId::new("runtime-webui-credential-agent").unwrap()),
+            None,
+        );
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github").unwrap();
+
+        let first = bundle
+            .api
+            .setup_extension(
+                caller.clone(),
+                package_ref.clone(),
+                WebUiSetupExtensionRequest {
+                    action: Some("submit".to_string()),
+                    payload: Some(serde_json::json!({
+                        "secrets": {
+                            "github_runtime_token": "ghp_first_token"
+                        },
+                        "fields": {}
+                    })),
+                },
+            )
+            .await
+            .expect("submit github runtime token");
+        assert_eq!(first.secrets.len(), 1);
+        assert!(first.secrets[0].provided);
+        let first_credential_ref = first.secrets[0]
+            .credential_ref
+            .clone()
+            .expect("credential ref");
+
+        let second = bundle
+            .api
+            .setup_extension(
+                caller,
+                package_ref,
+                WebUiSetupExtensionRequest {
+                    action: Some("submit".to_string()),
+                    payload: Some(serde_json::json!({
+                        "secrets": {
+                            "github_runtime_token": "ghp_second_token"
+                        },
+                        "fields": {}
+                    })),
+                },
+            )
+            .await
+            .expect("rotate github runtime token");
+        assert_eq!(second.secrets.len(), 1);
+        assert!(second.secrets[0].provided);
+        assert_eq!(
+            second.secrets[0].credential_ref.as_deref(),
+            Some(first_credential_ref.as_str()),
+            "reconfigure should rotate the existing account instead of creating a duplicate"
         );
 
         runtime.shutdown().await.expect("runtime shutdown");
