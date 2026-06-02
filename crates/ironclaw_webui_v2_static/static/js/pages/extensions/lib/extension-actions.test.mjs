@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { primaryExtensionAction } from "./extension-actions.js";
+import { primaryExtensionAction, setupReadyForActivation } from "./extension-actions.js";
 
 const notionRef = { kind: "extension", id: "notion" };
 
@@ -35,5 +35,29 @@ test("primaryExtensionAction hides activation for active extensions", () => {
       active: true,
     }),
     null,
+  );
+});
+
+test("setupReadyForActivation waits until all setup secrets are provided", () => {
+  assert.equal(
+    setupReadyForActivation({
+      secrets: [{ provided: true }, { provided: true }],
+      fields: [],
+    }),
+    true,
+  );
+  assert.equal(
+    setupReadyForActivation({
+      secrets: [{ provided: true }, { provided: false }],
+      fields: [],
+    }),
+    false,
+  );
+  assert.equal(
+    setupReadyForActivation({
+      secrets: [{ provided: true }],
+      fields: [{ name: "workspace" }],
+    }),
+    false,
   );
 });

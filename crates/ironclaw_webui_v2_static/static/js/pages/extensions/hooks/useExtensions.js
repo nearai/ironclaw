@@ -187,6 +187,25 @@ export function useSetupSubmit(packageRef, onSuccess) {
 export function useOauthSetup(packageRef) {
   const queryClient = useQueryClient();
   const packageKey = packageRef?.id || packageRef;
+  const refreshSetupState = React.useCallback(() => {
+    queryClient.invalidateQueries({ queryKey: ["extensions"] });
+    queryClient.invalidateQueries({ queryKey: ["extension-registry"] });
+    queryClient.invalidateQueries({ queryKey: ["extension-setup", packageKey] });
+  }, [packageKey, queryClient]);
+
+  const watchPopupClose = React.useCallback(
+    (popup) => {
+      if (!popup) return;
+      const startedAt = Date.now();
+      const timer = window.setInterval(() => {
+        if (popup.closed || Date.now() - startedAt > 10 * 60 * 1000) {
+          window.clearInterval(timer);
+          refreshSetupState();
+        }
+      }, 1000);
+    },
+    [refreshSetupState]
+  );
 
   return useMutation({
     mutationFn: ({ secret, popup }) =>
@@ -199,7 +218,8 @@ export function useOauthSetup(packageRef) {
       } else if (popup && !popup.closed) {
         popup.close();
       }
-      queryClient.invalidateQueries({ queryKey: ["extension-setup", packageKey] });
+      refreshSetupState();
+      watchPopupClose(popup);
     },
     onError: (_err, variables) => {
       const popup = variables?.popup;

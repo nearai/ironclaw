@@ -18,3 +18,10 @@ export function primaryExtensionAction(ext) {
 
   return "activate";
 }
+
+export function setupReadyForActivation({ secrets = [], fields = [] } = {}) {
+  if (fields.length > 0 || secrets.length === 0) {
+    return false;
+  }
+  return secrets.every((secret) => secret.provided);
+}
