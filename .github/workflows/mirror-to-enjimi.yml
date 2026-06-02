@@ -3,7 +3,6 @@ name: Mirror to enjimi
 on:
   push:
     branches:
-      - main
       - native-matrix-channel-pilot
 
 jobs:
@@ -21,4 +20,4 @@ jobs:
           ENJIMI_PAT: ${{ secrets.ENJIMI_PAT }}
         run: |
           git remote add enjimi https://x-access-token:${ENJIMI_PAT}@github.com/enjimi/ironclaw.git
-          git push enjimi "$GITHUB_REF" --tags --force
+          git push enjimi HEAD:refs/heads/main
