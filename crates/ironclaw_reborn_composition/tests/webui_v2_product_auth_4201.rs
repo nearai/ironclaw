@@ -697,7 +697,6 @@ async fn accounts_select_rejects_malformed_account_id() {
     assert!(body.contains("\"code\":\"invalid_request\""));
 }
 
-
 // ── Wire-shape enrichment tests (issue #4112) ────────────────────────────────
 
 #[test]
@@ -713,16 +712,25 @@ fn auth_prompt_view_serialises_optional_fields_when_present() {
         challenge_kind: Some(AuthPromptChallengeKind::OAuthUrl),
         provider: Some("google".to_string()),
         account_label: Some("work@example.com".to_string()),
-        authorization_url: Some("https://accounts.google.com/o/oauth2/auth?scope=calendar".to_string()),
-        expires_at: Some(chrono::DateTime::parse_from_rfc3339("2030-01-01T00:00:00Z")
-            .unwrap()
-            .with_timezone(&chrono::Utc)),
+        authorization_url: Some(
+            "https://accounts.google.com/o/oauth2/auth?scope=calendar".to_string(),
+        ),
+        expires_at: Some(
+            chrono::DateTime::parse_from_rfc3339("2030-01-01T00:00:00Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+        ),
     };
     let json = serde_json::to_value(&view).expect("serialise");
     assert_eq!(json["challenge_kind"], "oauth_url");
     assert_eq!(json["provider"], "google");
     assert_eq!(json["account_label"], "work@example.com");
-    assert!(json["authorization_url"].as_str().unwrap().starts_with("https://"));
+    assert!(
+        json["authorization_url"]
+            .as_str()
+            .unwrap()
+            .starts_with("https://")
+    );
     assert!(json["expires_at"].is_string());
 }
 
@@ -743,11 +751,26 @@ fn auth_prompt_view_omits_optional_fields_when_absent() {
         expires_at: None,
     };
     let json = serde_json::to_value(&view).expect("serialise");
-    assert!(json.get("challenge_kind").is_none(), "challenge_kind should be absent when None");
-    assert!(json.get("provider").is_none(), "provider should be absent when None");
-    assert!(json.get("account_label").is_none(), "account_label should be absent when None");
-    assert!(json.get("authorization_url").is_none(), "authorization_url should be absent when None");
-    assert!(json.get("expires_at").is_none(), "expires_at should be absent when None");
+    assert!(
+        json.get("challenge_kind").is_none(),
+        "challenge_kind should be absent when None"
+    );
+    assert!(
+        json.get("provider").is_none(),
+        "provider should be absent when None"
+    );
+    assert!(
+        json.get("account_label").is_none(),
+        "account_label should be absent when None"
+    );
+    assert!(
+        json.get("authorization_url").is_none(),
+        "authorization_url should be absent when None"
+    );
+    assert!(
+        json.get("expires_at").is_none(),
+        "expires_at should be absent when None"
+    );
 }
 
 #[test]
@@ -772,12 +795,11 @@ fn auth_prompt_view_deserialises_without_optional_fields() {
 #[tokio::test]
 async fn challenge_for_gate_returns_oauth_url_view_for_seeded_flow() {
     use chrono::Utc;
+    use ironclaw_auth::AuthProviderId;
     use ironclaw_auth::{
         AuthChallenge, AuthContinuationRef, AuthFlowKind, AuthFlowManager, AuthGateRef,
-        AuthProductScope, AuthSurface, InMemoryAuthProductServices, NewAuthFlow,
-        OAuthAuthorizationUrl, TurnRunRef,
+        InMemoryAuthProductServices, NewAuthFlow, OAuthAuthorizationUrl, TurnRunRef,
     };
-    use ironclaw_auth::AuthProviderId;
     use ironclaw_product_adapters::AuthPromptChallengeKind;
     use std::sync::Arc;
 
@@ -819,10 +841,18 @@ async fn challenge_for_gate_returns_oauth_url_view_for_seeded_flow() {
         .expect("create flow");
 
     let provider = product_auth.as_auth_challenge_provider().expect("provider");
-    let view = provider.challenge_for_gate(gate_ref_str).await.expect("found");
+    let view = provider
+        .challenge_for_gate(gate_ref_str)
+        .await
+        .expect("found");
     assert!(matches!(view.kind, AuthPromptChallengeKind::OAuthUrl));
     assert_eq!(view.provider, "google");
-    assert!(view.authorization_url.as_deref().unwrap().contains("accounts.google.com"));
+    assert!(
+        view.authorization_url
+            .as_deref()
+            .unwrap()
+            .contains("accounts.google.com")
+    );
     assert!(view.account_label.is_none());
 }
 

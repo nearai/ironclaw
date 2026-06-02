@@ -108,10 +108,7 @@ impl RebornProjectionServices {
     /// `challenge_kind`, `provider`, `account_label`, and `authorization_url`.
     /// Optional: when absent the `AuthPromptView` omits those fields (backward
     /// compatible — legacy consumers deserialise them as `None`).
-    pub(crate) fn with_auth_challenges(
-        mut self,
-        provider: Arc<dyn AuthChallengeProvider>,
-    ) -> Self {
+    pub(crate) fn with_auth_challenges(mut self, provider: Arc<dyn AuthChallengeProvider>) -> Self {
         self.auth_challenges = Some(provider);
         self
     }

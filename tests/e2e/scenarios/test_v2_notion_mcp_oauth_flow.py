@@ -93,7 +93,7 @@ async def v2_notion_server(ironclaw_binary, mock_llm_server, mock_notion, mock_n
     )
     Path(os.path.join(config_dir, "config.toml")).write_text(config_toml)
 
-    sock, port = _reserve_loopback_port()
+    port = _reserve_loopback_port()
     async with _start_engine_v2_server(
         ironclaw_binary,
         mock_llm_server=mock_llm_server,
@@ -108,7 +108,6 @@ async def v2_notion_server(ironclaw_binary, mock_llm_server, mock_notion, mock_n
             "MCP_ENABLED": "true",
         },
     ) as base_url:
-        sock.close()
         yield base_url
 
 

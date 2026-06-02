@@ -135,7 +135,7 @@ async def v2_gsuite_server(ironclaw_binary, mock_llm_server, mock_idp, mock_goog
         if resp.status_code not in (200, 404):
             resp.raise_for_status()
 
-    sock, port = _reserve_loopback_port()
+    port = _reserve_loopback_port()
     async with _start_engine_v2_server(
         ironclaw_binary,
         mock_llm_server=mock_llm_server,
@@ -150,7 +150,6 @@ async def v2_gsuite_server(ironclaw_binary, mock_llm_server, mock_idp, mock_goog
             "GOOGLE_OAUTH_CLIENT_ID": "test-google-client",
         },
     ) as base_url:
-        sock.close()
         yield base_url
 
 
@@ -326,10 +325,8 @@ class TestGSuiteOAuthWireShape:
         same user each receive their own ``request_id`` so resolving one
         gate does not accidentally resume the other thread.
 
-        Note: cross-user (multi-tenant) isolation is out of scope for this
-        fixture because the server is started with a single GATEWAY_USER_ID.
-        Cross-user isolation requires a separate test in test_ownership_model.py
-        that sends user-B’s token against user-A’s pending gate and asserts 403.
+        Cross-user (multi-tenant) isolation is out of scope for this fixture
+        because the server is started with a single GATEWAY_USER_ID.
         """
         # Thread A
         r_a = await api_post(v2_gsuite_server, "/api/chat/thread/new", timeout=15)

@@ -143,7 +143,7 @@ async def v2_pat_server(ironclaw_binary, mock_llm_server, mock_bearer, tmp_path_
     os.makedirs(skills_dir, exist_ok=True)
     _write_github_skill(skills_dir, mock_bearer._mock_host)
 
-    sock, port = _reserve_loopback_port()
+    port = _reserve_loopback_port()
     async with _start_engine_v2_server(
         ironclaw_binary,
         mock_llm_server=mock_llm_server,
@@ -153,7 +153,6 @@ async def v2_pat_server(ironclaw_binary, mock_llm_server, mock_bearer, tmp_path_
         user_id="e2e-4112-pat",
         label="v2_pat_server",
     ) as base_url:
-        sock.close()
         yield base_url
 
 

@@ -557,9 +557,7 @@ impl RebornProductAuthServices {
     /// production deployments that use durable DB backends not yet wired to
     /// `AuthFlowRecordSource`). The WebUI prompt falls back to the plain
     /// 4-field view in that case, which is backward-compatible.
-    pub fn as_auth_challenge_provider(
-        self: &Arc<Self>,
-    ) -> Option<Arc<dyn AuthChallengeProvider>> {
+    pub fn as_auth_challenge_provider(self: &Arc<Self>) -> Option<Arc<dyn AuthChallengeProvider>> {
         if self.flow_record_source.is_some() {
             Some(Arc::clone(self) as Arc<dyn AuthChallengeProvider>)
         } else {
@@ -575,14 +573,13 @@ impl AuthChallengeProvider for RebornProductAuthServices {
         // Search all flow records for one whose TurnGateResume continuation
         // matches this gate_ref. Gate refs are UUIDs, so the scan is O(n)
         // over a typically small in-memory set; no index needed.
-        let flow = source
-            .flow_records_snapshot()
-            .into_iter()
-            .find(|flow| matches!(
+        let flow = source.flow_records_snapshot().into_iter().find(|flow| {
+            matches!(
                 &flow.continuation,
                 ironclaw_auth::AuthContinuationRef::TurnGateResume { gate_ref: g, .. }
                     if g.as_str() == gate_ref
-            ))?;
+            )
+        })?;
         let challenge = flow.challenge.as_ref()?;
         Some(auth_challenge_to_view(challenge, &flow))
     }
@@ -625,7 +622,6 @@ fn auth_challenge_to_view(
 }
 
 impl RebornProductAuthServices {
-
     /// Refresh a credential account through the injected product-auth port.
     ///
     /// Concrete account services own the durable account update and provider

@@ -576,16 +576,11 @@ async def wait_for_pending_auth_gate(
     )
 
 
-def _reserve_loopback_port() -> tuple[socket.socket, int]:
-    """Bind a loopback socket and hold it open to minimise the TOCTOU window.
-
-    The caller MUST close the returned socket after the subprocess has started
-    (i.e. after ``wait_for_ready`` confirms the process is up).
-    """
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    sock.bind(("127.0.0.1", 0))
-    return sock, sock.getsockname()[1]
+def _reserve_loopback_port() -> int:
+    """Return an available loopback port for a short-lived E2E server."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
 
 
 _ENGINE_V2_BASE_ENV = {
@@ -594,7 +589,7 @@ _ENGINE_V2_BASE_ENV = {
     "ENGINE_V2": "true",
     "AGENT_AUTO_APPROVE_TOOLS": "true",
     "HTTP_ALLOW_LOCALHOST": "true",
-    "SECRETS_MASTER_KEY": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "SECRETS_MASTER_KEY": hashlib.sha256(b"ironclaw-4112-e2e-master-key").hexdigest(),
     "GATEWAY_ENABLED": "true",
     "GATEWAY_HOST": "127.0.0.1",
     "GATEWAY_AUTH_TOKEN": AUTH_TOKEN,
