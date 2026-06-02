@@ -97,7 +97,8 @@ impl RuntimeCredentialAccountSelectionService for ProductAuthRuntimeCredentialAc
         match selectable.as_slice() {
             [] => Err(AuthProductError::CrossScopeDenied),
             [account] => Ok(account.clone()),
-            _ => Err(AuthProductError::AccountSelectionRequired),
+            _ => select_latest_duplicate_user_reusable_account(&selectable)
+                .ok_or(AuthProductError::AccountSelectionRequired),
         }
     }
 }
@@ -191,6 +192,26 @@ fn account_visible_from_runtime_scope(
         && account_resource.mission_id == runtime_resource.mission_id
         && account_resource.thread_id == runtime_resource.thread_id
         && account.scope.session_id == runtime_scope.session_id
+}
+
+fn select_latest_duplicate_user_reusable_account(
+    accounts: &[CredentialAccount],
+) -> Option<CredentialAccount> {
+    let first = accounts.first()?;
+    if !accounts.iter().all(|account| {
+        account.provider == first.provider
+            && account.label == first.label
+            && account.ownership == CredentialOwnership::UserReusable
+            && account.owner_extension.is_none()
+            && account.granted_extensions.is_empty()
+            && account.access_secret.is_some()
+    }) {
+        return None;
+    }
+    accounts
+        .iter()
+        .max_by_key(|account| (account.updated_at, account.created_at, account.id))
+        .cloned()
 }
 
 fn runtime_account_owner_scope(
@@ -621,5 +642,61 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(error, CredentialStageError::AuthRequired);
+    }
+
+    #[tokio::test]
+    async fn resolver_uses_latest_duplicate_user_reusable_account() {
+        let accounts = Arc::new(InMemoryAuthProductServices::new());
+        let scope =
+            ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new())
+                .unwrap();
+        let auth_scope = AuthProductScope::new(scope.clone(), AuthSurface::Api);
+        let first_secret = SecretHandle::new("old-token").unwrap();
+        let latest_secret = SecretHandle::new("new-token").unwrap();
+        accounts
+            .create_account(NewCredentialAccount {
+                scope: auth_scope.clone(),
+                provider: AuthProviderId::new("github").unwrap(),
+                label: CredentialAccountLabel::new("GitHub").unwrap(),
+                status: CredentialAccountStatus::Configured,
+                ownership: CredentialOwnership::UserReusable,
+                owner_extension: None,
+                granted_extensions: Vec::new(),
+                access_secret: Some(first_secret),
+                refresh_secret: None,
+                scopes: Vec::new(),
+            })
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        accounts
+            .create_account(NewCredentialAccount {
+                scope: auth_scope,
+                provider: AuthProviderId::new("github").unwrap(),
+                label: CredentialAccountLabel::new("GitHub").unwrap(),
+                status: CredentialAccountStatus::Configured,
+                ownership: CredentialOwnership::UserReusable,
+                owner_extension: None,
+                granted_extensions: Vec::new(),
+                access_secret: Some(latest_secret.clone()),
+                refresh_secret: None,
+                scopes: Vec::new(),
+            })
+            .await
+            .unwrap();
+        let resolver = ProductAuthRuntimeCredentialResolver::new(Arc::new(
+            ProductAuthRuntimeCredentialAccountSelector::new(accounts),
+        ));
+
+        let resolved = resolver
+            .resolve_access_secret(RuntimeCredentialAccountRequest {
+                scope: &scope,
+                provider: &RuntimeCredentialAccountProviderId::new("github").unwrap(),
+                requester_extension: &ExtensionId::new("github").unwrap(),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(resolved, latest_secret);
     }
 }

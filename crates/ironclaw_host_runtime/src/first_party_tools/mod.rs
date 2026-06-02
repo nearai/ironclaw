@@ -8,6 +8,7 @@
 mod echo;
 mod http;
 mod json;
+mod memory;
 mod schemas;
 mod shell;
 mod skill_management;
@@ -43,6 +44,10 @@ pub(crate) use self::schemas::resolve_builtin_input_schema_ref;
 pub use echo::ECHO_CAPABILITY_ID;
 pub use http::{HTTP_CAPABILITY_ID, HTTP_SAVE_CAPABILITY_ID};
 pub use json::JSON_CAPABILITY_ID;
+pub use memory::{
+    MEMORY_READ_CAPABILITY_ID, MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID,
+    MEMORY_WRITE_CAPABILITY_ID,
+};
 pub use shell::SHELL_CAPABILITY_ID;
 pub use skill_management::{
     SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID,
@@ -149,6 +154,7 @@ pub fn builtin_first_party_package() -> Result<ExtensionPackage, ExtensionError>
                     shell::manifest()?,
                     spawn_subagent::manifest()?,
                 ];
+                capabilities.extend(memory::manifests()?);
                 capabilities.extend(coding_manifests()?);
                 capabilities.extend(skill_management::manifests()?);
                 capabilities
@@ -182,6 +188,22 @@ pub fn builtin_first_party_handlers() -> Result<FirstPartyCapabilityRegistry, Ho
         .with_handler(CapabilityId::new(JSON_CAPABILITY_ID)?, handler.clone())
         .with_handler(CapabilityId::new(HTTP_CAPABILITY_ID)?, handler.clone())
         .with_handler(CapabilityId::new(HTTP_SAVE_CAPABILITY_ID)?, handler.clone())
+        .with_handler(
+            CapabilityId::new(MEMORY_SEARCH_CAPABILITY_ID)?,
+            handler.clone(),
+        )
+        .with_handler(
+            CapabilityId::new(MEMORY_WRITE_CAPABILITY_ID)?,
+            handler.clone(),
+        )
+        .with_handler(
+            CapabilityId::new(MEMORY_READ_CAPABILITY_ID)?,
+            handler.clone(),
+        )
+        .with_handler(
+            CapabilityId::new(MEMORY_TREE_CAPABILITY_ID)?,
+            handler.clone(),
+        )
         .with_handler(CapabilityId::new(SHELL_CAPABILITY_ID)?, handler.clone());
     for metadata in CODING_CAPABILITIES {
         registry.insert_handler(CapabilityId::new(metadata.id)?, handler.clone());
@@ -225,6 +247,7 @@ fn first_party_capability_manifest(
 #[derive(Debug, Default)]
 pub struct BuiltinFirstPartyTools {
     coding_state: CodingCapabilityState,
+    memory_state: memory::MemoryCapabilityState,
 }
 
 #[async_trait]
@@ -245,6 +268,15 @@ impl FirstPartyCapabilityHandler for BuiltinFirstPartyTools {
                 let result = http::dispatch(&request).await?;
                 network_egress_bytes = result.network_egress_bytes;
                 (result.output, None)
+            }
+            MEMORY_SEARCH_CAPABILITY_ID
+            | MEMORY_WRITE_CAPABILITY_ID
+            | MEMORY_READ_CAPABILITY_ID
+            | MEMORY_TREE_CAPABILITY_ID => {
+                let mut result = memory::dispatch(&self.memory_state, &request).await?;
+                result.usage.output_bytes =
+                    bounded_output_bytes(&result.output, FIRST_PARTY_MAX_OUTPUT_BYTES)?;
+                return Ok(result);
             }
             SHELL_CAPABILITY_ID => {
                 let (output, duration) = shell::dispatch(&request).await?;
@@ -399,8 +431,21 @@ fn normalize_optional_null_sentinels(request: &mut FirstPartyCapabilityRequest) 
     object.retain(|key, value| {
         !(declared.contains(key.as_str())
             && !required.contains(key)
-            && (value.as_str() == Some("null") || value.is_null()))
+            && (value.as_str() == Some("null") || value.is_null())
+            && !preserve_optional_null_sentinel(
+                request.capability_id.as_str(),
+                key.as_str(),
+                value,
+            ))
     });
+}
+
+fn preserve_optional_null_sentinel(
+    capability_id: &str,
+    key: &str,
+    value: &serde_json::Value,
+) -> bool {
+    capability_id == MEMORY_WRITE_CAPABILITY_ID && key == "target" && value.is_null()
 }
 
 fn resource_profile() -> Option<ResourceProfile> {

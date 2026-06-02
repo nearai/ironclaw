@@ -369,6 +369,10 @@ where
             Arc::clone(&self.process_port),
             self.secret_store.clone(),
         );
+        if let Some(audit_sink) = &self.audit_sink {
+            invocation_services_resolver =
+                invocation_services_resolver.with_audit_sink(Arc::clone(audit_sink));
+        }
         if let Some(process_port) = &self.tenant_sandbox_process_port {
             invocation_services_resolver = invocation_services_resolver
                 .with_tenant_sandbox_process_port(Arc::clone(process_port));
