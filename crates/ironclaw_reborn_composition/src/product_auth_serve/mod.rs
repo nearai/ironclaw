@@ -1229,8 +1229,15 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::RebornAuthContinuationDispatcher;
+    use crate::oauth_dcr::{OAuthDcrProvider, OAuthDcrProviderConfig, OAuthDcrProviderRegistry};
+    use crate::oauth_dcr_protocol::flow_secret_handle;
+    use crate::{RebornAuthContinuationDispatcher, notion_oauth::notion_provider_spec};
     use async_trait::async_trait;
+    use ironclaw_capabilities::{CapabilityObligationHandler, CapabilityObligationRequest};
+    use ironclaw_host_api::{
+        RuntimeHttpEgress, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse,
+    };
+    use ironclaw_secrets::{InMemorySecretStore, SecretMaterial, SecretStore};
 
     struct NoopDispatcher;
 
@@ -1253,6 +1260,18 @@ mod tests {
             None,
             None,
         )
+    }
+
+    fn test_resource_scope() -> ResourceScope {
+        ResourceScope {
+            tenant_id: TenantId::new("tenant-alpha").expect("tenant"),
+            user_id: UserId::new("user-alpha").expect("user"),
+            agent_id: None,
+            project_id: None,
+            mission_id: None,
+            thread_id: None,
+            invocation_id: InvocationId::new(),
+        }
     }
 
     #[test]
@@ -1292,5 +1311,101 @@ mod tests {
 
         assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(error.body.code, AuthErrorCode::BackendUnavailable);
+    }
+
+    #[tokio::test]
+    async fn dcr_oauth_callback_retrieves_pkce_from_registry_when_route_cache_misses() {
+        let secret_store = Arc::new(InMemorySecretStore::new());
+        let secret_store_for_provider: Arc<dyn SecretStore> = secret_store.clone();
+        let dcr_provider = Arc::new(
+            OAuthDcrProvider::new(
+                OAuthDcrProviderConfig {
+                    spec: notion_provider_spec(),
+                    callback_origin: "http://127.0.0.1:3000".to_string(),
+                    client_name: "Ironclaw".to_string(),
+                    account_label: CredentialAccountLabel::new("notion").expect("label"),
+                    scopes: Vec::new(),
+                },
+                Arc::new(PanickingDcrEgress),
+                secret_store_for_provider,
+                Arc::new(NoopObligationHandler),
+            )
+            .expect("DCR provider"),
+        );
+        let product_auth = RebornProductAuthServices::local_dev_in_memory(Arc::new(NoopDispatcher))
+            .with_dcr_oauth_registry(Arc::new(OAuthDcrProviderRegistry::new(vec![dcr_provider])));
+        let state = ProductAuthRouteState::new(
+            Arc::new(product_auth),
+            TenantId::new("tenant-alpha").expect("tenant"),
+            None,
+            None,
+        );
+        let flow_id = AuthFlowId::new();
+        let scope = AuthProductScope::new(test_resource_scope(), AuthSurface::Callback);
+        let provider = AuthProviderId::new("notion").expect("provider");
+        let verifier = "dcr-pkce-verifier";
+
+        secret_store
+            .put(
+                scope.resource.clone(),
+                flow_secret_handle(&notion_provider_spec(), flow_id, "pkce")
+                    .expect("flow secret handle"),
+                SecretMaterial::from(verifier.to_string()),
+            )
+            .await
+            .expect("stored DCR PKCE verifier");
+
+        let query = OAuthCallbackQuery {
+            user_id: scope.resource.user_id.to_string(),
+            invocation_id: scope.resource.invocation_id.to_string(),
+            state: Some(RawCallbackValue::new("opaque-state".to_string()).expect("state")),
+            provider: Some("notion".to_string()),
+            account_label: Some("notion".to_string()),
+            code: Some(RawSecretValue::new("oauth-code".to_string()).expect("code")),
+            error: None,
+            agent_id: None,
+            project_id: None,
+            thread_id: None,
+            session_id: None,
+            scopes: None,
+        };
+
+        let outcome =
+            oauth::callback_outcome_from_query(&state, flow_id, &scope, Some(&provider), &query)
+                .await
+                .expect("callback outcome");
+
+        let RebornOAuthCallbackOutcome::Authorized { provider_request } = outcome else {
+            panic!("expected authorized callback outcome");
+        };
+        assert_eq!(provider_request.provider, provider);
+        assert_eq!(provider_request.account_label.as_str(), "notion");
+        assert_eq!(provider_request.pkce_verifier.expose_secret(), verifier);
+    }
+
+    #[derive(Debug)]
+    struct PanickingDcrEgress;
+
+    #[async_trait]
+    impl RuntimeHttpEgress for PanickingDcrEgress {
+        async fn execute(
+            &self,
+            _request: RuntimeHttpEgressRequest,
+        ) -> Result<RuntimeHttpEgressResponse, ironclaw_host_api::RuntimeHttpEgressError> {
+            panic!("callback PKCE fallback test must not perform DCR HTTP egress")
+        }
+    }
+
+    #[derive(Debug)]
+    struct NoopObligationHandler;
+
+    #[async_trait]
+    impl CapabilityObligationHandler for NoopObligationHandler {
+        async fn satisfy(
+            &self,
+            _request: CapabilityObligationRequest<'_>,
+        ) -> Result<(), ironclaw_capabilities::CapabilityObligationError> {
+            Ok(())
+        }
     }
 }

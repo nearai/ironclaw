@@ -856,6 +856,8 @@ fn challenge_view_from_flow(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[tokio::test]
     async fn dcr_provider_creates_blocked_gate_flow_and_stores_pkce_material() {
@@ -940,6 +942,139 @@ mod tests {
         assert!(pkce.is_some());
     }
 
+    #[tokio::test]
+    async fn discover_authorization_server_empty_authorization_servers_returns_backend_unavailable()
+    {
+        let provider = test_provider(Arc::new(DcrDiscoveryEgress::empty_authorization_servers()));
+        let error = provider
+            .discover_authorization_server(&sample_resource_scope())
+            .await
+            .expect_err("empty authorization_servers must fail");
+
+        assert_eq!(
+            error.code(),
+            ironclaw_auth::AuthErrorCode::BackendUnavailable
+        );
+    }
+
+    #[tokio::test]
+    async fn discover_authorization_server_falls_back_to_issuer_url_when_resource_metadata_fails() {
+        let provider = test_provider(Arc::new(DcrDiscoveryEgress::resource_metadata_fails()));
+
+        let metadata = provider
+            .discover_authorization_server(&sample_resource_scope())
+            .await
+            .expect("issuer fallback metadata");
+
+        assert_eq!(
+            metadata.registration_endpoint,
+            "https://mcp.notion.com/register"
+        );
+    }
+
+    #[tokio::test]
+    async fn discover_authorization_server_empty_registration_endpoint_returns_backend_unavailable()
+    {
+        let provider = test_provider(Arc::new(DcrDiscoveryEgress::empty_registration_endpoint()));
+
+        let error = provider
+            .discover_authorization_server(&sample_resource_scope())
+            .await
+            .expect_err("empty registration endpoint must fail");
+
+        assert_eq!(
+            error.code(),
+            ironclaw_auth::AuthErrorCode::BackendUnavailable
+        );
+    }
+
+    #[tokio::test]
+    async fn store_flow_material_cleanup_runs_when_client_material_write_fails() {
+        let secret_store = Arc::new(SecondPutFailingSecretStore::new());
+        let provider = OAuthDcrProvider::new(
+            test_config(),
+            Arc::new(DcrSetupEgress),
+            secret_store.clone(),
+            Arc::new(TestObligationHandler),
+        )
+        .unwrap();
+        let auth = Arc::new(ironclaw_auth::InMemoryAuthProductServices::new());
+        let flow_manager: Arc<dyn AuthFlowManager> = auth.clone();
+        let flow_source: Arc<dyn AuthFlowRecordSource> = auth.clone();
+        let scope = sample_turn_scope();
+        let owner = ironclaw_host_api::UserId::new("user").unwrap();
+        let run_id = TurnRunId::new();
+        let gate_ref =
+            AuthGateRef::new("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".to_string()).unwrap();
+
+        let error = provider
+            .challenge_for_blocked_gate(
+                &flow_manager,
+                &flow_source,
+                &scope,
+                &owner,
+                run_id,
+                &gate_ref,
+            )
+            .await
+            .expect_err("second secret write fails");
+
+        assert_eq!(
+            error.code(),
+            ironclaw_auth::AuthErrorCode::BackendUnavailable
+        );
+        let put_handles = secret_store.put_handles();
+        assert_eq!(
+            put_handles.len(),
+            2,
+            "PKCE and client material put attempted"
+        );
+        let deleted_handles = secret_store.deleted_handles();
+        assert_eq!(
+            deleted_handles, put_handles,
+            "rollback must delete both flow-scoped handles"
+        );
+        assert!(
+            secret_store
+                .metadata(&sample_auth_scope().resource, &put_handles[0])
+                .await
+                .unwrap()
+                .is_none(),
+            "PKCE material written before client failure must be removed"
+        );
+        assert!(
+            flow_source
+                .flow_for_turn_gate(TurnGateAuthFlowQuery {
+                    owner: AuthFlowOwnerScope {
+                        tenant_id: scope.tenant_id.clone(),
+                        user_id: owner,
+                        agent_id: scope.agent_id.clone(),
+                        project_id: scope.project_id.clone(),
+                        thread_id: scope.thread_id.clone(),
+                    },
+                    turn_run_ref: TurnRunRef::new(run_id.to_string()).unwrap(),
+                    gate_ref,
+                    include_terminal: false,
+                })
+                .await
+                .unwrap()
+                .is_none(),
+            "failed DCR storage must cancel the newly created flow"
+        );
+    }
+
+    #[tokio::test]
+    async fn pkce_verifier_for_flow_returns_none_when_secret_not_found() {
+        let provider = test_provider(Arc::new(TestEgress));
+
+        let pkce = provider
+            .pkce_verifier_for_flow(&sample_auth_scope(), AuthFlowId::new())
+            .await
+            .unwrap();
+
+        assert!(pkce.is_none());
+    }
+
     #[test]
     fn callback_redirect_uri_carries_existing_callback_query_fields() {
         let provider = OAuthDcrProvider::new(
@@ -988,6 +1123,254 @@ mod tests {
         assert!(redirect.as_str().contains("provider=notion"));
         assert!(redirect.as_str().contains("account_label=notion"));
         assert!(redirect.as_str().contains("scope=read"));
+    }
+
+    fn test_provider(egress: Arc<dyn RuntimeHttpEgress>) -> OAuthDcrProvider {
+        OAuthDcrProvider::new(
+            test_config(),
+            egress,
+            Arc::new(ironclaw_secrets::InMemorySecretStore::new()),
+            Arc::new(TestObligationHandler),
+        )
+        .unwrap()
+    }
+
+    fn test_config() -> OAuthDcrProviderConfig {
+        OAuthDcrProviderConfig {
+            spec: HostOAuthProviderSpec {
+                provider_id: "notion",
+                capability_id: "ironclaw_auth.notion_oauth",
+                token_endpoint: "https://mcp.notion.com/token",
+                secret_handle_prefix: "notion",
+                resource: Some("https://mcp.notion.com/mcp"),
+                exchange_scope_policy:
+                    crate::oauth_provider_client::ExchangeScopePolicy::FallbackToRequested,
+            },
+            callback_origin: "http://127.0.0.1:3000".to_string(),
+            client_name: "Ironclaw".to_string(),
+            account_label: CredentialAccountLabel::new("notion").unwrap(),
+            scopes: Vec::new(),
+        }
+    }
+
+    fn sample_resource_scope() -> ResourceScope {
+        sample_auth_scope().resource
+    }
+
+    fn sample_auth_scope() -> AuthProductScope {
+        AuthProductScope::new(
+            ResourceScope {
+                tenant_id: ironclaw_host_api::TenantId::new("tenant").unwrap(),
+                user_id: ironclaw_host_api::UserId::new("user").unwrap(),
+                agent_id: Some(ironclaw_host_api::AgentId::new("agent").unwrap()),
+                project_id: Some(ironclaw_host_api::ProjectId::new("project").unwrap()),
+                mission_id: None,
+                thread_id: Some(ironclaw_host_api::ThreadId::new("thread").unwrap()),
+                invocation_id: InvocationId::new(),
+            },
+            ironclaw_auth::AuthSurface::Callback,
+        )
+    }
+
+    fn sample_turn_scope() -> TurnScope {
+        TurnScope::new(
+            ironclaw_host_api::TenantId::new("tenant").unwrap(),
+            Some(ironclaw_host_api::AgentId::new("agent").unwrap()),
+            Some(ironclaw_host_api::ProjectId::new("project").unwrap()),
+            ironclaw_host_api::ThreadId::new("thread").unwrap(),
+        )
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    enum DcrDiscoveryCase {
+        EmptyAuthorizationServers,
+        ResourceMetadataFails,
+        EmptyRegistrationEndpoint,
+    }
+
+    #[derive(Debug)]
+    struct DcrDiscoveryEgress {
+        case: DcrDiscoveryCase,
+    }
+
+    impl DcrDiscoveryEgress {
+        fn empty_authorization_servers() -> Self {
+            Self {
+                case: DcrDiscoveryCase::EmptyAuthorizationServers,
+            }
+        }
+
+        fn resource_metadata_fails() -> Self {
+            Self {
+                case: DcrDiscoveryCase::ResourceMetadataFails,
+            }
+        }
+
+        fn empty_registration_endpoint() -> Self {
+            Self {
+                case: DcrDiscoveryCase::EmptyRegistrationEndpoint,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl RuntimeHttpEgress for DcrDiscoveryEgress {
+        async fn execute(
+            &self,
+            request: RuntimeHttpEgressRequest,
+        ) -> Result<
+            ironclaw_host_api::RuntimeHttpEgressResponse,
+            ironclaw_host_api::RuntimeHttpEgressError,
+        > {
+            let (status, body) = match (self.case, request.url.as_str()) {
+                (
+                    DcrDiscoveryCase::EmptyAuthorizationServers,
+                    "https://mcp.notion.com/mcp/.well-known/oauth-protected-resource",
+                ) => (200, br#"{"authorization_servers":[]}"#.to_vec()),
+                (
+                    DcrDiscoveryCase::ResourceMetadataFails,
+                    "https://mcp.notion.com/mcp/.well-known/oauth-protected-resource",
+                ) => (500, Vec::new()),
+                (
+                    DcrDiscoveryCase::ResourceMetadataFails,
+                    "https://mcp.notion.com/.well-known/oauth-authorization-server",
+                ) => (
+                    200,
+                    br#"{"authorization_endpoint":"https://mcp.notion.com/authorize","token_endpoint":"https://mcp.notion.com/token","registration_endpoint":"https://mcp.notion.com/register"}"#.to_vec(),
+                ),
+                (
+                    DcrDiscoveryCase::EmptyRegistrationEndpoint,
+                    "https://mcp.notion.com/mcp/.well-known/oauth-protected-resource",
+                ) => (
+                    200,
+                    br#"{"authorization_servers":["https://oauth.notion.com"]}"#.to_vec(),
+                ),
+                (
+                    DcrDiscoveryCase::EmptyRegistrationEndpoint,
+                    "https://oauth.notion.com/.well-known/oauth-authorization-server",
+                ) => (
+                    200,
+                    br#"{"authorization_endpoint":"https://oauth.notion.com/authorize","token_endpoint":"https://oauth.notion.com/token","registration_endpoint":""}"#.to_vec(),
+                ),
+                other => panic!("unexpected DCR discovery egress URL: {other:?}"),
+            };
+            Ok(ironclaw_host_api::RuntimeHttpEgressResponse {
+                status,
+                headers: Vec::new(),
+                request_bytes: request.body.len() as u64,
+                response_bytes: body.len() as u64,
+                body,
+                saved_body: None,
+                redaction_applied: false,
+            })
+        }
+    }
+
+    #[derive(Debug)]
+    struct SecondPutFailingSecretStore {
+        inner: ironclaw_secrets::InMemorySecretStore,
+        put_count: AtomicUsize,
+        put_handles: Mutex<Vec<SecretHandle>>,
+        deleted_handles: Mutex<Vec<SecretHandle>>,
+    }
+
+    impl SecondPutFailingSecretStore {
+        fn new() -> Self {
+            Self {
+                inner: ironclaw_secrets::InMemorySecretStore::new(),
+                put_count: AtomicUsize::new(0),
+                put_handles: Mutex::new(Vec::new()),
+                deleted_handles: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn put_handles(&self) -> Vec<SecretHandle> {
+            self.put_handles
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone()
+        }
+
+        fn deleted_handles(&self) -> Vec<SecretHandle> {
+            self.deleted_handles
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone()
+        }
+    }
+
+    #[async_trait]
+    impl SecretStore for SecondPutFailingSecretStore {
+        async fn put(
+            &self,
+            scope: ResourceScope,
+            handle: SecretHandle,
+            material: SecretMaterial,
+        ) -> Result<ironclaw_secrets::SecretMetadata, ironclaw_secrets::SecretStoreError> {
+            self.put_handles
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(handle.clone());
+            if self.put_count.fetch_add(1, Ordering::SeqCst) == 1 {
+                return Err(ironclaw_secrets::SecretStoreError::StoreUnavailable {
+                    reason: "injected second put failure".to_string(),
+                });
+            }
+            self.inner.put(scope, handle, material).await
+        }
+
+        async fn metadata(
+            &self,
+            scope: &ResourceScope,
+            handle: &SecretHandle,
+        ) -> Result<Option<ironclaw_secrets::SecretMetadata>, ironclaw_secrets::SecretStoreError>
+        {
+            self.inner.metadata(scope, handle).await
+        }
+
+        async fn delete(
+            &self,
+            scope: &ResourceScope,
+            handle: &SecretHandle,
+        ) -> Result<bool, ironclaw_secrets::SecretStoreError> {
+            self.deleted_handles
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(handle.clone());
+            self.inner.delete(scope, handle).await
+        }
+
+        async fn lease_once(
+            &self,
+            scope: &ResourceScope,
+            handle: &SecretHandle,
+        ) -> Result<ironclaw_secrets::SecretLease, ironclaw_secrets::SecretStoreError> {
+            self.inner.lease_once(scope, handle).await
+        }
+
+        async fn consume(
+            &self,
+            scope: &ResourceScope,
+            lease_id: ironclaw_secrets::SecretLeaseId,
+        ) -> Result<SecretMaterial, ironclaw_secrets::SecretStoreError> {
+            self.inner.consume(scope, lease_id).await
+        }
+
+        async fn revoke(
+            &self,
+            scope: &ResourceScope,
+            lease_id: ironclaw_secrets::SecretLeaseId,
+        ) -> Result<ironclaw_secrets::SecretLease, ironclaw_secrets::SecretStoreError> {
+            self.inner.revoke(scope, lease_id).await
+        }
+
+        async fn leases_for_scope(
+            &self,
+            scope: &ResourceScope,
+        ) -> Result<Vec<ironclaw_secrets::SecretLease>, ironclaw_secrets::SecretStoreError>
+        {
+            self.inner.leases_for_scope(scope).await
+        }
     }
 
     #[derive(Debug)]

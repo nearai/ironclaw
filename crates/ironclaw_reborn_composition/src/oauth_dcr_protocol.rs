@@ -157,7 +157,7 @@ pub(super) fn validate_callback_origin(origin: &str) -> Result<(), AuthProductEr
     let is_loopback_http = parsed.scheme() == "http"
         && parsed
             .host_str()
-            .is_some_and(|host| matches!(host, "localhost" | "127.0.0.1" | "[::1]"));
+            .is_some_and(|host| matches!(host, "localhost" | "127.0.0.1" | "::1" | "[::1]"));
     if parsed.scheme() != "https" && !is_loopback_http {
         return Err(AuthProductError::BackendUnavailable);
     }
@@ -285,6 +285,26 @@ mod tests {
                 "https://attacker.example/register",
                 "https://oauth.notion.com/.well-known/oauth-authorization-server",
             ),
+            Err(AuthProductError::BackendUnavailable)
+        ));
+    }
+
+    #[test]
+    fn validate_callback_origin_rejects_non_loopback_http_and_non_root_path() {
+        validate_callback_origin("http://127.0.0.1:3000").unwrap();
+        validate_callback_origin("http://[::1]:3000").unwrap();
+        validate_callback_origin("https://app.example").unwrap();
+
+        assert!(matches!(
+            validate_callback_origin("http://app.example"),
+            Err(AuthProductError::BackendUnavailable)
+        ));
+        assert!(matches!(
+            validate_callback_origin("https://app.example/callback"),
+            Err(AuthProductError::BackendUnavailable)
+        ));
+        assert!(matches!(
+            validate_callback_origin("https://app.example?x=1"),
             Err(AuthProductError::BackendUnavailable)
         ));
     }
