@@ -20,8 +20,8 @@ use ironclaw_host_api::{
     },
 };
 pub use ironclaw_host_api::{
-    CapabilityDispatchRequest, CapabilityDispatchResult, CapabilityDispatcher, DispatchError,
-    RuntimeDispatchErrorKind,
+    CapabilityDispatchRequest, CapabilityDispatchResult, CapabilityDispatcher,
+    CapabilityDisplayOutputPreview, DispatchError, RuntimeDispatchErrorKind,
 };
 use ironclaw_resources::ResourceGovernor;
 use serde_json::Value;
@@ -75,6 +75,7 @@ where
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeAdapterResult {
     pub output: Value,
+    pub display_preview: Option<CapabilityDisplayOutputPreview>,
     pub usage: ResourceUsage,
     pub receipt: ResourceReceipt,
     pub output_bytes: u64,
@@ -343,6 +344,7 @@ where
             provider: descriptor.provider.clone(),
             runtime,
             output: execution.output,
+            display_preview: execution.display_preview,
             usage: execution.usage,
             receipt: execution.receipt,
         })

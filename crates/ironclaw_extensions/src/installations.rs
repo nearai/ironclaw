@@ -454,6 +454,12 @@ pub trait ExtensionInstallationStore: Send + Sync {
         manifest: ExtensionManifestRecord,
     ) -> Result<(), ExtensionInstallationError>;
 
+    async fn upsert_manifest_and_installation(
+        &self,
+        manifest: ExtensionManifestRecord,
+        installation: ExtensionInstallation,
+    ) -> Result<(), ExtensionInstallationError>;
+
     async fn list_installations(
         &self,
     ) -> Result<Vec<ExtensionInstallation>, ExtensionInstallationError>;
@@ -518,6 +524,16 @@ where
         manifest: ExtensionManifestRecord,
     ) -> Result<(), ExtensionInstallationError> {
         (**self).upsert_manifest(manifest).await
+    }
+
+    async fn upsert_manifest_and_installation(
+        &self,
+        manifest: ExtensionManifestRecord,
+        installation: ExtensionInstallation,
+    ) -> Result<(), ExtensionInstallationError> {
+        (**self)
+            .upsert_manifest_and_installation(manifest, installation)
+            .await
     }
 
     async fn list_installations(
@@ -622,6 +638,22 @@ impl ExtensionInstallationStore for InMemoryExtensionInstallationStore {
         inner
             .manifests
             .insert(manifest.extension_id().clone(), manifest);
+        Ok(())
+    }
+
+    async fn upsert_manifest_and_installation(
+        &self,
+        manifest: ExtensionManifestRecord,
+        installation: ExtensionInstallation,
+    ) -> Result<(), ExtensionInstallationError> {
+        validate_installation_against_one_manifest(&manifest, &installation)?;
+        let mut inner = self.inner.write().await;
+        inner
+            .manifests
+            .insert(manifest.extension_id().clone(), manifest);
+        inner
+            .installations
+            .insert(installation.installation_id().clone(), installation);
         Ok(())
     }
 

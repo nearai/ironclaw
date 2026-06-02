@@ -28,8 +28,9 @@ pub use cleanup::{
 pub use credential::{
     CredentialAccount, CredentialAccountChoiceRequest, CredentialAccountListPage,
     CredentialAccountListRequest, CredentialAccountLookupRequest, CredentialAccountMutation,
-    CredentialAccountProjection, CredentialAccountSelectionRequest, CredentialAccountService,
-    CredentialAccountStatus, CredentialAccountUpdate, CredentialOwnership, CredentialRecoveryKind,
+    CredentialAccountOwnerScope, CredentialAccountProjection, CredentialAccountRecordSource,
+    CredentialAccountSelectionRequest, CredentialAccountService, CredentialAccountStatus,
+    CredentialAccountUpdate, CredentialOwnership, CredentialRecoveryKind,
     CredentialRecoveryProjection, CredentialRecoveryReason, CredentialRecoveryRequest,
     CredentialRecoveryState, CredentialRefreshReport, CredentialRefreshRequest,
     CredentialSetupService, NewCredentialAccount, ProviderBackedCredentialAccountService,
@@ -38,9 +39,11 @@ pub use error::{AuthErrorCode, AuthProductError};
 pub use fakes::InMemoryAuthProductServices;
 pub use flow::{
     AuthChallenge, AuthContinuationEvent, AuthContinuationRef, AuthFlowKind, AuthFlowManager,
-    AuthFlowRecord, AuthFlowRecordSource, AuthFlowStatus, CredentialAccountUpdateBinding,
-    CredentialSelectionInput, NewAuthFlow, OAuthCallbackClaimRequest, OAuthCallbackFailureInput,
-    OAuthCallbackInput, ProviderCallbackOutcome, credential_status_for_completed_flow,
+    AuthFlowOwnerScope, AuthFlowRecord, AuthFlowRecordSource, AuthFlowStatus,
+    CredentialAccountUpdateBinding, CredentialSelectionInput, ManualTokenCompletionInput,
+    NewAuthFlow, OAuthCallbackClaimRequest, OAuthCallbackFailureInput, OAuthCallbackInput,
+    ProviderCallbackOutcome, TurnGateAuthFlowQuery, credential_status_for_completed_flow,
+    flow_matches_turn_gate_query,
 };
 pub use ids::{
     AuthFlowId, AuthGateRef, AuthInteractionId, AuthProviderId, AuthSessionId,
@@ -54,11 +57,12 @@ pub use interaction::{
 pub use oauth::{
     GOOGLE_AUTHORIZATION_ENDPOINT, GOOGLE_CALENDAR_EVENTS_SCOPE, GOOGLE_CALENDAR_READONLY_SCOPE,
     GOOGLE_GMAIL_MODIFY_SCOPE, GOOGLE_GMAIL_READONLY_SCOPE, GOOGLE_GMAIL_SEND_SCOPE,
-    GOOGLE_PROVIDER_ID, GOOGLE_TOKEN_ENDPOINT, OAuthAuthorizationEndpoint,
-    OAuthAuthorizeUrlRequest, OAuthClientId, OAuthExtraParam, OAuthRedirectUri, OAuthState,
-    OAuthTokenResponse, PkceCodeChallenge, authorization_code_hash, build_authorization_url,
-    build_google_authorization_url, opaque_state_hash, pkce_s256_challenge, pkce_verifier_hash,
-    scope_text,
+    GOOGLE_PROVIDER_ID, GOOGLE_TOKEN_ENDPOINT, GoogleOAuthCallbackState, GoogleOAuthRouteConfig,
+    OAuthAuthorizationEndpoint, OAuthAuthorizeUrlRequest, OAuthClientId, OAuthExtraParam,
+    OAuthRedirectUri, OAuthState, OAuthTokenResponse, PkceCodeChallenge, authorization_code_hash,
+    build_authorization_url, build_google_authorization_url, is_allowed_google_scope,
+    opaque_state_hash, parse_google_callback_scopes, parse_google_requested_scopes,
+    pkce_s256_challenge, pkce_verifier_hash, scope_text,
 };
 pub use provider::{
     AuthProviderClient, OAuthAuthorizationCode, OAuthProviderCallbackRequest,

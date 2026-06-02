@@ -200,8 +200,10 @@ pub trait OAuthProvider: Send + Sync + 'static {
   REAL `GitHubProvider` against a local mock GitHub token/user/emails
   server: discovery, login redirect (state + scope, no PKCE),
   callback success minting a session for the primary verified email,
-  ticket exchange + single-use replay, provider-error and
-  exchange-failure redirects, and logout revocation.
+  an all-unverified login minting a provider-sub (`github:<id>`)
+  session rather than an email identity, ticket exchange + single-use
+  replay, provider-error and exchange-failure redirects, and logout
+  revocation.
 - `tests/near_auth_routes.rs` — caller-level tests driving the REAL
   `NearLoginProvider` against a local mock NEAR RPC server: provider
   discovery (advertises `near` only when configured), `404` when not

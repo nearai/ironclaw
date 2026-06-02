@@ -307,62 +307,103 @@ fn bundled_extension_package(
 }
 
 fn github_assets() -> Vec<AvailableExtensionAsset> {
+    macro_rules! github_schema_asset {
+        ($path:literal) => {
+            bytes_asset(
+                concat!("schemas/github/", $path),
+                include_bytes!(concat!(
+                    "../../ironclaw_first_party_extensions/assets/github/schemas/github/",
+                    $path
+                )),
+            )
+        };
+    }
+    macro_rules! github_prompt_asset {
+        ($path:literal) => {
+            bytes_asset(
+                concat!("prompts/github/", $path),
+                include_bytes!(concat!(
+                    "../../ironclaw_first_party_extensions/assets/github/prompts/github/",
+                    $path
+                )),
+            )
+        };
+    }
+
     vec![
         bytes_asset("manifest.toml", GITHUB_MANIFEST.as_bytes()),
-        bytes_asset(
-            "schemas/github/search_issues.input.v1.json",
-            include_bytes!(
-                "../../ironclaw_first_party_extensions/assets/github/schemas/github/search_issues.input.v1.json"
-            ),
-        ),
-        bytes_asset(
-            "schemas/github/search_issues.output.v1.json",
-            include_bytes!(
-                "../../ironclaw_first_party_extensions/assets/github/schemas/github/search_issues.output.v1.json"
-            ),
-        ),
-        bytes_asset(
-            "schemas/github/get_issue.input.v1.json",
-            include_bytes!(
-                "../../ironclaw_first_party_extensions/assets/github/schemas/github/get_issue.input.v1.json"
-            ),
-        ),
-        bytes_asset(
-            "schemas/github/get_issue.output.v1.json",
-            include_bytes!(
-                "../../ironclaw_first_party_extensions/assets/github/schemas/github/get_issue.output.v1.json"
-            ),
-        ),
-        bytes_asset(
-            "schemas/github/comment_issue.input.v1.json",
-            include_bytes!(
-                "../../ironclaw_first_party_extensions/assets/github/schemas/github/comment_issue.input.v1.json"
-            ),
-        ),
-        bytes_asset(
-            "schemas/github/comment_issue.output.v1.json",
-            include_bytes!(
-                "../../ironclaw_first_party_extensions/assets/github/schemas/github/comment_issue.output.v1.json"
-            ),
-        ),
-        bytes_asset(
-            "prompts/github/search_issues.md",
-            include_bytes!(
-                "../../ironclaw_first_party_extensions/assets/github/prompts/github/search_issues.md"
-            ),
-        ),
-        bytes_asset(
-            "prompts/github/get_issue.md",
-            include_bytes!(
-                "../../ironclaw_first_party_extensions/assets/github/prompts/github/get_issue.md"
-            ),
-        ),
-        bytes_asset(
-            "prompts/github/comment_issue.md",
-            include_bytes!(
-                "../../ironclaw_first_party_extensions/assets/github/prompts/github/comment_issue.md"
-            ),
-        ),
+        github_schema_asset!("comment_issue.input.v1.json"),
+        github_schema_asset!("comment_issue.output.v1.json"),
+        github_schema_asset!("create_branch.input.v1.json"),
+        github_schema_asset!("create_issue.input.v1.json"),
+        github_schema_asset!("create_issue_comment.input.v1.json"),
+        github_schema_asset!("create_or_update_file.input.v1.json"),
+        github_schema_asset!("create_pr_review.input.v1.json"),
+        github_schema_asset!("create_pull_request.input.v1.json"),
+        github_schema_asset!("create_release.input.v1.json"),
+        github_schema_asset!("create_repo.input.v1.json"),
+        github_schema_asset!("delete_file.input.v1.json"),
+        github_schema_asset!("fork_repo.input.v1.json"),
+        github_schema_asset!("get_combined_status.input.v1.json"),
+        github_schema_asset!("get_file_content.input.v1.json"),
+        github_schema_asset!("get_issue.input.v1.json"),
+        github_schema_asset!("get_issue.output.v1.json"),
+        github_schema_asset!("get_pull_request.input.v1.json"),
+        github_schema_asset!("get_pull_request_files.input.v1.json"),
+        github_schema_asset!("get_pull_request_reviews.input.v1.json"),
+        github_schema_asset!("get_repo.input.v1.json"),
+        github_schema_asset!("get_workflow_runs.input.v1.json"),
+        github_schema_asset!("handle_webhook.input.v1.json"),
+        github_schema_asset!("list_branches.input.v1.json"),
+        github_schema_asset!("list_issue_comments.input.v1.json"),
+        github_schema_asset!("list_issues.input.v1.json"),
+        github_schema_asset!("list_pull_request_comments.input.v1.json"),
+        github_schema_asset!("list_pull_requests.input.v1.json"),
+        github_schema_asset!("list_releases.input.v1.json"),
+        github_schema_asset!("list_repos.input.v1.json"),
+        github_schema_asset!("merge_pull_request.input.v1.json"),
+        github_schema_asset!("raw_output.v1.json"),
+        github_schema_asset!("reply_pull_request_comment.input.v1.json"),
+        github_schema_asset!("search_code.input.v1.json"),
+        github_schema_asset!("search_issues.input.v1.json"),
+        github_schema_asset!("search_issues.output.v1.json"),
+        github_schema_asset!("search_issues_pull_requests.input.v1.json"),
+        github_schema_asset!("search_repositories.input.v1.json"),
+        github_schema_asset!("trigger_workflow.input.v1.json"),
+        github_prompt_asset!("comment_issue.md"),
+        github_prompt_asset!("create_branch.md"),
+        github_prompt_asset!("create_issue.md"),
+        github_prompt_asset!("create_issue_comment.md"),
+        github_prompt_asset!("create_or_update_file.md"),
+        github_prompt_asset!("create_pr_review.md"),
+        github_prompt_asset!("create_pull_request.md"),
+        github_prompt_asset!("create_release.md"),
+        github_prompt_asset!("create_repo.md"),
+        github_prompt_asset!("delete_file.md"),
+        github_prompt_asset!("fork_repo.md"),
+        github_prompt_asset!("get_combined_status.md"),
+        github_prompt_asset!("get_file_content.md"),
+        github_prompt_asset!("get_issue.md"),
+        github_prompt_asset!("get_pull_request.md"),
+        github_prompt_asset!("get_pull_request_files.md"),
+        github_prompt_asset!("get_pull_request_reviews.md"),
+        github_prompt_asset!("get_repo.md"),
+        github_prompt_asset!("get_workflow_runs.md"),
+        github_prompt_asset!("handle_webhook.md"),
+        github_prompt_asset!("list_branches.md"),
+        github_prompt_asset!("list_issue_comments.md"),
+        github_prompt_asset!("list_issues.md"),
+        github_prompt_asset!("list_pull_request_comments.md"),
+        github_prompt_asset!("list_pull_requests.md"),
+        github_prompt_asset!("list_releases.md"),
+        github_prompt_asset!("list_repos.md"),
+        github_prompt_asset!("merge_pull_request.md"),
+        github_prompt_asset!("reply_pull_request_comment.md"),
+        github_prompt_asset!("search_code.md"),
+        github_prompt_asset!("search_issues.md"),
+        github_prompt_asset!("search_issues_pull_requests.md"),
+        github_prompt_asset!("search_repositories.md"),
+        github_prompt_asset!("trigger_workflow.md"),
         bytes_asset("wasm/github_tool.wasm", GITHUB_WASM_MODULE),
     ]
 }
@@ -834,6 +875,9 @@ where
                 }
             }
         };
+        if existing_asset_matches(fs, &path, &bytes).await {
+            continue;
+        }
         if let Err(error) = fs.write_file(&path, &bytes).await {
             for written_path in written_paths.iter().rev() {
                 let _ = fs.delete(written_path).await;
@@ -848,6 +892,17 @@ where
         written_paths.push(path);
     }
     Ok(())
+}
+
+async fn existing_asset_matches<F>(fs: &F, path: &VirtualPath, bytes: &[u8]) -> bool
+where
+    F: RootFilesystem + ?Sized,
+{
+    match fs.read_file(path).await {
+        Ok(existing) => existing == bytes,
+        Err(FilesystemError::NotFound { .. }) | Err(FilesystemError::MountNotFound { .. }) => false,
+        Err(_) => false,
+    }
 }
 
 async fn load_filesystem_packages<F>(
@@ -980,8 +1035,9 @@ pub(crate) fn visible_capability_ids(
 #[cfg(test)]
 mod tests {
     use std::{
-        collections::HashSet,
+        collections::{HashMap, HashSet},
         sync::{Arc, Mutex},
+        time::SystemTime,
     };
 
     use async_trait::async_trait;
@@ -1012,7 +1068,14 @@ mod tests {
     fn bundled_first_party_manifest_asset_refs_are_packaged() {
         let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
 
-        for extension_id in ["notion", "web-access", "nearai", "google-calendar", "gmail"] {
+        for extension_id in [
+            "github",
+            "notion",
+            "web-access",
+            "nearai",
+            "google-calendar",
+            "gmail",
+        ] {
             let package_ref =
                 LifecyclePackageRef::new(LifecyclePackageKind::Extension, extension_id).unwrap();
             let package = catalog.resolve(&package_ref).unwrap();
@@ -1045,6 +1108,37 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[tokio::test]
+    async fn materialize_bundled_github_writes_manifest_schema_refs() {
+        let fs = InMemoryBackend::default();
+        let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github").unwrap();
+        let github = catalog.resolve(&package_ref).unwrap();
+
+        materialize_available_extension(&fs, github).await.unwrap();
+
+        let get_repo_schema = fs
+            .read_file(
+                &VirtualPath::new(
+                    "/system/extensions/github/schemas/github/get_repo.input.v1.json",
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            std::str::from_utf8(&get_repo_schema)
+                .unwrap()
+                .contains("GitHub get_repo input")
+        );
+        fs.read_file(
+            &VirtualPath::new("/system/extensions/github/prompts/github/get_repo.md").unwrap(),
+        )
+        .await
+        .unwrap();
     }
 
     #[test]
@@ -1125,6 +1219,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn materialize_skips_matching_existing_assets() {
+        let fs = RecordingMaterializeFilesystem::default();
+        let extension = test_extension_package();
+        for asset in &extension.assets {
+            let path = extension_asset_path(&extension.package.id, &asset.path).unwrap();
+            let AvailableExtensionAssetContent::Bytes(bytes) = &asset.content else {
+                panic!("test fixture assets are byte-backed");
+            };
+            fs.files
+                .lock()
+                .unwrap()
+                .insert(path.as_str().to_string(), bytes.clone());
+        }
+
+        materialize_available_extension(&fs, &extension)
+            .await
+            .expect("matching assets already materialized");
+
+        assert!(
+            fs.writes.lock().unwrap().is_empty(),
+            "restore should not rewrite already materialized matching assets"
+        );
+    }
+
+    #[tokio::test]
     async fn filesystem_catalog_loads_manifest_and_runtime_assets() {
         let fs = InMemoryBackend::default();
         let extension = test_extension_package();
@@ -1185,6 +1304,68 @@ mod tests {
     struct FailingWriteState {
         writes: Vec<String>,
         deletes: Vec<String>,
+    }
+
+    #[derive(Default)]
+    struct RecordingMaterializeFilesystem {
+        files: Arc<Mutex<HashMap<String, Vec<u8>>>>,
+        writes: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[async_trait]
+    impl RootFilesystem for RecordingMaterializeFilesystem {
+        fn capabilities(&self) -> BackendCapabilities {
+            BackendCapabilities::default()
+        }
+
+        async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+            Err(FilesystemError::Unsupported {
+                path: path.clone(),
+                operation: FilesystemOperation::ListDir,
+            })
+        }
+
+        async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+            let files = self.files.lock().unwrap();
+            let Some(bytes) = files.get(path.as_str()) else {
+                return Err(FilesystemError::NotFound {
+                    path: path.clone(),
+                    operation: FilesystemOperation::Stat,
+                });
+            };
+            Ok(FileStat {
+                path: path.clone(),
+                file_type: FileType::File,
+                len: bytes.len() as u64,
+                modified: Some(SystemTime::UNIX_EPOCH),
+                sensitive: false,
+            })
+        }
+
+        async fn read_file(&self, path: &VirtualPath) -> Result<Vec<u8>, FilesystemError> {
+            self.files
+                .lock()
+                .unwrap()
+                .get(path.as_str())
+                .cloned()
+                .ok_or_else(|| FilesystemError::NotFound {
+                    path: path.clone(),
+                    operation: FilesystemOperation::ReadFile,
+                })
+        }
+
+        async fn write_file(
+            &self,
+            path: &VirtualPath,
+            bytes: &[u8],
+        ) -> Result<(), FilesystemError> {
+            self.writes.lock().unwrap().push(path.as_str().to_string());
+            self.files
+                .lock()
+                .unwrap()
+                .insert(path.as_str().to_string(), bytes.to_vec());
+            Ok(())
+        }
     }
 
     #[async_trait]

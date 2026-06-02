@@ -17,14 +17,16 @@ use ironclaw_host_api::sha256_digest_token;
 use ironclaw_llm::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmProvider, Role,
     ToolCall, ToolCompletionRequest, ToolCompletionResponse, ToolDefinition, clean_response,
+    costs::{default_cost, model_cost},
 };
 use ironclaw_loop_support::{
     HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
     HostManagedModelMessage, HostManagedModelMessageRole, HostManagedModelRequest,
     HostManagedModelResponse, HostManagedModelRouteSnapshot, HostManagedToolResultContent,
-    ThreadBackedLoopContextPort, ThreadBackedLoopModelPort,
+    ModelCost, StaticModelCostTable, ThreadBackedLoopContextPort, ThreadBackedLoopModelPort,
 };
 use ironclaw_threads::{ProviderToolCallReferenceEnvelope, SessionThreadService, ThreadScope};
+use ironclaw_turns::run_profile::LoopModelUsage;
 use ironclaw_turns::{
     TurnId, TurnRunId,
     run_profile::{
@@ -66,6 +68,35 @@ impl LlmModelProfilePolicy {
 
     fn route_for(&self, model_profile_id: &ModelProfileId) -> Option<&LlmModelProfileRoute> {
         self.routes.get(model_profile_id)
+    }
+
+    /// Build a [`StaticModelCostTable`] mapping every allowed `ModelProfileId`
+    /// to its per-token price via [`ironclaw_llm::costs::model_cost`].
+    /// Profiles whose `model_override` is unknown to the LLM cost table
+    /// fall back to [`ironclaw_llm::costs::default_cost`] (roughly GPT-4o
+    /// pricing) so the accountant always reconciles to a non-zero spend
+    /// for an unknown provider — fail-safe, not silent.
+    pub fn build_cost_table(&self) -> StaticModelCostTable {
+        let mut table = StaticModelCostTable::new();
+        for (profile_id, route) in &self.routes {
+            let cost = route
+                .model_override
+                .as_deref()
+                .and_then(model_cost)
+                .unwrap_or_else(default_cost);
+            table.insert(
+                profile_id.clone(),
+                ModelCost {
+                    input_per_token: cost.0,
+                    output_per_token: cost.1,
+                    // 0 = unknown; accountant falls back to its
+                    // `DEFAULT_MAX_OUTPUT_TOKENS` (8 KiB) for the
+                    // upfront reservation estimate.
+                    max_output_tokens: 0,
+                },
+            );
+        }
+        table
     }
 }
 
@@ -888,7 +919,11 @@ async fn tool_response_to_host(
             candidates,
             response.content.unwrap_or_default(),
             response.reasoning,
-        ));
+        )
+        .with_usage(LoopModelUsage {
+            input_tokens: response.input_tokens,
+            output_tokens: response.output_tokens,
+        }));
     }
 
     match response.finish_reason {
@@ -901,7 +936,11 @@ async fn tool_response_to_host(
             Ok(HostManagedModelResponse::assistant_reply_with_reasoning(
                 content,
                 response.reasoning,
-            ))
+            )
+            .with_usage(LoopModelUsage {
+                input_tokens: response.input_tokens,
+                output_tokens: response.output_tokens,
+            }))
         }
         FinishReason::Length => Err(HostManagedModelError::safe(
             HostManagedModelErrorKind::BudgetExceeded,
@@ -967,13 +1006,18 @@ fn sha256_hex_prefix(input: &[u8], len: usize) -> String {
 fn response_to_host_reply(
     response: CompletionResponse,
 ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+    let usage = LoopModelUsage {
+        input_tokens: response.input_tokens,
+        output_tokens: response.output_tokens,
+    };
     match response.finish_reason {
         FinishReason::Stop => {
             let content = clean_response(&response.content);
             Ok(HostManagedModelResponse::assistant_reply_with_reasoning(
                 content,
                 response.reasoning,
-            ))
+            )
+            .with_usage(usage))
         }
         FinishReason::Length => Err(HostManagedModelError::safe(
             HostManagedModelErrorKind::BudgetExceeded,

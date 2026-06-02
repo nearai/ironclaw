@@ -323,6 +323,11 @@ mod tests {
         let after_activate = active_extension_capability_ids(&extension_management).await;
         assert!(after_activate.iter().any(|id| id == "github.search_issues"));
         assert!(after_activate.iter().any(|id| id == "github.get_issue"));
+        let health = runtime.health().await.expect("runtime health");
+        assert!(
+            !health.missing_runtime_backends.contains(&RuntimeKind::Wasm),
+            "activated GitHub WASM capabilities require a registered WASM runtime"
+        );
 
         let remove = invoke_json(
             runtime.as_ref(),

@@ -118,6 +118,7 @@ pub async fn oauth_flow(
 ) -> ironclaw_auth::AuthFlowRecord {
     services
         .create_flow(NewAuthFlow {
+            id: None,
             scope: owner,
             kind: AuthFlowKind::IntegrationCredential,
             provider: provider(),
@@ -154,6 +155,7 @@ pub async fn try_oauth_update_flow(
 ) -> Result<ironclaw_auth::AuthFlowRecord, AuthProductError> {
     services
         .create_flow(NewAuthFlow {
+            id: None,
             scope: owner,
             kind: AuthFlowKind::IntegrationCredential,
             provider: provider(),

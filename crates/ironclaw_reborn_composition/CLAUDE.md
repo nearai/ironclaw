@@ -35,9 +35,10 @@
   through chat commands, model-visible messages, serializable DTOs,
   projections, or route-local pending maps.
 - `RebornProductAuthServices::flow_record_source` is an optional WebUI/local-dev
-  read-projection port, not a required product-auth capability. Local-dev
-  in-memory composition wires it so pending auth gates can be rendered from
-  blocked turn state plus auth-flow records. If a supplied product-auth bundle
+  read-projection port, not a required product-auth capability. Filesystem-backed
+  local-dev composition wires the durable product-auth service itself as this
+  source so pending auth gates can be rendered from blocked turn state plus
+  auth-flow records. If a supplied product-auth bundle
   omits it, runtime composition must expose the WebUI auth interaction surface
   as explicitly unavailable; do not fabricate a route-local or unscoped pending
   auth read model.

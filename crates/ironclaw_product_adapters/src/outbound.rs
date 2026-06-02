@@ -587,6 +587,9 @@ pub struct AuthPromptView {
     /// This is the same URL already surfaced in the legacy
     /// `AppEvent::OnboardingState.auth_url` field — safe to render in the
     /// browser. Never contains a PKCE verifier, client secret, or token.
+    ///
+    /// Upstream projection converts this from validated `OAuthAuthorizationUrl`;
+    /// the DTO stores a `String` only to preserve the stable JSON wire shape.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub authorization_url: Option<String>,
     /// Challenge expiry. Present when the auth flow has a bounded TTL.
@@ -942,6 +945,21 @@ impl ProductOutboundEnvelope {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn auth_prompt_challenge_kind_all_variants_roundtrip() {
+        for (variant, expected) in [
+            (AuthPromptChallengeKind::OAuthUrl, "\"oauth_url\""),
+            (AuthPromptChallengeKind::ManualToken, "\"manual_token\""),
+            (AuthPromptChallengeKind::Other, "\"other\""),
+        ] {
+            let serialized = serde_json::to_string(&variant).expect("serialize challenge kind");
+            assert_eq!(serialized, expected);
+            let decoded: AuthPromptChallengeKind =
+                serde_json::from_str(&serialized).expect("deserialize challenge kind");
+            assert_eq!(decoded, variant);
+        }
+    }
 
     #[test]
     fn cursor_round_trips() {

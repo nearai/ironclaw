@@ -748,6 +748,7 @@ fn execute_prepared_wasm(
     };
     Ok(RuntimeAdapterResult {
         output,
+        display_preview: None,
         output_bytes: execution.usage.output_bytes,
         usage: execution.usage,
         receipt,

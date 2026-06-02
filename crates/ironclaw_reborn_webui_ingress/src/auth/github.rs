@@ -39,21 +39,59 @@ const GITHUB_EMAILS_URL: &str = "https://api.github.com/user/emails";
 /// single stalled call. The default `reqwest::Client` has no timeout,
 /// which would let a hung GitHub response pin the callback handler
 /// indefinitely.
-const GITHUB_HTTP_TIMEOUT: Duration = Duration::from_secs(8);
+///
+/// Kept low enough that the three sequential calls cannot, even in the
+/// worst case, exceed [`GITHUB_EXCHANGE_BUDGET`] — see the invariant on
+/// that constant. This makes the per-call timeout the binding limit in
+/// the normal "one slow stage" case and surfaces the more specific
+/// `reqwest` timeout error rather than the generic budget error.
+const GITHUB_HTTP_TIMEOUT: Duration = Duration::from_secs(6);
 
 /// Overall budget for the full `exchange_code` chain (token -> user ->
 /// emails). The per-call timeout bounds one request; without a wrapping
-/// budget, three sequential 8s stalls could pin a Tokio task for ~24s,
-/// so the whole exchange is wrapped in this shorter ceiling. Whichever
-/// limit trips first fails the exchange closed.
+/// budget, three sequential stalls could still pin a Tokio task for the
+/// sum of every call's timeout, so the whole exchange is wrapped in this
+/// ceiling as a backstop. Whichever limit trips first fails closed.
+///
+/// Invariant: `GITHUB_EXCHANGE_BUDGET >= 3 * GITHUB_HTTP_TIMEOUT`
+/// (20s >= 18s). Keeping the budget at or above the sum means a single
+/// genuinely-slow stage fails with the precise per-call timeout instead
+/// of the generic budget error; the budget only ever fires for a
+/// degraded-across-all-stages exchange (or a stuck future the per-call
+/// `reqwest` timer cannot see, e.g. the test blackhole).
 const GITHUB_EXCHANGE_BUDGET: Duration = Duration::from_secs(20);
 
 /// Defensive cap on the `/user/emails` list. A real account has a
 /// handful of addresses; anything past this is treated as abuse /
-/// misbehavior rather than allocated and scanned.
+/// misbehavior. Enforced *during* deserialization (see
+/// [`CappedGitHubEmails`]) so a hostile endpoint cannot make serde
+/// inflate an arbitrary number of owned `GitHubEmail` structs before a
+/// post-hoc length check could reject them — allocation is bounded to
+/// `MAX_GITHUB_EMAILS + 1` entries regardless of how many it streams
+/// (the [`read_capped_body`] byte-cap bounds the raw transfer; this
+/// bounds the parsed structures).
 const MAX_GITHUB_EMAILS: usize = 100;
 
 /// GitHub OAuth provider.
+///
+/// # PKCE is deliberately absent
+///
+/// GitHub's OAuth App flow does not implement PKCE: its authorization
+/// endpoint ignores `code_challenge` and its token endpoint rejects a
+/// `code_verifier`
+/// (<https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/authorizing-oauth-apps>).
+/// So the `code_challenge` the router computes is intentionally dropped
+/// in [`authorization_url`](GitHubProvider::authorization_url) rather
+/// than sent.
+///
+/// **Accepted residual risk:** without PKCE there is no
+/// authorization-code → client binding, so CSRF protection rests
+/// *entirely* on the `state` parameter the router mints and verifies
+/// (single-use, TTL-bounded, cross-provider-replay-guarded — see
+/// `CLAUDE.md` §Security invariants). A future maintainer must NOT add
+/// PKCE here expecting it to help (GitHub will ignore or reject it),
+/// and must NOT copy this no-PKCE shape to a provider that *does*
+/// support PKCE (where dropping it would be a real downgrade).
 pub struct GitHubProvider {
     /// Cached provider name. Constructed once at provider build time
     /// so `OAuthProvider::name()` is allocation-free and returns the
@@ -183,6 +221,50 @@ struct GitHubEmail {
     email: String,
     verified: bool,
     primary: bool,
+}
+
+/// `Vec<GitHubEmail>` that refuses to grow past [`MAX_GITHUB_EMAILS`]
+/// *while* deserializing. A post-hoc `.len()` check would let serde
+/// allocate every entry of a hostile multi-thousand-element list first;
+/// this stops at the first element past the cap, so peak allocation is
+/// bounded to `MAX_GITHUB_EMAILS + 1` structs.
+struct CappedGitHubEmails(Vec<GitHubEmail>);
+
+impl<'de> Deserialize<'de> for CappedGitHubEmails {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct EmailsVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for EmailsVisitor {
+            type Value = Vec<GitHubEmail>;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "an array of at most {MAX_GITHUB_EMAILS} GitHub emails")
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::SeqAccess<'de>,
+            {
+                let mut emails = Vec::new();
+                while let Some(email) = seq.next_element::<GitHubEmail>()? {
+                    if emails.len() >= MAX_GITHUB_EMAILS {
+                        return Err(serde::de::Error::custom(format!(
+                            "GitHub returned an implausible number of emails (>{MAX_GITHUB_EMAILS})"
+                        )));
+                    }
+                    emails.push(email);
+                }
+                Ok(emails)
+            }
+        }
+
+        deserializer
+            .deserialize_seq(EmailsVisitor)
+            .map(CappedGitHubEmails)
+    }
 }
 
 #[async_trait]
@@ -380,15 +462,12 @@ impl GitHubProvider {
         let body = read_capped_body(resp)
             .await
             .map_err(OAuthError::ProfileFetch)?;
-        let emails: Vec<GitHubEmail> = serde_json::from_slice(&body)
+        // `CappedGitHubEmails` enforces `MAX_GITHUB_EMAILS` mid-parse, so
+        // an oversized list is rejected before serde allocates past the
+        // cap — no separate post-deserialize length check needed.
+        let emails: CappedGitHubEmails = serde_json::from_slice(&body)
             .map_err(|err| OAuthError::ProfileFetch(err.to_string()))?;
-        if emails.len() > MAX_GITHUB_EMAILS {
-            return Err(OAuthError::ProfileFetch(format!(
-                "GitHub returned an implausible number of emails ({})",
-                emails.len()
-            )));
-        }
-        Ok(emails)
+        Ok(emails.0)
     }
 }
 

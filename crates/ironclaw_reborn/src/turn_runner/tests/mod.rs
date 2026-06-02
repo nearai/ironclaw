@@ -127,6 +127,7 @@ fn test_run_state(scope: TurnScope, status: TurnStatus) -> TurnRunState {
         received_at: chrono::Utc::now(),
         checkpoint_id: None,
         gate_ref: None,
+        credential_requirements: Vec::new(),
         failure: None,
         event_cursor: EventCursor(0),
     }

@@ -72,4 +72,4 @@ rand = "0.8"
 base64 = "0.22"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde_json = "1"
-tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "net", "time"] }
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "net", "time", "io-util"] }

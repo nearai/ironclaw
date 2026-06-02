@@ -21,7 +21,8 @@ use ironclaw_host_api::{
     CapabilityDispatchResult, CapabilityId, CredentialStageError, DecisionSummary, EffectKind,
     ExtensionId, MountView, NetworkPolicy, Obligation, ProcessId, ResourceCeiling,
     ResourceEstimate, ResourceReservation, ResourceScope, ResourceUsage,
-    RuntimeCredentialAccountProviderId, RuntimeHttpEgress, SandboxQuota, SecretHandle,
+    RuntimeCredentialAccountProviderId, RuntimeCredentialAuthRequirement, RuntimeHttpEgress,
+    SandboxQuota, SecretHandle,
 };
 use ironclaw_network::NetworkHttpEgress;
 use ironclaw_processes::{ProcessError, ProcessRecord, ProcessStart, ProcessStore};
@@ -59,12 +60,13 @@ pub trait RuntimeCredentialAccountResolver: Send + Sync + fmt::Debug {
     ) -> Result<SecretHandle, CredentialStageError>;
 }
 
-/// One-shot runtime secret material staged after `InjectSecretOnce` lease consumption.
+/// Runtime secret material staged after `InjectSecretOnce` lease consumption.
 ///
 /// The store is keyed by scoped invocation, capability, and handle. Runtime adapters
-/// must use `take(...)` so staged material is removed before it can be reused.
-/// Entries also expire after a short TTL so abandoned handoffs from setup
-/// failures, cancellation, or adapter bugs cannot remain usable indefinitely.
+/// borrow staged material during dispatch; `complete_dispatch`/`abort` removes it
+/// after the scoped capability finishes. Entries also expire after a short TTL so
+/// abandoned handoffs from setup failures, cancellation, or adapter bugs cannot
+/// remain usable indefinitely.
 #[derive(Clone)]
 pub(crate) struct RuntimeSecretInjectionStore {
     state: Arc<RuntimeSecretInjectionState>,
@@ -131,6 +133,24 @@ impl RuntimeSecretInjectionStore {
                 handle,
             ))
             .map(|entry| entry.material))
+    }
+
+    pub(crate) fn get(
+        &self,
+        scope: &ResourceScope,
+        capability_id: &CapabilityId,
+        handle: &SecretHandle,
+    ) -> Result<Option<SecretMaterial>, RuntimeSecretInjectionStoreError> {
+        let now = Instant::now();
+        let mut secrets = self.lock()?;
+        prune_expired_entries(&mut secrets, now);
+        Ok(secrets
+            .get(&RuntimeSecretInjectionKey::new(
+                scope,
+                capability_id,
+                handle,
+            ))
+            .map(|entry| entry.material.clone()))
     }
 
     /// Discard all staged secrets for a scoped capability before process ownership exists.
@@ -1182,7 +1202,9 @@ impl BuiltinObligationHandler {
                 .map_err(|_| secret_obligation_failed())?
                 .is_some();
             if !exists {
-                return Err(CapabilityObligationError::AuthRequired);
+                return Err(CapabilityObligationError::AuthRequired {
+                    credential_requirements: Vec::new(),
+                });
             }
         }
         Ok(())
@@ -1255,7 +1277,9 @@ impl BuiltinObligationHandler {
                     requester_extension: obligation.requester_extension,
                 })
                 .await
-                .map_err(credential_stage_error_to_obligation_error)?;
+                .map_err(|error| {
+                    credential_stage_error_to_obligation_error(error, Some(&obligation))
+                })?;
             // Retrieve and stage the resolved credential under the obligation's injection handle.
             // The access_secret names the material in the secret store; obligation.handle is
             // the slot name the WASM guest expects.
@@ -1268,7 +1292,9 @@ impl BuiltinObligationHandler {
                 obligation.handle,
             )
             .await
-            .map_err(credential_stage_error_to_obligation_error)?;
+            .map_err(|error| {
+                credential_stage_error_to_obligation_error(error, Some(&obligation))
+            })?;
         }
 
         Ok(())
@@ -1506,6 +1532,7 @@ impl CapabilityObligationHandler for BuiltinObligationHandler {
                     return Err(error);
                 }
             };
+            dispatch.display_preview = None;
         }
 
         let output_bytes = dispatch_output_bytes(&dispatch.output)?;
@@ -1615,6 +1642,7 @@ fn obligation_supported_before_dispatch(
     match obligation {
         Obligation::AuditBefore
         | Obligation::ApplyNetworkPolicy { .. }
+        | Obligation::FirstPartyCredentialStagedViaHostPort { .. }
         | Obligation::InjectCredentialAccountOnce { .. }
         | Obligation::InjectSecretOnce { .. }
         | Obligation::ReserveResources { .. }
@@ -1648,6 +1676,7 @@ fn obligation_supported_after_dispatch(
     match obligation {
         Obligation::AuditBefore
         | Obligation::ApplyNetworkPolicy { .. }
+        | Obligation::FirstPartyCredentialStagedViaHostPort { .. }
         | Obligation::InjectCredentialAccountOnce { .. }
         | Obligation::InjectSecretOnce { .. }
         | Obligation::ReserveResources { .. }
@@ -1718,9 +1747,19 @@ fn staged_secret_injection_handles(obligations: &[Obligation]) -> Vec<SecretHand
 /// the same AuthRequired/Backend semantics.
 fn credential_stage_error_to_obligation_error(
     error: CredentialStageError,
+    credential_obligation: Option<&CredentialAccountInjectionObligation<'_>>,
 ) -> CapabilityObligationError {
     match error {
-        CredentialStageError::AuthRequired => CapabilityObligationError::AuthRequired,
+        CredentialStageError::AuthRequired => CapabilityObligationError::AuthRequired {
+            credential_requirements: credential_obligation
+                .map(|obligation| {
+                    vec![RuntimeCredentialAuthRequirement {
+                        provider: obligation.provider.clone(),
+                        requester_extension: obligation.requester_extension.clone(),
+                    }]
+                })
+                .unwrap_or_default(),
+        },
         CredentialStageError::Backend => secret_obligation_failed(),
     }
 }
@@ -2114,6 +2153,9 @@ fn obligation_label(obligation: &Obligation) -> Option<&'static str> {
         Obligation::ApplyNetworkPolicy { .. } => Some("apply_network_policy"),
         Obligation::InjectSecretOnce { .. } => Some("inject_secret_once"),
         Obligation::InjectCredentialAccountOnce { .. } => Some("inject_credential_account_once"),
+        Obligation::FirstPartyCredentialStagedViaHostPort { .. } => {
+            Some("first_party_credential_staged_via_host_port")
+        }
         Obligation::EnforceOutputLimit { .. } => Some("enforce_output_limit"),
         Obligation::ReserveResources { .. } => Some("reserve_resources"),
         Obligation::UseScopedMounts { .. } => Some("use_scoped_mounts"),
@@ -2149,9 +2191,9 @@ mod tests {
 
     use ironclaw_events::InMemoryAuditSink;
     use ironclaw_host_api::{
-        AgentId, CapabilitySet, CorrelationId, ExecutionContext, ExtensionId, InvocationId,
-        NetworkScheme, NetworkTargetPattern, ProjectId, ResourceReservationId, RuntimeKind,
-        TenantId, TrustClass, UserId,
+        AgentId, CapabilityDisplayOutputPreview, CapabilitySet, CorrelationId, ExecutionContext,
+        ExtensionId, InvocationId, NetworkScheme, NetworkTargetPattern, ProjectId,
+        ResourceReservationId, RuntimeKind, TenantId, TrustClass, UserId,
     };
     use ironclaw_resources::{InMemoryResourceGovernor, ResourceAccount};
     use ironclaw_secrets::InMemorySecretStore;
@@ -2294,6 +2336,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn redact_output_clears_display_preview_side_channel() {
+        use ironclaw_host_api::{ReservationStatus, ResourceReceipt, ResourceUsage, RuntimeKind};
+
+        let services = BuiltinObligationServices::with_handoff_stores(
+            Arc::new(InMemoryAuditSink::new()),
+            Arc::new(NetworkObligationPolicyStore::new()),
+            Arc::new(InMemorySecretStore::new()),
+            Arc::new(RuntimeSecretInjectionStore::new()),
+            Arc::new(InMemoryResourceGovernor::new()),
+        );
+        let handler = services.obligation_handler();
+        let context = execution_context();
+        let capability_id = capability_id();
+        let estimate = ResourceEstimate::default();
+        let obligations = vec![Obligation::RedactOutput];
+        let dispatch = CapabilityDispatchResult {
+            capability_id: capability_id.clone(),
+            provider: context.extension_id.clone(),
+            runtime: RuntimeKind::Wasm,
+            output: serde_json::json!({"secret": "sk-secret", "safe": "ok"}),
+            display_preview: Some(CapabilityDisplayOutputPreview {
+                output_summary: Some("contains secret".to_string()),
+                output_preview: "sk-secret".to_string(),
+                output_kind: "text".to_string(),
+                subtitle: None,
+                truncated: false,
+            }),
+            usage: ResourceUsage::default(),
+            receipt: ResourceReceipt {
+                id: ResourceReservationId::new(),
+                scope: context.resource_scope.clone(),
+                status: ReservationStatus::Released,
+                estimate: ResourceEstimate::default(),
+                actual: None,
+            },
+        };
+
+        let completed = handler
+            .complete_dispatch(CapabilityObligationCompletionRequest {
+                phase: CapabilityObligationPhase::Invoke,
+                context: &context,
+                capability_id: &capability_id,
+                estimate: &estimate,
+                obligations: &obligations,
+                dispatch: &dispatch,
+            })
+            .await
+            .expect("redacted dispatch completes");
+
+        assert!(completed.display_preview.is_none());
+        assert_eq!(completed.output["safe"], serde_json::json!("ok"));
+    }
+
+    #[tokio::test]
     async fn leak_detector_block_records_security_audit_event_through_complete_dispatch() {
         use ironclaw_events::{
             InMemorySecurityAuditSink, SecurityAuditSink, SecurityBoundary, SecurityDecision,
@@ -2341,6 +2437,7 @@ mod tests {
             provider: context.extension_id.clone(),
             runtime: RuntimeKind::Wasm,
             output: leaky_payload,
+            display_preview: None,
             usage: ResourceUsage::default(),
             receipt: ResourceReceipt {
                 id: ResourceReservationId::new(),
@@ -2426,6 +2523,7 @@ mod tests {
             provider: context.extension_id.clone(),
             runtime: RuntimeKind::Wasm,
             output: serde_json::Value::String("leak AKIAIOSFODNN7EXAMPLE".to_string()),
+            display_preview: None,
             usage: ResourceUsage::default(),
             receipt: ResourceReceipt {
                 id: ResourceReservationId::new(),

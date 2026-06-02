@@ -14,11 +14,12 @@ use libsql::params;
 
 #[cfg(feature = "libsql")]
 use crate::{
-    ClaimDueFireOutcome, ClaimDueFireRequest, ClaimedTriggerFire, FireAcceptedRequest,
-    FirePermanentFailedRequest, FireReplayedRequest, FireRetryableFailedRequest,
-    TriggerCompletionPolicy, TriggerError, TriggerId, TriggerRecord, TriggerRepository,
-    TriggerRunStatus, TriggerSchedule, TriggerSourceKind, TriggerState,
-    reject_failed_result_after_active_run, reject_non_future_next_run_at, reject_run_ref_rewrite,
+    ClaimDueFireOutcome, ClaimDueFireRequest, ClaimedTriggerFire, ClearActiveFireRequest,
+    FireAcceptedRequest, FirePermanentFailedRequest, FireReplayedRequest,
+    FireRetryableFailedRequest, FireTerminalFailedRequest, TriggerCompletionPolicy, TriggerError,
+    TriggerId, TriggerRecord, TriggerRepository, TriggerRunStatus, TriggerSchedule,
+    TriggerSourceKind, TriggerState, reject_failed_result_after_active_run,
+    reject_non_future_next_run_at, reject_run_ref_rewrite,
 };
 
 #[cfg(feature = "libsql")]
@@ -293,6 +294,36 @@ impl TriggerRepository for LibSqlTriggerRepository {
         Ok(records)
     }
 
+    async fn list_active_triggers(&self, limit: usize) -> Result<Vec<TriggerRecord>, TriggerError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let limit = limit.min(super::MAX_DUE_TRIGGER_POLL_LIMIT);
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                &format!(
+                    "SELECT {TRIGGER_COLUMNS}
+                     FROM {TRIGGER_TABLE}
+                     WHERE active_fire_slot IS NOT NULL
+                     ORDER BY active_fire_slot, tenant_id, trigger_id
+                     LIMIT ?1"
+                ),
+                params![limit as i64],
+            )
+            .await
+            .map_err(|error| backend_error("query active trigger records", error))?;
+        let mut records = Vec::new();
+        loop {
+            match rows.next().await {
+                Ok(Some(row)) => records.push(row_to_record(&row)?),
+                Ok(None) => break,
+                Err(error) => return Err(backend_error("read active trigger record row", error)),
+            }
+        }
+        Ok(records)
+    }
+
     async fn claim_due_fire(
         &self,
         request: ClaimDueFireRequest,
@@ -508,6 +539,82 @@ impl TriggerRepository for LibSqlTriggerRepository {
         }
         resolve_missed_fire_result_update(&conn, &tenant_id, trigger_id, fire_slot, None, None)
             .await
+    }
+
+    async fn mark_fire_terminally_failed(
+        &self,
+        request: FireTerminalFailedRequest,
+    ) -> Result<Option<TriggerRecord>, TriggerError> {
+        let FireTerminalFailedRequest {
+            tenant_id,
+            trigger_id,
+            fire_slot,
+        } = request;
+        let fire_slot_text = fmt_ts(&fire_slot);
+        let last_status = status_text(TriggerRunStatus::Error);
+        let completed = state_text(TriggerState::Completed);
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                &format!(
+                    "UPDATE {TRIGGER_TABLE}
+                     SET state = ?3,
+                         last_status = ?4,
+                         active_fire_slot = NULL,
+                         active_run_ref = NULL
+                     WHERE tenant_id = ?1
+                       AND trigger_id = ?2
+                       AND active_fire_slot = ?5
+                       AND active_run_ref IS NULL
+                     RETURNING {TRIGGER_COLUMNS}"
+                ),
+                params![
+                    tenant_id.as_str(),
+                    trigger_id.to_string(),
+                    completed,
+                    last_status,
+                    fire_slot_text,
+                ],
+            )
+            .await
+            .map_err(|error| backend_error("mark terminal trigger fire failure", error))?;
+        if let Some(record) =
+            returned_record(&mut rows, "read terminal trigger fire failure").await?
+        {
+            return Ok(Some(record));
+        }
+        resolve_missed_fire_result_update(&conn, &tenant_id, trigger_id, fire_slot, None, None)
+            .await
+    }
+
+    async fn clear_active_fire(
+        &self,
+        request: ClearActiveFireRequest,
+    ) -> Result<Option<TriggerRecord>, TriggerError> {
+        let conn = self.connect().await?;
+        // Keep active-fire clearing atomic as one predicate-guarded write.
+        let mut rows = conn
+            .query(
+                &format!(
+                    "UPDATE {TRIGGER_TABLE}
+                     SET active_fire_slot = NULL,
+                         active_run_ref = NULL
+                     WHERE tenant_id = ?1
+                       AND trigger_id = ?2
+                       AND active_fire_slot = ?3
+                       AND active_run_ref = ?4
+                     RETURNING {TRIGGER_COLUMNS}"
+                ),
+                params![
+                    request.tenant_id.as_str(),
+                    request.trigger_id.to_string(),
+                    fmt_ts(&request.fire_slot),
+                    request.run_id.to_string(),
+                ],
+            )
+            .await
+            .map_err(|error| backend_error("clear active trigger fire", error))?;
+        returned_record(&mut rows, "read cleared trigger fire").await
     }
 }
 

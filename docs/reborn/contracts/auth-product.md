@@ -71,6 +71,10 @@ must create the flow first, then return a sanitized authorization URL carrying
 flow/callback metadata; raw state and PKCE verifier material stay hashed or
 process-local and must not be serialized. Callback query parsing is bounded and
 malformed fields fail closed before provider exchange.
+Provider-specific routes may own additional provider URL construction when they
+need host-only client metadata; the Google setup route builds the Google
+authorization URL from configured Reborn product-auth client metadata and keeps
+the static redirect URI aligned with the provider exchange client.
 
 `ironclaw_product_workflow::ProductAuthTurnGateResumeDispatcher` is the
 product-workflow bridge for `AuthContinuationRef::TurnGateResume`. It converts
@@ -444,6 +448,8 @@ tenant/user fields.
 | --- | --- | --- |
 | `POST` | `/api/reborn/product-auth/oauth/start` | Open an OAuth setup flow; returns redacted authorization URL + invocation scope. |
 | `GET`  | `/api/reborn/product-auth/oauth/callback/{flow_id}` | Public OAuth callback; validates scope/state hash before any product effect. |
+| `POST` | `/api/reborn/product-auth/oauth/google/start` | Open a Google product-auth setup flow from configured Reborn Google OAuth client metadata; returns a Google authorization URL with PKCE/offline consent and invocation scope. |
+| `GET`  | `/api/reborn/product-auth/oauth/google/callback` | Public static Google OAuth callback; resolves flow/scope from auth-owned encoded state, validates the durable state hash/PKCE claim, and completes through `RebornProductAuthServices`. |
 | `POST` | `/api/reborn/product-auth/manual-token/submit` | One-shot manual-token setup + secret-submit (legacy WebUI shape, compatibility). |
 | `POST` | `/api/reborn/product-auth/manual-token/setup` | Mint a manual-token interaction challenge; returns `interaction_id` + `invocation_id`. |
 | `POST` | `/api/reborn/product-auth/manual-token/secret-submit` | Submit the raw token for an existing `interaction_id`; model transcript, tool arguments, logs, and durable events only ever see the redacted `credential_submitted` / `auth_failed` projection. |
@@ -462,6 +468,17 @@ Rules:
 - Manual-token setup and secret-submit are linked by `interaction_id` plus an
   `invocation_id` round-tripped through the browser, matching the OAuth
   start/callback pattern.
+- Google OAuth setup is configured in the Reborn host process from env-only
+  values: `IRONCLAW_REBORN_GOOGLE_CLIENT_ID`,
+  `IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI`, optional
+  `IRONCLAW_REBORN_GOOGLE_CLIENT_SECRET`, and optional
+  `IRONCLAW_REBORN_GOOGLE_HOSTED_DOMAIN_HINT`. For bootstrap compatibility, Reborn
+  also accepts `GOOGLE_CLIENT_ID`, `GOOGLE_OAUTH_REDIRECT_URI`,
+  `GOOGLE_CLIENT_SECRET`, and `GOOGLE_ALLOWED_HD` as a hosted-domain hint when
+  the redirect URI opt-in is present. The hint only adds Google's `hd=`
+  authorization parameter; product-auth setup does not treat it as a server-side
+  domain allowlist. The redirect URI must match the static Google callback route
+  exposed by the WebUI listener.
 - All routes project only adapter-safe DTOs (`CredentialAccountProjection`,
   `CredentialAccountListPage`, `CredentialRecoveryProjection`,
   `CredentialRefreshReport`, `SecretCleanupReport`). Raw secret handles,
@@ -529,7 +546,7 @@ five new optional fields added in #4112 for WebUI v2 OAuth/PAT rendering:
 
 | Field | Type | Present when |
 |---|---|---|
-| `challenge_kind` | `"oauth_url" \| "manual_token" \| "other"` | Projection finds a matching auth-flow record |
+| `challenge_kind` | `"oauth_url" \| "manual_token" \| "other"` | Projection finds a matching auth-flow record, or a blocked turn carries exactly one runtime credential auth requirement |
 | `provider` | `string` | Same as above |
 | `account_label` | `string \| null` | `ManualToken` challenge only |
 | `authorization_url` | `string \| null` | `OAuthUrl` challenge only |
@@ -539,6 +556,12 @@ All fields are `#[serde(default, skip_serializing_if = "Option::is_none")]`.
 **Existing serialised rows without these fields round-trip safely** — they
 deserialise as `None` on both ends. V1 channels that persist or replay
 `AuthPromptView` are unaffected.
+
+When no auth-flow record exists, WebUI v2 projection may still render a
+manual-token prompt from a single host-runtime credential auth requirement. That
+fallback exposes only the provider id and account label needed to route secure
+manual-token submit; raw token values still cross only the dedicated
+secret-submit route.
 
 ### Redaction invariant
 

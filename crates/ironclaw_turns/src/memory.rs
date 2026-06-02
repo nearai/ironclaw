@@ -122,6 +122,7 @@ struct RunRecord {
     reply_target_binding_ref: ReplyTargetBindingRef,
     checkpoint_id: Option<TurnCheckpointId>,
     gate_ref: Option<crate::GateRef>,
+    credential_requirements: Vec<ironclaw_host_api::RuntimeCredentialAuthRequirement>,
     failure: Option<SanitizedFailure>,
     event_cursor: EventCursor,
     runner_id: Option<crate::TurnRunnerId>,
@@ -608,6 +609,7 @@ impl TurnStateStore for InMemoryTurnStateStore {
             reply_target_binding_ref: request.reply_target_binding_ref.clone(),
             checkpoint_id: None,
             gate_ref: None,
+            credential_requirements: Vec::new(),
             failure: None,
             event_cursor: cursor,
             runner_id: None,
@@ -1023,6 +1025,7 @@ impl TurnSpawnTreeStateStore for InMemoryTurnStateStore {
             reply_target_binding_ref: request.reply_target_binding_ref.clone(),
             checkpoint_id: None,
             gate_ref: None,
+            credential_requirements: Vec::new(),
             failure: None,
             event_cursor: cursor,
             runner_id: None,
@@ -1320,6 +1323,7 @@ impl TurnRunTransitionPort for InMemoryTurnStateStore {
             record.status = request.reason.status();
             record.checkpoint_id = Some(request.checkpoint_id);
             record.gate_ref = Some(request.reason.gate_ref().clone());
+            record.credential_requirements = request.reason.credential_requirements().to_vec();
             record.runner_id = None;
             record.lease_token = None;
             record.lease_expires_at = None;
@@ -1450,6 +1454,7 @@ impl Inner {
                     reply_target_binding_ref: run.reply_target_binding_ref,
                     checkpoint_id: run.checkpoint_id,
                     gate_ref: run.gate_ref,
+                    credential_requirements: run.credential_requirements,
                     failure: run.failure,
                     event_cursor: run.event_cursor,
                     runner_id: run.runner_id,
@@ -1620,6 +1625,7 @@ impl Inner {
                     crate::events::TurnBlockedGateMetadata {
                         gate_ref,
                         gate_kind,
+                        credential_requirements: record.credential_requirements.clone(),
                     }
                 })
             })
@@ -1923,6 +1929,7 @@ impl Inner {
             let now = Utc::now();
             record.status = TurnStatus::Queued;
             record.gate_ref = None;
+            record.credential_requirements = Vec::new();
             record.source_binding_ref = request.source_binding_ref.clone();
             record.reply_target_binding_ref = request.reply_target_binding_ref.clone();
             record.event_cursor = self.next_cursor();
@@ -2225,6 +2232,7 @@ impl Inner {
         record.status = reason.status();
         record.checkpoint_id = Some(checkpoint_id);
         record.gate_ref = Some(reason.gate_ref().clone());
+        record.credential_requirements = reason.credential_requirements().to_vec();
         record.runner_id = None;
         record.lease_token = None;
         record.lease_expires_at = None;
@@ -2561,6 +2569,7 @@ impl RunRecord {
             resolved_model_route: self.resolved_model_route.clone(),
             checkpoint_id: self.checkpoint_id,
             gate_ref: self.gate_ref.clone(),
+            credential_requirements: self.credential_requirements.clone(),
             failure: self.failure.clone(),
             event_cursor: self.event_cursor,
             runner_id: self.runner_id,
@@ -2591,6 +2600,7 @@ impl RunRecord {
             received_at: self.received_at,
             checkpoint_id: self.checkpoint_id,
             gate_ref: self.gate_ref.clone(),
+            credential_requirements: self.credential_requirements.clone(),
             failure: self.failure.clone(),
             event_cursor: self.event_cursor,
         }

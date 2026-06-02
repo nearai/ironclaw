@@ -234,6 +234,7 @@ async fn submit_and_block_auth_run(
                 .expect("checkpoint ref"),
             reason: BlockedReason::Auth {
                 gate_ref: gate_ref.clone(),
+                credential_requirements: Vec::new(),
             },
         })
         .await
@@ -255,6 +256,7 @@ async fn create_auth_flow(
         .expect("product auth")
         .flow_manager()
         .create_flow(NewAuthFlow {
+            id: None,
             scope: auth_scope_for_turn(scope, actor),
             kind: AuthFlowKind::IntegrationCredential,
             provider: AuthProviderId::new("github").expect("provider"),

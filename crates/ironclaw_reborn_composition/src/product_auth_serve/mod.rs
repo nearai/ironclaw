@@ -11,6 +11,7 @@ mod manual_token;
 mod oauth;
 
 use std::{
+    hash::Hash,
     num::{NonZeroU32, NonZeroU64, NonZeroUsize},
     sync::{Arc, Mutex},
     time::Duration,
@@ -31,9 +32,11 @@ use ironclaw_auth::{
     CredentialAccountLabel, CredentialAccountListPage, CredentialAccountListRequest,
     CredentialAccountProjection, CredentialAccountStatus, CredentialRecoveryProjection,
     CredentialRecoveryRequest, CredentialRefreshReport, CredentialRefreshRequest,
-    OAuthAuthorizationCode, OAuthAuthorizationUrl, OAuthProviderCallbackRequest, OpaqueStateHash,
-    PkceVerifierHash, PkceVerifierSecret, ProviderScope, SecretCleanupAction, SecretCleanupReport,
-    SecretCleanupRequest, Timestamp, TurnRunRef,
+    GOOGLE_PROVIDER_ID, GoogleOAuthCallbackState, GoogleOAuthRouteConfig, OAuthAuthorizationCode,
+    OAuthAuthorizationUrl, OAuthProviderCallbackRequest, OpaqueStateHash, PkceVerifierHash,
+    PkceVerifierSecret, ProviderScope, SecretCleanupAction, SecretCleanupReport,
+    SecretCleanupRequest, Timestamp, TurnRunRef, build_google_authorization_url,
+    parse_google_callback_scopes, parse_google_requested_scopes, pkce_s256_challenge,
 };
 use ironclaw_host_api::NetworkMethod;
 use ironclaw_host_api::ingress::{
@@ -60,6 +63,9 @@ use crate::{
 
 pub(crate) const OAUTH_START_PATH: &str = "/api/reborn/product-auth/oauth/start";
 pub(crate) const OAUTH_CALLBACK_PATH: &str = "/api/reborn/product-auth/oauth/callback/{flow_id}";
+pub(crate) const GOOGLE_OAUTH_START_PATH: &str = "/api/reborn/product-auth/oauth/google/start";
+pub(crate) const GOOGLE_OAUTH_CALLBACK_PATH: &str =
+    "/api/reborn/product-auth/oauth/google/callback";
 pub(crate) const MANUAL_TOKEN_SUBMIT_PATH: &str = "/api/reborn/product-auth/manual-token/submit";
 pub(crate) const MANUAL_TOKEN_SETUP_PATH: &str = "/api/reborn/product-auth/manual-token/setup";
 pub(crate) const MANUAL_TOKEN_SECRET_SUBMIT_PATH: &str =
@@ -72,6 +78,8 @@ pub(crate) const LIFECYCLE_CLEANUP_PATH: &str = "/api/reborn/product-auth/lifecy
 
 const OAUTH_START_ROUTE_ID: &str = "product_auth.oauth.start";
 const OAUTH_CALLBACK_ROUTE_ID: &str = "product_auth.oauth.callback";
+const GOOGLE_OAUTH_START_ROUTE_ID: &str = "product_auth.oauth.google.start";
+const GOOGLE_OAUTH_CALLBACK_ROUTE_ID: &str = "product_auth.oauth.google.callback";
 const MANUAL_TOKEN_SUBMIT_ROUTE_ID: &str = "product_auth.manual_token.submit";
 const MANUAL_TOKEN_SETUP_ROUTE_ID: &str = "product_auth.manual_token.setup";
 const MANUAL_TOKEN_SECRET_SUBMIT_ROUTE_ID: &str = "product_auth.manual_token.secret_submit";
@@ -125,11 +133,12 @@ pub(crate) struct ProductAuthRouteState {
     tenant_id: TenantId,
     default_agent_id: Option<AgentId>,
     default_project_id: Option<ProjectId>,
+    google_oauth: Option<GoogleOAuthRouteConfig>,
     // First-slice WebUI OAuth stores the raw PKCE verifier process-locally
     // because `AuthFlowRecord` deliberately serializes hashes only. Production
     // HA must replace this with a host-owned encrypted verifier store before
     // routing callbacks across replicas or restarts.
-    pkce_verifiers: Arc<Mutex<LruCache<AuthFlowId, StoredPkceVerifier>>>,
+    pkce_verifiers: ExpiringLruCache<AuthFlowId, StoredPkceVerifier>,
 }
 
 impl ProductAuthRouteState {
@@ -144,10 +153,23 @@ impl ProductAuthRouteState {
             tenant_id,
             default_agent_id,
             default_project_id,
-            pkce_verifiers: Arc::new(Mutex::new(LruCache::new(
+            google_oauth: None,
+            pkce_verifiers: ExpiringLruCache::new(
                 OAUTH_PKCE_VERIFIER_CACHE_CAPACITY,
-            ))),
+                StoredPkceVerifier::expires_at,
+            ),
         }
+    }
+
+    pub(crate) fn with_google_oauth(mut self, config: GoogleOAuthRouteConfig) -> Self {
+        self.google_oauth = Some(config);
+        self
+    }
+
+    fn google_oauth_config(&self) -> Result<&GoogleOAuthRouteConfig, ProductAuthRouteFailure> {
+        self.google_oauth
+            .as_ref()
+            .ok_or_else(ProductAuthRouteFailure::backend_unavailable)
     }
 
     fn store_pkce_verifier(
@@ -156,52 +178,27 @@ impl ProductAuthRouteState {
         verifier: SecretString,
         expires_at: Timestamp,
     ) -> Result<(), ProductAuthRouteFailure> {
-        let mut verifiers = self.lock_pkce_verifiers();
-        remove_expired_pkce_verifiers(&mut verifiers);
-        if verifiers.len() >= verifiers.cap().get() && !verifiers.contains(&flow_id) {
-            return Err(ProductAuthRouteFailure::backend_unavailable());
-        }
-        verifiers.put(
+        self.pkce_verifiers.store(
             flow_id,
             StoredPkceVerifier {
                 verifier,
                 expires_at,
             },
-        );
-        Ok(())
-    }
-
-    fn ensure_pkce_verifier_capacity(&self) -> Result<(), ProductAuthRouteFailure> {
-        let mut verifiers = self.lock_pkce_verifiers();
-        remove_expired_pkce_verifiers(&mut verifiers);
-        if verifiers.len() >= verifiers.cap().get() {
-            return Err(ProductAuthRouteFailure::backend_unavailable());
-        }
-        Ok(())
+        )
     }
 
     fn pkce_verifier_for_callback(
         &self,
         flow_id: AuthFlowId,
     ) -> Result<SecretString, ProductAuthRouteFailure> {
-        let mut verifiers = self.lock_pkce_verifiers();
-        remove_expired_pkce_verifiers(&mut verifiers);
-        verifiers
+        self.pkce_verifiers
             .get(&flow_id)
             .map(|stored| stored.verifier.clone())
             .ok_or_else(ProductAuthRouteFailure::unknown_or_expired_flow)
     }
 
     fn remove_pkce_verifier(&self, flow_id: AuthFlowId) {
-        self.lock_pkce_verifiers().pop(&flow_id);
-    }
-
-    fn lock_pkce_verifiers(
-        &self,
-    ) -> std::sync::MutexGuard<'_, LruCache<AuthFlowId, StoredPkceVerifier>> {
-        self.pkce_verifiers
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.pkce_verifiers.remove(&flow_id);
     }
 }
 
@@ -213,26 +210,79 @@ impl std::fmt::Debug for ProductAuthRouteState {
             .field("tenant_id", &self.tenant_id)
             .field("default_agent_id", &self.default_agent_id)
             .field("default_project_id", &self.default_project_id)
-            .field("pkce_verifiers", &"Arc<Mutex<LruCache<...>>>")
+            .field("google_oauth", &self.google_oauth.is_some())
+            .field("pkce_verifiers", &"ExpiringLruCache<...>")
             .finish()
     }
 }
 
+#[derive(Clone)]
+struct ExpiringLruCache<K, V> {
+    entries: Arc<Mutex<LruCache<K, V>>>,
+    expires_at: fn(&V) -> Timestamp,
+}
+
+impl<K, V> ExpiringLruCache<K, V>
+where
+    K: Clone + Eq + Hash,
+{
+    fn new(capacity: NonZeroUsize, expires_at: fn(&V) -> Timestamp) -> Self {
+        Self {
+            entries: Arc::new(Mutex::new(LruCache::new(capacity))),
+            expires_at,
+        }
+    }
+
+    fn store(&self, key: K, value: V) -> Result<(), ProductAuthRouteFailure> {
+        let mut entries = self.lock();
+        self.remove_expired(&mut entries);
+        if entries.len() >= entries.cap().get() && !entries.contains(&key) {
+            return Err(ProductAuthRouteFailure::backend_unavailable());
+        }
+        entries.put(key, value);
+        Ok(())
+    }
+
+    fn get(&self, key: &K) -> Option<V>
+    where
+        V: Clone,
+    {
+        let mut entries = self.lock();
+        self.remove_expired(&mut entries);
+        entries.get(key).cloned()
+    }
+
+    fn remove(&self, key: &K) {
+        self.lock().pop(key);
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, LruCache<K, V>> {
+        self.entries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn remove_expired(&self, entries: &mut LruCache<K, V>) {
+        let now = Utc::now();
+        let expired = entries
+            .iter()
+            .filter_map(|(key, value)| ((self.expires_at)(value) <= now).then_some(key.clone()))
+            .collect::<Vec<_>>();
+        for key in expired {
+            entries.pop(&key);
+        }
+    }
+}
+
+#[derive(Clone)]
 pub(super) struct StoredPkceVerifier {
     verifier: SecretString,
     expires_at: Timestamp,
 }
 
-pub(super) fn remove_expired_pkce_verifiers(
-    verifiers: &mut LruCache<AuthFlowId, StoredPkceVerifier>,
-) {
-    let now = Utc::now();
-    let expired = verifiers
-        .iter()
-        .filter_map(|(flow_id, stored)| (stored.expires_at <= now).then_some(*flow_id))
-        .collect::<Vec<_>>();
-    for flow_id in expired {
-        verifiers.pop(&flow_id);
+impl StoredPkceVerifier {
+    fn expires_at(&self) -> Timestamp {
+        self.expires_at
     }
 }
 
@@ -251,6 +301,10 @@ pub(crate) fn product_auth_route_mount(state: ProductAuthRouteState) -> ProductA
     ProductAuthRouteMount {
         protected: Router::new()
             .route(OAUTH_START_PATH, post(oauth::oauth_start_handler))
+            .route(
+                GOOGLE_OAUTH_START_PATH,
+                post(oauth::google_oauth_start_handler),
+            )
             .route(
                 MANUAL_TOKEN_SUBMIT_PATH,
                 post(manual_token::manual_token_submit_handler),
@@ -283,6 +337,10 @@ pub(crate) fn product_auth_route_mount(state: ProductAuthRouteState) -> ProductA
             .with_state(state.clone()),
         public: Router::new()
             .route(OAUTH_CALLBACK_PATH, get(oauth::oauth_callback_handler))
+            .route(
+                GOOGLE_OAUTH_CALLBACK_PATH,
+                get(oauth::google_oauth_callback_handler),
+            )
             .with_state(state),
         descriptors: product_auth_route_descriptors(),
     }
@@ -294,6 +352,7 @@ pub(crate) fn product_auth_route_descriptors() -> Vec<IngressRouteDescriptor> {
     // and stops descriptor blocks from drifting per-route.
     const PROTECTED_MUTATIONS: &[(&str, &str)] = &[
         (OAUTH_START_ROUTE_ID, OAUTH_START_PATH),
+        (GOOGLE_OAUTH_START_ROUTE_ID, GOOGLE_OAUTH_START_PATH),
         (MANUAL_TOKEN_SUBMIT_ROUTE_ID, MANUAL_TOKEN_SUBMIT_PATH),
         (MANUAL_TOKEN_SETUP_ROUTE_ID, MANUAL_TOKEN_SETUP_PATH),
         (
@@ -329,6 +388,12 @@ pub(crate) fn product_auth_route_descriptors() -> Vec<IngressRouteDescriptor> {
         OAUTH_CALLBACK_ROUTE_ID,
         NetworkMethod::Get,
         OAUTH_CALLBACK_PATH,
+        callback_policy(),
+    ));
+    descriptors.push(descriptor(
+        GOOGLE_OAUTH_CALLBACK_ROUTE_ID,
+        NetworkMethod::Get,
+        GOOGLE_OAUTH_CALLBACK_PATH,
         callback_policy(),
     ));
     descriptors
@@ -426,6 +491,15 @@ pub(super) struct OAuthStartRequest {
 }
 
 #[derive(Deserialize)]
+pub(super) struct GoogleOAuthStartRequest {
+    account_label: String,
+    scopes: Vec<String>,
+    expires_at: Timestamp,
+    session_id: Option<String>,
+    thread_id: Option<String>,
+}
+
+#[derive(Deserialize)]
 pub(super) struct ManualTokenSubmitRequest {
     provider: String,
     account_label: String,
@@ -438,6 +512,17 @@ pub(super) struct ManualTokenSubmitRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct OAuthStartResponse {
+    pub(crate) flow_id: AuthFlowId,
+    pub(crate) status: AuthFlowStatus,
+    pub(crate) provider: AuthProviderId,
+    pub(crate) authorization_url: OAuthAuthorizationUrl,
+    pub(crate) expires_at: Timestamp,
+    pub(crate) continuation: AuthContinuationRef,
+    pub(crate) callback_scope: OAuthCallbackScopeHint,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct GoogleOAuthStartResponse {
     pub(crate) flow_id: AuthFlowId,
     pub(crate) status: AuthFlowStatus,
     pub(crate) provider: AuthProviderId,
@@ -571,6 +656,15 @@ pub(super) struct OAuthCallbackQuery {
     project_id: Option<String>,
     thread_id: Option<String>,
     session_id: Option<String>,
+    #[serde(alias = "scope")]
+    scopes: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub(super) struct GoogleOAuthCallbackQuery {
+    state: Option<RawCallbackValue>,
+    code: Option<RawSecretValue>,
+    error: Option<String>,
     #[serde(alias = "scope")]
     scopes: Option<String>,
 }

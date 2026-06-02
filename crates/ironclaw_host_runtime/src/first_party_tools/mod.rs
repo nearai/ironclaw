@@ -237,14 +237,14 @@ impl FirstPartyCapabilityHandler for BuiltinFirstPartyTools {
         normalize_optional_null_sentinels(&mut request);
         let start = Instant::now();
         let mut network_egress_bytes = 0;
-        let output = match request.capability_id.as_str() {
-            ECHO_CAPABILITY_ID => echo::dispatch(&request.input)?,
-            TIME_CAPABILITY_ID => time::dispatch(&request.input)?,
-            JSON_CAPABILITY_ID => json::dispatch(&request.input)?,
+        let (output, display_preview) = match request.capability_id.as_str() {
+            ECHO_CAPABILITY_ID => (echo::dispatch(&request.input)?, None),
+            TIME_CAPABILITY_ID => (time::dispatch(&request.input)?, None),
+            JSON_CAPABILITY_ID => (json::dispatch(&request.input)?, None),
             HTTP_CAPABILITY_ID | HTTP_SAVE_CAPABILITY_ID => {
                 let result = http::dispatch(&request).await?;
                 network_egress_bytes = result.network_egress_bytes;
-                result.output
+                (result.output, None)
             }
             SHELL_CAPABILITY_ID => {
                 let (output, duration) = shell::dispatch(&request).await?;
@@ -269,7 +269,7 @@ impl FirstPartyCapabilityHandler for BuiltinFirstPartyTools {
                     },
                 ));
             }
-            SPAWN_SUBAGENT_CAPABILITY_ID => spawn_subagent::dispatch(),
+            SPAWN_SUBAGENT_CAPABILITY_ID => (spawn_subagent::dispatch(), None),
             capability_id => {
                 let Some(metadata) = coding_capability_metadata(capability_id) else {
                     return Err(FirstPartyCapabilityError::new(
@@ -283,10 +283,12 @@ impl FirstPartyCapabilityHandler for BuiltinFirstPartyTools {
                     Arc::clone(&request.services.filesystem),
                     &request.input,
                 );
-                self.coding_state
+                let result = self
+                    .coding_state
                     .dispatch(&request)
                     .await
-                    .map_err(coding_error)?
+                    .map_err(coding_error)?;
+                (result.output, result.display_preview)
             }
         };
         let wall_clock_ms = start.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
@@ -311,7 +313,7 @@ impl FirstPartyCapabilityHandler for BuiltinFirstPartyTools {
             network_egress_bytes,
             ..ResourceUsage::default()
         };
-        Ok(FirstPartyCapabilityResult::new(output, usage))
+        Ok(FirstPartyCapabilityResult::new(output, usage).with_display_preview(display_preview))
     }
 }
 
