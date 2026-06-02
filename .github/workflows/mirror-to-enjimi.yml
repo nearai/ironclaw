@@ -5,19 +5,80 @@ on:
     branches:
       - native-matrix-channel-pilot
 
+permissions:
+  contents: read
+
 jobs:
   mirror:
     if: github.repository == 'theredspoon/ironclaw'
     runs-on: ubuntu-latest
+    env:
+      ENJIMI_REPOSITORY: enjimi/ironclaw
+      MIRROR_BRANCH: mirror/native-matrix-channel-pilot
+      TARGET_BRANCH: deployment-target
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Push to enjimi
+      - name: Generate enjimi mirror token
+        id: enjimi_token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
+        with:
+          client-id: ${{ vars.ENJIMI_IRONCLAW_MIRROR_CLIENT_ID }}
+          private-key: ${{ secrets.ENJIMI_IRONCLAW_MIRROR_PRIVATE_KEY }}
+          owner: enjimi
+          repositories: ironclaw
+
+      - name: Push to enjimi mirror ingress branch
         env:
-          ENJIMI_PAT: ${{ secrets.ENJIMI_PAT }}
+          ENJIMI_TOKEN: ${{ steps.enjimi_token.outputs.token }}
+          SOURCE_SHA: ${{ github.sha }}
         run: |
-          git remote add enjimi https://x-access-token:${ENJIMI_PAT}@github.com/enjimi/ironclaw.git
-          git push enjimi HEAD:refs/heads/main
+          set -euo pipefail
+          git remote add enjimi "https://x-access-token:${ENJIMI_TOKEN}@github.com/${ENJIMI_REPOSITORY}.git"
+          git push enjimi "HEAD:refs/heads/${MIRROR_BRANCH}"
+
+      - name: Open or update deployment target PR
+        env:
+          GH_TOKEN: ${{ steps.enjimi_token.outputs.token }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          existing_pr="$(
+            gh api --method GET "repos/${ENJIMI_REPOSITORY}/pulls" \
+              -F state=open \
+              -F base="${TARGET_BRANCH}" \
+              -F head="enjimi:${MIRROR_BRANCH}" \
+              --jq '.[0].number // empty'
+          )"
+
+          pr_body="$(
+            cat <<EOF
+          Mirrors reviewed source from theredspoon/ironclaw.
+
+          - source repository: \`${GITHUB_REPOSITORY}\`
+          - source branch: \`${GITHUB_REF_NAME}\`
+          - source sha: \`${SOURCE_SHA}\`
+          - target branch: \`${TARGET_BRANCH}\`
+
+          After this PR merges, \`${ENJIMI_REPOSITORY}:${TARGET_BRANCH}\` triggers the pilot Linux artifact workflow.
+          EOF
+          )"
+
+          if [[ -n "${existing_pr}" ]]; then
+            gh pr edit "${existing_pr}" \
+              --repo "${ENJIMI_REPOSITORY}" \
+              --title "Deploy Matrix pilot source ${SOURCE_SHA:0:12}" \
+              --body "${pr_body}"
+            echo "Updated existing enjimi deployment PR #${existing_pr}"
+          else
+            gh pr create \
+              --repo "${ENJIMI_REPOSITORY}" \
+              --base "${TARGET_BRANCH}" \
+              --head "${MIRROR_BRANCH}" \
+              --title "Deploy Matrix pilot source ${SOURCE_SHA:0:12}" \
+              --body "${pr_body}"
+          fi
