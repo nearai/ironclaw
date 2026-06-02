@@ -531,6 +531,12 @@ async fn assert_active_query_lists_active_records_in_deterministic_order(
 
     let cursor =
         ActiveTriggerScanCursor::from_active_record(&first_page[2]).expect("active cursor");
+    assert!(
+        repo.list_active_triggers_after(Some(cursor.clone()), 0)
+            .await
+            .expect("list active cursor with zero limit")
+            .is_empty()
+    );
     let second_page = repo
         .list_active_triggers_after(Some(cursor.clone()), 3)
         .await

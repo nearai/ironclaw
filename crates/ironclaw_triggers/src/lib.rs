@@ -1,7 +1,7 @@
 //! Scheduled trigger domain contracts for IronClaw Reborn.
 //!
 //! This crate owns trigger records, source-provider evaluation, deterministic
-//! fire identity, trusted poller scope, and in-memory test behavior. Poller
+//! fire identity, trusted poller call sites, and in-memory test behavior. Poller
 //! lifecycle wiring, first-party capabilities, and outbound delivery are owned
 //! by later slices.
 
@@ -33,63 +33,6 @@ const MAX_DUE_TRIGGER_POLL_LIMIT: usize = 128;
 const IDENTITY_VERSION_LABEL: &str = "ironclaw.trigger-fire.v1";
 const ROUTE_THREAD_DOMAIN: &str = "route-thread";
 const EXTERNAL_EVENT_DOMAIN: &str = "external-event";
-
-mod trusted_poller {
-    use core::marker::PhantomData;
-
-    use super::private;
-
-    /// Sealed host-only token proving the caller already crossed the trusted
-    /// trigger poller boundary.
-    ///
-    /// The witness is crate-local, zero-sized, and unconstructible by
-    /// capability or adapter code. Trigger-owned poller code can mint it
-    /// without adding lifecycle wiring or a separate composition hook.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub(crate) struct TrustedTriggerPollerWitness(PhantomData<private::TrustedTriggerPollerSeal>);
-
-    pub(crate) fn mint() -> TrustedTriggerPollerWitness {
-        TrustedTriggerPollerWitness(PhantomData)
-    }
-}
-
-#[allow(dead_code)]
-mod private {
-    pub(crate) struct TrustedTriggerPollerSeal;
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct TrustedTriggerPollerScope(trusted_poller::TrustedTriggerPollerWitness);
-
-impl TrustedTriggerPollerScope {
-    pub(crate) fn mint() -> Self {
-        Self(trusted_poller::mint())
-    }
-}
-
-#[async_trait]
-trait TrustedTriggerPollerRepository: TriggerRepository {
-    async fn list_due_triggers_trusted(
-        &self,
-        _scope: TrustedTriggerPollerScope,
-        now: Timestamp,
-        limit: usize,
-    ) -> Result<Vec<TriggerRecord>, TriggerError> {
-        self.list_due_triggers(now, limit).await
-    }
-
-    async fn list_active_triggers_after_trusted(
-        &self,
-        _scope: TrustedTriggerPollerScope,
-        after: Option<ActiveTriggerScanCursor>,
-        limit: usize,
-    ) -> Result<Vec<TriggerRecord>, TriggerError> {
-        self.list_active_triggers_after(after, limit).await
-    }
-}
-
-#[async_trait]
-impl<T> TrustedTriggerPollerRepository for T where T: TriggerRepository + ?Sized {}
 
 #[derive(Debug, Error)]
 pub enum TriggerError {
@@ -652,8 +595,8 @@ pub trait TriggerRepository: Send + Sync {
     ///
     /// This is a global repository query and must not be surfaced as a
     /// tenant-scoped or user-facing capability. Host-owned poller code should
-    /// prefer the sealed trusted poller scope helper so the call site stays
-    /// explicit about crossing the boundary.
+    /// keep this call on explicit worker-local trusted poller call sites so the
+    /// trust boundary remains visible.
     async fn list_due_triggers(
         &self,
         now: Timestamp,
@@ -666,8 +609,8 @@ pub trait TriggerRepository: Send + Sync {
     ///
     /// This is a global repository query and must not be surfaced as a
     /// tenant-scoped or user-facing capability. Host-owned poller code should
-    /// prefer the sealed trusted poller scope helper so the call site stays
-    /// explicit about crossing the boundary.
+    /// keep this call on explicit worker-local trusted poller call sites so the
+    /// trust boundary remains visible.
     async fn list_active_triggers(&self, limit: usize) -> Result<Vec<TriggerRecord>, TriggerError>;
 
     /// Lists active trigger fires after a previous scan cursor.
@@ -860,39 +803,41 @@ impl TriggerRepository for InMemoryTriggerRepository {
             return Ok(Vec::new());
         }
         let limit = limit.min(MAX_DUE_TRIGGER_POLL_LIMIT);
-        let state = self.lock_state()?;
-        let mut selected_keys = state
-            .iter()
-            .filter_map(|(key, record)| {
-                let active_fire_slot = record.active_fire_slot?;
-                Some((
-                    active_fire_slot,
-                    record.tenant_id.clone(),
-                    record.trigger_id,
-                    key.clone(),
-                ))
-            })
-            .filter(
-                |(active_fire_slot, tenant_id, trigger_id, _)| match after.as_ref() {
-                    Some(cursor) => {
-                        (*active_fire_slot, tenant_id, *trigger_id)
-                            > (
-                                cursor.active_fire_slot(),
-                                cursor.tenant_id(),
-                                cursor.trigger_id(),
-                            )
-                    }
-                    None => true,
-                },
-            )
-            .collect::<Vec<_>>();
-        selected_keys.sort_by_key(|(active_fire_slot, tenant_id, trigger_id, _)| {
+        let mut selected_records = {
+            let state = self.lock_state()?;
+            state
+                .values()
+                .filter_map(|record| {
+                    let active_fire_slot = record.active_fire_slot?;
+                    Some((
+                        active_fire_slot,
+                        record.tenant_id.clone(),
+                        record.trigger_id,
+                        record.clone(),
+                    ))
+                })
+                .filter(
+                    |(active_fire_slot, tenant_id, trigger_id, _record)| match after.as_ref() {
+                        Some(cursor) => {
+                            (*active_fire_slot, tenant_id, *trigger_id)
+                                > (
+                                    cursor.active_fire_slot(),
+                                    cursor.tenant_id(),
+                                    cursor.trigger_id(),
+                                )
+                        }
+                        None => true,
+                    },
+                )
+                .collect::<Vec<_>>()
+        };
+        selected_records.sort_by_key(|(active_fire_slot, tenant_id, trigger_id, _record)| {
             (*active_fire_slot, tenant_id.clone(), *trigger_id)
         });
-        selected_keys.truncate(limit);
-        Ok(selected_keys
+        selected_records.truncate(limit);
+        Ok(selected_records
             .into_iter()
-            .filter_map(|(_, _, _, key)| state.get(&key).cloned())
+            .map(|(_, _, _, record)| record)
             .collect())
     }
 
@@ -1387,12 +1332,6 @@ mod tests {
             TriggerExternalEventId::new("event-1"),
             Err(TriggerError::InvalidFireIdentityComponent { .. })
         ));
-    }
-
-    #[test]
-    fn trusted_trigger_poller_scope_is_host_minted_and_zero_sized() {
-        let scope = TrustedTriggerPollerScope::mint();
-        assert_eq!(core::mem::size_of_val(&scope), 0);
     }
 
     #[test]

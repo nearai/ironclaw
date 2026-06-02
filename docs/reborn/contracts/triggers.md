@@ -182,12 +182,10 @@ plumbing, not capability APIs.
 
 - `list_due_triggers` and `list_active_triggers` are the raw repository
   queries used by the trusted poller path.
-- Trigger-owned poller code must cross the boundary through a sealed
-  `TrustedTriggerPollerScope` witness so the call site stays explicit about the
-  trust transition.
+- Trigger-owned poller code must keep worker-local call sites explicit about the
+  trusted poller transition without adding a user-facing capability surface.
 - Product adapters, first-party capability code, and other untrusted callers
-  must not mint that witness or treat the global list methods as a user-facing
-  surface.
+  must not treat the global list methods as a user-facing surface.
 - The poller may continue to use the raw repository methods internally, but the
   contract treats them as implementation plumbing, not a capability contract.
 

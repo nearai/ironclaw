@@ -14,7 +14,7 @@ use crate::{
     FireAcceptedRequest, FirePermanentFailedRequest, FireReplayedRequest,
     FireRetryableFailedRequest, FireTerminalFailedRequest, TriggerError, TriggerFire, TriggerId,
     TriggerInboundContentRef, TriggerPromptMaterializer, TriggerRecord, TriggerRepository,
-    TriggerSourceProvider, TrustedTriggerPollerRepository, TrustedTriggerPollerScope,
+    TriggerSourceProvider,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,8 +68,8 @@ pub struct TriggerPollerWorker {
     config: TriggerPollerWorkerConfig,
     deps: TriggerPollerWorkerDeps,
     tick_guard: tokio::sync::Mutex<()>,
-    // This guard is held only around synchronous cursor clone/set operations,
-    // never across repository, materialization, submit, or lookup awaits.
+    // active_scan_cursor's sync mutex is held only around cursor clone/set
+    // operations, never across repository, materialization, submit, or lookup awaits.
     active_scan_cursor: Mutex<Option<ActiveTriggerScanCursor>>,
 }
 
@@ -96,15 +96,11 @@ impl TriggerPollerWorker {
         let _tick_guard = self.tick_guard.lock().await;
         let mut report = TriggerPollerTickReport::new(now);
         self.clear_terminal_active_fires(&mut report).await?;
+        // trusted-poller: this is host-owned background work, not a tenant/API list.
         let due_records = self
             .deps
             .repository
-            .as_ref()
-            .list_due_triggers_trusted(
-                TrustedTriggerPollerScope::mint(),
-                now,
-                self.config.fires_per_tick,
-            )
+            .list_due_triggers(now, self.config.fires_per_tick)
             .await?;
         report.due_records = due_records.len();
         for record in due_records {
@@ -253,27 +249,19 @@ impl TriggerPollerWorker {
         &self,
     ) -> Result<(Option<ActiveTriggerScanCursor>, Vec<TriggerRecord>), TriggerError> {
         let mut cursor = self.active_scan_cursor()?;
+        // trusted-poller: active scan cursors are derived from previous global
+        // active scan results, not user input or tenant-scoped list paths.
         let mut active_records = self
             .deps
             .repository
-            .as_ref()
-            .list_active_triggers_after_trusted(
-                TrustedTriggerPollerScope::mint(),
-                cursor.clone(),
-                self.config.fires_per_tick,
-            )
+            .list_active_triggers_after(cursor.clone(), self.config.fires_per_tick)
             .await?;
         if active_records.is_empty() && cursor.is_some() {
             cursor = None;
             active_records = self
                 .deps
                 .repository
-                .as_ref()
-                .list_active_triggers_after_trusted(
-                    TrustedTriggerPollerScope::mint(),
-                    cursor.clone(),
-                    self.config.fires_per_tick,
-                )
+                .list_active_triggers_after(cursor.clone(), self.config.fires_per_tick)
                 .await?;
         }
         Ok((cursor, active_records))
@@ -1364,6 +1352,44 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![first_id, second_id, third_id, first_id, second_id]
         );
+    }
+
+    #[tokio::test]
+    async fn tick_active_cleanup_cursor_wraps_to_empty_page_succeeds_with_zero_active_records() {
+        let repo = Arc::new(InMemoryTriggerRepository::default());
+        let trigger_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZZ").expect("ulid");
+        let fire_slot = ts(1_704_067_200);
+        let run_id = TurnRunId::parse("01890f0f-9b6f-7a85-9e5b-9f21a93c4f5a").expect("run id");
+        let mut record = sample_record(trigger_id, tenant("tenant-a"), ts(1_704_067_800));
+        record.active_fire_slot = Some(fire_slot);
+        record.active_run_ref = Some(run_id);
+        repo.upsert_trigger(record).await.expect("insert active");
+
+        let worker = worker_with_config(
+            repo.clone(),
+            Arc::new(crate::ScheduleTriggerSourceProvider),
+            Arc::new(RecordingMaterializer::success("content:trigger-fire")),
+            Arc::new(RecordingSubmitter::with_outcomes(Vec::new())),
+            Arc::new(RecordingActiveRunLookup::with_state(
+                TriggerActiveRunState::Nonterminal,
+            )),
+            TriggerPollerWorkerConfig {
+                fires_per_tick: 1,
+                ..TriggerPollerWorkerConfig::default()
+            },
+        );
+
+        let first_report = worker.tick_once(fire_slot).await.expect("first tick");
+        assert_eq!(first_report.active_records, 1);
+
+        repo.remove_trigger(tenant("tenant-a"), trigger_id)
+            .await
+            .expect("remove active");
+
+        let second_report = worker.tick_once(fire_slot).await.expect("second tick");
+        assert_eq!(second_report.active_records, 0);
+        let third_report = worker.tick_once(fire_slot).await.expect("third tick");
+        assert_eq!(third_report.active_records, 0);
     }
 
     #[tokio::test]
