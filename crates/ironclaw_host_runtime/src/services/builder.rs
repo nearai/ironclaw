@@ -16,12 +16,12 @@ use super::{
     ProductionImplementationReadiness, ProductionWiringComponent, ProductionWiringIssueKind,
     ProductionWiringReport, RebornEventStoreConfig, RebornEventStoreError, RebornEventStores,
     RebornProfile, ResourceGovernor, RootFilesystem, RunProfileResolver, RunStateApprovalStore,
-    RunStateStore, RuntimeBackendHealth, RuntimeHttpEgress, RuntimeKind, RuntimeProcessPort,
-    ScopedFilesystem, ScriptExecutor, SecretMode, SecretStore, SharedSecretStore,
-    TenantSandboxProcessPort, TrustPolicy, TurnRunTransitionPort, TurnRunWakeNotifier,
-    TurnStateStore, WasmError, WasmRuntimeAdapter, WasmRuntimeCredentialProvider,
-    WasmStagedRuntimeCredentials, WitToolHost, WitToolRuntimeConfig, build_reborn_event_stores,
-    production_wiring_report, set_runtime_http_egress,
+    RunStateStore, RuntimeBackendHealth, RuntimeCredentialAccountResolver, RuntimeHttpEgress,
+    RuntimeKind, RuntimeProcessPort, ScopedFilesystem, ScriptExecutor, SecretMode, SecretStore,
+    SharedSecretStore, TenantSandboxProcessPort, TrustPolicy, TurnRunTransitionPort,
+    TurnRunWakeNotifier, TurnStateStore, WasmError, WasmRuntimeAdapter,
+    WasmRuntimeCredentialProvider, WasmStagedRuntimeCredentials, WitToolHost, WitToolRuntimeConfig,
+    build_reborn_event_stores, production_wiring_report, set_runtime_http_egress,
 };
 use crate::LocalHostProcessPort;
 use crate::RuntimeHttpBodyStore;
@@ -59,6 +59,7 @@ where
             secret_store,
             credential_account_store,
             credential_session_store,
+            runtime_credential_account_resolver,
             network_policy_store,
             secret_injection_store,
             process_lifecycle_store,
@@ -99,6 +100,7 @@ where
             secret_store,
             credential_account_store,
             credential_session_store,
+            runtime_credential_account_resolver,
             network_policy_store,
             secret_injection_store,
             process_lifecycle_store,
@@ -160,6 +162,7 @@ where
             secret_store,
             credential_account_store,
             credential_session_store,
+            runtime_credential_account_resolver,
             network_policy_store,
             secret_injection_store,
             process_lifecycle_store: _,
@@ -210,6 +213,7 @@ where
             secret_store,
             credential_account_store,
             credential_session_store,
+            runtime_credential_account_resolver,
             network_policy_store,
             secret_injection_store,
             process_lifecycle_store,
@@ -597,6 +601,15 @@ where
         self
     }
 
+    pub fn with_runtime_credential_account_resolver<T>(mut self, resolver: Arc<T>) -> Self
+    where
+        T: RuntimeCredentialAccountResolver + 'static,
+    {
+        let resolver: Arc<dyn RuntimeCredentialAccountResolver> = resolver;
+        self.runtime_credential_account_resolver = Some(resolver);
+        self
+    }
+
     pub fn with_credential_broker<T>(self, broker: Arc<T>) -> Self
     where
         T: CredentialAccountStore + CredentialSessionStore + 'static,
@@ -882,5 +895,9 @@ where
             self.wasm_credential_provider.clone(),
         )?);
         Ok(self.with_wasm_runtime(adapter))
+    }
+
+    pub fn try_with_default_wasm_runtime(self) -> Result<Self, WasmError> {
+        self.try_with_wasm_runtime(WitToolRuntimeConfig::default(), WitToolHost::deny_all())
     }
 }

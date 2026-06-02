@@ -12,7 +12,7 @@ use ironclaw_run_state::{
 use tracing::{debug, warn};
 
 use crate::helpers::{
-    CapabilityActionKind, apply_run_state_transition_if_configured,
+    CapabilityActionKind, CapabilityRunStateTransition, apply_run_state_transition_if_configured,
     approval_not_approved_error_kind, capability_lease_error_kind,
     claim_error_may_be_concurrent_resume, complete_run_after_side_effect, fail_run_if_configured,
     invocation_fingerprint_for_kind, matching_approval_lease, resume_context_mismatch_kind,
@@ -1652,18 +1652,13 @@ fn prepare_obligation_error_to_invocation(
                 obligations,
             }
         }
-        CapabilityObligationError::AuthRequired => {
-            // CapabilityObligationError::AuthRequired is a unit variant (no secret
-            // handle list).  The obligation handler does not surface which staged
-            // secret was missing, so required_secrets is left empty here.  The
-            // runtime auth gate accepts an empty list and falls back to the generic
-            // re-auth prompt; the dispatch-side conversion in error.rs forwards the
-            // real list when DispatchError::AuthRequired is raised instead.
-            CapabilityInvocationError::AuthorizationRequiresAuth {
-                capability: capability_id.clone(),
-                required_secrets: Vec::new(),
-            }
-        }
+        CapabilityObligationError::AuthRequired {
+            credential_requirements,
+        } => CapabilityInvocationError::AuthorizationRequiresAuth {
+            capability: capability_id.clone(),
+            required_secrets: Vec::new(),
+            credential_requirements,
+        },
         CapabilityObligationError::Failed { kind } => CapabilityInvocationError::ObligationFailed {
             capability: capability_id.clone(),
             kind,
@@ -1676,14 +1671,23 @@ fn completion_obligation_error_to_invocation(
     error: CapabilityObligationError,
 ) -> CapabilityInvocationError {
     match error {
-        CapabilityObligationError::AuthRequired => CapabilityInvocationError::ObligationFailed {
-            capability: capability_id.clone(),
-            kind: CapabilityObligationFailureKind::Secret,
-        },
+        CapabilityObligationError::AuthRequired { .. } => {
+            CapabilityInvocationError::ObligationFailed {
+                capability: capability_id.clone(),
+                kind: CapabilityObligationFailureKind::Secret,
+            }
+        }
         other => prepare_obligation_error_to_invocation(capability_id, other),
     }
 }
 
 fn obligation_invocation_error_kind(error: &CapabilityInvocationError) -> &'static str {
-    error.run_state_transition().error_kind()
+    // `run_state_transition` returns `None` for `CapabilityInvocationError::Dispatch`
+    // because PR #4236 handles those failures via the disposition policy on the
+    // outcome path. The obligation call sites only see this function for
+    // diagnostic logging; fall back to a stable "Dispatch" label in that case.
+    error
+        .run_state_transition()
+        .map(CapabilityRunStateTransition::error_kind)
+        .unwrap_or("Dispatch")
 }

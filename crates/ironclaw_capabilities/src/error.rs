@@ -1,7 +1,7 @@
 use ironclaw_authorization::CapabilityLeaseError;
 use ironclaw_host_api::{
     CapabilityId, DenyReason, DispatchError, DispatchFailureKind, HostApiError, Obligation,
-    SecretHandle,
+    RuntimeCredentialAuthRequirement, SecretHandle,
 };
 use ironclaw_processes::ProcessError;
 
@@ -42,6 +42,7 @@ pub enum CapabilityInvocationError {
     AuthorizationRequiresAuth {
         capability: CapabilityId,
         required_secrets: Vec<SecretHandle>,
+        credential_requirements: Vec<RuntimeCredentialAuthRequirement>,
     },
     #[error("capability {capability} invocation fingerprint failed: {source}")]
     InvocationFingerprint {
@@ -120,6 +121,7 @@ impl From<DispatchError> for CapabilityInvocationError {
             } => Self::AuthorizationRequiresAuth {
                 capability,
                 required_secrets,
+                credential_requirements: Vec::new(),
             },
             other => Self::Dispatch {
                 kind: dispatch_error_kind(&other),
@@ -267,9 +269,11 @@ mod tests {
                 CapabilityInvocationError::AuthorizationRequiresAuth {
                     capability,
                     required_secrets,
+                    credential_requirements,
                 } => {
                     assert_eq!(capability, cap(), "handles: {handles:?}");
                     assert_eq!(required_secrets, secrets, "handles: {handles:?}");
+                    assert_eq!(credential_requirements, Vec::new(), "handles: {handles:?}");
                 }
                 other => panic!("expected AuthorizationRequiresAuth, got {other:?}"),
             }

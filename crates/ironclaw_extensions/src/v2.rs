@@ -40,8 +40,9 @@ use std::sync::Arc;
 use ironclaw_host_api::{
     CapabilityId, CapabilityProfileId, CapabilityProfileSchemaRef, EffectKind, ExtensionId,
     HostApiError, HostPortCatalog, HostPortId, NetworkScheme, NetworkTargetPattern, PermissionMode,
-    RequestedTrustClass, ResourceProfile, RuntimeCredentialRequirement, RuntimeCredentialTarget,
-    RuntimeKind, SecretHandle, TrustClass,
+    RequestedTrustClass, ResourceProfile, RuntimeCredentialRequirement,
+    RuntimeCredentialRequirementSource, RuntimeCredentialTarget, RuntimeKind, SecretHandle,
+    TrustClass,
 };
 use serde::{Deserialize, Deserializer};
 use thiserror::Error;
@@ -870,6 +871,7 @@ impl CapabilityDeclV2 {
             validate_runtime_credential_audience(&id, &raw_credential.audience)?;
             runtime_credentials.push(RuntimeCredentialRequirement {
                 handle,
+                source: raw_credential.source,
                 audience: raw_credential.audience,
                 target: raw_credential.target,
                 required: raw_credential.required,
@@ -1427,6 +1429,8 @@ pub(crate) struct RawCapabilityV2 {
 #[serde(deny_unknown_fields)]
 struct RawRuntimeCredentialV2 {
     handle: String,
+    #[serde(default)]
+    source: RuntimeCredentialRequirementSource,
     audience: NetworkTargetPattern,
     target: RuntimeCredentialTarget,
     #[serde(default = "default_runtime_credential_required")]

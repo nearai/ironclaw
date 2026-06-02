@@ -31,7 +31,7 @@ use ironclaw_turns::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::{LoopCapabilityInputResolver, LoopCapabilityResultWriter};
+use crate::{CapabilityResultWrite, LoopCapabilityInputResolver, LoopCapabilityResultWriter};
 
 pub const DEFAULT_SUBAGENT_MAX_DEPTH: u32 = 1;
 pub const DEFAULT_SUBAGENT_MAX_SPAWN_PER_TURN: u32 = 4;
@@ -617,13 +617,14 @@ impl SubagentSpawnCapabilityPort {
         let result_ref = self
             .deps
             .result_writer
-            .write_capability_result(
-                &self.run_context,
-                &invocation.input_ref,
-                InvocationId::new(),
-                &self.spawn_id,
-                payload,
-            )
+            .write_capability_result(CapabilityResultWrite {
+                run_context: &self.run_context,
+                input_ref: &invocation.input_ref,
+                invocation_id: InvocationId::new(),
+                capability_id: &self.spawn_id,
+                output: payload,
+                display_preview: None,
+            })
             .await?;
         compensation.result_written = Some(result_ref.clone());
         let child_thread = self

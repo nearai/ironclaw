@@ -8,12 +8,16 @@
 
 use std::fmt;
 
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use ironclaw_host_api::ResourceScope;
 use secrecy::{ExposeSecret, SecretString};
+use serde::{Deserialize, Serialize};
 use url::Url;
 
 use crate::{
-    AuthProductError, AuthorizationCodeHash, OAuthAuthorizationCode, OAuthAuthorizationUrl,
-    OpaqueStateHash, PkceVerifierHash, PkceVerifierSecret, ProviderScope,
+    AuthProductError, AuthProductScope, AuthSessionId, AuthSurface, AuthorizationCodeHash,
+    CredentialAccountLabel, OAuthAuthorizationCode, OAuthAuthorizationUrl, OpaqueStateHash,
+    PkceVerifierHash, PkceVerifierSecret, ProviderScope, ids::AuthFlowId,
 };
 
 /// Reborn auth provider id for Google OAuth accounts.
@@ -42,6 +46,165 @@ pub struct PkceCodeChallenge(String);
 impl PkceCodeChallenge {
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+/// Google product-auth OAuth route configuration.
+#[derive(Clone)]
+pub struct GoogleOAuthRouteConfig {
+    client_id: OAuthClientId,
+    redirect_uri: OAuthRedirectUri,
+    hosted_domain_hint: Option<String>,
+}
+
+impl GoogleOAuthRouteConfig {
+    pub fn new(
+        client_id: impl Into<String>,
+        redirect_uri: impl Into<String>,
+    ) -> Result<Self, AuthProductError> {
+        Ok(Self {
+            client_id: OAuthClientId::new(client_id)?,
+            redirect_uri: OAuthRedirectUri::new(redirect_uri)?,
+            hosted_domain_hint: None,
+        })
+    }
+
+    pub fn with_hosted_domain_hint(
+        mut self,
+        hosted_domain: impl Into<String>,
+    ) -> Result<Self, AuthProductError> {
+        let hosted_domain = hosted_domain.into();
+        validate_authorize_fragment("google hosted domain hint", &hosted_domain)?;
+        self.hosted_domain_hint = Some(hosted_domain);
+        Ok(self)
+    }
+
+    pub fn client_id(&self) -> &OAuthClientId {
+        &self.client_id
+    }
+
+    pub fn redirect_uri(&self) -> &OAuthRedirectUri {
+        &self.redirect_uri
+    }
+
+    pub fn hosted_domain_hint(&self) -> Option<&str> {
+        self.hosted_domain_hint.as_deref()
+    }
+}
+
+impl fmt::Debug for GoogleOAuthRouteConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GoogleOAuthRouteConfig")
+            .field("client_id", &self.client_id.as_str())
+            .field("redirect_uri", &self.redirect_uri)
+            .field(
+                "hosted_domain_hint",
+                &self.hosted_domain_hint.as_ref().map(|_| "[REDACTED]"),
+            )
+            .finish()
+    }
+}
+
+/// Host-resolved data carried through Google's static callback URL in `state`.
+///
+/// The value is not authority by itself. Callback handlers must still hash the
+/// full raw state and let `AuthFlowManager` compare it against the durable flow
+/// before any provider exchange or completion side effect.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GoogleOAuthCallbackState {
+    flow_id: AuthFlowId,
+    scope: AuthProductScope,
+    account_label: CredentialAccountLabel,
+    requested_scopes: Vec<ProviderScope>,
+    nonce: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct GoogleOAuthCallbackStateWire {
+    flow_id: AuthFlowId,
+    resource: ResourceScope,
+    session_id: Option<AuthSessionId>,
+    account_label: CredentialAccountLabel,
+    requested_scopes: Vec<ProviderScope>,
+    nonce: String,
+}
+
+impl GoogleOAuthCallbackState {
+    const PREFIX: &'static str = "icg1.";
+
+    pub fn new(
+        flow_id: AuthFlowId,
+        scope: AuthProductScope,
+        account_label: CredentialAccountLabel,
+        requested_scopes: Vec<ProviderScope>,
+    ) -> Result<Self, AuthProductError> {
+        validate_google_requested_scope_values(&requested_scopes)?;
+        Ok(Self {
+            flow_id,
+            scope,
+            account_label,
+            requested_scopes,
+            nonce: ironclaw_common::pkce::generate_code_verifier(),
+        })
+    }
+
+    pub fn flow_id(&self) -> AuthFlowId {
+        self.flow_id
+    }
+
+    pub fn scope(&self) -> &AuthProductScope {
+        &self.scope
+    }
+
+    pub fn account_label(&self) -> &CredentialAccountLabel {
+        &self.account_label
+    }
+
+    pub fn requested_scopes(&self) -> &[ProviderScope] {
+        &self.requested_scopes
+    }
+
+    pub fn encode(&self) -> Result<OAuthState, AuthProductError> {
+        let wire = GoogleOAuthCallbackStateWire {
+            flow_id: self.flow_id,
+            resource: self.scope.resource.clone(),
+            session_id: self.scope.session_id.clone(),
+            account_label: self.account_label.clone(),
+            requested_scopes: self.requested_scopes.clone(),
+            nonce: self.nonce.clone(),
+        };
+        let payload =
+            serde_json::to_vec(&wire).map_err(|_| AuthProductError::BackendUnavailable)?;
+        OAuthState::new(format!(
+            "{}{}",
+            Self::PREFIX,
+            URL_SAFE_NO_PAD.encode(payload)
+        ))
+    }
+
+    pub fn decode(raw: &str) -> Result<Self, AuthProductError> {
+        let encoded = raw
+            .strip_prefix(Self::PREFIX)
+            .ok_or(AuthProductError::MalformedCallback)?;
+        let payload = URL_SAFE_NO_PAD
+            .decode(encoded)
+            .map_err(|_| AuthProductError::MalformedCallback)?;
+        let wire: GoogleOAuthCallbackStateWire =
+            serde_json::from_slice(&payload).map_err(|_| AuthProductError::MalformedCallback)?;
+        validate_authorize_fragment("google oauth nonce", &wire.nonce)
+            .map_err(|_| AuthProductError::MalformedCallback)?;
+        let mut scope = AuthProductScope::new(wire.resource, AuthSurface::Callback);
+        if let Some(session_id) = wire.session_id {
+            scope = scope.with_session_id(session_id);
+        }
+        Ok(Self {
+            flow_id: wire.flow_id,
+            scope,
+            account_label: wire.account_label,
+            requested_scopes: validate_google_callback_scope_values(wire.requested_scopes)?,
+            nonce: wire.nonce,
+        })
     }
 }
 
@@ -381,6 +544,86 @@ pub fn build_google_authorization_url(
         scopes,
         extra_params: &extra_params,
     })
+}
+
+pub fn parse_google_requested_scopes(
+    raw_scopes: &[String],
+) -> Result<Vec<ProviderScope>, AuthProductError> {
+    let scopes = raw_scopes
+        .iter()
+        .map(|scope| ProviderScope::new(scope.clone()))
+        .collect::<Result<Vec<_>, _>>()?;
+    validate_google_requested_scope_values(&scopes)?;
+    Ok(scopes)
+}
+
+pub fn parse_google_callback_scopes(
+    raw: Option<&str>,
+) -> Result<Option<Vec<ProviderScope>>, AuthProductError> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    if raw.trim() != raw {
+        return Err(AuthProductError::MalformedCallback);
+    }
+    if raw.is_empty() {
+        return Ok(Some(Vec::new()));
+    }
+    raw.split([' ', ','])
+        .filter(|scope| !scope.is_empty())
+        .map(|scope| {
+            if !is_allowed_google_scope(scope) {
+                return Err(AuthProductError::MalformedCallback);
+            }
+            ProviderScope::new(scope.to_string()).map_err(|_| AuthProductError::MalformedCallback)
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(Some)
+}
+
+pub fn is_allowed_google_scope(scope: &str) -> bool {
+    matches!(
+        scope,
+        GOOGLE_CALENDAR_READONLY_SCOPE
+            | GOOGLE_CALENDAR_EVENTS_SCOPE
+            | GOOGLE_GMAIL_READONLY_SCOPE
+            | GOOGLE_GMAIL_SEND_SCOPE
+            | GOOGLE_GMAIL_MODIFY_SCOPE
+    )
+}
+
+fn validate_google_requested_scope_values(
+    scopes: &[ProviderScope],
+) -> Result<(), AuthProductError> {
+    if scopes.is_empty() {
+        return Err(AuthProductError::invalid_request(
+            "google oauth scopes must not be empty",
+        ));
+    }
+    if scopes
+        .iter()
+        .any(|scope| !is_allowed_google_scope(scope.as_str()))
+    {
+        return Err(AuthProductError::invalid_request(
+            "google oauth scope is not allowed",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_google_callback_scope_values(
+    scopes: Vec<ProviderScope>,
+) -> Result<Vec<ProviderScope>, AuthProductError> {
+    if scopes.is_empty() {
+        return Err(AuthProductError::MalformedCallback);
+    }
+    if scopes
+        .iter()
+        .any(|scope| !is_allowed_google_scope(scope.as_str()))
+    {
+        return Err(AuthProductError::MalformedCallback);
+    }
+    Ok(scopes)
 }
 
 pub fn scope_text(scopes: &[ProviderScope]) -> String {

@@ -231,11 +231,7 @@ impl LoopCapabilityPort for RecordingBatchPort {
 impl LoopCapabilityResultWriter for NoopResultWriter {
     async fn write_capability_result(
         &self,
-        _run_context: &LoopRunContext,
-        _input_ref: &CapabilityInputRef,
-        _invocation_id: InvocationId,
-        _capability_id: &CapabilityId,
-        _output: serde_json::Value,
+        _write: CapabilityResultWrite<'_>,
     ) -> Result<LoopResultRef, AgentLoopHostError> {
         Ok(LoopResultRef::new("result:spawn").unwrap())
     }
@@ -666,6 +662,7 @@ fn turn_record(run_context: &LoopRunContext, subagent_depth: u32) -> TurnRunReco
         resolved_model_route: None,
         checkpoint_id: None,
         gate_ref: None,
+        credential_requirements: Vec::new(),
         failure: None,
         event_cursor: EventCursor(1),
         runner_id: None,

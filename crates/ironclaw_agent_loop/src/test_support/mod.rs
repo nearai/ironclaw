@@ -967,6 +967,7 @@ fn scripted_model_response(
         output,
         effective_model_profile_id: ModelProfileId::new("model")
             .unwrap_or_else(|error| panic!("test model id should be valid: {error}")),
+        usage: None,
     })
 }
 
@@ -1003,6 +1004,7 @@ fn scripted_capability_outcome(
         ScriptedCapabilityOutcome::AuthRequired { gate_ref } => {
             Ok(CapabilityOutcome::AuthRequired {
                 gate_ref: loop_gate_ref(&gate_ref),
+                credential_requirements: Vec::new(),
                 safe_summary: "auth required".to_string(),
             })
         }

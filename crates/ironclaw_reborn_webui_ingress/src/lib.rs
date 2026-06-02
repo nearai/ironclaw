@@ -28,9 +28,9 @@ mod session;
 #[cfg(any(test, feature = "dev-in-memory-session"))]
 pub use auth::EmailUserDirectory;
 pub use auth::{
-    GoogleOAuthConfig, GoogleProvider, OAuthError, OAuthProvider, OAuthProviderName,
-    OAuthProviderNameError, OAuthRouterConfig, OAuthUserProfile, PublicRouteMount, UserDirectory,
-    UserDirectoryError, webui_v2_auth_router,
+    GitHubOAuthConfig, GitHubProvider, GoogleOAuthConfig, GoogleProvider, OAuthError,
+    OAuthProvider, OAuthProviderName, OAuthProviderNameError, OAuthRouterConfig, OAuthUserProfile,
+    ProviderInitError, PublicRouteMount, UserDirectory, UserDirectoryError, webui_v2_auth_router,
 };
 pub use oidc::{
     AudienceClaim, ClaimToUserIdFn, IdTokenClaims, OidcAuthenticator, OidcAuthenticatorConfig,

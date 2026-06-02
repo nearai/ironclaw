@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::{StreamExt, stream};
+use ironclaw_auth::{AuthProviderId, CredentialAccountLabel, OAuthAuthorizationUrl};
 #[cfg(test)]
 use ironclaw_event_projections::CapabilityActivityProjection;
 use ironclaw_event_projections::{
@@ -29,7 +30,7 @@ use ironclaw_product_adapters::{
     ProjectionSubscriptionRequest, RedactedString,
 };
 use ironclaw_turns::{
-    ReplyTargetBindingRef, TurnActor, TurnCoordinator, TurnEventProjectionCursor,
+    ReplyTargetBindingRef, SanitizedFailure, TurnActor, TurnCoordinator, TurnEventProjectionCursor,
     TurnEventProjectionSource, TurnRunId, TurnScope, run_profile::LoopHostMilestoneSink,
 };
 
@@ -45,7 +46,9 @@ use live_progress::{
 use runtime_replay::{
     RuntimePayloadCandidate, replay_payload_candidates, snapshot_payload_candidates,
 };
-use turn_events::{TurnEventBridge, TurnEventPayload};
+use turn_events::{
+    FailureExplanationProvider, ModelFailureExplanationProvider, TurnEventBridge, TurnEventPayload,
+};
 
 // ── Auth challenge projection ────────────────────────────────────────────────
 
@@ -55,24 +58,49 @@ use turn_events::{TurnEventBridge, TurnEventPayload};
 #[derive(Debug, Clone)]
 pub struct AuthChallengeView {
     pub kind: AuthPromptChallengeKind,
-    pub provider: String,
-    pub account_label: Option<String>,
-    pub authorization_url: Option<String>,
+    pub provider: AuthProviderId,
+    pub account_label: Option<CredentialAccountLabel>,
+    pub authorization_url: Option<OAuthAuthorizationUrl>,
     pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl AuthChallengeView {
+    /// Apply the view's enrichment fields onto a partially-constructed
+    /// `AuthPromptView`, removing the 5-field manual mapping at call sites.
+    ///
+    /// Caller constructs the 4 mandatory fields; this method fills the 5
+    /// optional enrichment fields from `self`.
+    pub(crate) fn enrich(
+        self,
+        mut view: ironclaw_product_adapters::AuthPromptView,
+    ) -> ironclaw_product_adapters::AuthPromptView {
+        view.challenge_kind = Some(self.kind);
+        view.provider = Some(self.provider.as_str().to_string());
+        view.account_label = self.account_label.map(|label| label.as_str().to_string());
+        view.authorization_url = self.authorization_url.map(|url| url.as_str().to_string());
+        view.expires_at = self.expires_at;
+        view
+    }
 }
 
 /// Narrow read-only interface used by the turn-event projection layer to
 /// enrich `AuthPromptView` with challenge metadata. Implemented by
 /// `RebornProductAuthServices` when a `flow_record_source` is wired in.
 ///
-/// Only one method: look up by gate_ref string. Gate refs are UUIDs so
-/// collision risk across scopes is negligible.
+/// Implementations MUST verify caller user, run id, gate ref, and
+/// tenant/agent/project/thread before returning a record.
 #[async_trait]
 pub trait AuthChallengeProvider: Send + Sync {
-    /// Return the projection-safe challenge view for the given gate ref, or
-    /// `None` if the auth flow cannot be found (already consumed, not yet
-    /// created, or record source unavailable).
-    async fn challenge_for_gate(&self, gate_ref: &str) -> Option<AuthChallengeView>;
+    /// Return the projection-safe challenge view for the given gate ref and
+    /// caller scope, or `None` if the auth flow cannot be found (already
+    /// consumed, not yet created, wrong scope, or record source unavailable).
+    async fn challenge_for_gate(
+        &self,
+        scope: &TurnScope,
+        owner_user_id: &UserId,
+        run_id: TurnRunId,
+        gate_ref: &str,
+    ) -> Option<AuthChallengeView>;
 }
 
 pub(crate) use display_preview::{CapabilityDisplayPreviewResult, CapabilityDisplayPreviewStore};
@@ -102,6 +130,25 @@ impl RebornProjectionServices {
     ) -> Self {
         self.turn_events = TurnEventBridge::enabled(turn_event_source, turn_coordinator);
         self
+    }
+
+    pub(crate) fn with_failure_explainer(
+        mut self,
+        explainer: Arc<dyn FailureExplanationProvider>,
+    ) -> Self {
+        self.turn_events = self.turn_events.with_failure_explainer(explainer);
+        self
+    }
+
+    pub(crate) fn with_model_failure_explainer_factory(
+        self,
+        system_inference: Arc<
+            dyn Fn() -> Arc<dyn ironclaw_turns::run_profile::SystemInferencePort> + Send + Sync,
+        >,
+    ) -> Self {
+        self.with_failure_explainer(Arc::new(ModelFailureExplanationProvider::from_factory(
+            system_inference,
+        )))
     }
 
     /// Wire in an auth challenge provider so `auth_required` SSE events carry
@@ -925,12 +972,49 @@ fn run_status_projection_state(
         .map(|run| ProductProjectionItem::RunStatus {
             run_id: TurnRunId::from_uuid(run.invocation_id.as_uuid()),
             status: run_status_wire(run.status).to_string(),
+            failure_category: run_failure_category(&run),
+            failure_summary: run_failure_summary(&run),
         })
         .collect::<Vec<_>>();
     if items.is_empty() {
         return Ok(None);
     }
     ProductProjectionState::new(scope.thread_id.to_string(), items).map(Some)
+}
+
+fn run_failure_category(run: &RunStatusProjection) -> Option<SanitizedFailure> {
+    // Runtime replay categories intentionally use the event-projection namespace
+    // (model_failed, dispatch_failed, process_killed, ...), while turn lifecycle
+    // events use runner/driver failure reasons (lease_expired, driver_failed, ...).
+    // Both are sanitized product categories; clients must treat the field as an
+    // opaque category and prefer failure_summary for user-facing copy.
+    matches!(
+        run.status,
+        RunProjectionStatus::Failed | RunProjectionStatus::Killed
+    )
+    .then(|| run.error_kind.clone())
+    .flatten()
+    .and_then(|category| SanitizedFailure::new(category).ok())
+}
+
+fn run_failure_summary(run: &RunStatusProjection) -> Option<String> {
+    run_failure_category(run)
+        .as_ref()
+        .map(SanitizedFailure::category)
+        .map(runtime_failure_summary_for_category)
+        .map(str::to_string)
+}
+
+fn runtime_failure_summary_for_category(category: &str) -> &'static str {
+    match category {
+        "model_failed" => "The run failed while waiting for the model.",
+        "dispatch_failed" => "The run failed while executing a capability.",
+        "process_failed" => "The run failed while executing a runtime process.",
+        "process_killed" => "The run stopped because its runtime process was killed.",
+        "hook_failed" => "The run failed while evaluating a runtime hook.",
+        "unknown" | "unclassified" => "The run failed for an unknown reason.",
+        _ => "The run failed before producing a reply.",
+    }
 }
 
 fn capability_activity_status_wire(

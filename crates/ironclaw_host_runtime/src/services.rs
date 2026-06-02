@@ -74,7 +74,8 @@ use ironclaw_wasm::{
 };
 
 use crate::obligations::{
-    NetworkObligationPolicyStore, RuntimeSecretInjectionStore, SharedSecretStore,
+    NetworkObligationPolicyStore, RuntimeCredentialAccountResolver, RuntimeSecretInjectionStore,
+    SharedSecretStore,
 };
 use crate::{
     BuiltinObligationHandler, CapabilitySurfaceVersion, DefaultHostRuntime,
@@ -137,6 +138,7 @@ where
     secret_store: Option<Arc<dyn SecretStore>>,
     credential_account_store: Arc<dyn CredentialAccountStore>,
     credential_session_store: Arc<dyn CredentialSessionStore>,
+    runtime_credential_account_resolver: Option<Arc<dyn RuntimeCredentialAccountResolver>>,
     network_policy_store: Arc<NetworkObligationPolicyStore>,
     secret_injection_store: Arc<RuntimeSecretInjectionStore>,
     process_lifecycle_store: Arc<ProcessObligationLifecycleStore>,
@@ -230,8 +232,11 @@ impl ProductAuthProviderRuntimePorts {
 /// so the runtime auth gate fires instead of surfacing a generic backend
 /// failure. Anything else is a true backend defect.
 ///
-/// `pub(crate)` so it can be unit-tested directly; used in production by
-/// [`ProductAuthProviderRuntimePorts::stage_secret_once`]. Not part of the public API.
+/// Used in production by [`ProductAuthProviderRuntimePorts::stage_secret_once`]
+/// and by the obligation-handler `stage_credential_material` helper so the
+/// WASM `InjectCredentialAccountOnce` lane and the first-party stager lane
+/// share identical AuthRequired classification. Crate-private: cross-crate
+/// callers must go through one of the two staging entry points above.
 pub(crate) fn stage_secret_error(error: SecretStoreError) -> ProductAuthCredentialStageError {
     // Unknown / expired / revoked / consumed / unknown-lease are all user-actionable
     // re-auth conditions: the credential is missing or no longer valid.  Anything
@@ -292,6 +297,7 @@ where
             secret_store: None,
             credential_account_store,
             credential_session_store,
+            runtime_credential_account_resolver: None,
             network_policy_store,
             secret_injection_store,
             process_lifecycle_store,
@@ -489,6 +495,7 @@ where
             .runtime_policy
             .clone()
             .unwrap_or_else(local_testing_runtime_policy);
+        let surface_filesystem: Arc<dyn RootFilesystem> = self.filesystem.clone();
 
         let mut runtime = DefaultHostRuntime::from_shared_registry(
             Arc::clone(&self.registry),
@@ -497,6 +504,7 @@ where
             self.surface_version.clone(),
             runtime_policy,
         )
+        .with_surface_filesystem(surface_filesystem)
         .with_trust_policy_dyn(Arc::clone(&self.trust_policy))
         .with_process_manager(process_manager)
         .with_process_store(process_store)
@@ -532,6 +540,9 @@ where
         }
         if let Some(secret_store) = &self.secret_store {
             handler = handler.with_secret_store_dyn(Arc::clone(secret_store));
+        }
+        if let Some(resolver) = &self.runtime_credential_account_resolver {
+            handler = handler.with_credential_account_resolver_dyn(Arc::clone(resolver));
         }
 
         handler

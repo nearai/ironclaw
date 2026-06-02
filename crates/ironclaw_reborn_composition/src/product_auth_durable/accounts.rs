@@ -11,10 +11,11 @@ use super::{FilesystemAuthProductServices, scope_matches};
 use ironclaw_auth::{
     AuthProductError, CredentialAccount, CredentialAccountChoiceRequest, CredentialAccountId,
     CredentialAccountListPage, CredentialAccountListRequest, CredentialAccountLookupRequest,
-    CredentialAccountMutation, CredentialAccountProjection, CredentialAccountSelectionRequest,
-    CredentialAccountService, CredentialAccountStatus, CredentialRecoveryProjection,
-    CredentialRecoveryReason, CredentialRecoveryRequest, CredentialRefreshReport,
-    CredentialRefreshRequest, CredentialSetupService, NewCredentialAccount,
+    CredentialAccountMutation, CredentialAccountOwnerScope, CredentialAccountProjection,
+    CredentialAccountRecordSource, CredentialAccountSelectionRequest, CredentialAccountService,
+    CredentialAccountStatus, CredentialRecoveryProjection, CredentialRecoveryReason,
+    CredentialRecoveryRequest, CredentialRefreshReport, CredentialRefreshRequest,
+    CredentialSetupService, NewCredentialAccount,
 };
 
 #[async_trait]
@@ -211,8 +212,11 @@ where
             .await?
             .map(|(account, _)| account)
             .ok_or(AuthProductError::CredentialMissing)?;
-        if !scope_matches(&request.scope, &account.scope) || account.provider != request.provider {
+        if !scope_matches(&request.scope, &account.scope) {
             return Err(AuthProductError::CrossScopeDenied);
+        }
+        if account.provider != request.provider {
+            return Err(AuthProductError::CredentialMissing);
         }
         if account.status != CredentialAccountStatus::Configured {
             return Err(AuthProductError::CredentialMissing);
@@ -228,6 +232,27 @@ where
         _request: CredentialRefreshRequest,
     ) -> Result<CredentialRefreshReport, AuthProductError> {
         Err(AuthProductError::BackendUnavailable)
+    }
+}
+
+#[async_trait]
+impl<F> CredentialAccountRecordSource for FilesystemAuthProductServices<F>
+where
+    F: RootFilesystem + 'static,
+{
+    async fn accounts_for_owner(
+        &self,
+        scope: &ironclaw_auth::AuthProductScope,
+    ) -> Result<Vec<CredentialAccount>, AuthProductError> {
+        let owner = CredentialAccountOwnerScope::from_scope(scope);
+        self.account_records_for_owner(&owner).await
+    }
+
+    async fn select_unique_configured_account_for_owner(
+        &self,
+        request: CredentialAccountSelectionRequest,
+    ) -> Result<CredentialAccount, AuthProductError> {
+        self.select_configured_account_for_owner(request).await
     }
 }
 

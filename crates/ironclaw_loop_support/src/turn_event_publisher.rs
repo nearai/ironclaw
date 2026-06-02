@@ -35,6 +35,7 @@ impl EventPublishingTurnRunTransitionPort {
                     TurnBlockedGateMetadata {
                         gate_ref,
                         gate_kind,
+                        credential_requirements: state.credential_requirements.clone(),
                     }
                 })
             })

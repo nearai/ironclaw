@@ -282,6 +282,7 @@ async fn create_flow(services: &RebornProductAuthServices, scope: AuthProductSco
     services
         .flow_manager()
         .create_flow(NewAuthFlow {
+            id: None,
             scope,
             kind: AuthFlowKind::IntegrationCredential,
             provider: provider(),

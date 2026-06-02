@@ -81,17 +81,7 @@ fn needs_top_level_flatten(schema: &JsonValue) -> bool {
     match schema {
         JsonValue::Object(map) => {
             let has_forbidden = FORBIDDEN_TOP_LEVEL.iter().any(|k| map.contains_key(*k));
-            let has_properties = map.contains_key("properties");
-            let type_value = map.get("type");
-            let is_object_type = match type_value {
-                Some(JsonValue::String(s)) => s == "object",
-                Some(JsonValue::Array(arr)) => arr
-                    .iter()
-                    .any(|v| matches!(v, JsonValue::String(s) if s == "object")),
-                _ => false,
-            };
-            let missing_type_with_properties = type_value.is_none() && has_properties;
-            has_forbidden || (!is_object_type && !missing_type_with_properties)
+            has_forbidden || !top_level_accepts_object_properties(map)
         }
         _ => true,
     }
@@ -132,6 +122,13 @@ fn merge_top_level_variant_properties(schema: &JsonValue) -> serde_json::Map<Str
     let Some(obj) = schema.as_object() else {
         return merged;
     };
+    if top_level_accepts_object_properties(obj)
+        && let Some(props) = obj.get("properties").and_then(|v| v.as_object())
+    {
+        for (key, value) in props {
+            merged.insert(key.clone(), value.clone());
+        }
+    }
     for keyword in &["oneOf", "anyOf", "allOf"] {
         let Some(JsonValue::Array(variants)) = obj.get(*keyword) else {
             continue;
@@ -148,6 +145,17 @@ fn merge_top_level_variant_properties(schema: &JsonValue) -> serde_json::Map<Str
         }
     }
     merged
+}
+
+fn top_level_accepts_object_properties(map: &serde_json::Map<String, JsonValue>) -> bool {
+    match map.get("type") {
+        Some(JsonValue::String(s)) => s == "object",
+        Some(JsonValue::Array(arr)) => arr
+            .iter()
+            .any(|v| matches!(v, JsonValue::String(s) if s == "object")),
+        None => map.contains_key("properties"),
+        _ => false,
+    }
 }
 
 pub(crate) struct CappedJson {
@@ -456,6 +464,37 @@ mod tests {
         assert_eq!(result["properties"]["mode"]["const"], "by_name");
         assert_eq!(result["properties"]["name"]["type"], "string");
         assert_eq!(result["properties"]["id"]["type"], "string");
+        assert!(description.contains("Upstream JSON schema"));
+    }
+
+    #[test]
+    fn test_flatten_top_level_anyof_preserves_parent_properties() {
+        let input = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "name": { "type": "string" },
+                "capability_id": { "type": "string" },
+                "detail": { "type": "string", "enum": ["names", "summary", "schema"] }
+            },
+            "anyOf": [
+                { "required": ["name"] },
+                { "required": ["capability_id"] }
+            ]
+        });
+        let mut description = "Capability info".to_string();
+
+        let result = shape_tool_schema(ToolSchemaPolicy::FlattenOnly, &input, &mut description);
+
+        assert_eq!(result["type"], "object");
+        assert!(result.get("anyOf").is_none());
+        assert_eq!(result["additionalProperties"], true);
+        assert_eq!(result["required"], serde_json::json!([]));
+        assert_eq!(result["properties"]["name"]["type"], "string");
+        assert_eq!(result["properties"]["capability_id"]["type"], "string");
+        assert_eq!(
+            result["properties"]["detail"]["enum"],
+            serde_json::json!(["names", "summary", "schema"])
+        );
         assert!(description.contains("Upstream JSON schema"));
     }
 

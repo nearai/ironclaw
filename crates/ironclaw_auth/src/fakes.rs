@@ -10,17 +10,18 @@ use crate::{
     AuthFlowRecordSource, AuthFlowStatus, AuthInteractionId, AuthInteractionService,
     AuthProductError, AuthProviderClient, CredentialAccount, CredentialAccountChoiceRequest,
     CredentialAccountId, CredentialAccountListPage, CredentialAccountListRequest,
-    CredentialAccountLookupRequest, CredentialAccountMutation, CredentialAccountProjection,
-    CredentialAccountSelectionRequest, CredentialAccountService, CredentialAccountStatus,
-    CredentialOwnership, CredentialRecoveryProjection, CredentialRecoveryReason,
-    CredentialRecoveryRequest, CredentialRefreshReport, CredentialRefreshRequest,
-    CredentialSelectionInput, CredentialSetupService, ManualTokenSetupRequest, NewAuthFlow,
+    CredentialAccountLookupRequest, CredentialAccountMutation, CredentialAccountOwnerScope,
+    CredentialAccountProjection, CredentialAccountRecordSource, CredentialAccountSelectionRequest,
+    CredentialAccountService, CredentialAccountStatus, CredentialOwnership,
+    CredentialRecoveryProjection, CredentialRecoveryReason, CredentialRecoveryRequest,
+    CredentialRefreshReport, CredentialRefreshRequest, CredentialSelectionInput,
+    CredentialSetupService, ManualTokenCompletionInput, ManualTokenSetupRequest, NewAuthFlow,
     NewCredentialAccount, OAuthCallbackClaimRequest, OAuthCallbackFailureInput, OAuthCallbackInput,
     OAuthProviderCallbackRequest, OAuthProviderExchange, OAuthProviderExchangeContext,
     OAuthProviderRefresh, OAuthProviderRefreshRequest, ProviderCallbackOutcome,
     SecretCleanupAction, SecretCleanupQuarantine, SecretCleanupQuarantineReason,
     SecretCleanupReport, SecretCleanupRequest, SecretCleanupService, SecretSubmitRequest,
-    SecretSubmitResult, Timestamp,
+    SecretSubmitResult, Timestamp, TurnGateAuthFlowQuery,
     cleanup::SecretCleanupAction::Deactivate,
     domain::{
         PreparedCallbackFlow, account_is_authorized_for_requester, prepare_callback_flow,
@@ -28,10 +29,11 @@ use crate::{
         update_account_from_exchange, update_account_from_request, validate_account_update_target,
         validate_bound_update_authority, validate_callback_claim,
         validate_credential_status_transition, validate_flow_update_binding,
-        validate_manual_token_update_binding, validate_new_credential_account,
-        validate_refresh_target, validate_selection_flow,
+        validate_manual_token_flow, validate_manual_token_update_binding,
+        validate_new_credential_account, validate_refresh_target, validate_selection_flow,
     },
     flow::credential_status_for_completed_flow,
+    flow_matches_turn_gate_query,
     interaction::PendingSecretInteraction,
     provider::validate_provider_callback_request,
     scope_matches,
@@ -108,9 +110,33 @@ impl InMemoryAuthProductServices {
     }
 }
 
+#[async_trait]
 impl AuthFlowRecordSource for InMemoryAuthProductServices {
-    fn flow_records_snapshot(&self) -> Vec<AuthFlowRecord> {
-        Self::flow_records_snapshot(self)
+    async fn flow_for_turn_gate(
+        &self,
+        query: TurnGateAuthFlowQuery,
+    ) -> Result<Option<AuthFlowRecord>, AuthProductError> {
+        let state = self.lock_state();
+        Ok(state
+            .flows
+            .values()
+            .find(|flow| flow_matches_turn_gate_query(flow, &query))
+            .cloned())
+    }
+
+    async fn flows_for_owner(
+        &self,
+        owner: crate::AuthFlowOwnerScope,
+    ) -> Result<Vec<AuthFlowRecord>, AuthProductError> {
+        let state = self.lock_state();
+        let mut flows = state
+            .flows
+            .values()
+            .filter(|flow| owner.matches(flow))
+            .cloned()
+            .collect::<Vec<_>>();
+        flows.sort_by_key(|flow| flow.id);
+        Ok(flows)
     }
 }
 
@@ -126,8 +152,12 @@ impl AuthFlowManager for InMemoryAuthProductServices {
                 .ok_or(AuthProductError::CredentialMissing)?;
             validate_flow_update_binding(account, &request)?;
         }
+        let id = request.id.unwrap_or_default();
+        if state.flows.contains_key(&id) {
+            return Err(AuthProductError::BackendUnavailable);
+        }
         let record = AuthFlowRecord {
-            id: AuthFlowId::new(),
+            id,
             scope: request.scope,
             kind: request.kind,
             status: AuthFlowStatus::AwaitingUser,
@@ -287,6 +317,97 @@ impl AuthFlowManager for InMemoryAuthProductServices {
             emitted_at: now,
         });
         Ok(completed)
+    }
+
+    async fn complete_manual_token(
+        &self,
+        scope: &crate::AuthProductScope,
+        input: ManualTokenCompletionInput,
+    ) -> Result<AuthFlowRecord, AuthProductError> {
+        let now = Utc::now();
+        let mut state = self.lock_state();
+        let flow_id = state
+            .flows
+            .iter()
+            .find_map(|(flow_id, record)| {
+                let matches_interaction = matches!(
+                    &record.challenge,
+                    Some(AuthChallenge::ManualTokenRequired { interaction_id, .. })
+                        if interaction_id == &input.interaction_id
+                );
+                matches_interaction.then_some(*flow_id)
+            })
+            .ok_or(AuthProductError::UnknownOrExpiredFlow)?;
+        let (flow_scope, flow_provider) = {
+            let record = state
+                .flows
+                .get_mut(&flow_id)
+                .ok_or(AuthProductError::BackendUnavailable)?;
+            validate_manual_token_flow(record, scope, &input, now)?;
+            if record.status == AuthFlowStatus::Completed {
+                return Ok(record.clone());
+            }
+            (record.scope.clone(), record.provider.clone())
+        };
+        let account = state
+            .accounts
+            .get(&input.credential_account_id)
+            .ok_or(AuthProductError::CredentialMissing)?;
+        if !scope_matches(&flow_scope, &account.scope) || account.provider != flow_provider {
+            return Err(AuthProductError::CrossScopeDenied);
+        }
+        if account.status != CredentialAccountStatus::Configured {
+            return Err(AuthProductError::CredentialMissing);
+        }
+        let record = state
+            .flows
+            .get_mut(&flow_id)
+            .ok_or(AuthProductError::BackendUnavailable)?;
+        record.status = AuthFlowStatus::Completed;
+        record.error = None;
+        record.credential_account_id = Some(input.credential_account_id);
+        record.updated_at = now;
+        let completed = record.clone();
+        state.continuations.push(AuthContinuationEvent {
+            flow_id: completed.id,
+            scope: completed.scope.clone(),
+            continuation: completed.continuation.clone(),
+            credential_account_id: completed.credential_account_id,
+            emitted_at: now,
+        });
+        Ok(completed)
+    }
+
+    async fn cancel_manual_token(
+        &self,
+        scope: &crate::AuthProductScope,
+        interaction_id: AuthInteractionId,
+    ) -> Result<Option<AuthFlowRecord>, AuthProductError> {
+        let now = Utc::now();
+        let mut state = self.lock_state();
+        let Some(flow_id) = state.flows.iter().find_map(|(flow_id, record)| {
+            let matches_interaction = matches!(
+                &record.challenge,
+                Some(AuthChallenge::ManualTokenRequired { interaction_id: id, .. })
+                    if id == &interaction_id
+            );
+            matches_interaction.then_some(*flow_id)
+        }) else {
+            return Ok(None);
+        };
+        let record = state
+            .flows
+            .get_mut(&flow_id)
+            .ok_or(AuthProductError::BackendUnavailable)?;
+        if !scope_matches(scope, &record.scope) {
+            return Err(AuthProductError::CrossScopeDenied);
+        }
+        if !crate::is_terminal_status(record.status) {
+            record.status = AuthFlowStatus::Canceled;
+            record.error = Some(crate::AuthErrorCode::Canceled);
+            record.updated_at = now;
+        }
+        Ok(Some(record.clone()))
     }
 
     async fn fail_oauth_callback(
@@ -555,8 +676,11 @@ impl CredentialAccountService for InMemoryAuthProductServices {
             .accounts
             .get(&request.account_id)
             .ok_or(AuthProductError::CredentialMissing)?;
-        if !scope_matches(&request.scope, &account.scope) || account.provider != request.provider {
+        if !scope_matches(&request.scope, &account.scope) {
             return Err(AuthProductError::CrossScopeDenied);
+        }
+        if account.provider != request.provider {
+            return Err(AuthProductError::CredentialMissing);
         }
         if account.status != CredentialAccountStatus::Configured {
             return Err(AuthProductError::CredentialMissing);
@@ -652,6 +776,25 @@ impl CredentialAccountService for InMemoryAuthProductServices {
             }
             Err(error) => Err(error),
         }
+    }
+}
+
+#[async_trait]
+impl CredentialAccountRecordSource for InMemoryAuthProductServices {
+    async fn accounts_for_owner(
+        &self,
+        scope: &crate::AuthProductScope,
+    ) -> Result<Vec<CredentialAccount>, AuthProductError> {
+        let owner = CredentialAccountOwnerScope::from_scope(scope);
+        let state = self.lock_state();
+        let mut accounts = state
+            .accounts
+            .values()
+            .filter(|account| owner.matches(account))
+            .cloned()
+            .collect::<Vec<_>>();
+        accounts.sort_by_key(|account| account.id);
+        Ok(accounts)
     }
 }
 

@@ -1,5 +1,5 @@
-Use `github.get_issue` for read-only retrieval of one GitHub issue or pull request when the repository owner, repository name, and issue number are known.
+Use `github.get_issue` to fetch one issue or pull request by issue number.
 
-Pass `owner`, `repo`, and `issue_number` exactly. If the user provides a GitHub issue or pull request URL, extract those three fields before calling this capability.
+Use the exact JSON field names from this capability schema. If the user provides a GitHub URL, extract the owner and repo fields plus the schema-specific number, path, or ref key; for pull-request tools, use `pr_number`; for issue tools, use `issue_number`.
 
-This capability reads from the GitHub API through the host HTTP egress port. It requires a configured `github_token` runtime credential declared by the manifest.
+This capability reads from the GitHub API through host HTTP egress and requires a configured GitHub product-auth account.

@@ -10,6 +10,7 @@ use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, Trust
 use crate::extension_lifecycle::{ActiveExtensionCapability, RebornLocalExtensionManagementPort};
 use ironclaw_first_party_extensions::{
     EXA_MCP_HOST, NETWORK_EGRESS_LIMIT, WEB_ACCESS_EXTENSION_ID, WEB_SEARCH_CAPABILITY_ID,
+    gsuite_network_policy_for,
 };
 use ironclaw_product_workflow::ProductWorkflowError;
 
@@ -118,6 +119,10 @@ impl LocalDevExtensionSurface {
 }
 
 fn extension_network_policy(capability: &ActiveExtensionCapability) -> NetworkPolicy {
+    if let Some(policy) = gsuite_network_policy_for(&capability.provider) {
+        return policy;
+    }
+
     let mut targets = Vec::new();
     for credential in &capability.runtime_credentials {
         if !targets.contains(&credential.audience) {
@@ -147,6 +152,7 @@ fn extension_network_policy(capability: &ActiveExtensionCapability) -> NetworkPo
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ironclaw_first_party_extensions::google_api_network_policy;
     use ironclaw_host_api::CapabilityId;
 
     #[test]
@@ -180,6 +186,7 @@ mod tests {
             effects: vec![EffectKind::DispatchCapability, EffectKind::Network],
             runtime_credentials: vec![ironclaw_host_api::RuntimeCredentialRequirement {
                 handle: ironclaw_host_api::SecretHandle::new("exa_mcp_token").unwrap(),
+                source: ironclaw_host_api::RuntimeCredentialRequirementSource::SecretHandle,
                 audience: NetworkTargetPattern {
                     scheme: Some(NetworkScheme::Https),
                     host_pattern: EXA_MCP_HOST.to_string(),
@@ -197,5 +204,43 @@ mod tests {
 
         assert_eq!(policy.allowed_targets.len(), 1);
         assert_eq!(policy.max_egress_bytes, Some(NETWORK_EGRESS_LIMIT));
+    }
+
+    #[test]
+    fn gsuite_capabilities_get_google_api_network_policy() {
+        let capability = ActiveExtensionCapability {
+            id: CapabilityId::new("gmail.list_messages").unwrap(),
+            provider: ExtensionId::new(ironclaw_first_party_extensions::GMAIL_EXTENSION_ID)
+                .unwrap(),
+            effects: vec![
+                EffectKind::DispatchCapability,
+                EffectKind::Network,
+                EffectKind::UseSecret,
+            ],
+            runtime_credentials: Vec::new(),
+        };
+
+        let policy = extension_network_policy(&capability);
+
+        assert_eq!(policy, google_api_network_policy());
+    }
+
+    #[test]
+    fn calendar_capability_gets_google_api_network_policy() {
+        let capability = ActiveExtensionCapability {
+            id: CapabilityId::new("google-calendar.list_events").unwrap(),
+            provider: ExtensionId::new(ironclaw_first_party_extensions::CALENDAR_EXTENSION_ID)
+                .unwrap(),
+            effects: vec![
+                EffectKind::DispatchCapability,
+                EffectKind::Network,
+                EffectKind::UseSecret,
+            ],
+            runtime_credentials: Vec::new(),
+        };
+
+        let policy = extension_network_policy(&capability);
+
+        assert_eq!(policy, google_api_network_policy());
     }
 }

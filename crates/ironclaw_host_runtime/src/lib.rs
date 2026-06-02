@@ -26,8 +26,9 @@
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    ApprovalRequestId, CapabilityId, CorrelationId, ExecutionContext, ExtensionId, ProcessId,
-    ResourceEstimate, ResourceScope, ResourceUsage, RuntimeKind, SecretHandle,
+    ApprovalRequestId, CapabilityDisplayOutputPreview, CapabilityId, CorrelationId,
+    ExecutionContext, ExtensionId, ProcessId, ResourceEstimate, ResourceScope, ResourceUsage,
+    RuntimeCredentialAuthRequirement, RuntimeKind, SecretHandle,
     runtime_policy::{DeploymentMode, EffectiveRuntimePolicy, RuntimeProfile},
 };
 use ironclaw_trust::TrustDecision;
@@ -84,7 +85,8 @@ pub use invocation_services::{
 };
 pub use obligations::{
     BuiltinObligationHandler, BuiltinObligationServices, LEAK_REDACT_FAILED_CODE,
-    ProcessObligationLifecycleStore,
+    ProcessObligationLifecycleStore, RuntimeCredentialAccountRequest,
+    RuntimeCredentialAccountResolver,
 };
 pub use planner::{ExecutionPlan, PlannerError, plan_capability};
 pub use process_output::{SavedCommandOutput, SavedCommandOutputSanitization};
@@ -461,6 +463,7 @@ pub struct VisibleCapabilitySurface {
 pub struct RuntimeCapabilityCompleted {
     pub capability_id: CapabilityId,
     pub output: Value,
+    pub display_preview: Option<CapabilityDisplayOutputPreview>,
     pub usage: ResourceUsage,
 }
 
@@ -479,6 +482,7 @@ pub struct RuntimeAuthGate {
     pub capability_id: CapabilityId,
     pub reason: RuntimeBlockedReason,
     pub required_secrets: Vec<SecretHandle>,
+    pub credential_requirements: Vec<RuntimeCredentialAuthRequirement>,
 }
 
 /// Resource suspension state.

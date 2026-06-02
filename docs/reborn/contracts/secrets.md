@@ -153,9 +153,12 @@ material once and reuses it only within that request. Runtime callers must not
 supply their own `Authorization`, cookie, or API-key-style headers; those values
 must come from the host-approved injection plan. WASM host-mediated HTTP
 composition should derive production staged plans from manifest v2
-`runtime_credentials`: the declaration identifies the secret handle, HTTPS
-audience, required/optional behavior, and injection target, while authorization
-still decides whether the active grant may stage that handle. Explicit
+`runtime_credentials`: the declaration identifies the runtime credential slot,
+source (`secret_handle` or product-auth account provider), HTTPS audience,
+required/optional behavior, and injection target, while authorization still
+decides whether material may be staged for that invocation. Product-auth account
+sources resolve to the selected account's access secret before the same
+one-shot handoff store is populated. Explicit
 `WasmStagedRuntimeCredentials` construction is retained for named legacy/test
 composition; exact-url rules should be preferred there when a credential is only
 valid for specific destinations.

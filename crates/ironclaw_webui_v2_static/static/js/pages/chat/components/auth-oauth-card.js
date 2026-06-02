@@ -13,75 +13,105 @@
  *   by this component. The server supplies only an opaque IDP URL.
  * - window.open is called with `noopener,noreferrer` to prevent the popup
  *   from accessing this window's context.
+ * - The URL is parsed and must have the "https:" protocol before opening to
+ *   reject non-HTTPS schemes (javascript:, data:, custom protocol handlers).
  */
 import { React, html } from "../../../lib/html.js";
+import { useT } from "../../../lib/i18n.js";
+import { Button } from "../../../design-system/button.js";
+import { Icon } from "../../../design-system/icons.js";
 
 export function AuthOauthCard({ gate, onCancel }) {
+  const t = useT();
   const [opened, setOpened] = React.useState(false);
-
-  const openAuth = React.useCallback(() => {
-    if (!gate.authorizationUrl) return;
-    // Must be called synchronously in a click handler to be treated as a
-    // user-gesture popup by the browser (not blocked by popup blockers).
-    window.open(gate.authorizationUrl, "_blank", "noopener,noreferrer");
-    setOpened(true);
+  const hasHttpsAuthorizationUrl = React.useMemo(() => {
+    if (!gate.authorizationUrl) return false;
+    try {
+      return new URL(gate.authorizationUrl).protocol === "https:";
+    } catch {
+      return false;
+    }
   }, [gate.authorizationUrl]);
 
   const providerLabel = gate.provider
     ? gate.provider.charAt(0).toUpperCase() + gate.provider.slice(1)
-    : "the provider";
+    : t("authGate.oauthProviderFallback");
+
+  const openAuth = React.useCallback(() => {
+    // Guard: reject missing or non-HTTPS URLs before window.open so that
+    // custom protocol handlers (javascript:, tel:, ms-msdt:, slack:) are
+    // never opened even if a future code path writes an unexpected scheme.
+    if (!hasHttpsAuthorizationUrl) return;
+    // Must be called synchronously in a click handler to be treated as a
+    // user-gesture popup by the browser (not blocked by popup blockers).
+    window.open(gate.authorizationUrl, "_blank", "noopener,noreferrer");
+    setOpened(true);
+  }, [gate.authorizationUrl, hasHttpsAuthorizationUrl]);
+
+  const openLabel = opened
+    ? t("authGate.reopenAuthorization", { provider: providerLabel })
+    : t("authGate.openAuthorization", { provider: providerLabel });
 
   return html`
-    <div class="auth-oauth-card border rounded-xl p-4 bg-surface shadow-sm space-y-3">
-      <div class="font-semibold text-base">
-        ${gate.headline || \`Authorize \${providerLabel}\`}
+    <form
+      className="mx-auto w-full max-w-lg rounded-xl border border-[rgba(76,167,230,0.34)] bg-[rgba(76,167,230,0.08)] p-4"
+      onSubmit=${(e) => e.preventDefault()}
+    >
+      <div className="mb-3 flex items-center gap-2">
+        <span className="grid h-8 w-8 place-items-center rounded-md border border-[rgba(76,167,230,0.28)] bg-[rgba(76,167,230,0.1)] text-[#8fc8f2]">
+          <${Icon} name="link" className="h-4 w-4" />
+        </span>
+        <span className="font-semibold text-white">
+          ${gate?.headline || t("authGate.oauthTitle")}
+        </span>
       </div>
 
-      ${gate.accountLabel && html`
-        <div class="text-sm text-muted">
-          Account: ${gate.accountLabel}
+      ${gate?.accountLabel && html`
+        <div className="mb-2 text-xs text-iron-300">
+          ${t("authGate.oauthAccountLabel")} ${gate.accountLabel}
         </div>
       `}
 
-      ${gate.body && html`
-        <div class="text-sm">${gate.body}</div>
+      ${gate?.body && html`
+        <div className="mb-3 text-sm text-iron-200">${gate.body}</div>
       `}
 
-      <div class="flex gap-2 pt-1">
-        <button
-          type="button"
-          class="btn btn-primary flex-1"
-          onClick=${openAuth}
-          disabled=${!gate.authorizationUrl}
+      <div className="flex flex-wrap gap-2">
+        <${Button}
+          as="a"
+          href=${hasHttpsAuthorizationUrl ? gate.authorizationUrl : undefined}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="auth-oauth"
+          variant="primary"
+          disabled=${!hasHttpsAuthorizationUrl}
+          onClick=${(event) => {
+            event.preventDefault();
+            openAuth();
+          }}
         >
-          ${opened
-            ? \`Re-open \${providerLabel} authorization\`
-            : \`Open \${providerLabel} authorization\`}
-        </button>
-
-        ${onCancel && html`
-          <button
-            type="button"
-            class="btn btn-secondary"
-            onClick=${onCancel}
-          >
-            Cancel
-          </button>
-        `}
+          ${openLabel}
+        <//>
+        <${Button}
+          type="button"
+          variant="secondary"
+          onClick=${() => onCancel?.()}
+        >
+          ${t("authGate.cancel")}
+        <//>
       </div>
 
       ${opened && html`
-        <div class="text-xs text-muted">
-          Waiting for authorization to complete\u2026 You can close the popup tab
-          once you\u2019ve approved access.
-        </div>
+        <p className="mt-2 text-xs text-iron-300">
+          ${t("authGate.oauthWaiting")}
+        </p>
       `}
 
-      ${gate.expiresAt && html`
-        <div class="text-xs text-muted">
-          Expires: ${new Date(gate.expiresAt).toLocaleString()}
-        </div>
+      ${gate?.expiresAt && html`
+        <p className="mt-1 text-xs text-iron-300">
+          ${t("authGate.expiresAt")}: ${new Date(gate.expiresAt).toLocaleString()}
+        </p>
       `}
-    </div>
+    </form>
   `;
 }

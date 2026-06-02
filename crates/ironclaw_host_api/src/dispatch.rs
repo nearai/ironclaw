@@ -26,6 +26,47 @@ pub struct CapabilityDispatchRequest {
     pub input: Value,
 }
 
+/// Display-only preview metadata for a completed capability result.
+///
+/// This side channel lets runtime/tool implementations provide renderer-ready
+/// material without changing the model-visible capability output shape.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapabilityDisplayOutputPreview {
+    pub output_summary: Option<String>,
+    /// Raw, unsanitized content — callers MUST sanitize before display or logging.
+    /// The canonical sanitization point is the projection layer in
+    /// `ironclaw_reborn_composition`. New consumers must not read this field
+    /// without sanitizing.
+    pub output_preview: String,
+    pub output_kind: String,
+    pub subtitle: Option<String>,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapabilityDisplayText {
+    pub text: String,
+    pub truncated: bool,
+}
+
+pub fn truncate_capability_display_text(text: &str, max_bytes: usize) -> CapabilityDisplayText {
+    if text.len() <= max_bytes {
+        return CapabilityDisplayText {
+            text: text.to_string(),
+            truncated: false,
+        };
+    }
+
+    let mut end = max_bytes;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    CapabilityDisplayText {
+        text: text[..end].to_string(),
+        truncated: true,
+    }
+}
+
 /// Normalized dispatch result returned by a runtime dispatcher.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapabilityDispatchResult {
@@ -33,6 +74,7 @@ pub struct CapabilityDispatchResult {
     pub provider: ExtensionId,
     pub runtime: RuntimeKind,
     pub output: Value,
+    pub display_preview: Option<CapabilityDisplayOutputPreview>,
     pub usage: ResourceUsage,
     pub receipt: ResourceReceipt,
 }

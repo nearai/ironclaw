@@ -26,3 +26,20 @@ pub struct GoogleOAuthConfig {
     /// whose `hd` claim does not match.
     pub allowed_hd: Option<String>,
 }
+
+/// GitHub OAuth configuration. Mirrors the v1 gateway's
+/// `GitHubOAuthConfig` shape so existing operator config can be
+/// re-used by the v2 wire-up.
+///
+/// GitHub's OAuth App flow does not support PKCE; CSRF is protected
+/// solely by the `state` parameter the router mints, so there is no
+/// hosted-domain analogue here — the provider just needs the client
+/// credentials.
+#[derive(Debug, Clone)]
+pub struct GitHubOAuthConfig {
+    /// OAuth App client id issued by GitHub.
+    pub client_id: String,
+    /// OAuth App client secret. Wrapped in [`SecretString`] so the
+    /// `Debug` impl is redacted.
+    pub client_secret: SecretString,
+}

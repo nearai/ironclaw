@@ -15,22 +15,26 @@
 //!   return the bearer over same-origin JSON.
 //! - `POST /auth/logout` — revoke the current session.
 //!
-//! The crate ships a Google provider only at the moment; GitHub and
-//! NEAR are out of scope for this iteration of issue #4116. The
-//! [`OAuthProvider`] trait is the seam those will plug into.
+//! The crate ships Google and GitHub providers today; NEAR wallet
+//! login (which does not fit the OAuth code flow) is still out of
+//! scope for this iteration of issue #4116. The [`OAuthProvider`]
+//! trait is the seam those plug into.
 
 mod config;
 mod error;
+mod github;
 mod google;
 mod pending;
 mod profile;
 mod provider;
+mod provider_http;
 mod provider_name;
 mod routes;
 mod user_directory;
 
-pub use config::GoogleOAuthConfig;
-pub use error::OAuthError;
+pub use config::{GitHubOAuthConfig, GoogleOAuthConfig};
+pub use error::{OAuthError, ProviderInitError};
+pub use github::GitHubProvider;
 pub use google::GoogleProvider;
 pub use ironclaw_reborn_composition::PublicRouteMount;
 pub use profile::OAuthUserProfile;

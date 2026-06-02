@@ -145,6 +145,18 @@ fn projection_state() -> ProductProjectionState {
             ProductProjectionItem::RunStatus {
                 run_id: run_id(),
                 status: "running".to_string(),
+                failure_category: None,
+                failure_summary: None,
+            },
+            ProductProjectionItem::RunStatus {
+                run_id: run_id(),
+                status: "failed".to_string(),
+                failure_category: Some(
+                    ironclaw_turns::SanitizedFailure::new("driver_failed").unwrap(),
+                ),
+                failure_summary: Some(
+                    "The run failed because the execution driver reported an error.".to_string(),
+                ),
             },
             ProductProjectionItem::WorkSummary {
                 id: "work-summary-1".to_string(),

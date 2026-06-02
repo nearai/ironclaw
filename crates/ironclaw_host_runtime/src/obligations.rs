@@ -18,9 +18,11 @@ use ironclaw_events::{
 };
 use ironclaw_host_api::{
     ActionResultSummary, ActionSummary, AuditEnvelope, AuditEventId, AuditStage,
-    CapabilityDispatchResult, CapabilityId, DecisionSummary, EffectKind, MountView, NetworkPolicy,
-    Obligation, ProcessId, ResourceCeiling, ResourceEstimate, ResourceReservation, ResourceScope,
-    ResourceUsage, RuntimeHttpEgress, SandboxQuota, SecretHandle,
+    CapabilityDispatchResult, CapabilityId, CredentialStageError, DecisionSummary, EffectKind,
+    ExtensionId, MountView, NetworkPolicy, Obligation, ProcessId, ResourceCeiling,
+    ResourceEstimate, ResourceReservation, ResourceScope, ResourceUsage,
+    RuntimeCredentialAccountProviderId, RuntimeCredentialAuthRequirement, RuntimeHttpEgress,
+    SandboxQuota, SecretHandle,
 };
 use ironclaw_network::NetworkHttpEgress;
 use ironclaw_processes::{ProcessError, ProcessRecord, ProcessStart, ProcessStore};
@@ -35,12 +37,36 @@ use crate::http_body::{RuntimeHttpBodyStore, UnsupportedRuntimeHttpBodyStore};
 /// Default maximum lifetime for one-shot runtime secret material staged in memory.
 pub(crate) const DEFAULT_RUNTIME_SECRET_INJECTION_TTL: Duration = Duration::from_secs(300);
 
-/// One-shot runtime secret material staged after `InjectSecretOnce` lease consumption.
+#[derive(Debug)]
+pub struct RuntimeCredentialAccountRequest<'a> {
+    pub scope: &'a ResourceScope,
+    pub provider: &'a RuntimeCredentialAccountProviderId,
+    pub requester_extension: &'a ExtensionId,
+}
+
+#[async_trait]
+pub trait RuntimeCredentialAccountResolver: Send + Sync + fmt::Debug {
+    /// Resolve the access-secret handle for the requested product-auth account.
+    ///
+    /// Returns [`CredentialStageError::AuthRequired`] when the account is
+    /// missing/unconfigured/expired/revoked (user must re-authenticate), or
+    /// [`CredentialStageError::Backend`] for internal failures not attributable
+    /// to user credentials. Shares its error vocabulary with the rest of the
+    /// staged-credential surface (`ProductAuthCredentialStageError`,
+    /// `GsuiteCredentialStageError`) so no per-layer error mapping is needed.
+    async fn resolve_access_secret(
+        &self,
+        request: RuntimeCredentialAccountRequest<'_>,
+    ) -> Result<SecretHandle, CredentialStageError>;
+}
+
+/// Runtime secret material staged after `InjectSecretOnce` lease consumption.
 ///
 /// The store is keyed by scoped invocation, capability, and handle. Runtime adapters
-/// must use `take(...)` so staged material is removed before it can be reused.
-/// Entries also expire after a short TTL so abandoned handoffs from setup
-/// failures, cancellation, or adapter bugs cannot remain usable indefinitely.
+/// borrow staged material during dispatch; `complete_dispatch`/`abort` removes it
+/// after the scoped capability finishes. Entries also expire after a short TTL so
+/// abandoned handoffs from setup failures, cancellation, or adapter bugs cannot
+/// remain usable indefinitely.
 #[derive(Clone)]
 pub(crate) struct RuntimeSecretInjectionStore {
     state: Arc<RuntimeSecretInjectionState>,
@@ -107,6 +133,24 @@ impl RuntimeSecretInjectionStore {
                 handle,
             ))
             .map(|entry| entry.material))
+    }
+
+    pub(crate) fn get(
+        &self,
+        scope: &ResourceScope,
+        capability_id: &CapabilityId,
+        handle: &SecretHandle,
+    ) -> Result<Option<SecretMaterial>, RuntimeSecretInjectionStoreError> {
+        let now = Instant::now();
+        let mut secrets = self.lock()?;
+        prune_expired_entries(&mut secrets, now);
+        Ok(secrets
+            .get(&RuntimeSecretInjectionKey::new(
+                scope,
+                capability_id,
+                handle,
+            ))
+            .map(|entry| entry.material.clone()))
     }
 
     /// Discard all staged secrets for a scoped capability before process ownership exists.
@@ -373,6 +417,7 @@ pub struct BuiltinObligationServices {
     secret_store: Arc<dyn SecretStore>,
     secret_injections: Arc<RuntimeSecretInjectionStore>,
     resource_governor: Arc<dyn ResourceGovernor>,
+    credential_account_resolver: Option<Arc<dyn RuntimeCredentialAccountResolver>>,
 }
 
 impl BuiltinObligationServices {
@@ -403,7 +448,24 @@ impl BuiltinObligationServices {
             secret_store,
             secret_injections,
             resource_governor,
+            credential_account_resolver: None,
         }
+    }
+
+    pub fn with_credential_account_resolver<T>(mut self, resolver: Arc<T>) -> Self
+    where
+        T: RuntimeCredentialAccountResolver + 'static,
+    {
+        self.credential_account_resolver = Some(resolver);
+        self
+    }
+
+    pub fn with_credential_account_resolver_dyn(
+        mut self,
+        resolver: Arc<dyn RuntimeCredentialAccountResolver>,
+    ) -> Self {
+        self.credential_account_resolver = Some(resolver);
+        self
     }
 
     pub fn audit_sink(&self) -> Arc<dyn AuditSink> {
@@ -475,12 +537,16 @@ impl BuiltinObligationServices {
     }
 
     pub fn obligation_handler(&self) -> BuiltinObligationHandler {
-        BuiltinObligationHandler::new()
+        let handler = BuiltinObligationHandler::new()
             .with_audit_sink_dyn(self.audit_sink.clone())
             .with_network_policy_store(self.network_policies.clone())
             .with_secret_store_dyn(self.secret_store.clone())
             .with_secret_injection_store(self.secret_injections.clone())
-            .with_resource_governor_dyn(self.resource_governor.clone())
+            .with_resource_governor_dyn(self.resource_governor.clone());
+        match &self.credential_account_resolver {
+            Some(resolver) => handler.with_credential_account_resolver_dyn(Arc::clone(resolver)),
+            None => handler,
+        }
     }
 }
 
@@ -493,6 +559,13 @@ impl fmt::Debug for BuiltinObligationServices {
             .field("secret_store", &"[REDACTED]")
             .field("secret_injections", &self.secret_injections)
             .field("resource_governor", &"<resource_governor>")
+            .field(
+                "credential_account_resolver",
+                &self
+                    .credential_account_resolver
+                    .as_ref()
+                    .map(|_| "<resolver>"),
+            )
             .finish()
     }
 }
@@ -996,6 +1069,7 @@ pub struct BuiltinObligationHandler {
     secret_store: Option<Arc<dyn SecretStore>>,
     secret_injections: Option<Arc<RuntimeSecretInjectionStore>>,
     resource_governor: Option<Arc<dyn ResourceGovernor>>,
+    credential_account_resolver: Option<Arc<dyn RuntimeCredentialAccountResolver>>,
 }
 
 impl BuiltinObligationHandler {
@@ -1072,6 +1146,23 @@ impl BuiltinObligationHandler {
         self
     }
 
+    pub fn with_credential_account_resolver<T>(mut self, resolver: Arc<T>) -> Self
+    where
+        T: RuntimeCredentialAccountResolver + 'static,
+    {
+        let resolver: Arc<dyn RuntimeCredentialAccountResolver> = resolver;
+        self.credential_account_resolver = Some(resolver);
+        self
+    }
+
+    pub fn with_credential_account_resolver_dyn(
+        mut self,
+        resolver: Arc<dyn RuntimeCredentialAccountResolver>,
+    ) -> Self {
+        self.credential_account_resolver = Some(resolver);
+        self
+    }
+
     async fn emit_audit_before(
         &self,
         request: &CapabilityObligationRequest<'_>,
@@ -1111,7 +1202,9 @@ impl BuiltinObligationHandler {
                 .map_err(|_| secret_obligation_failed())?
                 .is_some();
             if !exists {
-                return Err(CapabilityObligationError::AuthRequired);
+                return Err(CapabilityObligationError::AuthRequired {
+                    credential_requirements: Vec::new(),
+                });
             }
         }
         Ok(())
@@ -1155,6 +1248,55 @@ impl BuiltinObligationHandler {
                 )
                 .map_err(|_| secret_obligation_failed())?;
         }
+        Ok(())
+    }
+
+    async fn inject_credential_accounts(
+        &self,
+        request: &CapabilityObligationRequest<'_>,
+    ) -> Result<(), CapabilityObligationError> {
+        let account_obligations = credential_account_injection_obligations(request.obligations);
+        if account_obligations.is_empty() {
+            return Ok(());
+        }
+        let Some(resolver) = &self.credential_account_resolver else {
+            return Err(secret_obligation_failed());
+        };
+        let Some(secret_store) = &self.secret_store else {
+            return Err(secret_obligation_failed());
+        };
+        let Some(secret_injections) = &self.secret_injections else {
+            return Err(secret_obligation_failed());
+        };
+
+        for obligation in account_obligations {
+            let access_secret = resolver
+                .resolve_access_secret(RuntimeCredentialAccountRequest {
+                    scope: &request.context.resource_scope,
+                    provider: obligation.provider,
+                    requester_extension: obligation.requester_extension,
+                })
+                .await
+                .map_err(|error| {
+                    credential_stage_error_to_obligation_error(error, Some(&obligation))
+                })?;
+            // Retrieve and stage the resolved credential under the obligation's injection handle.
+            // The access_secret names the material in the secret store; obligation.handle is
+            // the slot name the WASM guest expects.
+            stage_credential_material(
+                secret_store.as_ref(),
+                secret_injections,
+                &request.context.resource_scope,
+                request.capability_id,
+                &access_secret,
+                obligation.handle,
+            )
+            .await
+            .map_err(|error| {
+                credential_stage_error_to_obligation_error(error, Some(&obligation))
+            })?;
+        }
+
         Ok(())
     }
 
@@ -1213,6 +1355,7 @@ impl BuiltinObligationHandler {
         }
 
         self.inject_secrets(request, secret_handles).await?;
+        self.inject_credential_accounts(request).await?;
 
         if let Some(policy) = network_policy {
             let Some(store) = &self.network_policies else {
@@ -1306,7 +1449,7 @@ impl CapabilityObligationHandler for BuiltinObligationHandler {
             return Err(network_obligation_failed());
         }
         let scoped_mounts = scoped_mount_obligation(request.context, request.obligations)?;
-        let secret_handles = secret_injection_obligations(request.obligations);
+        let secret_handles = secret_injection_handles(request.obligations);
         self.preflight_secret_injection(&request, &secret_handles)
             .await?;
         self.preflight_resource_ceiling(&request)?;
@@ -1389,6 +1532,7 @@ impl CapabilityObligationHandler for BuiltinObligationHandler {
                     return Err(error);
                 }
             };
+            dispatch.display_preview = None;
         }
 
         let output_bytes = dispatch_output_bytes(&dispatch.output)?;
@@ -1453,7 +1597,7 @@ impl BuiltinObligationHandler {
         }
 
         if let Some(store) = &self.secret_injections {
-            for handle in secret_injection_obligations(obligations) {
+            for handle in staged_secret_injection_handles(obligations) {
                 let _ = store
                     .take(scope, capability_id, &handle)
                     .map_err(|_| secret_obligation_failed())?;
@@ -1498,6 +1642,8 @@ fn obligation_supported_before_dispatch(
     match obligation {
         Obligation::AuditBefore
         | Obligation::ApplyNetworkPolicy { .. }
+        | Obligation::FirstPartyCredentialStagedViaHostPort { .. }
+        | Obligation::InjectCredentialAccountOnce { .. }
         | Obligation::InjectSecretOnce { .. }
         | Obligation::ReserveResources { .. }
         | Obligation::UseScopedMounts { .. } => true,
@@ -1530,6 +1676,8 @@ fn obligation_supported_after_dispatch(
     match obligation {
         Obligation::AuditBefore
         | Obligation::ApplyNetworkPolicy { .. }
+        | Obligation::FirstPartyCredentialStagedViaHostPort { .. }
+        | Obligation::InjectCredentialAccountOnce { .. }
         | Obligation::InjectSecretOnce { .. }
         | Obligation::ReserveResources { .. }
         | Obligation::UseScopedMounts { .. } => true,
@@ -1544,7 +1692,7 @@ fn obligation_supported_after_dispatch(
     }
 }
 
-fn secret_injection_obligations(obligations: &[Obligation]) -> Vec<SecretHandle> {
+fn secret_injection_handles(obligations: &[Obligation]) -> Vec<SecretHandle> {
     obligations
         .iter()
         .filter_map(|obligation| match obligation {
@@ -1552,6 +1700,107 @@ fn secret_injection_obligations(obligations: &[Obligation]) -> Vec<SecretHandle>
             _ => None,
         })
         .collect()
+}
+
+struct CredentialAccountInjectionObligation<'a> {
+    handle: &'a SecretHandle,
+    provider: &'a RuntimeCredentialAccountProviderId,
+    requester_extension: &'a ExtensionId,
+}
+
+fn credential_account_injection_obligations(
+    obligations: &[Obligation],
+) -> Vec<CredentialAccountInjectionObligation<'_>> {
+    obligations
+        .iter()
+        .filter_map(|obligation| match obligation {
+            Obligation::InjectCredentialAccountOnce {
+                handle,
+                provider,
+                requester_extension,
+            } => Some(CredentialAccountInjectionObligation {
+                handle,
+                provider,
+                requester_extension,
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+fn staged_secret_injection_handles(obligations: &[Obligation]) -> Vec<SecretHandle> {
+    obligations
+        .iter()
+        .filter_map(|obligation| match obligation {
+            Obligation::InjectSecretOnce { handle }
+            | Obligation::InjectCredentialAccountOnce { handle, .. } => Some(handle.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Map the canonical staged-credential error to the obligation-handler error type.
+///
+/// Used by both [`inject_credential_accounts`] (resolver-side errors) and
+/// [`stage_credential_material`] (storage-side errors) so the WASM
+/// `InjectCredentialAccountOnce` path and the first-party stager path share
+/// the same AuthRequired/Backend semantics.
+fn credential_stage_error_to_obligation_error(
+    error: CredentialStageError,
+    credential_obligation: Option<&CredentialAccountInjectionObligation<'_>>,
+) -> CapabilityObligationError {
+    match error {
+        CredentialStageError::AuthRequired => CapabilityObligationError::AuthRequired {
+            credential_requirements: credential_obligation
+                .map(|obligation| {
+                    vec![RuntimeCredentialAuthRequirement {
+                        provider: obligation.provider.clone(),
+                        requester_extension: obligation.requester_extension.clone(),
+                    }]
+                })
+                .unwrap_or_default(),
+        },
+        CredentialStageError::Backend => secret_obligation_failed(),
+    }
+}
+
+/// Retrieve `source` from the secret store and stage the material under `target`
+/// in the injection store for the given capability invocation.
+///
+/// Used when the secret store key (`source`) differs from the runtime injection slot
+/// (`target`) — for example, when a product-auth account's backing secret is resolved
+/// to a concrete handle before being injected under the WASM guest's declared slot name.
+/// Lease → consume → insert the staged credential material.
+///
+/// Mirrors [`crate::services::ProductAuthProviderRuntimePorts::stage_secret_once`]
+/// so the WASM `InjectCredentialAccountOnce` path and the first-party stager path
+/// (e.g. `ProductAuthRuntimeGsuiteCredentialStager`) share identical lease/consume
+/// semantics and `CredentialStageError` mapping. `SecretStoreError` variants for
+/// unknown/expired/revoked/consumed material map to
+/// [`CredentialStageError::AuthRequired`] via [`crate::services::stage_secret_error`];
+/// other failures map to [`CredentialStageError::Backend`].
+async fn stage_credential_material(
+    secret_store: &dyn SecretStore,
+    secret_injections: &RuntimeSecretInjectionStore,
+    scope: &ResourceScope,
+    capability_id: &CapabilityId,
+    source: &SecretHandle,
+    target: &SecretHandle,
+) -> Result<(), CredentialStageError> {
+    let lease = secret_store.lease_once(scope, source).await.map_err(|e| {
+        tracing::debug!(err = %e, "stage_credential_material: lease_once failed");
+        crate::services::stage_secret_error(e)
+    })?;
+    let secret = secret_store.consume(scope, lease.id).await.map_err(|e| {
+        tracing::debug!(err = %e, "stage_credential_material: consume failed");
+        crate::services::stage_secret_error(e)
+    })?;
+    secret_injections
+        .insert(scope, capability_id, target, secret)
+        .map_err(|e| {
+            tracing::debug!(err = %e, "stage_credential_material: insert failed");
+            CredentialStageError::Backend
+        })
 }
 
 fn network_policy_obligation(
@@ -1903,6 +2152,10 @@ fn obligation_label(obligation: &Obligation) -> Option<&'static str> {
         Obligation::RedactOutput => Some("redact_output"),
         Obligation::ApplyNetworkPolicy { .. } => Some("apply_network_policy"),
         Obligation::InjectSecretOnce { .. } => Some("inject_secret_once"),
+        Obligation::InjectCredentialAccountOnce { .. } => Some("inject_credential_account_once"),
+        Obligation::FirstPartyCredentialStagedViaHostPort { .. } => {
+            Some("first_party_credential_staged_via_host_port")
+        }
         Obligation::EnforceOutputLimit { .. } => Some("enforce_output_limit"),
         Obligation::ReserveResources { .. } => Some("reserve_resources"),
         Obligation::UseScopedMounts { .. } => Some("use_scoped_mounts"),
@@ -1938,9 +2191,9 @@ mod tests {
 
     use ironclaw_events::InMemoryAuditSink;
     use ironclaw_host_api::{
-        AgentId, CapabilitySet, CorrelationId, ExecutionContext, ExtensionId, InvocationId,
-        NetworkScheme, NetworkTargetPattern, ProjectId, ResourceReservationId, RuntimeKind,
-        TenantId, TrustClass, UserId,
+        AgentId, CapabilityDisplayOutputPreview, CapabilitySet, CorrelationId, ExecutionContext,
+        ExtensionId, InvocationId, NetworkScheme, NetworkTargetPattern, ProjectId,
+        ResourceReservationId, RuntimeKind, TenantId, TrustClass, UserId,
     };
     use ironclaw_resources::{InMemoryResourceGovernor, ResourceAccount};
     use ironclaw_secrets::InMemorySecretStore;
@@ -2083,6 +2336,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn redact_output_clears_display_preview_side_channel() {
+        use ironclaw_host_api::{ReservationStatus, ResourceReceipt, ResourceUsage, RuntimeKind};
+
+        let services = BuiltinObligationServices::with_handoff_stores(
+            Arc::new(InMemoryAuditSink::new()),
+            Arc::new(NetworkObligationPolicyStore::new()),
+            Arc::new(InMemorySecretStore::new()),
+            Arc::new(RuntimeSecretInjectionStore::new()),
+            Arc::new(InMemoryResourceGovernor::new()),
+        );
+        let handler = services.obligation_handler();
+        let context = execution_context();
+        let capability_id = capability_id();
+        let estimate = ResourceEstimate::default();
+        let obligations = vec![Obligation::RedactOutput];
+        let dispatch = CapabilityDispatchResult {
+            capability_id: capability_id.clone(),
+            provider: context.extension_id.clone(),
+            runtime: RuntimeKind::Wasm,
+            output: serde_json::json!({"secret": "sk-secret", "safe": "ok"}),
+            display_preview: Some(CapabilityDisplayOutputPreview {
+                output_summary: Some("contains secret".to_string()),
+                output_preview: "sk-secret".to_string(),
+                output_kind: "text".to_string(),
+                subtitle: None,
+                truncated: false,
+            }),
+            usage: ResourceUsage::default(),
+            receipt: ResourceReceipt {
+                id: ResourceReservationId::new(),
+                scope: context.resource_scope.clone(),
+                status: ReservationStatus::Released,
+                estimate: ResourceEstimate::default(),
+                actual: None,
+            },
+        };
+
+        let completed = handler
+            .complete_dispatch(CapabilityObligationCompletionRequest {
+                phase: CapabilityObligationPhase::Invoke,
+                context: &context,
+                capability_id: &capability_id,
+                estimate: &estimate,
+                obligations: &obligations,
+                dispatch: &dispatch,
+            })
+            .await
+            .expect("redacted dispatch completes");
+
+        assert!(completed.display_preview.is_none());
+        assert_eq!(completed.output["safe"], serde_json::json!("ok"));
+    }
+
+    #[tokio::test]
     async fn leak_detector_block_records_security_audit_event_through_complete_dispatch() {
         use ironclaw_events::{
             InMemorySecurityAuditSink, SecurityAuditSink, SecurityBoundary, SecurityDecision,
@@ -2124,12 +2431,13 @@ mod tests {
         //   - capability_id + scope are populated
         //   - no payload (the offending string never appears in the event)
         let leaky_payload =
-            serde_json::Value::String("hello AKIAABCDEFGHIJKLMNOP goodbye".to_string());
+            serde_json::Value::String("hello AKIAIOSFODNN7EXAMPLE goodbye".to_string());
         let dispatch = CapabilityDispatchResult {
             capability_id: capability_id.clone(),
             provider: context.extension_id.clone(),
             runtime: RuntimeKind::Wasm,
             output: leaky_payload,
+            display_preview: None,
             usage: ResourceUsage::default(),
             receipt: ResourceReceipt {
                 id: ResourceReservationId::new(),
@@ -2214,7 +2522,8 @@ mod tests {
             capability_id: capability_id.clone(),
             provider: context.extension_id.clone(),
             runtime: RuntimeKind::Wasm,
-            output: serde_json::Value::String("leak AKIAABCDEFGHIJKLMNOP".to_string()),
+            output: serde_json::Value::String("leak AKIAIOSFODNN7EXAMPLE".to_string()),
+            display_preview: None,
             usage: ResourceUsage::default(),
             receipt: ResourceReceipt {
                 id: ResourceReservationId::new(),

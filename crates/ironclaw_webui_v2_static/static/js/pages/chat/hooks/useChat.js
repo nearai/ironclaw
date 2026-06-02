@@ -32,6 +32,10 @@ function credentialStoredGateResolutionError(cause) {
   return error;
 }
 
+function submitResponseResumedTurnGate(response) {
+  return response?.continuation?.type === "turn_gate_resume";
+}
+
 // v2 chat hook. Differences from the fork's v1 hook:
 // - No image / attachment plumbing — v2 SendMessage carries `content` only.
 // - No /api/chat/approval — approvals fold into gate/resolve in v2.
@@ -230,8 +234,13 @@ export function useChat(threadId) {
         always: opts.always,
         credentialRef: opts.credentialRef,
       });
+      const shouldContinueProcessing =
+        resolution === "approved" || resolution === "credential_provided";
       setPendingGate(null);
-      setIsProcessing(true);
+      setIsProcessing(shouldContinueProcessing);
+      if (!shouldContinueProcessing) {
+        setActiveRun(null);
+      }
     },
     [pendingGate, threadId],
   );
@@ -260,8 +269,9 @@ export function useChat(threadId) {
 
       try {
         let credentialRef = authTokenSubmitRef.current.credentialRef;
+        let submitted = null;
         if (!credentialRef) {
-          const submitted = await withAuthTokenTimeout((signal) =>
+          submitted = await withAuthTokenTimeout((signal) =>
             submitManualToken({
               provider,
               accountLabel,
@@ -279,19 +289,21 @@ export function useChat(threadId) {
           authTokenSubmitRef.current.credentialRef = credentialRef;
         }
 
-        try {
-          await withAuthTokenTimeout((signal) =>
-            resolveGateRequest({
-              threadId,
-              runId,
-              gateRef,
-              resolution: "credential_provided",
-              credentialRef,
-              signal,
-            }),
-          );
-        } catch (err) {
-          throw credentialStoredGateResolutionError(err);
+        if (!submitResponseResumedTurnGate(submitted)) {
+          try {
+            await withAuthTokenTimeout((signal) =>
+              resolveGateRequest({
+                threadId,
+                runId,
+                gateRef,
+                resolution: "credential_provided",
+                credentialRef,
+                signal,
+              }),
+            );
+          } catch (err) {
+            throw credentialStoredGateResolutionError(err);
+          }
         }
 
         authTokenSubmitRef.current = {

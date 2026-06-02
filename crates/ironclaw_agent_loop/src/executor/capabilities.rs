@@ -251,6 +251,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                             call: first_call,
                             kind: GateKind::AwaitDependentRun,
                             gate_ref: shared_gate_ref,
+                            credential_requirements: Vec::new(),
                         },
                     )
                     .await?
@@ -370,11 +371,16 @@ impl CapabilityStage {
                             call,
                             kind: GateKind::Approval,
                             gate_ref,
+                            credential_requirements: Vec::new(),
                         },
                     )
                     .await
             }
-            CapabilityOutcome::AuthRequired { gate_ref, .. } => {
+            CapabilityOutcome::AuthRequired {
+                gate_ref,
+                credential_requirements,
+                ..
+            } => {
                 GateStage
                     .process(
                         ctx,
@@ -383,6 +389,7 @@ impl CapabilityStage {
                             call,
                             kind: GateKind::Auth,
                             gate_ref,
+                            credential_requirements,
                         },
                     )
                     .await
@@ -396,6 +403,7 @@ impl CapabilityStage {
                             call,
                             kind: GateKind::Resource,
                             gate_ref,
+                            credential_requirements: Vec::new(),
                         },
                     )
                     .await

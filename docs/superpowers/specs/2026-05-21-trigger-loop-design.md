@@ -17,6 +17,14 @@ workflow from something other than a live human message. V1 delivers
 mail." Webhook and message-regex triggers are planned fast-follow work and the
 architecture must not preclude them.
 
+**P0 implementation goal:** ship cron-backed scheduled trigger events first. P0
+proves that a stored schedule can fire, enter the Reborn inbound/turn pipeline
+as a synthetic inbound message, run in a new dedicated thread, and persist the
+resulting thread. Fixed interval and one-shot schedules may share the same
+schedule-provider implementation if they are cheap, but cron scheduled events
+are the first acceptance target. Webhook, message-regex, and system-event
+sources are not P0.
+
 A trigger fire is treated as exactly what it is: a **synthetic inbound
 message**. Instead of building a parallel execution engine, a fire fans into
 the Reborn inbound pipeline (`InboundTurnService → TurnCoordinator →
@@ -36,7 +44,9 @@ cron is an external transport.
 
 ### In V1
 
-- Schedule trigger source: cron expression, fixed interval, one-shot timestamp.
+- Schedule trigger source: cron expression first; fixed interval and one-shot
+  timestamp may ride along in the same provider if they do not expand the P0
+  surface.
 - `trigger_create` / `trigger_list` / `trigger_remove` capabilities, invoked
   through the Reborn capability/dispatch surface.
 - Typed `TriggerRepository` with PostgreSQL + libSQL parity.
@@ -50,10 +60,11 @@ cron is an external transport.
 
 ### Acceptance criterion
 
-Cron triggers only. Webhook and regex sources are explicitly **not** acceptance
-criteria for V1. If Reborn outbound is not ready at implementation time,
-delivery (§6) drops to fast-follow and V1 acceptance is: a trigger fires on
-schedule, runs a turn in a new dedicated thread, and the thread persists.
+P0/V1 acceptance is cron-triggered events only. Webhook and regex sources are
+explicitly **not** acceptance criteria for V1. If Reborn outbound is not ready
+at implementation time, delivery (§6) drops to fast-follow and V1 acceptance is:
+a cron trigger fires on schedule, runs a turn in a new dedicated thread, and the
+thread persists.
 
 ### Deferred (fast-follow — architecture must leave room, no implementation in V1)
 
@@ -93,15 +104,14 @@ the one contract-sensitive piece of the design.
   `ConversationBindingService::resolve_or_create_binding_with_trusted_scope(request, trusted_agent_id, trusted_project_id)`
   (`crates/ironclaw_conversations/src/traits.rs:26`). Trusted scope must come
   from host configuration and is persisted on first bind.
-- `InboundTurnService` does **not** currently expose a trusted variant.
+- `InboundTurnService` exposes a trusted variant that accepts a host-owned
+  `TrustedInboundTurnRequest`.
 
 **Required contract extension.** Add a facade method to `ironclaw_conversations`:
 
 ```
 InboundTurnService::handle_inbound_turn_with_trusted_scope(
-    request: InboundTurnRequest,
-    trusted_agent_id: Option<AgentId>,
-    trusted_project_id: Option<ProjectId>,
+    request: TrustedInboundTurnRequest,
 ) -> Result<InboundTurnResponse, InboundTurnError>
 ```
 
@@ -292,7 +302,7 @@ for a long-lived Reborn background worker. Loop:
       content-store semantics; prefer content-addressed storage.
    b. Build the synthetic `InboundTurnRequest` (§5.5) with
       `identity.route_thread_id` and `identity.external_event_id`.
-   c. Call `handle_inbound_turn_with_trusted_scope(req, agent_id, project_id)`.
+   c. Call `handle_inbound_turn_with_trusted_scope(trusted_req)`.
 4. On submit success: set `last_run_at`,
    `last_fired_slot = identity.fire_slot`,
    `last_status = Ok` (= "submitted to turn queue"), recompute `next_run_at =
