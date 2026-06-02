@@ -1150,10 +1150,10 @@ fn structured_wasm_error_code(execution: &WitToolExecution) -> Option<String> {
 
 fn wasm_error_code_or_text(execution: &WitToolExecution) -> Option<String> {
     let error = execution.error.as_deref()?;
-    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(error) {
-        if let Some(code) = parsed["code"].as_str() {
-            return Some(code.to_string());
-        }
+    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(error)
+        && let Some(code) = parsed["code"].as_str()
+    {
+        return Some(code.to_string());
     }
     Some(error.to_string())
 }
