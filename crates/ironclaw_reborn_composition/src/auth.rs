@@ -28,7 +28,7 @@ use ironclaw_host_api::UserId;
 use ironclaw_turns::{TurnRunId, TurnScope};
 
 use crate::manual_token_flow::{PortBackedManualTokenFlowService, RebornManualTokenFlowService};
-use crate::oauth_dcr::{DcrGateChallengeRequest, OAuthDcrProviderRegistry};
+use crate::oauth_dcr::{DcrGateChallengeRequest, DcrSetupFlowRequest, OAuthDcrProviderRegistry};
 use crate::product_auth_runtime_credentials::{
     ProductAuthRuntimeCredentialAccountSelector, RuntimeCredentialAccountSelectionService,
 };
@@ -115,6 +115,7 @@ pub(crate) struct RebornOAuthStartFlowRequest {
 pub(crate) struct RebornDcrOAuthStartFlowRequest {
     pub(crate) scope: AuthProductScope,
     pub(crate) provider: AuthProviderId,
+    pub(crate) account_label: CredentialAccountLabel,
     pub(crate) provider_scopes: Vec<ProviderScope>,
     pub(crate) update_binding: Option<CredentialAccountUpdateBinding>,
     pub(crate) expires_at: ironclaw_auth::Timestamp,
@@ -980,11 +981,14 @@ impl RebornProductAuthServices {
         registry
             .start_setup_flow(
                 &self.flow_manager,
-                request.scope,
-                &request.provider,
-                &request.provider_scopes,
-                request.update_binding,
-                request.expires_at,
+                DcrSetupFlowRequest {
+                    scope: request.scope,
+                    provider: request.provider,
+                    account_label: request.account_label,
+                    provider_scopes: request.provider_scopes,
+                    update_binding: request.update_binding,
+                    expires_at: request.expires_at,
+                },
             )
             .await
     }

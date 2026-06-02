@@ -65,7 +65,7 @@ pub(super) async fn google_oauth_start_handler(
     State(state): State<ProductAuthRouteState>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Json(request): Json<GoogleOAuthStartRequest>,
-) -> Result<Json<GoogleOAuthStartResponse>, ProductAuthRouteFailure> {
+) -> Result<Json<ProductOAuthStartResponse>, ProductAuthRouteFailure> {
     start_google_oauth_flow(state, caller, request, None, false).await
 }
 
@@ -74,7 +74,7 @@ pub(super) async fn extension_oauth_start_handler(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Path(package_id): Path<String>,
     Json(request): Json<ExtensionOAuthStartRequest>,
-) -> Result<Json<GoogleOAuthStartResponse>, ProductAuthRouteFailure> {
+) -> Result<Json<ProductOAuthStartResponse>, ProductAuthRouteFailure> {
     let requester_extension =
         ExtensionId::new(package_id).map_err(|_| ProductAuthRouteFailure::invalid_request())?;
     if request.provider != GOOGLE_PROVIDER_ID {
@@ -102,7 +102,7 @@ async fn start_dcr_extension_oauth_flow(
     caller: WebUiAuthenticatedCaller,
     request: ExtensionOAuthStartRequest,
     requester_extension: ExtensionId,
-) -> Result<Json<GoogleOAuthStartResponse>, ProductAuthRouteFailure> {
+) -> Result<Json<ProductOAuthStartResponse>, ProductAuthRouteFailure> {
     let now = Utc::now();
     if request.expires_at <= now
         || request.expires_at > now + ChronoDuration::seconds(PRODUCT_AUTH_FLOW_MAX_TTL_SECONDS)
@@ -111,6 +111,8 @@ async fn start_dcr_extension_oauth_flow(
     }
 
     let provider = AuthProviderId::new(request.provider)
+        .map_err(|_| ProductAuthRouteFailure::invalid_request())?;
+    let account_label = CredentialAccountLabel::new(request.account_label)
         .map_err(|_| ProductAuthRouteFailure::invalid_request())?;
     let requested_scopes = request
         .scopes
@@ -136,13 +138,14 @@ async fn start_dcr_extension_oauth_flow(
         RebornDcrOAuthStartFlowRequest {
             scope: scope.clone(),
             provider: provider.clone(),
+            account_label,
             provider_scopes: requested_scopes,
             update_binding,
             expires_at: request.expires_at,
         },
     ))
     .await?
-    .ok_or_else(ProductAuthRouteFailure::invalid_request)?;
+    .ok_or_else(ProductAuthRouteFailure::malformed_config)?;
     let Some(AuthChallenge::OAuthUrl {
         authorization_url, ..
     }) = &flow.challenge
@@ -150,7 +153,7 @@ async fn start_dcr_extension_oauth_flow(
         return Err(ProductAuthRouteFailure::backend_unavailable());
     };
 
-    Ok(Json(GoogleOAuthStartResponse {
+    Ok(Json(ProductOAuthStartResponse {
         flow_id: flow.id,
         status: flow.status,
         provider,
@@ -167,7 +170,7 @@ async fn start_google_oauth_flow(
     request: GoogleOAuthStartRequest,
     requester_extension: Option<ExtensionId>,
     require_invocation_id: bool,
-) -> Result<Json<GoogleOAuthStartResponse>, ProductAuthRouteFailure> {
+) -> Result<Json<ProductOAuthStartResponse>, ProductAuthRouteFailure> {
     let now = Utc::now();
     if request.expires_at <= now
         || request.expires_at > now + ChronoDuration::seconds(PRODUCT_AUTH_FLOW_MAX_TTL_SECONDS)
@@ -241,7 +244,7 @@ async fn start_google_oauth_flow(
     .await?;
     state.store_pkce_verifier(flow.id, pkce_verifier_secret, flow.expires_at)?;
 
-    Ok(Json(GoogleOAuthStartResponse {
+    Ok(Json(ProductOAuthStartResponse {
         flow_id: flow.id,
         status: flow.status,
         provider,
