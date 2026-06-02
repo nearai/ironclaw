@@ -62,4 +62,8 @@ allow-git = [
     # Pulls in ruff_* crates from astral-sh/ruff at a pinned revision.
     "https://github.com/pydantic/monty.git",
     "https://github.com/astral-sh/ruff.git",
+    # Matrix pilot branch: pinned until the released SDK line carries the
+    # recursion-limit fix needed by current Rust stable.
+    "https://github.com/matrix-org/matrix-rust-sdk",
+    "https://github.com/ruma/ruma",
 ]

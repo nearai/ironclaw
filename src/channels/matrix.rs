@@ -956,10 +956,10 @@ mod sdk {
                 if let Err(e) = room.typing_notice(true).await {
                     debug!(error = %e, "Matrix: failed to send typing indicator");
                 }
-            } else if let Some(text) = format_status_message(&status) {
-                if let Err(e) = self.send_text_to_room(&room_id, &text).await {
-                    debug!(error = %e, "Matrix: failed to send status notification");
-                }
+            } else if let Some(text) = format_status_message(&status)
+                && let Err(e) = self.send_text_to_room(&room_id, &text).await
+            {
+                debug!(error = %e, "Matrix: failed to send status notification");
             }
             Ok(())
         }

@@ -884,7 +884,7 @@ mod tests {
     #[test]
     fn extract_pptx_rejects_oversized_slide() {
         use std::io::{Cursor, Write};
-        let big_slide = "<a:t>".to_string() + &"x".repeat(60 * 1024 * 1024) + "</a:t>";
+        let big_slide = format!("<a:t>{}</a:t>", "x".repeat(60 * 1024 * 1024));
         let buf = Vec::new();
         let cursor = Cursor::new(buf);
         let mut writer = zip::ZipWriter::new(cursor);
