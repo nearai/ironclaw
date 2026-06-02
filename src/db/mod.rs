@@ -386,6 +386,13 @@ pub struct UserIdentityRecord {
     pub updated_at: DateTime<Utc>,
 }
 
+pub(crate) fn scoped_conversation_id(channel: &str, user_id: &str, scope: &str) -> Uuid {
+    Uuid::parse_str(scope).unwrap_or_else(|_| {
+        let seed = format!("scoped-conversation\x1f{channel}\x1f{user_id}\x1f{scope}");
+        Uuid::new_v5(&Uuid::NAMESPACE_OID, seed.as_bytes())
+    })
+}
+
 // ==================== Sub-traits ====================
 //
 // Each sub-trait groups related persistence methods. The `Database` supertrait
@@ -456,6 +463,23 @@ pub trait ConversationStore: Send + Sync {
         user_id: &str,
         channel: &str,
     ) -> Result<Uuid, DatabaseError>;
+    async fn get_or_create_scoped_conversation(
+        &self,
+        user_id: &str,
+        channel: &str,
+        scope: &str,
+    ) -> Result<Uuid, DatabaseError> {
+        let id = scoped_conversation_id(channel, user_id, scope);
+        let writable = self
+            .ensure_conversation(id, channel, user_id, Some(scope), Some(channel))
+            .await?;
+        if writable {
+            return Ok(id);
+        }
+        Err(DatabaseError::Constraint(format!(
+            "scoped conversation {id} is not writable for user={user_id} channel={channel}"
+        )))
+    }
     async fn create_conversation_with_metadata(
         &self,
         channel: &str,
