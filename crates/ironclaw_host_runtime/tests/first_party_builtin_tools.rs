@@ -24,13 +24,14 @@ use ironclaw_host_runtime::{
     APPLY_PATCH_CAPABILITY_ID, CapabilitySurfacePolicy, CapabilitySurfaceVersion,
     CommandExecutionOutput, CommandExecutionRequest, ECHO_CAPABILITY_ID, GLOB_CAPABILITY_ID,
     GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID, HTTP_SAVE_CAPABILITY_ID, HostRuntime,
-    HostRuntimeServices, JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, READ_FILE_CAPABILITY_ID,
-    RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeFailureKind, RuntimeProcessError,
-    RuntimeProcessPort, SHELL_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID,
-    SKILL_REMOVE_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID, SandboxCommandTransport, SurfaceKind,
-    TIME_CAPABILITY_ID, TenantSandboxProcessPort, VisibleCapabilityAccess,
-    VisibleCapabilityRequest, WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers,
-    builtin_first_party_package,
+    HostRuntimeServices, JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, MEMORY_READ_CAPABILITY_ID,
+    MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
+    READ_FILE_CAPABILITY_ID, RuntimeCapabilityOutcome, RuntimeCapabilityRequest,
+    RuntimeFailureKind, RuntimeProcessError, RuntimeProcessPort, SHELL_CAPABILITY_ID,
+    SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID,
+    SPAWN_SUBAGENT_CAPABILITY_ID, SandboxCommandTransport, SurfaceKind, TIME_CAPABILITY_ID,
+    TenantSandboxProcessPort, VisibleCapabilityAccess, VisibleCapabilityRequest,
+    WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers, builtin_first_party_package,
 };
 use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpResponse, NetworkHttpTransport,
@@ -86,6 +87,7 @@ async fn builtin_first_party_package_declares_expected_capabilities() {
         vec![
             EffectKind::ReadFilesystem,
             EffectKind::WriteFilesystem,
+            EffectKind::DeleteFilesystem,
             EffectKind::Network
         ]
     );
@@ -111,6 +113,28 @@ async fn builtin_first_party_package_declares_expected_capabilities() {
             EffectKind::WriteFilesystem
         ]
     );
+
+    let memory_write = package
+        .capabilities
+        .iter()
+        .find(|descriptor| descriptor.id.as_str() == MEMORY_WRITE_CAPABILITY_ID)
+        .expect("memory write manifest");
+    assert_eq!(
+        memory_write.effects,
+        vec![EffectKind::ReadFilesystem, EffectKind::WriteFilesystem]
+    );
+    for capability_id in [
+        MEMORY_SEARCH_CAPABILITY_ID,
+        MEMORY_READ_CAPABILITY_ID,
+        MEMORY_TREE_CAPABILITY_ID,
+    ] {
+        let descriptor = package
+            .capabilities
+            .iter()
+            .find(|descriptor| descriptor.id.as_str() == capability_id)
+            .expect("memory read-like manifest");
+        assert_eq!(descriptor.effects, vec![EffectKind::ReadFilesystem]);
+    }
 
     let handlers = builtin_first_party_handlers().unwrap();
     for id in all_builtin_capability_ids() {
@@ -266,6 +290,112 @@ async fn builtin_rejects_oversized_outputs_before_return() {
         panic!("expected output-too-large failure, got {outcome:?}");
     };
     assert_eq!(failure.kind, RuntimeFailureKind::OutputTooLarge);
+}
+
+#[tokio::test]
+async fn memory_capabilities_write_read_tree_and_search_native_reborn_memory() {
+    let runtime = runtime_with_filesystem(InMemoryBackend::new());
+    let context = execution_context_with_mounts(
+        all_builtin_capability_ids(),
+        memory_mounts(MountPermissions::read_write_list_delete()),
+    );
+
+    let write = invoke_with_context(
+        &runtime,
+        MEMORY_WRITE_CAPABILITY_ID,
+        json!({
+            "target": "projects/alpha/notes.md",
+            "content": "Architecture note: reborn memory capability search marker.",
+            "append": false
+        }),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(write["status"], json!("written"));
+    assert_eq!(write["path"], json!("projects/alpha/notes.md"));
+
+    let read = invoke_with_context(
+        &runtime,
+        MEMORY_READ_CAPABILITY_ID,
+        json!({"path": "projects/alpha/notes.md"}),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(read["path"], json!("projects/alpha/notes.md"));
+    assert!(
+        read["content"]
+            .as_str()
+            .unwrap()
+            .contains("reborn memory capability search marker")
+    );
+
+    let tree = invoke_with_context(
+        &runtime,
+        MEMORY_TREE_CAPABILITY_ID,
+        json!({"path": "", "depth": 3}),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+    assert!(
+        tree.to_string().contains("alpha/"),
+        "tree should include project directory: {tree}"
+    );
+
+    let search = invoke_with_context(
+        &runtime,
+        MEMORY_SEARCH_CAPABILITY_ID,
+        json!({"query": "capability search marker", "limit": 5}),
+        context,
+    )
+    .await
+    .unwrap();
+    assert_eq!(search["result_count"], json!(1));
+    assert_eq!(
+        search["results"][0]["path"],
+        json!("projects/alpha/notes.md")
+    );
+}
+
+#[tokio::test]
+async fn memory_write_rejects_local_filesystem_paths() {
+    let runtime = runtime_with_filesystem(InMemoryBackend::new());
+    let failure = invoke_with_context(
+        &runtime,
+        MEMORY_WRITE_CAPABILITY_ID,
+        json!({
+            "target": "/Users/example/notes.md",
+            "content": "should not write"
+        }),
+        execution_context_with_mounts(
+            [MEMORY_WRITE_CAPABILITY_ID],
+            memory_mounts(MountPermissions::read_write_list_delete()),
+        ),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(failure, RuntimeFailureKind::InvalidInput);
+}
+
+#[tokio::test]
+async fn memory_write_requires_memory_mount_authority() {
+    let runtime = runtime_with_filesystem(InMemoryBackend::new());
+    let (_filesystem, workspace_mounts) =
+        in_memory_mounted_filesystem(MountPermissions::read_write_list_delete());
+    let failure = invoke_with_context(
+        &runtime,
+        MEMORY_WRITE_CAPABILITY_ID,
+        json!({
+            "target": "notes.md",
+            "content": "should not write"
+        }),
+        execution_context_with_mounts([MEMORY_WRITE_CAPABILITY_ID], workspace_mounts),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(failure, RuntimeFailureKind::Authorization);
 }
 
 #[tokio::test]
@@ -1073,16 +1203,20 @@ async fn builtin_http_save_rejects_invalid_or_unresolved_save_to_before_egress()
 
 // arch-exempt: large-test-file, URL install tests share this first-party runtime harness; split plan #4062
 #[tokio::test]
-async fn builtin_skill_install_accepts_content_when_network_is_denied() {
+async fn builtin_skill_install_accepts_content_without_url_fetch() {
     let temp = tempfile::tempdir().unwrap();
     let (filesystem, mounts) = mounted_skill_filesystem(temp.path());
-    let runtime = runtime_with_filesystem_and_policy(filesystem, local_network_denied_policy());
+    let runtime = runtime_with_filesystem(filesystem);
 
     let installed = invoke_with_context(
         &runtime,
         SKILL_INSTALL_CAPABILITY_ID,
         json!({"content": "---\nname: offline-helper\n---\nOffline prompt.\n"}),
-        execution_context_with_mounts([SKILL_INSTALL_CAPABILITY_ID], mounts.clone()),
+        execution_context_with_mounts_and_network(
+            [SKILL_INSTALL_CAPABILITY_ID],
+            mounts.clone(),
+            http_test_policy(),
+        ),
     )
     .await
     .unwrap();
@@ -1164,13 +1298,17 @@ async fn builtin_skill_install_rejects_hidden_url_install_fields() {
     for input in cases {
         let temp = tempfile::tempdir().unwrap();
         let (filesystem, mounts) = mounted_skill_filesystem(temp.path());
-        let runtime = runtime_with_filesystem_and_policy(filesystem, local_network_denied_policy());
+        let runtime = runtime_with_filesystem(filesystem);
 
         let error = invoke_with_context(
             &runtime,
             SKILL_INSTALL_CAPABILITY_ID,
             input,
-            execution_context_with_mounts([SKILL_INSTALL_CAPABILITY_ID], mounts),
+            execution_context_with_mounts_and_network(
+                [SKILL_INSTALL_CAPABILITY_ID],
+                mounts,
+                http_test_policy(),
+            ),
         )
         .await
         .unwrap_err();
@@ -4271,7 +4409,7 @@ fn provider_id() -> ExtensionId {
     ExtensionId::new("builtin").unwrap()
 }
 
-fn all_builtin_capability_ids() -> [&'static str; 16] {
+fn all_builtin_capability_ids() -> [&'static str; 20] {
     [
         ECHO_CAPABILITY_ID,
         TIME_CAPABILITY_ID,
@@ -4280,6 +4418,10 @@ fn all_builtin_capability_ids() -> [&'static str; 16] {
         HTTP_SAVE_CAPABILITY_ID,
         SHELL_CAPABILITY_ID,
         SPAWN_SUBAGENT_CAPABILITY_ID,
+        MEMORY_SEARCH_CAPABILITY_ID,
+        MEMORY_WRITE_CAPABILITY_ID,
+        MEMORY_READ_CAPABILITY_ID,
+        MEMORY_TREE_CAPABILITY_ID,
         READ_FILE_CAPABILITY_ID,
         WRITE_FILE_CAPABILITY_ID,
         LIST_DIR_CAPABILITY_ID,
@@ -4317,6 +4459,15 @@ fn in_memory_mounted_filesystem(permissions: MountPermissions) -> (InMemoryBacke
     )])
     .unwrap();
     (InMemoryBackend::new(), mounts)
+}
+
+fn memory_mounts(permissions: MountPermissions) -> MountView {
+    MountView::new(vec![MountGrant::new(
+        MountAlias::new("/memory").unwrap(),
+        VirtualPath::new("/memory").unwrap(),
+        permissions,
+    )])
+    .unwrap()
 }
 
 fn mounted_skill_filesystem(path: &Path) -> (LocalFilesystem, MountView) {
@@ -4728,6 +4879,7 @@ fn builtin_effects() -> Vec<EffectKind> {
         EffectKind::DispatchCapability,
         EffectKind::ReadFilesystem,
         EffectKind::WriteFilesystem,
+        EffectKind::DeleteFilesystem,
         EffectKind::Network,
         EffectKind::SpawnProcess,
         EffectKind::ExecuteCode,
@@ -4745,13 +4897,6 @@ fn network_denied_policy() -> EffectiveRuntimePolicy {
         secret_mode: SecretMode::BrokeredHandles,
         approval_policy: ApprovalPolicy::AskAlways,
         audit_mode: AuditMode::LocalMinimal,
-    }
-}
-
-fn local_network_denied_policy() -> EffectiveRuntimePolicy {
-    EffectiveRuntimePolicy {
-        network_mode: NetworkMode::Deny,
-        ..local_dev_policy()
     }
 }
 

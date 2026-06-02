@@ -85,6 +85,12 @@ pub struct MemoryWriteOptions {
     pub changed_by: Option<String>,
 }
 
+/// Backend-facing options for a document write.
+#[derive(Debug, Clone, Default)]
+pub struct MemoryBackendWriteOptions {
+    pub metadata_overlay: Option<DocumentMetadata>,
+}
+
 pub(crate) async fn resolve_document_metadata<R>(
     repository: &R,
     path: &MemoryDocumentPath,

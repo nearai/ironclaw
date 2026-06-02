@@ -13,7 +13,7 @@ use crate::events::{
     MemorySignificantEventSource, record_memory_significant_event,
 };
 use crate::indexer::MemoryDocumentIndexer;
-use crate::metadata::{MemoryWriteOptions, resolve_document_metadata};
+use crate::metadata::{MemoryBackendWriteOptions, MemoryWriteOptions};
 use crate::path::{
     MemoryDocumentPath, MemoryDocumentScope, memory_backend_unsupported, memory_error,
     valid_memory_path,
@@ -27,6 +27,7 @@ use crate::safety::{
 };
 use crate::schema::validate_content_against_schema;
 use crate::search::{MemorySearchRequest, MemorySearchResult};
+use crate::write_metadata::resolve_write_metadata;
 
 /// Declared behavior supported by a memory backend.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -93,20 +94,9 @@ impl MemoryContext {
         self
     }
 
-    /// Internal marker used by the filesystem adapter to tell the wrapped
-    /// backend "I have already enforced prompt-write safety; do not run a
-    /// second policy evaluation that could erroneously reject a value the
-    /// adapter already approved."
-    ///
-    /// Crate-private on purpose. If this were `pub`, any direct backend
-    /// caller could construct a `MemoryContext` with the marker set and
-    /// persist high-risk content to protected files (`SOUL.md`,
-    /// `BOOTSTRAP.md`, etc.) through the public backend seam without
-    /// passing through *any* policy check. Only
-    /// `MemoryBackendFilesystemAdapter` (the same crate) is allowed to
-    /// produce an enforced context, and only after running its own
-    /// `enforce_prompt_write_safety` pass. zmanian #3180 HIGH
-    /// (`backend.rs:79`).
+    /// Internal marker set only after the filesystem adapter has already run
+    /// prompt-write safety. Keep crate-private so direct backend callers cannot
+    /// bypass protected-file policy.
     pub(crate) fn with_prompt_write_safety_enforced(mut self) -> Self {
         self.prompt_write_safety_enforced = true;
         self
@@ -173,6 +163,17 @@ pub trait MemoryBackend: Send + Sync {
         ))
     }
 
+    async fn write_document_with_backend_options(
+        &self,
+        context: &MemoryContext,
+        path: &MemoryDocumentPath,
+        bytes: &[u8],
+        options: &MemoryBackendWriteOptions,
+    ) -> Result<(), FilesystemError> {
+        let _ = options;
+        self.write_document(context, path, bytes).await
+    }
+
     async fn list_documents(
         &self,
         context: &MemoryContext,
@@ -212,6 +213,19 @@ pub trait MemoryBackend: Send + Sync {
             FilesystemOperation::AppendFile,
             "memory backend does not support atomic append",
         ))
+    }
+
+    async fn compare_and_append_document_with_backend_options(
+        &self,
+        context: &MemoryContext,
+        path: &MemoryDocumentPath,
+        expected_previous_hash: Option<&str>,
+        bytes: &[u8],
+        options: &MemoryBackendWriteOptions,
+    ) -> Result<MemoryAppendOutcome, FilesystemError> {
+        let _ = options;
+        self.compare_and_append_document(context, path, expected_previous_hash, bytes)
+            .await
     }
 }
 
@@ -315,13 +329,7 @@ where
     }
 }
 
-// Defense-in-depth scope guards for the public `MemoryBackend` seam. The host
-// resolves and authorizes a `MemoryContext` before calling any backend method;
-// the backend must refuse to operate on a path or scope that doesn't match
-// that authorized context. Without this, a direct caller that authorized one
-// context but passed a path/scope for another tenant/user/agent/project
-// would bypass the boundary even when the filesystem adapter would have
-// passed matching values.
+// Defense-in-depth scope guards for the public `MemoryBackend` seam.
 fn ensure_path_matches_context(
     context: &MemoryContext,
     path: &MemoryDocumentPath,
@@ -405,6 +413,22 @@ where
         path: &MemoryDocumentPath,
         bytes: &[u8],
     ) -> Result<(), FilesystemError> {
+        self.write_document_with_backend_options(
+            context,
+            path,
+            bytes,
+            &MemoryBackendWriteOptions::default(),
+        )
+        .await
+    }
+
+    async fn write_document_with_backend_options(
+        &self,
+        context: &MemoryContext,
+        path: &MemoryDocumentPath,
+        bytes: &[u8],
+        options: &MemoryBackendWriteOptions,
+    ) -> Result<(), FilesystemError> {
         ensure_file_documents_supported(
             context,
             FilesystemOperation::WriteFile,
@@ -453,7 +477,8 @@ where
             )
             .await?;
         }
-        let metadata = resolve_document_metadata(self.repository.as_ref(), path).await?;
+        let (metadata, metadata_to_persist) =
+            resolve_write_metadata(self.repository.as_ref(), path, options).await?;
         if let Some(schema) = &metadata.schema {
             validate_content_against_schema(path, content, schema)?;
         }
@@ -464,6 +489,11 @@ where
         self.repository
             .write_document_with_options(path, bytes, &options)
             .await?;
+        if let Some(metadata) = metadata_to_persist {
+            self.repository
+                .write_document_metadata(path, &metadata)
+                .await?;
+        }
         record_memory_significant_event(
             self.memory_event_sink.as_ref(),
             MemorySignificantEvent::document_written(
@@ -488,6 +518,24 @@ where
         path: &MemoryDocumentPath,
         expected_previous_hash: Option<&str>,
         bytes: &[u8],
+    ) -> Result<MemoryAppendOutcome, FilesystemError> {
+        self.compare_and_append_document_with_backend_options(
+            context,
+            path,
+            expected_previous_hash,
+            bytes,
+            &MemoryBackendWriteOptions::default(),
+        )
+        .await
+    }
+
+    async fn compare_and_append_document_with_backend_options(
+        &self,
+        context: &MemoryContext,
+        path: &MemoryDocumentPath,
+        expected_previous_hash: Option<&str>,
+        bytes: &[u8],
+        options: &MemoryBackendWriteOptions,
     ) -> Result<MemoryAppendOutcome, FilesystemError> {
         ensure_file_documents_supported(
             context,
@@ -543,7 +591,8 @@ where
             )
             .await?;
         }
-        let metadata = resolve_document_metadata(self.repository.as_ref(), path).await?;
+        let (metadata, metadata_to_persist) =
+            resolve_write_metadata(self.repository.as_ref(), path, options).await?;
         if let Some(schema) = &metadata.schema {
             validate_content_against_schema(path, content, schema)?;
         }
@@ -556,6 +605,11 @@ where
             .compare_and_append_document_with_options(path, expected_previous_hash, bytes, &options)
             .await?;
         if outcome == MemoryAppendOutcome::Appended {
+            if let Some(metadata) = metadata_to_persist {
+                self.repository
+                    .write_document_metadata(path, &metadata)
+                    .await?;
+            }
             record_memory_significant_event(
                 self.memory_event_sink.as_ref(),
                 MemorySignificantEvent::document_written(
@@ -738,12 +792,7 @@ mod tests {
 
     #[test]
     fn default_context_does_not_claim_prompt_safety_enforced() {
-        // The bypass marker is `pub(crate)` so external callers cannot
-        // construct an enforced context. The crate-internal default must
-        // start unenforced — otherwise a forgotten reset path could leak
-        // the bypass into routes that did not run policy. Locks the
-        // invariant in alongside the privacy reduction (zmanian #3180
-        // HIGH `backend.rs:79`).
+        // Locks the crate-private safety marker's default state.
         let ctx = MemoryContext::new(
             MemoryDocumentScope::new("tenant", "alpha", Some("project")).unwrap(),
         );
@@ -784,11 +833,8 @@ mod tests {
             .with_capabilities(capabilities)
     }
 
-    // Regression for PR #3180 review: a `MemoryBackend` is reachable from
-    // host/runtime composition as a public seam, and any caller that
-    // authorized one `MemoryContext` but passed a path or scope for another
-    // tenant/user/agent/project must be rejected before any repository side
-    // effect.
+    // Regression: backend callers cannot use an authorized context for one
+    // scope to operate on another scope.
     #[tokio::test]
     async fn read_document_rejects_path_with_scope_outside_authorized_context() {
         let backend = make_backend();

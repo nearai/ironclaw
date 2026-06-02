@@ -18,6 +18,7 @@ mod repo;
 mod safety;
 mod schema;
 mod search;
+mod write_metadata;
 
 pub use backend::{
     MemoryBackend, MemoryBackendCapabilities, MemoryContext, RepositoryMemoryBackend,
@@ -33,7 +34,10 @@ pub use indexer::{
     ChunkingMemoryDocumentIndexer, MemoryChunkReplaceOutcome, MemoryDocumentIndexRepository,
     MemoryDocumentIndexer,
 };
-pub use metadata::{CONFIG_FILE_NAME, DocumentMetadata, HygieneMetadata, MemoryWriteOptions};
+pub use metadata::{
+    CONFIG_FILE_NAME, DocumentMetadata, HygieneMetadata, MemoryBackendWriteOptions,
+    MemoryWriteOptions,
+};
 pub use path::{MemoryDocumentPath, MemoryDocumentScope};
 pub use repo::{
     FilesystemMemoryDocumentRepository, InMemoryMemoryDocumentRepository, MemoryAppendOutcome,

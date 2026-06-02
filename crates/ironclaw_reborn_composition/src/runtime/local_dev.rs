@@ -79,6 +79,7 @@ pub(super) fn capability_wiring(
     let local_runtime = services.local_runtime.as_ref()?;
     let workspace_mounts = local_runtime.workspace_mounts.clone();
     let skill_mounts = local_runtime.skill_mounts.clone();
+    let memory_mounts = local_runtime.memory_mounts.clone();
     let extension_surface_source =
         LocalDevExtensionSurfaceSource::new(local_runtime.extension_management.clone());
     let display_previews = Arc::new(CapabilityDisplayPreviewStore::default());
@@ -96,6 +97,7 @@ pub(super) fn capability_wiring(
             policy,
             workspace_mounts,
             skill_mounts,
+            memory_mounts,
             extension_surface_source,
             input_resolver: Arc::clone(&capability_input_resolver),
             result_writer: Arc::clone(&capability_result_writer),
@@ -122,6 +124,7 @@ struct LocalDevLoopCapabilityPortFactory {
     policy: Arc<LocalDevCapabilityPolicy>,
     workspace_mounts: MountView,
     skill_mounts: MountView,
+    memory_mounts: MountView,
     extension_surface_source: LocalDevExtensionSurfaceSource,
     input_resolver: Arc<dyn LoopCapabilityInputResolver>,
     result_writer: Arc<dyn LoopCapabilityResultWriter>,
@@ -137,6 +140,7 @@ impl LoopCapabilityPortFactory for LocalDevLoopCapabilityPortFactory {
     ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
         let workspace_mounts = self.workspace_mounts.clone();
         let skill_mounts = self.skill_mounts.clone();
+        let memory_mounts = self.memory_mounts.clone();
         let extension_surface = self
             .extension_surface_source
             .snapshot()
@@ -147,6 +151,7 @@ impl LoopCapabilityPortFactory for LocalDevLoopCapabilityPortFactory {
             self.user_id.clone(),
             workspace_mounts.clone(),
             skill_mounts.clone(),
+            memory_mounts.clone(),
             &self.policy,
             &extension_surface,
         )?;
@@ -162,6 +167,10 @@ impl LoopCapabilityPortFactory for LocalDevLoopCapabilityPortFactory {
         for capability_id in self.policy.skill_management_capability_ids() {
             factory = factory
                 .with_capability_execution_mount(capability_id.clone(), skill_mounts.clone());
+        }
+        for capability_id in self.policy.memory_capability_ids() {
+            factory = factory
+                .with_capability_execution_mount(capability_id.clone(), memory_mounts.clone());
         }
         let port = factory.for_run_context(run_context.clone());
         let synthetic_capabilities = match &self.skill_activation_source {
@@ -715,11 +724,17 @@ fn local_dev_visible_capability_request(
     user_id: UserId,
     workspace_mounts: MountView,
     skill_mounts: MountView,
+    memory_mounts: MountView,
     policy: &LocalDevCapabilityPolicy,
     extension_surface: &LocalDevExtensionSurface,
 ) -> Result<HostVisibleCapabilityRequest, AgentLoopHostError> {
     let extension_id = loop_driver_execution_extension_id(run_context)?;
-    let mut grants = policy.builtin_grants(&extension_id, &workspace_mounts, &skill_mounts);
+    let mut grants = policy.builtin_grants(
+        &extension_id,
+        &workspace_mounts,
+        &skill_mounts,
+        &memory_mounts,
+    );
     grants
         .grants
         .extend(extension_surface.grants(&extension_id));

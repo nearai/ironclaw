@@ -1308,6 +1308,7 @@ pub async fn build_reborn_runtime(
                 local_dev_capability_policy,
                 local_runtime.workspace_mounts.clone(),
                 local_runtime.skill_mounts.clone(),
+                local_runtime.memory_mounts.clone(),
             )),
             approval_resolver,
             Arc::clone(&planned_turn_coordinator),

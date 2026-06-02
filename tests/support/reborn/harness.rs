@@ -27,7 +27,11 @@ use std::{
 use async_trait::async_trait;
 use ironclaw_authorization::{GrantAuthorizer, TrustAwareCapabilityDispatchAuthorizer};
 use ironclaw_extensions::ExtensionRegistry;
-use ironclaw_filesystem::{LocalFilesystem, RootFilesystem, ScopedFilesystem};
+use ironclaw_filesystem::{
+    BackendCapabilities, BackendId, BackendKind, CompositeRootFilesystem, ContentKind,
+    InMemoryBackend, IndexPolicy, LocalFilesystem, MountDescriptor, RootFilesystem,
+    ScopedFilesystem, StorageClass,
+};
 use ironclaw_host_api::{
     AgentId, CapabilityDescriptor, CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet,
     CredentialStageError, Decision, EffectKind, ExecutionContext, ExtensionId, GrantConstraints,
@@ -40,11 +44,13 @@ use ironclaw_host_api::{
 use ironclaw_host_runtime::{
     APPLY_PATCH_CAPABILITY_ID, BUILTIN_FIRST_PARTY_PROVIDER, CapabilitySurfacePolicy,
     CapabilitySurfaceVersion as HostRuntimeCapabilitySurfaceVersion, ECHO_CAPABILITY_ID,
-    GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID, HostRuntime, HostRuntimeServices,
-    JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, READ_FILE_CAPABILITY_ID,
-    RuntimeCredentialAccountRequest, RuntimeCredentialAccountResolver, SHELL_CAPABILITY_ID,
-    SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID, SurfaceKind,
-    TIME_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers,
+    GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID, HTTP_SAVE_CAPABILITY_ID,
+    HostRuntime, HostRuntimeServices, JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID,
+    MEMORY_READ_CAPABILITY_ID, MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID,
+    MEMORY_WRITE_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, RuntimeCredentialAccountRequest,
+    RuntimeCredentialAccountResolver, SHELL_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID,
+    SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID,
+    SurfaceKind, TIME_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers,
     builtin_first_party_package,
 };
 use ironclaw_loop_support::{
@@ -1445,6 +1451,7 @@ struct HostRuntimeCapabilityHarness {
     root: Arc<tempfile::TempDir>,
     workspace_root: PathBuf,
     mounts: MountView,
+    capability_mount_overrides: Vec<(CapabilityId, MountView)>,
     capability_ids: Vec<CapabilityId>,
     runtime_kind: RuntimeKind,
     effect_kinds: Vec<EffectKind>,
@@ -1508,6 +1515,7 @@ impl HostRuntimeCapabilityHarness {
             vec![
                 CapabilityId::new(ECHO_CAPABILITY_ID)?,
                 CapabilityId::new(SHELL_CAPABILITY_ID)?,
+                CapabilityId::new(SPAWN_SUBAGENT_CAPABILITY_ID)?,
             ],
             vec![
                 EffectKind::DispatchCapability,
@@ -1526,20 +1534,28 @@ impl HostRuntimeCapabilityHarness {
     }
 
     async fn skill_management_tools() -> HarnessResult<Self> {
-        Self::new_with_mounts(
+        let mut harness = Self::new_with_mounts(
             "reborn-e2e-skill-management-tools",
             vec![
                 CapabilityId::new(SKILL_LIST_CAPABILITY_ID)?,
                 CapabilityId::new(SKILL_INSTALL_CAPABILITY_ID)?,
                 CapabilityId::new(SKILL_REMOVE_CAPABILITY_ID)?,
             ],
-            vec![EffectKind::ReadFilesystem, EffectKind::WriteFilesystem],
+            vec![
+                EffectKind::DispatchCapability,
+                EffectKind::ReadFilesystem,
+                EffectKind::WriteFilesystem,
+                EffectKind::DeleteFilesystem,
+                EffectKind::Network,
+            ],
             Vec::new(),
             ExtensionId::new(BUILTIN_FIRST_PARTY_PROVIDER)?,
             UserId::new("reborn-e2e-skill-management-user")?,
             skill_mounts()?,
         )
-        .await
+        .await?;
+        harness.network_policy = http_test_policy();
+        Ok(harness)
     }
 
     async fn new(
@@ -1586,6 +1602,7 @@ impl HostRuntimeCapabilityHarness {
             root,
             workspace_root,
             mounts,
+            capability_mount_overrides: Vec::new(),
             capability_ids,
             runtime_kind: RuntimeKind::FirstParty,
             effect_kinds,
@@ -1645,16 +1662,33 @@ impl HostRuntimeCapabilityHarness {
         user_id: UserId,
     ) -> HarnessResult<Self> {
         let mounts = workspace_mounts(MountPermissions::read_write_list_delete())?;
+        let memory_mounts = memory_mounts(MountPermissions::read_write_list_delete())?;
+        let memory_capability_ids = vec![
+            CapabilityId::new(MEMORY_SEARCH_CAPABILITY_ID)?,
+            CapabilityId::new(MEMORY_WRITE_CAPABILITY_ID)?,
+            CapabilityId::new(MEMORY_READ_CAPABILITY_ID)?,
+            CapabilityId::new(MEMORY_TREE_CAPABILITY_ID)?,
+        ];
         Ok(Self {
             runtime,
             io: Arc::new(ProductLiveCapabilityIo::default()),
             root,
             workspace_root,
             mounts,
+            capability_mount_overrides: memory_capability_ids
+                .iter()
+                .cloned()
+                .map(|capability_id| (capability_id, memory_mounts.clone()))
+                .collect(),
             capability_ids: vec![
                 CapabilityId::new(TIME_CAPABILITY_ID)?,
                 CapabilityId::new(JSON_CAPABILITY_ID)?,
                 CapabilityId::new(HTTP_CAPABILITY_ID)?,
+                CapabilityId::new(HTTP_SAVE_CAPABILITY_ID)?,
+                CapabilityId::new(MEMORY_SEARCH_CAPABILITY_ID)?,
+                CapabilityId::new(MEMORY_WRITE_CAPABILITY_ID)?,
+                CapabilityId::new(MEMORY_READ_CAPABILITY_ID)?,
+                CapabilityId::new(MEMORY_TREE_CAPABILITY_ID)?,
                 CapabilityId::new(READ_FILE_CAPABILITY_ID)?,
                 CapabilityId::new(APPLY_PATCH_CAPABILITY_ID)?,
             ],
@@ -1702,6 +1736,7 @@ impl HostRuntimeCapabilityHarness {
             root,
             workspace_root,
             mounts,
+            capability_mount_overrides: Vec::new(),
             capability_ids: github_support::capability_ids()?,
             runtime_kind: RuntimeKind::Wasm,
             effect_kinds: github_support::effect_kinds(),
@@ -1784,6 +1819,7 @@ impl LoopCapabilityPortFactory for HostRuntimeHarnessCapabilityPortFactory {
             &self.harness.capability_ids,
             self.harness.effect_kinds.clone(),
             self.harness.mounts.clone(),
+            &self.harness.capability_mount_overrides,
             self.harness.network_policy.clone(),
             self.harness.secrets.clone(),
         ))
@@ -1800,15 +1836,19 @@ impl LoopCapabilityPortFactory for HostRuntimeHarnessCapabilityPortFactory {
             inner: self.harness.io.clone(),
             results: Arc::clone(&self.harness.results),
         });
-        let port = HostRuntimeLoopCapabilityPortFactory::new(
+        let mut factory = HostRuntimeLoopCapabilityPortFactory::new(
             Arc::clone(&self.harness.runtime),
             visible_request,
             self.harness.io.clone(),
             result_writer,
             milestone_sink,
         )
-        .with_execution_mounts(execution_mounts)
-        .for_run_context(run_context.clone());
+        .with_execution_mounts(execution_mounts);
+        for (capability_id, mounts) in &self.harness.capability_mount_overrides {
+            factory =
+                factory.with_capability_execution_mount(capability_id.clone(), mounts.clone());
+        }
+        let port = factory.for_run_context(run_context.clone());
         Ok(Arc::new(RecordingDelegatingCapabilityPort {
             inner: port,
             invocations: Arc::clone(&self.harness.invocations),
@@ -1890,14 +1930,9 @@ fn local_dev_host_runtime_with_registry_and_runtime_http_egress(
     registry: ExtensionRegistry,
     egress: Arc<RecordingRuntimeHttpEgress>,
 ) -> HarnessResult<Arc<dyn HostRuntime>> {
-    let mut filesystem = LocalFilesystem::new();
-    filesystem.mount_local(
-        VirtualPath::new("/projects")?,
-        HostPath::from_path_buf(storage_root),
-    )?;
     let services = HostRuntimeServices::new(
         Arc::new(registry),
-        Arc::new(filesystem),
+        local_dev_root_filesystem(storage_root, LocalDevRootMounts::core_builtins())?,
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ironclaw_processes::ProcessServices::in_memory(),
@@ -1923,19 +1958,9 @@ fn local_dev_host_runtime_with_registry_and_egress(
     runtime_http_egress: Arc<RecordingRuntimeHttpEgress>,
     network_egress: Arc<RecordingNetworkHttpEgress>,
 ) -> HarnessResult<Arc<dyn HostRuntime>> {
-    let mut filesystem = LocalFilesystem::new();
-    filesystem.mount_local(
-        VirtualPath::new("/projects")?,
-        HostPath::from_path_buf(storage_root),
-    )?;
-    filesystem.mount_local(
-        VirtualPath::new("/system/extensions/github")?,
-        HostPath::from_path_buf(github_support::asset_root()),
-    )?;
-
     let services = HostRuntimeServices::new(
         Arc::new(registry),
-        Arc::new(filesystem),
+        local_dev_root_filesystem(storage_root, LocalDevRootMounts::github_assets())?,
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GithubHarnessAuthorizer::new()?),
         ironclaw_processes::ProcessServices::in_memory(),
@@ -1965,15 +1990,9 @@ fn local_dev_host_runtime_with_live_http_egress(
     let mut registry = ExtensionRegistry::new();
     registry.insert(builtin_first_party_package()?)?;
 
-    let mut filesystem = LocalFilesystem::new();
-    filesystem.mount_local(
-        VirtualPath::new("/projects")?,
-        HostPath::from_path_buf(storage_root),
-    )?;
-
     let services = HostRuntimeServices::new(
         Arc::new(registry),
-        Arc::new(filesystem),
+        local_dev_root_filesystem(storage_root, LocalDevRootMounts::core_builtins())?,
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ironclaw_processes::ProcessServices::in_memory(),
@@ -1992,6 +2011,110 @@ fn local_dev_host_runtime_with_live_http_egress(
     .with_trust_policy(Arc::new(first_party_trust_policy()?));
 
     Ok(Arc::new(services.host_runtime_for_local_testing()))
+}
+
+fn local_dev_root_filesystem(
+    storage_root: PathBuf,
+    mounts: LocalDevRootMounts,
+) -> HarnessResult<Arc<CompositeRootFilesystem>> {
+    let mut local = LocalFilesystem::new();
+    local.mount_local(
+        VirtualPath::new("/projects")?,
+        HostPath::from_path_buf(storage_root),
+    )?;
+    if mounts.github_assets {
+        local.mount_local(
+            VirtualPath::new("/system/extensions/github")?,
+            HostPath::from_path_buf(github_support::asset_root()),
+        )?;
+    }
+
+    let local = Arc::new(local);
+    let mut root = CompositeRootFilesystem::new();
+    root.mount(
+        local_dev_mount_descriptor(
+            "/projects",
+            "local-dev-projects",
+            BackendKind::LocalFilesystem,
+            StorageClass::FileContent,
+            ContentKind::ProjectFile,
+            IndexPolicy::NotIndexed,
+            BackendCapabilities::bytes_only(),
+        )?,
+        Arc::clone(&local),
+    )?;
+    if mounts.github_assets {
+        root.mount(
+            local_dev_mount_descriptor(
+                "/system/extensions/github",
+                "local-dev-github-assets",
+                BackendKind::LocalFilesystem,
+                StorageClass::FileContent,
+                ContentKind::ExtensionPackage,
+                IndexPolicy::NotIndexed,
+                BackendCapabilities::bytes_only(),
+            )?,
+            Arc::clone(&local),
+        )?;
+    }
+    if mounts.memory {
+        let memory = Arc::new(InMemoryBackend::new());
+        root.mount(
+            local_dev_mount_descriptor(
+                "/memory",
+                "local-dev-memory",
+                BackendKind::MemoryDocuments,
+                StorageClass::StructuredRecords,
+                ContentKind::MemoryDocument,
+                IndexPolicy::FullTextAndVector,
+                BackendCapabilities::in_memory_full(),
+            )?,
+            memory,
+        )?;
+    }
+    Ok(Arc::new(root))
+}
+
+#[derive(Clone, Copy)]
+struct LocalDevRootMounts {
+    github_assets: bool,
+    memory: bool,
+}
+
+impl LocalDevRootMounts {
+    fn core_builtins() -> Self {
+        Self {
+            github_assets: false,
+            memory: true,
+        }
+    }
+
+    fn github_assets() -> Self {
+        Self {
+            github_assets: true,
+            memory: false,
+        }
+    }
+}
+
+fn local_dev_mount_descriptor(
+    virtual_root: &str,
+    backend_id: &str,
+    backend_kind: BackendKind,
+    storage_class: StorageClass,
+    content_kind: ContentKind,
+    index_policy: IndexPolicy,
+    capabilities: BackendCapabilities,
+) -> HarnessResult<MountDescriptor> {
+    Ok(MountDescriptor {
+        virtual_root: VirtualPath::new(virtual_root)?,
+        backend_id: BackendId::new(backend_id)?,
+        backend_kind,
+        storage_class,
+        content_kind,
+        index_policy,
+        capabilities,
+    })
 }
 
 fn first_party_trust_policy() -> HarnessResult<HostTrustPolicy> {
@@ -2342,6 +2465,14 @@ fn workspace_mounts(permissions: MountPermissions) -> HarnessResult<MountView> {
     )])?)
 }
 
+fn memory_mounts(permissions: MountPermissions) -> HarnessResult<MountView> {
+    Ok(MountView::new(vec![MountGrant::new(
+        MountAlias::new("/memory")?,
+        VirtualPath::new("/memory")?,
+        permissions,
+    )])?)
+}
+
 fn skill_mounts() -> HarnessResult<MountView> {
     Ok(MountView::new(vec![
         MountGrant::new(
@@ -2362,26 +2493,34 @@ fn capability_grants(
     capabilities: &[CapabilityId],
     allowed_effects: Vec<EffectKind>,
     mounts: MountView,
+    mount_overrides: &[(CapabilityId, MountView)],
     network: NetworkPolicy,
     secrets: Vec<SecretHandle>,
 ) -> CapabilitySet {
     CapabilitySet {
         grants: capabilities
             .iter()
-            .map(|capability| CapabilityGrant {
-                id: CapabilityGrantId::new(),
-                capability: capability.clone(),
-                grantee: grantee.clone(),
-                issued_by: Principal::HostRuntime,
-                constraints: GrantConstraints {
-                    allowed_effects: allowed_effects.clone(),
-                    mounts: mounts.clone(),
-                    network: network.clone(),
-                    secrets: secrets.clone(),
-                    resource_ceiling: None,
-                    expires_at: None,
-                    max_invocations: None,
-                },
+            .map(|capability| {
+                let mounts = mount_overrides
+                    .iter()
+                    .find(|(override_capability, _mounts)| override_capability == capability)
+                    .map(|(_capability, mounts)| mounts.clone())
+                    .unwrap_or_else(|| mounts.clone());
+                CapabilityGrant {
+                    id: CapabilityGrantId::new(),
+                    capability: capability.clone(),
+                    grantee: grantee.clone(),
+                    issued_by: Principal::HostRuntime,
+                    constraints: GrantConstraints {
+                        allowed_effects: allowed_effects.clone(),
+                        mounts,
+                        network: network.clone(),
+                        secrets: secrets.clone(),
+                        resource_ceiling: None,
+                        expires_at: None,
+                        max_invocations: None,
+                    },
+                }
             })
             .collect(),
     }

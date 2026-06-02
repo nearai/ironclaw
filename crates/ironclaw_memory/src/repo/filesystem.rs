@@ -80,13 +80,13 @@ pub(crate) mod fs_keys {
 ///
 /// Wraps a shared [`RootFilesystem`] handle and routes every memory
 /// operation through the unified `put` / `get` / `query` ops.
-pub struct FilesystemMemoryDocumentRepository<F> {
+pub struct FilesystemMemoryDocumentRepository<F: ?Sized> {
     filesystem: Arc<F>,
 }
 
 impl<F> FilesystemMemoryDocumentRepository<F>
 where
-    F: RootFilesystem,
+    F: RootFilesystem + ?Sized,
 {
     pub fn new(filesystem: Arc<F>) -> Self {
         Self { filesystem }
@@ -95,7 +95,7 @@ where
 
 impl<F> FilesystemMemoryDocumentRepository<F>
 where
-    F: RootFilesystem + 'static,
+    F: RootFilesystem + ?Sized + 'static,
 {
     fn document_kind() -> RecordKind {
         RecordKind::new(DOCUMENT_KIND)
@@ -506,7 +506,7 @@ where
 #[async_trait]
 impl<F> MemoryDocumentRepository for FilesystemMemoryDocumentRepository<F>
 where
-    F: RootFilesystem + 'static,
+    F: RootFilesystem + ?Sized + 'static,
 {
     async fn read_document(
         &self,
@@ -892,7 +892,7 @@ where
 #[async_trait]
 impl<F> MemoryDocumentIndexRepository for FilesystemMemoryDocumentRepository<F>
 where
-    F: RootFilesystem + 'static,
+    F: RootFilesystem + ?Sized + 'static,
 {
     async fn replace_document_chunks_if_current(
         &self,
