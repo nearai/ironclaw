@@ -94,6 +94,60 @@ async fn http_egress_forwards_timeout_to_transport() {
 }
 
 #[tokio::test]
+async fn http_egress_forwards_sensitive_headers_in_zeroizing_transport_carrier() {
+    let transport = RecordingTransport::ok(NetworkHttpResponse {
+        status: 200,
+        headers: vec![],
+        body: b"ok".to_vec(),
+        usage: NetworkUsage {
+            request_bytes: 0,
+            response_bytes: 2,
+            resolved_ip: None,
+        },
+    });
+    let requests = transport.requests.clone();
+    let egress = PolicyNetworkHttpEgress::new_with_resolver(
+        transport,
+        StaticResolver::new(vec![IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))]),
+    );
+
+    egress
+        .execute(NetworkHttpRequest {
+            scope: sample_scope(),
+            method: NetworkMethod::Get,
+            url: "https://api.example.test/v1?token=sk-query-secret".to_string(),
+            headers: vec![(
+                "authorization".to_string(),
+                "Bearer sk-header-secret".to_string(),
+            )],
+            body: vec![],
+            policy: policy("api.example.test", Some(443), true, None),
+            response_body_limit: Some(1024),
+            timeout_ms: None,
+        })
+        .await
+        .expect("network response should be returned");
+
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    require_zeroize_on_drop(&requests[0]);
+    assert_eq!(
+        requests[0].url,
+        "https://api.example.test/v1?token=sk-query-secret"
+    );
+    assert_eq!(
+        requests[0]
+            .headers
+            .iter()
+            .find(|(name, _)| name == "authorization"),
+        Some(&(
+            "authorization".to_string(),
+            "Bearer sk-header-secret".to_string()
+        ))
+    );
+}
+
+#[tokio::test]
 async fn http_egress_denies_private_resolved_host_before_transport() {
     let transport = RecordingTransport::ok(NetworkHttpResponse {
         status: 200,
@@ -495,6 +549,8 @@ impl NetworkResolver for PanickingResolver {
         panic!("resolver panic")
     }
 }
+
+fn require_zeroize_on_drop<T: ?Sized + zeroize::ZeroizeOnDrop>(_: &T) {}
 
 fn sample_request(url: &str) -> NetworkHttpRequest {
     NetworkHttpRequest {

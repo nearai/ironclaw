@@ -4458,6 +4458,7 @@ dependencies = [
  "static_assertions",
  "thiserror 2.0.18",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]
@@ -4641,6 +4642,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "url",
+ "zeroize",
 ]
 
 [[package]]

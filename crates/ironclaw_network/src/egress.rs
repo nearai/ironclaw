@@ -62,7 +62,7 @@ where
 {
     async fn execute(
         &self,
-        request: NetworkHttpRequest,
+        mut request: NetworkHttpRequest,
     ) -> Result<NetworkHttpResponse, NetworkHttpError> {
         let estimated_request_bytes = estimate_http_request_bytes(
             request.method,
@@ -74,7 +74,7 @@ where
         let target = network_target_for_http_url(&request.url, estimated_request_bytes)?;
         let permit = StaticNetworkPolicyEnforcer::new(request.policy.clone())
             .authorize_blocking(NetworkRequest {
-                scope: request.scope,
+                scope: request.scope.clone(),
                 target: target.clone(),
                 method: request.method,
                 estimated_bytes: Some(estimated_request_bytes),
@@ -97,9 +97,9 @@ where
         })??;
         let transport_request = NetworkTransportRequest {
             method: permit.method,
-            url: request.url,
-            headers: request.headers,
-            body: request.body,
+            url: std::mem::take(&mut request.url),
+            headers: std::mem::take(&mut request.headers),
+            body: std::mem::take(&mut request.body),
             resolved_ips,
             response_body_limit: request.response_body_limit,
             timeout_ms: request.timeout_ms,

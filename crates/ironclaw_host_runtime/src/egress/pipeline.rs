@@ -95,7 +95,7 @@ fn authorize_body_store<N, S>(
 
 async fn dispatch_network<N, S>(
     service: &HostHttpEgressService<N, S>,
-    request: RuntimeHttpEgressRequest,
+    mut request: RuntimeHttpEgressRequest,
     network_policy: NetworkPolicy,
 ) -> Result<ironclaw_network::NetworkHttpResponse, PipelineError>
 where
@@ -104,11 +104,11 @@ where
     service
         .network()
         .execute(NetworkHttpRequest {
-            scope: request.scope,
+            scope: request.scope.clone(),
             method: request.method,
-            url: request.url,
-            headers: request.headers,
-            body: request.body,
+            url: std::mem::take(&mut request.url),
+            headers: std::mem::take(&mut request.headers),
+            body: std::mem::take(&mut request.body),
             policy: network_policy,
             response_body_limit: request.response_body_limit,
             timeout_ms: request.timeout_ms,

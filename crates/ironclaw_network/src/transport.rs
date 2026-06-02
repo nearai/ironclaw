@@ -7,6 +7,7 @@ use std::{
 
 use async_trait::async_trait;
 use ironclaw_host_api::NetworkMethod;
+use zeroize::Zeroize;
 
 use crate::{
     egress::NetworkHttpTransport,
@@ -117,7 +118,7 @@ fn build_reqwest_client(key: &ReqwestClientKey) -> Result<reqwest::Client, reqwe
 impl NetworkHttpTransport for ReqwestNetworkTransport {
     async fn execute(
         &self,
-        request: NetworkTransportRequest,
+        mut request: NetworkTransportRequest,
     ) -> Result<NetworkHttpResponse, NetworkHttpError> {
         let request_bytes = request.body.len() as u64;
         reject_caller_host_header(&request.headers)?;
@@ -141,6 +142,7 @@ impl NetworkHttpTransport for ReqwestNetworkTransport {
                 request_bytes,
                 response_bytes: 0,
             })?;
+        request.url.zeroize();
 
         let resolved_addrs = request
             .resolved_ips
@@ -162,8 +164,8 @@ impl NetworkHttpTransport for ReqwestNetworkTransport {
 
         let mut req = client
             .request(reqwest_method(request.method), url)
-            .body(request.body);
-        for (name, value) in request.headers {
+            .body(std::mem::take(&mut request.body));
+        for (name, value) in std::mem::take(&mut request.headers) {
             req = req.header(name, value);
         }
         let mut response = req
