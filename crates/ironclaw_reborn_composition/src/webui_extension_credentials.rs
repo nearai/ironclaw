@@ -14,6 +14,7 @@ use ironclaw_product_workflow::{
 
 use crate::{
     RebornManualTokenSetupRequest, RebornManualTokenSubmitRequest, RebornProductAuthServices,
+    product_auth_runtime_credentials::RuntimeCredentialAccountSelectionRequest,
 };
 
 const EXTENSION_CREDENTIAL_SETUP_TTL_SECONDS: i64 = 300;
@@ -40,8 +41,11 @@ impl ExtensionCredentialSetupService for ProductAuthExtensionCredentialSetup {
             .runtime_credential_account_selection_service();
         let account = selector
             .select_unique_configured_runtime_account(
-                CredentialAccountSelectionRequest::new(request.scope, request.provider)
-                    .for_extension(request.requester_extension),
+                RuntimeCredentialAccountSelectionRequest::new(
+                    CredentialAccountSelectionRequest::new(request.scope.clone(), request.provider)
+                        .for_extension(request.requester_extension),
+                    request.scope,
+                ),
             )
             .await
             .map_err(|error| match error {

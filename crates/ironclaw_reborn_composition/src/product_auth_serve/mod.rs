@@ -60,6 +60,7 @@ use crate::{
     RebornManualTokenSetupRequest, RebornManualTokenSubmitRequest, RebornManualTokenSubmitResponse,
     RebornOAuthCallbackError, RebornOAuthCallbackOutcome, RebornOAuthCallbackRequest,
     RebornOAuthCallbackResponse, RebornProductAuthServices,
+    product_auth_runtime_credentials::RuntimeCredentialAccountSelectionRequest,
 };
 
 pub(crate) const OAUTH_START_PATH: &str = "/api/reborn/product-auth/oauth/start";
@@ -865,10 +866,11 @@ pub(super) async fn scoped_update_binding_for_requester(
     let account = state
         .product_auth
         .runtime_credential_account_selection_service()
-        .select_unique_configured_runtime_account(
-            CredentialAccountSelectionRequest::new(scope, provider)
+        .select_unique_configured_runtime_account(RuntimeCredentialAccountSelectionRequest::new(
+            CredentialAccountSelectionRequest::new(scope.clone(), provider)
                 .for_extension(requester_extension.clone()),
-        )
+            scope,
+        ))
         .await;
     match account {
         Ok(account) => Ok(Some(CredentialAccountUpdateBinding::from_projection(
