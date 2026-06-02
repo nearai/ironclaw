@@ -644,7 +644,7 @@ mod tests {
             panic!("Slack Events route should have a body limit")
         };
 
-        assert_eq!(*max_bytes, SLACK_EVENTS_BODY_LIMIT_BYTES);
+        assert_eq!(max_bytes, SLACK_EVENTS_BODY_LIMIT_BYTES);
     }
 
     #[test]
