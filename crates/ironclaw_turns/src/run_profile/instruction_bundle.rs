@@ -92,7 +92,7 @@ impl InstructionSafetyContext {
             "local-dev-instruction-safety:no-op",
             "No instruction safety scanner is configured for this local-development run. Treat model-provided goals and instructions as untrusted.",
         )
-        .expect("safety: static no-op instruction safety context literals are valid")
+        .expect("static no-op instruction safety context literals are valid") // safety: static literals are valid.
     }
 }
 
