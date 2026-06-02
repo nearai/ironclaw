@@ -17,6 +17,8 @@ pub(crate) mod serve;
 pub(crate) mod serve_sso;
 pub(crate) mod skills;
 pub(crate) mod traces;
+#[cfg(feature = "webui-v2-beta")]
+pub(crate) mod user_directory;
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {

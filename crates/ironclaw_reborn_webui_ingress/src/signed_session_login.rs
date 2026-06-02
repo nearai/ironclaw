@@ -44,10 +44,8 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::auth::{
-    OAuthProvider, OAuthRouterConfig, PublicRouteMount, UserDirectory, UserDirectoryError,
-    webui_v2_auth_router,
+    OAuthProvider, OAuthRouterConfig, PublicRouteMount, UserDirectory, webui_v2_auth_router,
 };
-use crate::auth::{OAuthProviderName, OAuthUserProfile};
 use crate::session::{
     SessionAuthenticator, SessionId, SessionRecord, SessionStore, SessionStoreError,
 };
@@ -58,10 +56,11 @@ type HmacSha256 = Hmac<Sha256>;
 pub struct SignedSessionLoginConfig {
     /// Host-trusted installation tenant; never browser-influenced.
     pub tenant_id: TenantId,
-    /// The single operator identity every login maps to (see
-    /// [`FixedUserDirectory`]); must match the serve runtime's pinned
-    /// owner so authenticated turns run under the expected owner.
-    pub operator_user_id: UserId,
+    /// Host-supplied directory that maps each authenticated OAuth
+    /// profile to a `UserId`. Multi-user deployments inject a DB-backed
+    /// directory (distinct user per identity); a single-operator host
+    /// can inject one that always resolves to the operator.
+    pub user_directory: Arc<dyn UserDirectory>,
     /// Operator secret the session-token HMAC key is derived from. The
     /// same value typically backs the env-bearer authenticator.
     pub operator_secret: SecretString,
@@ -100,13 +99,11 @@ pub fn build_signed_session_login(
     );
     let session_authenticator: Arc<dyn WebuiAuthenticator> =
         Arc::new(SessionAuthenticator::new(session_store.clone()));
-    let user_directory: Arc<dyn UserDirectory> =
-        Arc::new(FixedUserDirectory::new(config.operator_user_id));
 
     let router_config = OAuthRouterConfig::new(
         config.tenant_id,
         session_store,
-        user_directory,
+        config.user_directory,
         config.providers,
         config.base_url,
     );
@@ -147,9 +144,14 @@ impl SignedTokenSessionStore {
         }
     }
 
+    /// Fresh keyed MAC. `new_from_slice` is infallible for HMAC — it
+    /// accepts a key of any length — so the `expect` can never fire.
+    fn mac(&self) -> HmacSha256 {
+        HmacSha256::new_from_slice(&self.key).expect("HMAC-SHA256 accepts a key of any length")
+    }
+
     fn sign(&self, payload_b64: &str) -> String {
-        let mut mac =
-            HmacSha256::new_from_slice(&self.key).expect("HMAC accepts a key of any length"); // safety: HMAC-SHA256 has no key-length constraint
+        let mut mac = self.mac();
         mac.update(payload_b64.as_bytes());
         URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes())
     }
@@ -161,8 +163,7 @@ impl SignedTokenSessionStore {
     fn verify(&self, candidate: &str) -> Option<TokenPayload> {
         let (payload_b64, signature_b64) = candidate.split_once('.')?;
         let signature = URL_SAFE_NO_PAD.decode(signature_b64).ok()?;
-        let mut mac =
-            HmacSha256::new_from_slice(&self.key).expect("HMAC accepts a key of any length"); // safety: HMAC-SHA256 has no key-length constraint
+        let mut mac = self.mac();
         mac.update(payload_b64.as_bytes());
         mac.verify_slice(&signature).ok()?;
         let payload_json = URL_SAFE_NO_PAD.decode(payload_b64).ok()?;
@@ -290,43 +291,10 @@ impl WebuiAuthenticator for CompositeAuthenticator {
     }
 }
 
-/// `UserDirectory` that maps EVERY successful login to the single
-/// operator `UserId` the serve command pins as the runtime owner.
-///
-/// The standalone serve runtime fixes its owner at startup, while the v2
-/// facade derives each thread's scope from the authenticated caller. If
-/// those diverge, every turn fails with "thread scope owner does not
-/// match the loop run actor". Mapping all logins to the operator keeps
-/// them aligned — the same single-operator model the env-bearer token
-/// already uses, unlocked through an OAuth handshake. The full provider
-/// flow still runs (redirect, code exchange, profile fetch); only the
-/// final identity mapping is fixed. A multi-user deployment supplies a
-/// real DB-backed `UserDirectory` instead.
-struct FixedUserDirectory {
-    user_id: UserId,
-}
-
-impl FixedUserDirectory {
-    fn new(user_id: UserId) -> Self {
-        Self { user_id }
-    }
-}
-
-#[async_trait]
-impl UserDirectory for FixedUserDirectory {
-    async fn resolve(
-        &self,
-        _provider: &OAuthProviderName,
-        _profile: &OAuthUserProfile,
-    ) -> Result<UserId, UserDirectoryError> {
-        Ok(self.user_id.clone())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::auth::OAuthError;
+    use crate::auth::{OAuthError, OAuthProviderName, OAuthUserProfile, UserDirectoryError};
     use secrecy::ExposeSecret;
 
     fn tenant() -> TenantId {
@@ -522,18 +490,18 @@ mod tests {
         assert!(composite.authenticate("nope").await.is_none());
     }
 
-    #[tokio::test]
-    async fn fixed_user_directory_maps_every_login_to_the_operator() {
-        let dir = FixedUserDirectory::new(UserId::new("operator").expect("user id"));
-        let provider = OAuthProviderName::new("google").expect("provider");
-        let profile = OAuthUserProfile {
-            provider_user_id: "g-sub-999".to_string(),
-            email: Some("someone.else@example.com".to_string()),
-            email_verified: true,
-            display_name: Some("Someone Else".to_string()),
-        };
-        let resolved = dir.resolve(&provider, &profile).await.expect("resolve");
-        assert_eq!(resolved.as_str(), "operator");
+    /// Minimal host-supplied directory for the builder wiring tests.
+    struct StubUserDirectory;
+
+    #[async_trait]
+    impl UserDirectory for StubUserDirectory {
+        async fn resolve(
+            &self,
+            _provider: &OAuthProviderName,
+            _profile: &OAuthUserProfile,
+        ) -> Result<UserId, UserDirectoryError> {
+            UserId::new("resolved-user").map_err(|e| UserDirectoryError::Backend(e.to_string()))
+        }
     }
 
     /// Minimal `OAuthProvider` for the builder wiring tests — the
@@ -562,7 +530,7 @@ mod tests {
     fn login_config(providers: Vec<Arc<dyn OAuthProvider>>) -> SignedSessionLoginConfig {
         SignedSessionLoginConfig {
             tenant_id: tenant(),
-            operator_user_id: UserId::new("operator").expect("user"),
+            user_directory: Arc::new(StubUserDirectory),
             operator_secret: SecretString::from("operator-secret".to_string()),
             base_url: "https://app.example".to_string(),
             providers,

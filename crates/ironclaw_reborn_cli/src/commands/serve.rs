@@ -119,7 +119,7 @@ impl ServeCommand {
         let session_signing_secret = SecretString::from(token_value.clone());
         let env_authenticator: Arc<dyn WebuiAuthenticator> = Arc::new(EnvBearerAuthenticator::new(
             SecretString::from(token_value),
-            user_id.clone(),
+            user_id,
         )?);
 
         // Resolve trusted host-installation default agent/project from
@@ -188,62 +188,19 @@ impl ServeCommand {
         let listen_addr = SocketAddr::new(host, port);
         reject_non_loopback_privileged_local_runtime(host, &runtime_input)?;
 
-        // WebChat v2 SSO login surface. When a Google/GitHub OAuth
-        // provider is configured via env, mount the host-owned
-        // `webui_v2_auth_router` outside the bearer layer and accept its
-        // signed session tokens alongside the env operator token. With no
-        // provider configured, the listener keeps the plain env-bearer
-        // auth and mounts no public login routes.
-        let (authenticator, public_mount): (Arc<dyn WebuiAuthenticator>, Option<PublicRouteMount>) = {
-            let providers = crate::commands::serve_sso::oauth_providers_from_env()
-                .context("failed to read WebChat v2 SSO provider config")?;
-            if providers.is_empty() {
-                (env_authenticator, None)
-            } else {
-                // Reborn-scoped base URL only — deliberately NOT falling
-                // back to the v1 gateway's `OAUTH_BASE_URL`, so a legacy v1
-                // setting can never silently rewrite Reborn WebChat callback
-                // URLs. Absent the Reborn var, use the bound listener address.
-                let base_url = env::var("IRONCLAW_REBORN_WEBUI_BASE_URL")
-                    .ok()
-                    .filter(|raw| !raw.trim().is_empty())
-                    .unwrap_or_else(|| format!("http://{listen_addr}"));
-                // Refuse cleartext OAuth on a public interface: http://
-                // redirect URIs leak authorization codes in transit (and
-                // Google/GitHub reject them for production apps). Loopback
-                // http:// stays allowed for local dev.
-                if base_url.starts_with("http://") && !host.is_loopback() {
-                    anyhow::bail!(
-                        "WebChat v2 SSO base URL `{base_url}` uses http:// on a non-loopback \
-                         interface, which would transmit OAuth authorization codes in \
-                         cleartext. Set IRONCLAW_REBORN_WEBUI_BASE_URL to an https:// URL."
-                    );
-                }
-                // Hand host config to the ingress builder, which owns the
-                // session store / authenticator / user-directory model.
-                // Every SSO login maps to this operator identity (the same
-                // one pinned as the runtime owner above) so a logged-in
-                // turn runs under the owner the loop host expects; reuses
-                // the already-validated `user_id` rather than re-parsing.
-                match build_signed_session_login(SignedSessionLoginConfig {
-                    tenant_id: tenant_id.clone(),
-                    operator_user_id: user_id.clone(),
-                    operator_secret: session_signing_secret,
-                    base_url,
-                    providers,
-                    env_authenticator: env_authenticator.clone(),
-                }) {
-                    Some(wiring) => {
-                        eprintln!(
-                            "ironclaw-reborn: WebChat v2 SSO login mounted — \
-                             see GET /auth/providers for the enabled set"
-                        );
-                        (wiring.authenticator, Some(wiring.mount))
-                    }
-                    None => (env_authenticator, None),
-                }
-            }
-        };
+        // WebChat v2 SSO login startup config (providers + base URL +
+        // cleartext guard). Resolved here so misconfiguration fails fast
+        // before the runtime is built; the DB-backed user directory and
+        // the login wiring are assembled inside the async runtime below,
+        // because opening the libSQL user store is async.
+        let sso_startup = crate::commands::serve_sso::sso_startup_config_from_env(listen_addr)?;
+        // The libSQL user-identity store lives alongside the local-dev
+        // runtime database under the reborn home.
+        let user_store_path = boot_config
+            .home()
+            .path()
+            .join("local-dev")
+            .join("webui-users.db");
 
         // CORS allow-origin list. Empty = fail-closed on every
         // cross-origin preflight; operators MUST opt in to the
@@ -325,6 +282,43 @@ impl ServeCommand {
                 .await
                 .context("failed to assemble Reborn runtime for `serve`")?;
             let bundle: RebornWebuiBundle = build_webui_services(&runtime, None)?;
+
+            // Assemble the SSO login surface. When a provider is configured,
+            // open the libSQL user-identity directory (multi-user: each
+            // OAuth identity maps to its own user) and hand it plus the
+            // resolved providers to the ingress builder. With no provider,
+            // keep the plain env-bearer auth and mount no public routes.
+            let (authenticator, public_mount): (
+                Arc<dyn WebuiAuthenticator>,
+                Option<PublicRouteMount>,
+            ) = match sso_startup {
+                Some(sso) => {
+                    if let Some(parent) = user_store_path.parent() {
+                        std::fs::create_dir_all(parent)
+                            .context("create WebChat user-store directory")?;
+                    }
+                    let user_directory = Arc::new(
+                        crate::commands::user_directory::DbUserDirectory::open(&user_store_path)
+                            .await
+                            .context("failed to open WebChat user-identity store")?,
+                    );
+                    let wiring = build_signed_session_login(SignedSessionLoginConfig {
+                        tenant_id: tenant_id.clone(),
+                        user_directory,
+                        operator_secret: session_signing_secret,
+                        base_url: sso.base_url,
+                        providers: sso.providers,
+                        env_authenticator: env_authenticator.clone(),
+                    })
+                    .expect("non-empty providers always produce login wiring");
+                    eprintln!(
+                        "ironclaw-reborn: WebChat v2 SSO login mounted — \
+                         see GET /auth/providers for the enabled set"
+                    );
+                    (wiring.authenticator, Some(wiring.mount))
+                }
+                None => (env_authenticator, None),
+            };
 
             print_serve_banner(
                 listen_addr,

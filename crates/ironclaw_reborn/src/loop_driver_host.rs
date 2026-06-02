@@ -881,6 +881,24 @@ where
         self.cancellation_factory.observation_kind()
     }
 
+    /// Per-run thread scope: the factory's installation scope
+    /// (tenant/agent/project) with `owner_user_id` re-pointed at the
+    /// run's authenticated actor. This is what makes the WebChat v2
+    /// surface multi-user — each caller's thread reads and writes land
+    /// in their own `owners/<user>` subtree (via
+    /// [`ThreadScope::to_resource_scope`]), matching the owner the
+    /// product facade already creates threads under
+    /// (`reborn_services::create_thread` scopes to `caller.user_id`).
+    ///
+    /// The re-scoping applies only when the factory is owner-scoped (it
+    /// declares an owner, as the serve path does by pinning the runtime
+    /// owner). An owner-less factory keeps its shared/system slot, so
+    /// owner-agnostic flows and runs without an actor (background tasks,
+    /// triggers) are unaffected.
+    fn effective_thread_scope(&self, run_context: &LoopRunContext) -> ThreadScope {
+        owner_scoped_thread_scope(&self.thread_scope, run_context)
+    }
+
     fn build_compaction_ports(&self, run_context: &LoopRunContext) -> Arc<dyn LoopCompactionPort> {
         let direct_system_inference: Arc<dyn SystemInferencePort> =
             Arc::new(ModelGatewayBackedSystemInferencePort::new(
@@ -897,7 +915,7 @@ where
         default_host_managed_loop_compaction_port(
             system_inference,
             Arc::clone(&self.thread_service),
-            self.thread_scope.clone(),
+            self.effective_thread_scope(run_context),
             include_str!("../../ironclaw_loop_support/prompts/compaction_summarizer_fresh.md"),
         )
     }
@@ -1156,7 +1174,10 @@ where
         surface_resolver: Arc<dyn CapabilitySurfaceProfileResolver>,
     ) -> Result<RebornLoopDriverHost, RebornLoopDriverHostError> {
         validate_claimed_run_context(&request.claimed_run, &request.loop_run_context)?;
-        validate_thread_scope(&self.thread_scope, &request.loop_run_context)?;
+        validate_thread_scope(
+            &self.effective_thread_scope(&request.loop_run_context),
+            &request.loop_run_context,
+        )?;
         let allow_set = Arc::new(
             surface_resolver
                 .resolve(&request.loop_run_context)
@@ -1175,13 +1196,17 @@ where
         capabilities: Arc<dyn LoopCapabilityPort>,
     ) -> Result<RebornLoopDriverHost, RebornLoopDriverHostError> {
         validate_claimed_run_context(&request.claimed_run, &request.loop_run_context)?;
-        validate_thread_scope(&self.thread_scope, &request.loop_run_context)?;
+        // Resolve the per-caller thread scope once; every thread read/write
+        // port below uses it so a logged-in user's turn touches only their
+        // own `owners/<user>` subtree.
+        let effective_scope = self.effective_thread_scope(&request.loop_run_context);
+        validate_thread_scope(&effective_scope, &request.loop_run_context)?;
 
         let max_messages = self.config.max_messages.max(1);
         let run_context = self.attach_model_route_snapshot(request.loop_run_context)?;
         let mut context_adapter = ThreadBackedLoopContextPort::new(
             Arc::clone(&self.thread_service),
-            self.thread_scope.clone(),
+            effective_scope.clone(),
             run_context.clone(),
             max_messages,
         );
@@ -1232,7 +1257,7 @@ where
                 // would silently dispatch B's hook events into A's
                 // dispatcher with A's context tenant.
                 subscription
-                    .validate_against_run_scope(&run_context.scope, &self.thread_scope)
+                    .validate_against_run_scope(&run_context.scope, &effective_scope)
                     .map_err(|reason| RebornLoopDriverHostError::ScopeMismatch { reason })?;
                 Some(subscription.clone_for_independent_spawn().spawn(
                     Arc::clone(dispatcher),
@@ -1358,7 +1383,7 @@ where
         };
         let model_gateway = Arc::new(ThreadResolvingLoopModelGateway {
             thread_service: Arc::clone(&self.thread_service),
-            thread_scope: self.thread_scope.clone(),
+            thread_scope: effective_scope.clone(),
             host_gateway: Arc::clone(&self.model_gateway),
             max_messages,
             skill_context_source: self.skill_context_source.clone(),
@@ -1384,7 +1409,7 @@ where
         let mut transcript: Arc<dyn LoopTranscriptPort> =
             Arc::new(ThreadBackedLoopTranscriptPort::with_milestone_sink(
                 Arc::clone(&self.thread_service),
-                self.thread_scope.clone(),
+                effective_scope.clone(),
                 run_context.clone(),
                 Arc::clone(&self.milestone_sink),
             ));
@@ -1955,6 +1980,22 @@ fn persisted_profile_id(profile_id: &RunProfileId) -> RunProfileId {
     }
 }
 
+/// Re-point a base thread scope's `owner_user_id` at the run's
+/// authenticated actor, so each caller's thread I/O is isolated to its
+/// own `owners/<user>` subtree. Only applies when the base scope is
+/// owner-scoped; an owner-less base (no declared owner) and runs with
+/// no actor are returned unchanged. See
+/// [`RebornLoopDriverHostFactory::effective_thread_scope`].
+fn owner_scoped_thread_scope(base: &ThreadScope, run_context: &LoopRunContext) -> ThreadScope {
+    let mut scope = base.clone();
+    if scope.owner_user_id.is_some()
+        && let Some(actor) = run_context.actor()
+    {
+        scope.owner_user_id = Some(actor.user_id.clone());
+    }
+    scope
+}
+
 fn validate_thread_scope(
     thread_scope: &ThreadScope,
     run_context: &LoopRunContext,
@@ -2215,11 +2256,11 @@ mod port_adapter_tests;
 mod tests {
     use super::*;
 
-    use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId};
+    use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
     use ironclaw_turns::{
         InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore, InMemoryRunProfileResolver,
-        PutLoopCheckpointRequest, RunProfileResolver, TurnCheckpointId, TurnId, TurnRunId,
-        TurnScope,
+        PutLoopCheckpointRequest, RunProfileResolver, TurnActor, TurnCheckpointId, TurnId,
+        TurnRunId, TurnScope,
         run_profile::{
             AgentLoopHostErrorKind, CheckpointSchemaId, InMemoryLoopHostMilestoneSink,
             LoadCheckpointPayloadRequest, LoopCheckpointKind, LoopCheckpointRequest,
@@ -2238,6 +2279,51 @@ mod tests {
             .await
             .unwrap();
         LoopRunContext::new(turn_scope, TurnId::new(), TurnRunId::new(), resolved)
+    }
+
+    #[tokio::test]
+    async fn owner_scoped_thread_scope_isolates_each_caller() {
+        let base = ThreadScope {
+            tenant_id: TenantId::new("tenant-scope-test").unwrap(),
+            agent_id: AgentId::new("agent-scope-test").unwrap(),
+            project_id: None,
+            owner_user_id: Some(UserId::new("operator").unwrap()),
+            mission_id: None,
+        };
+
+        // No actor → the factory's owner is kept (background / system runs).
+        let ctx = test_run_context().await;
+        assert_eq!(
+            owner_scoped_thread_scope(&base, &ctx).owner_user_id,
+            Some(UserId::new("operator").unwrap()),
+        );
+
+        // Distinct actors → distinct owners: this is the per-caller thread
+        // isolation. user-a's run can only ever touch owners/user-a.
+        let ctx_a = test_run_context()
+            .await
+            .with_actor(TurnActor::new(UserId::new("user-a").unwrap()));
+        let ctx_b = test_run_context()
+            .await
+            .with_actor(TurnActor::new(UserId::new("user-b").unwrap()));
+        assert_eq!(
+            owner_scoped_thread_scope(&base, &ctx_a).owner_user_id,
+            Some(UserId::new("user-a").unwrap()),
+        );
+        assert_eq!(
+            owner_scoped_thread_scope(&base, &ctx_b).owner_user_id,
+            Some(UserId::new("user-b").unwrap()),
+        );
+
+        // Owner-less base → unchanged even with an actor (shared/system slot).
+        let ownerless = ThreadScope {
+            owner_user_id: None,
+            ..base.clone()
+        };
+        assert_eq!(
+            owner_scoped_thread_scope(&ownerless, &ctx_a).owner_user_id,
+            None,
+        );
     }
 
     fn test_checkpoint_port(

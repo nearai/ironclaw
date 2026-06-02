@@ -4849,6 +4849,7 @@ name = "ironclaw_reborn_cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "chrono",
  "clap",
  "clap_complete",
@@ -4858,6 +4859,7 @@ dependencies = [
  "ironclaw_reborn_config",
  "ironclaw_reborn_traces",
  "ironclaw_reborn_webui_ingress",
+ "libsql",
  "reqwest",
  "secrecy",
  "serde",
