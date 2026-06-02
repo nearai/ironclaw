@@ -43,7 +43,7 @@ from helpers import (
     wait_for_pending_auth_gate,
     wait_for_ready,
 )
-from fixtures.mock_oauth_idp import start_mock_oauth_idp
+from fixtures.mock_oauth_idp import make_pkce_verifier_and_challenge, start_mock_oauth_idp
 from fixtures.mock_bearer_api import start_mock_bearer_api
 
 # ---------------------------------------------------------------------------
@@ -154,6 +154,42 @@ async def v2_gsuite_server(ironclaw_binary, mock_llm_server, mock_idp, mock_goog
 
 
 # ---------------------------------------------------------------------------
+# Test helpers
+# ---------------------------------------------------------------------------
+
+async def _issue_oauth_code(
+    mock_idp,
+    *,
+    include_verifier: bool = False,
+) -> tuple[str, str] | tuple[str, str, str]:
+    """Issue a mock OAuth authorization code for token-exchange assertions."""
+    import secrets
+
+    verifier, challenge = make_pkce_verifier_and_challenge()
+    state = secrets.token_urlsafe(16)
+    redirect_uri = "http://127.0.0.1:9999/callback"
+    params = {
+        "response_type": "code",
+        "client_id": "google-client",
+        "redirect_uri": redirect_uri,
+        "state": state,
+        "scope": "openid email",
+        "code_challenge": challenge,
+        "code_challenge_method": "S256",
+    }
+    async with httpx.AsyncClient(follow_redirects=False) as client:
+        r = await client.get(
+            f"{mock_idp.authorize_url}?{urlencode(params)}",
+            timeout=10,
+        )
+    assert r.status_code in (302, 307), f"expected redirect, got {r.status_code}"
+    code = parse_qs(urlparse(r.headers["location"]).query)["code"][0]
+    if include_verifier:
+        return code, redirect_uri, verifier
+    return code, redirect_uri
+
+
+# ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
 
@@ -217,13 +253,8 @@ class TestGSuiteOAuthWireShape:
     async def test_mock_idp_authorize_endpoint(self, mock_idp):
         """The mock IDP's /authorize endpoint issues an auth code."""
         import secrets
-        import hashlib
-        import base64
 
-        verifier = secrets.token_urlsafe(32)
-        challenge = base64.urlsafe_b64encode(
-            hashlib.sha256(verifier.encode()).digest()
-        ).rstrip(b"=").decode()
+        _verifier, challenge = make_pkce_verifier_and_challenge()
         state = secrets.token_urlsafe(16)
         redirect_uri = "http://127.0.0.1:9999/callback"
 
@@ -249,14 +280,9 @@ class TestGSuiteOAuthWireShape:
     async def test_mock_idp_token_endpoint(self, mock_idp):
         """The mock IDP's /token endpoint issues fake access/refresh tokens."""
         import secrets
-        import hashlib
-        import base64
         from urllib.parse import urlencode
 
-        verifier = secrets.token_urlsafe(32)
-        challenge = base64.urlsafe_b64encode(
-            hashlib.sha256(verifier.encode()).digest()
-        ).rstrip(b"=").decode()
+        verifier, challenge = make_pkce_verifier_and_challenge()
         state = secrets.token_urlsafe(16)
         redirect_uri = "http://127.0.0.1:9999/callback"
 
@@ -294,6 +320,100 @@ class TestGSuiteOAuthWireShape:
         assert body["access_token"].startswith("fake_access_")
         assert body["refresh_token"].startswith("fake_refresh_")
         assert body["token_type"] == "Bearer"
+
+    async def test_mock_idp_rejects_missing_pkce_verifier(self, mock_idp):
+        """The mock IDP rejects auth-code exchange when PKCE verifier is missing."""
+        code, redirect_uri = await _issue_oauth_code(mock_idp)
+
+        async with httpx.AsyncClient() as client:
+            r = await client.post(
+                mock_idp.token_url,
+                data={
+                    "grant_type": "authorization_code",
+                    "code": code,
+                    "redirect_uri": redirect_uri,
+                    "client_id": "google-client",
+                },
+                timeout=10,
+            )
+        assert r.status_code == 400
+        assert r.json()["error"] == "invalid_grant"
+
+    async def test_mock_idp_rejects_redirect_uri_mismatch(self, mock_idp):
+        """The mock IDP binds auth codes to their original redirect_uri."""
+        code, _redirect_uri, verifier = await _issue_oauth_code(
+            mock_idp,
+            include_verifier=True,
+        )
+
+        async with httpx.AsyncClient() as client:
+            r = await client.post(
+                mock_idp.token_url,
+                data={
+                    "grant_type": "authorization_code",
+                    "code": code,
+                    "redirect_uri": "http://127.0.0.1:9999/wrong-callback",
+                    "code_verifier": verifier,
+                    "client_id": "google-client",
+                },
+                timeout=10,
+            )
+        assert r.status_code == 400
+        assert r.json()["error"] == "invalid_grant"
+
+    async def test_mock_idp_refresh_token_is_bound_to_client_id(self, mock_idp):
+        """Refresh tokens must be issued and later used by the same client_id."""
+        code, redirect_uri, verifier = await _issue_oauth_code(
+            mock_idp,
+            include_verifier=True,
+        )
+        async with httpx.AsyncClient() as client:
+            token_r = await client.post(
+                mock_idp.token_url,
+                data={
+                    "grant_type": "authorization_code",
+                    "code": code,
+                    "redirect_uri": redirect_uri,
+                    "code_verifier": verifier,
+                    "client_id": "google-client",
+                },
+                timeout=10,
+            )
+            assert token_r.status_code == 200, token_r.text
+            refresh_token = token_r.json()["refresh_token"]
+
+            wrong_client_r = await client.post(
+                mock_idp.token_url,
+                data={
+                    "grant_type": "refresh_token",
+                    "refresh_token": refresh_token,
+                    "client_id": "other-client",
+                },
+                timeout=10,
+            )
+            valid_r = await client.post(
+                mock_idp.token_url,
+                data={
+                    "grant_type": "refresh_token",
+                    "refresh_token": refresh_token,
+                    "client_id": "google-client",
+                },
+                timeout=10,
+            )
+            unknown_r = await client.post(
+                mock_idp.token_url,
+                data={
+                    "grant_type": "refresh_token",
+                    "refresh_token": "fake_refresh_unknown",
+                    "client_id": "google-client",
+                },
+                timeout=10,
+            )
+
+        assert wrong_client_r.status_code == 400
+        assert valid_r.status_code == 200, valid_r.text
+        assert valid_r.json()["access_token"].startswith("fake_access_")
+        assert unknown_r.status_code == 400
 
     async def test_oauth_secrets_not_in_history(self, v2_gsuite_server, mock_idp):
         """No raw access_token or refresh_token appears in chat history."""

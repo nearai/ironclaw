@@ -6,7 +6,8 @@ Notion MCP OAuth flow:
   - POST /mcp  (JSON-RPC 2.0, ``initialize`` / ``tools/list`` / ``tools/call``)
   - Bearer-gated ``tools/call`` — returns 401 JSON-RPC error without auth
   - OAuth auth_required metadata injected in ``initialize`` response so the
-    Reborn MCP adapter knows to trigger a product-auth OAuth flow
+    Reborn MCP adapter knows to trigger a product-auth OAuth flow. Tests can
+    inject a mock IDP's authorization/token URLs when starting the server.
 
 Recorded calls are exposed for assertion::
 
@@ -36,6 +37,8 @@ from aiohttp import web
 @dataclass
 class MockNotionMcpHandle:
     base_url: str
+    oauth_authorization_url: str | None = None
+    oauth_token_url: str | None = None
     tool_call_tokens: list[str] = field(default_factory=list)
     tool_call_requests: list[tuple[str, dict]] = field(default_factory=list)
 
@@ -52,8 +55,17 @@ def _json_rpc_ok(request_id, result) -> dict:
     return {"jsonrpc": "2.0", "id": request_id, "result": result}
 
 
-async def start_mock_notion_mcp(*, port: int = 0) -> AsyncIterator[MockNotionMcpHandle]:
-    handle = MockNotionMcpHandle(base_url="")
+async def start_mock_notion_mcp(
+    *,
+    port: int = 0,
+    oauth_authorization_url: str | None = None,
+    oauth_token_url: str | None = None,
+) -> AsyncIterator[MockNotionMcpHandle]:
+    handle = MockNotionMcpHandle(
+        base_url="",
+        oauth_authorization_url=oauth_authorization_url,
+        oauth_token_url=oauth_token_url,
+    )
 
     async def mcp_handler(request: web.Request) -> web.Response:
         body = await request.json()
@@ -70,8 +82,11 @@ async def start_mock_notion_mcp(*, port: int = 0) -> AsyncIterator[MockNotionMcp
                     "tools": {},
                     "auth": {
                         "type": "oauth2",
-                        "authorization_url": f"{handle.base_url}/authorize",
-                        "token_url": f"{handle.base_url}/token",
+                        "authorization_url": (
+                            handle.oauth_authorization_url
+                            or f"{handle.base_url}/authorize"
+                        ),
+                        "token_url": handle.oauth_token_url or f"{handle.base_url}/token",
                         "scopes": ["read_content"],
                     },
                 },

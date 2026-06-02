@@ -41,6 +41,18 @@ import pytest
 from aiohttp import web
 
 
+def pkce_challenge_for(verifier: str) -> str:
+    """Return the S256 PKCE challenge for *verifier*."""
+    digest = hashlib.sha256(verifier.encode()).digest()
+    return base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
+
+
+def make_pkce_verifier_and_challenge() -> tuple[str, str]:
+    """Return a random PKCE verifier and its S256 challenge."""
+    verifier = secrets.token_urlsafe(32)
+    return verifier, pkce_challenge_for(verifier)
+
+
 @dataclass
 class MockOAuthIdpHandle:
     base_url: str
@@ -147,8 +159,7 @@ async def start_mock_oauth_idp(*, port: int = 0) -> AsyncIterator[MockOAuthIdpHa
                         {"error": "invalid_grant", "error_description": "PKCE verifier missing"},
                         status=400,
                     )
-                digest = hashlib.sha256(code_verifier.encode()).digest()
-                computed = base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
+                computed = pkce_challenge_for(code_verifier)
                 if computed != expected_challenge:
                     return web.json_response(
                         {"error": "invalid_grant", "error_description": "PKCE mismatch"},

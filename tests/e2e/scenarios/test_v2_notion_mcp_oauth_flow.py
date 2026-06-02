@@ -20,8 +20,9 @@ exercised in ``crates/ironclaw_reborn_composition`` Rust integration tests.
 import asyncio
 import json
 import os
+import re
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 
 import httpx
 import pytest
@@ -40,7 +41,7 @@ from helpers import (
     wait_for_ready,
 )
 from fixtures.mock_notion_mcp import start_mock_notion_mcp
-from fixtures.mock_oauth_idp import start_mock_oauth_idp
+from fixtures.mock_oauth_idp import make_pkce_verifier_and_challenge, start_mock_oauth_idp
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -48,25 +49,31 @@ from fixtures.mock_oauth_idp import start_mock_oauth_idp
 
 ROOT = Path(__file__).resolve().parent.parent.parent.parent
 
+_OAUTH_SECRET_RE = re.compile(
+    r"fake_access_[A-Za-z0-9\-_]+"
+    r"|fake_refresh_[A-Za-z0-9\-_]+"
+    r"|fake_code_[A-Za-z0-9\-_]+"
+)
+
 
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
 
 @pytest.fixture(scope="module")
-async def mock_notion():
-    """Start a minimal mock Notion MCP server."""
-    async for handle in start_mock_notion_mcp():
+async def mock_notion_idp():
+    """Start mock OAuth IDP for the Notion MCP server to advertise."""
+    async for handle in start_mock_oauth_idp():
         yield handle
 
 
 @pytest.fixture(scope="module")
-async def mock_notion_idp(mock_notion):
-    """Start mock OAuth IDP — Notion MCP server advertises its own /authorize."""
-    # The mock_notion_mcp server already stores its base_url so tests can
-    # reference its /authorize and /token. Here we create a separate IDP
-    # instance for testing the OAuth exchange round-trip.
-    async for handle in start_mock_oauth_idp():
+async def mock_notion(mock_notion_idp):
+    """Start a minimal mock Notion MCP server."""
+    async for handle in start_mock_notion_mcp(
+        oauth_authorization_url=mock_notion_idp.authorize_url,
+        oauth_token_url=mock_notion_idp.token_url,
+    ):
         yield handle
 
 
@@ -112,13 +119,49 @@ async def v2_notion_server(ironclaw_binary, mock_llm_server, mock_notion, mock_n
 
 
 # ---------------------------------------------------------------------------
+# Test helpers
+# ---------------------------------------------------------------------------
+
+async def _issue_notion_oauth_code(
+    mock_notion_idp,
+    *,
+    include_verifier: bool = False,
+) -> tuple[str, str] | tuple[str, str, str]:
+    """Issue a mock Notion OAuth authorization code for exchange assertions."""
+    import secrets
+
+    verifier, challenge = make_pkce_verifier_and_challenge()
+    state = secrets.token_urlsafe(16)
+    redirect_uri = "http://127.0.0.1:9999/notion/callback"
+    params = {
+        "response_type": "code",
+        "client_id": "notion-client",
+        "redirect_uri": redirect_uri,
+        "state": state,
+        "scope": "read_content",
+        "code_challenge": challenge,
+        "code_challenge_method": "S256",
+    }
+    async with httpx.AsyncClient(follow_redirects=False) as client:
+        r = await client.get(
+            f"{mock_notion_idp.authorize_url}?{urlencode(params)}",
+            timeout=10,
+        )
+    assert r.status_code in (302, 307), f"expected redirect, got {r.status_code}"
+    code = parse_qs(urlparse(r.headers["location"]).query)["code"][0]
+    if include_verifier:
+        return code, redirect_uri, verifier
+    return code, redirect_uri
+
+
+# ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
 
 class TestMockNotionMcpFixture:
     """Validate the mock Notion MCP server itself before using it in wider tests."""
 
-    async def test_initialize_returns_oauth_capability(self, mock_notion):
+    async def test_initialize_returns_oauth_capability(self, mock_notion, mock_notion_idp):
         """Mock MCP initialize response advertises OAuth auth capability."""
         async with httpx.AsyncClient() as client:
             r = await client.post(
@@ -131,8 +174,8 @@ class TestMockNotionMcpFixture:
         capabilities = body["result"]["capabilities"]
         assert "auth" in capabilities, f"auth capability not in: {capabilities}"
         assert capabilities["auth"]["type"] == "oauth2"
-        assert "authorization_url" in capabilities["auth"]
-        assert "token_url" in capabilities["auth"]
+        assert capabilities["auth"]["authorization_url"] == mock_notion_idp.authorize_url
+        assert capabilities["auth"]["token_url"] == mock_notion_idp.token_url
 
     async def test_tools_list_returns_notion_search(self, mock_notion):
         """Mock MCP tools/list returns notion_search."""
@@ -212,6 +255,131 @@ class TestNotionMcpOAuthRoutes:
         assert r.status_code != 405, "405 means route is not mounted"
         assert r.status_code in (200, 400, 422)
 
+    async def test_mock_idp_authorize_endpoint_for_notion(self, mock_notion_idp):
+        """The Notion OAuth IDP authorization URL issues a state-bound code."""
+        import secrets
+
+        _verifier, challenge = make_pkce_verifier_and_challenge()
+        state = secrets.token_urlsafe(16)
+        redirect_uri = "http://127.0.0.1:9999/notion/callback"
+        params = {
+            "response_type": "code",
+            "client_id": "notion-client",
+            "redirect_uri": redirect_uri,
+            "state": state,
+            "scope": "read_content",
+            "code_challenge": challenge,
+            "code_challenge_method": "S256",
+        }
+
+        async with httpx.AsyncClient(follow_redirects=False) as client:
+            r = await client.get(
+                f"{mock_notion_idp.authorize_url}?{urlencode(params)}",
+                timeout=10,
+            )
+        assert r.status_code in (302, 307), f"expected redirect, got {r.status_code}"
+        location = r.headers.get("location", "")
+        qs = parse_qs(urlparse(location).query)
+        assert qs.get("state", [""])[0] == state
+        assert qs["code"][0].startswith("fake_code_")
+
+    async def test_mock_idp_rejects_missing_pkce_verifier_for_notion(self, mock_notion_idp):
+        """The Notion OAuth mock rejects auth-code exchange without PKCE verifier."""
+        code, redirect_uri = await _issue_notion_oauth_code(mock_notion_idp)
+
+        async with httpx.AsyncClient() as client:
+            r = await client.post(
+                mock_notion_idp.token_url,
+                data={
+                    "grant_type": "authorization_code",
+                    "code": code,
+                    "redirect_uri": redirect_uri,
+                    "client_id": "notion-client",
+                },
+                timeout=10,
+            )
+        assert r.status_code == 400
+        assert r.json()["error"] == "invalid_grant"
+
+    async def test_mock_idp_rejects_redirect_uri_mismatch_for_notion(self, mock_notion_idp):
+        """The Notion OAuth mock binds auth codes to the callback URI."""
+        code, _redirect_uri, verifier = await _issue_notion_oauth_code(
+            mock_notion_idp,
+            include_verifier=True,
+        )
+
+        async with httpx.AsyncClient() as client:
+            r = await client.post(
+                mock_notion_idp.token_url,
+                data={
+                    "grant_type": "authorization_code",
+                    "code": code,
+                    "redirect_uri": "http://127.0.0.1:9999/notion/wrong-callback",
+                    "code_verifier": verifier,
+                    "client_id": "notion-client",
+                },
+                timeout=10,
+            )
+        assert r.status_code == 400
+        assert r.json()["error"] == "invalid_grant"
+
+    async def test_mock_idp_refresh_token_is_bound_to_notion_client_id(
+        self,
+        mock_notion_idp,
+    ):
+        """The Notion OAuth mock rejects unknown or cross-client refresh tokens."""
+        code, redirect_uri, verifier = await _issue_notion_oauth_code(
+            mock_notion_idp,
+            include_verifier=True,
+        )
+        async with httpx.AsyncClient() as client:
+            token_r = await client.post(
+                mock_notion_idp.token_url,
+                data={
+                    "grant_type": "authorization_code",
+                    "code": code,
+                    "redirect_uri": redirect_uri,
+                    "code_verifier": verifier,
+                    "client_id": "notion-client",
+                },
+                timeout=10,
+            )
+            assert token_r.status_code == 200, token_r.text
+            refresh_token = token_r.json()["refresh_token"]
+
+            wrong_client_r = await client.post(
+                mock_notion_idp.token_url,
+                data={
+                    "grant_type": "refresh_token",
+                    "refresh_token": refresh_token,
+                    "client_id": "other-client",
+                },
+                timeout=10,
+            )
+            valid_r = await client.post(
+                mock_notion_idp.token_url,
+                data={
+                    "grant_type": "refresh_token",
+                    "refresh_token": refresh_token,
+                    "client_id": "notion-client",
+                },
+                timeout=10,
+            )
+            unknown_r = await client.post(
+                mock_notion_idp.token_url,
+                data={
+                    "grant_type": "refresh_token",
+                    "refresh_token": "fake_refresh_unknown",
+                    "client_id": "notion-client",
+                },
+                timeout=10,
+            )
+
+        assert wrong_client_r.status_code == 400
+        assert valid_r.status_code == 200, valid_r.text
+        assert valid_r.json()["access_token"].startswith("fake_access_")
+        assert unknown_r.status_code == 400
+
     async def test_notion_mcp_oauth_flow_end_to_end(self, v2_notion_server, mock_notion):
         """MCP capability via Notion triggers an auth gate (HTTP API smoke test)."""
         mock_notion.reset()
@@ -239,6 +407,29 @@ class TestNotionMcpOAuthRoutes:
         turns = history.get("turns", [])
         assert gate or turns, (
             "Expected either a pending auth gate or completed turns for Notion MCP request"
+        )
+
+    async def test_notion_oauth_secrets_not_in_history(self, v2_notion_server):
+        """No raw OAuth code/access/refresh token appears in Notion chat history."""
+        r = await api_post(v2_notion_server, "/api/chat/thread/new", timeout=15)
+        assert r.status_code == 200
+        thread_id = r.json()["id"]
+
+        await api_post(
+            v2_notion_server,
+            "/api/chat/send",
+            json={"content": "search notion for roadmap", "thread_id": thread_id},
+            timeout=15,
+        )
+        await asyncio.sleep(5.0)
+        history_r = await api_get(
+            v2_notion_server, f"/api/chat/history?thread_id={thread_id}", timeout=15
+        )
+        history_text = json.dumps(history_r.json())
+        match = _OAUTH_SECRET_RE.search(history_text)
+        assert match is None, (
+            f"OAuth secret found in Notion history: {match.group()!r}\n"
+            f"(first 500): {history_text[:500]}"
         )
 
 
