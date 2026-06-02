@@ -461,9 +461,10 @@ impl BackendCapabilities {
     }
 
     /// Convenience: every capability the in-memory reference backend
-    /// implements. Includes Events on top of `sql_typical`.
+    /// implements. Includes Events, FTS, and Vector on top of
+    /// `sql_typical`.
     pub const fn in_memory_full() -> Self {
-        Self::sql_typical().with(Capability::Events)
+        Self::sql_typical_full()
     }
 
     /// Convenience: read + write + append + list + stat + delete only.

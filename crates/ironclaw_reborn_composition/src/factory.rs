@@ -21,11 +21,13 @@ use ironclaw_events::{
 use ironclaw_extensions::{
     ExtensionInstallationStore, ExtensionLifecycleService, ExtensionRegistry,
 };
-use ironclaw_filesystem::RootFilesystem;
+#[cfg(not(feature = "libsql"))]
+use ironclaw_filesystem::InMemoryBackend;
 #[cfg(feature = "libsql")]
+use ironclaw_filesystem::LibSqlRootFilesystem;
 use ironclaw_filesystem::{
     BackendCapabilities, BackendId, BackendKind, Capability, CompositeRootFilesystem, ContentKind,
-    IndexPolicy, LibSqlRootFilesystem, MountDescriptor, StorageClass,
+    IndexPolicy, MountDescriptor, RootFilesystem, StorageClass,
 };
 use ironclaw_filesystem::{LocalFilesystem, ScopedFilesystem};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -109,10 +111,7 @@ use crate::{
     web_access::register_bundled_web_access_first_party_handlers,
 };
 
-#[cfg(feature = "libsql")]
 pub(crate) type LocalDevRootFilesystem = CompositeRootFilesystem;
-#[cfg(not(feature = "libsql"))]
-pub(crate) type LocalDevRootFilesystem = LocalFilesystem;
 
 type LocalDevWorkspaceFilesystems = (
     Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
@@ -991,6 +990,7 @@ async fn build_local_dev_root_filesystem(
         )?,
         Arc::clone(&database),
     )?;
+    mount_local_dev_memory_root(&mut root, Arc::clone(&database))?;
     root.mount(
         local_dev_mount_descriptor(
             "/events",
@@ -1003,30 +1003,7 @@ async fn build_local_dev_root_filesystem(
         )?,
         database,
     )?;
-    root.mount(
-        local_dev_mount_descriptor(
-            "/projects",
-            "local-dev-project-files",
-            BackendKind::LocalFilesystem,
-            StorageClass::FileContent,
-            ContentKind::ProjectFile,
-            IndexPolicy::NotIndexed,
-            local_dev_bytes_capabilities(),
-        )?,
-        Arc::clone(&local),
-    )?;
-    root.mount(
-        local_dev_mount_descriptor(
-            "/system/extensions",
-            "local-dev-system-extensions",
-            BackendKind::LocalFilesystem,
-            StorageClass::FileContent,
-            ContentKind::ExtensionPackage,
-            IndexPolicy::NotIndexed,
-            local_dev_bytes_capabilities(),
-        )?,
-        Arc::clone(&local),
-    )?;
+    mount_local_dev_project_roots(&mut root, local)?;
     Ok(Arc::new(root))
 }
 
@@ -1036,11 +1013,15 @@ async fn build_local_dev_root_filesystem(
     workspace_root: &Path,
     host_home_root: Option<&LocalDevHostHomeRoot>,
 ) -> Result<Arc<LocalDevRootFilesystem>, RebornBuildError> {
-    Ok(Arc::new(local_dev_project_filesystem(
+    let local = Arc::new(local_dev_project_filesystem(
         root,
         workspace_root,
         host_home_root,
-    )?))
+    )?);
+    let mut root = CompositeRootFilesystem::new();
+    mount_local_dev_memory_root(&mut root, Arc::new(InMemoryBackend::new()))?;
+    mount_local_dev_project_roots(&mut root, local)?;
+    Ok(Arc::new(root))
 }
 
 fn local_dev_project_filesystem(
@@ -1068,6 +1049,59 @@ fn local_dev_project_filesystem(
         )?;
     }
     Ok(filesystem)
+}
+
+fn mount_local_dev_memory_root<F>(
+    root: &mut CompositeRootFilesystem,
+    backend: Arc<F>,
+) -> Result<(), RebornBuildError>
+where
+    F: RootFilesystem + 'static,
+{
+    root.mount(
+        local_dev_mount_descriptor(
+            "/memory",
+            "local-dev-memory",
+            BackendKind::MemoryDocuments,
+            StorageClass::StructuredRecords,
+            ContentKind::MemoryDocument,
+            IndexPolicy::FullTextAndVector,
+            backend.capabilities(),
+        )?,
+        backend,
+    )?;
+    Ok(())
+}
+
+fn mount_local_dev_project_roots(
+    root: &mut CompositeRootFilesystem,
+    local: Arc<LocalFilesystem>,
+) -> Result<(), RebornBuildError> {
+    root.mount(
+        local_dev_mount_descriptor(
+            "/projects",
+            "local-dev-project-files",
+            BackendKind::LocalFilesystem,
+            StorageClass::FileContent,
+            ContentKind::ProjectFile,
+            IndexPolicy::NotIndexed,
+            local_dev_bytes_capabilities(),
+        )?,
+        Arc::clone(&local),
+    )?;
+    root.mount(
+        local_dev_mount_descriptor(
+            "/system/extensions",
+            "local-dev-system-extensions",
+            BackendKind::LocalFilesystem,
+            StorageClass::FileContent,
+            ContentKind::ExtensionPackage,
+            IndexPolicy::NotIndexed,
+            local_dev_bytes_capabilities(),
+        )?,
+        local,
+    )?;
+    Ok(())
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -1196,7 +1230,6 @@ fn write_local_dev_secret_master_key(path: &Path, key: &str) -> Result<(), Rebor
     }
 }
 
-#[cfg(feature = "libsql")]
 fn local_dev_mount_descriptor(
     virtual_root: &str,
     backend_id: &str,
@@ -1217,7 +1250,6 @@ fn local_dev_mount_descriptor(
     })
 }
 
-#[cfg(feature = "libsql")]
 fn local_dev_bytes_capabilities() -> BackendCapabilities {
     BackendCapabilities::empty()
         .with(Capability::Read)
@@ -2192,6 +2224,7 @@ mod tests {
         RuntimeKind, ScopedPath, SecretHandle, TrustClass, UserId, VirtualPath,
     };
     use ironclaw_host_runtime::{
+        MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
         RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeFailureKind,
         SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID,
     };
@@ -2227,6 +2260,58 @@ mod tests {
                 .is_some()
         );
         assert_eq!(services.readiness.state, RebornReadinessState::DevOnly);
+    }
+
+    #[tokio::test]
+    async fn local_dev_memory_first_party_tools_use_mounted_memory_root() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let services = build_reborn_services(RebornBuildInput::local_dev(
+            "local-dev-memory-owner",
+            dir.path().join("local-dev"),
+        ))
+        .await
+        .expect("local-dev services build");
+        let runtime = services.host_runtime.expect("host runtime composed");
+
+        invoke_json(
+            runtime.as_ref(),
+            MEMORY_WRITE_CAPABILITY_ID,
+            memory_context(MEMORY_WRITE_CAPABILITY_ID),
+            serde_json::json!({
+                "target": "projects/alpha/notes.md",
+                "content": "local dev mounted memory root search marker",
+                "append": false
+            }),
+        )
+        .await
+        .expect("memory_write should use the mounted /memory root");
+
+        let tree = invoke_json(
+            runtime.as_ref(),
+            MEMORY_TREE_CAPABILITY_ID,
+            memory_context(MEMORY_TREE_CAPABILITY_ID),
+            serde_json::json!({"path": "", "depth": 3}),
+        )
+        .await
+        .expect("memory_tree should list the mounted /memory root");
+        assert!(
+            tree.to_string().contains("alpha/"),
+            "memory_tree should include the written memory document: {tree}"
+        );
+
+        let search = invoke_json(
+            runtime.as_ref(),
+            MEMORY_SEARCH_CAPABILITY_ID,
+            memory_context(MEMORY_SEARCH_CAPABILITY_ID),
+            serde_json::json!({"query": "mounted memory root search marker", "limit": 5}),
+        )
+        .await
+        .expect("memory_search should query the mounted /memory root");
+        assert_eq!(search["result_count"], serde_json::json!(1));
+        assert_eq!(
+            search["results"][0]["path"],
+            serde_json::json!("projects/alpha/notes.md")
+        );
     }
 
     #[cfg(feature = "libsql")]
@@ -2970,6 +3055,14 @@ mod tests {
 
     fn workspace_context(capability_id: &str) -> ExecutionContext {
         execution_context(capability_id, workspace_mounts())
+    }
+
+    fn memory_context(capability_id: &str) -> ExecutionContext {
+        execution_context(
+            capability_id,
+            memory_mount_view(MountPermissions::read_write_list_delete())
+                .expect("valid memory mounts"),
+        )
     }
 
     fn gsuite_context(capability_id: &str) -> ExecutionContext {

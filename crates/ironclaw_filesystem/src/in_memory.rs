@@ -689,6 +689,9 @@ mod tests {
         // (e.g. a backend without pgvector); the trait-level capability
         // declaration is what gates real backends.
         let fs = InMemoryBackend::new();
+        let capabilities = fs.capabilities();
+        assert!(capabilities.has(crate::Capability::IndexFts));
+        assert!(capabilities.has(crate::Capability::IndexVector));
         let prefix = vpath("/memory");
         let fts = IndexSpec::new(
             IndexName::new("by_chunk").unwrap(),
