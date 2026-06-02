@@ -247,6 +247,7 @@ fn first_party_capability_manifest(
 #[derive(Debug, Default)]
 pub struct BuiltinFirstPartyTools {
     coding_state: CodingCapabilityState,
+    memory_state: memory::MemoryCapabilityState,
 }
 
 #[async_trait]
@@ -272,7 +273,7 @@ impl FirstPartyCapabilityHandler for BuiltinFirstPartyTools {
             | MEMORY_WRITE_CAPABILITY_ID
             | MEMORY_READ_CAPABILITY_ID
             | MEMORY_TREE_CAPABILITY_ID => {
-                let mut result = memory::dispatch(&request).await?;
+                let mut result = memory::dispatch(&self.memory_state, &request).await?;
                 result.usage.output_bytes =
                     bounded_output_bytes(&result.output, FIRST_PARTY_MAX_OUTPUT_BYTES)?;
                 return Ok(result);
@@ -430,8 +431,21 @@ fn normalize_optional_null_sentinels(request: &mut FirstPartyCapabilityRequest) 
     object.retain(|key, value| {
         !(declared.contains(key.as_str())
             && !required.contains(key)
-            && (value.as_str() == Some("null") || value.is_null()))
+            && (value.as_str() == Some("null") || value.is_null())
+            && !preserve_optional_null_sentinel(
+                request.capability_id.as_str(),
+                key.as_str(),
+                value,
+            ))
     });
+}
+
+fn preserve_optional_null_sentinel(
+    capability_id: &str,
+    key: &str,
+    value: &serde_json::Value,
+) -> bool {
+    capability_id == MEMORY_WRITE_CAPABILITY_ID && key == "target" && value.is_null()
 }
 
 fn resource_profile() -> Option<ResourceProfile> {

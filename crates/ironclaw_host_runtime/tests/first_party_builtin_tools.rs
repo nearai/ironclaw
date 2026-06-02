@@ -340,6 +340,11 @@ async fn memory_capabilities_write_read_tree_and_search_native_reborn_memory() {
     )
     .await
     .unwrap();
+    assert_eq!(
+        tree,
+        json!([{"projects/": [{"alpha/": ["notes.md"]}]}]),
+        "tree should preserve dynamic directory names: {tree}"
+    );
     assert!(
         tree.to_string().contains("alpha/"),
         "tree should include project directory: {tree}"
@@ -358,6 +363,39 @@ async fn memory_capabilities_write_read_tree_and_search_native_reborn_memory() {
         search["results"][0]["path"],
         json!("projects/alpha/notes.md")
     );
+}
+
+#[tokio::test]
+async fn memory_write_metadata_overlay_can_skip_search_indexing() {
+    let runtime = runtime_with_filesystem(InMemoryBackend::new());
+    let context = execution_context_with_mounts(
+        [MEMORY_WRITE_CAPABILITY_ID, MEMORY_SEARCH_CAPABILITY_ID],
+        memory_mounts(MountPermissions::read_write_list_delete()),
+    );
+
+    invoke_with_context(
+        &runtime,
+        MEMORY_WRITE_CAPABILITY_ID,
+        json!({
+            "target": "projects/alpha/skip-index.md",
+            "content": "metadata overlay search marker",
+            "append": false,
+            "metadata": {"skip_indexing": true}
+        }),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+
+    let search = invoke_with_context(
+        &runtime,
+        MEMORY_SEARCH_CAPABILITY_ID,
+        json!({"query": "metadata overlay search marker", "limit": 5}),
+        context,
+    )
+    .await
+    .unwrap();
+    assert_eq!(search["result_count"], json!(0));
 }
 
 #[tokio::test]
@@ -487,21 +525,25 @@ async fn memory_write_daily_log_rejects_invalid_timezone() {
 #[tokio::test]
 async fn memory_write_rejects_local_filesystem_paths() {
     let runtime = runtime_with_filesystem(InMemoryBackend::new());
-    let failure = invoke_with_context(
-        &runtime,
-        MEMORY_WRITE_CAPABILITY_ID,
-        json!({
-            "target": "/Users/example/notes.md",
-            "content": "should not write"
-        }),
-        execution_context_with_mounts(
-            [MEMORY_WRITE_CAPABILITY_ID],
-            memory_mounts(MountPermissions::read_write_list_delete()),
-        ),
-    )
-    .await
-    .unwrap_err();
-    assert_eq!(failure, RuntimeFailureKind::InvalidInput);
+    let context = execution_context_with_mounts(
+        [MEMORY_WRITE_CAPABILITY_ID],
+        memory_mounts(MountPermissions::read_write_list_delete()),
+    );
+
+    for target in ["/Users/example/notes.md", "C:/Users/example/notes.md"] {
+        let failure = invoke_with_context(
+            &runtime,
+            MEMORY_WRITE_CAPABILITY_ID,
+            json!({
+                "target": target,
+                "content": "should not write"
+            }),
+            context.clone(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(failure, RuntimeFailureKind::InvalidInput);
+    }
 }
 
 #[tokio::test]
@@ -521,6 +563,28 @@ async fn memory_write_rejects_traversal_paths() {
                 "content": "should not write"
             }),
             context.clone(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(failure, RuntimeFailureKind::InvalidInput);
+    }
+}
+
+#[tokio::test]
+async fn memory_write_rejects_non_string_target() {
+    let runtime = runtime_with_filesystem(InMemoryBackend::new());
+    for target in [json!(null), json!(42), json!(true)] {
+        let failure = invoke_with_context(
+            &runtime,
+            MEMORY_WRITE_CAPABILITY_ID,
+            json!({
+                "target": target,
+                "content": "should not write"
+            }),
+            execution_context_with_mounts(
+                [MEMORY_WRITE_CAPABILITY_ID],
+                memory_mounts(MountPermissions::read_write_list_delete()),
+            ),
         )
         .await
         .unwrap_err();

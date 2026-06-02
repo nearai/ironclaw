@@ -23,7 +23,9 @@ mod write_metadata;
 pub use backend::{
     MemoryBackend, MemoryBackendCapabilities, MemoryContext, RepositoryMemoryBackend,
 };
-pub use chunking::{ChunkConfig, MemoryChunkWrite, chunk_document, content_sha256};
+pub use chunking::{
+    ChunkConfig, MemoryChunkWrite, chunk_document, content_bytes_sha256, content_sha256,
+};
 pub use embedding::{EmbeddingError, EmbeddingProvider};
 pub use events::{
     MemoryAuditContext, MemoryEventSinkError, MemorySignificantEvent, MemorySignificantEventKind,

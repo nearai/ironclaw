@@ -1,10 +1,11 @@
-use std::{path::Path, sync::Arc};
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use chrono::Utc;
 use chrono_tz::Tz;
 use ironclaw_events::AuditSink;
 use ironclaw_extensions::{CapabilityManifest, ExtensionError};
+use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
     ActionResultSummary, ActionSummary, AuditEnvelope, AuditEventId, AuditStage, DecisionSummary,
     EffectKind, ExtensionId, PermissionMode, ResourceUsage, RuntimeDispatchErrorKind,
@@ -15,10 +16,9 @@ use ironclaw_memory::{
     MemoryDocumentPath, MemoryDocumentScope, MemoryEventSinkError, MemorySearchRequest,
     MemoryWriteOutcome, PromptSafetyAllowanceId, PromptSafetyReasonCode, PromptWriteOperation,
     PromptWriteSafetyEvent, PromptWriteSafetyEventKind, PromptWriteSafetyEventSink,
-    RepositoryMemoryBackend,
+    RepositoryMemoryBackend, content_bytes_sha256,
 };
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 
 use crate::{FirstPartyCapabilityError, FirstPartyCapabilityRequest, FirstPartyCapabilityResult};
 
@@ -38,6 +38,26 @@ const MEMORY_PROMPT_SAFETY_EXTENSION_ID: &str = "memory.prompt_safety";
 struct MemoryServices {
     scope: MemoryDocumentScope,
     context: MemoryContext,
+    backend: Arc<dyn MemoryBackend>,
+}
+
+#[derive(Default)]
+pub(super) struct MemoryCapabilityState {
+    cached_backend: Mutex<Option<CachedMemoryBackend>>,
+}
+
+impl std::fmt::Debug for MemoryCapabilityState {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("MemoryCapabilityState")
+            .field("cached_backend", &"<cached-memory-backend>")
+            .finish()
+    }
+}
+
+struct CachedMemoryBackend {
+    filesystem: Arc<dyn RootFilesystem>,
+    audit_sink: Option<Arc<dyn AuditSink>>,
     backend: Arc<dyn MemoryBackend>,
 }
 
@@ -164,10 +184,11 @@ pub(super) fn manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
 }
 
 pub(super) async fn dispatch(
+    state: &MemoryCapabilityState,
     request: &FirstPartyCapabilityRequest,
 ) -> Result<FirstPartyCapabilityResult, FirstPartyCapabilityError> {
     let start = std::time::Instant::now();
-    let services = memory_services(request)?;
+    let services = memory_services(state, request)?;
     let output = match request.capability_id.as_str() {
         MEMORY_SEARCH_CAPABILITY_ID => dispatch_search(&services, &request.input).await?,
         MEMORY_WRITE_CAPABILITY_ID => dispatch_write(&services, &request.input).await?,
@@ -186,6 +207,7 @@ pub(super) async fn dispatch(
 }
 
 fn memory_services(
+    state: &MemoryCapabilityState,
     request: &FirstPartyCapabilityRequest,
 ) -> Result<MemoryServices, FirstPartyCapabilityError> {
     ensure_memory_mount(
@@ -203,9 +225,58 @@ fn memory_services(
         request.scope.clone(),
         ironclaw_host_api::CorrelationId::new(),
     );
-    let repository = Arc::new(FilesystemMemoryDocumentRepository::new(
-        request.services.filesystem.clone(),
-    ));
+    let backend = state.backend_for(request)?;
+    Ok(MemoryServices {
+        scope,
+        context,
+        backend,
+    })
+}
+
+impl MemoryCapabilityState {
+    fn backend_for(
+        &self,
+        request: &FirstPartyCapabilityRequest,
+    ) -> Result<Arc<dyn MemoryBackend>, FirstPartyCapabilityError> {
+        let mut cached_backend = self.cached_backend.lock().map_err(|_| operation_error())?;
+        if let Some(cached) = cached_backend.as_ref()
+            && Arc::ptr_eq(&cached.filesystem, &request.services.filesystem)
+            && audit_sinks_match(
+                cached.audit_sink.as_ref(),
+                request.services.audit_sink.as_ref(),
+            )
+        {
+            return Ok(Arc::clone(&cached.backend));
+        }
+
+        let filesystem = Arc::clone(&request.services.filesystem);
+        let audit_sink = request.services.audit_sink.clone();
+        let backend = build_backend(Arc::clone(&filesystem), audit_sink.clone());
+        *cached_backend = Some(CachedMemoryBackend {
+            filesystem,
+            audit_sink,
+            backend: Arc::clone(&backend),
+        });
+        Ok(backend)
+    }
+}
+
+fn audit_sinks_match(
+    left: Option<&Arc<dyn AuditSink>>,
+    right: Option<&Arc<dyn AuditSink>>,
+) -> bool {
+    match (left, right) {
+        (None, None) => true,
+        (Some(left), Some(right)) => Arc::ptr_eq(left, right),
+        _ => false,
+    }
+}
+
+fn build_backend(
+    filesystem: Arc<dyn RootFilesystem>,
+    audit_sink: Option<Arc<dyn AuditSink>>,
+) -> Arc<dyn MemoryBackend> {
+    let repository = Arc::new(FilesystemMemoryDocumentRepository::new(filesystem));
     let indexer = Arc::new(ChunkingMemoryDocumentIndexer::new(Arc::clone(&repository)));
     let mut backend = RepositoryMemoryBackend::new(Arc::clone(&repository))
         .with_indexer(indexer)
@@ -219,18 +290,12 @@ fn memory_services(
             transactions: true,
             ..MemoryBackendCapabilities::default()
         });
-    if let Some(audit_sink) = &request.services.audit_sink {
+    if let Some(audit_sink) = audit_sink {
         backend = backend.with_prompt_write_safety_event_sink(Arc::new(
-            AuditPromptWriteSafetyEventSink {
-                audit_sink: Arc::clone(audit_sink),
-            },
+            AuditPromptWriteSafetyEventSink { audit_sink },
         ));
     }
-    Ok(MemoryServices {
-        scope,
-        context,
-        backend: Arc::new(backend),
-    })
+    Arc::new(backend)
 }
 
 fn ensure_memory_mount(
@@ -307,7 +372,7 @@ async fn dispatch_write(
         path,
         metadata_overlay,
         operation,
-    } = parse_write_command(services, input)?;
+    } = parse_write_command(&services.scope, input)?;
     match operation {
         MemoryWriteOperation::ClearBootstrap => {
             clear_bootstrap_document(services, &path, &resolved_path, metadata_overlay.as_ref())
@@ -366,17 +431,18 @@ async fn dispatch_write(
 }
 
 fn parse_write_command(
-    services: &MemoryServices,
+    scope: &MemoryDocumentScope,
     input: &Value,
 ) -> Result<MemoryWriteCommand, FirstPartyCapabilityError> {
-    let target = input
-        .get("target")
-        .and_then(Value::as_str)
-        .unwrap_or("daily_log");
+    let target = match input.get("target") {
+        Some(Value::String(target)) => target.as_str(),
+        Some(_) => return Err(input_error()),
+        None => "daily_log",
+    };
     reject_local_or_traversal_path(target)?;
 
     let resolved_path = resolve_target_path(target, input)?;
-    let path = document_path(&services.scope, &resolved_path)?;
+    let path = document_path(scope, &resolved_path)?;
     let metadata_overlay = input
         .get("metadata")
         .filter(|metadata| metadata.is_object())
@@ -426,6 +492,9 @@ async fn clear_bootstrap_document(
     resolved_path: &str,
     metadata_overlay: Option<&DocumentMetadata>,
 ) -> Result<Value, FirstPartyCapabilityError> {
+    if path.relative_path() != BOOTSTRAP_PATH || resolved_path != BOOTSTRAP_PATH {
+        return Err(operation_error());
+    }
     let context = services
         .context
         .clone()
@@ -461,8 +530,8 @@ async fn patch_document(
         else {
             return Err(operation_error());
         };
-        let expected = content_bytes_sha256(&bytes);
         let existing = String::from_utf8(bytes).map_err(|_| operation_error())?;
+        let expected = content_bytes_sha256(existing.as_bytes());
         let replacements = existing.matches(old_string).count();
         if replacements == 0 {
             return Err(input_error());
@@ -514,10 +583,6 @@ fn write_options(metadata_overlay: Option<&DocumentMetadata>) -> MemoryBackendWr
     MemoryBackendWriteOptions {
         metadata_overlay: metadata_overlay.cloned(),
     }
-}
-
-fn content_bytes_sha256(bytes: &[u8]) -> String {
-    format!("sha256:{}", hex::encode(Sha256::digest(bytes)))
 }
 
 async fn dispatch_read(
@@ -613,7 +678,7 @@ fn tree_for_paths(paths: &[String], root: &str, max_depth: usize) -> Vec<Value> 
             if child_tree.is_empty() {
                 output.push(Value::String(display));
             } else {
-                output.push(json!({ display: child_tree }));
+                output.push(json!({ (display): child_tree }));
             }
         }
     }
@@ -682,7 +747,7 @@ fn looks_like_filesystem_path(path: &str) -> bool {
     if path.is_empty() {
         return false;
     }
-    if Path::new(path).is_absolute() || path.starts_with("~/") {
+    if path.starts_with('/') || path.starts_with("~/") {
         return true;
     }
     let bytes = path.as_bytes();
