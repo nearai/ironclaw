@@ -517,3 +517,17 @@ impl<'de> Deserialize<'de> for BackendCapabilities {
         Ok(out)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn in_memory_full_includes_fts_vector_events() {
+        let capabilities = BackendCapabilities::in_memory_full();
+
+        assert!(capabilities.has(Capability::IndexFts));
+        assert!(capabilities.has(Capability::IndexVector));
+        assert!(capabilities.has(Capability::Events));
+    }
+}

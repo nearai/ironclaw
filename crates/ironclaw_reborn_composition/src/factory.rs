@@ -1018,10 +1018,13 @@ async fn build_local_dev_root_filesystem(
         workspace_root,
         host_home_root,
     )?);
-    let mut root = CompositeRootFilesystem::new();
-    mount_local_dev_memory_root(&mut root, Arc::new(InMemoryBackend::new()))?;
-    mount_local_dev_project_roots(&mut root, local)?;
-    Ok(Arc::new(root))
+    tracing::warn!(
+        "local-dev: /memory is backed by InMemoryBackend; memory documents are ephemeral and will be lost on restart"
+    );
+    let mut composite = CompositeRootFilesystem::new();
+    mount_local_dev_memory_root(&mut composite, Arc::new(InMemoryBackend::new()))?;
+    mount_local_dev_project_roots(&mut composite, local)?;
+    Ok(Arc::new(composite))
 }
 
 fn local_dev_project_filesystem(
@@ -1230,6 +1233,8 @@ fn write_local_dev_secret_master_key(path: &Path, key: &str) -> Result<(), Rebor
     }
 }
 
+// Intentionally uncfg'd: these helpers are called from both libsql and
+// no-libsql local-dev root filesystem paths.
 fn local_dev_mount_descriptor(
     virtual_root: &str,
     backend_id: &str,
@@ -2311,6 +2316,70 @@ mod tests {
         assert_eq!(
             search["results"][0]["path"],
             serde_json::json!("projects/alpha/notes.md")
+        );
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn local_dev_memory_documents_persist_across_rebuilds() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let local_dev_root = dir.path().join("local-dev");
+        let owner = "local-dev-durable-memory-owner";
+
+        let services =
+            build_reborn_services(RebornBuildInput::local_dev(owner, local_dev_root.clone()))
+                .await
+                .expect("first local-dev services build");
+        let runtime = services
+            .host_runtime
+            .as_ref()
+            .expect("host runtime composed");
+
+        invoke_json(
+            runtime.as_ref(),
+            MEMORY_WRITE_CAPABILITY_ID,
+            memory_context(MEMORY_WRITE_CAPABILITY_ID),
+            serde_json::json!({
+                "target": "projects/durable/notes.md",
+                "content": "local dev durable mounted memory root search marker",
+                "append": false
+            }),
+        )
+        .await
+        .expect("memory_write should persist through the libsql /memory root");
+        drop(services);
+
+        let rebuilt =
+            build_reborn_services(RebornBuildInput::local_dev(owner, local_dev_root.clone()))
+                .await
+                .expect("rebuilt local-dev services");
+        let runtime = rebuilt.host_runtime.as_ref().expect("rebuilt host runtime");
+
+        let tree = invoke_json(
+            runtime.as_ref(),
+            MEMORY_TREE_CAPABILITY_ID,
+            memory_context(MEMORY_TREE_CAPABILITY_ID),
+            serde_json::json!({"path": "", "depth": 3}),
+        )
+        .await
+        .expect("memory_tree should list rebuilt libsql memory documents");
+        assert!(
+            tree.to_string().contains("durable/"),
+            "memory_tree should include the persisted memory document: {tree}"
+        );
+
+        let search = invoke_json(
+            runtime.as_ref(),
+            MEMORY_SEARCH_CAPABILITY_ID,
+            memory_context(MEMORY_SEARCH_CAPABILITY_ID),
+            serde_json::json!({"query": "durable mounted memory root search marker", "limit": 5}),
+        )
+        .await
+        .expect("memory_search should query rebuilt libsql memory documents");
+        assert_eq!(search["result_count"], serde_json::json!(1));
+        assert_eq!(
+            search["results"][0]["path"],
+            serde_json::json!("projects/durable/notes.md")
         );
     }
 
