@@ -1373,20 +1373,10 @@ mod tests {
             list_files.runtime_credentials[0].provider_scopes,
             vec!["https://www.googleapis.com/auth/drive.readonly".to_string()]
         );
-        assert!(
-            !list_files
-                .effects
-                .iter()
-                .any(|effect| *effect == EffectKind::ExternalWrite)
-        );
+        assert!(!list_files.effects.contains(&EffectKind::ExternalWrite));
 
         let upload_file = capabilities["google-drive.upload_file"];
-        assert!(
-            upload_file
-                .effects
-                .iter()
-                .any(|effect| *effect == EffectKind::ExternalWrite)
-        );
+        assert!(upload_file.effects.contains(&EffectKind::ExternalWrite));
     }
 
     #[tokio::test]
