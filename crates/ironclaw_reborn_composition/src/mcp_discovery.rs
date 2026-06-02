@@ -140,6 +140,11 @@ fn hosted_mcp_capability_template(
     }
     Ok(HostedMcpCapabilityTemplate {
         planning_capability_id: first.id.clone(),
+        provider_declares_external_write: package
+            .manifest
+            .capabilities
+            .iter()
+            .any(|capability| capability.effects.contains(&EffectKind::ExternalWrite)),
         required_host_ports: first.required_host_ports.clone(),
         runtime_credentials: first.runtime_credentials.clone(),
         resource_profile: first.resource_profile.clone(),
@@ -148,6 +153,7 @@ fn hosted_mcp_capability_template(
 
 struct HostedMcpCapabilityTemplate {
     planning_capability_id: CapabilityId,
+    provider_declares_external_write: bool,
     required_host_ports: Vec<ironclaw_host_api::HostPortId>,
     runtime_credentials: Vec<ironclaw_host_api::RuntimeCredentialRequirement>,
     resource_profile: Option<ironclaw_host_api::ResourceProfile>,
@@ -180,7 +186,9 @@ fn discovered_capability_manifest(
     if !template.runtime_credentials.is_empty() {
         effects.push(EffectKind::UseSecret);
     }
-    effects.push(EffectKind::ExternalWrite);
+    if discovered_tool_requires_external_write(template, tool) {
+        effects.push(EffectKind::ExternalWrite);
+    }
 
     Ok(CapabilityManifest {
         id: capability_id,
@@ -200,6 +208,22 @@ fn discovered_capability_manifest(
         runtime_credentials: template.runtime_credentials.clone(),
         resource_profile: template.resource_profile.clone(),
     })
+}
+
+fn discovered_tool_requires_external_write(
+    template: &HostedMcpCapabilityTemplate,
+    tool: &McpDiscoveredTool,
+) -> bool {
+    if tool.annotations.destructive_hint || tool.annotations.side_effects_hint {
+        return true;
+    }
+    if tool.annotations.read_only_hint {
+        return false;
+    }
+    // MCP annotations are advisory. For providers whose bundled manifest
+    // declares write-capable tools, unannotated discovered tools stay
+    // conservative so policy surfaces do not understate possible side effects.
+    template.provider_declares_external_write
 }
 
 #[cfg(test)]
@@ -246,6 +270,10 @@ runtime_credentials = [
                     "properties": {"query": {"type": "string"}},
                     "required": ["query"]
                 }),
+                annotations: ironclaw_mcp::McpDiscoveredToolAnnotations {
+                    read_only_hint: true,
+                    ..Default::default()
+                },
             },
             McpDiscoveredTool {
                 name: "notion-create-pages".to_string(),
@@ -254,6 +282,10 @@ runtime_credentials = [
                     "type": "object",
                     "properties": {"pages": {"type": "array"}}
                 }),
+                annotations: ironclaw_mcp::McpDiscoveredToolAnnotations {
+                    side_effects_hint: true,
+                    ..Default::default()
+                },
             },
         ];
 
@@ -283,7 +315,13 @@ runtime_credentials = [
         );
         assert_eq!(search.runtime_credentials.len(), 1);
         assert!(search.effects.contains(&EffectKind::UseSecret));
-        assert!(search.effects.contains(&EffectKind::ExternalWrite));
+        assert!(!search.effects.contains(&EffectKind::ExternalWrite));
+        let create_pages = discovered
+            .capabilities
+            .iter()
+            .find(|capability| capability.id.as_str() == "notion.notion-create-pages")
+            .expect("discovered create-pages capability");
+        assert!(create_pages.effects.contains(&EffectKind::ExternalWrite));
         assert_eq!(discovered.manifest.capabilities.len(), 2);
     }
 
@@ -298,6 +336,7 @@ runtime_credentials = [
             name: "notion-search".to_string(),
             description: "Search live Notion tools".to_string(),
             input_schema: serde_json::json!({"type": "object"}),
+            annotations: Default::default(),
         }];
 
         let error = package_with_discovered_tools(&package, &tools)

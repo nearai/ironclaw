@@ -104,6 +104,15 @@ pub struct McpDiscoveredTool {
     pub name: String,
     pub description: String,
     pub input_schema: Value,
+    pub annotations: McpDiscoveredToolAnnotations,
+}
+
+/// MCP tool behavior hints returned by `tools/list`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct McpDiscoveredToolAnnotations {
+    pub destructive_hint: bool,
+    pub side_effects_hint: bool,
+    pub read_only_hint: bool,
 }
 
 /// Result of a hosted MCP schema-discovery pass.
@@ -885,6 +894,9 @@ fn parse_tools_list_result(value: &Value) -> Result<Vec<McpDiscoveredTool>, Stri
             let name = tool
                 .get("name")
                 .and_then(Value::as_str)
+                // Discovered tool names become Reborn capability suffixes, so
+                // discovery rejects unsupported names instead of normalizing
+                // them into potentially colliding capability IDs.
                 .filter(|name| is_supported_mcp_tool_name(name, MAX_TOOL_NAME_BYTES))
                 .ok_or_else(response_error)?;
             let description = tool
@@ -892,7 +904,7 @@ fn parse_tools_list_result(value: &Value) -> Result<Vec<McpDiscoveredTool>, Stri
                 .and_then(Value::as_str)
                 .unwrap_or("");
             if description.len() > MAX_TOOL_DESCRIPTION_BYTES
-                || description.chars().any(char::is_control)
+                || description.chars().any(is_unsupported_description_char)
             {
                 return Err(response_error());
             }
@@ -901,13 +913,40 @@ fn parse_tools_list_result(value: &Value) -> Result<Vec<McpDiscoveredTool>, Stri
                 .filter(|schema| schema.is_object())
                 .cloned()
                 .ok_or_else(response_error)?;
+            let annotations = parse_tool_annotations(tool.get("annotations"))?;
             Ok(McpDiscoveredTool {
                 name: name.to_string(),
                 description: description.to_string(),
                 input_schema,
+                annotations,
             })
         })
         .collect()
+}
+
+fn is_unsupported_description_char(value: char) -> bool {
+    value.is_control() && !matches!(value, '\n' | '\r' | '\t')
+}
+
+fn parse_tool_annotations(value: Option<&Value>) -> Result<McpDiscoveredToolAnnotations, String> {
+    let Some(value) = value else {
+        return Ok(McpDiscoveredToolAnnotations::default());
+    };
+    let object = value.as_object().ok_or_else(response_error)?;
+    Ok(McpDiscoveredToolAnnotations {
+        destructive_hint: object
+            .get("destructiveHint")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        side_effects_hint: object
+            .get("sideEffectsHint")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        read_only_hint: object
+            .get("readOnlyHint")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    })
 }
 
 fn is_supported_mcp_tool_name(value: &str, max_bytes: usize) -> bool {

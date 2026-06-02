@@ -613,7 +613,12 @@ async fn concrete_mcp_http_client_discovers_tool_schemas_through_shared_egress()
 
     assert_eq!(output.tools.len(), 2);
     assert_eq!(output.tools[0].name, "search");
-    assert_eq!(output.tools[0].description, "Search GitHub issues");
+    assert_eq!(
+        output.tools[0].description,
+        "Search GitHub issues\nacross repositories"
+    );
+    assert!(output.tools[0].annotations.read_only_hint);
+    assert!(!output.tools[0].annotations.side_effects_hint);
     assert_eq!(
         output.tools[0].input_schema,
         json!({
@@ -625,6 +630,7 @@ async fn concrete_mcp_http_client_discovers_tool_schemas_through_shared_egress()
         })
     );
     assert_eq!(output.tools[1].name, "issue.create");
+    assert!(output.tools[1].annotations.side_effects_hint);
 
     let requests = egress.requests();
     assert_eq!(
@@ -1180,13 +1186,16 @@ impl RuntimeHttpEgress for RecordingRuntimeEgress {
                     "tools": [
                         {
                             "name": "search",
-                            "description": "Search GitHub issues",
+                            "description": "Search GitHub issues\nacross repositories",
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {
                                     "query": {"type": "string"}
                                 },
                                 "required": ["query"]
+                            },
+                            "annotations": {
+                                "readOnlyHint": true
                             }
                         },
                         {
@@ -1197,6 +1206,9 @@ impl RuntimeHttpEgress for RecordingRuntimeEgress {
                                 "properties": {
                                     "title": {"type": "string"}
                                 }
+                            },
+                            "annotations": {
+                                "sideEffectsHint": true
                             }
                         }
                     ]

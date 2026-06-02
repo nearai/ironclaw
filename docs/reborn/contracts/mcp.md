@@ -172,9 +172,18 @@ The protocol client parses the server result into bounded `McpDiscoveredTool`
 records:
 
 - tool names must be directly publishable as Reborn capability suffixes
-  (lowercase ASCII name segments separated by dots)
+  (lowercase ASCII name segments separated by dots); unsupported names are
+  rejected rather than normalized so discovery cannot create ambiguous or
+  colliding capability IDs
 - descriptions are bounded and control-character-free
+  except for normal formatting whitespace (`\n`, `\r`, `\t`)
 - `inputSchema` must be an object-shaped JSON schema
+- MCP annotations are parsed as behavior hints. `destructiveHint` and
+  `sideEffectsHint` mark the discovered capability as `external_write`;
+  `readOnlyHint` suppresses that effect when no stronger write hint is present.
+  If annotations are absent and the bundled provider manifest declares any
+  write-capable MCP tool, discovery keeps `external_write` as a conservative
+  provider-level over-approximation.
 - direct `SecretStoreLease` credential sources fail before the handshake
 - staged product-auth credentials are allowed for `tools/list` when the host
   planner supplies them
