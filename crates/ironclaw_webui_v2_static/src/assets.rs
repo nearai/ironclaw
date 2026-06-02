@@ -96,6 +96,26 @@ mod tests {
     }
 
     #[test]
+    fn chat_pending_reconciliation_has_caller_level_js_regression() {
+        let use_chat = asset_text("js/pages/chat/hooks/useChat.js");
+        assert!(use_chat.contains("recordAcceptedMessageRef("));
+        assert!(use_chat.contains("pendingMessagesRef.current"));
+        assert!(use_chat.contains("response?.accepted_message_ref"));
+
+        let pending_messages = asset_text("js/pages/chat/lib/pending-messages.js");
+        assert!(pending_messages.contains("timelineMessageIdFromAcceptedRef"));
+        assert!(
+            pending_messages.contains("return ref.startsWith(\"msg:\") ? ref.slice(\"msg:\".length) : null;")
+        );
+
+        let regression = asset_text("js/pages/chat/lib/useChat-send.test.mjs");
+        assert!(regression.contains("useChat.send: accepted ref reconciles"));
+        assert!(regression.contains("accepted_message_ref: \"msg:message-1\""));
+        assert!(regression.contains("await loadHistory();"));
+        assert!(regression.contains("[\"msg-message-1\"]"));
+    }
+
+    #[test]
     fn extensions_onboarding_messages_render_in_cards() {
         let extension_card = asset_text("js/pages/extensions/components/extension-card.js");
 
