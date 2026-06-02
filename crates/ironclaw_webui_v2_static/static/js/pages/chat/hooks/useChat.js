@@ -158,8 +158,10 @@ export function useChat(threadId) {
       const pendingKey = sendThreadId;
       const pendingRecord = {
         id: `pending-${pendingSeqRef.current++}`,
+        role: "user",
         content,
         timestamp: new Date().toISOString(),
+        isOptimistic: true,
       };
       addPending(pendingMessagesRef.current, pendingKey, pendingRecord);
 
@@ -189,6 +191,19 @@ export function useChat(threadId) {
             threadId: response.thread_id || sendThreadId,
             status: response.status || null,
           });
+        }
+        const timelineMessageId = timelineMessageIdFromAcceptedRef(
+          response?.accepted_message_ref,
+        );
+        if (timelineMessageId) {
+          updatePending(pendingMessagesRef.current, pendingKey, optimisticId, {
+            timelineMessageId,
+          });
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === optimisticId ? { ...m, timelineMessageId } : m,
+            ),
+          );
         }
         return response;
       } catch (err) {
@@ -400,6 +415,19 @@ function removePending(store, key, pendingId) {
   const next = (store.get(key) || []).filter((r) => r.id !== pendingId);
   if (next.length > 0) store.set(key, next);
   else store.delete(key);
+}
+
+function updatePending(store, key, pendingId, patch) {
+  const existing = store.get(key) || [];
+  const next = existing.map((record) =>
+    record.id === pendingId ? { ...record, ...patch } : record,
+  );
+  if (next.length > 0) store.set(key, next);
+}
+
+function timelineMessageIdFromAcceptedRef(ref) {
+  if (typeof ref !== "string") return null;
+  return ref.startsWith("msg:") ? ref.slice("msg:".length) : null;
 }
 
 function retryAfterMs(err) {
