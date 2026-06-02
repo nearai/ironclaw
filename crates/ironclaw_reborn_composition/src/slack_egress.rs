@@ -238,3 +238,131 @@ fn map_network_error(error: NetworkHttpError) -> ProtocolHttpEgressError {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use async_trait::async_trait;
+    use ironclaw_network::{NetworkHttpRequest, NetworkHttpResponse, NetworkUsage};
+    use ironclaw_product_adapters::{
+        DeclaredEgressHost, DeclaredEgressTarget, EgressCredentialHandle, EgressMethod, EgressPath,
+    };
+
+    use super::*;
+
+    #[derive(Default)]
+    struct RecordingNetwork {
+        requests: Mutex<Vec<NetworkHttpRequest>>,
+    }
+
+    impl RecordingNetwork {
+        fn requests(&self) -> Vec<NetworkHttpRequest> {
+            self.requests.lock().expect("network requests lock").clone()
+        }
+    }
+
+    #[async_trait]
+    impl NetworkHttpEgress for RecordingNetwork {
+        async fn execute(
+            &self,
+            request: NetworkHttpRequest,
+        ) -> Result<NetworkHttpResponse, NetworkHttpError> {
+            self.requests
+                .lock()
+                .expect("network requests lock")
+                .push(request);
+            Ok(NetworkHttpResponse {
+                status: 200,
+                headers: Vec::new(),
+                body: br#"{\"ok\":true}"#.to_vec(),
+                usage: NetworkUsage::default(),
+            })
+        }
+    }
+
+    fn slack_host() -> DeclaredEgressHost {
+        DeclaredEgressHost::new("slack.com").expect("slack host")
+    }
+
+    fn slack_handle() -> EgressCredentialHandle {
+        EgressCredentialHandle::new("slack_bot_token").expect("slack handle")
+    }
+
+    fn slack_request(handle: EgressCredentialHandle) -> EgressRequest {
+        EgressRequest::new(
+            slack_host(),
+            EgressMethod::post(),
+            EgressPath::new("/api/chat.postMessage").expect("slack path"),
+        )
+        .with_body(br#"{"channel":"D1","text":"hi"}"#.to_vec())
+        .with_credential_handle(Some(handle))
+    }
+
+    fn slack_egress(network: Arc<RecordingNetwork>) -> SlackProtocolHttpEgress {
+        let handle = slack_handle();
+        SlackProtocolHttpEgress::new(
+            network,
+            Arc::new(StaticSlackEgressCredentialProvider::new(
+                handle.clone(),
+                "xoxb-secret",
+            )),
+            EgressPolicy::new([DeclaredEgressTarget::new(slack_host(), Some(handle))]),
+            ResourceScope::system(),
+        )
+    }
+
+    #[tokio::test]
+    async fn slack_protocol_http_egress_validates_policy_and_injects_bearer() {
+        let network = Arc::new(RecordingNetwork::default());
+        let egress = slack_egress(Arc::clone(&network));
+
+        let response = egress
+            .send(slack_request(slack_handle()))
+            .await
+            .expect("slack egress should succeed");
+
+        assert_eq!(response.status(), 200);
+        let requests = network.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].url, "https://slack.com/api/chat.postMessage");
+        assert_eq!(requests[0].method, NetworkMethod::Post);
+        assert_eq!(requests[0].body, br#"{"channel":"D1","text":"hi"}"#);
+        let auth_headers = requests[0]
+            .headers
+            .iter()
+            .filter(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+            .collect::<Vec<_>>();
+        assert_eq!(auth_headers.len(), 1);
+        assert_eq!(auth_headers[0].1, "Bearer xoxb-secret");
+    }
+
+    #[tokio::test]
+    async fn slack_protocol_http_egress_rejects_unknown_handle_before_network() {
+        let network = Arc::new(RecordingNetwork::default());
+        let unknown = EgressCredentialHandle::new("other_token").expect("other handle");
+        let egress = SlackProtocolHttpEgress::new(
+            network.clone(),
+            Arc::new(StaticSlackEgressCredentialProvider::new(
+                slack_handle(),
+                "xoxb-secret",
+            )),
+            EgressPolicy::new([DeclaredEgressTarget::new(
+                slack_host(),
+                Some(unknown.clone()),
+            )]),
+            ResourceScope::system(),
+        );
+
+        let error = egress
+            .send(slack_request(unknown))
+            .await
+            .expect_err("unknown handle should fail before network");
+
+        assert!(matches!(
+            error,
+            ProtocolHttpEgressError::UnknownCredentialHandle { .. }
+        ));
+        assert!(network.requests().is_empty());
+    }
+}

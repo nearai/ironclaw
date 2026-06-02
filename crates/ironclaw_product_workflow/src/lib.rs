@@ -74,7 +74,7 @@ pub use auth_interaction::{
 };
 pub use binding::{
     ConversationBindingService, ProductConversationRouteKind, ResolveBindingRequest,
-    ResolvedBinding,
+    ResolvedBinding, route_kind_for_inbound_payload,
 };
 pub use command_dispatch::{
     ProductCommandAdmission, ProductCommandAdmissionService, ProductCommandContext,

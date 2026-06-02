@@ -4,10 +4,11 @@ use async_trait::async_trait;
 use ironclaw_product_adapters::redaction::RedactedString;
 use ironclaw_product_adapters::{
     AdapterInstallationId, AuthRequirement, DeclaredEgressHost, DeclaredEgressTarget,
-    DeliveryStatus, EgressCredentialHandle, OutboundDeliverySink, ParsedProductInbound,
-    ProductAdapter, ProductAdapterCapabilities, ProductAdapterError, ProductAdapterId,
-    ProductCapabilityFlag, ProductOutboundEnvelope, ProductOutboundPayload, ProductRenderOutcome,
-    ProductSurfaceKind, ProtocolAuthEvidence, ProtocolHttpEgress, ProtocolHttpEgressError,
+    DeliveryStatus, EgressCredentialHandle, EgressRequest, OutboundDeliverySink,
+    ParsedProductInbound, ProductAdapter, ProductAdapterCapabilities, ProductAdapterError,
+    ProductAdapterId, ProductCapabilityFlag, ProductOutboundEnvelope, ProductOutboundPayload,
+    ProductOutboundTarget, ProductRenderOutcome, ProductSurfaceKind, ProtocolAuthEvidence,
+    ProtocolHttpEgress, ProtocolHttpEgressError,
 };
 use ironclaw_turns::TurnRunId;
 use serde::Deserialize;
@@ -153,79 +154,13 @@ impl ProductAdapter for SlackV2Adapter {
         let target_binding = envelope.target.reply_target_binding_ref.clone();
         let run_id = payload_run_id(&envelope.payload);
 
-        let request = match envelope.payload {
-            ProductOutboundPayload::FinalReply(view) => {
-                match render_final_reply(
-                    &envelope.target,
-                    &view,
-                    self.config.egress_credential_handle.clone(),
-                ) {
-                    Ok(req) => req,
-                    Err(render_err) => {
-                        record_status(
-                            delivery_sink,
-                            DeliveryStatus::FailedPermanent {
-                                attempt_id,
-                                target: target_binding.clone(),
-                                run_id,
-                                reason: RedactedString::new(render_err.to_string()),
-                            },
-                        )
-                        .await;
-                        return Err(map_render_error(render_err));
-                    }
-                }
-            }
-            ProductOutboundPayload::GatePrompt(view) => {
-                match render_gate_prompt(
-                    &envelope.target,
-                    &view,
-                    self.config.egress_credential_handle.clone(),
-                ) {
-                    Ok(req) => req,
-                    Err(render_err) => {
-                        record_status(
-                            delivery_sink,
-                            DeliveryStatus::FailedPermanent {
-                                attempt_id,
-                                target: target_binding.clone(),
-                                run_id,
-                                reason: RedactedString::new(render_err.to_string()),
-                            },
-                        )
-                        .await;
-                        return Err(map_render_error(render_err));
-                    }
-                }
-            }
-            ProductOutboundPayload::AuthPrompt(view) => {
-                match render_auth_prompt(
-                    &envelope.target,
-                    &view,
-                    self.config.egress_credential_handle.clone(),
-                ) {
-                    Ok(req) => req,
-                    Err(render_err) => {
-                        record_status(
-                            delivery_sink,
-                            DeliveryStatus::FailedPermanent {
-                                attempt_id,
-                                target: target_binding.clone(),
-                                run_id,
-                                reason: RedactedString::new(render_err.to_string()),
-                            },
-                        )
-                        .await;
-                        return Err(map_render_error(render_err));
-                    }
-                }
-            }
-            ProductOutboundPayload::Progress(_)
-            | ProductOutboundPayload::CapabilityActivity(_)
-            | ProductOutboundPayload::CapabilityDisplayPreview(_)
-            | ProductOutboundPayload::ProjectionSnapshot { .. }
-            | ProductOutboundPayload::ProjectionUpdate { .. }
-            | ProductOutboundPayload::KeepAlive => {
+        let request = match render_supported_payload(
+            &envelope.target,
+            &envelope.payload,
+            self.config.egress_credential_handle.clone(),
+        ) {
+            Ok(Some(request)) => request,
+            Ok(None) => {
                 record_status(
                     delivery_sink,
                     DeliveryStatus::Deferred {
@@ -233,12 +168,25 @@ impl ProductAdapter for SlackV2Adapter {
                         target: target_binding,
                         run_id,
                         reason: RedactedString::new(
-                            "slack first slice only renders final reply envelopes",
+                            "slack first slice only renders final reply and prompt envelopes",
                         ),
                     },
                 )
                 .await;
                 return Ok(ProductRenderOutcome::Deferred);
+            }
+            Err(render_err) => {
+                record_status(
+                    delivery_sink,
+                    DeliveryStatus::FailedPermanent {
+                        attempt_id,
+                        target: target_binding.clone(),
+                        run_id,
+                        reason: RedactedString::new(render_err.to_string()),
+                    },
+                )
+                .await;
+                return Err(map_render_error(render_err));
             }
         };
 
@@ -357,6 +305,30 @@ impl ProductAdapter for SlackV2Adapter {
         )
         .await;
         Ok(ProductRenderOutcome::DeliveryRecorded)
+    }
+}
+
+fn render_supported_payload(
+    target: &ProductOutboundTarget,
+    payload: &ProductOutboundPayload,
+    credential_handle: EgressCredentialHandle,
+) -> Result<Option<EgressRequest>, SlackRenderError> {
+    match payload {
+        ProductOutboundPayload::FinalReply(view) => {
+            render_final_reply(target, view, credential_handle).map(Some)
+        }
+        ProductOutboundPayload::GatePrompt(view) => {
+            render_gate_prompt(target, view, credential_handle).map(Some)
+        }
+        ProductOutboundPayload::AuthPrompt(view) => {
+            render_auth_prompt(target, view, credential_handle).map(Some)
+        }
+        ProductOutboundPayload::Progress(_)
+        | ProductOutboundPayload::CapabilityActivity(_)
+        | ProductOutboundPayload::CapabilityDisplayPreview(_)
+        | ProductOutboundPayload::ProjectionSnapshot { .. }
+        | ProductOutboundPayload::ProjectionUpdate { .. }
+        | ProductOutboundPayload::KeepAlive => Ok(None),
     }
 }
 

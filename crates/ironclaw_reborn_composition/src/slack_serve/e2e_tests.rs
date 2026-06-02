@@ -48,7 +48,10 @@ use ironclaw_wasm_product_adapters::{
 use tower::ServiceExt;
 
 use super::*;
-use crate::slack_delivery::{SlackFinalReplyDeliveryObserver, SlackFinalReplyDeliverySettings};
+use crate::slack_delivery::{
+    SlackFinalReplyDeliveryObserver, SlackFinalReplyDeliveryServices,
+    SlackFinalReplyDeliverySettings,
+};
 
 const TENANT: &str = "tenant:slack";
 const AGENT: &str = "agent:slack";
@@ -81,10 +84,10 @@ impl Harness {
                     .uri(SLACK_EVENTS_PATH)
                     .header(SECRET_HEADER, SECRET)
                     .body(Body::from(body))
-                    .expect("request should build"),
+                    .expect("request should build"), // safety: static test request fixtures are valid.
             )
             .await
-            .expect("router should respond")
+            .expect("router should respond") // safety: in-process test router should not fail
     }
 
     async fn drain(&self) {
@@ -95,7 +98,9 @@ impl Harness {
         self.egress
             .requests()
             .into_iter()
-            .map(|request| serde_json::from_slice(request.body()).expect("Slack JSON body"))
+            .map(|request| {
+                serde_json::from_slice(request.body()).expect("Slack JSON body") // safety: Slack adapter emits JSON request bodies in this test.
+            })
             .collect()
     }
 }
@@ -107,25 +112,27 @@ async fn build_harness(mode: TurnMode) -> Harness {
     let actor_pairings: Arc<dyn ironclaw_conversations::ConversationActorPairingService> =
         conversations;
 
-    let adapter_id = ironclaw_product_adapters::ProductAdapterId::new(ADAPTER).expect("adapter id");
-    let installation_id = AdapterInstallationId::new(INSTALLATION).expect("installation id");
+    let adapter_id = ironclaw_product_adapters::ProductAdapterId::new(ADAPTER).expect("adapter id"); // safety: static test adapter id is valid.
+    let installation_id = AdapterInstallationId::new(INSTALLATION).expect("installation id"); // safety: static test installation id is valid.
     let adapter: Arc<dyn ProductAdapter> = Arc::new(SlackV2Adapter::new(SlackV2AdapterConfig {
         adapter_id: adapter_id.clone(),
         installation_id: installation_id.clone(),
-        egress_credential_handle: EgressCredentialHandle::new("slack_bot_token").expect("handle"),
+        egress_credential_handle: EgressCredentialHandle::new("slack_bot_token").expect("handle"), // safety: static test handle is valid.
         auth_requirement: AuthRequirement::SharedSecretHeader {
             header_name: SECRET_HEADER.into(),
         },
     }));
 
     let scope = ProductInstallationScope::with_default_scope(
-        TenantId::new(TENANT).expect("tenant"),
-        AgentId::new(AGENT).expect("agent"),
-        Some(ProjectId::new(PROJECT).expect("project")),
+        TenantId::new(TENANT).expect("tenant"), // safety: static test tenant id is valid.
+        AgentId::new(AGENT).expect("agent"),    // safety: static test agent id is valid.
+        Some(
+            ProjectId::new(PROJECT).expect("project"), // safety: static test project id is valid.
+        ),
     )
     .with_preconfigured_actor_binding(
-        ExternalActorRef::new(SLACK_USER_ACTOR_KIND, SLACK_USER, None::<String>).expect("actor"),
-        UserId::new(USER).expect("user"),
+        ExternalActorRef::new(SLACK_USER_ACTOR_KIND, SLACK_USER, None::<String>).expect("actor"), // safety: static Slack actor ref is valid.
+        UserId::new(USER).expect("user"), // safety: static test user id is valid.
     );
     let resolver = StaticProductInstallationResolver::new([(
         ProductInstallationKey::new(adapter_id, installation_id.clone()),
@@ -165,7 +172,7 @@ async fn build_harness(mode: TurnMode) -> Harness {
         }),
         NativeProductAdapterRunnerConfig::new(
             Duration::from_secs(2),
-            NonZeroUsize::new(4).expect("nonzero"),
+            NonZeroUsize::new(4).expect("nonzero"), // safety: 4 is non-zero.
         ),
     ));
 
@@ -175,14 +182,16 @@ async fn build_harness(mode: TurnMode) -> Harness {
     let egress = RecordingEgress::default();
     let sink = RecordingDeliverySink::default();
     let observer = Arc::new(SlackFinalReplyDeliveryObserver::with_settings(
-        Arc::new(binding),
-        Arc::new(threads),
-        Arc::new(coordinator),
-        outbound_store,
-        preferences,
-        adapter,
-        Arc::new(egress.clone()),
-        Arc::new(sink),
+        SlackFinalReplyDeliveryServices {
+            binding_service: Arc::new(binding),
+            thread_service: Arc::new(threads),
+            turn_coordinator: Arc::new(coordinator),
+            outbound_store,
+            communication_preferences: preferences,
+            adapter,
+            egress: Arc::new(egress.clone()),
+            delivery_sink: Arc::new(sink),
+        },
         SlackFinalReplyDeliverySettings {
             poll_interval: Duration::from_millis(1),
             max_wait: Duration::from_secs(2),
@@ -191,7 +200,7 @@ async fn build_harness(mode: TurnMode) -> Harness {
 
     let slack_resolver = StaticSlackInstallationResolver::new(vec![
         SlackInstallationRecord::new(
-            TenantId::new(TENANT).expect("tenant"),
+            TenantId::new(TENANT).expect("tenant"), // safety: static test tenant id is valid.
             installation_id,
             SlackInstallationSelector::team(TEAM),
             runner,
@@ -245,14 +254,12 @@ async fn slack_dm_delivers_approval_prompt_after_immediate_ack() {
     assert!(
         messages[0]["text"]
             .as_str()
-            .expect("text")
-            .contains("Approval needed")
+            .is_some_and(|text| text.contains("Approval needed"))
     );
     assert!(
         messages[0]["text"]
             .as_str()
-            .expect("text")
-            .contains("approve gate:approve-slack")
+            .is_some_and(|text| text.contains("approve gate:approve-slack"))
     );
 }
 
@@ -318,7 +325,10 @@ impl RecordingTurnCoordinator {
     }
 
     fn blocked_run_id(&self) -> Option<TurnRunId> {
-        self.state.lock().expect("state lock").blocked_run_id
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .blocked_run_id
     }
 
     async fn complete_run(
@@ -329,7 +339,10 @@ impl RecordingTurnCoordinator {
         text: &str,
     ) -> Result<(), ProductWorkflowError> {
         append_final_assistant_message(&self.threads, &scope, run_id, text).await?;
-        let mut state = self.state.lock().expect("state lock");
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         state.runs.insert(
             run_id,
             turn_state(
@@ -338,8 +351,8 @@ impl RecordingTurnCoordinator {
                 run_id,
                 TurnStatus::Completed,
                 None,
-                ReplyTargetBindingRef::new("slack:reply-target").expect("reply target"),
-                AcceptedMessageRef::new("slack:approval-reply").expect("accepted ref"),
+                ReplyTargetBindingRef::new("slack:reply-target").expect("reply target"), // safety: static test reply target is valid.
+                AcceptedMessageRef::new("slack:approval-reply").expect("accepted ref"), // safety: static test accepted ref is valid.
             ),
         );
         Ok(())
@@ -356,7 +369,7 @@ impl TurnCoordinator for RecordingTurnCoordinator {
         &self,
         request: SubmitTurnRequest,
     ) -> Result<SubmitTurnResponse, TurnError> {
-        let run_id = request.requested_run_id.unwrap_or_else(TurnRunId::new);
+        let run_id = request.requested_run_id.unwrap_or_default();
         let status = match &self.mode {
             TurnMode::Complete { assistant_text } => {
                 append_final_assistant_message(
@@ -374,7 +387,7 @@ impl TurnCoordinator for RecordingTurnCoordinator {
             TurnMode::BlockApproval => TurnStatus::BlockedApproval,
         };
         let gate_ref = if status == TurnStatus::BlockedApproval {
-            Some(GateRef::new(GATE).expect("gate ref"))
+            Some(GateRef::new(GATE).expect("gate ref")) // safety: static test gate ref is valid
         } else {
             None
         };
@@ -397,7 +410,10 @@ impl TurnCoordinator for RecordingTurnCoordinator {
             request.reply_target_binding_ref,
             request.accepted_message_ref,
         );
-        let mut state = self.state.lock().expect("state lock");
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if status == TurnStatus::BlockedApproval {
             state.blocked_run_id = Some(run_id);
         }
@@ -419,7 +435,7 @@ impl TurnCoordinator for RecordingTurnCoordinator {
     async fn get_run_state(&self, request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
         self.state
             .lock()
-            .expect("state lock")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .runs
             .get(&request.run_id)
             .cloned()
@@ -444,7 +460,7 @@ async fn append_final_assistant_message(
                 reason: "missing agent id in fake turn scope".into(),
             })?,
         project_id: scope.project_id.clone(),
-        owner_user_id: Some(UserId::new(USER).expect("user")),
+        owner_user_id: Some(UserId::new(USER).expect("user")), // safety: static test user id is valid.
         mission_id: None,
     };
     let message = threads
@@ -489,7 +505,7 @@ fn turn_state(
         status,
         accepted_message_ref,
         source_binding_ref: ironclaw_turns::SourceBindingRef::new("slack:source")
-            .expect("source binding"),
+            .expect("source binding"), // safety: static test source binding is valid.
         reply_target_binding_ref,
         resolved_run_profile_id: RunProfileId::default_profile(),
         resolved_run_profile_version: RunProfileVersion::new(1),
@@ -519,7 +535,10 @@ impl RecordingApprovalInteractionService {
     }
 
     fn requests(&self) -> Vec<ResolveApprovalInteractionRequest> {
-        self.requests.lock().expect("requests lock").clone()
+        self.requests
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 }
 
@@ -540,7 +559,7 @@ impl ApprovalInteractionService for RecordingApprovalInteractionService {
     ) -> Result<ResolveApprovalInteractionResponse, ProductWorkflowError> {
         self.requests
             .lock()
-            .expect("requests lock")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .push(request.clone());
         let run_id = self.coordinator.blocked_run_id().ok_or_else(|| {
             ProductWorkflowError::TurnResumeRejected {
@@ -573,7 +592,10 @@ struct RecordingEgress {
 
 impl RecordingEgress {
     fn requests(&self) -> Vec<EgressRequest> {
-        self.requests.lock().expect("egress lock").clone()
+        self.requests
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 }
 
@@ -583,7 +605,10 @@ impl ProtocolHttpEgress for RecordingEgress {
         &self,
         request: EgressRequest,
     ) -> Result<EgressResponse, ProtocolHttpEgressError> {
-        self.requests.lock().expect("egress lock").push(request);
+        self.requests
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(request);
         Ok(EgressResponse::new(200, br#"{"ok":true}"#.to_vec()))
     }
 }
@@ -596,7 +621,10 @@ struct RecordingDeliverySink {
 #[async_trait]
 impl OutboundDeliverySink for RecordingDeliverySink {
     async fn record(&self, status: DeliveryStatus) {
-        self.statuses.lock().expect("sink lock").push(status);
+        self.statuses
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(status);
     }
 }
 
@@ -615,9 +643,9 @@ async fn assert_body(response: axum::response::Response, expected: &str) {
         .into_body()
         .collect()
         .await
-        .expect("body collect")
+        .expect("body collect") // safety: in-memory response body should collect in tests
         .to_bytes();
-    assert_eq!(&body[..], expected.as_bytes());
+    assert_eq!(&body[..], expected.as_bytes()); // safety: assertion is inside the Slack E2E test helper.
 }
 
 const DM_FINAL: &str = r#"{

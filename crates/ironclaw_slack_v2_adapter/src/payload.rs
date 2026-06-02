@@ -113,6 +113,14 @@ fn parse_app_mention(
     team_id: Option<&str>,
     event: &SlackEvent,
 ) -> Result<ParsedProductInbound, SlackPayloadParseError> {
+    if let Some(parsed) = try_parse_resolution_message(
+        event_id.clone(),
+        team_id,
+        event,
+        ProductTriggerReason::BotMention,
+    )? {
+        return Ok(parsed);
+    }
     try_parse_user_message(event_id, team_id, event, SlackMessageKind::AppMention)
 }
 
@@ -125,28 +133,29 @@ fn parse_message_event(
         event.channel.as_deref().unwrap_or_default(),
         event.channel_type.as_deref(),
     ) {
+        if let Some(parsed) = try_parse_resolution_message(
+            event_id.clone(),
+            team_id,
+            event,
+            ProductTriggerReason::DirectChat,
+        )? {
+            return Ok(parsed);
+        }
         return try_parse_user_message(event_id, team_id, event, SlackMessageKind::Dm);
     }
     if event.thread_ts.is_some() {
-        return try_parse_user_message(
-            event_id,
-            team_id,
-            event,
-            SlackMessageKind::ThreadInteraction,
-        );
+        return parse_thread_interaction(event_id, team_id, event);
     }
     noop_parsed_inbound(event_id, team_id, Some(event))
 }
 
-/// Fixed message routing strategies in this first slice.
+/// Fixed user-message routing strategies in this first slice.
 /// `AppMention`: public channel, strip leading `@mention`, thread fallback to `ts`.
 /// `Dm`: direct-message channel required, keep text verbatim, no thread fallback.
-/// `ThreadInteraction`: threaded channel reply, parse only approval/auth resolution commands.
 #[derive(Debug, Clone, Copy)]
 enum SlackMessageKind {
     AppMention,
     Dm,
-    ThreadInteraction,
 }
 
 fn try_parse_user_message(
@@ -169,9 +178,6 @@ fn try_parse_user_message(
     {
         return noop_parsed_inbound(event_id, team_id, Some(event));
     }
-    if matches!(kind, SlackMessageKind::ThreadInteraction) && event.thread_ts.is_none() {
-        return noop_parsed_inbound(event_id, team_id, Some(event));
-    }
     let Some(ts) = event.ts.as_deref() else {
         return noop_parsed_inbound(event_id, team_id, Some(event));
     };
@@ -188,11 +194,6 @@ fn try_parse_user_message(
             event.thread_ts.as_deref(),
             ProductTriggerReason::DirectChat,
         ),
-        SlackMessageKind::ThreadInteraction => (
-            raw_text.to_string(),
-            event.thread_ts.as_deref(),
-            ProductTriggerReason::ReplyToBot,
-        ),
     };
 
     let attachments = collect_attachments(&event.files)?;
@@ -206,13 +207,74 @@ fn try_parse_user_message(
         attachments,
         trigger,
     };
-    if let Some(payload) = parse_interaction_resolution(parts.text.as_str(), parts.trigger)? {
-        return build_payload_message(event_id, &parts, payload);
-    }
-    if matches!(kind, SlackMessageKind::ThreadInteraction) {
-        return noop_parsed_inbound(event_id, team_id, Some(event));
-    }
     build_user_message(event_id, parts)
+}
+
+fn parse_thread_interaction(
+    event_id: ExternalEventId,
+    team_id: Option<&str>,
+    event: &SlackEvent,
+) -> Result<ParsedProductInbound, SlackPayloadParseError> {
+    let Some(parsed) = try_parse_resolution_message(
+        event_id.clone(),
+        team_id,
+        event,
+        ProductTriggerReason::ReplyToBot,
+    )?
+    else {
+        return noop_parsed_inbound(event_id, team_id, Some(event));
+    };
+    Ok(parsed)
+}
+
+fn try_parse_resolution_message(
+    event_id: ExternalEventId,
+    team_id: Option<&str>,
+    event: &SlackEvent,
+    source_trigger: ProductTriggerReason,
+) -> Result<Option<ParsedProductInbound>, SlackPayloadParseError> {
+    if event.bot_id.is_some() || !is_user_generated_message_subtype(event.subtype.as_deref()) {
+        return Ok(None);
+    }
+    let Some(user) = event.user.as_deref() else {
+        return Ok(None);
+    };
+    let Some(channel) = event.channel.as_deref() else {
+        return Ok(None);
+    };
+    let Some(ts) = event.ts.as_deref() else {
+        return Ok(None);
+    };
+
+    let raw_text = event.text.as_deref().unwrap_or_default();
+    let text = match source_trigger {
+        ProductTriggerReason::BotMention => strip_leading_bot_mention(raw_text),
+        ProductTriggerReason::DirectChat
+        | ProductTriggerReason::ReplyToBot
+        | ProductTriggerReason::BotCommand
+        | ProductTriggerReason::LinkedThreadAction => raw_text.to_string(),
+    };
+    let Some(payload) = parse_interaction_resolution(&text, source_trigger)? else {
+        return Ok(None);
+    };
+    let thread_ts = match source_trigger {
+        ProductTriggerReason::BotMention => event.thread_ts.as_deref().or(Some(ts)),
+        ProductTriggerReason::DirectChat
+        | ProductTriggerReason::ReplyToBot
+        | ProductTriggerReason::BotCommand
+        | ProductTriggerReason::LinkedThreadAction => event.thread_ts.as_deref(),
+    };
+    let parts = SlackUserMessageParts {
+        team_id,
+        user,
+        channel,
+        thread_ts,
+        message_ts: Some(ts),
+        text,
+        attachments: Vec::new(),
+        trigger: source_trigger,
+    };
+    build_payload_message(event_id, &parts, payload).map(Some)
 }
 
 struct SlackUserMessageParts<'a> {

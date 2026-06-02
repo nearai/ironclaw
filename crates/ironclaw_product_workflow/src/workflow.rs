@@ -9,8 +9,8 @@ use async_trait::async_trait;
 use ironclaw_auth::{AuthFlowId, CredentialAccountId};
 use ironclaw_product_adapters::{
     ApprovalDecision, ProductAdapterError, ProductInboundAck, ProductInboundEnvelope,
-    ProductInboundPayload, ProductRejection, ProductRejectionKind, ProductTriggerReason,
-    ProductWorkflow, ProductWorkflowRejectionKind, ProjectionSubscriptionRequest, RedactedString,
+    ProductInboundPayload, ProductRejection, ProductRejectionKind, ProductWorkflow,
+    ProductWorkflowRejectionKind, ProjectionSubscriptionRequest, RedactedString,
 };
 use ironclaw_turns::{
     AcceptedMessageRef, AdmissionRejectionReason, GateRef, IdempotencyKey, TurnActor, TurnError,
@@ -28,10 +28,7 @@ use crate::auth_interaction::{
     AuthInteractionDecision, AuthInteractionRejectionKind, AuthInteractionService,
     RejectingAuthInteractionService, ResolveAuthInteractionRequest, ResolveAuthInteractionResponse,
 };
-use crate::binding::{
-    ConversationBindingService, ProductConversationRouteKind, ResolveBindingRequest,
-    ResolvedBinding,
-};
+use crate::binding::{ConversationBindingService, ResolveBindingRequest, ResolvedBinding};
 use crate::binding_ref::{
     DEFAULT_BINDING_REF_RAW_MAX_BYTES, binding_ref_segment, bounded_idempotency_key,
 };
@@ -275,43 +272,7 @@ struct DispatchPorts<'a> {
 }
 
 fn resolve_binding_request(envelope: &ProductInboundEnvelope) -> ResolveBindingRequest {
-    ResolveBindingRequest {
-        adapter_id: envelope.adapter_id().clone(),
-        installation_id: envelope.installation_id().clone(),
-        external_actor_ref: envelope.external_actor_ref().clone(),
-        external_conversation_ref: envelope.external_conversation_ref().clone(),
-        external_event_id: envelope.external_event_id().clone(),
-        route_kind: route_kind_for_payload(envelope.payload()),
-        auth_claim: envelope.auth_claim().clone(),
-    }
-}
-
-fn route_kind_for_payload(payload: &ProductInboundPayload) -> ProductConversationRouteKind {
-    match payload {
-        ProductInboundPayload::UserMessage(message) => route_kind_for_trigger(message.trigger),
-        ProductInboundPayload::Command(command) => route_kind_for_trigger(command.trigger),
-        ProductInboundPayload::ApprovalResolution(resolution) => resolution
-            .source_trigger
-            .map(route_kind_for_trigger)
-            .unwrap_or(ProductConversationRouteKind::Direct),
-        ProductInboundPayload::AuthResolution(resolution) => resolution
-            .source_trigger
-            .map(route_kind_for_trigger)
-            .unwrap_or(ProductConversationRouteKind::Direct),
-        ProductInboundPayload::SubscriptionRequest(_)
-        | ProductInboundPayload::LinkedThreadAction(_)
-        | ProductInboundPayload::NoOp => ProductConversationRouteKind::Direct,
-    }
-}
-
-fn route_kind_for_trigger(trigger: ProductTriggerReason) -> ProductConversationRouteKind {
-    match trigger {
-        ProductTriggerReason::DirectChat => ProductConversationRouteKind::Direct,
-        ProductTriggerReason::BotMention
-        | ProductTriggerReason::ReplyToBot
-        | ProductTriggerReason::BotCommand
-        | ProductTriggerReason::LinkedThreadAction => ProductConversationRouteKind::Shared,
-    }
+    ResolveBindingRequest::from_envelope(envelope)
 }
 
 fn projection_thread_id_from_binding(

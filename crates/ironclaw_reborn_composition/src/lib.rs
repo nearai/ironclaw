@@ -160,7 +160,10 @@ pub use runtime_input::{
 };
 pub use skill_listing::{RebornSkillListError, list_reborn_local_skills};
 #[cfg(feature = "slack-v2-host-beta")]
-pub use slack_delivery::{SlackFinalReplyDeliveryObserver, SlackFinalReplyDeliverySettings};
+pub use slack_delivery::{
+    SlackFinalReplyDeliveryObserver, SlackFinalReplyDeliveryServices,
+    SlackFinalReplyDeliverySettings,
+};
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack_egress::{
     SlackEgressCredential, SlackEgressCredentialError, SlackEgressCredentialProvider,
