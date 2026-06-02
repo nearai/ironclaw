@@ -233,10 +233,27 @@ async fn concrete_mcp_http_client_routes_json_rpc_through_shared_egress() {
     );
     assert_eq!(json_rpc_method(&requests[0].body), "initialize");
     assert_eq!(
+        json_rpc_param(&requests[0].body, "protocolVersion"),
+        json!("2025-06-18")
+    );
+    assert_eq!(
         json_rpc_method(&requests[1].body),
         "notifications/initialized"
     );
     assert_eq!(json_rpc_method(&requests[2].body), "tools/call");
+    assert_eq!(
+        header_value(&requests[0].headers, "MCP-Protocol-Version"),
+        None,
+        "initialize is the negotiation request and must not carry stale protocol metadata"
+    );
+    assert_eq!(
+        header_value(&requests[1].headers, "MCP-Protocol-Version"),
+        Some("2025-06-18")
+    );
+    assert_eq!(
+        header_value(&requests[2].headers, "MCP-Protocol-Version"),
+        Some("2025-06-18")
+    );
     assert_eq!(json_rpc_param(&requests[2].body, "name"), json!("search"));
     assert_eq!(
         json_rpc_param(&requests[2].body, "arguments"),
@@ -271,6 +288,44 @@ async fn concrete_mcp_http_client_routes_json_rpc_through_shared_egress() {
         vec!["tools/call", "initialize", "notifications/initialized"]
     );
     assert_eq!(planner_calls[0].json_rpc_id, json_rpc_id(&requests[2].body));
+}
+
+#[tokio::test]
+async fn concrete_mcp_http_client_uses_negotiated_protocol_version_header() {
+    let egress = RecordingRuntimeEgress::json_rpc_with_protocol_version("2025-03-26");
+    let client = McpHostHttpClient::new(
+        McpRuntimeHttpAdapter::new(Arc::new(egress.clone())),
+        StaticMcpHostHttpEgressPlanner::new(host_http_plan()),
+    );
+
+    client
+        .call_tool(McpClientRequest {
+            provider: ExtensionId::new("github-mcp").unwrap(),
+            capability_id: CapabilityId::new("github-mcp.search").unwrap(),
+            scope: sample_scope(),
+            transport: "http".to_string(),
+            command: None,
+            args: vec![],
+            url: Some("https://mcp.example.test/mcp".to_string()),
+            input: json!({"query": "ironclaw"}),
+            max_output_bytes: 4096,
+        })
+        .await
+        .unwrap();
+
+    let requests = egress.requests();
+    assert_eq!(
+        json_rpc_param(&requests[0].body, "protocolVersion"),
+        json!("2025-06-18")
+    );
+    assert_eq!(
+        header_value(&requests[1].headers, "MCP-Protocol-Version"),
+        Some("2025-03-26")
+    );
+    assert_eq!(
+        header_value(&requests[2].headers, "MCP-Protocol-Version"),
+        Some("2025-03-26")
+    );
 }
 
 #[tokio::test]
@@ -1116,13 +1171,19 @@ enum RecordedResponseMode {
 #[derive(Debug, Clone)]
 struct RecordingRuntimeEgress {
     mode: RecordedResponseMode,
+    protocol_version: &'static str,
     requests: Arc<Mutex<Vec<RuntimeHttpEgressRequest>>>,
 }
 
 impl RecordingRuntimeEgress {
     fn json_rpc() -> Self {
+        Self::json_rpc_with_protocol_version("2025-06-18")
+    }
+
+    fn json_rpc_with_protocol_version(protocol_version: &'static str) -> Self {
         Self {
             mode: RecordedResponseMode::Json,
+            protocol_version,
             requests: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -1130,6 +1191,7 @@ impl RecordingRuntimeEgress {
     fn sse() -> Self {
         Self {
             mode: RecordedResponseMode::Sse,
+            protocol_version: "2025-06-18",
             requests: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -1151,7 +1213,7 @@ impl RuntimeHttpEgress for RecordingRuntimeEgress {
             "initialize" => Ok(runtime_json_response(
                 json_rpc_id(&request.body),
                 json!({
-                    "protocolVersion": "2024-11-05",
+                    "protocolVersion": self.protocol_version,
                     "capabilities": {"tools": {"listChanged": false}},
                     "serverInfo": {"name": "mock-mcp", "version": "1.0.0"}
                 }),
@@ -1304,6 +1366,13 @@ fn json_rpc_param(body: &[u8], key: &str) -> serde_json::Value {
     serde_json::from_slice::<serde_json::Value>(body).unwrap()["params"][key].clone()
 }
 
+fn header_value<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
+    headers
+        .iter()
+        .find(|(header_name, _)| header_name.eq_ignore_ascii_case(name))
+        .map(|(_, value)| value.as_str())
+}
+
 fn runtime_json_response(
     id: Option<u64>,
     result: serde_json::Value,
@@ -1375,7 +1444,7 @@ impl RuntimeHttpEgress for ScopedSessionRuntimeEgress {
             "initialize" => Ok(runtime_json_response(
                 Some(json_rpc_id(&request.body).unwrap()),
                 json!({
-                    "protocolVersion": "2024-11-05",
+                    "protocolVersion": "2025-06-18",
                     "capabilities": {"tools": {"listChanged": false}},
                     "serverInfo": {"name": "mock-mcp", "version": "1.0.0"}
                 }),
@@ -1416,7 +1485,7 @@ impl RuntimeHttpEgress for InvalidSessionRuntimeEgress {
         Ok(runtime_json_response(
             Some(1),
             json!({
-                "protocolVersion": "2024-11-05",
+                "protocolVersion": "2025-06-18",
                 "capabilities": {"tools": {"listChanged": false}},
                 "serverInfo": {"name": "mock-mcp", "version": "1.0.0"}
             }),
@@ -1441,7 +1510,7 @@ impl RuntimeHttpEgress for MissingIdRuntimeEgress {
             "initialize" => Ok(runtime_json_response(
                 json_rpc_id(&request.body),
                 json!({
-                    "protocolVersion": "2024-11-05",
+                    "protocolVersion": "2025-06-18",
                     "capabilities": {"tools": {"listChanged": false}},
                     "serverInfo": {"name": "mock-mcp", "version": "1.0.0"}
                 }),
@@ -1514,7 +1583,7 @@ impl RuntimeHttpEgress for ErrorSessionRuntimeEgress {
                 Ok(runtime_json_response(
                     json_rpc_id(&request.body),
                     json!({
-                        "protocolVersion": "2024-11-05",
+                        "protocolVersion": "2025-06-18",
                         "capabilities": {"tools": {"listChanged": false}},
                         "serverInfo": {"name": "mock-mcp", "version": "1.0.0"}
                     }),

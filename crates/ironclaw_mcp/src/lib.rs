@@ -27,6 +27,9 @@ use ironclaw_resources::{ResourceError, ResourceGovernor, ResourceReceipt};
 use serde_json::Value;
 use thiserror::Error;
 
+const STREAMABLE_HTTP_MCP_PROTOCOL_VERSION: &str = "2025-06-18";
+const MCP_PROTOCOL_VERSION_HEADER: &str = "MCP-Protocol-Version";
+
 /// Host-owned MCP adapter limits.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpRuntimeConfig {
@@ -343,7 +346,7 @@ struct McpHostHttpClientState {
     // HashMap operations (never across an `.await`), and the key includes
     // `invocation_id` so concurrent dispatches from different invocations act
     // on disjoint map entries with no real contention.
-    session_ids: Mutex<HashMap<McpHostHttpSessionKey, String>>,
+    sessions: Mutex<HashMap<McpHostHttpSessionKey, McpHostHttpSession>>,
 }
 
 struct McpHostHttpSessionCleanup {
@@ -360,6 +363,12 @@ struct PlannedMcpJsonRpc {
     plan: McpHostHttpEgressPlan,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct McpHostHttpSession {
+    session_id: Option<String>,
+    protocol_version: String,
+}
+
 impl McpHostHttpSessionCleanup {
     fn new(state: Arc<McpHostHttpClientState>, session_key: McpHostHttpSessionKey) -> Self {
         Self { state, session_key }
@@ -368,7 +377,7 @@ impl McpHostHttpSessionCleanup {
 
 impl Drop for McpHostHttpSessionCleanup {
     fn drop(&mut self) {
-        if let Ok(mut guard) = self.state.session_ids.lock() {
+        if let Ok(mut guard) = self.state.sessions.lock() {
             guard.remove(&self.session_key);
         }
     }
@@ -414,7 +423,7 @@ where
             planner,
             state: Arc::new(McpHostHttpClientState {
                 next_id: AtomicU64::new(1),
-                session_ids: Mutex::new(HashMap::new()),
+                sessions: Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -480,8 +489,14 @@ where
         planned: PlannedMcpJsonRpc,
     ) -> Result<McpJsonRpcExchange, String> {
         let mut headers = planned.policy_headers;
-        if let Some(session_id) = self.current_session_id(session_key)? {
-            headers.push(("Mcp-Session-Id".to_string(), session_id));
+        if let Some(session) = self.current_session(session_key)? {
+            headers.push((
+                MCP_PROTOCOL_VERSION_HEADER.to_string(),
+                session.protocol_version,
+            ));
+            if let Some(session_id) = session.session_id {
+                headers.push(("Mcp-Session-Id".to_string(), session_id));
+            }
         }
 
         let response_body_limit = effective_mcp_response_body_limit(
@@ -516,7 +531,7 @@ where
         if !(200..300).contains(&response.status) {
             return Err(response_error());
         }
-        self.capture_session_id(session_key, &response)?;
+        let session_id = mcp_session_id_from_response(&response)?;
 
         if response.status == 202 && planned.id.is_none() {
             return Ok(McpJsonRpcExchange {
@@ -524,52 +539,36 @@ where
                     result: None,
                     error: false,
                 },
+                session_id,
                 usage,
             });
         }
 
         Ok(McpJsonRpcExchange {
             response: parse_mcp_response(&response, planned.id)?,
+            session_id,
             usage,
         })
     }
 
-    fn current_session_id(
+    fn current_session(
         &self,
         session_key: &McpHostHttpSessionKey,
-    ) -> Result<Option<String>, String> {
+    ) -> Result<Option<McpHostHttpSession>, String> {
         self.state
-            .session_ids
+            .sessions
             .lock()
             .map(|guard| guard.get(session_key).cloned())
             .map_err(|_| request_denied())
     }
 
-    fn capture_session_id(
+    fn store_session(
         &self,
         session_key: &McpHostHttpSessionKey,
-        response: &McpHostHttpResponse,
+        session: McpHostHttpSession,
     ) -> Result<(), String> {
-        let Some((_, value)) = response
-            .headers
-            .iter()
-            .find(|(name, _)| name.eq_ignore_ascii_case("Mcp-Session-Id"))
-        else {
-            return Ok(());
-        };
-        let trimmed = value.trim();
-        if trimmed.is_empty() {
-            return Ok(());
-        }
-        if !is_safe_mcp_session_id(trimmed) {
-            return Err(response_error());
-        }
-        let mut guard = self
-            .state
-            .session_ids
-            .lock()
-            .map_err(|_| request_denied())?;
-        guard.insert(session_key.clone(), trimmed.to_string());
+        let mut guard = self.state.sessions.lock().map_err(|_| request_denied())?;
+        guard.insert(session_key.clone(), session);
         Ok(())
     }
 
@@ -593,6 +592,13 @@ where
         if initialize.response.error {
             return Err(response_error());
         }
+        self.store_session(
+            session_key,
+            McpHostHttpSession {
+                session_id: initialize.session_id,
+                protocol_version: protocol_version_from_initialize_response(&initialize.response)?,
+            },
+        )?;
 
         let initialized = self
             .send_json_rpc(
@@ -714,6 +720,7 @@ struct McpJsonRpcResponse {
 #[derive(Debug, Clone, PartialEq)]
 struct McpJsonRpcExchange {
     response: McpJsonRpcResponse,
+    session_id: Option<String>,
     usage: ResourceUsage,
 }
 
@@ -799,6 +806,50 @@ fn is_safe_mcp_session_id(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= MAX_MCP_SESSION_ID_BYTES
         && value.bytes().all(|byte| matches!(byte, 0x21..=0x7e))
+}
+
+fn mcp_session_id_from_response(response: &McpHostHttpResponse) -> Result<Option<String>, String> {
+    let Some((_, value)) = response
+        .headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("Mcp-Session-Id"))
+    else {
+        return Ok(None);
+    };
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    if !is_safe_mcp_session_id(trimmed) {
+        return Err(response_error());
+    }
+    Ok(Some(trimmed.to_string()))
+}
+
+fn is_safe_mcp_protocol_version(value: &str) -> bool {
+    const MAX_MCP_PROTOCOL_VERSION_BYTES: usize = 64;
+    !value.is_empty()
+        && value.len() <= MAX_MCP_PROTOCOL_VERSION_BYTES
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
+}
+
+fn protocol_version_from_initialize_response(
+    response: &McpJsonRpcResponse,
+) -> Result<String, String> {
+    let Some(protocol_version) = response
+        .result
+        .as_ref()
+        .and_then(|result| result.get("protocolVersion"))
+        .and_then(Value::as_str)
+    else {
+        return Err(response_error());
+    };
+    if !is_safe_mcp_protocol_version(protocol_version) {
+        return Err(response_error());
+    }
+    Ok(protocol_version.to_string())
 }
 
 fn encode_json_rpc_request(
@@ -1051,7 +1102,7 @@ fn json_rpc_id(value: &Value) -> Option<u64> {
 
 fn json_rpc_initialize_params() -> Value {
     serde_json::json!({
-        "protocolVersion": "2024-11-05",
+        "protocolVersion": STREAMABLE_HTTP_MCP_PROTOCOL_VERSION,
         "capabilities": {
             "roots": { "listChanged": false },
             "sampling": {}
