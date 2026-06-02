@@ -107,8 +107,8 @@ fn validate_provider_arguments_schema(
         )
     })?;
     if let Some(error) = validator.iter_errors(arguments).next() {
-        let instance_path = error.instance_path().as_str().to_string();
-        let schema_path = error.schema_path().as_str().to_string();
+        let instance_path = safe_schema_path_summary(error.instance_path().as_str());
+        let schema_path = safe_schema_path_summary(error.schema_path().as_str());
         return Err(AgentLoopHostError::new(
             AgentLoopHostErrorKind::InvalidInvocation,
             format!(
@@ -117,6 +117,17 @@ fn validate_provider_arguments_schema(
         ));
     }
     Ok(())
+}
+
+fn safe_schema_path_summary(path: &str) -> String {
+    let trimmed = path.trim();
+    if trimmed.is_empty() || trimmed == "/" {
+        return "root".to_string();
+    }
+    trimmed
+        .trim_start_matches('/')
+        .replace(['/', '\\', '[', ']'], ".")
+        .replace(['{', '}', '`', '<', '>'], "")
 }
 
 fn schema_is_unresolved_ref(schema: &serde_json::Value) -> bool {

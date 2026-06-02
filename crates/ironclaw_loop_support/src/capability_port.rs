@@ -2439,6 +2439,9 @@ mod tests {
 
         assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
         assert!(error.safe_summary.contains("schema validation"));
+        assert!(
+            ironclaw_turns::run_profile::LoopSafeSummary::new(error.safe_summary.clone()).is_ok()
+        );
     }
 
     #[test]
@@ -2468,6 +2471,9 @@ mod tests {
 
         assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
         assert!(error.safe_summary.contains("schema validation"));
+        assert!(
+            ironclaw_turns::run_profile::LoopSafeSummary::new(error.safe_summary.clone()).is_ok()
+        );
     }
 
     #[test]

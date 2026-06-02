@@ -2167,6 +2167,11 @@ async fn model_visible_provider_tool_failures_append_failure_tool_result_for_rep
             "capability failed with invalid_input: invalid input",
         ),
         (
+            CapabilityFailureKind::InvalidInput,
+            "provider arguments failed schema validation at instance path root against schema path required",
+            "capability failed with invalid_input: provider arguments failed schema validation at instance path root against schema path required",
+        ),
+        (
             CapabilityFailureKind::MissingRuntime,
             "runtime missing",
             "capability failed with missing_runtime: runtime missing",
