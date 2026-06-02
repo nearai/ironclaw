@@ -26,8 +26,8 @@ use ironclaw_filesystem::InMemoryBackend;
 #[cfg(feature = "libsql")]
 use ironclaw_filesystem::LibSqlRootFilesystem;
 use ironclaw_filesystem::{
-    BackendCapabilities, BackendId, BackendKind, Capability, CompositeRootFilesystem, ContentKind,
-    IndexPolicy, MountDescriptor, RootFilesystem, StorageClass,
+    BackendCapabilities, BackendId, BackendKind, CompositeRootFilesystem, ContentKind, IndexPolicy,
+    MountDescriptor, RootFilesystem, StorageClass,
 };
 use ironclaw_filesystem::{LocalFilesystem, ScopedFilesystem};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -1088,7 +1088,7 @@ fn mount_local_dev_project_roots(
             StorageClass::FileContent,
             ContentKind::ProjectFile,
             IndexPolicy::NotIndexed,
-            local_dev_bytes_capabilities(),
+            BackendCapabilities::bytes_only(),
         )?,
         Arc::clone(&local),
     )?;
@@ -1100,7 +1100,7 @@ fn mount_local_dev_project_roots(
             StorageClass::FileContent,
             ContentKind::ExtensionPackage,
             IndexPolicy::NotIndexed,
-            local_dev_bytes_capabilities(),
+            BackendCapabilities::bytes_only(),
         )?,
         local,
     )?;
@@ -1233,8 +1233,8 @@ fn write_local_dev_secret_master_key(path: &Path, key: &str) -> Result<(), Rebor
     }
 }
 
-// Intentionally uncfg'd: these helpers are called from both libsql and
-// no-libsql local-dev root filesystem paths.
+// Intentionally uncfg'd: called from both libsql and no-libsql local-dev root
+// filesystem paths.
 fn local_dev_mount_descriptor(
     virtual_root: &str,
     backend_id: &str,
@@ -1253,16 +1253,6 @@ fn local_dev_mount_descriptor(
         index_policy,
         capabilities,
     })
-}
-
-fn local_dev_bytes_capabilities() -> BackendCapabilities {
-    BackendCapabilities::empty()
-        .with(Capability::Read)
-        .with(Capability::Write)
-        .with(Capability::Append)
-        .with(Capability::List)
-        .with(Capability::Stat)
-        .with(Capability::Delete)
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
