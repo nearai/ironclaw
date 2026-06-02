@@ -183,6 +183,7 @@ pub enum ActionDispatchKind {
     UserMessageTurn { run_id: TurnRunId },
     Command { command: ProductCommandName },
     ApprovalResolution { gate_ref: LoopGateRef },
+    ScopedApprovalResolution,
     AuthResolution { auth_request_ref: AuthRequestRef },
     ProjectionSubscription,
     LinkedThreadAction { action_id: LinkedThreadActionId },
@@ -206,6 +207,9 @@ impl ActionDispatchKind {
                 gate_ref: LoopGateRef::new(res.gate_ref.clone())
                     .map_err(|reason| ProductWorkflowError::TurnSubmissionRejected { reason })?,
             }),
+            ProductInboundPayload::ScopedApprovalResolution(_) => {
+                Ok(Self::ScopedApprovalResolution)
+            }
             ProductInboundPayload::AuthResolution(res) => Ok(Self::AuthResolution {
                 auth_request_ref: AuthRequestRef::new(res.auth_request_ref.clone())
                     .map_err(|reason| ProductWorkflowError::TurnSubmissionRejected { reason })?,

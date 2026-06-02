@@ -225,7 +225,7 @@ impl<'de> Deserialize<'de> for InboundCommandPayload {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalDecision {
     ApproveOnce,
@@ -261,6 +261,32 @@ impl ApprovalResolutionPayload {
     }
 }
 
+/// Approval command scoped by the current product conversation/actor binding.
+///
+/// Surfaces use this for thread-local shorthand such as `approve` / `deny`
+/// where the gate reference is intentionally resolved by the trusted workflow
+/// layer instead of being supplied by the adapter.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ScopedApprovalResolutionPayload {
+    pub decision: ApprovalDecision,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_trigger: Option<ProductTriggerReason>,
+}
+
+impl ScopedApprovalResolutionPayload {
+    pub fn new(decision: ApprovalDecision) -> Result<Self, ProductAdapterError> {
+        Ok(Self {
+            decision,
+            source_trigger: None,
+        })
+    }
+
+    pub fn with_source_trigger(mut self, source_trigger: ProductTriggerReason) -> Self {
+        self.source_trigger = Some(source_trigger);
+        self
+    }
+}
+
 #[derive(Deserialize)]
 struct ApprovalResolutionPayloadWire {
     gate_ref: String,
@@ -275,6 +301,26 @@ impl<'de> Deserialize<'de> for ApprovalResolutionPayload {
     {
         let wire = ApprovalResolutionPayloadWire::deserialize(deserializer)?;
         let payload = Self::new(wire.gate_ref, wire.decision).map_err(serde::de::Error::custom)?;
+        Ok(match wire.source_trigger {
+            Some(source_trigger) => payload.with_source_trigger(source_trigger),
+            None => payload,
+        })
+    }
+}
+
+#[derive(Deserialize)]
+struct ScopedApprovalResolutionPayloadWire {
+    decision: ApprovalDecision,
+    source_trigger: Option<ProductTriggerReason>,
+}
+
+impl<'de> Deserialize<'de> for ScopedApprovalResolutionPayload {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = ScopedApprovalResolutionPayloadWire::deserialize(deserializer)?;
+        let payload = Self::new(wire.decision).map_err(serde::de::Error::custom)?;
         Ok(match wire.source_trigger {
             Some(source_trigger) => payload.with_source_trigger(source_trigger),
             None => payload,
@@ -453,6 +499,7 @@ pub enum ProductInboundPayload {
     UserMessage(UserMessagePayload),
     Command(InboundCommandPayload),
     ApprovalResolution(ApprovalResolutionPayload),
+    ScopedApprovalResolution(ScopedApprovalResolutionPayload),
     AuthResolution(AuthResolutionPayload),
     SubscriptionRequest(ProjectionSubscriptionPayload),
     LinkedThreadAction(LinkedThreadActionPayload),

@@ -14,7 +14,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use ironclaw_conversations::InMemoryConversationServices;
-use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
+use ironclaw_host_api::{AgentId, ApprovalRequestId, ProjectId, TenantId, UserId};
 use ironclaw_outbound::{
     CommunicationPreferenceRepository, InMemoryOutboundStateStore, OutboundStateStore,
 };
@@ -24,9 +24,10 @@ use ironclaw_product_adapters::{
     ProtocolHttpEgressError,
 };
 use ironclaw_product_workflow::{
-    ApprovalInteractionDecision, ApprovalInteractionService, DefaultInboundTurnService,
-    DefaultProductWorkflow, InMemoryIdempotencyLedger, ListPendingApprovalsRequest,
-    ListPendingApprovalsResponse, ProductConversationBindingService, ProductInstallationKey,
+    ApprovalInteractionActionView, ApprovalInteractionDecision, ApprovalInteractionScope,
+    ApprovalInteractionService, DefaultInboundTurnService, DefaultProductWorkflow,
+    InMemoryIdempotencyLedger, ListPendingApprovalsRequest, ListPendingApprovalsResponse,
+    PendingApprovalInteractionView, ProductConversationBindingService, ProductInstallationKey,
     ProductInstallationScope, ProductWorkflowError, ResolveApprovalInteractionRequest,
     ResolveApprovalInteractionResponse, StaticProductInstallationResolver,
 };
@@ -259,7 +260,7 @@ async fn slack_dm_delivers_approval_prompt_after_immediate_ack() {
     assert!(
         messages[0]["text"]
             .as_str()
-            .is_some_and(|text| text.contains("approve gate:approve-slack"))
+            .is_some_and(|text| text.contains("approve` or `deny"))
     );
 }
 
@@ -275,7 +276,7 @@ async fn slack_approval_reply_resumes_and_delivers_final_reply() {
     assert_eq!(harness.slack_messages().len(), 1);
 
     let second = harness
-        .post_event(dm_message("Ev-approve", "approve gate:approve-slack"))
+        .post_event(dm_message("Ev-approve", "approve"))
         .await;
 
     assert_eq!(second.status(), StatusCode::OK);
@@ -546,10 +547,26 @@ impl RecordingApprovalInteractionService {
 impl ApprovalInteractionService for RecordingApprovalInteractionService {
     async fn list_pending(
         &self,
-        _request: ListPendingApprovalsRequest,
+        request: ListPendingApprovalsRequest,
     ) -> Result<ListPendingApprovalsResponse, ProductWorkflowError> {
+        let Some(run_id) = self.coordinator.blocked_run_id() else {
+            return Ok(ListPendingApprovalsResponse {
+                approvals: Vec::new(),
+            });
+        };
         Ok(ListPendingApprovalsResponse {
-            approvals: Vec::new(),
+            approvals: vec![PendingApprovalInteractionView {
+                scope: ApprovalInteractionScope::from_turn(&request.scope, &request.actor),
+                run_id,
+                gate_ref: GateRef::new(GATE).map_err(|err| {
+                    ProductWorkflowError::TurnSubmissionRejected {
+                        reason: err.to_string(),
+                    }
+                })?,
+                approval_request_id: ApprovalRequestId::new(),
+                summary: "Approval needed".into(),
+                action: ApprovalInteractionActionView::Other,
+            }],
         })
     }
 
@@ -633,7 +650,7 @@ fn dm_message(event_id: &'static str, text: &'static str) -> &'static str {
         ("Ev-final", "hello") => DM_FINAL,
         ("Ev-approval", "needs approval") => DM_APPROVAL,
         ("Ev-block", "needs approval") => DM_BLOCK,
-        ("Ev-approve", "approve gate:approve-slack") => DM_APPROVE,
+        ("Ev-approve", "approve") => DM_APPROVE,
         _ => panic!("unknown fixture"),
     }
 }
@@ -677,5 +694,5 @@ const DM_APPROVE: &str = r#"{
   "team_id":"T-A",
   "api_app_id":"A-slack",
   "event_id":"Ev-approve",
-  "event":{"type":"message","channel_type":"im","user":"U123","channel":"D-A","text":"approve gate:approve-slack","ts":"1710000000.000004"}
+  "event":{"type":"message","channel_type":"im","user":"U123","channel":"D-A","text":"approve","ts":"1710000000.000004"}
 }"#;

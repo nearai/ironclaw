@@ -13,8 +13,8 @@ use ironclaw_product_adapters::{
     ProductWorkflowRejectionKind, ProjectionSubscriptionRequest, RedactedString,
 };
 use ironclaw_turns::{
-    AcceptedMessageRef, AdmissionRejectionReason, GateRef, IdempotencyKey, TurnActor, TurnError,
-    TurnErrorCategory, TurnRunId, TurnScope,
+    AcceptedMessageRef, AdmissionRejectionReason, GateRef, IdempotencyKey, LoopGateRef, TurnActor,
+    TurnError, TurnErrorCategory, TurnRunId, TurnScope,
 };
 use sha2::{Digest, Sha256};
 use tracing::debug;
@@ -22,8 +22,8 @@ use tracing::debug;
 use crate::action::{ActionDispatchKind, ActionFingerprintKey, SourceBindingKey};
 use crate::approval_interaction::{
     ApprovalInteractionDecision, ApprovalInteractionRejectionKind, ApprovalInteractionService,
-    RejectingApprovalInteractionService, ResolveApprovalInteractionRequest,
-    ResolveApprovalInteractionResponse,
+    ListPendingApprovalsRequest, RejectingApprovalInteractionService,
+    ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
 };
 use crate::auth_interaction::{
     AuthInteractionDecision, AuthInteractionRejectionKind, AuthInteractionService,
@@ -367,6 +367,16 @@ async fn dispatch_payload(
             )
             .await
         }
+        ProductInboundPayload::ScopedApprovalResolution(payload) => {
+            dispatch_scoped_approval_resolution(
+                envelope,
+                payload,
+                action_fingerprint,
+                ports.binding_service,
+                ports.approval_interaction_service,
+            )
+            .await
+        }
         ProductInboundPayload::AuthResolution(payload) => {
             dispatch_auth_resolution(
                 envelope,
@@ -401,15 +411,7 @@ async fn dispatch_approval_resolution(
     binding_service: &dyn ConversationBindingService,
     approval_interaction_service: &dyn ApprovalInteractionService,
 ) -> Result<DispatchedAction, ProductWorkflowError> {
-    let decision = match payload.decision {
-        ApprovalDecision::ApproveOnce => ApprovalInteractionDecision::ApproveOnce,
-        ApprovalDecision::Deny => ApprovalInteractionDecision::Deny,
-        ApprovalDecision::AlwaysAllow => {
-            return Err(ProductWorkflowError::ApprovalInteractionRejected {
-                kind: ApprovalInteractionRejectionKind::AlwaysAllowUnsupported,
-            });
-        }
-    };
+    let decision = approval_interaction_decision(payload.decision)?;
     let binding = binding_service
         .lookup_binding(resolve_binding_request(envelope))
         .await?;
@@ -439,6 +441,76 @@ async fn dispatch_approval_resolution(
         },
         dispatch_kind: ActionDispatchKind::try_from_payload(envelope.payload())?,
     })
+}
+
+async fn dispatch_scoped_approval_resolution(
+    envelope: &ProductInboundEnvelope,
+    payload: &ironclaw_product_adapters::ScopedApprovalResolutionPayload,
+    action_fingerprint: ActionFingerprintKey,
+    binding_service: &dyn ConversationBindingService,
+    approval_interaction_service: &dyn ApprovalInteractionService,
+) -> Result<DispatchedAction, ProductWorkflowError> {
+    let decision = approval_interaction_decision(payload.decision)?;
+    let binding = binding_service
+        .lookup_binding(resolve_binding_request(envelope))
+        .await?;
+    let scope = turn_scope_from_binding(&binding);
+    let actor = TurnActor::new(binding.user_id.clone());
+    let pending = approval_interaction_service
+        .list_pending(ListPendingApprovalsRequest {
+            scope: scope.clone(),
+            actor: actor.clone(),
+        })
+        .await?;
+    let gate = match pending.approvals.as_slice() {
+        [gate] => gate,
+        [] => {
+            return Err(ProductWorkflowError::ApprovalInteractionRejected {
+                kind: ApprovalInteractionRejectionKind::MissingGate,
+            });
+        }
+        _ => {
+            return Err(ProductWorkflowError::ApprovalInteractionRejected {
+                kind: ApprovalInteractionRejectionKind::AmbiguousGate,
+            });
+        }
+    };
+    let gate_ref = gate.gate_ref.clone();
+    let idempotency_key = approval_resolution_idempotency_key(&action_fingerprint)?;
+    let response = approval_interaction_service
+        .resolve(ResolveApprovalInteractionRequest {
+            scope,
+            actor,
+            run_id_hint: Some(gate.run_id),
+            gate_ref: gate_ref.clone(),
+            decision,
+            idempotency_key,
+        })
+        .await?;
+    let submitted_run_id = run_id_from_approval_resolution(response);
+    let dispatch_gate_ref = LoopGateRef::new(gate_ref.as_str())
+        .map_err(|reason| ProductWorkflowError::TurnSubmissionRejected { reason })?;
+    Ok(DispatchedAction {
+        ack: ProductInboundAck::Accepted {
+            accepted_message_ref: interaction_accepted_message_ref("approval", envelope)?,
+            submitted_run_id,
+        },
+        dispatch_kind: ActionDispatchKind::ApprovalResolution {
+            gate_ref: dispatch_gate_ref,
+        },
+    })
+}
+
+fn approval_interaction_decision(
+    decision: ApprovalDecision,
+) -> Result<ApprovalInteractionDecision, ProductWorkflowError> {
+    match decision {
+        ApprovalDecision::ApproveOnce => Ok(ApprovalInteractionDecision::ApproveOnce),
+        ApprovalDecision::Deny => Ok(ApprovalInteractionDecision::Deny),
+        ApprovalDecision::AlwaysAllow => Err(ProductWorkflowError::ApprovalInteractionRejected {
+            kind: ApprovalInteractionRejectionKind::AlwaysAllowUnsupported,
+        }),
+    }
 }
 
 async fn dispatch_auth_resolution(
@@ -765,7 +837,8 @@ fn rejection_kind_for_approval_interaction(
     match kind {
         ApprovalInteractionRejectionKind::MissingGate => ProductRejectionKind::BindingRequired,
         ApprovalInteractionRejectionKind::CrossScopeDenied => ProductRejectionKind::AccessDenied,
-        ApprovalInteractionRejectionKind::StaleGate
+        ApprovalInteractionRejectionKind::AmbiguousGate
+        | ApprovalInteractionRejectionKind::StaleGate
         | ApprovalInteractionRejectionKind::InvalidGateRef
         | ApprovalInteractionRejectionKind::AlwaysAllowUnsupported
         | ApprovalInteractionRejectionKind::UnsupportedAction

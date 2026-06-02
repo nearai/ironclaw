@@ -75,6 +75,10 @@ pub fn route_kind_for_inbound_payload(
             .source_trigger
             .map(route_kind_for_trigger)
             .unwrap_or(ProductConversationRouteKind::Direct),
+        ProductInboundPayload::ScopedApprovalResolution(resolution) => resolution
+            .source_trigger
+            .map(route_kind_for_trigger)
+            .unwrap_or(ProductConversationRouteKind::Direct),
         ProductInboundPayload::AuthResolution(resolution) => resolution
             .source_trigger
             .map(route_kind_for_trigger)

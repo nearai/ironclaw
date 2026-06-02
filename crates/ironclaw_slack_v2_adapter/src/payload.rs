@@ -9,7 +9,8 @@ use ironclaw_product_adapters::{
     AdapterInstallationId, ApprovalDecision, ApprovalResolutionPayload, AuthResolutionPayload,
     AuthResolutionResult, ExternalActorRef, ExternalConversationRef, ExternalEventId,
     ParsedProductInbound, ProductAdapterError, ProductAttachmentDescriptor, ProductAttachmentKind,
-    ProductInboundPayload, ProductTriggerReason, ProtocolAuthEvidence, UserMessagePayload,
+    ProductInboundPayload, ProductTriggerReason, ProtocolAuthEvidence,
+    ScopedApprovalResolutionPayload, UserMessagePayload,
 };
 use serde::Deserialize;
 use thiserror::Error;
@@ -338,32 +339,18 @@ fn parse_interaction_resolution(
         return Ok(None);
     };
     match first.to_ascii_lowercase().as_str() {
-        "approve" => {
-            let Some(gate_ref) = parts.next() else {
-                return Ok(None);
-            };
-            if parts.next().is_some() {
-                return Ok(None);
-            }
-            ApprovalResolutionPayload::new(gate_ref, ApprovalDecision::ApproveOnce)
-                .map(|payload| payload.with_source_trigger(source_trigger))
-                .map(ProductInboundPayload::ApprovalResolution)
-                .map(Some)
-                .map_err(adapter_error_to_payload_error)
-        }
-        "deny" => {
-            let Some(gate_ref) = parts.next() else {
-                return Ok(None);
-            };
-            if parts.next().is_some() {
-                return Ok(None);
-            }
-            ApprovalResolutionPayload::new(gate_ref, ApprovalDecision::Deny)
-                .map(|payload| payload.with_source_trigger(source_trigger))
-                .map(ProductInboundPayload::ApprovalResolution)
-                .map(Some)
-                .map_err(adapter_error_to_payload_error)
-        }
+        "approve" => parse_approval_resolution(
+            parts.next(),
+            parts.next(),
+            ApprovalDecision::ApproveOnce,
+            source_trigger,
+        ),
+        "deny" => parse_approval_resolution(
+            parts.next(),
+            parts.next(),
+            ApprovalDecision::Deny,
+            source_trigger,
+        ),
         "auth" => {
             let Some(action) = parts.next() else {
                 return Ok(None);
@@ -385,6 +372,30 @@ fn parse_interaction_resolution(
             }
         }
         _ => Ok(None),
+    }
+}
+
+fn parse_approval_resolution(
+    gate_ref: Option<&str>,
+    extra_token: Option<&str>,
+    decision: ApprovalDecision,
+    source_trigger: ProductTriggerReason,
+) -> Result<Option<ProductInboundPayload>, SlackPayloadParseError> {
+    if extra_token.is_some() {
+        return Ok(None);
+    }
+
+    match gate_ref {
+        Some(gate_ref) => ApprovalResolutionPayload::new(gate_ref, decision)
+            .map(|payload| payload.with_source_trigger(source_trigger))
+            .map(ProductInboundPayload::ApprovalResolution)
+            .map(Some)
+            .map_err(adapter_error_to_payload_error),
+        None => ScopedApprovalResolutionPayload::new(decision)
+            .map(|payload| payload.with_source_trigger(source_trigger))
+            .map(ProductInboundPayload::ScopedApprovalResolution)
+            .map(Some)
+            .map_err(adapter_error_to_payload_error),
     }
 }
 

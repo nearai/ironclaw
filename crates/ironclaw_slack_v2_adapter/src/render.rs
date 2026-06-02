@@ -92,10 +92,12 @@ pub fn render_auth_prompt(
 fn gate_prompt_reply_instruction(target: &ProductOutboundTarget, gate_ref: &str) -> String {
     if requires_app_mention(target) {
         return format!(
-            "Mention this app in this Slack thread with `approve {gate_ref}` or `deny {gate_ref}`."
+            "Mention this app in this Slack thread with `approve` or `deny`. If the thread has multiple pending approvals, use `approve {gate_ref}` or `deny {gate_ref}`."
         );
     }
-    format!("Reply `approve {gate_ref}` or `deny {gate_ref}` in this Slack thread.")
+    format!(
+        "Reply `approve` or `deny` in this Slack thread. If the thread has multiple pending approvals, use `approve {gate_ref}` or `deny {gate_ref}`."
+    )
 }
 
 fn auth_prompt_reply_instruction(target: &ProductOutboundTarget, auth_request_ref: &str) -> String {
