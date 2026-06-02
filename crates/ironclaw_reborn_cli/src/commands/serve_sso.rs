@@ -40,7 +40,7 @@ use ironclaw_reborn_webui_ingress::{
     SessionId, SessionRecord, SessionStore, SessionStoreError, UserDirectory, UserDirectoryError,
     webui_v2_auth_router,
 };
-use secrecy::SecretString;
+use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -74,10 +74,10 @@ impl SignedTokenSessionStore {
     /// Derive the HMAC key from the operator secret, domain-separated so
     /// the session-signing key never collides with another use of the
     /// same secret.
-    fn from_operator_secret(secret: &str) -> Self {
+    fn from_operator_secret(secret: &SecretString) -> Self {
         let mut hasher = Sha256::new();
         hasher.update(b"ironclaw-reborn-webui-session-v1::");
-        hasher.update(secret.as_bytes());
+        hasher.update(secret.expose_secret().as_bytes());
         Self {
             key: hasher.finalize().to_vec(),
         }
@@ -110,6 +110,14 @@ impl SessionStore for SignedTokenSessionStore {
         user_id: UserId,
         lifetime: ChronoDuration,
     ) -> Result<SecretString, SessionStoreError> {
+        // A non-positive lifetime would mint a token whose `exp <= iat`;
+        // `lookup` then rejects it immediately, so the caller would get
+        // `Ok(token)` for an already-dead session. Fail loud instead.
+        if lifetime <= ChronoDuration::zero() {
+            return Err(SessionStoreError::Backend(
+                "session lifetime must be positive".into(),
+            ));
+        }
         let now = Utc::now();
         let expires_at = now
             .checked_add_signed(lifetime)
@@ -149,8 +157,10 @@ impl SessionStore for SignedTokenSessionStore {
         let Ok(payload) = serde_json::from_slice::<TokenPayload>(&payload_json) else {
             return Ok(None);
         };
+        // RFC 7519 §4.1.4: a token must not be accepted on or after the
+        // instant *after* `exp`; the expiry second itself is still valid.
         let now = Utc::now().timestamp();
-        if payload.exp <= now {
+        if payload.exp < now {
             return Ok(None);
         }
         // A malformed identity inside a validly-signed token is a
@@ -230,22 +240,24 @@ impl UserDirectory for FixedUserDirectory {
 /// [`FixedUserDirectory`]). `operator_secret` keys the session-token
 /// HMAC (see [`SignedTokenSessionStore`]).
 ///
-/// Returns `Ok(None)` when no OAuth provider is enabled (Google or
-/// GitHub), in which case the caller keeps the plain env-bearer
-/// authenticator and mounts no public login routes.
+/// Returns `None` when `providers` is empty, in which case the caller
+/// keeps the plain env-bearer authenticator and mounts no public login
+/// routes. Provider discovery is the caller's job
+/// ([`oauth_providers_from_env`]); taking the resolved list as a
+/// parameter keeps this factory deterministic and callable from tests
+/// without touching process environment.
 pub(crate) fn build_oauth_login(
     tenant_id: TenantId,
     owner_user_id: UserId,
-    operator_secret: &str,
+    operator_secret: &SecretString,
     base_url: String,
+    providers: Vec<Arc<dyn OAuthProvider>>,
     env_authenticator: Arc<dyn WebuiAuthenticator>,
-) -> anyhow::Result<Option<OAuthLoginWiring>> {
-    let providers = oauth_providers_from_env()?;
-
+) -> Option<OAuthLoginWiring> {
     // Nothing configured → keep the plain env-bearer listener and mount
     // no public login routes.
     if providers.is_empty() {
-        return Ok(None);
+        return None;
     }
 
     let session_store: Arc<dyn SessionStore> = Arc::new(
@@ -271,18 +283,18 @@ pub(crate) fn build_oauth_login(
         env_token: env_authenticator,
     });
 
-    Ok(Some(OAuthLoginWiring {
+    Some(OAuthLoginWiring {
         mount,
         authenticator,
-    }))
+    })
 }
 
 /// Collect the configured OAuth providers from env. A provider is
-/// opted in by setting its `IRONCLAW_REBORN_WEBUI_*_CLIENT_ID`; the
-/// matching `*_CLIENT_SECRET` is read alongside (both are required for
-/// the real code exchange to succeed, but the button surfaces as soon
-/// as the client id is present so the login UI can be exercised
-/// locally).
+/// opted in by setting its `IRONCLAW_REBORN_WEBUI_*_CLIENT_ID`. The
+/// matching `*_CLIENT_SECRET` is required: if the client id is set but
+/// the secret is missing, the provider is skipped with a `warn!` rather
+/// than registered with an empty secret (which would surface a login
+/// button whose code exchange always fails at the provider).
 ///
 /// These WebChat-login vars live in the `IRONCLAW_REBORN_WEBUI_*`
 /// namespace — the same one as `IRONCLAW_REBORN_WEBUI_TOKEN` /
@@ -297,30 +309,59 @@ pub(crate) fn build_oauth_login(
 /// configurable. (The browser-user *login* client and the product
 /// *credential* client are usually distinct OAuth clients anyway —
 /// different registered redirect URIs.)
-fn oauth_providers_from_env() -> anyhow::Result<Vec<Arc<dyn OAuthProvider>>> {
+pub(crate) fn oauth_providers_from_env() -> anyhow::Result<Vec<Arc<dyn OAuthProvider>>> {
     let mut providers: Vec<Arc<dyn OAuthProvider>> = Vec::new();
 
     if let Some(client_id) = non_empty_env("IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_ID") {
-        let provider = GoogleProvider::new(GoogleOAuthConfig {
-            client_id,
-            client_secret: SecretString::from(
-                env::var("IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_SECRET").unwrap_or_default(),
+        match non_empty_env("IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_SECRET") {
+            Some(client_secret) => {
+                let allowed_hd = non_empty_env("IRONCLAW_REBORN_WEBUI_GOOGLE_ALLOWED_HD");
+                // Every successful login is mapped to the single operator
+                // (see `FixedUserDirectory`), so with no hosted-domain
+                // restriction ANY Google account that completes the flow
+                // becomes the operator. Warn loudly when it is unset.
+                if allowed_hd.is_none() {
+                    tracing::warn!(
+                        target = "ironclaw::reborn::cli::serve",
+                        "IRONCLAW_REBORN_WEBUI_GOOGLE_ALLOWED_HD is unset — any Google account \
+                         that completes login is mapped to the operator identity; set it to \
+                         restrict Google login to one Workspace domain",
+                    );
+                }
+                let provider = GoogleProvider::new(GoogleOAuthConfig {
+                    client_id,
+                    client_secret: SecretString::from(client_secret),
+                    allowed_hd,
+                })
+                .context("failed to build Google OAuth provider")?;
+                providers.push(Arc::new(provider));
+            }
+            None => tracing::warn!(
+                target = "ironclaw::reborn::cli::serve",
+                "IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_ID is set but \
+                 IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_SECRET is missing; skipping the Google \
+                 login provider (code exchange would always fail without the secret)",
             ),
-            allowed_hd: non_empty_env("IRONCLAW_REBORN_WEBUI_GOOGLE_ALLOWED_HD"),
-        })
-        .context("failed to build Google OAuth provider")?;
-        providers.push(Arc::new(provider));
+        }
     }
 
     if let Some(client_id) = non_empty_env("IRONCLAW_REBORN_WEBUI_GITHUB_CLIENT_ID") {
-        let provider = GitHubProvider::new(GitHubOAuthConfig {
-            client_id,
-            client_secret: SecretString::from(
-                env::var("IRONCLAW_REBORN_WEBUI_GITHUB_CLIENT_SECRET").unwrap_or_default(),
+        match non_empty_env("IRONCLAW_REBORN_WEBUI_GITHUB_CLIENT_SECRET") {
+            Some(client_secret) => {
+                let provider = GitHubProvider::new(GitHubOAuthConfig {
+                    client_id,
+                    client_secret: SecretString::from(client_secret),
+                })
+                .context("failed to build GitHub OAuth provider")?;
+                providers.push(Arc::new(provider));
+            }
+            None => tracing::warn!(
+                target = "ironclaw::reborn::cli::serve",
+                "IRONCLAW_REBORN_WEBUI_GITHUB_CLIENT_ID is set but \
+                 IRONCLAW_REBORN_WEBUI_GITHUB_CLIENT_SECRET is missing; skipping the GitHub \
+                 login provider (code exchange would always fail without the secret)",
             ),
-        })
-        .context("failed to build GitHub OAuth provider")?;
-        providers.push(Arc::new(provider));
+        }
     }
 
     Ok(providers)
@@ -334,15 +375,28 @@ fn non_empty_env(name: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use secrecy::ExposeSecret;
+    use ironclaw_reborn_webui_ingress::OAuthError;
 
     fn tenant() -> TenantId {
         TenantId::new("tenant-a").expect("tenant")
     }
 
+    fn signed_store(secret: &str) -> SignedTokenSessionStore {
+        SignedTokenSessionStore::from_operator_secret(&SecretString::from(secret.to_string()))
+    }
+
+    /// Mint a raw `{payload}.{sig}` token directly from a payload — used
+    /// to craft tokens (expired, malformed identity) that `create_session`
+    /// would refuse to produce.
+    fn signed_raw(store: &SignedTokenSessionStore, payload: &TokenPayload) -> String {
+        let payload_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(payload).expect("encode"));
+        let signature = store.sign(&payload_b64);
+        format!("{payload_b64}.{signature}")
+    }
+
     #[tokio::test]
     async fn signed_token_round_trips_tenant_and_user() {
-        let store = SignedTokenSessionStore::from_operator_secret("operator-secret");
+        let store = signed_store("operator-secret");
         let token = store
             .create_session(
                 tenant(),
@@ -362,7 +416,7 @@ mod tests {
 
     #[tokio::test]
     async fn tampered_or_wrong_key_token_is_rejected() {
-        let store = SignedTokenSessionStore::from_operator_secret("secret-a");
+        let store = signed_store("secret-a");
         let token = store
             .create_session(
                 tenant(),
@@ -381,7 +435,7 @@ mod tests {
 
         // A store built from a different operator secret rejects the
         // token (signature mismatch).
-        let other = SignedTokenSessionStore::from_operator_secret("secret-b");
+        let other = signed_store("secret-b");
         assert!(other.lookup(&raw).await.expect("lookup").is_none());
 
         // Garbage / non-token input is rejected, not an error.
@@ -390,23 +444,70 @@ mod tests {
 
     #[tokio::test]
     async fn expired_token_is_rejected() {
-        let store = SignedTokenSessionStore::from_operator_secret("operator-secret");
-        // A negative lifetime puts `exp` in the past.
-        let token = store
+        let store = signed_store("operator-secret");
+        // `create_session` refuses to mint an expired token, so craft a
+        // validly-signed one with `exp` in the past directly.
+        let now = Utc::now().timestamp();
+        let token = signed_raw(
+            &store,
+            &TokenPayload {
+                sid: "sess-1".to_string(),
+                tenant: "tenant-a".to_string(),
+                user: "operator".to_string(),
+                iat: now - 100,
+                exp: now - 10,
+            },
+        );
+        assert!(store.lookup(&token).await.expect("lookup").is_none());
+    }
+
+    #[tokio::test]
+    async fn create_session_rejects_non_positive_lifetime() {
+        let store = signed_store("operator-secret");
+        for lifetime in [ChronoDuration::zero(), ChronoDuration::seconds(-1)] {
+            let err = store
+                .create_session(tenant(), UserId::new("operator").expect("user"), lifetime)
+                .await
+                .expect_err("a non-positive lifetime must error, not mint a dead token");
+            assert!(matches!(err, SessionStoreError::Backend(_)));
+        }
+    }
+
+    #[tokio::test]
+    async fn create_session_returns_error_on_lifetime_overflow() {
+        let store = signed_store("operator-secret");
+        let err = store
             .create_session(
                 tenant(),
                 UserId::new("operator").expect("user"),
-                ChronoDuration::seconds(-1),
+                ChronoDuration::MAX,
             )
             .await
-            .expect("create");
-        assert!(
-            store
-                .lookup(token.expose_secret())
-                .await
-                .expect("lookup")
-                .is_none()
+            .expect_err("a lifetime that overflows the expiry instant must error");
+        assert!(matches!(err, SessionStoreError::Backend(_)));
+    }
+
+    #[tokio::test]
+    async fn lookup_surfaces_backend_error_on_malformed_tenant() {
+        let store = signed_store("operator-secret");
+        let now = Utc::now().timestamp();
+        // Validly-signed token carrying an empty tenant — a backend
+        // inconsistency, surfaced as an error rather than a silent miss.
+        let token = signed_raw(
+            &store,
+            &TokenPayload {
+                sid: "sess-1".to_string(),
+                tenant: String::new(),
+                user: "operator".to_string(),
+                iat: now,
+                exp: now + 3600,
+            },
         );
+        let err = store
+            .lookup(&token)
+            .await
+            .expect_err("malformed tenant in a signed token must surface an error");
+        assert!(matches!(err, SessionStoreError::Backend(_)));
     }
 
     /// Stub authenticator that recognizes exactly one token.
@@ -468,5 +569,67 @@ mod tests {
         };
         let resolved = dir.resolve(&provider, &profile).await.expect("resolve");
         assert_eq!(resolved.as_str(), "operator");
+    }
+
+    /// Minimal `OAuthProvider` for the `build_oauth_login` wiring tests —
+    /// `build_oauth_login` only stores the provider list, so the URL /
+    /// exchange methods are never invoked here.
+    struct StubProvider(OAuthProviderName);
+
+    #[async_trait]
+    impl OAuthProvider for StubProvider {
+        fn name(&self) -> &OAuthProviderName {
+            &self.0
+        }
+        fn authorization_url(&self, _callback_url: &str, _state: &str, _challenge: &str) -> String {
+            "https://provider.example/authorize".to_string()
+        }
+        async fn exchange_code(
+            &self,
+            _code: &str,
+            _callback_url: &str,
+            _verifier: &str,
+        ) -> Result<OAuthUserProfile, OAuthError> {
+            unreachable!("exchange_code is not exercised by the wiring test")
+        }
+    }
+
+    fn env_authenticator() -> Arc<dyn WebuiAuthenticator> {
+        Arc::new(OneToken {
+            token: "env-tok",
+            user: "operator",
+        })
+    }
+
+    #[test]
+    fn build_oauth_login_returns_none_when_no_providers() {
+        // Caller-level guard (`.claude/rules/testing.md`): with no provider
+        // configured the factory mounts no public routes and leaves the
+        // env-bearer authenticator in place.
+        let wiring = build_oauth_login(
+            tenant(),
+            UserId::new("operator").expect("user"),
+            &SecretString::from("operator-secret".to_string()),
+            "https://app.example".to_string(),
+            Vec::new(),
+            env_authenticator(),
+        );
+        assert!(wiring.is_none());
+    }
+
+    #[test]
+    fn build_oauth_login_returns_wiring_when_a_provider_is_present() {
+        let provider: Arc<dyn OAuthProvider> = Arc::new(StubProvider(
+            OAuthProviderName::new("google").expect("name"),
+        ));
+        let wiring = build_oauth_login(
+            tenant(),
+            UserId::new("operator").expect("user"),
+            &SecretString::from("operator-secret".to_string()),
+            "https://app.example".to_string(),
+            vec![provider],
+            env_authenticator(),
+        );
+        assert!(wiring.is_some());
     }
 }

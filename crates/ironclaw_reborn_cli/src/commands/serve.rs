@@ -113,10 +113,12 @@ impl ServeCommand {
 
         // Keep a copy of the operator secret to key the SSO session-token
         // HMAC before the value is moved into the env-bearer authenticator.
-        let session_signing_secret = token_value.clone();
+        // Held as `SecretString` so it is redacted in `Debug`/logs and
+        // zeroed on drop — it doubles as the session-signing key.
+        let session_signing_secret = SecretString::from(token_value.clone());
         let env_authenticator: Arc<dyn WebuiAuthenticator> = Arc::new(EnvBearerAuthenticator::new(
             SecretString::from(token_value),
-            user_id,
+            user_id.clone(),
         )?);
 
         // Resolve trusted host-installation default agent/project from
@@ -192,42 +194,56 @@ impl ServeCommand {
         // provider configured, the listener keeps the plain env-bearer
         // auth and mounts no public login routes.
         let (authenticator, public_mount): (Arc<dyn WebuiAuthenticator>, Option<PublicRouteMount>) = {
-            // Prefer the WebChat-login-scoped base URL; fall back to the
-            // shared `OAUTH_BASE_URL` (also read by the v1 gateway) and
-            // finally to the bound listener address.
-            let base_url = env::var("IRONCLAW_REBORN_WEBUI_BASE_URL")
-                .ok()
-                .filter(|raw| !raw.trim().is_empty())
-                .or_else(|| {
-                    env::var("OAUTH_BASE_URL")
-                        .ok()
-                        .filter(|raw| !raw.trim().is_empty())
-                })
-                .unwrap_or_else(|| format!("http://{listen_addr}"));
-            // Every SSO login maps to this operator identity (the same
-            // one pinned as the runtime owner above), so a logged-in turn
-            // runs under the owner the loop host expects. Rebuilt from the
-            // validated raw value — it already parsed cleanly for the
-            // env-bearer authenticator.
-            let owner_user_id = ironclaw_reborn_composition::host_api::UserId::new(&user_id_raw)
-                .map_err(|err| {
-                    anyhow!("{env_user_id_var} value `{user_id_raw}` is invalid: {err}")
-                })?;
-            match crate::commands::serve_sso::build_oauth_login(
-                tenant_id.clone(),
-                owner_user_id,
-                &session_signing_secret,
-                base_url,
-                env_authenticator.clone(),
-            )? {
-                Some(wiring) => {
-                    eprintln!(
-                        "ironclaw-reborn: WebChat v2 SSO login mounted — \
-                         see GET /auth/providers for the enabled set"
+            let providers = crate::commands::serve_sso::oauth_providers_from_env()
+                .context("failed to read WebChat v2 SSO provider config")?;
+            if providers.is_empty() {
+                (env_authenticator, None)
+            } else {
+                // Prefer the WebChat-login-scoped base URL; fall back to the
+                // shared `OAUTH_BASE_URL` (also read by the v1 gateway) and
+                // finally to the bound listener address.
+                let base_url = env::var("IRONCLAW_REBORN_WEBUI_BASE_URL")
+                    .ok()
+                    .filter(|raw| !raw.trim().is_empty())
+                    .or_else(|| {
+                        env::var("OAUTH_BASE_URL")
+                            .ok()
+                            .filter(|raw| !raw.trim().is_empty())
+                    })
+                    .unwrap_or_else(|| format!("http://{listen_addr}"));
+                // Refuse cleartext OAuth on a public interface: http://
+                // redirect URIs leak authorization codes in transit (and
+                // Google/GitHub reject them for production apps). Loopback
+                // http:// stays allowed for local dev.
+                if base_url.starts_with("http://") && !host.is_loopback() {
+                    anyhow::bail!(
+                        "WebChat v2 SSO base URL `{base_url}` uses http:// on a non-loopback \
+                         interface, which would transmit OAuth authorization codes in \
+                         cleartext. Set IRONCLAW_REBORN_WEBUI_BASE_URL to an https:// URL."
                     );
-                    (wiring.authenticator, Some(wiring.mount))
                 }
-                None => (env_authenticator, None),
+                // Every SSO login maps to this operator identity (the same
+                // one pinned as the runtime owner above), so a logged-in
+                // turn runs under the owner the loop host expects. Reuses
+                // the already-validated `user_id` rather than re-parsing.
+                let owner_user_id = user_id.clone();
+                match crate::commands::serve_sso::build_oauth_login(
+                    tenant_id.clone(),
+                    owner_user_id,
+                    &session_signing_secret,
+                    base_url,
+                    providers,
+                    env_authenticator.clone(),
+                ) {
+                    Some(wiring) => {
+                        eprintln!(
+                            "ironclaw-reborn: WebChat v2 SSO login mounted — \
+                             see GET /auth/providers for the enabled set"
+                        );
+                        (wiring.authenticator, Some(wiring.mount))
+                    }
+                    None => (env_authenticator, None),
+                }
             }
         };
 
