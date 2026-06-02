@@ -7,7 +7,7 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::llm::ChatMessage;
+use ironclaw_llm::ChatMessage;
 
 /// A record of an action taken during job execution.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -121,7 +121,7 @@ impl ConversationMemory {
         // Trim old messages if needed (keeping system message if present)
         while self.messages.len() > self.max_messages {
             // Don't remove system messages
-            if self.messages.first().map(|m| m.role) == Some(crate::llm::Role::System) {
+            if self.messages.first().map(|m| m.role) == Some(ironclaw_llm::Role::System) {
                 if self.messages.len() > 1 {
                     self.messages.remove(1);
                 } else {
@@ -416,7 +416,7 @@ mod tests {
 
         assert_eq!(mem.len(), 3); // safety: test
         // System message must survive
-        assert_eq!(mem.messages()[0].role, crate::llm::Role::System); // safety: test
+        assert_eq!(mem.messages()[0].role, ironclaw_llm::Role::System); // safety: test
         assert_eq!(mem.messages()[0].content, "You are helpful"); // safety: test
         // Oldest non-system message (msg1) should be gone
         assert_eq!(mem.messages()[1].content, "msg2"); // safety: test
@@ -432,7 +432,7 @@ mod tests {
         mem.add(ChatMessage::user("b"));
 
         assert_eq!(mem.len(), 2); // safety: test
-        assert_eq!(mem.messages()[0].role, crate::llm::Role::System); // safety: test
+        assert_eq!(mem.messages()[0].role, ironclaw_llm::Role::System); // safety: test
         assert_eq!(mem.messages()[1].content, "b"); // safety: test
     }
 

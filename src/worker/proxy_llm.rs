@@ -9,11 +9,11 @@ use async_trait::async_trait;
 use rust_decimal::Decimal;
 
 use crate::error::LlmError;
-use crate::llm::{
+use crate::worker::api::WorkerHttpClient;
+use ironclaw_llm::{
     CompletionRequest, CompletionResponse, LlmProvider, ToolCompletionRequest,
     ToolCompletionResponse,
 };
-use crate::worker::api::WorkerHttpClient;
 
 /// An LLM provider that routes all calls through the orchestrator's HTTP API.
 ///

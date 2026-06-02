@@ -15,15 +15,15 @@ use ironclaw::channels::web::log_layer::LogBroadcaster;
 use ironclaw::channels::{OutgoingResponse, StatusUpdate};
 use ironclaw::config::Config;
 use ironclaw::db::Database;
-use ironclaw::llm::{LlmProvider, SessionConfig, SessionManager};
 use ironclaw::tools::Tool;
+use ironclaw_llm::{LlmProvider, SessionConfig, SessionManager};
 
 use crate::support::instrumented_llm::InstrumentedLlm;
 use crate::support::metrics::{ToolInvocation, TraceMetrics};
 use crate::support::test_channel::{CapturedEvent, TestChannel, TestChannelHandle};
 use crate::support::trace_llm::{LlmTrace, TraceLlm};
 
-use ironclaw::llm::recording::{HttpExchange, HttpInterceptor, ReplayingHttpInterceptor};
+use ironclaw_llm::recording::{HttpExchange, HttpInterceptor, ReplayingHttpInterceptor};
 
 // ---------------------------------------------------------------------------
 // TestRig
@@ -299,7 +299,33 @@ impl TestRig {
     /// Resolve an OAuth-style gate by submitting a typed
     /// `Submission::ExternalCallback`.
     pub async fn send_external_callback(&self, request_id: uuid::Uuid) {
-        let submission = ironclaw::agent::submission::Submission::ExternalCallback { request_id };
+        let submission = ironclaw::agent::submission::Submission::ExternalCallback {
+            request_id,
+            payload: None,
+        };
+        let msg = ironclaw::channels::IncomingMessage::new(
+            self.channel.channel_name(),
+            self.channel.user_id(),
+            "",
+        )
+        .with_structured_submission(submission);
+        self.channel.send_incoming(msg).await;
+    }
+
+    /// Resolve a caller-tool external gate (Responses API path) with a
+    /// JSON resolution payload. The payload becomes
+    /// `GateResolution::ExternalCallback { payload }` after submission;
+    /// the engine then has to materialise it back into an `ActionResult`
+    /// the LLM can see.
+    pub async fn send_external_callback_with_payload(
+        &self,
+        request_id: uuid::Uuid,
+        payload: serde_json::Value,
+    ) {
+        let submission = ironclaw::agent::submission::Submission::ExternalCallback {
+            request_id,
+            payload: Some(payload),
+        };
         let msg = ironclaw::channels::IncomingMessage::new(
             self.channel.channel_name(),
             self.channel.user_id(),
@@ -312,7 +338,7 @@ impl TestRig {
     /// Return all message lists that were sent to the LLM provider.
     ///
     /// Only available when the rig was built with a `TraceLlm` (i.e., via `.with_trace()`).
-    pub fn captured_llm_requests(&self) -> Vec<Vec<ironclaw::llm::ChatMessage>> {
+    pub fn captured_llm_requests(&self) -> Vec<Vec<ironclaw_llm::ChatMessage>> {
         self.trace_llm
             .as_ref()
             .map(|t| t.captured_requests())
@@ -896,7 +922,7 @@ impl TestRigBuilder {
     /// Unlike `with_extra_tools`, these overrides are applied at the end of
     /// `build()` via `ToolRegistry::register_sync`, so a probe stub can
     /// intentionally replace an earlier built-in registration (e.g.
-    /// `tool_activate`, `tool_auth`) for gate testing.
+    /// `tool_install`, `tool_auth`) for gate testing.
     pub fn with_test_tool_override(mut self, tool: Arc<dyn Tool>) -> Self {
         self.test_tool_overrides.push(tool);
         self

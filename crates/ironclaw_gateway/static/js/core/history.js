@@ -239,8 +239,15 @@ function loadHistory(before) {
 
     hasMore = data.has_more || false;
     oldestTimestamp = data.oldest_timestamp || null;
-  }).catch(() => {
-    // No history or no active thread
+  }).catch((err) => {
+    // Surface the error in DevTools and flag for SSE-open retry (#3274).
+    // The previous silent swallow left the user staring at an empty chat
+    // when the very first request after auth raced engine initialization
+    // and only a manual refresh recovered.
+    console.error('[chat] loadHistory failed:', err);
+    if (window._initialHydrationPending) {
+      window._initialHydrationPending.history = true;
+    }
   }).finally(() => {
     loadingOlder = false;
     removeScrollSpinner();
@@ -520,7 +527,12 @@ function loadThreads() {
         enableChatInput();
       }
     }
-  }).catch(() => {});
+  }).catch((err) => {
+    console.error('[chat] loadThreads failed:', err);
+    if (window._initialHydrationPending) {
+      window._initialHydrationPending.threads = true;
+    }
+  });
 }
 
 function disableChatInputReadOnly() {

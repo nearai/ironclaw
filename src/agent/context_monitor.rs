@@ -3,7 +3,7 @@
 //! Monitors the size of the conversation context and triggers
 //! compaction when approaching the limit.
 
-use crate::llm::ChatMessage;
+use ironclaw_llm::ChatMessage;
 
 /// Default context window limit (conservative estimate).
 pub(crate) const DEFAULT_CONTEXT_LIMIT: usize = 100_000;
@@ -173,10 +173,10 @@ impl ContextBreakdown {
             breakdown.total_tokens += tokens;
 
             match message.role {
-                crate::llm::Role::System => breakdown.system_tokens += tokens,
-                crate::llm::Role::User => breakdown.user_tokens += tokens,
-                crate::llm::Role::Assistant => breakdown.assistant_tokens += tokens,
-                crate::llm::Role::Tool => breakdown.tool_tokens += tokens,
+                ironclaw_llm::Role::System => breakdown.system_tokens += tokens,
+                ironclaw_llm::Role::User => breakdown.user_tokens += tokens,
+                ironclaw_llm::Role::Assistant => breakdown.assistant_tokens += tokens,
+                ironclaw_llm::Role::Tool => breakdown.tool_tokens += tokens,
             }
         }
 

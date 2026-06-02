@@ -123,11 +123,16 @@ The engine defines three traits that the host crate implements:
 
 Python execution via Monty interpreter (`executor/scripting.rs`). Follows the RLM (Recursive Language Model) pattern.
 
-For engine v2 prompt surfacing, blocked managed integrations are described in
-`Activatable Integrations` and the model is expected to use
-`tool_activate(name=...)` first. Newly enabled tools become visible on the
-next top-level orchestrator turn; CodeAct does not hot-refresh callable tools
-mid-step.
+For engine v2 prompt surfacing, installed-but-unauthed provider tools (e.g.
+`gmail` without an OAuth token) are direct-callable: the engine's auth
+preflight raises an `Authentication` gate at execute time, the inline-await
+machinery parks the VM, and the OAuth callback delivers the resolved
+credential to retry the action. Integrations that need user-driven setup
+(`NeedsSetup`, `Inactive`, `AvailableNotInstalled`) are listed under
+`Activatable Integrations` and the model installs them by calling
+`tool_install(name="<name>")` directly (issue #3533 / PR #3559 — the
+hidden gate on `tool_install` from #2868 was removed; the tool's
+`requires_approval = UnlessAutoApproved` mediates user consent).
 
 **Context as variables** (not attention input):
 - Thread messages injected as `context` Python variable

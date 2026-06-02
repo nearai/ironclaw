@@ -121,9 +121,15 @@ pub struct ExecutionLoop {
     store: Option<Arc<dyn crate::traits::store::Store>>,
     /// Runtime platform metadata for self-awareness in system prompts.
     platform_info: Option<crate::executor::prompt::PlatformInfo>,
+    /// Host gate controller, attached to every `ThreadExecutionContext`
+    /// this loop builds so executors can pause in place on `Approval`
+    /// gates. Required: callers without an inline-await surface use
+    /// [`crate::gate::CancellingGateController::arc()`].
+    gate_controller: Arc<dyn crate::gate::GateController>,
 }
 
 impl ExecutionLoop {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         thread: Thread,
         llm: Arc<dyn LlmBackend>,
@@ -132,6 +138,7 @@ impl ExecutionLoop {
         policy: Arc<PolicyEngine>,
         signal_rx: SignalReceiver,
         user_id: String,
+        gate_controller: Arc<dyn crate::gate::GateController>,
     ) -> Self {
         Self {
             thread,
@@ -146,6 +153,7 @@ impl ExecutionLoop {
             retrieval: None,
             store: None,
             platform_info: None,
+            gate_controller,
         }
     }
 
@@ -250,6 +258,7 @@ impl ExecutionLoop {
             &self.thread,
             StepId::new(),
             None,
+            self.gate_controller.clone(),
         );
         let capabilities_result = self
             .effects
@@ -429,6 +438,7 @@ impl ExecutionLoop {
             self.retrieval.as_ref(),
             self.store.as_ref(),
             self.platform_info.as_ref(),
+            &self.gate_controller,
             &checkpoint.persisted_state,
         )
         .await;
@@ -762,7 +772,16 @@ mod tests {
 
         let (tx, rx) = crate::runtime::messaging::signal_channel(16);
 
-        let exec = ExecutionLoop::new(thread, llm, effects, leases, policy, rx, "test-user".into());
+        let exec = ExecutionLoop::new(
+            thread,
+            llm,
+            effects,
+            leases,
+            policy,
+            rx,
+            "test-user".into(),
+            crate::gate::CancellingGateController::arc(),
+        );
         (exec, tx)
     }
 
@@ -882,6 +901,7 @@ mod tests {
             policy,
             rx,
             "test-user".into(),
+            crate::gate::CancellingGateController::arc(),
         );
 
         let outcome = exec.run().await.unwrap();
@@ -956,7 +976,11 @@ mod tests {
                     name: "slack".into(),
                     display_name: Some("Slack".into()),
                     kind: CapabilitySummaryKind::Provider,
-                    status: CapabilityStatus::NeedsAuth,
+                    // NeedsSetup keeps slack visible in the
+                    // Activatable Integrations prompt section.
+                    // NeedsAuth would render in the regular action
+                    // inventory (post-#3133 direct-callable path).
+                    status: CapabilityStatus::NeedsSetup,
                     description: Some("Slack workspace integration".into()),
                     action_preview: vec!["slack_send".into()],
                     routing_hint: None,
@@ -1020,6 +1044,7 @@ mod tests {
             policy,
             rx,
             "test-user".into(),
+            crate::gate::CancellingGateController::arc(),
         );
 
         let outcome = exec.run().await.unwrap();
@@ -1030,7 +1055,7 @@ mod tests {
         assert!(!system_prompt.contains("## Available tools (call as Python functions)"));
         assert!(system_prompt.contains("`slack` [provider]"));
         assert!(system_prompt.contains("## Activatable Integrations"));
-        assert!(system_prompt.contains("tool_activate(name=\"<integration>\")"));
+        assert!(system_prompt.contains("need user setup before their tools become callable"));
         assert!(!system_prompt.contains("`telegram` [channel]"));
         assert!(system_prompt.contains("## Prior Knowledge (from completed threads)"));
         assert!(system_prompt.contains("GitHub API Skill"));
@@ -1117,7 +1142,11 @@ mod tests {
                     name: "slack".into(),
                     display_name: Some("Slack".into()),
                     kind: CapabilitySummaryKind::Provider,
-                    status: CapabilityStatus::NeedsAuth,
+                    // NeedsSetup keeps slack visible in the
+                    // Activatable Integrations prompt section.
+                    // NeedsAuth would render in the regular action
+                    // inventory (post-#3133 direct-callable path).
+                    status: CapabilityStatus::NeedsSetup,
                     description: Some("Slack workspace integration".into()),
                     action_preview: vec!["slack_send".into()],
                     routing_hint: None,
@@ -1174,6 +1203,7 @@ mod tests {
             policy,
             rx,
             "test-user".into(),
+            crate::gate::CancellingGateController::arc(),
         );
 
         let outcome = exec.run().await.unwrap();
@@ -1266,8 +1296,16 @@ mod tests {
             .unwrap();
         let (_tx, rx) = crate::runtime::messaging::signal_channel(16);
 
-        let mut exec =
-            ExecutionLoop::new(thread, llm, effects, leases, policy, rx, "test-user".into());
+        let mut exec = ExecutionLoop::new(
+            thread,
+            llm,
+            effects,
+            leases,
+            policy,
+            rx,
+            "test-user".into(),
+            crate::gate::CancellingGateController::arc(),
+        );
 
         exec.refresh_system_prompt(&[], true, &mut checkpoint).await;
         assert_eq!(exec.thread.messages[0].content, old_prompt);
@@ -1317,8 +1355,16 @@ mod tests {
             .unwrap();
         let (_tx, rx) = crate::runtime::messaging::signal_channel(16);
 
-        let mut exec =
-            ExecutionLoop::new(thread, llm, effects, leases, policy, rx, "test-user".into());
+        let mut exec = ExecutionLoop::new(
+            thread,
+            llm,
+            effects,
+            leases,
+            policy,
+            rx,
+            "test-user".into(),
+            crate::gate::CancellingGateController::arc(),
+        );
 
         exec.refresh_system_prompt(&[], false, &mut checkpoint)
             .await;
@@ -1975,8 +2021,16 @@ mod tests {
             .unwrap();
 
         let (_tx, rx) = crate::runtime::messaging::signal_channel(16);
-        let mut exec =
-            ExecutionLoop::new(thread, llm, effects, leases, policy, rx, "test-user".into());
+        let mut exec = ExecutionLoop::new(
+            thread,
+            llm,
+            effects,
+            leases,
+            policy,
+            rx,
+            "test-user".into(),
+            crate::gate::CancellingGateController::arc(),
+        );
 
         exec.run().await.unwrap();
 

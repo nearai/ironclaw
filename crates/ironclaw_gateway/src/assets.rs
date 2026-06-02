@@ -172,3 +172,23 @@ pub const ADMIN_CSS: &str = include_str!("../static/admin/admin.css");
 
 /// Admin panel JavaScript.
 pub const ADMIN_JS: &str = include_str!("../static/admin/admin.js");
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn logs_toolbar_exposes_download_button() {
+        assert!(INDEX_HTML.contains("id=\"logs-download-btn\""));
+        assert!(INDEX_HTML.contains("data-i18n=\"logs.download\""));
+    }
+
+    #[test]
+    fn logs_surface_can_export_buffer_as_jsonl() {
+        assert!(APP_JS.contains("downloadLogsJsonl"));
+        assert!(APP_JS.contains("serializeLogEntriesAsJsonl"));
+        assert!(APP_JS.contains("ironclaw-logs-"));
+        assert!(APP_JS.contains("logs-download-btn').addEventListener('click'"));
+        assert!(APP_JS.contains("setTimeout(() => URL.revokeObjectURL(url)"));
+    }
+}

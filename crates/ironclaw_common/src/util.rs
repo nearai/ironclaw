@@ -1,5 +1,31 @@
 //! Shared utility functions.
 
+/// Collapse a multi-line string into a single line and truncate to `max_chars` chars.
+///
+/// Unlike `truncate_preview` (which works in bytes and preserves newlines for
+/// XML payloads), this normalises whitespace and works in chars — suitable for
+/// log lines that should fit on a single screen row.
+pub fn truncate_for_preview(output: &str, max_chars: usize) -> String {
+    let collapsed: String = output
+        .chars()
+        .take(max_chars + 50)
+        .map(|c| if c == '\n' { ' ' } else { c })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if collapsed.chars().count() > max_chars {
+        let byte_offset = collapsed
+            .char_indices()
+            .nth(max_chars)
+            .map(|(i, _)| i)
+            .unwrap_or(collapsed.len());
+        format!("{}...", &collapsed[..byte_offset])
+    } else {
+        collapsed
+    }
+}
+
 /// Truncate a string to at most `max_bytes` bytes at a char boundary, appending "...".
 ///
 /// If the input is wrapped in `<tool_output ...>...</tool_output>` and truncation

@@ -1,6 +1,6 @@
 //! Shared utility functions used across the codebase.
 
-use crate::llm::{ChatMessage, Role};
+use ironclaw_llm::{ChatMessage, Role};
 use serde_json::{Map, Value};
 
 /// Find the largest valid UTF-8 char boundary at or before `pos`.
@@ -109,11 +109,11 @@ pub fn canonicalize_json_value(value: Value) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use crate::llm::ChatMessage;
     use crate::util::{
         canonicalize_json_value, ensure_ends_with_user_message, floor_char_boundary,
         llm_signals_completion,
     };
+    use ironclaw_llm::ChatMessage;
 
     // ── canonicalize_json_value ──
 
@@ -192,7 +192,7 @@ mod tests {
         let mut msgs: Vec<ChatMessage> = vec![];
         ensure_ends_with_user_message(&mut msgs);
         assert_eq!(msgs.len(), 1);
-        assert_eq!(msgs[0].role, crate::llm::Role::User);
+        assert_eq!(msgs[0].role, ironclaw_llm::Role::User);
     }
 
     #[test]
@@ -200,7 +200,7 @@ mod tests {
         let mut msgs = vec![ChatMessage::user("hi"), ChatMessage::assistant("hello")];
         ensure_ends_with_user_message(&mut msgs);
         assert_eq!(msgs.len(), 3);
-        assert_eq!(msgs[2].role, crate::llm::Role::User);
+        assert_eq!(msgs[2].role, ironclaw_llm::Role::User);
     }
 
     #[test]
@@ -211,7 +211,7 @@ mod tests {
         ];
         ensure_ends_with_user_message(&mut msgs);
         assert_eq!(msgs.len(), 3);
-        assert_eq!(msgs[2].role, crate::llm::Role::User);
+        assert_eq!(msgs[2].role, ironclaw_llm::Role::User);
     }
 
     #[test]

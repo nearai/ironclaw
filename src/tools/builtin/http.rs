@@ -759,13 +759,13 @@ impl Tool for HttpTool {
         // API keys, and injected query-param/URL-path credentials never
         // reach the recorder. Replay matching uses `method` + `url` only,
         // so omitting the injected values is safe for determinism.
-        let intercept_req = crate::llm::recording::HttpExchangeRequest {
+        let intercept_req = ironclaw_llm::recording::HttpExchangeRequest {
             method: method_upper,
             url: caller_url.to_string(),
             headers: caller_headers,
             body: body_bytes
                 .as_ref()
-                .map(|b| crate::llm::recording::redact_body(&String::from_utf8_lossy(b))),
+                .map(|b| ironclaw_llm::recording::redact_body(&String::from_utf8_lossy(b))),
         };
 
         // Check HTTP interceptor (replay mode returns pre-recorded response)
@@ -1059,7 +1059,7 @@ impl Tool for HttpTool {
             interceptor
                 .after_response(
                     &intercept_req,
-                    &crate::llm::recording::HttpExchangeResponse {
+                    &ironclaw_llm::recording::HttpExchangeResponse {
                         status,
                         headers: resp_headers,
                         body: body_text.clone(),
@@ -1880,7 +1880,7 @@ mod tests {
     /// no real HTTP call is made.
     #[derive(Debug)]
     struct SpyInterceptor {
-        captured: tokio::sync::Mutex<Option<crate::llm::recording::HttpExchangeRequest>>,
+        captured: tokio::sync::Mutex<Option<ironclaw_llm::recording::HttpExchangeRequest>>,
     }
 
     impl SpyInterceptor {
@@ -1890,19 +1890,19 @@ mod tests {
             }
         }
 
-        async fn captured_request(&self) -> Option<crate::llm::recording::HttpExchangeRequest> {
+        async fn captured_request(&self) -> Option<ironclaw_llm::recording::HttpExchangeRequest> {
             self.captured.lock().await.clone()
         }
     }
 
     #[async_trait::async_trait]
-    impl crate::llm::recording::HttpInterceptor for SpyInterceptor {
+    impl ironclaw_llm::recording::HttpInterceptor for SpyInterceptor {
         async fn before_request(
             &self,
-            request: &crate::llm::recording::HttpExchangeRequest,
-        ) -> Option<crate::llm::recording::HttpExchangeResponse> {
+            request: &ironclaw_llm::recording::HttpExchangeRequest,
+        ) -> Option<ironclaw_llm::recording::HttpExchangeResponse> {
             *self.captured.lock().await = Some(request.clone());
-            Some(crate::llm::recording::HttpExchangeResponse {
+            Some(ironclaw_llm::recording::HttpExchangeResponse {
                 status: 200,
                 headers: vec![],
                 body: r#"{"ok":true}"#.to_string(),
@@ -1911,8 +1911,8 @@ mod tests {
 
         async fn after_response(
             &self,
-            _request: &crate::llm::recording::HttpExchangeRequest,
-            _response: &crate::llm::recording::HttpExchangeResponse,
+            _request: &ironclaw_llm::recording::HttpExchangeRequest,
+            _response: &ironclaw_llm::recording::HttpExchangeResponse,
         ) {
         }
     }
@@ -1962,7 +1962,8 @@ mod tests {
 
         let spy = Arc::new(SpyInterceptor::new());
         let mut ctx = crate::context::JobContext::new("test", "test");
-        ctx.http_interceptor = Some(spy.clone() as Arc<dyn crate::llm::recording::HttpInterceptor>);
+        ctx.http_interceptor =
+            Some(spy.clone() as Arc<dyn ironclaw_llm::recording::HttpInterceptor>);
 
         // `api.github.com` chosen because DNS resolution runs before the
         // interceptor short-circuits (see `validate_and_resolve_url` in
@@ -2037,7 +2038,8 @@ mod tests {
 
         let spy = Arc::new(SpyInterceptor::new());
         let mut ctx = crate::context::JobContext::new("test", "test");
-        ctx.http_interceptor = Some(spy.clone() as Arc<dyn crate::llm::recording::HttpInterceptor>);
+        ctx.http_interceptor =
+            Some(spy.clone() as Arc<dyn ironclaw_llm::recording::HttpInterceptor>);
 
         let params = serde_json::json!({
             "method": "GET",

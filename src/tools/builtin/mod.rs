@@ -25,8 +25,8 @@ mod tool_info;
 
 pub use echo::EchoTool;
 pub use extension_tools::{
-    ExtensionInfoTool, ToolActivateTool, ToolAuthTool, ToolInstallTool, ToolListTool,
-    ToolPermissionSetTool, ToolRemoveTool, ToolSearchTool, ToolUpgradeTool,
+    ExtensionInfoTool, ToolAuthTool, ToolInstallTool, ToolListTool, ToolPermissionSetTool,
+    ToolRemoveTool, ToolSearchTool, ToolUpgradeTool,
 };
 pub use file::{ApplyPatchTool, ListDirTool, ReadFileTool, WriteFileTool};
 pub use file_edit_guard::{SharedReadFileState, shared_read_file_state};
@@ -57,11 +57,13 @@ mod html_converter;
 pub mod image_analyze;
 pub mod image_edit;
 pub mod image_gen;
+mod pairing;
 
 pub use html_converter::convert_html_to_markdown;
 pub use image_analyze::ImageAnalyzeTool;
 pub use image_edit::ImageEditTool;
 pub use image_gen::ImageGenerateTool;
+pub use pairing::PairingApproveTool;
 
 /// Detect image media type from file extension via `mime_guess`.
 /// Falls back to `image/jpeg` for unrecognized or non-image extensions.

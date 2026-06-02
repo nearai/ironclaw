@@ -33,7 +33,7 @@ pub use builder::{
     LlmSoftwareBuilder, SoftwareBuilder, SoftwareType, Template, TemplateEngine, TemplateType,
     TestCase, TestHarness, TestResult, TestSuite, ValidationError, ValidationResult, WasmValidator,
 };
-pub(crate) use coercion::prepare_tool_params;
+pub(crate) use coercion::{prepare_params_for_schema, prepare_tool_params};
 pub use rate_limiter::RateLimiter;
 pub use registry::{ToolRegistry, is_protected_tool_name};
 pub use tool::{

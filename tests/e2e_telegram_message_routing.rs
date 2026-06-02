@@ -19,7 +19,7 @@ mod tests {
     use ironclaw::config::Config;
     use ironclaw::db::{Database, libsql::LibSqlBackend};
     use ironclaw::error::ChannelError;
-    use ironclaw::llm::{LlmProvider, SessionConfig, SessionManager};
+    use ironclaw_llm::{LlmProvider, SessionConfig, SessionManager};
     use tokio::sync::{Mutex, mpsc};
     use tokio_stream::wrappers::ReceiverStream;
 

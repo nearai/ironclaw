@@ -597,16 +597,6 @@ mod tests {
                 }),
             ),
             (
-                "tool_activate",
-                serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "name": { "type": "string", "description": "Extension name" }
-                    },
-                    "required": ["name"]
-                }),
-            ),
-            (
                 "tool_list",
                 serde_json::json!({
                     "type": "object",

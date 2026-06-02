@@ -3,7 +3,7 @@
 use base64::Engine;
 
 use crate::channels::{AttachmentKind, IncomingAttachment};
-use crate::llm::{ContentPart, ImageUrl};
+use ironclaw_llm::{ContentPart, ImageUrl};
 
 /// Result of processing attachments for the LLM pipeline.
 pub struct AugmentResult {

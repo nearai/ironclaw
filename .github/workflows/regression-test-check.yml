@@ -21,25 +21,29 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Fetch PR head and base
+      - name: Fetch PR base
         env:
           BASE_REF: ${{ github.event.pull_request.base.ref }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           git fetch origin -- "$BASE_REF"
-          git fetch origin -- "pull/${PR_NUMBER}/head:pr-head"
 
       - name: Check for regression tests
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
           PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
 
           BASE_REF="origin/${PR_BASE_REF}"
-          # Use the actual PR head, not the merge commit that actions/checkout checks out
-          HEAD_REF="pr-head"
+          # Use the PR head SHA from the event payload directly. The previous
+          # approach fetched `refs/pull/N/head`, which GitHub occasionally
+          # fails to publish for in-repo PRs (hit on #3324, blocking this
+          # workflow before any of its actual checks could run). The SHA is
+          # reachable locally because actions/checkout (fetch-depth: 0)
+          # already pulled the merge commit, whose second parent is this SHA.
+          HEAD_REF="$PR_HEAD_SHA"
 
           # --- 1. Is this a fix PR? Check title first, then commit messages ---
           IS_FIX=false

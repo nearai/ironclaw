@@ -33,6 +33,10 @@ pub struct ChannelsConfig {
     /// Per-channel owner user IDs. When set, the channel only responds to this user.
     /// Key: channel name (e.g., "telegram"), Value: owner user ID.
     pub wasm_channel_owner_ids: HashMap<String, i64>,
+    /// Runtime config overrides for WASM channels.
+    ///
+    /// Key format: `<channel>:<config_key>` (e.g. `wecom:allow_from`).
+    pub wasm_channel_runtime_overrides: HashMap<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone)]
@@ -562,6 +566,7 @@ impl ChannelsConfig {
                 }
                 ids
             },
+            wasm_channel_runtime_overrides: cs.wasm_channel_runtime_overrides.clone(),
         })
     }
 }
@@ -744,6 +749,7 @@ mod tests {
             wasm_channels_enabled: true,
             configured_wasm_channels: Vec::new(),
             wasm_channel_owner_ids: HashMap::new(),
+            wasm_channel_runtime_overrides: HashMap::new(),
         };
         assert!(cfg.cli.enabled);
         assert!(cfg.http.is_none());
@@ -752,6 +758,7 @@ mod tests {
         assert_eq!(cfg.wasm_channels_dir, PathBuf::from("/tmp/channels"));
         assert!(cfg.wasm_channels_enabled);
         assert!(cfg.wasm_channel_owner_ids.is_empty());
+        assert!(cfg.wasm_channel_runtime_overrides.is_empty());
     }
 
     #[test]
@@ -771,6 +778,7 @@ mod tests {
             wasm_channels_enabled: false,
             configured_wasm_channels: vec!["telegram".to_string()],
             wasm_channel_owner_ids: ids,
+            wasm_channel_runtime_overrides: HashMap::new(),
         };
         assert_eq!(cfg.wasm_channel_owner_ids.get("telegram"), Some(&12345));
         assert_eq!(cfg.wasm_channel_owner_ids.get("slack"), Some(&67890));

@@ -449,6 +449,24 @@
   margin-bottom: 0;
 }
 
+.restart-loader-error {
+  margin-top: 1.25rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border-soft);
+}
+
+.restart-loader-error-text {
+  color: var(--text-primary);
+  font-size: 0.875rem;
+  margin: 0 0 0.75rem 0;
+}
+
+.restart-loader-error-actions {
+  display: flex;
+  gap: 0.5rem;
+  justify-content: flex-end;
+}
+
 .restart-modal-info a {
   color: var(--accent-brand);
   text-decoration: none;

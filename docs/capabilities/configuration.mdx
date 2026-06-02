@@ -1,0 +1,578 @@
+---
+title: Configuration
+sidebarTitle: Configuration
+description: Common operator configuration reference for IronClaw
+---
+
+IronClaw is configured through bootstrap environment variables, database-backed settings, and a small set of advanced or provider-specific environment variables. This page documents the primary options used during setup and normal operation.
+
+<Info>
+This operator-focused reference is checked against the current `src/config/` modules and `providers.json`. Test-only variables, one-off debugging hooks, and lower-level runtime internals may still exist outside this page; when changing configuration behavior, treat `src/config/`, `providers.json`, and `src/setup/README.md` as the source of truth.
+</Info>
+
+## Two-Layer Configuration
+
+IronClaw uses a two-layer configuration system:
+
+<AccordionGroup>
+  <Accordion title="Layer 1: ~/.ironclaw/.env (Bootstrap)" icon="file">
+    Contains settings needed **before** database connection:
+
+    - `DATABASE_BACKEND` — Which database to use
+    - `DATABASE_URL` — PostgreSQL connection string
+    - `LIBSQL_PATH` — libSQL database file path
+    - `LLM_BACKEND` — Which LLM provider to use
+    - `NEARAI_API_KEY` — NEAR AI Cloud API key (if using that mode)
+
+    Written automatically by the onboarding wizard.
+  </Accordion>
+
+  <Accordion title="Layer 2: Database Settings" icon="database">
+    Most user-facing runtime settings are stored in the database and loaded at runtime:
+
+    - Channel configuration
+    - Model selection
+    - Embeddings settings
+    - Skills configuration
+    - Heartbeat settings
+
+    Some security-sensitive and advanced options remain environment-only. Manage database-backed values through the wizard or `ironclaw config` command.
+  </Accordion>
+</AccordionGroup>
+
+## Common Configuration Categories
+
+<CardGroup cols={2}>
+  <Card title="Agent Settings" icon="bot" href="#agent-settings">
+    AGENT_NAME, MAX_PARALLEL_JOBS, timeouts, cost limits
+  </Card>
+
+  <Card title="Database" icon="database" href="#database">
+    DATABASE_BACKEND, DATABASE_URL, LIBSQL_PATH
+  </Card>
+
+  <Card title="LLM / Inference" icon="brain" href="#llm--inference">
+    NEARAI_*, ANTHROPIC_*, OPENAI_*, OLLAMA_*
+  </Card>
+
+  <Card title="Channels" icon="message-square" href="#channels">
+    GATEWAY_*, HTTP_*, TELEGRAM_*, SIGNAL_*
+  </Card>
+
+  <Card title="Embeddings" icon="search" href="#embeddings">
+    EMBEDDING_*, OPENAI_API_KEY
+  </Card>
+
+  <Card title="Sandbox" icon="container" href="#sandbox">
+    SANDBOX_*, CLAUDE_CODE_*
+  </Card>
+
+  <Card title="Skills" icon="puzzle" href="#skills">
+    SKILLS_ENABLED, SKILLS_MAX_CONTEXT_TOKENS
+  </Card>
+
+  <Card title="Security" icon="shield" href="#security">
+    SECRETS_MASTER_KEY, IRONCLAW_BASE_DIR
+  </Card>
+</CardGroup>
+
+## Agent Settings
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `AGENT_NAME` | string | `ironclaw` | Agent name displayed in responses |
+| `AGENT_MAX_PARALLEL_JOBS` | int | `5` | Maximum concurrent jobs |
+| `AGENT_JOB_TIMEOUT_SECS` | int | `3600` | Job timeout in seconds (1 hour) |
+| `AGENT_STUCK_THRESHOLD_SECS` | int | `300` | Time before job considered stuck (5 min) |
+| `SELF_REPAIR_CHECK_INTERVAL_SECS` | int | `60` | Self-repair check frequency (1 min) |
+| `SELF_REPAIR_MAX_ATTEMPTS` | int | `3` | Max repair attempts per job |
+| `AGENT_USE_PLANNING` | bool | `true` | Enable planning before tool execution |
+| `SESSION_IDLE_TIMEOUT_SECS` | int | `604800` | Session idle timeout (7 days) |
+| `ALLOW_LOCAL_TOOLS` | bool | `false` | Allow filesystem/shell tools directly |
+| `MAX_COST_PER_DAY_CENTS` | int | — | Daily spend limit (cents, e.g., 10000 = $100) |
+| `MAX_ACTIONS_PER_HOUR` | int | — | Hourly action limit |
+| `AGENT_MAX_TOOL_ITERATIONS` | int | `50` | Max tool calls per loop |
+| `AGENT_AUTO_APPROVE_TOOLS` | bool | `false` | Skip tool approval (for benchmarks) |
+
+## Database
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `DATABASE_BACKEND` | enum | `postgres` | Backend: `postgres` or `libsql` |
+| `DATABASE_URL` | string | — | PostgreSQL connection URL |
+| `DATABASE_POOL_SIZE` | int | `30` | Connection pool size |
+| `DATABASE_SSLMODE` | enum | `prefer` | TLS mode: `disable`, `prefer`, `require` |
+| `LIBSQL_PATH` | path | `~/.ironclaw/ironclaw.db` | libSQL database file |
+| `LIBSQL_URL` | URL | — | Turso cloud sync URL |
+| `LIBSQL_AUTH_TOKEN` | string | — | Turso auth token |
+
+### PostgreSQL Example
+
+```bash
+export DATABASE_BACKEND=postgres
+export DATABASE_URL="postgres://user:pass@localhost/ironclaw"
+export DATABASE_SSLMODE=require
+```
+
+### libSQL Example
+
+```bash
+export DATABASE_BACKEND=libsql
+export LIBSQL_PATH="/home/user/.ironclaw/ironclaw.db"
+```
+
+### Turso Example
+
+```bash
+export DATABASE_BACKEND=libsql
+export LIBSQL_PATH="/home/user/.ironclaw/ironclaw.db"
+export LIBSQL_URL="libsql://your-db.turso.io"
+export LIBSQL_AUTH_TOKEN="your-auth-token"
+```
+
+## LLM / Inference
+
+### NEAR AI
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `NEARAI_BASE_URL` | URL | `https://private.near.ai` | NEAR AI Chat API base URL |
+| `NEARAI_SESSION_TOKEN` | string | — | Session token for OAuth mode |
+| `NEARAI_API_KEY` | string | — | API key for Cloud mode |
+| `NEARAI_MODEL` | string | — | Default model (e.g., `claude-sonnet-4-20250514`) |
+| `NEARAI_CHEAP_MODEL` | string | — | Cheaper model for simple tasks |
+| `NEARAI_FALLBACK_MODEL` | string | — | Fallback if primary fails |
+
+### Anthropic
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `ANTHROPIC_API_KEY` | string | — | API key from console.anthropic.com |
+| `ANTHROPIC_BASE_URL` | URL | — | Custom base URL (optional) |
+
+### OpenAI
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `OPENAI_API_KEY` | string | — | API key from platform.openai.com |
+| `OPENAI_BASE_URL` | URL | — | Custom base URL (optional) |
+
+### Ollama
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `OLLAMA_BASE_URL` | URL | `http://localhost:11434` | Ollama server URL |
+
+### OpenAI-Compatible
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `LLM_BACKEND` | string | — | Set to `openai_compatible` |
+| `LLM_BASE_URL` | URL | — | API endpoint (e.g., `https://api.openrouter.ai`) |
+| `LLM_API_KEY` | string | — | API key |
+| `LLM_EXTRA_HEADERS` | string | — | Extra headers (format: `Key:Value,Key2:Value2`) |
+
+### Tinfoil
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `TINFOIL_API_KEY` | string | — | Tinfoil API key |
+| `TINFOIL_MODEL` | string | `kimi-k2-5` | Model to use |
+
+## Channels
+
+### Web Gateway
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `GATEWAY_ENABLED` | bool | `true` | Enable web UI |
+| `GATEWAY_HOST` | string | `127.0.0.1` | Bind host |
+| `GATEWAY_PORT` | int | `3000` | Port number |
+| `GATEWAY_AUTH_TOKEN` | string | random | Bearer token for auth |
+
+### HTTP Webhook
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `HTTP_HOST` | string | `127.0.0.1` | Bind host |
+| `HTTP_PORT` | int | `8080` | Port number |
+| `HTTP_WEBHOOK_SECRET` | string | — | Shared secret for validation |
+
+<Warning>
+The HTTP webhook binds to `127.0.0.1:8080` by default. To receive webhooks from external services, set `HTTP_HOST=0.0.0.0`.
+</Warning>
+
+### Terminal UI
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `CLI_ENABLED` | bool | `true` | Enable TUI on startup |
+
+### WASM Channels
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `WASM_CHANNELS_ENABLED` | bool | `true` | Enable WASM channels |
+| `WASM_CHANNELS_DIR` | path | `~/.ironclaw/channels` | Channel modules directory |
+| `TELEGRAM_OWNER_ID` | int | — | Telegram owner user ID (legacy) |
+
+### Signal
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `SIGNAL_HTTP_URL` | URL | — | signal-cli daemon URL |
+| `SIGNAL_ACCOUNT` | string | — | Phone number (+1234567890) |
+| `SIGNAL_ALLOW_FROM` | list | — | Allowed senders (comma-separated) |
+| `SIGNAL_ALLOW_FROM_GROUPS` | list | — | Allowed groups |
+| `SIGNAL_DM_POLICY` | enum | `pairing` | DM policy: `open`, `allowlist`, `pairing` |
+| `SIGNAL_GROUP_POLICY` | enum | `allowlist` | Group policy: `allowlist`, `open`, `disabled` |
+| `SIGNAL_IGNORE_ATTACHMENTS` | bool | `false` | Skip attachment-only messages |
+| `SIGNAL_IGNORE_STORIES` | bool | `true` | Skip story messages |
+
+## Embeddings
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `EMBEDDING_ENABLED` | bool | `false` | Enable semantic search |
+| `EMBEDDING_PROVIDER` | enum | `nearai` | Provider: `nearai` or `openai` |
+| `EMBEDDING_MODEL` | string | `text-embedding-3-small` | Embedding model |
+| `OPENAI_API_KEY` | string | — | Required if using OpenAI embeddings |
+
+## Sandbox
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `SANDBOX_ENABLED` | bool | `true` | Enable Docker sandbox |
+| `SANDBOX_POLICY` | enum | `readonly` | Policy: `readonly`, `workspace_write`, `full_access` |
+| `SANDBOX_TIMEOUT_SECS` | int | `120` | Command timeout |
+| `SANDBOX_MEMORY_LIMIT_MB` | int | `2048` | Memory limit per container |
+| `SANDBOX_CPU_SHARES` | int | `1024` | CPU shares (relative weight) |
+| `SANDBOX_IMAGE` | string | `ironclaw-worker:latest` | Docker image |
+| `SANDBOX_AUTO_PULL` | bool | `true` | Auto-pull missing images |
+| `SANDBOX_EXTRA_DOMAINS` | list | — | Additional allowed domains |
+
+## Claude Code
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `CLAUDE_CODE_ENABLED` | bool | `false` | Enable Claude Code mode |
+| `CLAUDE_CONFIG_DIR` | path | `~/.claude` | Claude config directory |
+| `CLAUDE_CODE_MODEL` | string | `sonnet` | Claude model |
+| `CLAUDE_CODE_MAX_TURNS` | int | `50` | Max agentic turns |
+| `CLAUDE_CODE_MEMORY_LIMIT_MB` | int | `4096` | Container memory limit |
+| `CLAUDE_CODE_ALLOWED_TOOLS` | list | — | Allowed tool patterns |
+
+## Skills
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `SKILLS_ENABLED` | bool | `true` | Enable skills system |
+| `SKILLS_MAX_CONTEXT_TOKENS` | int | `4000` | Max prompt budget for skills |
+
+## Heartbeat
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `HEARTBEAT_ENABLED` | bool | `false` | Enable periodic execution |
+| `HEARTBEAT_INTERVAL_SECS` | int | `1800` | Interval in seconds (30 min) |
+
+## Routines
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `ROUTINES_ENABLED` | bool | `true` | Enable scheduled/reactive tasks |
+| `ROUTINES_CRON_INTERVAL` | int | `15` | Cron tick interval (seconds) |
+| `ROUTINES_MAX_CONCURRENT` | int | `10` | Max concurrent routines |
+
+## Security
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `SECRETS_MASTER_KEY` | string | — | Master key for encryption (env var mode) |
+| `IRONCLAW_BASE_DIR` | path | `~/.ironclaw` | Data directory |
+| `IRONCLAW_OAUTH_CALLBACK_URL` | URL | `http://127.0.0.1:9876` | OAuth callback URL |
+
+## Provider Registry Variables
+
+The provider registry in `providers.json` defines additional LLM provider environment variables. Use these with `LLM_BACKEND=<provider id>` unless the provider is selected through database-backed settings or the UI.
+
+| Provider | API key | Base URL | Model | Extra headers |
+|----------|---------|----------|-------|---------------|
+| `openai` | `OPENAI_API_KEY` | `OPENAI_BASE_URL` | `OPENAI_MODEL` | — |
+| `anthropic` | `ANTHROPIC_API_KEY` | `ANTHROPIC_BASE_URL` | `ANTHROPIC_MODEL` | — |
+| `ollama` | — | `OLLAMA_BASE_URL` | `OLLAMA_MODEL` | — |
+| `openai_compatible` | `LLM_API_KEY` | `LLM_BASE_URL` | `LLM_MODEL` | `LLM_EXTRA_HEADERS` |
+| `github_copilot` | `GITHUB_COPILOT_TOKEN` | — | `GITHUB_COPILOT_MODEL` | `GITHUB_COPILOT_EXTRA_HEADERS` |
+| `tinfoil` | `TINFOIL_API_KEY` | — | `TINFOIL_MODEL` | — |
+| `openrouter` | `OPENROUTER_API_KEY` | — | `OPENROUTER_MODEL` | — |
+| `groq` | `GROQ_API_KEY` | — | `GROQ_MODEL` | — |
+| `nvidia` | `NVIDIA_API_KEY` | — | `NVIDIA_MODEL` | — |
+| `venice` | `VENICE_API_KEY` | — | `VENICE_MODEL` | — |
+| `together` | `TOGETHER_API_KEY` | — | `TOGETHER_MODEL` | — |
+| `fireworks` | `FIREWORKS_API_KEY` | — | `FIREWORKS_MODEL` | — |
+| `deepseek` | `DEEPSEEK_API_KEY` | — | `DEEPSEEK_MODEL` | — |
+| `zai` | `ZAI_API_KEY` | — | `ZAI_MODEL` | — |
+| `cerebras` | `CEREBRAS_API_KEY` | — | `CEREBRAS_MODEL` | — |
+| `sambanova` | `SAMBANOVA_API_KEY` | — | `SAMBANOVA_MODEL` | — |
+| `gemini` | `GEMINI_API_KEY` | — | `GEMINI_MODEL` | — |
+| `ionet` | `IONET_API_KEY` | — | `IONET_MODEL` | — |
+| `mistral` | `MISTRAL_API_KEY` | — | `MISTRAL_MODEL` | — |
+| `yandex` | `YANDEX_API_KEY` | — | `YANDEX_MODEL` | `YANDEX_EXTRA_HEADERS` |
+| `minimax` | `MINIMAX_API_KEY` | `MINIMAX_BASE_URL` | `MINIMAX_MODEL` | — |
+| `cloudflare` | `CLOUDFLARE_API_KEY` | `CLOUDFLARE_BASE_URL` | `CLOUDFLARE_MODEL` | — |
+
+## Advanced Configuration Variables
+
+These variables are resolved by the current `src/config/` modules but are less commonly needed during initial setup.
+
+### Agent, tenancy, and execution limits
+
+| Variable | Description |
+|----------|-------------|
+| `DEFAULT_TIMEZONE` | Default IANA timezone for new sessions. |
+| `AGENT_MAX_TOKENS_PER_JOB` | Maximum tokens per job; `0` means unlimited. |
+| `AGENT_MULTI_TENANT` | Marks the deployment as multi-tenant. |
+| `MAX_COST_PER_USER_PER_DAY_CENTS` | Per-user daily cost limit. |
+| `MAX_JOBS_PER_USER` | Per-user job limit. |
+| `TENANT_MAX_LLM_CONCURRENT` | Per-user concurrent LLM call limit. |
+| `TENANT_MAX_JOBS_CONCURRENT` | Per-user concurrent job limit. |
+| `ENGINE_V2` | Enables Engine V2 routing. |
+
+### Gateway, memory layers, and TUI
+
+| Variable | Description |
+|----------|-------------|
+| `HTTP_ENABLED` | Enables HTTP webhook channel even without host/port env overrides. |
+| `CLI_MODE` | CLI mode; `tui` enables the TUI channel. |
+| `TUI_THEME` | TUI theme name. |
+| `TUI_SIDEBAR` | Controls TUI sidebar visibility. |
+| `GATEWAY_MAX_CONNECTIONS` | Maximum concurrent SSE/WebSocket connections. |
+| `SSE_BROADCAST_BUFFER` | SSE broadcast channel buffer size, clamped by the gateway. |
+| `GATEWAY_OIDC_ENABLED` | Enables gateway OIDC/JWT authentication. |
+| `GATEWAY_OIDC_JWKS_URL` | JWKS URL required when OIDC is enabled. |
+| `GATEWAY_OIDC_HEADER` | Header containing the gateway JWT. |
+| `GATEWAY_OIDC_ISSUER` | Optional expected JWT issuer. |
+| `GATEWAY_OIDC_AUDIENCE` | Optional expected JWT audience. |
+| `MEMORY_LAYERS` | JSON memory layer definitions. |
+| `WORKSPACE_READ_SCOPES` | Comma-separated extra workspace scopes readable by the gateway/workspace. |
+
+### Signal channel
+
+| Variable | Description |
+|----------|-------------|
+| `SIGNAL_ENABLED` | Enables Signal channel configuration. |
+| `SIGNAL_GROUP_ALLOW_FROM` | Allowed group message senders; falls back to `SIGNAL_ALLOW_FROM` when unset. |
+
+### LLM reliability, routing, cache, and special backends
+
+| Variable | Description |
+|----------|-------------|
+| `LLM_MODEL` | Generic selected model for compatible/custom providers. |
+| `LLM_CHEAP_MODEL` | Generic cheap model override. |
+| `LLM_REQUEST_TIMEOUT_SECS` | LLM request timeout. |
+| `LLM_MAX_RETRIES` | Generic retry count. |
+| `LLM_CIRCUIT_BREAKER_THRESHOLD` | Generic circuit breaker threshold. |
+| `LLM_CIRCUIT_BREAKER_RECOVERY_SECS` | Generic circuit breaker recovery window. |
+| `LLM_FAILOVER_THRESHOLD` | Failover threshold. |
+| `LLM_FAILOVER_COOLDOWN_SECS` | Failover cooldown window. |
+| `LLM_RESPONSE_CACHE_ENABLED` | Generic response cache enable flag. |
+| `LLM_RESPONSE_CACHE_TTL_SECS` | Generic response cache TTL. |
+| `LLM_RESPONSE_CACHE_MAX_ENTRIES` | Generic response cache capacity. |
+| `SMART_ROUTING_CASCADE` | Enables smart-routing cascade behavior. |
+| `NEARAI_AUTH_URL` | NEAR AI auth/session base URL. |
+| `NEARAI_SESSION_PATH` | NEAR AI session file path. |
+| `NEARAI_MAX_RETRIES` | NEAR AI retry count. |
+| `ANTHROPIC_OAUTH_TOKEN` | Anthropic OAuth token. |
+| `ANTHROPIC_CACHE_RETENTION` | Anthropic cache retention mode. |
+| `BEDROCK_REGION` | AWS Bedrock region. |
+| `BEDROCK_MODEL` | AWS Bedrock model. |
+| `BEDROCK_CROSS_REGION` | Bedrock cross-region inference prefix. |
+| `AWS_PROFILE` | AWS profile used for Bedrock credentials. |
+| `GEMINI_CREDENTIALS_PATH` | Gemini OAuth credentials path. |
+| `LLM_USE_CODEX_AUTH` | Enables Codex auth flow. |
+| `CODEX_AUTH_PATH` | Codex auth state path. |
+| `OPENAI_CODEX_MODEL` | OpenAI Codex model. |
+| `OPENAI_CODEX_AUTH_URL` | OpenAI Codex auth endpoint. |
+| `OPENAI_CODEX_API_URL` | OpenAI Codex API endpoint. |
+| `OPENAI_CODEX_CLIENT_ID` | OpenAI Codex OAuth client ID. |
+| `OPENAI_CODEX_SESSION_PATH` | OpenAI Codex session path. |
+| `OPENAI_CODEX_REFRESH_MARGIN_SECS` | OpenAI Codex refresh margin. |
+| `CIRCUIT_BREAKER_THRESHOLD` | Legacy NearAI circuit breaker threshold. |
+| `CIRCUIT_BREAKER_RECOVERY_SECS` | Legacy NearAI circuit breaker recovery window. |
+| `RESPONSE_CACHE_ENABLED` | Legacy NearAI response cache flag. |
+| `RESPONSE_CACHE_TTL_SECS` | Legacy NearAI response cache TTL. |
+| `RESPONSE_CACHE_MAX_ENTRIES` | Legacy NearAI response cache capacity. |
+
+### Embeddings and search
+
+| Variable | Description |
+|----------|-------------|
+| `EMBEDDING_DIMENSION` | Explicit embedding vector dimension. |
+| `EMBEDDING_BASE_URL` | OpenAI-compatible embedding base URL. |
+| `EMBEDDING_CACHE_SIZE` | Embedding LRU cache capacity. |
+| `SEARCH_FUSION_STRATEGY` | Workspace search fusion strategy. |
+| `SEARCH_VECTOR_WEIGHT` | Vector score weight. |
+| `SEARCH_FTS_WEIGHT` | Full-text score weight. |
+| `SEARCH_RRF_K` | Reciprocal-rank-fusion constant. |
+| `SEARCH_REASONING_ENABLED` | Enables reasoning over search results. |
+
+### Sandbox, Claude Code, ACP, and WASM tools
+
+| Variable | Description |
+|----------|-------------|
+| `SANDBOX_ALLOW_FULL_ACCESS` | Required second opt-in for `SANDBOX_POLICY=full_access`. |
+| `SANDBOX_REAPER_INTERVAL_SECS` | Sandbox orphan reaper interval. |
+| `SANDBOX_ORPHAN_THRESHOLD_SECS` | Age threshold for orphaned sandbox containers. |
+| `ACP_ENABLED` | Enables ACP mode. |
+| `ACP_TIMEOUT_SECS` | ACP command timeout. |
+| `ACP_MEMORY_LIMIT_MB` | ACP memory limit. |
+| `WASM_ENABLED` | Enables WASM tools. |
+| `WASM_TOOLS_DIR` | WASM tools directory. |
+| `WASM_CACHE_DIR` | WASM compiled cache directory. |
+| `WASM_CACHE_COMPILED` | Enables compiled WASM caching. |
+| `WASM_DEFAULT_TIMEOUT_SECS` | Default WASM execution timeout. |
+| `WASM_DEFAULT_MEMORY_LIMIT` | Default WASM memory limit. |
+| `WASM_DEFAULT_FUEL_LIMIT` | Default WASM fuel limit. |
+
+### Skills, routines, heartbeat, and builder mode
+
+| Variable | Description |
+|----------|-------------|
+| `SKILLS_DIR` | Local trusted skills directory. |
+| `SKILLS_INSTALLED_DIR` | Registry-installed skills directory. |
+| `SKILLS_MAX_ACTIVE` | Maximum active skills. |
+| `SKILLS_MAX_SCAN_DEPTH` | Skill directory scan depth. |
+| `HEARTBEAT_FIRE_AT` | Time-of-day heartbeat schedule. |
+| `HEARTBEAT_TIMEZONE` | Heartbeat timezone. |
+| `HEARTBEAT_QUIET_START` | Quiet-hours start. |
+| `HEARTBEAT_QUIET_END` | Quiet-hours end. |
+| `HEARTBEAT_NOTIFY_CHANNEL` | Notification channel for heartbeat output. |
+| `HEARTBEAT_NOTIFY_USER` | Notification user for heartbeat output. |
+| `GATEWAY_USER_TOKENS` | Enables heartbeat integration with gateway user tokens. |
+| `ROUTINES_DEFAULT_COOLDOWN` | Default routine cooldown. |
+| `ROUTINES_MAX_TOKENS` | Routine token budget. |
+| `ROUTINES_LIGHTWEIGHT_TOOLS` | Tool allowlist for lightweight routines. |
+| `ROUTINES_LIGHTWEIGHT_MAX_ITERATIONS` | Max lightweight routine iterations. |
+| `BUILDER_ENABLED` | Enables builder mode. |
+| `BUILDER_DIR` | Builder workspace directory. |
+| `BUILDER_TIMEOUT_SECS` | Builder timeout. |
+| `BUILDER_MAX_ITERATIONS` | Builder max iterations. |
+| `BUILDER_AUTO_REGISTER` | Auto-register builder artifacts. |
+
+### OAuth, relay, tunnel, transcription, safety, and hygiene
+
+| Variable | Description |
+|----------|-------------|
+| `OAUTH_ENABLED` | Enables web OAuth/social login. |
+| `OAUTH_BASE_URL` | External OAuth base URL. |
+| `OAUTH_ALLOWED_DOMAINS` | Allowed email/domain list for OAuth login. |
+| `GOOGLE_CLIENT_ID` | Google OAuth client ID. |
+| `GOOGLE_CLIENT_SECRET` | Google OAuth client secret. |
+| `GOOGLE_ALLOWED_HD` | Google hosted-domain restriction. |
+| `GITHUB_CLIENT_ID` | GitHub OAuth client ID. |
+| `GITHUB_CLIENT_SECRET` | GitHub OAuth client secret. |
+| `APPLE_CLIENT_ID` | Apple OAuth client ID. |
+| `APPLE_TEAM_ID` | Apple team ID. |
+| `APPLE_KEY_ID` | Apple key ID. |
+| `APPLE_PRIVATE_KEY_PATH` | Apple private key path. |
+| `APPLE_PRIVATE_KEY_PEM` | Apple private key PEM. |
+| `NEAR_AUTH_ENABLED` | Enables NEAR auth. |
+| `NEAR_AUTH_NETWORK` | NEAR network. |
+| `NEAR_AUTH_RPC_URL` | NEAR RPC URL. |
+| `TUNNEL_PROVIDER` | Tunnel provider selection. |
+| `TUNNEL_URL` | Public tunnel URL override. |
+| `TUNNEL_NGROK_TOKEN` | ngrok token. |
+| `TUNNEL_NGROK_DOMAIN` | ngrok custom domain. |
+| `TUNNEL_CF_TOKEN` | Cloudflare tunnel token. |
+| `TUNNEL_TS_HOSTNAME` | Tailscale hostname. |
+| `TUNNEL_TS_FUNNEL` | Tailscale funnel toggle. |
+| `TUNNEL_CUSTOM_COMMAND` | Custom tunnel command. |
+| `TUNNEL_CUSTOM_URL_PATTERN` | Custom tunnel URL extraction pattern. |
+| `TUNNEL_CUSTOM_HEALTH_URL` | Custom tunnel health URL. |
+| `CHANNEL_RELAY_URL` | External channel relay URL. |
+| `CHANNEL_RELAY_API_KEY` | External channel relay API key. |
+| `IRONCLAW_INSTANCE_ID` | Relay instance ID. |
+| `RELAY_WEBHOOK_PATH` | Relay webhook path. |
+| `RELAY_REQUEST_TIMEOUT_SECS` | Relay request timeout. |
+| `TRANSCRIPTION_ENABLED` | Enables transcription. |
+| `TRANSCRIPTION_PROVIDER` | Transcription provider. |
+| `TRANSCRIPTION_MODEL` | Transcription model. |
+| `TRANSCRIPTION_BASE_URL` | Transcription base URL. |
+| `TRANSCRIPTION_API_KEY` | Transcription API key. |
+| `SAFETY_MAX_OUTPUT_LENGTH` | Max tool/output length before safety truncation. |
+| `SAFETY_INJECTION_CHECK_ENABLED` | Enables prompt-injection checks. |
+| `MEMORY_HYGIENE_ENABLED` | Enables memory hygiene. |
+| `MEMORY_HYGIENE_CADENCE_HOURS` | Memory hygiene cadence. |
+| `MEMORY_HYGIENE_VERSION_KEEP_COUNT` | Memory hygiene versions to keep. |
+| `MISSION_INSIGHTS_INTERVAL` | Mission insight generation interval. |
+
+### Bootstrap and process-level variables
+
+| Variable | Description |
+|----------|-------------|
+| `IRONCLAW_BASE_DIR` | Overrides the IronClaw data directory. |
+| `IRONCLAW_OWNER_ID` | Stable owner scope for the instance. |
+| `IRONCLAW_PROFILE` | Built-in profile selected during onboarding. |
+| `IRONCLAW_OAUTH_CALLBACK_URL` | OAuth callback URL used by auth flows. |
+| `NEARAI_SESSION_TOKEN` | NEAR AI session token; takes precedence over session file. |
+| `IRONCLAW_PID_LOCK_PATH` | Process PID lock path override. |
+| `IRONCLAW_PID_LOCK_HOLD_MS` | PID lock hold duration. |
+| `IRONCLAW_PID_LOCK_CHILD` | Internal child-process PID lock marker. |
+
+
+## Environment File Example
+
+Create `~/.ironclaw/.env`:
+
+```bash
+# Database
+DATABASE_BACKEND=libsql
+LIBSQL_PATH=/home/user/.ironclaw/ironclaw.db
+
+# LLM (NEAR AI)
+LLM_BACKEND=nearai
+
+# Web Gateway
+GATEWAY_ENABLED=true
+GATEWAY_HOST=127.0.0.1
+GATEWAY_PORT=3000
+
+# Optional: Persistent auth token
+GATEWAY_AUTH_TOKEN=your-secure-token-here
+
+# Sandbox
+SANDBOX_ENABLED=true
+SANDBOX_POLICY=workspace_write
+
+# Heartbeat
+HEARTBEAT_ENABLED=true
+HEARTBEAT_INTERVAL_SECS=1800
+```
+
+## Configuration Commands
+
+```bash
+# View current config
+ironclaw config list
+
+# Get specific value
+ironclaw config get llm.backend
+
+# Set value
+ironclaw config set llm.backend nearai
+
+# Delete value (reset to default)
+ironclaw config delete llm.backend
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Database Backends" icon="database" href="/capabilities/database">
+    PostgreSQL vs libSQL comparison
+  </Card>
+
+  <Card title="LLM Providers" icon="brain" href="/capabilities/llm-providers">
+    Provider-specific configuration
+  </Card>
+</CardGroup>

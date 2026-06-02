@@ -30,8 +30,8 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use ironclaw::llm::recording::RecordingLlm;
-use ironclaw::llm::{ChatMessage, CompletionRequest, LlmProvider, SessionConfig, SessionManager};
+use ironclaw_llm::recording::RecordingLlm;
+use ironclaw_llm::{ChatMessage, CompletionRequest, LlmProvider, SessionConfig, SessionManager};
 
 use crate::support::test_rig::{TestRig, TestRigBuilder};
 use crate::support::trace_llm::LlmTrace;
@@ -706,7 +706,7 @@ impl LiveTestHarnessBuilder {
         let source_user_id = config.owner_id.clone();
 
         let session = Arc::new(SessionManager::new(SessionConfig::default()));
-        let (provider, cheap_llm, _, _) = ironclaw::llm::build_provider_chain(&config.llm, session)
+        let (provider, cheap_llm, _, _) = ironclaw_llm::build_provider_chain(&config.llm, session)
             .await
             .expect("Failed to build LLM provider chain for live test");
 

@@ -10,13 +10,8 @@
 
 use std::sync::Arc;
 
-use ironclaw::{
-    agent::HeartbeatRunner,
-    config::Config,
-    history::Store,
-    llm::{create_llm_provider, create_session_manager},
-    workspace::Workspace,
-};
+use ironclaw::{agent::HeartbeatRunner, config::Config, history::Store, workspace::Workspace};
+use ironclaw_llm::{create_llm_provider, create_session_manager};
 
 #[tokio::test]
 #[ignore] // Requires running database and LLM credentials

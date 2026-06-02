@@ -87,6 +87,7 @@ IronClaw is the AI assistant you can actually trust with your personal and profe
 - Rust 1.92+
 - PostgreSQL 15+ with [pgvector](https://github.com/pgvector/pgvector) extension
 - NEAR AI account (authentication handled via setup wizard)
+- `libclang` and a working C toolchain if you build the WeChat voice/SILK path from source
 
 ## Download or Build
 
@@ -143,6 +144,14 @@ cargo test
 ```
 
 For **full release** (after modifying channel sources), run `./scripts/build-all.sh` to rebuild channels first.
+
+> **Optional:** WeChat voice notes (`audio/silk`) require the standalone
+> `ironclaw-silk-decoder` helper to be transcribable. It's excluded from the
+> default workspace build because `silk-codec` pulls in `bindgen`/`libclang`.
+> Build it separately with `./crates/ironclaw_silk_decoder/build.sh` (needs
+> libclang + a C toolchain) and put the resulting binary on `$PATH`, beside
+> the `ironclaw` binary, or pointed at by `IRONCLAW_SILK_DECODER`. Without
+> it, voice messages are still delivered — just as raw `audio/silk` blobs.
 
 </details>
 

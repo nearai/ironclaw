@@ -138,10 +138,7 @@ absent, it wasn't.
     /// Count occurrences of `needle` across every captured LLM
     /// request's messages (system + user + assistant). A positive
     /// count means the string was injected into at least one prompt.
-    fn occurrences_in_requests(
-        requests: &[Vec<ironclaw::llm::ChatMessage>],
-        needle: &str,
-    ) -> usize {
+    fn occurrences_in_requests(requests: &[Vec<ironclaw_llm::ChatMessage>], needle: &str) -> usize {
         let mut n = 0;
         for req in requests {
             for msg in req {
