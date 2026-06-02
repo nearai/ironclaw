@@ -6,8 +6,11 @@ use ironclaw_auth::{
     CredentialAccountRecordSource, CredentialAccountSelectionRequest, CredentialAccountStatus,
     CredentialOwnership, ProviderScope,
 };
-use ironclaw_host_api::{CredentialStageError, SecretHandle};
-use ironclaw_host_runtime::{RuntimeCredentialAccountRequest, RuntimeCredentialAccountResolver};
+use ironclaw_host_api::CredentialStageError;
+use ironclaw_host_runtime::{
+    RuntimeCredentialAccessSecret, RuntimeCredentialAccountRequest,
+    RuntimeCredentialAccountResolver,
+};
 
 #[derive(Clone)]
 pub(crate) struct ProductAuthRuntimeCredentialResolver {
@@ -117,7 +120,7 @@ impl RuntimeCredentialAccountResolver for ProductAuthRuntimeCredentialResolver {
     async fn resolve_access_secret(
         &self,
         request: RuntimeCredentialAccountRequest<'_>,
-    ) -> Result<SecretHandle, CredentialStageError> {
+    ) -> Result<RuntimeCredentialAccessSecret, CredentialStageError> {
         let auth_scope =
             AuthProductScope::new(runtime_account_owner_scope(request.scope), AuthSurface::Api);
         let provider = AuthProviderId::new(request.provider.as_str()).map_err(|e| {
@@ -163,7 +166,11 @@ impl RuntimeCredentialAccountResolver for ProductAuthRuntimeCredentialResolver {
         // both together; cleanup/uninstall clears status to Revoked together with
         // the handle), so this branch can only fire on corrupt state. Return
         // Backend so the caller does not loop through re-auth.
-        account.access_secret.ok_or(CredentialStageError::Backend)
+        let handle = account.access_secret.ok_or(CredentialStageError::Backend)?;
+        Ok(RuntimeCredentialAccessSecret {
+            scope: account.scope.resource,
+            handle,
+        })
     }
 }
 
@@ -240,7 +247,7 @@ mod tests {
     };
     use ironclaw_host_api::{
         ExtensionId, InvocationId, MissionId, ResourceScope, RuntimeCredentialAccountProviderId,
-        ThreadId, UserId,
+        SecretHandle, ThreadId, UserId,
     };
 
     use super::*;
@@ -282,7 +289,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(resolved, access_secret);
+        assert_eq!(resolved.handle, access_secret);
+        assert_eq!(resolved.scope, scope);
     }
 
     #[tokio::test]
@@ -297,7 +305,7 @@ mod tests {
         let access_secret = SecretHandle::new("github_manual_access").unwrap();
         accounts
             .create_account(NewCredentialAccount {
-                scope: AuthProductScope::new(setup_scope, AuthSurface::Callback),
+                scope: AuthProductScope::new(setup_scope.clone(), AuthSurface::Callback),
                 provider: AuthProviderId::new("github").unwrap(),
                 label: CredentialAccountLabel::new("work github").unwrap(),
                 status: CredentialAccountStatus::Configured,
@@ -324,7 +332,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(resolved, access_secret);
+        assert_eq!(resolved.handle, access_secret);
+        assert_eq!(resolved.scope, setup_scope);
     }
 
     #[tokio::test]
@@ -340,7 +349,7 @@ mod tests {
         let access_secret = SecretHandle::new("github_manual_access").unwrap();
         accounts
             .create_account(NewCredentialAccount {
-                scope: AuthProductScope::new(setup_scope, AuthSurface::Callback),
+                scope: AuthProductScope::new(setup_scope.clone(), AuthSurface::Callback),
                 provider: AuthProviderId::new("github").unwrap(),
                 label: CredentialAccountLabel::new("work github").unwrap(),
                 status: CredentialAccountStatus::Configured,
@@ -367,7 +376,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(resolved, access_secret);
+        assert_eq!(resolved.handle, access_secret);
+        assert_eq!(resolved.scope, setup_scope);
     }
 
     #[tokio::test]
@@ -383,7 +393,7 @@ mod tests {
         let access_secret = SecretHandle::new("github_manual_access").unwrap();
         accounts
             .create_account(NewCredentialAccount {
-                scope: AuthProductScope::new(setup_scope, AuthSurface::Callback),
+                scope: AuthProductScope::new(setup_scope.clone(), AuthSurface::Callback),
                 provider: AuthProviderId::new("github").unwrap(),
                 label: CredentialAccountLabel::new("work github").unwrap(),
                 status: CredentialAccountStatus::Configured,
@@ -410,7 +420,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(resolved, access_secret);
+        assert_eq!(resolved.handle, access_secret);
+        assert_eq!(resolved.scope, setup_scope);
     }
 
     #[tokio::test]
@@ -698,6 +709,6 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(resolved, latest_secret);
+        assert_eq!(resolved.handle, latest_secret);
     }
 }
