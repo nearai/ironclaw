@@ -1,0 +1,46 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Google Drive list_files",
+  "description": "Search or list files and folders.",
+  "type": "object",
+  "required": [],
+  "properties": {
+    "query": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Drive search query."
+    },
+    "page_size": {
+      "type": "integer",
+      "description": "Maximum number of results. Defaults to 25."
+    },
+    "order_by": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Sort order, such as modifiedTime desc or name."
+    },
+    "corpora": {
+      "type": "string",
+      "description": "Search corpus. Defaults to user."
+    },
+    "drive_id": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Shared drive ID when corpora is drive."
+    },
+    "page_token": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Page token for pagination."
+    }
+  },
+  "additionalProperties": false
+}

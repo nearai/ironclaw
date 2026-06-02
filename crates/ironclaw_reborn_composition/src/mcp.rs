@@ -527,6 +527,7 @@ mod tests {
                                             )
                                             .unwrap(),
                                         },
+                                    provider_scopes: Vec::new(),
                                     audience: NetworkTargetPattern {
                                         scheme: Some(NetworkScheme::Https),
                                         host_pattern: host,

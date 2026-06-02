@@ -19,7 +19,7 @@ import { failureMessageForRunStatus } from "./failureMessages.js";
 // the item shapes.
 //
 // Items are externally-tagged enums so each entry carries exactly
-// one of `{ run_status, text, gate }` as a sub-object.
+// one of `{ run_status, thinking, text, gate }` as a sub-object.
 //
 // Status mapping (from `RunStatus.status`):
 //   "queued" | "running"           → processing
@@ -307,6 +307,25 @@ function applyProjectionItems({
       });
       setIsProcessing(false);
       setPendingGate(null);
+    }
+
+    if (item.thinking) {
+      const messageId = `thinking-${item.thinking.id}`;
+      setMessages((prev) => {
+        const existing = prev.findIndex((m) => m.id === messageId);
+        const next = {
+          id: messageId,
+          role: "thinking",
+          content: item.thinking.body || "",
+          timestamp: new Date().toISOString(),
+        };
+        if (existing >= 0) {
+          const copy = [...prev];
+          copy[existing] = next;
+          return copy;
+        }
+        return [...prev, next];
+      });
     }
 
     if (item.gate) {

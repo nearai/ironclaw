@@ -6,6 +6,7 @@ import { Icon } from "../../../design-system/icons.js";
 const ROLE_STYLES = {
   user: "ml-auto bg-signal/10 text-iron-100 border-signal/25",
   assistant: "mr-auto bg-iron-800/58 text-iron-100 border-white/10",
+  thinking: "mr-auto bg-iron-900/70 text-iron-200 border-white/10",
   system: "mx-auto bg-copper/10 text-copper border-copper/20 text-center",
   error: "mx-auto bg-red-500/10 text-red-200 border-red-400/20 text-center",
 };
@@ -54,7 +55,14 @@ export function MessageBubble({ message, onRetry }) {
             isOptimistic ? "opacity-70" : "",
           ].join(" ")}
         >
-          ${role === "assistant" || role === "system" || role === "error"
+          ${role === "thinking" && html`
+            <div className="mb-2 flex items-center gap-2 text-xs font-medium uppercase tracking-wide text-iron-400">
+              <${Icon} name="spark" className="h-3.5 w-3.5" />
+              <span>Thinking</span>
+            </div>
+          `}
+
+          ${role === "assistant" || role === "system" || role === "error" || role === "thinking"
             ? html`<${MarkdownRenderer} content=${content} />`
             : html`<div className="whitespace-pre-wrap">${content}</div>`}
 
