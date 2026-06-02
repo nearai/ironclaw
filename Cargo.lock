@@ -4018,6 +4018,7 @@ dependencies = [
  "ironclaw_secrets",
  "ironclaw_skills",
  "ironclaw_threads",
+ "ironclaw_triggers",
  "ironclaw_trust",
  "ironclaw_tui",
  "ironclaw_turns",
