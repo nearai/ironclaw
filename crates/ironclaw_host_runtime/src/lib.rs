@@ -182,6 +182,14 @@ impl RuntimeGateId {
         Self(CorrelationId::new().to_string())
     }
 
+    pub fn from_stable_suffix(suffix: &str) -> Result<Self, HostRuntimeError> {
+        Ok(Self(validate_bounded_contract_string(
+            suffix.to_string(),
+            "runtime gate id",
+            128,
+        )?))
+    }
+
     pub fn as_str(&self) -> &str {
         &self.0
     }
