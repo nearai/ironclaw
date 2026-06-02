@@ -71,18 +71,18 @@ impl TriggerPollerWorker {
                 Ok(outcome) => outcome,
                 Err(error) => {
                     let classification = classify_failure(&error);
-                    report.results.push(report::TriggerPollerFireReport {
+                    report.results.push(TriggerPollerFireReport {
                         tenant_id,
                         trigger_id,
                         fire_slot,
-                        outcome: report::TriggerPollerFireOutcome::DueFireFailed {
+                        outcome: TriggerPollerFireOutcome::DueFireFailed {
                             reason: classification.reason,
                         },
                     });
                     continue;
                 }
             };
-            report.results.push(report::TriggerPollerFireReport {
+            report.results.push(TriggerPollerFireReport {
                 tenant_id,
                 trigger_id,
                 fire_slot,
