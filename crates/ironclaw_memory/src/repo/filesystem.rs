@@ -51,8 +51,8 @@ use crate::search::{
 };
 
 use super::{
-    MemoryAppendOutcome, MemoryDocumentRepository, ensure_document_path_does_not_conflict,
-    scoped_memory_changed_by_key,
+    MemoryAppendOutcome, MemoryDocumentRepository, MemoryWriteOutcome,
+    ensure_document_path_does_not_conflict, scoped_memory_changed_by_key,
 };
 
 const DOCUMENT_KIND: &str = "memory_document";
@@ -80,13 +80,13 @@ pub(crate) mod fs_keys {
 ///
 /// Wraps a shared [`RootFilesystem`] handle and routes every memory
 /// operation through the unified `put` / `get` / `query` ops.
-pub struct FilesystemMemoryDocumentRepository<F> {
+pub struct FilesystemMemoryDocumentRepository<F: ?Sized> {
     filesystem: Arc<F>,
 }
 
 impl<F> FilesystemMemoryDocumentRepository<F>
 where
-    F: RootFilesystem,
+    F: RootFilesystem + ?Sized,
 {
     pub fn new(filesystem: Arc<F>) -> Self {
         Self { filesystem }
@@ -95,7 +95,7 @@ where
 
 impl<F> FilesystemMemoryDocumentRepository<F>
 where
-    F: RootFilesystem + 'static,
+    F: RootFilesystem + ?Sized + 'static,
 {
     fn document_kind() -> RecordKind {
         RecordKind::new(DOCUMENT_KIND)
@@ -506,7 +506,7 @@ where
 #[async_trait]
 impl<F> MemoryDocumentRepository for FilesystemMemoryDocumentRepository<F>
 where
-    F: RootFilesystem + 'static,
+    F: RootFilesystem + ?Sized + 'static,
 {
     async fn read_document(
         &self,
@@ -693,6 +693,93 @@ where
                     Ok(_) => Ok(MemoryAppendOutcome::Appended),
                     Err(FilesystemError::VersionMismatch { .. }) => {
                         Ok(MemoryAppendOutcome::Conflict)
+                    }
+                    Err(error) => Err(error),
+                }
+            }
+        }
+    }
+
+    async fn compare_and_write_document_with_options(
+        &self,
+        path: &MemoryDocumentPath,
+        expected_previous_hash: Option<&str>,
+        bytes: &[u8],
+        options: &MemoryWriteOptions,
+    ) -> Result<MemoryWriteOutcome, FilesystemError> {
+        let previous = self
+            .read_document_with_version(path, FilesystemOperation::WriteFile)
+            .await?;
+        let current_hash = previous
+            .as_ref()
+            .map(|(bytes, _)| content_bytes_sha256(bytes));
+        if current_hash.as_deref() != expected_previous_hash {
+            return Ok(MemoryWriteOutcome::Conflict);
+        }
+
+        let virtual_path = Self::document_virtual_path(path, FilesystemOperation::WriteFile)?;
+        match previous {
+            Some((previous_bytes, previous_version)) => {
+                let previous_content = std::str::from_utf8(&previous_bytes).map_err(|_| {
+                    memory_error(
+                        virtual_path.clone(),
+                        FilesystemOperation::WriteFile,
+                        "memory document content must be UTF-8",
+                    )
+                })?;
+                let new_content = std::str::from_utf8(bytes).map_err(|_| {
+                    memory_error(
+                        virtual_path.clone(),
+                        FilesystemOperation::WriteFile,
+                        "memory document content must be UTF-8",
+                    )
+                })?;
+                let should_version = options.metadata.skip_versioning != Some(true)
+                    && previous_content != new_content
+                    && !previous_content.is_empty();
+                let entry = Self::build_document_entry(path.scope(), bytes);
+                let put_result = self
+                    .filesystem
+                    .put(
+                        &virtual_path,
+                        entry,
+                        CasExpectation::Version(previous_version),
+                    )
+                    .await;
+                match put_result {
+                    Ok(_) => {
+                        if should_version {
+                            self.save_document_version(
+                                path,
+                                previous_content,
+                                options.changed_by.as_deref(),
+                            )
+                            .await?;
+                        }
+                        Ok(MemoryWriteOutcome::Written)
+                    }
+                    Err(FilesystemError::VersionMismatch { .. }) => {
+                        Ok(MemoryWriteOutcome::Conflict)
+                    }
+                    Err(error) => Err(error),
+                }
+            }
+            None => {
+                let existing_documents = self.list_documents(path.scope()).await?;
+                ensure_document_path_does_not_conflict(
+                    path,
+                    &existing_documents,
+                    FilesystemOperation::WriteFile,
+                )?;
+                let entry = Self::build_document_entry(path.scope(), bytes);
+                match self
+                    .filesystem
+                    .put(&virtual_path, entry, CasExpectation::Absent)
+                    .await
+                {
+                    Ok(_) => Ok(MemoryWriteOutcome::Written),
+                    Err(FilesystemError::VersionMismatch { .. }) => {
+                        Ok(MemoryWriteOutcome::Conflict)
                     }
                     Err(error) => Err(error),
                 }
@@ -892,7 +979,7 @@ where
 #[async_trait]
 impl<F> MemoryDocumentIndexRepository for FilesystemMemoryDocumentRepository<F>
 where
-    F: RootFilesystem + 'static,
+    F: RootFilesystem + ?Sized + 'static,
 {
     async fn replace_document_chunks_if_current(
         &self,

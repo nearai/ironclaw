@@ -208,6 +208,7 @@ async fn filesystem_runtime_account_selection_matches_setup_invocation_account()
         .select_unique_configured_runtime_account(RuntimeCredentialAccountSelectionRequest::new(
             CredentialAccountSelectionRequest::new(runtime_scope.clone(), google_provider()),
             runtime_scope,
+            Vec::new(),
         ))
         .await
         .unwrap();
@@ -252,6 +253,7 @@ async fn filesystem_runtime_account_selection_matches_new_thread_reusable_accoun
         .resolve_access_secret(RuntimeCredentialAccountRequest {
             scope: &runtime_scope.resource,
             provider: &RuntimeCredentialAccountProviderId::new("google").unwrap(),
+            provider_scopes: &[],
             requester_extension: &ExtensionId::new("google-calendar").unwrap(),
         })
         .await
@@ -324,6 +326,101 @@ async fn filesystem_manual_token_submit_stores_secret_and_dedupes_replay() {
         .await
         .expect_err("manual token submit should be one-shot");
     assert_eq!(replay, AuthProductError::UnknownOrExpiredFlow);
+}
+
+#[tokio::test]
+async fn filesystem_manual_token_submit_rotates_existing_reusable_account() {
+    let filesystem = test_filesystem();
+    let concrete_secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_store: Arc<dyn SecretStore> = concrete_secret_store.clone();
+    let scope = test_scope();
+    let service = test_service(filesystem, secret_store);
+
+    let first_challenge = service
+        .request_secret_input(ManualTokenSetupRequest {
+            scope: scope.clone(),
+            provider: google_provider(),
+            label: account_label(),
+            continuation: AuthContinuationRef::SetupOnly,
+            update_binding: None,
+            expires_at: Utc::now() + Duration::minutes(5),
+        })
+        .await
+        .unwrap();
+    let AuthChallenge::ManualTokenRequired {
+        interaction_id: first_interaction,
+        ..
+    } = first_challenge
+    else {
+        panic!("expected manual token challenge");
+    };
+    let first = service
+        .submit_manual_token(
+            &scope,
+            SecretSubmitRequest {
+                interaction_id: first_interaction,
+                secret: SecretString::from("first-manual-token"),
+            },
+        )
+        .await
+        .unwrap();
+    let first_account = service
+        .read_account(&scope, first.account_id)
+        .await
+        .unwrap()
+        .expect("first account")
+        .0;
+    let first_handle = first_account.access_secret.expect("first secret handle");
+
+    let second_challenge = service
+        .request_secret_input(ManualTokenSetupRequest {
+            scope: scope.clone(),
+            provider: google_provider(),
+            label: account_label(),
+            continuation: AuthContinuationRef::SetupOnly,
+            update_binding: None,
+            expires_at: Utc::now() + Duration::minutes(5),
+        })
+        .await
+        .unwrap();
+    let AuthChallenge::ManualTokenRequired {
+        interaction_id: second_interaction,
+        ..
+    } = second_challenge
+    else {
+        panic!("expected manual token challenge");
+    };
+    let second = service
+        .submit_manual_token(
+            &scope,
+            SecretSubmitRequest {
+                interaction_id: second_interaction,
+                secret: SecretString::from("second-manual-token"),
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(second.account_id, first.account_id);
+    let accounts = service.accounts_for_owner(&scope).await.unwrap();
+    assert_eq!(accounts.len(), 1);
+    let updated = accounts.into_iter().next().unwrap();
+    let second_handle = updated.access_secret.expect("second secret handle");
+    assert_ne!(second_handle, first_handle);
+    assert!(
+        concrete_secret_store
+            .metadata(&scope.resource, &second_handle)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        concrete_secret_store
+            .metadata(&scope.resource, &first_handle)
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[tokio::test]

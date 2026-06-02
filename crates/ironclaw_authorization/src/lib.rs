@@ -1178,6 +1178,7 @@ fn obligations_for_grant(
                         obligations.push(Obligation::InjectCredentialAccountOnce {
                             handle: credential.handle.clone(),
                             provider: provider.clone(),
+                            provider_scopes: credential.provider_scopes.clone(),
                             requester_extension: descriptor.provider.clone(),
                         });
                     }

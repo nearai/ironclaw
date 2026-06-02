@@ -2040,10 +2040,26 @@ mod tests {
         else {
             panic!("expected extension search payload");
         };
-        assert_eq!(extensions.len(), 1);
-        assert_eq!(extensions[0].package_ref.id.as_str(), "google-calendar");
+        let extension_ids = extensions
+            .iter()
+            .map(|extension| extension.package_ref.id.as_str())
+            .collect::<BTreeSet<_>>();
         assert_eq!(
-            extensions[0].visible_read_only_capability_ids,
+            extension_ids,
+            BTreeSet::from([
+                "google-calendar",
+                "google-docs",
+                "google-drive",
+                "google-sheets",
+                "google-slides",
+            ])
+        );
+        let calendar = extensions
+            .iter()
+            .find(|extension| extension.package_ref.id.as_str() == "google-calendar")
+            .expect("google-calendar search result");
+        assert_eq!(
+            calendar.visible_read_only_capability_ids,
             vec![
                 "google-calendar.list_calendars",
                 "google-calendar.list_events",

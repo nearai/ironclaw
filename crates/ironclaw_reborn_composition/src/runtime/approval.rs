@@ -13,6 +13,7 @@ pub(super) struct LocalDevApprovalLeaseTermsProvider {
     policy: Arc<LocalDevCapabilityPolicy>,
     workspace_mounts: MountView,
     skill_mounts: MountView,
+    memory_mounts: MountView,
 }
 
 impl LocalDevApprovalLeaseTermsProvider {
@@ -20,11 +21,13 @@ impl LocalDevApprovalLeaseTermsProvider {
         policy: Arc<LocalDevCapabilityPolicy>,
         workspace_mounts: MountView,
         skill_mounts: MountView,
+        memory_mounts: MountView,
     ) -> Self {
         Self {
             policy,
             workspace_mounts,
             skill_mounts,
+            memory_mounts,
         }
     }
 }
@@ -40,7 +43,12 @@ impl ApprovalLeaseTermsProvider for LocalDevApprovalLeaseTermsProvider {
                 kind: ApprovalInteractionRejectionKind::UnsupportedAction,
             })?;
         self.policy
-            .lease_approval_for(action, &self.workspace_mounts, &self.skill_mounts)
+            .lease_approval_for(
+                action,
+                &self.workspace_mounts,
+                &self.skill_mounts,
+                &self.memory_mounts,
+            )
             .map_err(|error| {
                 tracing::error!(%error, "local-dev approval lease terms are unavailable");
                 ProductWorkflowError::ApprovalInteractionRejected {

@@ -1,0 +1,21 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Google Sheets delete_sheet",
+  "description": "Delete a sheet tab.",
+  "type": "object",
+  "required": [
+    "spreadsheet_id",
+    "sheet_id"
+  ],
+  "properties": {
+    "spreadsheet_id": {
+      "type": "string",
+      "description": "The spreadsheet ID."
+    },
+    "sheet_id": {
+      "type": "integer",
+      "description": "Numeric sheet ID."
+    }
+  },
+  "additionalProperties": false
+}

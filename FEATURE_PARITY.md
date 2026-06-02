@@ -336,6 +336,7 @@ Trace Commons issuer/TenantCtx note: the server-side `zmanian/tracedao-server` s
 | Tool-level streaming | ✅ | ❌ | |
 | Z.AI tool_stream | ✅ | ❌ | Real-time tool call streaming |
 | Plugin tools | ✅ | ✅ | WASM tools |
+| GSuite WASM tools | ✅ | 🚧 | Reborn bundles operation-level Google Drive/Docs/Sheets/Slides WASM packages with host-mediated HTTP egress and product-auth scoped bearer injection; live OAuth/setup UX and full live-recorded parity remain follow-up |
 | Hosted MCP extensions | ✅ | 🚧 | Reborn composes host-mediated MCP runtime, bundles the current Notion MCP supported tool set, wires Notion ProductAuth OAuth exchange/refresh, and can activate hosted MCP packages with live `tools/list` schema discovery through host-staged product-auth credentials; user-start/DCR OAuth setup parity remains pending |
 | NEAR AI MCP extension | ✅ | 🚧 | Host-bundled Reborn MCP extension exposes `nearai.search` via host-mediated HTTP and `llm_nearai_api_key`; manifest-declared product-auth credentials can now be staged through the hosted MCP runtime/discovery bridge, while user-start/DCR OAuth setup parity remains pending |
 | Tool policies (allow/deny) | ✅ | ✅ | |

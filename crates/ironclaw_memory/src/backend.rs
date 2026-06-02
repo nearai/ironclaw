@@ -13,12 +13,14 @@ use crate::events::{
     MemorySignificantEventSource, record_memory_significant_event,
 };
 use crate::indexer::MemoryDocumentIndexer;
-use crate::metadata::{MemoryWriteOptions, resolve_document_metadata};
+use crate::metadata::{MemoryBackendWriteOptions, MemoryWriteOptions};
 use crate::path::{
     MemoryDocumentPath, MemoryDocumentScope, memory_backend_unsupported, memory_error,
     valid_memory_path,
 };
-use crate::repo::{MemoryAppendOutcome, MemoryDocumentRepository, scoped_memory_changed_by_key};
+use crate::repo::{
+    MemoryAppendOutcome, MemoryDocumentRepository, MemoryWriteOutcome, scoped_memory_changed_by_key,
+};
 use crate::safety::{
     DefaultPromptWriteSafetyPolicy, PromptProtectedPathRegistry, PromptSafetyAllowanceId,
     PromptWriteOperation, PromptWriteSafetyCheck, PromptWriteSafetyEventSink,
@@ -27,6 +29,7 @@ use crate::safety::{
 };
 use crate::schema::validate_content_against_schema;
 use crate::search::{MemorySearchRequest, MemorySearchResult};
+use crate::write_metadata::resolve_write_metadata;
 
 /// Declared behavior supported by a memory backend.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -93,20 +96,10 @@ impl MemoryContext {
         self
     }
 
-    /// Internal marker used by the filesystem adapter to tell the wrapped
-    /// backend "I have already enforced prompt-write safety; do not run a
-    /// second policy evaluation that could erroneously reject a value the
-    /// adapter already approved."
-    ///
-    /// Crate-private on purpose. If this were `pub`, any direct backend
-    /// caller could construct a `MemoryContext` with the marker set and
-    /// persist high-risk content to protected files (`SOUL.md`,
-    /// `BOOTSTRAP.md`, etc.) through the public backend seam without
-    /// passing through *any* policy check. Only
-    /// `MemoryBackendFilesystemAdapter` (the same crate) is allowed to
-    /// produce an enforced context, and only after running its own
-    /// `enforce_prompt_write_safety` pass. zmanian #3180 HIGH
-    /// (`backend.rs:79`).
+    /// Internal marker set only after `MemoryBackendFilesystemAdapter` has
+    /// already run prompt-write safety. Keep crate-private so direct backend
+    /// callers cannot bypass protected prompt-file policy for files called out
+    /// in zmanian #3180 HIGH, including `SOUL.md` and `BOOTSTRAP.md`.
     pub(crate) fn with_prompt_write_safety_enforced(mut self) -> Self {
         self.prompt_write_safety_enforced = true;
         self
@@ -173,6 +166,17 @@ pub trait MemoryBackend: Send + Sync {
         ))
     }
 
+    async fn write_document_with_backend_options(
+        &self,
+        context: &MemoryContext,
+        path: &MemoryDocumentPath,
+        bytes: &[u8],
+        backend_options: &MemoryBackendWriteOptions,
+    ) -> Result<(), FilesystemError> {
+        let _ = backend_options;
+        self.write_document(context, path, bytes).await
+    }
+
     async fn list_documents(
         &self,
         context: &MemoryContext,
@@ -211,6 +215,63 @@ pub trait MemoryBackend: Send + Sync {
             context.scope(),
             FilesystemOperation::AppendFile,
             "memory backend does not support atomic append",
+        ))
+    }
+
+    async fn compare_and_append_document_with_backend_options(
+        &self,
+        context: &MemoryContext,
+        path: &MemoryDocumentPath,
+        expected_previous_hash: Option<&str>,
+        bytes: &[u8],
+        backend_options: &MemoryBackendWriteOptions,
+    ) -> Result<MemoryAppendOutcome, FilesystemError> {
+        let _ = backend_options;
+        self.compare_and_append_document(context, path, expected_previous_hash, bytes)
+            .await
+    }
+
+    async fn compare_and_write_document_with_backend_options(
+        &self,
+        context: &MemoryContext,
+        path: &MemoryDocumentPath,
+        expected_previous_hash: Option<&str>,
+        bytes: &[u8],
+        backend_options: &MemoryBackendWriteOptions,
+    ) -> Result<MemoryWriteOutcome, FilesystemError> {
+        let _ = (expected_previous_hash, backend_options);
+        self.write_document(context, path, bytes)
+            .await
+            .map(|_| MemoryWriteOutcome::Written)
+    }
+
+    async fn append_document_with_backend_options(
+        &self,
+        context: &MemoryContext,
+        path: &MemoryDocumentPath,
+        bytes: &[u8],
+        backend_options: &MemoryBackendWriteOptions,
+    ) -> Result<(), FilesystemError> {
+        for _ in 0..8 {
+            let previous = self.read_document(context, path).await?;
+            let expected = previous.as_deref().map(content_bytes_sha256);
+            let outcome = self
+                .compare_and_append_document_with_backend_options(
+                    context,
+                    path,
+                    expected.as_deref(),
+                    bytes,
+                    backend_options,
+                )
+                .await?;
+            if outcome == MemoryAppendOutcome::Appended {
+                return Ok(());
+            }
+        }
+        Err(memory_error(
+            path.virtual_path().unwrap_or_else(|_| valid_memory_path()),
+            FilesystemOperation::AppendFile,
+            "memory document changed during append; retry limit exceeded",
         ))
     }
 }
@@ -315,13 +376,7 @@ where
     }
 }
 
-// Defense-in-depth scope guards for the public `MemoryBackend` seam. The host
-// resolves and authorizes a `MemoryContext` before calling any backend method;
-// the backend must refuse to operate on a path or scope that doesn't match
-// that authorized context. Without this, a direct caller that authorized one
-// context but passed a path/scope for another tenant/user/agent/project
-// would bypass the boundary even when the filesystem adapter would have
-// passed matching values.
+// Defense-in-depth scope guards for the public `MemoryBackend` seam.
 fn ensure_path_matches_context(
     context: &MemoryContext,
     path: &MemoryDocumentPath,
@@ -405,6 +460,22 @@ where
         path: &MemoryDocumentPath,
         bytes: &[u8],
     ) -> Result<(), FilesystemError> {
+        self.write_document_with_backend_options(
+            context,
+            path,
+            bytes,
+            &MemoryBackendWriteOptions::default(),
+        )
+        .await
+    }
+
+    async fn write_document_with_backend_options(
+        &self,
+        context: &MemoryContext,
+        path: &MemoryDocumentPath,
+        bytes: &[u8],
+        backend_options: &MemoryBackendWriteOptions,
+    ) -> Result<(), FilesystemError> {
         ensure_file_documents_supported(
             context,
             FilesystemOperation::WriteFile,
@@ -453,7 +524,8 @@ where
             )
             .await?;
         }
-        let metadata = resolve_document_metadata(self.repository.as_ref(), path).await?;
+        let (metadata, metadata_to_persist) =
+            resolve_write_metadata(self.repository.as_ref(), path, backend_options).await?;
         if let Some(schema) = &metadata.schema {
             validate_content_against_schema(path, content, schema)?;
         }
@@ -464,6 +536,11 @@ where
         self.repository
             .write_document_with_options(path, bytes, &options)
             .await?;
+        if let Some(metadata) = metadata_to_persist {
+            self.repository
+                .write_document_metadata(path, &metadata)
+                .await?;
+        }
         record_memory_significant_event(
             self.memory_event_sink.as_ref(),
             MemorySignificantEvent::document_written(
@@ -488,6 +565,24 @@ where
         path: &MemoryDocumentPath,
         expected_previous_hash: Option<&str>,
         bytes: &[u8],
+    ) -> Result<MemoryAppendOutcome, FilesystemError> {
+        self.compare_and_append_document_with_backend_options(
+            context,
+            path,
+            expected_previous_hash,
+            bytes,
+            &MemoryBackendWriteOptions::default(),
+        )
+        .await
+    }
+
+    async fn compare_and_append_document_with_backend_options(
+        &self,
+        context: &MemoryContext,
+        path: &MemoryDocumentPath,
+        expected_previous_hash: Option<&str>,
+        bytes: &[u8],
+        backend_options: &MemoryBackendWriteOptions,
     ) -> Result<MemoryAppendOutcome, FilesystemError> {
         ensure_file_documents_supported(
             context,
@@ -543,7 +638,8 @@ where
             )
             .await?;
         }
-        let metadata = resolve_document_metadata(self.repository.as_ref(), path).await?;
+        let (metadata, metadata_to_persist) =
+            resolve_write_metadata(self.repository.as_ref(), path, backend_options).await?;
         if let Some(schema) = &metadata.schema {
             validate_content_against_schema(path, content, schema)?;
         }
@@ -556,6 +652,219 @@ where
             .compare_and_append_document_with_options(path, expected_previous_hash, bytes, &options)
             .await?;
         if outcome == MemoryAppendOutcome::Appended {
+            if let Some(metadata) = metadata_to_persist {
+                self.repository
+                    .write_document_metadata(path, &metadata)
+                    .await?;
+            }
+            record_memory_significant_event(
+                self.memory_event_sink.as_ref(),
+                MemorySignificantEvent::document_written(
+                    path,
+                    MemorySignificantEventSource::RepositoryMemoryBackend,
+                    bytes.len() as u64,
+                )
+                .with_audit_context(context.audit_context()),
+            )
+            .await;
+            if let Some(indexer) = &self.indexer {
+                let _ = indexer
+                    .reindex_document_with_audit_context(path, context.audit_context())
+                    .await;
+            }
+        }
+        Ok(outcome)
+    }
+
+    async fn append_document_with_backend_options(
+        &self,
+        context: &MemoryContext,
+        path: &MemoryDocumentPath,
+        bytes: &[u8],
+        backend_options: &MemoryBackendWriteOptions,
+    ) -> Result<(), FilesystemError> {
+        for _ in 0..8 {
+            ensure_file_documents_supported(
+                context,
+                FilesystemOperation::AppendFile,
+                self.capabilities.file_documents,
+            )?;
+            ensure_path_matches_context(context, path, FilesystemOperation::AppendFile)?;
+            let current = self.repository.read_document(path).await?;
+            let expected_previous_hash = current.as_deref().map(content_bytes_sha256);
+            let previous_bytes = current.unwrap_or_default();
+            let mut combined = previous_bytes.clone();
+            combined.extend_from_slice(bytes);
+            let content = std::str::from_utf8(&combined).map_err(|_| {
+                memory_error(
+                    path.virtual_path().unwrap_or_else(|_| valid_memory_path()),
+                    FilesystemOperation::AppendFile,
+                    "memory document content must be UTF-8",
+                )
+            })?;
+            let previous_hash = if prompt_write_protected_classification(
+                self.prompt_safety_policy.as_ref(),
+                &self.prompt_protected_path_registry,
+                path,
+            )
+            .is_some()
+                && prompt_write_policy_requires_previous_content_hash(
+                    self.prompt_safety_policy.as_ref(),
+                ) {
+                std::str::from_utf8(&previous_bytes)
+                    .ok()
+                    .map(content_sha256)
+            } else {
+                None
+            };
+            if !context.prompt_write_safety_enforced() {
+                enforce_prompt_write_safety(
+                    self.prompt_safety_policy.as_ref(),
+                    self.prompt_safety_event_sink.as_ref(),
+                    &self.prompt_protected_path_registry,
+                    PromptWriteSafetyCheck {
+                        scope: context.scope(),
+                        path,
+                        operation: PromptWriteOperation::Append,
+                        source: PromptWriteSource::MemoryBackend,
+                        content,
+                        previous_content_hash: previous_hash.as_deref(),
+                        allowance: context.prompt_write_safety_allowance(),
+                        audit_context: context.audit_context(),
+                        filesystem_operation: FilesystemOperation::AppendFile,
+                    },
+                )
+                .await?;
+            }
+            let (metadata, metadata_to_persist) =
+                resolve_write_metadata(self.repository.as_ref(), path, backend_options).await?;
+            if let Some(schema) = &metadata.schema {
+                validate_content_against_schema(path, content, schema)?;
+            }
+            let repository_options = MemoryWriteOptions {
+                metadata,
+                changed_by: Some(scoped_memory_changed_by_key(path.scope())),
+            };
+            let outcome = self
+                .repository
+                .compare_and_append_document_with_options(
+                    path,
+                    expected_previous_hash.as_deref(),
+                    bytes,
+                    &repository_options,
+                )
+                .await?;
+            if outcome == MemoryAppendOutcome::Appended {
+                if let Some(metadata) = metadata_to_persist {
+                    self.repository
+                        .write_document_metadata(path, &metadata)
+                        .await?;
+                }
+                record_memory_significant_event(
+                    self.memory_event_sink.as_ref(),
+                    MemorySignificantEvent::document_written(
+                        path,
+                        MemorySignificantEventSource::RepositoryMemoryBackend,
+                        bytes.len() as u64,
+                    )
+                    .with_audit_context(context.audit_context()),
+                )
+                .await;
+                if let Some(indexer) = &self.indexer {
+                    let _ = indexer
+                        .reindex_document_with_audit_context(path, context.audit_context())
+                        .await;
+                }
+                return Ok(());
+            }
+            std::thread::yield_now();
+        }
+        Err(memory_error(
+            path.virtual_path().unwrap_or_else(|_| valid_memory_path()),
+            FilesystemOperation::AppendFile,
+            "memory document changed during append; retry limit exceeded",
+        ))
+    }
+
+    async fn compare_and_write_document_with_backend_options(
+        &self,
+        context: &MemoryContext,
+        path: &MemoryDocumentPath,
+        expected_previous_hash: Option<&str>,
+        bytes: &[u8],
+        backend_options: &MemoryBackendWriteOptions,
+    ) -> Result<MemoryWriteOutcome, FilesystemError> {
+        ensure_file_documents_supported(
+            context,
+            FilesystemOperation::WriteFile,
+            self.capabilities.file_documents,
+        )?;
+        ensure_path_matches_context(context, path, FilesystemOperation::WriteFile)?;
+        let content = std::str::from_utf8(bytes).map_err(|_| {
+            memory_error(
+                path.virtual_path().unwrap_or_else(|_| valid_memory_path()),
+                FilesystemOperation::WriteFile,
+                "memory document content must be UTF-8",
+            )
+        })?;
+        let previous = self.repository.read_document(path).await?;
+        let current_hash = previous.as_deref().map(content_bytes_sha256);
+        if current_hash.as_deref() != expected_previous_hash {
+            return Ok(MemoryWriteOutcome::Conflict);
+        }
+        let previous_hash = if prompt_write_protected_classification(
+            self.prompt_safety_policy.as_ref(),
+            &self.prompt_protected_path_registry,
+            path,
+        )
+        .is_some()
+            && prompt_write_policy_requires_previous_content_hash(
+                self.prompt_safety_policy.as_ref(),
+            ) {
+            previous
+                .as_deref()
+                .and_then(|bytes| std::str::from_utf8(bytes).ok().map(content_sha256))
+        } else {
+            None
+        };
+        if !context.prompt_write_safety_enforced() {
+            enforce_prompt_write_safety(
+                self.prompt_safety_policy.as_ref(),
+                self.prompt_safety_event_sink.as_ref(),
+                &self.prompt_protected_path_registry,
+                PromptWriteSafetyCheck {
+                    scope: context.scope(),
+                    path,
+                    operation: PromptWriteOperation::Write,
+                    source: PromptWriteSource::MemoryBackend,
+                    content,
+                    previous_content_hash: previous_hash.as_deref(),
+                    allowance: context.prompt_write_safety_allowance(),
+                    audit_context: context.audit_context(),
+                    filesystem_operation: FilesystemOperation::WriteFile,
+                },
+            )
+            .await?;
+        }
+        let (metadata, metadata_to_persist) =
+            resolve_write_metadata(self.repository.as_ref(), path, backend_options).await?;
+        if let Some(schema) = &metadata.schema {
+            validate_content_against_schema(path, content, schema)?;
+        }
+        let options = MemoryWriteOptions {
+            metadata,
+            changed_by: Some(scoped_memory_changed_by_key(path.scope())),
+        };
+        let outcome = self
+            .repository
+            .compare_and_write_document_with_options(path, expected_previous_hash, bytes, &options)
+            .await?;
+        if outcome == MemoryWriteOutcome::Written {
+            if let Some(metadata) = metadata_to_persist {
+                self.repository
+                    .write_document_metadata(path, &metadata)
+                    .await?;
+            }
             record_memory_significant_event(
                 self.memory_event_sink.as_ref(),
                 MemorySignificantEvent::document_written(
@@ -738,12 +1047,7 @@ mod tests {
 
     #[test]
     fn default_context_does_not_claim_prompt_safety_enforced() {
-        // The bypass marker is `pub(crate)` so external callers cannot
-        // construct an enforced context. The crate-internal default must
-        // start unenforced — otherwise a forgotten reset path could leak
-        // the bypass into routes that did not run policy. Locks the
-        // invariant in alongside the privacy reduction (zmanian #3180
-        // HIGH `backend.rs:79`).
+        // Locks the crate-private safety marker's default state.
         let ctx = MemoryContext::new(
             MemoryDocumentScope::new("tenant", "alpha", Some("project")).unwrap(),
         );
@@ -784,11 +1088,8 @@ mod tests {
             .with_capabilities(capabilities)
     }
 
-    // Regression for PR #3180 review: a `MemoryBackend` is reachable from
-    // host/runtime composition as a public seam, and any caller that
-    // authorized one `MemoryContext` but passed a path or scope for another
-    // tenant/user/agent/project must be rejected before any repository side
-    // effect.
+    // Regression: backend callers cannot use an authorized context for one
+    // scope to operate on another scope.
     #[tokio::test]
     async fn read_document_rejects_path_with_scope_outside_authorized_context() {
         let backend = make_backend();

@@ -18,6 +18,26 @@ const GITHUB_WASM_MODULE: &[u8] =
     include_bytes!("../../ironclaw_first_party_extensions/assets/github/wasm/github_tool.wasm");
 const GOOGLE_CALENDAR_MANIFEST: &str =
     include_str!("../../ironclaw_first_party_extensions/assets/google-calendar/manifest.toml");
+const GOOGLE_DOCS_MANIFEST: &str =
+    include_str!("../../ironclaw_first_party_extensions/assets/google-docs/manifest.toml");
+const GOOGLE_DOCS_WASM_MODULE: &[u8] = include_bytes!(
+    "../../ironclaw_first_party_extensions/assets/google-docs/wasm/google_docs_tool.wasm"
+);
+const GOOGLE_DRIVE_MANIFEST: &str =
+    include_str!("../../ironclaw_first_party_extensions/assets/google-drive/manifest.toml");
+const GOOGLE_DRIVE_WASM_MODULE: &[u8] = include_bytes!(
+    "../../ironclaw_first_party_extensions/assets/google-drive/wasm/google_drive_tool.wasm"
+);
+const GOOGLE_SHEETS_MANIFEST: &str =
+    include_str!("../../ironclaw_first_party_extensions/assets/google-sheets/manifest.toml");
+const GOOGLE_SHEETS_WASM_MODULE: &[u8] = include_bytes!(
+    "../../ironclaw_first_party_extensions/assets/google-sheets/wasm/google_sheets_tool.wasm"
+);
+const GOOGLE_SLIDES_MANIFEST: &str =
+    include_str!("../../ironclaw_first_party_extensions/assets/google-slides/manifest.toml");
+const GOOGLE_SLIDES_WASM_MODULE: &[u8] = include_bytes!(
+    "../../ironclaw_first_party_extensions/assets/google-slides/wasm/google_slides_tool.wasm"
+);
 const GMAIL_MANIFEST: &str =
     include_str!("../../ironclaw_first_party_extensions/assets/gmail/manifest.toml");
 const NOTION_MCP_MANIFEST: &str =
@@ -91,6 +111,10 @@ impl AvailableExtensionCatalog {
             web_access_package()?,
             nearai_mcp_package()?,
             google_calendar_package()?,
+            google_docs_package()?,
+            google_drive_package()?,
+            google_sheets_package()?,
+            google_slides_package()?,
             gmail_package()?,
         ]))
     }
@@ -199,12 +223,64 @@ fn google_calendar_package() -> Result<AvailableExtensionPackage, ProductWorkflo
     )
 }
 
+fn google_docs_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
+    bundled_extension_package(
+        "google-docs",
+        "Google Docs",
+        GOOGLE_DOCS_MANIFEST,
+        google_docs_assets(),
+    )
+}
+
+fn google_drive_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
+    bundled_extension_package(
+        "google-drive",
+        "Google Drive",
+        GOOGLE_DRIVE_MANIFEST,
+        google_drive_assets(),
+    )
+}
+
+fn google_sheets_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
+    bundled_extension_package(
+        "google-sheets",
+        "Google Sheets",
+        GOOGLE_SHEETS_MANIFEST,
+        google_sheets_assets(),
+    )
+}
+
+fn google_slides_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
+    bundled_extension_package(
+        "google-slides",
+        "Google Slides",
+        GOOGLE_SLIDES_MANIFEST,
+        google_slides_assets(),
+    )
+}
+
 fn gmail_package() -> Result<AvailableExtensionPackage, ProductWorkflowError> {
     bundled_extension_package("gmail", "Gmail", GMAIL_MANIFEST, gmail_assets())
 }
 
 pub(crate) fn google_calendar_manifest_digest() -> String {
     sha256_digest_token(GOOGLE_CALENDAR_MANIFEST.as_bytes())
+}
+
+pub(crate) fn google_docs_manifest_digest() -> String {
+    sha256_digest_token(GOOGLE_DOCS_MANIFEST.as_bytes())
+}
+
+pub(crate) fn google_drive_manifest_digest() -> String {
+    sha256_digest_token(GOOGLE_DRIVE_MANIFEST.as_bytes())
+}
+
+pub(crate) fn google_sheets_manifest_digest() -> String {
+    sha256_digest_token(GOOGLE_SHEETS_MANIFEST.as_bytes())
+}
+
+pub(crate) fn google_slides_manifest_digest() -> String {
+    sha256_digest_token(GOOGLE_SLIDES_MANIFEST.as_bytes())
 }
 
 pub(crate) fn gmail_manifest_digest() -> String {
@@ -736,6 +812,143 @@ fn google_calendar_assets() -> Vec<AvailableExtensionAsset> {
     ]
 }
 
+macro_rules! google_wasm_assets {
+    ($id:literal, $manifest:expr, $wasm_file:literal, $wasm_module:expr, [$($operation:literal),+ $(,)?]) => {{
+        vec![
+            bytes_asset("manifest.toml", $manifest.as_bytes()),
+            bytes_asset(
+                concat!("schemas/", $id, "/raw_output.v1.json"),
+                include_bytes!(concat!(
+                    "../../ironclaw_first_party_extensions/assets/",
+                    $id,
+                    "/schemas/",
+                    $id,
+                    "/raw_output.v1.json"
+                )),
+            ),
+            $(
+                bytes_asset(
+                    concat!("schemas/", $id, "/", $operation, ".input.v1.json"),
+                    include_bytes!(concat!(
+                        "../../ironclaw_first_party_extensions/assets/",
+                        $id,
+                        "/schemas/",
+                        $id,
+                        "/",
+                        $operation,
+                        ".input.v1.json"
+                    )),
+                ),
+                bytes_asset(
+                    concat!("prompts/", $id, "/", $operation, ".md"),
+                    include_bytes!(concat!(
+                        "../../ironclaw_first_party_extensions/assets/",
+                        $id,
+                        "/prompts/",
+                        $id,
+                        "/",
+                        $operation,
+                        ".md"
+                    )),
+                ),
+            )+
+            bytes_asset(concat!("wasm/", $wasm_file), $wasm_module),
+        ]
+    }};
+}
+
+fn google_docs_assets() -> Vec<AvailableExtensionAsset> {
+    google_wasm_assets!(
+        "google-docs",
+        GOOGLE_DOCS_MANIFEST,
+        "google_docs_tool.wasm",
+        GOOGLE_DOCS_WASM_MODULE,
+        [
+            "create_document",
+            "get_document",
+            "read_content",
+            "insert_text",
+            "delete_content",
+            "replace_text",
+            "format_text",
+            "format_paragraph",
+            "insert_table",
+            "create_list",
+            "batch_update"
+        ]
+    )
+}
+
+fn google_drive_assets() -> Vec<AvailableExtensionAsset> {
+    google_wasm_assets!(
+        "google-drive",
+        GOOGLE_DRIVE_MANIFEST,
+        "google_drive_tool.wasm",
+        GOOGLE_DRIVE_WASM_MODULE,
+        [
+            "list_files",
+            "get_file",
+            "download_file",
+            "upload_file",
+            "update_file",
+            "create_folder",
+            "delete_file",
+            "trash_file",
+            "share_file",
+            "list_permissions",
+            "remove_permission",
+            "list_shared_drives"
+        ]
+    )
+}
+
+fn google_sheets_assets() -> Vec<AvailableExtensionAsset> {
+    google_wasm_assets!(
+        "google-sheets",
+        GOOGLE_SHEETS_MANIFEST,
+        "google_sheets_tool.wasm",
+        GOOGLE_SHEETS_WASM_MODULE,
+        [
+            "create_spreadsheet",
+            "get_spreadsheet",
+            "read_values",
+            "batch_read_values",
+            "write_values",
+            "append_values",
+            "clear_values",
+            "add_sheet",
+            "delete_sheet",
+            "rename_sheet",
+            "format_cells"
+        ]
+    )
+}
+
+fn google_slides_assets() -> Vec<AvailableExtensionAsset> {
+    google_wasm_assets!(
+        "google-slides",
+        GOOGLE_SLIDES_MANIFEST,
+        "google_slides_tool.wasm",
+        GOOGLE_SLIDES_WASM_MODULE,
+        [
+            "create_presentation",
+            "get_presentation",
+            "get_thumbnail",
+            "create_slide",
+            "delete_object",
+            "insert_text",
+            "delete_text",
+            "replace_all_text",
+            "create_shape",
+            "insert_image",
+            "format_text",
+            "format_paragraph",
+            "replace_shapes_with_image",
+            "batch_update"
+        ]
+    )
+}
+
 fn gmail_assets() -> Vec<AvailableExtensionAsset> {
     vec![
         bytes_asset("manifest.toml", GMAIL_MANIFEST.as_bytes()),
@@ -1085,6 +1298,10 @@ mod tests {
             "web-access",
             "nearai",
             "google-calendar",
+            "google-docs",
+            "google-drive",
+            "google-sheets",
+            "google-slides",
             "gmail",
         ] {
             let package_ref =
@@ -1121,6 +1338,47 @@ mod tests {
         }
     }
 
+    #[test]
+    fn bundled_gsuite_wasm_capabilities_are_operation_scoped() {
+        let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "google-drive").unwrap();
+        let package = catalog.resolve(&package_ref).unwrap();
+        let capabilities = package
+            .package
+            .manifest
+            .capabilities
+            .iter()
+            .map(|capability| (capability.id.as_str(), capability))
+            .collect::<HashMap<_, _>>();
+
+        assert!(!capabilities.contains_key("google-drive.execute"));
+        assert!(capabilities.contains_key("google-drive.list_files"));
+        assert!(capabilities.contains_key("google-drive.upload_file"));
+
+        let summary = package.summary();
+        assert!(
+            summary
+                .visible_read_only_capability_ids
+                .contains(&"google-drive.list_files".to_string())
+        );
+        assert!(
+            !summary
+                .visible_read_only_capability_ids
+                .contains(&"google-drive.upload_file".to_string())
+        );
+
+        let list_files = capabilities["google-drive.list_files"];
+        assert_eq!(
+            list_files.runtime_credentials[0].provider_scopes,
+            vec!["https://www.googleapis.com/auth/drive.readonly".to_string()]
+        );
+        assert!(!list_files.effects.contains(&EffectKind::ExternalWrite));
+
+        let upload_file = capabilities["google-drive.upload_file"];
+        assert!(upload_file.effects.contains(&EffectKind::ExternalWrite));
+    }
+
     #[tokio::test]
     async fn materialize_bundled_github_writes_manifest_schema_refs() {
         let fs = InMemoryBackend::default();
@@ -1153,8 +1411,14 @@ mod tests {
     }
 
     #[test]
-    fn bundled_mcp_manifest_digests_are_sha256_tokens() {
+    fn bundled_manifest_digests_are_sha256_tokens() {
         assert!(notion_mcp_manifest_digest().starts_with("sha256:"));
+        assert!(google_calendar_manifest_digest().starts_with("sha256:"));
+        assert!(google_docs_manifest_digest().starts_with("sha256:"));
+        assert!(google_drive_manifest_digest().starts_with("sha256:"));
+        assert!(google_sheets_manifest_digest().starts_with("sha256:"));
+        assert!(google_slides_manifest_digest().starts_with("sha256:"));
+        assert!(gmail_manifest_digest().starts_with("sha256:"));
     }
 
     #[test]

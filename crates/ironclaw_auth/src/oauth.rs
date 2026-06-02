@@ -32,6 +32,24 @@ pub const GOOGLE_CALENDAR_READONLY_SCOPE: &str =
     "https://www.googleapis.com/auth/calendar.readonly";
 /// Read/write access to Google Calendar events.
 pub const GOOGLE_CALENDAR_EVENTS_SCOPE: &str = "https://www.googleapis.com/auth/calendar.events";
+/// Read-only access to Google Drive files.
+pub const GOOGLE_DRIVE_READONLY_SCOPE: &str = "https://www.googleapis.com/auth/drive.readonly";
+/// Read/write access to Google Drive files.
+pub const GOOGLE_DRIVE_SCOPE: &str = "https://www.googleapis.com/auth/drive";
+/// Read-only access to Google Docs documents.
+pub const GOOGLE_DOCS_READONLY_SCOPE: &str = "https://www.googleapis.com/auth/documents.readonly";
+/// Read/write access to Google Docs documents.
+pub const GOOGLE_DOCS_SCOPE: &str = "https://www.googleapis.com/auth/documents";
+/// Read-only access to Google Sheets spreadsheets.
+pub const GOOGLE_SHEETS_READONLY_SCOPE: &str =
+    "https://www.googleapis.com/auth/spreadsheets.readonly";
+/// Read/write access to Google Sheets spreadsheets.
+pub const GOOGLE_SHEETS_SCOPE: &str = "https://www.googleapis.com/auth/spreadsheets";
+/// Read-only access to Google Slides presentations.
+pub const GOOGLE_SLIDES_READONLY_SCOPE: &str =
+    "https://www.googleapis.com/auth/presentations.readonly";
+/// Read/write access to Google Slides presentations.
+pub const GOOGLE_SLIDES_SCOPE: &str = "https://www.googleapis.com/auth/presentations";
 /// Read-only access to Gmail messages and metadata.
 pub const GOOGLE_GMAIL_READONLY_SCOPE: &str = "https://www.googleapis.com/auth/gmail.readonly";
 /// Permission to send Gmail messages.
@@ -586,6 +604,14 @@ pub fn is_allowed_google_scope(scope: &str) -> bool {
         scope,
         GOOGLE_CALENDAR_READONLY_SCOPE
             | GOOGLE_CALENDAR_EVENTS_SCOPE
+            | GOOGLE_DRIVE_READONLY_SCOPE
+            | GOOGLE_DRIVE_SCOPE
+            | GOOGLE_DOCS_READONLY_SCOPE
+            | GOOGLE_DOCS_SCOPE
+            | GOOGLE_SHEETS_READONLY_SCOPE
+            | GOOGLE_SHEETS_SCOPE
+            | GOOGLE_SLIDES_READONLY_SCOPE
+            | GOOGLE_SLIDES_SCOPE
             | GOOGLE_GMAIL_READONLY_SCOPE
             | GOOGLE_GMAIL_SEND_SCOPE
             | GOOGLE_GMAIL_MODIFY_SCOPE
@@ -689,5 +715,22 @@ mod tests {
         assert!(OAuthRedirectUri::new("https://example.com/callback").is_ok());
         assert!(OAuthRedirectUri::new("http://localhost:8080/callback").is_ok());
         assert!(OAuthRedirectUri::new("http://127.0.0.1:8080/callback").is_ok());
+    }
+
+    #[test]
+    fn google_oauth_allowlist_includes_gsuite_wasm_scopes() {
+        for scope in [
+            GOOGLE_DRIVE_READONLY_SCOPE,
+            GOOGLE_DRIVE_SCOPE,
+            GOOGLE_DOCS_READONLY_SCOPE,
+            GOOGLE_DOCS_SCOPE,
+            GOOGLE_SHEETS_READONLY_SCOPE,
+            GOOGLE_SHEETS_SCOPE,
+            GOOGLE_SLIDES_READONLY_SCOPE,
+            GOOGLE_SLIDES_SCOPE,
+        ] {
+            assert!(is_allowed_google_scope(scope), "{scope} must be allowed");
+            assert!(parse_google_requested_scopes(&[scope.to_string()]).is_ok());
+        }
     }
 }
