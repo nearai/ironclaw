@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     sync::{Arc, Mutex, MutexGuard},
 };
 
@@ -8,8 +8,9 @@ use ironclaw_host_api::CapabilityId;
 use ironclaw_turns::run_profile::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation, CapabilityBatchOutcome,
     CapabilityCallCandidate, CapabilityDenied, CapabilityDeniedReasonKind, CapabilityInvocation,
-    CapabilityOutcome, LoopCapabilityPort, ProviderToolCall, ProviderToolCallCapabilityIds,
-    ProviderToolDefinition, VisibleCapabilityRequest, VisibleCapabilitySurface,
+    CapabilityOutcome, LoopCapabilityPort, LoopModelCapabilityView, ProviderToolCall,
+    ProviderToolCallCapabilityIds, ProviderToolDefinition, VisibleCapabilityRequest,
+    VisibleCapabilitySurface,
 };
 
 use crate::{CapabilityAllowSet, capability_info};
@@ -59,6 +60,37 @@ impl CapabilitySurfaceVisibleFilter {
 
     fn permits(&self, capability_id: &CapabilityId) -> bool {
         self.visible_capability_ids.contains(capability_id)
+    }
+}
+
+pub(crate) fn subagent_prompt_capability_view(
+    mut allowed_capabilities: BTreeSet<CapabilityId>,
+    existing_view: Option<LoopModelCapabilityView>,
+) -> LoopModelCapabilityView {
+    if let Some(existing_view) = existing_view {
+        let existing = existing_view
+            .visible_capability_ids
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        let mut dropped = None;
+        allowed_capabilities.retain(|capability| {
+            let keep = existing.contains(capability);
+            if !keep {
+                dropped
+                    .get_or_insert_with(Vec::new)
+                    .push(capability.as_str().to_string());
+            }
+            keep
+        });
+        if let Some(dropped) = dropped {
+            tracing::warn!(
+                dropped_capabilities = ?dropped,
+                "subagent flavor capability allowlist was narrowed by parent capability view"
+            );
+        }
+    }
+    LoopModelCapabilityView {
+        visible_capability_ids: allowed_capabilities.into_iter().collect(),
     }
 }
 

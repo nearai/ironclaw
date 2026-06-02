@@ -9,8 +9,9 @@ use ironclaw_loop_support::{
     HostInputQueue, HostManagedModelGateway, HostRuntimeLoopCapabilityPortFactory,
     HostSkillContextSource, LoopCapabilityResultWriter, ProductLiveCancellationReadiness,
     RunCancellationFactory, SpawnSubagentInputCodec, SubagentDefinitionResolver,
-    SubagentPromptComposer, SubagentSpawnCapabilityPort, SubagentSpawnDeps, SubagentSpawnGoalStore,
-    SubagentSpawnLimits, verify_product_live_cancellation_probe,
+    SubagentPromptComposer, SubagentPromptMaterialSource, SubagentSpawnCapabilityPort,
+    SubagentSpawnDeps, SubagentSpawnGoalStore, SubagentSpawnLimits,
+    verify_product_live_cancellation_probe,
 };
 use ironclaw_threads::{SessionThreadService, ThreadScope};
 use ironclaw_turns::{
@@ -36,11 +37,12 @@ use crate::{
     loop_exit_applier::{LoopExitApplier, ThreadCheckpointLoopExitEvidencePort},
     model_routes::ModelRouteResolver,
     planned_driver_factory::{
-        DefaultPlannedDriverRegistrationError, SUBAGENT_PLANNED_PROFILE_ID,
-        default_planned_run_profile_resolver, register_default_planned_driver,
-        register_default_text_only_driver, register_subagent_planned_driver,
+        DefaultPlannedDriverRegistrationError, default_planned_run_profile_resolver,
+        register_default_planned_driver, register_default_text_only_driver,
+        register_subagent_planned_driver,
     },
     subagent::{
+        capability_surface::SubagentCapabilitySurfaceResolver,
         completion_observer::SubagentCompletionObserver,
         gate_resolution::BoundedSubagentGateResolutionStore, goal_store::SubagentGoalStore,
         prompt_material::GateBackedSubagentPromptMaterialSource,
@@ -299,6 +301,13 @@ where
     build_default_planned_runtime(parts).map_err(ProductLiveRuntimeBuildError::Runtime)
 }
 
+fn local_development_noop_safety_context() -> InstructionSafetyContext {
+    tracing::warn!(
+        "using local-development no-op instruction safety context; configure a real instruction safety scanner before product-live use"
+    );
+    InstructionSafetyContext::local_development_noop()
+}
+
 pub fn build_default_planned_runtime<T, G>(
     parts: DefaultPlannedRuntimeParts<T, G>,
 ) -> Result<
@@ -382,31 +391,40 @@ where
         .map_err(|error| DefaultPlannedRuntimeBuildError::SubagentCompletion(error.to_string()))?;
 
     let turn_state_store: Arc<dyn TurnStateStore> = turn_state.clone();
-    let subagent_prompt_source = Arc::new(GateBackedSubagentPromptMaterialSource::new(
-        Arc::clone(&parts.subagent_goal_store),
-        Arc::clone(&parts.subagent_gate_store),
-        Arc::clone(&parts.thread_service),
-    ));
-    let subagent_prompt_composer = SubagentPromptComposer::new(subagent_prompt_source);
-    let capability_factory: Arc<dyn LoopCapabilityPortFactory> =
-        Arc::new(SubagentAwareCapabilityPortFactory::new(
-            parts.capability_factory,
-            SubagentSpawnDeps {
-                coordinator: Arc::clone(&coordinator) as Arc<dyn ironclaw_turns::TurnCoordinator>,
-                child_runs,
-                turn_state_store: Arc::clone(&parts.turn_state) as Arc<dyn TurnSpawnTreeStateStore>,
-                thread_service: Arc::clone(&parts.thread_service),
-                goal_store: Arc::clone(&parts.subagent_goal_store)
-                    as Arc<dyn SubagentSpawnGoalStore>,
-                gate_store: Arc::clone(&parts.subagent_gate_store)
-                    as Arc<dyn ironclaw_loop_support::SubagentGateResolutionStore>,
-                definition_resolver: Arc::clone(&parts.subagent_definition_resolver),
-                spawn_input_codec: Arc::clone(&parts.subagent_spawn_input_codec),
-                result_writer: Arc::clone(&parts.capability_result_writer),
-            },
-            parts.subagent_spawn_limits,
-            subagent_prompt_composer.clone(),
-        )?);
+    let subagent_prompt_source: Arc<dyn SubagentPromptMaterialSource> =
+        Arc::new(GateBackedSubagentPromptMaterialSource::new(
+            Arc::clone(&parts.subagent_goal_store),
+            Arc::clone(&parts.subagent_gate_store),
+            Arc::clone(&parts.thread_service),
+        ));
+    let subagent_prompt_composer = SubagentPromptComposer::new(Arc::clone(&subagent_prompt_source));
+    let spawn_decorator = Arc::new(SubagentSpawnCapabilityDecorator::new(
+        SubagentSpawnDeps {
+            coordinator: Arc::clone(&coordinator) as Arc<dyn ironclaw_turns::TurnCoordinator>,
+            child_runs,
+            turn_state_store: Arc::clone(&parts.turn_state) as Arc<dyn TurnSpawnTreeStateStore>,
+            thread_service: Arc::clone(&parts.thread_service),
+            goal_store: Arc::clone(&parts.subagent_goal_store) as Arc<dyn SubagentSpawnGoalStore>,
+            gate_store: Arc::clone(&parts.subagent_gate_store)
+                as Arc<dyn ironclaw_loop_support::SubagentGateResolutionStore>,
+            definition_resolver: Arc::clone(&parts.subagent_definition_resolver),
+            spawn_input_codec: Arc::clone(&parts.subagent_spawn_input_codec),
+            result_writer: Arc::clone(&parts.capability_result_writer),
+        },
+        parts.subagent_spawn_limits,
+    )?);
+    let capability_factory: Arc<dyn LoopCapabilityPortFactory> = Arc::new(
+        DecoratingLoopCapabilityPortFactory::new(parts.capability_factory)
+            .with_decorator(spawn_decorator),
+    );
+    let capability_surface_resolver: Arc<dyn CapabilitySurfaceProfileResolver> =
+        Arc::new(SubagentCapabilitySurfaceResolver::new(
+            parts.capability_surface_resolver,
+            Arc::clone(&subagent_prompt_source),
+        ));
+    let safety_context = parts
+        .safety_context
+        .unwrap_or_else(local_development_noop_safety_context);
     let mut host_factory = RebornLoopDriverHostFactory::new(
         Arc::clone(&parts.thread_service),
         parts.thread_scope,
@@ -416,8 +434,9 @@ where
         Arc::clone(&parts.loop_checkpoint_store),
         parts.milestone_sink,
         parts.config.host,
+        safety_context,
     )
-    .with_profiled_capability_port_factory(capability_factory, parts.capability_surface_resolver)
+    .with_profiled_capability_port_factory(capability_factory, capability_surface_resolver)
     .with_subagent_prompt_composer(subagent_prompt_composer)
     .with_driver_requirements(driver_registry.requirements_snapshot());
     if let Some(resolver) = parts.model_route_resolver {
@@ -437,9 +456,6 @@ where
     }
     if let Some(accountant) = parts.model_budget_accountant {
         host_factory = host_factory.with_model_budget_accountant(accountant);
-    }
-    if let Some(safety) = parts.safety_context {
-        host_factory = host_factory.with_safety_context(safety);
     }
     host_factory = host_factory.with_identity_context_source(parts.identity_context_source);
     let host_factory = Arc::new(host_factory);
@@ -471,56 +487,82 @@ where
     )
 }
 
-struct SubagentAwareCapabilityPortFactory {
+trait LoopCapabilityPortDecorator: Send + Sync {
+    fn decorate(
+        &self,
+        run_context: &LoopRunContext,
+        inner: Arc<dyn LoopCapabilityPort>,
+    ) -> Arc<dyn LoopCapabilityPort>;
+}
+
+struct DecoratingLoopCapabilityPortFactory {
     inner: Arc<dyn LoopCapabilityPortFactory>,
+    decorators: Vec<Arc<dyn LoopCapabilityPortDecorator>>,
+}
+
+impl DecoratingLoopCapabilityPortFactory {
+    fn new(inner: Arc<dyn LoopCapabilityPortFactory>) -> Self {
+        Self {
+            inner,
+            decorators: Vec::new(),
+        }
+    }
+
+    fn with_decorator(mut self, decorator: Arc<dyn LoopCapabilityPortDecorator>) -> Self {
+        self.decorators.push(decorator);
+        self
+    }
+}
+
+#[async_trait]
+impl LoopCapabilityPortFactory for DecoratingLoopCapabilityPortFactory {
+    async fn create_capability_port(
+        &self,
+        run_context: &LoopRunContext,
+    ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
+        let mut port = self.inner.create_capability_port(run_context).await?;
+        for decorator in &self.decorators {
+            port = decorator.decorate(run_context, port);
+        }
+        Ok(port)
+    }
+}
+
+struct SubagentSpawnCapabilityDecorator {
     spawn_deps: Arc<SubagentSpawnDeps>,
     spawn_id: CapabilityId,
     spawn_limits: SubagentSpawnLimits,
-    prompt_composer: SubagentPromptComposer,
 }
 
-impl SubagentAwareCapabilityPortFactory {
+impl SubagentSpawnCapabilityDecorator {
     fn new(
-        inner: Arc<dyn LoopCapabilityPortFactory>,
         spawn_deps: SubagentSpawnDeps,
         spawn_limits: SubagentSpawnLimits,
-        prompt_composer: SubagentPromptComposer,
     ) -> Result<Self, DefaultPlannedRuntimeBuildError> {
         let spawn_id =
             CapabilityId::new(ironclaw_loop_support::DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID)
                 .map_err(|error| DefaultPlannedRuntimeBuildError::RunProfile(error.to_string()))?;
         Ok(Self {
-            inner,
             spawn_deps: Arc::new(spawn_deps),
             spawn_id,
             spawn_limits,
-            prompt_composer,
         })
     }
 }
 
-#[async_trait]
-impl LoopCapabilityPortFactory for SubagentAwareCapabilityPortFactory {
-    async fn create_capability_port(
+impl LoopCapabilityPortDecorator for SubagentSpawnCapabilityDecorator {
+    fn decorate(
         &self,
         run_context: &LoopRunContext,
-    ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
-        let inner = self.inner.create_capability_port(run_context).await?;
-        let with_spawn: Arc<dyn LoopCapabilityPort> = Arc::new(SubagentSpawnCapabilityPort::new(
+        inner: Arc<dyn LoopCapabilityPort>,
+    ) -> Arc<dyn LoopCapabilityPort> {
+        Arc::new(SubagentSpawnCapabilityPort::new(
             inner,
             run_context.clone(),
             self.spawn_id.clone(),
             self.spawn_limits,
             Arc::clone(&self.spawn_deps),
-        ));
-        if run_context.resolved_run_profile.profile_id.as_str() == SUBAGENT_PLANNED_PROFILE_ID {
-            return Ok(Arc::new(
-                self.prompt_composer
-                    .capability_filter_for_run(run_context, with_spawn)
-                    .await?,
-            ));
-        }
-        Ok(with_spawn)
+        ))
     }
 }
 

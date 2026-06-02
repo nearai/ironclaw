@@ -81,10 +81,10 @@ pub use skill_context::{
     build_skill_run_snapshot,
 };
 pub use subagent_prompt_port::{
-    DEFAULT_SUBAGENT_GOAL_MAX_BYTES, SubagentLoopPromptPort, SubagentPromptComposer,
-    SubagentPromptGoal, SubagentPromptLimits, SubagentPromptMaterial, SubagentPromptMaterialSource,
-    materialize_direction_message, materialize_goal_framing_message, materialize_goal_message,
-    subagent_run_id_from_context,
+    DEFAULT_SUBAGENT_GOAL_MAX_BYTES, DEFAULT_SUBAGENT_GOAL_RAW_MAX_BYTES, SubagentLoopPromptPort,
+    SubagentPromptComposer, SubagentPromptGoal, SubagentPromptLimits, SubagentPromptMaterial,
+    SubagentPromptMaterialSource, materialize_direction_message, materialize_goal_framing_message,
+    materialize_goal_message, subagent_run_id_from_context,
 };
 pub use subagent_spawn_port::{
     AwaitedChildSetRecord, DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID, DEFAULT_SUBAGENT_MAX_DEPTH,

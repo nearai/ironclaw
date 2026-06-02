@@ -31,10 +31,11 @@ use ironclaw_turns::{
     TurnId, TurnRunId,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, HostManagedLoopPromptPort,
-        InMemoryLoopHostMilestoneSink, LoopModelGateway, LoopModelGatewayError,
-        LoopModelGatewayRequest, LoopModelPort, LoopModelRequest, LoopModelResponse,
-        LoopPromptBundleRequest, LoopPromptPort, LoopRunContext, LoopSafeSummary, ModelProfileId,
-        PromptMode, ProviderToolCall, ProviderToolDefinition,
+        InMemoryInstructionMaterializationStore, InMemoryLoopHostMilestoneSink,
+        InstructionMaterializationStore, InstructionSafetyContext, LoopModelGateway,
+        LoopModelGatewayError, LoopModelGatewayRequest, LoopModelPort, LoopModelRequest,
+        LoopModelResponse, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext,
+        LoopSafeSummary, ModelProfileId, PromptMode, ProviderToolCall, ProviderToolDefinition,
     },
 };
 use tracing::debug;
@@ -121,6 +122,8 @@ where
     thread_scope: ThreadScope,
     host_gateway: Arc<G>,
     max_messages: usize,
+    safety_context: InstructionSafetyContext,
+    instruction_materialization_store: Arc<dyn InstructionMaterializationStore>,
 }
 
 impl<S, G> ThreadBackedLoopModelGateway<S, G>
@@ -133,13 +136,23 @@ where
         thread_scope: ThreadScope,
         host_gateway: Arc<G>,
         max_messages: usize,
+        safety_context: InstructionSafetyContext,
     ) -> Self {
         Self {
             thread_service,
             thread_scope,
             host_gateway,
             max_messages,
+            safety_context,
+            instruction_materialization_store: Arc::new(
+                InMemoryInstructionMaterializationStore::default(),
+            ),
         }
+    }
+
+    pub fn with_safety_context(mut self, safety_context: InstructionSafetyContext) -> Self {
+        self.safety_context = safety_context;
+        self
     }
 }
 
@@ -162,6 +175,7 @@ where
             Arc::clone(&self.host_gateway),
             self.max_messages,
         )
+        .with_instruction_materialization_store(Arc::clone(&self.instruction_materialization_store))
         .stream_model(request.request)
         .await
         .map_err(host_error_to_model_gateway_error)
@@ -188,7 +202,11 @@ where
             context.clone(),
             context_port,
             Arc::new(InMemoryLoopHostMilestoneSink::default()),
-        );
+        )
+        .with_safety_context(self.safety_context.clone())
+        .with_instruction_materialization_store(Arc::clone(
+            &self.instruction_materialization_store,
+        ));
         let prompt_bundle = prompt_port
             .build_prompt_bundle(LoopPromptBundleRequest {
                 mode: PromptMode::TextOnly,

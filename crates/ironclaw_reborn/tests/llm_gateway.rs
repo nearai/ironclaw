@@ -9,7 +9,7 @@ use ironclaw_llm::{
 use ironclaw_loop_support::{
     HostManagedModelErrorKind, HostManagedModelGateway, HostManagedModelMessage,
     HostManagedModelMessageRole, HostManagedModelRequest, HostManagedModelRouteSnapshot,
-    HostManagedToolResultContent,
+    HostManagedToolResultContent, ThreadBackedLoopContextPort,
 };
 use ironclaw_reborn::model_gateway::{
     LlmModelProfilePolicy, LlmProviderModelGateway, RoutedLlmProviderModelGateway,
@@ -27,15 +27,21 @@ use ironclaw_turns::{
     LoopMessageRef, RunProfileResolutionRequest, RunProfileResolver, TurnId, TurnRunId, TurnScope,
     run_profile::{
         AgentLoopHostErrorKind, CapabilitySurfaceVersion, HostManagedLoopModelPort,
-        InMemoryLoopHostMilestoneSink, InMemoryRunProfileResolver, LoopCapabilityPort,
-        LoopHostMilestoneKind, LoopModelMessage, LoopModelPort, LoopModelRequest, LoopRunContext,
-        ModelProfileId, ParentLoopOutput, ProviderToolCall, ProviderToolCallReplay,
+        HostManagedLoopPromptPort, InMemoryInstructionMaterializationStore,
+        InMemoryLoopHostMilestoneSink, InMemoryRunProfileResolver, InstructionSafetyContext,
+        LoopCapabilityPort, LoopHostMilestoneKind, LoopModelMessage, LoopModelPort,
+        LoopModelRequest, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext, ModelProfileId,
+        ParentLoopOutput, PromptMode, ProviderToolCall, ProviderToolCallReplay,
         ProviderToolDefinition, VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
 };
 use rust_decimal::Decimal;
 
 const STATIC_PROVIDER_ID: &str = "static-test-provider";
+
+fn local_development_safety_context() -> InstructionSafetyContext {
+    InstructionSafetyContext::local_development_noop()
+}
 
 #[tokio::test]
 async fn gateway_calls_llm_provider_for_allowed_model_profile() {
@@ -1214,6 +1220,7 @@ async fn production_loop_model_gateway_resolves_thread_refs_and_emits_milestones
         fixture.thread_scope.clone(),
         provider_gateway,
         16,
+        local_development_safety_context(),
     ));
     let milestones = Arc::new(InMemoryLoopHostMilestoneSink::default());
     let port = HostManagedLoopModelPort::new(
@@ -1223,16 +1230,7 @@ async fn production_loop_model_gateway_resolves_thread_refs_and_emits_milestones
     );
 
     let response = port
-        .stream_model(LoopModelRequest {
-            messages: vec![LoopModelMessage {
-                role: "user".to_string(),
-                content_ref: LoopMessageRef::new(format!("msg:{}", fixture.user_message_id))
-                    .unwrap(),
-            }],
-            surface_version: None,
-            model_preference: None,
-            capability_view: None,
-        })
+        .stream_model(production_loop_request(&fixture, None).await)
         .await
         .unwrap();
 
@@ -1240,7 +1238,17 @@ async fn production_loop_model_gateway_resolves_thread_refs_and_emits_milestones
     let requests = provider.requests.lock().unwrap();
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].model.as_deref(), Some("host-selected-model"));
-    assert_eq!(requests[0].messages[0].content, "hello production gateway");
+    assert!(requests[0].messages.iter().any(|message| {
+        message
+            .content
+            .contains("No instruction safety scanner is configured")
+    }));
+    assert!(
+        requests[0]
+            .messages
+            .iter()
+            .any(|message| message.content == "hello production gateway")
+    );
     let milestone_kinds = milestones
         .milestones()
         .into_iter()
@@ -1260,6 +1268,52 @@ async fn production_loop_model_gateway_resolves_thread_refs_and_emits_milestones
 }
 
 #[tokio::test]
+async fn production_loop_model_gateway_includes_configured_safety_context() {
+    let fixture = ThreadFixture::new().await;
+    let provider = Arc::new(RecordingLlmProvider::reply("production response"));
+    let provider_gateway = Arc::new(LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider.clone(),
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    ));
+    let safety_context =
+        InstructionSafetyContext::new("safety:configured", "configured safety enforced").unwrap();
+    let model_gateway = Arc::new(ThreadBackedLoopModelGateway::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        provider_gateway,
+        16,
+        safety_context.clone(),
+    ));
+    let milestones = Arc::new(InMemoryLoopHostMilestoneSink::default());
+    let port = HostManagedLoopModelPort::new(
+        fixture.run_context.clone(),
+        model_gateway,
+        milestones.clone(),
+    );
+
+    port.stream_model(production_loop_request_with_safety(&fixture, None, safety_context).await)
+        .await
+        .unwrap();
+
+    let requests = provider.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert!(
+        requests[0]
+            .messages
+            .iter()
+            .any(|message| message.content == "configured safety enforced")
+    );
+    assert!(
+        requests[0]
+            .messages
+            .iter()
+            .all(|message| !message.content.contains("No instruction safety scanner"))
+    );
+}
+
+#[tokio::test]
 async fn production_loop_model_gateway_sanitizes_provider_output_before_public_chunks() {
     let fixture = ThreadFixture::new().await;
     let provider = Arc::new(RecordingLlmProvider::reply(
@@ -1276,6 +1330,7 @@ async fn production_loop_model_gateway_sanitizes_provider_output_before_public_c
         fixture.thread_scope.clone(),
         provider_gateway,
         16,
+        local_development_safety_context(),
     ));
     let milestones = Arc::new(InMemoryLoopHostMilestoneSink::default());
     let port = HostManagedLoopModelPort::new(
@@ -1285,16 +1340,7 @@ async fn production_loop_model_gateway_sanitizes_provider_output_before_public_c
     );
 
     let response = port
-        .stream_model(LoopModelRequest {
-            messages: vec![LoopModelMessage {
-                role: "user".to_string(),
-                content_ref: LoopMessageRef::new(format!("msg:{}", fixture.user_message_id))
-                    .unwrap(),
-            }],
-            surface_version: None,
-            model_preference: None,
-            capability_view: None,
-        })
+        .stream_model(production_loop_request(&fixture, None).await)
         .await
         .unwrap();
 
@@ -1338,6 +1384,7 @@ async fn production_loop_model_gateway_maps_provider_auth_and_session_to_credent
             fixture.thread_scope.clone(),
             provider_gateway,
             16,
+            local_development_safety_context(),
         ));
         let milestones = Arc::new(InMemoryLoopHostMilestoneSink::default());
         let port = HostManagedLoopModelPort::new(
@@ -1347,16 +1394,7 @@ async fn production_loop_model_gateway_maps_provider_auth_and_session_to_credent
         );
 
         let error = port
-            .stream_model(LoopModelRequest {
-                messages: vec![LoopModelMessage {
-                    role: "user".to_string(),
-                    content_ref: LoopMessageRef::new(format!("msg:{}", fixture.user_message_id))
-                        .unwrap(),
-                }],
-                surface_version: None,
-                model_preference: None,
-                capability_view: None,
-            })
+            .stream_model(production_loop_request(&fixture, None).await)
             .await
             .unwrap_err();
 
@@ -1387,6 +1425,7 @@ async fn production_loop_model_gateway_fails_closed_before_provider_call() {
         fixture.thread_scope.clone(),
         provider_gateway,
         16,
+        local_development_safety_context(),
     ));
     let milestones = Arc::new(InMemoryLoopHostMilestoneSink::default());
     let port = HostManagedLoopModelPort::new(
@@ -1396,16 +1435,13 @@ async fn production_loop_model_gateway_fails_closed_before_provider_call() {
     );
 
     let error = port
-        .stream_model(LoopModelRequest {
-            messages: vec![LoopModelMessage {
-                role: "user".to_string(),
-                content_ref: LoopMessageRef::new(format!("msg:{}", fixture.user_message_id))
-                    .unwrap(),
-            }],
-            surface_version: None,
-            model_preference: Some(ModelProfileId::new("mission_model").unwrap()),
-            capability_view: None,
-        })
+        .stream_model(
+            production_loop_request(
+                &fixture,
+                Some(ModelProfileId::new("mission_model").unwrap()),
+            )
+            .await,
+        )
         .await
         .unwrap_err();
 
@@ -1434,6 +1470,7 @@ async fn production_loop_model_gateway_rejects_forged_context_summary_before_pro
         fixture.thread_scope.clone(),
         provider_gateway,
         16,
+        local_development_safety_context(),
     ));
     let milestones = Arc::new(InMemoryLoopHostMilestoneSink::default());
     let port = HostManagedLoopModelPort::new(
@@ -1481,6 +1518,7 @@ async fn production_loop_model_gateway_rejects_unvalidated_surface_before_provid
         fixture.thread_scope.clone(),
         provider_gateway,
         16,
+        local_development_safety_context(),
     ));
     let milestones = Arc::new(InMemoryLoopHostMilestoneSink::default());
     let port = HostManagedLoopModelPort::new(
@@ -1525,22 +1563,14 @@ async fn production_loop_model_gateway_preserves_error_kind_when_summary_is_resa
         fixture.thread_scope.clone(),
         invalid_summary_gateway,
         16,
+        local_development_safety_context(),
     ));
     let milestones = Arc::new(InMemoryLoopHostMilestoneSink::default());
     let port =
         HostManagedLoopModelPort::new(fixture.run_context.clone(), model_gateway, milestones);
 
     let error = port
-        .stream_model(LoopModelRequest {
-            messages: vec![LoopModelMessage {
-                role: "user".to_string(),
-                content_ref: LoopMessageRef::new(format!("msg:{}", fixture.user_message_id))
-                    .unwrap(),
-            }],
-            surface_version: None,
-            model_preference: None,
-            capability_view: None,
-        })
+        .stream_model(production_loop_request(&fixture, None).await)
         .await
         .unwrap_err();
 
@@ -1865,6 +1895,58 @@ impl ThreadFixture {
             user_message_id: accepted.message_id,
             run_context,
         }
+    }
+}
+
+async fn production_loop_request(
+    fixture: &ThreadFixture,
+    model_preference: Option<ModelProfileId>,
+) -> LoopModelRequest {
+    production_loop_request_with_safety(
+        fixture,
+        model_preference,
+        InstructionSafetyContext::local_development_noop(),
+    )
+    .await
+}
+
+async fn production_loop_request_with_safety(
+    fixture: &ThreadFixture,
+    model_preference: Option<ModelProfileId>,
+    safety_context: InstructionSafetyContext,
+) -> LoopModelRequest {
+    let context_port = Arc::new(ThreadBackedLoopContextPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        16,
+    ));
+    let prompt_port = HostManagedLoopPromptPort::new(
+        fixture.run_context.clone(),
+        context_port,
+        Arc::new(InMemoryLoopHostMilestoneSink::default()),
+    )
+    .with_safety_context(safety_context)
+    .with_instruction_materialization_store(Arc::new(
+        InMemoryInstructionMaterializationStore::default(),
+    ));
+    let prompt_bundle = prompt_port
+        .build_prompt_bundle(LoopPromptBundleRequest {
+            mode: PromptMode::TextOnly,
+            context_cursor: None,
+            surface_version: None,
+            checkpoint_state_ref: None,
+            max_messages: Some(16),
+            inline_messages: Vec::new(),
+            capability_view: None,
+        })
+        .await
+        .expect("test prompt bundle should build");
+    LoopModelRequest {
+        messages: prompt_bundle.messages,
+        surface_version: None,
+        model_preference,
+        capability_view: None,
     }
 }
 

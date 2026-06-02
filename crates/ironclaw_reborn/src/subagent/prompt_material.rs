@@ -18,6 +18,7 @@ use crate::subagent::{
     goal_store::{SubagentGoalStore, SubagentGoalStoreError},
 };
 
+#[cfg(test)]
 pub struct RebornSubagentPromptMaterialSource<G>
 where
     G: SubagentGoalStore + ?Sized,
@@ -26,6 +27,7 @@ where
     flavor_id: SubagentFlavorId,
 }
 
+#[cfg(test)]
 impl<G> RebornSubagentPromptMaterialSource<G>
 where
     G: SubagentGoalStore + ?Sized,
@@ -105,6 +107,7 @@ where
     }
 }
 
+#[cfg(test)]
 #[async_trait]
 impl<G> SubagentPromptMaterialSource for RebornSubagentPromptMaterialSource<G>
 where
