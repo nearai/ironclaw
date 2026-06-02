@@ -5,6 +5,7 @@ use std::{
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use crate::product_auth_durable::{FilesystemAuthProductServices, UnavailableAuthProviderClient};
+#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_auth::AuthProviderClient;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_authorization::FilesystemCapabilityLeaseStore;
@@ -82,7 +83,7 @@ use crate::local_dev_mounts::{
     skill_management_mount_view, workspace_mount_view,
 };
 use crate::mcp::hosted_http_mcp_runtime;
-use crate::product_auth_providers::compose_provider_client;
+use crate::product_auth_providers::{OAuthProviderComposition, compose_provider_client};
 use crate::product_auth_runtime_credentials::ProductAuthRuntimeCredentialResolver;
 use crate::{
     RebornAuthContinuationDispatcher, RebornBuildError, RebornBuildInput, RebornCompositionProfile,
@@ -419,13 +420,17 @@ fn auth_continuation_dispatcher(
 fn compose_product_auth_services(
     ports: RebornProductAuthServicePorts,
     turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator>,
-    provider_client: Option<Arc<dyn AuthProviderClient>>,
+    provider_composition: OAuthProviderComposition,
 ) -> Arc<RebornProductAuthServices> {
-    let ports = match provider_client {
+    let ports = match provider_composition.client {
         Some(provider_client) => ports.with_provider_client(provider_client),
         None => ports,
     };
-    Arc::new(ports.into_services(auth_continuation_dispatcher(turn_coordinator)))
+    let mut services = ports.into_services(auth_continuation_dispatcher(turn_coordinator));
+    if let Some(registry) = provider_composition.dcr_registry {
+        services = services.with_dcr_oauth_registry(registry);
+    }
+    Arc::new(services)
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -452,6 +457,7 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         runtime_process_binding,
         product_auth_ports,
         oauth_provider_configs,
+        oauth_dcr_provider_configs,
         owner_id,
         ..
     } = input;
@@ -586,14 +592,15 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     services = attach_hosted_mcp_runtime(services)?;
     services = attach_wasm_runtime(services)?;
     let product_auth_runtime_ports = require_product_auth_runtime_ports(&services)?;
-    let provider_client = compose_provider_client(
+    let provider_composition = compose_provider_client(
         oauth_provider_configs,
+        oauth_dcr_provider_configs,
         Arc::clone(&secret_store),
         product_auth_runtime_ports.clone(),
     )?;
     let product_auth = match product_auth_ports {
         Some(ports) => {
-            compose_product_auth_services(ports, turn_coordinator.clone(), provider_client)
+            compose_product_auth_services(ports, turn_coordinator.clone(), provider_composition)
         }
         None => {
             #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -602,14 +609,20 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
                     local_dev_product_auth_filesystem,
                     Arc::clone(&secret_store),
                 ));
-                let provider_client: Arc<dyn AuthProviderClient> =
-                    provider_client.unwrap_or_else(|| Arc::new(UnavailableAuthProviderClient));
+                let provider_client: Arc<dyn AuthProviderClient> = provider_composition
+                    .client
+                    .clone()
+                    .unwrap_or_else(|| Arc::new(UnavailableAuthProviderClient));
                 let services = RebornProductAuthServicePorts::from_shared_with_provider(
                     Arc::clone(&durable_services),
                     provider_client,
                 )
                 .into_services(auth_continuation_dispatcher(turn_coordinator.clone()))
                 .with_flow_record_source(durable_services);
+                let services = match provider_composition.dcr_registry.clone() {
+                    Some(registry) => services.with_dcr_oauth_registry(registry),
+                    None => services,
+                };
                 Arc::new(services)
             }
             #[cfg(not(any(feature = "libsql", feature = "postgres")))]
@@ -617,8 +630,12 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
                 let services = RebornProductAuthServices::local_dev_in_memory(
                     auth_continuation_dispatcher(turn_coordinator.clone()),
                 );
-                Arc::new(match provider_client {
+                let services = match provider_composition.client.clone() {
                     Some(provider_client) => services.with_provider_client(provider_client),
+                    None => services,
+                };
+                Arc::new(match provider_composition.dcr_registry.clone() {
+                    Some(registry) => services.with_dcr_oauth_registry(registry),
                     None => services,
                 })
             }
@@ -1573,6 +1590,7 @@ async fn build_production_shaped(
         require_wasm_credentials,
         product_auth_ports,
         oauth_provider_configs,
+        oauth_dcr_provider_configs,
     } = input;
     #[cfg(any(feature = "libsql", feature = "postgres"))]
     let wiring_config = production_config(
@@ -1591,6 +1609,7 @@ async fn build_production_shaped(
         require_wasm_credentials,
         product_auth_ports,
         oauth_provider_configs,
+        oauth_dcr_provider_configs,
     );
 
     match storage {
@@ -1622,6 +1641,7 @@ async fn build_production_shaped(
                 production_wiring,
                 product_auth_ports,
                 oauth_provider_configs,
+                oauth_dcr_provider_configs,
             };
             build_libsql_production(context, db, path_or_url, auth_token, secret_master_key).await
         }
@@ -1644,6 +1664,7 @@ async fn build_production_shaped(
                 production_wiring,
                 product_auth_ports,
                 oauth_provider_configs,
+                oauth_dcr_provider_configs,
             };
             build_postgres_production(context, pool, url, secret_master_key).await
         }
@@ -1674,6 +1695,7 @@ struct RebornProductionBuildContext {
     production_wiring: RebornProductionWiring,
     product_auth_ports: Option<RebornProductAuthServicePorts>,
     oauth_provider_configs: Vec<crate::input::OAuthProviderBackendConfig>,
+    oauth_dcr_provider_configs: Vec<crate::input::OAuthDcrProviderBackendConfig>,
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -1973,6 +1995,7 @@ where
         production_wiring,
         product_auth_ports,
         oauth_provider_configs,
+        oauth_dcr_provider_configs,
     } = context;
     let secret_store: Arc<dyn SecretStore> = stores.secret_credentials.secret_store.clone();
     let mut first_party_registry = builtin_first_party_registry()?;
@@ -2005,8 +2028,9 @@ where
     .with_turn_run_wake_notifier(production_wiring.turn_run_wake_notifier);
     let product_auth_runtime_ports = require_product_auth_runtime_ports(&services)?;
     let services = attach_hosted_mcp_runtime(services)?;
-    let provider_client = compose_provider_client(
+    let provider_composition = compose_provider_client(
         oauth_provider_configs,
+        oauth_dcr_provider_configs,
         Arc::clone(&secret_store),
         product_auth_runtime_ports.clone(),
     )?;
@@ -2025,7 +2049,8 @@ where
         ));
         RebornProductAuthServicePorts::from_shared_with_provider(
             durable,
-            provider_client
+            provider_composition
+                .client
                 .clone()
                 .unwrap_or_else(|| Arc::new(UnavailableAuthProviderClient)),
         )
@@ -2033,7 +2058,7 @@ where
     let product_auth_services = compose_product_auth_services(
         product_auth_ports,
         turn_coordinator.clone(),
-        provider_client,
+        provider_composition,
     );
     let product_auth_ready = true;
     // Wire ProductAuthAccount runtime credential resolver before

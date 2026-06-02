@@ -21,6 +21,8 @@
 use std::sync::Arc;
 
 mod auth;
+#[cfg(test)]
+mod auth_dcr_tests;
 mod available_extensions;
 mod budget;
 mod budget_events;
@@ -46,6 +48,8 @@ mod mcp;
 mod mcp_discovery;
 mod nearai_mcp;
 mod notion_oauth;
+mod oauth_dcr;
+mod oauth_dcr_protocol;
 mod oauth_provider_client;
 mod product_auth_durable;
 mod product_auth_providers;
