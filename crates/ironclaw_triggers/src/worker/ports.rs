@@ -64,4 +64,20 @@ pub trait TriggerActiveRunLookup: Send + Sync {
         &self,
         request: TriggerActiveRunStateRequest,
     ) -> Result<TriggerActiveRunState, TriggerError>;
+
+    /// Resolve active run states for a batch of requests.
+    ///
+    /// Implementations must return exactly one result per request, in the same
+    /// order as the input vector. Callers use positional matching to preserve
+    /// per-trigger cleanup report semantics across batched backend reads.
+    async fn active_run_states(
+        &self,
+        requests: Vec<TriggerActiveRunStateRequest>,
+    ) -> Vec<Result<TriggerActiveRunState, TriggerError>> {
+        let mut results = Vec::with_capacity(requests.len());
+        for request in requests {
+            results.push(self.active_run_state(request).await);
+        }
+        results
+    }
 }

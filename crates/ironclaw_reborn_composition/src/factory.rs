@@ -89,6 +89,7 @@ use crate::product_auth_runtime_credentials::ProductAuthRuntimeCredentialResolve
 use crate::{
     RebornAuthContinuationDispatcher, RebornBuildError, RebornBuildInput, RebornCompositionProfile,
     RebornFacadeReadiness, RebornProductAuthServices, RebornReadiness, RebornReadinessState,
+    RebornWorkerReadiness,
 };
 use crate::{
     available_extensions::{
@@ -305,6 +306,7 @@ pub(crate) struct RebornLocalRuntimeServices {
     pub(crate) approval_requests: Arc<LocalDevApprovalRequestStore>,
     pub(crate) capability_leases: Arc<LocalDevCapabilityLeaseStore>,
     pub(crate) turn_state: Arc<LocalDevTurnStateStore>,
+    pub(crate) trigger_repository: Arc<dyn TriggerRepository>,
     pub(crate) checkpoint_state_store: Arc<dyn CheckpointStateStore>,
     pub(crate) loop_checkpoint_store: Arc<dyn LoopCheckpointStore>,
     pub(crate) thread_service: Arc<dyn SessionThreadService>,
@@ -813,6 +815,7 @@ fn build_local_dev_store_graph(
         approval_requests: Arc::clone(&approval_requests),
         capability_leases: Arc::clone(&capability_leases),
         turn_state: Arc::clone(&turn_state),
+        trigger_repository: Arc::clone(&trigger_repository),
         checkpoint_state_store,
         loop_checkpoint_store,
         thread_service,
@@ -897,6 +900,7 @@ fn build_local_dev_store_graph(
         approval_requests: Arc::clone(&approval_requests),
         capability_leases: Arc::clone(&capability_leases),
         turn_state: Arc::clone(&turn_state),
+        trigger_repository: Arc::clone(&trigger_repository),
         checkpoint_state_store,
         loop_checkpoint_store,
         thread_service,
@@ -2201,6 +2205,10 @@ fn readiness_for(
             host_runtime,
             turn_coordinator,
             product_auth,
+        },
+        workers: RebornWorkerReadiness {
+            turn_runner: false,
+            trigger_poller: false,
         },
     }
 }

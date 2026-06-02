@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
+use ironclaw_trusted_ingress::HostTrustedTriggerIngress;
 use ironclaw_turns::{
     AcceptedMessageRef, ReplyTargetBindingRef, RunProfileRequest, SourceBindingRef,
     SubmitTurnResponse, TurnActor, TurnScope,
@@ -10,40 +11,6 @@ use crate::{
     AdapterInstallationId, AdapterKind, ExternalActorRef, ExternalConversationRef, ExternalEventId,
     InboundMessageContentRef,
 };
-
-#[allow(dead_code)]
-pub(crate) mod trusted_ingress {
-    use core::marker::PhantomData;
-
-    use super::private;
-
-    mod sealed {
-        pub trait Sealed {}
-    }
-
-    /// Sealed host-only token proving the caller already crossed the host
-    /// ingress boundary. Only crate-local host code can mint it, so product
-    /// adapters cannot fabricate trusted scope on their own. A later
-    /// host-owned shim in this crate can mint the token without widening the
-    /// public API.
-    pub(crate) trait TrustedIngressToken: sealed::Sealed {}
-
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    struct TrustedIngressWitness(PhantomData<private::TrustedIngressSeal>);
-
-    impl sealed::Sealed for TrustedIngressWitness {}
-
-    impl TrustedIngressToken for TrustedIngressWitness {}
-
-    pub(crate) fn mint() -> impl TrustedIngressToken {
-        TrustedIngressWitness(PhantomData)
-    }
-}
-
-#[allow(dead_code)]
-mod private {
-    pub(crate) struct TrustedIngressSeal;
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -209,11 +176,7 @@ pub struct TrustedInboundTurnRequest {
 #[allow(dead_code)]
 impl TrustedInboundTurnRequest {
     /// Crate-local constructor for host-owned trusted ingress.
-    /// The sealed token keeps external adapters from minting trusted scope,
-    /// while still letting this crate add a future host shim without changing
-    /// the public API.
     pub(crate) fn new(
-        _witness: impl trusted_ingress::TrustedIngressToken,
         request: InboundTurnRequest,
         trusted_agent_id: Option<AgentId>,
         trusted_project_id: Option<ProjectId>,
@@ -225,20 +188,23 @@ impl TrustedInboundTurnRequest {
         }
     }
 
+    /// Public host-composition constructor for scheduled trigger fires.
+    ///
+    /// Product adapters must continue to use [`InboundTurnRequest`] through
+    /// the untrusted path. This constructor is for the composition-owned
+    /// background trigger poller after it has already crossed the host trust
+    /// boundary.
+    pub fn for_host_trigger_fire(
+        _authority: &HostTrustedTriggerIngress,
+        request: InboundTurnRequest,
+        trusted_agent_id: Option<AgentId>,
+        trusted_project_id: Option<ProjectId>,
+    ) -> Self {
+        Self::new(request, trusted_agent_id, trusted_project_id)
+    }
+
     pub(crate) fn into_parts(self) -> (InboundTurnRequest, Option<AgentId>, Option<ProjectId>) {
         (self.request, self.trusted_agent_id, self.trusted_project_id)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::trusted_ingress;
-
-    #[test]
-    fn trusted_ingress_witness_is_host_minted_and_zero_sized() {
-        let witness = trusted_ingress::mint();
-
-        assert_eq!(core::mem::size_of_val(&witness), 0);
     }
 }
 

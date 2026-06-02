@@ -93,6 +93,66 @@ fn reborn_crate_dependency_boundaries_hold() {
 }
 
 #[test]
+fn trusted_trigger_ingress_constructor_stays_composition_owned() {
+    let root = workspace_root();
+    let mut uses = Vec::new();
+    collect_string_uses(
+        &root.join("crates"),
+        "for_host_trigger_fire",
+        &root,
+        &mut uses,
+    );
+    let allowed = BTreeSet::from([
+        "crates/ironclaw_architecture/tests/reborn_dependency_boundaries.rs",
+        "crates/ironclaw_conversations/src/types.rs",
+        "crates/ironclaw_reborn_composition/src/trigger_poller_trusted_submit.rs",
+    ]);
+    let violations = uses
+        .into_iter()
+        .filter(|path| !allowed.contains(path.as_str()))
+        .collect::<Vec<_>>();
+
+    assert!(
+        violations.is_empty(),
+        "Trusted trigger ingress construction must stay host/composition-owned; \
+         product adapters and capabilities must use untrusted inbound requests. \
+         Unexpected call sites:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn host_trusted_ingress_authority_stays_host_owned() {
+    let metadata = cargo_metadata();
+    let packages = metadata["packages"]
+        .as_array()
+        .expect("cargo metadata must include packages");
+    let dependencies = packages
+        .iter()
+        .filter_map(package_dependencies)
+        .collect::<HashMap<_, _>>();
+    let allowed_dependents =
+        BTreeSet::from(["ironclaw_conversations", "ironclaw_reborn_composition"]);
+    let violations = dependencies
+        .iter()
+        .filter_map(|(crate_name, deps)| {
+            deps.iter()
+                .any(|dependency| dependency == "ironclaw_trusted_ingress")
+                .then_some(crate_name.as_str())
+        })
+        .filter(|crate_name| !allowed_dependents.contains(crate_name))
+        .collect::<Vec<_>>();
+
+    assert!(
+        violations.is_empty(),
+        "Host trusted ingress authority must stay conversations/composition-owned; \
+         product adapters, product workflow, capabilities, and host-runtime handlers \
+         must not depend on ironclaw_trusted_ingress. Unexpected dependents:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
 fn reborn_cli_binary_crate_stays_separate_from_v1_root() {
     let metadata = cargo_metadata();
     let packages = metadata["packages"]
@@ -1235,6 +1295,37 @@ fn collect_forbidden_turns_identifier_uses(
                     path.strip_prefix(root).unwrap_or(&path).display()
                 ));
             }
+        }
+    }
+}
+
+fn collect_string_uses(
+    dir: &std::path::Path,
+    needle: &str,
+    root: &std::path::Path,
+    matches: &mut Vec<String>,
+) {
+    let entries = std::fs::read_dir(dir)
+        .unwrap_or_else(|err| panic!("failed to read {}: {err}", dir.display()));
+    for entry in entries {
+        let entry = entry.unwrap_or_else(|err| panic!("failed to read dir entry: {err}"));
+        let path = entry.path();
+        if path.is_dir() {
+            collect_string_uses(&path, needle, root, matches);
+            continue;
+        }
+        if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+            continue;
+        }
+        let contents = std::fs::read_to_string(&path)
+            .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
+        if contents.contains(needle) {
+            matches.push(
+                path.strip_prefix(root)
+                    .unwrap_or(&path)
+                    .to_string_lossy()
+                    .to_string(),
+            );
         }
     }
 }

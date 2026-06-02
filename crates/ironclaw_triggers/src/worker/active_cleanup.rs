@@ -6,6 +6,14 @@ use super::{
     TriggerPollerWorker,
 };
 
+struct ActiveLookupItem {
+    record: TriggerRecord,
+    fire_slot: chrono::DateTime<chrono::Utc>,
+    record_cursor: ActiveTriggerScanCursor,
+    run_id: ironclaw_turns::TurnRunId,
+    result_index: usize,
+}
+
 impl TriggerPollerWorker {
     pub(super) async fn clear_terminal_active_fires(
         &self,
@@ -15,6 +23,8 @@ impl TriggerPollerWorker {
         report.active_records = active_records.len();
         let mut next_cursor = cursor;
         let mut first_unadvanced_cursor: Option<ActiveTriggerScanCursor> = None;
+        let mut lookup_items = Vec::new();
+        let mut lookup_requests = Vec::new();
         for record in active_records {
             debug_assert!(
                 record.active_fire_slot.is_some(),
@@ -43,17 +53,47 @@ impl TriggerPollerWorker {
                 }
                 continue;
             };
-            let state = match self
-                .deps
-                .active_run_lookup
-                .active_run_state(TriggerActiveRunStateRequest {
-                    tenant_id: record.tenant_id.clone(),
-                    trigger_id: record.trigger_id,
-                    fire_slot,
-                    run_id,
-                })
-                .await
-            {
+            let result_index = lookup_requests.len();
+            lookup_requests.push(TriggerActiveRunStateRequest {
+                tenant_id: record.tenant_id.clone(),
+                trigger_id: record.trigger_id,
+                fire_slot,
+                run_id,
+            });
+            lookup_items.push(ActiveLookupItem {
+                record,
+                fire_slot,
+                record_cursor,
+                run_id,
+                result_index,
+            });
+        }
+
+        let mut lookup_results = self
+            .deps
+            .active_run_lookup
+            .active_run_states(lookup_requests)
+            .await
+            .into_iter()
+            .map(Some)
+            .collect::<Vec<_>>();
+
+        for item in lookup_items {
+            let ActiveLookupItem {
+                record,
+                fire_slot,
+                record_cursor,
+                run_id,
+                result_index,
+            } = item;
+            let state = match lookup_results
+                .get_mut(result_index)
+                .and_then(Option::take)
+                .unwrap_or_else(|| {
+                    Err(TriggerError::Backend {
+                        reason: "active run lookup returned too few results".to_string(),
+                    })
+                }) {
                 Ok(state) => state,
                 Err(_error) => {
                     report.results.push(TriggerPollerFireReport {

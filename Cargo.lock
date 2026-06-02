@@ -4210,6 +4210,7 @@ dependencies = [
  "chrono",
  "ironclaw_filesystem",
  "ironclaw_host_api",
+ "ironclaw_trusted_ingress",
  "ironclaw_turns",
  "serde",
  "serde_json",
@@ -4890,6 +4891,7 @@ dependencies = [
  "ironclaw_authorization",
  "ironclaw_capabilities",
  "ironclaw_common",
+ "ironclaw_conversations",
  "ironclaw_event_projections",
  "ironclaw_event_streams",
  "ironclaw_events",
@@ -4920,6 +4922,7 @@ dependencies = [
  "ironclaw_threads",
  "ironclaw_triggers",
  "ironclaw_trust",
+ "ironclaw_trusted_ingress",
  "ironclaw_turns",
  "ironclaw_wasm_product_adapters",
  "ironclaw_webui_v2",
@@ -5260,6 +5263,10 @@ dependencies = [
  "static_assertions",
  "thiserror 2.0.18",
 ]
+
+[[package]]
+name = "ironclaw_trusted_ingress"
+version = "0.1.0"
 
 [[package]]
 name = "ironclaw_tui"

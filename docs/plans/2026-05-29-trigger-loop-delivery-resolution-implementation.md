@@ -106,10 +106,10 @@ PRs should record them as contract language.
 13. Trigger fires bypass `ironclaw_product_workflow` ingress entirely. Product
     workflow remains adapter-facing; scheduled triggers enter only through the
     planned `ironclaw_conversations::InboundTurnService` trusted facade.
-14. The sealed host-trusted ingress marker and witness are owned by
-    `ironclaw_conversations::trusted_ingress`; host composition constructs them
-    for trigger submission. Product adapters must not receive constructors or
-    model them in product payload DTOs.
+14. Host-trusted trigger ingress authority is owned by the host-only
+    `ironclaw_trusted_ingress` crate and consumed only by conversations and
+    Reborn composition. Product adapters must not depend on that crate, receive
+    constructors, or model trusted trigger ingress in product payload DTOs.
 
 ## Dependency DAG
 
@@ -711,6 +711,28 @@ Wire the trigger poller into Reborn composition:
   approval rejection while preserving trigger `active_run_ref` back-pressure.
 - readiness semantics for whether a disabled trigger poller is allowed and
   whether a failed trigger worker marks Reborn runtime readiness degraded.
+- PR18 review follow-up status:
+  - host-trusted trigger ingress is hardened with a host-only authority crate,
+    root/crate-local `AGENTS.md` guidance, and architecture tests that restrict
+    dependents and trusted constructor call sites. Rust has no sibling-crate
+    `friend` visibility, so the enforceable boundary is the dependency graph.
+  - trigger poller startup is opt-in by default; runtimes must explicitly pass
+    enabled trigger poller settings before the background worker starts.
+  - runtime shutdown cancels the trigger poller and waits only for a bounded
+    shutdown interval before aborting a stalled in-flight tick.
+  - trusted trigger prompt recording happens after trusted inbound turn
+    acceptance/replay, so failed submissions do not durably inject visible
+    prompt content.
+  - active-run lookup is batched for each cleanup page so composition snapshots
+    turn state once per active page rather than once per active trigger record.
+  - still open for the next lifecycle/recovery slice: define active-run lookup
+    behavior when turn retention prunes the referenced `TurnRunId`, including
+    whether terminal tombstones or a narrower durable lookup are required before
+    missing runs can unblock stale active-fire metadata.
+  - still open for production lifecycle wiring: switch lifecycle jitter to a
+    real per-process random or seeded PRNG source if deployed replicas need
+    stronger startup/tick de-correlation than the current bounded wall-clock
+    fallback.
 - architecture tests for `ironclaw_triggers` dependency edges
 - current architecture map update
 - `FEATURE_PARITY.md` update with a distinct Reborn trigger-loop note rather

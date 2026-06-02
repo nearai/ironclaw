@@ -27,6 +27,7 @@ use std::time::Duration;
 use ironclaw_loop_support::HostManagedModelGateway;
 use ironclaw_loop_support::HostSkillContextSource;
 use ironclaw_reborn_config::BudgetDefaults;
+use ironclaw_triggers::TriggerPollerWorkerConfig;
 
 use crate::input::RebornBuildInput;
 
@@ -122,6 +123,47 @@ impl Default for PollSettings {
     }
 }
 
+/// Configuration for the composition-owned scheduled-trigger poller.
+///
+/// This is intentionally separate from [`PollSettings`], which controls
+/// caller-side waiting for an already submitted turn. The trigger poller is a
+/// background worker that scans due trigger records and submits trusted inbound
+/// turns.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TriggerPollerSettings {
+    pub enabled: bool,
+    pub worker: TriggerPollerWorkerConfig,
+    pub startup_jitter_max: Duration,
+    pub tick_jitter_max: Duration,
+}
+
+impl Default for TriggerPollerSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            worker: TriggerPollerWorkerConfig::default(),
+            startup_jitter_max: Duration::ZERO,
+            tick_jitter_max: Duration::ZERO,
+        }
+    }
+}
+
+impl TriggerPollerSettings {
+    pub fn enabled() -> Self {
+        Self {
+            enabled: true,
+            ..Self::default()
+        }
+    }
+
+    pub fn disabled() -> Self {
+        Self {
+            enabled: false,
+            ..Self::default()
+        }
+    }
+}
+
 /// Full input for `build_reborn_runtime` — substrate config plus the extras
 /// needed to assemble a runnable Reborn agent.
 #[derive(Default)]
@@ -130,6 +172,7 @@ pub struct RebornRuntimeInput {
     #[cfg(feature = "root-llm-provider")]
     pub llm: Option<ResolvedRebornLlm>,
     pub runner: TurnRunnerSettings,
+    pub trigger_poller: TriggerPollerSettings,
     pub poll: PollSettings,
     pub identity: RebornRuntimeIdentity,
     pub regex_skill_activation_enabled: bool,
@@ -172,6 +215,7 @@ impl RebornRuntimeInput {
             #[cfg(feature = "root-llm-provider")]
             llm: None,
             runner: TurnRunnerSettings::default(),
+            trigger_poller: TriggerPollerSettings::default(),
             poll: PollSettings::default(),
             identity: RebornRuntimeIdentity::default(),
             regex_skill_activation_enabled: true,
@@ -217,6 +261,11 @@ impl RebornRuntimeInput {
 
     pub fn with_runner_settings(mut self, runner: TurnRunnerSettings) -> Self {
         self.runner = runner;
+        self
+    }
+
+    pub fn with_trigger_poller_settings(mut self, trigger_poller: TriggerPollerSettings) -> Self {
+        self.trigger_poller = trigger_poller;
         self
     }
 

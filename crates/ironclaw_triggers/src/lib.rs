@@ -417,6 +417,26 @@ impl TriggerFireIdentity {
             external_event_id,
         }
     }
+
+    pub fn tenant_id(&self) -> &TenantId {
+        &self.tenant_id
+    }
+
+    pub fn trigger_id(&self) -> TriggerId {
+        self.trigger_id
+    }
+
+    pub fn fire_slot(&self) -> Timestamp {
+        self.fire_slot
+    }
+
+    pub fn route_thread_id(&self) -> &TriggerRouteThreadId {
+        &self.route_thread_id
+    }
+
+    pub fn external_event_id(&self) -> &TriggerExternalEventId {
+        &self.external_event_id
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
