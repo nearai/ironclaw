@@ -42,6 +42,8 @@ pub use installation::{
 };
 
 #[cfg(test)]
+mod e2e_tests;
+#[cfg(test)]
 mod handler_tests;
 
 pub const SLACK_EVENTS_PATH: &str = "/webhooks/slack/events";
