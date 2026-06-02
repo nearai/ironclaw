@@ -3,8 +3,8 @@ use std::fmt;
 use ironclaw_auth::{AuthFlowId, AuthProductError, OAuthClientId, OAuthRedirectUri, ProviderScope};
 use ironclaw_common::hashing::sha256_hex;
 use ironclaw_host_api::SecretHandle;
-use secrecy::SecretString;
-use serde::{Deserialize, Serialize};
+use secrecy::{ExposeSecret, SecretString};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::oauth_provider_client::{HostOAuthProviderSpec, OAuthClientMaterial};
 
@@ -13,7 +13,7 @@ pub(super) struct ProtectedResourceMetadata {
     pub(super) authorization_servers: Vec<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub(super) struct AuthorizationServerMetadata {
     pub(super) authorization_endpoint: String,
     pub(super) token_endpoint: String,
@@ -33,14 +33,20 @@ pub(super) struct DcrRegistrationRequest<'a> {
 pub(super) struct DcrRegistrationResponse {
     pub(super) client_id: String,
     #[serde(default)]
-    pub(super) client_secret: Option<SecretString>,
+    pub(super) registration_client_uri: Option<String>,
+    #[serde(default)]
+    pub(super) registration_access_token: Option<SecretString>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
 pub(super) struct StoredDcrClientMaterial {
     pub(super) client_id: String,
-    #[serde(default)]
-    pub(super) client_secret: Option<String>,
+    #[serde(
+        default,
+        serialize_with = "serialize_optional_secret",
+        deserialize_with = "deserialize_optional_secret"
+    )]
+    pub(super) client_secret: Option<SecretString>,
     pub(super) redirect_uri: String,
     pub(super) token_endpoint: String,
 }
@@ -64,7 +70,7 @@ impl StoredDcrClientMaterial {
     pub(super) fn into_client_material(self) -> Result<OAuthClientMaterial, AuthProductError> {
         Ok(OAuthClientMaterial {
             client_id: OAuthClientId::new(self.client_id)?,
-            client_secret: self.client_secret.map(SecretString::from),
+            client_secret: self.client_secret,
             redirect_uri: OAuthRedirectUri::new(self.redirect_uri)?,
             token_endpoint: self.token_endpoint,
         })
@@ -104,6 +110,37 @@ pub(super) fn authorization_server_metadata_url_from_issuer(
     metadata.set_query(None);
     metadata.set_fragment(None);
     Ok(metadata.to_string())
+}
+
+pub(super) fn validate_issuer_related_to_resource(
+    resource: &str,
+    issuer: &str,
+) -> Result<(), AuthProductError> {
+    let resource = url::Url::parse(resource).map_err(|_| AuthProductError::BackendUnavailable)?;
+    let issuer = url::Url::parse(issuer).map_err(|_| AuthProductError::BackendUnavailable)?;
+    let Some(resource_domain) = registrable_domain(&resource) else {
+        return Err(AuthProductError::BackendUnavailable);
+    };
+    let Some(issuer_domain) = registrable_domain(&issuer) else {
+        return Err(AuthProductError::BackendUnavailable);
+    };
+    if resource_domain != issuer_domain {
+        return Err(AuthProductError::BackendUnavailable);
+    }
+    Ok(())
+}
+
+pub(super) fn validate_endpoint_origin(
+    endpoint: &str,
+    expected_origin_url: &str,
+) -> Result<(), AuthProductError> {
+    let endpoint = url::Url::parse(endpoint).map_err(|_| AuthProductError::BackendUnavailable)?;
+    let expected =
+        url::Url::parse(expected_origin_url).map_err(|_| AuthProductError::BackendUnavailable)?;
+    if endpoint.origin() != expected.origin() {
+        return Err(AuthProductError::BackendUnavailable);
+    }
+    Ok(())
 }
 
 pub(super) fn callback_base_url(
@@ -162,6 +199,35 @@ pub(super) fn scope_text(scopes: &[ProviderScope]) -> String {
         .join(" ")
 }
 
+fn registrable_domain(url: &url::Url) -> Option<String> {
+    let host = url.host_str()?.trim_end_matches('.');
+    let labels = host.split('.').collect::<Vec<_>>();
+    if labels.len() < 2 {
+        return None;
+    }
+    Some(labels[labels.len() - 2..].join("."))
+}
+
+fn serialize_optional_secret<S>(
+    secret: &Option<SecretString>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    secret
+        .as_ref()
+        .map(|secret| secret.expose_secret())
+        .serialize(serializer)
+}
+
+fn deserialize_optional_secret<'de, D>(deserializer: D) -> Result<Option<SecretString>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer).map(|secret| secret.map(SecretString::from))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -178,7 +244,7 @@ mod tests {
     fn stored_dcr_client_material_debug_redacts_client_secret() {
         let material = StoredDcrClientMaterial {
             client_id: "client".to_string(),
-            client_secret: Some("super-secret".to_string()),
+            client_secret: Some(SecretString::from("super-secret".to_string())),
             redirect_uri: "https://app.example/callback".to_string(),
             token_endpoint: "https://issuer.example/token".to_string(),
         };
@@ -187,5 +253,39 @@ mod tests {
 
         assert!(debug.contains("[REDACTED]"));
         assert!(!debug.contains("super-secret"));
+    }
+
+    #[test]
+    fn authorization_server_issuer_must_match_resource_registrable_domain() {
+        validate_issuer_related_to_resource(
+            "https://mcp.notion.com/mcp",
+            "https://oauth.notion.com",
+        )
+        .unwrap();
+
+        assert!(matches!(
+            validate_issuer_related_to_resource(
+                "https://mcp.notion.com/mcp",
+                "https://attacker.example"
+            ),
+            Err(AuthProductError::BackendUnavailable)
+        ));
+    }
+
+    #[test]
+    fn registration_endpoint_must_share_authorization_server_origin() {
+        validate_endpoint_origin(
+            "https://oauth.notion.com/register",
+            "https://oauth.notion.com/.well-known/oauth-authorization-server",
+        )
+        .unwrap();
+
+        assert!(matches!(
+            validate_endpoint_origin(
+                "https://attacker.example/register",
+                "https://oauth.notion.com/.well-known/oauth-authorization-server",
+            ),
+            Err(AuthProductError::BackendUnavailable)
+        ));
     }
 }

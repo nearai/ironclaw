@@ -162,15 +162,21 @@ pub(super) async fn oauth_callback_handler(
             .as_str(),
     )?;
 
-    if is_authorized_callback_candidate(&query) {
-        run_with_backend_timeout(
-            state
-                .product_auth
-                .ensure_oauth_callback_flow_known(&scope, flow_id),
+    let flow_provider = if is_authorized_callback_candidate(&query) {
+        Some(
+            run_with_backend_timeout(
+                state
+                    .product_auth
+                    .ensure_oauth_callback_flow_known(&scope, flow_id),
+            )
+            .await?,
         )
-        .await?;
-    }
-    let outcome = callback_outcome_from_query(&state, flow_id, &scope, &query).await?;
+    } else {
+        None
+    };
+    let outcome =
+        callback_outcome_from_query(&state, flow_id, &scope, flow_provider.as_ref(), &query)
+            .await?;
 
     let response = match run_with_backend_timeout(state.product_auth.handle_oauth_callback(
         RebornOAuthCallbackRequest {
@@ -316,6 +322,7 @@ pub(super) async fn callback_outcome_from_query(
     state: &ProductAuthRouteState,
     flow_id: AuthFlowId,
     scope: &AuthProductScope,
+    flow_provider: Option<&AuthProviderId>,
     query: &OAuthCallbackQuery,
 ) -> Result<RebornOAuthCallbackOutcome, ProductAuthRouteFailure> {
     if query
@@ -329,6 +336,9 @@ pub(super) async fn callback_outcome_from_query(
     let provider = required_callback_value(query.provider.as_deref())?;
     let provider = AuthProviderId::new(provider.to_string())
         .map_err(|_| ProductAuthRouteFailure::malformed_callback())?;
+    if flow_provider.is_some_and(|known_provider| known_provider != &provider) {
+        return Err(ProductAuthRouteFailure::malformed_callback());
+    }
     let account_label = required_callback_value(query.account_label.as_deref())?;
     let code = query
         .code
@@ -338,7 +348,7 @@ pub(super) async fn callback_outcome_from_query(
         Ok(verifier) => verifier,
         Err(cache_error) => state
             .product_auth
-            .oauth_pkce_verifier_for_flow(scope, &provider, flow_id)
+            .oauth_pkce_verifier_for_flow(scope, flow_provider.unwrap_or(&provider), flow_id)
             .await?
             .ok_or(cache_error)?,
     };

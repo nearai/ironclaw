@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use chrono::{Duration as ChronoDuration, Utc};
@@ -22,12 +23,14 @@ use ironclaw_secrets::{SecretMaterial, SecretStore};
 use ironclaw_turns::{TurnRunId, TurnScope};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
+use tokio::sync::{Mutex as AsyncMutex, RwLock};
 
 use crate::oauth_dcr_protocol::{
     AuthorizationServerMetadata, DcrRegistrationRequest, DcrRegistrationResponse,
     ProtectedResourceMetadata, StoredDcrClientMaterial, authorization_server_metadata_url,
     authorization_server_metadata_url_from_issuer, callback_base_url, flow_secret_handle,
     protected_resource_metadata_url, refresh_secret_handle, scope_text, validate_callback_origin,
+    validate_endpoint_origin, validate_issuer_related_to_resource,
 };
 use crate::oauth_provider_client::{
     HostOAuthProviderSpec, OAuthClientMaterial, OAuthClientMaterialSource, authorize_oauth_egress,
@@ -59,6 +62,8 @@ pub(crate) struct OAuthDcrProvider {
     secret_store: Arc<dyn SecretStore>,
     obligation_handler: Arc<dyn CapabilityObligationHandler>,
     capability_id: CapabilityId,
+    metadata_cache: Arc<RwLock<Option<CachedAuthorizationServerMetadata>>>,
+    setup_lock: Arc<AsyncMutex<()>>,
 }
 
 impl OAuthDcrProvider {
@@ -81,6 +86,8 @@ impl OAuthDcrProvider {
             secret_store,
             obligation_handler,
             capability_id,
+            metadata_cache: Arc::new(RwLock::new(None)),
+            setup_lock: Arc::new(AsyncMutex::new(())),
         })
     }
 
@@ -115,6 +122,11 @@ impl OAuthDcrProvider {
             return challenge_view_from_flow(&existing);
         }
 
+        let _setup_guard = self.setup_lock.lock().await;
+        if let Some(existing) = flow_source.flow_for_turn_gate(query.clone()).await? {
+            return challenge_view_from_flow(&existing);
+        }
+
         let flow_id = AuthFlowId::new();
         let material = self
             .prepare_flow_material(&auth_scope, flow_id, &turn_run_ref, gate_ref)
@@ -122,7 +134,7 @@ impl OAuthDcrProvider {
         let expires_at = Utc::now() + ChronoDuration::seconds(DCR_FLOW_TTL_SECONDS);
         let request = NewAuthFlow {
             id: Some(flow_id),
-            scope: auth_scope,
+            scope: auth_scope.clone(),
             kind: AuthFlowKind::IntegrationCredential,
             provider: AuthProviderId::new(self.spec.provider_id)?,
             challenge: AuthChallenge::OAuthUrl {
@@ -140,14 +152,18 @@ impl OAuthDcrProvider {
         };
         let flow = match flow_manager.create_flow(request).await {
             Ok(flow) => flow,
-            Err(AuthProductError::BackendConflict) => flow_source
-                .flow_for_turn_gate(query)
-                .await?
-                .ok_or(AuthProductError::BackendConflict)?,
+            Err(AuthProductError::BackendConflict) => {
+                self.cleanup_registered_client(&auth_scope.resource, &material.registration)
+                    .await;
+                flow_source
+                    .flow_for_turn_gate(query)
+                    .await?
+                    .ok_or(AuthProductError::BackendConflict)?
+            }
             Err(error) => return Err(error),
         };
-        if flow.id == flow_id {
-            if let Err(error) = self
+        if flow.id == flow_id
+            && let Err(error) = self
                 .store_flow_material(
                     &flow.scope,
                     flow_id,
@@ -155,12 +171,32 @@ impl OAuthDcrProvider {
                     &material.client_material,
                 )
                 .await
+        {
+            if self
+                .cleanup_flow_material(&flow.scope.resource, flow_id)
+                .await
+                .is_err()
             {
-                self.cleanup_flow_material(&flow.scope.resource, flow_id)
-                    .await?;
-                let _ = flow_manager.cancel_flow(&flow.scope, flow_id).await;
-                return Err(error);
+                tracing::warn!(
+                    provider = self.spec.provider_id,
+                    flow_id = %flow_id,
+                    cleanup_kind = "flow_material",
+                    "failed to clean up DCR flow material after storage failure"
+                );
             }
+            if flow_manager
+                .cancel_flow(&flow.scope, flow_id)
+                .await
+                .is_err()
+            {
+                tracing::warn!(
+                    provider = self.spec.provider_id,
+                    flow_id = %flow_id,
+                    cleanup_kind = "cancel_flow",
+                    "failed to cancel DCR flow after storage failure"
+                );
+            }
+            return Err(error);
         }
         challenge_view_from_flow(&flow)
     }
@@ -200,7 +236,7 @@ impl OAuthDcrProvider {
                 &redirect_uri,
             )
             .await?;
-        let client_id = OAuthClientId::new(registration.client_id)?;
+        let client_id = OAuthClientId::new(registration.client_id.clone())?;
         let authorization_endpoint =
             OAuthAuthorizationEndpoint::new(metadata.authorization_endpoint.clone())?;
         let state_value = OAuthState::new(state.clone())?;
@@ -220,9 +256,7 @@ impl OAuthDcrProvider {
         })?;
         let client_material = StoredDcrClientMaterial {
             client_id: client_id.as_str().to_string(),
-            client_secret: registration
-                .client_secret
-                .map(|secret| secret.expose_secret().to_string()),
+            client_secret: None,
             redirect_uri: redirect_uri.as_str().to_string(),
             token_endpoint: metadata.token_endpoint,
         };
@@ -239,6 +273,7 @@ impl OAuthDcrProvider {
             pkce_verifier_hash: pkce_verifier_hash(&pkce_secret)?,
             pkce_verifier,
             client_material,
+            registration,
         })
     }
 
@@ -246,6 +281,11 @@ impl OAuthDcrProvider {
         &self,
         scope: &ResourceScope,
     ) -> Result<AuthorizationServerMetadata, AuthProductError> {
+        if let Some(cached) = self.metadata_cache.read().await.as_ref()
+            && cached.expires_at > Instant::now()
+        {
+            return Ok(cached.metadata.clone());
+        }
         let Some(resource) = self.spec.resource else {
             return Err(AuthProductError::BackendUnavailable);
         };
@@ -256,14 +296,23 @@ impl OAuthDcrProvider {
             DCR_RESPONSE_BODY_LIMIT,
         );
         let authorization_server_metadata = match resource_metadata.await {
-            Ok(metadata) => metadata
-                .authorization_servers
-                .into_iter()
-                .next()
-                .map(|issuer| authorization_server_metadata_url_from_issuer(&issuer))
-                .transpose()?
-                .ok_or(AuthProductError::BackendUnavailable)?,
-            Err(_) => authorization_server_metadata_url(resource)?,
+            Ok(metadata) => {
+                let issuer = metadata
+                    .authorization_servers
+                    .into_iter()
+                    .next()
+                    .ok_or(AuthProductError::BackendUnavailable)?;
+                validate_issuer_related_to_resource(resource, &issuer)?;
+                authorization_server_metadata_url_from_issuer(&issuer)?
+            }
+            Err(error) => {
+                tracing::debug!(
+                    provider = self.spec.provider_id,
+                    reason = ?error.code(),
+                    "DCR protected-resource metadata unavailable; falling back to issuer well-known URL"
+                );
+                authorization_server_metadata_url(resource)?
+            }
         };
         let metadata = self
             .get_json::<AuthorizationServerMetadata>(
@@ -275,6 +324,19 @@ impl OAuthDcrProvider {
         if metadata.registration_endpoint.trim().is_empty() {
             return Err(AuthProductError::BackendUnavailable);
         }
+        validate_endpoint_origin(
+            &metadata.authorization_endpoint,
+            &authorization_server_metadata,
+        )?;
+        validate_endpoint_origin(&metadata.token_endpoint, &authorization_server_metadata)?;
+        validate_endpoint_origin(
+            &metadata.registration_endpoint,
+            &authorization_server_metadata,
+        )?;
+        *self.metadata_cache.write().await = Some(CachedAuthorizationServerMetadata {
+            metadata: metadata.clone(),
+            expires_at: Instant::now() + Duration::from_secs(DCR_FLOW_TTL_SECONDS as u64),
+        });
         Ok(metadata)
     }
 
@@ -369,10 +431,47 @@ impl OAuthDcrProvider {
             flow_secret_handle(&self.spec, flow_id, "pkce")?,
             flow_secret_handle(&self.spec, flow_id, "client")?,
         ];
+        let mut first_error = None;
         for handle in handles {
-            let _ = self.secret_store.delete(scope, &handle).await;
+            if let Err(error) = self.secret_store.delete(scope, &handle).await
+                && first_error.is_none()
+            {
+                first_error = Some(error);
+            }
         }
-        Ok(())
+        first_error.map_or(Ok(()), |_| Err(AuthProductError::BackendUnavailable))
+    }
+
+    async fn cleanup_registered_client(
+        &self,
+        scope: &ResourceScope,
+        registration: &DcrRegistrationResponse,
+    ) {
+        let Some(registration_client_uri) = registration.registration_client_uri.as_deref() else {
+            return;
+        };
+        let Some(registration_access_token) = registration.registration_access_token.as_ref()
+        else {
+            return;
+        };
+        if self
+            .execute_json_request::<serde_json::Value>(
+                scope.clone(),
+                NetworkMethod::Delete,
+                registration_client_uri,
+                Vec::new(),
+                DCR_RESPONSE_BODY_LIMIT,
+                Some(registration_access_token),
+            )
+            .await
+            .is_err()
+        {
+            tracing::warn!(
+                provider = self.spec.provider_id,
+                cleanup_kind = "dcr_registration",
+                "failed to deregister orphaned DCR client after flow conflict"
+            );
+        }
     }
 
     fn callback_redirect_uri(
@@ -427,6 +526,7 @@ impl OAuthDcrProvider {
             url,
             Vec::new(),
             response_body_limit,
+            None,
         )
         .await
     }
@@ -443,8 +543,15 @@ impl OAuthDcrProvider {
         B: Serialize,
     {
         let body = serde_json::to_vec(body).map_err(|_| AuthProductError::BackendUnavailable)?;
-        self.execute_json_request(scope, NetworkMethod::Post, url, body, response_body_limit)
-            .await
+        self.execute_json_request(
+            scope,
+            NetworkMethod::Post,
+            url,
+            body,
+            response_body_limit,
+            None,
+        )
+        .await
     }
 
     async fn execute_json_request<T>(
@@ -454,6 +561,7 @@ impl OAuthDcrProvider {
         url: &str,
         body: Vec<u8>,
         response_body_limit: u64,
+        bearer_token: Option<&SecretString>,
     ) -> Result<T, AuthProductError>
     where
         T: for<'de> Deserialize<'de>,
@@ -467,6 +575,16 @@ impl OAuthDcrProvider {
             &policy,
         )
         .await?;
+        let mut headers = vec![
+            ("accept".to_string(), "application/json".to_string()),
+            ("content-type".to_string(), "application/json".to_string()),
+        ];
+        if let Some(token) = bearer_token {
+            headers.push((
+                "authorization".to_string(),
+                format!("Bearer {}", token.expose_secret()),
+            ));
+        }
         let response = self
             .egress
             .execute(RuntimeHttpEgressRequest {
@@ -475,10 +593,7 @@ impl OAuthDcrProvider {
                 capability_id: self.capability_id.clone(),
                 method,
                 url: url.to_string(),
-                headers: vec![
-                    ("accept".to_string(), "application/json".to_string()),
-                    ("content-type".to_string(), "application/json".to_string()),
-                ],
+                headers,
                 body,
                 network_policy: policy,
                 credential_injections: Vec::new(),
@@ -618,14 +733,17 @@ impl OAuthDcrProviderRegistry {
 
     pub(crate) async fn challenge_for_blocked_gate(
         &self,
-        flow_manager: &Arc<dyn AuthFlowManager>,
-        flow_source: &Arc<dyn AuthFlowRecordSource>,
-        requirements: &[RuntimeCredentialAuthRequirement],
-        scope: &TurnScope,
-        owner_user_id: &ironclaw_host_api::UserId,
-        run_id: TurnRunId,
-        gate_ref: &AuthGateRef,
+        request: DcrGateChallengeRequest<'_>,
     ) -> Result<Option<AuthChallengeView>, AuthProductError> {
+        let DcrGateChallengeRequest {
+            flow_manager,
+            flow_source,
+            requirements,
+            scope,
+            owner_user_id,
+            run_id,
+            gate_ref,
+        } = request;
         let [requirement] = requirements else {
             return Ok(None);
         };
@@ -679,6 +797,23 @@ struct PreparedDcrFlow {
     pkce_verifier_hash: ironclaw_auth::PkceVerifierHash,
     pkce_verifier: SecretString,
     client_material: StoredDcrClientMaterial,
+    registration: DcrRegistrationResponse,
+}
+
+#[derive(Debug, Clone)]
+struct CachedAuthorizationServerMetadata {
+    metadata: AuthorizationServerMetadata,
+    expires_at: Instant,
+}
+
+pub(crate) struct DcrGateChallengeRequest<'a> {
+    pub(crate) flow_manager: &'a Arc<dyn AuthFlowManager>,
+    pub(crate) flow_source: &'a Arc<dyn AuthFlowRecordSource>,
+    pub(crate) requirements: &'a [RuntimeCredentialAuthRequirement],
+    pub(crate) scope: &'a TurnScope,
+    pub(crate) owner_user_id: &'a ironclaw_host_api::UserId,
+    pub(crate) run_id: TurnRunId,
+    pub(crate) gate_ref: &'a AuthGateRef,
 }
 
 fn auth_scope_for_blocked_turn(
@@ -869,12 +1004,12 @@ mod tests {
         > {
             let body = match request.url.as_str() {
                 "https://mcp.notion.com/mcp/.well-known/oauth-protected-resource" => {
-                    br#"{"authorization_servers":["https://issuer.example"]}"#.to_vec()
+                    br#"{"authorization_servers":["https://oauth.notion.com"]}"#.to_vec()
                 }
-                "https://issuer.example/.well-known/oauth-authorization-server" => {
-                    br#"{"authorization_endpoint":"https://issuer.example/authorize","token_endpoint":"https://issuer.example/token","registration_endpoint":"https://issuer.example/register"}"#.to_vec()
+                "https://oauth.notion.com/.well-known/oauth-authorization-server" => {
+                    br#"{"authorization_endpoint":"https://oauth.notion.com/authorize","token_endpoint":"https://oauth.notion.com/token","registration_endpoint":"https://oauth.notion.com/register"}"#.to_vec()
                 }
-                "https://issuer.example/register" => br#"{"client_id":"dcr-client"}"#.to_vec(),
+                "https://oauth.notion.com/register" => br#"{"client_id":"dcr-client"}"#.to_vec(),
                 other => panic!("unexpected DCR egress URL: {other}"),
             };
             Ok(ironclaw_host_api::RuntimeHttpEgressResponse {

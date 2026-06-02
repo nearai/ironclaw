@@ -28,7 +28,7 @@ use ironclaw_host_api::UserId;
 use ironclaw_turns::{TurnRunId, TurnScope};
 
 use crate::manual_token_flow::{PortBackedManualTokenFlowService, RebornManualTokenFlowService};
-use crate::oauth_dcr::OAuthDcrProviderRegistry;
+use crate::oauth_dcr::{DcrGateChallengeRequest, OAuthDcrProviderRegistry};
 use crate::product_auth_runtime_credentials::{
     ProductAuthRuntimeCredentialAccountSelector, RuntimeCredentialAccountSelectionService,
 };
@@ -663,8 +663,6 @@ impl RebornProductAuthServices {
         self
     }
 
-    /// Enable WebUI/local-dev auth interaction read models from a scoped
-    /// auth-flow projection source.
     /// Enable WebUI/local-dev auth-flow projection source.
     ///
     /// Exported `pub` so integration-test harnesses outside the crate can
@@ -904,7 +902,7 @@ impl RebornProductAuthServices {
         &self,
         scope: &AuthProductScope,
         flow_id: AuthFlowId,
-    ) -> Result<(), RebornOAuthCallbackError> {
+    ) -> Result<AuthProviderId, RebornOAuthCallbackError> {
         let Some(record) = self
             .flow_manager
             .get_flow(scope, flow_id)
@@ -916,7 +914,7 @@ impl RebornProductAuthServices {
         if record.expires_at <= Utc::now() {
             return Err(AuthProductError::UnknownOrExpiredFlow.into());
         }
-        Ok(())
+        Ok(record.provider)
     }
 
     #[allow(
@@ -1209,15 +1207,15 @@ impl AuthChallengeProvider for RebornProductAuthServices {
         };
         if let Some(registry) = &self.dcr_oauth_registry
             && let Some(view) = registry
-                .challenge_for_blocked_gate(
-                    &self.flow_manager,
-                    source,
-                    credential_requirements,
+                .challenge_for_blocked_gate(DcrGateChallengeRequest {
+                    flow_manager: &self.flow_manager,
+                    flow_source: source,
+                    requirements: credential_requirements,
                     scope,
                     owner_user_id,
                     run_id,
-                    &gate_ref,
-                )
+                    gate_ref: &gate_ref,
+                })
                 .await?
         {
             return Ok(Some(view));

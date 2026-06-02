@@ -307,6 +307,31 @@ async fn local_dev_notion_oauth_backend_builds_with_host_provider_config() {
 }
 
 #[tokio::test]
+async fn local_dev_notion_dcr_oauth_backend_builds_and_wires_registry() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let services = build_reborn_services(
+        RebornBuildInput::local_dev(
+            "local-dev-notion-dcr-oauth-owner",
+            dir.path().join("local-dev"),
+        )
+        .with_notion_dcr_oauth_backend("http://127.0.0.1:3000", "Ironclaw")
+        .expect("notion dcr config"),
+    )
+    .await
+    .expect("local-dev services build");
+
+    assert!(services.product_auth.is_some());
+    assert!(
+        services
+            .product_auth
+            .as_ref()
+            .and_then(|product_auth| product_auth.as_auth_challenge_provider())
+            .is_some(),
+        "DCR-backed product auth must expose the challenge provider projection path"
+    );
+}
+
+#[tokio::test]
 async fn oauth_callback_exchanges_notion_through_reborn_product_auth_boundary() {
     let egress = Arc::new(RecordingOAuthEgress::ok(
         br#"{"access_token":"notion-access","refresh_token":"notion-refresh","expires_in":3600,"token_type":"Bearer"}"#.to_vec(),

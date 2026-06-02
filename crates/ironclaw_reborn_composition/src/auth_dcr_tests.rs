@@ -69,6 +69,62 @@ async fn dcr_challenge_errors_propagate_through_product_auth_provider() {
     );
 }
 
+#[tokio::test]
+async fn dcr_registry_returns_none_for_zero_and_multiple_requirements() {
+    let shared = Arc::new(InMemoryAuthProductServices::new());
+    let dcr_provider = Arc::new(
+        OAuthDcrProvider::new(
+            OAuthDcrProviderConfig {
+                spec: crate::notion_oauth::notion_provider_spec(),
+                callback_origin: "http://127.0.0.1:3000".to_string(),
+                client_name: "Ironclaw".to_string(),
+                account_label: CredentialAccountLabel::new("notion").unwrap(),
+                scopes: Vec::new(),
+            },
+            Arc::new(PanickingDcrEgress),
+            Arc::new(InMemorySecretStore::new()),
+            Arc::new(NoopObligationHandler),
+        )
+        .unwrap(),
+    );
+    let product_auth = Arc::new(
+        RebornProductAuthServices::from_shared(shared.clone(), Arc::new(NoopAuthDispatcher))
+            .with_flow_record_source(shared)
+            .with_dcr_oauth_registry(Arc::new(OAuthDcrProviderRegistry::new(vec![dcr_provider]))),
+    );
+    let provider = product_auth
+        .as_auth_challenge_provider()
+        .expect("challenge provider");
+    let scope = TurnScope::new(
+        TenantId::new("tenant").unwrap(),
+        Some(AgentId::new("agent").unwrap()),
+        Some(ProjectId::new("project").unwrap()),
+        ThreadId::new("thread").unwrap(),
+    );
+    let owner = UserId::new("user").unwrap();
+    let run_id = TurnRunId::new();
+    let gate_ref = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+    let notion = RuntimeCredentialAuthRequirement {
+        provider: RuntimeCredentialAccountProviderId::new("notion".to_string()).unwrap(),
+        requester_extension: ExtensionId::new("notion-mcp".to_string()).unwrap(),
+    };
+
+    assert!(
+        provider
+            .challenge_for_gate(&scope, &owner, run_id, gate_ref, &[])
+            .await
+            .expect("zero requirement lookup")
+            .is_none()
+    );
+    assert!(
+        provider
+            .challenge_for_gate(&scope, &owner, run_id, gate_ref, &[notion.clone(), notion])
+            .await
+            .expect("multiple requirement lookup")
+            .is_none()
+    );
+}
+
 #[derive(Debug)]
 struct NoopAuthDispatcher;
 
@@ -100,6 +156,19 @@ impl RuntimeHttpEgress for FailingDcrEgress {
             saved_body: None,
             redaction_applied: false,
         })
+    }
+}
+
+#[derive(Debug)]
+struct PanickingDcrEgress;
+
+#[async_trait]
+impl RuntimeHttpEgress for PanickingDcrEgress {
+    async fn execute(
+        &self,
+        _request: RuntimeHttpEgressRequest,
+    ) -> Result<RuntimeHttpEgressResponse, ironclaw_host_api::RuntimeHttpEgressError> {
+        panic!("DCR egress should not run when registry ignores zero or multiple requirements")
     }
 }
 
