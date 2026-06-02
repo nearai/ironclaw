@@ -41,6 +41,7 @@ pub(crate) const DEFAULT_RUNTIME_SECRET_INJECTION_TTL: Duration = Duration::from
 pub struct RuntimeCredentialAccountRequest<'a> {
     pub scope: &'a ResourceScope,
     pub provider: &'a RuntimeCredentialAccountProviderId,
+    pub provider_scopes: &'a [String],
     pub requester_extension: &'a ExtensionId,
 }
 
@@ -1274,6 +1275,7 @@ impl BuiltinObligationHandler {
                 .resolve_access_secret(RuntimeCredentialAccountRequest {
                     scope: &request.context.resource_scope,
                     provider: obligation.provider,
+                    provider_scopes: obligation.provider_scopes,
                     requester_extension: obligation.requester_extension,
                 })
                 .await
@@ -1705,6 +1707,7 @@ fn secret_injection_handles(obligations: &[Obligation]) -> Vec<SecretHandle> {
 struct CredentialAccountInjectionObligation<'a> {
     handle: &'a SecretHandle,
     provider: &'a RuntimeCredentialAccountProviderId,
+    provider_scopes: &'a [String],
     requester_extension: &'a ExtensionId,
 }
 
@@ -1717,10 +1720,12 @@ fn credential_account_injection_obligations(
             Obligation::InjectCredentialAccountOnce {
                 handle,
                 provider,
+                provider_scopes,
                 requester_extension,
             } => Some(CredentialAccountInjectionObligation {
                 handle,
                 provider,
+                provider_scopes,
                 requester_extension,
             }),
             _ => None,
@@ -1756,6 +1761,7 @@ fn credential_stage_error_to_obligation_error(
                     vec![RuntimeCredentialAuthRequirement {
                         provider: obligation.provider.clone(),
                         requester_extension: obligation.requester_extension.clone(),
+                        provider_scopes: obligation.provider_scopes.to_vec(),
                     }]
                 })
                 .unwrap_or_default(),

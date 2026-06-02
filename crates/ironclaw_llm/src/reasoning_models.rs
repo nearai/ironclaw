@@ -80,6 +80,53 @@ pub fn supports_openai_reasoning(model: &str) -> bool {
     OPENAI_REASONING_PATTERNS.iter().any(|p| lower.contains(p))
 }
 
+/// Anthropic models that use the `adaptive` thinking mode (4.6+/4.7+).
+///
+/// These models accept `{type: "adaptive"}` and do not require a
+/// fixed `budget_tokens` cap.
+const ANTHROPIC_ADAPTIVE_THINKING_PATTERNS: &[&str] =
+    &["claude-opus-4-6", "claude-sonnet-4-6", "claude-opus-4-7"];
+
+/// Returns `true` if *model* qualifies for Anthropic's adaptive thinking mode.
+pub fn supports_anthropic_adaptive_thinking(model: &str) -> bool {
+    let lower = model.to_ascii_lowercase();
+    ANTHROPIC_ADAPTIVE_THINKING_PATTERNS
+        .iter()
+        .any(|p| lower.contains(p))
+}
+
+/// Anthropic models that use the `enabled` thinking mode (3.7, 4.0–4.4 families).
+///
+/// These models accept `{type: "enabled", budget_tokens: N}`.
+/// NOTE: does **not** include 4.5+ models — those require adaptive thinking.
+const ANTHROPIC_ENABLED_THINKING_PATTERNS: &[&str] = &[
+    "claude-3-7",
+    // 4.0–4.4 family: match specific version prefix to avoid leaking into 4.5+
+    "claude-4-0",
+    "claude-4-1",
+    "claude-4-2",
+    "claude-4-3",
+    "claude-4-4",
+    "claude-sonnet-4-0",
+    "claude-sonnet-4-1",
+    "claude-sonnet-4-2",
+    "claude-sonnet-4-3",
+    "claude-sonnet-4-4",
+    "claude-opus-4-0",
+    "claude-opus-4-1",
+    "claude-opus-4-2",
+    "claude-opus-4-3",
+    "claude-opus-4-4",
+];
+
+/// Returns `true` if *model* qualifies for Anthropic's enabled thinking mode.
+pub fn supports_anthropic_enabled_thinking(model: &str) -> bool {
+    let lower = model.to_ascii_lowercase();
+    ANTHROPIC_ENABLED_THINKING_PATTERNS
+        .iter()
+        .any(|p| lower.contains(p))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

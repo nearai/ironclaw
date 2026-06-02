@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_auth::{
     AuthProductScope, AuthProviderId, CredentialAccountId, CredentialAccountProjection,
-    CredentialAccountUpdateBinding,
+    CredentialAccountUpdateBinding, ProviderScope,
 };
 use ironclaw_host_api::{AgentId, ExtensionId, ThreadId};
 use ironclaw_product_adapters::{
@@ -76,6 +76,7 @@ type SkillActivationClearer =
 pub struct ExtensionCredentialStatusRequest {
     pub scope: AuthProductScope,
     pub provider: AuthProviderId,
+    pub provider_scopes: Vec<ProviderScope>,
     pub requester_extension: ExtensionId,
 }
 

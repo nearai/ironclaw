@@ -79,6 +79,8 @@ pub struct RuntimeCredentialRequirement {
     pub handle: SecretHandle,
     #[serde(default)]
     pub source: RuntimeCredentialRequirementSource,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub provider_scopes: Vec<String>,
     pub audience: NetworkTargetPattern,
     pub target: RuntimeCredentialTarget,
     pub required: bool,

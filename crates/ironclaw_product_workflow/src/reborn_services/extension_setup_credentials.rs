@@ -1,6 +1,8 @@
 use std::collections::{BTreeMap, HashMap};
 
-use ironclaw_auth::{AuthProductScope, AuthProviderId, CredentialAccountUpdateBinding};
+use ironclaw_auth::{
+    AuthProductScope, AuthProviderId, CredentialAccountUpdateBinding, ProviderScope,
+};
 use ironclaw_host_api::ExtensionId;
 use secrecy::SecretString;
 use serde::Deserialize;
@@ -48,12 +50,14 @@ pub(super) async fn project(
     for requirement in requirements {
         let provider = AuthProviderId::new(requirement.provider.as_str())
             .map_err(|_| RebornServicesError::internal_invariant())?;
+        let provider_scopes = provider_scopes_for_requirement(requirement)?;
         let account = match extension_credentials {
             Some(service) => {
                 service
                     .credential_status(ExtensionCredentialStatusRequest {
                         scope: scope.clone(),
                         provider,
+                        provider_scopes,
                         requester_extension: extension_id.clone(),
                     })
                     .await?
@@ -137,10 +141,12 @@ async fn submit_manual_token_requirement(
 ) -> Result<(), RebornServicesError> {
     let provider = AuthProviderId::new(requirement.provider.as_str())
         .map_err(|_| RebornServicesError::internal_invariant())?;
+    let provider_scopes = provider_scopes_for_requirement(requirement)?;
     let existing = service
         .credential_status(ExtensionCredentialStatusRequest {
             scope: scope.clone(),
             provider: provider.clone(),
+            provider_scopes,
             requester_extension: extension_id.clone(),
         })
         .await?;
@@ -199,6 +205,20 @@ fn setup_projection(
 
 fn credential_prompt(requirement: &LifecycleExtensionCredentialRequirement) -> String {
     format!("{} credential", requirement.provider)
+}
+
+fn provider_scopes_for_requirement(
+    requirement: &LifecycleExtensionCredentialRequirement,
+) -> Result<Vec<ProviderScope>, RebornServicesError> {
+    let LifecycleExtensionCredentialSetup::OAuth { scopes } = &requirement.setup else {
+        return Ok(Vec::new());
+    };
+    scopes
+        .iter()
+        .map(|scope| {
+            ProviderScope::new(scope.clone()).map_err(|_| RebornServicesError::internal_invariant())
+        })
+        .collect()
 }
 
 fn credential_label(

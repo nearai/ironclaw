@@ -182,6 +182,7 @@ async fn capability_access_resolves_product_auth_account_runtime_credentials() {
                 provider: RuntimeCredentialAccountProviderId::new("github").unwrap(),
                 setup: Default::default(),
             },
+            provider_scopes: vec!["repo".to_string()],
             ..runtime_credential(slot.clone(), github_audience(), true)
         }],
         ..wasm_descriptor()
@@ -210,6 +211,7 @@ async fn capability_access_resolves_product_auth_account_runtime_credentials() {
         &[Obligation::InjectCredentialAccountOnce {
             handle: slot,
             provider: RuntimeCredentialAccountProviderId::new("github").unwrap(),
+            provider_scopes: vec!["repo".to_string()],
             requester_extension: ExtensionId::new("echo").unwrap(),
         }]
     );
@@ -259,6 +261,7 @@ fn runtime_credential(
     RuntimeCredentialRequirement {
         handle,
         source: Default::default(),
+        provider_scopes: Vec::new(),
         audience,
         target: RuntimeCredentialTarget::Header {
             name: "authorization".to_string(),

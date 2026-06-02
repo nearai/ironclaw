@@ -858,6 +858,7 @@ pub(super) async fn scoped_update_binding_for_requester(
     state: &ProductAuthRouteState,
     scope: AuthProductScope,
     provider: AuthProviderId,
+    provider_scopes: Vec<ProviderScope>,
     requester_extension: Option<&ExtensionId>,
 ) -> Result<Option<CredentialAccountUpdateBinding>, ProductAuthRouteFailure> {
     let Some(requester_extension) = requester_extension else {
@@ -870,6 +871,7 @@ pub(super) async fn scoped_update_binding_for_requester(
             CredentialAccountSelectionRequest::new(scope.clone(), provider)
                 .for_extension(requester_extension.clone()),
             scope,
+            provider_scopes,
         ))
         .await;
     match account {
