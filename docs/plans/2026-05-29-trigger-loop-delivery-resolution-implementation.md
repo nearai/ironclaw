@@ -643,6 +643,23 @@ Scope must be stamped from invocation context and rechecked on list/remove.
 Repository access must be injected through an explicit composition-owned seam;
 do not assume `InvocationServices` already carries a trigger repository.
 
+PR 17 follow-ups that must not be lost:
+
+- Per-scope trigger quotas are deferred from the first capability slice. Do not
+  implement them as a race-prone handler-only `list then create` check. The
+  next quota implementation should be repository/database-owned and atomic
+  across durable backends, with any host-runtime error mapping layered on top of
+  that contract.
+- Durable backend hydration should continue to reject malformed stored trigger
+  rows. The cron re-parse-on-read optimization is valid future performance work
+  only if it preserves that malformed-row behavior, for example by introducing
+  an explicit stored-schedule hydration constructor plus backend hydration
+  validation tests.
+- PostgreSQL NULL-scope planner tuning is deferred. The durable schemas include
+  the scoped-list composite index; add a NULL-specific partial index only after
+  `EXPLAIN` or production-like benchmark evidence shows Postgres is not using
+  the composite index for `agent_id/project_id IS NOT DISTINCT FROM NULL`.
+
 Expected size: less than 1000 lines.
 
 ### PR 18 — Trigger Worker Config and Lifecycle

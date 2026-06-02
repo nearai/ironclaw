@@ -1,7 +1,7 @@
 use std::{sync::Arc, time::Instant};
 
 use async_trait::async_trait;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use ironclaw_extensions::{CapabilityManifest, ExtensionError};
 use ironclaw_host_api::{
     CapabilityId, EffectKind, HostApiError, PermissionMode, ResourceScope, ResourceUsage,
@@ -61,7 +61,15 @@ pub(super) fn insert_handlers(
     registry: &mut FirstPartyCapabilityRegistry,
     repository: Arc<dyn TriggerRepository>,
 ) -> Result<(), HostApiError> {
-    let handler = Arc::new(TriggerManagementToolHandler { repository });
+    insert_handlers_with_clock(registry, repository, Arc::new(SystemTriggerManagementClock))
+}
+
+pub(super) fn insert_handlers_with_clock(
+    registry: &mut FirstPartyCapabilityRegistry,
+    repository: Arc<dyn TriggerRepository>,
+    clock: Arc<dyn TriggerManagementClock>,
+) -> Result<(), HostApiError> {
+    let handler = Arc::new(TriggerManagementToolHandler { repository, clock });
     registry.insert_handler(
         CapabilityId::new(TRIGGER_CREATE_CAPABILITY_ID)?,
         handler.clone(),
@@ -74,8 +82,23 @@ pub(super) fn insert_handlers(
     Ok(())
 }
 
+#[doc(hidden)]
+pub trait TriggerManagementClock: Send + Sync {
+    fn now(&self) -> DateTime<Utc>;
+}
+
+#[derive(Debug)]
+struct SystemTriggerManagementClock;
+
+impl TriggerManagementClock for SystemTriggerManagementClock {
+    fn now(&self) -> DateTime<Utc> {
+        Utc::now()
+    }
+}
+
 struct TriggerManagementToolHandler {
     repository: Arc<dyn TriggerRepository>,
+    clock: Arc<dyn TriggerManagementClock>,
 }
 
 #[async_trait]
@@ -88,7 +111,13 @@ impl FirstPartyCapabilityHandler for TriggerManagementToolHandler {
         let started = Instant::now();
         let output = match request.capability_id.as_str() {
             TRIGGER_CREATE_CAPABILITY_ID => {
-                create_trigger(&*self.repository, &request.scope, request.input).await?
+                create_trigger(
+                    &*self.repository,
+                    &request.scope,
+                    request.input,
+                    self.clock.now(),
+                )
+                .await?
             }
             TRIGGER_LIST_CAPABILITY_ID => {
                 list_triggers(&*self.repository, &request.scope, request.input).await?
@@ -131,14 +160,11 @@ async fn create_trigger(
     repository: &dyn TriggerRepository,
     scope: &ResourceScope,
     input: Value,
+    now: DateTime<Utc>,
 ) -> Result<Value, FirstPartyCapabilityError> {
     let input: TriggerCreateInput = serde_json::from_value(input).map_err(|_| input_error())?;
     let schedule = TriggerSchedule::cron(input.cron).map_err(trigger_input_error)?;
-    let now = Utc::now();
-    let next_run_at = schedule
-        .next_slot_after(now)
-        .map_err(trigger_input_error)?
-        .ok_or_else(input_error)?;
+    let next_run_at = next_run_at_for_schedule(&schedule, now)?;
     let record = TriggerRecord {
         trigger_id: TriggerId::new(),
         tenant_id: scope.tenant_id.clone(),
@@ -190,7 +216,7 @@ async fn list_triggers(
         .await
         .map_err(trigger_repository_error)?
         .into_iter()
-        .map(|record| trigger_list_output(&record))
+        .map(|record| trigger_output(&record))
         .collect::<Vec<_>>();
     Ok(json!({ "triggers": records }))
 }
@@ -229,7 +255,6 @@ fn trigger_output(record: &TriggerRecord) -> Value {
         "source": record.source,
         "schedule": record.schedule,
         "completion_policy": record.completion_policy,
-        "prompt": record.prompt,
         "state": record.state,
         "next_run_at": record.next_run_at,
         "last_run_at": record.last_run_at,
@@ -241,12 +266,14 @@ fn trigger_output(record: &TriggerRecord) -> Value {
     })
 }
 
-fn trigger_list_output(record: &TriggerRecord) -> Value {
-    let mut output = trigger_output(record);
-    if let Some(object) = output.as_object_mut() {
-        object.remove("prompt");
-    }
-    output
+fn next_run_at_for_schedule(
+    schedule: &TriggerSchedule,
+    now: DateTime<Utc>,
+) -> Result<DateTime<Utc>, FirstPartyCapabilityError> {
+    schedule
+        .next_slot_after(now)
+        .map_err(trigger_input_error)?
+        .ok_or_else(input_error)
 }
 
 fn trigger_input_error(_error: TriggerError) -> FirstPartyCapabilityError {
@@ -266,5 +293,33 @@ fn usage_with_elapsed(started: Instant, output_bytes: u64) -> ResourceUsage {
         wall_clock_ms: started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
         output_bytes,
         ..ResourceUsage::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::{Datelike, TimeZone};
+
+    use super::*;
+
+    #[test]
+    fn next_run_at_for_schedule_rejects_schedule_with_no_future_slot() {
+        let future_year = Utc::now().year() + 1;
+        let schedule = TriggerSchedule::cron(format!("0 0 8 * * * {future_year}"))
+            .expect("future finite schedule is valid");
+        let after_schedule_expires = Utc
+            .with_ymd_and_hms(future_year + 1, 1, 1, 0, 0, 0)
+            .unwrap();
+
+        let error = next_run_at_for_schedule(&schedule, after_schedule_expires)
+            .expect_err("exhausted schedule rejected");
+
+        assert!(matches!(
+            error,
+            FirstPartyCapabilityError::Dispatch {
+                kind: RuntimeDispatchErrorKind::InputEncode,
+                ..
+            }
+        ));
     }
 }

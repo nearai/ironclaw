@@ -57,6 +57,7 @@ pub use spawn_subagent::SPAWN_SUBAGENT_CAPABILITY_ID;
 pub use time::TIME_CAPABILITY_ID;
 pub use trigger_management::{
     TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID,
+    TriggerManagementClock,
 };
 
 pub const BUILTIN_FIRST_PARTY_PROVIDER: &str = "builtin";
@@ -189,6 +190,21 @@ fn coding_manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
 pub fn builtin_first_party_handlers(
     trigger_repository: Arc<dyn ironclaw_triggers::TriggerRepository>,
 ) -> Result<FirstPartyCapabilityRegistry, HostApiError> {
+    builtin_first_party_handlers_with_registry_clock(trigger_repository, None)
+}
+
+#[doc(hidden)]
+pub fn builtin_first_party_handlers_with_trigger_clock(
+    trigger_repository: Arc<dyn ironclaw_triggers::TriggerRepository>,
+    trigger_clock: Arc<dyn TriggerManagementClock>,
+) -> Result<FirstPartyCapabilityRegistry, HostApiError> {
+    builtin_first_party_handlers_with_registry_clock(trigger_repository, Some(trigger_clock))
+}
+
+fn builtin_first_party_handlers_with_registry_clock(
+    trigger_repository: Arc<dyn ironclaw_triggers::TriggerRepository>,
+    trigger_clock: Option<Arc<dyn TriggerManagementClock>>,
+) -> Result<FirstPartyCapabilityRegistry, HostApiError> {
     let handler = Arc::new(BuiltinFirstPartyTools::default());
     let mut registry = FirstPartyCapabilityRegistry::new()
         .with_handler(CapabilityId::new(ECHO_CAPABILITY_ID)?, handler.clone())
@@ -221,7 +237,15 @@ pub fn builtin_first_party_handlers(
         handler.clone(),
     );
     skill_management::insert_handlers(&mut registry)?;
-    trigger_management::insert_handlers(&mut registry, trigger_repository)?;
+    if let Some(trigger_clock) = trigger_clock {
+        trigger_management::insert_handlers_with_clock(
+            &mut registry,
+            trigger_repository,
+            trigger_clock,
+        )?;
+    } else {
+        trigger_management::insert_handlers(&mut registry, trigger_repository)?;
+    }
     Ok(registry)
 }
 

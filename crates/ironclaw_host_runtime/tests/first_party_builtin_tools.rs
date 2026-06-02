@@ -10,6 +10,7 @@ use std::{
 
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
+use chrono::{DateTime, Datelike, TimeZone, Utc};
 use ironclaw_authorization::GrantAuthorizer;
 use ironclaw_events::InMemoryAuditSink;
 use ironclaw_extensions::ExtensionRegistry;
@@ -32,8 +33,9 @@ use ironclaw_host_runtime::{
     SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID,
     SPAWN_SUBAGENT_CAPABILITY_ID, SandboxCommandTransport, SurfaceKind, TIME_CAPABILITY_ID,
     TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID,
-    TenantSandboxProcessPort, VisibleCapabilityAccess, VisibleCapabilityRequest,
-    WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers, builtin_first_party_package,
+    TenantSandboxProcessPort, TriggerManagementClock, VisibleCapabilityAccess,
+    VisibleCapabilityRequest, WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers,
+    builtin_first_party_handlers_with_trigger_clock, builtin_first_party_package,
 };
 use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpResponse, NetworkHttpTransport,
@@ -283,7 +285,7 @@ async fn builtin_trigger_create_stamps_caller_scope_and_persists_record() {
 
     let trigger = &output["trigger"];
     assert_eq!(trigger["name"], json!("Daily summary"));
-    assert_eq!(trigger["prompt"], json!("Summarize yesterday"));
+    assert!(trigger.get("prompt").is_none());
     assert_eq!(trigger["source"], json!("schedule"));
     assert_eq!(trigger["completion_policy"], json!("recurring"));
     assert_eq!(trigger["state"], json!("scheduled"));
@@ -306,6 +308,7 @@ async fn builtin_trigger_create_stamps_caller_scope_and_persists_record() {
         .await
         .unwrap();
     assert_eq!(records.len(), 1);
+    assert_eq!(records[0].prompt, "Summarize yesterday");
     assert_eq!(records[0].creator_user_id, context.resource_scope.user_id);
     assert_eq!(records[0].agent_id, context.resource_scope.agent_id);
     assert_eq!(records[0].project_id, context.resource_scope.project_id);
@@ -324,6 +327,42 @@ async fn builtin_trigger_create_rejects_sub_minute_schedule_before_persistence()
             "name": "Too fast",
             "prompt": "Run constantly",
             "cron": "* * * * * *"
+        }),
+        context.clone(),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error, RuntimeFailureKind::InvalidInput);
+    assert!(
+        repository
+            .list_triggers(context.resource_scope.tenant_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn builtin_trigger_create_rejects_schedule_with_no_future_slot_before_persistence() {
+    let repository = Arc::new(InMemoryTriggerRepository::default());
+    let future_year = Utc::now().year() + 1;
+    let after_schedule_expires = Utc
+        .with_ymd_and_hms(future_year + 1, 1, 1, 0, 0, 0)
+        .unwrap();
+    let runtime = runtime_with_trigger_repository_and_clock(
+        repository.clone(),
+        Arc::new(FixedTriggerClock(after_schedule_expires)),
+    );
+    let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID]);
+
+    let error = invoke_with_context(
+        &runtime,
+        TRIGGER_CREATE_CAPABILITY_ID,
+        json!({
+            "name": "Expired finite schedule",
+            "prompt": "Run once in the finite year",
+            "cron": format!("0 0 8 * * * {future_year}")
         }),
         context.clone(),
     )
@@ -500,6 +539,7 @@ async fn builtin_trigger_list_and_remove_are_caller_scoped() {
     )
     .await
     .unwrap();
+    assert!(created["trigger"].get("prompt").is_none());
     let trigger_id = created["trigger"]["trigger_id"].as_str().unwrap();
 
     let foreign_list = invoke_with_context(
@@ -543,6 +583,7 @@ async fn builtin_trigger_list_and_remove_are_caller_scoped() {
     .await
     .unwrap();
     assert_eq!(owner_remove["removed"], json!(true));
+    assert!(owner_remove["trigger"].get("prompt").is_none());
 
     let records = repository
         .list_triggers(owner_context.resource_scope.tenant_id)
@@ -597,6 +638,7 @@ async fn builtin_trigger_create_list_and_remove_use_full_request_scope() {
     assert_eq!(trigger["creator_user_id"], json!("scoped-user"));
     assert_eq!(trigger["agent_id"], json!("scoped-agent"));
     assert_eq!(trigger["project_id"], json!("scoped-project"));
+    assert!(trigger.get("prompt").is_none());
     let trigger_id = trigger["trigger_id"].as_str().unwrap();
 
     let other_agent_list = invoke_with_context(
@@ -638,6 +680,7 @@ async fn builtin_trigger_create_list_and_remove_use_full_request_scope() {
     .await
     .unwrap();
     assert_eq!(owner_remove["removed"], json!(true));
+    assert!(owner_remove["trigger"].get("prompt").is_none());
 }
 
 #[tokio::test]
@@ -4985,6 +5028,28 @@ fn runtime_with_trigger_repository(repository: Arc<dyn TriggerRepository>) -> im
     )
 }
 
+fn runtime_with_trigger_repository_and_clock(
+    trigger_repository: Arc<dyn TriggerRepository>,
+    trigger_clock: Arc<dyn TriggerManagementClock>,
+) -> impl HostRuntime {
+    HostRuntimeServices::new(
+        Arc::new(registry()),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ironclaw_processes::ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_first_party_capabilities(Arc::new(
+        builtin_first_party_handlers_with_trigger_clock(trigger_repository, trigger_clock).unwrap(),
+    ))
+    .with_runtime_http_egress(Arc::new(RecordingRuntimeHttpEgress::default()))
+    .with_audit_sink(Arc::new(InMemoryAuditSink::new()))
+    .with_runtime_policy(local_dev_policy())
+    .with_trust_policy(Arc::new(trust_policy()))
+    .host_runtime_for_local_testing()
+}
+
 fn runtime_with_filesystem_policy_and_trigger_repository<F>(
     filesystem: F,
     policy: EffectiveRuntimePolicy,
@@ -5009,6 +5074,15 @@ where
     .with_runtime_policy(policy)
     .with_trust_policy(Arc::new(trust_policy()))
     .host_runtime_for_local_testing()
+}
+
+#[derive(Debug)]
+struct FixedTriggerClock(DateTime<Utc>);
+
+impl TriggerManagementClock for FixedTriggerClock {
+    fn now(&self) -> DateTime<Utc> {
+        self.0
+    }
 }
 
 struct FailingTriggerRepository;

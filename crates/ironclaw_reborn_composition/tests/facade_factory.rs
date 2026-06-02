@@ -27,7 +27,7 @@ use ironclaw_host_runtime::{
     SchedulerTurnRunWakeNotifier, TurnRunExecutor, TurnRunExecutorError, TurnRunScheduler,
     TurnRunSchedulerConfig, TurnRunSchedulerHandle,
 };
-#[cfg(feature = "libsql")]
+#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_reborn_composition::RebornRuntimeProcessBinding;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_reborn_composition::{RebornBuildError, RebornCompositionProfile};
@@ -366,7 +366,7 @@ async fn local_dev_builds_facades_without_production_claim() {
     assert!(services.product_auth.is_some());
 }
 
-#[cfg(feature = "libsql")]
+#[cfg(any(feature = "libsql", feature = "postgres"))]
 fn test_sandbox_process_binding() -> RebornRuntimeProcessBinding {
     let process_port = Arc::new(ironclaw_host_runtime::TenantSandboxProcessPort::new(
         Arc::new(ProductionReadySandboxTransport),
@@ -374,11 +374,11 @@ fn test_sandbox_process_binding() -> RebornRuntimeProcessBinding {
     RebornRuntimeProcessBinding::tenant_sandbox(process_port)
 }
 
-#[cfg(feature = "libsql")]
+#[cfg(any(feature = "libsql", feature = "postgres"))]
 #[derive(Debug)]
 struct ProductionReadySandboxTransport;
 
-#[cfg(feature = "libsql")]
+#[cfg(any(feature = "libsql", feature = "postgres"))]
 #[async_trait::async_trait]
 impl ironclaw_host_runtime::SandboxCommandTransport for ProductionReadySandboxTransport {
     async fn run_command(
@@ -933,6 +933,43 @@ async fn production_libsql_services_migrate_trigger_repository_before_runtime_in
         .expect("read trigger table count row")
         .expect("trigger table count row");
     let count: i64 = row.get(0).expect("trigger table count");
+    assert_eq!(count, 0);
+}
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn production_postgres_services_migrate_trigger_repository_before_runtime_injection() {
+    let Some((_container, pool, database_url)) = postgres_pool_or_skip().await else {
+        return;
+    };
+    let (notifier, handle) = live_wake_notifier();
+
+    let services = build_reborn_services(
+        RebornBuildInput::postgres(
+            RebornCompositionProfile::Production,
+            "test-owner",
+            pool.clone(),
+            SecretMaterial::from(database_url),
+            test_master_key(),
+        )
+        .with_production_trust_policy(production_trust_policy())
+        .with_runtime_policy(production_runtime_policy())
+        .with_turn_run_wake_notifier(notifier)
+        .with_runtime_process_binding(test_sandbox_process_binding()),
+    )
+    .await
+    .expect("production postgres services should build with trigger repository migrations");
+
+    handle.shutdown().await;
+
+    assert!(services.host_runtime.is_some());
+
+    let client = pool.get().await.expect("connect postgres state db");
+    let row = client
+        .query_one("SELECT COUNT(*) FROM trigger_records", &[])
+        .await
+        .expect("trigger table exists after production build");
+    let count: i64 = row.get(0);
     assert_eq!(count, 0);
 }
 

@@ -765,20 +765,14 @@ impl TriggerRepository for InMemoryTriggerRepository {
     }
 
     async fn list_triggers(&self, tenant_id: TenantId) -> Result<Vec<TriggerRecord>, TriggerError> {
-        let mut keys = {
-            let state = self.lock_state()?;
-            state
-                .iter()
-                .filter(|(_, record)| record.tenant_id == tenant_id)
-                .map(|(key, record)| (record.created_at, record.trigger_id, key.clone()))
-                .collect::<Vec<_>>()
-        };
-        keys.sort_by_key(|(created_at, trigger_id, _)| (*created_at, *trigger_id));
         let state = self.lock_state()?;
-        Ok(keys
-            .into_iter()
-            .filter_map(|(_, _, key)| state.get(&key).cloned())
-            .collect())
+        let mut records = state
+            .values()
+            .filter(|record| record.tenant_id == tenant_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        records.sort_by_key(|record| (record.created_at, record.trigger_id));
+        Ok(records)
     }
 
     async fn list_scoped_triggers(
@@ -1704,7 +1698,13 @@ mod tests {
             .list_triggers(tenant("tenant-a"))
             .await
             .expect("list tenant");
-        assert_eq!(tenant_records.len(), 2);
+        assert_eq!(
+            tenant_records
+                .iter()
+                .map(|record| record.trigger_id)
+                .collect::<Vec<_>>(),
+            vec![due.trigger_id, later.trigger_id]
+        );
 
         let removed = repo
             .remove_trigger(tenant("tenant-a"), due.trigger_id)

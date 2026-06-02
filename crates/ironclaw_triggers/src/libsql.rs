@@ -167,7 +167,7 @@ impl LibSqlTriggerRepository {
                 .map_err(|error| backend_error("commit trigger migration", error)),
             Err(error) => {
                 if let Err(rollback_error) = conn.execute("ROLLBACK", ()).await {
-                    tracing::warn!(
+                    tracing::debug!(
                         migration_error = %error,
                         rollback_error = %rollback_error,
                         "ROLLBACK failed after libSQL trigger migration error"
