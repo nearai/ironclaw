@@ -294,6 +294,7 @@ where
             Arc::clone(&parts.loop_checkpoint_store),
             parts.thread_scope.clone(),
         )
+        .with_checkpoint_state_store(Arc::clone(&parts.checkpoint_state_store))
         .with_cancellation_factory(cancellation_factory),
     );
     build_default_planned_runtime(parts).map_err(ProductLiveRuntimeBuildError::Runtime)
