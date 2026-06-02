@@ -6,8 +6,8 @@
 //! tokens.
 
 use ironclaw_product_adapters::{
-    DeclaredEgressHost, EgressCredentialHandle, EgressHeader, EgressMethod, EgressPath,
-    EgressRequest, FinalReplyView, ProductOutboundTarget,
+    AuthPromptView, DeclaredEgressHost, EgressCredentialHandle, EgressHeader, EgressMethod,
+    EgressPath, EgressRequest, FinalReplyView, GatePromptView, ProductOutboundTarget,
 };
 use serde::Serialize;
 use thiserror::Error;
@@ -51,10 +51,49 @@ pub fn render_final_reply(
     view: &FinalReplyView,
     credential_handle: EgressCredentialHandle,
 ) -> Result<EgressRequest, SlackRenderError> {
+    render_text_message(target, view.text.clone(), credential_handle)
+}
+
+pub fn render_gate_prompt(
+    target: &ProductOutboundTarget,
+    view: &GatePromptView,
+    credential_handle: EgressCredentialHandle,
+) -> Result<EgressRequest, SlackRenderError> {
+    render_text_message(
+        target,
+        format!(
+            "{}\n\n{}\n\nReply `approve {}` or `deny {}` in this Slack thread.",
+            view.headline, view.body, view.gate_ref, view.gate_ref
+        ),
+        credential_handle,
+    )
+}
+
+pub fn render_auth_prompt(
+    target: &ProductOutboundTarget,
+    view: &AuthPromptView,
+    credential_handle: EgressCredentialHandle,
+) -> Result<EgressRequest, SlackRenderError> {
+    let mut text = format!(
+        "{}\n\n{}\n\nReply `auth deny {}` to cancel this blocked run.",
+        view.headline, view.body, view.auth_request_ref
+    );
+    if let Some(url) = &view.authorization_url {
+        text.push_str("\n\nSetup link: ");
+        text.push_str(url);
+    }
+    render_text_message(target, text, credential_handle)
+}
+
+fn render_text_message(
+    target: &ProductOutboundTarget,
+    text: String,
+    credential_handle: EgressCredentialHandle,
+) -> Result<EgressRequest, SlackRenderError> {
     let reply = slack_reply_target(target)?;
     let body = ChatPostMessageRequest {
         channel: reply.channel,
-        text: view.text.clone(),
+        text,
         mrkdwn: false,
         thread_ts: reply.thread_ts,
     };

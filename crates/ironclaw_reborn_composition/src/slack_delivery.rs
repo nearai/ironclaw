@@ -18,9 +18,9 @@ use ironclaw_outbound::{
     RunNotificationOrigin, SourceRouteContext, ValidatedReplyTargetBinding,
 };
 use ironclaw_product_adapters::{
-    ExternalActorRef, ExternalConversationRef, FinalReplyView, OutboundDeliverySink,
-    ProductAdapter, ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload,
-    ProductOutboundPayload, ProductTriggerReason, ProtocolHttpEgress,
+    AuthPromptView, ExternalActorRef, ExternalConversationRef, FinalReplyView, GatePromptView,
+    OutboundDeliverySink, ProductAdapter, ProductInboundAck, ProductInboundEnvelope,
+    ProductInboundPayload, ProductOutboundPayload, ProductTriggerReason, ProtocolHttpEgress,
 };
 use ironclaw_product_workflow::{
     ConversationBindingService, ProductConversationRouteKind, ProductOutboundDeliveryRequest,
@@ -128,18 +128,61 @@ impl SlackFinalReplyDeliveryObserver {
             .await?;
         let scope = turn_scope_from_binding(&binding)?;
         let actor = TurnActor::new(binding.user_id.clone());
-        let terminal_state = self.wait_for_terminal(&scope, run_id).await?;
-        if terminal_state.status != TurnStatus::Completed {
-            return Ok(());
-        }
+        let actionable_state = self.wait_for_actionable(&scope, run_id).await?;
         let thread_scope = thread_scope_from_binding(&binding, route_kind)?;
-        let Some(text) = self
-            .read_latest_assistant_text(&thread_scope, &binding, run_id)
-            .await?
-        else {
-            return Ok(());
+        let (event_kind, payload) = match actionable_state.status {
+            TurnStatus::Completed => {
+                let Some(text) = self
+                    .read_latest_assistant_text(&thread_scope, &binding, run_id)
+                    .await?
+                else {
+                    return Ok(());
+                };
+                (
+                    RunNotificationEventKind::FinalReplyReady,
+                    ProductOutboundPayload::FinalReply(FinalReplyView {
+                        turn_run_id: run_id,
+                        text,
+                        generated_at: Utc::now(),
+                    }),
+                )
+            }
+            TurnStatus::BlockedApproval => {
+                let Some(gate_ref) = actionable_state.gate_ref.as_ref() else {
+                    return Ok(());
+                };
+                (
+                    RunNotificationEventKind::ApprovalNeeded,
+                    ProductOutboundPayload::GatePrompt(GatePromptView {
+                        turn_run_id: run_id,
+                        gate_ref: gate_ref.as_str().to_string(),
+                        headline: "Approval needed".to_string(),
+                        body: "Reply in this Slack thread with `approve <gate_ref>` or `deny <gate_ref>`.".to_string(),
+                    }),
+                )
+            }
+            TurnStatus::BlockedAuth => {
+                let Some(gate_ref) = actionable_state.gate_ref.as_ref() else {
+                    return Ok(());
+                };
+                (
+                    RunNotificationEventKind::AuthRequired,
+                    ProductOutboundPayload::AuthPrompt(AuthPromptView {
+                        turn_run_id: run_id,
+                        auth_request_ref: gate_ref.as_str().to_string(),
+                        headline: "Authentication required".to_string(),
+                        body: "Use WebUI setup to connect the missing account, or reply `auth deny <auth_request_ref>` to cancel this blocked run.".to_string(),
+                        challenge_kind: None,
+                        provider: None,
+                        account_label: None,
+                        authorization_url: None,
+                        expires_at: None,
+                    }),
+                )
+            }
+            _ => return Ok(()),
         };
-        let reply_target = terminal_state.reply_target_binding_ref.clone();
+        let reply_target = actionable_state.reply_target_binding_ref.clone();
         let target_authority = ObservedSlackReplyTargetAuthority {
             scope: scope.clone(),
             actor: actor.clone(),
@@ -161,7 +204,7 @@ impl SlackFinalReplyDeliveryObserver {
                 actor,
                 modality: CommunicationModality::Text,
                 intent: CommunicationDeliveryIntent::RunNotification(RunNotificationContext {
-                    event_kind: RunNotificationEventKind::FinalReplyReady,
+                    event_kind,
                     origin: RunNotificationOrigin::LiveSourceRoute {
                         source_route: SourceRouteContext {
                             reply_target_binding_ref: reply_target,
@@ -173,11 +216,6 @@ impl SlackFinalReplyDeliveryObserver {
             projection_ref,
             attempted_at: Utc::now(),
         };
-        let payload = ProductOutboundPayload::FinalReply(FinalReplyView {
-            turn_run_id: run_id,
-            text,
-            generated_at: Utc::now(),
-        });
         let _outcome = prepare_and_render_product_outbound(
             &outbound_policy,
             self.communication_preferences.as_ref(),
@@ -202,7 +240,7 @@ impl SlackFinalReplyDeliveryObserver {
         Ok(())
     }
 
-    async fn wait_for_terminal(
+    async fn wait_for_actionable(
         &self,
         scope: &TurnScope,
         run_id: TurnRunId,
@@ -216,7 +254,12 @@ impl SlackFinalReplyDeliveryObserver {
                     run_id,
                 })
                 .await?;
-            if state.status.is_terminal() {
+            if state.status.is_terminal()
+                || matches!(
+                    state.status,
+                    TurnStatus::BlockedApproval | TurnStatus::BlockedAuth
+                )
+            {
                 return Ok(state);
             }
             if start.elapsed() >= self.settings.max_wait {

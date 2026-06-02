@@ -6,7 +6,8 @@
 //! trusted context outside this crate after verifying Slack request signatures.
 
 use ironclaw_product_adapters::{
-    AdapterInstallationId, ExternalActorRef, ExternalConversationRef, ExternalEventId,
+    AdapterInstallationId, ApprovalDecision, ApprovalResolutionPayload, AuthResolutionPayload,
+    AuthResolutionResult, ExternalActorRef, ExternalConversationRef, ExternalEventId,
     ParsedProductInbound, ProductAdapterError, ProductAttachmentDescriptor, ProductAttachmentKind,
     ProductInboundPayload, ProductTriggerReason, ProtocolAuthEvidence, UserMessagePayload,
 };
@@ -170,19 +171,21 @@ fn try_parse_user_message(
         ),
     };
 
-    build_user_message(
-        event_id,
-        SlackUserMessageParts {
-            team_id,
-            user,
-            channel,
-            thread_ts,
-            message_ts: Some(ts),
-            text,
-            attachments: collect_attachments(&event.files)?,
-            trigger,
-        },
-    )
+    let attachments = collect_attachments(&event.files)?;
+    let parts = SlackUserMessageParts {
+        team_id,
+        user,
+        channel,
+        thread_ts,
+        message_ts: Some(ts),
+        text,
+        attachments,
+        trigger,
+    };
+    if let Some(payload) = parse_interaction_resolution(parts.text.as_str())? {
+        return build_payload_message(event_id, &parts, payload);
+    }
+    build_user_message(event_id, parts)
 }
 
 struct SlackUserMessageParts<'a> {
@@ -219,6 +222,77 @@ fn build_user_message(
         ProductInboundPayload::UserMessage(user_message),
     )
     .map_err(adapter_error_to_payload_error)
+}
+
+fn build_payload_message(
+    event_id: ExternalEventId,
+    parts: &SlackUserMessageParts<'_>,
+    payload: ProductInboundPayload,
+) -> Result<ParsedProductInbound, SlackPayloadParseError> {
+    let actor_ref = build_actor_ref(Some(parts.user))?;
+    let conversation_ref = build_conversation_ref(
+        parts.team_id,
+        Some(parts.channel),
+        parts.thread_ts,
+        parts.message_ts,
+    )?;
+    ParsedProductInbound::new(event_id, actor_ref, conversation_ref, payload)
+        .map_err(adapter_error_to_payload_error)
+}
+
+fn parse_interaction_resolution(
+    text: &str,
+) -> Result<Option<ProductInboundPayload>, SlackPayloadParseError> {
+    let mut parts = text.split_whitespace();
+    let Some(first) = parts.next() else {
+        return Ok(None);
+    };
+    match first.to_ascii_lowercase().as_str() {
+        "approve" => {
+            let Some(gate_ref) = parts.next() else {
+                return Ok(None);
+            };
+            if parts.next().is_some() {
+                return Ok(None);
+            }
+            ApprovalResolutionPayload::new(gate_ref, ApprovalDecision::ApproveOnce)
+                .map(ProductInboundPayload::ApprovalResolution)
+                .map(Some)
+                .map_err(adapter_error_to_payload_error)
+        }
+        "deny" => {
+            let Some(gate_ref) = parts.next() else {
+                return Ok(None);
+            };
+            if parts.next().is_some() {
+                return Ok(None);
+            }
+            ApprovalResolutionPayload::new(gate_ref, ApprovalDecision::Deny)
+                .map(ProductInboundPayload::ApprovalResolution)
+                .map(Some)
+                .map_err(adapter_error_to_payload_error)
+        }
+        "auth" => {
+            let Some(action) = parts.next() else {
+                return Ok(None);
+            };
+            if action.eq_ignore_ascii_case("deny") {
+                let Some(auth_request_ref) = parts.next() else {
+                    return Ok(None);
+                };
+                if parts.next().is_some() {
+                    return Ok(None);
+                }
+                AuthResolutionPayload::new(auth_request_ref, AuthResolutionResult::Denied)
+                    .map(ProductInboundPayload::AuthResolution)
+                    .map(Some)
+                    .map_err(adapter_error_to_payload_error)
+            } else {
+                Ok(None)
+            }
+        }
+        _ => Ok(None),
+    }
 }
 
 fn noop_parsed_inbound(

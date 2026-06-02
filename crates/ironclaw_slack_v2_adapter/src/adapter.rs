@@ -13,7 +13,7 @@ use ironclaw_turns::TurnRunId;
 use serde::Deserialize;
 
 use crate::payload::{SLACK_API_HOST, SlackPayloadParseError, parse_slack_event};
-use crate::render::{SlackRenderError, render_final_reply};
+use crate::render::{SlackRenderError, render_auth_prompt, render_final_reply, render_gate_prompt};
 
 /// Timeout for recording a delivery status to the sink.
 /// Guards against a hung sink blocking the delivery hot path indefinitely.
@@ -176,18 +176,49 @@ impl ProductAdapter for SlackV2Adapter {
                     }
                 }
             }
-            ProductOutboundPayload::GatePrompt(_) | ProductOutboundPayload::AuthPrompt(_) => {
-                record_status(
-                    delivery_sink,
-                    DeliveryStatus::Deferred {
-                        attempt_id,
-                        target: target_binding,
-                        run_id,
-                        reason: RedactedString::new("gate/auth prompts deferred to #3094 on Slack"),
-                    },
-                )
-                .await;
-                return Ok(ProductRenderOutcome::Deferred);
+            ProductOutboundPayload::GatePrompt(view) => {
+                match render_gate_prompt(
+                    &envelope.target,
+                    &view,
+                    self.config.egress_credential_handle.clone(),
+                ) {
+                    Ok(req) => req,
+                    Err(render_err) => {
+                        record_status(
+                            delivery_sink,
+                            DeliveryStatus::FailedPermanent {
+                                attempt_id,
+                                target: target_binding.clone(),
+                                run_id,
+                                reason: RedactedString::new(render_err.to_string()),
+                            },
+                        )
+                        .await;
+                        return Err(map_render_error(render_err));
+                    }
+                }
+            }
+            ProductOutboundPayload::AuthPrompt(view) => {
+                match render_auth_prompt(
+                    &envelope.target,
+                    &view,
+                    self.config.egress_credential_handle.clone(),
+                ) {
+                    Ok(req) => req,
+                    Err(render_err) => {
+                        record_status(
+                            delivery_sink,
+                            DeliveryStatus::FailedPermanent {
+                                attempt_id,
+                                target: target_binding.clone(),
+                                run_id,
+                                reason: RedactedString::new(render_err.to_string()),
+                            },
+                        )
+                        .await;
+                        return Err(map_render_error(render_err));
+                    }
+                }
             }
             ProductOutboundPayload::Progress(_)
             | ProductOutboundPayload::CapabilityActivity(_)
