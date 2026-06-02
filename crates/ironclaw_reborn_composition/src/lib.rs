@@ -151,8 +151,11 @@ pub use runtime_input::{
 pub use skill_listing::{RebornSkillListError, list_reborn_local_skills};
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack_serve::{
-    SLACK_EVENTS_PATH, SlackEventsRouteState, SlackEventsWebhookDispatcher,
-    slack_events_route_descriptors, slack_events_route_mount,
+    ResolvedSlackInstallation, SLACK_EVENTS_PATH, SlackEnvelopeMetadata, SlackEventsRouteState,
+    SlackEventsWebhookDispatcher, SlackIngressError, SlackIngressService,
+    SlackInstallationRateLimitConfig, SlackInstallationRecord, SlackInstallationResolver,
+    SlackInstallationSelector, StaticSlackInstallationResolver, slack_events_route_descriptors,
+    slack_events_route_mount,
 };
 pub use webui::{RebornWebuiBundle, build_webui_services};
 #[cfg(feature = "webui-v2-beta")]
