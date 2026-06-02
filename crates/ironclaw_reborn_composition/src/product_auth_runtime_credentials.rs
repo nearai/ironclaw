@@ -692,6 +692,7 @@ mod tests {
             .resolve_access_secret(RuntimeCredentialAccountRequest {
                 scope: &scope,
                 provider: &RuntimeCredentialAccountProviderId::new("github").unwrap(),
+                provider_scopes: &[],
                 requester_extension: &ExtensionId::new("github").unwrap(),
             })
             .await
