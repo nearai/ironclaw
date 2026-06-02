@@ -2021,6 +2021,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn lifecycle_facade_activates_hosted_mcp_with_runtime_egress() {
+        let (_dir, _storage_root, facade, active_registry, _installation_store) =
+            extension_lifecycle_fixture_with_catalog_and_service(
+                AvailableExtensionCatalog::from_first_party_assets().expect("first-party assets"),
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+            );
+        let facade = facade.with_runtime_http_egress(Arc::new(HostedMcpDiscoveryEgress::default()));
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "notion").expect("valid ref");
+
+        facade
+            .execute(
+                lifecycle_surface_context(),
+                LifecycleProductAction::ExtensionInstall {
+                    package_ref: package_ref.clone(),
+                },
+            )
+            .await
+            .expect("install Notion MCP");
+        let activate = facade
+            .execute(
+                lifecycle_surface_context(),
+                LifecycleProductAction::ExtensionActivate { package_ref },
+            )
+            .await
+            .expect("hosted MCP activation should use discovery egress");
+
+        assert_eq!(activate.phase, LifecyclePhase::Active);
+        assert!(
+            active_registry
+                .snapshot()
+                .get_capability(&CapabilityId::new("notion.live-search").unwrap())
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
     async fn extension_lifecycle_installs_activates_and_removes_gsuite() {
         let (_dir, storage_root, facade, active_registry, _installation_store) =
             github_extension_lifecycle_fixture();
