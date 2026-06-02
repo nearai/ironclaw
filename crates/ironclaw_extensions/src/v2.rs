@@ -1487,3 +1487,57 @@ fn validate_runtime_credential_provider_scopes(
     }
     Ok(scopes)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn capability_id() -> CapabilityId {
+        CapabilityId::new("acme.echo").unwrap()
+    }
+
+    fn product_auth_source() -> RuntimeCredentialRequirementSource {
+        RuntimeCredentialRequirementSource::ProductAuthAccount {
+            provider: ironclaw_host_api::RuntimeCredentialAccountProviderId::new("google").unwrap(),
+        }
+    }
+
+    #[test]
+    fn validate_runtime_credential_provider_scopes_rejects_empty_scope() {
+        let err = validate_runtime_credential_provider_scopes(
+            &capability_id(),
+            &product_auth_source(),
+            vec!["".to_string()],
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, ManifestV2Error::Invalid { .. }), "{err:?}");
+    }
+
+    #[test]
+    fn validate_runtime_credential_provider_scopes_rejects_whitespace_padded_scope() {
+        let err = validate_runtime_credential_provider_scopes(
+            &capability_id(),
+            &product_auth_source(),
+            vec![" https://www.googleapis.com/auth/drive".to_string()],
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, ManifestV2Error::Invalid { .. }), "{err:?}");
+    }
+
+    #[test]
+    fn validate_runtime_credential_provider_scopes_rejects_duplicate_scope() {
+        let err = validate_runtime_credential_provider_scopes(
+            &capability_id(),
+            &product_auth_source(),
+            vec![
+                "https://www.googleapis.com/auth/drive".to_string(),
+                "https://www.googleapis.com/auth/drive".to_string(),
+            ],
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, ManifestV2Error::Invalid { .. }), "{err:?}");
+    }
+}

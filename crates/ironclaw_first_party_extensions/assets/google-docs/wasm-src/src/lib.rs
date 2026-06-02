@@ -267,4 +267,17 @@ fn params_with_action(params: &str, action: &str) -> Result<serde_json::Value, S
     Ok(params)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn params_with_action_rejects_caller_supplied_action() {
+        let result =
+            params_with_action(r#"{"action":"delete_all","document_id":"doc-1"}"#, "get_document");
+
+        assert_eq!(result, Err("invalid_parameters".to_string()));
+    }
+}
+
 export!(GoogleDocsTool);

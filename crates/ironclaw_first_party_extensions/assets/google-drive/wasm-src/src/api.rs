@@ -245,8 +245,6 @@ pub fn upload_file(
     parent_id: Option<&str>,
     description: Option<&str>,
 ) -> Result<FileResult, String> {
-    let boundary = "ironclaw_upload_boundary_42";
-
     let mut metadata = serde_json::json!({
         "name": name,
         "mimeType": mime_type,
@@ -259,6 +257,7 @@ pub fn upload_file(
     }
 
     let metadata_str = serde_json::to_string(&metadata).map_err(|e| e.to_string())?;
+    let boundary = multipart_boundary(&metadata_str, content);
 
     // Build multipart body
     let mut body = String::new();
@@ -302,6 +301,23 @@ pub fn upload_file(
     Ok(FileResult {
         file: parse_file(&parsed),
     })
+}
+
+fn multipart_boundary(metadata: &str, content: &str) -> String {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for b in metadata.bytes().chain(content.bytes()) {
+        hash ^= b as u64;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+
+    let mut attempt = 0_u64;
+    loop {
+        let boundary = format!("ironclaw_upload_boundary_{hash:016x}_{attempt:016x}");
+        if !metadata.contains(&boundary) && !content.contains(&boundary) {
+            return boundary;
+        }
+        attempt = attempt.wrapping_add(1);
+    }
 }
 
 /// Update file metadata.
@@ -517,4 +533,21 @@ pub fn list_shared_drives(page_size: u32) -> Result<ListSharedDrivesResult, Stri
 
 fn url_encode(s: &str) -> String {
     urlencoding::encode(s).into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn multipart_boundary_does_not_appear_in_metadata_or_content() {
+        let metadata = r#"{"name":"ironclaw_upload_boundary_marker"}"#;
+        let content = "body with ironclaw_upload_boundary_marker";
+
+        let boundary = multipart_boundary(metadata, content);
+
+        assert!(!metadata.contains(&boundary));
+        assert!(!content.contains(&boundary));
+        assert!(boundary.starts_with("ironclaw_upload_boundary_"));
+    }
 }

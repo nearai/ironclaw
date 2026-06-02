@@ -180,6 +180,11 @@ fn extract_text_from_elements(elements: &[serde_json::Value], out: &mut String) 
                 }
             }
         }
+        if let Some(table_of_contents) = el.get("tableOfContents") {
+            if let Some(content) = table_of_contents["content"].as_array() {
+                extract_text_from_elements(content, out);
+            }
+        }
     }
 }
 
@@ -190,7 +195,7 @@ pub fn insert_text(
     index: i64,
     segment_id: &str,
 ) -> Result<UpdateResult, String> {
-    let request = if index < 0 {
+    let request = if index == -1 {
         // Append at end of segment
         let mut loc = serde_json::json!({});
         if !segment_id.is_empty() {
@@ -202,6 +207,10 @@ pub fn insert_text(
                 "endOfSegmentLocation": loc,
             }
         })
+    } else if index < 0 {
+        return Err(format!(
+            "invalid index {index}: only -1 (append) or non-negative indexes are accepted"
+        ));
     } else {
         let mut loc = serde_json::json!({ "index": index });
         if !segment_id.is_empty() {
@@ -350,16 +359,18 @@ pub fn format_text(opts: FormatTextOptions<'_>) -> Result<UpdateResult, String> 
         fields.push("weightedFontFamily");
     }
     if let Some(color) = opts.foreground_color {
-        if let Some(c) = parse_hex_color(color) {
-            style["foregroundColor"] = c;
-            fields.push("foregroundColor");
-        }
+        let Some(c) = parse_hex_color(color) else {
+            return Err(format!("invalid foreground_color hex: {color}"));
+        };
+        style["foregroundColor"] = c;
+        fields.push("foregroundColor");
     }
     if let Some(color) = opts.background_color {
-        if let Some(c) = parse_hex_color(color) {
-            style["backgroundColor"] = c;
-            fields.push("backgroundColor");
-        }
+        let Some(c) = parse_hex_color(color) else {
+            return Err(format!("invalid background_color hex: {color}"));
+        };
+        style["backgroundColor"] = c;
+        fields.push("backgroundColor");
     }
 
     if fields.is_empty() {
@@ -502,4 +513,58 @@ pub fn batch_update(
 
 fn url_encode(s: &str) -> String {
     urlencoding::encode(s).into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_text_from_elements_includes_table_of_contents_content() {
+        let elements = vec![serde_json::json!({
+            "tableOfContents": {
+                "content": [
+                    {
+                        "paragraph": {
+                            "elements": [
+                                { "textRun": { "content": "Heading 1\n" } }
+                            ]
+                        }
+                    }
+                ]
+            }
+        })];
+        let mut text = String::new();
+
+        extract_text_from_elements(&elements, &mut text);
+
+        assert_eq!(text, "Heading 1\n");
+    }
+
+    #[test]
+    fn insert_text_rejects_negative_indexes_other_than_append() {
+        let err = insert_text("doc-1", "text", -2, "").unwrap_err();
+
+        assert!(err.contains("invalid index -2"), "{err}");
+    }
+
+    #[test]
+    fn format_text_rejects_invalid_hex_colors() {
+        let err = format_text(FormatTextOptions {
+            document_id: "doc-1",
+            start_index: 1,
+            end_index: 2,
+            bold: None,
+            italic: None,
+            underline: None,
+            strikethrough: None,
+            font_size: None,
+            font_family: None,
+            foreground_color: Some("#GG0000"),
+            background_color: None,
+        })
+        .unwrap_err();
+
+        assert_eq!(err, "invalid foreground_color hex: #GG0000");
+    }
 }
