@@ -3,10 +3,11 @@
 //! Compiled under the `webui-v2-beta` feature (the same feature that
 //! compiles the `serve` command). This module owns the host config side
 //! of SSO login startup policy: reading the operator's env vars into a
-//! provider list, resolving the public base URL, and refusing cleartext
-//! OAuth on a public interface. The auth/session model itself — the
-//! signed-token session store, the composite authenticator, the
-//! single-operator user directory, and the route wiring — lives in
+//! provider list, resolving the public base URL, refusing cleartext
+//! OAuth on a public interface, and requiring a fail-closed
+//! verified-email-domain admission allowlist. The auth/session model
+//! itself — the signed-token session store, the composite authenticator,
+//! and the route wiring — lives in
 //! `ironclaw_reborn_webui_ingress` (see
 //! [`ironclaw_reborn_webui_ingress::build_signed_session_login`]), which
 //! is where this crate's guardrails place `WebuiAuthenticator` /
@@ -17,6 +18,7 @@
 use std::env;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, anyhow};
 use ironclaw_reborn_webui_ingress::{
@@ -31,6 +33,12 @@ use secrecy::SecretString;
 pub(crate) struct SsoStartupConfig {
     pub(crate) providers: Vec<Arc<dyn OAuthProvider>>,
     pub(crate) base_url: String,
+    /// Lowercased verified-email domains allowed to log in. The host
+    /// [`WebuiUserDirectory`](crate::commands::user_directory) admits a
+    /// login only when the profile's verified email is in this set;
+    /// startup fails when providers are configured but this is empty, so
+    /// it is never empty here in practice.
+    pub(crate) allowed_email_domains: Vec<String>,
 }
 
 /// Resolve the SSO startup config from environment, applying all
@@ -58,21 +66,74 @@ pub(crate) fn sso_startup_config_from_env(
         .filter(|raw| !raw.trim().is_empty())
         .unwrap_or_else(|| format!("http://{listen_addr}"));
 
-    // Refuse cleartext OAuth on a public interface: http:// redirect URIs
-    // leak authorization codes in transit (and Google/GitHub reject them
-    // for production apps). Loopback http:// stays allowed for local dev.
-    if base_url.starts_with("http://") && !listen_addr.ip().is_loopback() {
+    reject_cleartext_oauth(&base_url, listen_addr)?;
+
+    let allowed_email_domains = parse_allowed_email_domains(
+        non_empty_env("IRONCLAW_REBORN_WEBUI_ALLOWED_EMAIL_DOMAINS")
+            .as_deref()
+            .unwrap_or_default(),
+    );
+    require_admission_allowlist(&allowed_email_domains)?;
+
+    Ok(Some(SsoStartupConfig {
+        providers,
+        base_url,
+        allowed_email_domains,
+    }))
+}
+
+/// Parse the comma-separated verified-email-domain allowlist, trimmed,
+/// lowercased, and de-blanked.
+fn parse_allowed_email_domains(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(|domain| domain.trim().to_ascii_lowercase())
+        .filter(|domain| !domain.is_empty())
+        .collect()
+}
+
+/// Fail closed when SSO providers are configured without an admission
+/// allowlist. GitHub has no org/team allowlist and Google only an
+/// optional hosted-domain check, so a configured provider with no
+/// verified-email-domain allowlist would let *any* Google/GitHub account
+/// mint a session on a protected WebUI — open registration. Refuse to
+/// start rather than silently expose that.
+fn require_admission_allowlist(allowed_email_domains: &[String]) -> anyhow::Result<()> {
+    if allowed_email_domains.is_empty() {
+        anyhow::bail!(
+            "WebChat v2 SSO providers are configured but \
+             IRONCLAW_REBORN_WEBUI_ALLOWED_EMAIL_DOMAINS is empty. Without an \
+             allowlist, any Google/GitHub account that completes login would be \
+             admitted (open registration). Set it to a comma-separated list of \
+             allowed verified-email domains (e.g. example.com,team.example.com)."
+        );
+    }
+    Ok(())
+}
+
+/// Refuse cleartext OAuth on a public interface: `http://` redirect URIs
+/// leak authorization codes in transit (and Google/GitHub reject them for
+/// production apps). Loopback `http://` stays allowed for local dev.
+fn reject_cleartext_oauth(base_url: &str, listen_addr: SocketAddr) -> anyhow::Result<()> {
+    if is_cleartext_http_scheme(base_url) && !listen_addr.ip().is_loopback() {
         anyhow::bail!(
             "WebChat v2 SSO base URL `{base_url}` uses http:// on a non-loopback interface, \
              which would transmit OAuth authorization codes in cleartext. Set \
              IRONCLAW_REBORN_WEBUI_BASE_URL to an https:// URL."
         );
     }
+    Ok(())
+}
 
-    Ok(Some(SsoStartupConfig {
-        providers,
-        base_url,
-    }))
+/// Whether `base_url` uses the cleartext `http` scheme. URL schemes are
+/// case-insensitive (RFC 3986 §3.1), so `HTTP://` and `Http://` are
+/// cleartext too. A literal `starts_with("http://")` check would let
+/// `IRONCLAW_REBORN_WEBUI_BASE_URL=HTTP://example.com` slip past the
+/// non-loopback guard while still building a cleartext callback URL —
+/// comparing the scheme case-insensitively closes that bypass.
+fn is_cleartext_http_scheme(base_url: &str) -> bool {
+    base_url
+        .split_once("://")
+        .is_some_and(|(scheme, _)| scheme.eq_ignore_ascii_case("http"))
 }
 
 /// Collect the configured OAuth providers from env. A provider is
@@ -98,6 +159,10 @@ pub(crate) fn sso_startup_config_from_env(
 /// different registered redirect URIs.)
 fn oauth_providers_from_env() -> anyhow::Result<Vec<Arc<dyn OAuthProvider>>> {
     let mut providers: Vec<Arc<dyn OAuthProvider>> = Vec::new();
+    // Optional operator override for the provider HTTP timeout, applied to
+    // every configured provider. Useful on a slow / cross-border path to
+    // the provider (e.g. `github.com`) where the default times out.
+    let http_timeout = oauth_http_timeout_from_env();
 
     if let Some(client_id) = non_empty_env("IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_ID") {
         let client_secret = non_empty_env("IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_SECRET")
@@ -108,22 +173,28 @@ fn oauth_providers_from_env() -> anyhow::Result<Vec<Arc<dyn OAuthProvider>>> {
                 )
             })?;
         let allowed_hd = non_empty_env("IRONCLAW_REBORN_WEBUI_GOOGLE_ALLOWED_HD");
-        // Every successful login is mapped to the single operator (see
-        // `FixedUserDirectory` in the ingress crate), so with no
-        // hosted-domain restriction ANY Google account that completes the
-        // flow becomes the operator. Warn loudly when it is unset.
+        // `allowed_hd` is an additional Google-side restriction (the ID
+        // token's `hd` claim must match a Workspace domain). It is
+        // independent of — and narrower than — the cross-provider
+        // verified-email-domain allowlist the host `UserDirectory`
+        // enforces. When unset, Google login is still gated by
+        // `IRONCLAW_REBORN_WEBUI_ALLOWED_EMAIL_DOMAINS` (admission cannot
+        // be open), but consumer Gmail accounts in an allowed email domain
+        // are not additionally excluded; warn so operators can opt into
+        // the stricter Workspace-only check.
         if allowed_hd.is_none() {
             tracing::warn!(
                 target = "ironclaw::reborn::cli::serve",
-                "IRONCLAW_REBORN_WEBUI_GOOGLE_ALLOWED_HD is unset — any Google account that \
-                 completes login is mapped to the operator identity; set it to restrict \
-                 Google login to one Workspace domain",
+                "IRONCLAW_REBORN_WEBUI_GOOGLE_ALLOWED_HD is unset — Google login is gated \
+                 only by IRONCLAW_REBORN_WEBUI_ALLOWED_EMAIL_DOMAINS, not by a Workspace \
+                 hosted domain; set it to also require a specific hd claim",
             );
         }
         let provider = GoogleProvider::new(GoogleOAuthConfig {
             client_id,
             client_secret: SecretString::from(client_secret),
             allowed_hd,
+            http_timeout,
         })
         .context("failed to build Google OAuth provider")?;
         providers.push(Arc::new(provider));
@@ -140,6 +211,7 @@ fn oauth_providers_from_env() -> anyhow::Result<Vec<Arc<dyn OAuthProvider>>> {
         let provider = GitHubProvider::new(GitHubOAuthConfig {
             client_id,
             client_secret: SecretString::from(client_secret),
+            http_timeout,
         })
         .context("failed to build GitHub OAuth provider")?;
         providers.push(Arc::new(provider));
@@ -151,4 +223,100 @@ fn oauth_providers_from_env() -> anyhow::Result<Vec<Arc<dyn OAuthProvider>>> {
 /// Read an env var, returning `None` when it is unset or blank.
 fn non_empty_env(name: &str) -> Option<String> {
     env::var(name).ok().filter(|raw| !raw.trim().is_empty())
+}
+
+/// Operator override for the OAuth provider HTTP per-call timeout, in
+/// whole seconds. `None` (unset) keeps each provider's default. A
+/// non-positive or unparseable value is ignored with a warning rather
+/// than failing startup — a timeout typo should not take down `serve`.
+fn oauth_http_timeout_from_env() -> Option<Duration> {
+    let raw = non_empty_env("IRONCLAW_REBORN_WEBUI_OAUTH_HTTP_TIMEOUT_SECS")?;
+    match raw.trim().parse::<u64>() {
+        Ok(secs) if secs > 0 => Some(Duration::from_secs(secs)),
+        _ => {
+            tracing::warn!(
+                target = "ironclaw::reborn::cli::serve",
+                value = %raw,
+                "IRONCLAW_REBORN_WEBUI_OAUTH_HTTP_TIMEOUT_SECS is not a positive integer; \
+                 using the provider default timeout",
+            );
+            None
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn addr(raw: &str) -> SocketAddr {
+        raw.parse().expect("valid socket addr")
+    }
+
+    #[test]
+    fn cleartext_scheme_is_detected_case_insensitively() {
+        for raw in [
+            "http://example.com",
+            "HTTP://example.com",
+            "Http://example.com",
+        ] {
+            assert!(is_cleartext_http_scheme(raw), "{raw} should be cleartext");
+        }
+        for raw in [
+            "https://example.com",
+            "HTTPS://example.com",
+            "Https://example.com",
+        ] {
+            assert!(
+                !is_cleartext_http_scheme(raw),
+                "{raw} should not be cleartext"
+            );
+        }
+    }
+
+    #[test]
+    fn cleartext_oauth_rejected_on_non_loopback_for_any_scheme_case() {
+        let public = addr("203.0.113.1:3000");
+        for raw in [
+            "http://example.com",
+            "HTTP://example.com",
+            "Http://example.com",
+        ] {
+            assert!(
+                reject_cleartext_oauth(raw, public).is_err(),
+                "{raw} on a non-loopback bind must be rejected",
+            );
+        }
+        assert!(reject_cleartext_oauth("https://example.com", public).is_ok());
+        assert!(reject_cleartext_oauth("HTTPS://example.com", public).is_ok());
+    }
+
+    #[test]
+    fn cleartext_oauth_allowed_on_loopback_regardless_of_scheme_case() {
+        let loopback = addr("127.0.0.1:3000");
+        for raw in ["http://localhost:3000", "HTTP://localhost:3000"] {
+            assert!(
+                reject_cleartext_oauth(raw, loopback).is_ok(),
+                "{raw} on loopback stays allowed for local dev",
+            );
+        }
+    }
+
+    #[test]
+    fn allowed_email_domains_are_trimmed_lowercased_and_deblanked() {
+        assert_eq!(
+            parse_allowed_email_domains(" Example.com , ,team.EXAMPLE.org ,"),
+            vec!["example.com".to_string(), "team.example.org".to_string()],
+        );
+        assert!(parse_allowed_email_domains("").is_empty());
+        assert!(parse_allowed_email_domains("  , ,").is_empty());
+    }
+
+    #[test]
+    fn admission_allowlist_required_when_providers_configured() {
+        // The fail-closed startup gate: an empty allowlist (which would be
+        // open registration) must error; a non-empty one must pass.
+        assert!(require_admission_allowlist(&[]).is_err());
+        assert!(require_admission_allowlist(&["example.com".to_string()]).is_ok());
+    }
 }

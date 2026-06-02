@@ -1,202 +1,94 @@
-//! libSQL-backed [`UserDirectory`] for the WebChat v2 SSO login surface.
+//! Host [`UserDirectory`] for the WebChat v2 SSO login surface.
 //!
-//! This is the host-supplied production directory the ingress
-//! `build_signed_session_login` builder consumes: it maps each
-//! authenticated OAuth profile to a stable, distinct `UserId`, so
-//! different people logging in become different users (each with their
-//! own `owners/<user>` thread subtree). It mirrors the v1 gateway's
-//! `resolve_user`: look up by provider identity, else link by a
-//! verified email, else create a fresh user.
+//! Thin adapter over the reborn-owned
+//! [`RebornLibSqlUserStore`](ironclaw_reborn_composition::RebornLibSqlUserStore)
+//! (reached through the composition facade, not a direct `ironclaw_reborn`
+//! dependency): it applies the operator's email-domain admission policy
+//! (fail-closed),
+//! then delegates identity resolution/persistence to the store. Keeping
+//! admission here — in the host adapter — leaves the storage layer pure
+//! and the ingress trait seam unchanged, and keeps the durable schema in
+//! `ironclaw_reborn` rather than in this command crate.
 //!
-//! Two tables in a small libSQL file under the reborn home:
-//! - `users(id, email, display_name, created_at)`
-//! - `user_identities(provider, provider_user_id, user_id, email,
-//!   email_verified, created_at)` keyed on `(provider, provider_user_id)`.
+//! Admission is the control that stops a configured provider from
+//! becoming open registration: GitHub has no org/team allowlist and
+//! Google only an optional hosted-domain check, so without an explicit
+//! verified-email-domain allowlist *any* Google/GitHub account could mint
+//! a session on a protected WebUI. `serve` refuses to start when SSO
+//! providers are configured without an allowlist, so the list is never
+//! empty in production.
 
-use std::path::Path;
 use std::sync::Arc;
 
-use anyhow::Context;
 use async_trait::async_trait;
-use chrono::{SecondsFormat, Utc};
 use ironclaw_reborn_composition::host_api::UserId;
+use ironclaw_reborn_composition::{RebornLibSqlUserStore, ResolveIdentity};
 use ironclaw_reborn_webui_ingress::{
     OAuthProviderName, OAuthUserProfile, UserDirectory, UserDirectoryError,
 };
-use uuid::Uuid;
 
-/// libSQL-backed user-identity directory.
-pub(crate) struct DbUserDirectory {
-    db: Arc<libsql::Database>,
+/// Admission + persistence adapter implementing the ingress
+/// [`UserDirectory`] seam.
+pub(crate) struct WebuiUserDirectory {
+    store: Arc<RebornLibSqlUserStore>,
+    /// Lowercased verified-email domains allowed to log in. Never empty
+    /// in production — an empty list rejects every login (fail closed).
+    allowed_email_domains: Vec<String>,
 }
 
-impl DbUserDirectory {
-    /// Open (or create) the user-identity store at `path` and run its
-    /// idempotent migrations.
-    pub(crate) async fn open(path: &Path) -> anyhow::Result<Self> {
-        let db = libsql::Builder::new_local(path)
-            .build()
-            .await
-            .with_context(|| format!("open WebChat user store at {}", path.display()))?;
-        let directory = Self { db: Arc::new(db) };
-        directory.run_migrations().await?;
-        Ok(directory)
+impl WebuiUserDirectory {
+    pub(crate) fn new(
+        store: Arc<RebornLibSqlUserStore>,
+        allowed_email_domains: Vec<String>,
+    ) -> Self {
+        Self {
+            store,
+            allowed_email_domains,
+        }
     }
 
-    async fn run_migrations(&self) -> anyhow::Result<()> {
-        let conn = self.db.connect().context("connect WebChat user store")?;
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS users (\
-                 id TEXT PRIMARY KEY, \
-                 email TEXT, \
-                 display_name TEXT, \
-                 created_at TEXT NOT NULL)",
-            (),
-        )
-        .await
-        .context("create users table")?;
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS user_identities (\
-                 provider TEXT NOT NULL, \
-                 provider_user_id TEXT NOT NULL, \
-                 user_id TEXT NOT NULL, \
-                 email TEXT, \
-                 email_verified INTEGER NOT NULL, \
-                 created_at TEXT NOT NULL, \
-                 PRIMARY KEY (provider, provider_user_id))",
-            (),
-        )
-        .await
-        .context("create user_identities table")?;
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_user_identities_verified_email \
-                 ON user_identities (email) WHERE email_verified = 1",
-            (),
-        )
-        .await
-        .context("create verified-email index")?;
-        Ok(())
+    /// Whether `profile` clears the fail-closed admission gate: a
+    /// verified email whose domain is on the allowlist. An unverified
+    /// email (untrustworthy domain), a missing email, or an off-list
+    /// domain is denied.
+    fn admits(&self, profile: &OAuthUserProfile) -> bool {
+        if !profile.email_verified {
+            return false;
+        }
+        let Some(email) = profile.email.as_deref() else {
+            return false;
+        };
+        let Some(domain) = email.rsplit_once('@').map(|(_, d)| d.to_ascii_lowercase()) else {
+            return false;
+        };
+        self.allowed_email_domains
+            .iter()
+            .any(|allowed| allowed == &domain)
     }
-
-    async fn connect(&self) -> Result<libsql::Connection, UserDirectoryError> {
-        self.db
-            .connect()
-            .map_err(|err| UserDirectoryError::Backend(err.to_string()))
-    }
-}
-
-fn backend(err: impl std::fmt::Display) -> UserDirectoryError {
-    UserDirectoryError::Backend(err.to_string())
-}
-
-fn text_or_null(value: Option<&str>) -> libsql::Value {
-    match value {
-        Some(text) => libsql::Value::Text(text.to_string()),
-        None => libsql::Value::Null,
-    }
-}
-
-fn to_user_id(raw: String) -> Result<UserId, UserDirectoryError> {
-    UserId::new(&raw).map_err(backend)
-}
-
-/// First column of the first row of `sql`, as a String, if any.
-async fn query_one_string(
-    conn: &libsql::Connection,
-    sql: &str,
-    params: impl libsql::params::IntoParams,
-) -> Result<Option<String>, UserDirectoryError> {
-    let mut rows = conn.query(sql, params).await.map_err(backend)?;
-    match rows.next().await.map_err(backend)? {
-        Some(row) => Ok(Some(row.get::<String>(0).map_err(backend)?)),
-        None => Ok(None),
-    }
-}
-
-async fn insert_identity(
-    conn: &libsql::Connection,
-    provider: &str,
-    profile: &OAuthUserProfile,
-    user_id: &str,
-    created_at: &str,
-) -> Result<(), UserDirectoryError> {
-    conn.execute(
-        "INSERT INTO user_identities \
-             (provider, provider_user_id, user_id, email, email_verified, created_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        libsql::params![
-            provider,
-            profile.provider_user_id.as_str(),
-            user_id,
-            text_or_null(profile.email.as_deref()),
-            i64::from(profile.email_verified),
-            created_at,
-        ],
-    )
-    .await
-    .map_err(backend)?;
-    Ok(())
 }
 
 #[async_trait]
-impl UserDirectory for DbUserDirectory {
+impl UserDirectory for WebuiUserDirectory {
     async fn resolve(
         &self,
         provider: &OAuthProviderName,
         profile: &OAuthUserProfile,
     ) -> Result<UserId, UserDirectoryError> {
-        let conn = self.connect().await?;
-        let provider = provider.as_str();
-
-        // 1. Known provider identity → its existing user.
-        if let Some(user_id) = query_one_string(
-            &conn,
-            "SELECT user_id FROM user_identities WHERE provider = ?1 AND provider_user_id = ?2",
-            libsql::params![provider, profile.provider_user_id.as_str()],
-        )
-        .await?
-        {
-            return to_user_id(user_id);
+        if !self.admits(profile) {
+            // Fail closed: the callback maps `Unknown` to a 403 redirect
+            // and mints no session.
+            return Err(UserDirectoryError::Unknown);
         }
-
-        let now = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
-
-        // 2. Link by a VERIFIED email to an existing user (cross-provider
-        //    account linking). Never link on an unverified email — that
-        //    would let an attacker claim another user's account by
-        //    asserting their address at a provider that does not verify it.
-        if profile.email_verified
-            && let Some(email) = profile.email.as_deref()
-        {
-            let email = email.to_ascii_lowercase();
-            if let Some(user_id) = query_one_string(
-                &conn,
-                "SELECT user_id FROM user_identities \
-                     WHERE email_verified = 1 AND lower(email) = ?1 LIMIT 1",
-                libsql::params![email],
-            )
-            .await?
-            {
-                insert_identity(&conn, provider, profile, &user_id, &now).await?;
-                return to_user_id(user_id);
-            }
-        }
-
-        // 3. New user.
-        let new_user_id = Uuid::new_v4().to_string();
-        conn.execute(
-            "INSERT INTO users (id, email, display_name, created_at) VALUES (?1, ?2, ?3, ?4)",
-            libsql::params![
-                new_user_id.as_str(),
-                text_or_null(profile.email.as_deref()),
-                text_or_null(profile.display_name.as_deref()),
-                now.as_str(),
-            ],
-        )
-        .await
-        .map_err(backend)?;
-        insert_identity(&conn, provider, profile, &new_user_id, &now).await?;
-        to_user_id(new_user_id)
+        self.store
+            .resolve_or_create(ResolveIdentity {
+                provider: provider.as_str(),
+                provider_user_id: profile.provider_user_id.as_str(),
+                email: profile.email.as_deref(),
+                email_verified: profile.email_verified,
+                display_name: profile.display_name.as_deref(),
+            })
+            .await
+            .map_err(|err| UserDirectoryError::Backend(err.to_string()))
     }
 }
 
@@ -204,97 +96,76 @@ impl UserDirectory for DbUserDirectory {
 mod tests {
     use super::*;
 
+    async fn directory(domains: &[&str]) -> WebuiUserDirectory {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        // Leak the tempdir so the libSQL file outlives the test body.
+        let path = tmp.keep().join("reborn-local-dev.db");
+        // Open through the same composition facade production uses, so the
+        // CLI test needs no direct libSQL dependency.
+        let store = ironclaw_reborn_composition::open_webui_user_store(&path)
+            .await
+            .expect("store");
+        WebuiUserDirectory::new(store, domains.iter().map(|d| d.to_string()).collect())
+    }
+
     fn google() -> OAuthProviderName {
         OAuthProviderName::new("google").expect("provider")
     }
-    fn github() -> OAuthProviderName {
-        OAuthProviderName::new("github").expect("provider")
-    }
-    fn profile(sub: &str, email: Option<&str>, verified: bool) -> OAuthUserProfile {
+
+    fn profile(email: Option<&str>, verified: bool) -> OAuthUserProfile {
         OAuthUserProfile {
-            provider_user_id: sub.to_string(),
+            provider_user_id: "g-1".to_string(),
             email: email.map(str::to_string),
             email_verified: verified,
             display_name: None,
         }
     }
 
-    async fn dir() -> DbUserDirectory {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        // Leak the tempdir so the libsql file outlives the test body.
-        let path = tmp.keep().join("users.db");
-        DbUserDirectory::open(&path).await.expect("open")
+    #[tokio::test]
+    async fn verified_allowed_domain_is_admitted() {
+        let dir = directory(&["example.com"]).await;
+        let user = dir
+            .resolve(&google(), &profile(Some("alice@example.com"), true))
+            .await
+            .expect("an allowed verified domain must be admitted");
+        assert!(!user.as_str().is_empty());
     }
 
     #[tokio::test]
-    async fn same_provider_identity_is_stable_across_logins() {
-        let dir = dir().await;
-        let p = google();
-        let first = dir
-            .resolve(&p, &profile("g-1", Some("a@x.com"), true))
+    async fn disallowed_domain_is_rejected_without_minting() {
+        let dir = directory(&["example.com"]).await;
+        let err = dir
+            .resolve(&google(), &profile(Some("mallory@evil.test"), true))
             .await
-            .expect("resolve");
-        let second = dir
-            .resolve(&p, &profile("g-1", Some("a@x.com"), true))
-            .await
-            .expect("resolve");
-        assert_eq!(first.as_str(), second.as_str());
+            .expect_err("an off-allowlist domain must be rejected");
+        assert!(matches!(err, UserDirectoryError::Unknown));
     }
 
     #[tokio::test]
-    async fn distinct_identities_get_distinct_users() {
-        let dir = dir().await;
-        let p = google();
-        let a = dir
-            .resolve(&p, &profile("g-1", Some("a@x.com"), true))
+    async fn unverified_email_in_allowed_domain_is_rejected() {
+        let dir = directory(&["example.com"]).await;
+        let err = dir
+            .resolve(&google(), &profile(Some("alice@example.com"), false))
             .await
-            .expect("resolve");
-        let b = dir
-            .resolve(&p, &profile("g-2", Some("b@x.com"), true))
-            .await
-            .expect("resolve");
-        assert_ne!(
-            a.as_str(),
-            b.as_str(),
-            "different people must be different users"
-        );
+            .expect_err("an unverified email must be rejected even on an allowed domain");
+        assert!(matches!(err, UserDirectoryError::Unknown));
     }
 
     #[tokio::test]
-    async fn verified_email_links_across_providers() {
-        let dir = dir().await;
-        let via_google = dir
-            .resolve(&google(), &profile("g-1", Some("same@x.com"), true))
+    async fn missing_email_is_rejected() {
+        let dir = directory(&["example.com"]).await;
+        let err = dir
+            .resolve(&google(), &profile(None, true))
             .await
-            .expect("resolve");
-        let via_github = dir
-            .resolve(&github(), &profile("gh-9", Some("same@x.com"), true))
-            .await
-            .expect("resolve");
-        assert_eq!(
-            via_google.as_str(),
-            via_github.as_str(),
-            "a verified shared email links the two provider identities to one user"
-        );
+            .expect_err("a profile without an email cannot clear a domain allowlist");
+        assert!(matches!(err, UserDirectoryError::Unknown));
     }
 
     #[tokio::test]
-    async fn unverified_email_does_not_link() {
-        let dir = dir().await;
-        let verified = dir
-            .resolve(&google(), &profile("g-1", Some("same@x.com"), true))
+    async fn domain_match_is_case_insensitive() {
+        let dir = directory(&["example.com"]).await;
+        dir.resolve(&google(), &profile(Some("Alice@Example.COM"), true))
             .await
-            .expect("resolve");
-        // A different provider asserting the SAME email but UNVERIFIED must
-        // not hijack the verified user's account.
-        let unverified = dir
-            .resolve(&github(), &profile("gh-9", Some("same@x.com"), false))
-            .await
-            .expect("resolve");
-        assert_ne!(
-            verified.as_str(),
-            unverified.as_str(),
-            "an unverified email must never link to a verified account"
-        );
+            .expect("domain comparison must be case-insensitive");
     }
 }

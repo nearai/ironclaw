@@ -231,11 +231,11 @@ where
         // Multi-user: the loop host wrote this thread under the run's
         // authenticated owner (`owners/<caller>`), so the completion-ref
         // read must use the same owner — otherwise it looks in the wrong
-        // subtree and fails with `unknown thread`. Resolve the owner from
-        // the run's actor, mirroring the loop host's per-caller scoping.
-        // Only when the base scope is owner-scoped (the serve path pins a
-        // runtime owner); an owner-less applier keeps its shared/system
-        // slot, so single-owner and owner-agnostic flows are unchanged.
+        // subtree and fails with `unknown thread`. Apply the SAME
+        // owner-rewrite rule the loop host uses, via the shared
+        // [`ThreadScopeResolver`], so the two cannot drift. The run-state
+        // read (for the actor) only runs when the base scope is
+        // owner-scoped; an owner-less applier keeps its shared/system slot.
         if thread_scope.owner_user_id.is_some() {
             let run_state = self
                 .turn_state_store
@@ -244,9 +244,10 @@ where
                     run_id: request.run_id,
                 })
                 .await?;
-            if let Some(actor) = run_state.actor {
-                thread_scope.owner_user_id = Some(actor.user_id);
-            }
+            thread_scope = crate::thread_scope::ThreadScopeResolver::resolve(
+                &thread_scope,
+                run_state.actor.as_ref(),
+            );
         }
         let history = self
             .thread_service

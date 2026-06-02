@@ -31,12 +31,12 @@ use super::provider_name::OAuthProviderName;
 const GOOGLE_AUTH_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 const GOOGLE_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 const GOOGLE_ISSUER: &str = "https://accounts.google.com";
-/// Per-request timeout on the Google token endpoint. The default
+/// Per-request DEFAULT timeout on the Google token endpoint. The default
 /// `reqwest::Client` has no timeout, which would let a hung Google
-/// response pin the callback handler indefinitely. 10s comfortably
-/// covers the worst-case TLS handshake + token exchange while
-/// failing loud on a real outage.
-const GOOGLE_HTTP_TIMEOUT: Duration = Duration::from_secs(10);
+/// response pin the callback handler indefinitely. Operators on a slow /
+/// cross-border path can override it via `GoogleOAuthConfig::http_timeout`
+/// (the reborn CLI exposes `IRONCLAW_REBORN_WEBUI_OAUTH_HTTP_TIMEOUT_SECS`).
+const GOOGLE_HTTP_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Google OIDC provider.
 pub struct GoogleProvider {
@@ -92,7 +92,7 @@ impl GoogleProvider {
         token_endpoint: impl Into<String>,
     ) -> Result<Self, ProviderInitError> {
         let http = reqwest::Client::builder()
-            .timeout(GOOGLE_HTTP_TIMEOUT)
+            .timeout(config.http_timeout.unwrap_or(GOOGLE_HTTP_TIMEOUT))
             .build()
             .map_err(|err| ProviderInitError(err.to_string()))?;
         Ok(Self {
@@ -272,6 +272,7 @@ mod tests {
             client_id: "client-id-123".to_string(),
             client_secret: SecretString::from("client-secret-xyz".to_string()),
             allowed_hd: hd.map(str::to_string),
+            http_timeout: None,
         }
     }
 

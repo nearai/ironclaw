@@ -97,7 +97,7 @@ pub fn build_signed_session_login(
     }
 
     let session_store: Arc<dyn SessionStore> = Arc::new(
-        SignedTokenSessionStore::from_operator_secret(&config.operator_secret),
+        SignedTokenSessionStore::from_operator_secret(&config.operator_secret, &config.tenant_id),
     );
     let session_authenticator: Arc<dyn WebuiAuthenticator> =
         Arc::new(SessionAuthenticator::new(session_store.clone()));
@@ -126,6 +126,9 @@ pub fn build_signed_session_login(
 /// process-local denylist that makes `revoke` (logout) effective.
 struct SignedTokenSessionStore {
     key: Vec<u8>,
+    /// Host tenant this store is bound to. The signing key is derived from
+    /// it, and `lookup` re-checks it as defense in depth.
+    tenant_id: TenantId,
     /// Revoked session ids → their expiry (unix seconds). Pruned lazily
     /// on each `revoke` so the set stays bounded by "live revoked
     /// sessions", never "every session ever revoked".
@@ -133,15 +136,27 @@ struct SignedTokenSessionStore {
 }
 
 impl SignedTokenSessionStore {
-    /// Derive the HMAC key from the operator secret, domain-separated so
-    /// the session-signing key never collides with another use of the
-    /// same secret.
-    fn from_operator_secret(secret: &SecretString) -> Self {
+    /// Derive the HMAC key from the operator secret AND the host tenant,
+    /// domain-separated so the session-signing key never collides with
+    /// another use of the same secret. Binding the tenant into the key is
+    /// the primary cross-tenant control: two `serve` instances that share
+    /// one operator secret but serve different tenants derive different
+    /// keys, so neither can validate the other's session tokens — a token
+    /// minted for one tenant fails the HMAC check on the other.
+    fn from_operator_secret(secret: &SecretString, tenant_id: &TenantId) -> Self {
         let mut hasher = Sha256::new();
         hasher.update(b"ironclaw-reborn-webui-session-v1::");
+        // Length-prefix the tenant so its bytes can never be confused with
+        // the secret bytes that follow (a tenant of `a` + secret `bc` must
+        // not key-collide with tenant `ab` + secret `c`).
+        let tenant_bytes = tenant_id.as_str().as_bytes();
+        hasher.update((tenant_bytes.len() as u64).to_le_bytes());
+        hasher.update(tenant_bytes);
+        hasher.update(b"::");
         hasher.update(secret.expose_secret().as_bytes());
         Self {
             key: hasher.finalize().to_vec(),
+            tenant_id: tenant_id.clone(),
             revoked: RwLock::new(HashMap::new()),
         }
     }
@@ -236,6 +251,15 @@ impl SessionStore for SignedTokenSessionStore {
         // backend inconsistency, not an auth miss — surface it.
         let tenant_id = TenantId::new(&payload.tenant)
             .map_err(|err| SessionStoreError::Backend(format!("token tenant: {err}")))?;
+        // Defense in depth atop the tenant-bound key: reject a
+        // validly-parsed token whose tenant differs from this host's. (A
+        // cross-tenant token cannot validly sign under the tenant-bound
+        // key, so reaching here with a mismatch should be impossible — but
+        // fail closed rather than stamp the host tenant onto a foreign
+        // token if the key derivation ever changes.)
+        if tenant_id.as_str() != self.tenant_id.as_str() {
+            return Ok(None);
+        }
         let user_id = UserId::new(&payload.user)
             .map_err(|err| SessionStoreError::Backend(format!("token user: {err}")))?;
         let created_at = DateTime::<Utc>::from_timestamp(payload.iat, 0)
@@ -304,7 +328,17 @@ mod tests {
     }
 
     fn signed_store(secret: &str) -> SignedTokenSessionStore {
-        SignedTokenSessionStore::from_operator_secret(&SecretString::from(secret.to_string()))
+        SignedTokenSessionStore::from_operator_secret(
+            &SecretString::from(secret.to_string()),
+            &tenant(),
+        )
+    }
+
+    fn signed_store_for(secret: &str, tenant_id: &TenantId) -> SignedTokenSessionStore {
+        SignedTokenSessionStore::from_operator_secret(
+            &SecretString::from(secret.to_string()),
+            tenant_id,
+        )
     }
 
     /// Mint a raw `{payload}.{sig}` token directly from a payload — used
@@ -358,6 +392,38 @@ mod tests {
         assert!(other.lookup(&raw).await.expect("lookup").is_none());
 
         assert!(store.lookup("not-a-token").await.expect("lookup").is_none());
+    }
+
+    #[tokio::test]
+    async fn same_secret_different_tenant_tokens_are_rejected() {
+        // Two serve instances sharing one operator secret but configured
+        // for different tenants must NOT accept each other's session
+        // tokens — otherwise a multi-tenant operator that reuses a secret
+        // leaks cross-tenant access.
+        let tenant_a = TenantId::new("tenant-a").expect("tenant");
+        let tenant_b = TenantId::new("tenant-b").expect("tenant");
+        let store_a = signed_store_for("shared-secret", &tenant_a);
+        let store_b = signed_store_for("shared-secret", &tenant_b);
+
+        let token = store_a
+            .create_session(
+                tenant_a.clone(),
+                UserId::new("alice").expect("user"),
+                ChronoDuration::hours(1),
+            )
+            .await
+            .expect("create");
+        let raw = token.expose_secret().to_string();
+
+        assert!(
+            store_a.lookup(&raw).await.expect("lookup").is_some(),
+            "the minting host must accept its own token",
+        );
+        assert!(
+            store_b.lookup(&raw).await.expect("lookup").is_none(),
+            "a session minted for tenant-a must not authenticate against a \
+             same-secret host bound to tenant-b",
+        );
     }
 
     #[tokio::test]

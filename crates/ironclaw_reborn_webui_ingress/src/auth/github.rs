@@ -40,12 +40,13 @@ const GITHUB_EMAILS_URL: &str = "https://api.github.com/user/emails";
 /// which would let a hung GitHub response pin the callback handler
 /// indefinitely.
 ///
-/// Kept low enough that the three sequential calls cannot, even in the
-/// worst case, exceed [`GITHUB_EXCHANGE_BUDGET`] — see the invariant on
-/// that constant. This makes the per-call timeout the binding limit in
-/// the normal "one slow stage" case and surfaces the more specific
-/// `reqwest` timeout error rather than the generic budget error.
-const GITHUB_HTTP_TIMEOUT: Duration = Duration::from_secs(6);
+/// This is the DEFAULT; operators on a slow / cross-border path to
+/// `github.com` can override it via `GitHubOAuthConfig::http_timeout`
+/// (the reborn CLI exposes `IRONCLAW_REBORN_WEBUI_OAUTH_HTTP_TIMEOUT_SECS`).
+/// The overall `exchange_budget` is derived from the effective per-call
+/// timeout at construction so the "budget >= sum of calls" invariant
+/// holds for any value.
+const GITHUB_HTTP_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Overall budget for the full `exchange_code` chain (token -> user ->
 /// emails). The per-call timeout bounds one request; without a wrapping
@@ -53,13 +54,12 @@ const GITHUB_HTTP_TIMEOUT: Duration = Duration::from_secs(6);
 /// sum of every call's timeout, so the whole exchange is wrapped in this
 /// ceiling as a backstop. Whichever limit trips first fails closed.
 ///
-/// Invariant: `GITHUB_EXCHANGE_BUDGET >= 3 * GITHUB_HTTP_TIMEOUT`
-/// (20s >= 18s). Keeping the budget at or above the sum means a single
-/// genuinely-slow stage fails with the precise per-call timeout instead
-/// of the generic budget error; the budget only ever fires for a
-/// degraded-across-all-stages exchange (or a stuck future the per-call
-/// `reqwest` timer cannot see, e.g. the test blackhole).
-const GITHUB_EXCHANGE_BUDGET: Duration = Duration::from_secs(20);
+/// Floor for the derived budget. The constructor computes
+/// `effective_timeout * 3 + 2s` and takes the max with this floor, so the
+/// invariant `budget >= 3 * per_call` always holds while a single
+/// genuinely-slow stage still fails with the precise per-call timeout
+/// rather than the generic budget error.
+const GITHUB_EXCHANGE_BUDGET_FLOOR: Duration = Duration::from_secs(20);
 
 /// Defensive cap on the `/user/emails` list. A real account has a
 /// handful of addresses; anything past this is treated as abuse /
@@ -163,8 +163,16 @@ impl GitHubProvider {
         user_endpoint: impl Into<String>,
         emails_endpoint: impl Into<String>,
     ) -> Result<Self, ProviderInitError> {
+        let effective_timeout = config.http_timeout.unwrap_or(GITHUB_HTTP_TIMEOUT);
+        // Derive the overall budget from the effective per-call timeout so
+        // the "budget >= 3 calls" invariant holds for any configured value,
+        // never below the floor.
+        let exchange_budget = effective_timeout
+            .saturating_mul(3)
+            .saturating_add(Duration::from_secs(2))
+            .max(GITHUB_EXCHANGE_BUDGET_FLOOR);
         let http = reqwest::Client::builder()
-            .timeout(GITHUB_HTTP_TIMEOUT)
+            .timeout(effective_timeout)
             // GitHub's API rejects requests without a User-Agent
             // header (HTTP 403). Set one on the client so every call
             // carries it.
@@ -180,7 +188,7 @@ impl GitHubProvider {
             token_endpoint: token_endpoint.into(),
             user_endpoint: user_endpoint.into(),
             emails_endpoint: emails_endpoint.into(),
-            exchange_budget: GITHUB_EXCHANGE_BUDGET,
+            exchange_budget,
         })
     }
 
@@ -486,6 +494,7 @@ mod tests {
         GitHubOAuthConfig {
             client_id: "gh-client-id".to_string(),
             client_secret: SecretString::from("gh-client-secret".to_string()),
+            http_timeout: None,
         }
     }
 

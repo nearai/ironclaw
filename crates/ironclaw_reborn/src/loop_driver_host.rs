@@ -725,6 +725,7 @@ async fn emit_subscription_terminated_note(
     };
     let milestone = ironclaw_turns::run_profile::LoopHostMilestone {
         scope: run_context.scope.clone(),
+        actor: run_context.actor.clone(),
         turn_id: run_context.turn_id,
         run_id: run_context.run_id,
         loop_driver_id: run_context.loop_driver_id.clone(),
@@ -896,7 +897,7 @@ where
     /// owner-agnostic flows and runs without an actor (background tasks,
     /// triggers) are unaffected.
     fn effective_thread_scope(&self, run_context: &LoopRunContext) -> ThreadScope {
-        owner_scoped_thread_scope(&self.thread_scope, run_context)
+        crate::thread_scope::ThreadScopeResolver::resolve(&self.thread_scope, run_context.actor())
     }
 
     fn build_compaction_ports(&self, run_context: &LoopRunContext) -> Arc<dyn LoopCompactionPort> {
@@ -1980,22 +1981,6 @@ fn persisted_profile_id(profile_id: &RunProfileId) -> RunProfileId {
     }
 }
 
-/// Re-point a base thread scope's `owner_user_id` at the run's
-/// authenticated actor, so each caller's thread I/O is isolated to its
-/// own `owners/<user>` subtree. Only applies when the base scope is
-/// owner-scoped; an owner-less base (no declared owner) and runs with
-/// no actor are returned unchanged. See
-/// [`RebornLoopDriverHostFactory::effective_thread_scope`].
-fn owner_scoped_thread_scope(base: &ThreadScope, run_context: &LoopRunContext) -> ThreadScope {
-    let mut scope = base.clone();
-    if scope.owner_user_id.is_some()
-        && let Some(actor) = run_context.actor()
-    {
-        scope.owner_user_id = Some(actor.user_id.clone());
-    }
-    scope
-}
-
 fn validate_thread_scope(
     thread_scope: &ThreadScope,
     run_context: &LoopRunContext,
@@ -2291,10 +2276,16 @@ mod tests {
             mission_id: None,
         };
 
+        // This drives the resolution exactly as the host does — through
+        // `run_context.actor()` — so it locks the host's call pattern, not
+        // just the resolver rule (which has its own tests in
+        // `crate::thread_scope`).
+        use crate::thread_scope::ThreadScopeResolver;
+
         // No actor → the factory's owner is kept (background / system runs).
         let ctx = test_run_context().await;
         assert_eq!(
-            owner_scoped_thread_scope(&base, &ctx).owner_user_id,
+            ThreadScopeResolver::resolve(&base, ctx.actor()).owner_user_id,
             Some(UserId::new("operator").unwrap()),
         );
 
@@ -2307,11 +2298,11 @@ mod tests {
             .await
             .with_actor(TurnActor::new(UserId::new("user-b").unwrap()));
         assert_eq!(
-            owner_scoped_thread_scope(&base, &ctx_a).owner_user_id,
+            ThreadScopeResolver::resolve(&base, ctx_a.actor()).owner_user_id,
             Some(UserId::new("user-a").unwrap()),
         );
         assert_eq!(
-            owner_scoped_thread_scope(&base, &ctx_b).owner_user_id,
+            ThreadScopeResolver::resolve(&base, ctx_b.actor()).owner_user_id,
             Some(UserId::new("user-b").unwrap()),
         );
 
@@ -2321,7 +2312,7 @@ mod tests {
             ..base.clone()
         };
         assert_eq!(
-            owner_scoped_thread_scope(&ownerless, &ctx_a).owner_user_id,
+            ThreadScopeResolver::resolve(&ownerless, ctx_a.actor()).owner_user_id,
             None,
         );
     }

@@ -6,14 +6,13 @@ use std::sync::Arc;
 use anyhow::{Context, anyhow};
 use clap::Args;
 use ironclaw_reborn_composition::{
-    GoogleOAuthRouteConfig, PublicRouteMount, RebornReadiness, RebornRuntimeIdentity,
-    RebornRuntimeInput, RebornWebuiBundle, WebuiAuthenticator, WebuiServeConfig,
-    build_reborn_runtime, build_webui_services, webui_v2_app_with_lifecycle,
+    GoogleOAuthRouteConfig, RebornReadiness, RebornRuntimeIdentity, RebornRuntimeInput,
+    RebornWebuiBundle, WebuiAuthenticator, WebuiServeConfig, build_reborn_runtime,
+    build_webui_services, webui_v2_app_with_lifecycle,
 };
 use ironclaw_reborn_config::IdentitySection;
 use ironclaw_reborn_webui_ingress::{
-    EnvBearerAuthenticator, RebornWebuiServeOptions, SignedSessionLoginConfig,
-    build_signed_session_login, serve_webui_v2,
+    EnvBearerAuthenticator, RebornWebuiServeOptions, serve_webui_v2,
 };
 use secrecy::SecretString;
 
@@ -194,13 +193,15 @@ impl ServeCommand {
         // the login wiring are assembled inside the async runtime below,
         // because opening the libSQL user store is async.
         let sso_startup = crate::commands::serve_sso::sso_startup_config_from_env(listen_addr)?;
-        // The libSQL user-identity store lives alongside the local-dev
-        // runtime database under the reborn home.
+        // The user-identity tables live IN the reborn local-dev substrate
+        // database (a second handle to the same `reborn-local-dev.db` the
+        // runtime opens), not a separate identity-store file — so there is
+        // one durable user source, not two.
         let user_store_path = boot_config
             .home()
             .path()
             .join("local-dev")
-            .join("webui-users.db");
+            .join("reborn-local-dev.db");
 
         // CORS allow-origin list. Empty = fail-closed on every
         // cross-origin preflight; operators MUST opt in to the
@@ -283,42 +284,21 @@ impl ServeCommand {
                 .context("failed to assemble Reborn runtime for `serve`")?;
             let bundle: RebornWebuiBundle = build_webui_services(&runtime, None)?;
 
-            // Assemble the SSO login surface. When a provider is configured,
-            // open the libSQL user-identity directory (multi-user: each
-            // OAuth identity maps to its own user) and hand it plus the
-            // resolved providers to the ingress builder. With no provider,
-            // keep the plain env-bearer auth and mount no public routes.
-            let (authenticator, public_mount): (
-                Arc<dyn WebuiAuthenticator>,
-                Option<PublicRouteMount>,
-            ) = match sso_startup {
-                Some(sso) => {
-                    if let Some(parent) = user_store_path.parent() {
-                        std::fs::create_dir_all(parent)
-                            .context("create WebChat user-store directory")?;
-                    }
-                    let user_directory = Arc::new(
-                        crate::commands::user_directory::DbUserDirectory::open(&user_store_path)
-                            .await
-                            .context("failed to open WebChat user-identity store")?,
-                    );
-                    let wiring = build_signed_session_login(SignedSessionLoginConfig {
-                        tenant_id: tenant_id.clone(),
-                        user_directory,
-                        operator_secret: session_signing_secret,
-                        base_url: sso.base_url,
-                        providers: sso.providers,
-                        env_authenticator: env_authenticator.clone(),
-                    })
-                    .expect("non-empty providers always produce login wiring"); // safety: this arm only runs for Some(sso), and sso_startup_config_from_env returns None when providers is empty, so build_signed_session_login never returns None here
-                    eprintln!(
-                        "ironclaw-reborn: WebChat v2 SSO login mounted — \
-                         see GET /auth/providers for the enabled set"
-                    );
-                    (wiring.authenticator, Some(wiring.mount))
-                }
-                None => (env_authenticator, None),
-            };
+            // Assemble the WebChat v2 auth surface (authenticator + optional
+            // public login mount). The auth/identity module owns the store
+            // opening + signed-session wiring; `serve` only supplies host
+            // config.
+            let crate::commands::webui_auth::WebuiAuthSurface {
+                authenticator,
+                public_mount,
+            } = crate::commands::webui_auth::build_webui_auth_surface(
+                sso_startup,
+                &user_store_path,
+                tenant_id.clone(),
+                session_signing_secret,
+                env_authenticator,
+            )
+            .await?;
 
             print_serve_banner(
                 listen_addr,

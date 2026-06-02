@@ -40,13 +40,11 @@ webui-v2-beta = [
     "ironclaw_reborn_composition/webui-v2-beta",
     "dep:ironclaw_reborn_webui_ingress",
     "dep:async-trait",
-    "dep:libsql",
 ]
 
 [dependencies]
 anyhow = "1"
 async-trait = { version = "0.1", optional = true }
-libsql = { version = "0.6", optional = true, default-features = false, features = ["core", "replication", "remote", "tls"] }
 chrono = { version = "0.4", features = ["serde"] }
 hex = "0.4.3"
 clap = { version = "4", features = ["derive", "env"] }

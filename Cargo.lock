@@ -4841,6 +4841,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "uuid",
  "wat",
 ]
 
@@ -4859,7 +4860,6 @@ dependencies = [
  "ironclaw_reborn_config",
  "ironclaw_reborn_traces",
  "ironclaw_reborn_webui_ingress",
- "libsql",
  "reqwest",
  "secrecy",
  "serde",
