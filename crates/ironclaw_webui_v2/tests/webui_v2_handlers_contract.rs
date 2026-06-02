@@ -27,7 +27,8 @@ use ironclaw_product_adapters::{
     ProgressKind, ProgressUpdateView, ProjectionCursor,
 };
 use ironclaw_product_workflow::{
-    ExtensionName, LifecyclePhase, RebornCancelRunResponse, RebornCreateThreadResponse,
+    LifecyclePackageRef, LifecyclePhase, RebornCancelRunResponse, RebornCreateThreadResponse,
+    RebornExtensionActionResponse, RebornExtensionListResponse, RebornExtensionRegistryResponse,
     RebornGetRunStateRequest, RebornGetRunStateResponse, RebornListThreadsResponse,
     RebornResolveGateResponse, RebornResumeGateResponse, RebornServicesApi, RebornServicesError,
     RebornServicesErrorCode, RebornServicesErrorKind, RebornSetupExtensionResponse,
@@ -70,6 +71,11 @@ struct StubServices {
     stream_events_calls: Mutex<Vec<RebornStreamEventsRequest>>,
     cancel_run_calls: Mutex<Vec<WebUiCancelRunRequest>>,
     resolve_gate_calls: Mutex<Vec<WebUiResolveGateRequest>>,
+    list_extensions_calls: Mutex<usize>,
+    list_extension_registry_calls: Mutex<usize>,
+    install_extension_calls: Mutex<Vec<String>>,
+    activate_extension_calls: Mutex<Vec<String>>,
+    remove_extension_calls: Mutex<Vec<String>>,
     next_create_thread_error: Mutex<Option<RebornServicesError>>,
     /// Per-call queued responses for `stream_events`. When non-empty, the
     /// front entry is popped and returned on each call so SSE tests can
@@ -279,19 +285,87 @@ impl RebornServicesApi for StubServices {
         })
     }
 
+    async fn list_extensions(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornExtensionListResponse, RebornServicesError> {
+        *self.list_extensions_calls.lock().expect("lock") += 1;
+        Ok(RebornExtensionListResponse {
+            extensions: Vec::new(),
+        })
+    }
+
+    async fn list_extension_registry(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornExtensionRegistryResponse, RebornServicesError> {
+        *self.list_extension_registry_calls.lock().expect("lock") += 1;
+        Ok(RebornExtensionRegistryResponse {
+            entries: Vec::new(),
+        })
+    }
+
+    async fn install_extension(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        package_ref: LifecyclePackageRef,
+    ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
+        self.install_extension_calls
+            .lock()
+            .expect("lock")
+            .push(package_ref.id.as_str().to_string());
+        Ok(extension_action_response("installed"))
+    }
+
+    async fn activate_extension(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        package_ref: LifecyclePackageRef,
+    ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
+        self.activate_extension_calls
+            .lock()
+            .expect("lock")
+            .push(package_ref.id.as_str().to_string());
+        Ok(extension_action_response("activated"))
+    }
+
+    async fn remove_extension(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        package_ref: LifecyclePackageRef,
+    ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
+        self.remove_extension_calls
+            .lock()
+            .expect("lock")
+            .push(package_ref.id.as_str().to_string());
+        Ok(extension_action_response("removed"))
+    }
+
     async fn setup_extension(
         &self,
         _caller: WebUiAuthenticatedCaller,
-        extension_name: ExtensionName,
+        package_ref: LifecyclePackageRef,
         _request: WebUiSetupExtensionRequest,
     ) -> Result<RebornSetupExtensionResponse, RebornServicesError> {
         Ok(RebornSetupExtensionResponse {
-            extension_name,
+            package_ref,
             phase: LifecyclePhase::UnsupportedOrLegacy,
             blockers: Vec::new(),
-            package_ref: None,
             payload: None,
         })
+    }
+}
+
+fn extension_action_response(message: &str) -> RebornExtensionActionResponse {
+    RebornExtensionActionResponse {
+        success: true,
+        message: message.to_string(),
+        activated: None,
+        auth_url: None,
+        awaiting_token: None,
+        instructions: None,
+        onboarding_state: None,
+        onboarding: None,
     }
 }
 
@@ -600,14 +674,171 @@ async fn stream_events_last_event_id_header_takes_precedence_over_query() {
     );
 }
 
-// Regression for the typed-internals review (Medium): the
-// `extension_name` route segment must be validated against
-// `ExtensionName` at the handler/facade boundary so the typed value
-// is what crosses into the facade contract — not a raw `String`. A
-// well-formed name reaches the facade and the typed identifier
-// round-trips into the response.
 #[tokio::test]
-async fn setup_extension_dispatches_typed_extension_name_to_facade() {
+async fn extension_list_and_registry_dispatch_through_facade() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    for uri in [
+        "/api/webchat/v2/extensions",
+        "/api/webchat/v2/extensions/registry",
+    ] {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(uri)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("oneshot");
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    assert_eq!(*services.list_extensions_calls.lock().expect("lock"), 1);
+    assert_eq!(
+        *services.list_extension_registry_calls.lock().expect("lock"),
+        1
+    );
+}
+
+#[tokio::test]
+async fn install_extension_decodes_body_package_ref_to_facade_call() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/extensions/install")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"package_ref":{"kind":"extension","id":"nearai-mcp"}}"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        services
+            .install_extension_calls
+            .lock()
+            .expect("lock")
+            .as_slice(),
+        ["nearai-mcp"]
+    );
+}
+
+#[tokio::test]
+async fn install_extension_rejects_non_extension_package_kind_with_400() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/extensions/install")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"package_ref":{"kind":"skill","id":"nearai-mcp"}}"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = read_json(response).await;
+    assert_eq!(body["error"], "invalid_request");
+    assert_eq!(body["field"], "package_ref");
+    assert_eq!(body["validation_code"], "invalid_id");
+    assert!(
+        services
+            .install_extension_calls
+            .lock()
+            .expect("lock")
+            .is_empty(),
+        "invalid package kind must not reach the facade"
+    );
+}
+
+#[tokio::test]
+async fn activate_and_remove_extension_decode_path_package_id_to_facade_call() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    for uri in [
+        "/api/webchat/v2/extensions/google-calendar/activate",
+        "/api/webchat/v2/extensions/google-calendar/remove",
+    ] {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(uri)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("oneshot");
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    assert_eq!(
+        services
+            .activate_extension_calls
+            .lock()
+            .expect("lock")
+            .as_slice(),
+        ["google-calendar"]
+    );
+    assert_eq!(
+        services
+            .remove_extension_calls
+            .lock()
+            .expect("lock")
+            .as_slice(),
+        ["google-calendar"]
+    );
+}
+
+#[tokio::test]
+async fn get_extension_setup_dispatches_package_ref_to_facade() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/extensions/telegram/setup")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(body["package_ref"]["id"], "telegram");
+    assert_eq!(body["package_ref"]["kind"], "extension");
+    assert_eq!(body["phase"], "unsupported_or_legacy");
+}
+
+// The path segment must become a lifecycle package ref at the
+// handler/facade boundary. A well-formed package id reaches the facade
+// and round-trips into the response.
+#[tokio::test]
+async fn setup_extension_dispatches_package_ref_to_facade() {
     let services = Arc::new(StubServices::default());
     let router = router_with(services.clone());
 
@@ -626,9 +857,10 @@ async fn setup_extension_dispatches_typed_extension_name_to_facade() {
     assert_eq!(response.status(), StatusCode::OK);
     let body = read_json(response).await;
     assert_eq!(
-        body["extension_name"], "telegram",
-        "facade must echo the typed extension name from the path",
+        body["package_ref"]["id"], "telegram",
+        "facade must echo the package id from the path",
     );
+    assert_eq!(body["package_ref"]["kind"], "extension");
     assert_eq!(body["phase"], "unsupported_or_legacy");
     assert!(
         body.get("status").is_none(),
@@ -644,16 +876,17 @@ async fn setup_extension_dispatches_typed_extension_name_to_facade() {
 // into the facade as a raw `String` and the typed-internals rule in
 // `.claude/rules/types.md` would be broken in practice.
 #[tokio::test]
-async fn setup_extension_rejects_malformed_extension_name_with_400() {
+async fn setup_extension_rejects_malformed_package_id_with_400() {
     let services = Arc::new(StubServices::default());
     let router = router_with(services.clone());
 
-    // `..` triggers `IdentityError::PathTraversal` in `ExtensionName::new`.
+    // `%0A` decodes to a newline and triggers control-character validation in
+    // LifecyclePackageRef::new.
     let response = router
         .oneshot(
             Request::builder()
                 .method(Method::POST)
-                .uri("/api/webchat/v2/extensions/..%2Fbad/setup")
+                .uri("/api/webchat/v2/extensions/bad%0Aid/setup")
                 .header("content-type", "application/json")
                 .body(Body::from("{}"))
                 .expect("request"),
@@ -664,9 +897,32 @@ async fn setup_extension_rejects_malformed_extension_name_with_400() {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let body = read_json(response).await;
     assert_eq!(body["error"], "invalid_request");
-    assert_eq!(body["field"], "extension_name");
+    assert_eq!(body["field"], "package_id");
     assert_eq!(body["validation_code"], "invalid_id");
     assert_eq!(body["retryable"], false);
+}
+
+#[tokio::test]
+async fn get_extension_setup_rejects_malformed_package_id_with_400() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/extensions/bad%0Aid/setup")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = read_json(response).await;
+    assert_eq!(body["error"], "invalid_request");
+    assert_eq!(body["field"], "package_id");
+    assert_eq!(body["validation_code"], "invalid_id");
 }
 
 fn url_encode(value: &str) -> String {
@@ -934,10 +1190,43 @@ async fn stream_events_releases_slot_when_facade_drain_stalls_past_max_lifetime(
         ) -> Result<RebornListThreadsResponse, RebornServicesError> {
             unreachable!("not exercised by this test")
         }
+        async fn list_extensions(
+            &self,
+            _caller: WebUiAuthenticatedCaller,
+        ) -> Result<RebornExtensionListResponse, RebornServicesError> {
+            unreachable!("not exercised by this test")
+        }
+        async fn list_extension_registry(
+            &self,
+            _caller: WebUiAuthenticatedCaller,
+        ) -> Result<RebornExtensionRegistryResponse, RebornServicesError> {
+            unreachable!("not exercised by this test")
+        }
+        async fn install_extension(
+            &self,
+            _caller: WebUiAuthenticatedCaller,
+            _package_ref: LifecyclePackageRef,
+        ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
+            unreachable!("not exercised by this test")
+        }
+        async fn activate_extension(
+            &self,
+            _caller: WebUiAuthenticatedCaller,
+            _package_ref: LifecyclePackageRef,
+        ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
+            unreachable!("not exercised by this test")
+        }
+        async fn remove_extension(
+            &self,
+            _caller: WebUiAuthenticatedCaller,
+            _package_ref: LifecyclePackageRef,
+        ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
+            unreachable!("not exercised by this test")
+        }
         async fn setup_extension(
             &self,
             _caller: WebUiAuthenticatedCaller,
-            _extension_name: ExtensionName,
+            _package_ref: LifecyclePackageRef,
             _request: WebUiSetupExtensionRequest,
         ) -> Result<RebornSetupExtensionResponse, RebornServicesError> {
             unreachable!("not exercised by this test")

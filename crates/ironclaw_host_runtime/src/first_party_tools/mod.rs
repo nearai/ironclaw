@@ -8,6 +8,7 @@
 mod echo;
 mod http;
 mod json;
+mod memory;
 mod schemas;
 mod shell;
 mod skill_management;
@@ -15,9 +16,10 @@ mod skill_url_install;
 mod spawn_subagent;
 mod time;
 
-use std::{sync::Arc, time::Instant};
+use std::{future::Future, panic::AssertUnwindSafe, sync::Arc, time::Instant};
 
 use async_trait::async_trait;
+use futures_util::FutureExt as _;
 use ironclaw_extensions::{
     CapabilityManifest, CapabilityVisibility, ExtensionError, ExtensionManifest, ExtensionPackage,
     ExtensionRuntime, MANIFEST_SCHEMA_VERSION, ManifestSource,
@@ -28,7 +30,8 @@ use ironclaw_first_party_extensions::coding::{
 use ironclaw_host_api::{
     CapabilityId, CapabilityProfileSchemaRef, EffectKind, ExtensionId, HostApiError,
     PermissionMode, RequestedTrustClass, ResourceCeiling, ResourceEstimate, ResourceProfile,
-    ResourceUsage, RuntimeDispatchErrorKind, TrustClass, VirtualPath,
+    ResourceUsage, RuntimeDispatchErrorKind, RuntimeHttpEgressError, RuntimeHttpEgressResponse,
+    TrustClass, VirtualPath,
 };
 
 use crate::{
@@ -41,6 +44,10 @@ pub(crate) use self::schemas::resolve_builtin_input_schema_ref;
 pub use echo::ECHO_CAPABILITY_ID;
 pub use http::{HTTP_CAPABILITY_ID, HTTP_SAVE_CAPABILITY_ID};
 pub use json::JSON_CAPABILITY_ID;
+pub use memory::{
+    MEMORY_READ_CAPABILITY_ID, MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID,
+    MEMORY_WRITE_CAPABILITY_ID,
+};
 pub use shell::SHELL_CAPABILITY_ID;
 pub use skill_management::{
     SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID,
@@ -147,6 +154,7 @@ pub fn builtin_first_party_package() -> Result<ExtensionPackage, ExtensionError>
                     shell::manifest()?,
                     spawn_subagent::manifest()?,
                 ];
+                capabilities.extend(memory::manifests()?);
                 capabilities.extend(coding_manifests()?);
                 capabilities.extend(skill_management::manifests()?);
                 capabilities
@@ -180,6 +188,22 @@ pub fn builtin_first_party_handlers() -> Result<FirstPartyCapabilityRegistry, Ho
         .with_handler(CapabilityId::new(JSON_CAPABILITY_ID)?, handler.clone())
         .with_handler(CapabilityId::new(HTTP_CAPABILITY_ID)?, handler.clone())
         .with_handler(CapabilityId::new(HTTP_SAVE_CAPABILITY_ID)?, handler.clone())
+        .with_handler(
+            CapabilityId::new(MEMORY_SEARCH_CAPABILITY_ID)?,
+            handler.clone(),
+        )
+        .with_handler(
+            CapabilityId::new(MEMORY_WRITE_CAPABILITY_ID)?,
+            handler.clone(),
+        )
+        .with_handler(
+            CapabilityId::new(MEMORY_READ_CAPABILITY_ID)?,
+            handler.clone(),
+        )
+        .with_handler(
+            CapabilityId::new(MEMORY_TREE_CAPABILITY_ID)?,
+            handler.clone(),
+        )
         .with_handler(CapabilityId::new(SHELL_CAPABILITY_ID)?, handler.clone());
     for metadata in CODING_CAPABILITIES {
         registry.insert_handler(CapabilityId::new(metadata.id)?, handler.clone());
@@ -223,6 +247,7 @@ fn first_party_capability_manifest(
 #[derive(Debug, Default)]
 pub struct BuiltinFirstPartyTools {
     coding_state: CodingCapabilityState,
+    memory_state: memory::MemoryCapabilityState,
 }
 
 #[async_trait]
@@ -235,14 +260,23 @@ impl FirstPartyCapabilityHandler for BuiltinFirstPartyTools {
         normalize_optional_null_sentinels(&mut request);
         let start = Instant::now();
         let mut network_egress_bytes = 0;
-        let output = match request.capability_id.as_str() {
-            ECHO_CAPABILITY_ID => echo::dispatch(&request.input)?,
-            TIME_CAPABILITY_ID => time::dispatch(&request.input)?,
-            JSON_CAPABILITY_ID => json::dispatch(&request.input)?,
+        let (output, display_preview) = match request.capability_id.as_str() {
+            ECHO_CAPABILITY_ID => (echo::dispatch(&request.input)?, None),
+            TIME_CAPABILITY_ID => (time::dispatch(&request.input)?, None),
+            JSON_CAPABILITY_ID => (json::dispatch(&request.input)?, None),
             HTTP_CAPABILITY_ID | HTTP_SAVE_CAPABILITY_ID => {
                 let result = http::dispatch(&request).await?;
                 network_egress_bytes = result.network_egress_bytes;
-                result.output
+                (result.output, None)
+            }
+            MEMORY_SEARCH_CAPABILITY_ID
+            | MEMORY_WRITE_CAPABILITY_ID
+            | MEMORY_READ_CAPABILITY_ID
+            | MEMORY_TREE_CAPABILITY_ID => {
+                let mut result = memory::dispatch(&self.memory_state, &request).await?;
+                result.usage.output_bytes =
+                    bounded_output_bytes(&result.output, FIRST_PARTY_MAX_OUTPUT_BYTES)?;
+                return Ok(result);
             }
             SHELL_CAPABILITY_ID => {
                 let (output, duration) = shell::dispatch(&request).await?;
@@ -267,7 +301,7 @@ impl FirstPartyCapabilityHandler for BuiltinFirstPartyTools {
                     },
                 ));
             }
-            SPAWN_SUBAGENT_CAPABILITY_ID => spawn_subagent::dispatch(),
+            SPAWN_SUBAGENT_CAPABILITY_ID => (spawn_subagent::dispatch(), None),
             capability_id => {
                 let Some(metadata) = coding_capability_metadata(capability_id) else {
                     return Err(FirstPartyCapabilityError::new(
@@ -281,10 +315,12 @@ impl FirstPartyCapabilityHandler for BuiltinFirstPartyTools {
                     Arc::clone(&request.services.filesystem),
                     &request.input,
                 );
-                self.coding_state
+                let result = self
+                    .coding_state
                     .dispatch(&request)
                     .await
-                    .map_err(coding_error)?
+                    .map_err(coding_error)?;
+                (result.output, result.display_preview)
             }
         };
         let wall_clock_ms = start.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
@@ -309,7 +345,7 @@ impl FirstPartyCapabilityHandler for BuiltinFirstPartyTools {
             network_egress_bytes,
             ..ResourceUsage::default()
         };
-        Ok(FirstPartyCapabilityResult::new(output, usage))
+        Ok(FirstPartyCapabilityResult::new(output, usage).with_display_preview(display_preview))
     }
 }
 
@@ -395,8 +431,21 @@ fn normalize_optional_null_sentinels(request: &mut FirstPartyCapabilityRequest) 
     object.retain(|key, value| {
         !(declared.contains(key.as_str())
             && !required.contains(key)
-            && (value.as_str() == Some("null") || value.is_null()))
+            && (value.as_str() == Some("null") || value.is_null())
+            && !preserve_optional_null_sentinel(
+                request.capability_id.as_str(),
+                key.as_str(),
+                value,
+            ))
     });
+}
+
+fn preserve_optional_null_sentinel(
+    capability_id: &str,
+    key: &str,
+    value: &serde_json::Value,
+) -> bool {
+    capability_id == MEMORY_WRITE_CAPABILITY_ID && key == "target" && value.is_null()
 }
 
 fn resource_profile() -> Option<ResourceProfile> {
@@ -419,6 +468,21 @@ fn resource_profile() -> Option<ResourceProfile> {
 
 fn input_error() -> FirstPartyCapabilityError {
     FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::InputEncode)
+}
+
+async fn run_egress_catching_panic<F, P>(
+    future: F,
+    panic_message: &'static str,
+    on_panic: P,
+) -> Result<Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError>, FirstPartyCapabilityError>
+where
+    F: Future<Output = Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError>>,
+    P: FnOnce() -> FirstPartyCapabilityError,
+{
+    AssertUnwindSafe(future).catch_unwind().await.map_err(|_| {
+        tracing::error!("{panic_message}");
+        on_panic()
+    })
 }
 
 fn operation_error() -> FirstPartyCapabilityError {

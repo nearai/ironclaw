@@ -125,7 +125,7 @@ fn config_stub() -> String {
 #
 # Layout:
 #   - This file (config.toml) carries the SELECTION layer:
-#     identity, policy, drivers, runner timing, and LLM-slot
+#     identity, policy, drivers, runner timing, skills, and LLM-slot
 #     selection by id.
 #   - providers.json (next to this file) carries the CATALOG layer:
 #     provider definitions known to the binary. The compiled-in
@@ -179,6 +179,12 @@ default_owner  = "reborn-cli"
 [runner]
 heartbeat_interval_secs = 5
 poll_interval_ms        = 200
+
+[skills]
+# When false, regex activation criteria do not auto-load full skill
+# context. Keyword/tag activation and explicit skill mentions such as
+# `$code-review` still activate skills.
+regex_activation_enabled = true
 
 [llm.default]
 # LLM slot selection. `provider_id` references an entry in

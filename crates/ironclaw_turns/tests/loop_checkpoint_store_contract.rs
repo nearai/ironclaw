@@ -30,6 +30,7 @@ fn put_request(scope: TurnScope, turn_id: TurnId, run_id: TurnRunId) -> PutLoopC
         schema_id: CheckpointSchemaId::new("interactive_checkpoint_v1").unwrap(),
         schema_version: RunProfileVersion::new(1),
         kind: LoopCheckpointKind::BeforeModel,
+        gate_ref: None,
     }
 }
 

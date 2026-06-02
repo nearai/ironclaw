@@ -121,10 +121,7 @@ pub(super) fn schema() -> serde_json::Value {
                 "description": "Compatibility alias for detail=schema."
             }
         },
-        "anyOf": [
-            { "required": ["name"] },
-            { "required": ["capability_id"] }
-        ],
+        "required": ["name"],
     })
 }
 
@@ -156,7 +153,7 @@ pub(super) fn output<'a>(
     Ok(output)
 }
 
-fn requested_name(input: &serde_json::Value) -> Result<&str, AgentLoopHostError> {
+pub(super) fn requested_name(input: &serde_json::Value) -> Result<&str, AgentLoopHostError> {
     let requested = input
         .get("name")
         .or_else(|| input.get("capability_id"))

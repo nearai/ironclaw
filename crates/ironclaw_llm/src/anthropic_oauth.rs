@@ -831,6 +831,37 @@ mod tests {
         assert_eq!(extracted.reasoning, Some("Summarized thinking".to_string()));
     }
 
+    #[test]
+    fn test_extract_response_uses_thinking_when_summary_absent() {
+        let response = AnthropicResponse {
+            content: vec![
+                AnthropicResponseBlock::Thinking {
+                    thinking: Some("Raw thinking fallback".to_string()),
+                    summary: None,
+                    _signature: Some("sig".to_string()),
+                },
+                AnthropicResponseBlock::Text {
+                    text: "Done.".to_string(),
+                },
+            ],
+            stop_reason: Some("end_turn".to_string()),
+            usage: AnthropicUsage {
+                input_tokens: 20,
+                output_tokens: 15,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
+            },
+        };
+
+        let extracted = extract_response_content(&response);
+
+        assert_eq!(extracted.content, Some("Done.".to_string()));
+        assert_eq!(
+            extracted.reasoning,
+            Some("Raw thinking fallback".to_string())
+        );
+    }
+
     /// Regression test for #1136: token field must be mutable via RwLock
     /// so that a refreshed token persists across subsequent requests.
     #[test]

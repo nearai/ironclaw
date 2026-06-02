@@ -1,15 +1,17 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
 use ironclaw_auth::{
-    AuthChallenge, AuthContinuationEvent, AuthContinuationRef, AuthErrorCode, AuthFlowManager,
-    AuthInteractionId, AuthInteractionService, AuthProductError, AuthProductScope,
-    AuthProviderClient, AuthProviderId, AuthSessionId, AuthSurface, CredentialAccountLabel,
-    CredentialAccountListRequest, CredentialAccountService, CredentialAccountStatus,
-    CredentialAccountUpdateBinding, CredentialOwnership, CredentialSetupService,
-    InMemoryAuthProductServices, ManualTokenSetupRequest, NewCredentialAccount,
-    OAuthAuthorizationUrl, SecretCleanupService, SecretSubmitRequest, SecretSubmitResult,
+    AuthChallenge, AuthContinuationEvent, AuthContinuationRef, AuthErrorCode, AuthFlowId,
+    AuthFlowManager, AuthFlowRecord, AuthFlowStatus, AuthInteractionId, AuthInteractionService,
+    AuthProductError, AuthProductScope, AuthProviderClient, AuthProviderId, AuthSessionId,
+    AuthSurface, CredentialAccountLabel, CredentialAccountListRequest, CredentialAccountService,
+    CredentialAccountStatus, CredentialAccountUpdateBinding, CredentialOwnership,
+    CredentialSelectionInput, CredentialSetupService, InMemoryAuthProductServices,
+    ManualTokenCompletionInput, ManualTokenSetupRequest, NewAuthFlow, NewCredentialAccount,
+    OAuthAuthorizationUrl, OAuthCallbackClaimRequest, OAuthCallbackFailureInput,
+    OAuthCallbackInput, SecretCleanupService, SecretSubmitRequest, SecretSubmitResult, Timestamp,
 };
 use ironclaw_host_api::{InvocationId, ResourceScope, SecretHandle, UserId};
 use ironclaw_reborn_composition::{
@@ -29,6 +31,56 @@ impl RebornAuthContinuationDispatcher for NoopContinuationDispatcher {
         &self,
         _event: AuthContinuationEvent,
     ) -> Result<(), AuthProductError> {
+        Ok(())
+    }
+}
+
+#[derive(Debug, Default)]
+struct RecordingContinuationDispatcher {
+    events: Mutex<Vec<AuthContinuationEvent>>,
+}
+
+impl RecordingContinuationDispatcher {
+    fn events(&self) -> Vec<AuthContinuationEvent> {
+        self.events.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl RebornAuthContinuationDispatcher for RecordingContinuationDispatcher {
+    async fn dispatch_auth_continuation(
+        &self,
+        event: AuthContinuationEvent,
+    ) -> Result<(), AuthProductError> {
+        self.events.lock().unwrap().push(event);
+        Ok(())
+    }
+}
+
+#[derive(Debug, Default)]
+struct FailsFirstContinuationDispatcher {
+    attempts: Mutex<usize>,
+    events: Mutex<Vec<AuthContinuationEvent>>,
+}
+
+impl FailsFirstContinuationDispatcher {
+    fn events(&self) -> Vec<AuthContinuationEvent> {
+        self.events.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl RebornAuthContinuationDispatcher for FailsFirstContinuationDispatcher {
+    async fn dispatch_auth_continuation(
+        &self,
+        event: AuthContinuationEvent,
+    ) -> Result<(), AuthProductError> {
+        let mut attempts = self.attempts.lock().unwrap();
+        *attempts += 1;
+        if *attempts == 1 {
+            return Err(AuthProductError::BackendUnavailable);
+        }
+        self.events.lock().unwrap().push(event);
         Ok(())
     }
 }
@@ -53,6 +105,14 @@ impl AuthInteractionService for FailingInteractionService {
         _request: SecretSubmitRequest,
     ) -> Result<SecretSubmitResult, AuthProductError> {
         Err(self.error.clone())
+    }
+
+    async fn abandon_manual_token(
+        &self,
+        _scope: &AuthProductScope,
+        _interaction_id: AuthInteractionId,
+    ) -> Result<bool, AuthProductError> {
+        Ok(false)
     }
 }
 
@@ -79,6 +139,185 @@ impl AuthInteractionService for UnexpectedChallengeInteractionService {
     ) -> Result<SecretSubmitResult, AuthProductError> {
         unreachable!("unexpected-challenge test does not submit manual tokens")
     }
+
+    async fn abandon_manual_token(
+        &self,
+        _scope: &AuthProductScope,
+        _interaction_id: AuthInteractionId,
+    ) -> Result<bool, AuthProductError> {
+        unreachable!("unexpected-challenge test does not abandon manual tokens")
+    }
+}
+
+#[derive(Debug)]
+struct SuccessfulManualTokenInteractionService {
+    interaction_id: AuthInteractionId,
+    abandoned: Mutex<Vec<AuthInteractionId>>,
+}
+
+impl SuccessfulManualTokenInteractionService {
+    fn new(interaction_id: AuthInteractionId) -> Self {
+        Self {
+            interaction_id,
+            abandoned: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn abandoned(&self) -> Vec<AuthInteractionId> {
+        self.abandoned.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl AuthInteractionService for SuccessfulManualTokenInteractionService {
+    async fn request_secret_input(
+        &self,
+        request: ManualTokenSetupRequest,
+    ) -> Result<AuthChallenge, AuthProductError> {
+        Ok(AuthChallenge::ManualTokenRequired {
+            interaction_id: self.interaction_id,
+            provider: request.provider,
+            label: request.label,
+            expires_at: request.expires_at,
+        })
+    }
+
+    async fn submit_manual_token(
+        &self,
+        _scope: &AuthProductScope,
+        _request: SecretSubmitRequest,
+    ) -> Result<SecretSubmitResult, AuthProductError> {
+        Ok(SecretSubmitResult {
+            account_id: ironclaw_auth::CredentialAccountId::new(),
+            status: CredentialAccountStatus::Configured,
+            continuation: AuthContinuationRef::SetupOnly,
+        })
+    }
+
+    async fn abandon_manual_token(
+        &self,
+        _scope: &AuthProductScope,
+        interaction_id: AuthInteractionId,
+    ) -> Result<bool, AuthProductError> {
+        self.abandoned.lock().unwrap().push(interaction_id);
+        Ok(true)
+    }
+}
+
+#[derive(Debug)]
+struct FailingManualTokenFlowManager {
+    create_error: Option<AuthProductError>,
+    complete_error: Option<AuthProductError>,
+    canceled: Mutex<Vec<AuthInteractionId>>,
+}
+
+impl FailingManualTokenFlowManager {
+    fn create_fails(error: AuthProductError) -> Self {
+        Self {
+            create_error: Some(error),
+            complete_error: None,
+            canceled: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn complete_fails(error: AuthProductError) -> Self {
+        Self {
+            create_error: None,
+            complete_error: Some(error),
+            canceled: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn canceled(&self) -> Vec<AuthInteractionId> {
+        self.canceled.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl AuthFlowManager for FailingManualTokenFlowManager {
+    async fn create_flow(&self, _request: NewAuthFlow) -> Result<AuthFlowRecord, AuthProductError> {
+        Err(self
+            .create_error
+            .clone()
+            .unwrap_or(AuthProductError::BackendUnavailable))
+    }
+
+    async fn get_flow(
+        &self,
+        _scope: &AuthProductScope,
+        _flow_id: AuthFlowId,
+    ) -> Result<Option<AuthFlowRecord>, AuthProductError> {
+        unreachable!("manual-token cleanup tests do not read flows")
+    }
+
+    async fn claim_oauth_callback(
+        &self,
+        _scope: &AuthProductScope,
+        _request: OAuthCallbackClaimRequest,
+    ) -> Result<AuthFlowRecord, AuthProductError> {
+        unreachable!("manual-token cleanup tests do not claim OAuth callbacks")
+    }
+
+    async fn complete_oauth_callback(
+        &self,
+        _scope: &AuthProductScope,
+        _input: OAuthCallbackInput,
+    ) -> Result<AuthFlowRecord, AuthProductError> {
+        unreachable!("manual-token cleanup tests do not complete OAuth callbacks")
+    }
+
+    async fn complete_credential_selection(
+        &self,
+        _scope: &AuthProductScope,
+        _input: CredentialSelectionInput,
+    ) -> Result<AuthFlowRecord, AuthProductError> {
+        unreachable!("manual-token cleanup tests do not complete account selection")
+    }
+
+    async fn complete_manual_token(
+        &self,
+        _scope: &AuthProductScope,
+        _input: ManualTokenCompletionInput,
+    ) -> Result<AuthFlowRecord, AuthProductError> {
+        Err(self
+            .complete_error
+            .clone()
+            .unwrap_or(AuthProductError::BackendUnavailable))
+    }
+
+    async fn cancel_manual_token(
+        &self,
+        _scope: &AuthProductScope,
+        interaction_id: AuthInteractionId,
+    ) -> Result<Option<AuthFlowRecord>, AuthProductError> {
+        self.canceled.lock().unwrap().push(interaction_id);
+        Ok(None)
+    }
+
+    async fn fail_oauth_callback(
+        &self,
+        _scope: &AuthProductScope,
+        _input: OAuthCallbackFailureInput,
+    ) -> Result<AuthFlowRecord, AuthProductError> {
+        unreachable!("manual-token cleanup tests do not fail OAuth callbacks")
+    }
+
+    async fn mark_continuation_dispatched(
+        &self,
+        _scope: &AuthProductScope,
+        _flow_id: AuthFlowId,
+        _emitted_at: Timestamp,
+    ) -> Result<AuthFlowRecord, AuthProductError> {
+        unreachable!("manual-token cleanup tests do not mark continuations")
+    }
+
+    async fn cancel_flow(
+        &self,
+        _scope: &AuthProductScope,
+        _flow_id: AuthFlowId,
+    ) -> Result<AuthFlowRecord, AuthProductError> {
+        unreachable!("manual-token cleanup tests do not cancel generic flows")
+    }
 }
 
 fn auth_services() -> RebornProductAuthServices {
@@ -93,6 +332,27 @@ fn auth_services_with_interaction(
 ) -> RebornProductAuthServices {
     let shared = Arc::new(InMemoryAuthProductServices::new());
     let flow_manager: Arc<dyn AuthFlowManager> = shared.clone();
+    let credential_setup_service: Arc<dyn CredentialSetupService> = shared.clone();
+    let credential_account_service: Arc<dyn CredentialAccountService> = shared.clone();
+    let provider_client: Arc<dyn AuthProviderClient> = shared.clone();
+    let cleanup_service: Arc<dyn SecretCleanupService> = shared;
+
+    RebornProductAuthServices::new(
+        flow_manager,
+        interaction_service,
+        credential_setup_service,
+        credential_account_service,
+        provider_client,
+        cleanup_service,
+        Arc::new(NoopContinuationDispatcher),
+    )
+}
+
+fn auth_services_with_flow_and_interaction(
+    flow_manager: Arc<dyn AuthFlowManager>,
+    interaction_service: Arc<dyn AuthInteractionService>,
+) -> RebornProductAuthServices {
+    let shared = Arc::new(InMemoryAuthProductServices::new());
     let credential_setup_service: Arc<dyn CredentialSetupService> = shared.clone();
     let credential_account_service: Arc<dyn CredentialAccountService> = shared.clone();
     let provider_client: Arc<dyn AuthProviderClient> = shared.clone();
@@ -287,6 +547,94 @@ async fn manual_token_facade_submits_secret_without_exposing_token() {
 }
 
 #[tokio::test]
+async fn manual_token_facade_tracks_setup_and_submit_in_auth_flow() {
+    let shared = Arc::new(InMemoryAuthProductServices::new());
+    let dispatcher = Arc::new(RecordingContinuationDispatcher::default());
+    let services = RebornProductAuthServices::from_shared(shared.clone(), dispatcher.clone());
+    let owner = scope("alice");
+
+    let challenge = services
+        .request_manual_token_setup(setup_request(owner.clone()))
+        .await
+        .expect("manual-token challenge");
+
+    let flows = shared.flow_records_snapshot();
+    assert_eq!(flows.len(), 1);
+    assert_eq!(flows[0].status, AuthFlowStatus::AwaitingUser);
+    assert!(matches!(
+        &flows[0].challenge,
+        Some(AuthChallenge::ManualTokenRequired { interaction_id, .. })
+            if interaction_id == &challenge.interaction_id
+    ));
+
+    let response = services
+        .submit_manual_token(RebornManualTokenSubmitRequest::new(
+            owner,
+            challenge.interaction_id,
+            secret(RAW_TOKEN),
+        ))
+        .await
+        .expect("manual token submit succeeds");
+
+    let flows = shared.flow_records_snapshot();
+    assert_eq!(flows.len(), 1);
+    assert_eq!(flows[0].status, AuthFlowStatus::Completed);
+    assert_eq!(flows[0].credential_account_id, Some(response.account_id));
+    assert!(
+        flows[0].continuation_emitted_at.is_some(),
+        "manual-token submit should mark continuation dispatch"
+    );
+    let events = dispatcher.events();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].flow_id, flows[0].id);
+    assert_eq!(events[0].credential_account_id, Some(response.account_id));
+}
+
+#[tokio::test]
+async fn manual_token_facade_retries_completed_flow_when_continuation_dispatch_fails() {
+    let shared = Arc::new(InMemoryAuthProductServices::new());
+    let dispatcher = Arc::new(FailsFirstContinuationDispatcher::default());
+    let services = RebornProductAuthServices::from_shared(shared.clone(), dispatcher.clone())
+        .with_flow_record_source(shared.clone());
+    let mut owner = scope("alice");
+    owner.resource.thread_id = Some(ironclaw_host_api::ThreadId::new("thread-retry").unwrap());
+
+    let challenge = services
+        .request_manual_token_setup(setup_request(owner.clone()))
+        .await
+        .expect("manual-token challenge");
+
+    let error = services
+        .submit_manual_token(RebornManualTokenSubmitRequest::new(
+            owner.clone(),
+            challenge.interaction_id,
+            secret(RAW_TOKEN),
+        ))
+        .await
+        .expect_err("first dispatch fails after flow completion");
+    assert_eq!(error.code, AuthErrorCode::BackendUnavailable);
+    assert!(error.retryable);
+
+    let response = services
+        .submit_manual_token(RebornManualTokenSubmitRequest::new(
+            owner,
+            challenge.interaction_id,
+            secret(RAW_TOKEN),
+        ))
+        .await
+        .expect("retry dispatches the completed manual-token flow");
+    assert_eq!(response.status, CredentialAccountStatus::Configured);
+    let flows = shared.flow_records_snapshot();
+    assert_eq!(flows.len(), 1);
+    assert_eq!(flows[0].status, AuthFlowStatus::Completed);
+    assert_eq!(flows[0].credential_account_id, Some(response.account_id));
+    assert!(flows[0].continuation_emitted_at.is_some());
+    let events = dispatcher.events();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].flow_id, flows[0].id);
+}
+
+#[tokio::test]
 async fn manual_token_facade_denies_cross_scope_submit_without_consuming_interaction() {
     let services = auth_services();
     let owner = scope("alice");
@@ -404,6 +752,50 @@ async fn manual_token_facade_returns_sanitized_backend_and_canceled_failures() {
     assert_eq!(canceled_error.code, AuthErrorCode::Canceled);
     assert!(!canceled_error.retryable);
     assert_error_safe(&canceled_error);
+}
+
+#[tokio::test]
+async fn manual_token_facade_abandons_interaction_when_flow_creation_fails() {
+    let interaction_id = AuthInteractionId::new();
+    let interaction = Arc::new(SuccessfulManualTokenInteractionService::new(interaction_id));
+    let services = auth_services_with_flow_and_interaction(
+        Arc::new(FailingManualTokenFlowManager::create_fails(
+            AuthProductError::BackendUnavailable,
+        )),
+        interaction.clone(),
+    );
+
+    let error = services
+        .request_manual_token_setup(setup_request(scope("alice")))
+        .await
+        .expect_err("flow creation failure should surface");
+
+    assert_eq!(error.code, AuthErrorCode::BackendUnavailable);
+    assert_eq!(interaction.abandoned(), vec![interaction_id]);
+}
+
+#[tokio::test]
+async fn manual_token_facade_cancels_flow_when_completion_fails() {
+    let interaction_id = AuthInteractionId::new();
+    let flow_manager = Arc::new(FailingManualTokenFlowManager::complete_fails(
+        AuthProductError::BackendUnavailable,
+    ));
+    let services = auth_services_with_flow_and_interaction(
+        flow_manager.clone(),
+        Arc::new(SuccessfulManualTokenInteractionService::new(interaction_id)),
+    );
+
+    let error = services
+        .submit_manual_token(RebornManualTokenSubmitRequest::new(
+            scope("alice"),
+            interaction_id,
+            secret(RAW_TOKEN),
+        ))
+        .await
+        .expect_err("flow completion failure should surface");
+
+    assert_eq!(error.code, AuthErrorCode::BackendUnavailable);
+    assert_eq!(flow_manager.canceled(), vec![interaction_id]);
 }
 
 #[tokio::test]

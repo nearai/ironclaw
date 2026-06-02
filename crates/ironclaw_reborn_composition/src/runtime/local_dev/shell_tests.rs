@@ -85,6 +85,12 @@ async fn local_dev_yolo_shell_translates_workspace_workdir_without_scoped_mounts
         .expect("local runtime substrate")
         .skill_mounts
         .clone();
+    let memory_mounts = services
+        .local_runtime
+        .as_ref()
+        .expect("local runtime substrate")
+        .memory_mounts
+        .clone();
     let policy = Arc::new(
         crate::local_dev_capability_policy::local_dev_capability_policy().expect("policy parses"),
     );
@@ -97,10 +103,12 @@ async fn local_dev_yolo_shell_translates_workspace_workdir_without_scoped_mounts
         policy,
         workspace_mounts,
         skill_mounts,
+        memory_mounts,
         extension_surface_source: LocalDevExtensionSurfaceSource::default(),
         input_resolver,
         result_writer,
         milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
+        skill_activation_source: None,
     };
     let run_context = run_context("shell-workdir").await;
     let port = factory

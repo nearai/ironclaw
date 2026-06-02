@@ -1,5 +1,4 @@
 use chrono::{DateTime, Utc};
-use ironclaw_common::ExtensionName;
 use ironclaw_host_api::ThreadId;
 use ironclaw_product_adapters::{ProductOutboundEnvelope, ProjectionCursor};
 use ironclaw_threads::{SessionThreadRecord, SummaryArtifact, ThreadMessageRecord};
@@ -8,6 +7,7 @@ use ironclaw_turns::{
     SanitizedFailure, TurnCheckpointId, TurnRunId, TurnRunState, TurnStatus,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::{
     LifecyclePackageRef, LifecyclePhase, LifecycleProductPayload, LifecycleReadinessBlocker,
@@ -194,6 +194,71 @@ pub struct RebornListThreadsResponse {
     pub next_cursor: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornExtensionListResponse {
+    pub extensions: Vec<RebornExtensionInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornExtensionRegistryResponse {
+    pub entries: Vec<RebornExtensionRegistryEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornExtensionRegistryEntry {
+    pub package_ref: LifecyclePackageRef,
+    pub display_name: String,
+    pub kind: String,
+    pub description: String,
+    pub installed: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keywords: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornExtensionInfo {
+    pub package_ref: LifecyclePackageRef,
+    pub display_name: String,
+    pub kind: String,
+    pub description: String,
+    pub authenticated: bool,
+    pub active: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<String>,
+    pub needs_setup: bool,
+    pub has_auth: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activation_status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activation_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub onboarding_state: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub onboarding: Option<Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornExtensionActionResponse {
+    pub success: bool,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activated: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub awaiting_token: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub onboarding_state: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub onboarding: Option<Value>,
+}
+
 /// WebUI v2 setup projection for extension lifecycle.
 ///
 /// This intentionally uses the v2 `phase`/`blockers` lifecycle contract and
@@ -202,12 +267,10 @@ pub struct RebornListThreadsResponse {
 /// can become lifecycle-native before it has compatibility consumers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebornSetupExtensionResponse {
-    pub extension_name: ExtensionName,
+    pub package_ref: LifecyclePackageRef,
     pub phase: LifecyclePhase,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub blockers: Vec<LifecycleReadinessBlocker>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub package_ref: Option<LifecyclePackageRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub payload: Option<LifecycleProductPayload>,
 }

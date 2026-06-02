@@ -13,7 +13,10 @@ use axum::routing::{get, post};
 use ironclaw_product_workflow::RebornServicesApi;
 
 use crate::descriptors::{
-    WEBUI_V2_PATTERN_CANCEL_RUN, WEBUI_V2_PATTERN_CREATE_THREAD, WEBUI_V2_PATTERN_GET_TIMELINE,
+    WEBUI_V2_PATTERN_ACTIVATE_EXTENSION, WEBUI_V2_PATTERN_CANCEL_RUN,
+    WEBUI_V2_PATTERN_CREATE_THREAD, WEBUI_V2_PATTERN_GET_TIMELINE,
+    WEBUI_V2_PATTERN_INSTALL_EXTENSION, WEBUI_V2_PATTERN_LIST_EXTENSION_REGISTRY,
+    WEBUI_V2_PATTERN_LIST_EXTENSIONS, WEBUI_V2_PATTERN_REMOVE_EXTENSION,
     WEBUI_V2_PATTERN_RESOLVE_GATE, WEBUI_V2_PATTERN_SEND_MESSAGE, WEBUI_V2_PATTERN_SETUP_EXTENSION,
     WEBUI_V2_PATTERN_STREAM_EVENTS, WEBUI_V2_PATTERN_STREAM_EVENTS_WS,
 };
@@ -86,8 +89,28 @@ pub fn webui_v2_router(state: WebUiV2State) -> Router {
         .route(WEBUI_V2_PATTERN_CANCEL_RUN, post(handlers::cancel_run))
         .route(WEBUI_V2_PATTERN_RESOLVE_GATE, post(handlers::resolve_gate))
         .route(
+            WEBUI_V2_PATTERN_LIST_EXTENSIONS,
+            get(handlers::list_extensions),
+        )
+        .route(
+            WEBUI_V2_PATTERN_LIST_EXTENSION_REGISTRY,
+            get(handlers::list_extension_registry),
+        )
+        .route(
+            WEBUI_V2_PATTERN_INSTALL_EXTENSION,
+            post(handlers::install_extension),
+        )
+        .route(
+            WEBUI_V2_PATTERN_ACTIVATE_EXTENSION,
+            post(handlers::activate_extension),
+        )
+        .route(
+            WEBUI_V2_PATTERN_REMOVE_EXTENSION,
+            post(handlers::remove_extension),
+        )
+        .route(
             WEBUI_V2_PATTERN_SETUP_EXTENSION,
-            post(handlers::setup_extension),
+            get(handlers::get_extension_setup).post(handlers::setup_extension),
         )
         .with_state(state)
 }

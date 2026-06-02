@@ -16,15 +16,16 @@ use super::{
     ProductionImplementationReadiness, ProductionWiringComponent, ProductionWiringIssueKind,
     ProductionWiringReport, RebornEventStoreConfig, RebornEventStoreError, RebornEventStores,
     RebornProfile, ResourceGovernor, RootFilesystem, RunProfileResolver, RunStateApprovalStore,
-    RunStateStore, RuntimeBackendHealth, RuntimeHttpEgress, RuntimeKind, RuntimeProcessPort,
-    ScopedFilesystem, ScriptExecutor, SecretMode, SecretStore, SharedSecretStore,
-    TenantSandboxProcessPort, TrustPolicy, TurnRunTransitionPort, TurnRunWakeNotifier,
-    TurnStateStore, WasmError, WasmRuntimeAdapter, WasmRuntimeCredentialProvider,
-    WasmStagedRuntimeCredentials, WitToolHost, WitToolRuntimeConfig, build_reborn_event_stores,
-    production_wiring_report, set_runtime_http_egress,
+    RunStateStore, RuntimeBackendHealth, RuntimeCredentialAccountResolver, RuntimeHttpEgress,
+    RuntimeKind, RuntimeProcessPort, ScopedFilesystem, ScriptExecutor, SecretMode, SecretStore,
+    SharedSecretStore, TenantSandboxProcessPort, TrustPolicy, TurnRunTransitionPort,
+    TurnRunWakeNotifier, TurnStateStore, WasmError, WasmRuntimeAdapter,
+    WasmRuntimeCredentialProvider, WasmStagedRuntimeCredentials, WitToolHost, WitToolRuntimeConfig,
+    build_reborn_event_stores, production_wiring_report, set_runtime_http_egress,
 };
 use crate::LocalHostProcessPort;
 use crate::RuntimeHttpBodyStore;
+use crate::http_body::UnsupportedRuntimeHttpBodyStore;
 use crate::wasm_credentials::SharedHostWasmRuntimeCredentials;
 use ironclaw_secrets::{CredentialAccountStore, CredentialSessionStore};
 
@@ -58,6 +59,7 @@ where
             secret_store,
             credential_account_store,
             credential_session_store,
+            runtime_credential_account_resolver,
             network_policy_store,
             secret_injection_store,
             process_lifecycle_store,
@@ -98,6 +100,7 @@ where
             secret_store,
             credential_account_store,
             credential_session_store,
+            runtime_credential_account_resolver,
             network_policy_store,
             secret_injection_store,
             process_lifecycle_store,
@@ -159,6 +162,7 @@ where
             secret_store,
             credential_account_store,
             credential_session_store,
+            runtime_credential_account_resolver,
             network_policy_store,
             secret_injection_store,
             process_lifecycle_store: _,
@@ -209,6 +213,7 @@ where
             secret_store,
             credential_account_store,
             credential_session_store,
+            runtime_credential_account_resolver,
             network_policy_store,
             secret_injection_store,
             process_lifecycle_store,
@@ -596,6 +601,15 @@ where
         self
     }
 
+    pub fn with_runtime_credential_account_resolver<T>(mut self, resolver: Arc<T>) -> Self
+    where
+        T: RuntimeCredentialAccountResolver + 'static,
+    {
+        let resolver: Arc<dyn RuntimeCredentialAccountResolver> = resolver;
+        self.runtime_credential_account_resolver = Some(resolver);
+        self
+    }
+
     pub fn with_credential_broker<T>(self, broker: Arc<T>) -> Self
     where
         T: CredentialAccountStore + CredentialSessionStore + 'static,
@@ -776,7 +790,7 @@ where
     where
         N: NetworkHttpEgress + 'static,
     {
-        self.try_with_host_http_egress_internal(network, None)
+        self.try_with_host_http_egress_internal(network, Arc::new(UnsupportedRuntimeHttpBodyStore))
     }
 
     pub fn try_with_host_http_egress_with_body_store<N, T>(
@@ -789,13 +803,13 @@ where
         T: RuntimeHttpBodyStore + 'static,
     {
         let body_store: Arc<dyn RuntimeHttpBodyStore> = body_store;
-        self.try_with_host_http_egress_internal(network, Some(body_store))
+        self.try_with_host_http_egress_internal(network, body_store)
     }
 
     fn try_with_host_http_egress_internal<N>(
         self,
         network: N,
-        body_store: Option<Arc<dyn RuntimeHttpBodyStore>>,
+        body_store: Arc<dyn RuntimeHttpBodyStore>,
     ) -> Result<Self, ProductionWiringReport>
     where
         N: NetworkHttpEgress + 'static,
@@ -807,18 +821,16 @@ where
                 None,
             ));
         };
-        let mut service =
-            crate::HostHttpEgressService::new(network, SharedSecretStore(secret_store))
-                .with_network_policy_store(Arc::clone(&self.network_policy_store))
-                .with_secret_injection_store(Arc::clone(&self.secret_injection_store))
-                .with_unsafe_raw_diagnostics_allowed(
-                    crate::runtime_policy_allows_unsafe_raw_http_diagnostics(
-                        self.runtime_policy.as_ref(),
-                    ),
-                );
-        if let Some(store) = body_store {
-            service = service.with_body_store(store);
-        }
+        let service = crate::HostHttpEgressService::production(
+            network,
+            SharedSecretStore(secret_store),
+            Arc::clone(&self.network_policy_store),
+            Arc::clone(&self.secret_injection_store),
+            body_store,
+        )
+        .with_unsafe_raw_diagnostics_allowed(
+            crate::runtime_policy_allows_unsafe_raw_http_diagnostics(self.runtime_policy.as_ref()),
+        );
         let runtime_http_egress = Arc::new(service);
         Ok(self.with_host_http_egress_service(runtime_http_egress))
     }
@@ -883,5 +895,9 @@ where
             self.wasm_credential_provider.clone(),
         )?);
         Ok(self.with_wasm_runtime(adapter))
+    }
+
+    pub fn try_with_default_wasm_runtime(self) -> Result<Self, WasmError> {
+        self.try_with_wasm_runtime(WitToolRuntimeConfig::default(), WitToolHost::deny_all())
     }
 }

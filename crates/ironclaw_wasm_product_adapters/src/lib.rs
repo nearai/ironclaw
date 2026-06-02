@@ -37,6 +37,7 @@ mod component_runtime;
 mod config;
 mod egress_policy;
 mod runner;
+mod runner_immediate_ack;
 mod store;
 
 pub use auth_verifier::{

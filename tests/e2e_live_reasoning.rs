@@ -57,9 +57,7 @@ mod live_tests {
         )
         .await;
 
-        let responses = rig
-            .wait_for_responses(1, Duration::from_secs(60))
-            .await;
+        let responses = rig.wait_for_responses(1, Duration::from_secs(60)).await;
 
         assert!(
             !responses.is_empty(),
@@ -120,11 +118,10 @@ mod live_tests {
             return;
         }
 
-        let harness =
-            LiveTestHarnessBuilder::new("non_reasoning_model_emits_no_thinking")
-                .with_engine_v2(true)
-                .build()
-                .await;
+        let harness = LiveTestHarnessBuilder::new("non_reasoning_model_emits_no_thinking")
+            .with_engine_v2(true)
+            .build()
+            .await;
 
         if harness.mode() != TestMode::Live {
             return;

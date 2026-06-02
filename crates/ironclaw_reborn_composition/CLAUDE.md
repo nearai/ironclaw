@@ -34,6 +34,14 @@
   pre-authorizing the existing scoped account. Do not route raw token values
   through chat commands, model-visible messages, serializable DTOs,
   projections, or route-local pending maps.
+- `RebornProductAuthServices::flow_record_source` is an optional WebUI/local-dev
+  read-projection port, not a required product-auth capability. Filesystem-backed
+  local-dev composition wires the durable product-auth service itself as this
+  source so pending auth gates can be rendered from blocked turn state plus
+  auth-flow records. If a supplied product-auth bundle
+  omits it, runtime composition must expose the WebUI auth interaction surface
+  as explicitly unavailable; do not fabricate a route-local or unscoped pending
+  auth read model.
 - Blocked run-state approval/auth gate rendering and resume belongs to #3094;
   keep this crate's #3811 auth seam reusable by that layer without implementing
   a second gate-resolution path.
@@ -75,10 +83,11 @@ Inbound order (outer → inner → handler):
    `BodyLimitPolicy` from `ironclaw_webui_v2::webui_v2_routes()` and,
    when present, product-auth route descriptors at composition time and
    enforces it before auth runs (so an oversized payload never spends a
-   bearer-validation step). Today: `create_thread` and product-auth
-   OAuth start 16 KiB, `send_message` 1 MiB, `cancel_run` and
-   `resolve_gate` 4 KiB, `get_timeline`, `stream_events`, and
-   product-auth OAuth callback `NoBody`.
+   bearer-validation step). Today: `create_thread`, product-auth OAuth
+   start, manual-token setup/secret-submit, accounts list/select/recovery/
+   refresh, and lifecycle cleanup — all 16 KiB; `send_message` 1 MiB;
+   `cancel_run` and `resolve_gate` 4 KiB; `get_timeline`,
+   `stream_events`, and product-auth OAuth callback `NoBody`.
    `BodyLimitPolicy` is an exhaustive `match`, so a new variant added
    upstream fails the build rather than silently disabling
    enforcement.
@@ -113,10 +122,10 @@ Inbound order (outer → inner → handler):
    send-message, get-timeline, stream-events SSE, stream-events WS,
    cancel-run, resolve-gate, setup-extension).
 
-### Product-auth OAuth routes
+### Product-auth routes
 
 When `bundle.product_auth` is present, `webui_v2_app` also mounts the
-Reborn-native product-auth OAuth surface:
+Reborn-native product-auth surface:
 
 - `POST /api/reborn/product-auth/oauth/start` is inside the existing
   bearer-auth layer. It derives `AuthProductScope` from the
@@ -137,6 +146,17 @@ Reborn-native product-auth OAuth surface:
   exchanges provider tokens, activates extensions, resumes turns, or
   writes secrets directly. Its descriptor declares `NoBody` and a
   transport-peer-IP public callback rate limit.
+- `POST /api/reborn/product-auth/manual-token/submit` is inside the
+  same bearer-auth layer as OAuth start. It derives `AuthProductScope`
+  from `WebUiAuthenticatedCaller`, validates the provider/account/token
+  fields, creates a short-lived manual-token interaction with a
+  `TurnGateResume` continuation, submits the raw token only to
+  `RebornProductAuthServices`, and returns the resulting
+  `credential_ref`. The browser must then call v2 `resolve_gate` with
+  that `credential_ref`; raw token values never go through gate resolution.
+  Setup, submit, and cleanup calls are timeout-bounded. If submit fails after
+  the interaction is created, the route abandons that scoped interaction before
+  returning a sanitized error.
 - Raw `state`, OAuth authorization codes, PKCE verifiers, provider
   token handles, provider bodies, and host paths must not be logged or
   serialized by the route. Responses use the sanitized product-auth
@@ -226,7 +246,7 @@ rows are inventoried here, not implemented in the current PR.
 | Resolve gate | `POST /api/chat/gate/resolve` | `POST /api/webchat/v2/threads/{tid}/runs/{run_id}/gates/{gate_ref}/resolve` | Mapped |
 | Approval shim | `POST /api/chat/approval` | (Subsumed by `resolve_gate`) | Mapped |
 | Auth-token / auth-cancel | `POST /api/chat/auth-{token,cancel}` | (Engine v1 compatibility shim; delete with v1) | v1-only (legacy) |
-| Extensions onboarding | `GET\|POST /api/extensions/{name}/setup` | `POST /api/webchat/v2/extensions/{name}/setup` | Mapped to lifecycle projection; no production setup side effects yet |
+| Extensions registry/list/install/activate/remove/setup | `GET\|POST /api/extensions/*` | `GET /api/webchat/v2/extensions`, `GET /api/webchat/v2/extensions/registry`, `POST /api/webchat/v2/extensions/install`, `POST /api/webchat/v2/extensions/{package_id}/{activate,remove,setup}` | Mapped to lifecycle package refs and registry projections; setup still has no production setup side effects yet |
 | SSO login (Google) | `GET /auth/providers`, `GET /auth/login/{p}`, `GET /auth/callback/{p}`, `POST /auth/logout` | Same paths on the v2 listener via `ironclaw_reborn_webui_ingress::webui_v2_auth_router`, merged into `webui_v2_app` through [`WebuiServeConfig::with_public_route_mount`] (typed `{ router, descriptors }` so the per-route body-limit / rate-limit middleware applies) | Mapped (Google); GitHub + NEAR follow under #4116 |
 
 ### Security invariants on every "Mapped" row

@@ -6,8 +6,9 @@ use std::sync::Arc;
 use anyhow::{Context, anyhow};
 use clap::Args;
 use ironclaw_reborn_composition::{
-    RebornReadiness, RebornRuntimeIdentity, RebornRuntimeInput, RebornWebuiBundle,
-    WebuiServeConfig, build_reborn_runtime, build_webui_services, webui_v2_app,
+    GoogleOAuthRouteConfig, RebornReadiness, RebornRuntimeIdentity, RebornRuntimeInput,
+    RebornWebuiBundle, WebuiServeConfig, build_reborn_runtime, build_webui_services,
+    webui_v2_app_with_lifecycle,
 };
 use ironclaw_reborn_config::IdentitySection;
 use ironclaw_reborn_webui_ingress::{
@@ -16,7 +17,7 @@ use ironclaw_reborn_webui_ingress::{
 use secrecy::SecretString;
 
 use crate::context::RebornCliContext;
-use crate::runtime::RuntimeInputOptions;
+use crate::runtime::{RuntimeInputOptions, resolve_google_oauth_config_from_env};
 
 const DEFAULT_SERVE_HOST: &str = "127.0.0.1";
 const DEFAULT_SERVE_PORT: u16 = 3000;
@@ -54,7 +55,10 @@ impl ServeCommand {
     pub(crate) fn execute(self, context: RebornCliContext) -> anyhow::Result<()> {
         crate::runtime::init_tracing();
 
-        // Build the runtime config from the operator's TOML.
+        // Build the runtime config from the operator's TOML. Built first so
+        // the local-dev-yolo host-access disclosure gate fires before any
+        // WebUI env-var resolution below; the owner is aligned to the
+        // authenticated WebUI user once it is resolved (see `with_owner_id`).
         let runtime_input = crate::runtime::build_runtime_input_with_options(
             context.boot_config(),
             crate::runtime::RuntimeInputCaller::Serve,
@@ -119,6 +123,14 @@ impl ServeCommand {
         // still 400. Mirror the same fallback rule the `run` command
         // uses: identity.default_agent or composition's default.
         let identity_section = config_file.as_ref().and_then(|file| file.identity.as_ref());
+
+        // Pin the runtime owner to the authenticated WebUI user so the
+        // turn-runner loop host reads thread context from the same
+        // `owners/<user>` subtree the v2 facade wrote to. Without this the
+        // runtime owner stays at `[identity].default_owner` (a different
+        // identity source) and every turn fails with `UnknownThread`.
+        let runtime_owner = resolve_webui_runtime_owner(identity_section, &user_id_raw)?;
+        let runtime_input = runtime_input.with_owner_id(runtime_owner);
         let default_agent_raw =
             resolve_webui_default_agent(identity_section, &runtime_input.identity);
         let default_agent_id =
@@ -264,6 +276,21 @@ impl ServeCommand {
             if let Some(project_id) = default_project_id {
                 serve_config = serve_config.with_default_project_id(project_id);
             }
+            if let Some(google_oauth) = resolve_google_oauth_config_from_env()
+                .context("failed to resolve Google OAuth setup config for WebUI")?
+            {
+                let mut route_config = GoogleOAuthRouteConfig::new(
+                    google_oauth.client.client_id.as_str(),
+                    google_oauth.client.redirect_uri.as_str(),
+                )
+                .context("invalid Google OAuth route config for WebUI")?;
+                if let Some(hosted_domain_hint) = google_oauth.hosted_domain_hint {
+                    route_config = route_config
+                        .with_hosted_domain_hint(hosted_domain_hint)
+                        .context("invalid Google OAuth hosted-domain hint for WebUI")?;
+                }
+                serve_config = serve_config.with_google_oauth(route_config);
+            }
             if let Some(value) = csp_override {
                 serve_config = serve_config
                     .with_csp_header_str(value)
@@ -275,8 +302,9 @@ impl ServeCommand {
             if let Some(host) = canonical_host {
                 serve_config = serve_config.with_canonical_host(host);
             }
-            let router =
-                webui_v2_app(bundle, serve_config).context("failed to compose v2 Router")?;
+            let webui_app = webui_v2_app_with_lifecycle(bundle, serve_config)
+                .context("failed to compose v2 Router")?;
+            let (router, public_route_drains) = webui_app.into_parts();
 
             let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
             tokio::spawn(async move {
@@ -296,6 +324,13 @@ impl ServeCommand {
                 bound_addr_tx: None,
             })
             .await;
+
+            // Always drain public route mounts before shutting down the
+            // Reborn runtime. Protocol webhooks such as Slack can ACK a
+            // request before product workflow dispatch completes, so their
+            // route-owned work must finish after ingress stops accepting new
+            // requests but before shared runtime services are torn down.
+            public_route_drains.drain().await;
 
             // Always drain the Reborn runtime, even on serve error, so
             // background tasks and turn-runner state shut down cleanly.
@@ -332,6 +367,39 @@ fn resolve_webui_default_agent(
     identity_section
         .and_then(|identity| identity.default_agent.clone())
         .unwrap_or_else(|| runtime_identity.agent_id.clone())
+}
+
+/// Resolve the owner the Reborn runtime must run under for the WebChat v2
+/// serve path.
+///
+/// The v2 facade writes and reads threads under a `ThreadScope` whose
+/// `owner_user_id` is the authenticated WebUI user, while the turn-runner
+/// loop host reads thread context under the runtime's composition owner. If
+/// those two identities diverge, `ThreadScope::to_resource_scope` resolves a
+/// different `/tenants/<t>/users/<u>/` MountView for the read than the write,
+/// so the loop host silently looks in the wrong `owners/<user>` subtree and
+/// every turn fails with `UnknownThread` -> `HostUnavailable { Prompt }`.
+///
+/// The runtime owner is therefore pinned to the authenticated WebUI user. A
+/// `[identity].default_owner` that contradicts that user is rejected loudly
+/// rather than silently producing thread-invisible turns.
+fn resolve_webui_runtime_owner(
+    identity_section: Option<&IdentitySection>,
+    webui_user_id: &str,
+) -> anyhow::Result<String> {
+    if let Some(configured) =
+        identity_section.and_then(|identity| identity.default_owner.as_deref())
+        && configured != webui_user_id
+    {
+        return Err(anyhow!(
+            "[identity].default_owner `{configured}` must match the WebChat v2 \
+             authenticated user `{webui_user_id}`. A mismatch makes every thread \
+             created through the WebUI invisible to the turn runner, because the \
+             loop host reads thread context under the runtime owner, not the WebUI \
+             user. Remove `[identity].default_owner` or set it to `{webui_user_id}`."
+        ));
+    }
+    Ok(webui_user_id.to_string())
 }
 
 fn print_serve_banner(
@@ -385,5 +453,47 @@ mod tests {
             resolve_webui_default_agent(Some(&identity), &runtime_identity),
             "configured-agent"
         );
+    }
+
+    #[test]
+    fn webui_runtime_owner_defaults_to_authenticated_user() {
+        // With no `[identity].default_owner`, the runtime owner must be the
+        // authenticated WebUI user so the turn-runner loop host reads thread
+        // context from the same `owners/<user>` subtree the v2 facade wrote.
+        assert_eq!(
+            resolve_webui_runtime_owner(None, "local-user").unwrap(),
+            "local-user"
+        );
+    }
+
+    #[test]
+    fn webui_runtime_owner_accepts_matching_config_owner() {
+        let identity = IdentitySection {
+            default_owner: Some("local-user".to_string()),
+            ..IdentitySection::default()
+        };
+
+        assert_eq!(
+            resolve_webui_runtime_owner(Some(&identity), "local-user").unwrap(),
+            "local-user"
+        );
+    }
+
+    #[test]
+    fn webui_runtime_owner_rejects_divergent_config_owner() {
+        // A configured owner that differs from the authenticated WebUI user is
+        // the bug class that silently made every thread invisible: the facade
+        // writes under `owners/local-user` while the loop host reads under
+        // `owners/reborn-cli`. Fail loud at startup instead.
+        let identity = IdentitySection {
+            default_owner: Some("reborn-cli".to_string()),
+            ..IdentitySection::default()
+        };
+
+        let error = resolve_webui_runtime_owner(Some(&identity), "local-user")
+            .expect_err("divergent owner must be rejected");
+        let message = error.to_string();
+        assert!(message.contains("reborn-cli"), "message: {message}");
+        assert!(message.contains("local-user"), "message: {message}");
     }
 }

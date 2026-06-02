@@ -9,7 +9,6 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_auth::CredentialAccountId;
-use ironclaw_common::ExtensionName;
 use ironclaw_host_api::{AgentId, ThreadId};
 use ironclaw_product_adapters::{
     ProductAdapterError, ProductWorkflowRejectionKind, ProjectionStream,
@@ -29,13 +28,13 @@ use uuid::Uuid;
 
 use crate::{
     ApprovalInteractionDecision, ApprovalInteractionService, AuthInteractionDecision,
-    AuthInteractionRejectionKind, AuthInteractionService, LifecycleProductFacade,
-    ProductWorkflowError, ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
-    ResolveAuthInteractionRequest, ResolveAuthInteractionResponse,
-    UnsupportedLifecycleProductFacade, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
-    WebUiCreateThreadRequest, WebUiGateResolution, WebUiInboundCommand, WebUiInboundValidationCode,
-    WebUiInboundValidationError, WebUiListThreadsRequest, WebUiResolveGateRequest,
-    WebUiSendMessageRequest, WebUiSetupExtensionRequest,
+    AuthInteractionRejectionKind, AuthInteractionService, LifecyclePackageRef,
+    LifecycleProductFacade, ProductWorkflowError, ResolveApprovalInteractionRequest,
+    ResolveApprovalInteractionResponse, ResolveAuthInteractionRequest,
+    ResolveAuthInteractionResponse, UnsupportedLifecycleProductFacade, WebUiAuthenticatedCaller,
+    WebUiCancelRunRequest, WebUiCreateThreadRequest, WebUiGateResolution, WebUiInboundCommand,
+    WebUiInboundValidationCode, WebUiInboundValidationError, WebUiListThreadsRequest,
+    WebUiResolveGateRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
     approval_interaction::RejectingApprovalInteractionService,
     auth_interaction::RejectingAuthInteractionService,
     binding_ref::{
@@ -46,16 +45,18 @@ use crate::{
 };
 
 mod error;
+mod extensions;
 mod lifecycle_setup;
 mod types;
 
 pub use error::{RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind};
 pub use types::{
-    RebornCancelRunResponse, RebornCreateThreadResponse, RebornGetRunStateRequest,
-    RebornGetRunStateResponse, RebornListThreadsResponse, RebornResolveGateResponse,
-    RebornResumeGateResponse, RebornSetupExtensionResponse, RebornStreamEventsRequest,
-    RebornStreamEventsResponse, RebornSubmitTurnResponse, RebornTimelineRequest,
-    RebornTimelineResponse,
+    RebornCancelRunResponse, RebornCreateThreadResponse, RebornExtensionActionResponse,
+    RebornExtensionInfo, RebornExtensionListResponse, RebornExtensionRegistryEntry,
+    RebornExtensionRegistryResponse, RebornGetRunStateRequest, RebornGetRunStateResponse,
+    RebornListThreadsResponse, RebornResolveGateResponse, RebornResumeGateResponse,
+    RebornSetupExtensionResponse, RebornStreamEventsRequest, RebornStreamEventsResponse,
+    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
 };
 
 type SkillActivationRecorder =
@@ -174,6 +175,34 @@ pub trait RebornServicesApi: Send + Sync {
         request: WebUiListThreadsRequest,
     ) -> Result<RebornListThreadsResponse, RebornServicesError>;
 
+    async fn list_extensions(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornExtensionListResponse, RebornServicesError>;
+
+    async fn list_extension_registry(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornExtensionRegistryResponse, RebornServicesError>;
+
+    async fn install_extension(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        package_ref: LifecyclePackageRef,
+    ) -> Result<RebornExtensionActionResponse, RebornServicesError>;
+
+    async fn activate_extension(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        package_ref: LifecyclePackageRef,
+    ) -> Result<RebornExtensionActionResponse, RebornServicesError>;
+
+    async fn remove_extension(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        package_ref: LifecyclePackageRef,
+    ) -> Result<RebornExtensionActionResponse, RebornServicesError>;
+
     /// Run a step in a v2-native extension onboarding flow. Today the
     /// facade returns
     /// [`RebornSetupExtensionStatus::NotImplemented`](types::RebornSetupExtensionStatus::NotImplemented)
@@ -182,16 +211,14 @@ pub trait RebornServicesApi: Send + Sync {
     /// complete and so future onboarding port work has a fixed surface
     /// to fill in.
     ///
-    /// `extension_name` is the validated, typed identifier from the
-    /// route path. Per `.claude/rules/types.md`, extension identifiers
-    /// must not flow internally as raw `String` — the handler/facade
-    /// boundary validates the path segment with
-    /// [`ironclaw_common::ExtensionName`] and threads the typed value
-    /// through this argument.
+    /// `package_ref` is the validated lifecycle package identity from
+    /// the route path or request body. The browser can still render
+    /// display names from registry metadata, but lifecycle side effects
+    /// use package refs end to end.
     async fn setup_extension(
         &self,
         caller: WebUiAuthenticatedCaller,
-        extension_name: ExtensionName,
+        package_ref: LifecyclePackageRef,
         request: WebUiSetupExtensionRequest,
     ) -> Result<RebornSetupExtensionResponse, RebornServicesError>;
 }
@@ -747,16 +774,54 @@ impl RebornServicesApi for RebornServices {
         })
     }
 
+    async fn list_extensions(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornExtensionListResponse, RebornServicesError> {
+        extensions::list_extensions(self.lifecycle_facade.as_ref(), caller).await
+    }
+
+    async fn list_extension_registry(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornExtensionRegistryResponse, RebornServicesError> {
+        extensions::list_extension_registry(self.lifecycle_facade.as_ref(), caller).await
+    }
+
+    async fn install_extension(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        package_ref: LifecyclePackageRef,
+    ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
+        extensions::install_extension(self.lifecycle_facade.as_ref(), caller, package_ref).await
+    }
+
+    async fn activate_extension(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        package_ref: LifecyclePackageRef,
+    ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
+        extensions::activate_extension(self.lifecycle_facade.as_ref(), caller, package_ref).await
+    }
+
+    async fn remove_extension(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        package_ref: LifecyclePackageRef,
+    ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
+        extensions::remove_extension(self.lifecycle_facade.as_ref(), caller, package_ref).await
+    }
+
     async fn setup_extension(
         &self,
         caller: WebUiAuthenticatedCaller,
-        extension_name: ExtensionName,
+        package_ref: LifecyclePackageRef,
         request: WebUiSetupExtensionRequest,
     ) -> Result<RebornSetupExtensionResponse, RebornServicesError> {
         lifecycle_setup::setup_extension(
             self.lifecycle_facade.as_ref(),
             caller,
-            extension_name,
+            package_ref,
             request,
         )
         .await
@@ -1011,6 +1076,10 @@ impl RebornServices {
         if state.actor.as_ref() != Some(actor) {
             return Err(participant_denied());
         }
+        // This read only selects the WebUI route. The typed auth/approval
+        // services intentionally re-read run-state through `blocked_gate_state`
+        // before mutating auth/approval records or resuming/cancelling a run,
+        // so stale facade classification cannot authorize a side effect.
         GateResolutionRoute::from_run_state(
             state.status,
             state.gate_ref.as_ref(),

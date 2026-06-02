@@ -8,8 +8,8 @@ use ironclaw_turns::{
     runner::{
         ApplyValidatedLoopExitRequest, BlockRunRequest, CancelRunCompletionRequest,
         ClaimRunRequest, ClaimedTurnRun, CompleteRunRequest, FailRunRequest, HeartbeatRequest,
-        RecordModelRouteSnapshotRequest, RecordRecoveryRequiredRequest,
-        RecoverExpiredLeasesRequest, RecoverExpiredLeasesResponse, TurnRunTransitionPort,
+        RecordModelRouteSnapshotRequest, RecordRunnerFailureRequest, RecoverExpiredLeasesRequest,
+        RecoverExpiredLeasesResponse, RelinquishRunRequest, TurnRunTransitionPort,
     },
 };
 
@@ -35,6 +35,7 @@ impl EventPublishingTurnRunTransitionPort {
                     TurnBlockedGateMetadata {
                         gate_ref,
                         gate_kind,
+                        credential_requirements: state.credential_requirements.clone(),
                     }
                 })
             })
@@ -116,8 +117,8 @@ impl TurnRunTransitionPort for EventPublishingTurnRunTransitionPort {
         for state in &response.recovered {
             self.publish_state_event_best_effort(
                 state,
-                TurnEventKind::RecoveryRequired,
-                Some("lease_expired".to_string()),
+                Self::event_kind_for_state(state),
+                Self::sanitized_reason_for_state(state),
             )
             .await;
         }
@@ -166,14 +167,28 @@ impl TurnRunTransitionPort for EventPublishingTurnRunTransitionPort {
         Ok(state)
     }
 
-    async fn record_recovery_required(
+    async fn record_runner_failure(
         &self,
-        request: RecordRecoveryRequiredRequest,
+        request: RecordRunnerFailureRequest,
     ) -> Result<TurnRunState, TurnError> {
-        let state = self.inner.record_recovery_required(request).await?;
+        let state = self.inner.record_runner_failure(request).await?;
         self.publish_state_event_best_effort(
             &state,
-            TurnEventKind::RecoveryRequired,
+            Self::event_kind_for_state(&state),
+            Self::sanitized_reason_for_state(&state),
+        )
+        .await;
+        Ok(state)
+    }
+
+    async fn relinquish_run(
+        &self,
+        request: RelinquishRunRequest,
+    ) -> Result<TurnRunState, TurnError> {
+        let state = self.inner.relinquish_run(request).await?;
+        self.publish_state_event_best_effort(
+            &state,
+            Self::event_kind_for_state(&state),
             Self::sanitized_reason_for_state(&state),
         )
         .await;

@@ -1,6 +1,7 @@
 use async_trait::async_trait;
-use ironclaw_turns::run_profile::{
-    LoopCheckpointRequest, LoopProgressEvent, StageCheckpointPayloadRequest,
+use ironclaw_turns::{
+    LoopGateRef,
+    run_profile::{LoopCheckpointRequest, LoopProgressEvent, StageCheckpointPayloadRequest},
 };
 
 use crate::state::{CheckpointKind, LoopExecutionState};
@@ -27,8 +28,37 @@ impl CheckpointStage {
     pub(super) async fn write(
         &self,
         ctx: StageContext<'_>,
+        state: LoopExecutionState,
+        kind: CheckpointKind,
+    ) -> Result<CheckpointWrite, AgentLoopExecutorError> {
+        self.write_with_gate_ref(ctx, state, kind, None).await
+    }
+
+    /// Variant of [`write`] for `BeforeBlock` checkpoints. Stores the
+    /// triggering gate ref in the checkpoint record so that
+    /// `verify_blocked_evidence` can cross-check gate identity and reject
+    /// a rogue driver that reuses a legitimate checkpoint from a different gate.
+    pub(super) async fn write_before_block(
+        &self,
+        ctx: StageContext<'_>,
+        state: LoopExecutionState,
+        gate_ref: &LoopGateRef,
+    ) -> Result<CheckpointWrite, AgentLoopExecutorError> {
+        self.write_with_gate_ref(
+            ctx,
+            state,
+            CheckpointKind::BeforeBlock,
+            Some(gate_ref.clone()),
+        )
+        .await
+    }
+
+    async fn write_with_gate_ref(
+        &self,
+        ctx: StageContext<'_>,
         mut state: LoopExecutionState,
         kind: CheckpointKind,
+        gate_ref: Option<LoopGateRef>,
     ) -> Result<CheckpointWrite, AgentLoopExecutorError> {
         state.last_checkpoint = Some(crate::state::CheckpointMarker {
             kind,
@@ -51,6 +81,7 @@ impl CheckpointStage {
             .checkpoint(LoopCheckpointRequest {
                 kind: host_kind,
                 state_ref: state_ref.clone(),
+                gate_ref,
             })
             .await
             .map_err(|_| AgentLoopExecutorError::CheckpointFailed { stage: kind })?;

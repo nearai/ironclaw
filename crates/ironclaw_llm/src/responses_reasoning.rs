@@ -1,5 +1,7 @@
 use serde_json::{Value, json};
 
+const MAX_REASONING_SUMMARY_BYTES: usize = 64 * 1024;
+
 pub(crate) fn summary_request() -> Value {
     json!({ "effort": "medium", "summary": "auto" })
 }
@@ -8,30 +10,47 @@ pub(crate) fn apply_summary_event(reasoning: &mut String, event_type: &str, data
     match event_type {
         "response.reasoning_summary_text.delta" => {
             if let Some(delta) = data.get("delta").and_then(|d| d.as_str()) {
-                reasoning.push_str(delta);
+                push_summary_text(reasoning, delta);
             }
             true
         }
         "response.reasoning_summary_text.done" => {
-            if reasoning.trim().is_empty()
+            if reasoning.is_empty()
                 && let Some(text) = data.get("text").and_then(|t| t.as_str())
             {
-                reasoning.push_str(text);
+                push_summary_text(reasoning, text);
             }
             true
         }
         "response.reasoning_summary_part.done" => {
-            if reasoning.trim().is_empty()
+            if reasoning.is_empty()
                 && let Some(text) = data
                     .get("part")
                     .and_then(|part| part.get("text"))
                     .and_then(|text| text.as_str())
             {
-                reasoning.push_str(text);
+                push_summary_text(reasoning, text);
             }
             true
         }
         _ => false,
+    }
+}
+
+fn push_summary_text(reasoning: &mut String, text: &str) {
+    if reasoning.len() >= MAX_REASONING_SUMMARY_BYTES {
+        return;
+    }
+    let remaining = MAX_REASONING_SUMMARY_BYTES - reasoning.len();
+    if text.len() <= remaining {
+        reasoning.push_str(text);
+        return;
+    }
+    for ch in text.chars() {
+        if reasoning.len() + ch.len_utf8() > MAX_REASONING_SUMMARY_BYTES {
+            break;
+        }
+        reasoning.push(ch);
     }
 }
 
@@ -104,6 +123,24 @@ mod tests {
     }
 
     #[test]
+    fn part_done_does_not_overwrite_accumulated_deltas() {
+        let mut reasoning = "Existing delta content".to_string();
+        let data = json!({
+            "part": {
+                "type": "summary_text",
+                "text": "This should not overwrite"
+            }
+        });
+
+        assert!(apply_summary_event(
+            &mut reasoning,
+            "response.reasoning_summary_part.done",
+            &data
+        ));
+        assert_eq!(reasoning, "Existing delta content");
+    }
+
+    #[test]
     fn delta_event_appends_to_accumulator() {
         let mut reasoning = "Initial ".to_string();
         let data = json!({
@@ -131,6 +168,38 @@ mod tests {
             &data
         ));
         assert_eq!(reasoning, "");
+    }
+
+    #[test]
+    fn delta_event_stops_appending_at_summary_cap() {
+        let mut reasoning = "a".repeat(MAX_REASONING_SUMMARY_BYTES - 2);
+        let data = json!({
+            "delta": "bcdef"
+        });
+
+        assert!(apply_summary_event(
+            &mut reasoning,
+            "response.reasoning_summary_text.delta",
+            &data
+        ));
+        assert_eq!(reasoning.len(), MAX_REASONING_SUMMARY_BYTES);
+        assert!(reasoning.ends_with("bc"));
+    }
+
+    #[test]
+    fn delta_event_preserves_utf8_boundary_at_summary_cap() {
+        let mut reasoning = "a".repeat(MAX_REASONING_SUMMARY_BYTES - 1);
+        let data = json!({
+            "delta": "é"
+        });
+
+        assert!(apply_summary_event(
+            &mut reasoning,
+            "response.reasoning_summary_text.delta",
+            &data
+        ));
+        assert_eq!(reasoning.len(), MAX_REASONING_SUMMARY_BYTES - 1);
+        assert!(reasoning.ends_with('a'));
     }
 
     #[test]

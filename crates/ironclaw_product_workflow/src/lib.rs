@@ -41,6 +41,7 @@ mod in_memory_ledger;
 mod inbound_turn;
 mod ledger;
 mod lifecycle;
+mod outbound_delivery;
 mod policy;
 mod reborn_services;
 mod webui_inbound;
@@ -91,7 +92,7 @@ pub use error::{AuthContinuationRejectionKind, ProductWorkflowError};
 #[cfg(any(test, feature = "test-support"))]
 pub use fakes::{
     FakeBeforeInboundPolicy, FakeConversationBindingService, FakeIdempotencyLedger,
-    FakeInboundTurnService,
+    FakeInboundTurnService, rejecting_reborn_services_error,
 };
 pub use in_memory_ledger::InMemoryIdempotencyLedger;
 pub use inbound_turn::{
@@ -99,12 +100,20 @@ pub use inbound_turn::{
 };
 pub use ledger::{IdempotencyDecision, IdempotencyLedger};
 pub use lifecycle::{
-    LifecycleBlockerRef, LifecycleCommandKind, LifecycleExtensionSource, LifecycleExtensionSummary,
+    LifecycleBlockerRef, LifecycleCommandKind, LifecycleExtensionRuntimeKind,
+    LifecycleExtensionSource, LifecycleExtensionSummary, LifecycleInstalledExtensionSummary,
     LifecyclePackageId, LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase,
     LifecycleProductAction, LifecycleProductContext, LifecycleProductFacade,
     LifecycleProductPayload, LifecycleProductResponse, LifecycleProductSurfaceContext,
     LifecycleReadinessBlocker, LifecycleSkillSource, LifecycleSkillSummary,
     UnsupportedLifecycleProductFacade,
+};
+// Product hosts use this outbound orchestration seam to wire outbound policy
+// decisions to adapter rendering without reaching into module internals.
+pub use outbound_delivery::{
+    ProductOutboundDeliveryError, ProductOutboundDeliveryOutcome, ProductOutboundDeliveryRequest,
+    ProductOutboundStatusUpdateFailure, ProductOutboundTargetResolver,
+    VerifiedProductOutboundTargetMetadata, prepare_and_render_product_outbound,
 };
 pub use policy::{
     BeforeInboundPolicy, BeforeInboundPolicyOutcome, BeforeInboundPolicyRequest,
@@ -121,18 +130,16 @@ pub use ironclaw_product_adapters::{
     ProductOutboundPayload, ProductProjectionItem, ProductProjectionState, ProductWorkSummaryPhase,
     ProgressKind, ProgressUpdateView, ProjectionCursor,
 };
-// Re-exported so the WebUI v2 handler crate can validate the
-// `extension_name` path segment at the handler/facade boundary
-// without pulling `ironclaw_common` into its forbidden-imports set.
-pub use ironclaw_common::ExtensionName;
 pub use reborn_services::{
-    RebornCancelRunResponse, RebornCreateThreadResponse, RebornGetRunStateRequest,
-    RebornGetRunStateResponse, RebornListThreadsResponse, RebornResolveGateResponse,
-    RebornResumeGateResponse, RebornServices, RebornServicesApi, RebornServicesError,
-    RebornServicesErrorCode, RebornServicesErrorKind, RebornSetupExtensionResponse,
-    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
-    RebornTimelineRequest, RebornTimelineResponse,
+    RebornCancelRunResponse, RebornCreateThreadResponse, RebornExtensionActionResponse,
+    RebornExtensionInfo, RebornExtensionListResponse, RebornExtensionRegistryEntry,
+    RebornExtensionRegistryResponse, RebornGetRunStateRequest, RebornGetRunStateResponse,
+    RebornListThreadsResponse, RebornResolveGateResponse, RebornResumeGateResponse, RebornServices,
+    RebornServicesApi, RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
+    RebornSetupExtensionResponse, RebornStreamEventsRequest, RebornStreamEventsResponse,
+    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
 };
+
 pub use webui_inbound::{
     WebUiAuthenticatedCaller, WebUiCancelReason, WebUiCancelRunRequest, WebUiCreateThreadRequest,
     WebUiGateResolution, WebUiInboundCommand, WebUiInboundValidationCode,

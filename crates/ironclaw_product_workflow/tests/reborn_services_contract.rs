@@ -363,6 +363,7 @@ impl TurnCoordinator for FakeTurnCoordinator {
             received_at: Utc::now(),
             checkpoint_id: None,
             gate_ref,
+            credential_requirements: Vec::new(),
             failure: None,
             event_cursor: EventCursor(17),
         })
@@ -3289,12 +3290,18 @@ async fn setup_extension_projects_through_configured_lifecycle_facade() {
     let response = services
         .setup_extension(
             caller(),
-            ironclaw_common::ExtensionName::new("github").expect("valid extension"),
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github")
+                .expect("valid package ref"),
             WebUiSetupExtensionRequest::default(),
         )
         .await
         .expect("setup extension response");
 
+    assert_eq!(
+        response.package_ref,
+        LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github")
+            .expect("valid package ref")
+    );
     assert_eq!(response.phase, LifecyclePhase::UnsupportedOrLegacy);
     assert!(response.blockers.iter().any(|blocker| matches!(
         blocker,

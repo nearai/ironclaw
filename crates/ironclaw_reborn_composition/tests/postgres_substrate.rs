@@ -186,6 +186,7 @@ impl SandboxCommandTransport for RecordingSandboxTransport {
     ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
         Ok(CommandExecutionOutput {
             output: String::new(),
+            saved_output: None,
             exit_code: 0,
             sandboxed: true,
             duration: Duration::ZERO,

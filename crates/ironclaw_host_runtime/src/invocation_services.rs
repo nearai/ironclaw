@@ -10,6 +10,7 @@
 
 use std::{fmt, sync::Arc};
 
+use ironclaw_events::AuditSink;
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
     MountView, ResourceScope, RuntimeDispatchErrorKind, RuntimeHttpEgress,
@@ -33,6 +34,7 @@ pub struct InvocationServices {
     pub runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
     pub process: Arc<dyn RuntimeProcessPort>,
     pub secret_store: Option<Arc<dyn SecretStore>>,
+    pub audit_sink: Option<Arc<dyn AuditSink>>,
     pub unsafe_raw_diagnostics_allowed: bool,
 }
 
@@ -49,6 +51,10 @@ impl fmt::Debug for InvocationServices {
             .field(
                 "secret_store",
                 &self.secret_store.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field(
+                "audit_sink",
+                &self.audit_sink.as_ref().map(|_| "[REDACTED]"),
             )
             .field(
                 "unsafe_raw_diagnostics_allowed",
@@ -115,6 +121,7 @@ pub struct LocalInvocationServicesResolver {
     process: Arc<dyn RuntimeProcessPort>,
     tenant_sandbox_process: Option<Arc<dyn RuntimeProcessPort>>,
     secret_store: Option<Arc<dyn SecretStore>>,
+    audit_sink: Option<Arc<dyn AuditSink>>,
 }
 
 impl LocalInvocationServicesResolver {
@@ -130,6 +137,7 @@ impl LocalInvocationServicesResolver {
             process,
             tenant_sandbox_process: None,
             secret_store,
+            audit_sink: None,
         }
     }
 
@@ -138,6 +146,11 @@ impl LocalInvocationServicesResolver {
         process: Arc<dyn RuntimeProcessPort>,
     ) -> Self {
         self.tenant_sandbox_process = Some(process);
+        self
+    }
+
+    pub fn with_audit_sink(mut self, audit_sink: Arc<dyn AuditSink>) -> Self {
+        self.audit_sink = Some(audit_sink);
         self
     }
 }
@@ -218,6 +231,7 @@ impl InvocationServicesResolver for LocalInvocationServicesResolver {
             } else {
                 None
             },
+            audit_sink: self.audit_sink.clone(),
             unsafe_raw_diagnostics_allowed: crate::local_runtime_allows_unsafe_raw_http_diagnostics(
                 plan.deployment,
                 plan.resolved_profile,
@@ -285,8 +299,9 @@ mod tests {
 
     struct NoopRuntimeHttpEgress;
 
+    #[async_trait]
     impl ironclaw_host_api::RuntimeHttpEgress for NoopRuntimeHttpEgress {
-        fn execute(
+        async fn execute(
             &self,
             _request: ironclaw_host_api::RuntimeHttpEgressRequest,
         ) -> Result<
@@ -305,6 +320,7 @@ mod tests {
         ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
             Ok(CommandExecutionOutput {
                 output: self.0.to_string(),
+                saved_output: None,
                 exit_code: 0,
                 sandboxed: false,
                 duration: std::time::Duration::ZERO,

@@ -11,24 +11,29 @@ use axum::extract::ConnectInfo;
 use axum::http::{HeaderValue, Method, Request, StatusCode, header};
 use chrono::{Duration as ChronoDuration, Utc};
 use ironclaw_auth::{
-    AuthContinuationEvent, AuthProductError, AuthProviderClient, InMemoryAuthProductServices,
+    AuthChallenge, AuthContinuationEvent, AuthFlowManager, AuthInteractionId,
+    AuthInteractionService, AuthProductError, AuthProductScope, AuthProviderClient,
+    CredentialAccountService, CredentialSetupService, GOOGLE_CALENDAR_READONLY_SCOPE,
+    GOOGLE_GMAIL_READONLY_SCOPE, InMemoryAuthProductServices, ManualTokenSetupRequest,
     OAuthProviderCallbackRequest, OAuthProviderExchange, OAuthProviderExchangeContext,
-    OAuthProviderRefresh, OAuthProviderRefreshRequest,
+    OAuthProviderRefresh, OAuthProviderRefreshRequest, SecretCleanupService, SecretSubmitRequest,
+    SecretSubmitResult,
 };
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
 use ironclaw_product_workflow::{
-    ExtensionName, RebornCancelRunResponse, RebornCreateThreadResponse, RebornGetRunStateRequest,
-    RebornGetRunStateResponse, RebornListThreadsResponse, RebornResolveGateResponse,
-    RebornServicesApi, RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
+    LifecyclePackageRef, RebornCancelRunResponse, RebornCreateThreadResponse,
+    RebornExtensionActionResponse, RebornExtensionListResponse, RebornExtensionRegistryResponse,
+    RebornGetRunStateRequest, RebornGetRunStateResponse, RebornListThreadsResponse,
+    RebornResolveGateResponse, RebornServicesApi, RebornServicesError,
     RebornSetupExtensionResponse, RebornStreamEventsRequest, RebornStreamEventsResponse,
     RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
     WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
     WebUiListThreadsRequest, WebUiResolveGateRequest, WebUiSendMessageRequest,
-    WebUiSetupExtensionRequest,
+    WebUiSetupExtensionRequest, rejecting_reborn_services_error,
 };
 use ironclaw_reborn_composition::{
-    RebornAuthContinuationDispatcher, RebornProductAuthServices, RebornReadiness,
-    RebornWebuiBundle, WebuiAuthenticator, WebuiServeConfig, webui_v2_app,
+    GoogleOAuthRouteConfig, RebornAuthContinuationDispatcher, RebornProductAuthServices,
+    RebornReadiness, RebornWebuiBundle, WebuiAuthenticator, WebuiServeConfig, webui_v2_app,
 };
 use serde_json::json;
 use tower::ServiceExt;
@@ -90,6 +95,87 @@ impl AuthProviderClient for FailingProviderClient {
     }
 }
 
+#[derive(Debug, Default)]
+struct SubmitFailingManualTokenInteractions {
+    interaction_id: AuthInteractionId,
+    abandoned: Mutex<Vec<(AuthProductScope, AuthInteractionId)>>,
+}
+
+impl SubmitFailingManualTokenInteractions {
+    fn abandoned(&self) -> Vec<(AuthProductScope, AuthInteractionId)> {
+        self.abandoned
+            .lock()
+            .expect("abandoned interactions lock")
+            .clone()
+    }
+}
+
+#[async_trait]
+impl AuthInteractionService for SubmitFailingManualTokenInteractions {
+    async fn request_secret_input(
+        &self,
+        request: ManualTokenSetupRequest,
+    ) -> Result<AuthChallenge, AuthProductError> {
+        Ok(AuthChallenge::ManualTokenRequired {
+            interaction_id: self.interaction_id,
+            provider: request.provider,
+            label: request.label,
+            expires_at: request.expires_at,
+        })
+    }
+
+    async fn submit_manual_token(
+        &self,
+        _scope: &AuthProductScope,
+        _request: SecretSubmitRequest,
+    ) -> Result<SecretSubmitResult, AuthProductError> {
+        Err(AuthProductError::InvalidRequest {
+            reason: "provider rejected token".to_string(),
+        })
+    }
+
+    async fn abandon_manual_token(
+        &self,
+        scope: &AuthProductScope,
+        interaction_id: AuthInteractionId,
+    ) -> Result<bool, AuthProductError> {
+        self.abandoned
+            .lock()
+            .expect("abandoned interactions lock")
+            .push((scope.clone(), interaction_id));
+        Ok(true)
+    }
+}
+
+#[derive(Debug)]
+struct SetupFailingManualTokenInteractions;
+
+#[async_trait]
+impl AuthInteractionService for SetupFailingManualTokenInteractions {
+    async fn request_secret_input(
+        &self,
+        _request: ManualTokenSetupRequest,
+    ) -> Result<AuthChallenge, AuthProductError> {
+        Err(AuthProductError::BackendUnavailable)
+    }
+
+    async fn submit_manual_token(
+        &self,
+        _scope: &AuthProductScope,
+        _request: SecretSubmitRequest,
+    ) -> Result<SecretSubmitResult, AuthProductError> {
+        unreachable!("setup-failure test does not submit manual tokens")
+    }
+
+    async fn abandon_manual_token(
+        &self,
+        _scope: &AuthProductScope,
+        _interaction_id: AuthInteractionId,
+    ) -> Result<bool, AuthProductError> {
+        unreachable!("setup-failure test does not abandon manual tokens")
+    }
+}
+
 struct UnusedServices;
 
 #[async_trait]
@@ -99,7 +185,7 @@ impl RebornServicesApi for UnusedServices {
         _caller: WebUiAuthenticatedCaller,
         _request: WebUiCreateThreadRequest,
     ) -> Result<RebornCreateThreadResponse, RebornServicesError> {
-        Err(unused_service_error())
+        Err(rejecting_reborn_services_error())
     }
 
     async fn submit_turn(
@@ -107,7 +193,7 @@ impl RebornServicesApi for UnusedServices {
         _caller: WebUiAuthenticatedCaller,
         _request: WebUiSendMessageRequest,
     ) -> Result<RebornSubmitTurnResponse, RebornServicesError> {
-        Err(unused_service_error())
+        Err(rejecting_reborn_services_error())
     }
 
     async fn get_timeline(
@@ -115,7 +201,7 @@ impl RebornServicesApi for UnusedServices {
         _caller: WebUiAuthenticatedCaller,
         _request: RebornTimelineRequest,
     ) -> Result<RebornTimelineResponse, RebornServicesError> {
-        Err(unused_service_error())
+        Err(rejecting_reborn_services_error())
     }
 
     async fn stream_events(
@@ -123,7 +209,7 @@ impl RebornServicesApi for UnusedServices {
         _caller: WebUiAuthenticatedCaller,
         _request: RebornStreamEventsRequest,
     ) -> Result<RebornStreamEventsResponse, RebornServicesError> {
-        Err(unused_service_error())
+        Err(rejecting_reborn_services_error())
     }
 
     async fn get_run_state(
@@ -131,7 +217,7 @@ impl RebornServicesApi for UnusedServices {
         _caller: WebUiAuthenticatedCaller,
         _request: RebornGetRunStateRequest,
     ) -> Result<RebornGetRunStateResponse, RebornServicesError> {
-        Err(unused_service_error())
+        Err(rejecting_reborn_services_error())
     }
 
     async fn cancel_run(
@@ -139,7 +225,7 @@ impl RebornServicesApi for UnusedServices {
         _caller: WebUiAuthenticatedCaller,
         _request: WebUiCancelRunRequest,
     ) -> Result<RebornCancelRunResponse, RebornServicesError> {
-        Err(unused_service_error())
+        Err(rejecting_reborn_services_error())
     }
 
     async fn resolve_gate(
@@ -147,7 +233,7 @@ impl RebornServicesApi for UnusedServices {
         _caller: WebUiAuthenticatedCaller,
         _request: WebUiResolveGateRequest,
     ) -> Result<RebornResolveGateResponse, RebornServicesError> {
-        Err(unused_service_error())
+        Err(rejecting_reborn_services_error())
     }
 
     async fn list_threads(
@@ -155,27 +241,54 @@ impl RebornServicesApi for UnusedServices {
         _caller: WebUiAuthenticatedCaller,
         _request: WebUiListThreadsRequest,
     ) -> Result<RebornListThreadsResponse, RebornServicesError> {
-        Err(unused_service_error())
+        Err(rejecting_reborn_services_error())
+    }
+
+    async fn list_extensions(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornExtensionListResponse, RebornServicesError> {
+        Err(rejecting_reborn_services_error())
+    }
+
+    async fn list_extension_registry(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornExtensionRegistryResponse, RebornServicesError> {
+        Err(rejecting_reborn_services_error())
+    }
+
+    async fn install_extension(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _package_ref: LifecyclePackageRef,
+    ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
+        Err(rejecting_reborn_services_error())
+    }
+
+    async fn activate_extension(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _package_ref: LifecyclePackageRef,
+    ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
+        Err(rejecting_reborn_services_error())
+    }
+
+    async fn remove_extension(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _package_ref: LifecyclePackageRef,
+    ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
+        Err(rejecting_reborn_services_error())
     }
 
     async fn setup_extension(
         &self,
         _caller: WebUiAuthenticatedCaller,
-        _extension_name: ExtensionName,
+        _package_ref: LifecyclePackageRef,
         _request: WebUiSetupExtensionRequest,
     ) -> Result<RebornSetupExtensionResponse, RebornServicesError> {
-        Err(unused_service_error())
-    }
-}
-
-fn unused_service_error() -> RebornServicesError {
-    RebornServicesError {
-        code: RebornServicesErrorCode::Internal,
-        kind: RebornServicesErrorKind::Internal,
-        status_code: 500,
-        retryable: false,
-        field: None,
-        validation_code: None,
+        Err(rejecting_reborn_services_error())
     }
 }
 
@@ -194,19 +307,73 @@ fn build_app_with_product_auth() -> (axum::Router, Arc<RecordingAuthDispatcher>)
 fn build_app_with_product_auth_service(
     product_auth: Arc<RebornProductAuthServices>,
 ) -> axum::Router {
+    build_app_with_product_auth_service_and_config(product_auth, None)
+}
+
+fn build_app_with_product_auth_service_and_config(
+    product_auth: Arc<RebornProductAuthServices>,
+    google_oauth: Option<GoogleOAuthRouteConfig>,
+) -> axum::Router {
     let bundle = RebornWebuiBundle {
         api: Arc::new(UnusedServices),
         product_auth: Some(product_auth),
         readiness: RebornReadiness::disabled(),
     };
-    let config = WebuiServeConfig::new(
+    let mut config = WebuiServeConfig::new(
         TenantId::new(TENANT).expect("tenant"),
         Arc::new(OnlyValidToken),
         vec![HeaderValue::from_static("http://localhost:1234")],
     )
     .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
     .with_default_project_id(ProjectId::new(PROJECT).expect("project"));
+    if let Some(google_oauth) = google_oauth {
+        config = config.with_google_oauth(google_oauth);
+    }
     webui_v2_app(bundle, config).expect("webui v2 app")
+}
+
+fn google_oauth_route_config() -> GoogleOAuthRouteConfig {
+    GoogleOAuthRouteConfig::new(
+        "google-client.apps.googleusercontent.com",
+        "http://127.0.0.1:3000/api/reborn/product-auth/oauth/google/callback",
+    )
+    .expect("google oauth route config")
+}
+
+fn build_app_with_google_oauth() -> (axum::Router, Arc<RecordingAuthDispatcher>) {
+    let dispatcher = Arc::new(RecordingAuthDispatcher::default());
+    let product_auth = Arc::new(RebornProductAuthServices::from_shared(
+        Arc::new(InMemoryAuthProductServices::new()),
+        dispatcher.clone(),
+    ));
+    (
+        build_app_with_product_auth_service_and_config(
+            product_auth,
+            Some(google_oauth_route_config()),
+        ),
+        dispatcher,
+    )
+}
+
+fn product_auth_with_interaction_service(
+    interaction_service: Arc<dyn AuthInteractionService>,
+) -> Arc<RebornProductAuthServices> {
+    let shared = Arc::new(InMemoryAuthProductServices::new());
+    let flow_manager: Arc<dyn AuthFlowManager> = shared.clone();
+    let credential_setup_service: Arc<dyn CredentialSetupService> = shared.clone();
+    let credential_account_service: Arc<dyn CredentialAccountService> = shared.clone();
+    let provider_client: Arc<dyn AuthProviderClient> = shared.clone();
+    let cleanup_service: Arc<dyn SecretCleanupService> = shared;
+
+    Arc::new(RebornProductAuthServices::new(
+        flow_manager,
+        interaction_service,
+        credential_setup_service,
+        credential_account_service,
+        provider_client,
+        cleanup_service,
+        Arc::new(RecordingAuthDispatcher::default()),
+    ))
 }
 
 #[derive(Debug)]
@@ -262,6 +429,89 @@ async fn post_oauth_start(app: &axum::Router, body: serde_json::Value) -> axum::
         )
         .await
         .expect("oneshot")
+}
+
+fn google_oauth_start_body(extra_fields: serde_json::Value) -> serde_json::Value {
+    let expires_at = (Utc::now() + ChronoDuration::minutes(5)).to_rfc3339();
+    let mut body = json!({
+        "account_label": "work google",
+        "scopes": [GOOGLE_GMAIL_READONLY_SCOPE, GOOGLE_CALENDAR_READONLY_SCOPE],
+        "expires_at": expires_at
+    });
+    merge_json_object(&mut body, extra_fields);
+    body
+}
+
+async fn post_google_oauth_start(
+    app: &axum::Router,
+    body: serde_json::Value,
+) -> axum::response::Response {
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/reborn/product-auth/oauth/google/start")
+                .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot")
+}
+
+async fn start_google_oauth_flow(app: &axum::Router) -> (serde_json::Value, String) {
+    let start_response = post_google_oauth_start(
+        app,
+        google_oauth_start_body(json!({
+            "session_id": "web-session-google",
+            "thread_id": "thread-auth-google"
+        })),
+    )
+    .await;
+    assert_eq!(start_response.status(), StatusCode::OK);
+    let start_body = read_body_string(start_response).await;
+    let start_json: serde_json::Value = serde_json::from_str(&start_body).expect("start json");
+    let authorization_url = start_json["authorization_url"]
+        .as_str()
+        .expect("authorization url");
+    let parsed = url::Url::parse(authorization_url).expect("google authorization url");
+    let state = parsed
+        .query_pairs()
+        .find_map(|(name, value)| (name == "state").then(|| value.into_owned()))
+        .expect("state");
+    (start_json, state)
+}
+
+async fn post_manual_token_submit(
+    app: &axum::Router,
+    body: serde_json::Value,
+) -> axum::response::Response {
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/reborn/product-auth/manual-token/submit")
+                .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot")
+}
+
+fn manual_token_body(token: &str, extra_fields: serde_json::Value) -> serde_json::Value {
+    let mut body = json!({
+        "provider": "github",
+        "account_label": "work github",
+        "token": token,
+        "run_id": "11111111-1111-1111-1111-111111111111",
+        "gate_ref": "gate:auth-github",
+        "thread_id": "thread-auth-1"
+    });
+    merge_json_object(&mut body, extra_fields);
+    body
 }
 
 fn merge_json_object(target: &mut serde_json::Value, source: serde_json::Value) {
@@ -354,6 +604,285 @@ async fn product_auth_oauth_start_requires_bearer_auth() {
         .expect("oneshot");
 
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn product_auth_google_oauth_start_requires_bearer_auth() {
+    let (app, _) = build_app_with_google_oauth();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/reborn/product-auth/oauth/google/start")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(google_oauth_start_body(json!({})).to_string()))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn product_auth_google_oauth_start_fails_closed_without_config() {
+    let (app, _) = build_app_with_product_auth();
+
+    let response = post_google_oauth_start(&app, google_oauth_start_body(json!({}))).await;
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = read_body_string(response).await;
+    assert!(body.contains("\"code\":\"backend_unavailable\""));
+}
+
+#[tokio::test]
+async fn product_auth_google_oauth_start_rejects_disallowed_scopes() {
+    let (app, _) = build_app_with_google_oauth();
+
+    let invalid_requests = [
+        google_oauth_start_body(json!({ "scopes": [] })),
+        google_oauth_start_body(json!({ "scopes": ["https://www.googleapis.com/auth/drive"] })),
+    ];
+
+    for body in invalid_requests {
+        let response = post_google_oauth_start(&app, body).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = read_body_string(response).await;
+        assert!(body.contains("\"code\":\"invalid_request\""));
+        assert!(!body.contains("drive"));
+    }
+}
+
+#[tokio::test]
+async fn product_auth_google_oauth_start_rejects_invalid_expiry() {
+    let (app, _) = build_app_with_google_oauth();
+
+    let invalid_requests = [
+        google_oauth_start_body(
+            json!({ "expires_at": (Utc::now() - ChronoDuration::minutes(1)).to_rfc3339() }),
+        ),
+        google_oauth_start_body(
+            json!({ "expires_at": (Utc::now() + ChronoDuration::hours(1)).to_rfc3339() }),
+        ),
+    ];
+
+    for body in invalid_requests {
+        let response = post_google_oauth_start(&app, body).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = read_body_string(response).await;
+        assert!(body.contains("\"code\":\"invalid_request\""));
+    }
+}
+
+#[tokio::test]
+async fn product_auth_manual_token_submit_requires_bearer_auth() {
+    let (app, _) = build_app_with_product_auth();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/reborn/product-auth/manual-token/submit")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    manual_token_body("ghp_secret", json!({})).to_string(),
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn product_auth_manual_token_submit_returns_credential_ref_without_exposing_pat() {
+    let (app, dispatcher) = build_app_with_product_auth();
+    let raw_pat = "ghp_super_secret_manual_pat";
+
+    let response = post_manual_token_submit(&app, manual_token_body(raw_pat, json!({}))).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_body_string(response).await;
+    assert!(
+        !body.contains(raw_pat),
+        "manual token response must not expose the raw PAT: {body}"
+    );
+
+    let json: serde_json::Value = serde_json::from_str(&body).expect("manual token json");
+    assert!(json["credential_ref"].as_str().is_some());
+    assert_eq!(json["status"].as_str(), Some("configured"));
+    assert_eq!(
+        json["continuation"]["type"].as_str(),
+        Some("turn_gate_resume")
+    );
+    assert_eq!(
+        json["continuation"]["gate_ref"].as_str(),
+        Some("gate:auth-github")
+    );
+    assert_eq!(
+        json["continuation"]["turn_run_ref"].as_str(),
+        Some("11111111-1111-1111-1111-111111111111")
+    );
+    assert_eq!(
+        dispatcher.events().len(),
+        1,
+        "manual token submit should dispatch the completed turn-gate continuation"
+    );
+}
+
+#[tokio::test]
+async fn product_auth_manual_token_submit_rejects_invalid_secret_without_echoing_it() {
+    let (app, _) = build_app_with_product_auth();
+    let raw_pat = " padded-ghp-secret ";
+
+    let response = post_manual_token_submit(&app, manual_token_body(raw_pat, json!({}))).await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = read_body_string(response).await;
+    assert!(!body.contains(raw_pat));
+    assert!(body.contains("invalid_request"));
+}
+
+#[tokio::test]
+async fn product_auth_manual_token_submit_abandons_interaction_on_submit_failure() {
+    let interactions = Arc::new(SubmitFailingManualTokenInteractions::default());
+    let expected_interaction_id = interactions.interaction_id;
+    let app = build_app_with_product_auth_service(product_auth_with_interaction_service(
+        interactions.clone(),
+    ));
+
+    let response = post_manual_token_submit(
+        &app,
+        manual_token_body(
+            "ghp_submit_fails_after_interaction",
+            json!({ "thread_id": "thread-cleanup-1" }),
+        ),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = read_body_string(response).await;
+    assert!(!body.contains("ghp_submit_fails_after_interaction"));
+    assert!(!body.contains("credential_ref"));
+    assert!(!body.contains("interaction_id"));
+
+    let abandoned = interactions.abandoned();
+    assert_eq!(abandoned.len(), 1);
+    assert_eq!(abandoned[0].1, expected_interaction_id);
+    assert_eq!(
+        abandoned[0].0.resource.tenant_id,
+        TenantId::new(TENANT).unwrap()
+    );
+    assert_eq!(abandoned[0].0.resource.user_id, UserId::new(USER).unwrap());
+    assert_eq!(
+        abandoned[0]
+            .0
+            .resource
+            .thread_id
+            .as_ref()
+            .map(|id| id.as_str()),
+        Some("thread-cleanup-1")
+    );
+}
+
+#[tokio::test]
+async fn product_auth_manual_token_submit_handles_setup_service_error() {
+    let app = build_app_with_product_auth_service(product_auth_with_interaction_service(Arc::new(
+        SetupFailingManualTokenInteractions,
+    )));
+    let raw_pat = "ghp_setup_fails_before_submit";
+
+    let response = post_manual_token_submit(&app, manual_token_body(raw_pat, json!({}))).await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = read_body_string(response).await;
+    assert!(body.contains("\"code\":\"backend_unavailable\""));
+    assert!(!body.contains(raw_pat));
+    assert!(!body.contains("credential_ref"));
+    assert!(!body.contains("interaction_id"));
+}
+
+#[tokio::test]
+async fn product_auth_manual_token_submit_oversized_body_rejects_before_auth() {
+    let (app, _) = build_app_with_product_auth();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/reborn/product-auth/manual-token/submit")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from("x".repeat(17 * 1024)))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+}
+
+#[tokio::test]
+async fn product_auth_manual_token_submit_has_per_caller_rate_limit() {
+    let (app, _) = build_app_with_product_auth();
+
+    for index in 0..20 {
+        let response = post_manual_token_submit(
+            &app,
+            manual_token_body(&format!("ghp_secret_{index}"), json!({})),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    let response =
+        post_manual_token_submit(&app, manual_token_body("ghp_secret_over", json!({}))).await;
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+}
+
+#[tokio::test]
+async fn product_auth_manual_token_submit_invalid_fields_are_sanitized() {
+    let (app, _) = build_app_with_product_auth();
+
+    let invalid_requests = [
+        manual_token_body("ghp_invalid_provider_secret", json!({ "provider": "" })),
+        manual_token_body("ghp_invalid_label_secret", json!({ "account_label": "" })),
+        manual_token_body("ghp_invalid_run_secret", json!({ "run_id": "" })),
+        manual_token_body("ghp_invalid_gate_secret", json!({ "gate_ref": "" })),
+    ];
+
+    for body in invalid_requests {
+        let response = post_manual_token_submit(&app, body).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = read_body_string(response).await;
+        assert!(body.contains("\"code\":\"invalid_request\""));
+        assert!(!body.contains("ghp_invalid_provider_secret"));
+        assert!(!body.contains("ghp_invalid_label_secret"));
+        assert!(!body.contains("ghp_invalid_run_secret"));
+        assert!(!body.contains("ghp_invalid_gate_secret"));
+    }
+}
+
+#[tokio::test]
+async fn product_auth_manual_token_submit_invalid_scope_fields_are_sanitized() {
+    let (app, _) = build_app_with_product_auth();
+
+    let invalid_requests = [
+        manual_token_body(
+            "ghp_invalid_thread_secret",
+            json!({ "thread_id": "bad/thread" }),
+        ),
+        manual_token_body(
+            "ghp_invalid_session_secret",
+            json!({ "session_id": "bad\u{0}session" }),
+        ),
+    ];
+
+    for body in invalid_requests {
+        let response = post_manual_token_submit(&app, body).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = read_body_string(response).await;
+        assert!(body.contains("\"code\":\"invalid_request\""));
+        assert!(!body.contains("ghp_invalid_thread_secret"));
+        assert!(!body.contains("ghp_invalid_session_secret"));
+        assert!(!body.contains("credential_ref"));
+    }
 }
 
 #[tokio::test]
@@ -507,6 +1036,188 @@ async fn product_auth_oauth_routes_create_flow_and_complete_callback() {
     assert_eq!(callback_json["flow_id"], started.flow_id);
     assert_eq!(callback_json["status"], "completed");
     assert_eq!(dispatcher.events().len(), 1);
+}
+
+#[tokio::test]
+async fn product_auth_google_oauth_start_builds_provider_authorization_url() {
+    let product_auth = Arc::new(RebornProductAuthServices::from_shared(
+        Arc::new(InMemoryAuthProductServices::new()),
+        Arc::new(RecordingAuthDispatcher::default()),
+    ));
+    let app = build_app_with_product_auth_service_and_config(
+        product_auth,
+        Some(
+            GoogleOAuthRouteConfig::new(
+                "google-client.apps.googleusercontent.com",
+                "http://127.0.0.1:3000/api/reborn/product-auth/oauth/google/callback",
+            )
+            .expect("google oauth route config")
+            .with_hosted_domain_hint("example.com")
+            .expect("hosted-domain hint"),
+        ),
+    );
+
+    let response = post_google_oauth_start(
+        &app,
+        google_oauth_start_body(json!({
+            "session_id": "web-session-google",
+            "thread_id": "thread-auth-google"
+        })),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_body_string(response).await;
+    assert!(!body.contains("google-pkce"));
+    let json: serde_json::Value = serde_json::from_str(&body).expect("start json");
+    assert_eq!(json["provider"], "google");
+    assert_eq!(json["continuation"]["type"], "setup_only");
+    let authorization_url = json["authorization_url"]
+        .as_str()
+        .expect("authorization url");
+    let parsed = url::Url::parse(authorization_url).expect("google authorization url");
+    assert_eq!(parsed.host_str(), Some("accounts.google.com"));
+    let query = parsed.query_pairs().collect::<Vec<_>>();
+    assert!(
+        query.iter().any(|(name, value)| name == "client_id"
+            && value == "google-client.apps.googleusercontent.com")
+    );
+    assert!(query.iter().any(|(name, value)| name == "redirect_uri"
+        && value == "http://127.0.0.1:3000/api/reborn/product-auth/oauth/google/callback"));
+    assert!(query.iter().any(|(name, value)| name == "scope"
+        && value.contains(GOOGLE_GMAIL_READONLY_SCOPE)
+        && value.contains(GOOGLE_CALENDAR_READONLY_SCOPE)));
+    assert!(
+        query
+            .iter()
+            .any(|(name, value)| name == "access_type" && value == "offline")
+    );
+    assert!(
+        query
+            .iter()
+            .any(|(name, value)| name == "hd" && value == "example.com")
+    );
+}
+
+#[tokio::test]
+async fn product_auth_google_oauth_callback_completes_setup_flow() {
+    let (app, dispatcher) = build_app_with_google_oauth();
+    let (start_json, state) = start_google_oauth_flow(&app).await;
+    let scopes = format!("{GOOGLE_GMAIL_READONLY_SCOPE}%20{GOOGLE_CALENDAR_READONLY_SCOPE}");
+
+    let callback_response = app
+        .oneshot(callback_request(format!(
+            "/api/reborn/product-auth/oauth/google/callback?state={state}&code=google-auth-code&scope={scopes}"
+        )))
+        .await
+        .expect("oneshot");
+    assert_eq!(callback_response.status(), StatusCode::OK);
+    let callback_body = read_body_string(callback_response).await;
+    assert!(!callback_body.contains("google-auth-code"));
+    let callback_json: serde_json::Value =
+        serde_json::from_str(&callback_body).expect("callback json");
+    assert_eq!(callback_json["flow_id"], start_json["flow_id"]);
+    assert_eq!(callback_json["status"], "completed");
+    assert_eq!(dispatcher.events().len(), 1);
+}
+
+#[tokio::test]
+async fn product_auth_google_oauth_callback_rejects_disallowed_scopes() {
+    let (app, dispatcher) = build_app_with_google_oauth();
+    let (_, state) = start_google_oauth_flow(&app).await;
+
+    let response = app
+        .clone()
+        .oneshot(callback_request(format!(
+            "/api/reborn/product-auth/oauth/google/callback?state={state}&code=google-auth-code&scope=https://www.googleapis.com/auth/drive"
+        )))
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = read_body_string(response).await;
+    assert!(body.contains("\"code\":\"malformed_callback\""));
+    assert!(!body.contains(&state));
+    assert!(!body.contains("google-auth-code"));
+    assert!(!body.contains("drive"));
+    assert!(dispatcher.events().is_empty());
+
+    let replay_response = app
+        .oneshot(callback_request(format!(
+            "/api/reborn/product-auth/oauth/google/callback?state={state}&code=google-auth-code&scope={GOOGLE_GMAIL_READONLY_SCOPE}"
+        )))
+        .await
+        .expect("oneshot");
+    assert_eq!(replay_response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn product_auth_google_oauth_callback_provider_denial_is_sanitized() {
+    let (app, dispatcher) = build_app_with_google_oauth();
+    let (_, state) = start_google_oauth_flow(&app).await;
+
+    let response = app
+        .oneshot(callback_request(format!(
+            "/api/reborn/product-auth/oauth/google/callback?state={state}&error=access_denied"
+        )))
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = read_body_string(response).await;
+    assert!(body.contains("\"code\":\"provider_denied\""));
+    assert!(!body.contains(&state));
+    assert!(!body.contains("access_denied"));
+    assert!(dispatcher.events().is_empty());
+}
+
+#[tokio::test]
+async fn product_auth_google_oauth_callback_unknown_state_is_sanitized() {
+    let (app, dispatcher) = build_app_with_google_oauth();
+
+    let response = app
+        .oneshot(callback_request(
+            "/api/reborn/product-auth/oauth/google/callback?state=unknown-google-state&error=access_denied"
+                .to_string(),
+        ))
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = read_body_string(response).await;
+    assert!(body.contains("\"code\":\"malformed_callback\""));
+    assert!(!body.contains("unknown-google-state"));
+    assert!(!body.contains("access_denied"));
+    assert!(dispatcher.events().is_empty());
+}
+
+#[tokio::test]
+async fn product_auth_google_oauth_callback_rejects_empty_parsed_scopes() {
+    let (app, dispatcher) = build_app_with_google_oauth();
+    let (_, state) = start_google_oauth_flow(&app).await;
+
+    let response = app
+        .clone()
+        .oneshot(callback_request(format!(
+            "/api/reborn/product-auth/oauth/google/callback?state={state}&code=google-auth-code&scope="
+        )))
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = read_body_string(response).await;
+    assert!(body.contains("\"code\":\"malformed_callback\""));
+    assert!(!body.contains(&state));
+    assert!(!body.contains("google-auth-code"));
+    assert!(dispatcher.events().is_empty());
+
+    let replay_response = app
+        .oneshot(callback_request(format!(
+            "/api/reborn/product-auth/oauth/google/callback?state={state}&code=google-auth-code&scope="
+        )))
+        .await
+        .expect("oneshot");
+    assert_eq!(replay_response.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]

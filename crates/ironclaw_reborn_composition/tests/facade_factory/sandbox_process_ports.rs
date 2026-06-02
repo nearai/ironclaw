@@ -60,6 +60,7 @@ impl ironclaw_host_runtime::SandboxCommandTransport for RecordingSandboxTranspor
         self.requests.lock().unwrap().push(request);
         Ok(ironclaw_host_runtime::CommandExecutionOutput {
             output: format!("sandbox port: {command}"),
+            saved_output: None,
             exit_code: 0,
             sandboxed: false,
             duration: Duration::from_millis(5),

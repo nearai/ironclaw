@@ -22,9 +22,10 @@ use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 
 use super::config::GoogleOAuthConfig;
-use super::error::OAuthError;
+use super::error::{OAuthError, ProviderInitError};
 use super::profile::OAuthUserProfile;
 use super::provider::OAuthProvider;
+use super::provider_http::sanitize_error_code;
 use super::provider_name::OAuthProviderName;
 
 const GOOGLE_AUTH_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
@@ -59,7 +60,15 @@ pub struct GoogleProvider {
 impl GoogleProvider {
     /// Build a provider from an operator-supplied
     /// [`GoogleOAuthConfig`] using the real Google endpoints.
-    pub fn new(config: GoogleOAuthConfig) -> Self {
+    ///
+    /// Fallible for the same reason as
+    /// [`GitHubProvider::new`](super::github::GitHubProvider::new): the
+    /// `reqwest::Client` build can fail if the rustls / tokio runtime
+    /// cannot initialize. Surfacing it as a `Result` lets the host
+    /// composition layer fail startup loudly rather than silently
+    /// shipping a client with no timeout (a hung token endpoint would
+    /// otherwise pin the callback task) or panicking in a constructor.
+    pub fn new(config: GoogleOAuthConfig) -> Result<Self, ProviderInitError> {
         Self::with_endpoints_inner(config, GOOGLE_AUTH_URL, GOOGLE_TOKEN_URL)
     }
 
@@ -73,7 +82,7 @@ impl GoogleProvider {
         config: GoogleOAuthConfig,
         auth_endpoint: impl Into<String>,
         token_endpoint: impl Into<String>,
-    ) -> Self {
+    ) -> Result<Self, ProviderInitError> {
         Self::with_endpoints_inner(config, auth_endpoint, token_endpoint)
     }
 
@@ -81,16 +90,12 @@ impl GoogleProvider {
         config: GoogleOAuthConfig,
         auth_endpoint: impl Into<String>,
         token_endpoint: impl Into<String>,
-    ) -> Self {
+    ) -> Result<Self, ProviderInitError> {
         let http = reqwest::Client::builder()
             .timeout(GOOGLE_HTTP_TIMEOUT)
             .build()
-            // Builder failure here means rustls / tokio runtime is
-            // genuinely broken; fall back to the default client so
-            // we still surface a real OAuthError on the request
-            // rather than a constructor panic.
-            .unwrap_or_else(|_| reqwest::Client::new());
-        Self {
+            .map_err(|err| ProviderInitError(err.to_string()))?;
+        Ok(Self {
             name: OAuthProviderName::new("google").expect("\"google\" satisfies the grammar"), // safety: literal satisfies OAuthProviderName grammar (lowercase ascii, 6 chars); checked by `OAuthProviderName::accepts_lowercase_alphanumeric`
             client_id: config.client_id,
             client_secret: config.client_secret,
@@ -98,7 +103,7 @@ impl GoogleProvider {
             http,
             token_endpoint: token_endpoint.into(),
             auth_endpoint: auth_endpoint.into(),
-        }
+        })
     }
 }
 
@@ -173,8 +178,13 @@ impl OAuthProvider for GoogleProvider {
                 .ok()
                 .and_then(|error| error.error);
             if let Some(error_code) = error_code {
+                // Sanitize the provider-supplied code (attacker-
+                // influenceable via an overridden token endpoint) before
+                // it lands in an error string that gets logged — same
+                // log-injection guard as the GitHub provider.
+                let safe_error = sanitize_error_code(&error_code);
                 return Err(OAuthError::CodeExchange(format!(
-                    "Google token endpoint returned {status} ({error_code})"
+                    "Google token endpoint returned {status} ({safe_error})"
                 )));
             }
             tracing::debug!(
@@ -267,7 +277,7 @@ mod tests {
 
     #[test]
     fn authorization_url_includes_required_oidc_params() {
-        let provider = GoogleProvider::new(cfg(None));
+        let provider = GoogleProvider::new(cfg(None)).expect("build provider");
         let url = provider.authorization_url(
             "https://example.com/auth/callback/google",
             "csrf-token",
@@ -284,7 +294,7 @@ mod tests {
 
     #[test]
     fn authorization_url_appends_hd_hint_when_restricted() {
-        let provider = GoogleProvider::new(cfg(Some("company.com")));
+        let provider = GoogleProvider::new(cfg(Some("company.com"))).expect("build provider");
         let url = provider.authorization_url(
             "https://example.com/auth/callback/google",
             "csrf-token",
@@ -341,12 +351,6 @@ mod tests {
     }
 
     async fn spawn_mock_token_endpoint(id_token: String) -> SocketAddr {
-        async fn handler(Json(body): Json<serde_json::Value>) -> Json<MockTokenResponse> {
-            let _ = body; // form params aren't validated in the mock
-            unreachable!("axum form extractor required, replaced below")
-        }
-        let _ = handler;
-
         let router = axum::Router::new().route(
             "/token",
             post(
@@ -382,7 +386,8 @@ mod tests {
         let endpoint = format!("http://{addr}/token");
 
         let provider =
-            GoogleProvider::with_endpoints(cfg(None), "https://example.invalid/auth", endpoint);
+            GoogleProvider::with_endpoints(cfg(None), "https://example.invalid/auth", endpoint)
+                .expect("build provider");
         let profile = provider
             .exchange_code(
                 "fake-auth-code",
@@ -413,7 +418,8 @@ mod tests {
             cfg(Some("company.com")),
             "https://example.invalid/auth",
             endpoint,
-        );
+        )
+        .expect("build provider");
         let err = provider
             .exchange_code(
                 "fake-auth-code",
@@ -469,7 +475,8 @@ mod tests {
 
     async fn run_exchange_against(endpoint: String) -> OAuthError {
         let provider =
-            GoogleProvider::with_endpoints(cfg(None), "https://example.invalid/auth", endpoint);
+            GoogleProvider::with_endpoints(cfg(None), "https://example.invalid/auth", endpoint)
+                .expect("build provider");
         provider
             .exchange_code(
                 "fake-auth-code",
@@ -554,7 +561,8 @@ mod tests {
         let endpoint = format!("http://{addr}/token");
 
         let provider =
-            GoogleProvider::with_endpoints(cfg(None), "https://example.invalid/auth", endpoint);
+            GoogleProvider::with_endpoints(cfg(None), "https://example.invalid/auth", endpoint)
+                .expect("build provider");
         let err = provider
             .exchange_code(
                 "fake-auth-code",

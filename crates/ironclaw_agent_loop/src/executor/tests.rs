@@ -830,7 +830,14 @@ async fn assistant_reply_stage_returns_reply_summary() {
     };
 
     let step = AssistantReplyStage
-        .process(ctx, AssistantReplyInput { state, reply })
+        .process(
+            ctx,
+            AssistantReplyInput {
+                state,
+                reply,
+                usage: None,
+            },
+        )
         .await
         .expect("assistant reply stage");
 
@@ -1452,6 +1459,7 @@ async fn gate_stage_skips_and_continues_records_skipped_summary() {
                 call,
                 kind: GateKind::Auth,
                 gate_ref,
+                credential_requirements: Vec::new(),
             },
         )
         .await
@@ -1494,6 +1502,7 @@ async fn gate_stage_aborts_returns_failed_exit() {
                 call,
                 kind: GateKind::Auth,
                 gate_ref,
+                credential_requirements: Vec::new(),
             },
         )
         .await

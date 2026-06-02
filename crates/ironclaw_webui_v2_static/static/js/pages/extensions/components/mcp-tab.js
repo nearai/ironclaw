@@ -1,6 +1,10 @@
 import { html } from "../../../lib/html.js";
 import { ExtensionCard, RegistryCard } from "./extension-card.js";
 
+function packageId(item) {
+  return item.package_ref?.id || "";
+}
+
 export function McpTab({
   mcpServers,
   mcpRegistry,
@@ -35,7 +39,7 @@ export function McpTab({
           ${mcpServers.map(
             (ext) => html`
               <${ExtensionCard}
-                key=${ext.name}
+                key=${packageId(ext)}
                 ext=${ext}
                 onActivate=${onActivate}
                 onConfigure=${onConfigure}
@@ -57,7 +61,7 @@ export function McpTab({
           ${mcpRegistry.map(
             (entry) => html`
               <${RegistryCard}
-                key=${entry.name}
+                key=${packageId(entry)}
                 entry=${entry}
                 onInstall=${onInstall}
                 isBusy=${isBusy}

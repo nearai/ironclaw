@@ -326,8 +326,8 @@ async fn first_party_handler_rejects_non_string_url_input() {
     }
 }
 
-#[test]
-fn http_error_kind_maps_all_reason_codes() {
+#[tokio::test]
+async fn http_error_kind_maps_all_reason_codes() {
     let cases = [
         (
             RuntimeHttpEgressReasonCode::CredentialUnavailable,
@@ -759,6 +759,7 @@ impl FirstPartyCapabilityHandler for HttpFirstPartyHandler {
                 save_body_to: None,
                 timeout_ms: Some(1000),
             })
+            .await
             .map_err(|error| {
                 FirstPartyCapabilityError::new(http_error_kind(error.reason_code()))
             })?;
@@ -970,8 +971,9 @@ struct FailingRuntimeHttpEgress {
 
 struct UnreachableRuntimeHttpEgress;
 
+#[async_trait::async_trait]
 impl RuntimeHttpEgress for FailingRuntimeHttpEgress {
-    fn execute(
+    async fn execute(
         &self,
         _request: RuntimeHttpEgressRequest,
     ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
@@ -979,8 +981,9 @@ impl RuntimeHttpEgress for FailingRuntimeHttpEgress {
     }
 }
 
+#[async_trait::async_trait]
 impl RuntimeHttpEgress for UnreachableRuntimeHttpEgress {
-    fn execute(
+    async fn execute(
         &self,
         _request: RuntimeHttpEgressRequest,
     ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
@@ -988,8 +991,9 @@ impl RuntimeHttpEgress for UnreachableRuntimeHttpEgress {
     }
 }
 
+#[async_trait::async_trait]
 impl NetworkHttpEgress for RecordingNetworkHttpEgress {
-    fn execute(
+    async fn execute(
         &self,
         request: NetworkHttpRequest,
     ) -> Result<NetworkHttpResponse, NetworkHttpError> {

@@ -2,6 +2,8 @@
 mod tests {
     #![allow(clippy::module_inception)]
 
+    mod display_preview;
+
     use super::super::*;
 
     use ironclaw_host_api::{
@@ -9,11 +11,12 @@ mod tests {
     };
     use ironclaw_host_runtime::{
         APPLY_PATCH_CAPABILITY_ID, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID,
-        HTTP_SAVE_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, READ_FILE_CAPABILITY_ID,
-        SHELL_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID,
-        SKILL_REMOVE_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID,
+        HTTP_SAVE_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
+        READ_FILE_CAPABILITY_ID, SHELL_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID,
+        SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID,
+        WRITE_FILE_CAPABILITY_ID,
     };
-    use ironclaw_loop_support::HostManagedModelMessage;
+    use ironclaw_loop_support::{HostManagedModelMessage, HostSkillContextSource};
     use ironclaw_product_workflow::{
         LifecyclePackageKind, LifecyclePackageRef, LifecycleProductAction, LifecycleProductContext,
         LifecycleProductFacade, LifecycleProductSurfaceContext,
@@ -23,8 +26,8 @@ mod tests {
         ToolResultReferenceEnvelope, ToolResultSafeSummary,
     };
     use ironclaw_turns::{
-        LoopMessageRef, RunProfileResolutionRequest, RunProfileResolver, TurnId, TurnRunId,
-        TurnScope,
+        AcceptedMessageRef, LoopMessageRef, RunProfileResolutionRequest, RunProfileResolver,
+        TurnActor, TurnId, TurnRunId, TurnScope,
         run_profile::{
             CapabilityFailureKind, CapabilityInvocation, CapabilityOutcome,
             InMemoryLoopHostMilestoneSink, InMemoryRunProfileResolver, ModelProfileId,
@@ -36,6 +39,7 @@ mod tests {
         EXTENSION_ACTIVATE_CAPABILITY_ID, EXTENSION_INSTALL_CAPABILITY_ID,
         EXTENSION_REMOVE_CAPABILITY_ID, EXTENSION_SEARCH_CAPABILITY_ID,
     };
+    use crate::runtime::local_dev_filesystem_skill_context_source;
 
     async fn run_context(label: &str) -> LoopRunContext {
         let resolved = InMemoryRunProfileResolver::default()
@@ -67,6 +71,12 @@ mod tests {
             reasoning: None,
             signature: None,
         }
+    }
+
+    fn skill_md(name: &str, description: &str, prompt: &str) -> String {
+        format!(
+            "---\nname: {name}\ndescription: {description}\nactivation:\n  keywords: [\"{name}\"]\n---\n\n{prompt}"
+        )
     }
 
     fn lifecycle_context(label: &str) -> LifecycleProductContext {
@@ -131,6 +141,193 @@ mod tests {
         assert!(!capability_ids.contains(&SPAWN_SUBAGENT_CAPABILITY_ID));
     }
 
+    async fn assert_gsuite_capabilities_visibility(
+        wiring: &LocalDevCapabilityWiring,
+        run_context: &LoopRunContext,
+        expected: GsuiteCapabilityVisibility,
+    ) {
+        let (descriptor_ids, tool_definition_ids) =
+            visible_capability_ids(wiring, run_context).await;
+
+        for capability_id in gsuite_capability_ids() {
+            let descriptor_visible = descriptor_ids.iter().any(|id| id == capability_id);
+            let tool_visible = tool_definition_ids.iter().any(|id| id == capability_id);
+            match expected {
+                GsuiteCapabilityVisibility::Visible => {
+                    assert!(
+                        descriptor_visible,
+                        "{capability_id} should be visible on the capability surface"
+                    );
+                    assert!(
+                        tool_visible,
+                        "{capability_id} should be advertised to the model as a provider tool"
+                    );
+                }
+                GsuiteCapabilityVisibility::HiddenUntilActivated => {
+                    assert!(
+                        !descriptor_visible,
+                        "{capability_id} should not be visible before activation"
+                    );
+                    assert!(
+                        !tool_visible,
+                        "{capability_id} should not be advertised before activation"
+                    );
+                }
+            }
+        }
+    }
+
+    async fn visible_capability_ids(
+        wiring: &LocalDevCapabilityWiring,
+        run_context: &LoopRunContext,
+    ) -> (Vec<String>, Vec<String>) {
+        let port = wiring
+            .capability_factory
+            .create_capability_port(run_context)
+            .await
+            .expect("capability port");
+        let surface = port
+            .visible_capabilities(VisibleCapabilityRequest {})
+            .await
+            .expect("visible surface");
+        let descriptor_ids = surface
+            .descriptors
+            .iter()
+            .map(|descriptor| descriptor.capability_id.as_str().to_string())
+            .collect::<Vec<_>>();
+        let tool_definitions = port.tool_definitions().expect("tool definitions");
+        let tool_definition_ids = tool_definitions
+            .iter()
+            .map(|definition| definition.capability_id.as_str().to_string())
+            .collect::<Vec<_>>();
+
+        (descriptor_ids, tool_definition_ids)
+    }
+
+    fn gsuite_capability_ids() -> [&'static str; 15] {
+        [
+            "gmail.list_messages",
+            "gmail.get_message",
+            "gmail.send_message",
+            "gmail.create_draft",
+            "gmail.reply_to_message",
+            "gmail.trash_message",
+            "google-calendar.list_calendars",
+            "google-calendar.list_events",
+            "google-calendar.get_event",
+            "google-calendar.find_free_slots",
+            "google-calendar.create_event",
+            "google-calendar.update_event",
+            "google-calendar.delete_event",
+            "google-calendar.add_attendees",
+            "google-calendar.set_reminder",
+        ]
+    }
+
+    struct GsuiteSurfaceHarness {
+        _dir: tempfile::TempDir,
+        wiring: LocalDevCapabilityWiring,
+        run_context: LoopRunContext,
+    }
+
+    #[derive(Clone, Copy)]
+    enum GsuiteCapabilityVisibility {
+        Visible,
+        HiddenUntilActivated,
+    }
+
+    #[derive(Clone, Copy)]
+    enum GsuiteExtensionState {
+        Installed,
+        Activated,
+    }
+
+    async fn gsuite_surface_harness(
+        owner: &str,
+        label: &str,
+        user: &str,
+        extension_state: GsuiteExtensionState,
+    ) -> GsuiteSurfaceHarness {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let services = crate::build_reborn_services(crate::RebornBuildInput::local_dev(
+            owner,
+            dir.path().join("local-dev"),
+        ))
+        .await
+        .expect("local-dev services build");
+        let run_context = run_context(label).await;
+        let thread_scope = ThreadScope {
+            tenant_id: run_context.scope.tenant_id.clone(),
+            agent_id: run_context.scope.agent_id.clone().expect("agent id"),
+            project_id: run_context.scope.project_id.clone(),
+            owner_user_id: None,
+            mission_id: None,
+        };
+        install_gsuite_extensions(&services, extension_state).await;
+        let wiring = capability_wiring(
+            &services,
+            Arc::new(InMemorySessionThreadService::default()),
+            thread_scope,
+            UserId::new(user).expect("user id"),
+            Arc::new(
+                crate::local_dev_capability_policy::local_dev_capability_policy()
+                    .expect("policy parses"),
+            ),
+            Arc::new(UnavailableModelGateway),
+            Arc::new(InMemoryLoopHostMilestoneSink::default()),
+            None,
+        )
+        .expect("local-dev capability wiring");
+
+        GsuiteSurfaceHarness {
+            _dir: dir,
+            wiring,
+            run_context,
+        }
+    }
+
+    async fn install_gsuite_extensions(
+        services: &crate::RebornServices,
+        extension_state: GsuiteExtensionState,
+    ) {
+        let local_runtime = services
+            .local_runtime
+            .as_ref()
+            .expect("local runtime substrate");
+        let extension_management = local_runtime
+            .extension_management
+            .as_ref()
+            .expect("extension management")
+            .clone();
+        let facade = crate::lifecycle::RebornLocalLifecycleFacade::new(
+            local_runtime.skill_management.clone(),
+        )
+        .with_extension_management(extension_management);
+        for extension_id in ["gmail", "google-calendar"] {
+            let package_ref =
+                LifecyclePackageRef::new(LifecyclePackageKind::Extension, extension_id)
+                    .expect("valid extension ref");
+            facade
+                .execute(
+                    lifecycle_context(extension_id),
+                    LifecycleProductAction::ExtensionInstall {
+                        package_ref: package_ref.clone(),
+                    },
+                )
+                .await
+                .expect("install GSuite extension");
+            if matches!(extension_state, GsuiteExtensionState::Activated) {
+                facade
+                    .execute(
+                        lifecycle_context(extension_id),
+                        LifecycleProductAction::ExtensionActivate { package_ref },
+                    )
+                    .await
+                    .expect("activate GSuite extension");
+            }
+        }
+    }
+
     #[tokio::test]
     async fn capability_io_writes_durable_preview_message_and_live_upsert_id() {
         let run_context = run_context("durable-preview").await;
@@ -167,14 +364,16 @@ mod tests {
             .expect("input stages");
         let invocation_id = InvocationId::new();
 
+        let capability_id = CapabilityId::new("builtin.echo").expect("capability id");
         let result_ref = capability_io
-            .write_capability_result(
-                &run_context,
-                &input_ref,
+            .write_capability_result(CapabilityResultWrite {
+                run_context: &run_context,
+                input_ref: &input_ref,
                 invocation_id,
-                &CapabilityId::new("builtin.echo").expect("capability id"),
-                serde_json::json!({"content": "hello"}),
-            )
+                capability_id: &capability_id,
+                output: serde_json::json!({"content": "hello"}),
+                display_preview: None,
+            })
             .await
             .expect("result stages");
 
@@ -235,14 +434,16 @@ mod tests {
             .expect("input stages");
         let invocation_id = InvocationId::new();
 
+        let capability_id = CapabilityId::new("builtin.echo").expect("capability id");
         let error = capability_io
-            .write_capability_result(
-                &run_context,
-                &input_ref,
+            .write_capability_result(CapabilityResultWrite {
+                run_context: &run_context,
+                input_ref: &input_ref,
                 invocation_id,
-                &CapabilityId::new("builtin.echo").expect("capability id"),
-                serde_json::json!({"content": "hello"}),
-            )
+                capability_id: &capability_id,
+                output: serde_json::json!({"content": "hello"}),
+                display_preview: None,
+            })
             .await
             .expect_err("missing thread rejects durable preview append");
 
@@ -340,6 +541,9 @@ mod tests {
         assert!(capability_ids.contains(&WRITE_FILE_CAPABILITY_ID));
         assert!(capability_ids.contains(&APPLY_PATCH_CAPABILITY_ID));
         assert!(capability_ids.contains(&SKILL_LIST_CAPABILITY_ID));
+        // SKILL_ACTIVATE_CAPABILITY_ID is a synthetic capability added by
+        // wrap_local_dev_synthetic_capabilities, not a policy capability.
+        assert!(!capability_ids.contains(&SKILL_ACTIVATE_CAPABILITY_ID));
         assert!(capability_ids.contains(&SKILL_INSTALL_CAPABILITY_ID));
         assert!(capability_ids.contains(&SKILL_REMOVE_CAPABILITY_ID));
         assert!(capability_ids.contains(&SHELL_CAPABILITY_ID));
@@ -378,6 +582,9 @@ mod tests {
                 .expect("workspace mounts build");
         let skill_mounts =
             crate::local_dev_mounts::skill_management_mount_view().expect("skill mounts build");
+        let memory_mounts =
+            crate::local_dev_mounts::memory_mount_view(MountPermissions::read_write_list_delete())
+                .expect("memory mounts build");
         assert!(workspace_mounts.mounts.iter().all(|mount| {
             mount.alias.as_str() != "/skills" && mount.alias.as_str() != "/system/skills"
         }));
@@ -400,6 +607,7 @@ mod tests {
             &ExtensionId::new("loop-driver").expect("valid extension id"),
             &workspace_mounts,
             &skill_mounts,
+            &memory_mounts,
         );
         let grant_for = |capability_id: &str| {
             grants
@@ -451,6 +659,21 @@ mod tests {
         assert_eq!(
             http_save_grant.constraints.network,
             local_dev_shell_network_policy
+        );
+
+        let memory_write_grant = grant_for(MEMORY_WRITE_CAPABILITY_ID);
+        assert_eq!(
+            memory_write_grant.constraints.allowed_effects,
+            vec![
+                EffectKind::DispatchCapability,
+                EffectKind::ReadFilesystem,
+                EffectKind::WriteFilesystem
+            ]
+        );
+        assert_eq!(memory_write_grant.constraints.mounts, memory_mounts);
+        assert_eq!(
+            memory_write_grant.constraints.network,
+            NetworkPolicy::default()
         );
 
         let extension_search_grant = grant_for(EXTENSION_SEARCH_CAPABILITY_ID);
@@ -518,6 +741,206 @@ mod tests {
             skill_remove_grant.constraints.network,
             NetworkPolicy::default()
         );
+        assert!(
+            !grants
+                .grants
+                .iter()
+                .any(|grant| { grant.capability.as_str() == SKILL_ACTIVATE_CAPABILITY_ID }),
+            "skill activation is a local-dev synthetic capability, not a host-runtime grant"
+        );
+    }
+
+    #[tokio::test]
+    async fn local_dev_skill_activate_tool_loads_selected_skill_context() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage_root = dir.path().join("local-dev");
+        let services = crate::build_reborn_services(crate::RebornBuildInput::local_dev(
+            "local-dev-skill-activate-owner",
+            storage_root.clone(),
+        ))
+        .await
+        .expect("local-dev services build");
+        let skill_path = storage_root.join("skills/unit-activate-helper/SKILL.md");
+        std::fs::create_dir_all(skill_path.parent().expect("skill parent")).expect("skill dir");
+        std::fs::write(
+            &skill_path,
+            skill_md(
+                "unit-activate-helper",
+                "Unit activation helper",
+                "UNIT_ACTIVATE_SENTINEL",
+            ),
+        )
+        .expect("skill file");
+        let runtime = services.host_runtime.clone().expect("host runtime");
+        let local_runtime = services
+            .local_runtime
+            .as_ref()
+            .expect("local runtime substrate");
+        let mut run_context = run_context("skill-activate-tool").await;
+        run_context = run_context
+            .with_accepted_message_ref(
+                AcceptedMessageRef::new("msg:skill-activate-tool").expect("message ref"),
+            )
+            .with_actor(TurnActor::new(
+                UserId::new("skill-activate-user").expect("user id"),
+            ));
+        let skill_context = local_dev_filesystem_skill_context_source(
+            local_runtime,
+            &run_context.scope.tenant_id,
+            false,
+        )
+        .expect("skill context source");
+        let activation_source = skill_context.activation_source;
+        let capability_io = Arc::new(LocalDevCapabilityIo::default());
+        let input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
+        let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
+        let policy = Arc::new(
+            crate::local_dev_capability_policy::local_dev_capability_policy()
+                .expect("policy parses"),
+        );
+        let skill_mounts = local_runtime.skill_mounts.clone();
+        let factory = LocalDevLoopCapabilityPortFactory {
+            runtime,
+            user_id: UserId::new("skill-activate-user").expect("user id"),
+            policy,
+            workspace_mounts: local_runtime.workspace_mounts.clone(),
+            skill_mounts,
+            memory_mounts: local_runtime.memory_mounts.clone(),
+            extension_surface_source: LocalDevExtensionSurfaceSource::default(),
+            input_resolver,
+            result_writer,
+            milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
+            skill_activation_source: Some(Arc::clone(&activation_source)),
+        };
+        let port = factory
+            .create_capability_port(&run_context)
+            .await
+            .expect("capability port");
+        let surface = port
+            .visible_capabilities(VisibleCapabilityRequest {})
+            .await
+            .expect("visible surface");
+        let descriptor = surface
+            .descriptors
+            .iter()
+            .find(|descriptor| descriptor.capability_id.as_str() == SKILL_ACTIVATE_CAPABILITY_ID)
+            .expect("skill_activate descriptor");
+        assert!(descriptor.provider.is_none());
+        assert!(
+            descriptor
+                .parameters_schema
+                .get("properties")
+                .and_then(|properties| properties.get("names"))
+                .is_some()
+        );
+        let tool_definition = port
+            .tool_definitions()
+            .expect("tool definitions")
+            .into_iter()
+            .find(|definition| definition.capability_id.as_str() == SKILL_ACTIVATE_CAPABILITY_ID)
+            .expect("skill_activate tool definition");
+        let call = ProviderToolCall {
+            provider_id: "test-provider".to_string(),
+            provider_model_id: "test-model".to_string(),
+            turn_id: Some("provider-turn-skill-activate".to_string()),
+            id: "call-skill-activate".to_string(),
+            name: tool_definition.name,
+            arguments: serde_json::json!({"names": ["unit-activate-helper"]}),
+            response_reasoning: None,
+            reasoning: None,
+            signature: None,
+        };
+        let candidate = port
+            .register_provider_tool_call(call)
+            .await
+            .expect("provider call stages");
+        assert_eq!(
+            candidate.capability_id.as_str(),
+            SKILL_ACTIVATE_CAPABILITY_ID
+        );
+        let outcome = port
+            .invoke_capability(CapabilityInvocation {
+                surface_version: candidate.surface_version,
+                capability_id: candidate.capability_id,
+                input_ref: candidate.input_ref,
+            })
+            .await
+            .expect("skill activation invokes");
+        assert!(matches!(outcome, CapabilityOutcome::Completed(_)));
+
+        let selected = activation_source
+            .load_skill_context_candidates(&run_context)
+            .await
+            .expect("selected skill context loads");
+        assert_eq!(selected.len(), 1);
+        assert!(
+            selected[0]
+                .skill_md
+                .as_ref()
+                .expect("skill context")
+                .contains("UNIT_ACTIVATE_SENTINEL")
+        );
+    }
+
+    #[tokio::test]
+    async fn capability_wiring_with_skill_activation_source_exposes_skill_activate_capability() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage_root = dir.path().join("local-dev");
+        let services = crate::build_reborn_services(crate::RebornBuildInput::local_dev(
+            "local-dev-skill-activate-wiring-owner",
+            storage_root.clone(),
+        ))
+        .await
+        .expect("local-dev services build");
+        let local_runtime = services
+            .local_runtime
+            .as_ref()
+            .expect("local runtime substrate");
+        let run_context = run_context("skill-activate-wiring").await;
+        let thread_scope = ThreadScope {
+            tenant_id: run_context.scope.tenant_id.clone(),
+            agent_id: run_context.scope.agent_id.clone().expect("agent id"),
+            project_id: run_context.scope.project_id.clone(),
+            owner_user_id: None,
+            mission_id: None,
+        };
+        let skill_context = local_dev_filesystem_skill_context_source(
+            local_runtime,
+            &run_context.scope.tenant_id,
+            false,
+        )
+        .expect("skill context source");
+        let policy = Arc::new(
+            crate::local_dev_capability_policy::local_dev_capability_policy()
+                .expect("policy parses"),
+        );
+        let wiring = capability_wiring(
+            &services,
+            Arc::new(InMemorySessionThreadService::default()),
+            thread_scope,
+            UserId::new("skill-activate-wiring-user").expect("user id"),
+            policy,
+            Arc::new(UnavailableModelGateway),
+            Arc::new(InMemoryLoopHostMilestoneSink::default()),
+            Some(skill_context.activation_source),
+        )
+        .expect("capability wiring");
+        let port = wiring
+            .capability_factory
+            .create_capability_port(&run_context)
+            .await
+            .expect("capability port");
+        let surface = port
+            .visible_capabilities(VisibleCapabilityRequest {})
+            .await
+            .expect("visible surface");
+
+        assert!(
+            surface
+                .descriptors
+                .iter()
+                .any(|descriptor| descriptor.capability_id.as_str() == SKILL_ACTIVATE_CAPABILITY_ID)
+        );
     }
 
     #[tokio::test]
@@ -576,10 +999,12 @@ mod tests {
             policy,
             workspace_mounts,
             skill_mounts,
+            memory_mounts: local_runtime.memory_mounts.clone(),
             extension_surface_source: LocalDevExtensionSurfaceSource::default(),
             input_resolver,
             result_writer,
             milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
+            skill_activation_source: None,
         };
         let run_context = run_context("host-mount-read").await;
         let port = factory
@@ -790,10 +1215,12 @@ mod tests {
             policy,
             workspace_mounts,
             skill_mounts,
+            memory_mounts: local_runtime.memory_mounts.clone(),
             extension_surface_source: LocalDevExtensionSurfaceSource::default(),
             input_resolver,
             result_writer,
             milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
+            skill_activation_source: None,
         };
         let run_context = run_context("skill-install-write").await;
         let port = factory
@@ -874,10 +1301,12 @@ mod tests {
             policy,
             workspace_mounts,
             skill_mounts,
+            memory_mounts: local_runtime.memory_mounts.clone(),
             extension_surface_source: LocalDevExtensionSurfaceSource::default(),
             input_resolver,
             result_writer,
             milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
+            skill_activation_source: None,
         };
         let run_context = run_context("no-host-disclosure").await;
         let port = factory
@@ -1034,6 +1463,7 @@ mod tests {
             ),
             Arc::new(UnavailableModelGateway),
             Arc::new(InMemoryLoopHostMilestoneSink::default()),
+            None,
         )
         .expect("local-dev capability wiring");
         assert_github_capabilities_visible(&wiring, &run_context).await;
@@ -1068,6 +1498,7 @@ mod tests {
             ),
             Arc::new(UnavailableModelGateway),
             Arc::new(InMemoryLoopHostMilestoneSink::default()),
+            None,
         )
         .expect("local-dev capability wiring");
         let local_runtime = services
@@ -1103,6 +1534,42 @@ mod tests {
             .expect("activate github extension");
 
         assert_github_capabilities_visible(&wiring, &run_context).await;
+    }
+
+    #[tokio::test]
+    async fn local_dev_capability_port_exposes_activated_gsuite_extensions_to_model() {
+        let harness = gsuite_surface_harness(
+            "local-dev-gsuite-surface-owner",
+            "gsuite-surface",
+            "local-dev-gsuite-surface-user",
+            GsuiteExtensionState::Activated,
+        )
+        .await;
+
+        assert_gsuite_capabilities_visibility(
+            &harness.wiring,
+            &harness.run_context,
+            GsuiteCapabilityVisibility::Visible,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn deactivated_gsuite_extension_capabilities_not_exposed_to_model() {
+        let harness = gsuite_surface_harness(
+            "local-dev-gsuite-inactive-surface-owner",
+            "gsuite-inactive-surface",
+            "local-dev-gsuite-inactive-surface-user",
+            GsuiteExtensionState::Installed,
+        )
+        .await;
+
+        assert_gsuite_capabilities_visibility(
+            &harness.wiring,
+            &harness.run_context,
+            GsuiteCapabilityVisibility::HiddenUntilActivated,
+        )
+        .await;
     }
 
     #[test]

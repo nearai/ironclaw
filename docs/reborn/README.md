@@ -46,6 +46,7 @@ docs/reborn/contracts/host-api.md
 docs/reborn/contracts/capability-access.md
 docs/reborn/contracts/dispatcher.md
 docs/reborn/contracts/events-projections.md
+docs/reborn/contracts/triggers.md
 docs/reborn/contracts/memory.md
 docs/reborn/contracts/secrets.md
 docs/reborn/contracts/network.md

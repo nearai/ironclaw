@@ -362,7 +362,7 @@ fn prune_deliverable_child_index(
 }
 
 fn is_subagent_terminal_status(status: TurnStatus) -> bool {
-    status.is_terminal() || status == TurnStatus::RecoveryRequired
+    status.is_terminal()
 }
 
 // Infallible parking_lot lock helper retained for call-site compatibility

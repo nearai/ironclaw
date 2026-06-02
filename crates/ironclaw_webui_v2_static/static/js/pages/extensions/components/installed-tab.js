@@ -1,6 +1,10 @@
 import { html } from "../../../lib/html.js";
 import { ExtensionCard } from "./extension-card.js";
 
+function packageId(ext) {
+  return ext.package_ref?.id || "";
+}
+
 export function InstalledTab({ extensions, onActivate, onConfigure, onRemove, isBusy }) {
   if (extensions.length === 0) {
     return html`
@@ -21,7 +25,7 @@ export function InstalledTab({ extensions, onActivate, onConfigure, onRemove, is
       ${extensions.map(
         (ext) => html`
           <${ExtensionCard}
-            key=${ext.name}
+            key=${packageId(ext)}
             ext=${ext}
             onActivate=${onActivate}
             onConfigure=${onConfigure}

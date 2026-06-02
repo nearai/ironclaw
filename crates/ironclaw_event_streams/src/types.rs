@@ -178,6 +178,12 @@ pub enum ThreadLiveProjectionItem {
         phase: ThreadLiveWorkSummaryPhase,
         body: String,
     },
+    SkillActivation {
+        id: String,
+        run_id: TurnRunId,
+        skill_names: Vec<String>,
+        feedback: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

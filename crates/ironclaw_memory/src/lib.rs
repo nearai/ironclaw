@@ -18,11 +18,14 @@ mod repo;
 mod safety;
 mod schema;
 mod search;
+mod write_metadata;
 
 pub use backend::{
     MemoryBackend, MemoryBackendCapabilities, MemoryContext, RepositoryMemoryBackend,
 };
-pub use chunking::{ChunkConfig, MemoryChunkWrite, chunk_document, content_sha256};
+pub use chunking::{
+    ChunkConfig, MemoryChunkWrite, chunk_document, content_bytes_sha256, content_sha256,
+};
 pub use embedding::{EmbeddingError, EmbeddingProvider};
 pub use events::{
     MemoryAuditContext, MemoryEventSinkError, MemorySignificantEvent, MemorySignificantEventKind,
@@ -33,11 +36,14 @@ pub use indexer::{
     ChunkingMemoryDocumentIndexer, MemoryChunkReplaceOutcome, MemoryDocumentIndexRepository,
     MemoryDocumentIndexer,
 };
-pub use metadata::{CONFIG_FILE_NAME, DocumentMetadata, HygieneMetadata, MemoryWriteOptions};
+pub use metadata::{
+    CONFIG_FILE_NAME, DocumentMetadata, HygieneMetadata, MemoryBackendWriteOptions,
+    MemoryWriteOptions,
+};
 pub use path::{MemoryDocumentPath, MemoryDocumentScope};
 pub use repo::{
     FilesystemMemoryDocumentRepository, InMemoryMemoryDocumentRepository, MemoryAppendOutcome,
-    MemoryDocumentRepository,
+    MemoryDocumentRepository, MemoryWriteOutcome,
 };
 pub use safety::{
     DEFAULT_PROMPT_PROTECTED_PATHS, DefaultPromptWriteSafetyPolicy, PromptProtectedPathClass,

@@ -1,7 +1,9 @@
 use std::{collections::HashMap, fmt, sync::Arc, sync::Mutex};
 
 use async_trait::async_trait;
-use ironclaw_host_api::{ExtensionId, SecretHandle};
+use ironclaw_host_api::{
+    AgentId, ExtensionId, MissionId, ProjectId, SecretHandle, TenantId, ThreadId, UserId,
+};
 use serde::{Deserialize, Serialize};
 use tokio::sync::OwnedMutexGuard;
 
@@ -36,7 +38,7 @@ pub enum CredentialOwnership {
 
 /// Durable credential account metadata. Secret values live behind handles and
 /// never appear in this record.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CredentialAccount {
     pub id: CredentialAccountId,
     pub scope: AuthProductScope,
@@ -93,6 +95,19 @@ impl CredentialAccount {
             owner_extension: self.owner_extension.clone(),
             granted_extensions: self.granted_extensions.clone(),
             secret_handle_count,
+        }
+    }
+
+    pub fn is_authorized_for_requester(&self, requester_extension: Option<&ExtensionId>) -> bool {
+        match self.ownership {
+            CredentialOwnership::UserReusable => true,
+            CredentialOwnership::ExtensionOwned => self
+                .owner_extension
+                .as_ref()
+                .is_some_and(|owner_extension| requester_extension == Some(owner_extension)),
+            CredentialOwnership::SharedAdminManaged => requester_extension
+                .is_some_and(|requester| self.granted_extensions.contains(requester)),
+            CredentialOwnership::System => false,
         }
     }
 }
@@ -286,7 +301,7 @@ impl CredentialAccountListRequest {
         self
     }
 
-    pub(crate) fn validate(&self) -> Result<(), AuthProductError> {
+    pub fn validate(&self) -> Result<(), AuthProductError> {
         if self.limit == 0 {
             return Err(AuthProductError::invalid_request(
                 "credential account list limit must be non-zero",
@@ -511,6 +526,97 @@ pub trait CredentialAccountService: Send + Sync {
         &self,
         request: CredentialRefreshRequest,
     ) -> Result<CredentialRefreshReport, AuthProductError>;
+}
+
+/// Stable credential-account owner fields used by read models that need to
+/// find accounts across transient invocation ids, product surfaces, or runtime
+/// sub-scopes. Missing mission/thread/session ids match both global and
+/// scoped accounts for the owner; present ids match only that exact scope.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CredentialAccountOwnerScope {
+    pub tenant_id: TenantId,
+    pub user_id: UserId,
+    pub agent_id: Option<AgentId>,
+    pub project_id: Option<ProjectId>,
+    pub mission_id: Option<MissionId>,
+    pub thread_id: Option<ThreadId>,
+    pub session_id: Option<crate::AuthSessionId>,
+}
+
+impl CredentialAccountOwnerScope {
+    pub fn from_scope(scope: &AuthProductScope) -> Self {
+        Self {
+            tenant_id: scope.resource.tenant_id.clone(),
+            user_id: scope.resource.user_id.clone(),
+            agent_id: scope.resource.agent_id.clone(),
+            project_id: scope.resource.project_id.clone(),
+            mission_id: scope.resource.mission_id.clone(),
+            thread_id: scope.resource.thread_id.clone(),
+            session_id: scope.session_id.clone(),
+        }
+    }
+
+    pub fn matches(&self, account: &CredentialAccount) -> bool {
+        let resource = &account.scope.resource;
+        resource.tenant_id == self.tenant_id
+            && resource.user_id == self.user_id
+            && resource.agent_id == self.agent_id
+            && resource.project_id == self.project_id
+            && self
+                .mission_id
+                .as_ref()
+                .is_none_or(|mission_id| resource.mission_id.as_ref() == Some(mission_id))
+            && self
+                .thread_id
+                .as_ref()
+                .is_none_or(|thread_id| resource.thread_id.as_ref() == Some(thread_id))
+            && self
+                .session_id
+                .as_ref()
+                .is_none_or(|session_id| account.scope.session_id.as_ref() == Some(session_id))
+    }
+}
+
+/// Read-only credential-account projection source for account owner queries.
+///
+/// This intentionally does not encode host-runtime credential selection. It
+/// only exposes accounts owned by a stable product-auth owner; composition
+/// layers decide which account, provider, or requester policy to apply.
+#[async_trait]
+pub trait CredentialAccountRecordSource: Send + Sync {
+    async fn accounts_for_owner(
+        &self,
+        scope: &AuthProductScope,
+    ) -> Result<Vec<CredentialAccount>, AuthProductError>;
+
+    async fn select_unique_configured_account_for_owner(
+        &self,
+        request: CredentialAccountSelectionRequest,
+    ) -> Result<CredentialAccount, AuthProductError> {
+        let configured = self
+            .accounts_for_owner(&request.scope)
+            .await?
+            .into_iter()
+            .filter(|account| {
+                account.provider == request.provider
+                    && account.status == CredentialAccountStatus::Configured
+            })
+            .collect::<Vec<_>>();
+        if configured.is_empty() {
+            return Err(AuthProductError::CredentialMissing);
+        }
+        let selectable = configured
+            .into_iter()
+            .filter(|account| {
+                account.is_authorized_for_requester(request.requester_extension.as_ref())
+            })
+            .collect::<Vec<_>>();
+        match selectable.as_slice() {
+            [] => Err(AuthProductError::CrossScopeDenied),
+            [account] => Ok(account.clone()),
+            _ => Err(AuthProductError::AccountSelectionRequired),
+        }
+    }
 }
 
 #[async_trait]

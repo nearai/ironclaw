@@ -238,6 +238,9 @@ fn parse_lifecycle_command_payload(
                 query: payload.arguments.trim().to_string(),
             },
         },
+        LifecycleCommandKind::ExtensionList => ProductCommand::Lifecycle {
+            action: LifecycleProductAction::ExtensionList,
+        },
         LifecycleCommandKind::ExtensionInstall => {
             extension_package_command(payload, |package_ref| {
                 LifecycleProductAction::ExtensionInstall { package_ref }

@@ -70,12 +70,11 @@ pub fn has_native_thinking(model: &str) -> bool {
 
 /// Models that are known to support OpenAI's Responses API `reasoning` field.
 ///
-/// Sending the `reasoning` object to models not in this list (e.g. `gpt-4o`)
-/// causes the API to hard-reject the request instead of ignoring the parameter.
-const OPENAI_REASONING_PATTERNS: &[&str] = &["o1", "o3", "o4", "gpt-5"];
+/// Sending the `reasoning` object to unsupported models (e.g. `gpt-4o`) causes
+/// the API to reject the request instead of ignoring the parameter.
+const OPENAI_REASONING_PATTERNS: &[&str] = &["o1", "o3", "o4", "/reasoning/", "gpt-5", "gpt-4.1"];
 
-/// Returns `true` when *model* is known to support the OpenAI Responses API
-/// `reasoning` parameter.
+/// Returns `true` when *model* is known to support the Responses API `reasoning` field.
 pub fn supports_openai_reasoning(model: &str) -> bool {
     let lower = model.to_ascii_lowercase();
     OPENAI_REASONING_PATTERNS.iter().any(|p| lower.contains(p))

@@ -3,6 +3,10 @@ import { html } from "../../../lib/html.js";
 import { ExtensionCard, RegistryCard } from "./extension-card.js";
 import { PairingSection } from "./pairing-section.js";
 
+function packageId(item) {
+  return item.package_ref?.id || "";
+}
+
 export function ChannelsTab({
   status,
   channels,
@@ -62,7 +66,7 @@ export function ChannelsTab({
           </h3>
           ${channels.map(
             (ch) => html`
-              <div key=${ch.name}>
+              <div key=${packageId(ch)}>
                 <${ExtensionCard}
                   ext=${ch}
                   onActivate=${onActivate}
@@ -72,7 +76,7 @@ export function ChannelsTab({
                 />
                 ${(ch.onboarding_state === "pairing_required" ||
                   ch.onboarding_state === "pairing") &&
-                html` <${PairingSection} channel=${ch.name} /> `}
+                html` <${PairingSection} channel=${packageId(ch)} /> `}
               </div>
             `
           )}
@@ -89,7 +93,7 @@ export function ChannelsTab({
           ${channelRegistry.map(
             (entry) => html`
               <${RegistryCard}
-                key=${entry.name}
+                key=${packageId(entry)}
                 entry=${entry}
                 onInstall=${onInstall}
                 isBusy=${isBusy}

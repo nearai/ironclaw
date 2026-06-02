@@ -96,6 +96,63 @@ async fn thread_context_port_loads_policy_filtered_transcript_messages() {
 }
 
 #[tokio::test]
+async fn thread_context_port_rejects_run_actor_owner_mismatch() {
+    // Defense in depth for the thread-owner MountView divergence: the store
+    // keys threads by owner, so reading a thread whose scope owner differs
+    // from the run's authenticated actor silently targets the wrong
+    // `owners/<user>` subtree. The port must fail loud before that read.
+    let fixture = ThreadFixture::new().await;
+    let mismatched_run_context = fixture
+        .run_context
+        .clone()
+        .with_actor(TurnActor::new(UserId::new("intruder-user").unwrap()));
+    let adapter = ThreadBackedLoopContextPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        mismatched_run_context,
+        16,
+    );
+
+    let error = adapter
+        .load_loop_context(LoopContextRequest {
+            after: None,
+            limit: 16,
+            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+        })
+        .await
+        .expect_err("owner mismatch must be rejected before the thread read");
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::ScopeMismatch);
+}
+
+#[tokio::test]
+async fn thread_context_port_accepts_matching_run_actor_owner() {
+    // The same path must still succeed when the run actor owns the thread.
+    let fixture = ThreadFixture::new().await;
+    let matched_run_context = fixture
+        .run_context
+        .clone()
+        .with_actor(TurnActor::new(UserId::new("user-loop-support").unwrap()));
+    let adapter = ThreadBackedLoopContextPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        matched_run_context,
+        16,
+    );
+
+    let bundle = adapter
+        .load_loop_context(LoopContextRequest {
+            after: None,
+            limit: 16,
+            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+        })
+        .await
+        .expect("matching run actor owner must load context");
+
+    assert_eq!(bundle.messages.len(), 1);
+}
+
+#[tokio::test]
 async fn thread_context_port_preserves_summary_replacements_as_system_messages() {
     let fixture = ThreadFixture::new().await;
     fixture
@@ -951,6 +1008,42 @@ async fn model_port_limits_provider_tool_definitions_to_model_visible_capability
             .collect::<Vec<_>>(),
         vec!["demo__allowed"]
     );
+}
+
+#[tokio::test]
+async fn model_port_maps_invalid_model_output_to_recoverable_model_error() {
+    let fixture = ThreadFixture::new().await;
+    let messages = user_model_messages(&fixture);
+    issue_prompt_grant(&fixture.run_context, &messages);
+
+    let gateway = Arc::new(RecordingGateway::model_error(
+        HostManagedModelErrorKind::InvalidOutput,
+        "model returned a tool call outside the advertised capability surface",
+    ));
+    let model_port = ThreadBackedLoopModelPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        gateway.clone(),
+        16,
+    );
+
+    let error = model_port
+        .stream_model(LoopModelRequest {
+            messages,
+            surface_version: None,
+            model_preference: None,
+            capability_view: None,
+        })
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::Unavailable);
+    assert_eq!(
+        error.safe_summary,
+        "model returned a tool call outside the advertised capability surface"
+    );
+    assert_eq!(gateway.calls.lock().unwrap().len(), 1);
 }
 
 #[tokio::test]
@@ -3837,6 +3930,14 @@ impl RecordingGateway {
                 HostManagedModelErrorKind::PolicyDenied,
                 safe_summary,
             )),
+        }
+    }
+
+    fn model_error(kind: HostManagedModelErrorKind, safe_summary: &str) -> Self {
+        Self {
+            calls: Mutex::new(Vec::new()),
+            tool_definition_calls: Mutex::new(Vec::new()),
+            response: Err(HostManagedModelError::safe(kind, safe_summary)),
         }
     }
 
