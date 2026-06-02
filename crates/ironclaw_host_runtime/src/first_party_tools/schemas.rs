@@ -71,7 +71,7 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                 },
                 "target": {
                     "type": "string",
-                    "description": "memory, daily_log, heartbeat, bootstrap, or a relative memory document path",
+                    "description": "Where to write: 'memory' for MEMORY.md, 'daily_log' for today's log, 'heartbeat' for HEARTBEAT.md checklist, 'bootstrap' to clear BOOTSTRAP.md (content is ignored; the file is always cleared), or a relative memory document path.",
                     "default": "daily_log"
                 },
                 "append": {

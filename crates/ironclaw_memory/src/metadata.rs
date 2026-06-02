@@ -40,7 +40,6 @@ impl DocumentMetadata {
             Err(error) => {
                 tracing::warn!(
                     error = %error,
-                    raw = %value,
                     "failed to deserialize DocumentMetadata; falling back to defaults"
                 );
                 Self::default()

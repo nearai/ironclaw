@@ -1,13 +1,20 @@
 use std::{path::Path, sync::Arc};
 
+use async_trait::async_trait;
 use chrono::Utc;
 use chrono_tz::Tz;
+use ironclaw_events::AuditSink;
 use ironclaw_extensions::{CapabilityManifest, ExtensionError};
-use ironclaw_host_api::{EffectKind, PermissionMode, ResourceUsage, RuntimeDispatchErrorKind};
+use ironclaw_host_api::{
+    ActionResultSummary, ActionSummary, AuditEnvelope, AuditEventId, AuditStage, DecisionSummary,
+    EffectKind, ExtensionId, PermissionMode, ResourceUsage, RuntimeDispatchErrorKind,
+};
 use ironclaw_memory::{
     ChunkingMemoryDocumentIndexer, DocumentMetadata, FilesystemMemoryDocumentRepository,
-    MemoryAppendOutcome, MemoryBackend, MemoryBackendCapabilities, MemoryBackendWriteOptions,
-    MemoryContext, MemoryDocumentPath, MemoryDocumentScope, MemorySearchRequest,
+    MemoryBackend, MemoryBackendCapabilities, MemoryBackendWriteOptions, MemoryContext,
+    MemoryDocumentPath, MemoryDocumentScope, MemoryEventSinkError, MemorySearchRequest,
+    MemoryWriteOutcome, PromptSafetyAllowanceId, PromptSafetyReasonCode, PromptWriteOperation,
+    PromptWriteSafetyEvent, PromptWriteSafetyEventKind, PromptWriteSafetyEventSink,
     RepositoryMemoryBackend,
 };
 use serde_json::{Value, json};
@@ -25,12 +32,80 @@ pub const MEMORY_TREE_CAPABILITY_ID: &str = "builtin.memory_tree";
 const MEMORY_PATH: &str = "MEMORY.md";
 const HEARTBEAT_PATH: &str = "HEARTBEAT.md";
 const BOOTSTRAP_PATH: &str = "BOOTSTRAP.md";
-const MAX_MEMORY_APPEND_RETRIES: usize = 8;
+const MAX_MEMORY_PATCH_RETRIES: usize = 8;
+const MEMORY_PROMPT_SAFETY_EXTENSION_ID: &str = "memory.prompt_safety";
 
 struct MemoryServices {
     scope: MemoryDocumentScope,
     context: MemoryContext,
     backend: Arc<dyn MemoryBackend>,
+}
+
+struct AuditPromptWriteSafetyEventSink {
+    audit_sink: Arc<dyn AuditSink>,
+}
+
+#[async_trait]
+impl PromptWriteSafetyEventSink for AuditPromptWriteSafetyEventSink {
+    async fn record_prompt_write_safety_event(
+        &self,
+        event: PromptWriteSafetyEvent,
+    ) -> Result<(), MemoryEventSinkError> {
+        let Some(audit_context) = event.audit_context.as_ref() else {
+            return Err(MemoryEventSinkError::new(
+                "prompt-write safety event missing audit context",
+            ));
+        };
+        let resource_scope = audit_context.resource_scope.clone();
+        let record = AuditEnvelope {
+            event_id: AuditEventId::new(),
+            correlation_id: audit_context.correlation_id,
+            stage: match event.kind {
+                PromptWriteSafetyEventKind::Rejected => AuditStage::Denied,
+                _ => AuditStage::After,
+            },
+            timestamp: Utc::now(),
+            tenant_id: resource_scope.tenant_id,
+            user_id: resource_scope.user_id,
+            agent_id: resource_scope.agent_id,
+            project_id: resource_scope.project_id,
+            mission_id: resource_scope.mission_id,
+            thread_id: resource_scope.thread_id,
+            invocation_id: resource_scope.invocation_id,
+            process_id: None,
+            approval_request_id: None,
+            extension_id: Some(ExtensionId::new(MEMORY_PROMPT_SAFETY_EXTENSION_ID).map_err(
+                |error| {
+                    MemoryEventSinkError::new(format!(
+                        "invalid memory prompt-safety extension id: {error}"
+                    ))
+                },
+            )?),
+            action: ActionSummary {
+                kind: prompt_write_action_kind(event.operation).to_string(),
+                target: None,
+                effects: vec![EffectKind::WriteFilesystem],
+            },
+            decision: DecisionSummary {
+                kind: event
+                    .reason_code
+                    .map(prompt_safety_reason_projection_kind)
+                    .unwrap_or_else(|| prompt_safety_event_kind_label(event.kind))
+                    .to_string(),
+                reason: None,
+                actor: None,
+            },
+            result: Some(ActionResultSummary {
+                success: event.kind != PromptWriteSafetyEventKind::Rejected,
+                status: Some(encode_prompt_safety_metadata(&event)),
+                output_bytes: None,
+            }),
+        };
+        self.audit_sink
+            .emit_audit(record)
+            .await
+            .map_err(|error| MemoryEventSinkError::new(error.to_string()))
+    }
 }
 
 struct MemoryWriteCommand {
@@ -132,7 +207,7 @@ fn memory_services(
         request.services.filesystem.clone(),
     ));
     let indexer = Arc::new(ChunkingMemoryDocumentIndexer::new(Arc::clone(&repository)));
-    let backend = RepositoryMemoryBackend::new(Arc::clone(&repository))
+    let mut backend = RepositoryMemoryBackend::new(Arc::clone(&repository))
         .with_indexer(indexer)
         .with_capabilities(MemoryBackendCapabilities {
             file_documents: true,
@@ -144,6 +219,13 @@ fn memory_services(
             transactions: true,
             ..MemoryBackendCapabilities::default()
         });
+    if let Some(audit_sink) = &request.services.audit_sink {
+        backend = backend.with_prompt_write_safety_event_sink(Arc::new(
+            AuditPromptWriteSafetyEventSink {
+                audit_sink: Arc::clone(audit_sink),
+            },
+        ));
+    }
     Ok(MemoryServices {
         scope,
         context,
@@ -344,14 +426,13 @@ async fn clear_bootstrap_document(
     resolved_path: &str,
     metadata_overlay: Option<&DocumentMetadata>,
 ) -> Result<Value, FirstPartyCapabilityError> {
+    let context = services
+        .context
+        .clone()
+        .with_prompt_write_safety_allowance(PromptSafetyAllowanceId::empty_prompt_file_clear());
     services
         .backend
-        .write_document_with_backend_options(
-            &services.context,
-            path,
-            b"",
-            &write_options(metadata_overlay),
-        )
+        .write_document_with_backend_options(&context, path, b"", &write_options(metadata_overlay))
         .await
         .map_err(|_| operation_error())?;
     Ok(json!({
@@ -370,41 +451,49 @@ async fn patch_document(
     new_string: &str,
     replace_all: bool,
 ) -> Result<Value, FirstPartyCapabilityError> {
-    let Some(bytes) = services
-        .backend
-        .read_document(&services.context, path)
-        .await
-        .map_err(|_| operation_error())?
-    else {
-        return Err(operation_error());
-    };
-    let existing = String::from_utf8(bytes).map_err(|_| operation_error())?;
-    let replacements = existing.matches(old_string).count();
-    if replacements == 0 {
-        return Err(input_error());
+    let options = write_options(metadata_overlay);
+    for _ in 0..MAX_MEMORY_PATCH_RETRIES {
+        let Some(bytes) = services
+            .backend
+            .read_document(&services.context, path)
+            .await
+            .map_err(|_| operation_error())?
+        else {
+            return Err(operation_error());
+        };
+        let expected = content_bytes_sha256(&bytes);
+        let existing = String::from_utf8(bytes).map_err(|_| operation_error())?;
+        let replacements = existing.matches(old_string).count();
+        if replacements == 0 {
+            return Err(input_error());
+        }
+        let replacement_count = if replace_all { replacements } else { 1 };
+        let updated = if replace_all {
+            existing.replace(old_string, new_string)
+        } else {
+            existing.replacen(old_string, new_string, 1)
+        };
+        let outcome = services
+            .backend
+            .compare_and_write_document_with_backend_options(
+                &services.context,
+                path,
+                Some(&expected),
+                updated.as_bytes(),
+                &options,
+            )
+            .await
+            .map_err(|_| operation_error())?;
+        if outcome == MemoryWriteOutcome::Written {
+            return Ok(json!({
+                "status": "patched",
+                "path": resolved_path,
+                "replacements": replacement_count,
+                "content_length": updated.len(),
+            }));
+        }
     }
-    let replacement_count = if replace_all { replacements } else { 1 };
-    let updated = if replace_all {
-        existing.replace(old_string, new_string)
-    } else {
-        existing.replacen(old_string, new_string, 1)
-    };
-    services
-        .backend
-        .write_document_with_backend_options(
-            &services.context,
-            path,
-            updated.as_bytes(),
-            &write_options(metadata_overlay),
-        )
-        .await
-        .map_err(|_| operation_error())?;
-    Ok(json!({
-        "status": "patched",
-        "path": resolved_path,
-        "replacements": replacement_count,
-        "content_length": updated.len(),
-    }))
+    Err(operation_error())
 }
 
 async fn append_document(
@@ -414,29 +503,11 @@ async fn append_document(
     bytes: &[u8],
 ) -> Result<(), FirstPartyCapabilityError> {
     let options = write_options(metadata_overlay);
-    for _ in 0..MAX_MEMORY_APPEND_RETRIES {
-        let previous = services
-            .backend
-            .read_document(&services.context, path)
-            .await
-            .map_err(|_| operation_error())?;
-        let expected = previous.as_deref().map(content_bytes_sha256);
-        let outcome = services
-            .backend
-            .compare_and_append_document_with_backend_options(
-                &services.context,
-                path,
-                expected.as_deref(),
-                bytes,
-                &options,
-            )
-            .await
-            .map_err(|_| operation_error())?;
-        if outcome == MemoryAppendOutcome::Appended {
-            return Ok(());
-        }
-    }
-    Err(operation_error())
+    services
+        .backend
+        .append_document_with_backend_options(&services.context, path, bytes, &options)
+        .await
+        .map_err(|_| operation_error())
 }
 
 fn write_options(metadata_overlay: Option<&DocumentMetadata>) -> MemoryBackendWriteOptions {
@@ -446,7 +517,7 @@ fn write_options(metadata_overlay: Option<&DocumentMetadata>) -> MemoryBackendWr
 }
 
 fn content_bytes_sha256(bytes: &[u8]) -> String {
-    hex::encode(Sha256::digest(bytes))
+    format!("sha256:{}", hex::encode(Sha256::digest(bytes)))
 }
 
 async fn dispatch_read(
@@ -556,11 +627,10 @@ fn resolve_target_path(target: &str, input: &Value) -> Result<String, FirstParty
         "heartbeat" => Ok(HEARTBEAT_PATH.to_string()),
         "bootstrap" => Ok(BOOTSTRAP_PATH.to_string()),
         "daily_log" => {
-            let timezone = input
-                .get("timezone")
-                .and_then(Value::as_str)
-                .and_then(|value| value.parse::<Tz>().ok())
-                .unwrap_or(Tz::UTC);
+            let timezone = match input.get("timezone").and_then(Value::as_str) {
+                Some(value) => value.parse::<Tz>().map_err(|_| input_error())?,
+                None => Tz::UTC,
+            };
             let now = Utc::now().with_timezone(&timezone);
             Ok(format!("daily/{}.md", now.format("%Y-%m-%d")))
         }
@@ -620,4 +690,65 @@ fn looks_like_filesystem_path(path: &str) -> bool {
         && bytes[0].is_ascii_alphabetic()
         && bytes[1] == b':'
         && (bytes[2] == b'\\' || bytes[2] == b'/')
+}
+
+fn prompt_write_action_kind(operation: PromptWriteOperation) -> &'static str {
+    match operation {
+        PromptWriteOperation::Write => "write_file",
+        PromptWriteOperation::Append => "append_file",
+        PromptWriteOperation::Patch => "patch_file",
+        PromptWriteOperation::Import => "memory_import",
+        PromptWriteOperation::Seed => "memory_seed",
+        PromptWriteOperation::ProfileUpdate => "profile_update",
+        PromptWriteOperation::AdminSystemPromptUpdate => "admin_system_prompt_update",
+    }
+}
+
+fn prompt_safety_reason_projection_kind(reason: PromptSafetyReasonCode) -> &'static str {
+    match reason {
+        PromptSafetyReasonCode::HighRiskPromptInjection => "prompt_high_risk",
+        PromptSafetyReasonCode::CriticalPromptInjection => "prompt_critical",
+        PromptSafetyReasonCode::PromptWritePolicyUnavailable => "prompt_policy_unavailable",
+        PromptSafetyReasonCode::PromptWritePolicyMisconfigured => "prompt_policy_misconfigured",
+        PromptSafetyReasonCode::ProtectedPathRegistryUnavailable => "protected_registry_missing",
+        PromptSafetyReasonCode::PromptWriteBypassNotAllowed => "prompt_bypass_denied",
+        PromptSafetyReasonCode::PromptWriteSafetyEventUnavailable => "prompt_event_unavailable",
+    }
+}
+
+fn prompt_safety_event_kind_label(kind: PromptWriteSafetyEventKind) -> &'static str {
+    match kind {
+        PromptWriteSafetyEventKind::Checked => "prompt_write_safety_checked",
+        PromptWriteSafetyEventKind::Warned => "prompt_write_safety_warned",
+        PromptWriteSafetyEventKind::Rejected => "prompt_write_safety_rejected",
+        PromptWriteSafetyEventKind::BypassAllowed => "prompt_write_safety_bypass_allowed",
+    }
+}
+
+fn encode_prompt_safety_metadata(event: &PromptWriteSafetyEvent) -> String {
+    let mut pairs = vec![format!(
+        "status={}",
+        match event.kind {
+            PromptWriteSafetyEventKind::Checked => "checked",
+            PromptWriteSafetyEventKind::Warned => "warned",
+            PromptWriteSafetyEventKind::Rejected => "rejected",
+            PromptWriteSafetyEventKind::BypassAllowed => "bypass_allowed",
+        }
+    )];
+    if let Some(path_hash) = &event.relative_path_hash {
+        pairs.push(format!("path_hash={path_hash}"));
+    }
+    if let Some(path_class) = &event.protected_path_class {
+        pairs.push(format!("protected_path_class={}", path_class.as_str()));
+    }
+    if let Some(reason) = event.reason_code {
+        pairs.push(format!("reason={}", reason.as_str()));
+    }
+    if let Some(severity) = event.severity {
+        pairs.push(format!("severity={}", severity.as_str()));
+    }
+    if event.finding_count > 0 {
+        pairs.push(format!("findings={}", event.finding_count));
+    }
+    format!("memory_prompt_safety:v1;{}", pairs.join(";"))
 }

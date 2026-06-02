@@ -11,6 +11,7 @@ use std::{
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use ironclaw_authorization::GrantAuthorizer;
+use ironclaw_events::InMemoryAuditSink;
 use ironclaw_extensions::ExtensionRegistry;
 #[cfg(feature = "libsql")]
 use ironclaw_filesystem::LibSqlRootFilesystem;
@@ -357,6 +358,130 @@ async fn memory_capabilities_write_read_tree_and_search_native_reborn_memory() {
         search["results"][0]["path"],
         json!("projects/alpha/notes.md")
     );
+}
+
+#[tokio::test]
+async fn memory_write_patches_existing_document_and_rejects_missing_old_string() {
+    let runtime = runtime_with_filesystem(InMemoryBackend::new());
+    let context = execution_context_with_mounts(
+        [MEMORY_WRITE_CAPABILITY_ID, MEMORY_READ_CAPABILITY_ID],
+        memory_mounts(MountPermissions::read_write_list_delete()),
+    );
+
+    invoke_with_context(
+        &runtime,
+        MEMORY_WRITE_CAPABILITY_ID,
+        json!({
+            "target": "projects/alpha/patch.md",
+            "content": "alpha beta beta",
+            "append": false
+        }),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+    let patch = invoke_with_context(
+        &runtime,
+        MEMORY_WRITE_CAPABILITY_ID,
+        json!({
+            "target": "projects/alpha/patch.md",
+            "old_string": "beta",
+            "new_string": "gamma"
+        }),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(patch["status"], json!("patched"));
+    assert_eq!(patch["replacements"], json!(1));
+
+    let patch_all = invoke_with_context(
+        &runtime,
+        MEMORY_WRITE_CAPABILITY_ID,
+        json!({
+            "target": "projects/alpha/patch.md",
+            "old_string": "beta",
+            "new_string": "delta",
+            "replace_all": true
+        }),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(patch_all["replacements"], json!(1));
+    let read = invoke_with_context(
+        &runtime,
+        MEMORY_READ_CAPABILITY_ID,
+        json!({"path": "projects/alpha/patch.md"}),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(read["content"], json!("alpha gamma delta"));
+
+    let failure = invoke_with_context(
+        &runtime,
+        MEMORY_WRITE_CAPABILITY_ID,
+        json!({
+            "target": "projects/alpha/patch.md",
+            "old_string": "missing",
+            "new_string": "value"
+        }),
+        context,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(failure, RuntimeFailureKind::InvalidInput);
+}
+
+#[tokio::test]
+async fn memory_write_bootstrap_target_clears_bootstrap_document() {
+    let runtime = runtime_with_filesystem(InMemoryBackend::new());
+    let context = execution_context_with_mounts(
+        [MEMORY_WRITE_CAPABILITY_ID, MEMORY_READ_CAPABILITY_ID],
+        memory_mounts(MountPermissions::read_write_list_delete()),
+    );
+
+    let clear = invoke_with_context(
+        &runtime,
+        MEMORY_WRITE_CAPABILITY_ID,
+        json!({"target": "bootstrap", "content": "ignored"}),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(clear["status"], json!("cleared"));
+
+    let read = invoke_with_context(
+        &runtime,
+        MEMORY_READ_CAPABILITY_ID,
+        json!({"path": "BOOTSTRAP.md"}),
+        context,
+    )
+    .await
+    .unwrap();
+    assert_eq!(read["content"], json!(""));
+}
+
+#[tokio::test]
+async fn memory_write_daily_log_rejects_invalid_timezone() {
+    let runtime = runtime_with_filesystem(InMemoryBackend::new());
+    let failure = invoke_with_context(
+        &runtime,
+        MEMORY_WRITE_CAPABILITY_ID,
+        json!({
+            "target": "daily_log",
+            "content": "timezone should reject",
+            "timezone": "not/a-zone"
+        }),
+        execution_context_with_mounts(
+            [MEMORY_WRITE_CAPABILITY_ID],
+            memory_mounts(MountPermissions::read_write_list_delete()),
+        ),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(failure, RuntimeFailureKind::InvalidInput);
 }
 
 #[tokio::test]
@@ -4175,6 +4300,7 @@ where
     )
     .with_first_party_capabilities(Arc::new(builtin_first_party_handlers().unwrap()))
     .with_runtime_http_egress(Arc::new(RecordingRuntimeHttpEgress::default()))
+    .with_audit_sink(Arc::new(InMemoryAuditSink::new()))
     .with_runtime_policy(policy)
     .with_trust_policy(Arc::new(trust_policy()))
     .host_runtime_for_local_testing()

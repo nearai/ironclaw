@@ -18,7 +18,9 @@ use crate::path::{
     MemoryDocumentPath, MemoryDocumentScope, memory_backend_unsupported, memory_error,
     valid_memory_path,
 };
-use crate::repo::{MemoryAppendOutcome, MemoryDocumentRepository, scoped_memory_changed_by_key};
+use crate::repo::{
+    MemoryAppendOutcome, MemoryDocumentRepository, MemoryWriteOutcome, scoped_memory_changed_by_key,
+};
 use crate::safety::{
     DefaultPromptWriteSafetyPolicy, PromptProtectedPathRegistry, PromptSafetyAllowanceId,
     PromptWriteOperation, PromptWriteSafetyCheck, PromptWriteSafetyEventSink,
@@ -226,6 +228,50 @@ pub trait MemoryBackend: Send + Sync {
         let _ = options;
         self.compare_and_append_document(context, path, expected_previous_hash, bytes)
             .await
+    }
+
+    async fn compare_and_write_document_with_backend_options(
+        &self,
+        context: &MemoryContext,
+        path: &MemoryDocumentPath,
+        expected_previous_hash: Option<&str>,
+        bytes: &[u8],
+        options: &MemoryBackendWriteOptions,
+    ) -> Result<MemoryWriteOutcome, FilesystemError> {
+        let _ = (expected_previous_hash, options);
+        self.write_document(context, path, bytes)
+            .await
+            .map(|_| MemoryWriteOutcome::Written)
+    }
+
+    async fn append_document_with_backend_options(
+        &self,
+        context: &MemoryContext,
+        path: &MemoryDocumentPath,
+        bytes: &[u8],
+        options: &MemoryBackendWriteOptions,
+    ) -> Result<(), FilesystemError> {
+        for _ in 0..8 {
+            let previous = self.read_document(context, path).await?;
+            let expected = previous.as_deref().map(content_bytes_sha256);
+            let outcome = self
+                .compare_and_append_document_with_backend_options(
+                    context,
+                    path,
+                    expected.as_deref(),
+                    bytes,
+                    options,
+                )
+                .await?;
+            if outcome == MemoryAppendOutcome::Appended {
+                return Ok(());
+            }
+        }
+        Err(memory_error(
+            path.virtual_path().unwrap_or_else(|_| valid_memory_path()),
+            FilesystemOperation::AppendFile,
+            "memory document changed during append; retry limit exceeded",
+        ))
     }
 }
 
@@ -605,6 +651,213 @@ where
             .compare_and_append_document_with_options(path, expected_previous_hash, bytes, &options)
             .await?;
         if outcome == MemoryAppendOutcome::Appended {
+            if let Some(metadata) = metadata_to_persist {
+                self.repository
+                    .write_document_metadata(path, &metadata)
+                    .await?;
+            }
+            record_memory_significant_event(
+                self.memory_event_sink.as_ref(),
+                MemorySignificantEvent::document_written(
+                    path,
+                    MemorySignificantEventSource::RepositoryMemoryBackend,
+                    bytes.len() as u64,
+                )
+                .with_audit_context(context.audit_context()),
+            )
+            .await;
+            if let Some(indexer) = &self.indexer {
+                let _ = indexer
+                    .reindex_document_with_audit_context(path, context.audit_context())
+                    .await;
+            }
+        }
+        Ok(outcome)
+    }
+
+    async fn append_document_with_backend_options(
+        &self,
+        context: &MemoryContext,
+        path: &MemoryDocumentPath,
+        bytes: &[u8],
+        options: &MemoryBackendWriteOptions,
+    ) -> Result<(), FilesystemError> {
+        for _ in 0..8 {
+            ensure_file_documents_supported(
+                context,
+                FilesystemOperation::AppendFile,
+                self.capabilities.file_documents,
+            )?;
+            ensure_path_matches_context(context, path, FilesystemOperation::AppendFile)?;
+            let current = self.repository.read_document(path).await?;
+            let expected_previous_hash = current.as_deref().map(content_bytes_sha256);
+            let previous_bytes = current.unwrap_or_default();
+            let mut combined = previous_bytes.clone();
+            combined.extend_from_slice(bytes);
+            let content = std::str::from_utf8(&combined).map_err(|_| {
+                memory_error(
+                    path.virtual_path().unwrap_or_else(|_| valid_memory_path()),
+                    FilesystemOperation::AppendFile,
+                    "memory document content must be UTF-8",
+                )
+            })?;
+            let previous_hash = if prompt_write_protected_classification(
+                self.prompt_safety_policy.as_ref(),
+                &self.prompt_protected_path_registry,
+                path,
+            )
+            .is_some()
+                && prompt_write_policy_requires_previous_content_hash(
+                    self.prompt_safety_policy.as_ref(),
+                ) {
+                std::str::from_utf8(&previous_bytes)
+                    .ok()
+                    .map(content_sha256)
+            } else {
+                None
+            };
+            if !context.prompt_write_safety_enforced() {
+                enforce_prompt_write_safety(
+                    self.prompt_safety_policy.as_ref(),
+                    self.prompt_safety_event_sink.as_ref(),
+                    &self.prompt_protected_path_registry,
+                    PromptWriteSafetyCheck {
+                        scope: context.scope(),
+                        path,
+                        operation: PromptWriteOperation::Append,
+                        source: PromptWriteSource::MemoryBackend,
+                        content,
+                        previous_content_hash: previous_hash.as_deref(),
+                        allowance: context.prompt_write_safety_allowance(),
+                        audit_context: context.audit_context(),
+                        filesystem_operation: FilesystemOperation::AppendFile,
+                    },
+                )
+                .await?;
+            }
+            let (metadata, metadata_to_persist) =
+                resolve_write_metadata(self.repository.as_ref(), path, options).await?;
+            if let Some(schema) = &metadata.schema {
+                validate_content_against_schema(path, content, schema)?;
+            }
+            let options = MemoryWriteOptions {
+                metadata,
+                changed_by: Some(scoped_memory_changed_by_key(path.scope())),
+            };
+            let outcome = self
+                .repository
+                .compare_and_append_document_with_options(
+                    path,
+                    expected_previous_hash.as_deref(),
+                    bytes,
+                    &options,
+                )
+                .await?;
+            if outcome == MemoryAppendOutcome::Appended {
+                if let Some(metadata) = metadata_to_persist {
+                    self.repository
+                        .write_document_metadata(path, &metadata)
+                        .await?;
+                }
+                record_memory_significant_event(
+                    self.memory_event_sink.as_ref(),
+                    MemorySignificantEvent::document_written(
+                        path,
+                        MemorySignificantEventSource::RepositoryMemoryBackend,
+                        bytes.len() as u64,
+                    )
+                    .with_audit_context(context.audit_context()),
+                )
+                .await;
+                if let Some(indexer) = &self.indexer {
+                    let _ = indexer
+                        .reindex_document_with_audit_context(path, context.audit_context())
+                        .await;
+                }
+                return Ok(());
+            }
+        }
+        Err(memory_error(
+            path.virtual_path().unwrap_or_else(|_| valid_memory_path()),
+            FilesystemOperation::AppendFile,
+            "memory document changed during append; retry limit exceeded",
+        ))
+    }
+
+    async fn compare_and_write_document_with_backend_options(
+        &self,
+        context: &MemoryContext,
+        path: &MemoryDocumentPath,
+        expected_previous_hash: Option<&str>,
+        bytes: &[u8],
+        options: &MemoryBackendWriteOptions,
+    ) -> Result<MemoryWriteOutcome, FilesystemError> {
+        ensure_file_documents_supported(
+            context,
+            FilesystemOperation::WriteFile,
+            self.capabilities.file_documents,
+        )?;
+        ensure_path_matches_context(context, path, FilesystemOperation::WriteFile)?;
+        let content = std::str::from_utf8(bytes).map_err(|_| {
+            memory_error(
+                path.virtual_path().unwrap_or_else(|_| valid_memory_path()),
+                FilesystemOperation::WriteFile,
+                "memory document content must be UTF-8",
+            )
+        })?;
+        let previous = self.repository.read_document(path).await?;
+        let current_hash = previous.as_deref().map(content_bytes_sha256);
+        if current_hash.as_deref() != expected_previous_hash {
+            return Ok(MemoryWriteOutcome::Conflict);
+        }
+        let previous_hash = if prompt_write_protected_classification(
+            self.prompt_safety_policy.as_ref(),
+            &self.prompt_protected_path_registry,
+            path,
+        )
+        .is_some()
+            && prompt_write_policy_requires_previous_content_hash(
+                self.prompt_safety_policy.as_ref(),
+            ) {
+            previous
+                .as_deref()
+                .and_then(|bytes| std::str::from_utf8(bytes).ok().map(content_sha256))
+        } else {
+            None
+        };
+        if !context.prompt_write_safety_enforced() {
+            enforce_prompt_write_safety(
+                self.prompt_safety_policy.as_ref(),
+                self.prompt_safety_event_sink.as_ref(),
+                &self.prompt_protected_path_registry,
+                PromptWriteSafetyCheck {
+                    scope: context.scope(),
+                    path,
+                    operation: PromptWriteOperation::Write,
+                    source: PromptWriteSource::MemoryBackend,
+                    content,
+                    previous_content_hash: previous_hash.as_deref(),
+                    allowance: context.prompt_write_safety_allowance(),
+                    audit_context: context.audit_context(),
+                    filesystem_operation: FilesystemOperation::WriteFile,
+                },
+            )
+            .await?;
+        }
+        let (metadata, metadata_to_persist) =
+            resolve_write_metadata(self.repository.as_ref(), path, options).await?;
+        if let Some(schema) = &metadata.schema {
+            validate_content_against_schema(path, content, schema)?;
+        }
+        let options = MemoryWriteOptions {
+            metadata,
+            changed_by: Some(scoped_memory_changed_by_key(path.scope())),
+        };
+        let outcome = self
+            .repository
+            .compare_and_write_document_with_options(path, expected_previous_hash, bytes, &options)
+            .await?;
+        if outcome == MemoryWriteOutcome::Written {
             if let Some(metadata) = metadata_to_persist {
                 self.repository
                     .write_document_metadata(path, &metadata)
