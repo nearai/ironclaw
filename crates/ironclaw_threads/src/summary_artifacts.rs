@@ -27,26 +27,39 @@ pub(crate) fn find_overlapping_summary<'a>(
         return Ok(None);
     }
 
-    let Some(overlapping) = summaries.iter().find(|summary| {
-        summary.model_context_policy == Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected)
-            && ranges_overlap(
-                request.start_sequence,
-                request.end_sequence,
-                summary.start_sequence,
-                summary.end_sequence,
-            )
-    }) else {
-        return Ok(None);
-    };
+    let overlapping: Vec<_> = summaries
+        .iter()
+        .filter(|summary| {
+            summary.model_context_policy
+                == Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected)
+                && ranges_overlap(
+                    request.start_sequence,
+                    request.end_sequence,
+                    summary.start_sequence,
+                    summary.end_sequence,
+                )
+        })
+        .collect();
 
-    if is_exact_compaction_summary_replay(overlapping, request, content) {
-        return Ok(Some(overlapping));
+    match overlapping.as_slice() {
+        [] => Ok(None),
+        [overlapping] => {
+            if request.summary_kind == SummaryKind::Compaction
+                && is_exact_compaction_summary_replay(overlapping, request, content)
+            {
+                Ok(Some(overlapping))
+            } else {
+                Err(SessionThreadError::OverlappingSummaryRange {
+                    start_sequence: request.start_sequence,
+                    end_sequence: request.end_sequence,
+                })
+            }
+        }
+        _ => Err(SessionThreadError::OverlappingSummaryRange {
+            start_sequence: request.start_sequence,
+            end_sequence: request.end_sequence,
+        }),
     }
-
-    Err(SessionThreadError::OverlappingSummaryRange {
-        start_sequence: request.start_sequence,
-        end_sequence: request.end_sequence,
-    })
 }
 
 fn ranges_overlap(left_start: u64, left_end: u64, right_start: u64, right_end: u64) -> bool {
@@ -88,6 +101,18 @@ mod tests {
             end_sequence: 4,
             summary_kind: SummaryKind::Compaction,
             content: "summary content".to_string(),
+            model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
+        }
+    }
+
+    fn summary_with(start_sequence: u64, end_sequence: u64, content: &str) -> SummaryArtifact {
+        SummaryArtifact {
+            summary_id: crate::SummaryArtifactId::new(),
+            thread_id: ThreadId::new("thread-test").unwrap(),
+            start_sequence,
+            end_sequence,
+            summary_kind: SummaryKind::Compaction,
+            content: content.to_string(),
             model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
         }
     }
@@ -193,6 +218,17 @@ mod tests {
     }
 
     #[test]
+    fn find_overlapping_summary_returns_none_when_no_overlaps_exist() {
+        let request = request();
+        let summaries = vec![summary_with(10, 12, "summary content")];
+
+        assert!(matches!(
+            find_overlapping_summary(&summaries, &request, "summary content"),
+            Ok(None)
+        ));
+    }
+
+    #[test]
     fn find_overlapping_summary_replays_exact_match() {
         let request = request();
         let summaries = vec![summary()];
@@ -207,11 +243,44 @@ mod tests {
     #[test]
     fn find_overlapping_summary_rejects_non_idempotent_overlap() {
         let request = request();
-        let mut summary = summary();
-        summary.content = "different content".to_string();
+        let summary = summary_with(2, 4, "different content");
 
         let error = find_overlapping_summary(&[summary], &request, "summary content")
             .expect_err("overlap should be rejected");
+
+        assert!(matches!(
+            error,
+            SessionThreadError::OverlappingSummaryRange {
+                start_sequence: 2,
+                end_sequence: 4
+            }
+        ));
+    }
+
+    #[test]
+    fn find_overlapping_summary_rejects_later_exact_match_after_earlier_nonmatching_overlap() {
+        let request = request();
+        let summaries = vec![summary_with(2, 4, "different content"), summary()];
+
+        let error = find_overlapping_summary(&summaries, &request, "summary content")
+            .expect_err("multiple overlaps should be rejected");
+
+        assert!(matches!(
+            error,
+            SessionThreadError::OverlappingSummaryRange {
+                start_sequence: 2,
+                end_sequence: 4
+            }
+        ));
+    }
+
+    #[test]
+    fn find_overlapping_summary_rejects_multiple_overlaps_with_exact_match_present() {
+        let request = request();
+        let summaries = vec![summary(), summary_with(3, 5, "different content")];
+
+        let error = find_overlapping_summary(&summaries, &request, "summary content")
+            .expect_err("multiple overlaps should be rejected");
 
         assert!(matches!(
             error,
