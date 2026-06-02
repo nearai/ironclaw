@@ -69,11 +69,11 @@ impl SlackEventsWebhookDispatcher for HeaderSecretDispatcher {
 }
 
 fn tenant_id(value: &str) -> TenantId {
-    TenantId::new(value).expect("valid tenant")
+    TenantId::new(value).expect("valid tenant") // safety: test helper only passes hard-coded valid tenant identifiers.
 }
 
 fn installation_id(value: &str) -> AdapterInstallationId {
-    AdapterInstallationId::new(value).expect("valid installation")
+    AdapterInstallationId::new(value).expect("valid installation") // safety: test helper only passes hard-coded valid installation identifiers.
 }
 
 async fn post_to_mount(
@@ -90,10 +90,10 @@ async fn post_to_mount(
                 .uri(SLACK_EVENTS_PATH)
                 .header("X-Test-Secret", secret)
                 .body(Body::from(body))
-                .expect("request should build"),
+                .expect("request should build"), // safety: test builds a valid fixed POST request.
         )
         .await
-        .expect("router should respond")
+        .expect("router should respond") // safety: axum test router should produce a response for fixed route input.
 }
 
 async fn assert_error_body(response: Response, expected: &str) {
@@ -101,10 +101,10 @@ async fn assert_error_body(response: Response, expected: &str) {
         .into_body()
         .collect()
         .await
-        .expect("body should collect")
+        .expect("body should collect") // safety: test response bodies are small and fully buffered.
         .to_bytes();
-    let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json error body");
-    assert_eq!(body["error"], expected);
+    let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json error body"); // safety: error responses are generated as JSON by this route.
+    assert_eq!(body["error"], expected); // safety: assertion is in a test-only helper.
 }
 
 const TEAM_A_BODY: &str = r#"{
