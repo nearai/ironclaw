@@ -35,6 +35,7 @@ use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 
 use super::error::OAuthError;
+use super::near::{NearLoginProvider, NearVerifyError, NearVerifyRequest};
 use super::pending::{PendingFlowStore, SessionTicketStore, sanitize_redirect};
 use super::provider::OAuthProvider;
 use super::provider_name::OAuthProviderName;
@@ -64,6 +65,13 @@ pub struct OAuthRouterConfig {
     pub providers: Vec<Arc<dyn OAuthProvider>>,
     pub base_url: String,
     pub session_lifetime: ChronoDuration,
+    /// Optional NEAR wallet login provider. When present, the router
+    /// mounts `/auth/near/challenge` + `/auth/near/verify` and `near`
+    /// appears in `/auth/providers`. NEAR uses a NEP-413 challenge/
+    /// verify flow rather than the OAuth code flow, so it is wired
+    /// separately from `providers` — see
+    /// [`NearLoginProvider`](super::near::NearLoginProvider).
+    pub near: Option<Arc<NearLoginProvider>>,
 }
 
 impl OAuthRouterConfig {
@@ -82,11 +90,20 @@ impl OAuthRouterConfig {
             providers,
             base_url: base_url.into(),
             session_lifetime: DEFAULT_SESSION_LIFETIME,
+            near: None,
         }
     }
 
     pub fn with_session_lifetime(mut self, lifetime: ChronoDuration) -> Self {
         self.session_lifetime = lifetime;
+        self
+    }
+
+    /// Enable NEAR wallet login. The supplied provider owns the nonce
+    /// store + RPC client; the router mounts the challenge/verify pair
+    /// and advertises `near` on `/auth/providers`.
+    pub fn with_near_provider(mut self, near: Arc<NearLoginProvider>) -> Self {
+        self.near = Some(near);
         self
     }
 }
@@ -101,6 +118,7 @@ struct RouterState {
     session_lifetime: ChronoDuration,
     pending: PendingFlowStore,
     session_tickets: SessionTicketStore,
+    near: Option<Arc<NearLoginProvider>>,
 }
 
 impl RouterState {
@@ -125,12 +143,16 @@ const PATH_LOGIN: &str = "/auth/login/{provider}";
 const PATH_CALLBACK: &str = "/auth/callback/{provider}";
 const PATH_SESSION_EXCHANGE: &str = "/auth/session/exchange";
 const PATH_LOGOUT: &str = "/auth/logout";
+const PATH_NEAR_CHALLENGE: &str = "/auth/near/challenge";
+const PATH_NEAR_VERIFY: &str = "/auth/near/verify";
 
 const ROUTE_ID_PROVIDERS: &str = "webui.sso.providers";
 const ROUTE_ID_LOGIN: &str = "webui.sso.login";
 const ROUTE_ID_CALLBACK: &str = "webui.sso.callback";
 const ROUTE_ID_SESSION_EXCHANGE: &str = "webui.sso.session_exchange";
 const ROUTE_ID_LOGOUT: &str = "webui.sso.logout";
+const ROUTE_ID_NEAR_CHALLENGE: &str = "webui.sso.near_challenge";
+const ROUTE_ID_NEAR_VERIFY: &str = "webui.sso.near_verify";
 
 /// Maximum session-exchange/logout body size. The exchange handler
 /// reads only `{ "ticket": "..." }`; logout doesn't read a body, but
@@ -156,6 +178,16 @@ const SSO_CALLBACK_MAX_REQUESTS: NonZeroU32 = NonZeroU32::new(60).expect("60 != 
 const SSO_EXCHANGE_MAX_REQUESTS: NonZeroU32 = NonZeroU32::new(60).expect("60 != 0"); // safety: const-evaluated, literal non-zero
 /// Logout. Per-IP, generous, because a sign-out blip should not 429.
 const SSO_LOGOUT_MAX_REQUESTS: NonZeroU32 = NonZeroU32::new(60).expect("60 != 0"); // safety: const-evaluated, literal non-zero
+/// NEAR challenge mints a nonce into the bounded nonce cache — cap the
+/// per-IP rate the same as `/auth/login` so a flood cannot fill it.
+const SSO_NEAR_CHALLENGE_MAX_REQUESTS: NonZeroU32 = NonZeroU32::new(60).expect("60 != 0"); // safety: const-evaluated, literal non-zero
+/// NEAR verify consumes a nonce and makes one RPC call. Same per-IP
+/// cap as the callback so a brute-force loop cannot run unbounded.
+const SSO_NEAR_VERIFY_MAX_REQUESTS: NonZeroU32 = NonZeroU32::new(60).expect("60 != 0"); // safety: const-evaluated, literal non-zero
+/// Verify request body cap. The JSON carries four short string fields
+/// (account id, public key, signature, nonce); 2 KiB bounds an
+/// oversized POST before the handler runs.
+const NEAR_VERIFY_BODY_LIMIT_BYTES: NonZeroU64 = NonZeroU64::new(2048).expect("2048 != 0"); // safety: const-evaluated, literal non-zero
 
 /// Build the unauthenticated axum sub-router that mounts the OAuth
 /// login endpoints plus the route descriptors composition needs to
@@ -170,14 +202,22 @@ pub fn webui_v2_auth_router(config: OAuthRouterConfig) -> PublicRouteMount {
         session_lifetime: config.session_lifetime,
         pending: PendingFlowStore::new(),
         session_tickets: SessionTicketStore::new(),
+        near: config.near,
     });
 
+    // The NEAR challenge/verify routes are always mounted so the
+    // descriptor list (and the per-route policy middleware composition
+    // folds it into) stays static regardless of config; the handlers
+    // return 404 when NEAR is not configured. This mirrors the v1
+    // gateway, which 404s `/auth/near/*` when NEAR auth is disabled.
     let router = axum::Router::new()
         .route(PATH_PROVIDERS, get(providers_handler))
         .route(PATH_LOGIN, get(login_handler))
         .route(PATH_CALLBACK, get(callback_handler))
         .route(PATH_SESSION_EXCHANGE, post(session_exchange_handler))
         .route(PATH_LOGOUT, post(logout_handler))
+        .route(PATH_NEAR_CHALLENGE, get(near_challenge_handler))
+        .route(PATH_NEAR_VERIFY, post(near_verify_handler))
         .with_state(state);
 
     PublicRouteMount {
@@ -232,6 +272,23 @@ fn sso_route_descriptors() -> Vec<IngressRouteDescriptor> {
                     max_bytes: LOGOUT_BODY_LIMIT_BYTES,
                 },
                 SSO_LOGOUT_MAX_REQUESTS,
+            ),
+        ),
+        descriptor(
+            ROUTE_ID_NEAR_CHALLENGE,
+            NetworkMethod::Get,
+            PATH_NEAR_CHALLENGE,
+            public_policy(BodyLimitPolicy::NoBody, SSO_NEAR_CHALLENGE_MAX_REQUESTS),
+        ),
+        descriptor(
+            ROUTE_ID_NEAR_VERIFY,
+            NetworkMethod::Post,
+            PATH_NEAR_VERIFY,
+            public_policy(
+                BodyLimitPolicy::Limited {
+                    max_bytes: NEAR_VERIFY_BODY_LIMIT_BYTES,
+                },
+                SSO_NEAR_VERIFY_MAX_REQUESTS,
             ),
         ),
     ]
@@ -318,6 +375,13 @@ async fn providers_handler(State(state): State<RouterStateHandle>) -> Json<Provi
         .iter()
         .map(|p| p.name().as_str().to_string())
         .collect();
+    // NEAR is not an `OAuthProvider` (challenge/verify, not code flow)
+    // so it is advertised here from the dedicated `near` slot rather
+    // than the `providers` list. The SPA filters discovery against its
+    // own supported set, so ordering is irrelevant past the sort below.
+    if let Some(near) = state.near.as_ref() {
+        providers.push(near.name().as_str().to_string());
+    }
     providers.sort_unstable();
     Json(ProvidersResponse { providers })
 }
@@ -572,7 +636,163 @@ async fn logout_handler(
     }
 }
 
+// ─── /auth/near/challenge ─────────────────────────────────────────────
+
+/// `GET /auth/near/challenge` — mint a single-use NEP-413 nonce plus
+/// the message the wallet must sign. Returns `404` when NEAR login is
+/// not configured (mirrors the v1 gateway, which 404s `/auth/near/*`
+/// when NEAR auth is disabled).
+async fn near_challenge_handler(State(state): State<RouterStateHandle>) -> Response {
+    let Some(near) = state.near.as_ref() else {
+        return near_not_enabled();
+    };
+    Json(near.challenge()).into_response()
+}
+
+// ─── /auth/near/verify ────────────────────────────────────────────────
+
+#[derive(Serialize)]
+struct NearVerifyResponse {
+    token: String,
+}
+
+/// `POST /auth/near/verify` — verify the NEP-413 signature and the
+/// access key, resolve the user through [`UserDirectory`], mint a
+/// session, and return the bearer over same-origin JSON. Unlike the
+/// OAuth callback there is no provider redirect, so the bearer is
+/// returned directly in the JSON body — the one-time login ticket
+/// exists only to keep a bearer out of a redirect `Location` header,
+/// which this flow never produces.
+async fn near_verify_handler(
+    State(state): State<RouterStateHandle>,
+    Json(req): Json<NearVerifyRequest>,
+) -> Response {
+    let Some(near) = state.near.as_ref() else {
+        return near_not_enabled();
+    };
+
+    let profile = match near.verify(&req).await {
+        Ok(profile) => profile,
+        Err(err) => {
+            log_near_error(&err);
+            return near_error_response(&err);
+        }
+    };
+
+    let provider_name = near.name();
+    let user_id = match state.user_directory.resolve(provider_name, &profile).await {
+        Ok(uid) => uid,
+        Err(UserDirectoryError::Unknown) => {
+            // Covers the "suspended / unrecognized account" failure
+            // case: the directory declines to mint a session.
+            tracing::debug!(
+                target = "ironclaw::reborn::webui_ingress::auth",
+                provider = %provider_name,
+                account = %req.account_id,
+                "user directory rejected NEAR account",
+            );
+            return (StatusCode::FORBIDDEN, "account not authorized").into_response();
+        }
+        Err(UserDirectoryError::Backend(reason)) => {
+            tracing::warn!(
+                target = "ironclaw::reborn::webui_ingress::auth",
+                provider = %provider_name,
+                error = %reason,
+                "user directory backend failure during NEAR verify",
+            );
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "login temporarily unavailable",
+            )
+                .into_response();
+        }
+    };
+
+    let bearer = match state
+        .session_store
+        .create_session(state.tenant_id.clone(), user_id, state.session_lifetime)
+        .await
+    {
+        Ok(token) => token,
+        Err(err) => {
+            tracing::error!(
+                target = "ironclaw::reborn::webui_ingress::auth",
+                error = %err,
+                "session store create_session failed during NEAR verify",
+            );
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not create session",
+            )
+                .into_response();
+        }
+    };
+
+    Json(NearVerifyResponse {
+        token: bearer.expose_secret().to_string(),
+    })
+    .into_response()
+}
+
 // ─── helpers ──────────────────────────────────────────────────────────
+
+/// Shared 404 for `/auth/near/*` when NEAR login is not configured.
+fn near_not_enabled() -> Response {
+    (StatusCode::NOT_FOUND, "NEAR wallet login is not enabled").into_response()
+}
+
+/// Map a [`NearVerifyError`] to a sanitized HTTP response. The internal
+/// `Display` text (RPC cause names, decode detail) is logged by
+/// [`log_near_error`] but never echoed to the client.
+fn near_error_response(err: &NearVerifyError) -> Response {
+    match err {
+        NearVerifyError::InvalidNonce => {
+            (StatusCode::BAD_REQUEST, "invalid or expired nonce").into_response()
+        }
+        NearVerifyError::InvalidInput(_) => {
+            (StatusCode::BAD_REQUEST, "invalid request").into_response()
+        }
+        NearVerifyError::InvalidSignature => {
+            (StatusCode::UNAUTHORIZED, "invalid signature").into_response()
+        }
+        NearVerifyError::AccessKeyInvalid(_) => (
+            StatusCode::UNAUTHORIZED,
+            "access key not valid for this account",
+        )
+            .into_response(),
+        NearVerifyError::RpcBackend(_) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "NEAR verification temporarily unavailable",
+        )
+            .into_response(),
+    }
+}
+
+/// Log a NEAR verify failure at the right level: auth misses (bad
+/// nonce / signature / key) are routine and stay at `debug!`; an RPC
+/// backend fault is operator-actionable and logs at `warn!`. Internal
+/// detail is logged but never returned to the client.
+fn log_near_error(err: &NearVerifyError) {
+    match err {
+        NearVerifyError::InvalidNonce
+        | NearVerifyError::InvalidInput(_)
+        | NearVerifyError::InvalidSignature
+        | NearVerifyError::AccessKeyInvalid(_) => {
+            tracing::debug!(
+                target = "ironclaw::reborn::webui_ingress::auth",
+                error = %err,
+                "NEAR verify rejected",
+            );
+        }
+        NearVerifyError::RpcBackend(_) => {
+            tracing::warn!(
+                target = "ironclaw::reborn::webui_ingress::auth",
+                error = %err,
+                "NEAR verify RPC backend failure",
+            );
+        }
+    }
+}
 
 fn extract_bearer(headers: &axum::http::HeaderMap) -> Option<String> {
     let value = headers.get(header::AUTHORIZATION)?;

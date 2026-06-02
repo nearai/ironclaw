@@ -25,6 +25,7 @@ v1 secrets / settings / DB.
 | `OAuthProvider` trait (in `auth/provider.rs`) | Extension point for per-provider URL / code-exchange logic. Deliberately lives in its own module so each provider does not depend on the others. `GoogleProvider` and `GitHubProvider` ship today. |
 | `GoogleProvider` (in `auth/google.rs`) | Google OIDC provider (scopes `openid email profile`, PKCE S256, optional `hd` hosted-domain restriction). Built from `GoogleOAuthConfig`. |
 | `GitHubProvider` (in `auth/github.rs`) | GitHub OAuth App provider (scopes `read:user user:email`, no PKCE, verified-email preference). Built from `GitHubOAuthConfig`. |
+| `NearLoginProvider` (in `auth/near/`) | NEAR wallet login — NEP-413 challenge/verify, not OAuth code flow, so it does NOT implement `OAuthProvider`. Owns a bounded single-use nonce store + the `view_access_key` RPC client. Built from `NearAuthConfig` (`NearNetwork` + optional RPC override); wired via `OAuthRouterConfig::with_near_provider`. |
 | `OAuthRouterConfig` | Tenant + `SessionStore` + `UserDirectory` + provider list + base URL |
 | `UserDirectory` trait | Host-supplied mapping from `(provider, OAuthUserProfile)` to `UserId` |
 | `EmailUserDirectory` | Local-dev default impl (verified email → `UserId`); gated on `dev-in-memory-session` |
@@ -50,7 +51,8 @@ secrets, never speaks to Google, never reads a `SessionStore` row.
 
 Routes mounted by `webui_v2_auth_router`:
 
-- `GET  /auth/providers` — list configured provider names.
+- `GET  /auth/providers` — list configured provider names (includes
+  `near` when a `NearLoginProvider` is wired).
 - `GET  /auth/login/{provider}` — mint a pending flow (CSRF state +
   PKCE verifier + sanitized `redirect_after`) and redirect the
   browser to the provider's authorization URL.
@@ -68,6 +70,21 @@ Routes mounted by `webui_v2_auth_router`:
   `SessionStore::revoke` and returns `204` on success or when no
   bearer is present, `500` if revocation fails, so the SPA's local
   clear stays unconditional without lying about server-side state.
+- `GET  /auth/near/challenge` — mint a single-use NEP-413 nonce +
+  the message the wallet signs (`{ nonce, message, recipient,
+  network }`). `404` when NEAR is not configured.
+- `POST /auth/near/verify` — consume the nonce, verify the Ed25519
+  signature is bound to it, confirm the public key is an active
+  access key on the account via `view_access_key` RPC, resolve the
+  user through `UserDirectory`, mint a session, and return the
+  bearer over same-origin JSON (`{ token }`). No `login_ticket`
+  round-trip: this flow has no provider redirect, so there is no
+  `Location` header for the bearer to leak through.
+
+  The two NEAR routes are always mounted (so the descriptor list the
+  per-route policy middleware folds in stays static); the handlers
+  `404` when no `NearLoginProvider` is wired, mirroring the v1
+  gateway's `/auth/near/*` behavior when NEAR auth is disabled.
 
 ### Provider trait
 
@@ -97,11 +114,18 @@ pub trait OAuthProvider: Send + Sync + 'static {
   flagged `email_verified = false` so the `UserDirectory` fails
   closed. Built from `GitHubOAuthConfig` (client id + secret); no
   hosted-domain analogue.
-- NEAR wallet login does NOT fit OAuth code flow and will get its
-  own pair of endpoints (`/auth/near/challenge` +
-  `/auth/near/verify`) plus its own sub-module under `auth/near/`.
-  The `SessionStore` + `UserDirectory` + composition seam stay the
-  same.
+- NEAR wallet login does NOT fit OAuth code flow, so it is NOT an
+  `OAuthProvider`. It ships as `NearLoginProvider` under `auth/near/`
+  with its own `/auth/near/challenge` + `/auth/near/verify` pair,
+  wired through `OAuthRouterConfig::with_near_provider`. The
+  `SessionStore` + `UserDirectory` + composition seam are unchanged:
+  `verify` projects a normalized `OAuthUserProfile` (provider-user-id
+  = NEAR account id, no email, `email_verified = false`) and the same
+  `UserDirectory::resolve` mints the session. NEP-413 verification is
+  re-implemented in `auth/near/verify.rs` rather than shared with v1's
+  `src/channels/web/oauth/near.rs` because this crate carries no
+  `src/`-tier dependency by contract; both copies pin the same tag /
+  field orderings and have their own tests.
 
 ### Security invariants
 
@@ -134,7 +158,21 @@ pub trait OAuthProvider: Send + Sync + 'static {
   redirect (`?login_ticket=<ticket>`) followed by same-origin
   exchange for the bearer — see
   `ironclaw_reborn_composition/CLAUDE.md` → "Session transport
-  decision" for the rationale.
+  decision" for the rationale. NEAR verify is the exception: it has
+  no redirect, so it returns the bearer directly over its
+  same-origin JSON response (no ticket needed).
+- **NEAR nonce store** is process-local, bounded (1024 entries +
+  5-min TTL), and single-use on `consume` — a replayed verify with an
+  already-spent nonce fails closed before any crypto runs. **NEP-413
+  binding** rejects raw-message signatures: only payloads that frame
+  the nonce verify, so a captured signature cannot be replayed.
+  **Wrong-network / unknown access keys** fail at the
+  `view_access_key` RPC (a key valid on another chain is absent on the
+  configured network's RPC → `401`). **Suspended / unrecognized
+  accounts** fail when `UserDirectory::resolve` returns `Unknown` →
+  `403`. RPC backend faults map to `503`, distinct from the `401`
+  auth-miss path, so operators can tell an infra outage from a bad
+  login.
 
 ### What the SSO router deliberately does NOT do
 
@@ -166,6 +204,14 @@ pub trait OAuthProvider: Send + Sync + 'static {
   session rather than an email identity, ticket exchange + single-use
   replay, provider-error and exchange-failure redirects, and logout
   revocation.
+- `tests/near_auth_routes.rs` — caller-level tests driving the REAL
+  `NearLoginProvider` against a local mock NEAR RPC server: provider
+  discovery (advertises `near` only when configured), `404` when not
+  configured, challenge shape, full challenge→sign→verify minting a
+  session bound to `near:<account_id>`, replayed-nonce and
+  unknown-nonce rejection (`400`), invalid-signature (`401`),
+  wrong-network access key (`401`), RPC backend fault (`503`), and
+  malformed public key (`400`). Locks #4181's acceptance criteria.
 - `tests/session_round_trip.rs` — end-to-end test composing
   `webui_v2_app` with `SessionAuthenticator` + the OAuth router;
   drives an OAuth callback, exchanges the resulting ticket, uses the bearer on

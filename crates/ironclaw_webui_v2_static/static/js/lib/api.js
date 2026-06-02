@@ -359,6 +359,63 @@ export async function exchangeLoginTicket(ticket) {
   return token;
 }
 
+// --- NEAR wallet login ---
+//
+// NEAR does not use the OAuth code-flow redirect; it is a NEP-413
+// challenge/verify pair. `fetchNearChallenge` mints a single-use
+// nonce + the message the wallet signs; `verifyNear` posts the
+// wallet's signature and, on success, returns the session bearer
+// directly over same-origin JSON (no `login_ticket` round-trip is
+// needed because this flow never produces a redirect that could leak
+// the bearer in a `Location` header).
+
+export async function fetchNearChallenge() {
+  const response = await fetch("/auth/near/challenge", {
+    headers: { Accept: "application/json" },
+    credentials: "same-origin",
+  });
+  if (!response.ok) {
+    throw new ApiError("Could not start NEAR sign-in.", {
+      status: response.status,
+      statusText: response.statusText,
+      headers: response.headers,
+    });
+  }
+  return response.json();
+}
+
+export async function verifyNear({ accountId, publicKey, signature, nonce }) {
+  const response = await fetch("/auth/near/verify", {
+    method: "POST",
+    headers: { Accept: "application/json", "Content-Type": "application/json" },
+    credentials: "same-origin",
+    body: JSON.stringify({
+      account_id: accountId,
+      public_key: publicKey,
+      signature,
+      nonce,
+    }),
+  });
+  if (!response.ok) {
+    throw new ApiError("NEAR sign-in could not be verified.", {
+      status: response.status,
+      statusText: response.statusText,
+      headers: response.headers,
+    });
+  }
+  const data = await response.json();
+  const token = (data?.token || "").trim();
+  if (!token) {
+    throw new ApiError("NEAR sign-in response did not include a token.", {
+      status: response.status,
+      statusText: response.statusText,
+      headers: response.headers,
+      payload: data,
+    });
+  }
+  return token;
+}
+
 export async function logout() {
   const token = readStoredToken();
   if (!token) return;

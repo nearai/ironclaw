@@ -321,7 +321,9 @@ pub(crate) struct RebornLocalRuntimeServices {
     /// Same sink as `budget_event_sink` but typed as the concrete
     /// `InMemoryBudgetEventSink` so the runtime can expose `drain()` /
     /// `snapshot()` to tests without leaking the concrete type into the
-    /// production `BudgetEventSink` boundary.
+    /// production `BudgetEventSink` boundary. Read only from test/
+    /// test-support builds, so mirror `budget_event_sink`'s allow.
+    #[allow(dead_code)]
     pub(crate) in_memory_budget_event_sink: Arc<ironclaw_resources::InMemoryBudgetEventSink>,
     /// Broadcast sink production callers can subscribe against once a
     /// real projection caller lands (review feedback Thermo-Nuclear

@@ -43,3 +43,66 @@ pub struct GitHubOAuthConfig {
     /// `Debug` impl is redacted.
     pub client_secret: SecretString,
 }
+
+/// NEAR network the wallet login flow validates access keys against.
+///
+/// A small fixed set, so an enum rather than a free `String`
+/// (`.claude/rules/types.md`): the network selects the default RPC
+/// endpoint and is echoed to the SPA so the wallet connector targets
+/// the matching chain. The wire form is snake_case (`mainnet` /
+/// `testnet`) so it round-trips cleanly through the challenge JSON
+/// and the SPA's `near-connect` connector.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NearNetwork {
+    Mainnet,
+    Testnet,
+}
+
+impl NearNetwork {
+    /// Stable wire / UI identifier. Used in the challenge response and
+    /// matched against the `near-connect` network parameter on the SPA.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            NearNetwork::Mainnet => "mainnet",
+            NearNetwork::Testnet => "testnet",
+        }
+    }
+
+    /// Default public RPC endpoint for the network. Used when
+    /// [`NearAuthConfig::rpc_url`] is left unset by the operator.
+    pub fn default_rpc_url(self) -> &'static str {
+        match self {
+            NearNetwork::Mainnet => "https://rpc.mainnet.near.org",
+            NearNetwork::Testnet => "https://rpc.testnet.near.org",
+        }
+    }
+}
+
+/// NEAR wallet login configuration. Unlike the OAuth providers above,
+/// NEAR uses a NEP-413 challenge/verify flow rather than an
+/// authorization-code redirect, so it is wired separately from the
+/// [`OAuthProvider`](super::provider::OAuthProvider) list — see
+/// [`NearLoginProvider`](super::near::NearLoginProvider).
+///
+/// Mirrors the v1 gateway's `NearAuthConfig` shape (network + RPC URL)
+/// so existing operator config can be re-used by the v2 wire-up.
+#[derive(Debug, Clone)]
+pub struct NearAuthConfig {
+    /// Network access keys are validated against. Selects the default
+    /// RPC endpoint and is advertised to the SPA wallet connector.
+    pub network: NearNetwork,
+    /// RPC endpoint used for the `view_access_key` query. When `None`,
+    /// [`NearNetwork::default_rpc_url`] is used.
+    pub rpc_url: Option<String>,
+}
+
+impl NearAuthConfig {
+    /// Resolve the effective RPC URL: the operator override when set,
+    /// otherwise the network's default public endpoint.
+    pub fn resolved_rpc_url(&self) -> String {
+        self.rpc_url
+            .clone()
+            .unwrap_or_else(|| self.network.default_rpc_url().to_string())
+    }
+}

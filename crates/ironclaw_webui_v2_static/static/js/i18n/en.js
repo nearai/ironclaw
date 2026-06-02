@@ -60,6 +60,10 @@ registerPack("en", {
   "login.connect": "Connect",
   "login.oauthDivider": "or continue with",
   "login.oauthProvider": "Continue with {provider}",
+  "login.nearButton": "Sign in with NEAR",
+  "login.nearConnecting": "Connecting wallet…",
+  "login.nearSigning": "Waiting for signature…",
+  "login.nearVerifying": "Verifying…",
 
   // Chat — empty state
   "chat.heroTitle": "Hello, what do you need help with?",

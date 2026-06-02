@@ -1035,28 +1035,23 @@ pub async fn build_reborn_runtime(
     // Resolve the model gateway in three flat steps so the cfg gates
     // don't multiply into a 4-way permutation:
     //
-    // 1. Normalize the test-only override into a plain `Option`.
-    //    Off-feature builds get a hard `None` so downstream control flow
-    //    stays plain.
-    // 2. Build the production gateway + cost table from the LLM config
+    // 1. Build the production gateway + cost table from the LLM config
     //    (cfg-gated helper); without `root-llm-provider` the helper
     //    short-circuits to a stub.
-    // 3. The test override wins over the production gateway when set;
-    //    the LLM-derived cost table is kept regardless so the
-    //    accountant can fire against a stub gateway too.
-    #[cfg(any(test, feature = "test-support"))]
-    let test_model_gateway_override = model_gateway_override;
-    #[cfg(not(any(test, feature = "test-support")))]
-    let test_model_gateway_override: Option<
-        Arc<dyn ironclaw_loop_support::HostManagedModelGateway>,
-    > = None;
-
+    // 2. The test-only override (destructured only under test /
+    //    test-support) wins over the production gateway when set;
+    //    off-feature builds use the production gateway directly. The
+    //    LLM-derived cost table is kept regardless so the accountant
+    //    can fire against a stub gateway too.
     #[cfg(feature = "root-llm-provider")]
     let (production_gateway, llm_cost_table) = build_production_model_gateway(llm).await?;
     #[cfg(not(feature = "root-llm-provider"))]
     let (production_gateway, llm_cost_table) = build_production_model_gateway()?;
 
-    let model_gateway = test_model_gateway_override.unwrap_or(production_gateway);
+    #[cfg(any(test, feature = "test-support"))]
+    let model_gateway = model_gateway_override.unwrap_or(production_gateway);
+    #[cfg(not(any(test, feature = "test-support")))]
+    let model_gateway = production_gateway;
 
     // Resolved cost table is either: the LLM-policy-derived table (real
     // LLM wired), a test override (so tests can drive deterministic

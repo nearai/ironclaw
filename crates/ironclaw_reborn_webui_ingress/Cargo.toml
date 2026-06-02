@@ -24,7 +24,9 @@ dev-in-memory-session = []
 async-trait = "0.1"
 axum = "0.8"
 base64 = "0.22"
+bs58 = "0.5"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
+ed25519-dalek = { version = "2.2.0", features = ["std"] }
 hex = "0.4.3"
 ironclaw_host_api = { path = "../ironclaw_host_api" }
 ironclaw_reborn_composition = { path = "../ironclaw_reborn_composition", features = ["webui-v2-beta"] }
