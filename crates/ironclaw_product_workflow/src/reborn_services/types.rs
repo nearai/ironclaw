@@ -7,7 +7,6 @@ use ironclaw_turns::{
     SanitizedFailure, TurnCheckpointId, TurnRunId, TurnRunState, TurnStatus,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 use crate::{
     LifecyclePackageRef, LifecyclePhase, LifecycleProductPayload, LifecycleReadinessBlocker,
@@ -236,9 +235,9 @@ pub struct RebornExtensionInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub onboarding_state: Option<String>,
+    pub onboarding_state: Option<RebornExtensionOnboardingState>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub onboarding: Option<Value>,
+    pub onboarding: Option<RebornExtensionOnboardingPayload>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -254,9 +253,28 @@ pub struct RebornExtensionActionResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instructions: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub onboarding_state: Option<String>,
+    pub onboarding_state: Option<RebornExtensionOnboardingState>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub onboarding: Option<Value>,
+    pub onboarding: Option<RebornExtensionOnboardingPayload>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RebornExtensionOnboardingState {
+    AuthRequired,
+    SetupRequired,
+    Installed,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornExtensionOnboardingPayload {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_instructions: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub setup_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_next_step: Option<String>,
 }
 
 /// WebUI v2 setup projection for extension lifecycle.
@@ -278,7 +296,7 @@ pub struct RebornSetupExtensionResponse {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fields: Vec<RebornExtensionSetupField>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub onboarding: Option<Value>,
+    pub onboarding: Option<RebornExtensionOnboardingPayload>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

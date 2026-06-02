@@ -342,6 +342,8 @@ pub struct LifecycleExtensionSummary {
     pub visible_read_only_capability_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub credential_requirements: Vec<LifecycleExtensionCredentialRequirement>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub onboarding: Option<LifecycleExtensionOnboarding>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -356,6 +358,17 @@ pub struct LifecycleExtensionCredentialRequirement {
     pub provider: String,
     pub required: bool,
     pub setup: LifecycleExtensionCredentialSetup,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LifecycleExtensionOnboarding {
+    pub instructions: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_instructions: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub setup_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_next_step: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -47,7 +47,13 @@ export function useExtensions() {
     mutationFn: ({ packageRef }) => installExtension(packageRef),
     onSuccess: (res, { displayName }) => {
       if (res.success) {
-        setActionResult({ type: "success", message: `${displayName || "Extension"} installed` });
+        setActionResult({
+          type: "success",
+          message:
+            res.message ||
+            res.instructions ||
+            `${displayName || "Extension"} installed`,
+        });
         if (res.auth_url) {
           window.open(res.auth_url, "_blank", "noopener,noreferrer");
         }
@@ -66,7 +72,13 @@ export function useExtensions() {
     mutationFn: ({ packageRef }) => activateExtension(packageRef),
     onSuccess: (res, { displayName }) => {
       if (res.success) {
-        setActionResult({ type: "success", message: `${displayName || "Extension"} activated` });
+        setActionResult({
+          type: "success",
+          message:
+            res.message ||
+            res.instructions ||
+            `${displayName || "Extension"} activated`,
+        });
         if (res.auth_url) {
           window.open(res.auth_url, "_blank", "noopener,noreferrer");
         }
