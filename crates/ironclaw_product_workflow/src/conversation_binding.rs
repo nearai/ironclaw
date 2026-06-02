@@ -3,8 +3,8 @@
 use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
-use ironclaw_host_api::{AgentId, ProjectId, TenantId};
-use ironclaw_product_adapters::{AdapterInstallationId, ProductAdapterId};
+use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
+use ironclaw_product_adapters::{AdapterInstallationId, ExternalActorRef, ProductAdapterId};
 
 use crate::{
     ConversationBindingService, ProductConversationRouteKind, ProductWorkflowError,
@@ -28,12 +28,26 @@ impl ProductInstallationKey {
     }
 }
 
+/// Host-owned actor binding policy for one adapter installation.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum ProductActorBindingPolicy {
+    /// Resolve only actor pairings that already exist in the canonical
+    /// conversations service.
+    #[default]
+    ExistingConversationPairings,
+    /// Allow only these host-preconfigured external actors and write their
+    /// pairings into the canonical conversations service before resolving the
+    /// external conversation binding.
+    PreconfiguredOnly(HashMap<ExternalActorRef, UserId>),
+}
+
 /// Trusted host configuration for one adapter installation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProductInstallationScope {
     pub tenant_id: TenantId,
     pub default_agent_id: Option<AgentId>,
     pub default_project_id: Option<ProjectId>,
+    pub actor_binding_policy: ProductActorBindingPolicy,
 }
 
 impl ProductInstallationScope {
@@ -42,6 +56,7 @@ impl ProductInstallationScope {
             tenant_id,
             default_agent_id: None,
             default_project_id: None,
+            actor_binding_policy: ProductActorBindingPolicy::default(),
         }
     }
 
@@ -54,7 +69,30 @@ impl ProductInstallationScope {
             tenant_id,
             default_agent_id: Some(default_agent_id),
             default_project_id,
+            actor_binding_policy: ProductActorBindingPolicy::default(),
         }
+    }
+
+    pub fn with_actor_binding_policy(mut self, policy: ProductActorBindingPolicy) -> Self {
+        self.actor_binding_policy = policy;
+        self
+    }
+
+    pub fn with_preconfigured_actor_bindings(
+        self,
+        bindings: impl IntoIterator<Item = (ExternalActorRef, UserId)>,
+    ) -> Self {
+        self.with_actor_binding_policy(ProductActorBindingPolicy::PreconfiguredOnly(
+            bindings.into_iter().collect(),
+        ))
+    }
+
+    pub fn with_preconfigured_actor_binding(
+        self,
+        external_actor_ref: ExternalActorRef,
+        user_id: UserId,
+    ) -> Self {
+        self.with_preconfigured_actor_bindings([(external_actor_ref, user_id)])
     }
 }
 
@@ -97,6 +135,7 @@ impl StaticProductInstallationResolver {
 #[derive(Clone)]
 pub struct ProductConversationBindingService {
     conversations: Arc<dyn ironclaw_conversations::ConversationBindingService>,
+    actor_pairings: Option<Arc<dyn ironclaw_conversations::ConversationActorPairingService>>,
     installations: StaticProductInstallationResolver,
 }
 
@@ -107,9 +146,62 @@ impl ProductConversationBindingService {
     ) -> Self {
         Self {
             conversations,
+            actor_pairings: None,
             installations,
         }
     }
+
+    pub fn with_actor_pairings(
+        mut self,
+        actor_pairings: Arc<dyn ironclaw_conversations::ConversationActorPairingService>,
+    ) -> Self {
+        self.actor_pairings = Some(actor_pairings);
+        self
+    }
+
+    async fn apply_preconfigured_actor_binding(
+        &self,
+        installation_scope: &ProductInstallationScope,
+        request: &ResolveBindingRequest,
+    ) -> Result<(), ProductWorkflowError> {
+        let Some(user_id) = ensure_preconfigured_actor_allowed(installation_scope, request)? else {
+            return Ok(());
+        };
+        let Some(actor_pairings) = &self.actor_pairings else {
+            return Err(ProductWorkflowError::BindingResolutionFailed {
+                reason:
+                    "preconfigured actor binding policy requires a conversation pairing service"
+                        .into(),
+            });
+        };
+        actor_pairings
+            .pair_external_actor(
+                installation_scope.tenant_id.clone(),
+                conversation_adapter_kind(&request.adapter_id)?,
+                conversation_installation_id(&request.installation_id)?,
+                conversation_actor_ref(&request.external_actor_ref)?,
+                user_id.clone(),
+            )
+            .await
+            .map_err(map_conversation_error)
+    }
+}
+
+fn ensure_preconfigured_actor_allowed<'a>(
+    installation_scope: &'a ProductInstallationScope,
+    request: &ResolveBindingRequest,
+) -> Result<Option<&'a UserId>, ProductWorkflowError> {
+    let ProductActorBindingPolicy::PreconfiguredOnly(bindings) =
+        &installation_scope.actor_binding_policy
+    else {
+        return Ok(None);
+    };
+    bindings
+        .get(&request.external_actor_ref)
+        .map(Some)
+        .ok_or_else(|| ProductWorkflowError::BindingRequired {
+            reason: "external actor is not preconfigured for this adapter installation".into(),
+        })
 }
 
 #[async_trait]
@@ -121,6 +213,8 @@ impl ConversationBindingService for ProductConversationBindingService {
         let installation_scope = self
             .installations
             .resolve(&request.adapter_id, &request.installation_id)?;
+        self.apply_preconfigured_actor_binding(&installation_scope, &request)
+            .await?;
         let resolution = self
             .conversations
             .resolve_or_create_binding_with_trusted_scope(
@@ -141,6 +235,7 @@ impl ConversationBindingService for ProductConversationBindingService {
         let installation_scope = self
             .installations
             .resolve(&request.adapter_id, &request.installation_id)?;
+        ensure_preconfigured_actor_allowed(&installation_scope, &request)?;
         let resolution = self
             .conversations
             .lookup_binding(conversation_request(

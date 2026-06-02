@@ -1573,6 +1573,91 @@ async fn projection_subscription_requires_existing_conversation_binding() {
 }
 
 #[tokio::test]
+async fn preconfigured_actor_binding_accepts_user_message_without_legacy_pairing() {
+    let conversations = Arc::new(InMemoryConversationServices::default());
+    let binding =
+        product_binding_service_with_preconfigured_actor(conversations, "user:preconfigured-slack");
+    let coordinator = Arc::new(RecordingTurnCoordinator::default());
+    let inbound = Arc::new(DefaultInboundTurnService::new(
+        binding.clone(),
+        InMemorySessionThreadService::default(),
+        coordinator.clone(),
+    ));
+    let workflow = DefaultProductWorkflow::new(
+        inbound,
+        Arc::new(InMemoryIdempotencyLedger::new()),
+        Arc::new(binding),
+    );
+
+    let ack = workflow
+        .accept_inbound(sample_envelope("preconfigured-actor"))
+        .await
+        .expect("preconfigured actor should be accepted");
+
+    assert!(matches!(ack, ProductInboundAck::Accepted { .. }));
+    let submission = coordinator
+        .submissions()
+        .into_iter()
+        .next()
+        .expect("turn should be submitted");
+    assert_eq!(
+        submission.actor.user_id.as_str(),
+        "user:preconfigured-slack"
+    );
+}
+
+#[tokio::test]
+async fn preconfigured_actor_binding_rejects_unconfigured_actor() {
+    let conversations = Arc::new(InMemoryConversationServices::default());
+    let conversation_port: Arc<dyn ironclaw_conversations::ConversationBindingService> =
+        conversations.clone();
+    let actor_pairings: Arc<dyn ironclaw_conversations::ConversationActorPairingService> =
+        conversations;
+    let scope = ProductInstallationScope::with_default_scope(
+        TenantId::new("tenant:alpha").expect("tenant"),
+        AgentId::new("agent:alpha").expect("agent"),
+        Some(ProjectId::new("project:alpha").expect("project")),
+    )
+    .with_preconfigured_actor_binding(
+        ExternalActorRef::new("test", "different-user", None::<String>).expect("actor"),
+        UserId::new("user:alice").expect("user"),
+    );
+    let resolver = StaticProductInstallationResolver::new([(
+        ProductInstallationKey::new(
+            ProductAdapterId::new("test_adapter").expect("adapter"),
+            AdapterInstallationId::new("install_alpha").expect("installation"),
+        ),
+        scope,
+    )]);
+    let binding = ProductConversationBindingService::new(conversation_port, resolver)
+        .with_actor_pairings(actor_pairings);
+    let workflow = DefaultProductWorkflow::new(
+        Arc::new(DefaultInboundTurnService::new(
+            binding.clone(),
+            InMemorySessionThreadService::default(),
+            Arc::new(RecordingTurnCoordinator::default()),
+        )),
+        Arc::new(InMemoryIdempotencyLedger::new()),
+        Arc::new(binding),
+    );
+
+    let err = workflow
+        .accept_inbound(sample_envelope("unconfigured-actor"))
+        .await
+        .expect_err("unconfigured actor should fail closed");
+
+    assert!(matches!(
+        err,
+        ProductAdapterError::WorkflowRejected {
+            kind: ProductWorkflowRejectionKind::ScopeNotFound,
+            status_code: 404,
+            retryable: false,
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
 async fn concrete_product_workflow_accepts_user_message_for_trusted_installation() {
     let conversations = Arc::new(InMemoryConversationServices::default());
     conversations
@@ -2564,6 +2649,34 @@ fn product_binding_service(
         },
     ));
     ProductConversationBindingService::new(conversation_port, resolver)
+}
+
+fn product_binding_service_with_preconfigured_actor(
+    conversations: Arc<InMemoryConversationServices>,
+    user_id: &str,
+) -> ProductConversationBindingService {
+    let conversation_port: Arc<dyn ironclaw_conversations::ConversationBindingService> =
+        conversations.clone();
+    let actor_pairings: Arc<dyn ironclaw_conversations::ConversationActorPairingService> =
+        conversations;
+    let scope = ProductInstallationScope::with_default_scope(
+        TenantId::new("tenant:alpha").expect("tenant"),
+        AgentId::new("agent:alpha").expect("agent"),
+        Some(ProjectId::new("project:alpha").expect("project")),
+    )
+    .with_preconfigured_actor_binding(
+        ExternalActorRef::new("test", "user1", None::<String>).expect("actor"),
+        UserId::new(user_id).expect("user"),
+    );
+    let resolver = StaticProductInstallationResolver::new([(
+        ProductInstallationKey::new(
+            ProductAdapterId::new("test_adapter").expect("adapter"),
+            AdapterInstallationId::new("install_alpha").expect("installation"),
+        ),
+        scope,
+    )]);
+    ProductConversationBindingService::new(conversation_port, resolver)
+        .with_actor_pairings(actor_pairings)
 }
 
 #[tokio::test]

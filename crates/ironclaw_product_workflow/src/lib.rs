@@ -85,8 +85,8 @@ pub use commands::{
     product_command_descriptors,
 };
 pub use conversation_binding::{
-    ProductConversationBindingService, ProductInstallationKey, ProductInstallationScope,
-    StaticProductInstallationResolver,
+    ProductActorBindingPolicy, ProductConversationBindingService, ProductInstallationKey,
+    ProductInstallationScope, StaticProductInstallationResolver,
 };
 pub use error::{AuthContinuationRejectionKind, ProductWorkflowError};
 #[cfg(any(test, feature = "test-support"))]
