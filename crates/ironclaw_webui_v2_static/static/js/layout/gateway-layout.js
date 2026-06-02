@@ -7,6 +7,8 @@ import { useT } from "../lib/i18n.js";
 import { useThreads } from "../pages/chat/hooks/useThreads.js";
 import { Sidebar } from "../components/sidebar.js";
 import { PageHeader } from "../components/page-header.js";
+import { CommandPalette } from "../components/command-palette.js";
+import { React } from "../lib/html.js";
 import { cn } from "../utils/cn.js";
 
 export function GatewayLayout({ token, profile, isAdmin, onSignOut }) {
@@ -18,6 +20,18 @@ export function GatewayLayout({ token, profile, isAdmin, onSignOut }) {
     onNewChat: () => threadsState.setActiveThreadId(null),
   });
   const status = statusQuery.data;
+
+  const [paletteOpen, setPaletteOpen] = React.useState(false);
+  React.useEffect(() => {
+    const onKeyDown = (event) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        setPaletteOpen((open) => !open);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
   // v2 has no DELETE thread endpoint, so the sidebar renders no
   // delete affordance (SidebarThreads conditionally renders the
   // trash button on `onDelete`).
@@ -80,6 +94,13 @@ export function GatewayLayout({ token, profile, isAdmin, onSignOut }) {
           />
         </main>
       </div>
+      <${CommandPalette}
+        open=${paletteOpen}
+        onClose=${() => setPaletteOpen(false)}
+        threadsState=${threadsState}
+        onNewChat=${sidebar.newChat}
+        onToggleTheme=${toggleTheme}
+      />
     </div>
   `;
 }
