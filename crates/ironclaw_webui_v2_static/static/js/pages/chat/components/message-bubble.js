@@ -2,6 +2,7 @@ import { React, html } from "../../../lib/html.js";
 import { MarkdownRenderer } from "./markdown-renderer.js";
 import { ToolActivity } from "./tool-activity.js";
 import { Icon } from "../../../design-system/icons.js";
+import { toast } from "../../../lib/toast.js";
 
 /* User keeps a tinted bubble; assistant is borderless (document-like);
    system / error stay as centered tinted notices. */
@@ -58,6 +59,7 @@ export function MessageBubble({ message, onRetry }) {
     try {
       await navigator.clipboard.writeText(typeof content === "string" ? content : "");
       setCopied(true);
+      toast("Copied to clipboard", { tone: "success" });
       setTimeout(() => setCopied(false), 1400);
     } catch {
       // clipboard unavailable — no-op

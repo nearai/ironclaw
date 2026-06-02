@@ -8,6 +8,7 @@ import { useThreads } from "../pages/chat/hooks/useThreads.js";
 import { Sidebar } from "../components/sidebar.js";
 import { PageHeader } from "../components/page-header.js";
 import { CommandPalette } from "../components/command-palette.js";
+import { ToastViewport } from "../components/toast-viewport.js";
 import { React } from "../lib/html.js";
 import { cn } from "../utils/cn.js";
 
@@ -101,6 +102,7 @@ export function GatewayLayout({ token, profile, isAdmin, onSignOut }) {
         onNewChat=${sidebar.newChat}
         onToggleTheme=${toggleTheme}
       />
+      <${ToastViewport} />
     </div>
   `;
 }

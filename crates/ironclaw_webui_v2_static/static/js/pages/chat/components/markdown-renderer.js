@@ -1,5 +1,6 @@
 import { React, html } from "../../../lib/html.js";
 import { renderMarkdown } from "../../../lib/markdown.js";
+import { toast } from "../../../lib/toast.js";
 
 const COLLAPSE_PX = 360;
 
@@ -55,6 +56,7 @@ function enhanceCodeBlocks(root) {
       try {
         await navigator.clipboard.writeText(codeEl ? codeEl.innerText : pre.innerText);
         copyBtn.textContent = "Copied";
+        toast("Code copied", { tone: "success" });
         setTimeout(() => (copyBtn.textContent = "Copy"), 1400);
       } catch {
         // clipboard unavailable
