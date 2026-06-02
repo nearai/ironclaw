@@ -1245,7 +1245,7 @@ async fn worker_preserves_model_credit_exhaustion_failure_category() {
     let driver = Arc::new(MockDriver::failing(
         desc.clone(),
         AgentLoopDriverError::Failed {
-            reason_kind: "model_credits_exhausted".to_string(),
+            reason_kind: MODEL_CREDITS_EXHAUSTED_CATEGORY.to_string(),
         },
     ));
     let registry = Arc::new(setup_registry(driver));
@@ -1276,7 +1276,7 @@ async fn worker_preserves_model_credit_exhaustion_failure_category() {
 
     assert_eq!(
         first_terminal_failure_category(&port),
-        "model_credits_exhausted"
+        MODEL_CREDITS_EXHAUSTED_CATEGORY
     );
 }
 
@@ -1597,4 +1597,18 @@ async fn worker_generates_stable_runner_id() {
     let id1 = worker.runner_id();
     let id2 = worker.runner_id();
     assert_eq!(id1, id2, "runner_id should be stable across calls");
+}
+
+#[test]
+fn sanitized_driver_failure_returns_credits_exhausted_for_known_category() {
+    let result = sanitized_driver_failure(MODEL_CREDITS_EXHAUSTED_CATEGORY);
+    let failure = result.expect("should return Some for credits exhausted category");
+    assert_eq!(failure.category(), MODEL_CREDITS_EXHAUSTED_CATEGORY);
+}
+
+#[test]
+fn sanitized_driver_failure_returns_driver_failed_for_unknown_category() {
+    let result = sanitized_driver_failure("some_unknown_driver_category");
+    let failure = result.expect("should return Some fallback for unknown category");
+    assert_eq!(failure.category(), "driver_failed");
 }

@@ -23,6 +23,8 @@ use ironclaw_turns::{
 };
 use tokio::sync::{Mutex, OnceCell, Semaphore};
 
+use ironclaw_reborn::failure_categories::MODEL_CREDITS_EXHAUSTED_CATEGORY;
+
 use crate::projection::AuthChallengeProvider;
 
 pub(super) const WEBUI_TURN_EVENT_PAGE_LIMIT: usize = 256;
@@ -542,7 +544,7 @@ async fn failure_summary_for_turn_event(
     category: &str,
     fallback_summary: String,
 ) -> String {
-    if category == "model_credits_exhausted" {
+    if category == MODEL_CREDITS_EXHAUSTED_CATEGORY {
         return fallback_summary;
     }
     failure_explainer
@@ -580,7 +582,7 @@ fn failure_summary_for_category(category: &str) -> &'static str {
         "route_snapshot_persistence_failed" => {
             "The run failed while saving the selected model route."
         }
-        "model_credits_exhausted" => {
+        MODEL_CREDITS_EXHAUSTED_CATEGORY => {
             "The AI provider account is out of credits. Add credits or switch providers and try again."
         }
         "heartbeat_failed" => "The run failed after the runner heartbeat could not be recorded.",

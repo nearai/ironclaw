@@ -1396,7 +1396,70 @@ fn is_credit_exhaustion_error(error: &LlmError) -> bool {
         || lower.contains("not enough credit")
         || lower.contains("not enough credits")
         || lower.contains("credits exhausted")
-        || lower.contains("credit balance")
-        || lower.contains("quota exceeded")
         || lower.contains("out of credits")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn request_failed(reason: &str) -> LlmError {
+        LlmError::RequestFailed {
+            provider: "test_provider".to_string(),
+            reason: reason.to_string(),
+        }
+    }
+
+    #[test]
+    fn is_credit_exhaustion_error_matches_all_trigger_phrases() {
+        let phrases = [
+            "HTTP 402",
+            "402 Payment Required",
+            "Payment Required",
+            "insufficient credit",
+            "insufficient credits",
+            "not enough credit",
+            "not enough credits",
+            "credits exhausted",
+            "out of credits",
+        ];
+        for phrase in &phrases {
+            let err = request_failed(&format!("error: {phrase}: some detail"));
+            assert!(
+                is_credit_exhaustion_error(&err),
+                "should match phrase: {phrase}"
+            );
+        }
+        // Case-insensitive
+        let err = request_failed("HTTP 402 payment required");
+        assert!(is_credit_exhaustion_error(&err), "should match lowercase");
+    }
+
+    #[test]
+    fn is_credit_exhaustion_error_returns_false_for_non_request_failed_variants() {
+        let non_request_failed = [
+            LlmError::ContextLengthExceeded { used: 1000, limit: 500 },
+            LlmError::ModelNotAvailable {
+                provider: "p".to_string(),
+                model: "m".to_string(),
+            },
+            LlmError::AuthFailed { provider: "p".to_string() },
+            LlmError::SessionExpired { provider: "p".to_string() },
+        ];
+        for err in &non_request_failed {
+            assert!(
+                !is_credit_exhaustion_error(err),
+                "should not match: {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn is_credit_exhaustion_error_returns_false_for_non_matching_request_failed() {
+        let err = request_failed("Internal server error");
+        assert!(!is_credit_exhaustion_error(&err));
+
+        let err = request_failed("rate limit exceeded");
+        assert!(!is_credit_exhaustion_error(&err));
+    }
 }

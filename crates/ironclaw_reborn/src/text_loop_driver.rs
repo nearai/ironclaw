@@ -22,6 +22,8 @@ use crate::failure_categories::{
 };
 
 pub(crate) const TEXT_ONLY_DRIVER_ID: &str = "reborn:text-only-model-reply";
+/// Stage name for the model call site; matches the string used in `map_host_error` call sites.
+const STAGE_MODEL: &str = "model";
 pub(crate) const TEXT_ONLY_DRIVER_VERSION: u64 = 1;
 const DEFAULT_CONTEXT_LIMIT: usize = 16;
 
@@ -87,7 +89,7 @@ impl AgentLoopDriver for TextOnlyModelReplyDriver {
                 capability_view: None,
             })
             .await
-            .map_err(|error| map_host_error("model", error))?;
+            .map_err(|error| map_host_error(STAGE_MODEL, error))?;
 
         let reply = match model_response.output {
             ParentLoopOutput::AssistantReply(reply) => reply,
@@ -178,7 +180,7 @@ fn map_host_error(stage: &'static str, error: AgentLoopHostError) -> AgentLoopDr
         "loop host port returned sanitized error"
     );
 
-    if stage == "model" && error.safe_summary == MODEL_CREDITS_EXHAUSTED_SUMMARY {
+    if stage == STAGE_MODEL && error.safe_summary == MODEL_CREDITS_EXHAUSTED_SUMMARY {
         return AgentLoopDriverError::Failed {
             reason_kind: MODEL_CREDITS_EXHAUSTED_CATEGORY.to_string(),
         };

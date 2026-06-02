@@ -618,6 +618,8 @@ impl TurnRunnerWorker {
                     DriverInvocationError::DriverError(AgentLoopDriverError::Unavailable {
                         ..
                     }) => "driver_unavailable",
+                    // DriverError(Failed) is destructured in the outer arm and dispatched
+                    // through sanitized_driver_failure before this branch is reached.
                     DriverInvocationError::DriverError(AgentLoopDriverError::Failed { .. }) => {
                         unreachable!("failed driver errors handled above")
                     }
