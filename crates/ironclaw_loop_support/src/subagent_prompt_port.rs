@@ -11,9 +11,7 @@ use ironclaw_turns::{
     },
 };
 
-use crate::capability_surface_filter::subagent_prompt_capability_view;
-
-pub const DEFAULT_SUBAGENT_GOAL_RAW_MAX_BYTES: usize = 128 * 1024;
+pub(crate) const DEFAULT_SUBAGENT_GOAL_RAW_MAX_BYTES: usize = 128 * 1024;
 pub const DEFAULT_SUBAGENT_GOAL_MAX_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -200,6 +198,37 @@ pub fn materialize_goal_message(
     })
 }
 
+fn subagent_prompt_capability_view(
+    mut allowed_capabilities: BTreeSet<CapabilityId>,
+    existing_view: Option<ironclaw_turns::run_profile::LoopModelCapabilityView>,
+) -> ironclaw_turns::run_profile::LoopModelCapabilityView {
+    if let Some(existing_view) = existing_view {
+        let existing = existing_view
+            .visible_capability_ids
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        let mut dropped = None;
+        allowed_capabilities.retain(|capability| {
+            let keep = existing.contains(capability);
+            if !keep {
+                dropped
+                    .get_or_insert_with(Vec::new)
+                    .push(capability.as_str().to_string());
+            }
+            keep
+        });
+        if let Some(dropped) = dropped {
+            tracing::warn!(
+                dropped_capabilities = ?dropped,
+                "subagent flavor capability allowlist was narrowed by parent capability view"
+            );
+        }
+    }
+    ironclaw_turns::run_profile::LoopModelCapabilityView {
+        visible_capability_ids: allowed_capabilities.into_iter().collect(),
+    }
+}
+
 fn loop_safe_inline_text(value: impl Into<String>) -> String {
     sanitize_model_visible_text(value)
         .split_whitespace()
@@ -283,6 +312,25 @@ mod tests {
     }
 
     #[test]
+    fn rejects_goal_that_passes_raw_cap_but_exceeds_sanitized_cap() {
+        let error = materialize_goal_message(
+            &SubagentPromptGoal {
+                task: "answer\n\n\nbriefly".to_string(),
+                handoff: None,
+            },
+            SubagentPromptLimits {
+                max_raw_goal_bytes: DEFAULT_SUBAGENT_GOAL_RAW_MAX_BYTES,
+                max_goal_bytes: "Subagent task: answer briefly".len() - 1,
+            },
+        )
+        .expect_err("sanitized goal should fail when it exceeds the budget");
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::Invalid);
+        assert!(error.safe_summary.contains("too large"));
+        assert!(!error.safe_summary.contains("before sanitization"));
+    }
+
+    #[test]
     fn goal_budget_uses_sanitized_model_visible_text() {
         let goal = materialize_goal_message(
             &SubagentPromptGoal {
@@ -312,6 +360,22 @@ mod tests {
         let view = LoopModelCapabilityView {
             visible_capability_ids: material.allowed_capabilities.into_iter().collect(),
         };
+
+        assert_eq!(
+            view.visible_capability_ids
+                .iter()
+                .map(CapabilityId::as_str)
+                .collect::<Vec<_>>(),
+            vec!["demo.read", "demo.write"]
+        );
+    }
+
+    #[test]
+    fn capability_view_with_no_existing_surface_returns_full_allowlist() {
+        let view = subagent_prompt_capability_view(
+            BTreeSet::from([cap("demo.write"), cap("demo.read")]),
+            None,
+        );
 
         assert_eq!(
             view.visible_capability_ids

@@ -123,7 +123,6 @@ where
     host_gateway: Arc<G>,
     max_messages: usize,
     safety_context: InstructionSafetyContext,
-    instruction_materialization_store: Arc<dyn InstructionMaterializationStore>,
 }
 
 impl<S, G> ThreadBackedLoopModelGateway<S, G>
@@ -144,15 +143,7 @@ where
             host_gateway,
             max_messages,
             safety_context,
-            instruction_materialization_store: Arc::new(
-                InMemoryInstructionMaterializationStore::default(),
-            ),
         }
-    }
-
-    pub fn with_safety_context(mut self, safety_context: InstructionSafetyContext) -> Self {
-        self.safety_context = safety_context;
-        self
     }
 }
 
@@ -166,8 +157,14 @@ where
         &self,
         request: LoopModelGatewayRequest,
     ) -> Result<LoopModelResponse, LoopModelGatewayError> {
-        self.issue_host_prompt_bundle(&request.context, &request.request)
-            .await?;
+        let instruction_materialization_store: Arc<dyn InstructionMaterializationStore> =
+            Arc::new(InMemoryInstructionMaterializationStore::default());
+        self.issue_host_prompt_bundle(
+            &request.context,
+            &request.request,
+            Arc::clone(&instruction_materialization_store),
+        )
+        .await?;
         ThreadBackedLoopModelPort::new(
             Arc::clone(&self.thread_service),
             self.thread_scope.clone(),
@@ -175,7 +172,7 @@ where
             Arc::clone(&self.host_gateway),
             self.max_messages,
         )
-        .with_instruction_materialization_store(Arc::clone(&self.instruction_materialization_store))
+        .with_instruction_materialization_store(instruction_materialization_store)
         .stream_model(request.request)
         .await
         .map_err(host_error_to_model_gateway_error)
@@ -191,6 +188,7 @@ where
         &self,
         context: &LoopRunContext,
         request: &LoopModelRequest,
+        instruction_materialization_store: Arc<dyn InstructionMaterializationStore>,
     ) -> Result<(), LoopModelGatewayError> {
         let context_port = Arc::new(ThreadBackedLoopContextPort::new(
             Arc::clone(&self.thread_service),
@@ -204,9 +202,7 @@ where
             Arc::new(InMemoryLoopHostMilestoneSink::default()),
         )
         .with_safety_context(self.safety_context.clone())
-        .with_instruction_materialization_store(Arc::clone(
-            &self.instruction_materialization_store,
-        ));
+        .with_instruction_materialization_store(instruction_materialization_store);
         let prompt_bundle = prompt_port
             .build_prompt_bundle(LoopPromptBundleRequest {
                 mode: PromptMode::TextOnly,

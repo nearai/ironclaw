@@ -302,7 +302,7 @@ where
 }
 
 fn local_development_noop_safety_context() -> InstructionSafetyContext {
-    tracing::warn!(
+    tracing::debug!(
         "using local-development no-op instruction safety context; configure a real instruction safety scanner before product-live use"
     );
     InstructionSafetyContext::local_development_noop()
@@ -415,7 +415,7 @@ where
     )?);
     let capability_factory: Arc<dyn LoopCapabilityPortFactory> = Arc::new(
         DecoratingLoopCapabilityPortFactory::new(parts.capability_factory)
-            .with_decorator(spawn_decorator),
+            .with_layer(spawn_decorator),
     );
     let capability_surface_resolver: Arc<dyn CapabilitySurfaceProfileResolver> =
         Arc::new(SubagentCapabilitySurfaceResolver::new(
@@ -487,7 +487,7 @@ where
     )
 }
 
-trait LoopCapabilityPortDecorator: Send + Sync {
+trait LoopCapabilityPortLayer: Send + Sync {
     fn decorate(
         &self,
         run_context: &LoopRunContext,
@@ -497,7 +497,7 @@ trait LoopCapabilityPortDecorator: Send + Sync {
 
 struct DecoratingLoopCapabilityPortFactory {
     inner: Arc<dyn LoopCapabilityPortFactory>,
-    decorators: Vec<Arc<dyn LoopCapabilityPortDecorator>>,
+    decorators: Vec<Arc<dyn LoopCapabilityPortLayer>>,
 }
 
 impl DecoratingLoopCapabilityPortFactory {
@@ -508,7 +508,7 @@ impl DecoratingLoopCapabilityPortFactory {
         }
     }
 
-    fn with_decorator(mut self, decorator: Arc<dyn LoopCapabilityPortDecorator>) -> Self {
+    fn with_layer(mut self, decorator: Arc<dyn LoopCapabilityPortLayer>) -> Self {
         self.decorators.push(decorator);
         self
     }
@@ -550,7 +550,7 @@ impl SubagentSpawnCapabilityDecorator {
     }
 }
 
-impl LoopCapabilityPortDecorator for SubagentSpawnCapabilityDecorator {
+impl LoopCapabilityPortLayer for SubagentSpawnCapabilityDecorator {
     fn decorate(
         &self,
         run_context: &LoopRunContext,
