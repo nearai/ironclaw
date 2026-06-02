@@ -726,9 +726,11 @@ struct McpJsonRpcExchange {
 
 /// Known MCP JSON-RPC methods whose credential-routing behavior is host-owned.
 ///
-/// Handshake methods must remain credential-free. Only `tools/call` can receive
-/// host-planned credentials; production egress remains the source-of-truth for
-/// rejecting direct secret-store leases before outbound transport.
+/// Hosted MCP providers may require bearer authentication for the whole
+/// JSON-RPC session, including `initialize` and notifications. The host egress
+/// planner remains the source of truth for which staged credentials may be
+/// sent to the provider URL, and direct secret-store leases are rejected before
+/// outbound transport.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum McpJsonRpcMethod {
     Initialize,
@@ -751,17 +753,13 @@ impl McpJsonRpcMethod {
         self,
         credential_injections: Vec<RuntimeCredentialInjection>,
     ) -> Result<Vec<RuntimeCredentialInjection>, String> {
-        match self {
-            Self::ToolsCall | Self::ToolsList => {
-                if credential_injections.iter().any(|injection| {
-                    matches!(injection.source, RuntimeCredentialSource::SecretStoreLease)
-                }) {
-                    return Err(request_denied());
-                }
-                Ok(credential_injections)
-            }
-            Self::Initialize | Self::InitializedNotification => Ok(Vec::new()),
+        if credential_injections
+            .iter()
+            .any(|injection| matches!(injection.source, RuntimeCredentialSource::SecretStoreLease))
+        {
+            return Err(request_denied());
         }
+        Ok(credential_injections)
     }
 }
 

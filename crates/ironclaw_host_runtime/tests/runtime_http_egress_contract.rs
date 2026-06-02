@@ -2082,7 +2082,7 @@ async fn mcp_http_client_reuses_real_host_staged_network_policy_for_json_rpc_ses
 }
 
 #[tokio::test]
-async fn mcp_http_client_uses_one_shot_staged_credential_for_tool_call_only() {
+async fn mcp_http_client_uses_one_shot_staged_credential_for_session() {
     let network = JsonRpcMcpNetwork::new();
     let network_recorder = network.requests.clone();
     let services = test_obligation_services();
@@ -2144,21 +2144,18 @@ async fn mcp_http_client_uses_one_shot_staged_credential_for_tool_call_only() {
         3,
         "initialize, initialized notification, and tools/call should all reach transport"
     );
-    assert!(requests[..2].iter().all(|request| {
-        !request
-            .headers
-            .iter()
-            .any(|(name, _)| name == "authorization")
-    }));
-    assert_eq!(
-        requests[2]
-            .headers
-            .iter()
-            .find(|(name, _)| name == "authorization"),
-        Some(&(
-            "authorization".to_string(),
-            "Bearer sk-staged-mcp-secret".to_string()
-        ))
+    assert!(
+        requests.iter().all(|request| {
+            request
+                .headers
+                .iter()
+                .find(|(name, _)| name == "authorization")
+                == Some(&(
+                    "authorization".to_string(),
+                    "Bearer sk-staged-mcp-secret".to_string(),
+                ))
+        }),
+        "initialize, initialized, and tools/call must all receive the staged MCP credential"
     );
     drop(requests);
 }
@@ -2257,21 +2254,18 @@ async fn mcp_http_client_uses_credential_account_staged_from_resolved_source_sco
         3,
         "initialize, initialized notification, and tools/call should all reach transport"
     );
-    assert!(requests[..2].iter().all(|request| {
-        !request
-            .headers
-            .iter()
-            .any(|(name, _)| name == "authorization")
-    }));
-    assert_eq!(
-        requests[2]
-            .headers
-            .iter()
-            .find(|(name, _)| name == "authorization"),
-        Some(&(
-            "authorization".to_string(),
-            "Bearer sk-account-scope-mcp-secret".to_string()
-        ))
+    assert!(
+        requests.iter().all(|request| {
+            request
+                .headers
+                .iter()
+                .find(|(name, _)| name == "authorization")
+                == Some(&(
+                    "authorization".to_string(),
+                    "Bearer sk-account-scope-mcp-secret".to_string(),
+                ))
+        }),
+        "initialize, initialized, and tools/call must all receive the staged product-auth credential"
     );
     drop(requests);
 }
