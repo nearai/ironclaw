@@ -223,6 +223,14 @@ impl DefaultAuthInteractionService {
                 return Err(auth_rejected(AuthInteractionRejectionKind::StaleAuth));
             }
         }
+        self.cancel_auth_run(request, run_id).await
+    }
+
+    async fn cancel_auth_run(
+        &self,
+        request: ResolveAuthInteractionRequest,
+        run_id: TurnRunId,
+    ) -> Result<ResolveAuthInteractionResponse, ProductWorkflowError> {
         let response = self
             .turn_coordinator
             .cancel_run(CancelRunRequest {
@@ -235,6 +243,20 @@ impl DefaultAuthInteractionService {
             .await
             .map_err(map_auth_resume_error)?;
         Ok(ResolveAuthInteractionResponse::Canceled(response))
+    }
+
+    async fn cancel_parked_auth_without_flow(
+        &self,
+        request: ResolveAuthInteractionRequest,
+        run_id: TurnRunId,
+    ) -> Result<ResolveAuthInteractionResponse, ProductWorkflowError> {
+        match self.turn_gate_state(&request, run_id).await? {
+            BlockedGateState::ParkedOnGate => {}
+            BlockedGateState::NotParkedOnGate => {
+                return Err(auth_rejected(AuthInteractionRejectionKind::MissingAuth));
+            }
+        }
+        self.cancel_auth_run(request, run_id).await
     }
 }
 
@@ -273,9 +295,21 @@ impl AuthInteractionService for DefaultAuthInteractionService {
         request: ResolveAuthInteractionRequest,
     ) -> Result<ResolveAuthInteractionResponse, ProductWorkflowError> {
         let scope = AuthInteractionScope::from_turn(&request.scope, &request.actor);
-        let gate = self
+        let gate = match self
             .find_gate(&scope, request.run_id_hint, &request.gate_ref)
-            .await?;
+            .await
+        {
+            Ok(gate) => gate,
+            Err(ProductWorkflowError::AuthInteractionRejected {
+                kind: AuthInteractionRejectionKind::MissingAuth,
+            }) if matches!(request.decision, AuthInteractionDecision::Deny) => {
+                let Some(run_id) = request.run_id_hint else {
+                    return Err(auth_rejected(AuthInteractionRejectionKind::MissingAuth));
+                };
+                return self.cancel_parked_auth_without_flow(request, run_id).await;
+            }
+            Err(error) => return Err(error),
+        };
         let run_id = request.run_id_hint.unwrap_or_else(|| gate.run_id());
         match (
             self.turn_gate_state(&request, run_id).await?,

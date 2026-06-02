@@ -40,18 +40,108 @@ pub(crate) struct HostOAuthProviderSpec {
     pub(crate) exchange_scope_policy: ExchangeScopePolicy,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct OAuthClientMaterial {
+    pub(crate) client_id: OAuthClientId,
+    pub(crate) client_secret: Option<SecretString>,
+    pub(crate) redirect_uri: OAuthRedirectUri,
+    pub(crate) token_endpoint: String,
+}
+
+#[async_trait]
+pub(crate) trait OAuthClientMaterialSource: Send + Sync + fmt::Debug {
+    async fn exchange_material(
+        &self,
+        scope: &ResourceScope,
+        flow_id: AuthFlowId,
+    ) -> Result<OAuthClientMaterial, AuthProductError>;
+
+    async fn refresh_material(
+        &self,
+        scope: &ResourceScope,
+        refresh_secret: &SecretHandle,
+    ) -> Result<OAuthClientMaterial, AuthProductError>;
+
+    async fn bind_refresh_material(
+        &self,
+        scope: &ResourceScope,
+        flow_id: AuthFlowId,
+        refresh_secret: &SecretHandle,
+    ) -> Result<(), AuthProductError>;
+
+    async fn cleanup_exchange_material(
+        &self,
+        scope: &ResourceScope,
+        flow_id: AuthFlowId,
+    ) -> Result<(), AuthProductError>;
+}
+
+#[derive(Clone)]
+struct StaticOAuthClientMaterialSource {
+    material: OAuthClientMaterial,
+}
+
+impl fmt::Debug for StaticOAuthClientMaterialSource {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("StaticOAuthClientMaterialSource")
+            .field("client_id", &self.material.client_id)
+            .field("redirect_uri", &self.material.redirect_uri)
+            .field("token_endpoint", &self.material.token_endpoint)
+            .field(
+                "client_secret",
+                &self.material.client_secret.as_ref().map(|_| "[REDACTED]"),
+            )
+            .finish()
+    }
+}
+
+#[async_trait]
+impl OAuthClientMaterialSource for StaticOAuthClientMaterialSource {
+    async fn exchange_material(
+        &self,
+        _scope: &ResourceScope,
+        _flow_id: AuthFlowId,
+    ) -> Result<OAuthClientMaterial, AuthProductError> {
+        Ok(self.material.clone())
+    }
+
+    async fn refresh_material(
+        &self,
+        _scope: &ResourceScope,
+        _refresh_secret: &SecretHandle,
+    ) -> Result<OAuthClientMaterial, AuthProductError> {
+        Ok(self.material.clone())
+    }
+
+    async fn bind_refresh_material(
+        &self,
+        _scope: &ResourceScope,
+        _flow_id: AuthFlowId,
+        _refresh_secret: &SecretHandle,
+    ) -> Result<(), AuthProductError> {
+        Ok(())
+    }
+
+    async fn cleanup_exchange_material(
+        &self,
+        _scope: &ResourceScope,
+        _flow_id: AuthFlowId,
+    ) -> Result<(), AuthProductError> {
+        Ok(())
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct HostOAuthProviderClient {
     spec: HostOAuthProviderSpec,
     egress: Arc<dyn RuntimeHttpEgress>,
     secret_store: Arc<dyn SecretStore>,
     obligation_handler: Arc<dyn CapabilityObligationHandler>,
-    client_id: OAuthClientId,
-    client_secret: Option<SecretString>,
-    redirect_uri: OAuthRedirectUri,
+    client_material: Arc<dyn OAuthClientMaterialSource>,
+    static_client_material: Option<OAuthClientMaterial>,
     runtime: RuntimeKind,
     capability_id: CapabilityId,
-    token_host: String,
     timeout_ms: u32,
     response_body_limit: u64,
 }
@@ -67,36 +157,75 @@ impl HostOAuthProviderClient {
     ) -> Result<Self, AuthProductError> {
         let capability_id = CapabilityId::new(spec.capability_id)
             .map_err(|_| AuthProductError::BackendUnavailable)?;
-        let token_host = token_endpoint_host(spec.token_endpoint)?;
+        oauth_endpoint_host(spec.token_endpoint)?;
+        let material = OAuthClientMaterial {
+            client_id,
+            client_secret: None,
+            redirect_uri,
+            token_endpoint: spec.token_endpoint.to_string(),
+        };
         Ok(Self {
             spec,
             egress,
             secret_store,
             obligation_handler,
-            client_id,
-            client_secret: None,
-            redirect_uri,
+            client_material: Arc::new(StaticOAuthClientMaterialSource {
+                material: material.clone(),
+            }),
+            static_client_material: Some(material),
             runtime: RuntimeKind::System,
             capability_id,
-            token_host,
+            timeout_ms: DEFAULT_TIMEOUT_MS,
+            response_body_limit: DEFAULT_RESPONSE_BODY_LIMIT,
+        })
+    }
+
+    pub(crate) fn new_with_client_material(
+        spec: HostOAuthProviderSpec,
+        egress: Arc<dyn RuntimeHttpEgress>,
+        secret_store: Arc<dyn SecretStore>,
+        obligation_handler: Arc<dyn CapabilityObligationHandler>,
+        client_material: Arc<dyn OAuthClientMaterialSource>,
+    ) -> Result<Self, AuthProductError> {
+        let capability_id = CapabilityId::new(spec.capability_id)
+            .map_err(|_| AuthProductError::BackendUnavailable)?;
+        oauth_endpoint_host(spec.token_endpoint)?;
+        Ok(Self {
+            spec,
+            egress,
+            secret_store,
+            obligation_handler,
+            client_material,
+            static_client_material: None,
+            runtime: RuntimeKind::System,
+            capability_id,
             timeout_ms: DEFAULT_TIMEOUT_MS,
             response_body_limit: DEFAULT_RESPONSE_BODY_LIMIT,
         })
     }
 
     pub(crate) fn with_client_secret(mut self, client_secret: SecretString) -> Self {
-        self.client_secret = Some(client_secret);
+        let Some(mut material) = self.static_client_material.clone() else {
+            return self;
+        };
+        material.client_secret = Some(client_secret);
+        self.client_material = Arc::new(StaticOAuthClientMaterialSource {
+            material: material.clone(),
+        });
+        self.static_client_material = Some(material);
         self
     }
 
     async fn execute_token_request(
         &self,
         scope: ResourceScope,
+        token_endpoint: &str,
         body: Vec<u8>,
         refresh_request: bool,
     ) -> Result<OAuthTokenResponse, AuthProductError> {
-        let policy = token_network_policy(&self.token_host, self.response_body_limit);
-        authorize_token_egress(
+        let token_host = oauth_endpoint_host(token_endpoint)?;
+        let policy = oauth_network_policy(&token_host, self.response_body_limit);
+        authorize_oauth_egress(
             Arc::clone(&self.obligation_handler),
             &scope,
             &self.capability_id,
@@ -110,7 +239,7 @@ impl HostOAuthProviderClient {
                 scope,
                 capability_id: self.capability_id.clone(),
                 method: NetworkMethod::Post,
-                url: self.spec.token_endpoint.to_string(),
+                url: token_endpoint.to_string(),
                 headers: vec![
                     (
                         "content-type".to_string(),
@@ -128,15 +257,13 @@ impl HostOAuthProviderClient {
             .await
             .map_err(|_| AuthProductError::BackendUnavailable)?;
         if !(200..300).contains(&response.status) {
-            return Err(
-                if refresh_request && (500..600).contains(&response.status) {
-                    AuthProductError::BackendUnavailable
-                } else if refresh_request {
-                    AuthProductError::RefreshFailed
-                } else {
-                    AuthProductError::TokenExchangeFailed
-                },
-            );
+            return Err(if (500..600).contains(&response.status) {
+                AuthProductError::BackendUnavailable
+            } else if refresh_request {
+                AuthProductError::RefreshFailed
+            } else {
+                AuthProductError::TokenExchangeFailed
+            });
         }
         parse_token_response(&response.body).map_err(|error| {
             if refresh_request {
@@ -260,16 +387,11 @@ impl fmt::Debug for HostOAuthProviderClient {
         formatter
             .debug_struct("HostOAuthProviderClient")
             .field("provider_id", &self.spec.provider_id)
-            .field("client_id", &self.client_id)
-            .field("redirect_uri", &self.redirect_uri)
+            .field("client_material", &self.client_material)
             .field("runtime", &self.runtime)
             .field("capability_id", &self.capability_id)
             .field("timeout_ms", &self.timeout_ms)
             .field("response_body_limit", &self.response_body_limit)
-            .field(
-                "client_secret",
-                &self.client_secret.as_ref().map(|_| "[REDACTED]"),
-            )
             .finish()
     }
 }
@@ -289,21 +411,35 @@ impl AuthProviderClient for HostOAuthProviderClient {
         if callback_scope.is_system() {
             return Err(AuthProductError::CrossScopeDenied);
         }
+        let material = self
+            .client_material
+            .exchange_material(&callback_scope, context.flow_id)
+            .await?;
         let body = authorization_code_body(
             &self.spec,
-            self.client_id.as_str(),
-            self.redirect_uri.as_str(),
-            self.client_secret.as_ref(),
+            material.client_id.as_str(),
+            material.redirect_uri.as_str(),
+            material.client_secret.as_ref(),
             request.authorization_code.expose_secret(),
             request.pkce_verifier.expose_secret(),
         );
         let token_response = self
-            .execute_token_request(callback_scope.clone(), body, false)
+            .execute_token_request(
+                callback_scope.clone(),
+                &material.token_endpoint,
+                body,
+                false,
+            )
             .await?;
         let scopes = scopes_for_exchange(&self.spec, &token_response, &request.scopes)?;
         let stored_tokens = self
             .store_tokens(callback_scope, context.flow_id, token_response)
             .await?;
+        if let Some(refresh_secret) = &stored_tokens.refresh_secret {
+            self.client_material
+                .bind_refresh_material(&context.scope.resource, context.flow_id, refresh_secret)
+                .await?;
+        }
 
         Ok(OAuthProviderExchange {
             provider: request.provider,
@@ -331,14 +467,18 @@ impl AuthProviderClient for HostOAuthProviderClient {
         let refresh_token = self
             .load_refresh_token(&refresh_scope, &request.refresh_secret)
             .await?;
+        let material = self
+            .client_material
+            .refresh_material(&refresh_scope, &request.refresh_secret)
+            .await?;
         let body = refresh_body(
             &self.spec,
-            self.client_id.as_str(),
-            self.client_secret.as_ref(),
+            material.client_id.as_str(),
+            material.client_secret.as_ref(),
             refresh_token.expose_secret(),
         );
         let token_response = self
-            .execute_token_request(refresh_scope.clone(), body, true)
+            .execute_token_request(refresh_scope.clone(), &material.token_endpoint, body, true)
             .await?;
         let scopes = scopes_for_refresh(&token_response, &request.scopes);
         let stored_tokens = self
@@ -362,7 +502,11 @@ impl AuthProviderClient for HostOAuthProviderClient {
         }
         let mut handles = vec![exchange.access_secret.clone()];
         handles.extend(exchange.refresh_secret.clone());
-        self.delete_tokens(&context.scope.resource, &handles).await
+        self.delete_tokens(&context.scope.resource, &handles)
+            .await?;
+        self.client_material
+            .cleanup_exchange_material(&context.scope.resource, context.flow_id)
+            .await
     }
 }
 
@@ -502,7 +646,7 @@ fn refresh_token_handle(
     .map_err(|_| AuthProductError::BackendUnavailable)
 }
 
-fn token_endpoint_host(endpoint: &str) -> Result<String, AuthProductError> {
+pub(crate) fn oauth_endpoint_host(endpoint: &str) -> Result<String, AuthProductError> {
     let url = url::Url::parse(endpoint).map_err(|_| AuthProductError::BackendUnavailable)?;
     if url.scheme() != "https" {
         return Err(AuthProductError::BackendUnavailable);
@@ -513,7 +657,7 @@ fn token_endpoint_host(endpoint: &str) -> Result<String, AuthProductError> {
         .ok_or(AuthProductError::BackendUnavailable)
 }
 
-fn token_network_policy(token_host: &str, response_body_limit: u64) -> NetworkPolicy {
+pub(crate) fn oauth_network_policy(token_host: &str, response_body_limit: u64) -> NetworkPolicy {
     NetworkPolicy {
         allowed_targets: vec![NetworkTargetPattern {
             scheme: Some(NetworkScheme::Https),
@@ -525,7 +669,7 @@ fn token_network_policy(token_host: &str, response_body_limit: u64) -> NetworkPo
     }
 }
 
-async fn authorize_token_egress(
+pub(crate) async fn authorize_oauth_egress(
     handler: Arc<dyn CapabilityObligationHandler>,
     scope: &ResourceScope,
     capability_id: &CapabilityId,
@@ -585,7 +729,7 @@ async fn cleanup_written_access(
     provider_id: &str,
 ) {
     if let Err(delete_error) = store.delete(scope, access_secret).await {
-        tracing::debug!(
+        tracing::warn!(
             provider_id,
             secret_store_reason = delete_error.stable_reason(),
             "oauth callback cleanup failed after refresh token write failure"

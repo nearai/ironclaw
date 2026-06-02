@@ -902,13 +902,13 @@ async fn tool_response_to_host(
         for provider_call in &provider_calls {
             capabilities
                 .validate_provider_tool_call(provider_call)
-                .map_err(map_capability_host_error)?;
+                .map_err(map_provider_tool_output_error)?;
         }
         for provider_call in provider_calls {
             let candidate = capabilities
                 .register_provider_tool_call(provider_call)
                 .await
-                .map_err(map_capability_host_error)?;
+                .map_err(map_provider_tool_output_error)?;
             candidates.push(candidate);
         }
         debug!(
@@ -1062,6 +1062,18 @@ fn map_capability_host_error(error: AgentLoopHostError) -> HostManagedModelError
         | AgentLoopHostErrorKind::Internal => HostManagedModelErrorKind::Unavailable,
     };
     HostManagedModelError::safe(kind, error.safe_summary)
+}
+
+fn map_provider_tool_output_error(error: AgentLoopHostError) -> HostManagedModelError {
+    match error.kind {
+        AgentLoopHostErrorKind::Invalid | AgentLoopHostErrorKind::InvalidInvocation => {
+            HostManagedModelError::safe(
+                HostManagedModelErrorKind::InvalidOutput,
+                error.safe_summary,
+            )
+        }
+        _ => map_capability_host_error(error),
+    }
 }
 
 fn convert_messages(

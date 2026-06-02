@@ -9,6 +9,7 @@ import {
   removeExtension,
   fetchExtensionSetup,
   submitExtensionSetup,
+  startExtensionOauth,
   fetchPairingRequests,
   approvePairingCode,
 } from "../lib/extensions-api.js";
@@ -46,7 +47,13 @@ export function useExtensions() {
     mutationFn: ({ packageRef }) => installExtension(packageRef),
     onSuccess: (res, { displayName }) => {
       if (res.success) {
-        setActionResult({ type: "success", message: `${displayName || "Extension"} installed` });
+        setActionResult({
+          type: "success",
+          message:
+            res.message ||
+            res.instructions ||
+            `${displayName || "Extension"} installed`,
+        });
         if (res.auth_url) {
           window.open(res.auth_url, "_blank", "noopener,noreferrer");
         }
@@ -65,7 +72,13 @@ export function useExtensions() {
     mutationFn: ({ packageRef }) => activateExtension(packageRef),
     onSuccess: (res, { displayName }) => {
       if (res.success) {
-        setActionResult({ type: "success", message: `${displayName || "Extension"} activated` });
+        setActionResult({
+          type: "success",
+          message:
+            res.message ||
+            res.instructions ||
+            `${displayName || "Extension"} activated`,
+        });
         if (res.auth_url) {
           window.open(res.auth_url, "_blank", "noopener,noreferrer");
         }
@@ -167,6 +180,30 @@ export function useSetupSubmit(packageRef, onSuccess) {
       queryClient.invalidateQueries({ queryKey: ["extensions"] });
       queryClient.invalidateQueries({ queryKey: ["extension-setup", packageKey] });
       if (onSuccess) onSuccess(res);
+    },
+  });
+}
+
+export function useOauthSetup(packageRef) {
+  const queryClient = useQueryClient();
+  const packageKey = packageRef?.id || packageRef;
+
+  return useMutation({
+    mutationFn: ({ secret, popup }) =>
+      startExtensionOauth(packageRef, secret).then((res) => ({ res, popup })),
+    onSuccess: ({ res, popup }) => {
+      if (res.authorization_url && popup && !popup.closed) {
+        popup.location.href = res.authorization_url;
+      } else if (res.authorization_url) {
+        window.open(res.authorization_url, "_blank", "noopener,noreferrer");
+      } else if (popup && !popup.closed) {
+        popup.close();
+      }
+      queryClient.invalidateQueries({ queryKey: ["extension-setup", packageKey] });
+    },
+    onError: (_err, variables) => {
+      const popup = variables?.popup;
+      if (popup && !popup.closed) popup.close();
     },
   });
 }

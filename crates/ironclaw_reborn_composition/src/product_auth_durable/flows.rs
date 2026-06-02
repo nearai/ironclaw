@@ -92,7 +92,7 @@ where
                     .await?;
                 return Err(AuthProductError::UnknownOrExpiredFlow);
             }
-            Err(e) => return Err(e),
+            Err(error) => return Err(error),
         }
         if record.status == AuthFlowStatus::Completed {
             return Ok(record);
@@ -103,7 +103,6 @@ where
             .await?;
         Ok(record)
     }
-
     async fn complete_oauth_callback(
         &self,
         scope: &ironclaw_auth::AuthProductScope,

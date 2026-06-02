@@ -22,18 +22,20 @@ export function InstalledTab({ extensions, onActivate, onConfigure, onRemove, is
       <h3 className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-signal">
         All installed extensions
       </h3>
-      ${extensions.map(
-        (ext) => html`
-          <${ExtensionCard}
-            key=${packageId(ext)}
-            ext=${ext}
-            onActivate=${onActivate}
-            onConfigure=${onConfigure}
-            onRemove=${onRemove}
-            isBusy=${isBusy}
-          />
-        `
-      )}
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 2xl:grid-cols-3">
+        ${extensions.map(
+          (ext) => html`
+            <${ExtensionCard}
+              key=${packageId(ext)}
+              ext=${ext}
+              onActivate=${onActivate}
+              onConfigure=${onConfigure}
+              onRemove=${onRemove}
+              isBusy=${isBusy}
+            />
+          `
+        )}
+      </div>
     </div>
   `;
 }

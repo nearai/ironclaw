@@ -36,6 +36,52 @@ use ironclaw_wasm::{
 };
 use serde_json::json;
 
+macro_rules! google_wasm_services_for_test {
+    (
+        $package_id:expr,
+        $policy:expr,
+        $network:expr,
+        $secret_store:expr,
+        $account_access_secret:expr,
+        $required_scopes:expr $(,)?
+    ) => {{
+        let package_id = $package_id;
+        let policy = $policy;
+        let required_scopes = $required_scopes;
+        HostRuntimeServices::new(
+            Arc::new(registry_with_google_package(package_id)),
+            Arc::new(filesystem_with_google_package(package_id)),
+            Arc::new(governor_with_default_limit(sample_account())),
+            Arc::new(ObligatingAuthorizer::new(vec![
+                Obligation::ApplyNetworkPolicy {
+                    policy: policy.clone(),
+                },
+                Obligation::InjectCredentialAccountOnce {
+                    handle: SecretHandle::new("google_runtime_token").unwrap(),
+                    provider: RuntimeCredentialAccountProviderId::new("google").unwrap(),
+                    provider_scopes: required_scopes.clone(),
+                    requester_extension: ExtensionId::new(package_id).unwrap(),
+                },
+            ])),
+            ProcessServices::in_memory(),
+            CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        )
+        .with_secret_store($secret_store)
+        .with_runtime_credential_account_resolver(Arc::new(
+            FixedGoogleRuntimeCredentialAccountResolver {
+                expected_requester_extension: ExtensionId::new(package_id).unwrap(),
+                expected_scopes: required_scopes,
+                result: Ok($account_access_secret),
+            },
+        ))
+        .with_trust_policy(Arc::new(google_first_party_trust_policy(package_id)))
+        .try_with_host_http_egress($network)
+        .unwrap()
+        .try_with_wasm_runtime(WitToolRuntimeConfig::default(), WitToolHost::deny_all())
+        .unwrap()
+    }};
+}
+
 #[tokio::test]
 async fn host_runtime_services_routes_structured_github_wasm_search_through_runtime_http_egress() {
     let capability_id = CapabilityId::new("github.search_issues").unwrap();
@@ -60,6 +106,7 @@ async fn host_runtime_services_routes_structured_github_wasm_search_through_runt
             Obligation::InjectCredentialAccountOnce {
                 handle: slot_handle,
                 provider: RuntimeCredentialAccountProviderId::new("github").unwrap(),
+                provider_scopes: Vec::new(),
                 requester_extension: ExtensionId::new("github").unwrap(),
             },
         ])),
@@ -123,6 +170,272 @@ async fn host_runtime_services_routes_structured_github_wasm_search_through_runt
 }
 
 #[tokio::test]
+async fn host_runtime_services_routes_google_drive_wasm_list_files_with_scoped_google_credential() {
+    let capability_id = CapabilityId::new("google-drive.list_files").unwrap();
+    let scope = sample_scope(InvocationId::new());
+    let policy = google_drive_policy();
+    let network = RecordingNetworkHttpEgress::with_body(br#"{"files":[]}"#.to_vec());
+    let secret_store = Arc::new(InMemorySecretStore::new());
+    let slot_handle = SecretHandle::new("google_runtime_token").unwrap();
+    let account_access_secret = SecretHandle::new("google_manual_access").unwrap();
+    let required_scopes = vec!["https://www.googleapis.com/auth/drive.readonly".to_string()];
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_google_drive_package()),
+        Arc::new(filesystem_with_google_drive_package()),
+        Arc::new(governor_with_default_limit(sample_account())),
+        Arc::new(ObligatingAuthorizer::new(vec![
+            Obligation::ApplyNetworkPolicy {
+                policy: policy.clone(),
+            },
+            Obligation::InjectCredentialAccountOnce {
+                handle: slot_handle,
+                provider: RuntimeCredentialAccountProviderId::new("google").unwrap(),
+                provider_scopes: required_scopes.clone(),
+                requester_extension: ExtensionId::new("google-drive").unwrap(),
+            },
+        ])),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_secret_store(Arc::clone(&secret_store))
+    .with_runtime_credential_account_resolver(Arc::new(
+        FixedGoogleRuntimeCredentialAccountResolver {
+            expected_requester_extension: ExtensionId::new("google-drive").unwrap(),
+            expected_scopes: required_scopes,
+            result: Ok(account_access_secret.clone()),
+        },
+    ))
+    .with_trust_policy(Arc::new(google_drive_first_party_trust_policy()))
+    .try_with_host_http_egress(network.clone())
+    .unwrap()
+    .try_with_wasm_runtime(WitToolRuntimeConfig::default(), WitToolHost::deny_all())
+    .unwrap();
+    secret_store
+        .put(
+            scope.clone(),
+            account_access_secret,
+            SecretMaterial::from("ya29.fake_fixture_token"),
+        )
+        .await
+        .unwrap();
+
+    let outcome = services
+        .host_runtime_for_local_testing()
+        .invoke_capability(wasm_runtime_request_for_scope(
+            capability_id.clone(),
+            scope,
+            json!({"query": "name contains 'report'"}),
+        ))
+        .await
+        .unwrap();
+
+    match outcome {
+        RuntimeCapabilityOutcome::Completed(completed) => {
+            assert_eq!(completed.capability_id, capability_id);
+            assert_eq!(completed.output, json!({"files":[]}));
+        }
+        other => panic!("expected completed outcome, got {other:?}"),
+    }
+    let requests = network.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].method, NetworkMethod::Get);
+    assert!(
+        requests[0]
+            .url
+            .starts_with("https://www.googleapis.com/drive/v3/files?")
+    );
+    assert!(requests[0].url.contains("pageSize=25"));
+    assert!(requests[0].url.contains("q=name%20contains%20%27report%27"));
+    assert_eq!(requests[0].body, Vec::<u8>::new());
+    assert_eq!(requests[0].policy, policy);
+    assert_eq!(
+        requests[0]
+            .headers
+            .iter()
+            .find(|(name, _)| name == "authorization"),
+        Some(&(
+            "authorization".to_string(),
+            "Bearer ya29.fake_fixture_token".to_string(),
+        ))
+    );
+}
+
+#[tokio::test]
+async fn host_runtime_services_routes_google_docs_wasm_get_document_with_scoped_google_credential()
+{
+    let capability_id = CapabilityId::new("google-docs.get_document").unwrap();
+    let scope = sample_scope(InvocationId::new());
+    let policy = google_policy("docs.googleapis.com");
+    let network = RecordingNetworkHttpEgress::with_body(
+        br#"{"documentId":"doc-1","title":"Doc","revisionId":"r1","body":{"content":[{"endIndex":5}]}}"#.to_vec(),
+    );
+    let secret_store = Arc::new(InMemorySecretStore::new());
+    let account_access_secret = SecretHandle::new("google_docs_access").unwrap();
+    let required_scopes = vec!["https://www.googleapis.com/auth/documents.readonly".to_string()];
+    let services = google_wasm_services_for_test!(
+        "google-docs",
+        policy.clone(),
+        network.clone(),
+        Arc::clone(&secret_store),
+        account_access_secret.clone(),
+        required_scopes,
+    );
+    secret_store
+        .put(
+            scope.clone(),
+            account_access_secret,
+            SecretMaterial::from("ya29.fake_fixture_token"),
+        )
+        .await
+        .unwrap();
+
+    let outcome = services
+        .host_runtime_for_local_testing()
+        .invoke_capability(wasm_runtime_request_for_scope(
+            capability_id.clone(),
+            scope,
+            json!({"document_id": "doc-1"}),
+        ))
+        .await
+        .unwrap();
+
+    match outcome {
+        RuntimeCapabilityOutcome::Completed(completed) => {
+            assert_eq!(completed.capability_id, capability_id);
+            assert_eq!(completed.output["document_id"], json!("doc-1"));
+        }
+        other => panic!("expected completed outcome, got {other:?}"),
+    }
+    let requests = network.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].method, NetworkMethod::Get);
+    assert_eq!(
+        requests[0].url,
+        "https://docs.googleapis.com/v1/documents/doc-1"
+    );
+    assert_eq!(requests[0].body, Vec::<u8>::new());
+    assert_eq!(requests[0].policy, policy);
+    assert_google_bearer_header(&requests[0], "ya29.fake_fixture_token");
+}
+
+#[tokio::test]
+async fn host_runtime_services_routes_google_sheets_wasm_get_spreadsheet_with_scoped_google_credential()
+ {
+    let capability_id = CapabilityId::new("google-sheets.get_spreadsheet").unwrap();
+    let scope = sample_scope(InvocationId::new());
+    let policy = google_policy("sheets.googleapis.com");
+    let network = RecordingNetworkHttpEgress::with_body(
+        br#"{"spreadsheetId":"sheet-1","properties":{"title":"Sheet"},"spreadsheetUrl":"https://docs.google.com/spreadsheets/d/sheet-1","sheets":[],"namedRanges":[]}"#.to_vec(),
+    );
+    let secret_store = Arc::new(InMemorySecretStore::new());
+    let account_access_secret = SecretHandle::new("google_sheets_access").unwrap();
+    let required_scopes = vec!["https://www.googleapis.com/auth/spreadsheets.readonly".to_string()];
+    let services = google_wasm_services_for_test!(
+        "google-sheets",
+        policy.clone(),
+        network.clone(),
+        Arc::clone(&secret_store),
+        account_access_secret.clone(),
+        required_scopes,
+    );
+    secret_store
+        .put(
+            scope.clone(),
+            account_access_secret,
+            SecretMaterial::from("ya29.fake_fixture_token"),
+        )
+        .await
+        .unwrap();
+
+    let outcome = services
+        .host_runtime_for_local_testing()
+        .invoke_capability(wasm_runtime_request_for_scope(
+            capability_id.clone(),
+            scope,
+            json!({"spreadsheet_id": "sheet-1"}),
+        ))
+        .await
+        .unwrap();
+
+    match outcome {
+        RuntimeCapabilityOutcome::Completed(completed) => {
+            assert_eq!(completed.capability_id, capability_id);
+            assert_eq!(completed.output["spreadsheet_id"], json!("sheet-1"));
+        }
+        other => panic!("expected completed outcome, got {other:?}"),
+    }
+    let requests = network.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].method, NetworkMethod::Get);
+    assert_eq!(
+        requests[0].url,
+        "https://sheets.googleapis.com/v4/spreadsheets/sheet-1?fields=spreadsheetId,properties.title,spreadsheetUrl,sheets.properties,namedRanges"
+    );
+    assert_eq!(requests[0].body, Vec::<u8>::new());
+    assert_eq!(requests[0].policy, policy);
+    assert_google_bearer_header(&requests[0], "ya29.fake_fixture_token");
+}
+
+#[tokio::test]
+async fn host_runtime_services_routes_google_slides_wasm_get_presentation_with_scoped_google_credential()
+ {
+    let capability_id = CapabilityId::new("google-slides.get_presentation").unwrap();
+    let scope = sample_scope(InvocationId::new());
+    let policy = google_policy("slides.googleapis.com");
+    let network = RecordingNetworkHttpEgress::with_body(
+        br#"{"presentationId":"slides-1","title":"Slides","revisionId":"r1","slides":[]}"#.to_vec(),
+    );
+    let secret_store = Arc::new(InMemorySecretStore::new());
+    let account_access_secret = SecretHandle::new("google_slides_access").unwrap();
+    let required_scopes =
+        vec!["https://www.googleapis.com/auth/presentations.readonly".to_string()];
+    let services = google_wasm_services_for_test!(
+        "google-slides",
+        policy.clone(),
+        network.clone(),
+        Arc::clone(&secret_store),
+        account_access_secret.clone(),
+        required_scopes,
+    );
+    secret_store
+        .put(
+            scope.clone(),
+            account_access_secret,
+            SecretMaterial::from("ya29.fake_fixture_token"),
+        )
+        .await
+        .unwrap();
+
+    let outcome = services
+        .host_runtime_for_local_testing()
+        .invoke_capability(wasm_runtime_request_for_scope(
+            capability_id.clone(),
+            scope,
+            json!({"presentation_id": "slides-1"}),
+        ))
+        .await
+        .unwrap();
+
+    match outcome {
+        RuntimeCapabilityOutcome::Completed(completed) => {
+            assert_eq!(completed.capability_id, capability_id);
+            assert_eq!(completed.output["presentation_id"], json!("slides-1"));
+        }
+        other => panic!("expected completed outcome, got {other:?}"),
+    }
+    let requests = network.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].method, NetworkMethod::Get);
+    assert_eq!(
+        requests[0].url,
+        "https://slides.googleapis.com/v1/presentations/slides-1"
+    );
+    assert_eq!(requests[0].body, Vec::<u8>::new());
+    assert_eq!(requests[0].policy, policy);
+    assert_google_bearer_header(&requests[0], "ya29.fake_fixture_token");
+}
+
+#[tokio::test]
 async fn host_runtime_services_maps_github_wasm_input_errors_to_invalid_input() {
     let capability_id = CapabilityId::new("github.search_issues").unwrap();
     let scope = sample_scope(InvocationId::new());
@@ -143,6 +456,7 @@ async fn host_runtime_services_maps_github_wasm_input_errors_to_invalid_input() 
             Obligation::InjectCredentialAccountOnce {
                 handle: slot_handle,
                 provider: RuntimeCredentialAccountProviderId::new("github").unwrap(),
+                provider_scopes: Vec::new(),
                 requester_extension: ExtensionId::new("github").unwrap(),
             },
         ])),
@@ -204,6 +518,7 @@ async fn host_runtime_services_missing_github_runtime_secret_blocks_on_auth() {
             Obligation::InjectCredentialAccountOnce {
                 handle: slot_handle,
                 provider: RuntimeCredentialAccountProviderId::new("github").unwrap(),
+                provider_scopes: Vec::new(),
                 requester_extension: ExtensionId::new("github").unwrap(),
             },
         ])),
@@ -768,6 +1083,53 @@ async fn bundled_github_wasm_leaves_success_json_for_host_output_decode() {
     assert_eq!(execution.error, None);
 }
 
+#[test]
+fn bundled_google_drive_wasm_rejects_invalid_context_derived_dispatch_inputs() {
+    let http = Arc::new(RecordingWasmHostHttp::ok(WasmHttpResponse {
+        status: 200,
+        headers_json: "{}".to_string(),
+        body: br#"{"files":[]}"#.to_vec(),
+    }));
+
+    let missing_context = execute_bundled_google_drive_wasm(json!({}), None, Arc::clone(&http));
+    assert_eq!(
+        wasm_error_code_or_text(&missing_context).as_deref(),
+        Some("missing_invocation_context")
+    );
+
+    let malformed_context =
+        execute_bundled_google_drive_wasm(json!({}), Some("not-json"), Arc::clone(&http));
+    assert_eq!(
+        wasm_error_code_or_text(&malformed_context).as_deref(),
+        Some("invalid_invocation_context")
+    );
+
+    let unsupported_capability = execute_bundled_google_drive_wasm(
+        json!({}),
+        Some(r#"{"capability_id":"google-drive.nope"}"#),
+        Arc::clone(&http),
+    );
+    assert_eq!(
+        wasm_error_code_or_text(&unsupported_capability).as_deref(),
+        Some("unsupported_google_drive_capability")
+    );
+
+    let action_collision = execute_bundled_google_drive_wasm(
+        json!({"action": "list_files"}),
+        Some(r#"{"capability_id":"google-drive.list_files"}"#),
+        Arc::clone(&http),
+    );
+    assert_eq!(
+        wasm_error_code_or_text(&action_collision).as_deref(),
+        Some("invalid_parameters")
+    );
+
+    assert!(
+        http.requests().unwrap().is_empty(),
+        "dispatch-wrapper validation failures must block before HTTP egress"
+    );
+}
+
 fn assert_failed_outcome(outcome: RuntimeCapabilityOutcome, expected_kind: RuntimeFailureKind) {
     match outcome {
         RuntimeCapabilityOutcome::Failed(failure) => assert_eq!(failure.kind, expected_kind),
@@ -784,6 +1146,16 @@ fn structured_wasm_error_code(execution: &WitToolExecution) -> Option<String> {
         "structured WASM guest error must include a non-empty kind"
     );
     parsed["code"].as_str().map(str::to_string)
+}
+
+fn wasm_error_code_or_text(execution: &WitToolExecution) -> Option<String> {
+    let error = execution.error.as_deref()?;
+    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(error)
+        && let Some(code) = parsed["code"].as_str()
+    {
+        return Some(code.to_string());
+    }
+    Some(error.to_string())
 }
 
 #[derive(Debug, Clone)]
@@ -880,6 +1252,29 @@ impl RuntimeCredentialAccountResolver for FixedRuntimeCredentialAccountResolver 
     }
 }
 
+#[derive(Debug)]
+struct FixedGoogleRuntimeCredentialAccountResolver {
+    expected_requester_extension: ExtensionId,
+    expected_scopes: Vec<String>,
+    result: Result<SecretHandle, CredentialStageError>,
+}
+
+#[async_trait]
+impl RuntimeCredentialAccountResolver for FixedGoogleRuntimeCredentialAccountResolver {
+    async fn resolve_access_secret(
+        &self,
+        request: RuntimeCredentialAccountRequest<'_>,
+    ) -> Result<SecretHandle, CredentialStageError> {
+        assert_eq!(request.provider.as_str(), "google");
+        assert_eq!(
+            request.requester_extension,
+            &self.expected_requester_extension
+        );
+        assert_eq!(request.provider_scopes, self.expected_scopes.as_slice());
+        self.result.clone()
+    }
+}
+
 fn registry_with_github_package() -> ExtensionRegistry {
     let manifest = ExtensionManifest::parse_with_host_api_contracts(
         &std::fs::read_to_string(github_asset_root().join("manifest.toml")).unwrap(),
@@ -898,6 +1293,10 @@ fn registry_with_github_package() -> ExtensionRegistry {
     registry
 }
 
+fn registry_with_google_drive_package() -> ExtensionRegistry {
+    registry_with_google_package("google-drive")
+}
+
 fn filesystem_with_github_package() -> LocalFilesystem {
     let mut filesystem = LocalFilesystem::new();
     filesystem
@@ -909,14 +1308,83 @@ fn filesystem_with_github_package() -> LocalFilesystem {
     filesystem
 }
 
+fn filesystem_with_google_drive_package() -> LocalFilesystem {
+    filesystem_with_google_package("google-drive")
+}
+
+fn registry_with_google_package(package_id: &str) -> ExtensionRegistry {
+    let manifest = ExtensionManifest::parse_with_host_api_contracts(
+        &std::fs::read_to_string(google_asset_root(package_id).join("manifest.toml")).unwrap(),
+        ManifestSource::HostBundled,
+        &default_host_port_catalog().unwrap(),
+        &default_host_api_contract_registry().unwrap(),
+    )
+    .unwrap();
+    let package = ExtensionPackage::from_manifest(
+        manifest,
+        VirtualPath::new(format!("/system/extensions/{package_id}")).unwrap(),
+    )
+    .unwrap();
+    let mut registry = ExtensionRegistry::new();
+    registry.insert(package).unwrap();
+    registry
+}
+
+fn filesystem_with_google_package(package_id: &str) -> LocalFilesystem {
+    let mut filesystem = LocalFilesystem::new();
+    filesystem
+        .mount_local(
+            VirtualPath::new("/system/extensions").unwrap(),
+            HostPath::from_path_buf(
+                google_asset_root(package_id)
+                    .parent()
+                    .unwrap()
+                    .to_path_buf(),
+            ),
+        )
+        .unwrap();
+    filesystem
+}
+
 fn github_asset_root() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .join("crates/ironclaw_first_party_extensions/assets/github")
 }
 
+fn google_drive_asset_root() -> std::path::PathBuf {
+    google_asset_root("google-drive")
+}
+
+fn google_asset_root(package_id: &str) -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("crates/ironclaw_first_party_extensions/assets")
+        .join(package_id)
+}
+
 fn github_wasm_path() -> std::path::PathBuf {
     github_asset_root().join("wasm/github_tool.wasm")
+}
+
+fn google_drive_wasm_path() -> std::path::PathBuf {
+    google_drive_asset_root().join("wasm/google_drive_tool.wasm")
+}
+
+fn google_drive_policy() -> NetworkPolicy {
+    google_policy("www.googleapis.com")
+}
+
+fn google_policy(host_pattern: &str) -> NetworkPolicy {
+    NetworkPolicy {
+        allowed_targets: vec![NetworkTargetPattern {
+            scheme: Some(NetworkScheme::Https),
+            host_pattern: host_pattern.to_string(),
+            port: None,
+        }],
+        deny_private_ip_ranges: true,
+        max_egress_bytes: Some(10_000),
+    }
 }
 
 fn github_first_party_trust_policy() -> HostTrustPolicy {
@@ -936,6 +1404,42 @@ fn github_first_party_trust_policy() -> HostTrustPolicy {
         ),
     ]))])
     .unwrap()
+}
+
+fn google_drive_first_party_trust_policy() -> HostTrustPolicy {
+    google_first_party_trust_policy("google-drive")
+}
+
+fn google_first_party_trust_policy(package_id: &str) -> HostTrustPolicy {
+    HostTrustPolicy::new(vec![Box::new(AdminConfig::with_entries(vec![
+        AdminEntry::for_local_manifest(
+            PackageId::new(package_id).unwrap(),
+            format!("/system/extensions/{package_id}/manifest.toml"),
+            None,
+            HostTrustAssignment::first_party(),
+            vec![
+                EffectKind::DispatchCapability,
+                EffectKind::Network,
+                EffectKind::UseSecret,
+                EffectKind::ExternalWrite,
+            ],
+            None,
+        ),
+    ]))])
+    .unwrap()
+}
+
+fn assert_google_bearer_header(request: &NetworkHttpRequest, expected_token: &str) {
+    assert_eq!(
+        request
+            .headers
+            .iter()
+            .find(|(name, _)| name == "authorization"),
+        Some(&(
+            "authorization".to_string(),
+            format!("Bearer {expected_token}"),
+        ))
+    );
 }
 
 fn wasm_runtime_request_for_scope(
@@ -1041,6 +1545,24 @@ fn execute_bundled_github_wasm(
                 .to_string(),
             ),
         )
+        .unwrap()
+}
+
+fn execute_bundled_google_drive_wasm(
+    input: serde_json::Value,
+    context: Option<&str>,
+    http: Arc<RecordingWasmHostHttp>,
+) -> WitToolExecution {
+    let runtime = WitToolRuntime::new(WitToolRuntimeConfig::default()).unwrap();
+    let wasm_bytes = std::fs::read(google_drive_wasm_path())
+        .expect("first-party Google Drive WASM must be built");
+    let prepared = runtime.prepare("google-drive", &wasm_bytes).unwrap();
+    let request = match context {
+        Some(context) => WitToolRequest::new(input.to_string()).with_context(context.to_string()),
+        None => WitToolRequest::new(input.to_string()),
+    };
+    runtime
+        .execute(&prepared, WitToolHost::deny_all().with_http(http), request)
         .unwrap()
 }
 

@@ -68,16 +68,18 @@ export function RegistryTab({
           ? html`<p className="py-4 text-sm text-iron-300">
               ${t("ext.registry.noMatch")}
             </p>`
-          : filtered.map(
-              (entry) => html`
-                <${RegistryCard}
-                  key=${packageId(entry)}
-                  entry=${entry}
-                  onInstall=${onInstall}
-                  isBusy=${isBusy}
-                />
-              `
-            )}
+          : html`<div className="grid grid-cols-1 gap-3 sm:grid-cols-2 2xl:grid-cols-3">
+              ${filtered.map(
+                (entry) => html`
+                  <${RegistryCard}
+                    key=${packageId(entry)}
+                    entry=${entry}
+                    onInstall=${onInstall}
+                    isBusy=${isBusy}
+                  />
+                `
+              )}
+            </div>`}
       </div>
     </div>
   `;

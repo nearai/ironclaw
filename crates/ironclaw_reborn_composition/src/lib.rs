@@ -21,6 +21,8 @@
 use std::sync::Arc;
 
 mod auth;
+#[cfg(test)]
+mod auth_dcr_tests;
 mod available_extensions;
 mod budget;
 mod budget_events;
@@ -43,8 +45,11 @@ mod local_dev_mounts;
 mod local_runtime_profile;
 mod manual_token_flow;
 mod mcp;
+mod mcp_discovery;
 mod nearai_mcp;
 mod notion_oauth;
+mod oauth_dcr;
+mod oauth_dcr_protocol;
 mod oauth_provider_client;
 mod product_auth_durable;
 mod product_auth_providers;
@@ -66,13 +71,14 @@ mod runtime;
 mod runtime_input;
 mod skill_listing;
 #[cfg(feature = "slack-v2-host-beta")]
-mod slack_serve;
+pub mod slack_serve;
 #[cfg(feature = "test-support")]
 pub mod test_support;
 mod web_access;
 mod webui;
 #[cfg(feature = "webui-v2-beta")]
 mod webui_body_limit;
+mod webui_extension_credentials;
 #[cfg(feature = "webui-v2-beta")]
 mod webui_rate_limit;
 #[cfg(feature = "webui-v2-beta")]

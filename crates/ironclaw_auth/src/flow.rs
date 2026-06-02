@@ -104,6 +104,17 @@ pub struct CredentialAccountUpdateBinding {
     pub granted_extensions: Vec<ExtensionId>,
 }
 
+impl CredentialAccountUpdateBinding {
+    pub fn from_projection(account: &crate::CredentialAccountProjection) -> Self {
+        Self {
+            account_id: account.id,
+            ownership: account.ownership,
+            owner_extension: account.owner_extension.clone(),
+            granted_extensions: account.granted_extensions.clone(),
+        }
+    }
+}
+
 /// Durable scoped auth flow record. OAuth state/verifier/code values are
 /// represented by hashes only; raw callback material must stay in one-shot
 /// provider-client inputs.

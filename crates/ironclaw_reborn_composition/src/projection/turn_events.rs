@@ -335,16 +335,25 @@ async fn blocked_prompt_payload(
             // available. Missing = backward-compatible (fields omitted as None).
             let owner_user_id = event.owner_user_id.as_ref().unwrap_or(caller_user_id);
             let challenge = match auth_challenges {
-                Some(provider) => {
-                    provider
-                        .challenge_for_gate(
-                            &event.scope,
-                            owner_user_id,
-                            event.run_id,
-                            &gate_ref_str,
-                        )
-                        .await
-                }
+                Some(provider) => provider
+                    .challenge_for_gate(
+                        &event.scope,
+                        owner_user_id,
+                        event.run_id,
+                        &gate_ref_str,
+                        &state.credential_requirements,
+                    )
+                    .await
+                    .map_err(|error| {
+                        tracing::debug!(
+                            %error,
+                            run_id = %event.run_id,
+                            "auth challenge lookup failed during WebUI projection"
+                        );
+                        ProductAdapterError::WorkflowTransient {
+                            reason: RedactedString::new("auth challenge lookup failed"),
+                        }
+                    })?,
                 None => None,
             };
             let base_view = AuthPromptView {

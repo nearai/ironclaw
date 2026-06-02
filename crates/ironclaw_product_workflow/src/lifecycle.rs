@@ -340,12 +340,45 @@ pub struct LifecycleExtensionSummary {
     pub source: LifecycleExtensionSource,
     pub runtime_kind: LifecycleExtensionRuntimeKind,
     pub visible_read_only_capability_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub credential_requirements: Vec<LifecycleExtensionCredentialRequirement>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub onboarding: Option<LifecycleExtensionOnboarding>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LifecycleInstalledExtensionSummary {
     pub summary: LifecycleExtensionSummary,
     pub phase: LifecyclePhase,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LifecycleExtensionCredentialRequirement {
+    pub name: String,
+    pub provider: String,
+    pub required: bool,
+    pub setup: LifecycleExtensionCredentialSetup,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LifecycleExtensionOnboarding {
+    pub instructions: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_instructions: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub setup_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_next_step: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum LifecycleExtensionCredentialSetup {
+    ManualToken,
+    #[serde(rename = "oauth")]
+    OAuth {
+        scopes: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

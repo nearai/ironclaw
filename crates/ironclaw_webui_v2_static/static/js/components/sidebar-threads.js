@@ -102,8 +102,53 @@ function ThreadItem({ thread, isActive, onSelect, onDelete }) {
   `;
 }
 
+const BUCKET_ORDER = [
+  "Today",
+  "Yesterday",
+  "Previous 7 days",
+  "Previous 30 days",
+  "Older",
+];
+
+function bucketOf(thread) {
+  const iso = thread.updated_at || thread.created_at;
+  if (!iso) return "Older";
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "Older";
+  const dayMs = 86400000;
+  const startOf = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  const diff = startOf(new Date()) - startOf(date);
+  if (diff <= 0) return "Today";
+  if (diff <= dayMs) return "Yesterday";
+  if (diff <= 7 * dayMs) return "Previous 7 days";
+  if (diff <= 30 * dayMs) return "Previous 30 days";
+  return "Older";
+}
+
 export function SidebarThreads({ threads, activeThreadId, onSelect, onDelete }) {
   const [collapsed, setCollapsed] = React.useState(false);
+  const [query, setQuery] = React.useState("");
+
+  const groups = React.useMemo(() => {
+    const q = query.trim().toLowerCase();
+    const filtered = q
+      ? threads.filter((thread) =>
+          (thread.title || thread.id || "").toLowerCase().includes(q)
+        )
+      : threads;
+    const byBucket = new Map();
+    for (const thread of filtered) {
+      const bucket = bucketOf(thread);
+      if (!byBucket.has(bucket)) byBucket.set(bucket, []);
+      byBucket.get(bucket).push(thread);
+    }
+    return BUCKET_ORDER.filter((b) => byBucket.has(b)).map((b) => ({
+      bucket: b,
+      items: byBucket.get(b),
+    }));
+  }, [threads, query]);
+
+  const totalMatches = groups.reduce((n, g) => n + g.items.length, 0);
 
   return html`
     <div className="flex min-h-0 flex-1 flex-col px-2">
@@ -128,22 +173,49 @@ export function SidebarThreads({ threads, activeThreadId, onSelect, onDelete }) 
 
       ${!collapsed &&
       html`
+        ${threads.length > 0 &&
+        html`<div className="relative mb-1 mt-1 px-1">
+          <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[var(--v2-text-faint)]">
+            <${Icon} name="search" className="h-3.5 w-3.5" />
+          </span>
+          <input
+            type="text"
+            value=${query}
+            onInput=${(event) => setQuery(event.currentTarget.value)}
+            placeholder="Search chats…"
+            className="h-8 w-full rounded-[8px] border border-[var(--v2-panel-border)] bg-[var(--v2-input-bg)] pl-8 pr-2 text-[12px] text-[var(--v2-text-strong)] outline-none placeholder:text-[var(--v2-text-faint)] focus:border-[var(--v2-accent)]"
+          />
+        </div>`}
         <div
-          className="mt-1 flex flex-col gap-1 overflow-y-auto [scrollbar-width:thin]"
+          className="mt-1 flex flex-col gap-2 overflow-y-auto [scrollbar-width:thin]"
         >
           ${threads.length === 0 &&
           html`<div className="px-3 py-2 text-[12px] text-[var(--v2-text-faint)]">
             No conversations yet
           </div>`}
-          ${threads.map(
-            (thread) => html`
-              <${ThreadItem}
-                key=${thread.id}
-                thread=${thread}
-                isActive=${thread.id === activeThreadId}
-                onSelect=${onSelect}
-                onDelete=${onDelete}
-              />
+          ${threads.length > 0 &&
+          totalMatches === 0 &&
+          html`<div className="px-3 py-2 text-[12px] text-[var(--v2-text-faint)]">
+            No chats match “${query}”
+          </div>`}
+          ${groups.map(
+            (group) => html`
+              <div key=${group.bucket} className="flex flex-col gap-1">
+                <span className="px-3 pt-1 text-[10px] font-semibold uppercase tracking-wider text-[var(--v2-text-faint)]">
+                  ${group.bucket}
+                </span>
+                ${group.items.map(
+                  (thread) => html`
+                    <${ThreadItem}
+                      key=${thread.id}
+                      thread=${thread}
+                      isActive=${thread.id === activeThreadId}
+                      onSelect=${onSelect}
+                      onDelete=${onDelete}
+                    />
+                  `
+                )}
+              </div>
             `
           )}
         </div>

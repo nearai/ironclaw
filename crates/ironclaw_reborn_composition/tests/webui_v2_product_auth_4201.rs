@@ -1264,8 +1264,10 @@ async fn challenge_for_gate_returns_oauth_url_view_for_seeded_flow() {
             &UserId::new(USER).expect("user"),
             turn_run_id,
             gate_ref_str,
+            &[],
         )
         .await
+        .expect("lookup")
         .expect("found");
     assert!(matches!(view.kind, AuthPromptChallengeKind::OAuthUrl));
     assert_eq!(view.provider.as_str(), "google");
@@ -1284,8 +1286,10 @@ async fn challenge_for_gate_returns_oauth_url_view_for_seeded_flow() {
                 &UserId::new("other-user-4201").expect("user"),
                 turn_run_id,
                 gate_ref_str,
+                &[],
             )
             .await
+            .expect("lookup")
             .is_none(),
         "challenge lookup must reject the wrong owner user"
     );
@@ -1296,8 +1300,10 @@ async fn challenge_for_gate_returns_oauth_url_view_for_seeded_flow() {
                 &UserId::new(USER).expect("user"),
                 TurnRunId::new(),
                 gate_ref_str,
+                &[],
             )
             .await
+            .expect("lookup")
             .is_none(),
         "challenge lookup must reject the wrong turn run"
     );
@@ -1389,8 +1395,10 @@ async fn challenge_for_gate_cancelled_flow_returns_none() {
             &UserId::new(USER).expect("user"),
             turn_run_id,
             gate_ref_str,
+            &[],
         )
-        .await;
+        .await
+        .expect("lookup");
     assert!(
         result.is_none(),
         "cancelled flow must not be surfaced by challenge_for_gate"
@@ -1459,8 +1467,10 @@ async fn challenge_for_gate_threadless_flow_returns_none_for_thread_scope() {
             &UserId::new(USER).expect("user"),
             turn_run_id,
             gate_ref_str,
+            &[],
         )
-        .await;
+        .await
+        .expect("lookup");
     assert!(
         result.is_none(),
         "thread-scoped lookup must reject matching flows that lack thread_id"
@@ -1535,8 +1545,10 @@ async fn challenge_for_gate_wrong_tenant_returns_none() {
             &UserId::new(USER).expect("user"),
             turn_run_id,
             gate_ref_str,
+            &[],
         )
-        .await;
+        .await
+        .expect("lookup");
     assert!(
         result.is_none(),
         "different-tenant caller must not receive another tenant's challenge"
@@ -1609,8 +1621,10 @@ async fn challenge_for_gate_returns_manual_token_view_for_seeded_flow() {
             &UserId::new(USER).expect("user"),
             turn_run_id,
             gate_ref_str,
+            &[],
         )
         .await
+        .expect("lookup")
         .expect("found");
     assert!(matches!(view.kind, AuthPromptChallengeKind::ManualToken));
     assert_eq!(view.provider.as_str(), "slack");
@@ -1685,8 +1699,10 @@ async fn challenge_for_gate_returns_other_kind_view_for_setup_required_flow() {
             &UserId::new(USER).expect("user"),
             turn_run_id,
             gate_ref_str,
+            &[],
         )
         .await
+        .expect("lookup")
         .expect("found");
     assert!(matches!(view.kind, AuthPromptChallengeKind::Other));
     assert_eq!(view.provider.as_str(), "github");

@@ -26,7 +26,6 @@ use ironclaw_host_api::ingress::{
     WebSocketOriginPolicy,
 };
 use ironclaw_product_adapters::ProtocolAuthEvidence;
-use ironclaw_slack_v2_adapter::parse_slack_url_verification_challenge;
 use ironclaw_wasm_product_adapters::{
     NativeProductAdapterRunner, RunnerError, WebhookProcessOutcome,
 };
@@ -34,10 +33,21 @@ use serde::Serialize;
 
 use crate::webui_serve::{PublicRouteDrain, PublicRouteMount};
 
+mod installation;
+pub use installation::{
+    ResolvedSlackIngress, ResolvedSlackInstallation, SlackApiAppId, SlackChannelId,
+    SlackEnterpriseId, SlackEnvelopeMetadata, SlackIngressError, SlackInstallationRateLimitConfig,
+    SlackInstallationRateLimiter, SlackInstallationRecord, SlackInstallationResolver,
+    SlackInstallationSelector, SlackTeamId, SlackUserId, StaticSlackInstallationResolver,
+};
+
+#[cfg(test)]
+mod handler_tests;
+
 pub const SLACK_EVENTS_PATH: &str = "/webhooks/slack/events";
 const SLACK_EVENTS_ROUTE_ID: &str = "slack.events";
 const SLACK_EVENTS_BODY_LIMIT_BYTES: NonZeroU64 = NonZeroU64::new(1024 * 1024).unwrap(); // safety: 1 MiB is a non-zero literal.
-const SLACK_EVENTS_MAX_REQUESTS: NonZeroU32 = NonZeroU32::new(120).unwrap(); // safety: 120 requests is a non-zero literal.
+const SLACK_EVENTS_MAX_REQUESTS: NonZeroU32 = NonZeroU32::new(12_000).unwrap(); // safety: 12,000 requests is a non-zero literal.
 const SLACK_EVENTS_RATE_WINDOW_SECONDS: NonZeroU32 = NonZeroU32::new(60).unwrap(); // safety: 60 seconds is a non-zero literal.
 
 pub trait SlackEventsWebhookDispatcher: Send + Sync {
@@ -83,17 +93,81 @@ impl SlackEventsWebhookDispatcher for NativeProductAdapterRunner {
 }
 
 #[derive(Clone)]
+pub struct SlackIngressService {
+    resolver: Arc<dyn SlackInstallationResolver>,
+    installation_rate_limiter: SlackInstallationRateLimiter,
+}
+
+impl SlackIngressService {
+    pub fn new(resolver: Arc<dyn SlackInstallationResolver>) -> Self {
+        Self::with_rate_limit_config(resolver, SlackInstallationRateLimitConfig::default())
+    }
+
+    pub fn with_rate_limit_config(
+        resolver: Arc<dyn SlackInstallationResolver>,
+        rate_limit: SlackInstallationRateLimitConfig,
+    ) -> Self {
+        Self {
+            resolver,
+            installation_rate_limiter: SlackInstallationRateLimiter::new(rate_limit),
+        }
+    }
+
+    async fn handle_events(&self, headers: HeaderMap, body: Bytes) -> Response {
+        let ingress = match self.resolver.resolve_ingress(&headers, body.as_ref()).await {
+            Ok(ingress) => ingress,
+            Err(error) => return ingress_error_response(error),
+        };
+        if let Err(error) = self.installation_rate_limiter.check(ingress.installation()) {
+            return ingress_error_response(error);
+        }
+
+        match ingress {
+            ResolvedSlackIngress::UrlVerification { challenge, .. } => {
+                (StatusCode::OK, challenge).into_response()
+            }
+            ResolvedSlackIngress::Event { installation, .. } => match installation
+                .dispatcher()
+                .process_verified_webhook_immediate_ack(body.as_ref(), installation.evidence())
+                .await
+            {
+                Ok(_) => (StatusCode::OK, "ok").into_response(),
+                Err(error) => runner_error_response(error),
+            },
+        }
+    }
+
+    pub async fn drain_installations(&self) {
+        self.resolver.drain_installations().await;
+    }
+}
+
+impl std::fmt::Debug for SlackIngressService {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SlackIngressService")
+            .field("resolver", &"Arc<dyn SlackInstallationResolver>")
+            .field("installation_rate_limiter", &self.installation_rate_limiter)
+            .finish()
+    }
+}
+
+#[derive(Clone)]
 pub struct SlackEventsRouteState {
-    dispatcher: Arc<dyn SlackEventsWebhookDispatcher>,
+    ingress: SlackIngressService,
 }
 
 impl SlackEventsRouteState {
-    pub fn new(dispatcher: Arc<dyn SlackEventsWebhookDispatcher>) -> Self {
-        Self { dispatcher }
+    pub fn new(ingress: SlackIngressService) -> Self {
+        Self { ingress }
+    }
+
+    pub fn from_resolver(resolver: Arc<dyn SlackInstallationResolver>) -> Self {
+        Self::new(SlackIngressService::new(resolver))
     }
 
     pub async fn drain_immediate_ack_tasks(&self) {
-        self.dispatcher.drain_immediate_ack_tasks().await;
+        self.ingress.drain_installations().await;
     }
 }
 
@@ -107,7 +181,7 @@ impl std::fmt::Debug for SlackEventsRouteState {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("SlackEventsRouteState")
-            .field("dispatcher", &"Arc<dyn SlackEventsWebhookDispatcher>")
+            .field("ingress", &self.ingress)
             .finish()
     }
 }
@@ -144,13 +218,12 @@ fn slack_events_policy() -> IngressPolicy {
             max_bytes: SLACK_EVENTS_BODY_LIMIT_BYTES,
         },
         rate_limit: RateLimitPolicy::Limited {
-            // Interim pre-auth guard. The descriptor-driven limiter runs before
-            // Slack signature verification, so it cannot yet bucket by verified
-            // installation/workspace. `PerIp` is also not a safe substitute for
-            // Slack because events arrive from shared Slack egress pools. A
-            // verified-installation limiter belongs in a follow-up extension to
-            // the ingress rate-limit model or a post-verification Slack-specific
-            // limiter.
+            // Coarse pre-auth abuse guard. Keep this well above the
+            // per-installation quota below: the route-level service adds a
+            // second post-verification bucket keyed by the resolved Slack
+            // tenant/installation, because Slack events can arrive from shared
+            // Slack egress pools and one workspace must not consume the budget
+            // for every tenant.
             scope: RateLimitScope::Global,
             max_requests: SLACK_EVENTS_MAX_REQUESTS,
             window_seconds: SLACK_EVENTS_RATE_WINDOW_SECONDS,
@@ -169,37 +242,60 @@ async fn slack_events_handler(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let evidence = match state
-        .dispatcher
-        .verify_webhook_auth(&headers, body.as_ref())
-    {
-        Ok(evidence) => evidence,
-        Err(error) => return runner_error_response(error),
-    };
+    state.ingress.handle_events(headers, body).await
+}
 
-    match parse_slack_url_verification_challenge(body.as_ref(), &evidence) {
-        Ok(Some(challenge)) => return (StatusCode::OK, challenge.challenge).into_response(),
-        Ok(None) => {}
-        Err(error) => {
+fn ingress_error_response(error: SlackIngressError) -> Response {
+    match error {
+        SlackIngressError::Runner(error) => runner_error_response(error),
+        SlackIngressError::Envelope(error) => {
             tracing::debug!(
                 target = "ironclaw::reborn::slack_events",
                 error = %error,
-                "Slack URL verification parse failed"
+                "Slack Events API envelope metadata parse failed"
             );
-            return error_response(
+            error_response(
                 StatusCode::BAD_REQUEST,
                 SlackWebhookErrorCategory::MalformedPayload,
-            );
+            )
         }
-    }
-
-    match state
-        .dispatcher
-        .process_verified_webhook_immediate_ack(body.as_ref(), &evidence)
-        .await
-    {
-        Ok(_) => (StatusCode::OK, "ok").into_response(),
-        Err(error) => runner_error_response(error),
+        SlackIngressError::InstallationNotFound => {
+            tracing::debug!(
+                target = "ironclaw::reborn::slack_events",
+                reason = "not_found",
+                "Slack Events API installation resolution failed"
+            );
+            error_response(
+                StatusCode::UNAUTHORIZED,
+                SlackWebhookErrorCategory::Authentication,
+            )
+        }
+        SlackIngressError::AmbiguousInstallation => {
+            tracing::debug!(
+                target = "ironclaw::reborn::slack_events",
+                reason = "ambiguous",
+                "Slack Events API installation resolution failed"
+            );
+            error_response(
+                StatusCode::UNAUTHORIZED,
+                SlackWebhookErrorCategory::Authentication,
+            )
+        }
+        SlackIngressError::InstallationRateLimited {
+            tenant_id,
+            adapter_installation_id,
+        } => {
+            tracing::debug!(
+                target = "ironclaw::reborn::slack_events",
+                tenant_id = %tenant_id,
+                adapter_installation_id = %adapter_installation_id,
+                "Slack Events API installation rate limit exceeded"
+            );
+            error_response(
+                StatusCode::TOO_MANY_REQUESTS,
+                SlackWebhookErrorCategory::Capacity,
+            )
+        }
     }
 }
 
@@ -266,6 +362,7 @@ mod tests {
     use axum::body::Body;
     use axum::http::Request;
     use http_body_util::BodyExt;
+    use ironclaw_host_api::TenantId;
     use ironclaw_product_adapters::auth::mark_request_signature_verified;
     use ironclaw_product_adapters::capabilities::ProductAdapterCapabilities;
     use ironclaw_product_adapters::external::{
@@ -281,6 +378,7 @@ mod tests {
         ProjectionSubscriptionRequest, ProtocolAuthEvidence, ProtocolAuthFailure,
         ProtocolHttpEgress, UserMessagePayload,
     };
+    use ironclaw_slack_v2_adapter::SlackPayloadParseError;
     use ironclaw_wasm_product_adapters::{
         NativeProductAdapterRunnerConfig, SharedSecretHeaderAuth, WebhookAuth,
     };
@@ -340,6 +438,80 @@ mod tests {
                 ..Self::verified()
             }
         }
+    }
+
+    struct FakeSlackResolver {
+        dispatcher: Arc<dyn SlackEventsWebhookDispatcher>,
+    }
+
+    impl FakeSlackResolver {
+        fn new(dispatcher: Arc<dyn SlackEventsWebhookDispatcher>) -> Self {
+            Self { dispatcher }
+        }
+    }
+
+    impl SlackInstallationResolver for FakeSlackResolver {
+        fn resolve_ingress<'a>(
+            &'a self,
+            headers: &'a HeaderMap,
+            body: &'a [u8],
+        ) -> Pin<
+            Box<dyn Future<Output = Result<ResolvedSlackIngress, SlackIngressError>> + Send + 'a>,
+        > {
+            Box::pin(async move {
+                let evidence = self.dispatcher.verify_webhook_auth(headers, body)?;
+                let installation = ResolvedSlackInstallation::new(
+                    tenant_id("tenant-alpha"),
+                    installation_id("install-alpha"),
+                    evidence,
+                    Arc::clone(&self.dispatcher),
+                );
+                let value: serde_json::Value = serde_json::from_slice(body).map_err(|err| {
+                    SlackIngressError::Envelope(SlackPayloadParseError::InvalidJson {
+                        reason: err.to_string(),
+                    })
+                })?;
+                if value.get("type").and_then(|kind| kind.as_str()) == Some("url_verification") {
+                    let challenge = value
+                        .get("challenge")
+                        .and_then(|challenge| challenge.as_str())
+                        .ok_or_else(|| {
+                            SlackIngressError::Envelope(SlackPayloadParseError::InvalidJson {
+                                reason: "missing challenge".into(),
+                            })
+                        })?;
+                    return Ok(ResolvedSlackIngress::UrlVerification {
+                        installation,
+                        challenge: challenge.to_string(),
+                    });
+                }
+                Ok(ResolvedSlackIngress::Event {
+                    installation,
+                    metadata: SlackEnvelopeMetadata::new(
+                        Some(SlackTeamId::new("T-alpha")),
+                        None,
+                        Some(SlackApiAppId::new("A-alpha")),
+                        Some(SlackUserId::new("U-install-alpha")),
+                        Some(SlackUserId::new("U123")),
+                        Some(SlackChannelId::new("D123")),
+                    ),
+                })
+            })
+        }
+
+        fn drain_installations<'a>(&'a self) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+            Box::pin(async move {
+                self.dispatcher.drain_immediate_ack_tasks().await;
+            })
+        }
+    }
+
+    fn tenant_id(value: &str) -> TenantId {
+        TenantId::new(value).expect("valid tenant")
+    }
+
+    fn installation_id(value: &str) -> AdapterInstallationId {
+        AdapterInstallationId::new(value).expect("valid installation")
     }
 
     struct StaticAdapter {
@@ -470,13 +642,33 @@ mod tests {
     }
 
     async fn post_slack_events(dispatcher: FakeSlackDispatcher, body: &'static str) -> Response {
-        let mount = slack_events_route_mount(SlackEventsRouteState::new(Arc::new(dispatcher)));
+        post_slack_events_with_headers(Arc::new(dispatcher), body, Vec::new()).await
+    }
+
+    async fn post_slack_events_with_headers(
+        dispatcher: Arc<dyn SlackEventsWebhookDispatcher>,
+        body: &'static str,
+        headers: Vec<(&'static str, &'static str)>,
+    ) -> Response {
+        let resolver = Arc::new(FakeSlackResolver::new(dispatcher));
+        let mount = slack_events_route_mount(SlackEventsRouteState::from_resolver(resolver));
+        post_to_mount(&mount, body, headers).await
+    }
+
+    async fn post_to_mount(
+        mount: &PublicRouteMount,
+        body: &'static str,
+        headers: Vec<(&'static str, &'static str)>,
+    ) -> Response {
+        let mut builder = Request::builder().method("POST").uri(SLACK_EVENTS_PATH);
+        for (name, value) in headers {
+            builder = builder.header(name, value);
+        }
         mount
             .router
+            .clone()
             .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri(SLACK_EVENTS_PATH)
+                builder
                     .body(Body::from(body))
                     .expect("request should build"),
             )
@@ -606,7 +798,9 @@ mod tests {
                 std::num::NonZeroUsize::new(1).expect("nonzero"),
             ),
         );
-        let state = SlackEventsRouteState::new(Arc::new(runner));
+        let state = SlackEventsRouteState::from_resolver(Arc::new(FakeSlackResolver::new(
+            Arc::new(runner),
+        )));
         let mount = slack_events_route_mount(state.clone());
         let response = mount
             .router

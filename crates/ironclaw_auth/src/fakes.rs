@@ -143,7 +143,6 @@ impl AuthFlowRecordSource for InMemoryAuthProductServices {
 #[async_trait]
 impl AuthFlowManager for InMemoryAuthProductServices {
     async fn create_flow(&self, request: NewAuthFlow) -> Result<AuthFlowRecord, AuthProductError> {
-        let now = Utc::now();
         let mut state = self.lock_state();
         if let Some(binding) = &request.update_binding {
             let account = state
@@ -156,6 +155,7 @@ impl AuthFlowManager for InMemoryAuthProductServices {
         if state.flows.contains_key(&id) {
             return Err(AuthProductError::BackendUnavailable);
         }
+        let now = Utc::now();
         let record = AuthFlowRecord {
             id,
             scope: request.scope,

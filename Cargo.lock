@@ -4767,6 +4767,7 @@ dependencies = [
  "ironclaw_threads",
  "ironclaw_trust",
  "ironclaw_turns",
+ "secrecy",
  "serde",
  "serde_json",
  "tempfile",

@@ -7,7 +7,6 @@ use ironclaw_turns::{
     SanitizedFailure, TurnCheckpointId, TurnRunId, TurnRunState, TurnStatus,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 use crate::{
     LifecyclePackageRef, LifecyclePhase, LifecycleProductPayload, LifecycleReadinessBlocker,
@@ -236,9 +235,9 @@ pub struct RebornExtensionInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub onboarding_state: Option<String>,
+    pub onboarding_state: Option<RebornExtensionOnboardingState>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub onboarding: Option<Value>,
+    pub onboarding: Option<RebornExtensionOnboardingPayload>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -254,9 +253,28 @@ pub struct RebornExtensionActionResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instructions: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub onboarding_state: Option<String>,
+    pub onboarding_state: Option<RebornExtensionOnboardingState>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub onboarding: Option<Value>,
+    pub onboarding: Option<RebornExtensionOnboardingPayload>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RebornExtensionOnboardingState {
+    AuthRequired,
+    SetupRequired,
+    Installed,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornExtensionOnboardingPayload {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_instructions: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub setup_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_next_step: Option<String>,
 }
 
 /// WebUI v2 setup projection for extension lifecycle.
@@ -273,4 +291,43 @@ pub struct RebornSetupExtensionResponse {
     pub blockers: Vec<LifecycleReadinessBlocker>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub payload: Option<LifecycleProductPayload>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub secrets: Vec<RebornExtensionSetupSecret>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fields: Vec<RebornExtensionSetupField>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub onboarding: Option<RebornExtensionOnboardingPayload>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornExtensionSetupSecret {
+    pub name: String,
+    pub provider: String,
+    pub prompt: String,
+    pub optional: bool,
+    pub provided: bool,
+    pub setup: RebornExtensionCredentialSetup,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_ref: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RebornExtensionCredentialSetup {
+    ManualToken,
+    #[serde(rename = "oauth")]
+    OAuth {
+        account_label: String,
+        scopes: Vec<String>,
+        invocation_id: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornExtensionSetupField {
+    pub name: String,
+    pub prompt: String,
+    pub optional: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placeholder: Option<String>,
 }

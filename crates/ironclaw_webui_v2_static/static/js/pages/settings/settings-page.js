@@ -79,11 +79,14 @@ export function SettingsPage() {
       <div className="min-h-0 flex-1 overflow-y-auto">
         <div className="v2-page-entrance flex-1 p-4 sm:p-6">
           <div className="space-y-5">
-            <${RestartBanner}
-              visible=${needsRestart}
-              gatewayStatus=${gatewayStatus}
-              gatewayStatusQuery=${gatewayStatusQuery}
-            />
+            ${needsRestart &&
+            html`<div className="sticky top-0 z-20 -mx-4 -mt-4 mb-1 bg-[color-mix(in_srgb,var(--v2-canvas)_92%,transparent)] px-4 pt-4 backdrop-blur sm:-mx-6 sm:px-6">
+              <${RestartBanner}
+                visible=${true}
+                gatewayStatus=${gatewayStatus}
+                gatewayStatusQuery=${gatewayStatusQuery}
+              />
+            </div>`}
 
             <${SettingsToolbar}
               settingsExport=${query.data}

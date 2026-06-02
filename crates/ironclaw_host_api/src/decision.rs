@@ -58,6 +58,8 @@ pub enum Obligation {
     InjectCredentialAccountOnce {
         handle: SecretHandle,
         provider: RuntimeCredentialAccountProviderId,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        provider_scopes: Vec<String>,
         requester_extension: ExtensionId,
     },
     FirstPartyCredentialStagedViaHostPort {
@@ -78,6 +80,8 @@ pub enum Obligation {
 pub struct RuntimeCredentialAuthRequirement {
     pub provider: RuntimeCredentialAccountProviderId,
     pub requester_extension: ExtensionId,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub provider_scopes: Vec<String>,
 }
 
 /// Canonical obligation evaluation classes.

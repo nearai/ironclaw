@@ -10,6 +10,7 @@
 #![warn(unreachable_pub)]
 
 mod anthropic_oauth;
+mod anthropic_thinking;
 pub mod auth;
 #[cfg(feature = "bedrock")]
 mod bedrock;
@@ -34,6 +35,7 @@ pub mod registry;
 #[cfg(feature = "registry-provider-factory")]
 mod resolution;
 pub mod response_cache;
+mod responses_reasoning;
 pub mod retry;
 mod rig_adapter;
 pub mod runtime;

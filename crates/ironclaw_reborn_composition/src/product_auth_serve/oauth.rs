@@ -42,6 +42,7 @@ pub(super) async fn oauth_start_handler(
                     .map_err(ProductAuthRouteFailure::from)?,
                 opaque_state_hash,
                 pkce_verifier_hash,
+                update_binding: None,
                 expires_at: request.expires_at,
             }),
     )
@@ -65,6 +66,44 @@ pub(super) async fn google_oauth_start_handler(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Json(request): Json<GoogleOAuthStartRequest>,
 ) -> Result<Json<GoogleOAuthStartResponse>, ProductAuthRouteFailure> {
+    start_google_oauth_flow(state, caller, request, None, false).await
+}
+
+pub(super) async fn extension_oauth_start_handler(
+    State(state): State<ProductAuthRouteState>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path(package_id): Path<String>,
+    Json(request): Json<ExtensionOAuthStartRequest>,
+) -> Result<Json<GoogleOAuthStartResponse>, ProductAuthRouteFailure> {
+    if request.provider != GOOGLE_PROVIDER_ID {
+        return Err(ProductAuthRouteFailure::invalid_request());
+    }
+    let requester_extension =
+        ExtensionId::new(package_id).map_err(|_| ProductAuthRouteFailure::invalid_request())?;
+    start_google_oauth_flow(
+        state,
+        caller,
+        GoogleOAuthStartRequest {
+            account_label: request.account_label,
+            scopes: request.scopes,
+            expires_at: request.expires_at,
+            session_id: None,
+            thread_id: None,
+            invocation_id: request.invocation_id,
+        },
+        Some(requester_extension),
+        true,
+    )
+    .await
+}
+
+async fn start_google_oauth_flow(
+    state: ProductAuthRouteState,
+    caller: WebUiAuthenticatedCaller,
+    request: GoogleOAuthStartRequest,
+    requester_extension: Option<ExtensionId>,
+    require_invocation_id: bool,
+) -> Result<Json<GoogleOAuthStartResponse>, ProductAuthRouteFailure> {
     let now = Utc::now();
     if request.expires_at <= now
         || request.expires_at > now + ChronoDuration::seconds(PRODUCT_AUTH_FLOW_MAX_TTL_SECONDS)
@@ -79,15 +118,25 @@ pub(super) async fn google_oauth_start_handler(
         .map_err(|_| ProductAuthRouteFailure::invalid_request())?;
     let requested_scopes =
         parse_google_requested_scopes(&request.scopes).map_err(ProductAuthRouteFailure::from)?;
-    let scope = scope_from_authenticated_caller_parts(
-        &caller,
-        &ScopeFields {
-            session_id: request.session_id,
-            thread_id: request.thread_id,
-            invocation_id: None,
-        },
-    )?;
+    let fields = ScopeFields {
+        session_id: request.session_id,
+        thread_id: request.thread_id,
+        invocation_id: request.invocation_id,
+    };
+    let scope = if require_invocation_id {
+        scope_from_authenticated_caller_parts_requiring_invocation(&caller, &fields)?
+    } else {
+        scope_from_authenticated_caller_parts(&caller, &fields)?
+    };
     let flow_id = AuthFlowId::new();
+    let update_binding = scoped_update_binding_for_requester(
+        &state,
+        scope.clone(),
+        provider.clone(),
+        requested_scopes.clone(),
+        requester_extension.as_ref(),
+    )
+    .await?;
     let opaque_state = GoogleOAuthCallbackState::new(
         flow_id,
         scope.clone(),
@@ -121,6 +170,7 @@ pub(super) async fn google_oauth_start_handler(
             authorization_url: authorization_url.clone(),
             opaque_state_hash: opaque_state_hash.clone(),
             pkce_verifier_hash,
+            update_binding,
             expires_at: request.expires_at,
         },
     ))
@@ -162,15 +212,21 @@ pub(super) async fn oauth_callback_handler(
             .as_str(),
     )?;
 
-    if is_authorized_callback_candidate(&query) {
-        run_with_backend_timeout(
-            state
-                .product_auth
-                .ensure_oauth_callback_flow_known(&scope, flow_id),
+    let flow_provider = if is_authorized_callback_candidate(&query) {
+        Some(
+            run_with_backend_timeout(
+                state
+                    .product_auth
+                    .ensure_oauth_callback_flow_known(&scope, flow_id),
+            )
+            .await?,
         )
-        .await?;
-    }
-    let outcome = callback_outcome_from_query(&state, flow_id, &scope, &query)?;
+    } else {
+        None
+    };
+    let outcome =
+        callback_outcome_from_query(&state, flow_id, &scope, flow_provider.as_ref(), &query)
+            .await?;
 
     let response = match run_with_backend_timeout(state.product_auth.handle_oauth_callback(
         RebornOAuthCallbackRequest {
@@ -312,10 +368,11 @@ pub(super) async fn google_oauth_callback_handler(
     Ok(Json(response))
 }
 
-pub(super) fn callback_outcome_from_query(
+pub(super) async fn callback_outcome_from_query(
     state: &ProductAuthRouteState,
     flow_id: AuthFlowId,
-    _scope: &AuthProductScope,
+    scope: &AuthProductScope,
+    flow_provider: Option<&AuthProviderId>,
     query: &OAuthCallbackQuery,
 ) -> Result<RebornOAuthCallbackOutcome, ProductAuthRouteFailure> {
     if query
@@ -327,23 +384,31 @@ pub(super) fn callback_outcome_from_query(
     }
 
     let provider = required_callback_value(query.provider.as_deref())?;
+    let provider = AuthProviderId::new(provider.to_string())
+        .map_err(|_| ProductAuthRouteFailure::malformed_callback())?;
+    if flow_provider.is_some_and(|known_provider| known_provider != &provider) {
+        return Err(ProductAuthRouteFailure::malformed_callback());
+    }
     let account_label = required_callback_value(query.account_label.as_deref())?;
     let code = query
         .code
         .as_ref()
         .ok_or_else(ProductAuthRouteFailure::malformed_callback)?;
-    let pkce_verifier = state.pkce_verifier_for_callback(flow_id)?;
+    let pkce_verifier = match state.pkce_verifier_for_callback(flow_id) {
+        Ok(verifier) => verifier,
+        Err(cache_error) => state
+            .product_auth
+            .oauth_pkce_verifier_for_flow(scope, flow_provider.unwrap_or(&provider), flow_id)
+            .await?
+            .ok_or(cache_error)?,
+    };
     let scopes = parse_provider_scopes(query.scopes.as_deref())?;
-    if scopes.is_empty() {
-        return Err(ProductAuthRouteFailure::malformed_callback());
-    }
     let authorization_code_hash = authorization_code_hash(code.expose_secret())?;
     let pkce_verifier_hash = pkce_verifier_hash(pkce_verifier.expose_secret())?;
 
     Ok(RebornOAuthCallbackOutcome::Authorized {
         provider_request: OAuthProviderCallbackRequest {
-            provider: AuthProviderId::new(provider.to_string())
-                .map_err(|_| ProductAuthRouteFailure::malformed_callback())?,
+            provider,
             account_label: CredentialAccountLabel::new(account_label.to_string())
                 .map_err(|_| ProductAuthRouteFailure::malformed_callback())?,
             authorization_code: OAuthAuthorizationCode::new(code.clone_secret())

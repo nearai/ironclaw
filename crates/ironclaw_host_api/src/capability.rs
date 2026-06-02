@@ -79,6 +79,8 @@ pub struct RuntimeCredentialRequirement {
     pub handle: SecretHandle,
     #[serde(default)]
     pub source: RuntimeCredentialRequirementSource,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub provider_scopes: Vec<String>,
     pub audience: NetworkTargetPattern,
     pub target: RuntimeCredentialTarget,
     pub required: bool,
@@ -91,7 +93,18 @@ pub enum RuntimeCredentialRequirementSource {
     SecretHandle,
     ProductAuthAccount {
         provider: RuntimeCredentialAccountProviderId,
+        #[serde(default)]
+        setup: RuntimeCredentialAccountSetup,
     },
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RuntimeCredentialAccountSetup {
+    #[default]
+    ManualToken,
+    #[serde(rename = "oauth")]
+    OAuth { scopes: Vec<String> },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

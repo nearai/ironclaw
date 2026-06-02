@@ -235,6 +235,7 @@ async fn webui_event_stream_uses_credential_requirement_for_manual_token_auth_pr
     let credential_requirements = vec![RuntimeCredentialAuthRequirement {
         provider: RuntimeCredentialAccountProviderId::new("github").unwrap(),
         requester_extension: ExtensionId::new("github").unwrap(),
+        provider_scopes: Vec::new(),
     }];
     let event_log_dyn: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
     let services = build_reborn_projection_services(

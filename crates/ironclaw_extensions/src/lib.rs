@@ -233,6 +233,17 @@ pub struct ExtensionPackage {
     pub manifest: ExtensionManifest,
     pub capabilities: Vec<CapabilityDescriptor>,
     pub manifest_digest: Option<String>,
+    pub descriptor_schema_mode: CapabilityDescriptorSchemaMode,
+}
+
+/// How package capability descriptor schemas are derived from the manifest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CapabilityDescriptorSchemaMode {
+    /// Descriptors must carry the manifest's `$ref` schema projection.
+    ManifestRefs,
+    /// Descriptors may carry inline schemas, but all non-schema fields must
+    /// still match the manifest projection exactly.
+    InlineDynamic,
 }
 
 impl ExtensionPackage {
@@ -269,6 +280,38 @@ impl ExtensionPackage {
             manifest,
             capabilities,
             manifest_digest,
+            descriptor_schema_mode: CapabilityDescriptorSchemaMode::ManifestRefs,
+        })
+    }
+
+    pub fn from_host_bundled_manifest_with_inline_dynamic_schemas(
+        manifest: ExtensionManifest,
+        root: VirtualPath,
+        manifest_digest: Option<String>,
+        capabilities: Vec<CapabilityDescriptor>,
+    ) -> Result<Self, ExtensionError> {
+        if manifest.source != ManifestSource::HostBundled {
+            return Err(ExtensionError::InvalidManifest {
+                reason:
+                    "inline dynamic descriptor schemas are only supported for host-bundled packages"
+                        .to_string(),
+            });
+        }
+        ensure_extension_root_matches(&manifest.id, &root)?;
+        let expected = capability_descriptors_from_manifest(&manifest)?;
+        if !descriptors_match_except_schema(&capabilities, &expected) {
+            return Err(ExtensionError::InvalidManifest {
+                reason: "inline dynamic capability descriptors do not match manifest declarations"
+                    .to_string(),
+            });
+        }
+        Ok(Self {
+            id: manifest.id.clone(),
+            root,
+            manifest,
+            capabilities,
+            manifest_digest,
+            descriptor_schema_mode: CapabilityDescriptorSchemaMode::InlineDynamic,
         })
     }
 
@@ -286,7 +329,15 @@ impl ExtensionPackage {
             });
         }
         ensure_extension_root_matches(&self.manifest.id, &self.root)?;
-        if self.capabilities != capability_descriptors_from_manifest(&self.manifest)? {
+        let expected = capability_descriptors_from_manifest(&self.manifest)?;
+        let consistent = match self.descriptor_schema_mode {
+            CapabilityDescriptorSchemaMode::ManifestRefs => self.capabilities == expected,
+            CapabilityDescriptorSchemaMode::InlineDynamic => {
+                self.manifest.source == ManifestSource::HostBundled
+                    && descriptors_match_except_schema(&self.capabilities, &expected)
+            }
+        };
+        if !consistent {
             return Err(ExtensionError::InvalidManifest {
                 reason: "package capability descriptors do not match manifest declarations"
                     .to_string(),
@@ -339,7 +390,20 @@ impl ExtensionPackage {
     }
 }
 
+fn descriptors_match_except_schema(
+    actual: &[CapabilityDescriptor],
+    expected: &[CapabilityDescriptor],
+) -> bool {
+    actual.len() == expected.len()
+        && actual.iter().zip(expected).all(|(actual, expected)| {
+            let mut normalized = actual.clone();
+            normalized.parameters_schema = expected.parameters_schema.clone();
+            normalized == *expected
+        })
+}
+
 pub mod host_api;
+mod hosted_mcp_discovery;
 mod installations;
 mod lifecycle;
 mod registry;
@@ -347,6 +411,10 @@ pub mod v2;
 
 pub use host_api::capability_provider::{
     CAPABILITY_PROVIDER_HOST_API_ID, CAPABILITY_PROVIDER_SECTION, CapabilityProviderHostApiContract,
+};
+pub use hosted_mcp_discovery::{
+    HostedMcpDiscoveredTool, HostedMcpDiscoveredToolAnnotations, is_hosted_http_mcp_package,
+    package_with_discovered_hosted_mcp_tools,
 };
 pub use v2::{
     CapabilityDeclV2, CapabilityVisibility, ExtensionManifestV2, ExtensionRuntimeV2,
