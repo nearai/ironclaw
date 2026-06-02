@@ -4,12 +4,12 @@ use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_extensions::{CapabilityManifest, ExtensionError};
 use ironclaw_host_api::{
-    EffectKind, HostApiError, PermissionMode, ResourceScope, ResourceUsage,
+    CapabilityId, EffectKind, HostApiError, PermissionMode, ResourceScope, ResourceUsage,
     RuntimeDispatchErrorKind,
 };
 use ironclaw_triggers::{
-    TriggerCompletionPolicy, TriggerError, TriggerId, TriggerRecord, TriggerRepository,
-    TriggerRunStatus, TriggerSchedule, TriggerSourceKind, TriggerState,
+    MAX_TRIGGER_NAME_BYTES, MAX_TRIGGER_PROMPT_BYTES, TriggerCompletionPolicy, TriggerError,
+    TriggerId, TriggerRecord, TriggerRepository, TriggerSchedule, TriggerSourceKind, TriggerState,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -19,10 +19,14 @@ use crate::{
     FirstPartyCapabilityRequest, FirstPartyCapabilityResult,
 };
 
-use super::{first_party_capability_manifest, input_error, resource_profile};
+use super::{
+    FIRST_PARTY_MAX_OUTPUT_BYTES, bounded_input_size, bounded_output_bytes,
+    first_party_capability_manifest, input_error, resource_profile,
+};
 
 const DEFAULT_TRIGGER_LIST_LIMIT: usize = 100;
 const MAX_TRIGGER_LIST_LIMIT: usize = 100;
+const MAX_TRIGGER_SCOPE_TRIGGER_COUNT: usize = 100;
 
 pub const TRIGGER_CREATE_CAPABILITY_ID: &str = "builtin.trigger_create";
 pub const TRIGGER_LIST_CAPABILITY_ID: &str = "builtin.trigger_list";
@@ -60,17 +64,14 @@ pub(super) fn insert_handlers(
 ) -> Result<(), HostApiError> {
     let handler = Arc::new(TriggerManagementToolHandler { repository });
     registry.insert_handler(
-        ironclaw_host_api::CapabilityId::new(TRIGGER_CREATE_CAPABILITY_ID)?,
+        CapabilityId::new(TRIGGER_CREATE_CAPABILITY_ID)?,
         handler.clone(),
     );
     registry.insert_handler(
-        ironclaw_host_api::CapabilityId::new(TRIGGER_LIST_CAPABILITY_ID)?,
+        CapabilityId::new(TRIGGER_LIST_CAPABILITY_ID)?,
         handler.clone(),
     );
-    registry.insert_handler(
-        ironclaw_host_api::CapabilityId::new(TRIGGER_REMOVE_CAPABILITY_ID)?,
-        handler,
-    );
+    registry.insert_handler(CapabilityId::new(TRIGGER_REMOVE_CAPABILITY_ID)?, handler);
     Ok(())
 }
 
@@ -84,6 +85,7 @@ impl FirstPartyCapabilityHandler for TriggerManagementToolHandler {
         &self,
         request: FirstPartyCapabilityRequest,
     ) -> Result<FirstPartyCapabilityResult, FirstPartyCapabilityError> {
+        bounded_input_size(request.capability_id.as_str(), &request.input)?;
         let started = Instant::now();
         let output = match request.capability_id.as_str() {
             TRIGGER_CREATE_CAPABILITY_ID => {
@@ -101,9 +103,10 @@ impl FirstPartyCapabilityHandler for TriggerManagementToolHandler {
                 ));
             }
         };
+        let output_bytes = bounded_output_bytes(&output, FIRST_PARTY_MAX_OUTPUT_BYTES)?;
         Ok(FirstPartyCapabilityResult::new(
             output,
-            usage_with_elapsed(started),
+            usage_with_elapsed(started, output_bytes),
         ))
     }
 }
@@ -134,6 +137,10 @@ async fn create_trigger(
     if input.name.trim().is_empty() || input.prompt.trim().is_empty() {
         return Err(input_error());
     }
+    if input.name.len() > MAX_TRIGGER_NAME_BYTES || input.prompt.len() > MAX_TRIGGER_PROMPT_BYTES {
+        return Err(input_error());
+    }
+    reject_scope_trigger_quota_exceeded(repository, scope).await?;
     let schedule = TriggerSchedule::cron(input.cron).map_err(trigger_input_error)?;
     let now = Utc::now();
     let next_run_at = schedule
@@ -190,7 +197,7 @@ async fn list_triggers(
         .await
         .map_err(trigger_repository_error)?
         .into_iter()
-        .map(|record| trigger_output(&record))
+        .map(|record| trigger_list_output(&record))
         .collect::<Vec<_>>();
     Ok(json!({ "triggers": records }))
 }
@@ -202,18 +209,14 @@ async fn remove_trigger(
 ) -> Result<Value, FirstPartyCapabilityError> {
     let input: TriggerRemoveInput = serde_json::from_value(input).map_err(|_| input_error())?;
     let trigger_id = TriggerId::parse(&input.trigger_id).map_err(trigger_input_error)?;
-    let Some(record) = repository
-        .get_trigger(scope.tenant_id.clone(), trigger_id)
-        .await
-        .map_err(trigger_repository_error)?
-    else {
-        return Ok(json!({ "removed": false }));
-    };
-    if !record_belongs_to_scope(&record, scope) {
-        return Ok(json!({ "removed": false }));
-    }
     let removed = repository
-        .remove_trigger(scope.tenant_id.clone(), trigger_id)
+        .remove_scoped_trigger(
+            scope.tenant_id.clone(),
+            scope.user_id.clone(),
+            scope.agent_id.clone(),
+            scope.project_id.clone(),
+            trigger_id,
+        )
         .await
         .map_err(trigger_repository_error)?;
     Ok(json!({
@@ -222,11 +225,26 @@ async fn remove_trigger(
     }))
 }
 
-fn record_belongs_to_scope(record: &TriggerRecord, scope: &ResourceScope) -> bool {
-    record.tenant_id == scope.tenant_id
-        && record.creator_user_id == scope.user_id
-        && record.agent_id == scope.agent_id
-        && record.project_id == scope.project_id
+async fn reject_scope_trigger_quota_exceeded(
+    repository: &dyn TriggerRepository,
+    scope: &ResourceScope,
+) -> Result<(), FirstPartyCapabilityError> {
+    let records = repository
+        .list_scoped_triggers(
+            scope.tenant_id.clone(),
+            scope.user_id.clone(),
+            scope.agent_id.clone(),
+            scope.project_id.clone(),
+            MAX_TRIGGER_SCOPE_TRIGGER_COUNT,
+        )
+        .await
+        .map_err(trigger_repository_error)?;
+    if records.len() >= MAX_TRIGGER_SCOPE_TRIGGER_COUNT {
+        return Err(FirstPartyCapabilityError::new(
+            RuntimeDispatchErrorKind::Resource,
+        ));
+    }
+    Ok(())
 }
 
 fn trigger_output(record: &TriggerRecord) -> Value {
@@ -245,18 +263,19 @@ fn trigger_output(record: &TriggerRecord) -> Value {
         "next_run_at": record.next_run_at,
         "last_run_at": record.last_run_at,
         "last_fired_slot": record.last_fired_slot,
-        "last_status": record.last_status.map(trigger_status_text),
+        "last_status": record.last_status,
         "active_fire_slot": record.active_fire_slot,
         "active_run_ref": record.active_run_ref.as_ref().map(ToString::to_string),
         "created_at": record.created_at,
     })
 }
 
-fn trigger_status_text(status: TriggerRunStatus) -> &'static str {
-    match status {
-        TriggerRunStatus::Ok => "ok",
-        TriggerRunStatus::Error => "error",
+fn trigger_list_output(record: &TriggerRecord) -> Value {
+    let mut output = trigger_output(record);
+    if let Some(object) = output.as_object_mut() {
+        object.remove("prompt");
     }
+    output
 }
 
 fn trigger_input_error(_error: TriggerError) -> FirstPartyCapabilityError {
@@ -271,9 +290,10 @@ fn trigger_repository_error(error: TriggerError) -> FirstPartyCapabilityError {
     FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::Backend)
 }
 
-fn usage_with_elapsed(started: Instant) -> ResourceUsage {
+fn usage_with_elapsed(started: Instant, output_bytes: u64) -> ResourceUsage {
     ResourceUsage {
         wall_clock_ms: started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
+        output_bytes,
         ..ResourceUsage::default()
     }
 }

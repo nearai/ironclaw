@@ -1,5 +1,7 @@
 use serde_json::{Value, json};
 
+use ironclaw_triggers::{MAX_TRIGGER_NAME_BYTES, MAX_TRIGGER_PROMPT_BYTES};
+
 pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value> {
     Some(match reference {
         "schemas/builtin/echo.input.v1.json" => json!({
@@ -289,8 +291,16 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
         "schemas/builtin/trigger_create.input.v1.json" => json!({
             "type": "object",
             "properties": {
-                "name": { "type": "string", "description": "Human-readable trigger name" },
-                "prompt": { "type": "string", "description": "Prompt submitted when the trigger fires" },
+                "name": {
+                    "type": "string",
+                    "maxLength": MAX_TRIGGER_NAME_BYTES,
+                    "description": "Human-readable trigger name"
+                },
+                "prompt": {
+                    "type": "string",
+                    "maxLength": MAX_TRIGGER_PROMPT_BYTES,
+                    "description": "Prompt submitted when the trigger fires"
+                },
                 "cron": { "type": "string", "description": "Five-, six-, or seven-field cron expression; fire cadence must be at least one minute" }
             },
             "required": ["name", "prompt", "cron"],

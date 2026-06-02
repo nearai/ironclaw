@@ -136,6 +136,17 @@ impl LibSqlTriggerRepository {
             .map_err(|error| backend_error("create trigger tenant list index", error))?;
             conn.execute(
                 &format!(
+                    "CREATE INDEX IF NOT EXISTS trigger_records_scoped_list_idx
+                     ON {TRIGGER_TABLE} (
+                        tenant_id, creator_user_id, agent_id, project_id, created_at, trigger_id
+                     )"
+                ),
+                (),
+            )
+            .await
+            .map_err(|error| backend_error("create trigger scoped list index", error))?;
+            conn.execute(
+                &format!(
                     "CREATE INDEX IF NOT EXISTS trigger_records_active_fire_slot_idx
                      ON {TRIGGER_TABLE} (active_fire_slot, tenant_id, trigger_id)
                      WHERE active_fire_slot IS NOT NULL"
@@ -261,8 +272,8 @@ impl TriggerRepository for LibSqlTriggerRepository {
                      FROM {TRIGGER_TABLE}
                      WHERE tenant_id = ?1
                        AND creator_user_id = ?2
-                       AND (agent_id = ?3 OR (agent_id IS NULL AND ?3 IS NULL))
-                       AND (project_id = ?4 OR (project_id IS NULL AND ?4 IS NULL))
+                       AND agent_id IS ?3
+                       AND project_id IS ?4
                      ORDER BY created_at, trigger_id
                      LIMIT ?5"
                 ),
@@ -308,6 +319,48 @@ impl TriggerRepository for LibSqlTriggerRepository {
             Ok(Some(row)) => Ok(Some(row_to_record(&row)?)),
             Ok(None) => Ok(None),
             Err(error) => Err(backend_error("read removed trigger record row", error)),
+        }
+    }
+
+    async fn remove_scoped_trigger(
+        &self,
+        tenant_id: TenantId,
+        creator_user_id: UserId,
+        agent_id: Option<AgentId>,
+        project_id: Option<ProjectId>,
+        trigger_id: TriggerId,
+    ) -> Result<Option<TriggerRecord>, TriggerError> {
+        let conn = self.connect().await?;
+        let agent_id = agent_id.as_ref().map(AgentId::as_str);
+        let project_id = project_id.as_ref().map(ProjectId::as_str);
+        let mut rows = conn
+            .query(
+                &format!(
+                    "DELETE FROM {TRIGGER_TABLE}
+                     WHERE tenant_id = ?1
+                       AND creator_user_id = ?2
+                       AND agent_id IS ?3
+                       AND project_id IS ?4
+                       AND trigger_id = ?5
+                     RETURNING {TRIGGER_COLUMNS}"
+                ),
+                params![
+                    tenant_id.as_str(),
+                    creator_user_id.as_str(),
+                    agent_id,
+                    project_id,
+                    trigger_id.to_string(),
+                ],
+            )
+            .await
+            .map_err(|error| backend_error("remove scoped trigger record", error))?;
+        match rows.next().await {
+            Ok(Some(row)) => Ok(Some(row_to_record(&row)?)),
+            Ok(None) => Ok(None),
+            Err(error) => Err(backend_error(
+                "read removed scoped trigger record row",
+                error,
+            )),
         }
     }
 
@@ -727,11 +780,9 @@ fn row_to_record(row: &libsql::Row) -> Result<TriggerRecord, TriggerError> {
             ProjectId::new(value).map_err(|error| invalid_record("project_id", error.to_string()))
         })
         .transpose()?;
-    let schedule = TriggerSchedule::cron(required_text(
-        row,
-        SCHEDULE_EXPRESSION_COL,
-        "schedule_expression",
-    )?)?;
+    let schedule = TriggerSchedule::Cron {
+        expression: required_text(row, SCHEDULE_EXPRESSION_COL, "schedule_expression")?,
+    };
     let last_run_at = optional_text(row, LAST_RUN_AT_COL, "last_run_at")?
         .map(|value| parse_timestamp(&value, "last_run_at"))
         .transpose()?;

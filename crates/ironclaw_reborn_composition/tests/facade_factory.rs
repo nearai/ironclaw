@@ -894,6 +894,48 @@ async fn production_libsql_services_wire_first_party_runtime_http_egress() {
     assert!(services.product_auth.is_some());
 }
 
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn production_libsql_services_migrate_trigger_repository_before_runtime_injection() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = libsql_db_at(dir.path().join("reborn.db")).await;
+    let (notifier, handle) = live_wake_notifier();
+
+    let services = build_reborn_services(
+        RebornBuildInput::libsql(
+            RebornCompositionProfile::Production,
+            "test-owner",
+            Arc::clone(&db),
+            dir.path().join("events.db").to_string_lossy(),
+            None,
+            test_master_key(),
+        )
+        .with_production_trust_policy(production_trust_policy())
+        .with_runtime_policy(production_runtime_policy())
+        .with_turn_run_wake_notifier(notifier)
+        .with_runtime_process_binding(test_sandbox_process_binding()),
+    )
+    .await
+    .expect("production libsql services should build with trigger repository migrations");
+
+    handle.shutdown().await;
+
+    assert!(services.host_runtime.is_some());
+
+    let conn = db.connect().expect("connect libsql state db");
+    let mut rows = conn
+        .query("SELECT COUNT(*) FROM trigger_records", ())
+        .await
+        .expect("trigger table exists after production build");
+    let row = rows
+        .next()
+        .await
+        .expect("read trigger table count row")
+        .expect("trigger table count row");
+    let count: i64 = row.get(0).expect("trigger table count");
+    assert_eq!(count, 0);
+}
+
 #[cfg(feature = "postgres")]
 #[tokio::test]
 #[ignore = "TODO(#3856): restore when tenant sandbox process-port wiring exists"]

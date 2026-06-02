@@ -33,8 +33,7 @@ use ironclaw_host_runtime::{
     SPAWN_SUBAGENT_CAPABILITY_ID, SandboxCommandTransport, SurfaceKind, TIME_CAPABILITY_ID,
     TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID,
     TenantSandboxProcessPort, VisibleCapabilityAccess, VisibleCapabilityRequest,
-    WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers,
-    builtin_first_party_handlers_with_trigger_repository, builtin_first_party_package,
+    WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers, builtin_first_party_package,
 };
 use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpResponse, NetworkHttpTransport,
@@ -42,7 +41,9 @@ use ironclaw_network::{
 };
 use ironclaw_resources::{InMemoryResourceGovernor, ResourceAccount};
 use ironclaw_secrets::InMemorySecretStore;
-use ironclaw_triggers::{InMemoryTriggerRepository, TriggerRepository};
+use ironclaw_triggers::{
+    InMemoryTriggerRepository, MAX_TRIGGER_NAME_BYTES, MAX_TRIGGER_PROMPT_BYTES, TriggerRepository,
+};
 use ironclaw_trust::{
     AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
     HostTrustPolicy, TrustDecision, TrustProvenance,
@@ -142,7 +143,8 @@ async fn builtin_first_party_package_declares_expected_capabilities() {
         assert_eq!(descriptor.effects, vec![EffectKind::ReadFilesystem]);
     }
 
-    let handlers = builtin_first_party_handlers().unwrap();
+    let handlers =
+        builtin_first_party_handlers(Arc::new(InMemoryTriggerRepository::default())).unwrap();
     for id in all_builtin_capability_ids() {
         assert!(handlers.contains_handler(&capability_id(id)));
     }
@@ -405,6 +407,74 @@ async fn builtin_trigger_create_rejects_blank_name_or_prompt_before_persistence(
 }
 
 #[tokio::test]
+async fn builtin_trigger_create_rejects_oversized_name_or_prompt_before_persistence() {
+    let repository = Arc::new(InMemoryTriggerRepository::default());
+    let runtime = runtime_with_trigger_repository(repository.clone());
+    let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID]);
+
+    for input in [
+        json!({
+            "name": "x".repeat(MAX_TRIGGER_NAME_BYTES + 1),
+            "prompt": "Run work",
+            "cron": "0 8 * * *"
+        }),
+        json!({
+            "name": "Oversized prompt",
+            "prompt": "x".repeat(MAX_TRIGGER_PROMPT_BYTES + 1),
+            "cron": "0 8 * * *"
+        }),
+    ] {
+        let error = invoke_with_context(
+            &runtime,
+            TRIGGER_CREATE_CAPABILITY_ID,
+            input,
+            context.clone(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error, RuntimeFailureKind::InvalidInput);
+    }
+
+    assert!(
+        repository
+            .list_triggers(context.resource_scope.tenant_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn builtin_trigger_create_applies_first_party_input_size_bound() {
+    let repository = Arc::new(InMemoryTriggerRepository::default());
+    let runtime = runtime_with_trigger_repository(repository.clone());
+    let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID]);
+
+    let error = invoke_with_context(
+        &runtime,
+        TRIGGER_CREATE_CAPABILITY_ID,
+        json!({
+            "name": "Large ignored field",
+            "prompt": "Run work",
+            "cron": "0 8 * * *",
+            "padding": "x".repeat(1_048_576)
+        }),
+        context.clone(),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error, RuntimeFailureKind::Resource);
+    assert!(
+        repository
+            .list_triggers(context.resource_scope.tenant_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
 async fn builtin_trigger_list_and_remove_are_caller_scoped() {
     let repository = Arc::new(InMemoryTriggerRepository::default());
     let runtime = runtime_with_trigger_repository(repository.clone());
@@ -462,6 +532,7 @@ async fn builtin_trigger_list_and_remove_are_caller_scoped() {
     .unwrap();
     assert_eq!(owner_list["triggers"].as_array().unwrap().len(), 1);
     assert!(owner_list["triggers"][0].get("last_status").is_some());
+    assert!(owner_list["triggers"][0].get("prompt").is_none());
 
     let owner_remove = invoke_with_context(
         &runtime,
@@ -602,7 +673,7 @@ async fn builtin_trigger_list_applies_user_surface_limit_boundaries() {
     let runtime = runtime_with_trigger_repository(repository);
     let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID]);
 
-    for index in 0..101 {
+    for index in 0..100 {
         invoke_with_context(
             &runtime,
             TRIGGER_CREATE_CAPABILITY_ID,
@@ -647,6 +718,48 @@ async fn builtin_trigger_list_applies_user_surface_limit_boundaries() {
     .await
     .unwrap();
     assert_eq!(clamped["triggers"].as_array().unwrap().len(), 100);
+}
+
+#[tokio::test]
+async fn builtin_trigger_create_rejects_per_scope_quota_exhaustion() {
+    let repository = Arc::new(InMemoryTriggerRepository::default());
+    let runtime = runtime_with_trigger_repository(repository.clone());
+    let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID]);
+
+    for index in 0..100 {
+        invoke_with_context(
+            &runtime,
+            TRIGGER_CREATE_CAPABILITY_ID,
+            json!({
+                "name": format!("Trigger {index}"),
+                "prompt": "Run work",
+                "cron": "0 8 * * *"
+            }),
+            context.clone(),
+        )
+        .await
+        .unwrap();
+    }
+
+    let error = invoke_with_context(
+        &runtime,
+        TRIGGER_CREATE_CAPABILITY_ID,
+        json!({
+            "name": "Over quota",
+            "prompt": "Run work",
+            "cron": "0 8 * * *"
+        }),
+        context.clone(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error, RuntimeFailureKind::Resource);
+
+    let records = repository
+        .list_triggers(context.resource_scope.tenant_id)
+        .await
+        .unwrap();
+    assert_eq!(records.len(), 100);
 }
 
 #[tokio::test]
@@ -4886,7 +4999,7 @@ where
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_first_party_capabilities(Arc::new(
-        builtin_first_party_handlers_with_trigger_repository(trigger_repository).unwrap(),
+        builtin_first_party_handlers(trigger_repository).unwrap(),
     ))
     .with_runtime_http_egress(Arc::new(RecordingRuntimeHttpEgress::default()))
     .with_audit_sink(Arc::new(InMemoryAuditSink::new()))
@@ -4941,6 +5054,17 @@ impl TriggerRepository for FailingTriggerRepository {
     async fn remove_trigger(
         &self,
         _tenant_id: TenantId,
+        _trigger_id: ironclaw_triggers::TriggerId,
+    ) -> Result<Option<ironclaw_triggers::TriggerRecord>, ironclaw_triggers::TriggerError> {
+        Err(trigger_backend_error())
+    }
+
+    async fn remove_scoped_trigger(
+        &self,
+        _tenant_id: TenantId,
+        _creator_user_id: UserId,
+        _agent_id: Option<AgentId>,
+        _project_id: Option<ProjectId>,
         _trigger_id: ironclaw_triggers::TriggerId,
     ) -> Result<Option<ironclaw_triggers::TriggerRecord>, ironclaw_triggers::TriggerError> {
         Err(trigger_backend_error())
@@ -5031,7 +5155,9 @@ where
         ironclaw_processes::ProcessServices::in_memory(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
-    .with_first_party_capabilities(Arc::new(builtin_first_party_handlers().unwrap()))
+    .with_first_party_capabilities(Arc::new(
+        builtin_first_party_handlers(Arc::new(InMemoryTriggerRepository::default())).unwrap(),
+    ))
     .with_runtime_policy(local_dev_policy())
     .with_trust_policy(Arc::new(trust_policy()))
     .host_runtime_for_local_testing()
@@ -5050,7 +5176,9 @@ where
         ironclaw_processes::ProcessServices::in_memory(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
-    .with_first_party_capabilities(Arc::new(builtin_first_party_handlers().unwrap()))
+    .with_first_party_capabilities(Arc::new(
+        builtin_first_party_handlers(Arc::new(InMemoryTriggerRepository::default())).unwrap(),
+    ))
     .with_runtime_http_egress(egress)
     .with_runtime_policy(local_dev_policy())
     .with_trust_policy(Arc::new(trust_policy()))
@@ -5079,7 +5207,9 @@ where
         ironclaw_processes::ProcessServices::in_memory(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
-    .with_first_party_capabilities(Arc::new(builtin_first_party_handlers().unwrap()))
+    .with_first_party_capabilities(Arc::new(
+        builtin_first_party_handlers(Arc::new(InMemoryTriggerRepository::default())).unwrap(),
+    ))
     .with_runtime_process_port(process_port)
     .with_runtime_http_egress(Arc::new(RecordingRuntimeHttpEgress::default()))
     .with_runtime_policy(policy)
@@ -5103,7 +5233,9 @@ where
         ironclaw_processes::ProcessServices::in_memory(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
-    .with_first_party_capabilities(Arc::new(builtin_first_party_handlers().unwrap()))
+    .with_first_party_capabilities(Arc::new(
+        builtin_first_party_handlers(Arc::new(InMemoryTriggerRepository::default())).unwrap(),
+    ))
     .with_runtime_process_port(local_process)
     .with_tenant_sandbox_process_port(sandbox_process)
     .with_runtime_http_egress(Arc::new(RecordingRuntimeHttpEgress::default()))
@@ -5121,7 +5253,9 @@ fn runtime_with_policy(policy: EffectiveRuntimePolicy) -> impl HostRuntime {
         ironclaw_processes::ProcessServices::in_memory(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
-    .with_first_party_capabilities(Arc::new(builtin_first_party_handlers().unwrap()))
+    .with_first_party_capabilities(Arc::new(
+        builtin_first_party_handlers(Arc::new(InMemoryTriggerRepository::default())).unwrap(),
+    ))
     .with_trust_policy(Arc::new(trust_policy()))
     .with_runtime_policy(policy)
     .host_runtime_for_local_testing()
@@ -5184,7 +5318,9 @@ where
         ironclaw_processes::ProcessServices::in_memory(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
-    .with_first_party_capabilities(Arc::new(builtin_first_party_handlers().unwrap()))
+    .with_first_party_capabilities(Arc::new(
+        builtin_first_party_handlers(Arc::new(InMemoryTriggerRepository::default())).unwrap(),
+    ))
     .with_runtime_http_egress(egress)
     .with_trust_policy(Arc::new(trust_policy()))
     .with_runtime_policy(policy)
@@ -5206,7 +5342,9 @@ where
         ironclaw_processes::ProcessServices::in_memory(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
-    .with_first_party_capabilities(Arc::new(builtin_first_party_handlers().unwrap()))
+    .with_first_party_capabilities(Arc::new(
+        builtin_first_party_handlers(Arc::new(InMemoryTriggerRepository::default())).unwrap(),
+    ))
     .with_runtime_http_egress(egress)
     .with_trust_policy(Arc::new(trust_policy()))
     .host_runtime_for_local_testing()
@@ -5225,7 +5363,9 @@ where
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_secret_store(Arc::new(InMemorySecretStore::new()))
-    .with_first_party_capabilities(Arc::new(builtin_first_party_handlers().unwrap()))
+    .with_first_party_capabilities(Arc::new(
+        builtin_first_party_handlers(Arc::new(InMemoryTriggerRepository::default())).unwrap(),
+    ))
     .try_with_host_http_egress(network)
     .unwrap()
     .with_trust_policy(Arc::new(trust_policy()))

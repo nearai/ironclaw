@@ -38,8 +38,8 @@ use ironclaw_host_api::{
 use ironclaw_host_api::{MountAlias, MountGrant};
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, FirstPartyCapabilityRegistry, HostRuntimeServices,
-    LocalHostProcessPort, ProductAuthProviderRuntimePorts,
-    builtin_first_party_handlers_with_trigger_repository, builtin_first_party_package,
+    LocalHostProcessPort, ProductAuthProviderRuntimePorts, builtin_first_party_handlers,
+    builtin_first_party_package,
 };
 #[cfg(feature = "libsql")]
 use ironclaw_loop_support::FilesystemCheckpointStateStore;
@@ -808,8 +808,7 @@ fn build_local_dev_store_graph(
             }
         })?;
     let skill_management = build_local_skill_management_port(owner_user_id, filesystem)?;
-    let trigger_repository: Arc<dyn TriggerRepository> =
-        Arc::new(ironclaw_triggers::InMemoryTriggerRepository::default());
+    let trigger_repository = local_dev_trigger_repository();
     let local_runtime = Arc::new(RebornLocalRuntimeServices {
         approval_requests: Arc::clone(&approval_requests),
         capability_leases: Arc::clone(&capability_leases),
@@ -893,8 +892,7 @@ fn build_local_dev_store_graph(
             }
         })?;
     let skill_management = build_local_skill_management_port(owner_user_id, filesystem)?;
-    let trigger_repository: Arc<dyn TriggerRepository> =
-        Arc::new(ironclaw_triggers::InMemoryTriggerRepository::default());
+    let trigger_repository = local_dev_trigger_repository();
     let local_runtime = Arc::new(RebornLocalRuntimeServices {
         approval_requests: Arc::clone(&approval_requests),
         capability_leases: Arc::clone(&capability_leases),
@@ -934,6 +932,10 @@ fn build_local_dev_store_graph(
         process_services,
         trigger_repository,
     })
+}
+
+fn local_dev_trigger_repository() -> Arc<dyn TriggerRepository> {
+    Arc::new(ironclaw_triggers::InMemoryTriggerRepository::default())
 }
 
 struct BudgetSinks {
@@ -1436,7 +1438,7 @@ fn builtin_extension_registry() -> Result<ExtensionRegistry, RebornBuildError> {
 fn builtin_first_party_registry(
     trigger_repository: Arc<dyn TriggerRepository>,
 ) -> Result<FirstPartyCapabilityRegistry, RebornBuildError> {
-    builtin_first_party_handlers_with_trigger_repository(trigger_repository).map_err(|error| {
+    builtin_first_party_handlers(trigger_repository).map_err(|error| {
         RebornBuildError::InvalidConfig {
             reason: format!("built-in first-party handlers are invalid: {error}"),
         }

@@ -244,6 +244,45 @@ impl TriggerRepository for PostgresTriggerRepository {
         }
     }
 
+    async fn remove_scoped_trigger(
+        &self,
+        tenant_id: TenantId,
+        creator_user_id: UserId,
+        agent_id: Option<AgentId>,
+        project_id: Option<ProjectId>,
+        trigger_id: TriggerId,
+    ) -> Result<Option<TriggerRecord>, TriggerError> {
+        let client = self.connect().await?;
+        let trigger_id = trigger_id.to_string();
+        let agent_id = agent_id.as_ref().map(AgentId::as_str);
+        let project_id = project_id.as_ref().map(ProjectId::as_str);
+        let row = client
+            .query_opt(
+                &format!(
+                    "DELETE FROM {TRIGGER_TABLE}
+                     WHERE tenant_id = $1
+                       AND creator_user_id = $2
+                       AND agent_id IS NOT DISTINCT FROM $3
+                       AND project_id IS NOT DISTINCT FROM $4
+                       AND trigger_id = $5
+                     RETURNING {TRIGGER_COLUMNS}"
+                ),
+                &[
+                    &tenant_id.as_str(),
+                    &creator_user_id.as_str(),
+                    &agent_id,
+                    &project_id,
+                    &trigger_id,
+                ],
+            )
+            .await
+            .map_err(|error| backend_error("remove scoped trigger record", error))?;
+        match row {
+            Some(row) => Ok(Some(row_to_record(&row)?)),
+            None => Ok(None),
+        }
+    }
+
     async fn list_due_triggers(
         &self,
         now: Timestamp,
@@ -770,7 +809,9 @@ fn row_to_record(row: &Row) -> Result<TriggerRecord, TriggerError> {
             ProjectId::new(value).map_err(|error| invalid_record("project_id", error.to_string()))
         })
         .transpose()?;
-    let schedule = TriggerSchedule::cron(required_text(row, "schedule_expression")?)?;
+    let schedule = TriggerSchedule::Cron {
+        expression: required_text(row, "schedule_expression")?,
+    };
     let last_run_at = optional_text(row, "last_run_at")?
         .map(|value| parse_timestamp(&value, "last_run_at"))
         .transpose()?;
@@ -953,6 +994,9 @@ CREATE INDEX IF NOT EXISTS trigger_records_state_next_run_at_idx
 
 CREATE INDEX IF NOT EXISTS trigger_records_tenant_created_at_idx
     ON trigger_records (tenant_id, created_at, trigger_id);
+
+CREATE INDEX IF NOT EXISTS trigger_records_scoped_list_idx
+    ON trigger_records (tenant_id, creator_user_id, agent_id, project_id, created_at, trigger_id);
 
 CREATE INDEX IF NOT EXISTS trigger_records_active_fire_slot_idx
     ON trigger_records (active_fire_slot, tenant_id, trigger_id)

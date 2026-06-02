@@ -1945,7 +1945,9 @@ fn local_dev_host_runtime_with_registry_and_runtime_http_egress(
     .with_runtime_credential_account_resolver(Arc::new(FixedRuntimeCredentialAccountResolver {
         result: Ok(SecretHandle::new("github_manual_access")?),
     }))
-    .with_first_party_capabilities(Arc::new(builtin_first_party_handlers()?))
+    .with_first_party_capabilities(Arc::new(builtin_first_party_handlers(Arc::new(
+        ironclaw_triggers::InMemoryTriggerRepository::default(),
+    ))?))
     .with_runtime_http_egress(egress)
     .with_trust_policy(Arc::new(first_party_trust_policy()?));
 
@@ -1973,7 +1975,9 @@ fn local_dev_host_runtime_with_registry_and_egress(
     .with_runtime_credential_account_resolver(Arc::new(FixedRuntimeCredentialAccountResolver {
         result: Ok(SecretHandle::new("github_manual_access")?),
     }))
-    .with_first_party_capabilities(Arc::new(builtin_first_party_handlers()?))
+    .with_first_party_capabilities(Arc::new(builtin_first_party_handlers(Arc::new(
+        ironclaw_triggers::InMemoryTriggerRepository::default(),
+    ))?))
     .with_runtime_http_egress(runtime_http_egress)
     .with_trust_policy(Arc::new(github_first_party_trust_policy()?))
     .try_with_host_http_egress((*network_egress).clone())
@@ -1999,7 +2003,9 @@ fn local_dev_host_runtime_with_live_http_egress(
         HostRuntimeCapabilitySurfaceVersion::new("reborn-app-v1")?,
     )
     .with_secret_store(Arc::new(InMemorySecretStore::new()))
-    .with_first_party_capabilities(Arc::new(builtin_first_party_handlers()?))
+    .with_first_party_capabilities(Arc::new(builtin_first_party_handlers(Arc::new(
+        ironclaw_triggers::InMemoryTriggerRepository::default(),
+    ))?))
     .try_with_host_http_egress(PolicyNetworkHttpEgress::new(ReqwestNetworkTransport::new(
         Duration::from_secs(2),
     )))

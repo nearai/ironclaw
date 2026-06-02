@@ -67,11 +67,11 @@ pub const GLOB_CAPABILITY_ID: &str = "builtin.glob";
 pub const GREP_CAPABILITY_ID: &str = "builtin.grep";
 pub const APPLY_PATCH_CAPABILITY_ID: &str = "builtin.apply_patch";
 
-const MAX_FIRST_PARTY_INPUT_BYTES: usize = 1_048_576;
+pub(super) const MAX_FIRST_PARTY_INPUT_BYTES: usize = 1_048_576;
 const MAX_WRITE_FILE_INPUT_BYTES: usize = 6 * 1024 * 1024;
 const MAX_APPLY_PATCH_INPUT_BYTES: usize = 21 * 1024 * 1024;
 const FIRST_PARTY_DEFAULT_OUTPUT_BYTES: u64 = 16 * 1024;
-const FIRST_PARTY_MAX_OUTPUT_BYTES: u64 = 1_048_576;
+pub(super) const FIRST_PARTY_MAX_OUTPUT_BYTES: u64 = 1_048_576;
 const FIRST_PARTY_DEFAULT_WALL_CLOCK_MS: u64 = 100;
 const FIRST_PARTY_MAX_WALL_CLOCK_MS: u64 = 5_000;
 
@@ -184,16 +184,9 @@ fn coding_manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
         .collect()
 }
 
-/// Create handlers for all built-in first-party capabilities.
-pub fn builtin_first_party_handlers() -> Result<FirstPartyCapabilityRegistry, HostApiError> {
-    builtin_first_party_handlers_with_trigger_repository(Arc::new(
-        ironclaw_triggers::InMemoryTriggerRepository::default(),
-    ))
-}
-
 /// Create handlers for all built-in first-party capabilities using an
 /// explicitly composed trigger repository.
-pub fn builtin_first_party_handlers_with_trigger_repository(
+pub fn builtin_first_party_handlers(
     trigger_repository: Arc<dyn ironclaw_triggers::TriggerRepository>,
 ) -> Result<FirstPartyCapabilityRegistry, HostApiError> {
     let handler = Arc::new(BuiltinFirstPartyTools::default());
@@ -365,7 +358,7 @@ impl FirstPartyCapabilityHandler for BuiltinFirstPartyTools {
     }
 }
 
-fn bounded_input_size(
+pub(super) fn bounded_input_size(
     capability_id: &str,
     input: &serde_json::Value,
 ) -> Result<(), FirstPartyCapabilityError> {
@@ -381,7 +374,7 @@ fn bounded_input_size(
     Ok(())
 }
 
-fn bounded_output_bytes(
+pub(super) fn bounded_output_bytes(
     output: &serde_json::Value,
     max_bytes: u64,
 ) -> Result<u64, FirstPartyCapabilityError> {
