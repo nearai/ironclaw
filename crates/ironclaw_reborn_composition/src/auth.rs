@@ -29,7 +29,7 @@ use ironclaw_turns::{TurnRunId, TurnScope};
 
 use crate::manual_token_flow::{PortBackedManualTokenFlowService, RebornManualTokenFlowService};
 use crate::oauth_dcr::{DcrGateChallengeRequest, OAuthDcrProviderRegistry};
-use crate::oauth_gate::{OAuthGateChallengeRequest, OAuthGateProviderRegistry};
+use crate::oauth_gate::{GoogleOAuthGateProviderRegistry, OAuthGateChallengeRequest};
 use crate::product_auth_runtime_credentials::{
     ProductAuthRuntimeCredentialAccountSelector, RuntimeCredentialAccountSelectionService,
 };
@@ -438,7 +438,7 @@ pub struct RebornProductAuthServices {
     cleanup_service: Arc<dyn SecretCleanupService>,
     continuation_dispatcher: Arc<dyn RebornAuthContinuationDispatcher>,
     dcr_oauth_registry: Option<Arc<OAuthDcrProviderRegistry>>,
-    oauth_gate_registry: Option<Arc<OAuthGateProviderRegistry>>,
+    oauth_gate_registry: Option<Arc<GoogleOAuthGateProviderRegistry>>,
     /// Optional read projection for WebUI/local-dev auth interactions.
     ///
     /// `RebornProductAuthServices` may still support OAuth callbacks,
@@ -646,7 +646,7 @@ impl RebornProductAuthServices {
 
     pub(crate) fn with_oauth_gate_registry(
         mut self,
-        registry: Arc<OAuthGateProviderRegistry>,
+        registry: Arc<GoogleOAuthGateProviderRegistry>,
     ) -> Self {
         self.oauth_gate_registry = Some(registry);
         self

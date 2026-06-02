@@ -26,11 +26,11 @@ use crate::projection::AuthChallengeView;
 const GATE_FLOW_TTL_SECONDS: i64 = 600;
 
 #[derive(Clone)]
-pub(crate) struct OAuthGateProviderRegistry {
+pub(crate) struct GoogleOAuthGateProviderRegistry {
     providers: BTreeMap<String, Arc<GoogleOAuthGateProvider>>,
 }
 
-impl OAuthGateProviderRegistry {
+impl GoogleOAuthGateProviderRegistry {
     pub(crate) fn new(providers: Vec<Arc<GoogleOAuthGateProvider>>) -> Self {
         Self {
             providers: providers
@@ -69,10 +69,10 @@ impl OAuthGateProviderRegistry {
     }
 }
 
-impl fmt::Debug for OAuthGateProviderRegistry {
+impl fmt::Debug for GoogleOAuthGateProviderRegistry {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("OAuthGateProviderRegistry")
+            .debug_struct("GoogleOAuthGateProviderRegistry")
             .field("providers", &self.providers.keys().collect::<Vec<_>>())
             .finish()
     }

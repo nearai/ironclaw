@@ -293,7 +293,7 @@ async fn webui_event_stream_uses_credential_requirement_for_manual_token_auth_pr
 async fn webui_event_stream_creates_google_oauth_prompt_for_runtime_credential_gate() {
     use crate::OAuthClientConfig;
     use crate::auth::{RebornAuthContinuationDispatcher, RebornProductAuthServices};
-    use crate::oauth_gate::{GoogleOAuthGateProvider, OAuthGateProviderRegistry};
+    use crate::oauth_gate::{GoogleOAuthGateProvider, GoogleOAuthGateProviderRegistry};
     use async_trait::async_trait;
     use ironclaw_auth::{AuthContinuationEvent, InMemoryAuthProductServices};
     use ironclaw_secrets::InMemorySecretStore;
@@ -342,7 +342,9 @@ async fn webui_event_stream_creates_google_oauth_prompt_for_runtime_credential_g
     let product_auth = Arc::new(
         RebornProductAuthServices::from_shared(shared.clone(), Arc::new(NoopDispatcher))
             .with_flow_record_source(shared)
-            .with_oauth_gate_registry(Arc::new(OAuthGateProviderRegistry::new(vec![google_gate]))),
+            .with_oauth_gate_registry(Arc::new(GoogleOAuthGateProviderRegistry::new(vec![
+                google_gate,
+            ]))),
     );
 
     let event_log_dyn: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());

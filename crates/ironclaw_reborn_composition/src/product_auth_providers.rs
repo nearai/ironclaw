@@ -16,14 +16,14 @@ use ironclaw_secrets::SecretStore;
 use crate::RebornBuildError;
 use crate::input::{OAuthDcrProviderBackendConfig, OAuthProviderBackendConfig};
 use crate::oauth_dcr::{OAuthDcrProvider, OAuthDcrProviderRegistry};
-use crate::oauth_gate::{GoogleOAuthGateProvider, OAuthGateProviderRegistry};
+use crate::oauth_gate::{GoogleOAuthGateProvider, GoogleOAuthGateProviderRegistry};
 use crate::oauth_provider_client::HostOAuthProviderClient;
 
 #[derive(Clone)]
 pub(crate) struct OAuthProviderComposition {
     pub(crate) client: Option<Arc<dyn AuthProviderClient>>,
     pub(crate) dcr_registry: Option<Arc<OAuthDcrProviderRegistry>>,
-    pub(crate) gate_registry: Option<Arc<OAuthGateProviderRegistry>>,
+    pub(crate) gate_registry: Option<Arc<GoogleOAuthGateProviderRegistry>>,
 }
 
 pub(crate) fn compose_provider_client(
@@ -108,7 +108,7 @@ fn compose_provider_client_with_runtime(
     let dcr_registry =
         (!dcr_providers.is_empty()).then(|| Arc::new(OAuthDcrProviderRegistry::new(dcr_providers)));
     let gate_registry = (!gate_providers.is_empty())
-        .then(|| Arc::new(OAuthGateProviderRegistry::new(gate_providers)));
+        .then(|| Arc::new(GoogleOAuthGateProviderRegistry::new(gate_providers)));
     Ok(OAuthProviderComposition {
         client: compose_provider_clients(clients),
         dcr_registry,

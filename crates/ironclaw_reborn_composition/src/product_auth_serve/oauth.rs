@@ -308,22 +308,16 @@ pub(super) async fn google_oauth_callback_handler(
         state.remove_pkce_verifier(flow_id);
         return Err(ProductAuthRouteFailure::malformed_callback());
     };
-    let pkce_verifier = match state.pkce_verifier_for_callback(flow_id) {
-        Ok(pkce_verifier) => pkce_verifier,
-        Err(_) => match run_with_backend_timeout(state.product_auth.oauth_pkce_verifier_for_flow(
-            callback_scope,
-            &provider,
-            flow_id,
-        ))
-        .await?
+    let pkce_verifier =
+        match pkce_verifier_for_known_callback_flow(&state, callback_scope, &provider, flow_id)
+            .await
         {
-            Some(pkce_verifier) => pkce_verifier,
-            None => {
+            Ok(pkce_verifier) => pkce_verifier,
+            Err(error) => {
                 state.remove_pkce_verifier(flow_id);
-                return Err(ProductAuthRouteFailure::unknown_or_expired_flow());
+                return Err(error);
             }
-        },
-    };
+        };
     let callback_scopes = match parse_google_callback_scopes(query.scopes.as_deref()) {
         Ok(callback_scopes) => {
             callback_scopes.unwrap_or_else(|| callback_state.requested_scopes().to_vec())
@@ -406,14 +400,13 @@ pub(super) async fn callback_outcome_from_query(
         .code
         .as_ref()
         .ok_or_else(ProductAuthRouteFailure::malformed_callback)?;
-    let pkce_verifier = match state.pkce_verifier_for_callback(flow_id) {
-        Ok(verifier) => verifier,
-        Err(cache_error) => state
-            .product_auth
-            .oauth_pkce_verifier_for_flow(scope, flow_provider.unwrap_or(&provider), flow_id)
-            .await?
-            .ok_or(cache_error)?,
-    };
+    let pkce_verifier = pkce_verifier_for_known_callback_flow(
+        state,
+        scope,
+        flow_provider.unwrap_or(&provider),
+        flow_id,
+    )
+    .await?;
     let scopes = parse_provider_scopes(query.scopes.as_deref())?;
     let authorization_code_hash = authorization_code_hash(code.expose_secret())?;
     let pkce_verifier_hash = pkce_verifier_hash(pkce_verifier.expose_secret())?;
@@ -432,6 +425,25 @@ pub(super) async fn callback_outcome_from_query(
             scopes,
         },
     })
+}
+
+async fn pkce_verifier_for_known_callback_flow(
+    state: &ProductAuthRouteState,
+    scope: &AuthProductScope,
+    provider: &AuthProviderId,
+    flow_id: AuthFlowId,
+) -> Result<SecretString, ProductAuthRouteFailure> {
+    let cache_error = match state.pkce_verifier_for_callback(flow_id) {
+        Ok(verifier) => return Ok(verifier),
+        Err(error) => error,
+    };
+    run_with_backend_timeout(
+        state
+            .product_auth
+            .oauth_pkce_verifier_for_flow(scope, provider, flow_id),
+    )
+    .await?
+    .ok_or(cache_error)
 }
 
 fn validate_google_callback_query_fields(
@@ -481,7 +493,7 @@ mod tests {
     use super::*;
     use crate::RebornAuthContinuationDispatcher;
     use crate::input::OAuthClientConfig;
-    use crate::oauth_gate::{GoogleOAuthGateProvider, OAuthGateProviderRegistry};
+    use crate::oauth_gate::{GoogleOAuthGateProvider, GoogleOAuthGateProviderRegistry};
     use crate::projection::AuthChallengeProvider;
     use async_trait::async_trait;
     use ironclaw_auth::{GOOGLE_CALENDAR_READONLY_SCOPE, InMemoryAuthProductServices};
@@ -508,7 +520,7 @@ mod tests {
         let product_auth = Arc::new(
             RebornProductAuthServices::from_shared(shared.clone(), dispatcher.clone())
                 .with_flow_record_source(shared)
-                .with_oauth_gate_registry(Arc::new(OAuthGateProviderRegistry::new(vec![
+                .with_oauth_gate_registry(Arc::new(GoogleOAuthGateProviderRegistry::new(vec![
                     google_gate,
                 ]))),
         );
