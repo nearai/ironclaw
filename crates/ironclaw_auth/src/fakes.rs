@@ -1127,16 +1127,48 @@ fn create_or_update_manual_token_account(
             validate_account_update_target(account, &account_request)?;
             update_account_from_request(account, account_request, now)
         }
-        None => create_account_in_state(
-            state,
-            manual_token_account_request(
+        None => {
+            let mut account_request = manual_token_account_request(
                 &pending,
                 CredentialOwnership::UserReusable,
                 None,
                 Vec::new(),
-            )?,
-        ),
+            )?;
+            if let Some(account_id) = latest_reusable_manual_token_account_id(state, &pending) {
+                let now = Utc::now();
+                let account = state
+                    .accounts
+                    .get_mut(&account_id)
+                    .ok_or(AuthProductError::CredentialMissing)?;
+                account_request.scope = account.scope.clone();
+                validate_account_update_target(account, &account_request)?;
+                update_account_from_request(account, account_request, now)
+            } else {
+                create_account_in_state(state, account_request)
+            }
+        }
     }
+}
+
+fn latest_reusable_manual_token_account_id(
+    state: &AuthState,
+    pending: &PendingSecretInteraction,
+) -> Option<CredentialAccountId> {
+    state
+        .accounts
+        .values()
+        .filter(|account| {
+            CredentialAccountOwnerScope::from_scope(&pending.scope).matches(account)
+                && account.provider == pending.provider
+                && account.label == pending.label
+                && account.ownership == CredentialOwnership::UserReusable
+                && account.owner_extension.is_none()
+                && account.granted_extensions.is_empty()
+                && account.access_secret.is_some()
+                && account.status != CredentialAccountStatus::Revoked
+        })
+        .max_by_key(|account| (account.updated_at, account.created_at, account.id))
+        .map(|account| account.id)
 }
 
 fn manual_token_account_request(

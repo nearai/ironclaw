@@ -7,7 +7,8 @@ use anyhow::{Context, anyhow};
 use clap::Args;
 use ironclaw_reborn_composition::{
     GoogleOAuthRouteConfig, RebornReadiness, RebornRuntimeIdentity, RebornRuntimeInput,
-    RebornWebuiBundle, WebuiServeConfig, build_reborn_runtime, build_webui_services, webui_v2_app,
+    RebornWebuiBundle, WebuiServeConfig, build_reborn_runtime, build_webui_services,
+    webui_v2_app_with_lifecycle,
 };
 use ironclaw_reborn_config::IdentitySection;
 use ironclaw_reborn_webui_ingress::{
@@ -301,8 +302,9 @@ impl ServeCommand {
             if let Some(host) = canonical_host {
                 serve_config = serve_config.with_canonical_host(host);
             }
-            let router =
-                webui_v2_app(bundle, serve_config).context("failed to compose v2 Router")?;
+            let webui_app = webui_v2_app_with_lifecycle(bundle, serve_config)
+                .context("failed to compose v2 Router")?;
+            let (router, public_route_drains) = webui_app.into_parts();
 
             let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
             tokio::spawn(async move {
@@ -322,6 +324,13 @@ impl ServeCommand {
                 bound_addr_tx: None,
             })
             .await;
+
+            // Always drain public route mounts before shutting down the
+            // Reborn runtime. Protocol webhooks such as Slack can ACK a
+            // request before product workflow dispatch completes, so their
+            // route-owned work must finish after ingress stops accepting new
+            // requests but before shared runtime services are torn down.
+            public_route_drains.drain().await;
 
             // Always drain the Reborn runtime, even on serve error, so
             // background tasks and turn-runner state shut down cleanly.

@@ -11,6 +11,7 @@ use std::{
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use ironclaw_authorization::GrantAuthorizer;
+use ironclaw_events::InMemoryAuditSink;
 use ironclaw_extensions::ExtensionRegistry;
 #[cfg(feature = "libsql")]
 use ironclaw_filesystem::LibSqlRootFilesystem;
@@ -24,13 +25,14 @@ use ironclaw_host_runtime::{
     APPLY_PATCH_CAPABILITY_ID, CapabilitySurfacePolicy, CapabilitySurfaceVersion,
     CommandExecutionOutput, CommandExecutionRequest, ECHO_CAPABILITY_ID, GLOB_CAPABILITY_ID,
     GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID, HTTP_SAVE_CAPABILITY_ID, HostRuntime,
-    HostRuntimeServices, JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, READ_FILE_CAPABILITY_ID,
-    RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeFailureKind, RuntimeProcessError,
-    RuntimeProcessPort, SHELL_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID,
-    SKILL_REMOVE_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID, SandboxCommandTransport, SurfaceKind,
-    TIME_CAPABILITY_ID, TenantSandboxProcessPort, VisibleCapabilityAccess,
-    VisibleCapabilityRequest, WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers,
-    builtin_first_party_package,
+    HostRuntimeServices, JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, MEMORY_READ_CAPABILITY_ID,
+    MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
+    READ_FILE_CAPABILITY_ID, RuntimeCapabilityOutcome, RuntimeCapabilityRequest,
+    RuntimeFailureKind, RuntimeProcessError, RuntimeProcessPort, SHELL_CAPABILITY_ID,
+    SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID,
+    SPAWN_SUBAGENT_CAPABILITY_ID, SandboxCommandTransport, SurfaceKind, TIME_CAPABILITY_ID,
+    TenantSandboxProcessPort, VisibleCapabilityAccess, VisibleCapabilityRequest,
+    WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers, builtin_first_party_package,
 };
 use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpResponse, NetworkHttpTransport,
@@ -55,7 +57,7 @@ async fn builtin_first_party_package_declares_expected_capabilities() {
         .iter()
         .map(|descriptor| descriptor.id.as_str())
         .collect::<Vec<_>>();
-    assert_eq!(ids, all_builtin_capability_ids().to_vec());
+    assert_eq!(ids, all_builtin_capability_ids());
     for descriptor in &package.capabilities {
         let expected_permission = match descriptor.id.as_str() {
             HTTP_CAPABILITY_ID
@@ -86,6 +88,7 @@ async fn builtin_first_party_package_declares_expected_capabilities() {
         vec![
             EffectKind::ReadFilesystem,
             EffectKind::WriteFilesystem,
+            EffectKind::DeleteFilesystem,
             EffectKind::Network
         ]
     );
@@ -111,6 +114,28 @@ async fn builtin_first_party_package_declares_expected_capabilities() {
             EffectKind::WriteFilesystem
         ]
     );
+
+    let memory_write = package
+        .capabilities
+        .iter()
+        .find(|descriptor| descriptor.id.as_str() == MEMORY_WRITE_CAPABILITY_ID)
+        .expect("memory write manifest");
+    assert_eq!(
+        memory_write.effects,
+        vec![EffectKind::ReadFilesystem, EffectKind::WriteFilesystem]
+    );
+    for capability_id in [
+        MEMORY_SEARCH_CAPABILITY_ID,
+        MEMORY_READ_CAPABILITY_ID,
+        MEMORY_TREE_CAPABILITY_ID,
+    ] {
+        let descriptor = package
+            .capabilities
+            .iter()
+            .find(|descriptor| descriptor.id.as_str() == capability_id)
+            .expect("memory read-like manifest");
+        assert_eq!(descriptor.effects, vec![EffectKind::ReadFilesystem]);
+    }
 
     let handlers = builtin_first_party_handlers().unwrap();
     for id in all_builtin_capability_ids() {
@@ -170,7 +195,7 @@ async fn builtin_first_party_surface_lists_allowed_tools_in_registry_order() {
         .iter()
         .map(|capability| capability.descriptor.id.as_str())
         .collect::<Vec<_>>();
-    assert_eq!(ids, all_builtin_capability_ids().to_vec());
+    assert_eq!(ids, all_builtin_capability_ids());
     assert!(
         surface
             .capabilities
@@ -266,6 +291,341 @@ async fn builtin_rejects_oversized_outputs_before_return() {
         panic!("expected output-too-large failure, got {outcome:?}");
     };
     assert_eq!(failure.kind, RuntimeFailureKind::OutputTooLarge);
+}
+
+#[tokio::test]
+async fn memory_capabilities_write_read_tree_and_search_native_reborn_memory() {
+    let runtime = runtime_with_filesystem(InMemoryBackend::new());
+    let context = execution_context_with_mounts(
+        all_builtin_capability_ids(),
+        memory_mounts(MountPermissions::read_write_list_delete()),
+    );
+
+    let write = invoke_with_context(
+        &runtime,
+        MEMORY_WRITE_CAPABILITY_ID,
+        json!({
+            "target": "projects/alpha/notes.md",
+            "content": "Architecture note: reborn memory capability search marker.",
+            "append": false
+        }),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(write["status"], json!("written"));
+    assert_eq!(write["path"], json!("projects/alpha/notes.md"));
+
+    let read = invoke_with_context(
+        &runtime,
+        MEMORY_READ_CAPABILITY_ID,
+        json!({"path": "projects/alpha/notes.md"}),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(read["path"], json!("projects/alpha/notes.md"));
+    assert!(
+        read["content"]
+            .as_str()
+            .unwrap()
+            .contains("reborn memory capability search marker")
+    );
+
+    let tree = invoke_with_context(
+        &runtime,
+        MEMORY_TREE_CAPABILITY_ID,
+        json!({"path": "", "depth": 3}),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        tree,
+        json!([{"projects/": [{"alpha/": ["notes.md"]}]}]),
+        "tree should preserve dynamic directory names: {tree}"
+    );
+    assert!(
+        tree.to_string().contains("alpha/"),
+        "tree should include project directory: {tree}"
+    );
+
+    let search = invoke_with_context(
+        &runtime,
+        MEMORY_SEARCH_CAPABILITY_ID,
+        json!({"query": "capability search marker", "limit": 5}),
+        context,
+    )
+    .await
+    .unwrap();
+    assert_eq!(search["result_count"], json!(1));
+    assert_eq!(
+        search["results"][0]["path"],
+        json!("projects/alpha/notes.md")
+    );
+}
+
+#[tokio::test]
+async fn memory_write_metadata_overlay_can_skip_search_indexing() {
+    let runtime = runtime_with_filesystem(InMemoryBackend::new());
+    let context = execution_context_with_mounts(
+        [MEMORY_WRITE_CAPABILITY_ID, MEMORY_SEARCH_CAPABILITY_ID],
+        memory_mounts(MountPermissions::read_write_list_delete()),
+    );
+
+    invoke_with_context(
+        &runtime,
+        MEMORY_WRITE_CAPABILITY_ID,
+        json!({
+            "target": "projects/alpha/skip-index.md",
+            "content": "metadata overlay search marker",
+            "append": false,
+            "metadata": {"skip_indexing": true}
+        }),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+
+    let search = invoke_with_context(
+        &runtime,
+        MEMORY_SEARCH_CAPABILITY_ID,
+        json!({"query": "metadata overlay search marker", "limit": 5}),
+        context,
+    )
+    .await
+    .unwrap();
+    assert_eq!(search["result_count"], json!(0));
+}
+
+#[tokio::test]
+async fn memory_write_patches_existing_document_and_rejects_missing_old_string() {
+    let runtime = runtime_with_filesystem(InMemoryBackend::new());
+    let context = execution_context_with_mounts(
+        [MEMORY_WRITE_CAPABILITY_ID, MEMORY_READ_CAPABILITY_ID],
+        memory_mounts(MountPermissions::read_write_list_delete()),
+    );
+
+    invoke_with_context(
+        &runtime,
+        MEMORY_WRITE_CAPABILITY_ID,
+        json!({
+            "target": "projects/alpha/patch.md",
+            "content": "alpha beta beta",
+            "append": false
+        }),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+    let patch = invoke_with_context(
+        &runtime,
+        MEMORY_WRITE_CAPABILITY_ID,
+        json!({
+            "target": "projects/alpha/patch.md",
+            "old_string": "beta",
+            "new_string": "gamma"
+        }),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(patch["status"], json!("patched"));
+    assert_eq!(patch["replacements"], json!(1));
+
+    let patch_all = invoke_with_context(
+        &runtime,
+        MEMORY_WRITE_CAPABILITY_ID,
+        json!({
+            "target": "projects/alpha/patch.md",
+            "old_string": "beta",
+            "new_string": "delta",
+            "replace_all": true
+        }),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(patch_all["replacements"], json!(1));
+    let read = invoke_with_context(
+        &runtime,
+        MEMORY_READ_CAPABILITY_ID,
+        json!({"path": "projects/alpha/patch.md"}),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(read["content"], json!("alpha gamma delta"));
+
+    let failure = invoke_with_context(
+        &runtime,
+        MEMORY_WRITE_CAPABILITY_ID,
+        json!({
+            "target": "projects/alpha/patch.md",
+            "old_string": "missing",
+            "new_string": "value"
+        }),
+        context,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(failure, RuntimeFailureKind::InvalidInput);
+}
+
+#[tokio::test]
+async fn memory_write_bootstrap_target_clears_bootstrap_document() {
+    let runtime = runtime_with_filesystem(InMemoryBackend::new());
+    let context = execution_context_with_mounts(
+        [MEMORY_WRITE_CAPABILITY_ID, MEMORY_READ_CAPABILITY_ID],
+        memory_mounts(MountPermissions::read_write_list_delete()),
+    );
+
+    let clear = invoke_with_context(
+        &runtime,
+        MEMORY_WRITE_CAPABILITY_ID,
+        json!({"target": "bootstrap", "content": "ignored"}),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(clear["status"], json!("cleared"));
+
+    let read = invoke_with_context(
+        &runtime,
+        MEMORY_READ_CAPABILITY_ID,
+        json!({"path": "BOOTSTRAP.md"}),
+        context,
+    )
+    .await
+    .unwrap();
+    assert_eq!(read["content"], json!(""));
+}
+
+#[tokio::test]
+async fn memory_write_daily_log_rejects_invalid_timezone() {
+    let runtime = runtime_with_filesystem(InMemoryBackend::new());
+    let failure = invoke_with_context(
+        &runtime,
+        MEMORY_WRITE_CAPABILITY_ID,
+        json!({
+            "target": "daily_log",
+            "content": "timezone should reject",
+            "timezone": "not/a-zone"
+        }),
+        execution_context_with_mounts(
+            [MEMORY_WRITE_CAPABILITY_ID],
+            memory_mounts(MountPermissions::read_write_list_delete()),
+        ),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(failure, RuntimeFailureKind::InvalidInput);
+}
+
+#[tokio::test]
+async fn memory_write_rejects_local_filesystem_paths() {
+    let runtime = runtime_with_filesystem(InMemoryBackend::new());
+    let context = execution_context_with_mounts(
+        [MEMORY_WRITE_CAPABILITY_ID],
+        memory_mounts(MountPermissions::read_write_list_delete()),
+    );
+
+    for target in ["/Users/example/notes.md", "C:/Users/example/notes.md"] {
+        let failure = invoke_with_context(
+            &runtime,
+            MEMORY_WRITE_CAPABILITY_ID,
+            json!({
+                "target": target,
+                "content": "should not write"
+            }),
+            context.clone(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(failure, RuntimeFailureKind::InvalidInput);
+    }
+}
+
+#[tokio::test]
+async fn memory_write_rejects_traversal_paths() {
+    let runtime = runtime_with_filesystem(InMemoryBackend::new());
+    let context = execution_context_with_mounts(
+        [MEMORY_WRITE_CAPABILITY_ID],
+        memory_mounts(MountPermissions::read_write_list_delete()),
+    );
+
+    for target in ["daily/../SECRET.md", r"daily\..\SECRET.md"] {
+        let failure = invoke_with_context(
+            &runtime,
+            MEMORY_WRITE_CAPABILITY_ID,
+            json!({
+                "target": target,
+                "content": "should not write"
+            }),
+            context.clone(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(failure, RuntimeFailureKind::InvalidInput);
+    }
+}
+
+#[tokio::test]
+async fn memory_write_rejects_non_string_target() {
+    let runtime = runtime_with_filesystem(InMemoryBackend::new());
+    for target in [json!(null), json!(42), json!(true)] {
+        let failure = invoke_with_context(
+            &runtime,
+            MEMORY_WRITE_CAPABILITY_ID,
+            json!({
+                "target": target,
+                "content": "should not write"
+            }),
+            execution_context_with_mounts(
+                [MEMORY_WRITE_CAPABILITY_ID],
+                memory_mounts(MountPermissions::read_write_list_delete()),
+            ),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(failure, RuntimeFailureKind::InvalidInput);
+    }
+}
+
+#[tokio::test]
+async fn memory_read_returns_input_error_for_missing_document() {
+    let runtime = runtime_with_filesystem(InMemoryBackend::new());
+    let failure = invoke_with_context(
+        &runtime,
+        MEMORY_READ_CAPABILITY_ID,
+        json!({"path": "projects/alpha/missing.md"}),
+        execution_context_with_mounts(
+            [MEMORY_READ_CAPABILITY_ID],
+            memory_mounts(MountPermissions::read_write_list_delete()),
+        ),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(failure, RuntimeFailureKind::InvalidInput);
+}
+
+#[tokio::test]
+async fn memory_write_requires_memory_mount_authority() {
+    let runtime = runtime_with_filesystem(InMemoryBackend::new());
+    let (_filesystem, workspace_mounts) =
+        in_memory_mounted_filesystem(MountPermissions::read_write_list_delete());
+    let failure = invoke_with_context(
+        &runtime,
+        MEMORY_WRITE_CAPABILITY_ID,
+        json!({
+            "target": "notes.md",
+            "content": "should not write"
+        }),
+        execution_context_with_mounts([MEMORY_WRITE_CAPABILITY_ID], workspace_mounts),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(failure, RuntimeFailureKind::Authorization);
 }
 
 #[tokio::test]
@@ -1073,16 +1433,23 @@ async fn builtin_http_save_rejects_invalid_or_unresolved_save_to_before_egress()
 
 // arch-exempt: large-test-file, URL install tests share this first-party runtime harness; split plan #4062
 #[tokio::test]
-async fn builtin_skill_install_accepts_content_when_network_is_denied() {
+async fn builtin_skill_install_accepts_content_without_url_fetch() {
     let temp = tempfile::tempdir().unwrap();
     let (filesystem, mounts) = mounted_skill_filesystem(temp.path());
-    let runtime = runtime_with_filesystem_and_policy(filesystem, local_network_denied_policy());
+    let runtime = runtime_with_filesystem(filesystem);
 
+    // `skill_install` advertises `EffectKind::Network` because the same
+    // capability handles URL/GitHub installs, so `NetworkMode::Deny` rejects it
+    // before content-only dispatch. This case keeps the non-fetch path covered.
     let installed = invoke_with_context(
         &runtime,
         SKILL_INSTALL_CAPABILITY_ID,
         json!({"content": "---\nname: offline-helper\n---\nOffline prompt.\n"}),
-        execution_context_with_mounts([SKILL_INSTALL_CAPABILITY_ID], mounts.clone()),
+        execution_context_with_mounts_and_network(
+            [SKILL_INSTALL_CAPABILITY_ID],
+            mounts.clone(),
+            http_test_policy(),
+        ),
     )
     .await
     .unwrap();
@@ -1164,13 +1531,17 @@ async fn builtin_skill_install_rejects_hidden_url_install_fields() {
     for input in cases {
         let temp = tempfile::tempdir().unwrap();
         let (filesystem, mounts) = mounted_skill_filesystem(temp.path());
-        let runtime = runtime_with_filesystem_and_policy(filesystem, local_network_denied_policy());
+        let runtime = runtime_with_filesystem(filesystem);
 
         let error = invoke_with_context(
             &runtime,
             SKILL_INSTALL_CAPABILITY_ID,
             input,
-            execution_context_with_mounts([SKILL_INSTALL_CAPABILITY_ID], mounts),
+            execution_context_with_mounts_and_network(
+                [SKILL_INSTALL_CAPABILITY_ID],
+                mounts,
+                http_test_policy(),
+            ),
         )
         .await
         .unwrap_err();
@@ -3955,7 +4326,7 @@ async fn builtin_coding_write_is_denied_by_read_only_mount() {
 async fn builtin_missing_grant_denies_before_handler_dispatch() {
     let outcome = runtime()
         .invoke_capability(RuntimeCapabilityRequest::new(
-            execution_context([]),
+            execution_context(std::iter::empty::<&str>()),
             capability_id(ECHO_CAPABILITY_ID),
             ResourceEstimate::default(),
             json!({"message":"must not run"}),
@@ -4037,6 +4408,7 @@ where
     )
     .with_first_party_capabilities(Arc::new(builtin_first_party_handlers().unwrap()))
     .with_runtime_http_egress(Arc::new(RecordingRuntimeHttpEgress::default()))
+    .with_audit_sink(Arc::new(InMemoryAuditSink::new()))
     .with_runtime_policy(policy)
     .with_trust_policy(Arc::new(trust_policy()))
     .host_runtime_for_local_testing()
@@ -4271,8 +4643,8 @@ fn provider_id() -> ExtensionId {
     ExtensionId::new("builtin").unwrap()
 }
 
-fn all_builtin_capability_ids() -> [&'static str; 16] {
-    [
+fn all_builtin_capability_ids() -> Vec<&'static str> {
+    vec![
         ECHO_CAPABILITY_ID,
         TIME_CAPABILITY_ID,
         JSON_CAPABILITY_ID,
@@ -4280,6 +4652,10 @@ fn all_builtin_capability_ids() -> [&'static str; 16] {
         HTTP_SAVE_CAPABILITY_ID,
         SHELL_CAPABILITY_ID,
         SPAWN_SUBAGENT_CAPABILITY_ID,
+        MEMORY_SEARCH_CAPABILITY_ID,
+        MEMORY_WRITE_CAPABILITY_ID,
+        MEMORY_READ_CAPABILITY_ID,
+        MEMORY_TREE_CAPABILITY_ID,
         READ_FILE_CAPABILITY_ID,
         WRITE_FILE_CAPABILITY_ID,
         LIST_DIR_CAPABILITY_ID,
@@ -4317,6 +4693,15 @@ fn in_memory_mounted_filesystem(permissions: MountPermissions) -> (InMemoryBacke
     )])
     .unwrap();
     (InMemoryBackend::new(), mounts)
+}
+
+fn memory_mounts(permissions: MountPermissions) -> MountView {
+    MountView::new(vec![MountGrant::new(
+        MountAlias::new("/memory").unwrap(),
+        VirtualPath::new("/memory").unwrap(),
+        permissions,
+    )])
+    .unwrap()
 }
 
 fn mounted_skill_filesystem(path: &Path) -> (LocalFilesystem, MountView) {
@@ -4626,9 +5011,16 @@ impl NetworkResolver for StaticResolver {
     }
 }
 
-fn execution_context<const N: usize>(grants: [&str; N]) -> ExecutionContext {
+fn execution_context<I>(grants: I) -> ExecutionContext
+where
+    I: IntoIterator,
+    I::Item: AsRef<str>,
+{
     let capability_set = CapabilitySet {
-        grants: grants.into_iter().map(dispatch_grant).collect(),
+        grants: grants
+            .into_iter()
+            .map(|grant| dispatch_grant(grant.as_ref()))
+            .collect(),
     };
     ExecutionContext::local_default(
         UserId::new("user").unwrap(),
@@ -4641,14 +5033,15 @@ fn execution_context<const N: usize>(grants: [&str; N]) -> ExecutionContext {
     .unwrap()
 }
 
-fn execution_context_with_mounts<const N: usize>(
-    grants: [&str; N],
-    mounts: MountView,
-) -> ExecutionContext {
+fn execution_context_with_mounts<I>(grants: I, mounts: MountView) -> ExecutionContext
+where
+    I: IntoIterator,
+    I::Item: AsRef<str>,
+{
     let capability_set = CapabilitySet {
         grants: grants
             .into_iter()
-            .map(|grant| dispatch_grant_with_mounts(grant, mounts.clone()))
+            .map(|grant| dispatch_grant_with_mounts(grant.as_ref(), mounts.clone()))
             .collect(),
     };
     ExecutionContext::local_default(
@@ -4662,23 +5055,32 @@ fn execution_context_with_mounts<const N: usize>(
     .unwrap()
 }
 
-fn execution_context_with_network<const N: usize>(
-    grants: [&str; N],
-    network: NetworkPolicy,
-) -> ExecutionContext {
+fn execution_context_with_network<I>(grants: I, network: NetworkPolicy) -> ExecutionContext
+where
+    I: IntoIterator,
+    I::Item: AsRef<str>,
+{
     execution_context_with_mounts_and_network(grants, MountView::default(), network)
 }
 
-fn execution_context_with_mounts_and_network<const N: usize>(
-    grants: [&str; N],
+fn execution_context_with_mounts_and_network<I>(
+    grants: I,
     mounts: MountView,
     network: NetworkPolicy,
-) -> ExecutionContext {
+) -> ExecutionContext
+where
+    I: IntoIterator,
+    I::Item: AsRef<str>,
+{
     let capability_set = CapabilitySet {
         grants: grants
             .into_iter()
             .map(|grant| {
-                dispatch_grant_with_mounts_and_network(grant, mounts.clone(), network.clone())
+                dispatch_grant_with_mounts_and_network(
+                    grant.as_ref(),
+                    mounts.clone(),
+                    network.clone(),
+                )
             })
             .collect(),
     };
@@ -4728,6 +5130,7 @@ fn builtin_effects() -> Vec<EffectKind> {
         EffectKind::DispatchCapability,
         EffectKind::ReadFilesystem,
         EffectKind::WriteFilesystem,
+        EffectKind::DeleteFilesystem,
         EffectKind::Network,
         EffectKind::SpawnProcess,
         EffectKind::ExecuteCode,
@@ -4745,13 +5148,6 @@ fn network_denied_policy() -> EffectiveRuntimePolicy {
         secret_mode: SecretMode::BrokeredHandles,
         approval_policy: ApprovalPolicy::AskAlways,
         audit_mode: AuditMode::LocalMinimal,
-    }
-}
-
-fn local_network_denied_policy() -> EffectiveRuntimePolicy {
-    EffectiveRuntimePolicy {
-        network_mode: NetworkMode::Deny,
-        ..local_dev_policy()
     }
 }
 

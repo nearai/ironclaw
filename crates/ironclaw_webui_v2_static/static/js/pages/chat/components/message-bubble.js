@@ -5,7 +5,8 @@ import { Icon } from "../../../design-system/icons.js";
 import { toast } from "../../../lib/toast.js";
 
 /* User keeps a tinted bubble; assistant is borderless (document-like);
-   system / error stay as centered tinted notices. */
+   system / error stay as centered tinted notices. Reasoning ("thinking")
+   renders as a collapsible disclosure (see ThinkingDisclosure). */
 const ROLE_STYLES = {
   user: "ml-auto rounded-[18px] border border-signal/25 bg-signal/10 px-4 py-3 text-iron-100",
   assistant: "mr-auto px-1 text-iron-100",
@@ -18,6 +19,37 @@ function formatTimestamp(value) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "";
   return date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+}
+
+/* Collapsible provider-reasoning summary. Collapsed by default so the
+   thread stays clean; expands to the full reasoning markdown. Data comes
+   from the `thinking` projection item (PR #4230). */
+function ThinkingDisclosure({ content }) {
+  const [open, setOpen] = React.useState(false);
+  if (!content) return null;
+  return html`
+    <div className="flex flex-col items-start">
+      <button
+        type="button"
+        onClick=${() => setOpen((v) => !v)}
+        aria-expanded=${open ? "true" : "false"}
+        className="v2-button inline-flex items-center gap-1.5 border-0 bg-transparent px-1 py-1 text-xs font-medium text-iron-400 hover:text-iron-200"
+      >
+        <${Icon} name="spark" className="h-3.5 w-3.5" />
+        <span>${open ? "Hide reasoning" : "Reasoning"}</span>
+        <${Icon}
+          name="chevron"
+          className=${["h-3 w-3", open ? "rotate-180" : ""].join(" ")}
+        />
+      </button>
+      ${open &&
+      html`
+        <div className="mt-1 border-l-2 border-white/10 pl-3 text-iron-300">
+          <${MarkdownRenderer} content=${content} className="text-[13px]" />
+        </div>
+      `}
+    </div>
+  `;
 }
 
 export function MessageBubble({ message, onRetry }) {
@@ -33,6 +65,10 @@ export function MessageBubble({ message, onRetry }) {
         }
       : message;
     return html`<${ToolActivity} activity=${activity} />`;
+  }
+
+  if (role === "thinking") {
+    return html`<${ThinkingDisclosure} content=${content} />`;
   }
 
   if (role === "image") {
