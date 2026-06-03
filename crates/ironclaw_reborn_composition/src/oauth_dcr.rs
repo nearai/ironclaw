@@ -1042,6 +1042,28 @@ impl DcrOAuthCallbackState {
         }
     }
 
+    pub(crate) fn encode(&self) -> Result<OAuthState, AuthProductError> {
+        let wire = DcrOAuthCallbackStateWire {
+            flow_id: self.flow_id,
+            resource: self.scope.resource.clone(),
+            session_id: self.scope.session_id.clone(),
+            provider: self.provider.clone(),
+            account_label: self.account_label.clone(),
+            requested_scopes: self.requested_scopes.clone(),
+            nonce: self.nonce.clone(),
+        };
+        let payload =
+            serde_json::to_vec(&wire).map_err(|_| AuthProductError::BackendUnavailable)?;
+        OAuthState::new(format!(
+            "{}{}",
+            Self::PREFIX,
+            URL_SAFE_NO_PAD.encode(payload)
+        ))
+    }
+}
+
+#[cfg(any(test, feature = "webui-v2-beta"))]
+impl DcrOAuthCallbackState {
     pub(crate) fn has_prefix(raw: &str) -> bool {
         raw.starts_with(Self::PREFIX)
     }
@@ -1064,25 +1086,6 @@ impl DcrOAuthCallbackState {
 
     pub(crate) fn requested_scopes(&self) -> &[ProviderScope] {
         &self.requested_scopes
-    }
-
-    pub(crate) fn encode(&self) -> Result<OAuthState, AuthProductError> {
-        let wire = DcrOAuthCallbackStateWire {
-            flow_id: self.flow_id,
-            resource: self.scope.resource.clone(),
-            session_id: self.scope.session_id.clone(),
-            provider: self.provider.clone(),
-            account_label: self.account_label.clone(),
-            requested_scopes: self.requested_scopes.clone(),
-            nonce: self.nonce.clone(),
-        };
-        let payload =
-            serde_json::to_vec(&wire).map_err(|_| AuthProductError::BackendUnavailable)?;
-        OAuthState::new(format!(
-            "{}{}",
-            Self::PREFIX,
-            URL_SAFE_NO_PAD.encode(payload)
-        ))
     }
 
     pub(crate) fn decode(raw: &str) -> Result<Self, AuthProductError> {
