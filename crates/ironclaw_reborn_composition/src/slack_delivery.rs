@@ -376,7 +376,7 @@ fn submitted_run_id(ack: &ProductInboundAck) -> Option<TurnRunId> {
         ProductInboundAck::Accepted {
             submitted_run_id, ..
         } => Some(*submitted_run_id),
-        ProductInboundAck::Duplicate { prior } => submitted_run_id(prior),
+        ProductInboundAck::Duplicate { .. } => None,
         ProductInboundAck::DeferredBusy { .. }
         | ProductInboundAck::Rejected(_)
         | ProductInboundAck::CommandResult { .. }

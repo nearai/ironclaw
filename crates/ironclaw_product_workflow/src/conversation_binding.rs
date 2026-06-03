@@ -271,26 +271,19 @@ impl ConversationBindingService for ProductConversationBindingService {
             .resolve(&request.adapter_id, &request.installation_id)?;
         let expected_user_id =
             ensure_preconfigured_actor_allowed(&installation_scope, &request)?.cloned();
-        let resolution = if expected_user_id.is_some() {
+        if expected_user_id.is_some() {
             self.apply_preconfigured_actor_binding(&installation_scope, &request)
                 .await?;
-            self.conversations
-                .resolve_or_create_binding_with_trusted_scope(
-                    conversation_request(&request, installation_scope.tenant_id.clone())?,
-                    installation_scope.default_agent_id.clone(),
-                    installation_scope.default_project_id.clone(),
-                )
-                .await
-                .map_err(map_conversation_error)?
-        } else {
-            self.conversations
-                .lookup_binding(conversation_request(
-                    &request,
-                    installation_scope.tenant_id.clone(),
-                )?)
-                .await
-                .map_err(map_conversation_error)?
-        };
+        }
+        let resolution = self
+            .conversations
+            .resolve_or_create_binding_with_trusted_scope(
+                conversation_request(&request, installation_scope.tenant_id.clone())?,
+                installation_scope.default_agent_id.clone(),
+                installation_scope.default_project_id.clone(),
+            )
+            .await
+            .map_err(map_conversation_error)?;
         ensure_resolved_actor_matches_preconfigured(expected_user_id.as_ref(), &resolution)?;
 
         Ok(resolved_binding_from_resolution(resolution))

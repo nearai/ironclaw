@@ -56,20 +56,27 @@ jobs:
             cargo metadata --no-deps --format-version 1 \
               | jq -c '
                   (
-                    .packages[]
-                    | select(.name == "ironclaw_reborn_cli")
-                    | (
-                        [.name]
-                        + [
-                            .dependencies[]
-                            | select(
-                                .source == null
-                                and (.path // "" | contains("/crates/"))
-                                and (.name | startswith("ironclaw_"))
-                              )
-                            | .name
-                          ]
-                      )
+                    (
+                      .packages[]
+                      | select(.name == "ironclaw_reborn_cli")
+                      | (
+                          [.name]
+                          + [
+                              .dependencies[]
+                              | select(
+                                  .source == null
+                                  and (.path // "" | contains("/crates/"))
+                                  and (.name | startswith("ironclaw_"))
+                                )
+                              | .name
+                            ]
+                        )
+                    )
+                    + [
+                        "ironclaw_product_adapters",
+                        "ironclaw_product_workflow",
+                        "ironclaw_slack_v2_adapter"
+                      ]
                   )
                   | unique
                 '
