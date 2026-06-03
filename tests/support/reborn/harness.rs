@@ -59,7 +59,7 @@ use ironclaw_loop_support::{
     CapabilitySurfaceProfileResolver, DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID,
     HostIdentityContextBuildError, HostIdentityContextCandidate, HostIdentityContextSource,
     HostManagedModelRequest, HostRuntimeLoopCapabilityPortFactory, JsonSpawnSubagentInputCodec,
-    LoopCapabilityResultWriter,
+    LoopCapabilityPortFactory, LoopCapabilityResultWriter,
 };
 use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
@@ -79,7 +79,6 @@ use ironclaw_reborn::subagent::{
     goal_store::InMemoryBoundedSubagentGoalStore,
 };
 use ironclaw_reborn::{
-    loop_driver_host::LoopCapabilityPortFactory,
     loop_exit_applier::{
         BlockedEvidenceRequest, CompletionEvidenceRequest, FailureEvidenceRequest,
         FinalCheckpointEvidenceRequest, LoopExitEvidencePort, ThreadCheckpointLoopExitEvidencePort,
