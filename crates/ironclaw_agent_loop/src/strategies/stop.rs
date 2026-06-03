@@ -231,17 +231,16 @@ impl StopConditionStrategy for DefaultStopConditionStrategy {
         // loop from a productive one without relying on capability
         // signatures (which a model that just stops emitting tool
         // calls would not exercise).
-        if self.noprogress_window > 0
-            && state.recent_output_token_counts.len() >= self.noprogress_window
-        {
+        let noprogress_window = self.noprogress_window.min(8);
+        if noprogress_window > 0 && state.recent_output_token_counts.len() >= noprogress_window {
             let window_below = state
                 .recent_output_token_counts
                 .iter()
                 .rev()
-                .take(self.noprogress_window)
+                .take(noprogress_window)
                 .filter(|tokens| **tokens <= self.min_delta_tokens)
                 .count();
-            if window_below >= self.noprogress_window {
+            if window_below >= noprogress_window {
                 return StopOutcome::Stop {
                     kind: StopKind::NoProgressDetected,
                 };
@@ -653,6 +652,28 @@ mod tests {
             let (_state, outcome) = observe_and_decide(&strategy, state, after_batch()).await;
 
             assert!(matches!(outcome, StopOutcome::Continue { .. }));
+        }
+
+        #[tokio::test]
+        async fn oversized_no_progress_window_is_capped_to_state_capacity() {
+            let strategy = DefaultStopConditionStrategy {
+                noprogress_window: 32,
+                ..DefaultStopConditionStrategy::default()
+            };
+            let mut state = LoopExecutionState::initial_for_run(&test_run_context());
+            for _ in 0..8 {
+                state.recent_output_token_counts.push(2);
+            }
+
+            let (_state, outcome) = observe_and_decide(&strategy, state, after_batch()).await;
+
+            assert!(matches!(
+                outcome,
+                StopOutcome::Stop {
+                    kind: StopKind::NoProgressDetected,
+                    ..
+                }
+            ));
         }
 
         #[tokio::test]
