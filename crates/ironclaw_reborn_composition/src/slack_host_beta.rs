@@ -272,7 +272,7 @@ fn invalid_config(field: &'static str, reason: String) -> SlackHostBetaBuildErro
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use axum::body::Body;
@@ -283,6 +283,7 @@ mod tests {
         HostManagedModelError, HostManagedModelGateway, HostManagedModelRequest,
         HostManagedModelResponse,
     };
+    use ironclaw_product_workflow::{ProductActorUserResolutionRequest, ProductWorkflowError};
     use ironclaw_turns::run_profile::LoopCapabilityPort;
     use secrecy::ExposeSecret;
     use tower::ServiceExt;
@@ -357,6 +358,62 @@ mod tests {
         runtime.shutdown().await.expect("runtime shuts down");
     }
 
+    #[tokio::test]
+    async fn custom_actor_user_resolver_routes_inbound_slack_event() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let runtime = build_reborn_runtime(
+            RebornRuntimeInput::from_services(
+                RebornBuildInput::local_dev("slack-host-beta-owner", root.path().join("local-dev"))
+                    .with_runtime_policy(local_dev_runtime_policy().expect("local policy")),
+            )
+            .with_identity(RebornRuntimeIdentity {
+                tenant_id: TENANT.to_string(),
+                agent_id: AGENT.to_string(),
+                source_binding_id: "slack-host-source".to_string(),
+                reply_target_binding_id: "slack-host-reply".to_string(),
+            })
+            .with_model_gateway_override(Arc::new(StaticGateway)),
+        )
+        .await
+        .expect("runtime builds");
+        let resolver = Arc::new(RecordingProductActorUserResolver::new(
+            UserId::new(USER).expect("user"),
+        ));
+        let mount = build_slack_events_route_mount_with_actor_user_resolver(
+            &runtime,
+            config(),
+            resolver.clone(),
+        )
+        .expect("route builds");
+
+        let body = dm_event_body();
+        let timestamp = current_unix_timestamp();
+        let response = mount
+            .router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(SLACK_EVENTS_PATH)
+                    .header(SLACK_TIMESTAMP_HEADER, timestamp.to_string())
+                    .header(SLACK_SIGNATURE_HEADER, slack_signature(timestamp, body))
+                    .body(Body::from(body))
+                    .expect("request builds"),
+            )
+            .await
+            .expect("router responds");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let calls = wait_for_resolver_calls(&resolver, 1).await;
+        assert!(!calls.is_empty());
+        assert_eq!(calls[0].adapter_id.as_str(), SLACK_ADAPTER_ID);
+        assert_eq!(calls[0].installation_id.as_str(), INSTALLATION);
+        assert_eq!(calls[0].external_actor_ref.kind(), SLACK_USER_ACTOR_KIND);
+        assert_eq!(calls[0].external_actor_ref.id(), SLACK_USER);
+
+        runtime.shutdown().await.expect("runtime shuts down");
+    }
+
     #[test]
     fn slack_host_beta_config_binds_slack_actor_to_reborn_user() {
         let config = config();
@@ -398,6 +455,73 @@ mod tests {
         mac.update(format!("v0:{timestamp}:").as_bytes());
         mac.update(body.as_bytes());
         format!("v0={:x}", mac.finalize().into_bytes())
+    }
+
+    fn dm_event_body() -> &'static str {
+        r#"{
+          "type":"event_callback",
+          "team_id":"T-HOST",
+          "api_app_id":"A-HOST",
+          "event_id":"Ev-host-beta-custom-resolver",
+          "event":{
+            "type":"message",
+            "channel_type":"im",
+            "user":"U-HOST",
+            "channel":"D-HOST",
+            "text":"hello",
+            "ts":"1710000000.000001"
+          }
+        }"#
+    }
+
+    async fn wait_for_resolver_calls(
+        resolver: &RecordingProductActorUserResolver,
+        expected_len: usize,
+    ) -> Vec<ProductActorUserResolutionRequest> {
+        for _ in 0..40 {
+            let calls = resolver.calls();
+            if calls.len() >= expected_len {
+                return calls;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        resolver.calls()
+    }
+
+    #[derive(Debug)]
+    struct RecordingProductActorUserResolver {
+        user_id: UserId,
+        calls: Mutex<Vec<ProductActorUserResolutionRequest>>,
+    }
+
+    impl RecordingProductActorUserResolver {
+        fn new(user_id: UserId) -> Self {
+            Self {
+                user_id,
+                calls: Mutex::default(),
+            }
+        }
+
+        fn calls(&self) -> Vec<ProductActorUserResolutionRequest> {
+            self.calls
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ProductActorUserResolver for RecordingProductActorUserResolver {
+        async fn resolve_product_actor_user(
+            &self,
+            request: ProductActorUserResolutionRequest,
+        ) -> Result<Option<UserId>, ProductWorkflowError> {
+            self.calls
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(request);
+            Ok(Some(self.user_id.clone()))
+        }
     }
 
     #[derive(Debug)]

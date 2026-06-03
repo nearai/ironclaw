@@ -171,7 +171,7 @@ pub use skill_listing::{RebornSkillListError, list_reborn_local_skills};
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack_actor_identity::{
     RebornUserIdentityLookup, RebornUserIdentityLookupError, SlackUserIdentityActorResolver,
-    slack_user_identity_provider, slack_user_identity_provider_user_id,
+    slack_user_identity_provider_user_id,
 };
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack_delivery::{
