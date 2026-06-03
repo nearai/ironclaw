@@ -29,7 +29,7 @@ pub use ids::{
     AdapterInstallationId, AdapterKind, ExternalActorRef, ExternalConversationIdentity,
     ExternalConversationRef, ExternalEventId, InboundMessageContentRef,
 };
-pub use inbound::{InboundTurnService, trusted_trigger_fire_submitter};
+pub use inbound::{InboundTurnService, trusted_trigger_fire_submitter, validate_trigger_prompt};
 pub use memory::InMemoryConversationServices;
 pub use traits::{
     ConversationActorPairingService, ConversationBindingService, ConversationBindingServiceExt,

@@ -2,24 +2,30 @@ use async_trait::async_trait;
 use ironclaw_host_api::{TenantId, Timestamp};
 use ironclaw_turns::TurnRunId;
 
-use crate::{TriggerError, TriggerFire, TriggerId, TriggerInboundContentRef};
+use crate::{TriggerError, TriggerFire, TriggerId, TriggerMaterializedPrompt};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrustedTriggerSubmitRequest {
     fire: TriggerFire,
-    content_ref: TriggerInboundContentRef,
+    materialized_prompt: TriggerMaterializedPrompt,
     received_at: Timestamp,
 }
 
 impl TrustedTriggerSubmitRequest {
+    /// Create a sealed trusted trigger submit request.
+    ///
+    /// `materialized_prompt` must have been produced from the exact `fire`
+    /// supplied here. The worker is the only crate allowed to pair those values,
+    /// so downstream trusted submitters cannot forge or mix prompt content and
+    /// trigger identity.
     pub(crate) fn new(
         fire: TriggerFire,
-        content_ref: TriggerInboundContentRef,
+        materialized_prompt: TriggerMaterializedPrompt,
         received_at: Timestamp,
     ) -> Self {
         Self {
             fire,
-            content_ref,
+            materialized_prompt,
             received_at,
         }
     }
@@ -28,23 +34,21 @@ impl TrustedTriggerSubmitRequest {
         &self.fire
     }
 
-    pub fn content_ref(&self) -> &TriggerInboundContentRef {
-        &self.content_ref
+    pub fn materialized_prompt(&self) -> &TriggerMaterializedPrompt {
+        &self.materialized_prompt
+    }
+
+    pub fn content_ref(&self) -> &crate::TriggerInboundContentRef {
+        self.materialized_prompt.content_ref()
     }
 
     pub fn received_at(&self) -> Timestamp {
         self.received_at
     }
 
-    pub fn into_parts(self) -> (TriggerFire, TriggerInboundContentRef, Timestamp) {
-        (self.fire, self.content_ref, self.received_at)
+    pub fn into_parts(self) -> (TriggerFire, TriggerMaterializedPrompt, Timestamp) {
+        (self.fire, self.materialized_prompt, self.received_at)
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TrustedTriggerSubmitFailureReason {
-    Retryable,
-    Permanent,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,12 +60,6 @@ pub enum TrustedTriggerFireSubmitOutcome {
     Replayed {
         original_run_id: TurnRunId,
         replayed_at: Timestamp,
-    },
-    RetryableFailed {
-        reason: TrustedTriggerSubmitFailureReason,
-    },
-    PermanentFailed {
-        reason: TrustedTriggerSubmitFailureReason,
     },
 }
 

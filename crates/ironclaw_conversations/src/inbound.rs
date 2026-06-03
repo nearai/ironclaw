@@ -251,6 +251,12 @@ where
     }
 }
 
+/// Build the conversation-owned submitter used by host composition for trusted
+/// trigger fires.
+///
+/// This factory only wires the submitter. Trusted authority lives in the sealed
+/// `TrustedTriggerSubmitRequest`, whose constructor is owned by the trigger
+/// worker, not in this public function.
 pub fn trusted_trigger_fire_submitter<B, S, C>(
     binding_service: B,
     session_thread_service: S,
@@ -297,21 +303,26 @@ where
 fn trusted_inbound_request_from_trigger(
     request: TrustedTriggerSubmitRequest,
 ) -> Result<TrustedInboundTurnRequest, InboundTurnError> {
-    let (fire, content_ref, received_at) = request.into_parts();
-    let trigger_id = fire.identity.trigger_id();
+    let (fire, materialized_prompt, received_at) = request.into_parts();
+    let (content_ref, trusted_inbound_binding) = materialized_prompt.into_parts();
     Ok(TrustedInboundTurnRequest::new(
         InboundTurnRequest {
             tenant_id: fire.identity.tenant_id().clone(),
-            adapter_kind: AdapterKind::new("trigger")?,
-            adapter_installation_id: AdapterInstallationId::new("reborn-trigger-poller")?,
-            external_actor_ref: ExternalActorRef::new("user", fire.creator_user_id.as_str())?,
+            adapter_kind: AdapterKind::new(trusted_inbound_binding.adapter_kind())?,
+            adapter_installation_id: AdapterInstallationId::new(
+                trusted_inbound_binding.adapter_installation_id(),
+            )?,
+            external_actor_ref: ExternalActorRef::new(
+                trusted_inbound_binding.external_actor_namespace(),
+                trusted_inbound_binding.external_actor_id(),
+            )?,
             external_conversation_ref: ExternalConversationRef::new(
                 None,
-                format!("trigger-{trigger_id}"),
-                Some(fire.identity.route_thread_id().as_str()),
+                trusted_inbound_binding.external_conversation_id(),
+                Some(trusted_inbound_binding.route_thread_id()),
                 None,
             )?,
-            external_event_id: ExternalEventId::new(fire.identity.external_event_id().as_str())?,
+            external_event_id: ExternalEventId::new(trusted_inbound_binding.external_event_id())?,
             route_kind: ConversationRouteKind::Direct,
             content_ref: InboundMessageContentRef::new(content_ref.as_str())?,
             requested_agent_id: None,
@@ -473,7 +484,7 @@ fn opaque_trusted_trigger_inbound_rejection(
     }
 }
 
-fn validate_trigger_prompt(
+pub fn validate_trigger_prompt(
     prompt_safety: &dyn InjectionScanner,
     prompt: &str,
 ) -> Result<(), TriggerError> {

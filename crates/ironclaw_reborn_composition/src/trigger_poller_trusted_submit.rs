@@ -4,16 +4,17 @@ use async_trait::async_trait;
 use ironclaw_conversations::{
     AcceptedInboundMessage, AdapterInstallationId, AdapterKind, ConversationBindingResolution,
     ConversationBindingService, ConversationRouteKind, ExternalActorRef, ExternalConversationRef,
-    ExternalEventId, InboundTurnError, ResolveConversationRequest,
+    ExternalEventId, InboundTurnError, ResolveConversationRequest, validate_trigger_prompt,
 };
 use ironclaw_host_api::{AgentId, TenantId};
-use ironclaw_safety::{InjectionScanner, Sanitizer, Severity};
+use ironclaw_safety::{InjectionScanner, Sanitizer};
 use ironclaw_threads::{
     AcceptInboundMessageRequest as ThreadAcceptInboundMessageRequest, EnsureThreadRequest,
     MessageContent, SessionThreadService as CanonicalSessionThreadService, ThreadScope,
 };
 use ironclaw_triggers::{
-    TriggerError, TriggerFire, TriggerInboundContentRef, TriggerPromptMaterializer,
+    TriggerError, TriggerFire, TriggerMaterializedPrompt, TriggerPromptMaterializer,
+    TriggerTrustedInboundBinding,
 };
 use ironclaw_turns::{AdmissionRejectionReason, TurnError};
 
@@ -85,13 +86,14 @@ where
     async fn materialize_prompt(
         &self,
         fire: TriggerFire,
-    ) -> Result<TriggerInboundContentRef, TriggerError> {
+    ) -> Result<TriggerMaterializedPrompt, TriggerError> {
         self.authorizer
             .authorize_trigger_fire(&fire)
             .await
             .map_err(trigger_authorization_error)?;
         validate_trigger_prompt(&*self.prompt_safety, &fire.prompt)?;
-        let resolve_request = trigger_resolve_request(&fire)?;
+        let trusted_inbound_binding = TriggerTrustedInboundBinding::for_fire(&fire);
+        let resolve_request = trigger_resolve_request(&fire, &trusted_inbound_binding)?;
         let resolution = self
             .binding_service
             .resolve_or_create_binding_with_trusted_scope(
@@ -111,7 +113,14 @@ where
         )
         .await
         .map_err(classify_inbound_error)?;
-        TriggerInboundContentRef::new(format!("thread-message:{}", accepted.message_id))
+        let content_ref = ironclaw_triggers::TriggerInboundContentRef::new(format!(
+            "thread-message:{}",
+            accepted.message_id
+        ))?;
+        Ok(TriggerMaterializedPrompt::new(
+            content_ref,
+            trusted_inbound_binding,
+        ))
     }
 }
 
@@ -127,33 +136,36 @@ struct TriggerConversationFields {
 
 fn trigger_conversation_fields(
     fire: &TriggerFire,
+    trusted_inbound_binding: &TriggerTrustedInboundBinding,
 ) -> Result<TriggerConversationFields, TriggerError> {
-    let trigger_id = fire.identity.trigger_id();
-    let route_thread_id = fire.identity.route_thread_id().as_str().to_string();
-    let external_event_id = fire.identity.external_event_id().as_str().to_string();
     Ok(TriggerConversationFields {
         tenant_id: fire.identity.tenant_id().clone(),
-        adapter_kind: conversation_id(AdapterKind::new("trigger"))?,
+        adapter_kind: conversation_id(AdapterKind::new(trusted_inbound_binding.adapter_kind()))?,
         adapter_installation_id: conversation_id(AdapterInstallationId::new(
-            "reborn-trigger-poller",
+            trusted_inbound_binding.adapter_installation_id(),
         ))?,
         external_actor_ref: conversation_id(ExternalActorRef::new(
-            "user",
-            fire.creator_user_id.as_str(),
+            trusted_inbound_binding.external_actor_namespace(),
+            trusted_inbound_binding.external_actor_id(),
         ))?,
         external_conversation_ref: conversation_id(ExternalConversationRef::new(
             None,
-            format!("trigger-{trigger_id}"),
-            Some(&route_thread_id),
+            trusted_inbound_binding.external_conversation_id(),
+            Some(trusted_inbound_binding.route_thread_id()),
             None,
         ))?,
-        external_event_id: conversation_id(ExternalEventId::new(&external_event_id))?,
+        external_event_id: conversation_id(ExternalEventId::new(
+            trusted_inbound_binding.external_event_id(),
+        ))?,
         route_kind: ConversationRouteKind::Direct,
     })
 }
 
-fn trigger_resolve_request(fire: &TriggerFire) -> Result<ResolveConversationRequest, TriggerError> {
-    let fields = trigger_conversation_fields(fire)?;
+fn trigger_resolve_request(
+    fire: &TriggerFire,
+    trusted_inbound_binding: &TriggerTrustedInboundBinding,
+) -> Result<ResolveConversationRequest, TriggerError> {
+    let fields = trigger_conversation_fields(fire, trusted_inbound_binding)?;
     Ok(ResolveConversationRequest {
         tenant_id: fields.tenant_id,
         adapter_kind: fields.adapter_kind,
@@ -165,40 +177,6 @@ fn trigger_resolve_request(fire: &TriggerFire) -> Result<ResolveConversationRequ
         requested_agent_id: None,
         requested_project_id: None,
     })
-}
-
-fn validate_trigger_prompt(
-    prompt_safety: &dyn InjectionScanner,
-    prompt: &str,
-) -> Result<(), TriggerError> {
-    let warnings = prompt_safety.scan_injection(prompt);
-    let non_blocking_warnings: Vec<_> = warnings
-        .iter()
-        .filter(|warning| warning.severity < Severity::High)
-        .collect();
-    if let Some(max_severity) = non_blocking_warnings
-        .iter()
-        .map(|warning| warning.severity)
-        .max()
-    {
-        tracing::debug!(
-            warning_count = non_blocking_warnings.len(),
-            max_severity = ?max_severity,
-            "trusted trigger prompt safety warnings observed"
-        );
-    }
-    let blocked = warnings
-        .iter()
-        .find(|warning| warning.severity >= Severity::High);
-    if let Some(warning) = blocked {
-        return Err(TriggerError::InvalidMaterialization {
-            reason: format!(
-                "trusted trigger prompt rejected by safety scan: {}",
-                warning.description
-            ),
-        });
-    }
-    Ok(())
 }
 
 async fn record_trigger_prompt(
@@ -319,7 +297,7 @@ mod tests {
         MessageIdempotencyStatus, ThreadAccessDecision, trusted_trigger_fire_submitter,
     };
     use ironclaw_host_api::{ProjectId, TenantId, ThreadId, UserId};
-    use ironclaw_safety::InjectionWarning;
+    use ironclaw_safety::{InjectionWarning, Severity};
     use ironclaw_threads::{
         AcceptedInboundMessage as CanonicalAcceptedInboundMessage,
         AcceptedInboundMessageReplay as CanonicalAcceptedInboundMessageReplay,
@@ -335,7 +313,8 @@ mod tests {
     use ironclaw_triggers::{
         InMemoryTriggerRepository, ScheduleTriggerSourceProvider, TriggerActiveRunLookup,
         TriggerActiveRunState, TriggerActiveRunStateRequest, TriggerCompletionPolicy, TriggerError,
-        TriggerFire, TriggerFireIdentity, TriggerId, TriggerPollerFireOutcome, TriggerPollerWorker,
+        TriggerFire, TriggerFireIdentity, TriggerId, TriggerInboundContentRef,
+        TriggerMaterializedPrompt, TriggerPollerFireOutcome, TriggerPollerWorker,
         TriggerPollerWorkerConfig, TriggerPollerWorkerDeps, TriggerRecord, TriggerRepository,
         TriggerSchedule, TriggerSourceKind, TriggerState,
     };
@@ -347,7 +326,6 @@ mod tests {
         TurnStatus,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use tracing_test::traced_test;
 
     fn tenant_authorizer(tenant_id: &TenantId) -> Arc<dyn TriggerFireAuthorizer> {
         Arc::new(TrustedTenantTriggerFireAuthorizer::new(tenant_id.clone()))
@@ -373,9 +351,10 @@ mod tests {
     impl TriggerPromptMaterializer for FixedContentRefMaterializer {
         async fn materialize_prompt(
             &self,
-            _fire: TriggerFire,
-        ) -> Result<TriggerInboundContentRef, TriggerError> {
-            TriggerInboundContentRef::new(self.content_ref)
+            fire: TriggerFire,
+        ) -> Result<TriggerMaterializedPrompt, TriggerError> {
+            let content_ref = TriggerInboundContentRef::new(self.content_ref)?;
+            Ok(TriggerMaterializedPrompt::for_fire(&fire, content_ref))
         }
     }
 
@@ -814,9 +793,8 @@ mod tests {
         }
     }
 
-    #[traced_test]
     #[test]
-    fn medium_injection_warnings_emit_audit_signal_without_blocking() {
+    fn medium_injection_warnings_do_not_block_shared_prompt_validation() {
         let warning = InjectionWarning {
             pattern: "act as".to_string(),
             severity: Severity::Medium,
@@ -831,10 +809,6 @@ mod tests {
             "ignore this prompt",
         )
         .expect("medium warnings should not block");
-
-        assert!(logs_contain(
-            "trusted trigger prompt safety warnings observed"
-        ));
     }
 
     #[tokio::test]

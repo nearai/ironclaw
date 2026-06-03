@@ -217,6 +217,7 @@ fn untrusted_ingress_paths_cannot_submit_host_trusted_inbound() {
         "crates/ironclaw_capabilities/src",
         "crates/ironclaw_first_party_extension_ports/src",
         "crates/ironclaw_first_party_extensions/src",
+        "crates/ironclaw_host_api/src",
         "crates/ironclaw_host_runtime/src",
         "crates/ironclaw_product_adapters/src",
         "crates/ironclaw_product_adapter_registry/src",
