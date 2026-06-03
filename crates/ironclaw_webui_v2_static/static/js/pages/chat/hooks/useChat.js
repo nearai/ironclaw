@@ -250,10 +250,14 @@ export function useChat(threadId) {
       if (!pendingGate) {
         throw new Error("auth gate is no longer pending");
       }
-      const { runId, gateRef, provider, accountLabel } = pendingGate;
-      if (!runId || !gateRef || !provider || !accountLabel) {
+      const { runId, gateRef, provider } = pendingGate;
+      if (!runId || !gateRef || !provider) {
         throw new Error("auth gate is missing required credential metadata");
       }
+      // `account_label` is optional on the prompt (gates.js defaults it to
+      // an empty string), so don't gate submission on it — derive a sensible
+      // label when the prompt didn't carry one.
+      const accountLabel = pendingGate.accountLabel || `${provider} credential`;
       const gateKey = `${runId}\n${gateRef}`;
       if (authTokenSubmitRef.current.gateKey !== gateKey) {
         authTokenSubmitRef.current = {
