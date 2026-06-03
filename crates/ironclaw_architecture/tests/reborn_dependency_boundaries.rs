@@ -134,6 +134,20 @@ fn conversation_trusted_trigger_submitter_stays_out_of_root_exports() {
 }
 
 #[test]
+fn conversation_trusted_trigger_classifier_stays_out_of_root_exports() {
+    let root = workspace_root();
+    let lib_source = std::fs::read_to_string(root.join("crates/ironclaw_conversations/src/lib.rs"))
+        .expect("conversation lib source must be readable");
+
+    assert!(
+        !lib_source.contains("classify_trusted_trigger_inbound_error"),
+        "classify_trusted_trigger_inbound_error is submitter policy and must not be re-exported \
+         from ironclaw_conversations; composition-owned materialization should classify its own \
+         local errors"
+    );
+}
+
+#[test]
 fn trusted_trigger_submit_request_minting_stays_worker_owned() {
     let root = workspace_root();
     let mut struct_literal_uses = Vec::new();

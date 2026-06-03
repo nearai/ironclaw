@@ -436,10 +436,9 @@ fn trigger_prompt_safety_rejection(error: PromptSafetyRejection) -> TriggerError
 
 /// Classify conversation inbound failures for the trusted trigger submit path.
 ///
-/// This helper lives with `InboundTurnError` so composition and the concrete
-/// submitter use one mapping without making `ironclaw_triggers` depend on
-/// conversation internals.
-pub fn classify_trusted_trigger_inbound_error(error: InboundTurnError) -> TriggerError {
+/// This helper is private submitter policy. Composition classifies its own
+/// materialization failures before it mints a sealed submit request.
+fn classify_trusted_trigger_inbound_error(error: InboundTurnError) -> TriggerError {
     match error {
         InboundTurnError::TurnSubmissionFailed {
             error: TurnError::ThreadBusy(_),
