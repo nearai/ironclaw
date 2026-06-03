@@ -255,6 +255,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resolve_returns_material_allowset_when_base_is_all_for_subagent_context() {
+        let material_caps =
+            BTreeSet::from([cap("builtin.read_file"), cap("builtin.spawn_subagent")]);
+        let resolver = SubagentCapabilitySurfaceResolver::new(
+            Arc::new(StaticResolver(CapabilityAllowSet::All)),
+            Arc::new(SucceedingSource(SubagentPromptMaterial {
+                direction_markdown: "test".to_string(),
+                goal: ironclaw_loop_support::SubagentPromptGoal {
+                    task: "test".to_string(),
+                    handoff: None,
+                },
+                allowed_capabilities: material_caps.clone(),
+            })),
+        );
+
+        let resolved = resolver
+            .resolve(&planned_subagent_context())
+            .await
+            .expect("subagent runs with an all base allowset should return the material allowset");
+
+        assert_eq!(resolved, CapabilityAllowSet::allowlist(material_caps));
+    }
+
+    #[tokio::test]
     async fn resolve_returns_base_allowset_for_non_subagent_runs_without_material_source() {
         let base = allowlist(&["builtin.read_file", "builtin.write_file"]);
         let resolver = SubagentCapabilitySurfaceResolver::new(
