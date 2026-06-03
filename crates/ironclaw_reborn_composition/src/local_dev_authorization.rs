@@ -222,7 +222,11 @@ fn approval_request(
         requested_by: Principal::Extension(context.extension_id.clone()),
         action: Box::new(action),
         invocation_fingerprint: None,
-        reason: format!("approval required for {:?} of {}", action_kind, descriptor.id.as_str()),
+        reason: format!(
+            "approval required for {:?} of {}",
+            action_kind,
+            descriptor.id.as_str()
+        ),
         reusable_scope: None,
     }
 }
@@ -244,10 +248,7 @@ mod tests {
         test_descriptor_with_id(CapabilityId::new("builtin.shell").unwrap(), effects)
     }
 
-    fn test_descriptor_with_id(
-        id: CapabilityId,
-        effects: Vec<EffectKind>,
-    ) -> CapabilityDescriptor {
+    fn test_descriptor_with_id(id: CapabilityId, effects: Vec<EffectKind>) -> CapabilityDescriptor {
         CapabilityDescriptor {
             id,
             provider: ExtensionId::new("builtin").unwrap(),
@@ -263,7 +264,7 @@ mod tests {
     }
 
     fn test_context(grants: CapabilitySet) -> ExecutionContext {
-        let mut ctx = ExecutionContext::local_default(
+        let ctx = ExecutionContext::local_default(
             ironclaw_host_api::UserId::new("test-user").unwrap(),
             ExtensionId::new("builtin").unwrap(),
             RuntimeKind::FirstParty,
@@ -274,7 +275,7 @@ mod tests {
         .unwrap();
         ctx.validate().unwrap();
         ctx
-   }
+    }
 
     fn test_trust_decision() -> TrustDecision {
         TrustDecision {
@@ -291,8 +292,7 @@ mod tests {
     #[tokio::test]
     async fn dispatch_with_destructive_effect_requires_approval() {
         let capability_policy = Arc::new(local_dev_capability_policy().unwrap());
-        let authorizer =
-            local_dev_authorizer(None, capability_policy); // defaults to AskDestructive
+        let authorizer = local_dev_authorizer(None, capability_policy); // defaults to AskDestructive
 
         let shell_id = CapabilityId::new("builtin.shell").unwrap();
         let descriptor = test_descriptor_with_id(shell_id.clone(), vec![EffectKind::SpawnProcess]);
@@ -331,8 +331,7 @@ mod tests {
     #[tokio::test]
     async fn spawn_with_dispatch_only_capability_requires_approval() {
         let capability_policy = Arc::new(local_dev_capability_policy().unwrap());
-        let authorizer =
-            local_dev_authorizer(None, capability_policy); // defaults to AskDestructive
+        let authorizer = local_dev_authorizer(None, capability_policy); // defaults to AskDestructive
 
         // builtin.echo declares only DispatchCapability, but spawn elevates to include SpawnProcess
         let echo_id = CapabilityId::new("builtin.echo").unwrap();
@@ -373,8 +372,8 @@ mod tests {
     #[tokio::test]
     async fn minimal_policy_skips_approval_gate() {
         use ironclaw_host_api::runtime_policy::{
-            ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
-            NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
+            ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy,
+            FilesystemBackendKind, NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
         };
 
         let capability_policy = Arc::new(local_dev_capability_policy().unwrap());
@@ -428,8 +427,7 @@ mod tests {
     #[tokio::test]
     async fn deny_decision_passes_through_unchanged() {
         let capability_policy = Arc::new(local_dev_capability_policy().unwrap());
-        let authorizer =
-            local_dev_authorizer(None, capability_policy); // defaults to AskDestructive
+        let authorizer = local_dev_authorizer(None, capability_policy); // defaults to AskDestructive
 
         // Empty grant set: GrantAuthorizer returns Deny (no matching grant)
         let descriptor = test_descriptor(vec![EffectKind::DispatchCapability]);
