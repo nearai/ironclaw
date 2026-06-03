@@ -142,15 +142,24 @@ fn token_count_numbers(lower: &str) -> Vec<usize> {
 }
 
 fn number_immediately_before(segment: &str) -> Option<usize> {
+    let mut skipped_alphabetic = false;
     let digits = segment
         .chars()
         .rev()
-        .skip_while(|ch| !ch.is_ascii_digit())
+        .skip_while(|ch| {
+            if ch.is_alphabetic() {
+                skipped_alphabetic = true;
+            }
+            !ch.is_ascii_digit()
+        })
         .take_while(|ch| ch.is_ascii_digit())
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect::<String>();
+        .collect::<Vec<_>>();
+
+    if skipped_alphabetic || digits.is_empty() {
+        return None;
+    }
+
+    let digits = digits.into_iter().rev().collect::<String>();
     digits.parse().ok().filter(|&n| n > 0)
 }
 
@@ -260,6 +269,14 @@ mod tests {
         assert!(auth_guidance("groq").contains("GROQ_API_KEY"));
         assert!(auth_guidance("ollama").contains("Ollama is running"));
         assert!(auth_guidance("bedrock").contains("AWS"));
+    }
+
+    #[test]
+    fn parse_context_token_counts_ignores_non_adjacent_digits_before_tokens() {
+        let msg = "provider model 3 has some tokens available. this model's maximum context length is 128000 tokens. however, your messages resulted in 150000 tokens.";
+        let (used, limit) = parse_context_token_counts(msg);
+        assert_eq!(used, 150000);
+        assert_eq!(limit, 128000);
     }
 
     // ------------------------------------------------------------------
