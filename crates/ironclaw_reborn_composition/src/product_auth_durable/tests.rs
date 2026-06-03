@@ -778,12 +778,12 @@ async fn filesystem_account_record_source_projects_session_scoped_accounts_for_r
 }
 
 #[tokio::test]
-async fn filesystem_account_record_source_skips_malformed_scan_records() {
+async fn filesystem_account_record_source_rejects_malformed_scan_records() {
     let filesystem = test_filesystem();
     let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
     let scope = test_scope();
     let service = test_service(Arc::clone(&filesystem), secret_store);
-    let account = service
+    service
         .create_account(NewCredentialAccount {
             scope: scope.clone(),
             provider: google_provider(),
@@ -814,13 +814,13 @@ async fn filesystem_account_record_source_skips_malformed_scan_records() {
         .await
         .expect("malformed account fixture must write");
 
-    let accounts = service
-        .accounts_for_owner(&scope)
-        .await
-        .expect("owner projection should skip malformed account records");
-
-    assert_eq!(accounts.len(), 1);
-    assert_eq!(accounts[0].id, account.id);
+    assert!(
+        matches!(
+            service.accounts_for_owner(&scope).await,
+            Err(AuthProductError::BackendUnavailable)
+        ),
+        "runtime owner scans should fail loudly on malformed account records"
+    );
 
     assert!(
         matches!(

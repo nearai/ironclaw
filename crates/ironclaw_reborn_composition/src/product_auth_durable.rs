@@ -40,7 +40,8 @@ mod provider;
 #[cfg(test)]
 mod tests;
 
-const MAX_OWNER_SESSION_ROOTS_PER_SURFACE: usize = 64;
+const MAX_OWNER_SESSION_ROOTS_PER_SURFACE: usize = 1024;
+const MAX_OWNER_RECORDS_PER_ROOT: usize = 1024;
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub(crate) use provider::UnavailableAuthProviderClient;
@@ -134,18 +135,9 @@ where
         let Some(versioned) = self.filesystem.get(scope, path).await.map_err(fs_error)? else {
             return Ok(None);
         };
-        match serde_json::from_slice(&versioned.entry.body) {
-            Ok(account) => Ok(Some(account)),
-            Err(error) => {
-                tracing::warn!(
-                    target = "ironclaw::reborn::product_auth",
-                    path = %path.as_str(),
-                    error = %error,
-                    "skipping malformed product-auth account record during projection scan",
-                );
-                Ok(None)
-            }
-        }
+        serde_json::from_slice(&versioned.entry.body)
+            .map(Some)
+            .map_err(|_| AuthProductError::BackendUnavailable)
     }
 
     async fn write_record<T>(
@@ -421,11 +413,22 @@ where
                 continue;
             }
             let sessions_root = surface_sessions_root(&resource, surface)?;
-            let mut entries = match self.filesystem.list_dir(&resource, &sessions_root).await {
+            let mut entries = match self
+                .filesystem
+                .list_dir_bounded(
+                    &resource,
+                    &sessions_root,
+                    MAX_OWNER_SESSION_ROOTS_PER_SURFACE.saturating_add(1),
+                )
+                .await
+            {
                 Ok(entries) => entries,
                 Err(FilesystemError::NotFound { .. }) => continue,
                 Err(error) => return Err(fs_error(error)),
             };
+            if entries.len() > MAX_OWNER_SESSION_ROOTS_PER_SURFACE {
+                return Err(AuthProductError::BackendUnavailable);
+            }
             entries.sort_by(|left, right| left.name.cmp(&right.name));
             for entry in entries {
                 if entry.file_type != FileType::Directory {
@@ -450,10 +453,13 @@ where
         let mut accounts = Vec::new();
         for scope in self.account_scopes_for_owner(owner).await? {
             accounts.extend(
-                self.account_records_under_scope_root(&scope)
-                    .await?
-                    .into_iter()
-                    .filter(|account| owner.matches(account)),
+                self.account_records_under_scope_root_with_limit(
+                    &scope,
+                    Some(MAX_OWNER_RECORDS_PER_ROOT),
+                )
+                .await?
+                .into_iter()
+                .filter(|account| owner.matches(account)),
             );
         }
         accounts.sort_by_key(|account| account.id);
@@ -469,7 +475,13 @@ where
         let mut saw_configured = false;
         let mut selected = None;
         for scope in self.account_scopes_for_owner(&owner).await? {
-            for account in self.account_records_under_scope_root(&scope).await? {
+            for account in self
+                .account_records_under_scope_root_with_limit(
+                    &scope,
+                    Some(MAX_OWNER_RECORDS_PER_ROOT),
+                )
+                .await?
+            {
                 if !owner.matches(&account)
                     || account.provider != request.provider
                     || account.status != CredentialAccountStatus::Configured
