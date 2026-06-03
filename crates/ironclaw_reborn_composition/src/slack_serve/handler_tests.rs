@@ -58,6 +58,7 @@ impl SlackEventsWebhookDispatcher for HeaderSecretDispatcher {
         &'a self,
         _body: &'a [u8],
         _evidence: &'a ProtocolAuthEvidence,
+        _observer: Option<Arc<dyn ImmediateAckWorkflowObserver>>,
     ) -> Pin<Box<dyn Future<Output = Result<WebhookProcessOutcome, RunnerError>> + Send + 'a>> {
         self.dispatch_calls.fetch_add(1, Ordering::SeqCst);
         Box::pin(async { Ok(WebhookProcessOutcome::AcceptedForAsyncDispatch) })

@@ -47,7 +47,8 @@ pub use inbound::{
     ParsedProductInbound, ProductCommandResultPayload, ProductInboundAck, ProductInboundEnvelope,
     ProductInboundPayload, ProductRejection, ProductRejectionDisposition, ProductRejectionKind,
     ProductSlashCommandParseError, ProductTriggerReason, ProjectionSubscriptionPayload,
-    TrustedInboundContext, UserMessagePayload, parse_product_slash_command,
+    ScopedApprovalResolutionPayload, TrustedInboundContext, UserMessagePayload,
+    parse_product_slash_command,
 };
 pub use outbound::{
     AuthPromptChallengeKind, AuthPromptView, CAPABILITY_DISPLAY_KIND_MAX_BYTES,

@@ -15,6 +15,7 @@ const FALLBACK_APPROVAL_SUMMARY: &str = "Approval required";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApprovalInteractionRejectionKind {
     MissingGate,
+    AmbiguousGate,
     StaleGate,
     CrossScopeDenied,
     InvalidGateRef,
@@ -29,6 +30,7 @@ impl ApprovalInteractionRejectionKind {
     pub fn sanitized_reason(self) -> &'static str {
         match self {
             Self::MissingGate => "approval gate was not found",
+            Self::AmbiguousGate => "multiple approval gates are pending",
             Self::StaleGate => "approval gate is stale",
             Self::CrossScopeDenied => "approval gate is not visible to this caller",
             Self::InvalidGateRef => "approval gate reference is invalid",
@@ -43,7 +45,7 @@ impl ApprovalInteractionRejectionKind {
     pub fn workflow_rejection_kind(self) -> ProductWorkflowRejectionKind {
         match self {
             Self::MissingGate => ProductWorkflowRejectionKind::ScopeNotFound,
-            Self::StaleGate => ProductWorkflowRejectionKind::Conflict,
+            Self::AmbiguousGate | Self::StaleGate => ProductWorkflowRejectionKind::Conflict,
             Self::CrossScopeDenied => ProductWorkflowRejectionKind::Unauthorized,
             Self::InvalidGateRef
             | Self::AlwaysAllowUnsupported

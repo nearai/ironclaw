@@ -69,7 +69,7 @@ Some dependencies have already landed and should be treated as foundations, not 
 
 ### In scope for #3857
 
-- Default-off Slack ProductAdapter MVP with preconfigured credentials.
+- Default-off Slack ProductAdapter MVP with preconfigured credentials and host-preconfigured Reborn actor bindings for allowed Slack users.
 - Slack request verification using `SLACK_SIGNING_SECRET` at the host ingress boundary.
 - Slack bot-token egress through a host-owned credential handle (`SLACK_BOT_TOKEN` / `slack_bot_token`), never raw token exposure in the adapter.
 - DM and app mention event normalization into ProductAdapter DTOs.
@@ -82,7 +82,7 @@ Some dependencies have already landed and should be treated as foundations, not 
 ### Out of scope for #3857 MVP
 
 - Slack OAuth install flow. The issue explicitly uses preconfigured credentials for the MVP.
-- Full Slack v1 parity: pairing, broadcast lifecycle, file ingestion, search, rich home views, admin flows, or legacy Slack channel reuse.
+- Full Slack v1 parity: self-service pairing/code approval, broadcast lifecycle, file ingestion, search, rich home views, admin flows, or legacy Slack channel reuse.
 - v1 `Channel` integration, old Slack config/startup wiring, or direct use of runtime internals.
 - Slack-local approval stores, direct `TurnCoordinator::resume_turn`, or any custom run authority in the Slack adapter.
 - A Slack-specific LLM tool for proactive messages. Proactive delivery should use shared outbound/product capability abstractions.

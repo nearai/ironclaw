@@ -43,6 +43,7 @@ export function messagesFromTimeline(records, pendingMessages = []) {
       timestamp: timestampForRecord(record),
       kind: record.kind,
       status: record.status,
+      isFinalReply: isFinalAssistantRecord(record),
       sequence: record.sequence,
       turnRunId: record.turn_run_id || null,
     });
@@ -54,6 +55,13 @@ export function messagesFromTimeline(records, pendingMessages = []) {
   }
 
   return messages;
+}
+
+function isFinalAssistantRecord(record) {
+  return (
+    (record.kind === "assistant" || record.kind === "assistant_message") &&
+    record.status === "finalized"
+  );
 }
 
 function roleForRecord(record) {

@@ -57,3 +57,4 @@ pub use runner::{
     NativeProductAdapterRunnerConfig, RunnerError, WebhookAuth, WebhookProcessOutcome,
     evidence_from_bearer_subject, evidence_from_session_subject,
 };
+pub use runner_immediate_ack::ImmediateAckWorkflowObserver;

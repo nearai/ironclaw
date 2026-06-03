@@ -116,6 +116,24 @@ mod tests {
     }
 
     #[test]
+    fn chat_message_grouping_hoists_only_final_replies() {
+        let groups = asset_text("js/pages/chat/lib/message-groups.js");
+        assert!(groups.contains("function isFinalAssistantReply"));
+        assert!(groups.contains("msg.isFinalReply === true"));
+        assert!(groups.contains("msg.status === \"finalized\""));
+        assert!(groups.contains("appendGroupedMessages(items, reordered.before);"));
+        assert!(groups.contains("appendGroupedMessages(items, reordered.activity);"));
+        assert!(!groups.contains("lastAssistantReplyIndex"));
+
+        let history = asset_text("js/pages/chat/lib/history-messages.js");
+        assert!(history.contains("isFinalReply: isFinalAssistantRecord(record)"));
+        assert!(history.contains("record.status === \"finalized\""));
+
+        let events = asset_text("js/pages/chat/lib/useChatEvents.js");
+        assert!(events.contains("isFinalReply: true"));
+    }
+
+    #[test]
     fn extensions_onboarding_messages_render_in_cards() {
         let extension_card = asset_text("js/pages/extensions/components/extension-card.js");
 

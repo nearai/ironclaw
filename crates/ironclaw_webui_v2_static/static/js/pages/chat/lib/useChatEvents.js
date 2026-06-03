@@ -130,6 +130,7 @@ export function useChatEvents({
               content: reply.text || "",
               timestamp: reply.generated_at || new Date().toISOString(),
               turnRunId: reply.turn_run_id,
+              isFinalReply: true,
             },
           ]);
           setPendingGate(null);
@@ -299,6 +300,7 @@ function applyProjectionItems({
           role: "assistant",
           content: item.text.body || "",
           timestamp: new Date().toISOString(),
+          isFinalReply: true,
         };
         if (existing >= 0) {
           const copy = [...prev];

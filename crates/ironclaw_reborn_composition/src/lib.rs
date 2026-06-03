@@ -72,6 +72,10 @@ mod runtime;
 mod runtime_input;
 mod skill_listing;
 #[cfg(feature = "slack-v2-host-beta")]
+mod slack_delivery;
+#[cfg(feature = "slack-v2-host-beta")]
+mod slack_egress;
+#[cfg(feature = "slack-v2-host-beta")]
 pub mod slack_serve;
 #[cfg(feature = "test-support")]
 pub mod test_support;
@@ -160,6 +164,16 @@ pub use runtime_input::{
     RebornRuntimeIdentity, RebornRuntimeInput, TriggerPollerSettings, TurnRunnerSettings,
 };
 pub use skill_listing::{RebornSkillListError, list_reborn_local_skills};
+#[cfg(feature = "slack-v2-host-beta")]
+pub use slack_delivery::{
+    SlackFinalReplyDeliveryObserver, SlackFinalReplyDeliveryServices,
+    SlackFinalReplyDeliverySettings,
+};
+#[cfg(feature = "slack-v2-host-beta")]
+pub use slack_egress::{
+    SlackEgressCredential, SlackEgressCredentialError, SlackEgressCredentialProvider,
+    SlackProtocolHttpEgress, StaticSlackEgressCredentialProvider,
+};
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack_serve::{
     SLACK_EVENTS_PATH, SlackEventsRouteState, SlackEventsWebhookDispatcher,
