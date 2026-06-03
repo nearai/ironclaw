@@ -25,8 +25,8 @@ pub use install_bundle::{
 };
 
 use install_bundle::{
-    install_metadata_source, installed_skill_source, publish_skill_install,
-    read_install_metadata_bytes, validate_install_bundle_files,
+    existing_skill_install_matches, install_metadata_source, installed_skill_source,
+    publish_skill_install, read_install_metadata_bytes, validate_install_bundle_files,
 };
 
 pub(super) const USER_SKILLS_ROOT: &str = "/skills";
@@ -342,6 +342,27 @@ pub async fn install_skill(
 
     log_skill_filesystem_phase("stat_existing_dir", &skill_name, &skill_dir);
     if stat_optional(context, &skill_dir).await?.is_some() {
+        if existing_skill_install_matches(
+            context,
+            &skill_name,
+            &prepared.content,
+            request.files,
+            request.source,
+            request.source_url,
+        )
+        .await?
+        {
+            tracing::debug!(
+                skill_name = %skill_name,
+                scoped_path = %skill_dir,
+                "skill install matched existing skill directory"
+            );
+            return Ok(SkillInstallResult {
+                name: skill_name.clone(),
+                scoped_path: format!("{USER_SKILLS_ROOT}/{skill_name}/{SKILL_FILE_NAME}"),
+                source: installed_skill_source(request.source),
+            });
+        }
         tracing::debug!(
             skill_name = %skill_name,
             scoped_path = %skill_dir,
