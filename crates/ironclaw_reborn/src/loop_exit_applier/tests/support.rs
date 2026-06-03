@@ -13,8 +13,8 @@ use ironclaw_turns::{
     LoopCompletionKind, LoopExit, LoopExitId, LoopGateRef, LoopMessageRef, LoopResultRef,
     PutLoopCheckpointRequest, ReplyTargetBindingRef, ResumeTurnRequest, ResumeTurnResponse,
     RunProfileVersion, SanitizedFailure, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse,
-    TurnCheckpointId, TurnError, TurnId, TurnLeaseToken, TurnRunId, TurnRunState, TurnRunnerId,
-    TurnScope, TurnStateStore, TurnStatus,
+    TurnActor, TurnCheckpointId, TurnError, TurnId, TurnLeaseToken, TurnRunId, TurnRunState,
+    TurnRunnerId, TurnScope, TurnStateStore, TurnStatus,
     run_profile::{CheckpointSchemaId, LoopDriverId},
     runner::{
         ApplyValidatedLoopExitRequest, BlockRunRequest, CancelRunCompletionRequest,
@@ -59,6 +59,35 @@ where
         })
         .await
         .expect("tool result reference")
+}
+
+/// Build a minimal `Running` run state for a given scope/run, carrying
+/// the supplied authenticated actor. Used to exercise the applier's
+/// per-caller owner resolution.
+pub(super) fn running_run_state(
+    scope: TurnScope,
+    run_id: TurnRunId,
+    actor: Option<TurnActor>,
+) -> TurnRunState {
+    TurnRunState {
+        scope,
+        actor,
+        turn_id: TurnId::new(),
+        run_id,
+        status: TurnStatus::Running,
+        accepted_message_ref: AcceptedMessageRef::new("msg:accepted").expect("valid"),
+        source_binding_ref: SourceBindingRef::new("source").expect("valid"),
+        reply_target_binding_ref: ReplyTargetBindingRef::new("reply").expect("valid"),
+        resolved_run_profile_id: ironclaw_turns::RunProfileId::default_profile(),
+        resolved_run_profile_version: RunProfileVersion::new(1),
+        resolved_model_route: None,
+        received_at: chrono::Utc::now(),
+        checkpoint_id: None,
+        gate_ref: None,
+        credential_requirements: Vec::new(),
+        failure: None,
+        event_cursor: EventCursor(0),
+    }
 }
 
 pub(super) struct StaticTurnStateStore {

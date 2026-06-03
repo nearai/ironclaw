@@ -794,6 +794,7 @@ impl HostRuntimeLoopCapabilityPort {
         self.milestone_sink
             .publish_loop_milestone(LoopHostMilestone {
                 scope: self.run_context.scope.clone(),
+                actor: self.run_context.actor.clone(),
                 turn_id: self.run_context.turn_id,
                 run_id: self.run_context.run_id,
                 loop_driver_id: self.run_context.loop_driver_id.clone(),

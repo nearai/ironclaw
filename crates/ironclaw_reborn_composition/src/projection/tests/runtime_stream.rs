@@ -400,6 +400,160 @@ async fn webui_event_stream_preserves_sanitized_capability_activity_error_kind()
 }
 
 #[tokio::test]
+async fn webui_event_stream_drains_live_reasoning_projection_from_update_source() {
+    let tenant_id = TenantId::new("webui-thinking-tenant").unwrap();
+    let user_id = UserId::new("webui-thinking-user").unwrap();
+    let agent_id = AgentId::new("webui-thinking-agent").unwrap();
+    let thread_id = ThreadId::new("webui-thinking-thread").unwrap();
+    let event_log: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
+    let services = build_reborn_projection_services(
+        event_log,
+        ReplyTargetBindingRef::new("webui-thinking-reply").unwrap(),
+    );
+    let sink = services.with_live_progress_milestone_sink_for_publisher(
+        Arc::new(InMemoryLoopHostMilestoneSink::default()),
+        services.live_projection_publisher(user_id.clone()),
+    );
+    let scope = TurnScope::new(
+        tenant_id.clone(),
+        Some(agent_id.clone()),
+        None,
+        thread_id.clone(),
+    );
+
+    let thinking_body = "Thinking Steps • Summary\n\
+[] Inspect nearai/ironclaw.\n\
+[] Read the thermo-loop SKILL.md fully.\n\
+() Find the PR details using gh CLI.\n\
+[] Run the thermonuclear code quality review.\n\
+! Fix actionable findings.";
+
+    sink.publish_loop_milestone(LoopHostMilestone {
+        scope: scope.clone(),
+        actor: None,
+        turn_id: TurnId::new(),
+        run_id: TurnRunId::new(),
+        loop_driver_id: LoopDriverId::new("test_loop").unwrap(),
+        kind: LoopHostMilestoneKind::ModelReasoningDelta {
+            safe_delta: thinking_body.to_string(),
+        },
+    })
+    .await
+    .unwrap();
+
+    let events = services
+        .webui_event_stream()
+        .drain(ProjectionSubscriptionRequest {
+            actor: TurnActor::new(user_id),
+            scope,
+            after_cursor: None,
+        })
+        .await
+        .unwrap();
+
+    assert!(events.iter().any(|event| {
+        matches!(
+            event.payload(),
+            ProductOutboundPayload::ProjectionUpdate { state }
+                if state.thread_id == thread_id.to_string()
+                    && state.items.iter().any(|item| matches!(
+                        item,
+                        ProductProjectionItem::Thinking { body, .. } if body == thinking_body
+                    ))
+        )
+    }));
+}
+
+#[tokio::test]
+async fn live_projection_is_keyed_to_run_actor_not_publisher_owner() {
+    // A turn run by an SSO user whose id differs from the runtime owner
+    // must publish live progress to THAT user's stream, not the operator's.
+    // Regression for the projection-owner leak: the publisher used to key
+    // every live item to its construction-time owner, so an SSO user never
+    // saw their own thinking/progress while it leaked onto the operator
+    // stream.
+    let tenant_id = TenantId::new("webui-actor-tenant").unwrap();
+    let runtime_owner = UserId::new("runtime-owner").unwrap();
+    let sso_user = UserId::new("sso-user").unwrap();
+    let agent_id = AgentId::new("webui-actor-agent").unwrap();
+    let thread_id = ThreadId::new("webui-actor-thread").unwrap();
+    let event_log: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
+    let services = build_reborn_projection_services(
+        event_log,
+        ReplyTargetBindingRef::new("webui-actor-reply").unwrap(),
+    );
+    // Publisher built with the runtime owner — the fallback owner.
+    let sink = services.with_live_progress_milestone_sink_for_publisher(
+        Arc::new(InMemoryLoopHostMilestoneSink::default()),
+        services.live_projection_publisher(runtime_owner.clone()),
+    );
+    let scope = TurnScope::new(
+        tenant_id.clone(),
+        Some(agent_id.clone()),
+        None,
+        thread_id.clone(),
+    );
+
+    // The milestone is bound to the SSO user, not the runtime owner.
+    sink.publish_loop_milestone(LoopHostMilestone {
+        scope: scope.clone(),
+        actor: Some(TurnActor::new(sso_user.clone())),
+        turn_id: TurnId::new(),
+        run_id: TurnRunId::new(),
+        loop_driver_id: LoopDriverId::new("test_loop").unwrap(),
+        kind: LoopHostMilestoneKind::ModelReasoningDelta {
+            safe_delta: "sso user thinking".to_string(),
+        },
+    })
+    .await
+    .unwrap();
+
+    // The SSO user (the run actor) receives their own live progress.
+    let sso_events = services
+        .webui_event_stream()
+        .drain(ProjectionSubscriptionRequest {
+            actor: TurnActor::new(sso_user.clone()),
+            scope: scope.clone(),
+            after_cursor: None,
+        })
+        .await
+        .unwrap();
+    assert!(
+        sso_events.iter().any(|event| matches!(
+            event.payload(),
+            ProductOutboundPayload::ProjectionUpdate { state }
+                if state.items.iter().any(|item| matches!(
+                    item,
+                    ProductProjectionItem::Thinking { body, .. } if body == "sso user thinking"
+                ))
+        )),
+        "the run actor must receive its own live progress"
+    );
+
+    // The runtime owner (the old, wrong target) must NOT see it.
+    let owner_events = services
+        .webui_event_stream()
+        .drain(ProjectionSubscriptionRequest {
+            actor: TurnActor::new(runtime_owner.clone()),
+            scope,
+            after_cursor: None,
+        })
+        .await
+        .unwrap();
+    assert!(
+        !owner_events.iter().any(|event| matches!(
+            event.payload(),
+            ProductOutboundPayload::ProjectionUpdate { state }
+                if state.items.iter().any(|item| matches!(
+                    item,
+                    ProductProjectionItem::Thinking { body, .. } if body == "sso user thinking"
+                ))
+        )),
+        "live progress must not leak to a different user's stream"
+    );
+}
+
+#[tokio::test]
 async fn webui_event_stream_drains_skill_activation_projection_from_observer() {
     let tenant_id = TenantId::new("webui-skill-activation-tenant").unwrap();
     let user_id = UserId::new("webui-skill-activation-user").unwrap();
@@ -581,6 +735,7 @@ async fn webui_event_stream_drains_work_summary_projection_from_driver_note() {
 
     sink.publish_loop_milestone(LoopHostMilestone {
         scope: scope.clone(),
+        actor: None,
         turn_id: TurnId::new(),
         run_id,
         loop_driver_id: LoopDriverId::new("test_loop").unwrap(),
@@ -645,6 +800,7 @@ async fn webui_event_stream_maps_subscription_terminated_work_summary_to_context
 
     sink.publish_loop_milestone(LoopHostMilestone {
         scope: scope.clone(),
+        actor: None,
         turn_id: TurnId::new(),
         run_id,
         loop_driver_id: LoopDriverId::new("test_loop").unwrap(),
@@ -708,6 +864,7 @@ async fn webui_event_stream_skips_empty_work_summary_body() {
 
     sink.publish_loop_milestone(LoopHostMilestone {
         scope: scope.clone(),
+        actor: None,
         turn_id: TurnId::new(),
         run_id: TurnRunId::new(),
         loop_driver_id: LoopDriverId::new("test_loop").unwrap(),
