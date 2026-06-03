@@ -4,6 +4,7 @@ use std::{
 };
 
 use crate::parser::starts_with_frontmatter_delimiter;
+use crate::validation::normalize_skill_identifier;
 use crate::{
     MAX_PROMPT_FILE_SIZE, ParsedSkill, SkillParseError, normalize_line_endings, parse_skill_md,
     validate_skill_name,
@@ -210,6 +211,7 @@ pub struct SkillInstallResult {
 struct PreparedSkillInstall {
     content: String,
     parsed: ParsedSkill,
+    synthesized_frontmatter: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -321,6 +323,7 @@ pub async fn install_skill(
         ));
     }
     if let Some(requested_name) = request.name
+        && !prepared.synthesized_frontmatter
         && requested_name != prepared.parsed.manifest.name
     {
         tracing::debug!(
@@ -417,6 +420,7 @@ fn prepare_install_content(
         Ok(parsed) => Ok(PreparedSkillInstall {
             content: normalized_content,
             parsed,
+            synthesized_frontmatter: false,
         }),
         Err(SkillParseError::MissingFrontmatter)
             if !starts_with_frontmatter_delimiter(&normalized_content) =>
@@ -426,7 +430,11 @@ fn prepare_install_content(
                 tracing::debug!(%error, "skill install failed to parse synthesized SKILL.md content");
                 skill_parse_error(error)
             })?;
-            Ok(PreparedSkillInstall { content, parsed })
+            Ok(PreparedSkillInstall {
+                content,
+                parsed,
+                synthesized_frontmatter: true,
+            })
         }
         Err(error) => {
             tracing::debug!(%error, "skill install failed to parse SKILL.md content");
@@ -444,7 +452,7 @@ fn synthesize_install_frontmatter(
         tracing::debug!(%error, "skill install failed to parse SKILL.md content");
         return Err(skill_parse_error(error));
     };
-    if !validate_skill_name(requested_name) {
+    let Some(skill_name) = normalize_skill_identifier(requested_name) else {
         tracing::debug!(
             requested_name,
             "skill install rejected invalid requested name"
@@ -452,9 +460,9 @@ fn synthesize_install_frontmatter(
         return Err(SkillManagementError::new(
             SkillManagementErrorKind::InvalidInput,
         ));
-    }
+    };
 
-    let mut rendered = format!("---\nname: {requested_name}\n---\n\n");
+    let mut rendered = format!("---\nname: {skill_name}\n---\n\n");
     rendered.push_str(normalized_content);
     Ok(rendered)
 }
