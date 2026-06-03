@@ -100,7 +100,7 @@ async fn local_dev_yolo_shell_translates_workspace_workdir_without_scoped_mounts
     let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
     let factory = LocalDevLoopCapabilityPortFactory {
         runtime,
-        user_id: UserId::new("local-dev-shell-user").expect("user id"),
+        fallback_user_id: UserId::new("local-dev-shell-user").expect("user id"),
         policy,
         workspace_mounts,
         skill_mounts,

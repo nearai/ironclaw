@@ -4849,6 +4849,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "uuid",
  "wat",
 ]
 
@@ -4857,6 +4858,7 @@ name = "ironclaw_reborn_cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "chrono",
  "clap",
  "clap_complete",
@@ -5034,6 +5036,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "hex",
+ "hmac 0.12.1",
  "http 1.4.1",
  "http-body-util",
  "ironclaw_host_api",

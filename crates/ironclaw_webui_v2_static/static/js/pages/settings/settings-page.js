@@ -88,16 +88,18 @@ export function SettingsPage() {
               />
             </div>`}
 
-            <${SettingsToolbar}
-              settingsExport=${query.data}
-              onImport=${importSettings}
-              isImporting=${isImporting}
-              searchQuery=${searchQuery}
-              onSearchChange=${setSearchQuery}
-              onSearchClear=${() => setSearchQuery("")}
-              onBack=${handleBack}
-              canGoBack=${tab !== "inference"}
-            />
+            ${''
+              // <${SettingsToolbar}
+              //   settingsExport=${query.data}
+              //   onImport=${importSettings}
+              //   isImporting=${isImporting}
+              //   searchQuery=${searchQuery}
+              //   onSearchChange=${setSearchQuery}
+              //   onSearchClear=${() => setSearchQuery("")}
+              //   onBack=${handleBack}
+              //   canGoBack=${tab !== "inference"}
+              // />
+            }
 
             ${saveError &&
             html`

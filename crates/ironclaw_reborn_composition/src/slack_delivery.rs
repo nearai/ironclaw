@@ -5,6 +5,8 @@
 //! the submitted run to finish, reads the finalized assistant reply, and sends it
 //! through the host-mediated product outbound delivery seam.
 
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -38,6 +40,7 @@ use ironclaw_wasm_product_adapters::ImmediateAckWorkflowObserver;
 use tokio::sync::Semaphore;
 
 const MAX_SLACK_RUN_POLL_INTERVAL: Duration = Duration::from_secs(5);
+const SLACK_RUN_POLL_JITTER_BUCKETS: u32 = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SlackFinalReplyDeliverySettings {
@@ -255,7 +258,7 @@ impl SlackFinalReplyDeliveryObserver {
             if start.elapsed() >= self.settings.max_wait {
                 return Err(SlackFinalReplyDeliveryError::RunWaitTimedOut { run_id });
             }
-            tokio::time::sleep(poll_interval).await;
+            tokio::time::sleep(jittered_poll_interval(poll_interval, &run_id)).await;
             poll_interval = poll_interval
                 .saturating_mul(2)
                 .min(MAX_SLACK_RUN_POLL_INTERVAL);
@@ -279,6 +282,16 @@ impl SlackFinalReplyDeliveryObserver {
             .await?
             .and_then(|message| message.content))
     }
+}
+
+fn jittered_poll_interval(base: Duration, run_id: &TurnRunId) -> Duration {
+    if base.is_zero() {
+        return base;
+    }
+    let mut hasher = DefaultHasher::new();
+    run_id.to_string().hash(&mut hasher);
+    let bucket = hasher.finish() as u32 % SLACK_RUN_POLL_JITTER_BUCKETS;
+    (base + base / SLACK_RUN_POLL_JITTER_BUCKETS * bucket).min(MAX_SLACK_RUN_POLL_INTERVAL)
 }
 
 #[async_trait]

@@ -914,6 +914,15 @@ async fn assistant_reply_stage_returns_reply_summary() {
         TurnCompletedStep::Continue { state, summary } => {
             assert_eq!(state.assistant_refs, vec![message_ref("msg:assistant")]);
             assert_eq!(
+                state
+                    .recent_output_token_counts
+                    .iter()
+                    .copied()
+                    .collect::<Vec<_>>(),
+                vec![2],
+                "missing provider usage should still feed no-progress detection"
+            );
+            assert_eq!(
                 summary,
                 TurnSummary::reply_only(message_ref("msg:assistant"))
             );

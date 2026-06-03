@@ -56,6 +56,22 @@ export function MessageBubble({ message, onRetry }) {
   const { role, content, images, attachments, generatedImages, isOptimistic, status, error, toolCalls, timestamp } = message;
   const isUser = role === "user";
   const [copied, setCopied] = React.useState(false);
+  // All hooks must run before the role-based early returns below.
+  // A message can change role in place across renders (e.g. an
+  // optimistic bubble upgrading, or a streaming role shift), so
+  // declaring `copy` after the early returns made the hook count
+  // jump between renders and crashed the thread with "Rendered more
+  // hooks than during the previous render". Keep every hook here.
+  const copy = React.useCallback(async () => {
+    try {
+      await navigator.clipboard.writeText(typeof content === "string" ? content : "");
+      setCopied(true);
+      toast("Copied to clipboard", { tone: "success" });
+      setTimeout(() => setCopied(false), 1400);
+    } catch {
+      // clipboard unavailable — no-op
+    }
+  }, [content]);
 
   if (role === "tool_activity" || (toolCalls && toolCalls.length > 0)) {
     const activity = (toolCalls && toolCalls.length > 0)
@@ -90,17 +106,6 @@ export function MessageBubble({ message, onRetry }) {
       </div>
     `;
   }
-
-  const copy = React.useCallback(async () => {
-    try {
-      await navigator.clipboard.writeText(typeof content === "string" ? content : "");
-      setCopied(true);
-      toast("Copied to clipboard", { tone: "success" });
-      setTimeout(() => setCopied(false), 1400);
-    } catch {
-      // clipboard unavailable — no-op
-    }
-  }, [content]);
 
   const timeLabel = formatTimestamp(timestamp);
   const showActions = (role === "assistant" || role === "user") && !isOptimistic;

@@ -425,46 +425,15 @@ where
                 if binding.account_id != account_id {
                     return Err(AuthProductError::CrossScopeDenied);
                 }
-                let lock = self.lock_for(format!("account:{account_id}"));
-                let _guard = lock.lock().await;
-                let (mut account, version) = self
-                    .read_account(&callback.scope, account_id)
-                    .await?
-                    .ok_or(AuthProductError::CredentialMissing)?;
-                if !scope_matches(&callback.scope, &account.scope) {
-                    return Err(AuthProductError::CrossScopeDenied);
-                }
-                if account.provider != exchange.provider {
-                    return Err(AuthProductError::TokenExchangeFailed);
-                }
-                validate_bound_update_authority(&account, binding)?;
-                // Capture previous secret handles before overwriting so we can
-                // delete orphaned material from SecretStore after a successful
-                // write.  New tokens are written first; a write failure leaves
-                // the old handles still referenced by the on-disk record.
-                let previous_access_secret = account.access_secret.clone();
-                let previous_refresh_secret = account.refresh_secret.clone();
-                update_account_from_exchange(&mut account, exchange, Utc::now());
-                self.write_account(&account, CasExpectation::Version(version))
+                self.update_bound_oauth_account(&callback.scope, binding, exchange)
                     .await?;
-                // Best-effort purge of replaced handles.  Failures are
-                // non-fatal: orphans in SecretStore are recoverable; errors
-                // must not propagate to the caller.
-                if let Some(h) = &previous_access_secret
-                    && previous_access_secret.as_ref() != account.access_secret.as_ref()
-                {
-                    let _ = self.secret_store.delete(&callback.scope.resource, h).await;
-                }
-                if let Some(h) = &previous_refresh_secret
-                    && previous_refresh_secret.as_ref() != account.refresh_secret.as_ref()
-                {
-                    let _ = self.secret_store.delete(&callback.scope.resource, h).await;
-                }
                 Ok(account_id)
             }
             None => {
-                if callback.update_binding.is_some() {
-                    return Err(AuthProductError::CrossScopeDenied);
+                if let Some(binding) = &callback.update_binding {
+                    return self
+                        .update_bound_oauth_account(&callback.scope, binding, exchange)
+                        .await;
                 }
                 let account_id = CredentialAccountId::from_uuid(flow_id.as_uuid());
                 let request = NewCredentialAccount {
@@ -519,5 +488,50 @@ where
                 }
             }
         }
+    }
+
+    async fn update_bound_oauth_account(
+        &self,
+        scope: &ironclaw_auth::AuthProductScope,
+        binding: &ironclaw_auth::CredentialAccountUpdateBinding,
+        exchange: &OAuthProviderExchange,
+    ) -> Result<CredentialAccountId, AuthProductError> {
+        let account_id = binding.account_id;
+        let lock = self.lock_for(format!("account:{account_id}"));
+        let _guard = lock.lock().await;
+        let (mut account, version) = self
+            .read_account(scope, account_id)
+            .await?
+            .ok_or(AuthProductError::CredentialMissing)?;
+        if !scope_matches(scope, &account.scope) {
+            return Err(AuthProductError::CrossScopeDenied);
+        }
+        if account.provider != exchange.provider {
+            return Err(AuthProductError::TokenExchangeFailed);
+        }
+        validate_bound_update_authority(&account, binding)?;
+        // Capture previous secret handles before overwriting so we can delete
+        // orphaned material from SecretStore after a successful write. New
+        // tokens are written first; a write failure leaves the old handles
+        // still referenced by the on-disk record.
+        let previous_access_secret = account.access_secret.clone();
+        let previous_refresh_secret = account.refresh_secret.clone();
+        update_account_from_exchange(&mut account, exchange, Utc::now());
+        self.write_account(&account, CasExpectation::Version(version))
+            .await?;
+        // Best-effort purge of replaced handles. Failures are non-fatal:
+        // orphans in SecretStore are recoverable; errors must not propagate to
+        // the caller.
+        if let Some(h) = &previous_access_secret
+            && previous_access_secret.as_ref() != account.access_secret.as_ref()
+        {
+            let _ = self.secret_store.delete(&scope.resource, h).await;
+        }
+        if let Some(h) = &previous_refresh_secret
+            && previous_refresh_secret.as_ref() != account.refresh_secret.as_ref()
+        {
+            let _ = self.secret_store.delete(&scope.resource, h).await;
+        }
+        Ok(account_id)
     }
 }

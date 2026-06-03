@@ -4,11 +4,7 @@
 //! `src/pairing` path. It adapts a host-owned integration-user identity lookup
 //! to the product workflow's actor-to-user resolver contract.
 
-use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex},
-    time::{Duration, Instant},
-};
+use std::sync::Arc;
 
 use ironclaw_host_api::UserId;
 use ironclaw_product_adapters::AdapterInstallationId;
@@ -20,7 +16,6 @@ use thiserror::Error;
 
 const SLACK_ADAPTER_ID: &str = "slack_v2";
 const SLACK_PROVIDER: &str = "slack";
-const SLACK_IDENTITY_CACHE_TTL: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Error)]
 pub enum RebornUserIdentityLookupError {
@@ -42,60 +37,12 @@ pub trait RebornUserIdentityLookup: Send + Sync {
 #[derive(Clone)]
 pub struct SlackUserIdentityActorResolver {
     lookup: Arc<dyn RebornUserIdentityLookup>,
-    resolved_user_cache: Arc<Mutex<HashMap<String, CachedSlackUserIdentity>>>,
-    cache_ttl: Duration,
 }
 
 impl SlackUserIdentityActorResolver {
     pub fn new(lookup: Arc<dyn RebornUserIdentityLookup>) -> Self {
-        Self {
-            lookup,
-            resolved_user_cache: Arc::new(Mutex::new(HashMap::new())),
-            cache_ttl: SLACK_IDENTITY_CACHE_TTL,
-        }
+        Self { lookup }
     }
-
-    fn cached_user(&self, provider_user_id: &str) -> Result<Option<UserId>, ProductWorkflowError> {
-        let mut cache = self.resolved_user_cache.lock().map_err(|_| {
-            ProductWorkflowError::BindingResolutionFailed {
-                reason: "slack actor identity cache lock poisoned".into(),
-            }
-        })?;
-        let Some(cached) = cache.get(provider_user_id) else {
-            return Ok(None);
-        };
-        if cached.expires_at <= Instant::now() {
-            cache.remove(provider_user_id);
-            return Ok(None);
-        }
-        Ok(Some(cached.user_id.clone()))
-    }
-
-    fn cache_user(
-        &self,
-        provider_user_id: String,
-        user_id: UserId,
-    ) -> Result<(), ProductWorkflowError> {
-        self.resolved_user_cache
-            .lock()
-            .map_err(|_| ProductWorkflowError::BindingResolutionFailed {
-                reason: "slack actor identity cache lock poisoned".into(),
-            })?
-            .insert(
-                provider_user_id,
-                CachedSlackUserIdentity {
-                    user_id,
-                    expires_at: Instant::now() + self.cache_ttl,
-                },
-            );
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone)]
-struct CachedSlackUserIdentity {
-    user_id: UserId,
-    expires_at: Instant,
 }
 
 impl std::fmt::Debug for SlackUserIdentityActorResolver {
@@ -120,20 +67,12 @@ impl ProductActorUserResolver for SlackUserIdentityActorResolver {
             &request.installation_id,
             request.external_actor_ref.id(),
         );
-        if let Some(user_id) = self.cached_user(&provider_user_id)? {
-            return Ok(Some(user_id));
-        }
-        let resolved = self
-            .lookup
+        self.lookup
             .resolve_user_identity(SLACK_PROVIDER, &provider_user_id)
             .await
             .map_err(|error| ProductWorkflowError::BindingResolutionFailed {
                 reason: error.to_string(),
-            })?;
-        if let Some(user_id) = resolved.as_ref() {
-            self.cache_user(provider_user_id, user_id.clone())?;
-        }
-        Ok(resolved)
+            })
     }
 }
 
@@ -146,6 +85,8 @@ pub fn slack_user_identity_provider_user_id(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use ironclaw_product_adapters::{AdapterInstallationId, ExternalActorRef, ProductAdapterId};
 
     use super::*;
@@ -248,7 +189,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn slack_actor_identity_resolver_caches_positive_user_resolution() {
+    async fn slack_actor_identity_resolver_re_queries_positive_user_resolution() {
         let installation_id = installation("install-alpha");
         let lookup = Arc::new(RecordingLookup::new([(
             slack_user_identity_provider_user_id(&installation_id, "U123"),
@@ -270,7 +211,37 @@ mod tests {
         assert_eq!(second, Some(user("user:alice")));
         assert_eq!(
             lookup.calls(),
-            vec![("slack".to_string(), "install-alpha:U123".to_string())]
+            vec![
+                ("slack".to_string(), "install-alpha:U123".to_string()),
+                ("slack".to_string(), "install-alpha:U123".to_string())
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn slack_actor_identity_resolver_does_not_cache_negative_resolution() {
+        let installation_id = installation("install-alpha");
+        let lookup = Arc::new(RecordingLookup::default());
+        let resolver = SlackUserIdentityActorResolver::new(lookup.clone());
+        let request = request("slack_v2", installation_id, "slack_user", "U123");
+
+        let first = resolver
+            .resolve_product_actor_user(request.clone())
+            .await
+            .expect("first resolution succeeds");
+        let second = resolver
+            .resolve_product_actor_user(request)
+            .await
+            .expect("second resolution succeeds");
+
+        assert_eq!(first, None);
+        assert_eq!(second, None);
+        assert_eq!(
+            lookup.calls(),
+            vec![
+                ("slack".to_string(), "install-alpha:U123".to_string()),
+                ("slack".to_string(), "install-alpha:U123".to_string())
+            ]
         );
     }
 

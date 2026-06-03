@@ -40,6 +40,8 @@ use ironclaw_first_party_extension_ports::{
     FirstPartySkillsExtension, FirstPartySkillsExtensionHandles, SelectableSkillContextSource,
     SkillActivationSelectorConfig, SkillExecutionAdapter,
 };
+#[cfg(test)]
+use ironclaw_host_api::RuntimeHttpEgress;
 use ironclaw_host_api::{
     ActionResultSummary, ActionSummary, AgentId, AuditEnvelope, AuditEventId, AuditStage,
     CapabilityId, CorrelationId, DecisionSummary, EffectKind, InvocationId, ResourceScope,
@@ -210,6 +212,9 @@ pub struct RebornRuntime {
     worker_handle: JoinHandle<()>,
     worker_cancel: CancellationToken,
     trigger_poller_handle: Option<TriggerPollerRuntimeHandle>,
+    #[cfg(any(test, feature = "test-support"))]
+    trigger_conversation_pairing:
+        Option<Arc<dyn ironclaw_conversations::ConversationActorPairingService>>,
     budget_event_projection: Option<crate::budget_events::BudgetEventProjection>,
     poll_settings: PollSettings,
     actor_user_id: UserId,
@@ -233,9 +238,27 @@ pub(crate) type LocalDevSelectableSkillContextSource =
 type LocalDevSkillExecutionAdapter =
     SkillExecutionAdapter<FilesystemSkillBundleSource<LocalDevRootFilesystem>>;
 
+// TODO(#4416): when a second test-only handle is
+// needed off the trigger poller seam (e.g. trusted_submitter,
+// materializer, active_run_lookup for cleanup-state tests), consolidate
+// the cfg-gated fields into a dedicated `TriggerPollerTestHandles`
+// struct exposed via a single `RebornRuntime::trigger_poller_test_handles()`
+// accessor. That removes the current `TriggerPollerServices` /
+// `TriggerPollerServicesInner` split (review f-ptr-1/f-ptr-2) without
+// inventing cfg-gated function parameters. Premature today: only one
+// test-only handle exists, so the shape isn't proven yet.
 struct TriggerPollerServices {
     materializer: Arc<dyn ironclaw_triggers::TriggerPromptMaterializer>,
     trusted_submitter: Arc<dyn ironclaw_triggers::TrustedTriggerFireSubmitter>,
+    /// Test-support handle on the SAME conversation services instance the
+    /// poller-side materializer/submitter use, so integration tests can call
+    /// the production `pair_external_actor` API to seed the trigger
+    /// creator's actor pairing before driving the poller. Without this
+    /// pre-seed, real `ConversationContentRefMaterializer` fails closed with
+    /// `BindingRequired` — by design — and the trusted-ingress turn is
+    /// never submitted.
+    #[cfg(any(test, feature = "test-support"))]
+    pairing_service: Arc<dyn ironclaw_conversations::ConversationActorPairingService>,
 }
 
 async fn build_trigger_poller_services(
@@ -257,7 +280,14 @@ async fn build_trigger_poller_services(
         .map_err(|error| RebornRuntimeError::InvalidArgument {
             reason: format!("trigger conversation services unavailable: {error}"),
         })?;
-        Ok(build_trigger_poller_services_from_conversation_services(
+        #[cfg(any(test, feature = "test-support"))]
+        let pairing_service: Arc<
+            dyn ironclaw_conversations::ConversationActorPairingService,
+        > = Arc::new(conversations.clone());
+        let TriggerPollerServicesInner {
+            materializer,
+            trusted_submitter,
+        } = build_trigger_poller_services_from_conversation_services(
             conversations.clone(),
             conversations,
             turn_coordinator,
@@ -265,13 +295,26 @@ async fn build_trigger_poller_services(
             default_agent_id,
             authorizer,
             trusted_ingress,
-        ))
+        );
+        Ok(TriggerPollerServices {
+            materializer,
+            trusted_submitter,
+            #[cfg(any(test, feature = "test-support"))]
+            pairing_service,
+        })
     }
     #[cfg(not(any(feature = "libsql", feature = "postgres")))]
     {
         let _ = local_runtime;
         let conversations = InMemoryConversationServices::default();
-        Ok(build_trigger_poller_services_from_conversation_services(
+        #[cfg(any(test, feature = "test-support"))]
+        let pairing_service: Arc<
+            dyn ironclaw_conversations::ConversationActorPairingService,
+        > = Arc::new(conversations.clone());
+        let TriggerPollerServicesInner {
+            materializer,
+            trusted_submitter,
+        } = build_trigger_poller_services_from_conversation_services(
             conversations.clone(),
             conversations,
             turn_coordinator,
@@ -279,8 +322,19 @@ async fn build_trigger_poller_services(
             default_agent_id,
             authorizer,
             trusted_ingress,
-        ))
+        );
+        Ok(TriggerPollerServices {
+            materializer,
+            trusted_submitter,
+            #[cfg(any(test, feature = "test-support"))]
+            pairing_service,
+        })
     }
+}
+
+struct TriggerPollerServicesInner {
+    materializer: Arc<dyn ironclaw_triggers::TriggerPromptMaterializer>,
+    trusted_submitter: Arc<dyn ironclaw_triggers::TrustedTriggerFireSubmitter>,
 }
 
 fn build_trigger_poller_services_from_conversation_services<B, S>(
@@ -291,7 +345,7 @@ fn build_trigger_poller_services_from_conversation_services<B, S>(
     default_agent_id: AgentId,
     authorizer: Arc<dyn crate::trigger_poller_trusted_submit::TriggerFireAuthorizer>,
     trusted_ingress: ironclaw_trusted_ingress::HostTrustedTriggerIngress,
-) -> TriggerPollerServices
+) -> TriggerPollerServicesInner
 where
     B: ironclaw_conversations::ConversationBindingService + Clone + 'static,
     S: ironclaw_conversations::SessionThreadService + 'static,
@@ -308,7 +362,7 @@ where
         turn_coordinator,
         trusted_ingress,
     ));
-    TriggerPollerServices {
+    TriggerPollerServicesInner {
         materializer,
         trusted_submitter,
     }
@@ -463,9 +517,59 @@ impl RebornRuntime {
         &self.services
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_local_runtime_http_egress_for_test(
+        &mut self,
+        runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
+    ) {
+        let local_runtime = self
+            .services
+            .local_runtime
+            .as_mut()
+            .expect("test runtime must include local runtime services");
+        Arc::get_mut(local_runtime)
+            .expect("test must mutate local runtime services before cloning the service Arc")
+            .runtime_http_egress = runtime_http_egress;
+    }
+
     /// Diagnostic id for the no-profile run profile selected by this runtime.
     pub fn default_run_profile_id(&self) -> &str {
         &self.default_run_profile_id
+    }
+
+    /// Test-only accessor for the composition-owned trigger repository so
+    /// integration tests can seed `TriggerRecord` rows that the spawned
+    /// trigger poller will observe through its production read path. Returns
+    /// `None` when the runtime was built without a local-runtime substrate
+    /// (e.g. production-shape profiles that haven't been wired end-to-end
+    /// yet). Gated behind `test-support` so the substrate handle never leaks
+    /// into production builds. Mirrors the production read path exercised by
+    /// the spawned trigger poller worker, which calls
+    /// `TriggerRepository::list_due_triggers` on every tick and the
+    /// per-trigger `claim_due_fire` / `mark_fire_*` mutation methods.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn trigger_repository(&self) -> Option<Arc<dyn ironclaw_triggers::TriggerRepository>> {
+        self.services
+            .local_runtime
+            .as_ref()
+            .map(|local_runtime| Arc::clone(&local_runtime.trigger_repository))
+    }
+
+    /// Test-only accessor for the SAME `ConversationActorPairingService`
+    /// instance the spawned trigger poller's
+    /// [`ConversationContentRefMaterializer`] consults. Integration tests
+    /// use this to call the production `pair_external_actor` API and seed
+    /// the trigger creator's actor pairing — without it, the materializer
+    /// fails closed with `BindingRequired` (by design: trigger fires never
+    /// auto-pair unknown actors). Returns `None` when the trigger poller
+    /// wasn't built for this runtime (poller disabled). Gated behind
+    /// `test-support` so the conversation handle never leaks into
+    /// production builds.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn trigger_conversation_pairing(
+        &self,
+    ) -> Option<Arc<dyn ironclaw_conversations::ConversationActorPairingService>> {
+        self.trigger_conversation_pairing.as_ref().map(Arc::clone)
     }
 
     pub(crate) fn webui_thread_service(&self) -> Arc<dyn SessionThreadService> {
@@ -1444,7 +1548,18 @@ pub async fn build_reborn_runtime(
     };
     services.turn_coordinator = Some(Arc::clone(&planned_turn_coordinator));
 
-    let trigger_poller_handle = if trigger_poller.enabled {
+    // Both `trigger_poller_handle` and the test-support
+    // `trigger_conversation_pairing_value` are produced atomically inside
+    // a single `if trigger_poller.enabled` expression. Avoid a
+    // `let mut … = None` sentinel pattern flagged by code review
+    // (review f-ptr-3): the `let X;` deferred-init form is single-assign
+    // per branch and Rust's borrow checker prevents reads before init.
+    let trigger_poller_handle: Option<TriggerPollerRuntimeHandle>;
+    #[cfg(any(test, feature = "test-support"))]
+    let trigger_conversation_pairing_value: Option<
+        Arc<dyn ironclaw_conversations::ConversationActorPairingService>,
+    >;
+    if trigger_poller.enabled {
         let trigger_poller_services = build_trigger_poller_services(
             local_runtime,
             Arc::clone(&planned_turn_coordinator),
@@ -1454,7 +1569,12 @@ pub async fn build_reborn_runtime(
         )
         .await?;
         let active_run_lookup = build_trigger_active_run_lookup(Arc::clone(&turn_state_store));
-        spawn_trigger_poller(
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            trigger_conversation_pairing_value =
+                Some(Arc::clone(&trigger_poller_services.pairing_service));
+        }
+        trigger_poller_handle = spawn_trigger_poller(
             trigger_poller,
             TriggerPollerCompositionDeps {
                 repository: Arc::clone(&local_runtime.trigger_repository),
@@ -1465,10 +1585,14 @@ pub async fn build_reborn_runtime(
         )
         .map_err(|error| RebornRuntimeError::InvalidArgument {
             reason: format!("trigger poller could not be started: {error}"),
-        })?
+        })?;
     } else {
-        None
-    };
+        trigger_poller_handle = None;
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            trigger_conversation_pairing_value = None;
+        }
+    }
     let worker_cancel = CancellationToken::new();
     let worker = Arc::clone(&composition.worker);
     let worker_cancel_clone = worker_cancel.clone();
@@ -1506,6 +1630,8 @@ pub async fn build_reborn_runtime(
         worker_handle,
         worker_cancel,
         trigger_poller_handle,
+        #[cfg(any(test, feature = "test-support"))]
+        trigger_conversation_pairing: trigger_conversation_pairing_value,
         budget_event_projection,
         poll_settings: poll,
         actor_user_id,

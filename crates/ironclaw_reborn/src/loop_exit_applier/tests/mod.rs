@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use ironclaw_host_api::{AgentId, TenantId, ThreadId};
+use ironclaw_host_api::{AgentId, TenantId, ThreadId, UserId};
 use ironclaw_threads::{
     AppendAssistantDraftRequest, EnsureThreadRequest, InMemorySessionThreadService, MessageContent,
     MessageKind, MessageStatus, SessionThreadService, ThreadHistoryRequest, ThreadMessageId,
@@ -10,8 +10,8 @@ use ironclaw_turns::{
     CheckpointStateStore, InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore,
     LoopBlockedKind, LoopCheckpointKind, LoopCheckpointStore, LoopCompleted, LoopCompletionKind,
     LoopExit, LoopFailed, LoopFailureKind, LoopGateRef, LoopMessageRef, LoopResultRef,
-    PutCheckpointStateRequest, PutLoopCheckpointRequest, TurnCheckpointId, TurnError, TurnId,
-    TurnRunId, TurnScope, TurnStateStore, TurnStatus,
+    PutCheckpointStateRequest, PutLoopCheckpointRequest, TurnActor, TurnCheckpointId, TurnError,
+    TurnId, TurnRunId, TurnScope, TurnStateStore, TurnStatus,
 };
 
 use super::{
@@ -432,6 +432,97 @@ async fn thread_checkpoint_evidence_accepts_result_refs_with_durable_reply_ref()
         .expect("completion evidence should verify durable reply refs");
 
     assert!(verified);
+}
+
+#[tokio::test]
+async fn completion_evidence_reads_thread_under_the_run_caller_owner() {
+    // Regression (multi-user): the loop host writes a thread under the
+    // run's authenticated owner (`owners/<caller>`), while the applier's
+    // base scope pins a DIFFERENT runtime owner. The completion-ref read
+    // must re-scope to the caller (resolved from the run actor); without
+    // that it reads the wrong `owners/<user>` subtree and fails with
+    // `unknown thread`, which is exactly the live chat failure this fixes.
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let turn_scope = TurnScope::new(
+        TenantId::new("tenant").expect("valid"),
+        Some(AgentId::new("agent").expect("valid")),
+        None,
+        ThreadId::new("thread").expect("valid"),
+    );
+    let caller = UserId::new("user-a").expect("user");
+    // Thread created under the CALLER's owner, as the product facade does.
+    let caller_scope = ThreadScope {
+        tenant_id: turn_scope.tenant_id.clone(),
+        agent_id: turn_scope.agent_id.clone().expect("agent id"),
+        project_id: None,
+        owner_user_id: Some(caller.clone()),
+        mission_id: None,
+    };
+    thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: caller_scope.clone(),
+            thread_id: Some(turn_scope.thread_id.clone()),
+            created_by_actor_id: "user:user-a".to_string(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .expect("thread");
+    let run_id = TurnRunId::new();
+    let draft = thread_service
+        .append_assistant_draft(AppendAssistantDraftRequest {
+            scope: caller_scope.clone(),
+            thread_id: turn_scope.thread_id.clone(),
+            turn_run_id: run_id.to_string(),
+            content: MessageContent::text("hi"),
+        })
+        .await
+        .expect("draft");
+    thread_service
+        .finalize_assistant_message(
+            &caller_scope,
+            &turn_scope.thread_id,
+            draft.message_id,
+            MessageContent::text("hi"),
+        )
+        .await
+        .expect("finalized");
+    let message_ref =
+        LoopMessageRef::new(format!("msg:{}", draft.message_id)).expect("valid message ref");
+
+    // Applier base scope pins a DIFFERENT (runtime) owner; the run state
+    // carries the real caller as its actor.
+    let base_scope = ThreadScope {
+        owner_user_id: Some(UserId::new("operator").expect("operator")),
+        ..caller_scope.clone()
+    };
+    let run_state = running_run_state(
+        turn_scope.clone(),
+        run_id,
+        Some(TurnActor::new(caller.clone())),
+    );
+    let evidence = ThreadCheckpointLoopExitEvidencePort::new_with_thread_scope(
+        thread_service,
+        Arc::new(StaticTurnStateStore::new(run_state)) as Arc<dyn TurnStateStore>,
+        Arc::new(PanicLoopCheckpointStore),
+        base_scope,
+    );
+
+    let verified = evidence
+        .verify_completion_refs(CompletionEvidenceRequest {
+            scope: &turn_scope,
+            turn_id: TurnId::new(),
+            run_id,
+            reply_message_refs: &[message_ref],
+            result_refs: &[],
+        })
+        .await
+        .expect("must read the thread under the caller owner, not the pinned runtime owner");
+
+    assert!(
+        verified,
+        "the reply written under owners/<caller> must be found via the run actor's owner"
+    );
 }
 
 #[tokio::test]

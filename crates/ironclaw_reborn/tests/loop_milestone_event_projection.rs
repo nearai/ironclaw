@@ -268,6 +268,7 @@ async fn durable_milestone_sink_does_not_project_lossy_loop_progress_milestones(
     ] {
         sink.publish_loop_milestone(LoopHostMilestone {
             scope: scope.clone(),
+            actor: None,
             turn_id: TurnId::new(),
             run_id,
             loop_driver_id: LoopDriverId::new("test-driver").unwrap(),
@@ -639,6 +640,7 @@ fn projection_scope_for_thread(thread_id: ThreadId) -> ProjectionScope {
 fn loop_milestone_for_scope(scope: TurnScope) -> LoopHostMilestone {
     LoopHostMilestone {
         scope,
+        actor: None,
         turn_id: TurnId::new(),
         run_id: TurnRunId::new(),
         loop_driver_id: LoopDriverId::new("test-driver").unwrap(),
@@ -936,6 +938,7 @@ fn milestone_for(
 ) -> LoopHostMilestone {
     LoopHostMilestone {
         scope,
+        actor: None,
         turn_id: TurnId::new(),
         run_id,
         loop_driver_id: LoopDriverId::new("milestone-projection-driver").unwrap(),

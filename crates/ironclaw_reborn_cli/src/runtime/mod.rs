@@ -15,6 +15,12 @@ use tokio_util::sync::CancellationToken;
 
 use crate::context::RebornCliContext;
 
+#[cfg(test)]
+mod test_env;
+mod trigger_poller;
+
+use trigger_poller::trigger_poller_settings;
+
 pub(crate) fn init_tracing() {
     use tracing_subscriber::EnvFilter;
     use tracing_subscriber::fmt;
@@ -256,6 +262,9 @@ pub(crate) fn build_runtime_input_with_options(
     #[allow(unused_mut)]
     let mut runtime_input = RebornRuntimeInput::from_services(runtime_services.services_input)
         .with_runner_settings(runner_settings(runtime_services.config_file.as_ref())?)
+        .with_trigger_poller_settings(trigger_poller_settings(
+            runtime_services.config_file.as_ref(),
+        )?)
         .with_poll_settings(PollSettings {
             interval: Duration::from_millis(200),
             max_total: Duration::from_secs(180),
@@ -421,6 +430,13 @@ fn resolve_google_oauth_config(
     }))
 }
 
+/// Read an env var with lenient presence semantics: unset OR
+/// present-but-blank both collapse to `None`. Used for optional-config
+/// callers (OAuth client overrides, etc.) where a blank slot is benign.
+///
+/// **Not** for operator-control knobs like `IRONCLAW_TRIGGER_POLLER_*` —
+/// those use a strict-presence variant in the `trigger_poller` submodule,
+/// which treats a present-but-blank value as a fatal misconfiguration.
 fn optional_nonempty_env(name: &str) -> Option<String> {
     std::env::var(name)
         .ok()
@@ -599,6 +615,7 @@ mod tests {
     use ironclaw_reborn_composition::RebornCompositionProfile;
     use ironclaw_reborn_config::RebornBootConfig;
 
+    use super::test_env::{EnvGuard, lock_trigger_env};
     use super::{
         RuntimeInputCaller, RuntimeInputOptions, block_on_cli, build_runtime_input,
         build_runtime_input_with_options, resolve_google_oauth_config,
@@ -782,6 +799,143 @@ default_project = "project-alpha"
 
         let _runtime_input = build_runtime_input(&config, RuntimeInputCaller::Serve)
             .expect("serve must accept default_project");
+    }
+
+    #[test]
+    fn build_runtime_input_maps_trigger_poller_enabled_config() {
+        let _lock = lock_trigger_env();
+        let _enabled = EnvGuard::clear("IRONCLAW_TRIGGER_POLLER_ENABLED");
+        let _interval = EnvGuard::clear("IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS");
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("reborn-home");
+        std::fs::create_dir_all(&reborn_home).expect("mkdir");
+        std::fs::write(
+            reborn_home.join("config.toml"),
+            r#"
+[trigger_poller]
+enabled = true
+poll_interval_secs = 42
+"#,
+        )
+        .expect("write config");
+        let config = RebornBootConfig::resolve_from_env_parts(
+            Some(reborn_home.into_os_string()),
+            None,
+            None,
+            None,
+        )
+        .expect("boot config");
+
+        let input = build_runtime_input(&config, RuntimeInputCaller::Run).expect("runtime input");
+
+        assert!(
+            input.trigger_poller.enabled,
+            "[trigger_poller] enabled=true in config must reach runtime_input.trigger_poller.enabled"
+        );
+        assert_eq!(
+            input.trigger_poller.worker.poll_interval,
+            std::time::Duration::from_secs(42),
+            "config poll_interval_secs must reach worker.poll_interval"
+        );
+    }
+
+    #[test]
+    fn build_runtime_input_env_enables_trigger_poller_with_no_config_section() {
+        // No [trigger_poller] in config; env var enables → input.trigger_poller.enabled must be true.
+        let _lock = lock_trigger_env();
+        let _enabled = EnvGuard::set("IRONCLAW_TRIGGER_POLLER_ENABLED", "true");
+        let _interval = EnvGuard::clear("IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS");
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("reborn-home");
+        std::fs::create_dir_all(&reborn_home).expect("mkdir");
+        // No config.toml written → no [trigger_poller] section at all.
+
+        let config = RebornBootConfig::resolve_from_env_parts(
+            Some(reborn_home.to_string_lossy().to_string().into()),
+            None,
+            None,
+            None,
+        )
+        .expect("boot config");
+
+        let input = build_runtime_input(&config, RuntimeInputCaller::Run).expect("runtime input");
+
+        assert!(
+            input.trigger_poller.enabled,
+            "IRONCLAW_TRIGGER_POLLER_ENABLED=true must reach input.trigger_poller.enabled through build_runtime_input"
+        );
+    }
+
+    #[test]
+    fn build_runtime_input_env_interval_overrides_config_interval() {
+        // Config says interval=15s, env says interval=45s → env must win at the caller boundary.
+        let _lock = lock_trigger_env();
+        let _enabled = EnvGuard::clear("IRONCLAW_TRIGGER_POLLER_ENABLED");
+        let _interval = EnvGuard::set("IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS", "45");
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("reborn-home");
+        std::fs::create_dir_all(&reborn_home).expect("mkdir");
+        std::fs::write(
+            reborn_home.join("config.toml"),
+            r#"
+[trigger_poller]
+enabled = true
+poll_interval_secs = 15
+"#,
+        )
+        .expect("write config");
+
+        let config = RebornBootConfig::resolve_from_env_parts(
+            Some(reborn_home.to_string_lossy().to_string().into()),
+            None,
+            None,
+            None,
+        )
+        .expect("boot config");
+
+        let input = build_runtime_input(&config, RuntimeInputCaller::Run).expect("runtime input");
+
+        assert_eq!(
+            input.trigger_poller.worker.poll_interval,
+            std::time::Duration::from_secs(45),
+            "env IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS=45 must override config poll_interval_secs=15 through build_runtime_input"
+        );
+    }
+
+    #[test]
+    fn build_runtime_input_rejects_invalid_trigger_poller_enabled_env() {
+        // Invalid env value (`yes`) must error out through build_runtime_input,
+        // not slip through to the runtime input. Closes the caller-level gap
+        // for the error path; previous tests covered only happy/override paths.
+        let _lock = lock_trigger_env();
+        let _enabled = EnvGuard::set("IRONCLAW_TRIGGER_POLLER_ENABLED", "yes");
+        let _interval = EnvGuard::clear("IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS");
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("reborn-home");
+        std::fs::create_dir_all(&reborn_home).expect("mkdir");
+
+        let config = RebornBootConfig::resolve_from_env_parts(
+            Some(reborn_home.to_string_lossy().to_string().into()),
+            None,
+            None,
+            None,
+        )
+        .expect("boot config");
+
+        let err = match build_runtime_input(&config, RuntimeInputCaller::Run) {
+            Ok(_) => panic!(
+                "invalid IRONCLAW_TRIGGER_POLLER_ENABLED must propagate as Err through build_runtime_input"
+            ),
+            Err(e) => e,
+        };
+        assert!(
+            err.to_string().contains("IRONCLAW_TRIGGER_POLLER_ENABLED"),
+            "caller-level error must surface the env var name, got: {err}",
+        );
     }
 
     #[test]
