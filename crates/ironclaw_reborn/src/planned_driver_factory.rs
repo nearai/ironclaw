@@ -89,7 +89,7 @@ pub fn subagent_planned_profile_id() -> Result<RunProfileId, String> {
     RunProfileId::new(SUBAGENT_PLANNED_PROFILE_ID)
 }
 
-pub fn is_subagent_planned_profile(
+pub(crate) fn is_subagent_planned_profile(
     profile: &ironclaw_turns::run_profile::ResolvedRunProfile,
 ) -> bool {
     profile.profile_id.as_str() == SUBAGENT_PLANNED_PROFILE_ID
@@ -97,7 +97,7 @@ pub fn is_subagent_planned_profile(
         && profile.loop_driver.version == planned_driver_default_version()
 }
 
-pub fn is_subagent_planned_run_profile(
+pub(crate) fn is_subagent_planned_run_profile(
     run_context: &ironclaw_turns::run_profile::LoopRunContext,
 ) -> bool {
     is_subagent_planned_profile(&run_context.resolved_run_profile)

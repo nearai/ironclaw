@@ -35,6 +35,10 @@ pub trait SubagentPromptMaterialSource: Send + Sync {
     ) -> Result<SubagentPromptMaterial, AgentLoopHostError>;
 }
 
+/// Prompt budgets for subagent goal materialization.
+///
+/// Prefer `SubagentPromptLimits::default()` instead of naming the raw guard
+/// constant directly so callers stay aligned with the sanitized prompt budget.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SubagentPromptLimits {
     pub max_raw_goal_bytes: usize,
@@ -43,6 +47,7 @@ pub struct SubagentPromptLimits {
 
 impl Default for SubagentPromptLimits {
     fn default() -> Self {
+        // Keep the raw DoS guard internal; callers should use `Default`.
         Self {
             max_raw_goal_bytes: DEFAULT_SUBAGENT_GOAL_RAW_MAX_BYTES,
             max_goal_bytes: DEFAULT_SUBAGENT_GOAL_MAX_BYTES,

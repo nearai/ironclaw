@@ -134,6 +134,32 @@ mod tests {
         }
     }
 
+    struct SucceedingSource(SubagentPromptMaterial);
+
+    #[async_trait]
+    impl SubagentPromptMaterialSource for SucceedingSource {
+        async fn material_for_run(
+            &self,
+            _run_context: &LoopRunContext,
+        ) -> Result<SubagentPromptMaterial, AgentLoopHostError> {
+            Ok(self.0.clone())
+        }
+    }
+
+    struct FailingResolver;
+
+    #[async_trait]
+    impl ironclaw_loop_support::CapabilitySurfaceProfileResolver for FailingResolver {
+        async fn resolve(
+            &self,
+            _run_context: &LoopRunContext,
+        ) -> Result<CapabilityAllowSet, CapabilityResolveError> {
+            Err(CapabilityResolveError::internal(
+                "inner resolver failed for test",
+            ))
+        }
+    }
+
     #[test]
     fn intersect_allow_sets_all_all_returns_all() {
         assert_eq!(
@@ -181,6 +207,51 @@ mod tests {
             }
             other => panic!("unexpected resolve error: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn resolve_propagates_inner_resolver_error_on_subagent_context() {
+        let resolver = SubagentCapabilitySurfaceResolver::new(
+            Arc::new(FailingResolver),
+            Arc::new(FailingSource),
+        );
+
+        let error = resolver
+            .resolve(&planned_subagent_context())
+            .await
+            .expect_err("inner resolver failure should surface unchanged");
+
+        match error {
+            CapabilityResolveError::Internal { reason } => {
+                assert_eq!(reason, "inner resolver failed for test");
+            }
+            other => panic!("unexpected resolve error: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_intersects_base_and_material_allowsets_for_subagent_context() {
+        let base = allowlist(&["builtin.read_file", "builtin.write_file"]);
+        let material_caps =
+            BTreeSet::from([cap("builtin.read_file"), cap("builtin.spawn_subagent")]);
+        let resolver = SubagentCapabilitySurfaceResolver::new(
+            Arc::new(StaticResolver(base.clone())),
+            Arc::new(SucceedingSource(SubagentPromptMaterial {
+                direction_markdown: "test".to_string(),
+                goal: ironclaw_loop_support::SubagentPromptGoal {
+                    task: "test".to_string(),
+                    handoff: None,
+                },
+                allowed_capabilities: material_caps,
+            })),
+        );
+
+        let resolved = resolver
+            .resolve(&planned_subagent_context())
+            .await
+            .expect("subagent runs should intersect base and material allowsets");
+
+        assert_eq!(resolved, allowlist(&["builtin.read_file"]));
     }
 
     #[tokio::test]
