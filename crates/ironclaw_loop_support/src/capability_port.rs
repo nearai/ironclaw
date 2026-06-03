@@ -171,6 +171,55 @@ pub struct CapabilityResultWrite<'a> {
     pub display_preview: Option<CapabilityDisplayOutputPreview>,
 }
 
+#[async_trait]
+pub trait LoopCapabilityPortFactory: Send + Sync {
+    async fn create_capability_port(
+        &self,
+        run_context: &LoopRunContext,
+    ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError>;
+}
+
+pub trait LoopCapabilityPortDecorator: Send + Sync {
+    fn decorate(
+        &self,
+        run_context: &LoopRunContext,
+        inner: Arc<dyn LoopCapabilityPort>,
+    ) -> Arc<dyn LoopCapabilityPort>;
+}
+
+pub struct DecoratingLoopCapabilityPortFactory {
+    inner: Arc<dyn LoopCapabilityPortFactory>,
+    decorators: Vec<Arc<dyn LoopCapabilityPortDecorator>>,
+}
+
+impl DecoratingLoopCapabilityPortFactory {
+    pub fn new(inner: Arc<dyn LoopCapabilityPortFactory>) -> Self {
+        Self {
+            inner,
+            decorators: Vec::new(),
+        }
+    }
+
+    pub fn with_decorator(mut self, decorator: Arc<dyn LoopCapabilityPortDecorator>) -> Self {
+        self.decorators.push(decorator);
+        self
+    }
+}
+
+#[async_trait]
+impl LoopCapabilityPortFactory for DecoratingLoopCapabilityPortFactory {
+    async fn create_capability_port(
+        &self,
+        run_context: &LoopRunContext,
+    ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
+        let mut port = self.inner.create_capability_port(run_context).await?;
+        for decorator in &self.decorators {
+            port = decorator.decorate(run_context, port);
+        }
+        Ok(port)
+    }
+}
+
 #[derive(Clone)]
 pub struct HostRuntimeLoopCapabilityPortFactory {
     runtime: Arc<dyn HostRuntime>,
@@ -231,6 +280,16 @@ impl HostRuntimeLoopCapabilityPortFactory {
         )
         .with_execution_mounts(self.execution_mounts.clone())
         .with_capability_execution_mounts(self.capability_execution_mounts.clone())
+    }
+}
+
+#[async_trait]
+impl LoopCapabilityPortFactory for HostRuntimeLoopCapabilityPortFactory {
+    async fn create_capability_port(
+        &self,
+        run_context: &LoopRunContext,
+    ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
+        Ok(self.for_run_context(run_context.clone()))
     }
 }
 

@@ -33,16 +33,17 @@ use ironclaw_loop_support::{
     HostManagedModelRequest, HostManagedModelResponse, HostRuntimeLoopCapabilityPort,
     HostSkillContextBuildError, HostSkillContextCandidate, HostSkillContextSource,
     IdentityApplicability, IdentityFileName, JsonSpawnSubagentInputCodec,
-    LoopCapabilityInputResolver, LoopCapabilityResultWriter, ProductLiveCancellationProbe,
-    RunCancellationFactory, RunCancellationHandle, identity_message_ref,
+    LoopCapabilityInputResolver, LoopCapabilityPortFactory, LoopCapabilityResultWriter,
+    ProductLiveCancellationProbe, RunCancellationFactory, RunCancellationHandle,
+    identity_message_ref,
 };
 use ironclaw_processes::ProcessServices;
 use ironclaw_reborn::driver_registry::{
     DriverKind, DriverRegistry, DriverRequirements, LoopDriverRegistryKey,
 };
 use ironclaw_reborn::loop_driver_host::{
-    LoopCapabilityPortFactory, RebornLoopDriverHost, RebornLoopDriverHostFactory,
-    RebornLoopDriverHostRequest, TextOnlyLoopHostConfig,
+    RebornLoopDriverHost, RebornLoopDriverHostFactory, RebornLoopDriverHostRequest,
+    TextOnlyLoopHostConfig,
 };
 use ironclaw_reborn::loop_exit_applier::{
     BlockedEvidenceRequest, CompletionEvidenceRequest, FailureEvidenceRequest,

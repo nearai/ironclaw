@@ -2,12 +2,12 @@
 
 use std::{error::Error, fmt, marker::PhantomData, sync::Arc};
 
-use async_trait::async_trait;
 use ironclaw_host_api::CapabilityId;
 use ironclaw_loop_support::{
-    CapabilitySurfaceProfileResolver, CompositeTurnRunWakeNotifier, HostIdentityContextSource,
-    HostInputQueue, HostManagedModelGateway, HostRuntimeLoopCapabilityPortFactory,
-    HostSkillContextSource, LoopCapabilityResultWriter, ProductLiveCancellationReadiness,
+    CapabilitySurfaceProfileResolver, CompositeTurnRunWakeNotifier,
+    DecoratingLoopCapabilityPortFactory, HostIdentityContextSource, HostInputQueue,
+    HostManagedModelGateway, HostSkillContextSource, LoopCapabilityPortDecorator,
+    LoopCapabilityPortFactory, LoopCapabilityResultWriter, ProductLiveCancellationReadiness,
     RunCancellationFactory, SpawnSubagentInputCodec, SubagentDefinitionResolver,
     SubagentPromptComposer, SubagentPromptMaterialSource, SubagentSpawnCapabilityPort,
     SubagentSpawnDeps, SubagentSpawnGoalStore, SubagentSpawnLimits,
@@ -31,9 +31,7 @@ use ironclaw_turns::{
 use crate::{
     app_loop_family::build_loop_family_registry,
     driver_registry::{DriverRegistry, DriverRegistryError},
-    loop_driver_host::{
-        LoopCapabilityPortFactory, RebornLoopDriverHostFactory, TextOnlyLoopHostConfig,
-    },
+    loop_driver_host::{RebornLoopDriverHostFactory, TextOnlyLoopHostConfig},
     loop_exit_applier::{LoopExitApplier, ThreadCheckpointLoopExitEvidencePort},
     model_routes::ModelRouteResolver,
     planned_driver_factory::{
@@ -487,47 +485,6 @@ where
     )
 }
 
-trait LoopCapabilityPortDecorator: Send + Sync {
-    fn decorate(
-        &self,
-        run_context: &LoopRunContext,
-        inner: Arc<dyn LoopCapabilityPort>,
-    ) -> Arc<dyn LoopCapabilityPort>;
-}
-
-struct DecoratingLoopCapabilityPortFactory {
-    inner: Arc<dyn LoopCapabilityPortFactory>,
-    decorators: Vec<Arc<dyn LoopCapabilityPortDecorator>>,
-}
-
-impl DecoratingLoopCapabilityPortFactory {
-    fn new(inner: Arc<dyn LoopCapabilityPortFactory>) -> Self {
-        Self {
-            inner,
-            decorators: Vec::new(),
-        }
-    }
-
-    fn with_decorator(mut self, decorator: Arc<dyn LoopCapabilityPortDecorator>) -> Self {
-        self.decorators.push(decorator);
-        self
-    }
-}
-
-#[async_trait]
-impl LoopCapabilityPortFactory for DecoratingLoopCapabilityPortFactory {
-    async fn create_capability_port(
-        &self,
-        run_context: &LoopRunContext,
-    ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
-        let mut port = self.inner.create_capability_port(run_context).await?;
-        for decorator in &self.decorators {
-            port = decorator.decorate(run_context, port);
-        }
-        Ok(port)
-    }
-}
-
 struct SubagentSpawnCapabilityDecorator {
     spawn_deps: Arc<SubagentSpawnDeps>,
     spawn_id: CapabilityId,
@@ -566,16 +523,6 @@ impl LoopCapabilityPortDecorator for SubagentSpawnCapabilityDecorator {
     }
 }
 
-#[async_trait]
-impl LoopCapabilityPortFactory for HostRuntimeLoopCapabilityPortFactory {
-    async fn create_capability_port(
-        &self,
-        run_context: &LoopRunContext,
-    ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
-        Ok(self.for_run_context(run_context.clone()))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::{
@@ -595,7 +542,7 @@ mod tests {
         },
     };
 
-    use super::{
+    use ironclaw_loop_support::{
         DecoratingLoopCapabilityPortFactory, LoopCapabilityPortDecorator, LoopCapabilityPortFactory,
     };
 
