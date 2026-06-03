@@ -5,7 +5,7 @@ use ironclaw_conversations::{
     AcceptedInboundMessage, AdapterInstallationId, AdapterKind, ConversationBindingResolution,
     ConversationBindingService, ConversationRouteKind, ExternalActorRef, ExternalConversationRef,
     ExternalEventId, InboundTurnError, ResolveConversationRequest,
-    trusted_trigger::{TrustedTriggerInboundFailureKind, classify_inbound_error},
+    TrustedTriggerInboundFailureKind, classify_inbound_error,
 };
 use ironclaw_host_api::{AgentId, TenantId};
 use ironclaw_safety::{
