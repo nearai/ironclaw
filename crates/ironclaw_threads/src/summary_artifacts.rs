@@ -30,7 +30,6 @@ pub(crate) fn find_overlapping_summary<'a>(
         .filter(|summary| {
             summary.model_context_policy
                 == Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected)
-                && summary.summary_kind == SummaryKind::Compaction
                 && ranges_overlap(
                     request.start_sequence,
                     request.end_sequence,
@@ -44,6 +43,7 @@ pub(crate) fn find_overlapping_summary<'a>(
         [] => Ok(None),
         [overlapping] => {
             if request.summary_kind == SummaryKind::Compaction
+                && overlapping.summary_kind == request.summary_kind
                 && is_exact_compaction_summary_replay(overlapping, request, content)
             {
                 Ok(Some(overlapping))
