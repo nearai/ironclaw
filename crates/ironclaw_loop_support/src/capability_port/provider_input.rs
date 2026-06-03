@@ -107,8 +107,8 @@ fn validate_provider_arguments_schema(
         )
     })?;
     if let Some(error) = validator.iter_errors(arguments).next() {
-        let instance_path = error.instance_path().as_str().to_string();
-        let schema_path = error.schema_path().as_str().to_string();
+        let instance_path = safe_schema_path_summary(error.instance_path().as_str());
+        let schema_path = safe_schema_path_summary(error.schema_path().as_str());
         return Err(AgentLoopHostError::new(
             AgentLoopHostErrorKind::InvalidInvocation,
             format!(
@@ -117,6 +117,48 @@ fn validate_provider_arguments_schema(
         ));
     }
     Ok(())
+}
+
+fn safe_schema_path_summary(path: &str) -> String {
+    let trimmed = path.trim();
+    if trimmed.is_empty() || trimmed == "/" {
+        return "root".to_string();
+    }
+    let summary = trimmed
+        .trim_start_matches('/')
+        .replace(['/', '\\', '[', ']'], ".")
+        .replace(['{', '}', '`', '<', '>'], "");
+    scrub_sensitive_schema_path_markers(&summary)
+}
+
+fn scrub_sensitive_schema_path_markers(path: &str) -> String {
+    let mut scrubbed = path.to_string();
+    for marker in [
+        "tool_input",
+        "api_key",
+        "apikey",
+        "password",
+        "passwd",
+        "secret",
+        "bearer",
+        "access_token",
+        "access token",
+    ] {
+        scrubbed = replace_ascii_case_insensitive(&scrubbed, marker, "redacted");
+    }
+    scrubbed
+}
+
+fn replace_ascii_case_insensitive(input: &str, needle: &str, replacement: &str) -> String {
+    let mut remaining = input;
+    let mut replaced = String::with_capacity(input.len());
+    while let Some(index) = remaining.to_ascii_lowercase().find(needle) {
+        replaced.push_str(&remaining[..index]);
+        replaced.push_str(replacement);
+        remaining = &remaining[index + needle.len()..];
+    }
+    replaced.push_str(remaining);
+    replaced
 }
 
 fn schema_is_unresolved_ref(schema: &serde_json::Value) -> bool {

@@ -31,11 +31,17 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use axum::body::{Body, to_bytes};
 use axum::http::{HeaderValue, Method, Request, StatusCode, header};
+use ironclaw_auth::{
+    AuthProductScope, AuthSurface, CredentialAccountLabel, CredentialAccountStatus,
+    CredentialOwnership, NewCredentialAccount, ProviderScope,
+};
 use ironclaw_host_api::runtime_policy::{
     ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
     NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
 };
-use ironclaw_host_api::{AgentId, CapabilityId, TenantId, UserId};
+use ironclaw_host_api::{
+    AgentId, CapabilityId, InvocationId, ResourceScope, SecretHandle, TenantId, UserId,
+};
 use ironclaw_loop_support::{
     HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
     HostManagedModelMessageRole, HostManagedModelRequest, HostManagedModelResponse,
@@ -268,6 +274,23 @@ fn bearer_get(uri: &str) -> Request<Body> {
         .expect("bearer GET request")
 }
 
+fn webui_extension_setup_scope(extension_id: &str) -> AuthProductScope {
+    let seed = format!("webui-v2-extension-setup:{TENANT}:{USER}:{AGENT}::{extension_id}");
+    let resource = ResourceScope {
+        tenant_id: TenantId::new(TENANT).expect("tenant"),
+        user_id: UserId::new(USER).expect("user"),
+        agent_id: Some(AgentId::new(AGENT).expect("agent")),
+        project_id: None,
+        mission_id: None,
+        thread_id: None,
+        invocation_id: InvocationId::from_uuid(uuid::Uuid::new_v5(
+            &uuid::Uuid::NAMESPACE_OID,
+            seed.as_bytes(),
+        )),
+    };
+    AuthProductScope::new(resource, AuthSurface::Callback)
+}
+
 // ─── tests ────────────────────────────────────────────────────────────
 
 /// Step 2 of Lane 7: drive `create_thread` → `submit_turn` → poll
@@ -396,6 +419,84 @@ async fn webui_v2_http_happy_path_with_builtin_tool_call() {
         .shutdown()
         .await
         .expect("runtime shutdown clean");
+}
+
+#[tokio::test]
+async fn webui_v2_gmail_oauth_setup_complete_allows_activation() {
+    let harness = build_harness().await;
+    let product_auth = harness
+        .runtime
+        .services()
+        .product_auth
+        .as_ref()
+        .expect("local-dev runtime wires product auth");
+    product_auth
+        .credential_account_service()
+        .create_account(NewCredentialAccount {
+            scope: webui_extension_setup_scope("gmail"),
+            provider: ironclaw_first_party_extensions::google_provider_id()
+                .expect("google provider id"),
+            label: CredentialAccountLabel::new("work google").expect("label"),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: Vec::new(),
+            access_secret: Some(SecretHandle::new("google-access").expect("secret handle")),
+            refresh_secret: None,
+            scopes: vec![
+                ProviderScope::new("https://www.googleapis.com/auth/gmail.modify")
+                    .expect("gmail scope"),
+            ],
+        })
+        .await
+        .expect("seed callback-surface Google OAuth account");
+
+    let package_ref = json!({"kind": "extension", "id": "gmail"});
+    let install = harness
+        .router
+        .clone()
+        .oneshot(bearer_post(
+            "/api/webchat/v2/extensions/install",
+            json!({"package_ref": package_ref}),
+        ))
+        .await
+        .expect("install Gmail oneshot");
+    assert_eq!(install.status(), StatusCode::OK);
+    let install_body = read_json(install).await;
+    assert_eq!(
+        install_body["success"], true,
+        "install body: {install_body}"
+    );
+
+    let setup = harness
+        .router
+        .clone()
+        .oneshot(bearer_get("/api/webchat/v2/extensions/gmail/setup"))
+        .await
+        .expect("setup Gmail oneshot");
+    assert_eq!(setup.status(), StatusCode::OK);
+    let setup_body = read_json(setup).await;
+    assert_eq!(
+        setup_body["secrets"][0]["provided"], true,
+        "setup should see the completed Google OAuth account so the UI can offer Activate: {setup_body}"
+    );
+
+    let activate = harness
+        .router
+        .clone()
+        .oneshot(bearer_post(
+            "/api/webchat/v2/extensions/gmail/activate",
+            json!({}),
+        ))
+        .await
+        .expect("activate Gmail oneshot");
+    assert_eq!(activate.status(), StatusCode::OK);
+    let activate_body = read_json(activate).await;
+    assert_eq!(
+        activate_body["success"], true,
+        "activation should succeed after setup completion: {activate_body}"
+    );
+    assert_eq!(activate_body["activated"], true);
 }
 
 /// Walks a `ThreadMessageRecord` JSON object and returns the rendered

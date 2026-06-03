@@ -6,8 +6,9 @@ import {
   useOauthSetup,
   useSetupSubmit,
 } from "../hooks/useExtensions.js";
+import { setupReadyForActivation } from "../lib/extension-actions.js";
 
-export function ConfigureModal({ extension, onClose, onSaved }) {
+export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
   const extensionName = extension?.displayName || extension?.packageRef?.id || "Extension";
   const { secrets = [], fields = [], onboarding, isLoading, error } =
     useExtensionSetup(extension?.packageRef);
@@ -42,6 +43,7 @@ export function ConfigureModal({ extension, onClose, onSaved }) {
     (secret) => (secret.setup?.kind || "manual_token") === "manual_token"
   );
   const canSave = manualSecrets.length > 0 || fields.length > 0;
+  const canActivate = setupReadyForActivation({ secrets, fields });
 
   if (isLoading) {
     return html`
@@ -224,10 +226,19 @@ export function ConfigureModal({ extension, onClose, onSaved }) {
 
       <div className="mt-6 flex items-center justify-end gap-3">
         <${Button} variant="ghost" onClick=${onClose}>Cancel<//>
-        ${canSave &&
+        ${canActivate &&
         html`
         <${Button}
           variant="primary"
+          onClick=${() => onActivate?.(extension)}
+        >
+          Activate
+        <//>
+        `}
+        ${canSave &&
+        html`
+        <${Button}
+          variant=${canActivate ? "secondary" : "primary"}
           onClick=${handleSubmit}
           disabled=${submitMutation.isPending}
         >

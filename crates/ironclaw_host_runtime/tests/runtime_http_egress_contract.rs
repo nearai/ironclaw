@@ -4,15 +4,17 @@ use ironclaw_capabilities::{
 use ironclaw_events::InMemoryAuditSink;
 use ironclaw_filesystem::{InMemoryBackend, LocalFilesystem, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
-    AgentId, CapabilityId, CapabilitySet, ExecutionContext, ExtensionId, InvocationId, MountAlias,
-    MountGrant, MountPermissions, MountView, NetworkMethod, NetworkPolicy, NetworkScheme,
-    NetworkTargetPattern, Obligation, ResourceEstimate, ResourceScope, RuntimeCredentialInjection,
+    AgentId, CapabilityId, CapabilitySet, CredentialStageError, ExecutionContext, ExtensionId,
+    InvocationId, MountAlias, MountGrant, MountPermissions, MountView, NetworkMethod,
+    NetworkPolicy, NetworkScheme, NetworkTargetPattern, Obligation, ProjectId, ResourceEstimate,
+    ResourceScope, RuntimeCredentialAccountProviderId, RuntimeCredentialInjection,
     RuntimeCredentialSource, RuntimeCredentialTarget, RuntimeHttpEgress, RuntimeHttpEgressError,
     RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, RuntimeHttpSaveTarget, RuntimeKind,
     ScopedPath, SecretHandle, TenantId, TrustClass, UserId, VirtualPath,
 };
 use ironclaw_host_runtime::{
-    BuiltinObligationServices, RuntimeHttpBodyStore, RuntimeHttpBodyStoreError,
+    BuiltinObligationServices, RuntimeCredentialAccessSecret, RuntimeCredentialAccountRequest,
+    RuntimeCredentialAccountResolver, RuntimeHttpBodyStore, RuntimeHttpBodyStoreError,
 };
 use ironclaw_mcp::{
     McpClient, McpClientRequest, McpHostHttpClient, McpHostHttpEgressPlan, McpHostHttpRequest,
@@ -2148,7 +2150,7 @@ async fn mcp_http_client_reuses_real_host_staged_network_policy_for_json_rpc_ses
 }
 
 #[tokio::test]
-async fn mcp_http_client_uses_one_shot_staged_credential_for_tool_call_only() {
+async fn mcp_http_client_uses_one_shot_staged_credential_for_session() {
     let network = JsonRpcMcpNetwork::new();
     let network_recorder = network.requests.clone();
     let services = test_obligation_services();
@@ -2210,21 +2212,128 @@ async fn mcp_http_client_uses_one_shot_staged_credential_for_tool_call_only() {
         3,
         "initialize, initialized notification, and tools/call should all reach transport"
     );
-    assert!(requests[..2].iter().all(|request| {
-        !request
-            .headers
-            .iter()
-            .any(|(name, _)| name == "authorization")
-    }));
+    assert!(
+        requests.iter().all(|request| {
+            request
+                .headers
+                .iter()
+                .find(|(name, _)| name == "authorization")
+                == Some(&(
+                    "authorization".to_string(),
+                    "Bearer sk-staged-mcp-secret".to_string(),
+                ))
+        }),
+        "initialize, initialized, and tools/call must all receive the staged MCP credential"
+    );
+    drop(requests);
+}
+
+#[tokio::test]
+async fn mcp_http_client_uses_credential_account_staged_from_resolved_source_scope() {
+    let network = JsonRpcMcpNetwork::new();
+    let network_recorder = network.requests.clone();
+    let source_scope = sample_scope();
+    let mut runtime_scope = source_scope.clone();
+    runtime_scope.project_id = Some(ProjectId::new("runtime-project").unwrap());
+    runtime_scope.invocation_id = InvocationId::new();
+    let capability_id = CapabilityId::new("mcp.search").unwrap();
+    let account_access_handle = SecretHandle::new("mcp_account_access").unwrap();
+    let runtime_slot_handle = SecretHandle::new("mcp_runtime_token").unwrap();
+    let services = test_obligation_services().with_credential_account_resolver(Arc::new(
+        SourceScopedCredentialAccountResolver {
+            source_scope: source_scope.clone(),
+            handle: account_access_handle.clone(),
+        },
+    ));
+    services
+        .secret_store()
+        .put(
+            source_scope,
+            account_access_handle,
+            SecretMaterial::from("sk-account-scope-mcp-secret"),
+        )
+        .await
+        .unwrap();
+    let context = context_for_scope(runtime_scope.clone());
+    services
+        .obligation_handler()
+        .satisfy(CapabilityObligationRequest {
+            phase: CapabilityObligationPhase::Invoke,
+            context: &context,
+            capability_id: &capability_id,
+            estimate: &ResourceEstimate::default(),
+            obligations: &[
+                Obligation::ApplyNetworkPolicy {
+                    policy: sample_policy(),
+                },
+                Obligation::InjectCredentialAccountOnce {
+                    handle: runtime_slot_handle.clone(),
+                    provider: RuntimeCredentialAccountProviderId::new("mcp").unwrap(),
+                    provider_scopes: Vec::new(),
+                    requester_extension: ExtensionId::new("mcp").unwrap(),
+                },
+            ],
+        })
+        .await
+        .expect("credential account obligation should stage from resolved source scope");
+    let service = services.host_http_egress(network);
+    let client = McpHostHttpClient::new(
+        McpRuntimeHttpAdapter::new(Arc::new(service)),
+        StaticMcpHostHttpEgressPlanner::new(McpHostHttpEgressPlan {
+            network_policy: caller_supplied_policy(),
+            credential_injections: vec![RuntimeCredentialInjection {
+                handle: runtime_slot_handle,
+                source: RuntimeCredentialSource::StagedObligation {
+                    capability_id: capability_id.clone(),
+                },
+                target: RuntimeCredentialTarget::Header {
+                    name: "authorization".to_string(),
+                    prefix: Some("Bearer ".to_string()),
+                },
+                required: true,
+            }],
+            response_body_limit: Some(4096),
+            timeout_ms: Some(1000),
+        }),
+    );
+
+    let output = client
+        .call_tool(McpClientRequest {
+            provider: ExtensionId::new("mcp").unwrap(),
+            capability_id: capability_id.clone(),
+            scope: runtime_scope,
+            transport: "http".to_string(),
+            command: None,
+            args: vec![],
+            url: Some("https://api.example.test/v1/run".to_string()),
+            input: json!({"query": "ironclaw"}),
+            max_output_bytes: 4096,
+        })
+        .await
+        .expect("MCP tool call should use staged product-auth credential");
+
     assert_eq!(
-        requests[2]
-            .headers
-            .iter()
-            .find(|(name, _)| name == "authorization"),
-        Some(&(
-            "authorization".to_string(),
-            "Bearer sk-staged-mcp-secret".to_string()
-        ))
+        output.output,
+        json!({"content":[{"type":"text","text":"ok"}],"isError":false})
+    );
+    let requests = network_recorder.lock().unwrap();
+    assert_eq!(
+        requests.len(),
+        3,
+        "initialize, initialized notification, and tools/call should all reach transport"
+    );
+    assert!(
+        requests.iter().all(|request| {
+            request
+                .headers
+                .iter()
+                .find(|(name, _)| name == "authorization")
+                == Some(&(
+                    "authorization".to_string(),
+                    "Bearer sk-account-scope-mcp-secret".to_string(),
+                ))
+        }),
+        "initialize, initialized, and tools/call must all receive the staged product-auth credential"
     );
     drop(requests);
 }
@@ -4019,6 +4128,25 @@ fn test_obligation_services() -> BuiltinObligationServices {
 struct RequestPolicyStagingEgress {
     services: BuiltinObligationServices,
     inner: Arc<dyn RuntimeHttpEgress>,
+}
+
+#[derive(Debug)]
+struct SourceScopedCredentialAccountResolver {
+    source_scope: ResourceScope,
+    handle: SecretHandle,
+}
+
+#[async_trait::async_trait]
+impl RuntimeCredentialAccountResolver for SourceScopedCredentialAccountResolver {
+    async fn resolve_access_secret(
+        &self,
+        _request: RuntimeCredentialAccountRequest<'_>,
+    ) -> Result<RuntimeCredentialAccessSecret, CredentialStageError> {
+        Ok(RuntimeCredentialAccessSecret {
+            scope: self.source_scope.clone(),
+            handle: self.handle.clone(),
+        })
+    }
 }
 
 #[async_trait::async_trait]

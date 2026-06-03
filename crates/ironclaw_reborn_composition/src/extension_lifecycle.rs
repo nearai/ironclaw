@@ -365,13 +365,26 @@ impl RebornLocalExtensionManagementPort {
             }
         };
 
-        let active_package = discover_hosted_mcp_package(
+        let active_package = match discover_hosted_mcp_package(
             &discovery.base_package,
             discovery.scope,
             discovery.runtime_http_egress,
         )
         .await
-        .map_err(hosted_mcp_discovery_error)?;
+        {
+            Ok(active_package) => active_package,
+            Err(HostedMcpDiscoveryError::Transient(reason)) => {
+                tracing::debug!(
+                    extension_id = %extension_id.as_str(),
+                    reason,
+                    "hosted MCP discovery failed during activation; falling back to bundled manifest"
+                );
+                discovery.base_package.clone()
+            }
+            Err(error @ HostedMcpDiscoveryError::Permanent(_)) => {
+                return Err(hosted_mcp_discovery_error(error));
+            }
+        };
 
         let _operation_guard = self.operation_lock.lock().await;
         let installation = self
@@ -1311,14 +1324,15 @@ mod tests {
                 "tools/list".to_string(),
             ]
         );
-        assert_eq!(egress.credential_counts(), vec![0, 0, 1]);
+        assert_eq!(egress.credential_counts(), vec![1, 1, 1]);
     }
 
     #[tokio::test]
-    async fn hosted_mcp_activation_returns_transient_when_discovery_returns_no_tools() {
+    async fn hosted_mcp_activation_falls_back_to_bundled_manifest_when_discovery_returns_no_tools()
+    {
         let catalog =
             AvailableExtensionCatalog::from_first_party_assets().expect("first-party assets");
-        let (_dir, _storage_root, port, _active_registry, _installation_store) =
+        let (_dir, _storage_root, port, active_registry, _installation_store) =
             extension_management_port_fixture_with_catalog_and_service(
                 catalog,
                 ExtensionLifecycleService::new(ExtensionRegistry::new()),
@@ -1329,7 +1343,7 @@ mod tests {
         port.install(package_ref.clone())
             .await
             .expect("install Notion MCP");
-        let error = port
+        let activate = port
             .activate(
                 package_ref,
                 ExtensionActivationMode::HostedMcpDiscovery {
@@ -1338,9 +1352,16 @@ mod tests {
                 },
             )
             .await
-            .expect_err("empty tools/list should be retryable");
+            .expect("transient discovery failure should fall back to bundled manifest");
 
-        assert!(matches!(error, ProductWorkflowError::Transient { .. }));
+        assert_eq!(activate.phase, LifecyclePhase::Active);
+        assert!(
+            active_registry
+                .snapshot()
+                .get_capability(&CapabilityId::new("notion.notion-search").unwrap())
+                .is_some(),
+            "fallback activation must publish bundled Notion capabilities"
+        );
     }
 
     #[tokio::test]
@@ -2018,6 +2039,43 @@ mod tests {
             error,
             ProductWorkflowError::InvalidBindingRequest { .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn lifecycle_facade_activates_hosted_mcp_with_runtime_egress() {
+        let (_dir, _storage_root, facade, active_registry, _installation_store) =
+            extension_lifecycle_fixture_with_catalog_and_service(
+                AvailableExtensionCatalog::from_first_party_assets().expect("first-party assets"),
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+            );
+        let facade = facade.with_runtime_http_egress(Arc::new(HostedMcpDiscoveryEgress::default()));
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "notion").expect("valid ref");
+
+        facade
+            .execute(
+                lifecycle_surface_context(),
+                LifecycleProductAction::ExtensionInstall {
+                    package_ref: package_ref.clone(),
+                },
+            )
+            .await
+            .expect("install Notion MCP");
+        let activate = facade
+            .execute(
+                lifecycle_surface_context(),
+                LifecycleProductAction::ExtensionActivate { package_ref },
+            )
+            .await
+            .expect("hosted MCP activation should use discovery egress");
+
+        assert_eq!(activate.phase, LifecyclePhase::Active);
+        assert!(
+            active_registry
+                .snapshot()
+                .get_capability(&CapabilityId::new("notion.live-search").unwrap())
+                .is_some()
+        );
     }
 
     #[tokio::test]

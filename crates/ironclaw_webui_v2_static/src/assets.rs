@@ -186,4 +186,22 @@ mod tests {
             "extension cards must render the projected onboarding hint"
         );
     }
+
+    #[test]
+    fn extension_oauth_setup_refreshes_while_popup_is_open() {
+        let use_extensions = asset_text("js/pages/extensions/hooks/useExtensions.js");
+
+        assert!(
+            use_extensions.contains("OAUTH_SETUP_REFRESH_MS = 2000"),
+            "OAuth setup should poll often enough for setup-complete state to appear promptly"
+        );
+        assert!(
+            use_extensions.contains("const watchOauthProgress = React.useCallback"),
+            "OAuth setup should watch in-flight authorization, not only popup close"
+        );
+        assert!(
+            use_extensions.contains("refreshSetupState();\n        if ((popup && popup.closed)"),
+            "OAuth setup must refresh setup state before waiting for popup close"
+        );
+    }
 }

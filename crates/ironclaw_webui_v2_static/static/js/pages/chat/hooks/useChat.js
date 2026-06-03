@@ -19,6 +19,9 @@ import { useSSE } from "./useSSE.js";
 const AUTH_TOKEN_FLOW_TIMEOUT_MS = 30000;
 const AUTH_GATE_CREDENTIAL_STORED_ERROR =
   "credential_stored_gate_resolution_failed";
+const OAUTH_CALLBACK_CHANNEL = "ironclaw-product-auth";
+const OAUTH_CALLBACK_STORAGE_KEY = "ironclaw:product-auth:oauth-complete";
+const OAUTH_CALLBACK_MESSAGE_TYPE = "ironclaw:product-auth:oauth-complete";
 
 async function withAuthTokenTimeout(task) {
   const controller = new AbortController();
@@ -39,6 +42,34 @@ function credentialStoredGateResolutionError(cause) {
 
 function submitResponseResumedTurnGate(response) {
   return response?.continuation?.type === "turn_gate_resume";
+}
+
+function isPendingOAuthGate(gate) {
+  return gate?.kind === "auth_required" && gate?.challengeKind === "oauth_url";
+}
+
+function isOAuthCallbackCompletion(payload) {
+  return payload?.type === OAUTH_CALLBACK_MESSAGE_TYPE && payload?.status === "completed";
+}
+
+function oauthCompletionMatchesGate(payload, gate, listeningSince) {
+  if (!isOAuthCallbackCompletion(payload)) return false;
+  const continuation = payload?.continuation;
+  if (!continuation || continuation.type !== "turn_gate_resume") {
+    return Number(payload?.completedAt || 0) >= listeningSince;
+  }
+  if (continuation.turn_run_ref && continuation.turn_run_ref !== gate?.runId) return false;
+  if (continuation.gate_ref && continuation.gate_ref !== gate?.gateRef) return false;
+  return true;
+}
+
+function parseOAuthCallbackStoragePayload(value) {
+  if (!value) return null;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
 }
 
 // v2 chat hook. Differences from the fork's v1 hook:
@@ -108,6 +139,47 @@ export function useChat(threadId) {
       };
     }
   }, [pendingAuthGateKey]);
+
+  React.useEffect(() => {
+    if (!isPendingOAuthGate(pendingGate)) return;
+    const listeningSince = Date.now();
+
+    const handleCompletion = (payload) => {
+      if (!oauthCompletionMatchesGate(payload, pendingGate, listeningSince)) return;
+      setPendingGate((current) => (isPendingOAuthGate(current) ? null : current));
+      setIsProcessing(true);
+    };
+
+    let channel = null;
+    if (typeof window.BroadcastChannel === "function") {
+      channel = new window.BroadcastChannel(OAUTH_CALLBACK_CHANNEL);
+      channel.onmessage = (event) => handleCompletion(event.data);
+    }
+
+    const onStorage = (event) => {
+      if (event.key !== OAUTH_CALLBACK_STORAGE_KEY) return;
+      handleCompletion(parseOAuthCallbackStoragePayload(event.newValue));
+    };
+
+    window.addEventListener("storage", onStorage);
+    handleCompletion(
+      parseOAuthCallbackStoragePayload(
+        window.localStorage?.getItem?.(OAUTH_CALLBACK_STORAGE_KEY),
+      ),
+    );
+    const timer = window.setInterval(() => {
+      handleCompletion(
+        parseOAuthCallbackStoragePayload(
+          window.localStorage?.getItem?.(OAUTH_CALLBACK_STORAGE_KEY),
+        ),
+      );
+    }, 500);
+    return () => {
+      window.clearInterval(timer);
+      if (channel) channel.close();
+      window.removeEventListener("storage", onStorage);
+    };
+  }, [pendingGate]);
 
   const handleEvent = useChatEvents({
     threadId,
