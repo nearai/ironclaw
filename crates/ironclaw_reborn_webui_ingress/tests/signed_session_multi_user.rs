@@ -250,6 +250,7 @@ fn profile(sub: &str, email: &str) -> OAuthUserProfile {
         provider_user_id: sub.to_string(),
         email: Some(email.to_string()),
         email_verified: true,
+        verified_emails: vec![email.to_string()],
         display_name: None,
     }
 }

@@ -106,8 +106,9 @@ impl RebornLibSqlUserStore {
                  email_verified INTEGER NOT NULL, \
                  created_at TEXT NOT NULL, \
                  PRIMARY KEY (provider, provider_user_id)); \
-             CREATE INDEX IF NOT EXISTS idx_user_identities_verified_email \
-                 ON user_identities (email) WHERE email_verified = 1;",
+             DROP INDEX IF EXISTS idx_user_identities_verified_email; \
+             CREATE INDEX IF NOT EXISTS idx_user_identities_verified_email_lower \
+                 ON user_identities (lower(email)) WHERE email_verified = 1;",
         )
         .await
         .map_err(backend)?;

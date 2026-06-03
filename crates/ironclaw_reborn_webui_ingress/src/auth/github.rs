@@ -349,10 +349,22 @@ impl GitHubProvider {
             None => (user.email.clone(), false),
         };
 
+        // Carry ALL verified emails (primary first, for deterministic
+        // selection downstream) so a host admission allowlist can match a
+        // verified secondary address even when the primary is off-list.
+        let mut verified_emails: Vec<String> = Vec::new();
+        if let Some(primary) = emails.iter().find(|e| e.verified && e.primary) {
+            verified_emails.push(primary.email.clone());
+        }
+        for entry in emails.iter().filter(|e| e.verified && !e.primary) {
+            verified_emails.push(entry.email.clone());
+        }
+
         Ok(OAuthUserProfile {
             provider_user_id: user.id.to_string(),
             email,
             email_verified,
+            verified_emails,
             display_name: user.name.or(Some(user.login)),
         })
     }

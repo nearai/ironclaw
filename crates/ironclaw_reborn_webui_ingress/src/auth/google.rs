@@ -249,10 +249,19 @@ impl OAuthProvider for GoogleProvider {
             }
         }
 
+        let email = claims.email;
+        let email_verified = claims.email_verified.unwrap_or(false);
+        // Google's ID token carries a single email; surface it as a verified
+        // address only when the `email_verified` claim is true.
+        let verified_emails = match (&email, email_verified) {
+            (Some(addr), true) => vec![addr.clone()],
+            _ => Vec::new(),
+        };
         Ok(OAuthUserProfile {
             provider_user_id: claims.sub,
-            email: claims.email,
-            email_verified: claims.email_verified.unwrap_or(false),
+            email,
+            email_verified,
+            verified_emails,
             display_name: claims.name,
         })
     }

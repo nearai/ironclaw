@@ -47,23 +47,37 @@ impl WebuiUserDirectory {
         }
     }
 
-    /// Whether `profile` clears the fail-closed admission gate: a
-    /// verified email whose domain is on the allowlist. An unverified
-    /// email (untrustworthy domain), a missing email, or an off-list
-    /// domain is denied.
-    fn admits(&self, profile: &OAuthUserProfile) -> bool {
-        if !profile.email_verified {
-            return false;
-        }
-        let Some(email) = profile.email.as_deref() else {
-            return false;
-        };
-        let Some(domain) = email.rsplit_once('@').map(|(_, d)| d.to_ascii_lowercase()) else {
-            return false;
-        };
-        self.allowed_email_domains
-            .iter()
-            .any(|allowed| allowed == &domain)
+    /// The verified email this profile is admitted on, if any: the first
+    /// verified address whose domain is on the allowlist. Candidates are
+    /// the canonical [`email`](OAuthUserProfile::email) (only when
+    /// `email_verified`) followed by every entry in
+    /// [`verified_emails`](OAuthUserProfile::verified_emails) — so a user
+    /// whose primary address is off-list is still admitted on a verified
+    /// secondary that is on it (GitHub returns the full set). Returns
+    /// `None` (fail closed) when no verified candidate matches: an
+    /// unverified-only profile, a missing email, or an off-list domain.
+    ///
+    /// The returned address is the one the user is linked/persisted under,
+    /// so cross-provider account linking keys on the allowlisted email.
+    fn admitted_email(&self, profile: &OAuthUserProfile) -> Option<String> {
+        let canonical = profile
+            .email
+            .as_deref()
+            .filter(|_| profile.email_verified)
+            .into_iter();
+        canonical
+            .chain(profile.verified_emails.iter().map(String::as_str))
+            .find(|email| self.domain_allowed(email))
+            .map(str::to_string)
+    }
+
+    /// Whether `email`'s domain is on the operator allowlist
+    /// (case-insensitive).
+    fn domain_allowed(&self, email: &str) -> bool {
+        email
+            .rsplit_once('@')
+            .map(|(_, domain)| domain.to_ascii_lowercase())
+            .is_some_and(|domain| self.allowed_email_domains.iter().any(|a| a == &domain))
     }
 }
 
@@ -74,17 +88,19 @@ impl UserDirectory for WebuiUserDirectory {
         provider: &OAuthProviderName,
         profile: &OAuthUserProfile,
     ) -> Result<UserId, UserDirectoryError> {
-        if !self.admits(profile) {
-            // Fail closed: the callback maps `Unknown` to a 403 redirect
-            // and mints no session.
+        // Fail closed: an unadmitted profile maps to a 403 redirect and
+        // mints no session. The admitted address is what we link/persist
+        // on, so an allowlisted verified secondary email wins over an
+        // off-list primary.
+        let Some(admitted_email) = self.admitted_email(profile) else {
             return Err(UserDirectoryError::Unknown);
-        }
+        };
         self.store
             .resolve_or_create(ResolveIdentity {
                 provider: provider.as_str(),
                 provider_user_id: profile.provider_user_id.as_str(),
-                email: profile.email.as_deref(),
-                email_verified: profile.email_verified,
+                email: Some(admitted_email.as_str()),
+                email_verified: true,
                 display_name: profile.display_name.as_deref(),
             })
             .await
@@ -117,6 +133,11 @@ mod tests {
             provider_user_id: "g-1".to_string(),
             email: email.map(str::to_string),
             email_verified: verified,
+            verified_emails: email
+                .filter(|_| verified)
+                .map(str::to_string)
+                .into_iter()
+                .collect(),
             display_name: None,
         }
     }
@@ -167,5 +188,49 @@ mod tests {
         dir.resolve(&google(), &profile(Some("Alice@Example.COM"), true))
             .await
             .expect("domain comparison must be case-insensitive");
+    }
+
+    #[tokio::test]
+    async fn allowlisted_verified_secondary_email_is_admitted_over_offlist_primary() {
+        // GitHub-shaped profile: the primary verified email is off-list,
+        // but a verified secondary address is on the allowlist. The user
+        // must be admitted (and linked) on the allowlisted secondary, not
+        // denied for the primary. Regression for admission only checking
+        // the single canonical `email`.
+        let dir = directory(&["company.com"]).await;
+        let profile = OAuthUserProfile {
+            provider_user_id: "gh-42".to_string(),
+            email: Some("alice@gmail.com".to_string()),
+            email_verified: true,
+            verified_emails: vec![
+                "alice@gmail.com".to_string(),
+                "alice@company.com".to_string(),
+            ],
+            display_name: None,
+        };
+        let user = dir
+            .resolve(&google(), &profile)
+            .await
+            .expect("a verified secondary email on the allowlist must be admitted");
+        assert!(!user.as_str().is_empty());
+    }
+
+    #[tokio::test]
+    async fn no_verified_email_on_allowlist_is_rejected_despite_other_verified() {
+        // All verified addresses are off-list → fail closed, even though
+        // the account has verified emails.
+        let dir = directory(&["company.com"]).await;
+        let profile = OAuthUserProfile {
+            provider_user_id: "gh-43".to_string(),
+            email: Some("bob@gmail.com".to_string()),
+            email_verified: true,
+            verified_emails: vec!["bob@gmail.com".to_string(), "bob@outlook.com".to_string()],
+            display_name: None,
+        };
+        let err = dir
+            .resolve(&google(), &profile)
+            .await
+            .expect_err("no verified email on the allowlist must be rejected");
+        assert!(matches!(err, UserDirectoryError::Unknown));
     }
 }

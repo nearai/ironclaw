@@ -61,9 +61,16 @@ pub(crate) fn sso_startup_config_from_env(
     // v1 gateway's `OAUTH_BASE_URL`, so a legacy v1 setting can never
     // silently rewrite Reborn WebChat callback URLs. Absent the Reborn
     // var, use the bound listener address.
+    //
+    // Trim surrounding whitespace and trailing slashes: callback URLs are
+    // built as `{base_url}/auth/callback/{provider}`, so a value like
+    // `https://app.example.com/` would otherwise yield a double-slash
+    // `…com//auth/callback/google` that does not match the registered
+    // OAuth redirect URI.
     let base_url = env::var("IRONCLAW_REBORN_WEBUI_BASE_URL")
         .ok()
-        .filter(|raw| !raw.trim().is_empty())
+        .map(|raw| raw.trim().trim_end_matches('/').to_string())
+        .filter(|trimmed| !trimmed.is_empty())
         .unwrap_or_else(|| format!("http://{listen_addr}"));
 
     reject_cleartext_oauth(&base_url, listen_addr)?;
@@ -318,5 +325,78 @@ mod tests {
         // open registration) must error; a non-empty one must pass.
         assert!(require_admission_allowlist(&[]).is_err());
         assert!(require_admission_allowlist(&["example.com".to_string()]).is_ok());
+    }
+
+    /// Serializes the env-mutating tests below: `sso_startup_config_from_env`
+    /// reads process-global env vars, so two of these running concurrently
+    /// would clobber each other.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    const SSO_ENV_VARS: &[&str] = &[
+        "IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_ID",
+        "IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_SECRET",
+        "IRONCLAW_REBORN_WEBUI_GOOGLE_ALLOWED_HD",
+        "IRONCLAW_REBORN_WEBUI_GITHUB_CLIENT_ID",
+        "IRONCLAW_REBORN_WEBUI_GITHUB_CLIENT_SECRET",
+        "IRONCLAW_REBORN_WEBUI_BASE_URL",
+        "IRONCLAW_REBORN_WEBUI_ALLOWED_EMAIL_DOMAINS",
+    ];
+
+    fn clear_sso_env() {
+        for var in SSO_ENV_VARS {
+            // SAFETY: tests are serialized by `ENV_LOCK`; no other thread
+            // reads or writes these vars while the guard is held.
+            unsafe { std::env::remove_var(var) };
+        }
+    }
+
+    /// Caller-level coverage: with a provider configured but the
+    /// verified-email-domain allowlist absent, `sso_startup_config_from_env`
+    /// (the caller that wires provider discovery and admission together)
+    /// must fail closed — error out and produce NO mounted SSO config —
+    /// rather than admitting every account. The positive case confirms the
+    /// same caller succeeds once the allowlist is supplied.
+    #[test]
+    fn startup_fails_closed_when_providers_set_but_allowlist_missing() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        clear_sso_env();
+        // SAFETY: serialized by ENV_LOCK; cleaned up before the guard drops.
+        unsafe {
+            std::env::set_var("IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_ID", "client-id");
+            std::env::set_var(
+                "IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_SECRET",
+                "client-secret",
+            );
+        }
+
+        // Allowlist unset → fail closed (no config mounted).
+        let missing = sso_startup_config_from_env(addr("127.0.0.1:3000"));
+        assert!(
+            missing.is_err(),
+            "a configured provider with no allowlist must abort startup, not mount open registration",
+        );
+
+        // Blank allowlist → same fail-closed result.
+        // SAFETY: serialized by ENV_LOCK.
+        unsafe {
+            std::env::set_var("IRONCLAW_REBORN_WEBUI_ALLOWED_EMAIL_DOMAINS", "  , ,");
+        }
+        assert!(
+            sso_startup_config_from_env(addr("127.0.0.1:3000")).is_err(),
+            "a blank allowlist is equivalent to none and must also fail closed",
+        );
+
+        // Supplying the allowlist makes the same caller succeed.
+        // SAFETY: serialized by ENV_LOCK.
+        unsafe {
+            std::env::set_var("IRONCLAW_REBORN_WEBUI_ALLOWED_EMAIL_DOMAINS", "example.com");
+        }
+        let ok = sso_startup_config_from_env(addr("127.0.0.1:3000"))
+            .expect("a configured provider WITH an allowlist must start")
+            .expect("providers configured → Some(config)");
+        assert_eq!(ok.allowed_email_domains, vec!["example.com".to_string()]);
+        assert!(!ok.providers.is_empty());
+
+        clear_sso_env();
     }
 }
