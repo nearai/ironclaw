@@ -331,6 +331,14 @@ function applyProjectionItems({
       });
     }
 
+    if (item.capability_activity) {
+      const activity = item.capability_activity;
+      if (activity.invocation_id) {
+        const card = toolCardFromActivity(activity);
+        upsertToolFromActivity(setMessages, activity.invocation_id, card);
+      }
+    }
+
     if (item.gate) {
       // ProductProjectionItem::Gate { gate_ref, headline } — projection
       // carries gate_ref but not run_id, so we correlate to the

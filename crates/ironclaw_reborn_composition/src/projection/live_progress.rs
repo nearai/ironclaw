@@ -4,6 +4,7 @@ use std::sync::{
 };
 
 use async_trait::async_trait;
+use chrono::Utc;
 use ironclaw_event_projections::{
     ProjectionCursor as EventProjectionCursor, ProjectionScope as EventProjectionScope,
 };
@@ -13,8 +14,9 @@ use ironclaw_event_streams::{
 };
 use ironclaw_events::{EventCursor, EventStreamKey, ReadScope};
 use ironclaw_first_party_extension_ports::{SkillActivationObservedEvent, SkillActivationObserver};
-use ironclaw_host_api::UserId;
+use ironclaw_host_api::{CapabilityId, InvocationId, UserId};
 use ironclaw_product_adapters::{
+    CapabilityActivityStatusView, CapabilityActivityView, CapabilityActivityViewInput,
     PROJECTION_SKILL_ACTIVATION_MAX_ITEMS, PROJECTION_SKILL_FEEDBACK_MAX_BYTES,
     PROJECTION_SKILL_NAME_MAX_BYTES, ProductProjectionItem, ProductWorkSummaryPhase,
 };
@@ -133,33 +135,61 @@ pub(super) fn product_items_for_live_update(
     update
         .items
         .iter()
-        .map(|item| match item {
-            ThreadLiveProjectionItem::Thinking { id, body } => ProductProjectionItem::Thinking {
-                id: id.clone(),
-                body: body.clone(),
+        .filter_map(|item| match item {
+            ThreadLiveProjectionItem::Thinking { id, body } => {
+                Some(ProductProjectionItem::Thinking {
+                    id: id.clone(),
+                    body: body.clone(),
+                })
+            }
+            ThreadLiveProjectionItem::CapabilityActivity {
+                invocation_id,
+                capability_id,
+            } => match CapabilityActivityView::new(CapabilityActivityViewInput {
+                invocation_id: *invocation_id,
+                thread_id: Some(update.thread_id.clone()),
+                capability_id: capability_id.clone(),
+                status: CapabilityActivityStatusView::Started,
+                provider: None,
+                runtime: None,
+                process_id: None,
+                output_bytes: None,
+                error_kind: None,
+                updated_at: Utc::now(),
+            }) {
+                Ok(activity) => Some(ProductProjectionItem::CapabilityActivity(activity)),
+                Err(error) => {
+                    tracing::debug!(
+                        error = %error,
+                        invocation_id = %invocation_id,
+                        capability_id = %capability_id,
+                        "live capability activity rejected by product adapter boundary"
+                    );
+                    None
+                }
             },
             ThreadLiveProjectionItem::WorkSummary {
                 id,
                 run_id,
                 phase,
                 body,
-            } => ProductProjectionItem::WorkSummary {
+            } => Some(ProductProjectionItem::WorkSummary {
                 id: id.clone(),
                 run_id: *run_id,
                 phase: live_work_summary_phase_to_product_phase(*phase),
                 body: body.clone(),
-            },
+            }),
             ThreadLiveProjectionItem::SkillActivation {
                 id,
                 run_id,
                 skill_names,
                 feedback,
-            } => ProductProjectionItem::SkillActivation {
+            } => Some(ProductProjectionItem::SkillActivation {
                 id: id.clone(),
                 run_id: *run_id,
                 skill_names: skill_names.clone(),
                 feedback: feedback.clone(),
-            },
+            }),
         })
         .collect()
 }
@@ -191,6 +221,23 @@ impl LiveProgressMilestoneSink {
             ThreadLiveProjectionItem::Thinking {
                 id: thinking_id(milestone.run_id, sequence),
                 body: safe_delta,
+            },
+        );
+    }
+
+    fn publish_capability_activity(
+        &self,
+        milestone: &LoopHostMilestone,
+        invocation_id: InvocationId,
+        capability_id: &CapabilityId,
+    ) {
+        let sequence = self.publisher.next_live_sequence();
+        self.publisher.publish_live_item(
+            &milestone.scope,
+            sequence,
+            ThreadLiveProjectionItem::CapabilityActivity {
+                invocation_id,
+                capability_id: capability_id.clone(),
             },
         );
     }
@@ -280,6 +327,16 @@ impl LoopHostMilestoneSink for LiveProgressMilestoneSink {
         match &milestone.kind {
             LoopHostMilestoneKind::ModelReasoningDelta { safe_delta } => {
                 self.publish_reasoning_delta(&milestone, safe_delta);
+            }
+            LoopHostMilestoneKind::CapabilityInvoked {
+                activity_id,
+                capability_id,
+            } => {
+                self.publish_capability_activity(
+                    &milestone,
+                    InvocationId::from_uuid(activity_id.as_uuid()),
+                    capability_id,
+                );
             }
             LoopHostMilestoneKind::DriverNote { kind, safe_summary } => {
                 self.publish_work_summary(&milestone, *kind, safe_summary.as_str());
