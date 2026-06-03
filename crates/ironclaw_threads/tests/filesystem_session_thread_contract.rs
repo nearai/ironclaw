@@ -694,8 +694,9 @@ async fn filesystem_list_threads_for_scope_derives_title_from_first_user_message
     let service = FilesystemSessionThreadService::new(scoped);
     let scope = scope("fs-title");
 
-    // Thread #1: title-less, first user message has a multi-line body.
-    // Derivation must pick the first non-empty trimmed line.
+    // Thread #1: title-less, assistant speaks before the first user message.
+    // Derivation must skip assistant records and pick the first non-empty
+    // trimmed line from the earliest user message.
     let derived = service
         .ensure_thread(EnsureThreadRequest {
             scope: scope.clone(),
@@ -703,6 +704,15 @@ async fn filesystem_list_threads_for_scope_derives_title_from_first_user_message
             created_by_actor_id: "actor-a".into(),
             title: None,
             metadata_json: None,
+        })
+        .await
+        .unwrap();
+    service
+        .append_assistant_draft(AppendAssistantDraftRequest {
+            scope: scope.clone(),
+            thread_id: derived.thread_id.clone(),
+            turn_run_id: "run-derived-1".into(),
+            content: MessageContent::text("assistant text must not become the title"),
         })
         .await
         .unwrap();
@@ -715,6 +725,18 @@ async fn filesystem_list_threads_for_scope_derives_title_from_first_user_message
             reply_target_binding_id: None,
             external_event_id: Some("evt-derived-1".into()),
             content: MessageContent::text("  hello there  \nsecond line"),
+        })
+        .await
+        .unwrap();
+    service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope.clone(),
+            thread_id: derived.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: Some("evt-derived-2".into()),
+            content: MessageContent::text("later user message must not replace the title"),
         })
         .await
         .unwrap();

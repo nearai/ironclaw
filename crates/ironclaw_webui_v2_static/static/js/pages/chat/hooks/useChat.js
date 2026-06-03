@@ -32,6 +32,14 @@ function credentialStoredGateResolutionError(cause) {
   return error;
 }
 
+function threadNeedsSidebarRefresh(threadId) {
+  const cached = queryClient.getQueryData(["threads"]);
+  const threads = cached?.threads;
+  if (!Array.isArray(threads)) return true;
+  const thread = threads.find((item) => item.thread_id === threadId || item.id === threadId);
+  return !thread?.title;
+}
+
 // v2 chat hook. Differences from the fork's v1 hook:
 // - No image / attachment plumbing — v2 SendMessage carries `content` only.
 // - No /api/chat/approval — approvals fold into gate/resolve in v2.
@@ -192,10 +200,12 @@ export function useChat(threadId) {
           threadId: sendThreadId,
           content,
         });
-        // Refresh the sidebar so the backend-seeded title (from the
-        // first user message), turn_count, and updated_at appear
-        // without waiting for the next manual reload.
-        queryClient.invalidateQueries({ queryKey: ["threads"] });
+        // Refresh the sidebar only while the cached entry is missing
+        // or title-less. Once the first-message title has appeared,
+        // repeated sends do not need to refetch the whole thread list.
+        if (threadNeedsSidebarRefresh(sendThreadId)) {
+          queryClient.invalidateQueries({ queryKey: ["threads"] });
+        }
         if (response?.run_id) {
           setActiveRun({
             runId: response.run_id,
