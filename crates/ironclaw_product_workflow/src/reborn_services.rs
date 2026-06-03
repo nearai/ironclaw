@@ -1608,12 +1608,12 @@ pub(crate) const TIMELINE_MAX_PAGE_SIZE: u32 = 200;
 
 /// Default number of automation rows returned when the browser does not
 /// request a smaller page.
-pub(crate) const AUTOMATION_LIST_DEFAULT_PAGE_SIZE: u32 = 50;
+pub const AUTOMATION_LIST_DEFAULT_PAGE_SIZE: u32 = 50;
 
 /// Hard ceiling for the beta automation management list response. This keeps
 /// the user-facing endpoint bounded until the trigger capability exposes an
 /// opaque cursor contract.
-pub(crate) const AUTOMATION_LIST_MAX_PAGE_SIZE: u32 = 100;
+pub const AUTOMATION_LIST_MAX_PAGE_SIZE: u32 = 100;
 
 /// Hard ceiling on summary artifacts returned per response. Summary
 /// artifacts are typically much smaller than the message transcript so

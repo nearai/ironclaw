@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use chrono::{DateTime, Utc};
 use ironclaw_host_api::{
@@ -19,23 +19,37 @@ use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, Trust
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+const AUTOMATION_BACKEND_TIMEOUT: Duration = Duration::from_secs(30);
+
 #[derive(Clone)]
 pub struct RebornWebuiAutomationFacade {
     host_runtime: Arc<dyn HostRuntime>,
+    backend_timeout: Duration,
 }
 
 impl std::fmt::Debug for RebornWebuiAutomationFacade {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("RebornWebuiAutomationFacade")
-            .field("host_runtime", &true)
+            .field("host_runtime", &"Arc<dyn HostRuntime>")
             .finish()
     }
 }
 
 impl RebornWebuiAutomationFacade {
     pub(crate) fn new(host_runtime: Arc<dyn HostRuntime>) -> Self {
-        Self { host_runtime }
+        Self {
+            host_runtime,
+            backend_timeout: AUTOMATION_BACKEND_TIMEOUT,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_backend_timeout(host_runtime: Arc<dyn HostRuntime>, backend_timeout: Duration) -> Self {
+        Self {
+            host_runtime,
+            backend_timeout,
+        }
     }
 
     async fn invoke_trigger(
@@ -53,40 +67,51 @@ impl RebornWebuiAutomationFacade {
             trigger_trust_decision(),
         );
 
-        match self.host_runtime.invoke_capability(request).await {
-            Ok(RuntimeCapabilityOutcome::Completed(completed)) => Ok(completed.output),
-            Ok(RuntimeCapabilityOutcome::ApprovalRequired(_)) => Err(services_error(
-                RebornServicesErrorCode::Conflict,
-                RebornServicesErrorKind::BlockedApproval,
-                409,
-                false,
-            )),
-            Ok(RuntimeCapabilityOutcome::AuthRequired(_)) => Err(services_error(
-                RebornServicesErrorCode::Forbidden,
-                RebornServicesErrorKind::BlockedAuthentication,
-                403,
-                false,
-            )),
-            Ok(RuntimeCapabilityOutcome::ResourceBlocked(_)) => Err(services_error(
-                RebornServicesErrorCode::Unavailable,
-                RebornServicesErrorKind::BlockedResource,
-                503,
-                true,
-            )),
-            Ok(RuntimeCapabilityOutcome::SpawnedProcess(_)) => Err(services_error(
+        match tokio::time::timeout(
+            self.backend_timeout,
+            self.host_runtime.invoke_capability(request),
+        )
+        .await
+        {
+            Err(_) => Err(services_error(
                 RebornServicesErrorCode::Unavailable,
                 RebornServicesErrorKind::ServiceUnavailable,
                 503,
                 true,
             )),
-            Ok(RuntimeCapabilityOutcome::Failed(failure)) => Err(map_runtime_failure(failure)),
-            Ok(RuntimeCapabilityOutcome::Unknown(_)) => Err(services_error(
+            Ok(Ok(RuntimeCapabilityOutcome::Completed(completed))) => Ok(completed.output),
+            Ok(Ok(RuntimeCapabilityOutcome::ApprovalRequired(_))) => Err(services_error(
+                RebornServicesErrorCode::Conflict,
+                RebornServicesErrorKind::BlockedApproval,
+                409,
+                false,
+            )),
+            Ok(Ok(RuntimeCapabilityOutcome::AuthRequired(_))) => Err(services_error(
+                RebornServicesErrorCode::Forbidden,
+                RebornServicesErrorKind::BlockedAuthentication,
+                403,
+                false,
+            )),
+            Ok(Ok(RuntimeCapabilityOutcome::ResourceBlocked(_))) => Err(services_error(
+                RebornServicesErrorCode::Unavailable,
+                RebornServicesErrorKind::BlockedResource,
+                503,
+                true,
+            )),
+            Ok(Ok(RuntimeCapabilityOutcome::SpawnedProcess(_))) => Err(services_error(
+                RebornServicesErrorCode::Unavailable,
+                RebornServicesErrorKind::ServiceUnavailable,
+                503,
+                true,
+            )),
+            Ok(Ok(RuntimeCapabilityOutcome::Failed(failure))) => Err(map_runtime_failure(failure)),
+            Ok(Ok(RuntimeCapabilityOutcome::Unknown(_))) => Err(services_error(
                 RebornServicesErrorCode::Internal,
                 RebornServicesErrorKind::Internal,
                 500,
                 false,
             )),
-            Err(error) => Err(map_host_runtime_error(error)),
+            Ok(Err(error)) => Err(map_host_runtime_error(error)),
         }
     }
 }
@@ -628,6 +653,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn automation_facade_times_out_stalled_runtime() {
+        let facade = RebornWebuiAutomationFacade::with_backend_timeout(
+            Arc::new(HangingHostRuntime),
+            std::time::Duration::from_millis(1),
+        );
+
+        let error = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            facade.list_automations(caller(), 10),
+        )
+        .await
+        .expect("facade timeout should complete promptly")
+        .expect_err("stalled runtime should time out");
+
+        assert_eq!(error.code, RebornServicesErrorCode::Unavailable);
+        assert_eq!(error.kind, RebornServicesErrorKind::ServiceUnavailable);
+        assert_eq!(error.status_code, 503);
+        assert!(error.retryable);
+    }
+
+    #[tokio::test]
     async fn automation_facade_maps_blocked_and_unknown_outcomes() {
         let capability_id =
             ironclaw_host_api::CapabilityId::new(TRIGGER_LIST_CAPABILITY_ID).expect("capability");
@@ -1037,6 +1083,52 @@ mod tests {
             _request: RuntimeCapabilityRequest,
         ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
             Err(self.error.clone())
+        }
+
+        async fn resume_capability(
+            &self,
+            _request: ironclaw_host_runtime::RuntimeCapabilityResumeRequest,
+        ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
+            unreachable!("resume capability is not used in automation facade tests")
+        }
+
+        async fn visible_capabilities(
+            &self,
+            _request: ironclaw_host_runtime::VisibleCapabilityRequest,
+        ) -> Result<ironclaw_host_runtime::VisibleCapabilitySurface, HostRuntimeError> {
+            unreachable!("visible capabilities are not used in automation facade tests")
+        }
+
+        async fn cancel_work(
+            &self,
+            _request: ironclaw_host_runtime::CancelRuntimeWorkRequest,
+        ) -> Result<ironclaw_host_runtime::CancelRuntimeWorkOutcome, HostRuntimeError> {
+            unreachable!("cancel work is not used in automation facade tests")
+        }
+
+        async fn runtime_status(
+            &self,
+            _request: ironclaw_host_runtime::RuntimeStatusRequest,
+        ) -> Result<ironclaw_host_runtime::HostRuntimeStatus, HostRuntimeError> {
+            unreachable!("runtime status is not used in automation facade tests")
+        }
+
+        async fn health(
+            &self,
+        ) -> Result<ironclaw_host_runtime::HostRuntimeHealth, HostRuntimeError> {
+            unreachable!("health is not used in automation facade tests")
+        }
+    }
+
+    struct HangingHostRuntime;
+
+    #[async_trait]
+    impl HostRuntime for HangingHostRuntime {
+        async fn invoke_capability(
+            &self,
+            _request: RuntimeCapabilityRequest,
+        ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
+            std::future::pending().await
         }
 
         async fn resume_capability(

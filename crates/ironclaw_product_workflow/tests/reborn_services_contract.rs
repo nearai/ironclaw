@@ -11,22 +11,22 @@ use ironclaw_product_adapters::{
     ProjectionStream, ProjectionSubscriptionRequest, ProtocolAuthFailure, RedactedString,
 };
 use ironclaw_product_workflow::{
-    ApprovalInteractionDecision, ApprovalInteractionService, AuthInteractionDecision,
-    AuthInteractionService, AutomationProductFacade, ExtensionCredentialSetupService,
-    ExtensionCredentialStatusRequest, ExtensionCredentialSubmitRequest,
-    LifecycleExtensionCredentialRequirement, LifecycleExtensionCredentialSetup,
-    LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind, LifecycleExtensionSource,
-    LifecycleExtensionSummary, LifecycleInstalledExtensionSummary, LifecyclePackageKind,
-    LifecyclePackageRef, LifecyclePhase, LifecycleProductAction, LifecycleProductContext,
-    LifecycleProductFacade, LifecycleProductPayload, LifecycleProductResponse,
-    LifecycleReadinessBlocker, ListPendingApprovalsRequest, ListPendingApprovalsResponse,
-    ListPendingAuthInteractionsRequest, ListPendingAuthInteractionsResponse,
-    ProductAgentBoundCaller, ProductWorkflowError, RebornAutomationInfo, RebornAutomationRunStatus,
-    RebornAutomationSource, RebornAutomationState, RebornExtensionOnboardingState,
-    RebornGetRunStateRequest, RebornResolveGateResponse, RebornServices, RebornServicesApi,
-    RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
-    RebornStreamEventsRequest, RebornSubmitTurnResponse, RebornTimelineRequest,
-    ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
+    AUTOMATION_LIST_DEFAULT_PAGE_SIZE, AUTOMATION_LIST_MAX_PAGE_SIZE, ApprovalInteractionDecision,
+    ApprovalInteractionService, AuthInteractionDecision, AuthInteractionService,
+    AutomationProductFacade, ExtensionCredentialSetupService, ExtensionCredentialStatusRequest,
+    ExtensionCredentialSubmitRequest, LifecycleExtensionCredentialRequirement,
+    LifecycleExtensionCredentialSetup, LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind,
+    LifecycleExtensionSource, LifecycleExtensionSummary, LifecycleInstalledExtensionSummary,
+    LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase, LifecycleProductAction,
+    LifecycleProductContext, LifecycleProductFacade, LifecycleProductPayload,
+    LifecycleProductResponse, LifecycleReadinessBlocker, ListPendingApprovalsRequest,
+    ListPendingApprovalsResponse, ListPendingAuthInteractionsRequest,
+    ListPendingAuthInteractionsResponse, ProductAgentBoundCaller, ProductWorkflowError,
+    RebornAutomationInfo, RebornAutomationRunStatus, RebornAutomationSource, RebornAutomationState,
+    RebornExtensionOnboardingState, RebornGetRunStateRequest, RebornResolveGateResponse,
+    RebornServices, RebornServicesApi, RebornServicesError, RebornServicesErrorCode,
+    RebornServicesErrorKind, RebornStreamEventsRequest, RebornSubmitTurnResponse,
+    RebornTimelineRequest, ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
     ResolveAuthInteractionRequest, ResolveAuthInteractionResponse, WebUiAuthenticatedCaller,
     WebUiCancelRunRequest, WebUiCreateThreadRequest, WebUiInboundValidationCode,
     WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiResolveGateRequest,
@@ -3656,8 +3656,9 @@ async fn list_automations_clamps_oversize_limit_before_product_facade() {
     let list_calls = automation_facade.list_calls();
     assert_eq!(list_calls.len(), 1);
     assert_eq!(
-        list_calls[0].limit, 100,
-        "automation list limit must be clamped before the product facade"
+        list_calls[0].limit, AUTOMATION_LIST_MAX_PAGE_SIZE as usize,
+        "automation list limit must be clamped to AUTOMATION_LIST_MAX_PAGE_SIZE ({}) before the product facade",
+        AUTOMATION_LIST_MAX_PAGE_SIZE
     );
 }
 
@@ -3700,8 +3701,9 @@ async fn list_automations_uses_default_limit_when_omitted() {
     let list_calls = automation_facade.list_calls();
     assert_eq!(list_calls.len(), 1);
     assert_eq!(
-        list_calls[0].limit, 50,
-        "omitted automation list limit must use the browser-facing default page size"
+        list_calls[0].limit, AUTOMATION_LIST_DEFAULT_PAGE_SIZE as usize,
+        "omitted automation list limit must use AUTOMATION_LIST_DEFAULT_PAGE_SIZE ({})",
+        AUTOMATION_LIST_DEFAULT_PAGE_SIZE
     );
 }
 
