@@ -4,7 +4,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use ironclaw_host_api::CapabilityId;
+use ironclaw_host_api::{CapabilityId, UserId};
 use ironclaw_loop_support::{
     AwaitedChildSetRecord, DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID, LoopCapabilityResultWriter,
     SpawnSubagentMode, SubagentGateResolutionStore, SubagentSpawnGoalStore, SubagentThreadKind,
@@ -22,7 +22,7 @@ use ironclaw_turns::{
 };
 
 use crate::subagent::gate_resolution::{
-    AwaitedChildTerminalEvent, BoundedSubagentGateResolutionStore,
+    AwaitedChildState, AwaitedChildTerminalEvent, BoundedSubagentGateResolutionStore,
 };
 use crate::subagent::spawn_result::{
     SpawnedChildRunPayload, SubagentSpawnMode as PayloadSpawnMode,
@@ -100,13 +100,26 @@ where
             .subagent_kind_for_child(event.run_id)
             .map_err(map_host_error)?
             .is_some();
-        if !has_gate_record && !self.is_subagent_child(event).await? {
+        let child_record = if !has_gate_record || event.owner_user_id.is_none() {
+            self.turn_state_store
+                .get_run_record(&event.scope, event.run_id)
+                .await?
+        } else {
+            None
+        };
+        let is_subagent_child = child_record
+            .as_ref()
+            .is_some_and(|record| record.parent_run_id.is_some() && record.subagent_depth > 0);
+        if !has_gate_record && !is_subagent_child {
             return Ok(());
         }
+        let event = self
+            .terminal_event_with_recovered_owner(event, child_record.as_ref())
+            .await?;
         self.gate_store
-            .record_child_terminal(event.run_id, terminal_event_from_lifecycle(event))
+            .record_child_terminal(event.run_id, terminal_event_from_lifecycle(&event))
             .map_err(map_host_error)?;
-        self.recover_missing_gate_record(event).await?;
+        self.recover_missing_gate_record(&event).await?;
         let claimed = self
             .gate_store
             .claim_all_terminal_states_for_child(event.run_id)
@@ -126,26 +139,30 @@ where
 
     async fn handle_claimed_terminal_states(
         &self,
-        states: Vec<crate::subagent::gate_resolution::AwaitedChildState>,
+        states: Vec<AwaitedChildState>,
     ) -> Result<(), TurnError> {
-        let mut delivered_gates: HashSet<GateRef> = HashSet::new();
         let mut parent_resume_gates = HashSet::new();
         let mut parent_resumes = Vec::new();
+        let mut blocking_deliveries = Vec::new();
         for state in states {
-            let terminal_event = state.terminal_event.ok_or_else(|| TurnError::Unavailable {
-                reason: "subagent gate replay selected state without terminal metadata".to_string(),
-            })?;
+            let terminal_event =
+                state
+                    .terminal_event
+                    .clone()
+                    .ok_or_else(|| TurnError::Unavailable {
+                        reason: "subagent gate replay selected state without terminal metadata"
+                            .to_string(),
+                    })?;
             match state.record.mode {
                 SpawnSubagentMode::Blocking => {
-                    self.write_terminal_result(&state.record, &terminal_event)
-                        .await?;
+                    self.write_terminal_result(&state, &terminal_event).await?;
                     if parent_resume_gates.insert(state.record.gate_ref.clone()) {
                         parent_resumes.push((state.record.clone(), terminal_event.clone()));
                     }
+                    blocking_deliveries.push(state.record.clone());
                 }
                 SpawnSubagentMode::Background => {
-                    self.write_terminal_result(&state.record, &terminal_event)
-                        .await?;
+                    self.write_terminal_result(&state, &terminal_event).await?;
                 }
             }
             self.release_descendant_reservation(&state.record).await?;
@@ -153,32 +170,72 @@ where
                 .delete_goal(&state.record.child_scope, state.record.child_run_id)
                 .await
                 .map_err(map_host_error)?;
-            delivered_gates.insert(state.record.gate_ref.clone());
+            if state.record.mode == SpawnSubagentMode::Background {
+                self.mark_child_delivered(&state.record).await?;
+            }
         }
         for (record, terminal_event) in parent_resumes {
             self.resume_parent(&terminal_event, &record).await?;
         }
-        for gate_ref in delivered_gates {
-            self.gate_store
-                .mark_delivered(&gate_ref)
-                .map_err(map_host_error)?;
-            self.gate_store
-                .delete_awaited_child(&gate_ref)
-                .await
-                .map_err(map_host_error)?;
+        for record in blocking_deliveries {
+            self.mark_child_delivered(&record).await?;
         }
         Ok(())
     }
 
-    async fn is_subagent_child(&self, event: &TurnLifecycleEvent) -> Result<bool, TurnError> {
-        let Some(record) = self
-            .turn_state_store
-            .get_run_record(&event.scope, event.run_id)
-            .await?
-        else {
-            return Ok(false);
+    async fn terminal_event_with_recovered_owner(
+        &self,
+        event: &TurnLifecycleEvent,
+        child_record: Option<&TurnRunRecord>,
+    ) -> Result<TurnLifecycleEvent, TurnError> {
+        if event.owner_user_id.is_some() {
+            return Ok(event.clone());
+        }
+        let owner_user_id = self.recover_owner_user_id(event, child_record).await?;
+        let mut recovered = event.clone();
+        recovered.owner_user_id = Some(owner_user_id);
+        Ok(recovered)
+    }
+
+    async fn recover_owner_user_id(
+        &self,
+        event: &TurnLifecycleEvent,
+        child_record: Option<&TurnRunRecord>,
+    ) -> Result<UserId, TurnError> {
+        let Some(child_record) = child_record else {
+            return Err(TurnError::Unavailable {
+                reason: format!(
+                    "subagent terminal event {} missing owner user id and run record",
+                    event.run_id
+                ),
+            });
         };
-        Ok(record.parent_run_id.is_some() && record.subagent_depth > 0)
+        if !self.thread_service.supports_resolve_scope() {
+            return Err(TurnError::Unavailable {
+                reason: format!(
+                    "subagent terminal event {} missing owner user id and thread scope recovery is unavailable",
+                    event.run_id
+                ),
+            });
+        }
+        let thread_scope = self
+            .thread_service
+            .resolve_scope(child_record.scope.thread_id.clone())
+            .await
+            .map_err(|error| TurnError::Unavailable {
+                reason: format!(
+                    "subagent terminal event {} owner user id recovery failed: {error}",
+                    event.run_id
+                ),
+            })?;
+        thread_scope
+            .owner_user_id
+            .ok_or_else(|| TurnError::Unavailable {
+                reason: format!(
+                    "subagent terminal event {} recovered thread scope without owner user id",
+                    event.run_id
+                ),
+            })
     }
 
     async fn recover_missing_gate_record(
@@ -228,10 +285,10 @@ where
             .map_err(|error| TurnError::Unavailable {
                 reason: format!("subagent thread metadata unavailable: {error}"),
             })?;
-        let Some(metadata) = child_thread
-            .metadata_json
-            .as_deref()
-            .and_then(parse_subagent_thread_metadata)
+        let Some(metadata) = parse_optional_subagent_thread_metadata(
+            child_thread.metadata_json.as_deref(),
+            child_record.run_id,
+        )?
         else {
             return Ok(None);
         };
@@ -257,6 +314,12 @@ where
             .get_run_record(&parent_scope, metadata.parent_run_id)
             .await?
         else {
+            tracing::warn!(
+                child_run_id = %child_record.run_id,
+                parent_run_id = %metadata.parent_run_id,
+                parent_thread_id = %metadata.parent_thread_id,
+                "subagent completion recovery found child metadata but missing parent run record"
+            );
             return Ok(None);
         };
         Ok(Some(awaited_child_record_from_persisted(
@@ -336,23 +399,46 @@ where
 
     async fn write_terminal_result(
         &self,
-        record: &ironclaw_loop_support::AwaitedChildSetRecord,
+        state: &AwaitedChildState,
         event: &AwaitedChildTerminalEvent,
     ) -> Result<(), TurnError> {
+        let record = &state.record;
         let result_ref = &record.result_ref;
         let child_output = self.child_terminal_output(record, event).await?;
         let safe_summary = parent_result_summary(event, &child_output)?;
-        let payload = background_completion_payload(event, record, &child_output)?;
-        match self
-            .result_writer
-            .update_capability_result(&record.parent_run_context, result_ref, payload)
-            .await
-        {
-            Ok(()) => {}
-            Err(error) => return Err(map_host_error(error)),
+        if !state.terminal_result_written {
+            let payload = background_completion_payload(event, record, &child_output)?;
+            match self
+                .result_writer
+                .update_capability_result(&record.parent_run_context, result_ref, payload)
+                .await
+            {
+                Ok(()) => {}
+                Err(error) => return Err(map_host_error(error)),
+            }
+            self.gate_store
+                .mark_terminal_result_written(&record.gate_ref, record.child_run_id)
+                .map_err(map_host_error)?;
         }
         self.update_parent_result_reference(record, event, result_ref, safe_summary)
             .await?;
+        Ok(())
+    }
+
+    async fn mark_child_delivered(
+        &self,
+        record: &ironclaw_loop_support::AwaitedChildSetRecord,
+    ) -> Result<(), TurnError> {
+        let gate_complete = self
+            .gate_store
+            .mark_child_delivered(&record.gate_ref, record.child_run_id)
+            .map_err(map_host_error)?;
+        if gate_complete {
+            self.gate_store
+                .delete_awaited_child(&record.gate_ref)
+                .await
+                .map_err(map_host_error)?;
+        }
         Ok(())
     }
 
@@ -494,6 +580,10 @@ fn background_completion_payload(
         .failure_summary
         .as_deref()
         .map(|text| wrap_untrusted_subagent_text(sanitize_tool_result_summary(text.to_string())));
+    let terminal_reason = event
+        .sanitized_reason
+        .as_deref()
+        .map(|text| wrap_untrusted_subagent_text(sanitize_tool_result_summary(text.to_string())));
     let payload = SpawnedChildRunPayload {
         child_run_id: record.child_run_id,
         child_thread_id: record.child_thread_id.clone(),
@@ -506,7 +596,7 @@ fn background_completion_payload(
         terminal_event: Some(SubagentTerminalEventPayload {
             kind: terminal_event_kind(&event.kind),
             cursor: event.cursor,
-            reason: event.sanitized_reason.clone(),
+            reason: terminal_reason,
         }),
     };
     serde_json::to_value(payload).map_err(|error| TurnError::Unavailable {
@@ -691,10 +781,34 @@ fn recovered_gate_ref(
     .map_err(|reason| TurnError::InvalidRequest { reason })
 }
 
-fn parse_subagent_thread_metadata(raw: &str) -> Option<SubagentThreadMetadata> {
+fn parse_optional_subagent_thread_metadata(
+    raw: Option<&str>,
+    child_run_id: ironclaw_turns::TurnRunId,
+) -> Result<Option<SubagentThreadMetadata>, TurnError> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    match parse_subagent_thread_metadata(raw) {
+        Ok(metadata) => Ok(metadata),
+        Err(error) => {
+            let mut raw_preview = sanitize_model_visible_text(raw.to_string());
+            truncate_to_char_boundary(&mut raw_preview, 256);
+            tracing::warn!(
+                child_run_id = %child_run_id,
+                error = %error,
+                raw_metadata = %raw_preview,
+                "subagent completion recovery ignored malformed thread metadata"
+            );
+            Ok(None)
+        }
+    }
+}
+
+fn parse_subagent_thread_metadata(
+    raw: &str,
+) -> Result<Option<SubagentThreadMetadata>, serde_json::Error> {
     serde_json::from_str::<SubagentThreadMetadata>(raw)
-        .ok()
-        .filter(|metadata| metadata.kind == SubagentThreadKind::Subagent)
+        .map(|metadata| (metadata.kind == SubagentThreadKind::Subagent).then_some(metadata))
 }
 
 fn thread_scope_from_turn_scope(
@@ -861,8 +975,8 @@ mod tests {
 
     #[test]
     fn parse_subagent_thread_metadata_filters_invalid_and_wrong_kind_metadata() {
-        assert!(parse_subagent_thread_metadata("{not json").is_none());
-        assert!(parse_subagent_thread_metadata(r#"{"kind":"parent"}"#).is_none());
+        assert!(parse_subagent_thread_metadata("{not json").is_err());
+        assert!(parse_subagent_thread_metadata(r#"{"kind":"parent"}"#).is_err());
 
         let metadata = SubagentThreadMetadata {
             kind: SubagentThreadKind::Subagent,
@@ -877,7 +991,10 @@ mod tests {
         };
         let raw = serde_json::to_string(&metadata).unwrap();
 
-        assert_eq!(parse_subagent_thread_metadata(&raw), Some(metadata));
+        assert_eq!(
+            parse_subagent_thread_metadata(&raw).unwrap(),
+            Some(metadata)
+        );
     }
 
     struct RecordingResultWriter {
@@ -915,6 +1032,58 @@ mod tests {
             output: serde_json::Value,
         ) -> Result<(), AgentLoopHostError> {
             assert_eq!(result_ref, &self.result_ref);
+            self.writes.lock().unwrap().push(output);
+            Ok(())
+        }
+    }
+
+    struct FailOnceOnNthUpdateResultWriter {
+        result_ref: LoopResultRef,
+        fail_on_call: usize,
+        calls: Mutex<usize>,
+        writes: Mutex<Vec<serde_json::Value>>,
+    }
+
+    impl FailOnceOnNthUpdateResultWriter {
+        fn new(result_ref: LoopResultRef, fail_on_call: usize) -> Self {
+            Self {
+                result_ref,
+                fail_on_call,
+                calls: Mutex::new(0),
+                writes: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn writes(&self) -> Vec<serde_json::Value> {
+            self.writes.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl LoopCapabilityResultWriter for FailOnceOnNthUpdateResultWriter {
+        async fn write_capability_result(
+            &self,
+            write: CapabilityResultWrite<'_>,
+        ) -> Result<LoopResultRef, AgentLoopHostError> {
+            self.writes.lock().unwrap().push(write.output);
+            Ok(self.result_ref.clone())
+        }
+
+        async fn update_capability_result(
+            &self,
+            _run_context: &ironclaw_turns::run_profile::LoopRunContext,
+            result_ref: &LoopResultRef,
+            output: serde_json::Value,
+        ) -> Result<(), AgentLoopHostError> {
+            assert_eq!(result_ref, &self.result_ref);
+            let mut calls = self.calls.lock().unwrap();
+            *calls += 1;
+            if *calls == self.fail_on_call {
+                return Err(AgentLoopHostError::new(
+                    ironclaw_turns::run_profile::AgentLoopHostErrorKind::Unavailable,
+                    "injected result write failure",
+                ));
+            }
             self.writes.lock().unwrap().push(output);
             Ok(())
         }
@@ -1295,6 +1464,17 @@ mod tests {
         parent_run_context.scope = parent_scope.clone();
         parent_run_context.thread_id = parent_scope.thread_id.clone();
         parent_run_context.run_id = parent_run_id;
+        let mut child_run_context =
+            ironclaw_agent_loop::test_support::test_run_context("completion-observer-child");
+        child_run_context.scope = child_scope.clone();
+        child_run_context.thread_id = child_scope.thread_id.clone();
+        child_run_context.run_id = child_run_id;
+        turn_state_store.add_record(turn_record_for_context(
+            &child_run_context,
+            Some(parent_run_id),
+            1,
+            Some(parent_run_id),
+        ));
         gate_store
             .record_awaited_child(AwaitedChildSetRecord {
                 gate_ref: GateRef::new("gate:subagent-bg-test").unwrap(),
@@ -1331,7 +1511,7 @@ mod tests {
                 cursor: EventCursor(7),
                 scope: child_scope,
                 occurred_at: None,
-                owner_user_id: Some(owner),
+                owner_user_id: None,
                 run_id: child_run_id,
                 status: TurnStatus::Completed,
                 kind: TurnEventKind::Completed,
@@ -1905,6 +2085,64 @@ mod tests {
         assert!(!summary.as_str().contains('}'));
     }
 
+    #[test]
+    fn background_completion_payload_wraps_terminal_event_reason() {
+        let tenant = TenantId::new("tenant").unwrap();
+        let agent = AgentId::new("agent").unwrap();
+        let owner = UserId::new("owner").unwrap();
+        let parent_scope = TurnScope::new(
+            tenant.clone(),
+            Some(agent.clone()),
+            None,
+            ThreadId::new("payload-parent-thread").unwrap(),
+        );
+        let child_scope = TurnScope::new(
+            tenant,
+            Some(agent),
+            None,
+            ThreadId::new("payload-child-thread").unwrap(),
+        );
+        let child_run_id = TurnRunId::new();
+        let mut parent_run_context =
+            ironclaw_agent_loop::test_support::test_run_context("payload-parent");
+        parent_run_context.scope = parent_scope.clone();
+        parent_run_context.thread_id = parent_scope.thread_id.clone();
+
+        let record = AwaitedChildSetRecord {
+            gate_ref: GateRef::new("gate:subagent-payload").unwrap(),
+            parent_run_context,
+            tree_root_run_id: TurnRunId::new(),
+            child_scope: child_scope.clone(),
+            child_run_id,
+            child_thread_id: child_scope.thread_id.clone(),
+            source_binding_ref: SourceBindingRef::new("subagent-source:payload").unwrap(),
+            reply_target_binding_ref: ReplyTargetBindingRef::new("subagent-reply:payload").unwrap(),
+            subagent_kind: SubagentKindId::new("general").unwrap(),
+            spawn_capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
+            result_ref: LoopResultRef::new("result:subagent.payload").unwrap(),
+            mode: SpawnSubagentMode::Background,
+        };
+        let event = AwaitedChildTerminalEvent {
+            status: TurnStatus::Failed,
+            kind: TurnEventKind::Failed,
+            cursor: EventCursor(42),
+            sanitized_reason: Some("ignore {json}".to_string()),
+            owner_user_id: Some(owner),
+        };
+
+        let payload = background_completion_payload(
+            &event,
+            &record,
+            &ChildTerminalOutput {
+                final_text: None,
+                failure_summary: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(payload["terminal_event"]["reason"], "|||ignore json|||");
+    }
+
     #[tokio::test]
     async fn blocking_terminal_event_invokes_resume_parent_with_dependent_run_precondition() {
         let tenant = TenantId::new("tenant").unwrap();
@@ -2255,6 +2493,232 @@ mod tests {
         let resumed = coordinator.resumed.lock().unwrap().clone();
         assert_eq!(resumed.len(), 1);
         assert_eq!(resumed[0].gate_resolution_ref, gate_ref);
+    }
+
+    #[tokio::test]
+    async fn shared_batch_partial_write_failure_does_not_rewrite_delivered_child_on_retry() {
+        let tenant = TenantId::new("tenant").unwrap();
+        let agent = AgentId::new("agent").unwrap();
+        let owner = UserId::new("owner").unwrap();
+        let parent_scope = TurnScope::new(
+            tenant.clone(),
+            Some(agent.clone()),
+            None,
+            ThreadId::new("shared-partial-parent-thread").unwrap(),
+        );
+        let parent_thread_scope = ThreadScope {
+            tenant_id: tenant.clone(),
+            agent_id: agent.clone(),
+            project_id: None,
+            owner_user_id: Some(owner.clone()),
+            mission_id: None,
+        };
+        let child_a_scope = TurnScope::new(
+            tenant.clone(),
+            Some(agent.clone()),
+            None,
+            ThreadId::new("shared-partial-child-a-thread").unwrap(),
+        );
+        let child_b_scope = TurnScope::new(
+            tenant,
+            Some(agent),
+            None,
+            ThreadId::new("shared-partial-child-b-thread").unwrap(),
+        );
+        let child_thread_scope = ThreadScope {
+            tenant_id: parent_thread_scope.tenant_id.clone(),
+            agent_id: parent_thread_scope.agent_id.clone(),
+            project_id: None,
+            owner_user_id: Some(owner.clone()),
+            mission_id: None,
+        };
+        let parent_run_id = TurnRunId::new();
+        let child_a_run_id = TurnRunId::new();
+        let child_b_run_id = TurnRunId::new();
+        let result_ref = LoopResultRef::new("result:subagent.shared.partial").unwrap();
+        let gate_ref = GateRef::new("gate:subagent-batch-shared-partial").unwrap();
+
+        let turn_state_store = Arc::new(RecordingTurnStateStore::default());
+        let thread_service = Arc::new(InMemorySessionThreadService::default());
+        thread_service
+            .ensure_thread(EnsureThreadRequest {
+                scope: parent_thread_scope.clone(),
+                thread_id: Some(parent_scope.thread_id.clone()),
+                created_by_actor_id: "test".to_string(),
+                title: None,
+                metadata_json: None,
+            })
+            .await
+            .unwrap();
+        thread_service
+            .append_tool_result_reference(AppendToolResultReferenceRequest {
+                scope: parent_thread_scope,
+                thread_id: parent_scope.thread_id.clone(),
+                turn_run_id: parent_run_id.to_string(),
+                result_ref: result_ref.as_str().to_string(),
+                safe_summary: ToolResultSafeSummary::new("subagents spawned background").unwrap(),
+                provider_call: None,
+            })
+            .await
+            .unwrap();
+        for (scope, run_id, final_text) in [
+            (
+                child_a_scope.clone(),
+                child_a_run_id,
+                "first partial child final",
+            ),
+            (
+                child_b_scope.clone(),
+                child_b_run_id,
+                "second partial child final",
+            ),
+        ] {
+            thread_service
+                .ensure_thread(EnsureThreadRequest {
+                    scope: child_thread_scope.clone(),
+                    thread_id: Some(scope.thread_id.clone()),
+                    created_by_actor_id: "test".to_string(),
+                    title: None,
+                    metadata_json: None,
+                })
+                .await
+                .unwrap();
+            let draft = thread_service
+                .append_assistant_draft(AppendAssistantDraftRequest {
+                    scope: child_thread_scope.clone(),
+                    thread_id: scope.thread_id.clone(),
+                    turn_run_id: run_id.to_string(),
+                    content: MessageContent::text("draft"),
+                })
+                .await
+                .unwrap();
+            thread_service
+                .finalize_assistant_message(
+                    &child_thread_scope,
+                    &scope.thread_id,
+                    draft.message_id,
+                    MessageContent::text(final_text),
+                )
+                .await
+                .unwrap();
+        }
+
+        let gate_store = Arc::new(BoundedSubagentGateResolutionStore::new());
+        let goal_store = Arc::new(InMemoryBoundedSubagentGoalStore::new());
+        let mut parent_run_context = ironclaw_agent_loop::test_support::test_run_context(
+            "completion-observer-shared-partial",
+        );
+        parent_run_context.scope = parent_scope.clone();
+        parent_run_context.thread_id = parent_scope.thread_id.clone();
+        parent_run_context.run_id = parent_run_id;
+        for (child_scope, child_run_id) in [
+            (child_a_scope.clone(), child_a_run_id),
+            (child_b_scope.clone(), child_b_run_id),
+        ] {
+            gate_store
+                .record_awaited_child(AwaitedChildSetRecord {
+                    gate_ref: gate_ref.clone(),
+                    parent_run_context: parent_run_context.clone(),
+                    tree_root_run_id: parent_run_id,
+                    child_scope: child_scope.clone(),
+                    child_run_id,
+                    child_thread_id: child_scope.thread_id.clone(),
+                    source_binding_ref: SourceBindingRef::new(format!(
+                        "subagent-source:partial-{child_run_id}"
+                    ))
+                    .unwrap(),
+                    reply_target_binding_ref: ReplyTargetBindingRef::new(format!(
+                        "subagent-reply:partial-{child_run_id}"
+                    ))
+                    .unwrap(),
+                    subagent_kind: SubagentKindId::new("general").unwrap(),
+                    spawn_capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID)
+                        .unwrap(),
+                    result_ref: result_ref.clone(),
+                    mode: SpawnSubagentMode::Background,
+                })
+                .await
+                .unwrap();
+        }
+
+        let result_writer = Arc::new(FailOnceOnNthUpdateResultWriter::new(result_ref, 2));
+        let observer = SubagentCompletionObserver::new(
+            Arc::clone(&gate_store),
+            goal_store,
+            turn_state_store.clone(),
+            result_writer.clone(),
+            Arc::new(RecordingCoordinator::default()),
+            thread_service,
+        )
+        .unwrap();
+
+        observer
+            .handle_terminal(&TurnLifecycleEvent {
+                cursor: EventCursor(31),
+                scope: child_a_scope,
+                occurred_at: None,
+                owner_user_id: Some(owner.clone()),
+                run_id: child_a_run_id,
+                status: TurnStatus::Completed,
+                kind: TurnEventKind::Completed,
+                blocked_gate: None,
+                sanitized_reason: None,
+            })
+            .await
+            .unwrap();
+        assert!(result_writer.writes().is_empty());
+
+        let error = observer
+            .handle_terminal(&TurnLifecycleEvent {
+                cursor: EventCursor(32),
+                scope: child_b_scope.clone(),
+                occurred_at: None,
+                owner_user_id: Some(owner.clone()),
+                run_id: child_b_run_id,
+                status: TurnStatus::Completed,
+                kind: TurnEventKind::Completed,
+                blocked_gate: None,
+                sanitized_reason: None,
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(error, TurnError::Unavailable { .. }));
+        assert_eq!(
+            result_writer.writes().len(),
+            1,
+            "first child payload was written before the injected failure"
+        );
+
+        observer
+            .handle_terminal(&TurnLifecycleEvent {
+                cursor: EventCursor(33),
+                scope: child_b_scope,
+                occurred_at: None,
+                owner_user_id: Some(owner),
+                run_id: child_b_run_id,
+                status: TurnStatus::Completed,
+                kind: TurnEventKind::Completed,
+                blocked_gate: None,
+                sanitized_reason: None,
+            })
+            .await
+            .unwrap();
+
+        let writes = result_writer.writes();
+        assert_eq!(
+            writes.len(),
+            2,
+            "retry must not rewrite the first child payload"
+        );
+        assert_eq!(writes[0]["final_text"], "|||first partial child final|||");
+        assert_eq!(writes[1]["final_text"], "|||second partial child final|||");
+        assert_eq!(
+            turn_state_store.releases(),
+            vec![
+                (parent_scope.clone(), parent_run_id, 1),
+                (parent_scope, parent_run_id, 1),
+            ]
+        );
     }
 
     #[tokio::test]

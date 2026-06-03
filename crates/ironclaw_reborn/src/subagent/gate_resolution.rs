@@ -16,6 +16,7 @@ pub struct AwaitedChildState {
     pub record: AwaitedChildSetRecord,
     pub terminal_status: Option<TurnStatus>,
     pub terminal_event: Option<AwaitedChildTerminalEvent>,
+    pub terminal_result_written: bool,
     pub descendant_reservation_release_claimed: bool,
     pub descendant_reservation_released: bool,
     pub delivery_claimed: bool,
@@ -144,6 +145,42 @@ impl BoundedSubagentGateResolutionStore {
             }
         }
         Ok(())
+    }
+
+    pub fn mark_terminal_result_written(
+        &self,
+        gate_ref: &GateRef,
+        child_run_id: TurnRunId,
+    ) -> Result<(), AgentLoopHostError> {
+        let mut inner = lock(&self.inner)?;
+        if let Some(states) = inner.by_gate.get_mut(gate_ref) {
+            for state in states
+                .iter_mut()
+                .filter(|state| state.record.child_run_id == child_run_id)
+            {
+                state.terminal_result_written = true;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn mark_child_delivered(
+        &self,
+        gate_ref: &GateRef,
+        child_run_id: TurnRunId,
+    ) -> Result<bool, AgentLoopHostError> {
+        let mut inner = lock(&self.inner)?;
+        let Some(states) = inner.by_gate.get_mut(gate_ref) else {
+            return Ok(false);
+        };
+        for state in states
+            .iter_mut()
+            .filter(|state| state.record.child_run_id == child_run_id)
+        {
+            state.delivery_claimed = false;
+            state.delivered_to_parent = true;
+        }
+        Ok(states.iter().all(|state| state.delivered_to_parent))
     }
 
     pub fn release_terminal_claim(&self, gate_ref: &GateRef) -> Result<(), AgentLoopHostError> {
@@ -292,6 +329,13 @@ impl SubagentGateResolutionStore for BoundedSubagentGateResolutionStore {
                 "subagent awaited-child gate store is at capacity",
             ));
         }
+        if inner.by_gate.get(&gate_ref).is_some_and(|states| {
+            states
+                .iter()
+                .any(|state| state.record.child_run_id == record.child_run_id)
+        }) {
+            return Ok(());
+        }
         inner
             .gates_by_child
             .entry(record.child_run_id)
@@ -305,6 +349,7 @@ impl SubagentGateResolutionStore for BoundedSubagentGateResolutionStore {
                 record,
                 terminal_status: None,
                 terminal_event: None,
+                terminal_result_written: false,
                 descendant_reservation_release_claimed: false,
                 descendant_reservation_released: false,
                 delivery_claimed: false,
@@ -534,6 +579,94 @@ mod tests {
 
         assert_eq!(error.kind, AgentLoopHostErrorKind::Invalid);
         assert!(error.safe_summary.contains("must be terminal"));
+    }
+
+    #[tokio::test]
+    async fn record_awaited_child_dedupes_same_gate_and_child() {
+        let store = BoundedSubagentGateResolutionStore::new();
+        let child_run_id = TurnRunId::new();
+        let gate = "gate:subagent-dedup";
+        store
+            .record_awaited_child(record(gate, child_run_id))
+            .await
+            .unwrap();
+        store
+            .record_awaited_child(record(gate, child_run_id))
+            .await
+            .unwrap();
+
+        assert_eq!(store.len().unwrap(), 1);
+        store
+            .record_child_terminal(child_run_id, terminal_event(TurnStatus::Completed))
+            .unwrap();
+        let claimed = store
+            .claim_all_terminal_states_for_child(child_run_id)
+            .unwrap();
+        assert_eq!(claimed.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn terminal_result_written_is_state_scoped_under_shared_gate() {
+        let store = BoundedSubagentGateResolutionStore::new();
+        let child_a = TurnRunId::new();
+        let child_b = TurnRunId::new();
+        let gate = GateRef::new("gate:subagent-batch-result-written").unwrap();
+        store
+            .record_awaited_child(record(gate.as_str(), child_a))
+            .await
+            .unwrap();
+        store
+            .record_awaited_child(record(gate.as_str(), child_b))
+            .await
+            .unwrap();
+
+        store.mark_terminal_result_written(&gate, child_a).unwrap();
+
+        let inner = store.inner.lock();
+        let states = inner.by_gate.get(&gate).expect("gate states");
+        let state_a = states
+            .iter()
+            .find(|state| state.record.child_run_id == child_a)
+            .expect("child A state");
+        let state_b = states
+            .iter()
+            .find(|state| state.record.child_run_id == child_b)
+            .expect("child B state");
+        assert!(state_a.terminal_result_written);
+        assert!(!state_b.terminal_result_written);
+    }
+
+    #[tokio::test]
+    async fn mark_child_delivered_does_not_mark_shared_gate_siblings() {
+        let store = BoundedSubagentGateResolutionStore::new();
+        let child_a = TurnRunId::new();
+        let child_b = TurnRunId::new();
+        let gate = GateRef::new("gate:subagent-batch-child-delivered").unwrap();
+        store
+            .record_awaited_child(record(gate.as_str(), child_a))
+            .await
+            .unwrap();
+        store
+            .record_awaited_child(record(gate.as_str(), child_b))
+            .await
+            .unwrap();
+
+        assert!(!store.mark_child_delivered(&gate, child_a).unwrap());
+        {
+            let inner = store.inner.lock();
+            let states = inner.by_gate.get(&gate).expect("gate states");
+            let state_a = states
+                .iter()
+                .find(|state| state.record.child_run_id == child_a)
+                .expect("child A state");
+            let state_b = states
+                .iter()
+                .find(|state| state.record.child_run_id == child_b)
+                .expect("child B state");
+            assert!(state_a.delivered_to_parent);
+            assert!(!state_b.delivered_to_parent);
+        }
+        assert!(store.mark_child_delivered(&gate, child_b).unwrap());
     }
 
     #[tokio::test]
