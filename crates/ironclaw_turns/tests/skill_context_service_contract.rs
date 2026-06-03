@@ -286,16 +286,63 @@ async fn tampered_snapshot_version_fails_closed() {
 
 #[tokio::test]
 async fn oversized_single_snippet_is_allowed_within_aggregate_budget() {
+    let safe_description = "desc";
+    let prompt = "x".repeat(16 * 1024);
+    let model_content_bytes = safe_description.len() + "\n\n".len() + prompt.len();
+    let max_context_bytes = "skill:alpha".len() + model_content_bytes;
     let snapshot =
-        SkillRunSnapshot::from_entries(vec![visible_trusted("alpha", "desc", &"x".repeat(128))]);
-    let service = SkillContextService::with_budget(snapshot.clone(), SkillContextBudget::new(512));
+        SkillRunSnapshot::from_entries(vec![visible_trusted("alpha", safe_description, &prompt)]);
+    let service = SkillContextService::with_budget(
+        snapshot.clone(),
+        SkillContextBudget {
+            max_snippet_bytes: model_content_bytes + 1,
+            max_context_bytes,
+        },
+    );
 
     let snippets = service.skill_snippets(&snapshot).await.unwrap();
     assert_eq!(snippets.len(), 1);
-    assert_eq!(snippets[0].safe_summary, "desc");
-    assert!(!snippets[0].safe_summary.contains(&"x".repeat(128)));
-    assert!(snippets[0].model_content.contains("desc"));
-    assert!(snippets[0].model_content.contains(&"x".repeat(128)));
+    assert_eq!(snippets[0].safe_summary, safe_description);
+    assert!(!snippets[0].safe_summary.contains(&prompt));
+    assert!(snippets[0].model_content.contains(safe_description));
+    assert!(snippets[0].model_content.contains(&prompt));
+}
+
+#[tokio::test]
+async fn single_snippet_over_per_snippet_budget_fails_budget() {
+    let prompt = "x".repeat(128);
+    let snapshot = SkillRunSnapshot::from_entries(vec![visible_trusted("alpha", "desc", &prompt)]);
+    let service = SkillContextService::with_budget(
+        snapshot.clone(),
+        SkillContextBudget {
+            max_snippet_bytes: 64,
+            max_context_bytes: 512,
+        },
+    );
+
+    let err = service.skill_snippets(&snapshot).await.unwrap_err();
+    assert_eq!(err, SkillContextError::ContextBudgetExceeded);
+}
+
+#[tokio::test]
+async fn single_snippet_at_per_snippet_budget_limit_is_allowed() {
+    let max_snippet_bytes = 64;
+    let safe_description = "desc";
+    let prompt_prefix_bytes = safe_description.len() + "\n\n".len();
+    let prompt = "x".repeat(max_snippet_bytes - prompt_prefix_bytes);
+    let snapshot =
+        SkillRunSnapshot::from_entries(vec![visible_trusted("alpha", safe_description, &prompt)]);
+    let service = SkillContextService::with_budget(
+        snapshot.clone(),
+        SkillContextBudget {
+            max_snippet_bytes,
+            max_context_bytes: 128,
+        },
+    );
+
+    let snippets = service.skill_snippets(&snapshot).await.unwrap();
+    assert_eq!(snippets.len(), 1);
+    assert_eq!(snippets[0].model_content.len(), max_snippet_bytes);
 }
 
 #[tokio::test]
@@ -308,6 +355,28 @@ async fn aggregate_skill_context_fails_budget() {
 
     let err = service.skill_snippets(&snapshot).await.unwrap_err();
     assert_eq!(err, SkillContextError::ContextBudgetExceeded);
+}
+
+#[tokio::test]
+async fn aggregate_skill_context_allows_exact_budget_limit() {
+    let snapshot = SkillRunSnapshot::from_entries(vec![
+        visible_trusted_without_prompt("alpha", "first"),
+        visible_trusted_without_prompt("beta", "second"),
+    ]);
+    let max_context_bytes =
+        "skill:alpha".len() + "first".len() + "skill:beta".len() + "second".len();
+    let service = SkillContextService::with_budget(
+        snapshot.clone(),
+        SkillContextBudget::new(max_context_bytes),
+    );
+
+    let snippets = service.skill_snippets(&snapshot).await.unwrap();
+    assert_eq!(snippets.len(), 2);
+    let actual_context_bytes: usize = snippets
+        .iter()
+        .map(|snippet| snippet.snippet_ref.len() + snippet.model_content.len())
+        .sum();
+    assert_eq!(actual_context_bytes, max_context_bytes);
 }
 
 #[tokio::test]

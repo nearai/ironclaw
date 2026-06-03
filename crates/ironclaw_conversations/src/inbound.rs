@@ -10,7 +10,7 @@ use crate::{
 };
 
 #[derive(Clone)]
-pub struct InboundTurnService<B, S, C> {
+pub struct InboundTurnService<B, S, C: ?Sized> {
     binding_service: B,
     session_thread_service: S,
     turn_coordinator: Arc<C>,
@@ -20,7 +20,7 @@ impl<B, S, C> InboundTurnService<B, S, C>
 where
     B: ConversationBindingService,
     S: SessionThreadService,
-    C: TurnCoordinator,
+    C: TurnCoordinator + ?Sized,
 {
     pub fn new(binding_service: B, session_thread_service: S, turn_coordinator: Arc<C>) -> Self {
         Self {
@@ -487,8 +487,7 @@ mod tests {
         trusted_agent_id: Option<AgentId>,
         trusted_project_id: Option<ProjectId>,
     ) -> TrustedInboundTurnRequest {
-        TrustedInboundTurnRequest::new(
-            crate::types::trusted_ingress::mint(),
+        TrustedInboundTurnRequest::for_conversation_tests(
             inbound_request(
                 adapter_kind,
                 external_actor_ref,

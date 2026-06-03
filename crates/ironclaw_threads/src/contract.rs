@@ -137,6 +137,8 @@ pub struct SummaryArtifact {
     pub start_sequence: u64,
     pub end_sequence: u64,
     pub summary_kind: SummaryKind,
+    /// Plain-text summary body. Summary artifacts intentionally persist text
+    /// content, even though thread messages may carry richer side-channel data.
     pub content: String,
     pub model_context_policy: Option<SummaryModelContextPolicy>,
 }
@@ -398,6 +400,8 @@ pub struct CreateSummaryArtifactRequest {
     pub start_sequence: u64,
     pub end_sequence: u64,
     pub summary_kind: SummaryKind,
+    /// Plain-text summary body to persist for this range. Compaction summaries
+    /// are model-visible text artifacts, not rich message payload snapshots.
     pub content: MessageContent,
     pub model_context_policy: Option<SummaryModelContextPolicy>,
 }

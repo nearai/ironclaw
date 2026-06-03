@@ -20,17 +20,18 @@ use ironclaw_loop_support::{
     CapabilityResolveError, CapabilitySurfaceProfileFilter, CapabilitySurfaceProfileResolver,
     EmptyLoopCapabilityPort, GuardedSystemInferencePort, HostIdentityContextSource, HostInputQueue,
     HostManagedModelGateway, HostQueueLoopInputPort, HostSkillContextSource,
-    LoopCapabilityInputResolver, ModelGatewayBackedSystemInferencePort, RunCancellationFactory,
-    RunCancellationObservationKind, RunStateLoopCancellationPort, SubagentLoopPromptPort,
-    SubagentPromptComposer, ThreadBackedLoopContextPort, ThreadBackedLoopTranscriptPort,
-    TurnStateRunCancellationFactory, default_host_managed_loop_compaction_port,
+    LoopCapabilityInputResolver, LoopCapabilityPortFactory, ModelGatewayBackedSystemInferencePort,
+    RunCancellationFactory, RunCancellationObservationKind, RunStateLoopCancellationPort,
+    SubagentLoopPromptPort, SubagentPromptComposer, ThreadBackedLoopContextPort,
+    ThreadBackedLoopTranscriptPort, TurnStateRunCancellationFactory,
+    default_host_managed_loop_compaction_port,
 };
 use ironclaw_threads::{SessionThreadService, ThreadScope};
 
 use crate::driver_registry::{DriverRequirements, LoopDriverRegistryKey, RequirementLevel};
 use crate::hook_gate_refs::HookGateInvocationScopePort;
 use crate::model_routes::{ModelRouteError, ModelRouteResolver, ModelSlot};
-use crate::planned_driver_factory::SUBAGENT_PLANNED_PROFILE_ID;
+use crate::planned_driver_factory::is_subagent_planned_run_profile;
 use crate::text_loop_driver::{TEXT_ONLY_DRIVER_ID, TEXT_ONLY_DRIVER_VERSION};
 
 mod config;
@@ -78,14 +79,6 @@ use ironclaw_turns::{
     runner::ClaimedTurnRun,
 };
 use tokio::task::JoinHandle;
-
-#[async_trait]
-pub trait LoopCapabilityPortFactory: Send + Sync {
-    async fn create_capability_port(
-        &self,
-        run_context: &LoopRunContext,
-    ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError>;
-}
 
 struct ProfiledCapabilityHostRuntime {
     capability_factory: Arc<dyn LoopCapabilityPortFactory>,
@@ -803,7 +796,7 @@ where
     /// Optional durable runtime-event subscription for event-triggered hooks.
     /// The subscription starts only when a hook dispatcher is also installed.
     event_subscription: Option<EventTriggeredHookSubscription>,
-    safety_context: Option<InstructionSafetyContext>,
+    safety_context: InstructionSafetyContext,
     identity_context_source: Option<Arc<dyn HostIdentityContextSource>>,
     input_queue: Option<Arc<dyn HostInputQueue>>,
     profiled_capabilities: Option<ProfiledCapabilityHostRuntime>,
@@ -841,6 +834,7 @@ where
         loop_checkpoint_store: Arc<dyn LoopCheckpointStore>,
         milestone_sink: Arc<dyn LoopHostMilestoneSink>,
         config: TextOnlyLoopHostConfig,
+        safety_context: InstructionSafetyContext,
     ) -> Self {
         let cancellation_factory: Arc<dyn RunCancellationFactory> = Arc::new(
             TurnStateRunCancellationFactory::new(Arc::clone(&turn_state_store)),
@@ -864,7 +858,7 @@ where
             hook_gate_ref_factory: None,
             hook_gate_ref_factory_builder: None,
             event_subscription: None,
-            safety_context: None,
+            safety_context,
             identity_context_source: None,
             input_queue: None,
             profiled_capabilities: None,
@@ -1096,11 +1090,6 @@ where
         self.with_hook_dispatcher(builder.build_arc())
     }
 
-    pub fn with_safety_context(mut self, safety_context: InstructionSafetyContext) -> Self {
-        self.safety_context = Some(safety_context);
-        self
-    }
-
     // Queue ownership follows the same factory used for capability/context
     // ports. PlannedDriver delegates fully to the host for input port
     // construction.
@@ -1328,7 +1317,7 @@ where
             })?;
         let prompt_authority = LoopPromptBundleAuthority::shared();
         let surface_state_for_prompt = Arc::clone(&surface_state);
-        let mut prompt_port = HostManagedLoopPromptPort::new(
+        let prompt_port = HostManagedLoopPromptPort::new(
             run_context.clone(),
             Arc::clone(&context),
             Arc::clone(&self.milestone_sink),
@@ -1336,10 +1325,8 @@ where
         .with_prompt_bundle_authority(prompt_authority.clone())
         .with_default_message_limit(max_messages)
         .with_current_surface_lookup(move || surface_state_for_prompt.current())
-        .with_instruction_materialization_store(Arc::clone(&instruction_materialization_store));
-        if let Some(safety_context) = self.safety_context.clone() {
-            prompt_port = prompt_port.with_safety_context(safety_context);
-        }
+        .with_instruction_materialization_store(Arc::clone(&instruction_materialization_store))
+        .with_safety_context(self.safety_context.clone());
         let mut prompt: Arc<dyn LoopPromptPort> = Arc::new(prompt_port);
         if let Some(dispatcher) = per_build_dispatcher.as_ref() {
             // Pass a sink backed by the host's instruction materialization
@@ -1362,7 +1349,7 @@ where
                 .with_bundle_authority(prompt_authority.clone(), run_context.clone()),
             );
         }
-        if run_context.resolved_run_profile.profile_id.as_str() == SUBAGENT_PLANNED_PROFILE_ID {
+        if is_subagent_planned_run_profile(&run_context) {
             let Some(composer) = self.subagent_prompt_composer.clone() else {
                 return Err(RebornLoopDriverHostError::InvalidRequest {
                     reason: "subagent prompt composer is required for subagent run profile"

@@ -2,7 +2,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    DispatchError, ResourceEstimate, RuntimeDispatchErrorKind, RuntimeKind, SecretHandle,
+    DispatchError, ExtensionId, ResourceEstimate, RuntimeCredentialAccountProviderId,
+    RuntimeCredentialAuthRequirement, RuntimeDispatchErrorKind, RuntimeKind, SecretHandle,
 };
 use serde_json::json;
 
@@ -56,12 +57,14 @@ async fn first_party_adapter_maps_handler_auth_required_to_dispatch_auth_require
         Err(DispatchError::AuthRequired {
             capability,
             required_secrets,
+            credential_requirements,
         }) => {
             assert_eq!(capability, descriptor.id);
             assert!(
                 required_secrets.is_empty(),
                 "auth_required() handler yields no required handles; got {required_secrets:?}"
             );
+            assert!(credential_requirements.is_empty());
         }
         other => panic!("expected AuthRequired, got {other:?}"),
     }
@@ -176,6 +179,67 @@ async fn first_party_adapter_forwards_required_secrets_from_auth_required_handle
 }
 
 #[tokio::test]
+async fn first_party_adapter_forwards_credential_requirements_from_auth_required_handler() {
+    let requirement = RuntimeCredentialAuthRequirement {
+        provider: RuntimeCredentialAccountProviderId::new("google").unwrap(),
+        requester_extension: ExtensionId::new("gmail").unwrap(),
+        provider_scopes: vec!["https://www.googleapis.com/auth/gmail.readonly".to_string()],
+    };
+    let descriptor = test_descriptor(RuntimeKind::FirstParty, Vec::new());
+    let registry = Arc::new(FirstPartyCapabilityRegistry::new().with_handler(
+        descriptor.id.clone(),
+        Arc::new(AuthRequiredWithCredentialRequirementsHandler {
+            requirement: requirement.clone(),
+        }),
+    ));
+    let adapter = FirstPartyRuntimeAdapter::from_registry(
+        registry,
+        Arc::new(LocalInvocationServicesResolver::new(
+            Arc::new(LocalFilesystem::new()),
+            None,
+            Arc::new(LocalHostProcessPort::new()),
+            None,
+        )),
+    );
+    let filesystem = LocalFilesystem::new();
+    let governor = InMemoryResourceGovernor::new();
+    let scope = sample_scope();
+    let package = test_package(WASM_MANIFEST, "test-wasm");
+    let policy = policy_with(
+        FilesystemBackendKind::HostWorkspace,
+        ProcessBackendKind::LocalHost,
+        NetworkMode::DirectLogged,
+        SecretMode::ScrubbedEnv,
+    );
+
+    let result = adapter
+        .dispatch_json(RuntimeAdapterRequest {
+            package: &package,
+            descriptor: &descriptor,
+            filesystem: &filesystem,
+            governor: &governor,
+            runtime_policy: &policy,
+            capability_id: &descriptor.id,
+            scope,
+            estimate: ResourceEstimate::default(),
+            mounts: None,
+            resource_reservation: None,
+            input: json!({}),
+        })
+        .await;
+
+    match result {
+        Err(DispatchError::AuthRequired {
+            credential_requirements,
+            ..
+        }) => {
+            assert_eq!(credential_requirements, vec![requirement]);
+        }
+        other => panic!("expected AuthRequired, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn first_party_adapter_maps_panicking_handler_to_backend() {
     let descriptor = test_descriptor(RuntimeKind::FirstParty, Vec::new());
     let registry = Arc::new(
@@ -260,6 +324,24 @@ impl crate::FirstPartyCapabilityHandler for AuthRequiredWithSecretsHandler {
         Err(crate::FirstPartyCapabilityError::auth_required_with(vec![
             self.handle.clone(),
         ]))
+    }
+}
+
+struct AuthRequiredWithCredentialRequirementsHandler {
+    requirement: RuntimeCredentialAuthRequirement,
+}
+
+#[async_trait]
+impl crate::FirstPartyCapabilityHandler for AuthRequiredWithCredentialRequirementsHandler {
+    async fn dispatch(
+        &self,
+        _request: crate::FirstPartyCapabilityRequest,
+    ) -> Result<crate::FirstPartyCapabilityResult, crate::FirstPartyCapabilityError> {
+        Err(
+            crate::FirstPartyCapabilityError::auth_required_for_credentials(vec![
+                self.requirement.clone(),
+            ]),
+        )
     }
 }
 

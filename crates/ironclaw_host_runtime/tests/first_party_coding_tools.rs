@@ -15,6 +15,7 @@ use ironclaw_host_runtime::{
     WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers, builtin_first_party_package,
 };
 use ironclaw_resources::InMemoryResourceGovernor;
+use ironclaw_triggers::InMemoryTriggerRepository;
 use ironclaw_trust::{
     AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
     HostTrustPolicy, TrustDecision, TrustProvenance,
@@ -500,7 +501,9 @@ where
         ironclaw_processes::ProcessServices::in_memory(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
-    .with_first_party_capabilities(Arc::new(builtin_first_party_handlers().unwrap()))
+    .with_first_party_capabilities(Arc::new(
+        builtin_first_party_handlers(Arc::new(InMemoryTriggerRepository::default())).unwrap(),
+    ))
     .with_trust_policy(Arc::new(trust_policy()))
     .host_runtime_for_local_testing()
 }

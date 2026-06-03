@@ -1,3 +1,8 @@
+#![allow(
+    dead_code,
+    reason = "durable product-auth is staged for production/webui composition; clippy can check this crate before those callers are enabled"
+)]
+
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex, Weak},

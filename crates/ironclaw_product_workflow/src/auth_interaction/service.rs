@@ -418,7 +418,9 @@ fn map_auth_product_error(error: AuthProductError) -> ProductWorkflowError {
         AuthProductError::CrossScopeDenied => {
             auth_rejected(AuthInteractionRejectionKind::CrossScopeDenied)
         }
-        AuthProductError::BackendUnavailable | AuthProductError::BackendConflict => {
+        AuthProductError::BackendUnavailable
+        | AuthProductError::BackendConflict
+        | AuthProductError::MalformedConfig => {
             auth_rejected(AuthInteractionRejectionKind::FlowUnavailable)
         }
         AuthProductError::Canceled
@@ -443,7 +445,9 @@ fn map_credential_selection_error(error: AuthProductError) -> ProductWorkflowErr
         AuthProductError::CrossScopeDenied => {
             auth_rejected(AuthInteractionRejectionKind::CrossScopeDenied)
         }
-        AuthProductError::BackendUnavailable | AuthProductError::BackendConflict => {
+        AuthProductError::BackendUnavailable
+        | AuthProductError::BackendConflict
+        | AuthProductError::MalformedConfig => {
             auth_rejected(AuthInteractionRejectionKind::FlowUnavailable)
         }
         AuthProductError::CredentialMissing

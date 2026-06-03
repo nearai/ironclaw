@@ -18,9 +18,9 @@ use ironclaw_loop_support::{
     CapabilityResultWrite, HostManagedModelError, HostManagedModelErrorKind,
     HostManagedModelGateway, HostManagedModelMessageRole, HostManagedModelRequest,
     HostManagedModelResponse, HostManagedToolResultContent, HostRuntimeLoopCapabilityPortFactory,
-    LoopCapabilityInputResolver, LoopCapabilityResultWriter, loop_driver_execution_extension_id,
+    LoopCapabilityInputResolver, LoopCapabilityPortFactory, LoopCapabilityResultWriter,
+    loop_driver_execution_extension_id,
 };
-use ironclaw_reborn::loop_driver_host::LoopCapabilityPortFactory;
 use ironclaw_threads::{
     AppendCapabilityDisplayPreviewRequest, CapabilityDisplayPreviewEnvelope,
     CapabilityDisplayPreviewEnvelopeInput, CapabilityDisplayPreviewStatus, SessionThreadService,

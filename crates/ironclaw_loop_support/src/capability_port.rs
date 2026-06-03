@@ -171,6 +171,55 @@ pub struct CapabilityResultWrite<'a> {
     pub display_preview: Option<CapabilityDisplayOutputPreview>,
 }
 
+#[async_trait]
+pub trait LoopCapabilityPortFactory: Send + Sync {
+    async fn create_capability_port(
+        &self,
+        run_context: &LoopRunContext,
+    ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError>;
+}
+
+pub trait LoopCapabilityPortDecorator: Send + Sync {
+    fn decorate(
+        &self,
+        run_context: &LoopRunContext,
+        inner: Arc<dyn LoopCapabilityPort>,
+    ) -> Arc<dyn LoopCapabilityPort>;
+}
+
+pub struct DecoratingLoopCapabilityPortFactory {
+    inner: Arc<dyn LoopCapabilityPortFactory>,
+    decorators: Vec<Arc<dyn LoopCapabilityPortDecorator>>,
+}
+
+impl DecoratingLoopCapabilityPortFactory {
+    pub fn new(inner: Arc<dyn LoopCapabilityPortFactory>) -> Self {
+        Self {
+            inner,
+            decorators: Vec::new(),
+        }
+    }
+
+    pub fn with_decorator(mut self, decorator: Arc<dyn LoopCapabilityPortDecorator>) -> Self {
+        self.decorators.push(decorator);
+        self
+    }
+}
+
+#[async_trait]
+impl LoopCapabilityPortFactory for DecoratingLoopCapabilityPortFactory {
+    async fn create_capability_port(
+        &self,
+        run_context: &LoopRunContext,
+    ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
+        let mut port = self.inner.create_capability_port(run_context).await?;
+        for decorator in &self.decorators {
+            port = decorator.decorate(run_context, port);
+        }
+        Ok(port)
+    }
+}
+
 #[derive(Clone)]
 pub struct HostRuntimeLoopCapabilityPortFactory {
     runtime: Arc<dyn HostRuntime>,
@@ -231,6 +280,16 @@ impl HostRuntimeLoopCapabilityPortFactory {
         )
         .with_execution_mounts(self.execution_mounts.clone())
         .with_capability_execution_mounts(self.capability_execution_mounts.clone())
+    }
+}
+
+#[async_trait]
+impl LoopCapabilityPortFactory for HostRuntimeLoopCapabilityPortFactory {
+    async fn create_capability_port(
+        &self,
+        run_context: &LoopRunContext,
+    ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
+        Ok(self.for_run_context(run_context.clone()))
     }
 }
 
@@ -1833,7 +1892,10 @@ mod tests {
 
     use std::{
         collections::VecDeque,
-        sync::atomic::{AtomicUsize, Ordering},
+        sync::{
+            Mutex,
+            atomic::{AtomicUsize, Ordering},
+        },
     };
 
     use async_trait::async_trait;
@@ -1897,6 +1959,93 @@ mod tests {
                 "{effect:?}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn decorating_factory_with_no_decorators_delegates_to_inner() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let inner = Arc::new(DecoratorTestPort {
+            label: "inner",
+            log: Arc::clone(&log),
+        });
+        let factory = DecoratingLoopCapabilityPortFactory::new(Arc::new(DecoratorTestFactory {
+            port: inner,
+        }));
+
+        let port = factory
+            .create_capability_port(&loop_run_context(&execution_context("decorator-empty")).await)
+            .await
+            .expect("decorated port");
+
+        let error = port
+            .visible_capabilities(VisibleCapabilityRequest {})
+            .await
+            .expect_err("test inner port should fail");
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::Unavailable);
+        assert_eq!(&*log.lock().expect("log lock"), &["inner"]);
+    }
+
+    #[tokio::test]
+    async fn decorating_factory_applies_decorators_in_declared_order() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let inner = Arc::new(DecoratorTestPort {
+            label: "inner",
+            log: Arc::clone(&log),
+        });
+        let factory = DecoratingLoopCapabilityPortFactory::new(Arc::new(DecoratorTestFactory {
+            port: inner,
+        }))
+        .with_decorator(Arc::new(LoggingDecorator {
+            label: "first",
+            log: Arc::clone(&log),
+        }))
+        .with_decorator(Arc::new(LoggingDecorator {
+            label: "second",
+            log: Arc::clone(&log),
+        }));
+
+        let port = factory
+            .create_capability_port(&loop_run_context(&execution_context("decorator-order")).await)
+            .await
+            .expect("decorated port");
+
+        let error = port
+            .visible_capabilities(VisibleCapabilityRequest {})
+            .await
+            .expect_err("test inner port should fail");
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::Unavailable);
+        assert_eq!(
+            &*log.lock().expect("log lock"),
+            &["second", "first", "inner"]
+        );
+    }
+
+    #[tokio::test]
+    async fn decorating_factory_propagates_inner_error() {
+        let decorate_calls = Arc::new(AtomicUsize::new(0));
+        let factory = DecoratingLoopCapabilityPortFactory::new(Arc::new(FailingDecoratorFactory {
+            error: AgentLoopHostError::new(
+                AgentLoopHostErrorKind::Unavailable,
+                "inner factory failed",
+            ),
+        }))
+        .with_decorator(Arc::new(NoopDecorator {
+            decorate_calls: Arc::clone(&decorate_calls),
+        }));
+
+        let error = match factory
+            .create_capability_port(&loop_run_context(&execution_context("decorator-error")).await)
+            .await
+        {
+            Ok(_) => panic!("inner factory error should propagate"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::Unavailable);
+        assert_eq!(error.safe_summary, "inner factory failed");
+        assert_eq!(decorate_calls.load(Ordering::SeqCst), 0);
     }
 
     #[test]
@@ -4239,6 +4388,142 @@ mod tests {
             context,
             SurfaceKind::new("test").expect("valid surface kind"),
         )
+    }
+
+    struct DecoratorTestFactory {
+        port: Arc<dyn LoopCapabilityPort>,
+    }
+
+    #[async_trait]
+    impl LoopCapabilityPortFactory for DecoratorTestFactory {
+        async fn create_capability_port(
+            &self,
+            _run_context: &LoopRunContext,
+        ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
+            Ok(Arc::clone(&self.port))
+        }
+    }
+
+    struct FailingDecoratorFactory {
+        error: AgentLoopHostError,
+    }
+
+    #[async_trait]
+    impl LoopCapabilityPortFactory for FailingDecoratorFactory {
+        async fn create_capability_port(
+            &self,
+            _run_context: &LoopRunContext,
+        ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
+            Err(self.error.clone())
+        }
+    }
+
+    struct DecoratorTestPort {
+        label: &'static str,
+        log: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    #[async_trait]
+    impl LoopCapabilityPort for DecoratorTestPort {
+        async fn visible_capabilities(
+            &self,
+            _request: VisibleCapabilityRequest,
+        ) -> Result<ironclaw_turns::run_profile::VisibleCapabilitySurface, AgentLoopHostError>
+        {
+            self.log.lock().expect("log lock").push(self.label);
+            Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::Unavailable,
+                format!("{label} failed", label = self.label),
+            ))
+        }
+
+        async fn invoke_capability(
+            &self,
+            _request: CapabilityInvocation,
+        ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+            Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::Unavailable,
+                format!("{label} unused", label = self.label),
+            ))
+        }
+
+        async fn invoke_capability_batch(
+            &self,
+            _request: CapabilityBatchInvocation,
+        ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
+            Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::Unavailable,
+                format!("{label} unused", label = self.label),
+            ))
+        }
+    }
+
+    struct LoggingDecorator {
+        label: &'static str,
+        log: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    impl LoopCapabilityPortDecorator for LoggingDecorator {
+        fn decorate(
+            &self,
+            _run_context: &LoopRunContext,
+            inner: Arc<dyn LoopCapabilityPort>,
+        ) -> Arc<dyn LoopCapabilityPort> {
+            Arc::new(LoggingDecoratorPort {
+                label: self.label,
+                log: Arc::clone(&self.log),
+                inner,
+            })
+        }
+    }
+
+    struct LoggingDecoratorPort {
+        label: &'static str,
+        log: Arc<Mutex<Vec<&'static str>>>,
+        inner: Arc<dyn LoopCapabilityPort>,
+    }
+
+    #[async_trait]
+    impl LoopCapabilityPort for LoggingDecoratorPort {
+        async fn visible_capabilities(
+            &self,
+            request: VisibleCapabilityRequest,
+        ) -> Result<ironclaw_turns::run_profile::VisibleCapabilitySurface, AgentLoopHostError>
+        {
+            self.log.lock().expect("log lock").push(self.label);
+            self.inner.visible_capabilities(request).await
+        }
+
+        async fn invoke_capability(
+            &self,
+            request: CapabilityInvocation,
+        ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+            self.log.lock().expect("log lock").push(self.label);
+            self.inner.invoke_capability(request).await
+        }
+
+        async fn invoke_capability_batch(
+            &self,
+            request: CapabilityBatchInvocation,
+        ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
+            self.log.lock().expect("log lock").push(self.label);
+            self.inner.invoke_capability_batch(request).await
+        }
+    }
+
+    struct NoopDecorator {
+        decorate_calls: Arc<AtomicUsize>,
+    }
+
+    impl LoopCapabilityPortDecorator for NoopDecorator {
+        fn decorate(
+            &self,
+            _run_context: &LoopRunContext,
+            inner: Arc<dyn LoopCapabilityPort>,
+        ) -> Arc<dyn LoopCapabilityPort> {
+            self.decorate_calls.fetch_add(1, Ordering::SeqCst);
+            inner
+        }
     }
 
     fn execution_mounts() -> MountView {

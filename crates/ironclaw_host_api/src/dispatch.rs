@@ -12,7 +12,7 @@ use thiserror::Error;
 
 use crate::{
     CapabilityId, ExtensionId, MountView, ResourceEstimate, ResourceReceipt, ResourceReservation,
-    ResourceScope, ResourceUsage, RuntimeKind, SecretHandle,
+    ResourceScope, ResourceUsage, RuntimeCredentialAuthRequirement, RuntimeKind, SecretHandle,
 };
 
 /// Request for one already-authorized declared capability dispatch.
@@ -237,6 +237,7 @@ pub enum DispatchError {
     AuthRequired {
         capability: CapabilityId,
         required_secrets: Vec<SecretHandle>,
+        credential_requirements: Vec<RuntimeCredentialAuthRequirement>,
     },
     #[error("MCP dispatch failed: {kind}")]
     Mcp { kind: RuntimeDispatchErrorKind },
@@ -290,12 +291,20 @@ impl fmt::Debug for DispatchError {
             Self::AuthRequired {
                 capability,
                 required_secrets,
+                credential_requirements,
             } => f
                 .debug_struct("AuthRequired")
                 .field("capability", capability)
                 .field(
                     "required_secrets",
                     &format!("[{} handle(s) redacted]", required_secrets.len()),
+                )
+                .field(
+                    "credential_requirements",
+                    &format!(
+                        "[{} requirement(s) redacted]",
+                        credential_requirements.len()
+                    ),
                 )
                 .finish(),
             Self::Mcp { kind } => f.debug_struct("Mcp").field("kind", kind).finish(),

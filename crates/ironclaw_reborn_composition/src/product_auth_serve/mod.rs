@@ -26,9 +26,9 @@ use axum::{
 };
 use chrono::{Duration as ChronoDuration, Utc};
 use ironclaw_auth::{
-    AuthContinuationRef, AuthErrorCode, AuthFlowId, AuthFlowStatus, AuthGateRef, AuthInteractionId,
-    AuthProductError, AuthProductScope, AuthProviderId, AuthSessionId, AuthSurface,
-    AuthorizationCodeHash, CredentialAccountChoiceRequest, CredentialAccountId,
+    AuthChallenge, AuthContinuationRef, AuthErrorCode, AuthFlowId, AuthFlowStatus, AuthGateRef,
+    AuthInteractionId, AuthProductError, AuthProductScope, AuthProviderId, AuthSessionId,
+    AuthSurface, AuthorizationCodeHash, CredentialAccountChoiceRequest, CredentialAccountId,
     CredentialAccountLabel, CredentialAccountListPage, CredentialAccountListRequest,
     CredentialAccountProjection, CredentialAccountSelectionRequest, CredentialAccountStatus,
     CredentialAccountUpdateBinding, CredentialRecoveryProjection, CredentialRecoveryRequest,
@@ -55,7 +55,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use url::Url;
 use uuid::Uuid;
 
-use crate::auth::RebornOAuthStartFlowRequest;
+use crate::auth::{RebornDcrOAuthStartFlowRequest, RebornOAuthStartFlowRequest};
 use crate::{
     RebornManualTokenSetupRequest, RebornManualTokenSubmitRequest, RebornManualTokenSubmitResponse,
     RebornOAuthCallbackError, RebornOAuthCallbackOutcome, RebornOAuthCallbackRequest,
@@ -542,7 +542,7 @@ pub(crate) struct OAuthStartResponse {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct GoogleOAuthStartResponse {
+pub(crate) struct ProductOAuthStartResponse {
     pub(crate) flow_id: AuthFlowId,
     pub(crate) status: AuthFlowStatus,
     pub(crate) provider: AuthProviderId,
@@ -725,6 +725,13 @@ impl ProductAuthRouteFailure {
         )
     }
 
+    fn malformed_config() -> Self {
+        Self::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            AuthErrorCode::MalformedConfig,
+        )
+    }
+
     fn backend_timeout() -> Self {
         Self::new(
             StatusCode::GATEWAY_TIMEOUT,
@@ -760,7 +767,9 @@ pub(super) fn route_failure_from_callback_error(
         AuthErrorCode::CrossScopeDenied => StatusCode::FORBIDDEN,
         AuthErrorCode::ProviderDenied | AuthErrorCode::Canceled => StatusCode::BAD_REQUEST,
         AuthErrorCode::FlowAlreadyTerminal => StatusCode::CONFLICT,
-        AuthErrorCode::BackendUnavailable => StatusCode::SERVICE_UNAVAILABLE,
+        AuthErrorCode::BackendUnavailable | AuthErrorCode::MalformedConfig => {
+            StatusCode::SERVICE_UNAVAILABLE
+        }
         AuthErrorCode::TokenExchangeFailed | AuthErrorCode::RefreshFailed => {
             StatusCode::BAD_GATEWAY
         }
@@ -1282,11 +1291,14 @@ mod tests {
     use crate::oauth_dcr_protocol::flow_secret_handle;
     use crate::{RebornAuthContinuationDispatcher, notion_oauth::notion_provider_spec};
     use async_trait::async_trait;
+    use axum::body::{Body, to_bytes};
+    use axum::http::{Method, Request, header};
     use ironclaw_capabilities::{CapabilityObligationHandler, CapabilityObligationRequest};
     use ironclaw_host_api::{
-        RuntimeHttpEgress, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse,
+        NetworkMethod, RuntimeHttpEgress, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse,
     };
     use ironclaw_secrets::{InMemorySecretStore, SecretMaterial, SecretStore};
+    use tower::ServiceExt;
 
     struct NoopDispatcher;
 
@@ -1321,6 +1333,15 @@ mod tests {
             thread_id: None,
             invocation_id: InvocationId::new(),
         }
+    }
+
+    fn test_caller() -> WebUiAuthenticatedCaller {
+        WebUiAuthenticatedCaller::new(
+            TenantId::new("tenant-alpha").expect("tenant"),
+            UserId::new("user-alpha").expect("user"),
+            None,
+            None,
+        )
     }
 
     #[test]
@@ -1360,6 +1381,125 @@ mod tests {
 
         assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(error.body.code, AuthErrorCode::BackendUnavailable);
+    }
+
+    #[tokio::test]
+    async fn extension_oauth_start_handler_starts_dcr_setup_flow_for_notion() {
+        let secret_store = Arc::new(InMemorySecretStore::new());
+        let dcr_provider = Arc::new(
+            OAuthDcrProvider::new(
+                OAuthDcrProviderConfig {
+                    spec: notion_provider_spec(),
+                    callback_origin: "http://127.0.0.1:3000".to_string(),
+                    client_name: "Ironclaw".to_string(),
+                    account_label: CredentialAccountLabel::new("notion").expect("label"),
+                    scopes: Vec::new(),
+                },
+                Arc::new(RouteDcrSetupEgress),
+                secret_store,
+                Arc::new(NoopObligationHandler),
+            )
+            .expect("DCR provider"),
+        );
+        let product_auth = RebornProductAuthServices::local_dev_in_memory(Arc::new(NoopDispatcher))
+            .with_dcr_oauth_registry(Arc::new(OAuthDcrProviderRegistry::new(vec![dcr_provider])));
+        let state = ProductAuthRouteState::new(
+            Arc::new(product_auth),
+            TenantId::new("tenant-alpha").expect("tenant"),
+            None,
+            None,
+        );
+        let app = product_auth_route_mount(state)
+            .protected
+            .layer(axum::Extension(test_caller()));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/webchat/v2/extensions/notion/setup/oauth/start")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "provider": "notion",
+                            "account_label": "work notion",
+                            "scopes": [],
+                            "expires_at": (Utc::now() + ChronoDuration::minutes(5)).to_rfc3339(),
+                            "invocation_id": InvocationId::new().to_string(),
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("route response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("start json");
+        assert_eq!(json["provider"], "notion");
+        assert_eq!(json["continuation"]["type"], "setup_only");
+        let authorization_url = json["authorization_url"]
+            .as_str()
+            .expect("authorization url");
+        let parsed = url::Url::parse(authorization_url).expect("authorization URL");
+        assert_eq!(parsed.host_str(), Some("oauth.notion.com"));
+        let redirect_uri = parsed
+            .query_pairs()
+            .find_map(|(name, value)| (name == "redirect_uri").then(|| value.into_owned()))
+            .expect("redirect uri");
+        let redirect = url::Url::parse(&redirect_uri).expect("callback redirect URL");
+        assert_eq!(
+            redirect
+                .query_pairs()
+                .find_map(|(name, value)| (name == "account_label").then(|| value.into_owned())),
+            Some("work notion".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn extension_oauth_start_handler_returns_config_error_when_dcr_registry_is_missing() {
+        let state = ProductAuthRouteState::new(
+            Arc::new(RebornProductAuthServices::local_dev_in_memory(Arc::new(
+                NoopDispatcher,
+            ))),
+            TenantId::new("tenant-alpha").expect("tenant"),
+            None,
+            None,
+        );
+        let app = product_auth_route_mount(state)
+            .protected
+            .layer(axum::Extension(test_caller()));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/webchat/v2/extensions/notion/setup/oauth/start")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "provider": "notion",
+                            "account_label": "work notion",
+                            "scopes": [],
+                            "expires_at": (Utc::now() + ChronoDuration::minutes(5)).to_rfc3339(),
+                            "invocation_id": InvocationId::new().to_string(),
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("route response");
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("error json");
+        assert_eq!(json["code"], "malformed_config");
     }
 
     #[tokio::test]
@@ -1442,6 +1582,42 @@ mod tests {
             _request: RuntimeHttpEgressRequest,
         ) -> Result<RuntimeHttpEgressResponse, ironclaw_host_api::RuntimeHttpEgressError> {
             panic!("callback PKCE fallback test must not perform DCR HTTP egress")
+        }
+    }
+
+    #[derive(Debug)]
+    struct RouteDcrSetupEgress;
+
+    #[async_trait]
+    impl RuntimeHttpEgress for RouteDcrSetupEgress {
+        async fn execute(
+            &self,
+            request: RuntimeHttpEgressRequest,
+        ) -> Result<RuntimeHttpEgressResponse, ironclaw_host_api::RuntimeHttpEgressError> {
+            let body = match request.url.as_str() {
+                "https://mcp.notion.com/mcp/.well-known/oauth-protected-resource" => {
+                    br#"{"authorization_servers":["https://oauth.notion.com"]}"#.to_vec()
+                }
+                "https://oauth.notion.com/.well-known/oauth-authorization-server" => {
+                    br#"{"authorization_endpoint":"https://oauth.notion.com/authorize","token_endpoint":"https://oauth.notion.com/token","registration_endpoint":"https://oauth.notion.com/register"}"#.to_vec()
+                }
+                "https://oauth.notion.com/register" => br#"{"client_id":"dcr-client","registration_client_uri":"https://oauth.notion.com/register/dcr-client","registration_access_token":"registration-token"}"#.to_vec(),
+                "https://oauth.notion.com/register/dcr-client"
+                    if request.method == NetworkMethod::Delete =>
+                {
+                    br#"{}"#.to_vec()
+                }
+                other => panic!("unexpected DCR route egress URL: {other}"),
+            };
+            Ok(RuntimeHttpEgressResponse {
+                status: 200,
+                headers: Vec::new(),
+                request_bytes: request.body.len() as u64,
+                response_bytes: body.len() as u64,
+                body,
+                saved_body: None,
+                redaction_applied: false,
+            })
         }
     }
 

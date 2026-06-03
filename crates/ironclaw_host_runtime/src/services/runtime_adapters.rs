@@ -333,10 +333,13 @@ where
                 }
                 return match error {
                     FirstPartyCapabilityError::AuthRequired {
-                        required_secrets, ..
+                        required_secrets,
+                        credential_requirements,
+                        ..
                     } => Err(DispatchError::AuthRequired {
                         capability: request.capability_id.clone(),
                         required_secrets,
+                        credential_requirements,
                     }),
                     FirstPartyCapabilityError::Dispatch { kind, .. } => {
                         Err(DispatchError::FirstParty { kind })
@@ -772,6 +775,7 @@ fn wasm_guest_dispatch_error(error: &str, capability: &CapabilityId) -> Dispatch
         WasmGuestErrorKind::AuthRequired => DispatchError::AuthRequired {
             capability: capability.clone(),
             required_secrets: Vec::new(),
+            credential_requirements: Vec::new(),
         },
         WasmGuestErrorKind::Runtime(kind) => DispatchError::Wasm { kind },
     }

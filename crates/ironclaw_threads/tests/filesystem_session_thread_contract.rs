@@ -171,6 +171,151 @@ async fn filesystem_store_persists_preview_history_while_hiding_it_from_context(
 }
 
 #[tokio::test]
+async fn filesystem_store_exact_compaction_replacement_summary_replay_is_idempotent() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-summary", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let thread_scope = scope("fs-summary");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: thread_scope.clone(),
+            thread_id: None,
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    for text in ["one", "two"] {
+        service
+            .accept_inbound_message(AcceptInboundMessageRequest {
+                scope: thread_scope.clone(),
+                thread_id: thread.thread_id.clone(),
+                actor_id: "actor-a".into(),
+                source_binding_id: None,
+                reply_target_binding_id: None,
+                external_event_id: None,
+                content: MessageContent::text(text),
+            })
+            .await
+            .unwrap();
+    }
+
+    let first = service
+        .create_summary_artifact(CreateSummaryArtifactRequest {
+            scope: thread_scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            start_sequence: 1,
+            end_sequence: 2,
+            summary_kind: SummaryKind::Compaction,
+            content: MessageContent::text("one and two summarized"),
+            model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
+        })
+        .await
+        .unwrap();
+    let replay = service
+        .create_summary_artifact(CreateSummaryArtifactRequest {
+            scope: thread_scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            start_sequence: 1,
+            end_sequence: 2,
+            summary_kind: SummaryKind::Compaction,
+            content: MessageContent::text("one and two summarized"),
+            model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
+        })
+        .await
+        .unwrap();
+    assert_eq!(replay.summary_id, first.summary_id);
+
+    let changed_content = service
+        .create_summary_artifact(CreateSummaryArtifactRequest {
+            scope: thread_scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            start_sequence: 1,
+            end_sequence: 2,
+            summary_kind: SummaryKind::Compaction,
+            content: MessageContent::text("different summary"),
+            model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
+        })
+        .await;
+    assert!(matches!(
+        changed_content,
+        Err(SessionThreadError::OverlappingSummaryRange { .. })
+    ));
+
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: thread_scope,
+            thread_id: thread.thread_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(history.summary_artifacts.len(), 1);
+    assert_eq!(history.summary_artifacts[0].summary_id, first.summary_id);
+}
+
+#[tokio::test]
+async fn filesystem_store_overlapping_replacement_summaries_are_rejected() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-overlap", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let thread_scope = scope("fs-overlap");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: thread_scope.clone(),
+            thread_id: None,
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    for text in ["one", "two", "three"] {
+        service
+            .accept_inbound_message(AcceptInboundMessageRequest {
+                scope: thread_scope.clone(),
+                thread_id: thread.thread_id.clone(),
+                actor_id: "actor-a".into(),
+                source_binding_id: None,
+                reply_target_binding_id: None,
+                external_event_id: None,
+                content: MessageContent::text(text),
+            })
+            .await
+            .unwrap();
+    }
+    service
+        .create_summary_artifact(CreateSummaryArtifactRequest {
+            scope: thread_scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            start_sequence: 1,
+            end_sequence: 2,
+            summary_kind: SummaryKind::Compaction,
+            content: MessageContent::text("one and two summarized"),
+            model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
+        })
+        .await
+        .unwrap();
+
+    let overlapping = service
+        .create_summary_artifact(CreateSummaryArtifactRequest {
+            scope: thread_scope,
+            thread_id: thread.thread_id,
+            start_sequence: 2,
+            end_sequence: 3,
+            summary_kind: SummaryKind::Compaction,
+            content: MessageContent::text("two and three summarized"),
+            model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
+        })
+        .await;
+
+    assert!(matches!(
+        overlapping,
+        Err(SessionThreadError::OverlappingSummaryRange { .. })
+    ));
+}
+
+#[tokio::test]
 async fn filesystem_preview_append_retries_converge_on_one_message() {
     let backend = Arc::new(InMemoryBackend::new());
     let scoped = scoped_threads_fs_at(backend, "tenant-preview-race", "alice");

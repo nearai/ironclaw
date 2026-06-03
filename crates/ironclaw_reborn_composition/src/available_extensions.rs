@@ -110,12 +110,10 @@ fn onboarding(package_id: &str) -> Option<LifecycleExtensionOnboarding> {
             "After authorization completes, activate Google Calendar to publish its tools.",
         )),
         "notion" => Some(onboarding_message(
-            "Notion needs a workspace access token before MCP tools can run.",
-            Some(
-                "Create or copy a Notion integration token for the workspace IronClaw should access, then paste it here.",
-            ),
-            Some("https://www.notion.so/profile/integrations"),
-            "After saving the token, activate Notion to publish its MCP tools.",
+            "Notion needs OAuth authorization before MCP tools can run.",
+            Some("Authorize the Notion workspace that IronClaw should access for MCP requests."),
+            None,
+            "After authorization completes, activate Notion to publish its MCP tools.",
         )),
         "nearai" => Some(onboarding_message(
             "NEAR AI needs an API key before its MCP tools can run.",
@@ -1458,7 +1456,7 @@ mod tests {
                 "google-calendar",
                 "Google Calendar needs Google OAuth authorization",
             ),
-            ("notion", "Notion needs a workspace access token"),
+            ("notion", "Notion needs OAuth authorization"),
             ("nearai", "NEAR AI needs an API key"),
             ("web-access", "Web Access does not need credentials"),
         ] {
@@ -1480,6 +1478,22 @@ mod tests {
                 "{extension_id} must include the next user step"
             );
         }
+    }
+
+    #[test]
+    fn bundled_notion_projects_oauth_credential_setup() {
+        let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "notion").unwrap();
+        let summary = catalog.resolve(&package_ref).unwrap().summary();
+
+        assert_eq!(summary.credential_requirements.len(), 1);
+        let requirement = &summary.credential_requirements[0];
+        assert_eq!(requirement.provider, "notion");
+        assert!(matches!(
+            &requirement.setup,
+            LifecycleExtensionCredentialSetup::OAuth { scopes } if scopes.is_empty()
+        ));
     }
 
     #[test]

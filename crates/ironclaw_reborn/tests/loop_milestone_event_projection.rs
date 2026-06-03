@@ -46,10 +46,10 @@ use ironclaw_turns::{
     TurnRunState, TurnRunnerId, TurnScope, TurnStateStore, TurnStatus,
     run_profile::{
         AgentLoopHostErrorKind, BatchPolicyKind, CapabilityFailureKind, FinalizeAssistantMessage,
-        HookDecisionSummary, LoopCheckpointKind, LoopDriverId, LoopGateKind, LoopHostMilestone,
-        LoopHostMilestoneEmitter, LoopHostMilestoneKind, LoopHostMilestoneSink, LoopModelPort,
-        LoopModelRequest, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext,
-        LoopTranscriptPort, ParentLoopOutput, PromptMode,
+        HookDecisionSummary, InstructionSafetyContext, LoopCheckpointKind, LoopDriverId,
+        LoopGateKind, LoopHostMilestone, LoopHostMilestoneEmitter, LoopHostMilestoneKind,
+        LoopHostMilestoneSink, LoopModelPort, LoopModelRequest, LoopPromptBundleRequest,
+        LoopPromptPort, LoopRunContext, LoopTranscriptPort, ParentLoopOutput, PromptMode,
     },
     runner::ClaimedTurnRun,
 };
@@ -845,6 +845,7 @@ impl HostFixture {
                 max_messages: 8,
                 ..TextOnlyLoopHostConfig::default()
             },
+            InstructionSafetyContext::local_development_noop(),
         )
         .build_text_only_host(RebornLoopDriverHostRequest {
             claimed_run: self.claimed.clone(),

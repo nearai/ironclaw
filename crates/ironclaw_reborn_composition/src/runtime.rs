@@ -31,6 +31,10 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+#[cfg(not(any(feature = "libsql", feature = "postgres")))]
+use ironclaw_conversations::InMemoryConversationServices;
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+use ironclaw_conversations::RebornFilesystemConversationServices;
 use ironclaw_events::{DurableAuditLog, DurableEventLog, InMemoryAuditSink, RuntimeEvent};
 use ironclaw_first_party_extension_ports::{
     FirstPartySkillsExtension, FirstPartySkillsExtensionHandles, SelectableSkillContextSource,
@@ -87,6 +91,12 @@ use crate::factory::{LocalDevRootFilesystem, LocalDevTurnStateStore};
 use crate::local_dev_capability_policy::local_dev_capability_policy;
 use crate::projection::{RebornProjectionServices, build_reborn_projection_services};
 use crate::runtime_input::{PollSettings, RebornRuntimeIdentity, RebornRuntimeInput};
+use crate::trigger_poller::{
+    ConversationContentRefMaterializer, ConversationTrustedTriggerSubmitter,
+    LocalTriggerTurnSnapshotSource, SnapshotActiveRunLookup, TRIGGER_POLLER_SHUTDOWN_TIMEOUT,
+    TriggerPollerCompositionDeps, TriggerPollerRuntimeHandle, TriggerTurnSnapshotSource,
+    TrustedTenantTriggerFireAuthorizer, spawn_trigger_poller,
+};
 use crate::{
     RebornBuildError, RebornCompositionProfile, RebornProductAuthServices, RebornServices,
     build_reborn_services,
@@ -199,6 +209,7 @@ pub struct RebornRuntime {
     thread_scope: ThreadScope,
     worker_handle: JoinHandle<()>,
     worker_cancel: CancellationToken,
+    trigger_poller_handle: Option<TriggerPollerRuntimeHandle>,
     budget_event_projection: Option<crate::budget_events::BudgetEventProjection>,
     poll_settings: PollSettings,
     actor_user_id: UserId,
@@ -221,6 +232,95 @@ pub(crate) type LocalDevSelectableSkillContextSource =
     SelectableSkillContextSource<FilesystemSkillBundleSource<LocalDevRootFilesystem>>;
 type LocalDevSkillExecutionAdapter =
     SkillExecutionAdapter<FilesystemSkillBundleSource<LocalDevRootFilesystem>>;
+
+struct TriggerPollerServices {
+    materializer: Arc<dyn ironclaw_triggers::TriggerPromptMaterializer>,
+    trusted_submitter: Arc<dyn ironclaw_triggers::TrustedTriggerFireSubmitter>,
+}
+
+async fn build_trigger_poller_services(
+    local_runtime: &crate::factory::RebornLocalRuntimeServices,
+    turn_coordinator: Arc<dyn TurnCoordinator>,
+    thread_service: Arc<dyn SessionThreadService>,
+    tenant_id: TenantId,
+    default_agent_id: AgentId,
+) -> Result<TriggerPollerServices, RebornRuntimeError> {
+    let authorizer = Arc::new(TrustedTenantTriggerFireAuthorizer::new(tenant_id));
+    let trusted_ingress =
+        ironclaw_trusted_ingress::HostTrustedTriggerIngress::new_for_composition_root();
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
+    {
+        let conversations = RebornFilesystemConversationServices::new(Arc::clone(
+            &local_runtime.subagent_goal_filesystem,
+        ))
+        .await
+        .map_err(|error| RebornRuntimeError::InvalidArgument {
+            reason: format!("trigger conversation services unavailable: {error}"),
+        })?;
+        Ok(build_trigger_poller_services_from_conversation_services(
+            conversations.clone(),
+            conversations,
+            turn_coordinator,
+            thread_service,
+            default_agent_id,
+            authorizer,
+            trusted_ingress,
+        ))
+    }
+    #[cfg(not(any(feature = "libsql", feature = "postgres")))]
+    {
+        let _ = local_runtime;
+        let conversations = InMemoryConversationServices::default();
+        Ok(build_trigger_poller_services_from_conversation_services(
+            conversations.clone(),
+            conversations,
+            turn_coordinator,
+            thread_service,
+            default_agent_id,
+            authorizer,
+            trusted_ingress,
+        ))
+    }
+}
+
+fn build_trigger_poller_services_from_conversation_services<B, S>(
+    binding_service: B,
+    session_thread_service: S,
+    turn_coordinator: Arc<dyn TurnCoordinator>,
+    thread_service: Arc<dyn SessionThreadService>,
+    default_agent_id: AgentId,
+    authorizer: Arc<dyn crate::trigger_poller_trusted_submit::TriggerFireAuthorizer>,
+    trusted_ingress: ironclaw_trusted_ingress::HostTrustedTriggerIngress,
+) -> TriggerPollerServices
+where
+    B: ironclaw_conversations::ConversationBindingService + Clone + 'static,
+    S: ironclaw_conversations::SessionThreadService + 'static,
+{
+    let materializer = Arc::new(ConversationContentRefMaterializer::new(
+        binding_service.clone(),
+        Arc::clone(&thread_service),
+        default_agent_id.clone(),
+        authorizer,
+    ));
+    let trusted_submitter = Arc::new(ConversationTrustedTriggerSubmitter::new(
+        binding_service,
+        session_thread_service,
+        turn_coordinator,
+        trusted_ingress,
+    ));
+    TriggerPollerServices {
+        materializer,
+        trusted_submitter,
+    }
+}
+
+fn build_trigger_active_run_lookup(
+    turn_state_store: Arc<LocalDevTurnStateStore>,
+) -> Arc<dyn ironclaw_triggers::TriggerActiveRunLookup> {
+    let snapshot_source: Arc<dyn TriggerTurnSnapshotSource> =
+        Arc::new(LocalTriggerTurnSnapshotSource::new(turn_state_store));
+    Arc::new(SnapshotActiveRunLookup::new(snapshot_source))
+}
 
 struct LocalDevApprovalTurnRunLocator {
     turn_state: Arc<LocalDevTurnStateStore>,
@@ -742,6 +842,11 @@ impl RebornRuntime {
     /// Awaits both tasks before returning so background state is fully
     /// drained when the runtime drops.
     pub async fn shutdown(self) -> Result<(), RebornRuntimeError> {
+        if let Some(trigger_poller) = self.trigger_poller_handle {
+            trigger_poller
+                .shutdown(TRIGGER_POLLER_SHUTDOWN_TIMEOUT)
+                .await;
+        }
         self.worker_cancel.cancel();
         if let Some(projection) = self.budget_event_projection {
             projection.shutdown().await;
@@ -948,6 +1053,7 @@ pub async fn build_reborn_runtime(
         #[cfg(feature = "root-llm-provider")]
         llm,
         runner,
+        trigger_poller,
         poll,
         identity,
         regex_skill_activation_enabled,
@@ -1338,12 +1444,39 @@ pub async fn build_reborn_runtime(
     };
     services.turn_coordinator = Some(Arc::clone(&planned_turn_coordinator));
 
+    let trigger_poller_handle = if trigger_poller.enabled {
+        let trigger_poller_services = build_trigger_poller_services(
+            local_runtime,
+            Arc::clone(&planned_turn_coordinator),
+            Arc::clone(&thread_service),
+            thread_scope.tenant_id.clone(),
+            validated_identity.agent_id.clone(),
+        )
+        .await?;
+        let active_run_lookup = build_trigger_active_run_lookup(Arc::clone(&turn_state_store));
+        spawn_trigger_poller(
+            trigger_poller,
+            TriggerPollerCompositionDeps {
+                repository: Arc::clone(&local_runtime.trigger_repository),
+                materializer: trigger_poller_services.materializer,
+                trusted_submitter: trigger_poller_services.trusted_submitter,
+                active_run_lookup,
+            },
+        )
+        .map_err(|error| RebornRuntimeError::InvalidArgument {
+            reason: format!("trigger poller could not be started: {error}"),
+        })?
+    } else {
+        None
+    };
     let worker_cancel = CancellationToken::new();
     let worker = Arc::clone(&composition.worker);
     let worker_cancel_clone = worker_cancel.clone();
     let worker_handle = tokio::spawn(async move {
         worker.run(worker_cancel_clone).await;
     });
+    services.readiness.workers.turn_runner = true;
+    services.readiness.workers.trigger_poller = trigger_poller_handle.is_some();
     let turn_coordinator = planned_turn_coordinator;
     let wake_sender = composition.wake_sender;
 
@@ -1372,6 +1505,7 @@ pub async fn build_reborn_runtime(
         thread_scope,
         worker_handle,
         worker_cancel,
+        trigger_poller_handle,
         budget_event_projection,
         poll_settings: poll,
         actor_user_id,
@@ -1679,6 +1813,7 @@ mod tests {
     use std::time::Duration;
 
     use async_trait::async_trait;
+    use ironclaw_auth::GOOGLE_CALENDAR_READONLY_SCOPE;
 
     /// Wiring guard: the `regex_skill_activation_enabled` flag from
     /// [`RebornRuntimeInput`] must reach
@@ -1760,7 +1895,9 @@ mod tests {
 
     use crate::RebornReadinessState;
     use crate::input::RebornBuildInput;
-    use crate::runtime_input::{PollSettings, RebornRuntimeIdentity, RebornRuntimeInput};
+    use crate::runtime_input::{
+        PollSettings, RebornRuntimeIdentity, RebornRuntimeInput, TriggerPollerSettings,
+    };
     use crate::webui::build_webui_services;
 
     use super::{
@@ -2292,6 +2429,150 @@ mod tests {
         );
         assert_eq!(audit.decision.kind, "allowed");
         runtime.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test]
+    async fn local_dev_runtime_readiness_reports_trigger_poller_worker() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let gateway = Arc::new(RecordingGateway {
+            reply: "trigger readiness".to_string(),
+            requests: Arc::new(StdMutex::new(Vec::new())),
+        });
+
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev(
+                "runtime-trigger-readiness-owner",
+                root.path().join("local-dev"),
+            )
+            .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-trigger-readiness-tenant".to_string(),
+            agent_id: "runtime-trigger-readiness-agent".to_string(),
+            source_binding_id: "runtime-trigger-readiness-source".to_string(),
+            reply_target_binding_id: "runtime-trigger-readiness-reply".to_string(),
+        })
+        .with_trigger_poller_settings(TriggerPollerSettings::enabled())
+        .with_model_gateway_override(gateway);
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+
+        assert!(runtime.services().readiness.workers.turn_runner);
+        assert!(runtime.services().readiness.workers.trigger_poller);
+
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    #[tokio::test]
+    async fn local_dev_runtime_disables_trigger_poller_worker_by_default() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let gateway = Arc::new(RecordingGateway {
+            reply: "trigger disabled".to_string(),
+            requests: Arc::new(StdMutex::new(Vec::new())),
+        });
+
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev(
+                "runtime-trigger-disabled-owner",
+                root.path().join("local-dev"),
+            )
+            .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-trigger-disabled-tenant".to_string(),
+            agent_id: "runtime-trigger-disabled-agent".to_string(),
+            source_binding_id: "runtime-trigger-disabled-source".to_string(),
+            reply_target_binding_id: "runtime-trigger-disabled-reply".to_string(),
+        })
+        .with_model_gateway_override(gateway);
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+
+        assert!(runtime.services().readiness.workers.turn_runner);
+        assert!(!runtime.services().readiness.workers.trigger_poller);
+
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    #[tokio::test]
+    async fn local_dev_runtime_rejects_invalid_trigger_poller_worker_config() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let gateway = Arc::new(RecordingGateway {
+            reply: "trigger invalid config".to_string(),
+            requests: Arc::new(StdMutex::new(Vec::new())),
+        });
+        let trigger_poller = TriggerPollerSettings {
+            enabled: true,
+            worker: ironclaw_triggers::TriggerPollerWorkerConfig {
+                poll_interval: Duration::ZERO,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev(
+                "runtime-trigger-invalid-config-owner",
+                root.path().join("local-dev"),
+            )
+            .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-trigger-invalid-config-tenant".to_string(),
+            agent_id: "runtime-trigger-invalid-config-agent".to_string(),
+            source_binding_id: "runtime-trigger-invalid-config-source".to_string(),
+            reply_target_binding_id: "runtime-trigger-invalid-config-reply".to_string(),
+        })
+        .with_trigger_poller_settings(trigger_poller)
+        .with_model_gateway_override(gateway);
+
+        let err = match build_reborn_runtime(input).await {
+            Ok(runtime) => {
+                runtime
+                    .shutdown()
+                    .await
+                    .expect("unexpected runtime shutdown");
+                panic!("invalid trigger poller config must fail runtime build");
+            }
+            Err(err) => err,
+        };
+
+        assert!(
+            matches!(err, super::RebornRuntimeError::InvalidArgument { reason } if reason.contains("poll_interval must be non-zero"))
+        );
+    }
+
+    #[tokio::test]
+    async fn local_dev_runtime_shutdown_cancels_trigger_poller_worker() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let gateway = Arc::new(RecordingGateway {
+            reply: "trigger shutdown".to_string(),
+            requests: Arc::new(StdMutex::new(Vec::new())),
+        });
+
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev(
+                "runtime-trigger-shutdown-owner",
+                root.path().join("local-dev"),
+            )
+            .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-trigger-shutdown-tenant".to_string(),
+            agent_id: "runtime-trigger-shutdown-agent".to_string(),
+            source_binding_id: "runtime-trigger-shutdown-source".to_string(),
+            reply_target_binding_id: "runtime-trigger-shutdown-reply".to_string(),
+        })
+        .with_trigger_poller_settings(TriggerPollerSettings::enabled())
+        .with_model_gateway_override(gateway);
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        assert!(runtime.services().readiness.workers.trigger_poller);
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), runtime.shutdown())
+            .await
+            .expect("shutdown returns before timeout")
+            .expect("runtime shutdown");
     }
 
     #[tokio::test]
@@ -3493,7 +3774,7 @@ mod tests {
             RebornExtensionCredentialSetup::OAuth {
                 scopes,
                 ..
-            } if scopes == &vec!["https://www.googleapis.com/auth/calendar.events".to_string()]
+            } if scopes == &vec![GOOGLE_CALENDAR_READONLY_SCOPE.to_string()]
         ));
         let google_setup_json =
             serde_json::to_value(&google_setup.secrets[0]).expect("serialize setup secret");

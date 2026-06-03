@@ -9,6 +9,7 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use crate::identifiers::SummaryArtifactId;
+use crate::summary_artifacts::find_overlapping_summary;
 use crate::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
     AppendAssistantDraftRequest, AppendCapabilityDisplayPreviewRequest,
@@ -578,22 +579,11 @@ impl SessionThreadService for InMemorySessionThreadService {
                 end_sequence: request.end_sequence,
             });
         }
-        if request.model_context_policy == Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected)
-            && thread.summary_artifacts.iter().any(|summary| {
-                summary.model_context_policy
-                    == Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected)
-                    && ranges_overlap(
-                        request.start_sequence,
-                        request.end_sequence,
-                        summary.start_sequence,
-                        summary.end_sequence,
-                    )
-            })
+        let content = request.content.as_text().to_string();
+        if let Some(overlapping) =
+            find_overlapping_summary(&thread.summary_artifacts, &request, &content)?
         {
-            return Err(SessionThreadError::OverlappingSummaryRange {
-                start_sequence: request.start_sequence,
-                end_sequence: request.end_sequence,
-            });
+            return Ok(overlapping.clone());
         }
         let artifact = SummaryArtifact {
             summary_id: SummaryArtifactId::new(),
@@ -601,7 +591,7 @@ impl SessionThreadService for InMemorySessionThreadService {
             start_sequence: request.start_sequence,
             end_sequence: request.end_sequence,
             summary_kind: request.summary_kind,
-            content: request.content.into_text(),
+            content,
             model_context_policy: request.model_context_policy,
         };
         thread.summary_artifacts.push(artifact.clone());
@@ -802,10 +792,6 @@ fn ensure_user_accepted(
         from: message.status,
         attempted,
     })
-}
-
-fn ranges_overlap(left_start: u64, left_end: u64, right_start: u64, right_end: u64) -> bool {
-    left_start <= right_end && right_start <= left_end
 }
 
 fn context_messages_with_summary_replacements(thread: &StoredThread) -> Vec<ContextMessage> {

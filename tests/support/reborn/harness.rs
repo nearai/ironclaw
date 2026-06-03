@@ -50,7 +50,8 @@ use ironclaw_host_runtime::{
     MEMORY_WRITE_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, RuntimeCredentialAccountRequest,
     RuntimeCredentialAccountResolver, SHELL_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID,
     SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID,
-    SurfaceKind, TIME_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers,
+    SurfaceKind, TIME_CAPABILITY_ID, TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID,
+    TRIGGER_REMOVE_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers,
     builtin_first_party_package,
 };
 use ironclaw_loop_support::{
@@ -58,7 +59,7 @@ use ironclaw_loop_support::{
     CapabilitySurfaceProfileResolver, DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID,
     HostIdentityContextBuildError, HostIdentityContextCandidate, HostIdentityContextSource,
     HostManagedModelRequest, HostRuntimeLoopCapabilityPortFactory, JsonSpawnSubagentInputCodec,
-    LoopCapabilityResultWriter,
+    LoopCapabilityPortFactory, LoopCapabilityResultWriter,
 };
 use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
@@ -78,7 +79,6 @@ use ironclaw_reborn::subagent::{
     goal_store::InMemoryBoundedSubagentGoalStore,
 };
 use ironclaw_reborn::{
-    loop_driver_host::LoopCapabilityPortFactory,
     loop_exit_applier::{
         BlockedEvidenceRequest, CompletionEvidenceRequest, FailureEvidenceRequest,
         FinalCheckpointEvidenceRequest, LoopExitEvidencePort, ThreadCheckpointLoopExitEvidencePort,
@@ -527,6 +527,21 @@ impl RebornBinaryE2EHarness {
         model_gateway: RebornTraceReplayModelGateway,
     ) -> HarnessResult<Self> {
         let host_runtime = Arc::new(HostRuntimeCapabilityHarness::skill_management_tools().await?);
+        Self::with_model_gateway_capability_mode(
+            conversation_id,
+            model_gateway,
+            HarnessCapabilityMode::HostRuntime(host_runtime),
+            false,
+        )
+        .await
+    }
+
+    pub async fn with_host_runtime_trigger_management_capabilities(
+        conversation_id: &str,
+        model_gateway: RebornTraceReplayModelGateway,
+    ) -> HarnessResult<Self> {
+        let host_runtime =
+            Arc::new(HostRuntimeCapabilityHarness::trigger_management_tools().await?);
         Self::with_model_gateway_capability_mode(
             conversation_id,
             model_gateway,
@@ -1558,6 +1573,23 @@ impl HostRuntimeCapabilityHarness {
         Ok(harness)
     }
 
+    async fn trigger_management_tools() -> HarnessResult<Self> {
+        Self::new_with_mounts(
+            "reborn-e2e-trigger-management-tools",
+            vec![
+                CapabilityId::new(TRIGGER_CREATE_CAPABILITY_ID)?,
+                CapabilityId::new(TRIGGER_LIST_CAPABILITY_ID)?,
+                CapabilityId::new(TRIGGER_REMOVE_CAPABILITY_ID)?,
+            ],
+            vec![EffectKind::DispatchCapability, EffectKind::ExternalWrite],
+            Vec::new(),
+            ExtensionId::new(BUILTIN_FIRST_PARTY_PROVIDER)?,
+            UserId::new("reborn-e2e-trigger-management-user")?,
+            MountView::default(),
+        )
+        .await
+    }
+
     async fn new(
         service_label: &'static str,
         capability_ids: Vec<CapabilityId>,
@@ -1945,7 +1977,9 @@ fn local_dev_host_runtime_with_registry_and_runtime_http_egress(
     .with_runtime_credential_account_resolver(Arc::new(FixedRuntimeCredentialAccountResolver {
         result: Ok(SecretHandle::new("github_manual_access")?),
     }))
-    .with_first_party_capabilities(Arc::new(builtin_first_party_handlers()?))
+    .with_first_party_capabilities(Arc::new(builtin_first_party_handlers(Arc::new(
+        ironclaw_triggers::InMemoryTriggerRepository::default(),
+    ))?))
     .with_runtime_http_egress(egress)
     .with_trust_policy(Arc::new(first_party_trust_policy()?));
 
@@ -1973,7 +2007,9 @@ fn local_dev_host_runtime_with_registry_and_egress(
     .with_runtime_credential_account_resolver(Arc::new(FixedRuntimeCredentialAccountResolver {
         result: Ok(SecretHandle::new("github_manual_access")?),
     }))
-    .with_first_party_capabilities(Arc::new(builtin_first_party_handlers()?))
+    .with_first_party_capabilities(Arc::new(builtin_first_party_handlers(Arc::new(
+        ironclaw_triggers::InMemoryTriggerRepository::default(),
+    ))?))
     .with_runtime_http_egress(runtime_http_egress)
     .with_trust_policy(Arc::new(github_first_party_trust_policy()?))
     .try_with_host_http_egress((*network_egress).clone())
@@ -1999,7 +2035,9 @@ fn local_dev_host_runtime_with_live_http_egress(
         HostRuntimeCapabilitySurfaceVersion::new("reborn-app-v1")?,
     )
     .with_secret_store(Arc::new(InMemorySecretStore::new()))
-    .with_first_party_capabilities(Arc::new(builtin_first_party_handlers()?))
+    .with_first_party_capabilities(Arc::new(builtin_first_party_handlers(Arc::new(
+        ironclaw_triggers::InMemoryTriggerRepository::default(),
+    ))?))
     .try_with_host_http_egress(PolicyNetworkHttpEgress::new(ReqwestNetworkTransport::new(
         Duration::from_secs(2),
     )))
@@ -2067,7 +2105,7 @@ fn local_dev_root_filesystem(
                 StorageClass::StructuredRecords,
                 ContentKind::MemoryDocument,
                 IndexPolicy::FullTextAndVector,
-                BackendCapabilities::in_memory_full(),
+                memory.capabilities(),
             )?,
             memory,
         )?;
