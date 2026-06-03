@@ -40,6 +40,8 @@ use ironclaw_first_party_extension_ports::{
     FirstPartySkillsExtension, FirstPartySkillsExtensionHandles, SelectableSkillContextSource,
     SkillActivationSelectorConfig, SkillExecutionAdapter,
 };
+#[cfg(test)]
+use ironclaw_host_api::RuntimeHttpEgress;
 use ironclaw_host_api::{
     ActionResultSummary, ActionSummary, AgentId, AuditEnvelope, AuditEventId, AuditStage,
     CapabilityId, CorrelationId, DecisionSummary, EffectKind, InvocationId, ResourceScope,
@@ -513,6 +515,21 @@ impl RebornRuntime {
     /// Exposed for diagnostics / readiness reporting; **not** for traffic.
     pub fn services(&self) -> &RebornServices {
         &self.services
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_local_runtime_http_egress_for_test(
+        &mut self,
+        runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
+    ) {
+        let local_runtime = self
+            .services
+            .local_runtime
+            .as_mut()
+            .expect("test runtime must include local runtime services");
+        Arc::get_mut(local_runtime)
+            .expect("test must mutate local runtime services before cloning the service Arc")
+            .runtime_http_egress = runtime_http_egress;
     }
 
     /// Diagnostic id for the no-profile run profile selected by this runtime.

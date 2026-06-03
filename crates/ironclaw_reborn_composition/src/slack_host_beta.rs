@@ -49,6 +49,7 @@ const SLACK_SIGNATURE_HEADER: &str = "X-Slack-Signature";
 const SLACK_TIMESTAMP_HEADER: &str = "X-Slack-Request-Timestamp";
 const SLACK_WEBHOOK_WORKFLOW_TIMEOUT: Duration = Duration::from_secs(2);
 const SLACK_MAX_IN_FLIGHT_WEBHOOKS: usize = 64;
+const SLACK_IDEMPOTENCY_LEDGER_SETTLED_LIMIT: usize = 10_000;
 
 struct NoopSlackDeliverySink;
 
@@ -178,7 +179,11 @@ pub fn build_slack_events_route_mount(
     let workflow = Arc::new(
         DefaultProductWorkflow::new(
             inbound,
-            Arc::new(InMemoryIdempotencyLedger::new()),
+            Arc::new(InMemoryIdempotencyLedger::with_settled_entry_limit(
+                NonZeroUsize::new(SLACK_IDEMPOTENCY_LEDGER_SETTLED_LIMIT).ok_or_else(|| {
+                    invalid_config("idempotency_ledger_limit", "must be non-zero".to_string())
+                })?,
+            )),
             Arc::new(binding.clone()),
         )
         .with_approval_interaction_service(runtime.webui_approval_interaction_service())
@@ -263,14 +268,19 @@ mod tests {
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    use async_trait::async_trait;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use hmac::{Hmac, Mac};
     use http_body_util::BodyExt;
+    use ironclaw_host_api::{
+        RuntimeHttpEgress, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse,
+    };
     use ironclaw_loop_support::{
         HostManagedModelError, HostManagedModelGateway, HostManagedModelRequest,
         HostManagedModelResponse,
     };
+    use ironclaw_threads::{ListThreadsForScopeRequest, ThreadHistoryRequest, ThreadScope};
     use ironclaw_turns::run_profile::LoopCapabilityPort;
     use secrecy::ExposeSecret;
     use tower::ServiceExt;
@@ -295,22 +305,7 @@ mod tests {
 
     #[tokio::test]
     async fn build_slack_events_route_mount_builds_signed_route_from_reborn_runtime() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let runtime = build_reborn_runtime(
-            RebornRuntimeInput::from_services(
-                RebornBuildInput::local_dev("slack-host-beta-owner", root.path().join("local-dev"))
-                    .with_runtime_policy(local_dev_runtime_policy().expect("local policy")),
-            )
-            .with_identity(RebornRuntimeIdentity {
-                tenant_id: TENANT.to_string(),
-                agent_id: AGENT.to_string(),
-                source_binding_id: "slack-host-source".to_string(),
-                reply_target_binding_id: "slack-host-reply".to_string(),
-            })
-            .with_model_gateway_override(Arc::new(StaticGateway)),
-        )
-        .await
-        .expect("runtime builds");
+        let (runtime, _root) = runtime().await;
 
         let mount = build_slack_events_route_mount(&runtime, config()).expect("route builds");
         assert_eq!(mount.descriptors.len(), 1);
@@ -345,6 +340,70 @@ mod tests {
         runtime.shutdown().await.expect("runtime shuts down");
     }
 
+    #[tokio::test]
+    async fn build_slack_events_route_mount_fails_when_runtime_http_egress_unavailable() {
+        let (mut runtime, _root) = runtime().await;
+        runtime.set_local_runtime_http_egress_for_test(None);
+
+        let error = match build_slack_events_route_mount(&runtime, config()) {
+            Ok(_) => panic!("Slack route requires runtime HTTP egress"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            SlackHostBetaBuildError::RuntimeHttpEgressUnavailable
+        ));
+        runtime.shutdown().await.expect("runtime shuts down");
+    }
+
+    #[tokio::test]
+    async fn build_slack_events_route_mount_dispatches_signed_event_callback() {
+        let (mut runtime, _root) = runtime().await;
+        let egress = Arc::new(RecordingRuntimeHttpEgress::default());
+        runtime.set_local_runtime_http_egress_for_test(Some(egress.clone()));
+        let mount = build_slack_events_route_mount(&runtime, config()).expect("route builds");
+        let body = r#"{
+            "type":"event_callback",
+            "team_id":"T-HOST",
+            "api_app_id":"A-HOST",
+            "event_id":"Ev-host-beta-dispatch",
+            "event":{"type":"message","channel_type":"im","user":"U-HOST","channel":"D-HOST","text":"hello","ts":"1710000000.000010"}
+        }"#;
+        let timestamp = current_unix_timestamp();
+
+        let response = mount
+            .router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(SLACK_EVENTS_PATH)
+                    .header(SLACK_TIMESTAMP_HEADER, timestamp.to_string())
+                    .header(SLACK_SIGNATURE_HEADER, slack_signature(timestamp, body))
+                    .body(Body::from(body))
+                    .expect("request builds"),
+            )
+            .await
+            .expect("router responds");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        if let Some(drain) = mount.drain.as_ref() {
+            drain.drain().await;
+        }
+        let history = wait_for_slack_thread_history(&runtime).await;
+        assert_eq!(history.messages.len(), 1);
+        assert_eq!(history.messages[0].content.as_deref(), Some("hello"));
+        assert_eq!(
+            history.messages[0].source_binding_id.as_deref(),
+            Some(
+                "adapter:8:slack_v2;installation:17:install_host_beta;agent:16:agent:slack-host;project:18:project:slack-host;space:6:T-HOST;conversation:6:D-HOST;topic:0:;"
+            )
+        );
+
+        runtime.shutdown().await.expect("runtime shuts down");
+    }
+
     #[test]
     fn slack_host_beta_config_binds_slack_actor_to_reborn_user() {
         let config = config();
@@ -371,6 +430,63 @@ mod tests {
             bot_token: SecretString::from("xoxb-host-token"),
         })
         .expect("valid config")
+    }
+
+    async fn runtime() -> (RebornRuntime, tempfile::TempDir) {
+        let root = tempfile::tempdir().expect("tempdir");
+        let runtime = build_reborn_runtime(
+            RebornRuntimeInput::from_services(
+                RebornBuildInput::local_dev(USER, root.path().join("local-dev"))
+                    .with_runtime_policy(local_dev_runtime_policy().expect("local policy")),
+            )
+            .with_identity(RebornRuntimeIdentity {
+                tenant_id: TENANT.to_string(),
+                agent_id: AGENT.to_string(),
+                source_binding_id: "slack-host-source".to_string(),
+                reply_target_binding_id: "slack-host-reply".to_string(),
+            })
+            .with_model_gateway_override(Arc::new(StaticGateway)),
+        )
+        .await
+        .expect("runtime builds");
+        (runtime, root)
+    }
+
+    async fn wait_for_slack_thread_history(
+        runtime: &RebornRuntime,
+    ) -> ironclaw_threads::ThreadHistory {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let thread_service = runtime.webui_thread_service();
+        let scope = ThreadScope {
+            tenant_id: TenantId::new(TENANT).expect("tenant"),
+            agent_id: AgentId::new(AGENT).expect("agent"),
+            project_id: Some(ProjectId::new(PROJECT).expect("project")),
+            owner_user_id: Some(UserId::new(USER).expect("user")),
+            mission_id: None,
+        };
+        loop {
+            let threads = thread_service
+                .list_threads_for_scope(ListThreadsForScopeRequest {
+                    scope: scope.clone(),
+                    limit: Some(1),
+                    cursor: None,
+                })
+                .await
+                .expect("list Slack-created threads");
+            if let Some(thread) = threads.threads.first() {
+                return thread_service
+                    .list_thread_history(ThreadHistoryRequest {
+                        scope,
+                        thread_id: thread.thread_id.clone(),
+                    })
+                    .await
+                    .expect("read Slack-created thread history");
+            }
+            if tokio::time::Instant::now() >= deadline {
+                panic!("signed Slack event did not create a thread");
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
     }
 
     fn current_unix_timestamp() -> u64 {
@@ -406,6 +522,33 @@ mod tests {
             _capabilities: Arc<dyn LoopCapabilityPort>,
         ) -> Result<HostManagedModelResponse, HostManagedModelError> {
             self.stream_model(request).await
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingRuntimeHttpEgress {
+        requests: std::sync::Mutex<Vec<RuntimeHttpEgressRequest>>,
+    }
+
+    #[async_trait]
+    impl RuntimeHttpEgress for RecordingRuntimeHttpEgress {
+        async fn execute(
+            &self,
+            request: RuntimeHttpEgressRequest,
+        ) -> Result<RuntimeHttpEgressResponse, ironclaw_host_api::RuntimeHttpEgressError> {
+            self.requests
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(request);
+            Ok(RuntimeHttpEgressResponse {
+                status: 200,
+                headers: Vec::new(),
+                body: br#"{"ok":true}"#.to_vec(),
+                saved_body: None,
+                request_bytes: 0,
+                response_bytes: 0,
+                redaction_applied: false,
+            })
         }
     }
 }
