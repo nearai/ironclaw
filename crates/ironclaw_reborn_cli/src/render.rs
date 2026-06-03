@@ -1,3 +1,5 @@
+use std::io::Write;
+
 use serde::Serialize;
 
 use crate::dto::{
@@ -12,13 +14,13 @@ pub(crate) enum OutputMode {
 }
 
 pub(crate) trait Renderable: Serialize {
-    fn render_text(&self);
+    fn render_text_to(&self, w: &mut impl Write) -> std::io::Result<()>;
 }
 
 pub(crate) fn output(dto: &impl Renderable, mode: OutputMode) -> anyhow::Result<()> {
     match mode {
         OutputMode::Text => {
-            dto.render_text();
+            dto.render_text_to(&mut std::io::stdout())?;
             Ok(())
         }
         OutputMode::Json => {
@@ -31,14 +33,15 @@ pub(crate) fn output(dto: &impl Renderable, mode: OutputMode) -> anyhow::Result<
 // ─── Status ────────────────────────────────────────────────────────────────
 
 impl Renderable for StatusDto {
-    fn render_text(&self) {
-        println!("IronClaw Reborn status");
-        println!();
-        kv("version", &self.version);
-        kv("reborn_home", &self.reborn_home.display().to_string());
-        kv("home_source", self.home_source);
-        kv("profile", &self.profile);
+    fn render_text_to(&self, w: &mut impl Write) -> std::io::Result<()> {
+        writeln!(w, "IronClaw Reborn status")?;
+        writeln!(w)?;
+        kv(w, "version", &self.version)?;
+        kv(w, "reborn_home", &self.reborn_home.display().to_string())?;
+        kv(w, "home_source", self.home_source)?;
+        kv(w, "profile", &self.profile)?;
         kv(
+            w,
             "config_file",
             &format!(
                 "{} ({})",
@@ -49,8 +52,9 @@ impl Renderable for StatusDto {
                     "absent"
                 }
             ),
-        );
+        )?;
         kv(
+            w,
             "providers_file",
             &format!(
                 "{} ({})",
@@ -61,33 +65,35 @@ impl Renderable for StatusDto {
                     "absent"
                 }
             ),
-        );
-        kv("model_slots", &self.model_slots.join(", "));
-        println!();
-        println!("drivers:");
-        driver_line("  text_only", &self.drivers.text_only);
-        driver_line("  planned", &self.drivers.planned);
-        driver_line("  subagent_planned", &self.drivers.subagent_planned);
+        )?;
+        kv(w, "model_slots", &self.model_slots.join(", "))?;
+        writeln!(w)?;
+        writeln!(w, "drivers:")?;
+        driver_line(w, "  text_only", &self.drivers.text_only)?;
+        driver_line(w, "  planned", &self.drivers.planned)?;
+        driver_line(w, "  subagent_planned", &self.drivers.subagent_planned)?;
         driver_line(
+            w,
             "  planned_default_profile",
             &self.drivers.planned_default_profile,
-        );
+        )?;
+        Ok(())
     }
 }
 
-fn driver_line(label: &str, status: &ComponentStatus) {
+fn driver_line(w: &mut impl Write, label: &str, status: &ComponentStatus) -> std::io::Result<()> {
     match status {
-        ComponentStatus::Initialized => println!("{label}: initialized"),
-        ComponentStatus::Failed { reason } => println!("{label}: unavailable ({reason})"),
+        ComponentStatus::Initialized => writeln!(w, "{label}: initialized"),
+        ComponentStatus::Failed { reason } => writeln!(w, "{label}: unavailable ({reason})"),
     }
 }
 
 // ─── Doctor ────────────────────────────────────────────────────────────────
 
 impl Renderable for DoctorDto {
-    fn render_text(&self) {
-        println!("IronClaw Reborn doctor");
-        println!();
+    fn render_text_to(&self, w: &mut impl Write) -> std::io::Result<()> {
+        writeln!(w, "IronClaw Reborn doctor")?;
+        writeln!(w)?;
 
         let mut current_category: Option<CheckCategory> = None;
         for check in &self.checks {
@@ -97,63 +103,73 @@ impl Renderable for DoctorDto {
                     CheckCategory::Core => "Core",
                     CheckCategory::Drivers => "Drivers",
                 };
-                println!("  {label}");
+                writeln!(w, "  {label}")?;
             }
             let icon = match check.outcome {
                 CheckOutcome::Pass => "\u{2714}",
                 CheckOutcome::Fail => "\u{2718}",
                 CheckOutcome::Skip => "-",
             };
-            println!("  {icon} {:<28} {}", check.name, check.detail);
+            writeln!(w, "  {icon} {:<28} {}", check.name, check.detail)?;
         }
 
-        println!();
-        println!(
+        writeln!(w)?;
+        writeln!(
+            w,
             "{} passed, {} failed, {} skipped",
             self.summary.pass, self.summary.fail, self.summary.skip,
-        );
+        )?;
+        Ok(())
     }
 }
 
 // ─── Config ────────────────────────────────────────────────────────────────
 
 impl Renderable for ConfigListDto {
-    fn render_text(&self) {
-        println!("IronClaw Reborn config ({})", self.config_file.display());
-        println!();
+    fn render_text_to(&self, w: &mut impl Write) -> std::io::Result<()> {
+        writeln!(w, "IronClaw Reborn config ({})", self.config_file.display())?;
+        writeln!(w)?;
         for entry in &self.entries {
             match &entry.value {
-                Some(value) => println!("{:<44} {value}", entry.key),
-                None => println!("{:<44} (not set)", entry.key),
+                Some(value) => writeln!(w, "{:<44} {value}", entry.key)?,
+                None => writeln!(w, "{:<44} (not set)", entry.key)?,
             }
         }
+        Ok(())
     }
 }
 
 impl Renderable for ConfigGetDto {
-    fn render_text(&self) {
+    fn render_text_to(&self, w: &mut impl Write) -> std::io::Result<()> {
         match &self.value {
-            Some(value) => println!("{value}"),
-            None => println!("(not set)"),
+            Some(value) => writeln!(w, "{value}"),
+            None => writeln!(w, "(not set)"),
         }
     }
 }
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
-fn kv(key: &str, value: &str) {
-    println!("{:<20} {value}", format!("{key}:"));
+fn kv(w: &mut impl Write, key: &str, value: &str) -> std::io::Result<()> {
+    writeln!(w, "{:<20} {value}", format!("{key}:"))
 }
 
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
 
+    use super::Renderable;
     use crate::dto::{
         CheckCategory, CheckOutcome, ComponentStatus, ConfigEntry, ConfigGetDto, ConfigListDto,
         ConfigValue, DoctorCheck, DoctorDto, DoctorSummary, DriversSnapshot, FilePresence,
         StatusDto,
     };
+
+    fn render_to_string(dto: &impl Renderable) -> String {
+        let mut buf = Vec::new();
+        dto.render_text_to(&mut buf).expect("render");
+        String::from_utf8(buf).expect("utf8")
+    }
 
     fn sample_status() -> StatusDto {
         StatusDto {
