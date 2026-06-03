@@ -5279,10 +5279,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ironclaw_trusted_ingress"
-version = "0.1.0"
-
-[[package]]
 name = "ironclaw_tui"
 version = "0.1.0"
 dependencies = [

@@ -176,11 +176,33 @@ fn trusted_trigger_submit_request_minting_stays_worker_owned() {
 }
 
 #[test]
-fn retired_host_trusted_ingress_token_has_no_production_dependents() {
+fn retired_host_trusted_ingress_token_crate_stays_removed() {
+    let root = workspace_root();
+    let retired_crate_name = ["ironclaw", "trusted", "ingress"].join("_");
+    assert!(
+        !root
+            .join("crates")
+            .join(&retired_crate_name)
+            .join("Cargo.toml")
+            .exists(),
+        "a separate trusted ingress crate must stay absent; trusted trigger \
+         submission is sealed by ironclaw_triggers and privately converted inside \
+         ironclaw_conversations"
+    );
+
     let metadata = cargo_metadata();
     let packages = metadata["packages"]
         .as_array()
         .expect("cargo metadata must include packages");
+    let package_names = packages
+        .iter()
+        .filter_map(|package| package["name"].as_str())
+        .collect::<BTreeSet<_>>();
+    assert!(
+        !package_names.contains(retired_crate_name.as_str()),
+        "a separate trusted ingress crate must not be introduced as a workspace crate"
+    );
+
     let dependencies = packages
         .iter()
         .filter_map(package_dependencies)
@@ -189,15 +211,16 @@ fn retired_host_trusted_ingress_token_has_no_production_dependents() {
         .iter()
         .filter_map(|(crate_name, deps)| {
             deps.iter()
-                .any(|dependency| dependency == "ironclaw_trusted_ingress")
+                .any(|dependency| dependency == retired_crate_name.as_str())
                 .then_some(crate_name.as_str())
         })
         .collect::<Vec<_>>();
 
     assert!(
         violations.is_empty(),
-        "The retired host trusted ingress token crate must not regain production dependents; \
-         trusted trigger submission is now owned inside ironclaw_conversations. Unexpected dependents:\n{}",
+        "a separate trusted ingress crate must not be introduced as a production dependency; \
+         trusted trigger submission is now sealed by ironclaw_triggers and privately \
+         converted inside ironclaw_conversations. Unexpected dependents:\n{}",
         violations.join("\n")
     );
 }
@@ -224,11 +247,6 @@ fn untrusted_ingress_paths_cannot_submit_host_trusted_inbound() {
         ForbiddenUse {
             pattern: "TrustedTriggerFireSubmitter",
             reason: "untrusted ingress paths must not implement host-trusted trigger submission",
-            exempt: None,
-        },
-        ForbiddenUse {
-            pattern: "ironclaw_trusted_ingress",
-            reason: "untrusted ingress paths must not depend on retired host-trusted trigger authority",
             exempt: None,
         },
     ];

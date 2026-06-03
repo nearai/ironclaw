@@ -387,6 +387,48 @@ mod tests {
         }
     }
 
+    struct PanicBindingService;
+
+    #[async_trait]
+    impl ConversationBindingService for PanicBindingService {
+        async fn resolve_or_create_binding(
+            &self,
+            _request: ResolveConversationRequest,
+        ) -> Result<ConversationBindingResolution, InboundTurnError> {
+            panic!("foreign-tenant materialization must reject before binding resolution")
+        }
+
+        async fn resolve_or_create_binding_with_trusted_scope(
+            &self,
+            _request: ResolveConversationRequest,
+            _trusted_agent_id: Option<AgentId>,
+            _trusted_project_id: Option<ProjectId>,
+        ) -> Result<ConversationBindingResolution, InboundTurnError> {
+            panic!("foreign-tenant materialization must reject before trusted binding resolution")
+        }
+
+        async fn lookup_binding(
+            &self,
+            _request: ResolveConversationRequest,
+        ) -> Result<ConversationBindingResolution, InboundTurnError> {
+            panic!("foreign-tenant materialization must reject before binding lookup")
+        }
+
+        async fn link_conversation_to_thread(
+            &self,
+            _request: ironclaw_conversations::LinkConversationRequest,
+        ) -> Result<ironclaw_conversations::LinkedConversationBinding, InboundTurnError> {
+            panic!("foreign-tenant materialization must reject before conversation linking")
+        }
+
+        async fn validate_reply_target(
+            &self,
+            _request: ironclaw_conversations::ValidateReplyTargetRequest,
+        ) -> Result<ironclaw_conversations::ReplyTargetBinding, InboundTurnError> {
+            panic!("foreign-tenant materialization must reject before reply target validation")
+        }
+    }
+
     struct TestTriggerRecordInput {
         trigger_id: TriggerId,
         tenant_id: TenantId,
@@ -1275,5 +1317,50 @@ mod tests {
         assert!(
             matches!(error, TriggerError::Backend { reason } if reason == "trusted trigger submit retryable failure")
         );
+    }
+
+    #[tokio::test]
+    async fn materializer_rejects_foreign_tenant_fire_before_binding_or_prompt_write() {
+        let poller_tenant = TenantId::new("trigger-poller-tenant").expect("tenant id");
+        let foreign_tenant = TenantId::new("trigger-foreign-tenant").expect("tenant id");
+        let creator_user_id = UserId::new("trigger-foreign-user").expect("user id");
+        let agent_id = AgentId::new("trigger-foreign-agent").expect("agent id");
+        let thread_service = Arc::new(InMemorySessionThreadService::default());
+        let materializer = ConversationContentRefMaterializer::new(
+            PanicBindingService,
+            thread_service.clone(),
+            agent_id.clone(),
+            tenant_authorizer(&poller_tenant),
+        );
+
+        let error = materializer
+            .materialize_prompt(TriggerFire {
+                identity: TriggerFireIdentity::new(foreign_tenant, TriggerId::new(), Utc::now()),
+                creator_user_id,
+                agent_id: Some(agent_id.clone()),
+                project_id: None,
+                prompt: "summarize unread mail".to_string(),
+            })
+            .await
+            .expect_err("foreign tenant fire is rejected before materialization side effects");
+
+        assert!(
+            matches!(error, TriggerError::InvalidMaterialization { reason } if reason.contains("outside this trusted poller scope"))
+        );
+        let threads = thread_service
+            .list_threads_for_scope(ListThreadsForScopeRequest {
+                scope: ThreadScope {
+                    tenant_id: poller_tenant,
+                    agent_id,
+                    project_id: None,
+                    owner_user_id: Some(UserId::new("trigger-foreign-user").expect("user id")),
+                    mission_id: None,
+                },
+                limit: Some(10),
+                cursor: None,
+            })
+            .await
+            .expect("threads load");
+        assert!(threads.threads.is_empty());
     }
 }

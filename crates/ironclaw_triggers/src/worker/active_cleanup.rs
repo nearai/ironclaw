@@ -48,9 +48,7 @@ impl TriggerPollerWorker {
                         active_run_ref: None,
                     },
                 });
-                if first_unadvanced_cursor.is_none() {
-                    next_cursor = Some(record_cursor);
-                }
+                first_unadvanced_cursor.get_or_insert(record_cursor);
                 continue;
             };
             let result_index = lookup_requests.len();
