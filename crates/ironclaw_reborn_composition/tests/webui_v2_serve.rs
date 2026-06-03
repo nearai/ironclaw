@@ -1307,6 +1307,36 @@ async fn static_chat_hook_listens_for_oauth_callback_completion() {
 }
 
 #[tokio::test]
+async fn static_chat_events_clear_gate_when_run_resumes() {
+    let (app, _) = build_app();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/v2/js/pages/chat/lib/useChatEvents.js")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_body_string(response).await;
+
+    assert!(
+        body.contains("const PROMPT_RUN_STATUSES = new Set"),
+        "chat event handler must distinguish active prompts from resumed runs"
+    );
+    assert!(
+        body.contains("clearPendingGateForRun(setPendingGate, runId)"),
+        "non-blocked run_status updates must clear stale gates for the resumed run"
+    );
+    assert!(
+        body.contains("clearPendingGateForRun(setPendingGate, progress.turn_run_id)"),
+        "typed running/progress events must clear stale gates for the resumed run"
+    );
+}
+
+#[tokio::test]
 async fn static_css_asset_returns_text_css_content_type() {
     let (app, _) = build_app();
     let response = app

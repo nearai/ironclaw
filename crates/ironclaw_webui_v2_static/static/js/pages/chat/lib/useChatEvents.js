@@ -75,6 +75,7 @@ export function useChatEvents({
                 ? current
                 : { runId: progress.turn_run_id, threadId, status: "running" },
             );
+            clearPendingGateForRun(setPendingGate, progress.turn_run_id);
           }
           setIsProcessing(true);
           return;
@@ -187,6 +188,18 @@ const TERMINAL_RUN_STATUSES = new Set([
 ]);
 
 const SUCCESS_RUN_STATUSES = new Set(["completed", "succeeded"]);
+const PROMPT_RUN_STATUSES = new Set([
+  "blocked_auth",
+  "blocked_approval",
+  "blocked_resource",
+]);
+
+function clearPendingGateForRun(setPendingGate, runId) {
+  if (!runId) return;
+  setPendingGate((current) =>
+    current?.runId === runId ? null : current,
+  );
+}
 
 function applyProjectionItems({
   items,
@@ -280,6 +293,9 @@ function applyProjectionItems({
           });
         }
       } else {
+        if (!PROMPT_RUN_STATUSES.has(status)) {
+          clearPendingGateForRun(setPendingGate, runId);
+        }
         setIsProcessing(true);
       }
     }
@@ -289,8 +305,8 @@ function applyProjectionItems({
       // assistant-visible reply text accumulated through projection.
       // Dedup by item id so repeated snapshots don't duplicate the
       // same bubble. Text can arrive in the same projection snapshot
-      // as a still-blocked gate, so terminal run_status is the only
-      // projection item that clears pendingGate.
+      // as a still-blocked gate, so run_status remains the source of
+      // truth for clearing pendingGate.
       const messageId = `text-${item.text.id}`;
       setMessages((prev) => {
         const existing = prev.findIndex((m) => m.id === messageId);
