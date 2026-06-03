@@ -18,8 +18,6 @@ use ironclaw_host_api::{HostApiError, MountView, ResourceScope, ScopedPath, Virt
 
 mod install_bundle;
 #[cfg(test)]
-mod install_name_tests;
-#[cfg(test)]
 mod tests;
 
 pub use install_bundle::{
