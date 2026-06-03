@@ -8,6 +8,12 @@ pub(crate) struct ModelCapabilityViewIntersection {
     pub(crate) dropped_capabilities: Vec<CapabilityId>,
 }
 
+/// Keep the intersection logic beside subagent prompt composition.
+///
+/// `LoopModelCapabilityView` is defined in `ironclaw_turns::run_profile` as the
+/// shared prompt contract, but the narrowing policy and dropped-capability
+/// logging live in `ironclaw_loop_support` because this crate owns the prompt
+/// materialization boundary that consumes the result.
 pub(crate) fn intersect_model_capability_view(
     mut visible_capability_ids: BTreeSet<CapabilityId>,
     existing_view: Option<LoopModelCapabilityView>,

@@ -43,17 +43,28 @@ pub trait SubagentPromptMaterialSource: Send + Sync {
 /// constant directly so callers stay aligned with the sanitized prompt budget.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SubagentPromptLimits {
-    pub max_raw_goal_bytes: usize,
     pub max_goal_bytes: usize,
+    max_raw_goal_bytes: usize,
 }
 
 impl Default for SubagentPromptLimits {
     fn default() -> Self {
         // Keep the raw DoS guard internal; callers should use `Default`.
         Self {
-            max_raw_goal_bytes: DEFAULT_SUBAGENT_GOAL_RAW_MAX_BYTES,
             max_goal_bytes: DEFAULT_SUBAGENT_GOAL_MAX_BYTES,
+            max_raw_goal_bytes: DEFAULT_SUBAGENT_GOAL_RAW_MAX_BYTES,
         }
+    }
+}
+
+impl SubagentPromptLimits {
+    pub fn new(max_goal_bytes: usize) -> Self {
+        Self::default().with_goal_bytes(max_goal_bytes)
+    }
+
+    pub fn with_goal_bytes(mut self, max_goal_bytes: usize) -> Self {
+        self.max_goal_bytes = max_goal_bytes;
+        self
     }
 }
 
@@ -275,10 +286,7 @@ mod tests {
                 task: "abcd".to_string(),
                 handoff: None,
             },
-            SubagentPromptLimits {
-                max_raw_goal_bytes: DEFAULT_SUBAGENT_GOAL_RAW_MAX_BYTES,
-                max_goal_bytes: 3,
-            },
+            SubagentPromptLimits::new(3),
         )
         .expect_err("oversized goal should fail loud");
 
@@ -294,8 +302,8 @@ mod tests {
                 handoff: None,
             },
             SubagentPromptLimits {
-                max_raw_goal_bytes: "Subagent task:\na\n\n\n\n".len(),
                 max_goal_bytes: DEFAULT_SUBAGENT_GOAL_MAX_BYTES,
+                max_raw_goal_bytes: "Subagent task:\na\n\n\n\n".len(),
             },
         )
         .expect_err("oversized raw goal should fail before sanitization");
@@ -311,10 +319,7 @@ mod tests {
                 task: "answer\n\n\nbriefly".to_string(),
                 handoff: None,
             },
-            SubagentPromptLimits {
-                max_raw_goal_bytes: DEFAULT_SUBAGENT_GOAL_RAW_MAX_BYTES,
-                max_goal_bytes: "Subagent task: answer briefly".len() - 1,
-            },
+            SubagentPromptLimits::new("Subagent task: answer briefly".len() - 1),
         )
         .expect_err("sanitized goal should fail when it exceeds the budget");
 
@@ -330,10 +335,7 @@ mod tests {
                 task: "answer\n\n\nbriefly".to_string(),
                 handoff: None,
             },
-            SubagentPromptLimits {
-                max_raw_goal_bytes: DEFAULT_SUBAGENT_GOAL_RAW_MAX_BYTES,
-                max_goal_bytes: "Subagent task: answer briefly".len(),
-            },
+            SubagentPromptLimits::new("Subagent task: answer briefly".len()),
         )
         .expect("collapsed goal should fit");
 

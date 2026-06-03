@@ -302,7 +302,7 @@ where
 }
 
 fn local_development_noop_safety_context() -> InstructionSafetyContext {
-    tracing::debug!(
+    tracing::warn!(
         "using local-development no-op instruction safety context; configure a real instruction safety scanner before product-live use"
     );
     InstructionSafetyContext::local_development_noop()
