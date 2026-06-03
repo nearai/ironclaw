@@ -48,6 +48,7 @@ mod product_live_adapters;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 mod production_runtime_policy;
 mod profile;
+mod profile_approval_authorization;
 mod projection;
 #[cfg(feature = "root-llm-provider")]
 mod provider_admin;

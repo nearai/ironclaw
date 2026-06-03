@@ -359,7 +359,8 @@ fn local_dev_minimal_policy() -> ironclaw_host_api::runtime_policy::EffectiveRun
 }
 
 /// Minimal approval policy must complete effectful capabilities without any approval gate.
-/// Verifies `ApprovalPolicy::Minimal => GrantAuthorizer` path in `local_dev_authorizer`.
+/// Verifies `ApprovalPolicy::Minimal => GrantAuthorizer` path in the profile
+/// approval authorizer.
 #[tokio::test]
 async fn local_dev_minimal_policy_shell_invocation_completes_without_approval_gate() {
     let dir = tempfile::tempdir().expect("tempdir"); // safety: test-only helper in #[cfg(test)] module.
@@ -551,8 +552,8 @@ fn echo_spawn_allowed_effects() -> Vec<EffectKind> {
 }
 
 /// A capability invoked without a matching grant must be denied, not upgraded to
-/// RequireApproval. Verifies `other => other` pass-through in
-/// `require_approval_for_local_dev_policy`.
+/// RequireApproval. Verifies non-Allow pass-through in the profile approval
+/// authorizer.
 #[tokio::test]
 async fn local_dev_ungranted_capability_returns_denied_not_approval_gate() {
     let dir = tempfile::tempdir().expect("tempdir"); // safety: test-only helper in #[cfg(test)] module.
