@@ -541,6 +541,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn automation_facade_rejects_malformed_trigger_records() {
+        let facade = RebornWebuiAutomationFacade::new(Arc::new(OutputHostRuntime::new(json!({
+            "triggers": [{
+                "name": "Missing trigger id",
+                "schedule": {"kind": "cron", "expression": "0 9 * * *"},
+                "state": "active",
+                "last_status": "ok",
+                "is_active": true
+            }]
+        }))));
+
+        let error = facade
+            .list_automations(caller(), None)
+            .await
+            .expect_err("malformed record should fail closed");
+
+        assert_eq!(error.code, RebornServicesErrorCode::Internal);
+        assert_eq!(error.status_code, 500);
+        assert!(!error.retryable);
+    }
+
+    #[tokio::test]
     async fn automation_facade_redacts_runtime_failure_messages() {
         let runtime = Arc::new(FailingHostRuntime::new(RuntimeFailureKind::Internal));
         let facade = RebornWebuiAutomationFacade::new(runtime);

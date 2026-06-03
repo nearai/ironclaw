@@ -2020,6 +2020,82 @@ async fn stream_events_ws_emits_projection_frames_and_redacted_error() {
     );
 }
 
+#[tokio::test]
+async fn stream_events_ws_resumes_from_last_event_id_before_query_cursor() {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+    let services = Arc::new(StubServices::default());
+    services.enqueue_stream_events(Err(RebornServicesError {
+        code: RebornServicesErrorCode::Unavailable,
+        kind: RebornServicesErrorKind::ServiceUnavailable,
+        status_code: 503,
+        retryable: true,
+        field: None,
+        validation_code: None,
+    }));
+
+    let query_cursor = make_projection_envelope("cursor:query", "query");
+    let header_cursor = make_projection_envelope("cursor:header", "header");
+    let query_cursor_json =
+        serde_json::to_string(query_cursor.projection_cursor()).expect("query cursor");
+    let header_cursor_json =
+        serde_json::to_string(header_cursor.projection_cursor()).expect("header cursor");
+
+    let router = router_with(services.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("local_addr");
+    let serve_handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, router).await;
+    });
+
+    let url = format!(
+        "ws://{addr}/api/webchat/v2/threads/thread-x/ws?after_cursor={}",
+        url_encode(&query_cursor_json)
+    );
+    let mut request = url.into_client_request().expect("ws request");
+    request.headers_mut().insert(
+        "Last-Event-ID",
+        header_cursor_json.parse().expect("header cursor value"),
+    );
+
+    let (mut ws, response) = tokio::time::timeout(
+        Duration::from_secs(5),
+        tokio_tungstenite::connect_async(request),
+    )
+    .await
+    .expect("ws connect within 5s")
+    .expect("ws upgrade");
+    assert_eq!(response.status().as_u16(), 101);
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        if !services
+            .stream_events_calls
+            .lock()
+            .expect("lock")
+            .is_empty()
+        {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "WS handler did not call stream_events"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let _ = ws.close(None).await;
+    serve_handle.abort();
+
+    let calls = services.stream_events_calls.lock().expect("lock").clone();
+    assert_eq!(
+        calls[0].after_cursor.as_ref(),
+        Some(header_cursor.projection_cursor()),
+        "Last-Event-ID must win over ?after_cursor= for WS reconnects, matching SSE"
+    );
+}
+
 // Regression for the WS-idle-close review (Medium): the WS drain
 // loop must observe socket close immediately. Without this, an
 // idle peer (closed tab, dropped network) leaves the loop polling
