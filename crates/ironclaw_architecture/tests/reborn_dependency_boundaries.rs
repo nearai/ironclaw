@@ -2678,6 +2678,9 @@ fn collect_forbidden_uses(
             .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
         for (line_number, line) in contents.lines().enumerate() {
             for rule in forbidden {
+                if rule.pattern == "ironclaw::" && is_reborn_tracing_target_line(line) {
+                    continue;
+                }
                 if line.contains(rule.pattern) {
                     let relative = path.strip_prefix(root).unwrap_or(&path);
                     violations.push(format!(
@@ -2718,16 +2721,27 @@ fn collect_forbidden_reborn_auth_file_uses(
         path.display()
     );
     let contents = std::fs::read_to_string(path).expect(&message);
-    for rule in forbidden {
-        if contents.contains(rule.pattern) {
+    for (line_number, line) in contents.lines().enumerate() {
+        for rule in forbidden {
+            if rule.pattern == "ironclaw::" && is_reborn_tracing_target_line(line) {
+                continue;
+            }
+            if !line.contains(rule.pattern) {
+                continue;
+            }
             violations.push(format!(
-                "{} contains forbidden product-auth implementation pattern `{}`: {}",
+                "{}:{} contains forbidden product-auth implementation pattern `{}`: {}",
                 path.strip_prefix(root).unwrap_or(path).display(),
+                line_number + 1,
                 rule.pattern,
                 rule.reason
             ));
         }
     }
+}
+
+fn is_reborn_tracing_target_line(line: &str) -> bool {
+    line.contains("target: \"ironclaw::reborn::") || line.contains("target = \"ironclaw::reborn::")
 }
 
 #[test]
@@ -2764,6 +2778,76 @@ fn collect_forbidden_reborn_auth_file_uses_detects_violation() {
     assert!(
         violations[0].contains("provider transport must stay outside product auth composition"),
         "violation should report the forbidden-use reason: {:?}",
+        violations
+    );
+}
+
+#[test]
+fn collect_forbidden_reborn_auth_file_uses_allows_reborn_tracing_targets() {
+    let root = std::env::temp_dir().join(format!(
+        "ironclaw-reborn-auth-boundary-tracing-test-{}",
+        std::process::id()
+    ));
+    let src = root.join("crates/ironclaw_reborn_composition/src");
+    std::fs::create_dir_all(&src).expect("test source directory must be created");
+    let auth_rs = src.join("auth.rs");
+    std::fs::write(
+        &auth_rs,
+        "fn allowed() { tracing::warn!(target: \"ironclaw::reborn::product_auth::oauth\"); }\n",
+    )
+    .expect("test auth.rs must be written");
+
+    let mut violations = Vec::new();
+    collect_forbidden_reborn_auth_file_uses(
+        &auth_rs,
+        &root,
+        &[ForbiddenUse {
+            pattern: "ironclaw::",
+            reason: "Reborn product auth must not depend on the v1 root crate",
+        }],
+        &mut violations,
+    );
+
+    std::fs::remove_dir_all(&root).expect("test source directory must be removed");
+
+    assert!(
+        violations.is_empty(),
+        "Reborn tracing targets are log namespaces, not v1 root crate references: {:?}",
+        violations
+    );
+}
+
+#[test]
+fn collect_forbidden_uses_allows_reborn_tracing_targets() {
+    let root = std::env::temp_dir().join(format!(
+        "ironclaw-reborn-auth-boundary-dir-tracing-test-{}",
+        std::process::id()
+    ));
+    let src = root.join("crates/ironclaw_reborn_composition/src/product_auth_serve");
+    std::fs::create_dir_all(&src).expect("test source directory must be created");
+    let mod_rs = src.join("mod.rs");
+    std::fs::write(
+        &mod_rs,
+        "fn allowed() { tracing::warn!(target: \"ironclaw::reborn::product_auth::oauth\"); }\n",
+    )
+    .expect("test mod.rs must be written");
+
+    let mut violations = Vec::new();
+    collect_forbidden_uses(
+        &src,
+        &root,
+        &[ForbiddenUse {
+            pattern: "ironclaw::",
+            reason: "Reborn product auth must not depend on the v1 root crate",
+        }],
+        &mut violations,
+    );
+
+    std::fs::remove_dir_all(&root).expect("test source directory must be removed");
+
+    assert!(
+        violations.is_empty(),
+        "Directory scanner should treat Reborn tracing targets as log namespaces: {:?}",
         violations
     );
 }
