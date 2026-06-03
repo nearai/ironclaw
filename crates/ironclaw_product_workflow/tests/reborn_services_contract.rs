@@ -12,21 +12,22 @@ use ironclaw_product_adapters::{
 };
 use ironclaw_product_workflow::{
     ApprovalInteractionDecision, ApprovalInteractionService, AuthInteractionDecision,
-    AuthInteractionService, ExtensionCredentialSetupService, ExtensionCredentialStatusRequest,
-    ExtensionCredentialSubmitRequest, LifecycleExtensionCredentialRequirement,
-    LifecycleExtensionCredentialSetup, LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind,
-    LifecycleExtensionSource, LifecycleExtensionSummary, LifecycleInstalledExtensionSummary,
-    LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase, LifecycleProductAction,
-    LifecycleProductContext, LifecycleProductFacade, LifecycleProductPayload,
-    LifecycleProductResponse, LifecycleReadinessBlocker, ListPendingApprovalsRequest,
-    ListPendingApprovalsResponse, ListPendingAuthInteractionsRequest,
-    ListPendingAuthInteractionsResponse, ProductWorkflowError, RebornExtensionOnboardingState,
-    RebornGetRunStateRequest, RebornResolveGateResponse, RebornServices, RebornServicesApi,
-    RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
-    RebornStreamEventsRequest, RebornSubmitTurnResponse, RebornTimelineRequest,
-    ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
-    ResolveAuthInteractionRequest, ResolveAuthInteractionResponse, WebUiAuthenticatedCaller,
-    WebUiCancelRunRequest, WebUiCreateThreadRequest, WebUiInboundValidationCode,
+    AuthInteractionService, AutomationProductFacade, ExtensionCredentialSetupService,
+    ExtensionCredentialStatusRequest, ExtensionCredentialSubmitRequest,
+    LifecycleExtensionCredentialRequirement, LifecycleExtensionCredentialSetup,
+    LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind, LifecycleExtensionSource,
+    LifecycleExtensionSummary, LifecycleInstalledExtensionSummary, LifecyclePackageKind,
+    LifecyclePackageRef, LifecyclePhase, LifecycleProductAction, LifecycleProductContext,
+    LifecycleProductFacade, LifecycleProductPayload, LifecycleProductResponse,
+    LifecycleReadinessBlocker, ListPendingApprovalsRequest, ListPendingApprovalsResponse,
+    ListPendingAuthInteractionsRequest, ListPendingAuthInteractionsResponse, ProductWorkflowError,
+    RebornAutomationSource, RebornExtensionOnboardingState, RebornGetRunStateRequest,
+    RebornResolveGateResponse, RebornServices, RebornServicesApi, RebornServicesError,
+    RebornServicesErrorCode, RebornServicesErrorKind, RebornStreamEventsRequest,
+    RebornSubmitTurnResponse, RebornTimelineRequest, ResolveApprovalInteractionRequest,
+    ResolveApprovalInteractionResponse, ResolveAuthInteractionRequest,
+    ResolveAuthInteractionResponse, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
+    WebUiCreateThreadRequest, WebUiInboundValidationCode, WebUiListAutomationsRequest,
     WebUiListThreadsRequest, WebUiResolveGateRequest, WebUiSendMessageRequest,
     WebUiSetupExtensionRequest, approval_gate_ref,
 };
@@ -49,7 +50,7 @@ use ironclaw_turns::{
     SubmitTurnResponse, TurnActor, TurnCapacityResource, TurnCoordinator, TurnError, TurnId,
     TurnRunId, TurnRunState, TurnScope, TurnStatus,
 };
-use serde_json::json;
+use serde_json::{Value, json};
 
 fn caller() -> WebUiAuthenticatedCaller {
     caller_for_user("user-alpha")
@@ -620,6 +621,59 @@ impl LifecycleProductFacade for ListingLifecycleFacade {
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
         panic!("list_extensions should execute the list action, not project one package")
     }
+}
+
+#[derive(Debug, Clone)]
+struct ListAutomationCall {
+    caller: WebUiAuthenticatedCaller,
+    limit: Option<usize>,
+}
+
+#[derive(Default)]
+struct RecordingAutomationFacade {
+    list_calls: Mutex<Vec<ListAutomationCall>>,
+}
+
+impl RecordingAutomationFacade {
+    fn list_calls(&self) -> Vec<ListAutomationCall> {
+        self.list_calls.lock().expect("lock").clone()
+    }
+}
+
+#[async_trait]
+impl AutomationProductFacade for RecordingAutomationFacade {
+    async fn list_automations(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        limit: Option<usize>,
+    ) -> Result<Value, RebornServicesError> {
+        self.list_calls
+            .lock()
+            .expect("lock")
+            .push(ListAutomationCall { caller, limit });
+        Ok(json!({
+            "triggers": [
+                raw_automation("trigger-listed", "Daily status", "0 9 * * *")
+            ]
+        }))
+    }
+}
+
+fn raw_automation(trigger_id: &str, name: impl Into<String>, cron: impl Into<String>) -> Value {
+    json!({
+        "trigger_id": trigger_id,
+        "name": name.into(),
+        "schedule": {
+            "kind": "cron",
+            "expression": cron.into()
+        },
+        "state": "active",
+        "next_run_at": "2026-06-03T09:00:00Z",
+        "last_run_at": null,
+        "last_status": null,
+        "is_active": true,
+        "created_at": "2026-06-02T18:00:00Z"
+    })
 }
 
 #[derive(Default)]
@@ -3485,6 +3539,102 @@ async fn list_extensions_projects_onboarding_payload_through_reborn_services() {
         onboarding.credential_next_step.as_deref(),
         Some("After saving the token, activate GitHub to publish its tools.")
     );
+}
+
+#[tokio::test]
+async fn list_automation_dispatches_through_product_facade() {
+    let automation_facade = Arc::new(RecordingAutomationFacade::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_automation_product_facade(automation_facade.clone());
+
+    let listed = services
+        .list_automations(caller(), WebUiListAutomationsRequest { limit: Some(10) })
+        .await
+        .expect("list automations");
+    assert_eq!(listed.automations.len(), 1);
+    assert_eq!(listed.automations[0].automation_id, "trigger-listed");
+    assert_eq!(
+        listed.automations[0].source,
+        RebornAutomationSource::Schedule {
+            cron: "0 9 * * *".to_string()
+        }
+    );
+
+    let list_calls = automation_facade.list_calls();
+    assert_eq!(list_calls.len(), 1);
+    assert_eq!(list_calls[0].caller.user_id.as_str(), "user-alpha");
+    assert_eq!(list_calls[0].limit, Some(10));
+}
+
+#[tokio::test]
+async fn list_automations_clamps_oversize_limit_before_product_facade() {
+    let automation_facade = Arc::new(RecordingAutomationFacade::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_automation_product_facade(automation_facade.clone());
+
+    services
+        .list_automations(
+            caller(),
+            WebUiListAutomationsRequest {
+                limit: Some(u32::MAX),
+            },
+        )
+        .await
+        .expect("list automations");
+
+    let list_calls = automation_facade.list_calls();
+    assert_eq!(list_calls.len(), 1);
+    assert_eq!(
+        list_calls[0].limit,
+        Some(100),
+        "automation list limit must be clamped before the product facade"
+    );
+}
+
+#[tokio::test]
+async fn list_automations_clamps_zero_limit_before_product_facade() {
+    let automation_facade = Arc::new(RecordingAutomationFacade::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_automation_product_facade(automation_facade.clone());
+
+    services
+        .list_automations(caller(), WebUiListAutomationsRequest { limit: Some(0) })
+        .await
+        .expect("list automations");
+
+    let list_calls = automation_facade.list_calls();
+    assert_eq!(list_calls.len(), 1);
+    assert_eq!(
+        list_calls[0].limit,
+        Some(1),
+        "automation list limit must be clamped to at least one row"
+    );
+}
+
+#[tokio::test]
+async fn automation_facade_unwired_fails_closed() {
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    );
+
+    let error = services
+        .list_automations(caller(), WebUiListAutomationsRequest::default())
+        .await
+        .expect_err("unwired automation facade");
+
+    assert_eq!(error.code, RebornServicesErrorCode::Unavailable);
+    assert_eq!(error.status_code, 503);
+    assert!(error.retryable);
 }
 
 #[tokio::test]

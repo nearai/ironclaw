@@ -141,6 +141,20 @@ fn resolve_gate_maps_to_canonical_gate_command_without_raw_secret() {
 }
 
 #[test]
+fn list_automations_maps_authenticated_caller_and_limit() {
+    let request = ironclaw_product_workflow::WebUiListAutomationsRequest { limit: Some(25) };
+
+    let command = request.into_command(caller());
+
+    let WebUiInboundCommand::ListAutomations { caller, limit } = command else {
+        panic!("expected list-automations command");
+    };
+    assert_eq!(caller.tenant_id.as_str(), "tenant-alpha");
+    assert_eq!(caller.user_id.as_str(), "user-alpha");
+    assert_eq!(limit, Some(25));
+}
+
+#[test]
 fn missing_content_returns_stable_validation_error() {
     let request: WebUiSendMessageRequest = serde_json::from_value(json!({
         "client_action_id": "send-1",

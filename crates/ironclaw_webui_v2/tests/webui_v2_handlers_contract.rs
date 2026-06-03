@@ -27,15 +27,16 @@ use ironclaw_product_adapters::{
     ProgressKind, ProgressUpdateView, ProjectionCursor,
 };
 use ironclaw_product_workflow::{
-    LifecyclePackageRef, LifecyclePhase, RebornCancelRunResponse, RebornCreateThreadResponse,
-    RebornExtensionActionResponse, RebornExtensionListResponse, RebornExtensionRegistryResponse,
-    RebornGetRunStateRequest, RebornGetRunStateResponse, RebornListThreadsResponse,
+    LifecyclePackageRef, LifecyclePhase, RebornAutomationInfo, RebornAutomationSource,
+    RebornCancelRunResponse, RebornCreateThreadResponse, RebornExtensionActionResponse,
+    RebornExtensionListResponse, RebornExtensionRegistryResponse, RebornGetRunStateRequest,
+    RebornGetRunStateResponse, RebornListAutomationsResponse, RebornListThreadsResponse,
     RebornResolveGateResponse, RebornResumeGateResponse, RebornServicesApi, RebornServicesError,
     RebornServicesErrorCode, RebornServicesErrorKind, RebornSetupExtensionResponse,
     RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
     RebornTimelineRequest, RebornTimelineResponse, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
-    WebUiCreateThreadRequest, WebUiListThreadsRequest, WebUiResolveGateRequest,
-    WebUiSendMessageRequest, WebUiSetupExtensionRequest,
+    WebUiCreateThreadRequest, WebUiListAutomationsRequest, WebUiListThreadsRequest,
+    WebUiResolveGateRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
 };
 use ironclaw_threads::SessionThreadRecord;
 use ironclaw_turns::{
@@ -71,6 +72,7 @@ struct StubServices {
     stream_events_calls: Mutex<Vec<RebornStreamEventsRequest>>,
     cancel_run_calls: Mutex<Vec<WebUiCancelRunRequest>>,
     resolve_gate_calls: Mutex<Vec<WebUiResolveGateRequest>>,
+    list_automations_calls: Mutex<Vec<WebUiListAutomationsRequest>>,
     list_extensions_calls: Mutex<usize>,
     list_extension_registry_calls: Mutex<usize>,
     install_extension_calls: Mutex<Vec<String>>,
@@ -285,6 +287,24 @@ impl RebornServicesApi for StubServices {
         })
     }
 
+    async fn list_automations(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        request: WebUiListAutomationsRequest,
+    ) -> Result<RebornListAutomationsResponse, RebornServicesError> {
+        self.list_automations_calls
+            .lock()
+            .expect("lock")
+            .push(request);
+        Ok(RebornListAutomationsResponse {
+            automations: vec![automation_info(
+                "automation-listed",
+                "Daily status",
+                "0 9 * * *",
+            )],
+        })
+    }
+
     async fn list_extensions(
         &self,
         _caller: WebUiAuthenticatedCaller,
@@ -369,6 +389,22 @@ fn extension_action_response(message: &str) -> RebornExtensionActionResponse {
         instructions: None,
         onboarding_state: None,
         onboarding: None,
+    }
+}
+
+fn automation_info(automation_id: &str, name: &str, cron: &str) -> RebornAutomationInfo {
+    RebornAutomationInfo {
+        automation_id: automation_id.to_string(),
+        name: name.to_string(),
+        source: RebornAutomationSource::Schedule {
+            cron: cron.to_string(),
+        },
+        state: "active".to_string(),
+        next_run_at: None,
+        last_run_at: None,
+        last_status: None,
+        is_active: true,
+        created_at: None,
     }
 }
 
@@ -675,6 +711,35 @@ async fn stream_events_last_event_id_header_takes_precedence_over_query() {
         Some(&header_cursor),
         "Last-Event-ID header must win over ?after_cursor= query param"
     );
+}
+
+#[tokio::test]
+async fn list_automations_forwards_query_limit_to_facade() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/automations?limit=5")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(body["automations"][0]["automation_id"], "automation-listed");
+
+    let calls = services
+        .list_automations_calls
+        .lock()
+        .expect("lock")
+        .clone();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].limit, Some(5));
 }
 
 #[tokio::test]

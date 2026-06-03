@@ -193,6 +193,49 @@ pub struct RebornListThreadsResponse {
     pub next_cursor: Option<String>,
 }
 
+/// Bounded browser projection for caller-scoped automations.
+///
+/// The beta API currently returns one capped page without a cursor. Future
+/// pagination can extend this response with an optional cursor without changing
+/// the source-tagged automation rows.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornListAutomationsResponse {
+    pub automations: Vec<RebornAutomationInfo>,
+}
+
+/// Browser-safe automation row returned by the WebUI facade.
+///
+/// This deliberately exposes source, state, run timestamps, and sanitized
+/// status only; trigger repository internals remain behind the product facade.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornAutomationInfo {
+    pub automation_id: String,
+    pub name: String,
+    pub source: RebornAutomationSource,
+    pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_run_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_run_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_status: Option<serde_json::Value>,
+    #[serde(default)]
+    pub is_active: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<DateTime<Utc>>,
+}
+
+/// Source discriminator for automation rows.
+///
+/// V1 exposes only user-facing schedules. The wire tag remains
+/// source-discriminated so future sources can be added without overloading the
+/// schedule fields or advertising unsupported sources early.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum RebornAutomationSource {
+    Schedule { cron: String },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebornExtensionListResponse {
     pub extensions: Vec<RebornExtensionInfo>,

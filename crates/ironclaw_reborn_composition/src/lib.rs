@@ -23,6 +23,7 @@ use std::sync::Arc;
 mod auth;
 #[cfg(test)]
 mod auth_dcr_tests;
+mod automation;
 mod available_extensions;
 mod budget;
 mod budget_events;
@@ -102,6 +103,7 @@ pub use auth::{
     RebornOAuthCallbackOutcome, RebornOAuthCallbackRequest, RebornOAuthCallbackResponse,
     RebornProductAuthServicePorts, RebornProductAuthServices,
 };
+pub use automation::RebornWebuiAutomationFacade;
 pub use budget::build_default_budget_accountant;
 pub use budget_events::{BudgetEventObserver, TracingBudgetEventObserver};
 pub use error::RebornBuildError;
