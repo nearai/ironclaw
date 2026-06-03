@@ -1874,8 +1874,9 @@ mod tests {
         LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase, LifecycleProductPayload,
         LifecycleReadinessBlocker, RebornExtensionCredentialSetup, RebornServicesErrorCode,
         RebornServicesErrorKind, RebornStreamEventsRequest, RebornSubmitTurnResponse,
-        WebUiAuthenticatedCaller, WebUiCreateThreadRequest, WebUiResolveGateRequest,
-        WebUiSendMessageRequest, WebUiSetupExtensionRequest, approval_gate_ref,
+        WebUiAuthenticatedCaller, WebUiCreateThreadRequest, WebUiListAutomationsRequest,
+        WebUiResolveGateRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
+        approval_gate_ref,
     };
     use ironclaw_run_state::ApprovalRequestStore;
     use ironclaw_skills::SkillTrust;
@@ -3819,6 +3820,114 @@ mod tests {
             "local webui bundle must not fall back to the default unwired facade"
         );
 
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    #[cfg(feature = "webui-v2-beta")]
+    #[tokio::test]
+    async fn webui_route_rejects_list_automations_without_agent_binding() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use ironclaw_webui_v2::{WebUiV2State, webui_v2_router};
+        use tower::ServiceExt;
+
+        let root = tempfile::tempdir().expect("tempdir");
+        let gateway = Arc::new(RecordingGateway {
+            reply: "unused".to_string(),
+            requests: Arc::new(StdMutex::new(Vec::new())),
+        });
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev(
+                "runtime-webui-no-agent-owner",
+                root.path().join("local-dev"),
+            )
+            .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-webui-no-agent-tenant".to_string(),
+            agent_id: "runtime-webui-no-agent-agent".to_string(),
+            source_binding_id: "runtime-webui-no-agent-source".to_string(),
+            reply_target_binding_id: "runtime-webui-no-agent-reply".to_string(),
+        })
+        .with_poll_settings(PollSettings {
+            interval: Duration::from_millis(10),
+            max_total: Duration::from_secs(3),
+        })
+        .with_model_gateway_override(gateway);
+
+        let mut runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        runtime.services.host_runtime = None;
+        let bundle = build_webui_services(&runtime, None).expect("webui bundle");
+        let caller_without_agent = WebUiAuthenticatedCaller::new(
+            TenantId::new("runtime-webui-no-agent-tenant").unwrap(),
+            UserId::new("runtime-webui-no-agent-owner").unwrap(),
+            None,
+            None,
+        );
+        let router = webui_v2_router(WebUiV2State::new(bundle.api))
+            .layer(axum::Extension(caller_without_agent));
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/webchat/v2/automations")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("route response");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    #[tokio::test]
+    async fn build_webui_services_without_host_runtime_returns_503_on_list_automations() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let gateway = Arc::new(RecordingGateway {
+            reply: "unused".to_string(),
+            requests: Arc::new(StdMutex::new(Vec::new())),
+        });
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev(
+                "runtime-webui-no-host-owner",
+                root.path().join("local-dev"),
+            )
+            .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-webui-no-host-tenant".to_string(),
+            agent_id: "runtime-webui-no-host-agent".to_string(),
+            source_binding_id: "runtime-webui-no-host-source".to_string(),
+            reply_target_binding_id: "runtime-webui-no-host-reply".to_string(),
+        })
+        .with_poll_settings(PollSettings {
+            interval: Duration::from_millis(10),
+            max_total: Duration::from_secs(3),
+        })
+        .with_model_gateway_override(gateway);
+
+        let mut runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        runtime.services.host_runtime = None;
+        let bundle = build_webui_services(&runtime, None).expect("webui bundle");
+        let caller = WebUiAuthenticatedCaller::new(
+            TenantId::new("runtime-webui-no-host-tenant").unwrap(),
+            UserId::new("runtime-webui-no-host-owner").unwrap(),
+            Some(AgentId::new("runtime-webui-no-host-agent").unwrap()),
+            None,
+        );
+
+        let error = bundle
+            .api
+            .list_automations(caller, WebUiListAutomationsRequest::default())
+            .await
+            .expect_err("missing host runtime should leave automation facade unavailable");
+
+        assert_eq!(error.code, RebornServicesErrorCode::Unavailable);
+        assert_eq!(error.kind, RebornServicesErrorKind::ServiceUnavailable);
+        assert_eq!(error.status_code, 503);
+        assert!(error.retryable);
         runtime.shutdown().await.expect("runtime shutdown");
     }
 

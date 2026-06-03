@@ -277,7 +277,7 @@ fn trigger_execution_context(
         thread_id: None,
         extension_id,
         runtime: RuntimeKind::FirstParty,
-        trust: TrustClass::FirstParty,
+        trust: TrustClass::UserTrusted,
         grants,
         mounts: MountView::new(Vec::new()).map_err(|_| internal_invariant())?,
         resource_scope,
@@ -399,6 +399,7 @@ mod tests {
     use async_trait::async_trait;
     use ironclaw_host_api::{
         AgentId, ApprovalRequestId, ProcessId, ProjectId, SecretHandle, TenantId, UserId,
+        TrustClass,
     };
     use ironclaw_host_runtime::{
         HostRuntime, HostRuntimeError, RuntimeApprovalGate, RuntimeAuthGate, RuntimeBlockedReason,
@@ -457,6 +458,7 @@ mod tests {
             Some(caller.agent_id)
         );
         assert_eq!(request.context.resource_scope.project_id, caller.project_id);
+        assert_eq!(request.context.trust, TrustClass::UserTrusted);
         assert_eq!(request.input["limit"], 25);
     }
 
