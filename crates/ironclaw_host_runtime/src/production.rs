@@ -40,6 +40,7 @@ use ironclaw_run_state::{
     ApprovalRequestStore, RunStateApprovalStore, RunStateError, RunStateStore, RunStatus,
 };
 use ironclaw_trust::{HostTrustPolicy, TrustDecision, TrustError, TrustPolicy, TrustProvenance};
+use ironclaw_turns::run_profile::LoopSafeSummary;
 
 use crate::{
     BuiltinObligationHandler, BuiltinObligationServices, CancelRuntimeWorkOutcome,
@@ -1414,12 +1415,24 @@ fn sanitized_failure_message(error: &CapabilityInvocationError) -> Option<String
         | ProcessManagerMissing { .. }
         | ResumeNotBlocked { .. }
         | ResumeContextMismatch { .. } => Some(error.to_string()),
-        Dispatch { safe_summary, .. } => safe_summary.clone().or_else(|| Some(error.to_string())),
+        Dispatch { safe_summary, .. } => {
+            Some(dispatch_failure_message(safe_summary.as_deref(), error))
+        }
         InvocationFingerprint { .. } => Some("invocation fingerprint failed".to_string()),
         Lease(_) => Some("capability lease store unavailable".to_string()),
         RunState(_) => Some("run-state store unavailable".to_string()),
         Process(_) => Some("process manager unavailable".to_string()),
     }
+}
+
+fn dispatch_failure_message(
+    safe_summary: Option<&str>,
+    error: &CapabilityInvocationError,
+) -> String {
+    safe_summary
+        .and_then(|summary| LoopSafeSummary::new(summary).ok())
+        .map(|summary| summary.to_string())
+        .unwrap_or_else(|| error.to_string())
 }
 
 pub(crate) fn failure_kind_from(error: &CapabilityInvocationError) -> RuntimeFailureKind {
@@ -1854,6 +1867,18 @@ output_schema_ref = "schemas/test.output.json"
     }
 
     #[test]
+    fn sanitized_failure_message_rejects_unsafe_dispatch_safe_summary() {
+        let error = CapabilityInvocationError::Dispatch {
+            kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::OperationFailed),
+            safe_summary: Some("read_file failed for path workspace api_key.txt".to_string()),
+        };
+
+        let message = sanitized_failure_message(&error).expect("dispatch produces a message");
+        assert_eq!(message, "dispatch failed: OperationFailed");
+        assert!(!message.contains("api_key"));
+    }
+
+    #[test]
     fn runtime_failure_kind_as_str_is_stable_snake_case() {
         // Pin the public metric/tracing tokens; renaming any of these is a
         // breaking observability contract change.
@@ -1955,7 +1980,7 @@ output_schema_ref = "schemas/test.output.json"
             Some("x".repeat(3000)),
         );
         let summary = long.safe_summary().expect("long message is still safe");
-        assert_eq!(summary.chars().count(), 515);
+        assert_eq!(summary.chars().count(), 512);
         assert!(summary.ends_with("..."));
 
         let multibyte = RuntimeCapabilityFailure::new(
@@ -1966,8 +1991,15 @@ output_schema_ref = "schemas/test.output.json"
         let summary = multibyte
             .safe_summary()
             .expect("long multibyte message is still safe");
-        assert_eq!(summary.chars().count(), 515);
+        assert_eq!(summary.chars().count(), 512);
         assert!(summary.ends_with("..."));
+
+        let exact = RuntimeCapabilityFailure::new(
+            cap(),
+            RuntimeFailureKind::InvalidInput,
+            Some("x".repeat(512)),
+        );
+        assert_eq!(exact.safe_summary(), Some("x".repeat(512)));
     }
 
     #[test]
