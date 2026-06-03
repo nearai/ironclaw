@@ -84,6 +84,8 @@ registerPack("en", {
   "chat.attachFiles": "Attach files",
   "chat.removeImage": "Remove image",
   "chat.removeAttachment": "Remove attachment",
+  "chat.attachmentsUnsupported":
+    "WebChat v2 does not support image or file attachments yet. Remove the attachments and describe what you want in text.",
   "chat.modeAutoReview": "Auto-review",
   "chat.runtimeLocal": "Work locally",
   "chat.statusWorking": "Working",
