@@ -70,40 +70,40 @@ pub struct SlackHostBetaConfig {
     pub bot_token: SecretString,
 }
 
+pub struct SlackHostBetaConfigInput {
+    pub tenant_id: TenantId,
+    pub agent_id: AgentId,
+    pub project_id: Option<ProjectId>,
+    pub installation_id: String,
+    pub team_id: String,
+    pub api_app_id: Option<String>,
+    pub slack_user_id: String,
+    pub user_id: UserId,
+    pub signing_secret: SecretString,
+    pub bot_token: SecretString,
+}
+
 impl SlackHostBetaConfig {
-    // arch-exempt: too_many_args, needs SlackHostBetaBootstrap aggregation, plan #4418
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        tenant_id: TenantId,
-        agent_id: AgentId,
-        project_id: Option<ProjectId>,
-        installation_id: String,
-        team_id: String,
-        api_app_id: Option<String>,
-        slack_user_id: String,
-        user_id: UserId,
-        signing_secret: SecretString,
-        bot_token: SecretString,
-    ) -> Result<Self, SlackHostBetaBuildError> {
-        let installation_id = AdapterInstallationId::new(installation_id)
+    pub fn new(input: SlackHostBetaConfigInput) -> Result<Self, SlackHostBetaBuildError> {
+        let installation_id = AdapterInstallationId::new(input.installation_id)
             .map_err(|reason| invalid_config("installation_id", reason.to_string()))?;
-        let installation_selector = match api_app_id {
-            Some(api_app_id) => SlackInstallationSelector::app_team(api_app_id, team_id),
-            None => SlackInstallationSelector::team(team_id),
+        let installation_selector = match input.api_app_id {
+            Some(api_app_id) => SlackInstallationSelector::app_team(api_app_id, input.team_id),
+            None => SlackInstallationSelector::team(input.team_id),
         };
         let slack_actor =
-            ExternalActorRef::new(SLACK_USER_ACTOR_KIND, slack_user_id, None::<String>)
+            ExternalActorRef::new(SLACK_USER_ACTOR_KIND, input.slack_user_id, None::<String>)
                 .map_err(|reason| invalid_config("slack_user_id", reason.to_string()))?;
         Ok(Self {
-            tenant_id,
-            agent_id,
-            project_id,
+            tenant_id: input.tenant_id,
+            agent_id: input.agent_id,
+            project_id: input.project_id,
             installation_id,
             installation_selector,
             slack_actor,
-            user_id,
-            signing_secret,
-            bot_token,
+            user_id: input.user_id,
+            signing_secret: input.signing_secret,
+            bot_token: input.bot_token,
         })
     }
 }
@@ -358,18 +358,18 @@ mod tests {
     }
 
     fn config() -> SlackHostBetaConfig {
-        SlackHostBetaConfig::new(
-            TenantId::new(TENANT).expect("tenant"),
-            AgentId::new(AGENT).expect("agent"),
-            Some(ProjectId::new(PROJECT).expect("project")),
-            INSTALLATION.to_string(),
-            TEAM.to_string(),
-            Some(API_APP.to_string()),
-            SLACK_USER.to_string(),
-            UserId::new(USER).expect("user"),
-            SecretString::from(SECRET),
-            SecretString::from("xoxb-host-token"),
-        )
+        SlackHostBetaConfig::new(SlackHostBetaConfigInput {
+            tenant_id: TenantId::new(TENANT).expect("tenant"),
+            agent_id: AgentId::new(AGENT).expect("agent"),
+            project_id: Some(ProjectId::new(PROJECT).expect("project")),
+            installation_id: INSTALLATION.to_string(),
+            team_id: TEAM.to_string(),
+            api_app_id: Some(API_APP.to_string()),
+            slack_user_id: SLACK_USER.to_string(),
+            user_id: UserId::new(USER).expect("user"),
+            signing_secret: SecretString::from(SECRET),
+            bot_token: SecretString::from("xoxb-host-token"),
+        })
         .expect("valid config")
     }
 

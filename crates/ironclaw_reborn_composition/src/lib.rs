@@ -178,7 +178,8 @@ pub use slack_egress::{
 };
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack_host_beta::{
-    SlackHostBetaBuildError, SlackHostBetaConfig, build_slack_events_route_mount,
+    SlackHostBetaBuildError, SlackHostBetaConfig, SlackHostBetaConfigInput,
+    build_slack_events_route_mount,
 };
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack_serve::{

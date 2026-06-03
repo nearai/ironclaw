@@ -7,7 +7,7 @@ use std::env;
 use std::path::Path;
 
 #[cfg(feature = "slack-v2-host-beta")]
-use ironclaw_reborn_composition::SlackHostBetaConfig;
+use ironclaw_reborn_composition::{SlackHostBetaConfig, SlackHostBetaConfigInput};
 #[cfg(feature = "slack-v2-host-beta")]
 use secrecy::SecretString;
 
@@ -67,18 +67,18 @@ pub(crate) fn resolve_slack_host_beta_config(
     )?;
     let bot_token = required_env_secret("bot token", "bot_token_env", &bot_token_env, config_path)?;
 
-    Ok(Some(SlackHostBetaConfig::new(
-        tenant_id.clone(),
-        default_agent_id.clone(),
-        default_project_id.cloned(),
+    Ok(Some(SlackHostBetaConfig::new(SlackHostBetaConfigInput {
+        tenant_id: tenant_id.clone(),
+        agent_id: default_agent_id.clone(),
+        project_id: default_project_id.cloned(),
         installation_id,
         team_id,
         api_app_id,
         slack_user_id,
-        mapped_user_id,
-        SecretString::from(signing_secret),
-        SecretString::from(bot_token),
-    )?))
+        user_id: mapped_user_id,
+        signing_secret: SecretString::from(signing_secret),
+        bot_token: SecretString::from(bot_token),
+    })?))
 }
 
 #[cfg(feature = "slack-v2-host-beta")]
