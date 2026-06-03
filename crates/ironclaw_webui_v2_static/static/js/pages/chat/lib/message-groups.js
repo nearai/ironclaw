@@ -4,10 +4,22 @@
    stays last. Earlier assistant messages keep their original position because
    they are middle-of-turn narration. */
 export function groupMessages(messages) {
-  const ordered = assistantLastForTrailingActivity(messages);
   const items = [];
+  const reordered = trailingActivityBeforeFinalReply(messages);
+  if (reordered) {
+    appendGroupedMessages(items, reordered.before);
+    appendGroupedMessages(items, reordered.activity);
+    appendGroupedMessages(items, [reordered.reply]);
+    return items;
+  }
+
+  appendGroupedMessages(items, messages);
+  return items;
+}
+
+function appendGroupedMessages(items, messages) {
   let run = null;
-  for (const msg of ordered) {
+  for (const msg of messages) {
     const isToolActivity = isCollapsibleToolActivity(msg);
     if (isToolActivity) {
       if (!run) {
@@ -20,32 +32,37 @@ export function groupMessages(messages) {
       items.push({ type: "message", id: msg.id, message: msg });
     }
   }
-  return items;
 }
 
-function assistantLastForTrailingActivity(messages) {
-  const lastAssistant = lastAssistantReplyIndex(messages);
-  if (lastAssistant < 0 || lastAssistant === messages.length - 1) return messages;
+function trailingActivityBeforeFinalReply(messages) {
+  const lastAssistant = lastFinalAssistantReplyIndex(messages);
+  if (lastAssistant < 0 || lastAssistant === messages.length - 1) return null;
 
   const trailing = messages.slice(lastAssistant + 1);
-  if (!trailing.every(isAuxiliaryActivity)) return messages;
+  if (!trailing.every(isAuxiliaryActivity)) return null;
 
-  return [
-    ...messages.slice(0, lastAssistant),
-    ...trailing,
-    messages[lastAssistant],
-  ];
+  return {
+    before: messages.slice(0, lastAssistant),
+    activity: trailing,
+    reply: messages[lastAssistant],
+  };
 }
 
-function lastAssistantReplyIndex(messages) {
+function lastFinalAssistantReplyIndex(messages) {
   for (let i = messages.length - 1; i >= 0; i -= 1) {
-    if (isAssistantReply(messages[i])) return i;
+    if (isFinalAssistantReply(messages[i])) return i;
   }
   return -1;
 }
 
-function isAssistantReply(msg) {
-  return msg.role === "assistant" && !(msg.toolCalls && msg.toolCalls.length > 0);
+function isFinalAssistantReply(msg) {
+  return (
+    msg.role === "assistant" &&
+    !(msg.toolCalls && msg.toolCalls.length > 0) &&
+    (msg.isFinalReply === true ||
+      ((msg.kind === "assistant" || msg.kind === "assistant_message") &&
+        msg.status === "finalized"))
+  );
 }
 
 function isAuxiliaryActivity(msg) {
