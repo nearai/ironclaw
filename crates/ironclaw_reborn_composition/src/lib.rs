@@ -76,6 +76,8 @@ mod slack_delivery;
 #[cfg(feature = "slack-v2-host-beta")]
 mod slack_egress;
 #[cfg(feature = "slack-v2-host-beta")]
+mod slack_host_beta;
+#[cfg(feature = "slack-v2-host-beta")]
 pub mod slack_serve;
 #[cfg(feature = "test-support")]
 pub mod test_support;
@@ -175,9 +177,13 @@ pub use slack_egress::{
     SlackProtocolHttpEgress, StaticSlackEgressCredentialProvider,
 };
 #[cfg(feature = "slack-v2-host-beta")]
+pub use slack_host_beta::{
+    SlackHostBetaBuildError, SlackHostBetaConfig, build_slack_events_route_mount,
+};
+#[cfg(feature = "slack-v2-host-beta")]
 pub use slack_serve::{
     SLACK_EVENTS_PATH, SlackEventsRouteState, SlackEventsWebhookDispatcher,
-    slack_events_route_descriptors, slack_events_route_mount,
+    SlackInstallationSelector, slack_events_route_descriptors, slack_events_route_mount,
 };
 pub use webui::{RebornWebuiBundle, build_webui_services};
 #[cfg(feature = "webui-v2-beta")]

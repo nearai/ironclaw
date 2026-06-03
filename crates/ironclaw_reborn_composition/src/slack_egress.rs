@@ -10,9 +10,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern, ResourceScope,
+    CapabilityId, NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern, ResourceScope,
+    RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeKind,
 };
-use ironclaw_network::{NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest};
 use ironclaw_product_adapters::{
     EgressCredentialHandle, EgressRequest, EgressResponse, ProtocolHttpEgress,
     ProtocolHttpEgressError, RedactedString,
@@ -23,6 +23,7 @@ use thiserror::Error;
 
 const SLACK_EGRESS_TIMEOUT_MS: u32 = 10_000;
 const SLACK_EGRESS_RESPONSE_BODY_LIMIT_BYTES: u64 = 64 * 1024;
+const SLACK_EGRESS_CAPABILITY_ID: &str = "slack.egress";
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum SlackEgressCredentialError {
@@ -91,7 +92,7 @@ impl SlackEgressCredentialProvider for StaticSlackEgressCredentialProvider {
 }
 
 pub struct SlackProtocolHttpEgress {
-    network: Arc<dyn NetworkHttpEgress>,
+    runtime_http_egress: Arc<dyn RuntimeHttpEgress>,
     credentials: Arc<dyn SlackEgressCredentialProvider>,
     policy: EgressPolicy,
     scope: ResourceScope,
@@ -99,13 +100,13 @@ pub struct SlackProtocolHttpEgress {
 
 impl SlackProtocolHttpEgress {
     pub fn new(
-        network: Arc<dyn NetworkHttpEgress>,
+        runtime_http_egress: Arc<dyn RuntimeHttpEgress>,
         credentials: Arc<dyn SlackEgressCredentialProvider>,
         policy: EgressPolicy,
         scope: ResourceScope,
     ) -> Self {
         Self {
-            network,
+            runtime_http_egress,
             credentials,
             policy,
             scope,
@@ -142,10 +143,17 @@ impl ProtocolHttpEgress for SlackProtocolHttpEgress {
             headers.push(("authorization".to_string(), authorization));
         }
 
+        let capability_id = CapabilityId::new(SLACK_EGRESS_CAPABILITY_ID).map_err(|error| {
+            ProtocolHttpEgressError::PolicyDenied {
+                reason: RedactedString::new(format!("invalid Slack egress capability id: {error}")),
+            }
+        })?;
         let response = self
-            .network
-            .execute(NetworkHttpRequest {
+            .runtime_http_egress
+            .execute(RuntimeHttpEgressRequest {
+                runtime: RuntimeKind::FirstParty,
                 scope: self.scope.clone(),
+                capability_id,
                 method: network_method(request.method().as_str())?,
                 url: format!(
                     "https://{}{}",
@@ -154,12 +162,14 @@ impl ProtocolHttpEgress for SlackProtocolHttpEgress {
                 ),
                 headers,
                 body: request.body().to_vec(),
-                policy: slack_network_policy(request.host().as_str()),
+                network_policy: slack_network_policy(request.host().as_str()),
+                credential_injections: Vec::new(),
                 response_body_limit: Some(SLACK_EGRESS_RESPONSE_BODY_LIMIT_BYTES),
+                save_body_to: None,
                 timeout_ms: Some(SLACK_EGRESS_TIMEOUT_MS),
             })
             .await
-            .map_err(map_network_error)?;
+            .map_err(map_runtime_http_error)?;
 
         Ok(EgressResponse::new(response.status, response.body))
     }
@@ -235,17 +245,21 @@ fn map_credential_error(error: SlackEgressCredentialError) -> ProtocolHttpEgress
     }
 }
 
-fn map_network_error(error: NetworkHttpError) -> ProtocolHttpEgressError {
-    match error {
-        NetworkHttpError::PolicyDenied { reason, .. } => ProtocolHttpEgressError::PolicyDenied {
-            reason: RedactedString::new(reason),
-        },
-        NetworkHttpError::InvalidUrl { reason, .. } => ProtocolHttpEgressError::PolicyDenied {
-            reason: RedactedString::new(reason),
-        },
-        NetworkHttpError::ResponseBodyLimit { .. } => ProtocolHttpEgressError::LeakDetected,
-        NetworkHttpError::Dns { reason, .. } | NetworkHttpError::Transport { reason, .. } => {
-            ProtocolHttpEgressError::Network(RedactedString::new(reason))
+fn map_runtime_http_error(error: RuntimeHttpEgressError) -> ProtocolHttpEgressError {
+    match error.reason_code() {
+        ironclaw_host_api::RuntimeHttpEgressReasonCode::PolicyDenied
+        | ironclaw_host_api::RuntimeHttpEgressReasonCode::RequestDenied => {
+            ProtocolHttpEgressError::PolicyDenied {
+                reason: RedactedString::new(error.stable_runtime_reason()),
+            }
+        }
+        ironclaw_host_api::RuntimeHttpEgressReasonCode::ResponseBodyLimitExceeded => {
+            ProtocolHttpEgressError::LeakDetected
+        }
+        ironclaw_host_api::RuntimeHttpEgressReasonCode::CredentialUnavailable
+        | ironclaw_host_api::RuntimeHttpEgressReasonCode::NetworkError
+        | ironclaw_host_api::RuntimeHttpEgressReasonCode::ResponseError => {
+            ProtocolHttpEgressError::Network(RedactedString::new(error.stable_runtime_reason()))
         }
     }
 }
@@ -255,7 +269,10 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use async_trait::async_trait;
-    use ironclaw_network::{NetworkHttpRequest, NetworkHttpResponse, NetworkUsage};
+    use ironclaw_host_api::{
+        RUNTIME_HTTP_REASON_RESPONSE_BODY_LIMIT_EXCEEDED, RuntimeHttpEgressResponse,
+        RuntimeHttpSavedBody,
+    };
     use ironclaw_product_adapters::{
         DeclaredEgressHost, DeclaredEgressTarget, EgressCredentialHandle, EgressMethod, EgressPath,
     };
@@ -263,32 +280,52 @@ mod tests {
     use super::*;
 
     #[derive(Default)]
-    struct RecordingNetwork {
-        requests: Mutex<Vec<NetworkHttpRequest>>,
+    struct RecordingRuntimeHttpEgress {
+        requests: Mutex<Vec<RuntimeHttpEgressRequest>>,
     }
 
-    impl RecordingNetwork {
-        fn requests(&self) -> Vec<NetworkHttpRequest> {
-            self.requests.lock().expect("network requests lock").clone()
+    impl RecordingRuntimeHttpEgress {
+        fn requests(&self) -> Vec<RuntimeHttpEgressRequest> {
+            self.requests
+                .lock()
+                .expect("runtime HTTP requests lock")
+                .clone()
         }
     }
 
     #[async_trait]
-    impl NetworkHttpEgress for RecordingNetwork {
+    impl RuntimeHttpEgress for RecordingRuntimeHttpEgress {
         async fn execute(
             &self,
-            request: NetworkHttpRequest,
-        ) -> Result<NetworkHttpResponse, NetworkHttpError> {
+            request: RuntimeHttpEgressRequest,
+        ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
             self.requests
                 .lock()
-                .expect("network requests lock")
+                .expect("runtime HTTP requests lock")
                 .push(request);
-            Ok(NetworkHttpResponse {
+            Ok(RuntimeHttpEgressResponse {
                 status: 200,
                 headers: Vec::new(),
                 body: br#"{\"ok\":true}"#.to_vec(),
-                usage: NetworkUsage::default(),
+                saved_body: None::<RuntimeHttpSavedBody>,
+                request_bytes: 0,
+                response_bytes: 0,
+                redaction_applied: false,
             })
+        }
+    }
+
+    struct FailingRuntimeHttpEgress {
+        error: RuntimeHttpEgressError,
+    }
+
+    #[async_trait]
+    impl RuntimeHttpEgress for FailingRuntimeHttpEgress {
+        async fn execute(
+            &self,
+            _request: RuntimeHttpEgressRequest,
+        ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
+            Err(self.error.clone())
         }
     }
 
@@ -310,10 +347,25 @@ mod tests {
         .with_credential_handle(Some(handle))
     }
 
-    fn slack_egress(network: Arc<RecordingNetwork>) -> SlackProtocolHttpEgress {
+    fn slack_egress(runtime_http: Arc<RecordingRuntimeHttpEgress>) -> SlackProtocolHttpEgress {
         let handle = slack_handle();
         SlackProtocolHttpEgress::new(
-            network,
+            runtime_http,
+            Arc::new(StaticSlackEgressCredentialProvider::new(
+                handle.clone(),
+                "xoxb-secret",
+            )),
+            EgressPolicy::new([DeclaredEgressTarget::new(slack_host(), Some(handle))]),
+            ResourceScope::system(),
+        )
+    }
+
+    fn slack_egress_with_runtime(
+        runtime_http: Arc<dyn RuntimeHttpEgress>,
+    ) -> SlackProtocolHttpEgress {
+        let handle = slack_handle();
+        SlackProtocolHttpEgress::new(
+            runtime_http,
             Arc::new(StaticSlackEgressCredentialProvider::new(
                 handle.clone(),
                 "xoxb-secret",
@@ -325,8 +377,8 @@ mod tests {
 
     #[tokio::test]
     async fn slack_protocol_http_egress_validates_policy_and_injects_bearer() {
-        let network = Arc::new(RecordingNetwork::default());
-        let egress = slack_egress(Arc::clone(&network));
+        let runtime_http = Arc::new(RecordingRuntimeHttpEgress::default());
+        let egress = slack_egress(Arc::clone(&runtime_http));
 
         let response = egress
             .send(slack_request(slack_handle()))
@@ -334,7 +386,7 @@ mod tests {
             .expect("slack egress should succeed");
 
         assert_eq!(response.status(), 200);
-        let requests = network.requests();
+        let requests = runtime_http.requests();
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].url, "https://slack.com/api/chat.postMessage");
         assert_eq!(requests[0].method, NetworkMethod::Post);
@@ -350,10 +402,10 @@ mod tests {
 
     #[tokio::test]
     async fn slack_protocol_http_egress_rejects_control_chars_in_bearer_before_network() {
-        let network = Arc::new(RecordingNetwork::default());
+        let runtime_http = Arc::new(RecordingRuntimeHttpEgress::default());
         let handle = slack_handle();
         let egress = SlackProtocolHttpEgress::new(
-            network.clone(),
+            runtime_http.clone(),
             Arc::new(StaticSlackEgressCredentialProvider::new(
                 handle.clone(),
                 "xoxb-secret\r\nX-Injected: true",
@@ -374,15 +426,15 @@ mod tests {
             error,
             ProtocolHttpEgressError::PolicyDenied { .. }
         ));
-        assert!(network.requests().is_empty());
+        assert!(runtime_http.requests().is_empty());
     }
 
     #[tokio::test]
     async fn slack_protocol_http_egress_rejects_unknown_handle_before_network() {
-        let network = Arc::new(RecordingNetwork::default());
+        let runtime_http = Arc::new(RecordingRuntimeHttpEgress::default());
         let unknown = EgressCredentialHandle::new("other_token").expect("other handle");
         let egress = SlackProtocolHttpEgress::new(
-            network.clone(),
+            runtime_http.clone(),
             Arc::new(StaticSlackEgressCredentialProvider::new(
                 slack_handle(),
                 "xoxb-secret",
@@ -403,6 +455,87 @@ mod tests {
             error,
             ProtocolHttpEgressError::UnknownCredentialHandle { .. }
         ));
-        assert!(network.requests().is_empty());
+        assert!(runtime_http.requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn slack_protocol_http_egress_maps_runtime_http_failures() {
+        let cases = [
+            (
+                RuntimeHttpEgressError::Request {
+                    reason: "invalid_url".to_string(),
+                    request_bytes: 12,
+                    response_bytes: 0,
+                },
+                "request-denied",
+                RuntimeErrorExpectation::PolicyDenied,
+            ),
+            (
+                RuntimeHttpEgressError::Network {
+                    reason: "policy_denied".to_string(),
+                    request_bytes: 12,
+                    response_bytes: 0,
+                },
+                "policy-denied",
+                RuntimeErrorExpectation::PolicyDenied,
+            ),
+            (
+                RuntimeHttpEgressError::Response {
+                    reason: RUNTIME_HTTP_REASON_RESPONSE_BODY_LIMIT_EXCEEDED.to_string(),
+                    request_bytes: 12,
+                    response_bytes: 65_536,
+                },
+                "body-limit",
+                RuntimeErrorExpectation::LeakDetected,
+            ),
+            (
+                RuntimeHttpEgressError::Network {
+                    reason: "dns_failure".to_string(),
+                    request_bytes: 12,
+                    response_bytes: 0,
+                },
+                "network",
+                RuntimeErrorExpectation::Network,
+            ),
+        ];
+
+        for (runtime_error, label, expectation) in cases {
+            let runtime_http = Arc::new(FailingRuntimeHttpEgress {
+                error: runtime_error,
+            });
+            let egress = slack_egress_with_runtime(runtime_http);
+            let error = match egress.send(slack_request(slack_handle())).await {
+                Ok(response) => panic!("{label} case should fail, got {response:?}"),
+                Err(error) => error,
+            };
+
+            expectation.assert_matches(error, label);
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum RuntimeErrorExpectation {
+        PolicyDenied,
+        LeakDetected,
+        Network,
+    }
+
+    impl RuntimeErrorExpectation {
+        fn assert_matches(self, error: ProtocolHttpEgressError, label: &str) {
+            match self {
+                Self::PolicyDenied => assert!(
+                    matches!(error, ProtocolHttpEgressError::PolicyDenied { .. }),
+                    "{label}: expected policy denied, got {error:?}"
+                ),
+                Self::LeakDetected => assert!(
+                    matches!(error, ProtocolHttpEgressError::LeakDetected),
+                    "{label}: expected leak detected, got {error:?}"
+                ),
+                Self::Network => assert!(
+                    matches!(error, ProtocolHttpEgressError::Network(_)),
+                    "{label}: expected network error, got {error:?}"
+                ),
+            }
+        }
     }
 }

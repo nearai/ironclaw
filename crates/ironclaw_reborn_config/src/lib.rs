@@ -38,7 +38,7 @@ pub use config_file::{
     BootSection, BudgetSection, DefaultLlmSlotUpdate, DefaultLlmSlotUpdateSession, DriversSection,
     HarnessSection, IdentitySection, LlmSlotFieldUpdate, LlmSlotSelection, PolicySection,
     REBORN_CONFIG_API_VERSION, RebornConfigFile, RebornConfigFileError,
-    RebornConfigFileUpdateError, RunnerSection, begin_default_llm_slot_update,
+    RebornConfigFileUpdateError, RunnerSection, SlackSection, begin_default_llm_slot_update,
     update_default_llm_slot,
 };
 pub use doctor::RebornDoctorReport;

@@ -199,6 +199,19 @@ api_key_env = "OPENAI_API_KEY"
 # provider_id = "anthropic"
 # model       = "claude-3-5-sonnet-latest"
 # api_key_env = "ANTHROPIC_API_KEY"
+
+# [slack]
+# # Host-beta Slack Events API route for `ironclaw-reborn serve`.
+# # Requires a binary built with `--features slack-v2-host-beta`.
+# enabled = false
+# installation_id = "install-alpha"
+# team_id = "T123"
+# api_app_id = "A123"
+# slack_user_id = "U123"
+# # Defaults to the WebUI authenticated user when omitted.
+# # user_id = "reborn-cli"
+# signing_secret_env = "IRONCLAW_REBORN_SLACK_SIGNING_SECRET"
+# bot_token_env = "IRONCLAW_REBORN_SLACK_BOT_TOKEN"
 "#,
         api_version = REBORN_CONFIG_API_VERSION,
     )

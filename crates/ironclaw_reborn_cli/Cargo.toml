@@ -35,6 +35,13 @@ webui-v2-beta = [
     "ironclaw_reborn_composition/webui-v2-beta",
     "dep:ironclaw_reborn_webui_ingress",
 ]
+# Compile in the Slack Events API host-beta mount for `ironclaw-reborn serve`.
+# Still requires `[slack].enabled = true` at runtime before the route is
+# mounted; ambient Slack env vars alone do not enable it.
+slack-v2-host-beta = [
+    "webui-v2-beta",
+    "ironclaw_reborn_composition/slack-v2-host-beta",
+]
 
 [dependencies]
 anyhow = "1"

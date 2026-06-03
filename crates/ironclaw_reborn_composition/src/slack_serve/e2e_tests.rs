@@ -65,7 +65,7 @@ const ADAPTER: &str = "slack_v2";
 const INSTALLATION: &str = "install_alpha";
 const TEAM: &str = "T-A";
 const SLACK_USER: &str = "U123";
-const CHANNEL: &str = "D-A";
+const CHANNEL: &str = "D123";
 const SLACK_SIGNATURE_HEADER: &str = "X-Slack-Signature";
 const SLACK_TIMESTAMP_HEADER: &str = "X-Slack-Request-Timestamp";
 const SECRET: &str = "topsecret";
@@ -703,6 +703,7 @@ fn dm_message(event_id: &'static str, text: &'static str) -> &'static str {
         ("Ev-approval", "needs approval") => DM_APPROVAL,
         ("Ev-block", "needs approval") => DM_BLOCK,
         ("Ev-approve", "approve") => DM_APPROVE,
+        ("Ev-forged", "hello") => DM_FORGED,
         _ => panic!("unknown fixture"),
     }
 }
@@ -722,29 +723,37 @@ const DM_FINAL: &str = r#"{
   "team_id":"T-A",
   "api_app_id":"A-slack",
   "event_id":"Ev-final",
-  "event":{"type":"message","channel_type":"im","user":"U123","channel":"D-A","text":"hello","ts":"1710000000.000001"}
-}"#;
+	  "event":{"type":"message","channel_type":"im","user":"U123","channel":"D123","text":"hello","ts":"1710000000.000001"}
+	}"#;
 
 const DM_APPROVAL: &str = r#"{
   "type":"event_callback",
   "team_id":"T-A",
   "api_app_id":"A-slack",
   "event_id":"Ev-approval",
-  "event":{"type":"message","channel_type":"im","user":"U123","channel":"D-A","text":"needs approval","ts":"1710000000.000002"}
-}"#;
+	  "event":{"type":"message","channel_type":"im","user":"U123","channel":"D123","text":"needs approval","ts":"1710000000.000002"}
+	}"#;
 
 const DM_BLOCK: &str = r#"{
   "type":"event_callback",
   "team_id":"T-A",
   "api_app_id":"A-slack",
   "event_id":"Ev-block",
-  "event":{"type":"message","channel_type":"im","user":"U123","channel":"D-A","text":"needs approval","ts":"1710000000.000003"}
-}"#;
+	  "event":{"type":"message","channel_type":"im","user":"U123","channel":"D123","text":"needs approval","ts":"1710000000.000003"}
+	}"#;
 
 const DM_APPROVE: &str = r#"{
   "type":"event_callback",
   "team_id":"T-A",
   "api_app_id":"A-slack",
   "event_id":"Ev-approve",
-  "event":{"type":"message","channel_type":"im","user":"U123","channel":"D-A","text":"approve","ts":"1710000000.000004"}
-}"#;
+	  "event":{"type":"message","channel_type":"im","user":"U123","channel":"D123","text":"approve","ts":"1710000000.000004"}
+	}"#;
+
+const DM_FORGED: &str = r#"{
+	  "type":"event_callback",
+	  "team_id":"T-A",
+	  "api_app_id":"A-slack",
+	  "event_id":"Ev-forged",
+	  "event":{"type":"message","channel_type":"im","user":"U123","channel":"D123","text":"hello","ts":"1710000000.000005"}
+	}"#;
