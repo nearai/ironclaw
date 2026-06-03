@@ -27,8 +27,8 @@ use ironclaw_reborn_composition::{
     TriggerPollerSettings, build_reborn_runtime,
 };
 use ironclaw_triggers::{
-    TriggerCompletionPolicy, TriggerId, TriggerPollerWorkerConfig, TriggerRecord, TriggerSchedule,
-    TriggerSourceKind, TriggerState,
+    TriggerCompletionPolicy, TriggerId, TriggerPollerWorkerConfig, TriggerRecord,
+    TriggerRepository, TriggerRunStatus, TriggerSchedule, TriggerSourceKind, TriggerState,
 };
 use tokio::sync::Mutex as TokioMutex;
 
@@ -77,6 +77,44 @@ impl HostManagedModelGateway for RecordingGateway {
             "trigger e2e ok".to_string(),
         ))
     }
+}
+
+/// Poll `repo` until `predicate` returns `true` or `deadline` elapses.
+///
+/// Returns the last record seen. If the predicate is satisfied before the
+/// deadline, the returned record satisfies the predicate. If the deadline
+/// elapses, the returned record is the last one read (which may not satisfy
+/// the predicate — callers should then let the existing assertions fail with
+/// the diagnostic they already carry).
+///
+/// Used by the happy-path and Recurring tests to wait for the settle writes
+/// (step 3: `mark_fire_accepted` / `mark_fire_replayed`) to become visible
+/// after the first-pass loop breaks on `record_was_mutated && prompt_seen`.
+async fn wait_for_settled<F>(
+    repo: &Arc<dyn TriggerRepository>,
+    tenant_id: &TenantId,
+    trigger_id: TriggerId,
+    deadline: Duration,
+    mut predicate: F,
+) -> TriggerRecord
+where
+    F: FnMut(&TriggerRecord) -> bool,
+{
+    let stop = Instant::now() + deadline;
+    let mut last: Option<TriggerRecord> = None;
+    while Instant::now() < stop {
+        let current = repo
+            .get_trigger(tenant_id.clone(), trigger_id)
+            .await
+            .expect("get_trigger")
+            .expect("record present");
+        if predicate(&current) {
+            return current;
+        }
+        last = Some(current);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    last.expect("at least one read should have succeeded in wait_for_settled")
 }
 
 /// Shared runtime builder. Every test passes the `TriggerPollerSettings` it
@@ -186,7 +224,6 @@ async fn trigger_poller_drives_trusted_ingress_for_due_scheduled_trigger() {
     let deadline = Instant::now() + Duration::from_secs(15);
     let mut record_was_mutated = false;
     let mut prompt_seen = false;
-    let mut final_record: Option<TriggerRecord> = None;
 
     while Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -215,17 +252,28 @@ async fn trigger_poller_drives_trusted_ingress_for_due_scheduled_trigger() {
             }
         }
 
-        final_record = Some(current);
-
         if record_was_mutated && prompt_seen {
             break;
         }
     }
 
-    // Final snapshot for diagnostics, once.
-    let captured_contents = recording_gateway.captured_message_contents().await;
+    // Wait for the settle writes (mark_fire_accepted sets last_fired_slot, last_run_at)
+    // to become visible. The first-pass loop breaks as soon as the claim+prompt are seen;
+    // the settle may still be in flight.
+    let final_record = wait_for_settled(
+        &repo,
+        &tenant_id,
+        record.trigger_id,
+        Duration::from_secs(5),
+        |r| r.last_fired_slot.is_some() && r.last_run_at.is_some(),
+    )
+    .await;
 
     runtime.shutdown().await.expect("runtime shutdown");
+
+    // Final snapshot for diagnostics, once. Taken after shutdown so a request
+    // submitted between snapshot and shutdown completion cannot be invisible.
+    let captured_contents = recording_gateway.captured_message_contents().await;
 
     assert!(
         record_was_mutated,
@@ -235,6 +283,22 @@ async fn trigger_poller_drives_trusted_ingress_for_due_scheduled_trigger() {
         prompt_seen,
         "LLM gateway never received a request containing the trigger prompt within 15s \
          — captured_messages: {captured_contents:?}"
+    );
+    // CompleteAfterFirstFire: the settle write (mark_fire_accepted) records last_fired_slot
+    // and last_run_at. State transitions to Completed only when the terminal-failure path is
+    // taken; successful first-fire keeps state=Scheduled until a separate lifecycle step.
+    assert!(
+        final_record.last_fired_slot.is_some(),
+        "CompleteAfterFirstFire policy: last_fired_slot should be set after fire — record: {final_record:?}",
+    );
+    assert!(
+        final_record.last_run_at.is_some(),
+        "CompleteAfterFirstFire policy: last_run_at should be set after fire — record: {final_record:?}",
+    );
+    assert_eq!(
+        final_record.last_status,
+        Some(TriggerRunStatus::Ok),
+        "CompleteAfterFirstFire policy: last_status should be Ok after fire — record: {final_record:?}",
     );
 }
 
@@ -345,9 +409,13 @@ async fn trigger_poller_does_not_fire_trigger_with_future_next_run_at() {
 
     // Clone the repo handle before shutdown (Arc is cheap to clone).
     let repo_after = repo.clone();
-    let captured_contents = recording_gateway.captured_message_contents().await;
 
     runtime.shutdown().await.expect("runtime shutdown");
+
+    // Snapshot captured_contents AFTER shutdown so a request submitted between
+    // snapshot and shutdown completion cannot produce a false-green result.
+    // The recording_gateway Arc is independent of the runtime.
+    let captured_contents = recording_gateway.captured_message_contents().await;
 
     let current = repo_after
         .get_trigger(tenant_id.clone(), record.trigger_id)
@@ -451,9 +519,13 @@ async fn trigger_poller_does_not_submit_turn_for_unpaired_actor() {
 
     // Clone the repo handle before shutdown (Arc is cheap to clone).
     let repo_after = repo.clone();
-    let captured_contents = recording_gateway.captured_message_contents().await;
 
     runtime.shutdown().await.expect("runtime shutdown");
+
+    // Snapshot captured_contents AFTER shutdown so a request submitted between
+    // snapshot and shutdown completion cannot produce a false-green result.
+    // The recording_gateway Arc is independent of the runtime.
+    let captured_contents = recording_gateway.captured_message_contents().await;
 
     let current = repo_after
         .get_trigger(tenant_id.clone(), record.trigger_id)
@@ -556,7 +628,6 @@ async fn trigger_poller_fires_recurring_trigger_and_leaves_it_scheduled() {
     let deadline = Instant::now() + Duration::from_secs(15);
     let mut record_was_mutated = false;
     let mut prompt_seen = false;
-    let mut final_record: Option<TriggerRecord> = None;
 
     while Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -584,21 +655,32 @@ async fn trigger_poller_fires_recurring_trigger_and_leaves_it_scheduled() {
             }
         }
 
-        final_record = Some(current);
-
         if record_was_mutated && prompt_seen {
             break;
         }
     }
 
-    // Final snapshot for diagnostics, once.
-    let captured_contents = recording_gateway.captured_message_contents().await;
+    // Wait for the settle writes (mark_fire_replayed sets last_fired_slot, advances
+    // next_run_at) to become visible. The first-pass loop breaks as soon as the
+    // claim+prompt are seen; the settle may still be in flight.
+    let settled = wait_for_settled(
+        &repo,
+        &tenant_id,
+        record.trigger_id,
+        Duration::from_secs(5),
+        |r| r.last_fired_slot.is_some() && r.next_run_at > original_next_run_at,
+    )
+    .await;
 
     runtime.shutdown().await.expect("runtime shutdown");
 
+    // Final snapshot for diagnostics, once. Taken after shutdown so a request
+    // submitted between snapshot and shutdown completion cannot be invisible.
+    let captured_contents = recording_gateway.captured_message_contents().await;
+
     assert!(
         record_was_mutated,
-        "poller did not mutate recurring trigger record within 15s — record: {final_record:?}"
+        "poller did not mutate recurring trigger record within 15s — record: {settled:?}"
     );
     assert!(
         prompt_seen,
@@ -606,27 +688,25 @@ async fn trigger_poller_fires_recurring_trigger_and_leaves_it_scheduled() {
          — captured_messages: {captured_contents:?}"
     );
 
-    let current = final_record.expect("final_record set when record_was_mutated is true");
-
     // Recurring triggers must remain Scheduled (not Completed) after firing.
     assert_eq!(
-        current.state,
+        settled.state,
         TriggerState::Scheduled,
         "recurring trigger should remain Scheduled after fire — state: {:?}",
-        current.state
+        settled.state
     );
     assert!(
-        current.last_fired_slot.is_some(),
+        settled.last_fired_slot.is_some(),
         "recurring trigger should have last_fired_slot set after fire"
     );
     assert!(
-        current.last_run_at.is_some(),
+        settled.last_run_at.is_some(),
         "recurring trigger should have last_run_at set after fire"
     );
     assert!(
-        current.next_run_at > original_next_run_at,
+        settled.next_run_at > original_next_run_at,
         "recurring trigger next_run_at should have advanced — original: {:?}, current: {:?}",
         original_next_run_at,
-        current.next_run_at
+        settled.next_run_at
     );
 }
