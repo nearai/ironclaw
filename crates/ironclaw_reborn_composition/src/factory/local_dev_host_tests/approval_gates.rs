@@ -353,14 +353,17 @@ fn tenant_sandbox_process_policy() -> ironclaw_host_api::runtime_policy::Effecti
 
 fn local_dev_minimal_policy() -> ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy {
     let mut policy = local_dev_policy();
-    // Override approval policy to Minimal (yolo-equivalent via ApprovalPolicy enum).
+    // Minimal is a profile-scoped bypass, so model the resolver's local-yolo
+    // output instead of only overriding the approval enum.
+    policy.requested_profile = ironclaw_host_api::runtime_policy::RuntimeProfile::LocalYolo;
+    policy.resolved_profile = ironclaw_host_api::runtime_policy::RuntimeProfile::LocalYolo;
     policy.approval_policy = ironclaw_host_api::runtime_policy::ApprovalPolicy::Minimal;
     policy
 }
 
 /// Minimal approval policy must complete effectful capabilities without any approval gate.
-/// Verifies `ApprovalPolicy::Minimal => GrantAuthorizer` path in the profile
-/// approval authorizer.
+/// Verifies the runtime-profile policy allows Minimal bypass only for a yolo
+/// profile.
 #[tokio::test]
 async fn local_dev_minimal_policy_shell_invocation_completes_without_approval_gate() {
     let dir = tempfile::tempdir().expect("tempdir"); // safety: test-only helper in #[cfg(test)] module.
