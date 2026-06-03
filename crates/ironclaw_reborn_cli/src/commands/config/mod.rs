@@ -276,6 +276,11 @@ fn flatten_config(config: &ironclaw_reborn_config::RebornConfigFile) -> Vec<Conf
                 selection.base_url.as_deref().map(ConfigValue::from_str),
             ));
         }
+        if !llm.contains_key("default") {
+            for field in ["provider_id", "model", "api_key_env", "base_url"] {
+                entries.push(entry(&format!("llm.default.{field}"), None));
+            }
+        }
     } else {
         for field in ["provider_id", "model", "api_key_env", "base_url"] {
             entries.push(entry(&format!("llm.default.{field}"), None));
