@@ -236,7 +236,7 @@ pub(crate) type LocalDevSelectableSkillContextSource =
 type LocalDevSkillExecutionAdapter =
     SkillExecutionAdapter<FilesystemSkillBundleSource<LocalDevRootFilesystem>>;
 
-// TODO(trigger-poller-test-handles): when a second test-only handle is
+// TODO(#4416): when a second test-only handle is
 // needed off the trigger poller seam (e.g. trusted_submitter,
 // materializer, active_run_lookup for cleanup-state tests), consolidate
 // the cfg-gated fields into a dedicated `TriggerPollerTestHandles`
@@ -526,7 +526,10 @@ impl RebornRuntime {
     /// `None` when the runtime was built without a local-runtime substrate
     /// (e.g. production-shape profiles that haven't been wired end-to-end
     /// yet). Gated behind `test-support` so the substrate handle never leaks
-    /// into production builds.
+    /// into production builds. Mirrors the production read path exercised by
+    /// the spawned trigger poller worker, which calls
+    /// `TriggerRepository::list_due_triggers` on every tick and the
+    /// per-trigger `claim_due_fire` / `mark_fire_*` mutation methods.
     #[cfg(any(test, feature = "test-support"))]
     pub fn trigger_repository(&self) -> Option<Arc<dyn ironclaw_triggers::TriggerRepository>> {
         self.services
