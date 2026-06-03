@@ -12,7 +12,7 @@ use ironclaw_auth::{
     AuthProductScope, AuthProviderId, CredentialAccountId, CredentialAccountProjection,
     CredentialAccountUpdateBinding, ProviderScope,
 };
-use ironclaw_host_api::{AgentId, ExtensionId, ThreadId};
+use ironclaw_host_api::{AgentId, ExtensionId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_product_adapters::{
     ProductAdapterError, ProductWorkflowRejectionKind, ProjectionStream,
     ProjectionSubscriptionRequest,
@@ -105,11 +105,36 @@ pub trait ExtensionCredentialSetupService: Send + Sync {
     ) -> Result<CredentialAccountId, RebornServicesError>;
 }
 
+/// Product caller scope for actions that must run against a concrete agent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProductAgentBoundCaller {
+    pub tenant_id: TenantId,
+    pub user_id: UserId,
+    pub agent_id: AgentId,
+    pub project_id: Option<ProjectId>,
+}
+
+impl ProductAgentBoundCaller {
+    pub fn new(
+        tenant_id: TenantId,
+        user_id: UserId,
+        agent_id: AgentId,
+        project_id: Option<ProjectId>,
+    ) -> Self {
+        Self {
+            tenant_id,
+            user_id,
+            agent_id,
+            project_id,
+        }
+    }
+}
+
 #[async_trait]
 pub trait AutomationProductFacade: Send + Sync {
     async fn list_automations(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductAgentBoundCaller,
         limit: Option<usize>,
     ) -> Result<Vec<RebornAutomationInfo>, RebornServicesError>;
 }
@@ -127,7 +152,7 @@ impl UnsupportedAutomationProductFacade {
 impl AutomationProductFacade for UnsupportedAutomationProductFacade {
     async fn list_automations(
         &self,
-        _caller: WebUiAuthenticatedCaller,
+        _caller: ProductAgentBoundCaller,
         _limit: Option<usize>,
     ) -> Result<Vec<RebornAutomationInfo>, RebornServicesError> {
         Err(automation_unavailable())
@@ -875,13 +900,13 @@ impl RebornServicesApi for RebornServices {
         caller: WebUiAuthenticatedCaller,
         request: WebUiListAutomationsRequest,
     ) -> Result<RebornListAutomationsResponse, RebornServicesError> {
-        if caller.agent_id.is_none() {
+        let Some(caller) = product_agent_bound_caller_from_webui(caller) else {
             return Err(RebornServicesError::from_status(
                 RebornServicesErrorCode::InvalidRequest,
                 400,
                 false,
             ));
-        }
+        };
         let limit = Some(clamp_automation_list_limit(request.limit));
         let automations = self
             .automation_facade
@@ -1934,6 +1959,18 @@ fn create_thread_metadata_json(
         "client_action_id": client_action_id.as_str(),
     }))
     .map_err(|_| RebornServicesError::internal_invariant())
+}
+
+fn product_agent_bound_caller_from_webui(
+    caller: WebUiAuthenticatedCaller,
+) -> Option<ProductAgentBoundCaller> {
+    let agent_id = caller.agent_id?;
+    Some(ProductAgentBoundCaller::new(
+        caller.tenant_id,
+        caller.user_id,
+        agent_id,
+        caller.project_id,
+    ))
 }
 
 fn generated_thread_id(

@@ -20,12 +20,13 @@ use ironclaw_product_workflow::{
     LifecyclePackageRef, LifecyclePhase, LifecycleProductAction, LifecycleProductContext,
     LifecycleProductFacade, LifecycleProductPayload, LifecycleProductResponse,
     LifecycleReadinessBlocker, ListPendingApprovalsRequest, ListPendingApprovalsResponse,
-    ListPendingAuthInteractionsRequest, ListPendingAuthInteractionsResponse, ProductWorkflowError,
-    RebornAutomationInfo, RebornAutomationRunStatus, RebornAutomationSource, RebornAutomationState,
-    RebornExtensionOnboardingState, RebornGetRunStateRequest, RebornResolveGateResponse,
-    RebornServices, RebornServicesApi, RebornServicesError, RebornServicesErrorCode,
-    RebornServicesErrorKind, RebornStreamEventsRequest, RebornSubmitTurnResponse,
-    RebornTimelineRequest, ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
+    ListPendingAuthInteractionsRequest, ListPendingAuthInteractionsResponse,
+    ProductAgentBoundCaller, ProductWorkflowError, RebornAutomationInfo, RebornAutomationRunStatus,
+    RebornAutomationSource, RebornAutomationState, RebornExtensionOnboardingState,
+    RebornGetRunStateRequest, RebornResolveGateResponse, RebornServices, RebornServicesApi,
+    RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
+    RebornStreamEventsRequest, RebornSubmitTurnResponse, RebornTimelineRequest,
+    ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
     ResolveAuthInteractionRequest, ResolveAuthInteractionResponse, WebUiAuthenticatedCaller,
     WebUiCancelRunRequest, WebUiCreateThreadRequest, WebUiInboundValidationCode,
     WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiResolveGateRequest,
@@ -634,7 +635,7 @@ impl LifecycleProductFacade for ListingLifecycleFacade {
 
 #[derive(Debug, Clone)]
 struct ListAutomationCall {
-    caller: WebUiAuthenticatedCaller,
+    caller: ProductAgentBoundCaller,
     limit: Option<usize>,
 }
 
@@ -653,7 +654,7 @@ impl RecordingAutomationFacade {
 impl AutomationProductFacade for RecordingAutomationFacade {
     async fn list_automations(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductAgentBoundCaller,
         limit: Option<usize>,
     ) -> Result<Vec<RebornAutomationInfo>, RebornServicesError> {
         self.list_calls
@@ -678,7 +679,7 @@ struct StaticAutomationFacade {
 impl AutomationProductFacade for StaticAutomationFacade {
     async fn list_automations(
         &self,
-        _caller: WebUiAuthenticatedCaller,
+        _caller: ProductAgentBoundCaller,
         _limit: Option<usize>,
     ) -> Result<Vec<RebornAutomationInfo>, RebornServicesError> {
         Ok(self.output.clone())
@@ -3599,6 +3600,15 @@ async fn list_automation_dispatches_through_product_facade() {
     let list_calls = automation_facade.list_calls();
     assert_eq!(list_calls.len(), 1);
     assert_eq!(list_calls[0].caller.user_id.as_str(), "user-alpha");
+    assert_eq!(list_calls[0].caller.agent_id.as_str(), "agent-alpha");
+    assert_eq!(
+        list_calls[0]
+            .caller
+            .project_id
+            .as_ref()
+            .map(ProjectId::as_str),
+        Some("project-alpha")
+    );
     assert_eq!(list_calls[0].limit, Some(10));
 }
 

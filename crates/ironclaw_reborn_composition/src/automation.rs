@@ -11,9 +11,9 @@ use ironclaw_host_runtime::{
     RuntimeCapabilityRequest, RuntimeFailureKind, TRIGGER_LIST_CAPABILITY_ID,
 };
 use ironclaw_product_workflow::{
-    AutomationProductFacade, RebornAutomationInfo, RebornAutomationRunStatus,
-    RebornAutomationSource, RebornAutomationState, RebornServicesError, RebornServicesErrorCode,
-    RebornServicesErrorKind, WebUiAuthenticatedCaller,
+    AutomationProductFacade, ProductAgentBoundCaller, RebornAutomationInfo,
+    RebornAutomationRunStatus, RebornAutomationSource, RebornAutomationState, RebornServicesError,
+    RebornServicesErrorCode, RebornServicesErrorKind,
 };
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 use serde::Deserialize;
@@ -40,7 +40,7 @@ impl RebornWebuiAutomationFacade {
 
     async fn invoke_trigger(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductAgentBoundCaller,
         capability_id: &'static str,
         input: Value,
     ) -> Result<Value, RebornServicesError> {
@@ -95,7 +95,7 @@ impl RebornWebuiAutomationFacade {
 impl AutomationProductFacade for RebornWebuiAutomationFacade {
     async fn list_automations(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductAgentBoundCaller,
         limit: Option<usize>,
     ) -> Result<Vec<RebornAutomationInfo>, RebornServicesError> {
         let output = self
@@ -203,7 +203,7 @@ fn sanitize_automation_list_output(output: &mut Value) {
 }
 
 fn trigger_execution_context(
-    caller: &WebUiAuthenticatedCaller,
+    caller: &ProductAgentBoundCaller,
     capability_id: &str,
 ) -> Result<ExecutionContext, RebornServicesError> {
     let extension_id = automation_extension_id()?;
@@ -211,7 +211,7 @@ fn trigger_execution_context(
     let resource_scope = ResourceScope {
         tenant_id: caller.tenant_id.clone(),
         user_id: caller.user_id.clone(),
-        agent_id: caller.agent_id.clone(),
+        agent_id: Some(caller.agent_id.clone()),
         project_id: caller.project_id.clone(),
         mission_id: None,
         thread_id: None,
@@ -241,7 +241,7 @@ fn trigger_execution_context(
         parent_process_id: None,
         tenant_id: caller.tenant_id.clone(),
         user_id: caller.user_id.clone(),
-        agent_id: caller.agent_id.clone(),
+        agent_id: Some(caller.agent_id.clone()),
         project_id: caller.project_id.clone(),
         mission_id: None,
         thread_id: None,
@@ -377,9 +377,9 @@ mod tests {
         RuntimeProcessHandle, RuntimeResourceGate, TRIGGER_LIST_CAPABILITY_ID,
     };
     use ironclaw_product_workflow::{
-        AutomationProductFacade, RebornAutomationRunStatus, RebornAutomationSource,
-        RebornAutomationState, RebornServicesErrorCode, RebornServicesErrorKind,
-        WebUiAuthenticatedCaller,
+        AutomationProductFacade, ProductAgentBoundCaller, RebornAutomationRunStatus,
+        RebornAutomationSource, RebornAutomationState, RebornServicesErrorCode,
+        RebornServicesErrorKind,
     };
     use serde_json::{Value, json};
     use tokio::sync::Mutex;
@@ -418,11 +418,14 @@ mod tests {
         assert_eq!(request.capability_id.as_str(), TRIGGER_LIST_CAPABILITY_ID);
         assert_eq!(request.context.tenant_id, caller.tenant_id);
         assert_eq!(request.context.user_id, caller.user_id);
-        assert_eq!(request.context.agent_id, caller.agent_id);
+        assert_eq!(request.context.agent_id, Some(caller.agent_id.clone()));
         assert_eq!(request.context.project_id, caller.project_id);
         assert_eq!(request.context.resource_scope.tenant_id, caller.tenant_id);
         assert_eq!(request.context.resource_scope.user_id, caller.user_id);
-        assert_eq!(request.context.resource_scope.agent_id, caller.agent_id);
+        assert_eq!(
+            request.context.resource_scope.agent_id,
+            Some(caller.agent_id)
+        );
         assert_eq!(request.context.resource_scope.project_id, caller.project_id);
         assert_eq!(request.input["limit"], 25);
     }
@@ -744,13 +747,13 @@ mod tests {
         }
     }
 
-    fn caller() -> WebUiAuthenticatedCaller {
-        WebUiAuthenticatedCaller::new(
-            TenantId::new("tenant-alpha").expect("valid tenant"),
-            UserId::new("user-alpha").expect("valid user"),
-            Some(AgentId::new("agent-alpha").expect("valid agent")),
-            Some(ProjectId::new("project-alpha").expect("valid project")),
-        )
+    fn caller() -> ProductAgentBoundCaller {
+        ProductAgentBoundCaller {
+            tenant_id: TenantId::new("tenant-alpha").expect("valid tenant"),
+            user_id: UserId::new("user-alpha").expect("valid user"),
+            agent_id: AgentId::new("agent-alpha").expect("valid agent"),
+            project_id: Some(ProjectId::new("project-alpha").expect("valid project")),
+        }
     }
 
     fn raw_automation(
