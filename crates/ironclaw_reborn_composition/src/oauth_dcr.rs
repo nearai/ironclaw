@@ -1022,6 +1022,7 @@ struct DcrOAuthCallbackStateWire {
     nonce: String,
 }
 
+#[allow(dead_code)] // Used by the optional product-auth route surface; all-features test targets can compile this module without that route.
 impl DcrOAuthCallbackState {
     const PREFIX: &'static str = "icd1.";
 

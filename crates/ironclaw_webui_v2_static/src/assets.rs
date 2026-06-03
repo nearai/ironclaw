@@ -134,7 +134,7 @@ mod tests {
             .next()
             .expect("thinking branch follows text branch");
         assert!(
-            text_branch.contains("terminal run_status is the only"),
+            text_branch.contains("run_status remains the source of"),
             "text branch should document that run_status owns gate clearing"
         );
         assert!(
@@ -149,8 +149,9 @@ mod tests {
         assert!(groups.contains("function isFinalAssistantReply"));
         assert!(groups.contains("msg.isFinalReply === true"));
         assert!(groups.contains("msg.status === \"finalized\""));
-        assert!(groups.contains("appendGroupedMessages(items, reordered.before);"));
-        assert!(groups.contains("appendGroupedMessages(items, reordered.activity);"));
+        assert!(groups.contains("function followingActivity"));
+        assert!(groups.contains("type: \"activity-run\""));
+        assert!(groups.contains("appendActivityRun(items, activity);"));
         assert!(!groups.contains("lastAssistantReplyIndex"));
 
         let history = asset_text("js/pages/chat/lib/history-messages.js");
@@ -200,7 +201,9 @@ mod tests {
             "OAuth setup should watch in-flight authorization, not only popup close"
         );
         assert!(
-            use_extensions.contains("refreshSetupState();\n        if ((popup && popup.closed)"),
+            use_extensions.contains(
+                "refreshSetupState();\n        if (\n          setupIsConfigured() ||\n          (popup && popup.closed)"
+            ),
             "OAuth setup must refresh setup state before waiting for popup close"
         );
     }

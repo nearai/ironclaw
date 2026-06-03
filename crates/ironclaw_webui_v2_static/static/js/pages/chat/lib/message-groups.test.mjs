@@ -10,8 +10,8 @@ test("groupMessages: consecutive tool_activity messages collapse into one run", 
   ]);
 
   assert.equal(grouped.length, 1);
-  assert.equal(grouped[0].type, "tool-run");
-  assert.deepEqual(grouped[0].tools.map((t) => t.id), ["a", "b"]);
+  assert.equal(grouped[0].type, "activity-run");
+  assert.deepEqual(grouped[0].activity.map((item) => item.id), ["a", "b"]);
 });
 
 test("groupMessages: non-auxiliary messages break tool runs", () => {
@@ -22,22 +22,21 @@ test("groupMessages: non-auxiliary messages break tool runs", () => {
   ]);
 
   assert.equal(grouped.length, 3);
-  assert.equal(grouped[0].type, "tool-run");
+  assert.equal(grouped[0].type, "activity-run");
   assert.equal(grouped[1].type, "message");
-  assert.equal(grouped[2].type, "tool-run");
+  assert.equal(grouped[2].type, "activity-run");
 });
 
-test("groupMessages: toolCalls-bearing messages are not grouped and break runs", () => {
+test("groupMessages: toolCalls-bearing messages stay inside activity runs", () => {
   const grouped = groupMessages([
     { id: "a", role: "tool_activity" },
     { id: "g", role: "assistant", toolCalls: [{ toolName: "read" }] },
     { id: "b", role: "tool_activity" },
   ]);
 
-  assert.equal(grouped.length, 3);
-  assert.equal(grouped[0].type, "tool-run");
-  assert.equal(grouped[1].type, "message");
-  assert.equal(grouped[2].type, "tool-run");
+  assert.equal(grouped.length, 1);
+  assert.equal(grouped[0].type, "activity-run");
+  assert.deepEqual(grouped[0].activity.map((item) => item.id), ["a", "g", "b"]);
 });
 
 test("groupMessages: final assistant renders after trailing activity", () => {
@@ -53,15 +52,13 @@ test("groupMessages: final assistant renders after trailing activity", () => {
     { id: "r", role: "thinking", content: "Need to check the integration." },
   ]);
 
-  assert.equal(grouped.length, 4);
+  assert.equal(grouped.length, 3);
   assert.equal(grouped[0].type, "message");
   assert.equal(grouped[0].message.id, "u");
-  assert.equal(grouped[1].type, "tool-run");
-  assert.deepEqual(grouped[1].tools.map((t) => t.id), ["a"]);
+  assert.equal(grouped[1].type, "activity-run");
+  assert.deepEqual(grouped[1].activity.map((item) => item.id), ["a", "r"]);
   assert.equal(grouped[2].type, "message");
-  assert.equal(grouped[2].message.id, "r");
-  assert.equal(grouped[3].type, "message");
-  assert.equal(grouped[3].message.id, "m");
+  assert.equal(grouped[2].message.id, "m");
 });
 
 test("groupMessages: trailing activity stays separate from earlier tool runs", () => {
@@ -72,10 +69,10 @@ test("groupMessages: trailing activity stays separate from earlier tool runs", (
   ]);
 
   assert.equal(grouped.length, 3);
-  assert.equal(grouped[0].type, "tool-run");
-  assert.deepEqual(grouped[0].tools.map((t) => t.id), ["a"]);
-  assert.equal(grouped[1].type, "tool-run");
-  assert.deepEqual(grouped[1].tools.map((t) => t.id), ["b"]);
+  assert.equal(grouped[0].type, "activity-run");
+  assert.deepEqual(grouped[0].activity.map((item) => item.id), ["a"]);
+  assert.equal(grouped[1].type, "activity-run");
+  assert.deepEqual(grouped[1].activity.map((item) => item.id), ["b"]);
   assert.equal(grouped[2].type, "message");
   assert.equal(grouped[2].message.id, "m");
 });
@@ -90,7 +87,7 @@ test("groupMessages: middle assistant stays before its following activity", () =
   assert.equal(grouped.length, 3);
   assert.equal(grouped[0].type, "message");
   assert.equal(grouped[0].message.id, "m1");
-  assert.equal(grouped[1].type, "tool-run");
+  assert.equal(grouped[1].type, "activity-run");
   assert.equal(grouped[2].type, "message");
   assert.equal(grouped[2].message.id, "m2");
 });
@@ -105,11 +102,28 @@ test("groupMessages: middle assistant is not hoisted before final reply arrives"
   assert.equal(grouped.length, 2);
   assert.equal(grouped[0].type, "message");
   assert.equal(grouped[0].message.id, "m");
-  assert.equal(grouped[1].type, "tool-run");
-  assert.deepEqual(grouped[1].tools.map((t) => t.id), ["a", "b"]);
+  assert.equal(grouped[1].type, "activity-run");
+  assert.deepEqual(grouped[1].activity.map((item) => item.id), ["a", "b"]);
 });
 
-test("groupMessages: assistant is not hoisted when non-auxiliary message trails", () => {
+test("groupMessages: follow-up user does not break prior final reply ordering", () => {
+  const grouped = groupMessages([
+    { id: "m", role: "assistant", content: "answer", isFinalReply: true },
+    { id: "a", role: "tool_activity", toolName: "read" },
+    { id: "r", role: "thinking", content: "checking" },
+    { id: "u", role: "user", content: "did you finish?" },
+  ]);
+
+  assert.equal(grouped.length, 3);
+  assert.equal(grouped[0].type, "activity-run");
+  assert.deepEqual(grouped[0].activity.map((item) => item.id), ["a", "r"]);
+  assert.equal(grouped[1].type, "message");
+  assert.equal(grouped[1].message.id, "m");
+  assert.equal(grouped[2].type, "message");
+  assert.equal(grouped[2].message.id, "u");
+});
+
+test("groupMessages: system note after activity keeps original order", () => {
   const grouped = groupMessages([
     { id: "m", role: "assistant", content: "answer", isFinalReply: true },
     { id: "a", role: "tool_activity", toolName: "read" },
@@ -119,25 +133,23 @@ test("groupMessages: assistant is not hoisted when non-auxiliary message trails"
   assert.equal(grouped.length, 3);
   assert.equal(grouped[0].type, "message");
   assert.equal(grouped[0].message.id, "m");
-  assert.equal(grouped[1].type, "tool-run");
+  assert.equal(grouped[1].type, "activity-run");
   assert.equal(grouped[2].type, "message");
   assert.equal(grouped[2].message.id, "s");
 });
 
-test("groupMessages: toolCalls assistant is not the hoist target", () => {
+test("groupMessages: toolCalls assistant is hoisted as activity, not final reply", () => {
   const grouped = groupMessages([
     { id: "m", role: "assistant", content: "answer", isFinalReply: true },
     { id: "a", role: "tool_activity", toolName: "read" },
     { id: "g", role: "assistant", toolCalls: [{ toolName: "read" }] },
   ]);
 
-  assert.equal(grouped.length, 3);
-  assert.equal(grouped[0].type, "tool-run");
-  assert.deepEqual(grouped[0].tools.map((t) => t.id), ["a"]);
+  assert.equal(grouped.length, 2);
+  assert.equal(grouped[0].type, "activity-run");
+  assert.deepEqual(grouped[0].activity.map((item) => item.id), ["a", "g"]);
   assert.equal(grouped[1].type, "message");
-  assert.equal(grouped[1].message.id, "g");
-  assert.equal(grouped[2].type, "message");
-  assert.equal(grouped[2].message.id, "m");
+  assert.equal(grouped[1].message.id, "m");
 });
 
 test("groupMessages: no reordering when timeline has no assistant reply", () => {
@@ -150,6 +162,6 @@ test("groupMessages: no reordering when timeline has no assistant reply", () => 
   assert.equal(grouped.length, 2);
   assert.equal(grouped[0].type, "message");
   assert.equal(grouped[0].message.id, "u");
-  assert.equal(grouped[1].type, "tool-run");
-  assert.deepEqual(grouped[1].tools.map((t) => t.id), ["a", "b"]);
+  assert.equal(grouped[1].type, "activity-run");
+  assert.deepEqual(grouped[1].activity.map((item) => item.id), ["a", "b"]);
 });
