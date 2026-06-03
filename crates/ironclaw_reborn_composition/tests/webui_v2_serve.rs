@@ -1339,8 +1339,14 @@ async fn static_chat_events_clear_gate_when_run_resumes() {
         "non-blocked run_status updates must clear stale gates for the resumed run"
     );
     assert!(
-        body.contains("progress.turn_run_id,\n              promptRunIdRef,"),
-        "typed running/progress events must clear stale gates for the resumed run"
+        !body.contains(
+            "clearPendingGateForRun(\n              setPendingGate,\n              progress.turn_run_id,"
+        ),
+        "typed running/progress events must not clear blocked auth gates"
+    );
+    assert!(
+        body.contains("clearPendingNonAuthGateForRun(\n              setPendingGate,\n              progress.turn_run_id,\n              promptRunIdRef,"),
+        "typed running/progress events should still clear stale non-auth gates"
     );
     assert!(
         body.contains("promptRunIdRef?.current === activeRunId"),

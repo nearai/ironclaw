@@ -60,6 +60,43 @@ pub(super) fn sanitize_error_code(error: &str) -> &str {
     }
 }
 
+/// Build a server-log diagnostic string for a `reqwest` transport
+/// failure. `reqwest::Error`'s own `Display` is only "error sending
+/// request for url (…)"; the actionable cause — TLS handshake failure,
+/// DNS resolution error, connection refused, or a per-call timeout —
+/// lives in its source chain and in the `is_*` kind flags. This walks
+/// both so the OAuth flow log says *why* the exchange could not be sent.
+///
+/// Server-log only: callers wrap the result in an `OAuthError` that the
+/// route layer maps to an opaque client code; it is never echoed to the
+/// browser.
+pub(super) fn describe_transport_error(err: &reqwest::Error) -> String {
+    let mut message = err.to_string();
+    let mut source = std::error::Error::source(err);
+    while let Some(cause) = source {
+        message.push_str(": ");
+        message.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    let mut kinds = Vec::new();
+    if err.is_timeout() {
+        kinds.push("timeout");
+    }
+    if err.is_connect() {
+        kinds.push("connect");
+    }
+    if err.is_request() {
+        kinds.push("request");
+    }
+    if err.is_body() {
+        kinds.push("body");
+    }
+    if !kinds.is_empty() {
+        message.push_str(&format!(" [{}]", kinds.join(",")));
+    }
+    message
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

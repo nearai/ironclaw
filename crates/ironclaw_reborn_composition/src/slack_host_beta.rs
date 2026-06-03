@@ -71,6 +71,7 @@ pub struct SlackHostBetaConfig {
 }
 
 impl SlackHostBetaConfig {
+    // arch-exempt: too_many_args, needs SlackHostBetaBootstrap aggregation, plan #4418
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         tenant_id: TenantId,
@@ -136,6 +137,10 @@ pub fn build_slack_events_route_mount(
     runtime: &RebornRuntime,
     config: SlackHostBetaConfig,
 ) -> Result<PublicRouteMount, SlackHostBetaBuildError> {
+    tracing::warn!(
+        "Slack host-beta uses in-memory conversation bindings, idempotency ledger, and outbound state; Slack continuity, retry deduplication, and delivery state are lost on process restart"
+    );
+
     let adapter_id = ProductAdapterId::new(SLACK_ADAPTER_ID)
         .map_err(|reason| invalid_config("adapter_id", reason.to_string()))?;
     let token_handle = EgressCredentialHandle::new(SLACK_BOT_TOKEN_HANDLE)

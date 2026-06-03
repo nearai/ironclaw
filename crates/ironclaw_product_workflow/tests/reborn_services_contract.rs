@@ -539,6 +539,7 @@ impl RecordingLifecycleFacade {
             description: "test extension".to_string(),
             source: LifecycleExtensionSource::HostBundled,
             runtime_kind: LifecycleExtensionRuntimeKind::FirstParty,
+            visible_capability_ids: Vec::new(),
             visible_read_only_capability_ids: Vec::new(),
             credential_requirements: self.credential_requirements.clone(),
             onboarding: self.onboarding.clone(),
@@ -3472,6 +3473,7 @@ async fn list_extensions_projects_onboarding_payload_through_reborn_services() {
         .expect("extension list response");
     let extension = response.extensions.first().expect("one extension");
 
+    assert_eq!(extension.tools, vec!["github.read", "github.write"]);
     assert_eq!(
         extension.onboarding_state,
         Some(RebornExtensionOnboardingState::SetupRequired)
@@ -3634,6 +3636,7 @@ fn extension_summary(
         description: "test extension".to_string(),
         source: LifecycleExtensionSource::HostBundled,
         runtime_kind: LifecycleExtensionRuntimeKind::FirstParty,
+        visible_capability_ids: vec![format!("{package_id}.read"), format!("{package_id}.write")],
         visible_read_only_capability_ids: Vec::new(),
         credential_requirements,
         onboarding,

@@ -4,6 +4,7 @@ use std::{
 };
 
 use crate::parser::starts_with_frontmatter_delimiter;
+use crate::validation::normalize_skill_identifier;
 use crate::{
     MAX_PROMPT_FILE_SIZE, ParsedSkill, SkillParseError, normalize_line_endings, parse_skill_md,
     validate_skill_name,
@@ -320,18 +321,6 @@ pub async fn install_skill(
             SkillManagementErrorKind::Resource,
         ));
     }
-    if let Some(requested_name) = request.name
-        && requested_name != prepared.parsed.manifest.name
-    {
-        tracing::debug!(
-            requested_name,
-            parsed_name = %prepared.parsed.manifest.name,
-            "skill install rejected name mismatch"
-        );
-        return Err(SkillManagementError::new(
-            SkillManagementErrorKind::InvalidInput,
-        ));
-    }
     validate_install_bundle_files(request.files)?;
 
     let skill_name = prepared.parsed.manifest.name;
@@ -414,10 +403,13 @@ fn prepare_install_content(
 ) -> Result<PreparedSkillInstall, SkillManagementError> {
     let normalized_content = normalize_line_endings(content);
     match parse_skill_md(&normalized_content) {
-        Ok(parsed) => Ok(PreparedSkillInstall {
-            content: normalized_content,
-            parsed,
-        }),
+        Ok(parsed) => {
+            validate_requested_name_matches_manifest(requested_name, &parsed.manifest.name)?;
+            Ok(PreparedSkillInstall {
+                content: normalized_content,
+                parsed,
+            })
+        }
         Err(SkillParseError::MissingFrontmatter)
             if !starts_with_frontmatter_delimiter(&normalized_content) =>
         {
@@ -435,6 +427,25 @@ fn prepare_install_content(
     }
 }
 
+fn validate_requested_name_matches_manifest(
+    requested_name: Option<&str>,
+    manifest_name: &str,
+) -> Result<(), SkillManagementError> {
+    if let Some(requested_name) = requested_name
+        && normalize_skill_identifier(requested_name).as_deref() != Some(manifest_name)
+    {
+        tracing::debug!(
+            requested_name,
+            parsed_name = %manifest_name,
+            "skill install rejected name mismatch"
+        );
+        return Err(SkillManagementError::new(
+            SkillManagementErrorKind::InvalidInput,
+        ));
+    }
+    Ok(())
+}
+
 fn synthesize_install_frontmatter(
     normalized_content: &str,
     requested_name: Option<&str>,
@@ -444,7 +455,7 @@ fn synthesize_install_frontmatter(
         tracing::debug!(%error, "skill install failed to parse SKILL.md content");
         return Err(skill_parse_error(error));
     };
-    if !validate_skill_name(requested_name) {
+    let Some(skill_name) = normalize_skill_identifier(requested_name) else {
         tracing::debug!(
             requested_name,
             "skill install rejected invalid requested name"
@@ -452,9 +463,9 @@ fn synthesize_install_frontmatter(
         return Err(SkillManagementError::new(
             SkillManagementErrorKind::InvalidInput,
         ));
-    }
+    };
 
-    let mut rendered = format!("---\nname: {requested_name}\n---\n\n");
+    let mut rendered = format!("---\nname: {skill_name}\n---\n\n");
     rendered.push_str(normalized_content);
     Ok(rendered)
 }

@@ -204,6 +204,39 @@ pub mod host_api {
     pub use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
 }
 
+/// Reborn-owned WebChat user-identity store, re-exported so host
+/// binaries reach it through this composition facade instead of taking a
+/// direct `ironclaw_reborn` dependency (the
+/// `reborn_cli_binary_crate_stays_separate_from_v1_root` architecture
+/// boundary forbids that). The store is a reborn-owned repository;
+/// [`open_webui_user_store`] opens it so the libSQL substrate handle
+/// stays private to this facade and callers never construct one.
+#[cfg(feature = "webui-v2-beta")]
+pub use ironclaw_reborn::webui_users::{
+    RebornLibSqlUserStore, RebornUserStoreError, ResolveIdentity,
+};
+
+/// Open the reborn-owned WebChat user-identity store on the substrate DB
+/// at `path`, creating the parent directory and running its idempotent
+/// migrations. Keeps the libSQL handle private to the composition layer
+/// (composition CLAUDE.md: "keep lower substrate handles private").
+#[cfg(feature = "webui-v2-beta")]
+pub async fn open_webui_user_store(
+    path: &std::path::Path,
+) -> Result<std::sync::Arc<RebornLibSqlUserStore>, RebornUserStoreError> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|err| RebornUserStoreError::Backend(err.to_string()))?;
+    }
+    let db = std::sync::Arc::new(
+        libsql::Builder::new_local(path)
+            .build()
+            .await
+            .map_err(|err| RebornUserStoreError::Backend(err.to_string()))?,
+    );
+    Ok(std::sync::Arc::new(RebornLibSqlUserStore::open(db).await?))
+}
+
 /// Reborn model purpose slot names exposed for diagnostic callers.
 ///
 /// This keeps CLI diagnostics on the composition boundary instead of making

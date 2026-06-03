@@ -1,6 +1,6 @@
 use ironclaw_extensions::{
-    CapabilityVisibility, ExtensionAssetPath, ExtensionManifest, ExtensionPackage,
-    ExtensionRuntime, ManifestSource,
+    CapabilityDeclV2, CapabilityVisibility, ExtensionAssetPath, ExtensionManifest,
+    ExtensionPackage, ExtensionRuntime, ManifestSource,
 };
 use ironclaw_filesystem::{FileType, FilesystemError, RootFilesystem};
 use ironclaw_host_api::{CapabilityId, ExtensionId, VirtualPath, sha256_digest_token};
@@ -70,7 +70,10 @@ pub(crate) struct AvailableExtensionPackage {
 
 impl AvailableExtensionPackage {
     pub(crate) fn summary(&self) -> LifecycleExtensionSummary {
-        let visible_read_only_capability_ids = visible_capability_ids(self)
+        let visible_capability_ids = visible_capability_ids(self)
+            .map(|id| id.as_str().to_string())
+            .collect::<Vec<_>>();
+        let visible_read_only_capability_ids = visible_read_only_capability_ids(self)
             .map(|id| id.as_str().to_string())
             .collect::<Vec<_>>();
         LifecycleExtensionSummary {
@@ -80,6 +83,7 @@ impl AvailableExtensionPackage {
             description: self.package.manifest.description.clone(),
             source: LifecycleExtensionSource::HostBundled,
             runtime_kind: runtime_kind(&self.package.manifest.runtime),
+            visible_capability_ids,
             visible_read_only_capability_ids,
             credential_requirements: credential_requirements(self),
             onboarding: onboarding(self.package_ref.id.as_str()),
@@ -1392,14 +1396,26 @@ fn map_binding_error(error: impl std::fmt::Display) -> ProductWorkflowError {
 pub(crate) fn visible_capability_ids(
     extension: &AvailableExtensionPackage,
 ) -> impl Iterator<Item = &CapabilityId> {
+    visible_capabilities(extension).map(|capability| &capability.id)
+}
+
+pub(crate) fn visible_read_only_capability_ids(
+    extension: &AvailableExtensionPackage,
+) -> impl Iterator<Item = &CapabilityId> {
+    visible_capabilities(extension)
+        .filter(|capability| !capability.effects.iter().any(|effect| effect.is_write()))
+        .map(|capability| &capability.id)
+}
+
+fn visible_capabilities(
+    extension: &AvailableExtensionPackage,
+) -> impl Iterator<Item = &CapabilityDeclV2> {
     extension
         .package
         .manifest
         .capabilities
         .iter()
         .filter(|capability| capability.visibility == CapabilityVisibility::Model)
-        .filter(|capability| !capability.effects.iter().any(|effect| effect.is_write()))
-        .map(|capability| &capability.id)
 }
 
 #[cfg(test)]
@@ -1425,10 +1441,27 @@ mod tests {
     use crate::nearai_mcp::nearai_mcp_endpoint_from_base;
 
     #[test]
-    fn visible_capability_ids_excludes_write_effects() {
+    fn visible_capability_ids_include_write_effects() {
         let extension = test_extension_package();
 
         let visible = visible_capability_ids(&extension)
+            .cloned()
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            visible,
+            vec![
+                CapabilityId::new("fixture.search").unwrap(),
+                CapabilityId::new("fixture.write").unwrap()
+            ]
+        );
+    }
+
+    #[test]
+    fn visible_read_only_capability_ids_excludes_write_effects() {
+        let extension = test_extension_package();
+
+        let visible = visible_read_only_capability_ids(&extension)
             .cloned()
             .collect::<Vec<_>>();
 
@@ -1639,6 +1672,11 @@ mod tests {
         assert!(capabilities.contains_key("google-drive.upload_file"));
 
         let summary = package.summary();
+        assert!(
+            summary
+                .visible_capability_ids
+                .contains(&"google-drive.upload_file".to_string())
+        );
         assert!(
             summary
                 .visible_read_only_capability_ids

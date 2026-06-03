@@ -40,6 +40,14 @@ function credentialStoredGateResolutionError(cause) {
   return error;
 }
 
+function threadNeedsSidebarRefresh(threadId) {
+  const cached = queryClient.getQueryData?.(["threads"]);
+  const threads = cached?.threads;
+  if (!Array.isArray(threads)) return true;
+  const thread = threads.find((item) => item.thread_id === threadId || item.id === threadId);
+  return !thread?.title;
+}
+
 function submitResponseResumedTurnGate(response) {
   return response?.continuation?.type === "turn_gate_resume";
 }
@@ -117,6 +125,19 @@ export function useChat(threadId) {
     credentialRef: null,
     inFlight: false,
   });
+
+  // Per-thread transient state must not leak across thread switches.
+  // Without this reset, clicking "+ New" while the previous thread is
+  // still processing renders the TypingIndicator on the empty new
+  // thread. The SSE subscription for the new thread will set these
+  // back to non-default values if that thread actually has an active
+  // run / gate. `cooldownUntil` is intentionally not reset — it's a
+  // rate-limit timer that applies across threads.
+  React.useEffect(() => {
+    setIsProcessing(false);
+    setPendingGate(null);
+    setActiveRun(null);
+  }, [threadId]);
 
   const cooldownSeconds = Math.max(0, Math.ceil((cooldownUntil - now) / 1000));
   const pendingAuthGateKey =
@@ -262,6 +283,12 @@ export function useChat(threadId) {
           threadId: sendThreadId,
           content,
         });
+        // Refresh the sidebar only while the cached entry is missing
+        // or title-less. Once the first-message title has appeared,
+        // repeated sends do not need to refetch the whole thread list.
+        if (threadNeedsSidebarRefresh(sendThreadId)) {
+          queryClient.invalidateQueries({ queryKey: ["threads"] });
+        }
         if (response?.run_id) {
           setActiveRun({
             runId: response.run_id,
@@ -284,7 +311,6 @@ export function useChat(threadId) {
         }
         return response;
       } catch (err) {
-        removePending(pendingMessagesRef.current, pendingKey, optimisticId);
         if (err.status === 429) {
           setCooldownUntil(Date.now() + retryAfterMs(err));
         }
@@ -302,6 +328,16 @@ export function useChat(threadId) {
         );
         setIsProcessing(false);
         throw err;
+      } finally {
+        // Drop the optimistic from the pending ref unconditionally:
+        // on success the confirmed row arrives via /timeline, and on
+        // failure we mark the optimistic with `status: "error"` in
+        // React state above — neither outcome needs the entry to
+        // linger in `pendingMessagesRef`. Pending ids are `pending-N`
+        // while server ids are `msg-<uuid>`, so id-based dedup in
+        // `messagesFromTimeline` cannot reconcile a stale pending
+        // against the server row that supersedes it.
+        removePending(pendingMessagesRef.current, pendingKey, optimisticId);
       }
     },
     [threadId, setMessages],
@@ -342,10 +378,14 @@ export function useChat(threadId) {
       if (!pendingGate) {
         throw new Error("auth gate is no longer pending");
       }
-      const { runId, gateRef, provider, accountLabel } = pendingGate;
-      if (!runId || !gateRef || !provider || !accountLabel) {
+      const { runId, gateRef, provider } = pendingGate;
+      if (!runId || !gateRef || !provider) {
         throw new Error("auth gate is missing required credential metadata");
       }
+      // `account_label` is optional on the prompt (gates.js defaults it to
+      // an empty string), so don't gate submission on it — derive a sensible
+      // label when the prompt didn't carry one.
+      const accountLabel = pendingGate.accountLabel || `${provider} credential`;
       const gateKey = `${runId}\n${gateRef}`;
       if (authTokenSubmitRef.current.gateKey !== gateKey) {
         authTokenSubmitRef.current = {
