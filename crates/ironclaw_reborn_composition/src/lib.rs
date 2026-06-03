@@ -80,6 +80,8 @@ mod slack_egress;
 #[cfg(feature = "slack-v2-host-beta")]
 mod slack_host_beta;
 #[cfg(feature = "slack-v2-host-beta")]
+mod slack_personal_binding;
+#[cfg(feature = "slack-v2-host-beta")]
 pub mod slack_serve;
 #[cfg(feature = "test-support")]
 pub mod test_support;
@@ -187,6 +189,12 @@ pub use slack_egress::{
 pub use slack_host_beta::{
     SlackHostBetaBuildError, SlackHostBetaConfig, build_slack_events_route_mount,
     build_slack_events_route_mount_with_actor_user_resolver,
+};
+#[cfg(feature = "slack-v2-host-beta")]
+pub use slack_personal_binding::{
+    RebornUserIdentityBinding, RebornUserIdentityBindingError, RebornUserIdentityBindingStore,
+    SlackPersonalBindingInstallation, SlackPersonalUserBindingError,
+    SlackPersonalUserBindingRequest, SlackPersonalUserBindingService,
 };
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack_serve::{

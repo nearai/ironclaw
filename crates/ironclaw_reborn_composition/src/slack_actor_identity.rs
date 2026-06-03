@@ -19,7 +19,7 @@ use ironclaw_slack_v2_adapter::SLACK_USER_ACTOR_KIND;
 use thiserror::Error;
 
 const SLACK_ADAPTER_ID: &str = "slack_v2";
-const SLACK_PROVIDER: &str = "slack";
+pub(crate) const SLACK_IDENTITY_PROVIDER: &str = "slack";
 const SLACK_IDENTITY_CACHE_TTL: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Error)]
@@ -125,7 +125,7 @@ impl ProductActorUserResolver for SlackUserIdentityActorResolver {
         }
         let resolved = self
             .lookup
-            .resolve_user_identity(SLACK_PROVIDER, &provider_user_id)
+            .resolve_user_identity(SLACK_IDENTITY_PROVIDER, &provider_user_id)
             .await
             .map_err(|error| ProductWorkflowError::BindingResolutionFailed {
                 reason: error.to_string(),
