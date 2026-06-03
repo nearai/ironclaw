@@ -158,7 +158,7 @@ fn runtime_kind(runtime: &ExtensionRuntime) -> LifecycleExtensionRuntimeKind {
 fn credential_requirements(
     package: &AvailableExtensionPackage,
 ) -> Vec<LifecycleExtensionCredentialRequirement> {
-    let mut requirements = Vec::new();
+    let mut requirements: Vec<LifecycleExtensionCredentialRequirement> = Vec::new();
     for capability in &package.package.manifest.capabilities {
         for requirement in &capability.runtime_credentials {
             let ironclaw_host_api::RuntimeCredentialRequirementSource::ProductAuthAccount {
@@ -169,10 +169,9 @@ fn credential_requirements(
                 continue;
             };
             let name = requirement.handle.as_str().to_string();
-            if requirements
-                .iter()
-                .any(|seen: &LifecycleExtensionCredentialRequirement| seen.name == name)
-            {
+            if let Some(seen) = requirements.iter_mut().find(|seen| seen.name == name) {
+                seen.required |= requirement.required;
+                merge_credential_setup(&mut seen.setup, setup);
                 continue;
             }
             requirements.push(LifecycleExtensionCredentialRequirement {
@@ -184,6 +183,26 @@ fn credential_requirements(
         }
     }
     requirements
+}
+
+fn merge_credential_setup(
+    existing: &mut LifecycleExtensionCredentialSetup,
+    setup: &ironclaw_host_api::RuntimeCredentialAccountSetup,
+) {
+    let (
+        LifecycleExtensionCredentialSetup::OAuth { scopes },
+        ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
+            scopes: additional_scopes,
+        },
+    ) = (existing, setup)
+    else {
+        return;
+    };
+    for scope in additional_scopes {
+        if !scopes.iter().any(|seen| seen == scope) {
+            scopes.push(scope.clone());
+        }
+    }
 }
 
 fn credential_setup(
@@ -1377,7 +1396,10 @@ mod tests {
         BackendCapabilities, DirEntry, FileStat, FilesystemError, FilesystemOperation,
         InMemoryBackend,
     };
-    use ironclaw_host_api::{EffectKind, HostPortCatalog};
+    use ironclaw_host_api::{
+        EffectKind, HostPortCatalog, RuntimeCredentialAccountSetup,
+        RuntimeCredentialRequirementSource,
+    };
 
     use super::*;
     use crate::nearai_mcp::nearai_mcp_endpoint_from_base;
@@ -1494,6 +1516,82 @@ mod tests {
             &requirement.setup,
             LifecycleExtensionCredentialSetup::OAuth { scopes } if scopes.is_empty()
         ));
+    }
+
+    #[test]
+    fn bundled_gsuite_wasm_credentials_declare_oauth_setup() {
+        let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
+
+        for extension_id in [
+            "google-docs",
+            "google-drive",
+            "google-sheets",
+            "google-slides",
+        ] {
+            let package_ref =
+                LifecyclePackageRef::new(LifecyclePackageKind::Extension, extension_id).unwrap();
+            let package = catalog.resolve(&package_ref).unwrap();
+            let summary = package.summary();
+            let google_requirement = summary
+                .credential_requirements
+                .iter()
+                .find(|requirement| requirement.provider == "google")
+                .unwrap_or_else(|| panic!("{extension_id} should expose Google OAuth setup"));
+            let LifecycleExtensionCredentialSetup::OAuth {
+                scopes: summary_scopes,
+            } = &google_requirement.setup
+            else {
+                panic!("{extension_id} should expose Google OAuth setup");
+            };
+
+            assert!(
+                !summary_scopes.is_empty(),
+                "{extension_id} should expose Google OAuth setup in its lifecycle summary"
+            );
+
+            let mut credential_count = 0;
+            let mut capability_scopes = Vec::new();
+            for capability in &package.package.manifest.capabilities {
+                for credential in &capability.runtime_credentials {
+                    let RuntimeCredentialRequirementSource::ProductAuthAccount { provider, setup } =
+                        &credential.source
+                    else {
+                        panic!(
+                            "{extension_id} capability {} should use a Google product auth account",
+                            capability.id
+                        );
+                    };
+                    assert_eq!(provider.as_str(), "google");
+
+                    let RuntimeCredentialAccountSetup::OAuth { scopes } = setup else {
+                        panic!(
+                            "{extension_id} capability {} should declare OAuth setup",
+                            capability.id
+                        );
+                    };
+                    assert_eq!(
+                        scopes, &credential.provider_scopes,
+                        "{extension_id} capability {} OAuth setup scopes should match requested provider scopes",
+                        capability.id
+                    );
+                    for scope in scopes {
+                        if !capability_scopes.iter().any(|seen| seen == scope) {
+                            capability_scopes.push(scope.clone());
+                        }
+                    }
+                    credential_count += 1;
+                }
+            }
+
+            assert_eq!(
+                summary_scopes, &capability_scopes,
+                "{extension_id} lifecycle setup should request the package's unique OAuth scopes"
+            );
+            assert!(
+                credential_count > 0,
+                "{extension_id} should declare runtime credentials"
+            );
+        }
     }
 
     #[test]
