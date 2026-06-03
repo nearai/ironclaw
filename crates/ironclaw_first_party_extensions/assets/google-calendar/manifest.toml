@@ -16,7 +16,7 @@ effects = ["dispatch_capability", "network", "use_secret"]
 default_permission = "allow"
 visibility = "model"
 runtime_credentials = [
-  { handle = "google_calendar_account", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/calendar.readonly", "https://www.googleapis.com/auth/calendar.events", "https://www.googleapis.com/auth/gmail.readonly", "https://www.googleapis.com/auth/gmail.send", "https://www.googleapis.com/auth/gmail.modify"] } }, audience = { scheme = "https", host_pattern = "www.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+  { handle = "google_calendar_account", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/calendar.readonly"] } }, audience = { scheme = "https", host_pattern = "www.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
 ]
 input_schema_ref = "schemas/google-calendar/list_calendars.input.v1.json"
 output_schema_ref = "schemas/google-calendar/list_calendars.output.v1.json"
@@ -29,7 +29,7 @@ effects = ["dispatch_capability", "network", "use_secret"]
 default_permission = "allow"
 visibility = "model"
 runtime_credentials = [
-  { handle = "google_calendar_account", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/calendar.readonly", "https://www.googleapis.com/auth/calendar.events", "https://www.googleapis.com/auth/gmail.readonly", "https://www.googleapis.com/auth/gmail.send", "https://www.googleapis.com/auth/gmail.modify"] } }, audience = { scheme = "https", host_pattern = "www.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+  { handle = "google_calendar_account", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/calendar.readonly"] } }, audience = { scheme = "https", host_pattern = "www.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
 ]
 input_schema_ref = "schemas/google-calendar/list_events.input.v1.json"
 output_schema_ref = "schemas/google-calendar/list_events.output.v1.json"
@@ -42,7 +42,7 @@ effects = ["dispatch_capability", "network", "use_secret"]
 default_permission = "allow"
 visibility = "model"
 runtime_credentials = [
-  { handle = "google_calendar_account", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/calendar.readonly", "https://www.googleapis.com/auth/calendar.events", "https://www.googleapis.com/auth/gmail.readonly", "https://www.googleapis.com/auth/gmail.send", "https://www.googleapis.com/auth/gmail.modify"] } }, audience = { scheme = "https", host_pattern = "www.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+  { handle = "google_calendar_account", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/calendar.readonly"] } }, audience = { scheme = "https", host_pattern = "www.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
 ]
 input_schema_ref = "schemas/google-calendar/get_event.input.v1.json"
 output_schema_ref = "schemas/google-calendar/get_event.output.v1.json"
@@ -55,7 +55,7 @@ effects = ["dispatch_capability", "network", "use_secret"]
 default_permission = "allow"
 visibility = "model"
 runtime_credentials = [
-  { handle = "google_calendar_account", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/calendar.readonly", "https://www.googleapis.com/auth/calendar.events", "https://www.googleapis.com/auth/gmail.readonly", "https://www.googleapis.com/auth/gmail.send", "https://www.googleapis.com/auth/gmail.modify"] } }, audience = { scheme = "https", host_pattern = "www.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+  { handle = "google_calendar_account", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/calendar.readonly"] } }, audience = { scheme = "https", host_pattern = "www.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
 ]
 input_schema_ref = "schemas/google-calendar/find_free_slots.input.v1.json"
 output_schema_ref = "schemas/google-calendar/find_free_slots.output.v1.json"
@@ -68,7 +68,7 @@ effects = ["dispatch_capability", "network", "use_secret", "external_write"]
 default_permission = "ask"
 visibility = "model"
 runtime_credentials = [
-  { handle = "google_calendar_account", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/calendar.readonly", "https://www.googleapis.com/auth/calendar.events", "https://www.googleapis.com/auth/gmail.readonly", "https://www.googleapis.com/auth/gmail.send", "https://www.googleapis.com/auth/gmail.modify"] } }, audience = { scheme = "https", host_pattern = "www.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+  { handle = "google_calendar_account", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/calendar.events"] } }, audience = { scheme = "https", host_pattern = "www.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
 ]
 input_schema_ref = "schemas/google-calendar/create_event.input.v1.json"
 output_schema_ref = "schemas/google-calendar/create_event.output.v1.json"
@@ -81,7 +81,7 @@ effects = ["dispatch_capability", "network", "use_secret", "external_write"]
 default_permission = "ask"
 visibility = "model"
 runtime_credentials = [
-  { handle = "google_calendar_account", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/calendar.readonly", "https://www.googleapis.com/auth/calendar.events", "https://www.googleapis.com/auth/gmail.readonly", "https://www.googleapis.com/auth/gmail.send", "https://www.googleapis.com/auth/gmail.modify"] } }, audience = { scheme = "https", host_pattern = "www.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+  { handle = "google_calendar_account", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/calendar.events"] } }, audience = { scheme = "https", host_pattern = "www.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
 ]
 input_schema_ref = "schemas/google-calendar/update_event.input.v1.json"
 output_schema_ref = "schemas/google-calendar/update_event.output.v1.json"
@@ -94,7 +94,7 @@ effects = ["dispatch_capability", "network", "use_secret", "external_write"]
 default_permission = "ask"
 visibility = "model"
 runtime_credentials = [
-  { handle = "google_calendar_account", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/calendar.readonly", "https://www.googleapis.com/auth/calendar.events", "https://www.googleapis.com/auth/gmail.readonly", "https://www.googleapis.com/auth/gmail.send", "https://www.googleapis.com/auth/gmail.modify"] } }, audience = { scheme = "https", host_pattern = "www.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+  { handle = "google_calendar_account", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/calendar.events"] } }, audience = { scheme = "https", host_pattern = "www.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
 ]
 input_schema_ref = "schemas/google-calendar/delete_event.input.v1.json"
 output_schema_ref = "schemas/google-calendar/delete_event.output.v1.json"
@@ -107,7 +107,7 @@ effects = ["dispatch_capability", "network", "use_secret", "external_write"]
 default_permission = "ask"
 visibility = "model"
 runtime_credentials = [
-  { handle = "google_calendar_account", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/calendar.readonly", "https://www.googleapis.com/auth/calendar.events", "https://www.googleapis.com/auth/gmail.readonly", "https://www.googleapis.com/auth/gmail.send", "https://www.googleapis.com/auth/gmail.modify"] } }, audience = { scheme = "https", host_pattern = "www.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+  { handle = "google_calendar_account", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/calendar.events"] } }, audience = { scheme = "https", host_pattern = "www.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
 ]
 input_schema_ref = "schemas/google-calendar/add_attendees.input.v1.json"
 output_schema_ref = "schemas/google-calendar/add_attendees.output.v1.json"
@@ -120,7 +120,7 @@ effects = ["dispatch_capability", "network", "use_secret", "external_write"]
 default_permission = "ask"
 visibility = "model"
 runtime_credentials = [
-  { handle = "google_calendar_account", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/calendar.readonly", "https://www.googleapis.com/auth/calendar.events", "https://www.googleapis.com/auth/gmail.readonly", "https://www.googleapis.com/auth/gmail.send", "https://www.googleapis.com/auth/gmail.modify"] } }, audience = { scheme = "https", host_pattern = "www.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+  { handle = "google_calendar_account", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/calendar.events"] } }, audience = { scheme = "https", host_pattern = "www.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
 ]
 input_schema_ref = "schemas/google-calendar/set_reminder.input.v1.json"
 output_schema_ref = "schemas/google-calendar/set_reminder.output.v1.json"

@@ -24,10 +24,9 @@ use crate::{
     SecretSubmitResult, Timestamp, TurnGateAuthFlowQuery,
     cleanup::SecretCleanupAction::Deactivate,
     domain::{
-        PreparedCallbackFlow, account_is_authorized_for_requester, merge_provider_scopes,
-        prepare_callback_flow, recovery_projection_for_single_account,
-        recovery_projection_for_unconfigured_accounts, update_account_from_exchange,
-        update_account_from_request, validate_account_update_target,
+        PreparedCallbackFlow, account_is_authorized_for_requester, prepare_callback_flow,
+        recovery_projection_for_single_account, recovery_projection_for_unconfigured_accounts,
+        update_account_from_exchange, update_account_from_request, validate_account_update_target,
         validate_bound_update_authority, validate_callback_claim,
         validate_credential_status_transition, validate_flow_update_binding,
         validate_manual_token_flow, validate_manual_token_update_binding,
@@ -743,7 +742,7 @@ impl CredentialAccountService for InMemoryAuthProductServices {
                 if let Some(refresh_secret) = refresh.refresh_secret {
                     account.refresh_secret = Some(refresh_secret);
                 }
-                account.scopes = merge_provider_scopes(&account.scopes, &refresh.scopes);
+                account.scopes = refresh.scopes;
                 account.status = CredentialAccountStatus::Configured;
                 account.updated_at = Utc::now();
                 Ok(CredentialRefreshReport {

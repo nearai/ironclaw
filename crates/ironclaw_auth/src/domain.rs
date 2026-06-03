@@ -5,8 +5,8 @@ use crate::{
     CredentialAccount, CredentialAccountUpdateBinding, CredentialOwnership, CredentialRecoveryKind,
     CredentialRecoveryProjection, CredentialRecoveryReason, CredentialRefreshRequest,
     CredentialSelectionInput, ManualTokenCompletionInput, ManualTokenSetupRequest, NewAuthFlow,
-    NewCredentialAccount, OAuthCallbackClaimRequest, OAuthProviderExchange, ProviderScope,
-    Timestamp, flow::credential_status_for_completed_flow, scope_matches,
+    NewCredentialAccount, OAuthCallbackClaimRequest, OAuthProviderExchange, Timestamp,
+    flow::credential_status_for_completed_flow, scope_matches,
 };
 
 pub struct PreparedCallbackFlow {
@@ -194,21 +194,8 @@ pub fn update_account_from_exchange(
     account.status = credential_status_for_completed_flow();
     account.access_secret = Some(exchange.access_secret.clone());
     account.refresh_secret = exchange.refresh_secret.clone();
-    account.scopes = merge_provider_scopes(&account.scopes, &exchange.scopes);
+    account.scopes = exchange.scopes.clone();
     account.updated_at = now;
-}
-
-pub fn merge_provider_scopes(
-    existing: &[ProviderScope],
-    incoming: &[ProviderScope],
-) -> Vec<ProviderScope> {
-    let mut merged = existing.to_vec();
-    for scope in incoming {
-        if !merged.iter().any(|existing| existing == scope) {
-            merged.push(scope.clone());
-        }
-    }
-    merged
 }
 
 pub fn update_account_from_request(
@@ -485,24 +472,64 @@ fn recovery_kind_and_reason_for_status(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        AuthProviderId, CredentialAccountId, CredentialAccountLabel, CredentialAccountStatus,
+        OAuthAuthorizationCode, OAuthProviderExchange, PkceVerifierSecret, ProviderScope,
+    };
+    use chrono::Utc;
+    use ironclaw_host_api::{InvocationId, ResourceScope, SecretHandle, UserId};
+    use secrecy::SecretString;
 
     #[test]
-    fn merge_provider_scopes_preserves_existing_order_and_appends_new_scopes() {
-        let existing = vec![
-            ProviderScope::new("scope:read").expect("scope"),
-            ProviderScope::new("scope:write").expect("scope"),
-        ];
-        let incoming = vec![
-            ProviderScope::new("scope:write").expect("scope"),
-            ProviderScope::new("scope:calendar").expect("scope"),
-        ];
+    fn update_account_from_exchange_replaces_provider_reported_scopes() {
+        let mut account = CredentialAccount {
+            id: CredentialAccountId::new(),
+            scope: crate::AuthProductScope::new(
+                ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new())
+                    .unwrap(),
+                crate::AuthSurface::Api,
+            ),
+            provider: AuthProviderId::new("github").unwrap(),
+            label: CredentialAccountLabel::new("github").unwrap(),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: Vec::new(),
+            access_secret: Some(SecretHandle::new("old-access").unwrap()),
+            refresh_secret: Some(SecretHandle::new("old-refresh").unwrap()),
+            scopes: vec![
+                ProviderScope::new("repo").unwrap(),
+                ProviderScope::new("admin:org").unwrap(),
+            ],
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let exchange = OAuthProviderExchange {
+            provider: AuthProviderId::new("github").unwrap(),
+            account_label: CredentialAccountLabel::new("github").unwrap(),
+            authorization_code_hash: crate::authorization_code_hash(
+                &OAuthAuthorizationCode::new(SecretString::from("code")).unwrap(),
+            )
+            .unwrap(),
+            pkce_verifier_hash: crate::pkce_verifier_hash(
+                &PkceVerifierSecret::new(SecretString::from("pkce")).unwrap(),
+            )
+            .unwrap(),
+            access_secret: SecretHandle::new("new-access").unwrap(),
+            refresh_secret: Some(SecretHandle::new("new-refresh").unwrap()),
+            scopes: vec![ProviderScope::new("repo").unwrap()],
+            account_id: None,
+        };
 
-        let merged = merge_provider_scopes(&existing, &incoming);
+        update_account_from_exchange(&mut account, &exchange, Utc::now());
 
-        let merged = merged
-            .iter()
-            .map(|scope| scope.as_str())
-            .collect::<Vec<_>>();
-        assert_eq!(merged, vec!["scope:read", "scope:write", "scope:calendar"]);
+        assert_eq!(
+            account
+                .scopes
+                .iter()
+                .map(|scope| scope.as_str())
+                .collect::<Vec<_>>(),
+            vec!["repo"]
+        );
     }
 }

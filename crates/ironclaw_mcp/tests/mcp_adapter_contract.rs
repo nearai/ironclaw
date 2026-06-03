@@ -326,6 +326,40 @@ async fn concrete_mcp_http_client_uses_negotiated_protocol_version_header() {
 }
 
 #[tokio::test]
+async fn concrete_mcp_http_client_rejects_missing_or_unsafe_initialize_protocol_version() {
+    for egress in [
+        RecordingRuntimeEgress::json_rpc_without_protocol_version(),
+        RecordingRuntimeEgress::json_rpc_with_protocol_version(""),
+        RecordingRuntimeEgress::json_rpc_with_protocol_version("2025/06/18"),
+        RecordingRuntimeEgress::json_rpc_with_protocol_version(
+            "2025-06-18-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ),
+    ] {
+        let client = McpHostHttpClient::new(
+            McpRuntimeHttpAdapter::new(Arc::new(egress)),
+            StaticMcpHostHttpEgressPlanner::new(host_http_plan()),
+        );
+
+        let error = client
+            .call_tool(McpClientRequest {
+                provider: ExtensionId::new("github-mcp").unwrap(),
+                capability_id: CapabilityId::new("github-mcp.search").unwrap(),
+                scope: sample_scope(),
+                transport: "http".to_string(),
+                command: None,
+                args: vec![],
+                url: Some("https://mcp.example.test/mcp".to_string()),
+                input: json!({"query": "ironclaw"}),
+                max_output_bytes: 4096,
+            })
+            .await
+            .expect_err("unsafe initialize protocol versions must fail the call");
+
+        assert_eq!(error, "response_error");
+    }
+}
+
+#[tokio::test]
 async fn concrete_mcp_http_client_sends_credentials_only_for_tool_call_exchange() {
     let scope = sample_scope();
     let mut plan = host_http_plan();
@@ -1158,6 +1192,7 @@ impl McpClient for RecordingMcpClient {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RecordedResponseMode {
     Json,
+    JsonMissingProtocolVersion,
     Sse,
 }
 
@@ -1177,6 +1212,14 @@ impl RecordingRuntimeEgress {
         Self {
             mode: RecordedResponseMode::Json,
             protocol_version,
+            requests: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn json_rpc_without_protocol_version() -> Self {
+        Self {
+            mode: RecordedResponseMode::JsonMissingProtocolVersion,
+            protocol_version: "2025-06-18",
             requests: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -1203,15 +1246,24 @@ impl RuntimeHttpEgress for RecordingRuntimeEgress {
         let method = json_rpc_method(&request.body);
         self.requests.lock().unwrap().push(request.clone());
         match method.as_str() {
-            "initialize" => Ok(runtime_json_response(
-                json_rpc_id(&request.body),
-                json!({
+            "initialize" => {
+                let mut result = json!({
                     "protocolVersion": self.protocol_version,
                     "capabilities": {"tools": {"listChanged": false}},
                     "serverInfo": {"name": "mock-mcp", "version": "1.0.0"}
-                }),
-                vec![("Mcp-Session-Id".to_string(), "session-123".to_string())],
-            )),
+                });
+                if self.mode == RecordedResponseMode::JsonMissingProtocolVersion {
+                    result
+                        .as_object_mut()
+                        .expect("initialize result is an object")
+                        .remove("protocolVersion");
+                }
+                Ok(runtime_json_response(
+                    json_rpc_id(&request.body),
+                    result,
+                    vec![("Mcp-Session-Id".to_string(), "session-123".to_string())],
+                ))
+            }
             "notifications/initialized" => Ok(RuntimeHttpEgressResponse {
                 status: 202,
                 headers: vec![],
@@ -1224,11 +1276,14 @@ impl RuntimeHttpEgress for RecordingRuntimeEgress {
             "tools/call" => {
                 let id = json_rpc_id(&request.body);
                 match self.mode {
-                    RecordedResponseMode::Json => Ok(runtime_json_response(
-                        id,
-                        json!({"content":[{"type":"text","text":"ok"}],"isError":false}),
-                        vec![],
-                    )),
+                    RecordedResponseMode::Json
+                    | RecordedResponseMode::JsonMissingProtocolVersion => {
+                        Ok(runtime_json_response(
+                            id,
+                            json!({"content":[{"type":"text","text":"ok"}],"isError":false}),
+                            vec![],
+                        ))
+                    }
                     RecordedResponseMode::Sse => Ok(runtime_sse_response(
                         id,
                         json!({"content":[{"type":"text","text":"ok from sse"}],"isError":false}),

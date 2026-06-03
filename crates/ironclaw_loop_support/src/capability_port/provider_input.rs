@@ -124,10 +124,41 @@ fn safe_schema_path_summary(path: &str) -> String {
     if trimmed.is_empty() || trimmed == "/" {
         return "root".to_string();
     }
-    trimmed
+    let summary = trimmed
         .trim_start_matches('/')
         .replace(['/', '\\', '[', ']'], ".")
-        .replace(['{', '}', '`', '<', '>'], "")
+        .replace(['{', '}', '`', '<', '>'], "");
+    scrub_sensitive_schema_path_markers(&summary)
+}
+
+fn scrub_sensitive_schema_path_markers(path: &str) -> String {
+    let mut scrubbed = path.to_string();
+    for marker in [
+        "tool_input",
+        "api_key",
+        "apikey",
+        "password",
+        "passwd",
+        "secret",
+        "bearer",
+        "access_token",
+        "access token",
+    ] {
+        scrubbed = replace_ascii_case_insensitive(&scrubbed, marker, "redacted");
+    }
+    scrubbed
+}
+
+fn replace_ascii_case_insensitive(input: &str, needle: &str, replacement: &str) -> String {
+    let mut remaining = input;
+    let mut replaced = String::with_capacity(input.len());
+    while let Some(index) = remaining.to_ascii_lowercase().find(needle) {
+        replaced.push_str(&remaining[..index]);
+        replaced.push_str(replacement);
+        remaining = &remaining[index + needle.len()..];
+    }
+    replaced.push_str(remaining);
+    replaced
 }
 
 fn schema_is_unresolved_ref(schema: &serde_json::Value) -> bool {

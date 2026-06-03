@@ -280,7 +280,9 @@ impl GsuiteDispatchError {
 }
 
 pub struct GsuiteCredentialStageRequest<'a> {
+    /// Scope where the resolved Google access-secret handle is stored.
     pub source_scope: &'a ResourceScope,
+    /// Runtime invocation scope that receives the staged credential injection.
     pub target_scope: &'a ResourceScope,
     pub capability_id: &'a CapabilityId,
     pub access_secret: &'a ironclaw_host_api::SecretHandle,

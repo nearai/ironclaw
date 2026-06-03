@@ -1306,6 +1306,49 @@ mod tests {
         );
     }
 
+    #[test]
+    fn dcr_oauth_callback_state_round_trips_callback_fields() {
+        let scope = sample_auth_scope();
+        let provider = AuthProviderId::new("notion").unwrap();
+        let account_label = CredentialAccountLabel::new("work notion").unwrap();
+        let requested_scopes = vec![ProviderScope::new("read").unwrap()];
+        let state = DcrOAuthCallbackState::new(
+            AuthFlowId::new(),
+            scope.clone(),
+            provider.clone(),
+            account_label.clone(),
+            requested_scopes.clone(),
+        );
+
+        let encoded = state.encode().expect("encoded DCR callback state");
+        let decoded = DcrOAuthCallbackState::decode(encoded.as_str())
+            .expect("encoded DCR callback state should decode");
+
+        assert!(DcrOAuthCallbackState::has_prefix(encoded.as_str()));
+        assert_eq!(decoded.flow_id(), state.flow_id());
+        assert_eq!(decoded.scope(), &scope);
+        assert_eq!(decoded.provider(), &provider);
+        assert_eq!(decoded.account_label(), &account_label);
+        assert_eq!(decoded.requested_scopes(), requested_scopes.as_slice());
+    }
+
+    #[test]
+    fn dcr_oauth_callback_state_rejects_missing_prefix_or_corrupt_payload() {
+        let missing_prefix = DcrOAuthCallbackState::decode("not-dcr-state")
+            .expect_err("missing DCR prefix should fail");
+        let corrupt_payload =
+            DcrOAuthCallbackState::decode("icd1.not-base64").expect_err("corrupt payload fails");
+
+        assert_eq!(
+            missing_prefix.code(),
+            ironclaw_auth::AuthErrorCode::MalformedCallback
+        );
+        assert_eq!(
+            corrupt_payload.code(),
+            ironclaw_auth::AuthErrorCode::MalformedCallback
+        );
+    }
+
     #[tokio::test]
     async fn discover_authorization_server_empty_authorization_servers_returns_backend_unavailable()
     {

@@ -9,8 +9,8 @@ use tokio::sync::OwnedMutexGuard;
 
 use crate::{
     AuthProductError, AuthProviderClient, CredentialAccountId, CredentialAccountLabel,
-    OAuthProviderRefreshRequest, ProviderScope, Timestamp, domain::merge_provider_scopes,
-    ids::AuthProviderId, scope::AuthProductScope, scope_matches,
+    OAuthProviderRefreshRequest, ProviderScope, Timestamp, ids::AuthProviderId,
+    scope::AuthProductScope, scope_matches,
 };
 
 /// Credential account status projected to product surfaces.
@@ -893,7 +893,7 @@ impl CredentialAccountService for ProviderBackedCredentialAccountService {
                             Some(refresh.access_secret),
                             refresh_secret,
                             CredentialAccountStatus::Configured,
-                            merge_provider_scopes(&current.scopes, &refresh.scopes),
+                            refresh.scopes,
                         ))
                         .await?;
                     self.report_for(&updated, request.requester_extension.as_ref(), true)

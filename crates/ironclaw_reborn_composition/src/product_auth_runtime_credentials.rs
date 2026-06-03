@@ -817,4 +817,118 @@ mod tests {
 
         assert_eq!(resolved.handle, latest_secret);
     }
+
+    #[tokio::test]
+    async fn resolver_does_not_auto_select_mixed_reusable_and_extension_owned_accounts() {
+        let accounts = Arc::new(InMemoryAuthProductServices::new());
+        let scope =
+            ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new())
+                .unwrap();
+        let auth_scope = AuthProductScope::new(scope.clone(), AuthSurface::Api);
+        let requester = ExtensionId::new("gmail").unwrap();
+        let google_scope =
+            ProviderScope::new("https://www.googleapis.com/auth/gmail.readonly").unwrap();
+        accounts
+            .create_account(NewCredentialAccount {
+                scope: auth_scope.clone(),
+                provider: AuthProviderId::new("google").unwrap(),
+                label: CredentialAccountLabel::new("reusable google").unwrap(),
+                status: CredentialAccountStatus::Configured,
+                ownership: CredentialOwnership::UserReusable,
+                owner_extension: None,
+                granted_extensions: Vec::new(),
+                access_secret: Some(SecretHandle::new("reusable-token").unwrap()),
+                refresh_secret: None,
+                scopes: vec![google_scope.clone()],
+            })
+            .await
+            .unwrap();
+        accounts
+            .create_account(NewCredentialAccount {
+                scope: auth_scope,
+                provider: AuthProviderId::new("google").unwrap(),
+                label: CredentialAccountLabel::new("extension google").unwrap(),
+                status: CredentialAccountStatus::Configured,
+                ownership: CredentialOwnership::ExtensionOwned,
+                owner_extension: Some(requester.clone()),
+                granted_extensions: Vec::new(),
+                access_secret: Some(SecretHandle::new("extension-token").unwrap()),
+                refresh_secret: None,
+                scopes: vec![google_scope.clone()],
+            })
+            .await
+            .unwrap();
+        let resolver = ProductAuthRuntimeCredentialResolver::new(Arc::new(
+            ProductAuthRuntimeCredentialAccountSelector::new(accounts),
+        ));
+
+        let error = resolver
+            .resolve_access_secret(RuntimeCredentialAccountRequest {
+                scope: &scope,
+                provider: &RuntimeCredentialAccountProviderId::new("google").unwrap(),
+                provider_scopes: &[google_scope.as_str().to_string()],
+                requester_extension: &requester,
+            })
+            .await
+            .expect_err("mixed ownership must require explicit account selection");
+
+        assert_eq!(error, CredentialStageError::AuthRequired);
+    }
+
+    #[tokio::test]
+    async fn resolver_does_not_auto_select_mixed_reusable_and_shared_admin_accounts() {
+        let accounts = Arc::new(InMemoryAuthProductServices::new());
+        let scope =
+            ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new())
+                .unwrap();
+        let auth_scope = AuthProductScope::new(scope.clone(), AuthSurface::Api);
+        let requester = ExtensionId::new("gmail").unwrap();
+        let google_scope =
+            ProviderScope::new("https://www.googleapis.com/auth/gmail.readonly").unwrap();
+        accounts
+            .create_account(NewCredentialAccount {
+                scope: auth_scope.clone(),
+                provider: AuthProviderId::new("google").unwrap(),
+                label: CredentialAccountLabel::new("reusable google").unwrap(),
+                status: CredentialAccountStatus::Configured,
+                ownership: CredentialOwnership::UserReusable,
+                owner_extension: None,
+                granted_extensions: Vec::new(),
+                access_secret: Some(SecretHandle::new("reusable-token").unwrap()),
+                refresh_secret: None,
+                scopes: vec![google_scope.clone()],
+            })
+            .await
+            .unwrap();
+        accounts
+            .create_account(NewCredentialAccount {
+                scope: auth_scope,
+                provider: AuthProviderId::new("google").unwrap(),
+                label: CredentialAccountLabel::new("shared google").unwrap(),
+                status: CredentialAccountStatus::Configured,
+                ownership: CredentialOwnership::SharedAdminManaged,
+                owner_extension: None,
+                granted_extensions: vec![requester.clone()],
+                access_secret: Some(SecretHandle::new("shared-token").unwrap()),
+                refresh_secret: None,
+                scopes: vec![google_scope.clone()],
+            })
+            .await
+            .unwrap();
+        let resolver = ProductAuthRuntimeCredentialResolver::new(Arc::new(
+            ProductAuthRuntimeCredentialAccountSelector::new(accounts),
+        ));
+
+        let error = resolver
+            .resolve_access_secret(RuntimeCredentialAccountRequest {
+                scope: &scope,
+                provider: &RuntimeCredentialAccountProviderId::new("google").unwrap(),
+                provider_scopes: &[google_scope.as_str().to_string()],
+                requester_extension: &requester,
+            })
+            .await
+            .expect_err("mixed sharing semantics must require explicit account selection");
+
+        assert_eq!(error, CredentialStageError::AuthRequired);
+    }
 }

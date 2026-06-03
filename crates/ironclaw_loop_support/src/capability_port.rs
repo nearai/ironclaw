@@ -47,6 +47,7 @@ use self::surface_snapshot::{
 // snapshot logic in `capability_port/surface_snapshot.rs` while preserving the
 // existing adapter boundary.
 const PROVIDER_TOOL_NAME_DIGEST_BYTES: usize = 32;
+const PROVIDER_TOOL_CALL_INPUT_REF_PREFIX: &str = "input:provider-tool-";
 
 #[async_trait]
 pub trait LoopCapabilityInputResolver: Send + Sync {
@@ -1544,16 +1545,20 @@ fn provider_tool_call_input_ref(
     );
     let digest = sha256_digest_token(payload.as_bytes());
     let digest = digest.strip_prefix("sha256:").unwrap_or(&digest);
-    CapabilityInputRef::new(format!("input:provider-tool-{digest}")).map_err(|_| {
-        AgentLoopHostError::new(
-            AgentLoopHostErrorKind::Internal,
-            "provider tool-call input ref could not be represented",
-        )
-    })
+    CapabilityInputRef::new(format!("{PROVIDER_TOOL_CALL_INPUT_REF_PREFIX}{digest}")).map_err(
+        |_| {
+            AgentLoopHostError::new(
+                AgentLoopHostErrorKind::Internal,
+                "provider tool-call input ref could not be represented",
+            )
+        },
+    )
 }
 
 fn is_provider_tool_call_input_ref(input_ref: &CapabilityInputRef) -> bool {
-    input_ref.as_str().starts_with("input:provider-tool-")
+    input_ref
+        .as_str()
+        .starts_with(PROVIDER_TOOL_CALL_INPUT_REF_PREFIX)
 }
 
 fn loop_surface_version(
@@ -2517,6 +2522,27 @@ mod tests {
         )
         .expect_err("composed schema constraints should fail before dispatch");
         assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+    }
+
+    #[test]
+    fn provider_argument_schema_failure_sanitizes_sensitive_path_markers() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "secret_api_key": { "type": "integer" }
+            }
+        });
+
+        let error = prepare_provider_arguments(
+            &serde_json::json!({ "secret_api_key": "not an integer" }),
+            &schema,
+            "provider arguments",
+        )
+        .expect_err("schema failure should remain a model-visible invocation error");
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+        assert!(!error.safe_summary.contains("secret"));
+        assert!(!error.safe_summary.contains("api_key"));
     }
 
     /// Regression for Gemini review comment: a plain string that starts with
