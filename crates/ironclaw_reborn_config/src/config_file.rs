@@ -37,7 +37,7 @@ use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use thiserror::Error;
 
 use crate::secrets_guard::{InlineSecretError, reject_inline_secret};
@@ -83,7 +83,7 @@ pub struct RebornConfigFile {
     /// "unlimited" for that dimension.
     pub budget: Option<BudgetSection>,
     /// Trigger poller lifecycle settings. All fields optional; absent section
-    /// leaves all limits at the compiled defaults in the composition root.
+    /// leaves the worker at the compiled defaults in the composition root.
     pub trigger_poller: Option<TriggerPollerConfigSection>,
 }
 
@@ -257,30 +257,24 @@ pub struct BudgetSection {
 /// All fields are optional so a sparse or absent section is valid; the
 /// composition root applies its own compiled defaults for any field not set
 /// here. Env vars override this section; CLI flags override env vars.
-#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TriggerPollerConfigSection {
     /// Enable or disable the trigger poller. Default `false` (off) in
     /// composition; operators MUST set `enabled = true` to activate it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
-    /// How often the poller ticks, in seconds. Default in composition is 60.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// How often the poller ticks, in seconds. Default in composition is 30.
     pub poll_interval_secs: Option<u64>,
-    /// Maximum triggers to fire per tick. Default in composition is 100.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Maximum triggers to fire per tick. Default in composition is 32.
     pub fires_per_tick: Option<u32>,
     /// Maximum concurrent fires allowed for a single trigger. Default in
     /// composition is 1.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_concurrent_fires_per_trigger: Option<u32>,
     /// Upper bound (seconds) of a random jitter delay before the first tick.
     /// Spreads startup load across instances. Default in composition is 0.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub startup_jitter_max_secs: Option<u64>,
     /// Upper bound (seconds) of a random jitter added to each tick interval.
     /// Prevents synchronized thundering-herd across instances. Default 0.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tick_jitter_max_secs: Option<u64>,
 }
 
