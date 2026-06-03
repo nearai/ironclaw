@@ -589,6 +589,7 @@ where
     ) {
         Ok(execution) => execution,
         Err(error) => {
+            log_wasm_runtime_error(request.capability_id, &error);
             if let Some(usage) = preserved_wasm_error_usage(&error) {
                 account_or_release_failed_wasm_execution(request.governor, reservation.id, &usage)?;
             } else {
@@ -600,6 +601,7 @@ where
         }
     };
     if let Some(error) = execution.error {
+        log_wasm_guest_error(request.capability_id, &execution.logs, &error);
         account_or_release_failed_wasm_execution(
             request.governor,
             reservation.id,
@@ -778,6 +780,69 @@ fn wasm_guest_dispatch_error(error: &str, capability: &CapabilityId) -> Dispatch
             credential_requirements: Vec::new(),
         },
         WasmGuestErrorKind::Runtime(kind) => DispatchError::Wasm { kind },
+    }
+}
+
+fn log_wasm_runtime_error(capability_id: &CapabilityId, error: &WasmError) {
+    if let WasmError::ExecutionFailed { message, logs, .. } = error {
+        log_wasm_guest_logs(capability_id, logs);
+        tracing::debug!(
+            capability_id = %capability_id,
+            wasm_error = %message,
+            "WASM runtime execution failed with raw guest error"
+        );
+        return;
+    }
+
+    tracing::debug!(
+        capability_id = %capability_id,
+        wasm_error = %error,
+        "WASM runtime execution failed"
+    );
+}
+
+fn log_wasm_guest_error(
+    capability_id: &CapabilityId,
+    logs: &[ironclaw_wasm::WasmLogRecord],
+    error: &str,
+) {
+    log_wasm_guest_logs(capability_id, logs);
+    tracing::debug!(
+        capability_id = %capability_id,
+        wasm_error = %error,
+        "WASM guest returned raw capability error"
+    );
+}
+
+fn log_wasm_guest_logs(capability_id: &CapabilityId, logs: &[ironclaw_wasm::WasmLogRecord]) {
+    for log in logs {
+        match log.level {
+            ironclaw_wasm::WasmLogLevel::Trace => tracing::trace!(
+                capability_id = %capability_id,
+                wasm_log = %log.message,
+                "WASM guest log"
+            ),
+            ironclaw_wasm::WasmLogLevel::Debug => tracing::debug!(
+                capability_id = %capability_id,
+                wasm_log = %log.message,
+                "WASM guest log"
+            ),
+            ironclaw_wasm::WasmLogLevel::Info => tracing::info!(
+                capability_id = %capability_id,
+                wasm_log = %log.message,
+                "WASM guest log"
+            ),
+            ironclaw_wasm::WasmLogLevel::Warn => tracing::warn!(
+                capability_id = %capability_id,
+                wasm_log = %log.message,
+                "WASM guest log"
+            ),
+            ironclaw_wasm::WasmLogLevel::Error => tracing::error!(
+                capability_id = %capability_id,
+                wasm_log = %log.message,
+                "WASM guest log"
+            ),
+        }
     }
 }
 
