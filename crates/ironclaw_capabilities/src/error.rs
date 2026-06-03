@@ -97,7 +97,10 @@ pub enum CapabilityInvocationError {
     /// of the public contract for routing, metrics, and audit grouping, but
     /// callers that stay in-process can keep typed failure identity.
     #[error("dispatch failed: {kind}")]
-    Dispatch { kind: DispatchFailureKind },
+    Dispatch {
+        kind: DispatchFailureKind,
+        safe_summary: Option<String>,
+    },
 }
 
 impl From<RunStateError> for CapabilityInvocationError {
@@ -134,6 +137,7 @@ impl From<DispatchError> for CapabilityInvocationError {
             | DispatchError::Wasm { .. }
             | DispatchError::FirstParty { .. }) => Self::Dispatch {
                 kind: dispatch_error_kind(&other),
+                safe_summary: dispatch_error_safe_summary(&other),
             },
         }
     }
@@ -141,6 +145,13 @@ impl From<DispatchError> for CapabilityInvocationError {
 
 fn dispatch_error_kind(error: &DispatchError) -> DispatchFailureKind {
     error.failure_kind()
+}
+
+fn dispatch_error_safe_summary(error: &DispatchError) -> Option<String> {
+    match error {
+        DispatchError::FirstParty { safe_summary, .. } => safe_summary.clone(),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -229,6 +240,7 @@ mod tests {
     fn dispatch_error_kind_forwards_first_party_runtime_kind_as_str() {
         let kind = dispatch_error_kind(&DispatchError::FirstParty {
             kind: RuntimeDispatchErrorKind::UndeclaredCapability,
+            safe_summary: None,
         });
         assert_eq!(kind.as_str(), "UndeclaredCapability");
     }
@@ -238,7 +250,7 @@ mod tests {
         let err =
             CapabilityInvocationError::from(DispatchError::UnknownCapability { capability: cap() });
         match err {
-            CapabilityInvocationError::Dispatch { kind } => {
+            CapabilityInvocationError::Dispatch { kind, .. } => {
                 assert_eq!(kind, DispatchFailureKind::UnknownCapability)
             }
             other => panic!("expected Dispatch variant, got {other:?}"),
@@ -251,7 +263,7 @@ mod tests {
             kind: RuntimeDispatchErrorKind::Guest,
         });
         match err {
-            CapabilityInvocationError::Dispatch { kind } => {
+            CapabilityInvocationError::Dispatch { kind, .. } => {
                 assert_eq!(
                     kind,
                     DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Guest)

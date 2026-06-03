@@ -521,7 +521,10 @@ fn operation_error() -> FirstPartyCapabilityError {
 }
 
 fn coding_error(error: CodingCapabilityError) -> FirstPartyCapabilityError {
-    FirstPartyCapabilityError::new(error.kind())
+    match error.safe_summary() {
+        Some(summary) => FirstPartyCapabilityError::with_safe_summary(error.kind(), summary),
+        None => FirstPartyCapabilityError::new(error.kind()),
+    }
 }
 
 fn coding_capability_metadata(capability_id: &str) -> Option<CodingCapabilityMetadata> {

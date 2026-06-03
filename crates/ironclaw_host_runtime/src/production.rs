@@ -1413,8 +1413,8 @@ fn sanitized_failure_message(error: &CapabilityInvocationError) -> Option<String
         | ResumeStoreMissing { .. }
         | ProcessManagerMissing { .. }
         | ResumeNotBlocked { .. }
-        | ResumeContextMismatch { .. }
-        | Dispatch { .. } => Some(error.to_string()),
+        | ResumeContextMismatch { .. } => Some(error.to_string()),
+        Dispatch { safe_summary, .. } => safe_summary.clone().or_else(|| Some(error.to_string())),
         InvocationFingerprint { .. } => Some("invocation fingerprint failed".to_string()),
         Lease(_) => Some("capability lease store unavailable".to_string()),
         RunState(_) => Some("run-state store unavailable".to_string()),
@@ -1466,7 +1466,7 @@ pub(crate) fn failure_kind_from(error: &CapabilityInvocationError) -> RuntimeFai
         CapabilityInvocationError::Lease(_)
         | CapabilityInvocationError::RunState(_)
         | CapabilityInvocationError::Process(_) => RuntimeFailureKind::Backend,
-        CapabilityInvocationError::Dispatch { kind } => RuntimeFailureKind::from(*kind),
+        CapabilityInvocationError::Dispatch { kind, .. } => RuntimeFailureKind::from(*kind),
     }
 }
 
@@ -1555,7 +1555,10 @@ mod tests {
     }
 
     fn dispatch(kind: DispatchFailureKind) -> CapabilityInvocationError {
-        CapabilityInvocationError::Dispatch { kind }
+        CapabilityInvocationError::Dispatch {
+            kind,
+            safe_summary: None,
+        }
     }
 
     fn auth_requirement(scopes: &[&str]) -> RuntimeCredentialAuthRequirement {
@@ -1831,6 +1834,22 @@ output_schema_ref = "schemas/test.output.json"
         assert!(
             message.contains("NetworkDenied"),
             "sanitized dispatch message should expose the redacted kind, got {message:?}"
+        );
+    }
+
+    #[test]
+    fn sanitized_failure_message_uses_dispatch_safe_summary() {
+        let error = CapabilityInvocationError::Dispatch {
+            kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::OperationFailed),
+            safe_summary: Some(
+                "apply_patch failed for path workspace main.rs: old_string matched 0 times"
+                    .to_string(),
+            ),
+        };
+
+        assert_eq!(
+            sanitized_failure_message(&error).as_deref(),
+            Some("apply_patch failed for path workspace main.rs: old_string matched 0 times")
         );
     }
 

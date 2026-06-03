@@ -236,6 +236,7 @@ where
             tracing::debug!("first-party runtime adapter missing handler");
             return Err(DispatchError::FirstParty {
                 kind: RuntimeDispatchErrorKind::UndeclaredCapability,
+                safe_summary: None,
             });
         };
 
@@ -250,6 +251,7 @@ where
                 }
                 DispatchError::FirstParty {
                     kind: planner_error_kind(&error),
+                    safe_summary: None,
                 }
             })?;
         tracing::debug!(
@@ -274,7 +276,10 @@ where
                 if let Some(reservation) = &request.resource_reservation {
                     release_first_party_reservation(request.governor, reservation.id);
                 }
-                DispatchError::FirstParty { kind: error.kind() }
+                DispatchError::FirstParty {
+                    kind: error.kind(),
+                    safe_summary: None,
+                }
             })?;
         tracing::debug!("first-party runtime adapter services resolved");
 
@@ -288,6 +293,7 @@ where
                     tracing::debug!("first-party runtime adapter resource reservation failed");
                     DispatchError::FirstParty {
                         kind: RuntimeDispatchErrorKind::Resource,
+                        safe_summary: None,
                     }
                 })?,
         };
@@ -341,9 +347,9 @@ where
                         required_secrets,
                         credential_requirements,
                     }),
-                    FirstPartyCapabilityError::Dispatch { kind, .. } => {
-                        Err(DispatchError::FirstParty { kind })
-                    }
+                    FirstPartyCapabilityError::Dispatch {
+                        kind, safe_summary, ..
+                    } => Err(DispatchError::FirstParty { kind, safe_summary }),
                 };
             }
             Err(_) => {
@@ -354,6 +360,7 @@ where
                 release_first_party_reservation(request.governor, reservation.id);
                 return Err(DispatchError::FirstParty {
                     kind: RuntimeDispatchErrorKind::Backend,
+                    safe_summary: None,
                 });
             }
         };
@@ -368,6 +375,7 @@ where
                 release_first_party_reservation(request.governor, reservation.id);
                 DispatchError::FirstParty {
                     kind: RuntimeDispatchErrorKind::OutputDecode,
+                    safe_summary: None,
                 }
             })?;
         let mut usage = result.usage;
@@ -388,6 +396,7 @@ where
                 }
                 return Err(DispatchError::FirstParty {
                     kind: RuntimeDispatchErrorKind::Resource,
+                    safe_summary: None,
                 });
             }
         };
@@ -679,6 +688,7 @@ where
         release_first_party_reservation(governor, reservation_id);
         return Err(DispatchError::FirstParty {
             kind: RuntimeDispatchErrorKind::Resource,
+            safe_summary: None,
         });
     }
 
@@ -766,7 +776,10 @@ fn dispatch_error_for_runtime(
         RuntimeKind::Mcp => DispatchError::Mcp { kind },
         RuntimeKind::Script => DispatchError::Script { kind },
         RuntimeKind::Wasm => DispatchError::Wasm { kind },
-        RuntimeKind::FirstParty | RuntimeKind::System => DispatchError::FirstParty { kind },
+        RuntimeKind::FirstParty | RuntimeKind::System => DispatchError::FirstParty {
+            kind,
+            safe_summary: None,
+        },
     }
 }
 

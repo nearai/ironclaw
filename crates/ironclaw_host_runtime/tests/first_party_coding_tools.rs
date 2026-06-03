@@ -411,6 +411,65 @@ async fn builtin_apply_patch_returns_unified_diff_display_preview() {
 }
 
 #[tokio::test]
+async fn builtin_apply_patch_failure_reports_path_and_match_count() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(temp.path().join("main.rs"), "fn main() {\n    old();\n}\n").unwrap();
+
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_write());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(coding_capability_ids(), mounts);
+
+    invoke_with_context(
+        &runtime,
+        READ_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/main.rs"}),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+
+    let failure = invoke_failure_with_context(
+        &runtime,
+        APPLY_PATCH_CAPABILITY_ID,
+        json!({
+            "path": "/workspace/main.rs",
+            "old_string": "missing();",
+            "new_string": "new();"
+        }),
+        context,
+    )
+    .await;
+
+    assert_eq!(failure.kind, RuntimeFailureKind::OperationFailed);
+    assert_eq!(
+        failure.message.as_deref(),
+        Some("apply_patch failed for path workspace main.rs: old_string matched 0 times")
+    );
+}
+
+#[tokio::test]
+async fn builtin_read_file_failure_reports_missing_path() {
+    let temp = tempfile::tempdir().unwrap();
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_only());
+    let runtime = runtime_with_filesystem(filesystem);
+    let context = execution_context_with_mounts(coding_capability_ids(), mounts);
+
+    let failure = invoke_failure_with_context(
+        &runtime,
+        READ_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/missing.py"}),
+        context,
+    )
+    .await;
+
+    assert_eq!(failure.kind, RuntimeFailureKind::OperationFailed);
+    assert_eq!(
+        failure.message.as_deref(),
+        Some("read_file failed for path workspace missing.py: file not found")
+    );
+}
+
+#[tokio::test]
 async fn builtin_coding_glob_reports_visited_entry_budget_as_truncated_result() {
     let temp = tempfile::tempdir().unwrap();
     let (_filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_only());
@@ -485,6 +544,28 @@ async fn invoke_completed_with_context<R: HostRuntime + ?Sized>(
         .unwrap();
     match outcome {
         RuntimeCapabilityOutcome::Completed(completed) => *completed,
+        other => panic!("unexpected capability outcome: {other:?}"),
+    }
+}
+
+async fn invoke_failure_with_context<R: HostRuntime + ?Sized>(
+    runtime: &R,
+    capability: &str,
+    input: Value,
+    context: ExecutionContext,
+) -> ironclaw_host_runtime::RuntimeCapabilityFailure {
+    let outcome = runtime
+        .invoke_capability(RuntimeCapabilityRequest::new(
+            context,
+            CapabilityId::new(capability).unwrap(),
+            ResourceEstimate::default(),
+            input,
+            trust_decision(),
+        ))
+        .await
+        .unwrap();
+    match outcome {
+        RuntimeCapabilityOutcome::Failed(failure) => failure,
         other => panic!("unexpected capability outcome: {other:?}"),
     }
 }

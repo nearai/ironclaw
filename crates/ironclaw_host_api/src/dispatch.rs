@@ -246,7 +246,10 @@ pub enum DispatchError {
     #[error("WASM dispatch failed: {kind}")]
     Wasm { kind: RuntimeDispatchErrorKind },
     #[error("first-party dispatch failed: {kind}")]
-    FirstParty { kind: RuntimeDispatchErrorKind },
+    FirstParty {
+        kind: RuntimeDispatchErrorKind,
+        safe_summary: Option<String>,
+    },
 }
 
 impl fmt::Debug for DispatchError {
@@ -310,7 +313,9 @@ impl fmt::Debug for DispatchError {
             Self::Mcp { kind } => f.debug_struct("Mcp").field("kind", kind).finish(),
             Self::Script { kind } => f.debug_struct("Script").field("kind", kind).finish(),
             Self::Wasm { kind } => f.debug_struct("Wasm").field("kind", kind).finish(),
-            Self::FirstParty { kind } => f.debug_struct("FirstParty").field("kind", kind).finish(),
+            Self::FirstParty { kind, .. } => {
+                f.debug_struct("FirstParty").field("kind", kind).finish()
+            }
         }
     }
 }
@@ -340,7 +345,7 @@ impl DispatchError {
             Self::Mcp { kind }
             | Self::Script { kind }
             | Self::Wasm { kind }
-            | Self::FirstParty { kind } => DispatchFailureKind::Runtime(*kind),
+            | Self::FirstParty { kind, .. } => DispatchFailureKind::Runtime(*kind),
         }
     }
 
@@ -359,7 +364,7 @@ impl DispatchError {
             Self::Mcp { kind }
             | Self::Script { kind }
             | Self::Wasm { kind }
-            | Self::FirstParty { kind } => kind.event_kind(),
+            | Self::FirstParty { kind, .. } => kind.event_kind(),
         }
     }
 }

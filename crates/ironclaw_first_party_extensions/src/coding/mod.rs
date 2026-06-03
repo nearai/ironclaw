@@ -91,15 +91,33 @@ impl<'a> CodingCapabilityRequest<'a> {
 #[error("coding capability dispatch failed: {kind}")]
 pub struct CodingCapabilityError {
     kind: RuntimeDispatchErrorKind,
+    safe_summary: Option<String>,
 }
 
 impl CodingCapabilityError {
     pub fn new(kind: RuntimeDispatchErrorKind) -> Self {
-        Self { kind }
+        Self {
+            kind,
+            safe_summary: None,
+        }
+    }
+
+    pub fn with_safe_summary(
+        kind: RuntimeDispatchErrorKind,
+        safe_summary: impl Into<String>,
+    ) -> Self {
+        Self {
+            kind,
+            safe_summary: Some(bound_safe_summary(safe_summary.into())),
+        }
     }
 
     pub fn kind(&self) -> RuntimeDispatchErrorKind {
         self.kind
+    }
+
+    pub fn safe_summary(&self) -> Option<&str> {
+        self.safe_summary.as_deref()
     }
 }
 
@@ -145,6 +163,22 @@ fn input_error() -> CodingCapabilityError {
 
 fn operation_error() -> CodingCapabilityError {
     CodingCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed)
+}
+
+fn operation_error_with_summary(summary: impl Into<String>) -> CodingCapabilityError {
+    CodingCapabilityError::with_safe_summary(RuntimeDispatchErrorKind::OperationFailed, summary)
+}
+
+fn bound_safe_summary(summary: String) -> String {
+    const MAX_CHARS: usize = 512;
+    let summary = summary.trim();
+    let mut chars = summary.chars();
+    let bounded: String = chars.by_ref().take(MAX_CHARS).collect();
+    if chars.next().is_some() {
+        format!("{bounded}...")
+    } else {
+        bounded
+    }
 }
 
 #[cfg(test)]

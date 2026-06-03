@@ -689,7 +689,8 @@ async fn first_party_adapter_releases_reservation_when_invocation_service_resolu
     assert!(matches!(
         result,
         Err(DispatchError::FirstParty {
-            kind: RuntimeDispatchErrorKind::NetworkDenied
+            kind: RuntimeDispatchErrorKind::NetworkDenied,
+            ..
         })
     ));
     assert_eq!(
@@ -756,7 +757,8 @@ async fn first_party_adapter_releases_reservation_when_planner_denies() {
     assert!(matches!(
         result,
         Err(DispatchError::FirstParty {
-            kind: RuntimeDispatchErrorKind::NetworkDenied
+            kind: RuntimeDispatchErrorKind::NetworkDenied,
+            ..
         })
     ));
     assert_eq!(
