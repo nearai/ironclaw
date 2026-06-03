@@ -8,6 +8,11 @@ import {
 import { queryClient } from "../../../lib/query-client.js";
 import { React } from "../../../lib/html.js";
 import { useChatEvents } from "../lib/useChatEvents.js";
+import {
+  addPending,
+  recordAcceptedMessageRef,
+  removePending,
+} from "../lib/pending-messages.js";
 import { useHistory } from "./useHistory.js";
 import { useSSE } from "./useSSE.js";
 
@@ -161,6 +166,7 @@ export function useChat(threadId) {
         role: "user",
         content,
         timestamp: new Date().toISOString(),
+        isOptimistic: true,
       };
       addPending(pendingMessagesRef.current, pendingKey, pendingRecord);
 
@@ -190,6 +196,19 @@ export function useChat(threadId) {
             threadId: response.thread_id || sendThreadId,
             status: response.status || null,
           });
+        }
+        const timelineMessageId = recordAcceptedMessageRef(
+          pendingMessagesRef.current,
+          pendingKey,
+          optimisticId,
+          response?.accepted_message_ref,
+        );
+        if (timelineMessageId) {
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === optimisticId ? { ...m, timelineMessageId } : m,
+            ),
+          );
         }
         return response;
       } catch (err) {
@@ -394,17 +413,6 @@ export function useChat(threadId) {
     recoverHistory: noop,
     recoveryNotice: null,
   };
-}
-
-function addPending(store, key, record) {
-  const existing = store.get(key) || [];
-  store.set(key, [...existing, record]);
-}
-
-function removePending(store, key, pendingId) {
-  const next = (store.get(key) || []).filter((r) => r.id !== pendingId);
-  if (next.length > 0) store.set(key, next);
-  else store.delete(key);
 }
 
 function retryAfterMs(err) {

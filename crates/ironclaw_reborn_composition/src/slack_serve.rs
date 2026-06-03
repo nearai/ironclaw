@@ -27,7 +27,7 @@ use ironclaw_host_api::ingress::{
 };
 use ironclaw_product_adapters::ProtocolAuthEvidence;
 use ironclaw_wasm_product_adapters::{
-    NativeProductAdapterRunner, RunnerError, WebhookProcessOutcome,
+    ImmediateAckWorkflowObserver, NativeProductAdapterRunner, RunnerError, WebhookProcessOutcome,
 };
 use serde::Serialize;
 
@@ -41,6 +41,8 @@ pub use installation::{
     SlackInstallationSelector, SlackTeamId, SlackUserId, StaticSlackInstallationResolver,
 };
 
+#[cfg(test)]
+mod e2e_tests;
 #[cfg(test)]
 mod handler_tests;
 
@@ -61,6 +63,7 @@ pub trait SlackEventsWebhookDispatcher: Send + Sync {
         &'a self,
         body: &'a [u8],
         evidence: &'a ProtocolAuthEvidence,
+        observer: Option<Arc<dyn ImmediateAckWorkflowObserver>>,
     ) -> Pin<Box<dyn Future<Output = Result<WebhookProcessOutcome, RunnerError>> + Send + 'a>>;
 
     fn drain_immediate_ack_tasks<'a>(&'a self) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
@@ -79,10 +82,11 @@ impl SlackEventsWebhookDispatcher for NativeProductAdapterRunner {
         &'a self,
         body: &'a [u8],
         evidence: &'a ProtocolAuthEvidence,
+        observer: Option<Arc<dyn ImmediateAckWorkflowObserver>>,
     ) -> Pin<Box<dyn Future<Output = Result<WebhookProcessOutcome, RunnerError>> + Send + 'a>> {
         Box::pin(
-            NativeProductAdapterRunner::process_verified_webhook_immediate_ack(
-                self, body, evidence,
+            NativeProductAdapterRunner::process_verified_webhook_immediate_ack_with_observer(
+                self, body, evidence, observer,
             ),
         )
     }
@@ -113,7 +117,12 @@ impl SlackIngressService {
         }
     }
 
-    async fn handle_events(&self, headers: HeaderMap, body: Bytes) -> Response {
+    async fn handle_events(
+        &self,
+        headers: HeaderMap,
+        body: Bytes,
+        workflow_observer: Option<Arc<dyn ImmediateAckWorkflowObserver>>,
+    ) -> Response {
         let ingress = match self.resolver.resolve_ingress(&headers, body.as_ref()).await {
             Ok(ingress) => ingress,
             Err(error) => return ingress_error_response(error),
@@ -128,7 +137,11 @@ impl SlackIngressService {
             }
             ResolvedSlackIngress::Event { installation, .. } => match installation
                 .dispatcher()
-                .process_verified_webhook_immediate_ack(body.as_ref(), installation.evidence())
+                .process_verified_webhook_immediate_ack(
+                    body.as_ref(),
+                    installation.evidence(),
+                    installation.workflow_observer().or(workflow_observer),
+                )
                 .await
             {
                 Ok(_) => (StatusCode::OK, "ok").into_response(),
@@ -155,15 +168,27 @@ impl std::fmt::Debug for SlackIngressService {
 #[derive(Clone)]
 pub struct SlackEventsRouteState {
     ingress: SlackIngressService,
+    workflow_observer: Option<Arc<dyn ImmediateAckWorkflowObserver>>,
 }
 
 impl SlackEventsRouteState {
     pub fn new(ingress: SlackIngressService) -> Self {
-        Self { ingress }
+        Self {
+            ingress,
+            workflow_observer: None,
+        }
     }
 
     pub fn from_resolver(resolver: Arc<dyn SlackInstallationResolver>) -> Self {
         Self::new(SlackIngressService::new(resolver))
+    }
+
+    pub fn with_workflow_observer(
+        mut self,
+        workflow_observer: Arc<dyn ImmediateAckWorkflowObserver>,
+    ) -> Self {
+        self.workflow_observer = Some(workflow_observer);
+        self
     }
 
     pub async fn drain_immediate_ack_tasks(&self) {
@@ -182,6 +207,7 @@ impl std::fmt::Debug for SlackEventsRouteState {
         formatter
             .debug_struct("SlackEventsRouteState")
             .field("ingress", &self.ingress)
+            .field("workflow_observer", &self.workflow_observer.is_some())
             .finish()
     }
 }
@@ -242,7 +268,10 @@ async fn slack_events_handler(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    state.ingress.handle_events(headers, body).await
+    state
+        .ingress
+        .handle_events(headers, body, state.workflow_observer.clone())
+        .await
 }
 
 fn ingress_error_response(error: SlackIngressError) -> Response {
@@ -465,6 +494,7 @@ mod tests {
                     installation_id("install-alpha"),
                     evidence,
                     Arc::clone(&self.dispatcher),
+                    None,
                 );
                 let value: serde_json::Value = serde_json::from_slice(body).map_err(|err| {
                     SlackIngressError::Envelope(SlackPayloadParseError::InvalidJson {
@@ -627,6 +657,7 @@ mod tests {
             &'a self,
             _body: &'a [u8],
             _evidence: &'a ProtocolAuthEvidence,
+            _observer: Option<Arc<dyn ImmediateAckWorkflowObserver>>,
         ) -> Pin<Box<dyn Future<Output = Result<WebhookProcessOutcome, RunnerError>> + Send + 'a>>
         {
             self.dispatch_calls.fetch_add(1, Ordering::SeqCst);
