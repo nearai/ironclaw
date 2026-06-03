@@ -313,9 +313,9 @@ mod tests {
         InMemoryTriggerRepository, ScheduleTriggerSourceProvider, TriggerActiveRunLookup,
         TriggerActiveRunState, TriggerActiveRunStateRequest, TriggerCompletionPolicy, TriggerError,
         TriggerFire, TriggerFireIdentity, TriggerId, TriggerInboundContentRef,
-        TriggerMaterializedPrompt, TriggerPollerFireOutcome, TriggerPollerWorker,
-        TriggerPollerWorkerConfig, TriggerPollerWorkerDeps, TriggerRecord, TriggerRepository,
-        TriggerSchedule, TriggerSourceKind, TriggerState,
+        TriggerMaterializedPrompt, TriggerPollerFailureReason, TriggerPollerFireOutcome,
+        TriggerPollerWorker, TriggerPollerWorkerConfig, TriggerPollerWorkerDeps, TriggerRecord,
+        TriggerRepository, TriggerSchedule, TriggerSourceKind, TriggerState,
     };
     use ironclaw_turns::{
         AcceptedMessageRef, AdmissionRejection, AdmissionRejectionReason, CancelRunRequest,
@@ -921,8 +921,11 @@ mod tests {
 
         assert!(matches!(
             report.results.last().map(|result| &result.outcome),
-            Some(TriggerPollerFireOutcome::PermanentFailed { .. })
-                | Some(TriggerPollerFireOutcome::DueFireFailed { .. })
+            Some(TriggerPollerFireOutcome::PermanentFailed {
+                reason: TriggerPollerFailureReason::InvalidMaterialization,
+            }) | Some(TriggerPollerFireOutcome::DueFireFailed {
+                reason: TriggerPollerFailureReason::InvalidMaterialization,
+            })
         ));
         assert_eq!(submit_turn_count.load(Ordering::SeqCst), 0);
     }

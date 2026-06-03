@@ -102,8 +102,10 @@ where
                 .await;
         }
 
-        let (requested_agent_id, requested_project_id, binding_dispatch) =
-            binding_policy.into_resolution_parts(requested_agent_id, requested_project_id);
+        let (requested_agent_id, requested_project_id) = match &binding_policy {
+            BindingResolutionPolicy::Untrusted => (requested_agent_id, requested_project_id),
+            BindingResolutionPolicy::Trusted { .. } => (None, None),
+        };
         let resolve_request = ResolveConversationRequest {
             tenant_id: tenant_id.clone(),
             adapter_kind: adapter_kind.clone(),
@@ -115,13 +117,13 @@ where
             requested_agent_id,
             requested_project_id,
         };
-        let resolution = match binding_dispatch {
-            BindingResolutionDispatch::Untrusted => {
+        let resolution = match binding_policy {
+            BindingResolutionPolicy::Untrusted => {
                 self.binding_service
                     .resolve_or_create_binding(resolve_request)
                     .await?
             }
-            BindingResolutionDispatch::Trusted {
+            BindingResolutionPolicy::Trusted {
                 trusted_agent_id,
                 trusted_project_id,
             } => {
@@ -350,45 +352,6 @@ enum BindingResolutionPolicy {
     },
 }
 
-enum BindingResolutionDispatch {
-    Untrusted,
-    Trusted {
-        trusted_agent_id: Option<ironclaw_host_api::AgentId>,
-        trusted_project_id: Option<ironclaw_host_api::ProjectId>,
-    },
-}
-
-impl BindingResolutionPolicy {
-    fn into_resolution_parts(
-        self,
-        requested_agent_id: Option<ironclaw_host_api::AgentId>,
-        requested_project_id: Option<ironclaw_host_api::ProjectId>,
-    ) -> (
-        Option<ironclaw_host_api::AgentId>,
-        Option<ironclaw_host_api::ProjectId>,
-        BindingResolutionDispatch,
-    ) {
-        match self {
-            Self::Untrusted => (
-                requested_agent_id,
-                requested_project_id,
-                BindingResolutionDispatch::Untrusted,
-            ),
-            Self::Trusted {
-                trusted_agent_id,
-                trusted_project_id,
-            } => (
-                None,
-                None,
-                BindingResolutionDispatch::Trusted {
-                    trusted_agent_id,
-                    trusted_project_id,
-                },
-            ),
-        }
-    }
-}
-
 fn should_rotate_submit_key(error: &TurnError) -> bool {
     match error {
         TurnError::ThreadBusy(_) | TurnError::Unavailable { .. } => true,
@@ -468,7 +431,7 @@ fn opaque_trusted_trigger_inbound_rejection(
     reason: &'static str,
     _error: &InboundTurnError,
 ) -> TriggerError {
-    tracing::debug!("trusted trigger inbound request rejected");
+    tracing::debug!(reason, "trusted trigger inbound rejection");
     TriggerError::InvalidMaterialization {
         reason: reason.to_string(),
     }
