@@ -264,23 +264,24 @@ pub struct TriggerPollerConfigSection {
     /// composition; operators MUST set `enabled = true` to activate it.
     pub enabled: Option<bool>,
     /// How often the poller ticks, in seconds. Default in composition is 30.
-    /// Range `1..=3600` is enforced by the CLI settings layer; values outside
-    /// the range are a fatal boot error (`runtime/trigger_poller.rs`).
+    /// Range `1..=3600` is enforced at boot by the CLI settings layer;
+    /// values outside the range are a fatal startup error.
     pub poll_interval_secs: Option<u64>,
     /// Maximum triggers to fire per tick. Default in composition is 32.
-    /// Range `1..=1000` is enforced by the CLI settings layer.
+    /// Range `1..=1000` is enforced at boot by the CLI settings layer;
+    /// values outside the range are a fatal startup error.
     pub fires_per_tick: Option<u32>,
     /// Maximum concurrent fires allowed for a single trigger. Default in
-    /// composition is 1. V1 invariant: must equal 1 (enforced by the CLI
-    /// settings layer); any other value is a fatal boot error.
+    /// composition is 1. V1 invariant: must equal 1, enforced at boot by
+    /// the CLI settings layer; any other value is a fatal startup error.
     pub max_concurrent_fires_per_trigger: Option<u32>,
     /// Upper bound (seconds) of a random jitter delay before the first tick.
     /// Spreads startup load across instances. Default in composition is 0.
-    /// Range `0..=3600` is enforced by the CLI settings layer.
+    /// Range `0..=3600` is enforced at boot by the CLI settings layer.
     pub startup_jitter_max_secs: Option<u64>,
     /// Upper bound (seconds) of a random jitter added to each tick interval.
     /// Prevents synchronized thundering-herd across instances. Default 0.
-    /// Range `0..=3600` is enforced by the CLI settings layer.
+    /// Range `0..=3600` is enforced at boot by the CLI settings layer.
     pub tick_jitter_max_secs: Option<u64>,
 }
 

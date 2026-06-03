@@ -234,9 +234,31 @@ fn reborn_cli_binary_crate_stays_separate_from_v1_root() {
         "ironclaw_reborn_config must remain a standalone boot contract crate with no IronClaw workspace dependencies of any dependency kind",
     );
 
-    let cli_runtime_source =
-        std::fs::read_to_string(root.join("crates/ironclaw_reborn_cli/src/runtime.rs"))
-            .expect("Reborn CLI runtime.rs must be readable");
+    // The runtime entry point lives at `runtime/mod.rs`; helpers (e.g.
+    // `trigger_poller.rs`) live alongside as child modules. Boundary checks
+    // must scan every `.rs` file under the runtime module so a forbidden
+    // import cannot slip in through a child file.
+    let runtime_dir = root.join("crates/ironclaw_reborn_cli/src/runtime");
+    let mut cli_runtime_source = String::new();
+    for entry in std::fs::read_dir(&runtime_dir).unwrap_or_else(|err| {
+        panic!(
+            "Reborn CLI runtime/ directory must be readable at {}: {err}",
+            runtime_dir.display()
+        )
+    }) {
+        let path = entry.expect("dir entry").path();
+        if path.extension().and_then(|s| s.to_str()) != Some("rs") {
+            continue;
+        }
+        let content = std::fs::read_to_string(&path).unwrap_or_else(|err| {
+            panic!(
+                "Reborn CLI runtime file {} unreadable: {err}",
+                path.display()
+            )
+        });
+        cli_runtime_source.push_str(&content);
+        cli_runtime_source.push('\n');
+    }
     assert!(
         cli_runtime_source.contains("build_reborn_runtime"),
         "Reborn CLI should enter the assembled runtime through ironclaw_reborn_composition::build_reborn_runtime"
@@ -251,7 +273,7 @@ fn reborn_cli_binary_crate_stays_separate_from_v1_root() {
     ] {
         assert!(
             !cli_runtime_source.contains(forbidden),
-            "Reborn CLI runtime.rs must not wire lower-level Reborn runtime pieces directly via `{forbidden}`; keep REPL as a UX shell over ironclaw_reborn_composition."
+            "Reborn CLI runtime/ must not wire lower-level Reborn runtime pieces directly via `{forbidden}`; keep REPL as a UX shell over ironclaw_reborn_composition."
         );
     }
 }

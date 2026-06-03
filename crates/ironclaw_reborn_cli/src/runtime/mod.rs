@@ -15,6 +15,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::context::RebornCliContext;
 
+#[cfg(test)]
+mod test_env;
 mod trigger_poller;
 
 use trigger_poller::trigger_poller_settings;
@@ -606,6 +608,7 @@ mod tests {
     use ironclaw_reborn_composition::RebornCompositionProfile;
     use ironclaw_reborn_config::RebornBootConfig;
 
+    use super::test_env::{EnvGuard, lock_trigger_env};
     use super::{
         RuntimeInputCaller, RuntimeInputOptions, block_on_cli, build_runtime_input,
         build_runtime_input_with_options, resolve_google_oauth_config,
@@ -793,32 +796,9 @@ default_project = "project-alpha"
 
     #[test]
     fn build_runtime_input_maps_trigger_poller_enabled_config() {
-        // Inline RAII guards so the test is self-contained and does not
-        // depend on anything inside trigger_poller::tests.
-        struct EnvGuard {
-            key: &'static str,
-            prior: Option<String>,
-        }
-        impl EnvGuard {
-            fn clear(key: &'static str) -> Self {
-                let prior = std::env::var(key).ok();
-                // SAFETY: env mutation is process-global; Drop restores on
-                // unwind. Cleared keys are only read by trigger_poller_settings
-                // in this test's call stack.
-                unsafe { std::env::remove_var(key) };
-                Self { key, prior }
-            }
-        }
-        impl Drop for EnvGuard {
-            fn drop(&mut self) {
-                match self.prior.take() {
-                    Some(v) => unsafe { std::env::set_var(self.key, v) },
-                    None => unsafe { std::env::remove_var(self.key) },
-                }
-            }
-        }
-        let _g1 = EnvGuard::clear("IRONCLAW_TRIGGER_POLLER_ENABLED");
-        let _g2 = EnvGuard::clear("IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS");
+        let _lock = lock_trigger_env();
+        let _enabled = EnvGuard::clear("IRONCLAW_TRIGGER_POLLER_ENABLED");
+        let _interval = EnvGuard::clear("IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS");
 
         let temp = tempfile::tempdir().expect("tempdir");
         let reborn_home = temp.path().join("reborn-home");

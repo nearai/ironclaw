@@ -129,8 +129,10 @@ pub(super) fn trigger_poller_settings(
         match raw.to_ascii_lowercase().as_str() {
             "1" | "true" => settings.enabled = true,
             "0" | "false" => settings.enabled = false,
-            other => {
-                let display = truncate_env_value_for_display(other);
+            _ => {
+                // Display the operator's original value (case preserved), not the
+                // lowercased match key — they need to find it in their config.
+                let display = truncate_env_value_for_display(&raw);
                 anyhow::bail!(
                     "IRONCLAW_TRIGGER_POLLER_ENABLED must be one of 1, true, 0, false (got {display:?})"
                 )
@@ -158,22 +160,10 @@ pub(super) fn trigger_poller_settings(
 
 #[cfg(test)]
 mod tests {
+    use super::super::test_env::{EnvGuard, lock_trigger_env};
     use super::trigger_poller_settings;
     use ironclaw_reborn_config::TriggerPollerConfigSection;
-    use std::sync::{LazyLock, Mutex, MutexGuard};
     use std::time::Duration;
-
-    /// Serializes every test that touches `IRONCLAW_TRIGGER_*` env vars so
-    /// they cannot race each other. cargo test runs tests in parallel by
-    /// default; without this each env-mutating test would observe sibling
-    /// tests' mutations. Held for the whole body of every env-touching test.
-    static TRIGGER_ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
-
-    fn lock_trigger_env() -> MutexGuard<'static, ()> {
-        TRIGGER_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
 
     fn make_config_with_trigger_poller(
         section: TriggerPollerConfigSection,
@@ -181,47 +171,6 @@ mod tests {
         ironclaw_reborn_config::RebornConfigFile {
             trigger_poller: Some(section),
             ..Default::default()
-        }
-    }
-
-    /// RAII guard that snapshots an env var on construction and restores it on
-    /// drop. Restores on panic too (Drop runs during unwind), which the manual
-    /// snapshot/restore pattern does not. Tests that read `IRONCLAW_TRIGGER_*`
-    /// env vars (including the default-is-disabled case) install this guard so
-    /// other tests running in parallel cannot observe their mutations.
-    struct EnvGuard {
-        key: &'static str,
-        prior: Option<String>,
-    }
-
-    impl EnvGuard {
-        fn set(key: &'static str, value: &str) -> Self {
-            let prior = std::env::var(key).ok();
-            // SAFETY: env mutation is process-global; restore on Drop covers
-            // panic unwind, but tests that mutate the same key in parallel can
-            // still race. The two `IRONCLAW_TRIGGER_*` keys are used only by
-            // tests in this module and `#[serial(trigger_poller_env)]` would
-            // be needed to make this fully race-free across crates.
-            unsafe { std::env::set_var(key, value) };
-            Self { key, prior }
-        }
-
-        fn clear(key: &'static str) -> Self {
-            let prior = std::env::var(key).ok();
-            // SAFETY: see above.
-            unsafe { std::env::remove_var(key) };
-            Self { key, prior }
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            match self.prior.take() {
-                // SAFETY: see EnvGuard::set.
-                Some(v) => unsafe { std::env::set_var(self.key, v) },
-                // SAFETY: see EnvGuard::set.
-                None => unsafe { std::env::remove_var(self.key) },
-            }
         }
     }
 
@@ -522,6 +471,142 @@ mod tests {
         assert!(
             msg.contains("IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS") && msg.contains("86400"),
             "error must surface env var name and value, got: {msg}",
+        );
+    }
+
+    #[test]
+    fn trigger_poller_settings_env_enabled_invalid_value_preserves_case() {
+        // Operator must see what they actually typed (e.g. "YES"), not the
+        // lowercased match key, so they can find the value in their config.
+        let _lock = lock_trigger_env();
+        let _enabled = EnvGuard::set("IRONCLAW_TRIGGER_POLLER_ENABLED", "YES");
+        let _interval = EnvGuard::clear("IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS");
+
+        let err = trigger_poller_settings(None)
+            .expect_err("IRONCLAW_TRIGGER_POLLER_ENABLED=YES must be rejected");
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("YES"),
+            "error must surface the operator's original (un-lowercased) value, got: {msg}",
+        );
+    }
+
+    #[test]
+    fn trigger_poller_settings_config_poll_interval_at_cap_is_accepted() {
+        let section = TriggerPollerConfigSection {
+            enabled: Some(true),
+            poll_interval_secs: Some(3600),
+            ..Default::default()
+        };
+        let config = make_config_with_trigger_poller(section);
+
+        let settings = trigger_poller_settings(Some(&config))
+            .expect("poll_interval_secs at the cap must be accepted");
+        assert_eq!(settings.worker.poll_interval, Duration::from_secs(3600));
+    }
+
+    #[test]
+    fn trigger_poller_settings_config_fires_per_tick_at_cap_is_accepted() {
+        let section = TriggerPollerConfigSection {
+            enabled: Some(true),
+            fires_per_tick: Some(1000),
+            ..Default::default()
+        };
+        let config = make_config_with_trigger_poller(section);
+
+        let settings = trigger_poller_settings(Some(&config))
+            .expect("fires_per_tick at the cap must be accepted");
+        assert_eq!(settings.worker.fires_per_tick, 1000);
+    }
+
+    #[test]
+    fn trigger_poller_settings_config_jitter_at_cap_is_accepted() {
+        let section = TriggerPollerConfigSection {
+            enabled: Some(true),
+            startup_jitter_max_secs: Some(3600),
+            tick_jitter_max_secs: Some(3600),
+            ..Default::default()
+        };
+        let config = make_config_with_trigger_poller(section);
+
+        let settings =
+            trigger_poller_settings(Some(&config)).expect("jitter at the cap must be accepted");
+        assert_eq!(settings.startup_jitter_max, Duration::from_secs(3600));
+        assert_eq!(settings.tick_jitter_max, Duration::from_secs(3600));
+    }
+
+    #[test]
+    fn trigger_poller_settings_max_concurrent_fires_zero_is_error() {
+        // 0 has distinct semantic meaning in some systems (unlimited
+        // concurrency); confirm the V1 guard rejects it explicitly.
+        let section = TriggerPollerConfigSection {
+            enabled: Some(true),
+            max_concurrent_fires_per_trigger: Some(0),
+            ..Default::default()
+        };
+        let config = make_config_with_trigger_poller(section);
+
+        let err = trigger_poller_settings(Some(&config))
+            .expect_err("max_concurrent_fires_per_trigger=0 must be rejected");
+        assert!(
+            err.to_string().contains("max_concurrent_fires_per_trigger"),
+            "error must mention the field, got: {err}",
+        );
+    }
+
+    #[test]
+    fn trigger_poller_settings_env_enabled_numeric_one_enables() {
+        let _lock = lock_trigger_env();
+        let _enabled = EnvGuard::set("IRONCLAW_TRIGGER_POLLER_ENABLED", "1");
+        let _interval = EnvGuard::clear("IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS");
+
+        let settings = trigger_poller_settings(None).expect("ENABLED=1 must succeed");
+        assert!(
+            settings.enabled,
+            "IRONCLAW_TRIGGER_POLLER_ENABLED=1 must enable"
+        );
+    }
+
+    #[test]
+    fn trigger_poller_settings_env_enabled_numeric_zero_disables() {
+        let _lock = lock_trigger_env();
+        let _enabled = EnvGuard::set("IRONCLAW_TRIGGER_POLLER_ENABLED", "0");
+        let _interval = EnvGuard::clear("IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS");
+
+        let section = TriggerPollerConfigSection {
+            enabled: Some(true),
+            ..Default::default()
+        };
+        let config = make_config_with_trigger_poller(section);
+
+        let settings = trigger_poller_settings(Some(&config)).expect("ENABLED=0 must succeed");
+        assert!(
+            !settings.enabled,
+            "IRONCLAW_TRIGGER_POLLER_ENABLED=0 must disable"
+        );
+    }
+
+    #[test]
+    fn trigger_poller_settings_env_enabled_long_value_is_truncated() {
+        // Operator pastes an 80-char string into the env slot by mistake. The
+        // error message must NOT echo the full value verbatim (it might be a
+        // credential); the truncation ellipsis MUST appear.
+        let _lock = lock_trigger_env();
+        let long_value: String = "x".repeat(80);
+        let _enabled = EnvGuard::set("IRONCLAW_TRIGGER_POLLER_ENABLED", &long_value);
+        let _interval = EnvGuard::clear("IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS");
+
+        let err = trigger_poller_settings(None).expect_err("long ENABLED value must be rejected");
+        let msg = err.to_string();
+
+        assert!(
+            msg.contains('…'),
+            "truncation ellipsis must appear in error, got: {msg}",
+        );
+        assert!(
+            !msg.contains(&long_value),
+            "full untruncated value must not appear in error, got: {msg}",
         );
     }
 }
