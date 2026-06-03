@@ -33,8 +33,8 @@ use crate::{
         CapabilityErrorClass, CapabilityErrorSummary, CapabilityFilter, CapabilityStrategy,
         ContextStrategy, DefaultCompactionStrategy, GateHandlingStrategy, GateOutcome, GateSummary,
         InputDrainStrategy, ModelErrorSummary, RecoveryOutcome, RecoveryStrategy,
-        ReplyAdmissionOutcome, ReplyAdmissionStrategy, RetryScope, StopConditionStrategy, StopKind,
-        StopOutcome, TurnSummary,
+        ReplyAdmissionOutcome, ReplyAdmissionStrategy, RetryAlteration, RetryScope,
+        StopConditionStrategy, StopKind, StopOutcome, TurnSummary,
     },
 };
 
@@ -413,6 +413,34 @@ impl RecoveryStrategy for RetryPolicyDeniedRecoveryStrategy {
         RecoveryOutcome::Abort {
             recovery: state.recovery_state.clone(),
             failure_kind: LoopFailureKind::DriverBug,
+        }
+    }
+}
+
+pub(super) struct ShrinkContextCallScopeRecoveryStrategy;
+
+#[async_trait]
+impl RecoveryStrategy for ShrinkContextCallScopeRecoveryStrategy {
+    async fn on_capability_error(
+        &self,
+        state: &LoopExecutionState,
+        _err: &CapabilityErrorSummary,
+    ) -> RecoveryOutcome {
+        RecoveryOutcome::Abort {
+            recovery: state.recovery_state.clone(),
+            failure_kind: LoopFailureKind::CapabilityProtocolError,
+        }
+    }
+
+    async fn on_model_error(
+        &self,
+        state: &LoopExecutionState,
+        _err: &ModelErrorSummary,
+    ) -> RecoveryOutcome {
+        RecoveryOutcome::Retry {
+            recovery: state.recovery_state.clone(),
+            scope: RetryScope::Call,
+            alter: Some(RetryAlteration::ShrinkContext),
         }
     }
 }
@@ -998,6 +1026,18 @@ pub(super) fn family_with_retry_policy_denied_recovery() -> LoopFamily {
     let version = ComponentIdentity::from_static(
         "executor-retry-policy-denied-test",
         ComponentDigest([3; 32]),
+    );
+    LoopFamily::new(id, version, Arc::new(planner))
+}
+
+pub(super) fn family_with_shrink_context_call_scope_recovery() -> LoopFamily {
+    let planner = DefaultPlanner::compose_default()
+        .with_recovery(Arc::new(ShrinkContextCallScopeRecoveryStrategy));
+    let id =
+        LoopFamilyId::new("executor-shrink-context-call-scope-test").expect("valid test family id");
+    let version = ComponentIdentity::from_static(
+        "executor-shrink-context-call-scope-test",
+        ComponentDigest([9; 32]),
     );
     LoopFamily::new(id, version, Arc::new(planner))
 }

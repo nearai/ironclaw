@@ -719,13 +719,16 @@ impl RuntimeCapabilityFailure {
 }
 
 fn bounded_runtime_failure_summary(summary: &str) -> String {
+    const ELLIPSIS: &str = "...";
     let mut chars = summary.chars();
     let bounded: String = chars
         .by_ref()
         .take(MAX_RUNTIME_FAILURE_SUMMARY_CHARS)
         .collect();
     if chars.next().is_some() {
-        format!("{bounded}...")
+        let truncated_limit = MAX_RUNTIME_FAILURE_SUMMARY_CHARS - ELLIPSIS.chars().count();
+        let bounded: String = bounded.chars().take(truncated_limit).collect();
+        format!("{bounded}{ELLIPSIS}")
     } else {
         bounded
     }

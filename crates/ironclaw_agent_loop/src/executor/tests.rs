@@ -670,6 +670,75 @@ async fn prompt_stage_cancellation_after_compaction_success_skips_final_bundle_r
 }
 
 #[tokio::test]
+async fn model_context_overflow_retries_through_canonical_compaction_stage() {
+    let host = MockHost::new(vec![reply_response()])
+        .with_model_errors(vec![AgentLoopHostError::new(
+            AgentLoopHostErrorKind::BudgetExceeded,
+            "model request exceeded its context budget",
+        )])
+        .with_prompt_compaction_indexes(vec![
+            vec![compaction_metadata(1, LoopContextCompactionKind::User, 10)],
+            vec![compaction_metadata(1, LoopContextCompactionKind::User, 10)],
+            Vec::new(),
+        ])
+        .with_compaction_result(Ok(LoopCompactionResponse {
+            summary_artifact_id: LoopSummaryArtifactId::new("summary:overflow-retry")
+                .expect("valid summary id"),
+            compression_ratio_ppm: 100_000,
+        }));
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("execute");
+
+    assert!(matches!(exit, LoopExit::Completed(_)));
+    assert_eq!(host.model_requests().len(), 2);
+    assert_eq!(
+        host.prompt_requests().len(),
+        3,
+        "retry must return to PromptStage so compaction can run before the next model call"
+    );
+    assert!(host.progress_event_names().contains(&"compaction_started"));
+
+    let final_state = final_staged_state(&host);
+    assert_eq!(
+        final_state.compaction_state.last_compacted_through_seq,
+        Some(1)
+    );
+    assert!(!final_state.compaction_state.force_compact_on_next_iteration);
+}
+
+#[tokio::test]
+async fn model_shrink_context_call_scope_returns_planner_contract() {
+    let host =
+        MockHost::new(vec![reply_response()]).with_model_errors(vec![AgentLoopHostError::new(
+            AgentLoopHostErrorKind::BudgetExceeded,
+            "model request exceeded its context budget",
+        )]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let err = executor
+        .execute_family(
+            &family_with_shrink_context_call_scope_recovery(),
+            &host,
+            state,
+        )
+        .await
+        .expect_err("call-scoped ShrinkContext must violate the planner contract");
+
+    assert!(matches!(
+        err,
+        AgentLoopExecutorError::PlannerContract {
+            detail: "context shrink retry requires iteration scope"
+        }
+    ));
+}
+
+#[tokio::test]
 async fn input_stage_steering_drain_carries_pending_ack() {
     let host = MockHost::new(Vec::new());
     let run_context = host.run_context().clone();

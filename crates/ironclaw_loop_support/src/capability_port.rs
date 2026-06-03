@@ -2180,6 +2180,22 @@ mod tests {
                     && denied.safe_summary == "policy denied request"
         ));
 
+        let operation_failed = runtime_failure_to_loop(RuntimeCapabilityFailure::new(
+            capability_id.clone(),
+            RuntimeFailureKind::OperationFailed,
+            Some(
+                "apply_patch failed for path workspace main.rs: old_string matched 0 times"
+                    .to_string(),
+            ),
+        ))
+        .expect("convert operation failure");
+        assert!(matches!(
+            operation_failed,
+            CapabilityOutcome::Failed(failure)
+                if failure.error_kind == CapabilityFailureKind::OperationFailed
+                    && failure.safe_summary == "apply_patch failed for path workspace main.rs: old_string matched 0 times"
+        ));
+
         let missing_runtime = runtime_failure_to_loop(RuntimeCapabilityFailure::new(
             capability_id,
             RuntimeFailureKind::MissingRuntime,
