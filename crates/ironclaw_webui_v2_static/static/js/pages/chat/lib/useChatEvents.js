@@ -130,6 +130,7 @@ export function useChatEvents({
               content: reply.text || "",
               timestamp: reply.generated_at || new Date().toISOString(),
               turnRunId: reply.turn_run_id,
+              isFinalReply: true,
             },
           ]);
           setPendingGate(null);
@@ -288,7 +289,9 @@ function applyProjectionItems({
       // ProductProjectionItem::Text { id, body } — the body is the
       // assistant-visible reply text accumulated through projection.
       // Dedup by item id so repeated snapshots don't duplicate the
-      // same bubble.
+      // same bubble. Text can arrive in the same projection snapshot
+      // as a still-blocked gate, so terminal run_status is the only
+      // projection item that clears pendingGate.
       const messageId = `text-${item.text.id}`;
       setMessages((prev) => {
         const existing = prev.findIndex((m) => m.id === messageId);
@@ -297,6 +300,7 @@ function applyProjectionItems({
           role: "assistant",
           content: item.text.body || "",
           timestamp: new Date().toISOString(),
+          isFinalReply: true,
         };
         if (existing >= 0) {
           const copy = [...prev];
@@ -306,7 +310,6 @@ function applyProjectionItems({
         return [...prev, next];
       });
       setIsProcessing(false);
-      setPendingGate(null);
     }
 
     if (item.thinking) {

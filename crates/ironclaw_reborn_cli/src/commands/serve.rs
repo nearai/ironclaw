@@ -6,9 +6,9 @@ use std::sync::Arc;
 use anyhow::{Context, anyhow};
 use clap::Args;
 use ironclaw_reborn_composition::{
-    GoogleOAuthRouteConfig, RebornReadiness, RebornRuntimeIdentity, RebornRuntimeInput,
-    RebornWebuiBundle, WebuiServeConfig, build_reborn_runtime, build_webui_services,
-    webui_v2_app_with_lifecycle,
+    GoogleOAuthRouteConfig, RebornBuildInput, RebornReadiness, RebornRuntimeIdentity,
+    RebornRuntimeInput, RebornWebuiBundle, WebuiServeConfig, build_reborn_runtime,
+    build_webui_services, webui_v2_app_with_lifecycle,
 };
 use ironclaw_reborn_config::IdentitySection;
 use ironclaw_reborn_webui_ingress::{
@@ -130,7 +130,7 @@ impl ServeCommand {
         // runtime owner stays at `[identity].default_owner` (a different
         // identity source) and every turn fails with `UnknownThread`.
         let runtime_owner = resolve_webui_runtime_owner(identity_section, &user_id_raw)?;
-        let runtime_input = runtime_input.with_owner_id(runtime_owner);
+        let mut runtime_input = runtime_input.with_owner_id(runtime_owner);
         let default_agent_raw =
             resolve_webui_default_agent(identity_section, &runtime_input.identity);
         let default_agent_id =
@@ -179,8 +179,48 @@ impl ServeCommand {
         } else {
             DEFAULT_SERVE_PORT
         };
+        // Canonical host for WS same-origin check (defense against
+        // reverse-proxy passthrough-Host attacks). Validate as
+        // `host` or `host:port` — refuse multi-segment paths or
+        // scheme prefixes which would silently never match Origin.
+        let canonical_host = webui_section
+            .and_then(|section| section.canonical_host.as_deref())
+            .map(|raw| -> anyhow::Result<String> {
+                if raw.is_empty() {
+                    anyhow::bail!("[webui].canonical_host must not be empty");
+                }
+                if raw.contains("://") {
+                    anyhow::bail!(
+                        "[webui].canonical_host `{raw}` must be `host` or `host:port`, \
+                         not a scheme-qualified URL",
+                    );
+                }
+                if raw.contains('/') {
+                    anyhow::bail!("[webui].canonical_host `{raw}` must not contain `/`",);
+                }
+                Ok(raw.to_string())
+            })
+            .transpose()?;
+
         let listen_addr = SocketAddr::new(host, port);
         reject_non_loopback_privileged_local_runtime(host, &runtime_input)?;
+        if let Some(callback_origin) =
+            webui_oauth_callback_origin(listen_addr, canonical_host.as_deref())
+        {
+            let services = runtime_input.services.take().ok_or_else(|| {
+                anyhow!("WebChat v2 serve requires Reborn runtime services before OAuth wiring")
+            })?;
+            runtime_input.services = Some(
+                with_notion_dcr_oauth_backend(services, &callback_origin)
+                    .context("failed to configure Notion DCR OAuth for WebChat v2")?,
+            );
+        } else {
+            tracing::warn!(
+                target = "ironclaw::reborn::cli::serve",
+                %listen_addr,
+                "Notion DCR OAuth is not configured because the WebChat v2 listener origin is not a stable loopback HTTP origin"
+            );
+        }
 
         // CORS allow-origin list. Empty = fail-closed on every
         // cross-origin preflight; operators MUST opt in to the
@@ -203,29 +243,6 @@ impl ServeCommand {
                     usize::try_from(raw)
                         .map_err(|_| anyhow!("[webui].max_body_bytes_fallback exceeds usize"))
                 }
-            })
-            .transpose()?;
-
-        // Canonical host for WS same-origin check (defense against
-        // reverse-proxy passthrough-Host attacks). Validate as
-        // `host` or `host:port` — refuse multi-segment paths or
-        // scheme prefixes which would silently never match Origin.
-        let canonical_host = webui_section
-            .and_then(|section| section.canonical_host.as_deref())
-            .map(|raw| -> anyhow::Result<String> {
-                if raw.is_empty() {
-                    anyhow::bail!("[webui].canonical_host must not be empty");
-                }
-                if raw.contains("://") {
-                    anyhow::bail!(
-                        "[webui].canonical_host `{raw}` must be `host` or `host:port`, \
-                         not a scheme-qualified URL",
-                    );
-                }
-                if raw.contains('/') {
-                    anyhow::bail!("[webui].canonical_host `{raw}` must not contain `/`",);
-                }
-                Ok(raw.to_string())
             })
             .transpose()?;
 
@@ -358,6 +375,77 @@ fn reject_non_loopback_privileged_local_runtime(
          process, direct network, inherited environment). Bind to a loopback host such as \
          127.0.0.1 or ::1, or choose a less privileged profile."
     );
+}
+
+fn with_notion_dcr_oauth_backend(
+    services: RebornBuildInput,
+    callback_origin: &str,
+) -> anyhow::Result<RebornBuildInput> {
+    // Provider-visible DCR client display name shown during Notion OAuth consent.
+    services
+        .with_notion_dcr_oauth_backend(callback_origin, "Ironclaw")
+        .map_err(|error| anyhow!("Notion DCR OAuth backend rejected callback origin: {error}"))
+}
+
+fn webui_oauth_callback_origin(
+    listen_addr: SocketAddr,
+    canonical_host: Option<&str>,
+) -> Option<String> {
+    if let Some(host) = canonical_host {
+        return Some(format!(
+            "{}://{}",
+            callback_origin_scheme(host),
+            canonical_host_for_origin_url(host)
+        ));
+    }
+
+    let port = listen_addr.port();
+    if port == 0 {
+        return None;
+    }
+    match listen_addr.ip() {
+        IpAddr::V4(host) if host.is_unspecified() => Some(format!("http://localhost:{port}")),
+        IpAddr::V6(host) if host.is_unspecified() => Some(format!("http://localhost:{port}")),
+        IpAddr::V4(host) if host.is_loopback() => Some(format!("http://{host}:{port}")),
+        IpAddr::V6(host) if host.is_loopback() => Some(format!("http://[{host}]:{port}")),
+        _ => None,
+    }
+}
+
+fn callback_origin_scheme(host: &str) -> &'static str {
+    if canonical_host_is_loopback(host) {
+        "http"
+    } else {
+        "https"
+    }
+}
+
+fn canonical_host_is_loopback(host: &str) -> bool {
+    let host_name = canonical_host_name(host);
+    host_name == "localhost"
+        || host_name
+            .parse::<IpAddr>()
+            .is_ok_and(|host| host.is_loopback())
+}
+
+fn canonical_host_for_origin_url(host: &str) -> String {
+    if host.starts_with('[') {
+        return host.to_string();
+    }
+    if matches!(host.parse::<IpAddr>(), Ok(IpAddr::V6(_))) {
+        return format!("[{host}]");
+    }
+    host.to_string()
+}
+
+fn canonical_host_name(host: &str) -> &str {
+    if let Some(rest) = host.strip_prefix('[') {
+        return rest.split_once(']').map(|(host, _)| host).unwrap_or(host);
+    }
+    if host.parse::<IpAddr>().is_ok() {
+        return host;
+    }
+    host.split_once(':').map(|(host, _)| host).unwrap_or(host)
 }
 
 fn resolve_webui_default_agent(
@@ -495,5 +583,125 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains("reborn-cli"), "message: {message}");
         assert!(message.contains("local-user"), "message: {message}");
+    }
+
+    #[test]
+    fn webui_oauth_callback_origin_uses_loopback_http() {
+        assert_eq!(
+            webui_oauth_callback_origin(SocketAddr::from(([127, 0, 0, 1], 3000)), None).as_deref(),
+            Some("http://127.0.0.1:3000")
+        );
+    }
+
+    #[test]
+    fn webui_oauth_callback_origin_maps_unspecified_bind_to_localhost() {
+        assert_eq!(
+            webui_oauth_callback_origin(SocketAddr::from(([0, 0, 0, 0], 3000)), None).as_deref(),
+            Some("http://localhost:3000")
+        );
+    }
+
+    #[test]
+    fn webui_oauth_callback_origin_brackets_ipv6_loopback() {
+        let listen_addr = SocketAddr::new(IpAddr::from_str("::1").unwrap(), 3000);
+
+        assert_eq!(
+            webui_oauth_callback_origin(listen_addr, None).as_deref(),
+            Some("http://[::1]:3000")
+        );
+    }
+
+    #[test]
+    fn webui_oauth_callback_origin_skips_unstable_or_non_loopback_origin() {
+        assert_eq!(
+            webui_oauth_callback_origin(SocketAddr::from(([127, 0, 0, 1], 0)), None),
+            None
+        );
+        assert_eq!(
+            webui_oauth_callback_origin(SocketAddr::from(([192, 168, 1, 42], 3000)), None),
+            None
+        );
+    }
+
+    #[test]
+    fn webui_oauth_callback_origin_uses_https_canonical_host() {
+        assert_eq!(
+            webui_oauth_callback_origin(
+                SocketAddr::from(([0, 0, 0, 0], 3000)),
+                Some("app.example.com"),
+            )
+            .as_deref(),
+            Some("https://app.example.com")
+        );
+    }
+
+    #[test]
+    fn webui_oauth_callback_origin_uses_http_for_loopback_canonical_host() {
+        assert_eq!(
+            webui_oauth_callback_origin(
+                SocketAddr::from(([0, 0, 0, 0], 3000)),
+                Some("127.0.0.1:3000"),
+            )
+            .as_deref(),
+            Some("http://127.0.0.1:3000")
+        );
+    }
+
+    #[test]
+    fn webui_oauth_callback_origin_brackets_ipv6_canonical_host() {
+        assert_eq!(
+            webui_oauth_callback_origin(SocketAddr::from(([0, 0, 0, 0], 3000)), Some("::1"))
+                .as_deref(),
+            Some("http://[::1]")
+        );
+    }
+
+    #[tokio::test]
+    async fn webui_serve_wires_notion_dcr_into_runtime_services() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let services_input = with_notion_dcr_oauth_backend(
+            RebornBuildInput::local_dev("notion-dcr-owner", dir.path().join("local-dev")),
+            "http://127.0.0.1:3000",
+        )
+        .expect("notion dcr wiring");
+        let services = ironclaw_reborn_composition::build_reborn_services(services_input)
+            .await
+            .expect("reborn services build");
+
+        assert!(
+            services
+                .product_auth
+                .as_ref()
+                .and_then(|product_auth| product_auth.as_auth_challenge_provider())
+                .is_some(),
+            "serve wiring must expose the DCR-backed auth challenge provider"
+        );
+    }
+
+    #[tokio::test]
+    async fn webui_serve_wires_notion_dcr_with_canonical_host_origin() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let services_input = with_notion_dcr_oauth_backend(
+            RebornBuildInput::local_dev("notion-dcr-owner", dir.path().join("local-dev")),
+            webui_oauth_callback_origin(
+                SocketAddr::from(([0, 0, 0, 0], 3000)),
+                Some("app.example.com"),
+            )
+            .as_deref()
+            .expect("canonical callback origin"),
+        )
+        .expect("notion dcr wiring");
+        let services = ironclaw_reborn_composition::build_reborn_services(services_input)
+            .await
+            .expect("reborn services build");
+
+        assert!(
+            services
+                .product_auth
+                .as_ref()
+                .and_then(|product_auth| product_auth.as_auth_challenge_provider())
+                .is_some(),
+            "serve wiring must expose the DCR-backed auth challenge provider"
+        );
     }
 }

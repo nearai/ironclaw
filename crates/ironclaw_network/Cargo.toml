@@ -12,6 +12,7 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-
 thiserror = "2"
 tokio = { version = "1", features = ["rt"] }
 url = "2"
+zeroize = "1"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt", "time"] }

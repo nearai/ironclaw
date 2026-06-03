@@ -17,8 +17,8 @@ use ironclaw_loop_support::{
     HostIdentityContextSource, HostInputBatch, HostInputQueue, HostInputQueueError,
     HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
     HostManagedModelRequest, HostManagedModelResponse, JsonSpawnSubagentInputCodec,
-    LoopCapabilityResultWriter, ProductLiveCancellationProbe, RunCancellationFactory,
-    RunCancellationHandle,
+    LoopCapabilityPortFactory, LoopCapabilityResultWriter, ProductLiveCancellationProbe,
+    RunCancellationFactory, RunCancellationHandle,
 };
 use ironclaw_product_adapters::{
     AdapterInstallationId, AuthRequirement, ExternalActorRef, ExternalConversationRef,
@@ -31,7 +31,6 @@ use ironclaw_product_workflow::{
     InboundTurnService, ResolvedBinding,
 };
 use ironclaw_reborn::{
-    loop_driver_host::LoopCapabilityPortFactory,
     loop_exit_applier::ThreadCheckpointLoopExitEvidencePort,
     model_routes::{
         ModelRoute, ModelRoutePolicy, ModelSelectionMode, ModelSlot, StaticModelRouteResolver,

@@ -74,7 +74,7 @@ pub use auth_interaction::{
 };
 pub use binding::{
     ConversationBindingService, ProductConversationRouteKind, ResolveBindingRequest,
-    ResolvedBinding,
+    ResolvedBinding, route_kind_for_inbound_payload,
 };
 pub use command_dispatch::{
     ProductCommandAdmission, ProductCommandAdmissionService, ProductCommandContext,
@@ -85,8 +85,8 @@ pub use commands::{
     product_command_descriptors,
 };
 pub use conversation_binding::{
-    ProductConversationBindingService, ProductInstallationKey, ProductInstallationScope,
-    StaticProductInstallationResolver,
+    ProductActorBindingPolicy, ProductConversationBindingService, ProductInstallationKey,
+    ProductInstallationScope, StaticProductInstallationResolver,
 };
 pub use error::{AuthContinuationRejectionKind, ProductWorkflowError};
 #[cfg(any(test, feature = "test-support"))]

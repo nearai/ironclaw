@@ -136,6 +136,17 @@ impl LibSqlTriggerRepository {
             .map_err(|error| backend_error("create trigger tenant list index", error))?;
             conn.execute(
                 &format!(
+                    "CREATE INDEX IF NOT EXISTS trigger_records_scoped_list_idx
+                     ON {TRIGGER_TABLE} (
+                        tenant_id, creator_user_id, agent_id, project_id, created_at, trigger_id
+                     )"
+                ),
+                (),
+            )
+            .await
+            .map_err(|error| backend_error("create trigger scoped list index", error))?;
+            conn.execute(
+                &format!(
                     "CREATE INDEX IF NOT EXISTS trigger_records_active_fire_slot_idx
                      ON {TRIGGER_TABLE} (active_fire_slot, tenant_id, trigger_id)
                      WHERE active_fire_slot IS NOT NULL"
@@ -156,7 +167,7 @@ impl LibSqlTriggerRepository {
                 .map_err(|error| backend_error("commit trigger migration", error)),
             Err(error) => {
                 if let Err(rollback_error) = conn.execute("ROLLBACK", ()).await {
-                    tracing::warn!(
+                    tracing::debug!(
                         migration_error = %error,
                         rollback_error = %rollback_error,
                         "ROLLBACK failed after libSQL trigger migration error"
@@ -239,6 +250,54 @@ impl TriggerRepository for LibSqlTriggerRepository {
         Ok(records)
     }
 
+    async fn list_scoped_triggers(
+        &self,
+        tenant_id: TenantId,
+        creator_user_id: UserId,
+        agent_id: Option<AgentId>,
+        project_id: Option<ProjectId>,
+        limit: usize,
+    ) -> Result<Vec<TriggerRecord>, TriggerError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let limit = limit.min(crate::MAX_TRIGGER_LIST_LIMIT) as i64;
+        let conn = self.connect().await?;
+        let agent_id = agent_id.as_ref().map(AgentId::as_str);
+        let project_id = project_id.as_ref().map(ProjectId::as_str);
+        let mut rows = conn
+            .query(
+                &format!(
+                    "SELECT {TRIGGER_COLUMNS}
+                     FROM {TRIGGER_TABLE}
+                     WHERE tenant_id = ?1
+                       AND creator_user_id = ?2
+                       AND agent_id IS ?3
+                       AND project_id IS ?4
+                     ORDER BY created_at, trigger_id
+                     LIMIT ?5"
+                ),
+                params![
+                    tenant_id.as_str(),
+                    creator_user_id.as_str(),
+                    agent_id,
+                    project_id,
+                    limit
+                ],
+            )
+            .await
+            .map_err(|error| backend_error("query scoped trigger records", error))?;
+        let mut records = Vec::new();
+        loop {
+            match rows.next().await {
+                Ok(Some(row)) => records.push(row_to_record(&row)?),
+                Ok(None) => break,
+                Err(error) => return Err(backend_error("read scoped trigger record row", error)),
+            }
+        }
+        Ok(records)
+    }
+
     async fn remove_trigger(
         &self,
         tenant_id: TenantId,
@@ -260,6 +319,48 @@ impl TriggerRepository for LibSqlTriggerRepository {
             Ok(Some(row)) => Ok(Some(row_to_record(&row)?)),
             Ok(None) => Ok(None),
             Err(error) => Err(backend_error("read removed trigger record row", error)),
+        }
+    }
+
+    async fn remove_scoped_trigger(
+        &self,
+        tenant_id: TenantId,
+        creator_user_id: UserId,
+        agent_id: Option<AgentId>,
+        project_id: Option<ProjectId>,
+        trigger_id: TriggerId,
+    ) -> Result<Option<TriggerRecord>, TriggerError> {
+        let conn = self.connect().await?;
+        let agent_id = agent_id.as_ref().map(AgentId::as_str);
+        let project_id = project_id.as_ref().map(ProjectId::as_str);
+        let mut rows = conn
+            .query(
+                &format!(
+                    "DELETE FROM {TRIGGER_TABLE}
+                     WHERE tenant_id = ?1
+                       AND creator_user_id = ?2
+                       AND agent_id IS ?3
+                       AND project_id IS ?4
+                       AND trigger_id = ?5
+                     RETURNING {TRIGGER_COLUMNS}"
+                ),
+                params![
+                    tenant_id.as_str(),
+                    creator_user_id.as_str(),
+                    agent_id,
+                    project_id,
+                    trigger_id.to_string(),
+                ],
+            )
+            .await
+            .map_err(|error| backend_error("remove scoped trigger record", error))?;
+        match rows.next().await {
+            Ok(Some(row)) => Ok(Some(row_to_record(&row)?)),
+            Ok(None) => Ok(None),
+            Err(error) => Err(backend_error(
+                "read removed scoped trigger record row",
+                error,
+            )),
         }
     }
 

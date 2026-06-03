@@ -59,18 +59,25 @@ mod tests {
         )
     }
 
-    fn provider_tool_call(arguments: serde_json::Value) -> ProviderToolCall {
+    fn provider_tool_call_with_name(
+        name: impl Into<String>,
+        arguments: serde_json::Value,
+    ) -> ProviderToolCall {
         ProviderToolCall {
             provider_id: "test-provider".to_string(),
             provider_model_id: "test-model".to_string(),
             turn_id: Some("provider-turn-1".to_string()),
             id: "call-1".to_string(),
-            name: "builtin_echo".to_string(),
+            name: name.into(),
             arguments,
             response_reasoning: None,
             reasoning: None,
             signature: None,
         }
+    }
+
+    fn provider_tool_call(arguments: serde_json::Value) -> ProviderToolCall {
+        provider_tool_call_with_name("builtin_echo", arguments)
     }
 
     fn skill_md(name: &str, description: &str, prompt: &str) -> String {
@@ -573,7 +580,8 @@ mod tests {
                 EffectKind::DeleteFilesystem,
                 EffectKind::SpawnProcess,
                 EffectKind::ExecuteCode,
-                EffectKind::Network
+                EffectKind::Network,
+                EffectKind::ExternalWrite
             ]
         );
 
@@ -1552,6 +1560,69 @@ mod tests {
             GsuiteCapabilityVisibility::Visible,
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn activated_gmail_provider_tool_call_without_account_returns_oauth_gate() {
+        let harness = gsuite_surface_harness(
+            "local-dev-gmail-auth-owner",
+            "gmail-auth-gate",
+            "local-dev-gmail-auth-user",
+            GsuiteExtensionState::Activated,
+        )
+        .await;
+        let port = harness
+            .wiring
+            .capability_factory
+            .create_capability_port(&harness.run_context)
+            .await
+            .expect("capability port");
+        port.visible_capabilities(VisibleCapabilityRequest {})
+            .await
+            .expect("visible surface");
+        let tool_definition = port
+            .tool_definitions()
+            .expect("tool definitions")
+            .into_iter()
+            .find(|definition| definition.capability_id.as_str() == "gmail.list_messages")
+            .expect("gmail.list_messages tool definition");
+        assert_eq!(tool_definition.name, "gmail__list_messages");
+
+        let candidate = port
+            .register_provider_tool_call(provider_tool_call_with_name(
+                tool_definition.name,
+                serde_json::json!({}),
+            ))
+            .await
+            .expect("gmail provider tool call stages");
+
+        let outcome = port
+            .invoke_capability(CapabilityInvocation {
+                surface_version: candidate.surface_version,
+                capability_id: candidate.capability_id,
+                input_ref: candidate.input_ref,
+            })
+            .await
+            .expect("gmail provider tool call invokes");
+
+        let CapabilityOutcome::AuthRequired {
+            credential_requirements,
+            ..
+        } = outcome
+        else {
+            panic!("expected Gmail provider tool call to return AuthRequired, got {outcome:?}");
+        };
+        assert_eq!(credential_requirements.len(), 1);
+        let requirement = &credential_requirements[0];
+        assert_eq!(
+            requirement.provider.as_str(),
+            ironclaw_auth::GOOGLE_PROVIDER_ID
+        );
+        assert_eq!(requirement.requester_extension.as_str(), "gmail");
+        assert_eq!(
+            requirement.provider_scopes,
+            vec![ironclaw_auth::GOOGLE_GMAIL_READONLY_SCOPE.to_string()]
+        );
     }
 
     #[tokio::test]

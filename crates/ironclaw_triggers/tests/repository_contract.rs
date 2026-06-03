@@ -107,6 +107,102 @@ async fn assert_round_trip_and_scoped_isolation(repo: &impl TriggerRepository) {
         vec![due.trigger_id, later.trigger_id]
     );
 
+    let mut other_agent = sample_record(
+        TriggerId::parse("01J00000000000000000000002").expect("ulid"),
+        tenant("tenant-a"),
+        ts(1_704_067_320),
+    );
+    other_agent.agent_id = Some(AgentId::new("agent-b").expect("valid agent"));
+    repo.upsert_trigger(other_agent.clone())
+        .await
+        .expect("insert other agent");
+
+    let first_scoped_record = repo
+        .list_scoped_triggers(
+            tenant("tenant-a"),
+            user("user-a"),
+            Some(AgentId::new("agent-a").expect("valid agent")),
+            Some(ProjectId::new("project-a").expect("valid project")),
+            1,
+        )
+        .await
+        .expect("list first scoped trigger");
+    assert_eq!(
+        first_scoped_record
+            .iter()
+            .map(|record| record.trigger_id)
+            .collect::<Vec<_>>(),
+        vec![due.trigger_id]
+    );
+
+    let scoped_records = repo
+        .list_scoped_triggers(
+            tenant("tenant-a"),
+            user("user-a"),
+            Some(AgentId::new("agent-a").expect("valid agent")),
+            Some(ProjectId::new("project-a").expect("valid project")),
+            10,
+        )
+        .await
+        .expect("list scoped triggers");
+    assert_eq!(
+        scoped_records
+            .iter()
+            .map(|record| record.trigger_id)
+            .collect::<Vec<_>>(),
+        vec![due.trigger_id, later.trigger_id]
+    );
+
+    assert!(
+        repo.list_scoped_triggers(
+            tenant("tenant-a"),
+            user("user-a"),
+            Some(AgentId::new("agent-c").expect("valid agent")),
+            Some(ProjectId::new("project-a").expect("valid project")),
+            10,
+        )
+        .await
+        .expect("list other scoped triggers")
+        .is_empty()
+    );
+
+    assert_eq!(
+        repo.remove_scoped_trigger(
+            tenant("tenant-a"),
+            user("user-a"),
+            Some(AgentId::new("agent-c").expect("valid agent")),
+            Some(ProjectId::new("project-a").expect("valid project")),
+            later.trigger_id,
+        )
+        .await
+        .expect("wrong-scope scoped remove"),
+        None
+    );
+    assert!(
+        repo.get_trigger(tenant("tenant-a"), later.trigger_id)
+            .await
+            .expect("lookup after wrong-scope scoped remove")
+            .is_some()
+    );
+    let scoped_removed = repo
+        .remove_scoped_trigger(
+            tenant("tenant-a"),
+            user("user-a"),
+            Some(AgentId::new("agent-a").expect("valid agent")),
+            Some(ProjectId::new("project-a").expect("valid project")),
+            later.trigger_id,
+        )
+        .await
+        .expect("matching-scope scoped remove")
+        .expect("scoped removed record");
+    assert_eq!(scoped_removed.trigger_id, later.trigger_id);
+    assert!(
+        repo.get_trigger(tenant("tenant-a"), later.trigger_id)
+            .await
+            .expect("lookup scoped removed")
+            .is_none()
+    );
+
     let removed = repo
         .remove_trigger(tenant("tenant-a"), due.trigger_id)
         .await
@@ -193,6 +289,63 @@ async fn assert_round_trip_preserves_null_optional_scope_fields(repo: &impl Trig
         .expect("record present");
 
     assert_eq!(fetched, record);
+
+    let scoped_null_records = repo
+        .list_scoped_triggers(tenant("tenant-a"), user("user-a"), None, None, 10)
+        .await
+        .expect("list null-scoped triggers");
+    assert_eq!(
+        scoped_null_records
+            .iter()
+            .map(|record| record.trigger_id)
+            .collect::<Vec<_>>(),
+        vec![record.trigger_id]
+    );
+
+    assert!(
+        repo.list_scoped_triggers(
+            tenant("tenant-a"),
+            user("user-a"),
+            Some(AgentId::new("agent-a").expect("valid agent")),
+            None,
+            10,
+        )
+        .await
+        .expect("list nonmatching scoped triggers")
+        .is_empty()
+    );
+
+    assert_eq!(
+        repo.remove_scoped_trigger(
+            tenant("tenant-a"),
+            user("user-a"),
+            None,
+            None,
+            TriggerId::parse("01J00000000000000000000009").expect("ulid"),
+        )
+        .await
+        .expect("missing null-scoped remove"),
+        None
+    );
+
+    let scoped_null_removed = repo
+        .remove_scoped_trigger(
+            tenant("tenant-a"),
+            user("user-a"),
+            None,
+            None,
+            record.trigger_id,
+        )
+        .await
+        .expect("matching null-scoped remove")
+        .expect("null-scoped removed record");
+    assert_eq!(scoped_null_removed.trigger_id, record.trigger_id);
+    assert!(
+        repo.get_trigger(tenant("tenant-a"), record.trigger_id)
+            .await
+            .expect("lookup removed null-scoped record")
+            .is_none()
+    );
 }
 
 async fn assert_upsert_preserves_original_created_at(repo: &impl TriggerRepository) {

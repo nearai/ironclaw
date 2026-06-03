@@ -409,8 +409,11 @@ fn resolve_google_oauth_config(
         );
     }
     let hosted_domain_hint = reborn_hosted_domain_hint.or(legacy_hosted_domain_hint);
-    let client = OAuthClientConfig::new(client_id, redirect_uri, client_secret)
+    let mut client = OAuthClientConfig::new(client_id, redirect_uri, client_secret)
         .context("invalid Google OAuth client configuration")?;
+    if let Some(hosted_domain_hint) = hosted_domain_hint.clone() {
+        client = client.with_hosted_domain_hint(hosted_domain_hint);
+    }
 
     Ok(Some(ResolvedGoogleOAuthConfig {
         client,

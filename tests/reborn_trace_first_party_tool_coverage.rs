@@ -12,7 +12,8 @@ use ironclaw_host_runtime::{
     MEMORY_READ_CAPABILITY_ID, MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID,
     MEMORY_WRITE_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, SHELL_CAPABILITY_ID,
     SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID,
-    SPAWN_SUBAGENT_CAPABILITY_ID, TIME_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID,
+    SPAWN_SUBAGENT_CAPABILITY_ID, TIME_CAPABILITY_ID, TRIGGER_CREATE_CAPABILITY_ID,
+    TRIGGER_LIST_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID,
     builtin_first_party_package,
 };
 use ironclaw_loop_support::{HostManagedModelMessageRole, HostManagedModelResponse};
@@ -45,6 +46,9 @@ const REBORN_FIRST_PARTY_E2E_COVERED_CAPABILITIES: &[&str] = &[
     SKILL_LIST_CAPABILITY_ID,
     SKILL_INSTALL_CAPABILITY_ID,
     SKILL_REMOVE_CAPABILITY_ID,
+    TRIGGER_CREATE_CAPABILITY_ID,
+    TRIGGER_LIST_CAPABILITY_ID,
+    TRIGGER_REMOVE_CAPABILITY_ID,
 ];
 
 const SKILL_NAME: &str = "reborn-skill-e2e";
@@ -308,6 +312,111 @@ async fn reborn_trace_skill_management_first_party_tools_parity() {
     assert_eq!(tool_result_count(&requests[2]), 2);
     assert_eq!(tool_result_count(&requests[3]), 3);
     assert_eq!(tool_result_count(&requests[4]), 4);
+    assert_milestone_order(
+        &harness.milestones(),
+        |kind| matches!(kind, LoopHostMilestoneKind::CapabilityBatchCompleted { .. }),
+        |kind| matches!(kind, LoopHostMilestoneKind::AssistantReplyFinalized { .. }),
+    );
+    harness.assert_model_exhausted();
+
+    harness.shutdown().await;
+}
+
+#[tokio::test]
+async fn reborn_trace_trigger_management_first_party_tools_parity() {
+    let trigger_create =
+        CapabilityId::new(TRIGGER_CREATE_CAPABILITY_ID).expect("valid capability id");
+    let trigger_list = CapabilityId::new(TRIGGER_LIST_CAPABILITY_ID).expect("valid capability id");
+    let trigger_remove =
+        CapabilityId::new(TRIGGER_REMOVE_CAPABILITY_ID).expect("valid capability id");
+    let model_gateway = RebornTraceReplayModelGateway::with_scripted_steps([
+        RebornModelReplayStep::ProviderToolCalls {
+            calls: vec![RebornScriptedProviderToolCall::new(
+                trigger_create.clone(),
+                "call_trigger_create_first_party",
+                serde_json::json!({
+                    "name": "Daily trace summary",
+                    "prompt": "Summarize trace state",
+                    "cron": "0 8 * * *"
+                }),
+            )],
+            expected_tool_results: Vec::new(),
+        },
+        RebornModelReplayStep::ProviderToolCalls {
+            calls: vec![RebornScriptedProviderToolCall::new(
+                trigger_list.clone(),
+                "call_trigger_list_after_create",
+                serde_json::json!({}),
+            )],
+            expected_tool_results: Vec::new(),
+        },
+        RebornModelReplayStep::ProviderToolCalls {
+            calls: vec![RebornScriptedProviderToolCall::new(
+                trigger_remove.clone(),
+                "call_trigger_remove_first_party",
+                serde_json::json!({"trigger_id": "01J00000000000000000000009"}),
+            )],
+            expected_tool_results: Vec::new(),
+        },
+        RebornModelReplayStep::Response {
+            response: HostManagedModelResponse::assistant_reply(
+                "trigger management tools trace complete",
+            ),
+            expected_tool_results: Vec::new(),
+        },
+    ]);
+    let mut harness = RebornBinaryE2EHarness::with_host_runtime_trigger_management_capabilities(
+        "room-trace-trigger-management-first-party-tools",
+        model_gateway,
+    )
+    .await
+    .expect("harness");
+    harness.start();
+
+    let submitted = harness
+        .submit_text(
+            "event-trace-trigger-management-first-party-tools",
+            "exercise trigger management first-party tools",
+        )
+        .await
+        .expect("submit text");
+    harness
+        .wait_for_status(submitted.run_id, TurnStatus::Completed)
+        .await
+        .expect("completed run");
+    harness
+        .assert_final_reply("trigger management tools trace complete")
+        .await
+        .expect("final reply");
+
+    let invocations = harness.capability_invocations();
+    assert_eq!(invocations.len(), 3);
+    assert_eq!(invocations[0].capability_id, trigger_create);
+    assert_eq!(invocations[1].capability_id, trigger_list);
+    assert_eq!(invocations[2].capability_id, trigger_remove);
+
+    let results = harness.capability_results();
+    assert_eq!(results.len(), 3);
+    let trigger_id = results[0].output["trigger"]["trigger_id"]
+        .as_str()
+        .expect("created trigger id");
+    assert_eq!(
+        results[0].output["trigger"]["name"],
+        serde_json::json!("Daily trace summary")
+    );
+    assert_eq!(results[1].capability_id, trigger_list);
+    assert_eq!(
+        results[1].output["triggers"][0]["trigger_id"],
+        serde_json::json!(trigger_id)
+    );
+    assert_eq!(results[2].capability_id, trigger_remove);
+    assert_eq!(results[2].output["removed"], serde_json::json!(false));
+
+    let requests = harness.model_requests();
+    assert_eq!(requests.len(), 4);
+    assert_eq!(tool_result_count(&requests[1]), 1);
+    assert_eq!(tool_result_count(&requests[2]), 2);
+    assert_eq!(tool_result_count(&requests[3]), 3);
     assert_milestone_order(
         &harness.milestones(),
         |kind| matches!(kind, LoopHostMilestoneKind::CapabilityBatchCompleted { .. }),

@@ -33,16 +33,17 @@ use ironclaw_loop_support::{
     HostManagedModelRequest, HostManagedModelResponse, HostRuntimeLoopCapabilityPort,
     HostSkillContextBuildError, HostSkillContextCandidate, HostSkillContextSource,
     IdentityApplicability, IdentityFileName, JsonSpawnSubagentInputCodec,
-    LoopCapabilityInputResolver, LoopCapabilityResultWriter, ProductLiveCancellationProbe,
-    RunCancellationFactory, RunCancellationHandle, identity_message_ref,
+    LoopCapabilityInputResolver, LoopCapabilityPortFactory, LoopCapabilityResultWriter,
+    ProductLiveCancellationProbe, RunCancellationFactory, RunCancellationHandle,
+    identity_message_ref,
 };
 use ironclaw_processes::ProcessServices;
 use ironclaw_reborn::driver_registry::{
     DriverKind, DriverRegistry, DriverRequirements, LoopDriverRegistryKey,
 };
 use ironclaw_reborn::loop_driver_host::{
-    LoopCapabilityPortFactory, RebornLoopDriverHost, RebornLoopDriverHostFactory,
-    RebornLoopDriverHostRequest, TextOnlyLoopHostConfig,
+    RebornLoopDriverHost, RebornLoopDriverHostFactory, RebornLoopDriverHostRequest,
+    TextOnlyLoopHostConfig,
 };
 use ironclaw_reborn::loop_exit_applier::{
     BlockedEvidenceRequest, CompletionEvidenceRequest, FailureEvidenceRequest,
@@ -201,7 +202,7 @@ async fn text_only_host_factory_builds_complete_agent_loop_driver_host() {
         })
         .await
         .unwrap();
-    assert_eq!(prompt_bundle.messages.len(), 1);
+    assert_eq!(prompt_bundle.messages.len(), 2);
     assert!(prompt_bundle.instruction_fingerprint.is_some());
 
     let model_response = host_dyn
@@ -264,9 +265,16 @@ async fn text_only_host_factory_builds_complete_agent_loop_driver_host() {
     assert_eq!(assistant.content.as_deref(), Some("model says hi"));
 
     assert_eq!(fixture.gateway.requests().len(), 1);
-    assert_eq!(
-        fixture.gateway.requests()[0].messages[0].content,
-        "hello reborn"
+    let request_messages = &fixture.gateway.requests()[0].messages;
+    assert!(request_messages.iter().any(|message| {
+        message
+            .content
+            .contains("No instruction safety scanner is configured")
+    }));
+    assert!(
+        request_messages
+            .iter()
+            .any(|message| message.content == "hello reborn")
     );
 
     let milestone_names = fixture.milestone_names();
@@ -935,12 +943,22 @@ async fn text_only_model_reply_driver_rejects_profiles_not_assigned_to_driver() 
 #[tokio::test]
 async fn text_only_host_factory_includes_safety_context_in_prompt_bundle() {
     let fixture = HostFixture::new("thread-host-safety-context", "hello safety").await;
-    let host = fixture
-        .factory()
-        .with_safety_context(
-            InstructionSafetyContext::new("safety:prompt-write", "prompt write safety enforced")
-                .unwrap(),
-        )
+    let factory = RebornLoopDriverHostFactory::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        Arc::clone(&fixture.gateway),
+        fixture.checkpoint_state_store.clone(),
+        fixture.turn_state_store.clone(),
+        fixture.loop_checkpoint_store.clone(),
+        fixture.milestone_sink.clone(),
+        TextOnlyLoopHostConfig {
+            max_messages: 8,
+            require_model_route_snapshot: false,
+        },
+        InstructionSafetyContext::new("safety:prompt-write", "prompt write safety enforced")
+            .unwrap(),
+    );
+    let host = factory
         .build_text_only_host(RebornLoopDriverHostRequest {
             claimed_run: fixture.claimed.clone(),
             loop_run_context: fixture.context.clone(),
@@ -978,6 +996,57 @@ async fn text_only_host_factory_includes_safety_context_in_prompt_bundle() {
             .messages
             .iter()
             .any(|message| message.content == "prompt write safety enforced")
+    );
+    assert!(
+        requests[0]
+            .messages
+            .iter()
+            .all(|message| !message.content.contains("No instruction safety scanner"))
+    );
+}
+
+#[tokio::test]
+async fn text_only_host_factory_uses_explicit_local_noop_safety_context() {
+    let fixture = HostFixture::new("thread-host-default-safety-context", "hello safety").await;
+    let host = fixture
+        .factory()
+        .build_text_only_host(RebornLoopDriverHostRequest {
+            claimed_run: fixture.claimed.clone(),
+            loop_run_context: fixture.context.clone(),
+        })
+        .await
+        .unwrap();
+    let host_dyn: &(dyn AgentLoopDriverHost + Send + Sync) = &host;
+
+    let prompt_bundle = host_dyn
+        .build_prompt_bundle(LoopPromptBundleRequest {
+            mode: PromptMode::TextOnly,
+            context_cursor: None,
+            surface_version: None,
+            checkpoint_state_ref: None,
+            max_messages: Some(8),
+            inline_messages: Vec::new(),
+            capability_view: None,
+        })
+        .await
+        .unwrap();
+    host_dyn
+        .stream_model(LoopModelRequest {
+            messages: prompt_bundle.messages,
+            surface_version: None,
+            model_preference: None,
+            capability_view: None,
+        })
+        .await
+        .unwrap();
+
+    let requests = fixture.gateway.requests();
+    assert_eq!(requests.len(), 1);
+    assert!(
+        requests[0]
+            .messages
+            .iter()
+            .any(|message| message.content.contains("No instruction safety scanner"))
     );
 }
 
@@ -1232,6 +1301,7 @@ async fn turn_runner_worker_completes_after_libsql_turn_and_thread_services_reop
             max_messages: 8,
             require_model_route_snapshot: false,
         },
+        InstructionSafetyContext::local_development_noop(),
     );
     let mut registry = DriverRegistry::new();
     registry
@@ -1980,6 +2050,7 @@ async fn turn_runner_worker_fails_when_real_host_factory_rejects_claimed_scope()
             max_messages: 8,
             require_model_route_snapshot: false,
         },
+        InstructionSafetyContext::local_development_noop(),
     );
 
     let (_wake_sender, wake_receiver) = TurnRunnerWakeReceiver::new();
@@ -2554,6 +2625,45 @@ async fn product_live_runtime_builds_when_all_required_adapters_are_present() {
         .await
         .unwrap();
     assert_eq!(resolved.profile_id.as_str(), "reborn-planned-default");
+
+    let host = composition
+        .host_factory
+        .build_text_only_host(RebornLoopDriverHostRequest {
+            claimed_run: fixture.claimed.clone(),
+            loop_run_context: fixture.context.clone(),
+        })
+        .await
+        .unwrap();
+    let host_dyn: &(dyn AgentLoopDriverHost + Send + Sync) = &host;
+    let prompt_bundle = host_dyn
+        .build_prompt_bundle(LoopPromptBundleRequest {
+            mode: PromptMode::TextOnly,
+            context_cursor: None,
+            surface_version: None,
+            checkpoint_state_ref: None,
+            max_messages: Some(8),
+            inline_messages: Vec::new(),
+            capability_view: None,
+        })
+        .await
+        .unwrap();
+    host_dyn
+        .stream_model(LoopModelRequest {
+            messages: prompt_bundle.messages,
+            surface_version: None,
+            model_preference: None,
+            capability_view: None,
+        })
+        .await
+        .unwrap();
+    let requests = fixture.gateway.requests();
+    assert_eq!(requests.len(), 1);
+    assert!(
+        requests[0]
+            .messages
+            .iter()
+            .any(|message| message.content == "test safety context")
+    );
 }
 
 /// Build a fully-populated `DefaultPlannedRuntimeParts` for product-live
@@ -3365,6 +3475,7 @@ async fn text_only_host_default_cancellation_factory_observes_durable_cancel_req
             max_messages: 8,
             require_model_route_snapshot: false,
         },
+        InstructionSafetyContext::local_development_noop(),
     );
 
     assert!(factory.cancellation_observation_kind().is_live_capable());
@@ -3399,6 +3510,7 @@ async fn text_only_host_factory_rejects_thread_scope_mismatch() {
             max_messages: 8,
             require_model_route_snapshot: false,
         },
+        InstructionSafetyContext::local_development_noop(),
     );
 
     let error = factory
@@ -6242,6 +6354,7 @@ impl HostFactory for CapabilityHostFactory {
                 max_messages: 8,
                 require_model_route_snapshot: false,
             },
+            InstructionSafetyContext::local_development_noop(),
         )
         .build_text_only_host_with_capabilities(
             RebornLoopDriverHostRequest {
@@ -6765,6 +6878,7 @@ impl HostFixture {
             loop_checkpoint_store,
             self.milestone_sink.clone(),
             config,
+            InstructionSafetyContext::local_development_noop(),
         )
     }
 

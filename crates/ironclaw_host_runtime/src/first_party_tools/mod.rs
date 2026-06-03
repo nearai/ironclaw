@@ -15,6 +15,7 @@ mod skill_management;
 mod skill_url_install;
 mod spawn_subagent;
 mod time;
+mod trigger_management;
 
 use std::{future::Future, panic::AssertUnwindSafe, sync::Arc, time::Instant};
 
@@ -54,6 +55,11 @@ pub use skill_management::{
 };
 pub use spawn_subagent::SPAWN_SUBAGENT_CAPABILITY_ID;
 pub use time::TIME_CAPABILITY_ID;
+#[cfg(any(test, feature = "test-support"))]
+pub use trigger_management::TriggerManagementClock;
+pub use trigger_management::{
+    TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID,
+};
 
 pub const BUILTIN_FIRST_PARTY_PROVIDER: &str = "builtin";
 pub const READ_FILE_CAPABILITY_ID: &str = "builtin.read_file";
@@ -67,7 +73,7 @@ const MAX_FIRST_PARTY_INPUT_BYTES: usize = 1_048_576;
 const MAX_WRITE_FILE_INPUT_BYTES: usize = 6 * 1024 * 1024;
 const MAX_APPLY_PATCH_INPUT_BYTES: usize = 21 * 1024 * 1024;
 const FIRST_PARTY_DEFAULT_OUTPUT_BYTES: u64 = 16 * 1024;
-const FIRST_PARTY_MAX_OUTPUT_BYTES: u64 = 1_048_576;
+pub(super) const FIRST_PARTY_MAX_OUTPUT_BYTES: u64 = 1_048_576;
 const FIRST_PARTY_DEFAULT_WALL_CLOCK_MS: u64 = 100;
 const FIRST_PARTY_MAX_WALL_CLOCK_MS: u64 = 5_000;
 
@@ -157,6 +163,7 @@ pub fn builtin_first_party_package() -> Result<ExtensionPackage, ExtensionError>
                 capabilities.extend(memory::manifests()?);
                 capabilities.extend(coding_manifests()?);
                 capabilities.extend(skill_management::manifests()?);
+                capabilities.extend(trigger_management::manifests()?);
                 capabilities
             },
         },
@@ -179,8 +186,32 @@ fn coding_manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
         .collect()
 }
 
-/// Create handlers for all built-in first-party capabilities.
-pub fn builtin_first_party_handlers() -> Result<FirstPartyCapabilityRegistry, HostApiError> {
+/// Create handlers for all built-in first-party capabilities using an
+/// explicitly composed trigger repository.
+pub fn builtin_first_party_handlers(
+    trigger_repository: Arc<dyn ironclaw_triggers::TriggerRepository>,
+) -> Result<FirstPartyCapabilityRegistry, HostApiError> {
+    let mut registry = builtin_first_party_base_registry()?;
+    trigger_management::insert_handlers(&mut registry, trigger_repository)?;
+    Ok(registry)
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn builtin_first_party_handlers_with_trigger_clock(
+    trigger_repository: Arc<dyn ironclaw_triggers::TriggerRepository>,
+    trigger_clock: Arc<dyn TriggerManagementClock>,
+) -> Result<FirstPartyCapabilityRegistry, HostApiError> {
+    let mut registry = builtin_first_party_base_registry()?;
+    trigger_management::insert_handlers_with_clock(
+        &mut registry,
+        trigger_repository,
+        trigger_clock,
+    )?;
+    Ok(registry)
+}
+
+fn builtin_first_party_base_registry() -> Result<FirstPartyCapabilityRegistry, HostApiError> {
     let handler = Arc::new(BuiltinFirstPartyTools::default());
     let mut registry = FirstPartyCapabilityRegistry::new()
         .with_handler(CapabilityId::new(ECHO_CAPABILITY_ID)?, handler.clone())
@@ -349,7 +380,7 @@ impl FirstPartyCapabilityHandler for BuiltinFirstPartyTools {
     }
 }
 
-fn bounded_input_size(
+pub(super) fn bounded_input_size(
     capability_id: &str,
     input: &serde_json::Value,
 ) -> Result<(), FirstPartyCapabilityError> {
@@ -365,7 +396,7 @@ fn bounded_input_size(
     Ok(())
 }
 
-fn bounded_output_bytes(
+pub(super) fn bounded_output_bytes(
     output: &serde_json::Value,
     max_bytes: u64,
 ) -> Result<u64, FirstPartyCapabilityError> {

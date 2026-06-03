@@ -15,9 +15,9 @@ use ironclaw_auth::{
     InMemoryAuthProductServices, ManualTokenSetupRequest, NewAuthFlow, OAuthAuthorizationUrl,
     OAuthCallbackClaimRequest, OAuthCallbackFailureInput, OAuthCallbackInput,
     OAuthProviderCallbackRequest, OAuthProviderExchangeContext, OpaqueStateHash, PkceVerifierHash,
-    ProviderBackedCredentialAccountService, ProviderCallbackOutcome, SecretCleanupReport,
-    SecretCleanupRequest, SecretCleanupService, SecretSubmitRequest, SecretSubmitResult, Timestamp,
-    TurnGateAuthFlowQuery, TurnRunRef, scope_matches,
+    ProviderBackedCredentialAccountService, ProviderCallbackOutcome, ProviderScope,
+    SecretCleanupReport, SecretCleanupRequest, SecretCleanupService, SecretSubmitRequest,
+    SecretSubmitResult, Timestamp, TurnGateAuthFlowQuery, TurnRunRef, scope_matches,
 };
 use ironclaw_product_adapters::AuthPromptChallengeKind;
 use ironclaw_product_workflow::ProductAuthTurnGateResumeDispatcher;
@@ -28,7 +28,8 @@ use ironclaw_host_api::UserId;
 use ironclaw_turns::{TurnRunId, TurnScope};
 
 use crate::manual_token_flow::{PortBackedManualTokenFlowService, RebornManualTokenFlowService};
-use crate::oauth_dcr::{DcrGateChallengeRequest, OAuthDcrProviderRegistry};
+use crate::oauth_dcr::{DcrGateChallengeRequest, DcrSetupFlowRequest, OAuthDcrProviderRegistry};
+use crate::oauth_gate::{GoogleOAuthGateProviderRegistry, OAuthGateChallengeRequest};
 use crate::product_auth_runtime_credentials::{
     ProductAuthRuntimeCredentialAccountSelector, RuntimeCredentialAccountSelectionService,
 };
@@ -107,6 +108,20 @@ pub(crate) struct RebornOAuthStartFlowRequest {
     pub(crate) authorization_url: OAuthAuthorizationUrl,
     pub(crate) opaque_state_hash: OpaqueStateHash,
     pub(crate) pkce_verifier_hash: PkceVerifierHash,
+    pub(crate) update_binding: Option<CredentialAccountUpdateBinding>,
+    pub(crate) expires_at: ironclaw_auth::Timestamp,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(
+    dead_code,
+    reason = "used by the webui-v2-beta extension OAuth route through product-auth route composition"
+)]
+pub(crate) struct RebornDcrOAuthStartFlowRequest {
+    pub(crate) scope: AuthProductScope,
+    pub(crate) provider: AuthProviderId,
+    pub(crate) account_label: CredentialAccountLabel,
+    pub(crate) provider_scopes: Vec<ProviderScope>,
     pub(crate) update_binding: Option<CredentialAccountUpdateBinding>,
     pub(crate) expires_at: ironclaw_auth::Timestamp,
 }
@@ -437,6 +452,7 @@ pub struct RebornProductAuthServices {
     cleanup_service: Arc<dyn SecretCleanupService>,
     continuation_dispatcher: Arc<dyn RebornAuthContinuationDispatcher>,
     dcr_oauth_registry: Option<Arc<OAuthDcrProviderRegistry>>,
+    oauth_gate_registry: Option<Arc<GoogleOAuthGateProviderRegistry>>,
     /// Optional read projection for WebUI/local-dev auth interactions.
     ///
     /// `RebornProductAuthServices` may still support OAuth callbacks,
@@ -481,6 +497,7 @@ impl std::fmt::Debug for RebornProductAuthServices {
             )
             .field("flow_record_source", &self.flow_record_source.is_some())
             .field("dcr_oauth_registry", &self.dcr_oauth_registry.is_some())
+            .field("oauth_gate_registry", &self.oauth_gate_registry.is_some())
             .finish()
     }
 }
@@ -511,6 +528,7 @@ impl RebornProductAuthServices {
             cleanup_service,
             continuation_dispatcher,
             dcr_oauth_registry: None,
+            oauth_gate_registry: None,
             flow_record_source: None,
         }
     }
@@ -637,6 +655,14 @@ impl RebornProductAuthServices {
         registry: Arc<OAuthDcrProviderRegistry>,
     ) -> Self {
         self.dcr_oauth_registry = Some(registry);
+        self
+    }
+
+    pub(crate) fn with_oauth_gate_registry(
+        mut self,
+        registry: Arc<GoogleOAuthGateProviderRegistry>,
+    ) -> Self {
+        self.oauth_gate_registry = Some(registry);
         self
     }
 
@@ -928,6 +954,14 @@ impl RebornProductAuthServices {
         provider: &AuthProviderId,
         flow_id: AuthFlowId,
     ) -> Result<Option<SecretString>, RebornOAuthCallbackError> {
+        if let Some(registry) = &self.oauth_gate_registry
+            && let Some(pkce) = registry
+                .pkce_verifier_for_flow(scope, provider, flow_id)
+                .await
+                .map_err(RebornOAuthCallbackError::from)?
+        {
+            return Ok(Some(pkce));
+        }
         let Some(registry) = &self.dcr_oauth_registry else {
             return Ok(None);
         };
@@ -958,6 +992,32 @@ impl RebornProductAuthServices {
                 pkce_verifier_hash: Some(request.pkce_verifier_hash),
                 expires_at: request.expires_at,
             })
+            .await
+    }
+
+    #[allow(
+        dead_code,
+        reason = "used by the webui-v2-beta extension OAuth route through product-auth route composition"
+    )]
+    pub(crate) async fn start_dcr_setup_oauth_flow(
+        &self,
+        request: RebornDcrOAuthStartFlowRequest,
+    ) -> Result<Option<AuthFlowRecord>, AuthProductError> {
+        let Some(registry) = &self.dcr_oauth_registry else {
+            return Ok(None);
+        };
+        registry
+            .start_setup_flow(
+                &self.flow_manager,
+                DcrSetupFlowRequest {
+                    scope: request.scope,
+                    provider: request.provider,
+                    account_label: request.account_label,
+                    provider_scopes: request.provider_scopes,
+                    update_binding: request.update_binding,
+                    expires_at: request.expires_at,
+                },
+            )
             .await
     }
 
@@ -1206,6 +1266,21 @@ impl AuthChallengeProvider for RebornProductAuthServices {
         let Some(source) = self.flow_record_source.as_ref() else {
             return Ok(None);
         };
+        if let Some(registry) = &self.oauth_gate_registry
+            && let Some(view) = registry
+                .challenge_for_blocked_gate(OAuthGateChallengeRequest {
+                    flow_manager: &self.flow_manager,
+                    flow_source: source,
+                    requirements: credential_requirements,
+                    scope,
+                    owner_user_id,
+                    run_id,
+                    gate_ref: &gate_ref,
+                })
+                .await?
+        {
+            return Ok(Some(view));
+        }
         if let Some(registry) = &self.dcr_oauth_registry
             && let Some(view) = registry
                 .challenge_for_blocked_gate(DcrGateChallengeRequest {

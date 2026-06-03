@@ -276,6 +276,7 @@ async fn local_dev_google_oauth_backend_builds_with_host_provider_config() {
                 client_secret: None,
                 redirect_uri: OAuthRedirectUri::new("https://app.example/oauth/google/callback")
                     .expect("redirect uri"),
+                hosted_domain_hint: None,
             }),
     )
     .await
@@ -293,12 +294,14 @@ async fn local_dev_notion_oauth_backend_builds_with_host_provider_config() {
                 client_secret: None,
                 redirect_uri: OAuthRedirectUri::new("https://app.example/oauth/google/callback")
                     .expect("redirect uri"),
+                hosted_domain_hint: None,
             })
             .with_notion_oauth_backend(OAuthClientConfig {
                 client_id: OAuthClientId::new("notion-client-123").expect("client id"),
                 client_secret: None,
                 redirect_uri: OAuthRedirectUri::new("https://app.example/oauth/notion/callback")
                     .expect("redirect uri"),
+                hosted_domain_hint: None,
             }),
     )
     .await
@@ -394,6 +397,7 @@ async fn local_dev_google_oauth_backend_accepts_optional_client_secret_config() 
             client_secret: Some(SecretString::from("raw-client-secret".to_string())),
             redirect_uri: OAuthRedirectUri::new("https://app.example/oauth/google/callback")
                 .expect("redirect uri"),
+            hosted_domain_hint: None,
         }),
     )
     .await

@@ -5,13 +5,13 @@ use crate::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
     AppendAssistantDraftRequest, AppendCapabilityDisplayPreviewRequest,
     AppendToolResultReferenceRequest, ContextMessages, ContextWindow, CreateSummaryArtifactRequest,
-    EnsureThreadRequest, LatestThreadMessageRequest, ListThreadsForScopeRequest,
-    ListThreadsForScopeResponse, LoadContextMessagesRequest, LoadContextWindowRequest,
-    MessageContent, RedactMessageRequest, ReplayAcceptedInboundMessageRequest, SessionThreadError,
-    SessionThreadRecord, SummaryArtifact, ThreadGoal, ThreadHistory, ThreadHistoryRequest,
-    ThreadMessageId, ThreadMessageRange, ThreadMessageRangeRequest, ThreadMessageRecord,
-    ThreadScope, UpdateAssistantDraftRequest, UpdateThreadGoalRequest,
-    UpdateToolResultReferenceRequest,
+    EnsureThreadRequest, FinalizedAssistantMessageByRunRequest, LatestThreadMessageRequest,
+    ListThreadsForScopeRequest, ListThreadsForScopeResponse, LoadContextMessagesRequest,
+    LoadContextWindowRequest, MessageContent, RedactMessageRequest,
+    ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadRecord, SummaryArtifact,
+    ThreadGoal, ThreadHistory, ThreadHistoryRequest, ThreadMessageId, ThreadMessageRange,
+    ThreadMessageRangeRequest, ThreadMessageRecord, ThreadScope, UpdateAssistantDraftRequest,
+    UpdateThreadGoalRequest, UpdateToolResultReferenceRequest,
 };
 
 /// Canonical Reborn session thread and transcript boundary.
@@ -139,6 +139,23 @@ pub trait SessionThreadService: Send + Sync {
             .into_iter()
             .rev()
             .find(|message| message.kind == request.kind && message.status == request.status))
+    }
+
+    async fn finalized_assistant_message_by_run(
+        &self,
+        request: FinalizedAssistantMessageByRunRequest,
+    ) -> Result<Option<ThreadMessageRecord>, SessionThreadError> {
+        let history = self
+            .list_thread_history(ThreadHistoryRequest {
+                scope: request.scope,
+                thread_id: request.thread_id,
+            })
+            .await?;
+        Ok(history.messages.into_iter().rev().find(|message| {
+            message.kind == crate::MessageKind::Assistant
+                && message.status == crate::MessageStatus::Finalized
+                && message.turn_run_id.as_deref() == Some(request.turn_run_id.as_str())
+        }))
     }
 
     /// Cheap, owner-scoped existence probe that returns *only* the

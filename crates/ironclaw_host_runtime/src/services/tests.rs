@@ -883,20 +883,17 @@ fn request_with_staged_credential(
     capability_id: CapabilityId,
     handle: SecretHandle,
 ) -> RuntimeHttpEgressRequest {
-    RuntimeHttpEgressRequest {
-        credential_injections: vec![RuntimeCredentialInjection {
-            handle,
-            source: RuntimeCredentialSource::StagedObligation {
-                capability_id: capability_id.clone(),
-            },
-            target: RuntimeCredentialTarget::Header {
-                name: "authorization".to_string(),
-                prefix: Some("Bearer ".to_string()),
-            },
-            required: true,
-        }],
-        ..request_without_credentials(scope, capability_id)
-    }
+    let mut request = request_without_credentials(scope, capability_id.clone());
+    request.credential_injections = vec![RuntimeCredentialInjection {
+        handle,
+        source: RuntimeCredentialSource::StagedObligation { capability_id },
+        target: RuntimeCredentialTarget::Header {
+            name: "authorization".to_string(),
+            prefix: Some("Bearer ".to_string()),
+        },
+        required: true,
+    }];
+    request
 }
 
 fn sample_scope() -> ResourceScope {

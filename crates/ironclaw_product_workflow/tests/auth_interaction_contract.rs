@@ -744,6 +744,89 @@ async fn denied_auth_cancels_flow_and_run() {
 }
 
 #[tokio::test]
+async fn denied_auth_without_flow_record_cancels_parked_auth_run() {
+    let actor = TurnActor::new(UserId::new("alice").unwrap());
+    let scope = turn_scope("alice", "thread-a");
+    let run_id = TurnRunId::new();
+    let gate_ref = make_gate_ref("gate:auth-deny-no-flow");
+    let flow = auth_flow(
+        AuthFlowStatus::AwaitingUser,
+        &scope,
+        &actor,
+        run_id,
+        &gate_ref,
+        None,
+        setup_challenge(),
+    );
+    let (service, flow_manager, coordinator) =
+        service_parts(flow, Vec::new(), actor.clone(), gate_ref.clone());
+
+    let response = service
+        .resolve(ResolveAuthInteractionRequest {
+            scope,
+            actor,
+            run_id_hint: Some(run_id),
+            gate_ref,
+            decision: AuthInteractionDecision::Deny,
+            idempotency_key: IdempotencyKey::new("auth-action-deny-no-flow").unwrap(),
+        })
+        .await
+        .expect("deny parked auth without flow record");
+
+    assert!(matches!(
+        response,
+        ResolveAuthInteractionResponse::Canceled(_)
+    ));
+    assert!(
+        flow_manager.cancellations().is_empty(),
+        "no auth flow record should mean there is no flow to cancel"
+    );
+    assert_eq!(coordinator.cancellations().len(), 1);
+    assert!(coordinator.resumes().is_empty());
+}
+
+#[tokio::test]
+async fn denied_auth_without_flow_record_requires_current_parked_auth_gate() {
+    let actor = TurnActor::new(UserId::new("alice").unwrap());
+    let scope = turn_scope("alice", "thread-a");
+    let run_id = TurnRunId::new();
+    let gate_ref = make_gate_ref("gate:auth-deny-no-flow-stale");
+    let flow = auth_flow(
+        AuthFlowStatus::AwaitingUser,
+        &scope,
+        &actor,
+        run_id,
+        &gate_ref,
+        None,
+        setup_challenge(),
+    );
+    let (service, _flow_manager, coordinator) =
+        service_parts(flow, Vec::new(), actor.clone(), gate_ref.clone());
+    coordinator.set_status(TurnStatus::Queued);
+
+    let error = service
+        .resolve(ResolveAuthInteractionRequest {
+            scope,
+            actor,
+            run_id_hint: Some(run_id),
+            gate_ref,
+            decision: AuthInteractionDecision::Deny,
+            idempotency_key: IdempotencyKey::new("auth-action-deny-no-flow-stale").unwrap(),
+        })
+        .await
+        .expect_err("missing auth flow must not cancel a non-parked run");
+
+    assert!(matches!(
+        error,
+        ProductWorkflowError::AuthInteractionRejected {
+            kind: AuthInteractionRejectionKind::MissingAuth
+        }
+    ));
+    assert!(coordinator.cancellations().is_empty());
+    assert!(coordinator.resumes().is_empty());
+}
+
+#[tokio::test]
 async fn duplicate_completed_auth_resolution_replays_through_turn_coordinator() {
     let actor = TurnActor::new(UserId::new("alice").unwrap());
     let scope = turn_scope("alice", "thread-a");

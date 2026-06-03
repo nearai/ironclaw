@@ -78,6 +78,7 @@ use ironclaw_scripts::{
 use ironclaw_secrets::{
     InMemoryCredentialBroker, InMemorySecretStore, SecretMaterial, SecretStore,
 };
+use ironclaw_triggers::InMemoryTriggerRepository;
 use ironclaw_trust::{
     AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
     HostTrustPolicy, TrustDecision, TrustProvenance,
@@ -1184,7 +1185,9 @@ async fn production_wiring_validation_tracks_process_port_for_builtin_shell() {
         ProcessServices::in_memory(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
-    .with_first_party_capabilities(Arc::new(builtin_first_party_handlers().unwrap()));
+    .with_first_party_capabilities(Arc::new(
+        builtin_first_party_handlers(Arc::new(InMemoryTriggerRepository::default())).unwrap(),
+    ));
 
     let report = services
         .validate_production_wiring(&ProductionWiringConfig::new([RuntimeKind::FirstParty]))
@@ -1206,7 +1209,9 @@ async fn production_wiring_validation_tracks_process_port_for_builtin_shell() {
         ProcessServices::in_memory(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
-    .with_first_party_capabilities(Arc::new(builtin_first_party_handlers().unwrap()))
+    .with_first_party_capabilities(Arc::new(
+        builtin_first_party_handlers(Arc::new(InMemoryTriggerRepository::default())).unwrap(),
+    ))
     .with_runtime_process_port(Arc::new(ProductionCandidateProcessPort));
 
     let report = services
@@ -1232,7 +1237,9 @@ async fn production_wiring_validation_tracks_tenant_sandbox_process_port_for_bui
         ProcessServices::in_memory(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
-    .with_first_party_capabilities(Arc::new(builtin_first_party_handlers().unwrap()))
+    .with_first_party_capabilities(Arc::new(
+        builtin_first_party_handlers(Arc::new(InMemoryTriggerRepository::default())).unwrap(),
+    ))
     .with_runtime_policy(hosted_dev_runtime_policy());
 
     let report = services
@@ -1255,7 +1262,9 @@ async fn production_wiring_validation_tracks_tenant_sandbox_process_port_for_bui
         ProcessServices::in_memory(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
-    .with_first_party_capabilities(Arc::new(builtin_first_party_handlers().unwrap()))
+    .with_first_party_capabilities(Arc::new(
+        builtin_first_party_handlers(Arc::new(InMemoryTriggerRepository::default())).unwrap(),
+    ))
     .with_runtime_policy(hosted_dev_runtime_policy())
     .with_tenant_sandbox_process_port(Arc::new(TenantSandboxProcessPort::new(Arc::new(
         ProductionCandidateSandboxTransport,
@@ -1286,7 +1295,9 @@ async fn production_wiring_validation_tracks_tenant_sandbox_process_port_for_bui
         ProcessServices::in_memory(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
-    .with_first_party_capabilities(Arc::new(builtin_first_party_handlers().unwrap()))
+    .with_first_party_capabilities(Arc::new(
+        builtin_first_party_handlers(Arc::new(InMemoryTriggerRepository::default())).unwrap(),
+    ))
     .with_runtime_policy(hosted_dev_runtime_policy())
     .with_production_tenant_sandbox_process_port(Arc::new(TenantSandboxProcessPort::new(
         Arc::new(ProductionCandidateSandboxTransport),

@@ -106,10 +106,10 @@ PRs should record them as contract language.
 13. Trigger fires bypass `ironclaw_product_workflow` ingress entirely. Product
     workflow remains adapter-facing; scheduled triggers enter only through the
     planned `ironclaw_conversations::InboundTurnService` trusted facade.
-14. The sealed host-trusted ingress marker and witness are owned by
-    `ironclaw_conversations::trusted_ingress`; host composition constructs them
-    for trigger submission. Product adapters must not receive constructors or
-    model them in product payload DTOs.
+14. Host-trusted trigger ingress authority is owned by the host-only
+    `ironclaw_trusted_ingress` crate and consumed only by conversations and
+    Reborn composition. Product adapters must not depend on that crate, receive
+    constructors, or model trusted trigger ingress in product payload DTOs.
 
 ## Dependency DAG
 
@@ -144,7 +144,10 @@ Trigger execution track
                                                                               └─> PR 18 Trigger Worker Config and Lifecycle
 
 External trigger result delivery
-  PR 7 + PR 18 + named adapter readiness ─> PR 19 Trigger Delivery Integration Fast-Follow
+  PR 7 + PR 18 + named adapter readiness
+      ├─> PR 18.5 / PR 19 prerequisite: harden trusted trigger ingress
+      ├─> PR 18.5 / PR 19 prerequisite: fire-time creator authorization
+      └─> PR 19 Trigger Delivery Integration Fast-Follow
 ```
 
 Parallelization notes:
@@ -643,6 +646,27 @@ Scope must be stamped from invocation context and rechecked on list/remove.
 Repository access must be injected through an explicit composition-owned seam;
 do not assume `InvocationServices` already carries a trigger repository.
 
+PR 17 follow-ups that must not be lost:
+
+- Per-scope trigger quotas are deferred from the first capability slice. Do not
+  implement them as a race-prone handler-only `list then create` check. The
+  next quota implementation should be repository/database-owned and atomic
+  across durable backends, with any host-runtime error mapping layered on top of
+  that contract.
+- Durable backend hydration should continue to reject malformed stored trigger
+  rows. The cron re-parse-on-read optimization is valid future performance work
+  only if it preserves that malformed-row behavior, for example by introducing
+  an explicit stored-schedule hydration constructor plus backend hydration
+  validation tests.
+- `trigger_create` currently parses/validates the cron expression, then computes
+  `next_run_at` through a second parse. Collapse that to a single parse in a
+  later performance pass without weakening schedule validation or malformed-row
+  hydration guarantees.
+- PostgreSQL NULL-scope planner tuning is deferred. The durable schemas include
+  the scoped-list composite index; add a NULL-specific partial index only after
+  `EXPLAIN` or production-like benchmark evidence shows Postgres is not using
+  the composite index for `agent_id/project_id IS NOT DISTINCT FROM NULL`.
+
 Expected size: less than 1000 lines.
 
 ### PR 18 — Trigger Worker Config and Lifecycle
@@ -690,6 +714,75 @@ Wire the trigger poller into Reborn composition:
   approval rejection while preserving trigger `active_run_ref` back-pressure.
 - readiness semantics for whether a disabled trigger poller is allowed and
   whether a failed trigger worker marks Reborn runtime readiness degraded.
+- PR18 review follow-up status:
+  - host-trusted trigger ingress is hardened with a host-only authority crate,
+    root/crate-local `AGENTS.md` guidance, and architecture tests that restrict
+    dependents and trusted constructor call sites. Rust has no sibling-crate
+    `friend` visibility, so the enforceable boundary is the dependency graph.
+  - trigger poller startup is opt-in by default; runtimes must explicitly pass
+    enabled trigger poller settings before the background worker starts.
+  - runtime shutdown cancels the trigger poller and waits only for a bounded
+    shutdown interval before aborting a stalled in-flight tick.
+  - trusted trigger prompt recording happens after trusted inbound turn
+    acceptance/replay, so failed submissions do not durably inject visible
+    prompt content.
+  - trusted trigger prompt submission now applies a composition-owned
+    prompt-injection scan before turn submission and rejects high/critical
+    findings as permanent materialization failures without silently rewriting
+    the scheduled prompt.
+  - active-run lookup is batched for each cleanup page so composition snapshots
+    turn state once per active page rather than once per active trigger record.
+  - PR18.5 / PR19 prerequisite: strengthen host-trusted trigger ingress from
+    architecture-test-enforced dependency ownership into a compile-time sealed
+    host facade or equivalent factory. The prerequisite is not just another
+    dependency-boundary assertion; it needs a concrete API shape where product
+    adapter crates cannot mint trigger authority by adding
+    `ironclaw_trusted_ingress` as a dependency. Expected work:
+    - replace the public zero-argument trusted ingress constructor with a
+      composition-owned host factory or conversation-owned sealed witness that
+      cannot be constructed from adapter/product crates;
+    - keep `TrustedInboundTurnRequest` raw construction private inside
+      `ironclaw_conversations`;
+    - expose only the narrow trigger-fire submission operation needed by
+      composition, not a reusable generic trusted-inbound token;
+    - update architecture tests so adapter/product crates are forbidden from
+      depending on the authority crate/facade and forbidden from calling the
+      trusted trigger constructor/factory;
+    - add a negative or architecture test proving a product adapter path cannot
+      construct host-trusted trigger ingress;
+    - preserve existing PR18 poller behavior and trusted inbound replay tests.
+    If PR19 starts wiring external delivery or any user-visible trigger launch
+    path, this must be completed before that delivery path ships.
+  - PR18.5 / PR19 prerequisite: add fire-time creator authorization wired to
+    the real agent/project access source of truth. This must not be an
+    allow-all placeholder port. Expected work:
+    - define a composition-owned trigger fire authorization port whose request
+      includes `tenant_id`, `creator_user_id`, `agent_id`, `project_id`,
+      `trigger_id`, and `fire_slot`;
+    - wire the port before trusted inbound turn submission and before prompt
+      thread recording;
+    - implement the port against the real access-control source for the target
+      agent/project, or keep trigger external delivery disabled until that
+      source exists;
+    - classify denied/revoked access as a permanent authorization failure so
+      the trigger claim is cleared and the failed slot is advanced according to
+      the trigger contract;
+    - classify temporary authz backend unavailability as retryable without
+      marking the fire active;
+    - add caller-level tests for authorized creator, revoked creator,
+      project-specific denial, and retryable authz backend failure;
+    - ensure retry/replay does not submit a turn after a denied fire-time authz
+      check.
+    If PR19 makes trigger results externally deliverable, this must be
+    completed before delivery is enabled.
+  - still open for the next lifecycle/recovery slice: define active-run lookup
+    behavior when turn retention prunes the referenced `TurnRunId`, including
+    whether terminal tombstones or a narrower durable lookup are required before
+    missing runs can unblock stale active-fire metadata.
+  - still open for production lifecycle wiring: switch lifecycle jitter to a
+    real per-process random or seeded PRNG source if deployed replicas need
+    stronger startup/tick de-correlation than the current bounded wall-clock
+    fallback.
 - architecture tests for `ironclaw_triggers` dependency edges
 - current architecture map update
 - `FEATURE_PARITY.md` update with a distinct Reborn trigger-loop note rather
@@ -702,6 +795,10 @@ Expected size: less than 1000 lines; split into config and lifecycle if needed.
 Only after delivery-resolution PRs are merged and a concrete adapter path is
 ready, connect trigger-origin final reply delivery:
 
+- Before enabling external trigger delivery, close the two PR18 trusted-poller
+  security fast-follows: harden trusted trigger ingress into a compile-time host
+  facade or equivalent sealed factory, and enforce fire-time creator
+  authorization against the real agent/project access source of truth.
 - name the first real adapter path and readiness gate. Do not use the WebUI
   projection path as a stand-in unless it is explicitly routed through
   `ironclaw_outbound`.

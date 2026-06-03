@@ -30,6 +30,9 @@ mod worker;
 
 const MIN_FIRE_CADENCE: Duration = Duration::from_secs(60);
 const MAX_DUE_TRIGGER_POLL_LIMIT: usize = 128;
+const MAX_TRIGGER_LIST_LIMIT: usize = 100;
+pub const MAX_TRIGGER_NAME_BYTES: usize = 256;
+pub const MAX_TRIGGER_PROMPT_BYTES: usize = 32 * 1024;
 const IDENTITY_VERSION_LABEL: &str = "ironclaw.trigger-fire.v1";
 const ROUTE_THREAD_DOMAIN: &str = "route-thread";
 const EXTERNAL_EVENT_DOMAIN: &str = "external-event";
@@ -291,9 +294,19 @@ impl TriggerRecord {
                 reason: "trigger name must not be empty".to_string(),
             });
         }
+        if self.name.len() > MAX_TRIGGER_NAME_BYTES {
+            return Err(TriggerError::InvalidRecord {
+                reason: format!("trigger name must be at most {MAX_TRIGGER_NAME_BYTES} bytes"),
+            });
+        }
         if self.prompt.trim().is_empty() {
             return Err(TriggerError::InvalidRecord {
                 reason: "trigger prompt must not be empty".to_string(),
+            });
+        }
+        if self.prompt.len() > MAX_TRIGGER_PROMPT_BYTES {
+            return Err(TriggerError::InvalidRecord {
+                reason: format!("trigger prompt must be at most {MAX_TRIGGER_PROMPT_BYTES} bytes"),
             });
         }
         if self.active_run_ref.is_some() && self.active_fire_slot.is_none() {
@@ -403,6 +416,26 @@ impl TriggerFireIdentity {
             route_thread_id,
             external_event_id,
         }
+    }
+
+    pub fn tenant_id(&self) -> &TenantId {
+        &self.tenant_id
+    }
+
+    pub fn trigger_id(&self) -> TriggerId {
+        self.trigger_id
+    }
+
+    pub fn fire_slot(&self) -> Timestamp {
+        self.fire_slot
+    }
+
+    pub fn route_thread_id(&self) -> &TriggerRouteThreadId {
+        &self.route_thread_id
+    }
+
+    pub fn external_event_id(&self) -> &TriggerExternalEventId {
+        &self.external_event_id
     }
 }
 
@@ -583,9 +616,29 @@ pub trait TriggerRepository: Send + Sync {
     /// API pagination before exposing user-facing list surfaces.
     async fn list_triggers(&self, tenant_id: TenantId) -> Result<Vec<TriggerRecord>, TriggerError>;
 
+    /// Returns caller-scoped triggers in creation order, capped for user-facing surfaces.
+    async fn list_scoped_triggers(
+        &self,
+        tenant_id: TenantId,
+        creator_user_id: UserId,
+        agent_id: Option<AgentId>,
+        project_id: Option<ProjectId>,
+        limit: usize,
+    ) -> Result<Vec<TriggerRecord>, TriggerError>;
+
     async fn remove_trigger(
         &self,
         tenant_id: TenantId,
+        trigger_id: TriggerId,
+    ) -> Result<Option<TriggerRecord>, TriggerError>;
+
+    /// Removes a trigger only when the full caller scope matches the stored record.
+    async fn remove_scoped_trigger(
+        &self,
+        tenant_id: TenantId,
+        creator_user_id: UserId,
+        agent_id: Option<AgentId>,
+        project_id: Option<ProjectId>,
         trigger_id: TriggerId,
     ) -> Result<Option<TriggerRecord>, TriggerError>;
 
@@ -732,20 +785,42 @@ impl TriggerRepository for InMemoryTriggerRepository {
     }
 
     async fn list_triggers(&self, tenant_id: TenantId) -> Result<Vec<TriggerRecord>, TriggerError> {
-        let mut keys = {
-            let state = self.lock_state()?;
-            state
-                .iter()
-                .filter(|(_, record)| record.tenant_id == tenant_id)
-                .map(|(key, record)| (record.created_at, record.trigger_id, key.clone()))
-                .collect::<Vec<_>>()
-        };
-        keys.sort_by_key(|(created_at, trigger_id, _)| (*created_at, *trigger_id));
         let state = self.lock_state()?;
-        Ok(keys
-            .into_iter()
-            .filter_map(|(_, _, key)| state.get(&key).cloned())
-            .collect())
+        let mut records = state
+            .values()
+            .filter(|record| record.tenant_id == tenant_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        records.sort_by_key(|record| (record.created_at, record.trigger_id));
+        Ok(records)
+    }
+
+    async fn list_scoped_triggers(
+        &self,
+        tenant_id: TenantId,
+        creator_user_id: UserId,
+        agent_id: Option<AgentId>,
+        project_id: Option<ProjectId>,
+        limit: usize,
+    ) -> Result<Vec<TriggerRecord>, TriggerError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let limit = limit.min(MAX_TRIGGER_LIST_LIMIT);
+        let state = self.lock_state()?;
+        let mut records = state
+            .values()
+            .filter(|record| {
+                record.tenant_id == tenant_id
+                    && record.creator_user_id == creator_user_id
+                    && record.agent_id == agent_id
+                    && record.project_id == project_id
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        records.sort_by_key(|record| (record.created_at, record.trigger_id));
+        records.truncate(limit);
+        Ok(records)
     }
 
     async fn remove_trigger(
@@ -756,6 +831,28 @@ impl TriggerRepository for InMemoryTriggerRepository {
         Ok(self
             .lock_state()?
             .remove(&TriggerRepositoryKey::new(&tenant_id, trigger_id)))
+    }
+
+    async fn remove_scoped_trigger(
+        &self,
+        tenant_id: TenantId,
+        creator_user_id: UserId,
+        agent_id: Option<AgentId>,
+        project_id: Option<ProjectId>,
+        trigger_id: TriggerId,
+    ) -> Result<Option<TriggerRecord>, TriggerError> {
+        let mut state = self.lock_state()?;
+        let key = TriggerRepositoryKey::new(&tenant_id, trigger_id);
+        let Some(record) = state.get(&key) else {
+            return Ok(None);
+        };
+        if record.creator_user_id != creator_user_id
+            || record.agent_id != agent_id
+            || record.project_id != project_id
+        {
+            return Ok(None);
+        }
+        Ok(state.remove(&key))
     }
 
     async fn list_due_triggers(
@@ -1215,7 +1312,7 @@ fn update_length_prefixed(hasher: &mut Sha256, value: &[u8]) {
 
 #[cfg(test)]
 mod tests {
-    use chrono::TimeZone;
+    use chrono::{Datelike, TimeZone};
     use serde_json::{from_value, json, to_value};
 
     use super::*;
@@ -1277,6 +1374,19 @@ mod tests {
             .expect("next slot")
             .expect("future slot");
         assert_eq!(next, Utc.with_ymd_and_hms(2026, 5, 30, 12, 5, 0).unwrap());
+    }
+
+    #[test]
+    fn cron_schedule_rejects_exhausted_finite_year() {
+        let past_year = Utc::now().year() - 1;
+        let error = TriggerSchedule::cron(format!("0 0 8 * * * {past_year}"))
+            .expect_err("exhausted finite cron rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("cron expression has no upcoming fire time"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]
@@ -1608,7 +1718,13 @@ mod tests {
             .list_triggers(tenant("tenant-a"))
             .await
             .expect("list tenant");
-        assert_eq!(tenant_records.len(), 2);
+        assert_eq!(
+            tenant_records
+                .iter()
+                .map(|record| record.trigger_id)
+                .collect::<Vec<_>>(),
+            vec![due.trigger_id, later.trigger_id]
+        );
 
         let removed = repo
             .remove_trigger(tenant("tenant-a"), due.trigger_id)
@@ -1658,6 +1774,28 @@ mod tests {
             ts(1_704_067_200),
         );
         record.prompt.clear();
+        assert!(matches!(
+            repo.upsert_trigger(record).await,
+            Err(TriggerError::InvalidRecord { .. })
+        ));
+
+        let mut record = sample_record(
+            TriggerId::parse("01J00000000000000000000001").expect("ulid"),
+            tenant("tenant-a"),
+            ts(1_704_067_200),
+        );
+        record.name = "x".repeat(MAX_TRIGGER_NAME_BYTES + 1);
+        assert!(matches!(
+            repo.upsert_trigger(record).await,
+            Err(TriggerError::InvalidRecord { .. })
+        ));
+
+        let mut record = sample_record(
+            TriggerId::parse("01J00000000000000000000002").expect("ulid"),
+            tenant("tenant-a"),
+            ts(1_704_067_200),
+        );
+        record.prompt = "x".repeat(MAX_TRIGGER_PROMPT_BYTES + 1);
         assert!(matches!(
             repo.upsert_trigger(record).await,
             Err(TriggerError::InvalidRecord { .. })

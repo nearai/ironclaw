@@ -3,9 +3,10 @@ use ironclaw_turns::{AcceptedMessageRef, IdempotencyKey, SubmitTurnResponse};
 
 use crate::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageLookup,
-    AcceptedInboundMessageReplay, ConversationBindingResolution, InboundTurnError,
-    LinkConversationRequest, LinkedConversationBinding, ReplyTargetBinding,
-    ResolveConversationRequest, ValidateReplyTargetRequest,
+    AcceptedInboundMessageReplay, AdapterInstallationId, AdapterKind,
+    ConversationBindingResolution, ExternalActorRef, InboundTurnError, LinkConversationRequest,
+    LinkedConversationBinding, ReplyTargetBinding, ResolveConversationRequest,
+    ValidateReplyTargetRequest,
 };
 
 #[async_trait]
@@ -49,6 +50,23 @@ pub trait ConversationBindingService: Send + Sync {
 
 pub trait ConversationBindingServiceExt: ConversationBindingService {}
 impl<T> ConversationBindingServiceExt for T where T: ConversationBindingService {}
+
+#[async_trait]
+pub trait ConversationActorPairingService: Send + Sync {
+    /// Pair an adapter-scoped external actor with a canonical Reborn user.
+    ///
+    /// Callers must supply only host-trusted pairings. This is not a self-service
+    /// code approval flow; it persists an already-authorized actor mapping for
+    /// subsequent binding resolution.
+    async fn pair_external_actor(
+        &self,
+        tenant_id: ironclaw_host_api::TenantId,
+        adapter_kind: AdapterKind,
+        adapter_installation_id: AdapterInstallationId,
+        external_actor_ref: ExternalActorRef,
+        user_id: ironclaw_host_api::UserId,
+    ) -> Result<(), InboundTurnError>;
+}
 
 #[async_trait]
 pub trait SessionThreadService: Send + Sync {

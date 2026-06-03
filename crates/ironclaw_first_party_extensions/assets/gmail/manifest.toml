@@ -16,7 +16,7 @@ effects = ["dispatch_capability", "network", "use_secret"]
 default_permission = "allow"
 visibility = "model"
 runtime_credentials = [
-  { handle = "gmail_account", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/gmail.modify"] } }, audience = { scheme = "https", host_pattern = "gmail.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+  { handle = "gmail_account", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/gmail.readonly"] } }, provider_scopes = ["https://www.googleapis.com/auth/gmail.readonly"], audience = { scheme = "https", host_pattern = "gmail.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
 ]
 input_schema_ref = "schemas/gmail/list_messages.input.v1.json"
 output_schema_ref = "schemas/gmail/list_messages.output.v1.json"
@@ -29,7 +29,7 @@ effects = ["dispatch_capability", "network", "use_secret"]
 default_permission = "allow"
 visibility = "model"
 runtime_credentials = [
-  { handle = "gmail_account", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/gmail.modify"] } }, audience = { scheme = "https", host_pattern = "gmail.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+  { handle = "gmail_account", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/gmail.readonly"] } }, provider_scopes = ["https://www.googleapis.com/auth/gmail.readonly"], audience = { scheme = "https", host_pattern = "gmail.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
 ]
 input_schema_ref = "schemas/gmail/get_message.input.v1.json"
 output_schema_ref = "schemas/gmail/get_message.output.v1.json"
@@ -42,7 +42,7 @@ effects = ["dispatch_capability", "network", "use_secret", "external_write"]
 default_permission = "ask"
 visibility = "model"
 runtime_credentials = [
-  { handle = "gmail_account", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/gmail.modify"] } }, audience = { scheme = "https", host_pattern = "gmail.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+  { handle = "gmail_account", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/gmail.send"] } }, provider_scopes = ["https://www.googleapis.com/auth/gmail.send"], audience = { scheme = "https", host_pattern = "gmail.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
 ]
 input_schema_ref = "schemas/gmail/send_message.input.v1.json"
 output_schema_ref = "schemas/gmail/send_message.output.v1.json"
@@ -55,7 +55,7 @@ effects = ["dispatch_capability", "network", "use_secret", "external_write"]
 default_permission = "ask"
 visibility = "model"
 runtime_credentials = [
-  { handle = "gmail_account", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/gmail.modify"] } }, audience = { scheme = "https", host_pattern = "gmail.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+  { handle = "gmail_account", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/gmail.modify"] } }, provider_scopes = ["https://www.googleapis.com/auth/gmail.modify"], audience = { scheme = "https", host_pattern = "gmail.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
 ]
 input_schema_ref = "schemas/gmail/create_draft.input.v1.json"
 output_schema_ref = "schemas/gmail/create_draft.output.v1.json"
@@ -68,7 +68,7 @@ effects = ["dispatch_capability", "network", "use_secret", "external_write"]
 default_permission = "ask"
 visibility = "model"
 runtime_credentials = [
-  { handle = "gmail_account", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/gmail.modify"] } }, audience = { scheme = "https", host_pattern = "gmail.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+  { handle = "gmail_account", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/gmail.send"] } }, provider_scopes = ["https://www.googleapis.com/auth/gmail.send"], audience = { scheme = "https", host_pattern = "gmail.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
 ]
 input_schema_ref = "schemas/gmail/reply_to_message.input.v1.json"
 output_schema_ref = "schemas/gmail/reply_to_message.output.v1.json"
@@ -81,7 +81,7 @@ effects = ["dispatch_capability", "network", "use_secret", "external_write"]
 default_permission = "ask"
 visibility = "model"
 runtime_credentials = [
-  { handle = "gmail_account", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/gmail.modify"] } }, audience = { scheme = "https", host_pattern = "gmail.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+  { handle = "gmail_account", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/gmail.modify"] } }, provider_scopes = ["https://www.googleapis.com/auth/gmail.modify"], audience = { scheme = "https", host_pattern = "gmail.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
 ]
 input_schema_ref = "schemas/gmail/trash_message.input.v1.json"
 output_schema_ref = "schemas/gmail/trash_message.output.v1.json"

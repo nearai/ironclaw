@@ -196,12 +196,20 @@ plumbing, not capability APIs.
 A trigger fire is synthetic inbound, not a parallel agent loop.
 
 - The fire must enter the normal Reborn inbound/turn pipeline.
-- The trusted facade is `InboundTurnService::handle_inbound_turn_with_trusted_scope(TrustedInboundTurnRequest)`. PR 8 seals the trusted request constructor locally in `ironclaw_conversations`; a later trigger-worker/composition PR will add the host-owned construction shim once that caller exists.
+- The trusted facade is `InboundTurnService::handle_inbound_turn_with_trusted_scope(TrustedInboundTurnRequest)`. The raw trusted request constructor stays private inside `ironclaw_conversations`; host/composition code must enter through a host-owned trigger ingress seam instead of constructing trusted requests directly.
 - Binding resolution for trigger fires must use the trusted-scope path from `conversation-binding.md`.
-- The host-trusted ingress marker and witness used for trigger submission must be type-sealed and unconstructible by product adapters.
+- The host-trusted ingress marker and witness used for trigger submission must be inaccessible to product adapters. PR18 enforces this with a host-only trusted ingress crate plus architecture dependency tests; before trigger delivery launches, the trusted ingress authority should be hardened into a compile-time host facade or equivalent sealed factory so adapter crates cannot mint it merely by adding a dependency.
 - The host mints the trusted trigger ingress request from `TriggerRecord` state:
   `tenant_id`, `creator_user_id`, `agent_id`, and `project_id` are host state,
   not product payload data.
+- Before a trusted trigger fire is submitted, host composition must scan the
+  materialized trigger prompt for prompt-injection patterns and reject high- or
+  critical-severity findings as permanent materialization failures. The prompt
+  must not be silently rewritten before turn submission.
+- Before trigger delivery launches, host composition must also verify at fire
+  time that `creator_user_id` is still authorized for the target
+  `tenant_id`/`agent_id`/`project_id`; revoked or unauthorized creators must
+  produce a permanent authorization failure instead of submitting a turn.
 - The trusted inbound request is a host-owned wrapper around the ordinary inbound fields. It carries only ingress identity and turn scope data needed to create the canonical turn, and it discards adapter-supplied requested-scope hints before binding resolution.
 - It must not encode delivery targets, notification targets, or any other outbound routing policy.
 
@@ -305,6 +313,19 @@ The trigger system must expose `trigger_create`, `trigger_list`, and `trigger_re
 
 Exact wiring of the capability registry and handler dependencies may land in later implementation PRs, but the capability names and semantics are frozen here.
 
+Capability follow-ups before launch:
+
+- Trigger count quotas must be enforced through an atomic repository/database
+  policy when they are added. A handler-only precheck is not sufficient because
+  concurrent creates can race past the cap.
+- Durable backend hydration must keep malformed stored trigger rows observable
+  as repository errors. Optimizing schedule hydration to avoid cron re-parsing
+  is allowed only if the replacement keeps an explicit malformed-row validation
+  boundary.
+- PostgreSQL scoped-list NULL handling is performance tuning, not a V1
+  correctness gate. The schema owns a composite scoped-list index; add
+  NULL-specific partial indexes only with `EXPLAIN` or benchmark evidence.
+
 ---
 
 ## 9. Delivery
@@ -327,6 +348,8 @@ V1 acceptance does not require external delivery. A valid V1 trigger fire is one
 - PostgreSQL/libSQL parity is required for trigger persistence.
 - `trigger_create` caller-level tests must prove sub-minute and second-level
   schedules are rejected before persistence.
+- `trigger_create` caller-level tests must prove accepted finite schedules with
+  no future slot at dispatch time are rejected before persistence.
 - Trusted inbound caller-level tests must prove duplicate scheduled-slot retries
   replay the original accepted message and turn submission before binding
   creation.
