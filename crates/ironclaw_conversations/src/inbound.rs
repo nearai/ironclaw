@@ -484,8 +484,8 @@ pub fn classify_trusted_trigger_inbound_error(error: InboundTurnError) -> Trigge
     }
 }
 
-fn retryable_trusted_trigger_backend_error(error: &InboundTurnError) -> TriggerError {
-    tracing::debug!(error = ?error, "trusted trigger submit retryable failure");
+fn retryable_trusted_trigger_backend_error(_error: &InboundTurnError) -> TriggerError {
+    tracing::debug!("trusted trigger submit retryable failure");
     TriggerError::Backend {
         reason: "trusted trigger submit retryable failure".to_string(),
     }
@@ -493,9 +493,9 @@ fn retryable_trusted_trigger_backend_error(error: &InboundTurnError) -> TriggerE
 
 fn opaque_trusted_trigger_inbound_rejection(
     reason: &'static str,
-    error: &InboundTurnError,
+    _error: &InboundTurnError,
 ) -> TriggerError {
-    tracing::debug!(error = ?error, "trusted trigger inbound request rejected");
+    tracing::debug!("trusted trigger inbound request rejected");
     TriggerError::InvalidMaterialization {
         reason: reason.to_string(),
     }
