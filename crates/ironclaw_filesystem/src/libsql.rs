@@ -70,44 +70,53 @@ impl LibSqlRootFilesystem {
     }
 
     async fn connect(&self) -> Result<libsql::Connection, FilesystemError> {
-        // Match the legacy libSQL backend's connection policy: every
-        // operation gets its own connection, concurrent writers wait on
-        // SQLite locks, and transient file-open races get a short retry
-        // budget before surfacing as infrastructure errors.
-        let mut last_error = None;
-        for attempt in 0..LIBSQL_CONNECT_ATTEMPTS {
-            match self.db.connect() {
-                Ok(conn) => {
-                    conn.query("PRAGMA busy_timeout = 5000", ())
-                        .await
-                        .map_err(|error| {
-                            infrastructure_libsql_error(FilesystemOperation::Stat, error)
-                        })?;
-                    return Ok(conn);
-                }
-                Err(error) => {
-                    last_error = Some(error);
-                    if attempt + 1 < LIBSQL_CONNECT_ATTEMPTS {
-                        tokio::time::sleep(connect_backoff(attempt)).await;
-                    }
+        connect_with_retry(|| self.db.connect()).await
+    }
+}
+
+#[cfg(feature = "libsql")]
+async fn connect_with_retry<F>(mut open: F) -> Result<libsql::Connection, FilesystemError>
+where
+    F: FnMut() -> Result<libsql::Connection, libsql::Error>,
+{
+    // Match the legacy libSQL backend's connection policy: every
+    // operation gets its own connection, concurrent writers wait on
+    // SQLite locks, and transient file-open races get a short retry
+    // budget before surfacing as infrastructure errors.
+    let mut last_error = None;
+    for attempt in 0..LIBSQL_CONNECT_ATTEMPTS {
+        match open() {
+            Ok(conn) => {
+                conn.query("PRAGMA busy_timeout = 5000", ())
+                    .await
+                    .map_err(|error| {
+                        infrastructure_libsql_error(FilesystemOperation::Stat, error)
+                    })?;
+                return Ok(conn);
+            }
+            Err(error) => {
+                last_error = Some(error);
+                if attempt + 1 < LIBSQL_CONNECT_ATTEMPTS {
+                    tokio::time::sleep(connect_backoff(attempt)).await;
                 }
             }
         }
-
-        let reason = last_error
-            .map(|error| {
-                format!(
-                    "failed to create libSQL connection after {LIBSQL_CONNECT_ATTEMPTS} attempts: {error}"
-                )
-            })
-            .unwrap_or_else(|| {
-                format!("failed to create libSQL connection after {LIBSQL_CONNECT_ATTEMPTS} attempts")
-            });
-        Err(crate::db::infrastructure_error(
-            FilesystemOperation::Stat,
-            reason,
-        ))
     }
+
+    let reason = match last_error {
+        Some(error) => {
+            format!(
+                "failed to create libSQL connection after {LIBSQL_CONNECT_ATTEMPTS} attempts: {error}"
+            )
+        }
+        None => {
+            format!("failed to create libSQL connection after {LIBSQL_CONNECT_ATTEMPTS} attempts")
+        }
+    };
+    Err(crate::db::infrastructure_error(
+        FilesystemOperation::Stat,
+        reason,
+    ))
 }
 
 #[cfg(feature = "libsql")]
@@ -1844,5 +1853,31 @@ mod tests {
             let timeout = handle.await.unwrap().unwrap();
             assert_eq!(timeout, 5000);
         }
+    }
+
+    #[tokio::test]
+    async fn connect_retries_transient_open_failures_before_succeeding() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("connect-retry-branch-test.db");
+        let db = libsql::Builder::new_local(db_path).build().await.unwrap();
+        let mut attempts = 0;
+
+        let conn = connect_with_retry(|| {
+            attempts += 1;
+            if attempts < LIBSQL_CONNECT_ATTEMPTS {
+                return Err(libsql::Error::ConnectionFailed(format!(
+                    "synthetic transient failure {attempts}"
+                )));
+            }
+            db.connect()
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(attempts, LIBSQL_CONNECT_ATTEMPTS);
+        let mut rows = conn.query("PRAGMA busy_timeout", ()).await.unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        let timeout: i64 = row.get(0).unwrap();
+        assert_eq!(timeout, 5000);
     }
 }
