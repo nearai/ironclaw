@@ -380,8 +380,14 @@ mod tests {
         let client = reqwest::Client::new();
         let req = client.request(Method::GET, "http://example.com");
         let mut headers = vec![
-            ("authorization".to_string(), "Bearer sk-header-secret".to_string()),
-            ("x-api-key".to_string(), "sk-second-header-secret".to_string()),
+            (
+                "authorization".to_string(),
+                "Bearer sk-header-secret".to_string(),
+            ),
+            (
+                "x-api-key".to_string(),
+                "sk-second-header-secret".to_string(),
+            ),
         ];
 
         let req = apply_request_headers(req, &mut headers);
