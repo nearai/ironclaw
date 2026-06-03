@@ -388,6 +388,9 @@ pub struct AgentDeps {
     pub llm_backend: String,
     /// Per-tenant rate limiting registry (lazily creates rate state per user).
     pub tenant_rates: Arc<crate::tenant::TenantRateRegistry>,
+    /// Per-channel tool routing config. Wrapped in RwLock for hot-reload support.
+    pub channel_routing:
+        Arc<tokio::sync::RwLock<Option<crate::agent::channel_routing::ChannelRoutingConfig>>>,
 }
 
 /// The main agent that coordinates all components.
@@ -466,6 +469,7 @@ impl Agent {
         if let Some(ref interceptor) = deps.http_interceptor {
             scheduler.set_http_interceptor(Arc::clone(interceptor));
         }
+        scheduler.set_channel_routing(Arc::clone(&deps.channel_routing));
         let scheduler = Arc::new(scheduler);
 
         Self {
@@ -2473,6 +2477,7 @@ mod tests {
             builder: None,
             llm_backend: "nearai".to_string(),
             tenant_rates: Arc::new(crate::tenant::TenantRateRegistry::new(4, 3)),
+            channel_routing: Arc::new(tokio::sync::RwLock::new(None)),
         };
 
         Agent::new(

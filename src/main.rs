@@ -834,6 +834,11 @@ async fn async_main() -> anyhow::Result<()> {
     let scheduler_slot: ironclaw::tools::builtin::SchedulerSlot =
         Arc::new(tokio::sync::RwLock::new(None));
 
+    // Create channel routing Arc early so CreateJobTool can share it.
+    // Config is loaded from the DB later; the Arc is None until then but the
+    // tool reads it lazily at job creation time.
+    let channel_routing_arc = ironclaw::agent::channel_routing::ChannelRoutingConfig::none_arc();
+
     // Register job tools even under --cli-only so scheduler-backed jobs remain available.
     // Sandbox-only dependencies are injected only when the container manager is running.
     components.tools.register_job_tools(
@@ -849,6 +854,7 @@ async fn async_main() -> anyhow::Result<()> {
             None
         },
         components.secrets_store.clone(),
+        Some(Arc::clone(&channel_routing_arc)),
     );
 
     // ── Gateway channel ────────────────────────────────────────────────
@@ -881,12 +887,13 @@ async fn async_main() -> anyhow::Result<()> {
         gw = gw.with_log_level_handle(Arc::clone(&log_level_handle));
         gw = gw.with_tool_registry(Arc::clone(&components.tools));
         if let Some(ref db) = components.db {
-            let dispatcher = Arc::new(ironclaw::tools::dispatch::ToolDispatcher::new(
+            let dispatcher = ironclaw::tools::dispatch::ToolDispatcher::new(
                 Arc::clone(&components.tools),
                 Arc::clone(&components.safety),
                 Arc::clone(db),
-            ));
-            gw = gw.with_tool_dispatcher(dispatcher);
+            )
+            .with_channel_routing(Arc::clone(&channel_routing_arc));
+            gw = gw.with_tool_dispatcher(Arc::new(dispatcher));
         }
         if let Some(ref ext_mgr) = components.extension_manager {
             // Enable gateway mode so MCP OAuth returns auth URLs to the frontend
@@ -1266,6 +1273,17 @@ async fn async_main() -> anyhow::Result<()> {
     // Clone context_manager for the reaper before it's moved into Agent::new()
     let reaper_context_manager = Arc::clone(&components.context_manager);
 
+    // Load channel routing config from database before components.db is moved.
+    // Arc shared with register_job_tools (created earlier) and the SIGHUP handler.
+    if let Some(ref db) = components.db {
+        ironclaw::agent::channel_routing::ChannelRoutingConfig::reload_from_store(
+            db.as_ref(),
+            &config.owner_id,
+            &channel_routing_arc,
+        )
+        .await;
+    }
+
     // Capture settings store for SIGHUP handler before AppComponents is consumed.
     // Prefer the workspace-backed adapter (so SIGHUP-driven config reloads pick
     // up settings written through the workspace) and fall back to the raw db
@@ -1333,6 +1351,7 @@ async fn async_main() -> anyhow::Result<()> {
             config.agent.max_llm_concurrent_per_user.unwrap_or(4),
             config.agent.max_jobs_concurrent_per_user.unwrap_or(3),
         )),
+        channel_routing: Arc::clone(&channel_routing_arc),
     };
 
     let channels_for_warnings = Arc::clone(&channels);
@@ -1386,6 +1405,7 @@ async fn async_main() -> anyhow::Result<()> {
         let sighup_settings_store_clone = sighup_settings_store.clone();
         let sighup_secrets_store = components.secrets_store.clone();
         let sighup_owner_id = config.owner_id.clone();
+        let sighup_channel_routing = Arc::clone(&channel_routing_arc);
         let mut shutdown_rx = shutdown_tx.subscribe();
 
         tokio::spawn(async move {
@@ -1409,7 +1429,7 @@ async fn async_main() -> anyhow::Result<()> {
                         // Handle SIGHUP signal
                     }
                 }
-                tracing::info!("SIGHUP received — reloading HTTP webhook config");
+                tracing::debug!("SIGHUP received — reloading HTTP webhook config");
 
                 // Flush settings cache so direct DB edits are picked up.
                 if let Some(ref cache) = sighup_settings_cache {
@@ -1542,6 +1562,22 @@ async fn async_main() -> anyhow::Result<()> {
                     // Update all channels that support secret swapping
                     for updater in &secret_updaters {
                         updater.update_secret(new_secret.clone()).await;
+                    }
+                }
+
+                // Hot-reload channel routing config from SettingsStore
+                if let Some(ref store) = sighup_settings_store_clone {
+                    let changed =
+                        ironclaw::agent::channel_routing::ChannelRoutingConfig::reload_from_store(
+                            store.as_ref(),
+                            &sighup_owner_id,
+                            &sighup_channel_routing,
+                        )
+                        .await;
+                    if changed {
+                        tracing::debug!("SIGHUP: channel routing config reloaded");
+                    } else {
+                        tracing::debug!("SIGHUP: channel routing config unchanged");
                     }
                 }
             }

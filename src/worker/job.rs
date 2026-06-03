@@ -37,6 +37,8 @@ use ironclaw_llm::{
 };
 use ironclaw_safety::SafetyLayer;
 
+use crate::agent::channel_routing::ChannelRoutingConfig;
+
 /// Shared dependencies for worker execution.
 ///
 /// This bundles the dependencies that are shared across all workers,
@@ -61,6 +63,9 @@ pub struct WorkerDeps {
     pub http_interceptor: Option<Arc<dyn ironclaw_llm::recording::HttpInterceptor>>,
     /// Whether the deployment is multi-tenant (used for admin tool policy filtering).
     pub multi_tenant: bool,
+    /// Cached channel routing config — same Arc shared with the SIGHUP handler so
+    /// workers see live config without per-iteration DB queries.
+    pub channel_routing: Arc<tokio::sync::RwLock<Option<ChannelRoutingConfig>>>,
 }
 
 /// Worker that executes a single job.
@@ -108,6 +113,60 @@ impl Worker {
 
     fn use_planning(&self) -> bool {
         self.deps.use_planning
+    }
+
+    async fn tool_definitions_for_current_context(&self) -> Vec<ironclaw_llm::ToolDefinition> {
+        let tool_defs = self.tools().tool_definitions().await;
+
+        let Ok(job_ctx) = self.context_manager().get_context(self.job_id).await else {
+            return tool_defs;
+        };
+
+        // Extract origin channel — may be absent for jobs spawned by routines/heartbeats.
+        let channel = job_ctx
+            .metadata
+            .get("notify_channel")
+            .and_then(|v| v.as_str());
+
+        let null_metadata = serde_json::Value::Null;
+        let routing_metadata = job_ctx
+            .metadata
+            .get("notify_metadata")
+            .filter(|value| value.is_object())
+            .unwrap_or(&null_metadata);
+
+        // Use the cached Arc — same version as the SIGHUP-aware dispatcher,
+        // no extra DB round-trip per iteration.
+        let routing = self.deps.channel_routing.read().await.clone();
+        let Some(routing) = routing else {
+            return tool_defs;
+        };
+
+        // Resolve routing channel: use origin channel if present; fall back to
+        // empty string so resolve_group() maps to the default group (fail-closed).
+        // The empty-string sentinel is intentional — `is_dm("")` returns false, so
+        // routine/heartbeat-spawned jobs always get the default group, never DM bypass.
+        let effective_channel = channel.unwrap_or("");
+
+        let builtin_names = self.tools().builtin_tool_names().await;
+        let before = tool_defs.len();
+        let filtered = routing.filter_tool_defs(
+            effective_channel,
+            routing_metadata,
+            tool_defs,
+            &builtin_names,
+        );
+        if filtered.len() < before {
+            tracing::debug!(
+                job_id = %self.job_id,
+                channel = effective_channel,
+                group = routing.resolve_group(effective_channel),
+                before,
+                after = filtered.len(),
+                "Job channel routing filtered tools"
+            );
+        }
+        filtered
     }
 
     /// Fire-and-forget persistence of job status.
@@ -339,8 +398,9 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
             .unwrap_or(50) as usize;
         let max_iterations = max_iterations.min(ironclaw_common::MAX_WORKER_ITERATIONS as usize);
 
-        // Initial tool definitions for planning (will be refreshed in loop)
-        reason_ctx.available_tools = self.tools().tool_definitions().await;
+        // Initial tool definitions for planning — use the same filtered set
+        // that execute_tool_calls sees, so the plan only references permitted tools.
+        reason_ctx.available_tools = self.tool_definitions_for_current_context().await;
 
         // Generate plan if planning is enabled
         let plan = if self.use_planning() {
@@ -526,6 +586,47 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
 
         // Fetch job context early for approval checking and other needs
         let mut job_ctx = deps.context_manager.get_context(job_id).await?;
+
+        // Channel routing enforcement — execution-time gate (defense in depth).
+        //
+        // The agent's LLM-driven worker loop does NOT go through
+        // `ToolDispatcher::dispatch`, so the dispatcher's gate doesn't cover it.
+        // `tool_definitions_for_current_context` already filters the tool list
+        // the LLM sees, but that's a presentation-layer hint: a jailbroken or
+        // confused model can still name a hidden tool directly. Block it here
+        // before execution. Channel + metadata are read from the same job-context
+        // fields the presentation filter uses, so the two stay consistent
+        // (including DM bypass). builtin names are fetched before taking the
+        // routing read lock so the lock is only held across the sync check.
+        let builtin_names = deps.tools.builtin_tool_names().await;
+        if let Some(config) = deps.channel_routing.read().await.as_ref() {
+            let routing_channel = job_ctx
+                .metadata
+                .get("notify_channel")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let null_metadata = serde_json::Value::Null;
+            let routing_metadata = job_ctx
+                .metadata
+                .get("notify_metadata")
+                .filter(|value| value.is_object())
+                .unwrap_or(&null_metadata);
+            if !config.is_tool_permitted(
+                routing_channel,
+                routing_metadata,
+                tool_name,
+                &builtin_names,
+            ) {
+                return Err(crate::error::ToolError::AutonomousUnavailable {
+                    name: tool_name.to_string(),
+                    reason: format!(
+                        "Tool '{}' is not permitted on channel '{}' by channel routing",
+                        tool_name, routing_channel
+                    ),
+                }
+                .into());
+            }
+        }
 
         // Check approval: additive semantics - BOTH job-level AND worker-level must approve
         let requirement = tool.requires_approval(&normalized_params);
@@ -1437,7 +1538,7 @@ impl<'a> LoopDelegate for JobDelegate<'a> {
             reason_ctx.available_tools.clear();
         } else {
             // Refresh tool definitions so newly built tools become visible
-            let tool_defs = self.worker.tools().tool_definitions().await;
+            let tool_defs = self.worker.tool_definitions_for_current_context().await;
 
             // Apply admin tool policy filtering (multi-tenant only).
             let (user_id, is_admin) = self.resolve_user_info().await;
@@ -1839,9 +1940,11 @@ impl From<TaskOutput> for Result<String, Error> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
     use std::sync::Arc;
 
     use crate::channels::ChannelManager;
+    use crate::db::Database;
     use ironclaw_llm::ToolSelection;
 
     use super::*;
@@ -1941,6 +2044,7 @@ mod tests {
             approval_context: None,
             http_interceptor: None,
             multi_tenant: false,
+            channel_routing: ChannelRoutingConfig::none_arc(),
         };
 
         Worker::new(job_id, deps)
@@ -2161,6 +2265,7 @@ mod tests {
             approval_context,
             http_interceptor: None,
             multi_tenant: false,
+            channel_routing: ChannelRoutingConfig::none_arc(),
         };
 
         Worker::new(job_id, deps)
@@ -2764,6 +2869,226 @@ mod tests {
         assert_eq!(telegram.len(), 1);
         assert_eq!(telegram[0].0, "owner-scope");
         assert_eq!(telegram[0].1.content, "hello from routine");
+    }
+
+    // TODO(postgres-parity): no symmetric test for the postgres backend per
+    // .claude/rules/database.md — dual-backend features need testcontainers
+    // or #[cfg(feature = "integration")] coverage. Tracked as tech debt;
+    // the libsql test below covers the shared filtering logic in
+    // tool_definitions_for_current_context, which is backend-agnostic.
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn routed_jobs_filter_tools_by_originating_channel() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = crate::db::libsql::LibSqlBackend::new_local(&dir.path().join("test.db"))
+            .await
+            .unwrap();
+        backend.run_migrations().await.unwrap();
+
+        let routing: crate::agent::channel_routing::ChannelRoutingConfig =
+            serde_json::from_value(serde_json::json!({
+                "groups": {
+                    "content": ["Notion"]
+                },
+                "builtin_whitelist": {
+                    "content": ["memory_search"]
+                },
+                "channels": {
+                    "telegram": "content"
+                },
+                "default_group": "content"
+            }))
+            .unwrap();
+        routing.save_to_store(&backend, "user-1").await.unwrap();
+
+        // Populate the routing Arc from the store so the filter actually
+        // activates inside tool_definitions_for_current_context.
+        // none_arc() starts as None → the early return would skip filtering.
+        let channel_routing = ChannelRoutingConfig::none_arc();
+        ChannelRoutingConfig::reload_from_store(&backend, "user-1", &channel_routing).await;
+
+        let registry = ToolRegistry::new();
+        // MCP tools registered dynamically (async — not in builtin_tool_names).
+        registry
+            .register(Arc::new(SlowTool {
+                tool_name: "Notion_post_search".to_string(),
+                delay: Duration::ZERO,
+            }))
+            .await;
+        registry
+            .register(Arc::new(SlowTool {
+                tool_name: "Archon_search".to_string(),
+                delay: Duration::ZERO,
+            }))
+            .await;
+        // Built-in tool registered at startup (register_sync — in builtin_tool_names).
+        // Matches production: memory_search is a startup built-in, not a dynamic MCP tool.
+        registry.register_sync(Arc::new(SlowTool {
+            tool_name: "memory_search".to_string(),
+            delay: Duration::ZERO,
+        }));
+
+        let cm = Arc::new(crate::context::ContextManager::new(5));
+        let job_id = cm.create_job("test", "test routed job").await.unwrap();
+        cm.update_context(job_id, |ctx| {
+            ctx.user_id = "user-1".to_string();
+            ctx.metadata = serde_json::json!({
+                "notify_channel": "telegram",
+                "notify_metadata": {
+                    "chat_type": "group"
+                }
+            });
+            Ok::<(), String>(())
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+        let db: Arc<dyn crate::db::Database> = Arc::new(backend);
+        let worker = Worker::new(
+            job_id,
+            WorkerDeps {
+                context_manager: cm,
+                llm: Arc::new(StubLlm),
+                safety: Arc::new(SafetyLayer::new(&SafetyConfig {
+                    max_output_length: 100_000,
+                    injection_check_enabled: false,
+                })),
+                tools: Arc::new(registry),
+                store: Some(crate::tenant::SystemScope::new(db)),
+                hooks: Arc::new(crate::hooks::HookRegistry::new()),
+                timeout: Duration::from_secs(30),
+                use_planning: false,
+                sse_tx: None,
+                approval_context: None,
+                http_interceptor: None,
+                multi_tenant: false,
+                channel_routing,
+            },
+        );
+
+        let names: HashSet<_> = worker
+            .tool_definitions_for_current_context()
+            .await
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect();
+
+        assert!(names.contains("Notion_post_search"));
+        assert!(names.contains("memory_search"));
+        assert!(!names.contains("Archon_search"));
+    }
+
+    /// Regression test for the worker execution-time routing gate.
+    ///
+    /// The presentation filter (`tool_definitions_for_current_context`, tested
+    /// above) only hides tools from the LLM. This drives the actual execution
+    /// path (`execute_tool` → `execute_tool_inner`) to prove a tool routing
+    /// blocked is *rejected at execution time* even when named directly — the
+    /// case a jailbroken LLM exploits. Tools allowed by routing still run.
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn routed_jobs_block_filtered_tool_at_execution_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = crate::db::libsql::LibSqlBackend::new_local(&dir.path().join("test.db"))
+            .await
+            .unwrap();
+        backend.run_migrations().await.unwrap();
+
+        // content group: only Notion MCP + memory_search built-in.
+        let routing: crate::agent::channel_routing::ChannelRoutingConfig =
+            serde_json::from_value(serde_json::json!({
+                "groups": { "content": ["Notion"] },
+                "builtin_whitelist": { "content": ["memory_search"] },
+                "channels": { "telegram": "content" },
+                "default_group": "content"
+            }))
+            .unwrap();
+        routing.save_to_store(&backend, "user-1").await.unwrap();
+        let channel_routing = ChannelRoutingConfig::none_arc();
+        ChannelRoutingConfig::reload_from_store(&backend, "user-1", &channel_routing).await;
+
+        let registry = ToolRegistry::new();
+        registry
+            .register(Arc::new(SlowTool {
+                tool_name: "Notion_post_search".to_string(),
+                delay: Duration::ZERO,
+            }))
+            .await;
+        registry
+            .register(Arc::new(SlowTool {
+                tool_name: "Archon_search".to_string(),
+                delay: Duration::ZERO,
+            }))
+            .await;
+        registry.register_sync(Arc::new(SlowTool {
+            tool_name: "memory_search".to_string(),
+            delay: Duration::ZERO,
+        }));
+
+        let cm = Arc::new(crate::context::ContextManager::new(5));
+        let job_id = cm
+            .create_job("test", "test routed exec gate")
+            .await
+            .unwrap();
+        cm.update_context(job_id, |ctx| {
+            ctx.user_id = "user-1".to_string();
+            // Group message (not a DM) so routing applies.
+            ctx.metadata = serde_json::json!({
+                "notify_channel": "telegram",
+                "notify_metadata": { "chat_type": "group" }
+            });
+            Ok::<(), String>(())
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+        let db: Arc<dyn crate::db::Database> = Arc::new(backend);
+        let worker = Worker::new(
+            job_id,
+            WorkerDeps {
+                context_manager: cm,
+                llm: Arc::new(StubLlm),
+                safety: Arc::new(SafetyLayer::new(&SafetyConfig {
+                    max_output_length: 100_000,
+                    injection_check_enabled: false,
+                })),
+                tools: Arc::new(registry),
+                store: Some(crate::tenant::SystemScope::new(db)),
+                hooks: Arc::new(crate::hooks::HookRegistry::new()),
+                timeout: Duration::from_secs(30),
+                use_planning: false,
+                sse_tx: None,
+                approval_context: None,
+                http_interceptor: None,
+                multi_tenant: false,
+                channel_routing,
+            },
+        );
+
+        let params = serde_json::json!({});
+
+        // Allowed by routing → executes.
+        assert!(
+            worker
+                .execute_tool("Notion_post_search", &params)
+                .await
+                .is_ok(),
+            "Notion is in the content group and must execute"
+        );
+        assert!(
+            worker.execute_tool("memory_search", &params).await.is_ok(),
+            "memory_search is whitelisted and must execute"
+        );
+
+        // Hidden from the LLM AND must be rejected when named directly.
+        let blocked = worker.execute_tool("Archon_search", &params).await;
+        let err = blocked.expect_err("Archon is not in the content group; must be blocked");
+        assert!(
+            err.to_string().contains("channel routing"),
+            "expected a channel-routing rejection, got: {err}"
+        );
     }
 
     /// Regression test: only `EmptyResponse` errors are eligible for
