@@ -227,27 +227,21 @@ impl<'a> PromptPlanningPipeline<'a> {
     }
 
     async fn cancel_boundary(&mut self) -> Result<Option<LoopExit>, AgentLoopExecutorError> {
-        let original_state = self.state.clone();
-        let state = std::mem::replace(
-            &mut self.state,
-            LoopExecutionState::initial_for_run(self.ctx.host.run_context()),
-        );
         let cancel_check = CheckpointStage
             .cancel_if_requested_after_pending_input_ack(
                 self.ctx,
-                state,
+                self.state.clone(),
                 &mut self.pending_input_ack,
             )
             .await;
-        self.state = match cancel_check {
-            Ok(CancelCheck::Continue(state)) => *state,
-            Ok(CancelCheck::Exit(exit)) => return Ok(Some(exit)),
-            Err(error) => {
-                self.state = original_state;
-                return Err(error);
+        match cancel_check {
+            Ok(CancelCheck::Continue(state)) => {
+                self.state = *state;
+                Ok(None)
             }
-        };
-        Ok(None)
+            Ok(CancelCheck::Exit(exit)) => Ok(Some(exit)),
+            Err(error) => Err(error),
+        }
     }
 
     async fn visible_surface(

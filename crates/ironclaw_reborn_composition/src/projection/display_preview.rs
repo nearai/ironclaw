@@ -11,7 +11,7 @@ use ironclaw_product_adapters::{
     CapabilityDisplayPreviewView, CapabilityDisplayPreviewViewInput, ProductAdapterError,
 };
 use ironclaw_threads::ThreadMessageId;
-use ironclaw_turns::run_profile::CapabilityInputRef;
+use ironclaw_turns::{TurnRunId, run_profile::CapabilityInputRef};
 
 use super::capability_activity_status_wire;
 
@@ -236,6 +236,7 @@ fn capability_display_preview_from_store(
             .timeline_message_id
             .map(|message_id| message_id.to_string()),
         invocation_id: activity.invocation_id,
+        turn_run_id: turn_run_id_for_activity(activity),
         thread_id: activity.thread_id.clone(),
         capability_id: activity.capability_id.clone(),
         status: capability_activity_status_wire(activity.status),
@@ -270,6 +271,7 @@ fn failed_capability_display_preview(
     CapabilityDisplayPreviewView::new(CapabilityDisplayPreviewViewInput {
         timeline_message_id: None,
         invocation_id: activity.invocation_id,
+        turn_run_id: turn_run_id_for_activity(activity),
         thread_id: activity.thread_id.clone(),
         capability_id: activity.capability_id.clone(),
         status: capability_activity_status_wire(activity.status),
@@ -289,6 +291,12 @@ fn failed_capability_display_preview(
         updated_at: activity.updated_at,
     })
     .map(Some)
+}
+
+fn turn_run_id_for_activity(activity: &CapabilityActivityProjection) -> Option<TurnRunId> {
+    activity
+        .run_id
+        .map(|run_id| TurnRunId::from_uuid(run_id.as_uuid()))
 }
 
 #[derive(Debug, Clone)]

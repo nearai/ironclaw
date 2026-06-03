@@ -921,6 +921,9 @@ async fn runtime_payload_from_candidate(
         RuntimePayloadCandidate::CapabilityActivity(activity) => {
             CapabilityActivityView::new(CapabilityActivityViewInput {
                 invocation_id: activity.invocation_id,
+                turn_run_id: activity
+                    .run_id
+                    .map(|run_id| TurnRunId::from_uuid(run_id.as_uuid())),
                 thread_id: activity.thread_id,
                 capability_id: activity.capability_id,
                 status: capability_activity_status_wire(activity.status),

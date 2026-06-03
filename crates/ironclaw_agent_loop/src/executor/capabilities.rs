@@ -306,7 +306,10 @@ fn prefixed_capability_summary(
     safe_summary: String,
 ) -> Result<SanitizedStrategySummary, AgentLoopExecutorError> {
     let detail = sanitized_strategy_summary(safe_summary)?;
-    let detail = truncate_summary_detail(detail.as_str(), MAX_SAFE_SUMMARY_BYTES - prefix.len());
+    let detail = truncate_summary_detail(
+        detail.as_str(),
+        MAX_SAFE_SUMMARY_BYTES.saturating_sub(prefix.len()),
+    );
     sanitized_strategy_summary(format!("{prefix}{detail}"))
 }
 
@@ -780,5 +783,17 @@ mod tests {
         assert!(result.is_some());
         let (gate, _) = result.unwrap();
         assert_eq!(gate.as_str(), "gate:batch-2");
+    }
+
+    #[test]
+    fn prefixed_capability_summary_does_not_underflow_when_prefix_is_too_long() {
+        let prefix = "x".repeat(MAX_SAFE_SUMMARY_BYTES + 1);
+        let result = prefixed_capability_summary(prefix, "detail".to_string());
+
+        assert!(matches!(
+            result,
+            Err(AgentLoopExecutorError::PlannerContract { detail })
+                if detail == "host returned unsafe strategy summary"
+        ));
     }
 }

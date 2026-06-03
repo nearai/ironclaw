@@ -288,6 +288,35 @@ async fn concrete_mcp_http_client_routes_json_rpc_through_shared_egress() {
 }
 
 #[tokio::test]
+async fn concrete_mcp_http_client_maps_upstream_auth_status_to_auth_required() {
+    let egress = RecordingRuntimeEgress::auth_required();
+    let client = McpHostHttpClient::new(
+        McpRuntimeHttpAdapter::new(Arc::new(egress.clone())),
+        StaticMcpHostHttpEgressPlanner::new(host_http_plan()),
+    );
+
+    let error = client
+        .call_tool(McpClientRequest {
+            provider: ExtensionId::new("github-mcp").unwrap(),
+            capability_id: CapabilityId::new("github-mcp.search").unwrap(),
+            scope: sample_scope(),
+            transport: "http".to_string(),
+            command: None,
+            args: vec![],
+            url: Some("https://mcp.example.test/mcp".to_string()),
+            input: json!({"query": "ironclaw"}),
+            max_output_bytes: 4096,
+        })
+        .await
+        .expect_err("upstream MCP auth failures must become auth-required errors");
+
+    assert!(matches!(error, McpClientError::AuthRequired));
+    let requests = egress.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(json_rpc_method(&requests[0].body), "initialize");
+}
+
+#[tokio::test]
 async fn concrete_mcp_http_client_uses_negotiated_protocol_version_header() {
     let egress = RecordingRuntimeEgress::json_rpc_with_protocol_version("2025-03-26");
     let client = McpHostHttpClient::new(
@@ -386,7 +415,7 @@ async fn concrete_mcp_http_client_rejects_missing_or_unsafe_initialize_protocol_
             .await
             .expect_err("unsafe initialize protocol versions must fail the call");
 
-        assert_eq!(error, "response_error");
+        assert_eq!(error.stable_reason(), "response_error");
     }
 }
 
@@ -426,7 +455,7 @@ async fn concrete_mcp_http_client_sends_credentials_only_for_tool_call_exchange(
         .await
         .expect_err("direct secret-store leases must fail before MCP transport");
 
-    assert_eq!(error, "request_denied");
+    assert_eq!(error.stable_reason(), "request_denied");
     assert!(
         egress.requests().is_empty(),
         "direct leases must be rejected before initialize or tools/call transport"
@@ -577,7 +606,7 @@ async fn concrete_mcp_http_client_does_not_reuse_session_from_failed_initialize(
         })
         .await
         .expect_err("failed initialize responses must fail the call");
-    assert_eq!(error, "response_error");
+    assert_eq!(error.stable_reason(), "response_error");
 
     client
         .call_tool(McpClientRequest {
@@ -629,7 +658,7 @@ async fn concrete_mcp_http_client_rejects_json_rpc_response_without_matching_id(
         .await
         .expect_err("ID-bearing JSON-RPC requests must reject missing response ids");
 
-    assert_eq!(error, "response_error");
+    assert_eq!(error.stable_reason(), "response_error");
 }
 
 #[tokio::test]
@@ -775,6 +804,31 @@ async fn concrete_mcp_http_client_discovers_tool_schemas_through_shared_egress()
 }
 
 #[tokio::test]
+async fn concrete_mcp_http_client_maps_discovery_auth_status_to_auth_required() {
+    let client = McpHostHttpClient::new(
+        McpRuntimeHttpAdapter::new(Arc::new(RecordingRuntimeEgress::auth_required())),
+        StaticMcpHostHttpEgressPlanner::new(host_http_plan()),
+    );
+
+    let error = client
+        .discover_tools(McpClientRequest {
+            provider: ExtensionId::new("github-mcp").unwrap(),
+            capability_id: CapabilityId::new("github-mcp.search").unwrap(),
+            scope: sample_scope(),
+            transport: "http".to_string(),
+            command: None,
+            args: vec![],
+            url: Some("https://mcp.example.test/mcp".to_string()),
+            input: json!({}),
+            max_output_bytes: 4096,
+        })
+        .await
+        .expect_err("upstream MCP discovery auth failures must stay typed");
+
+    assert!(matches!(error, McpClientError::AuthRequired));
+}
+
+#[tokio::test]
 async fn concrete_mcp_http_client_caps_missing_plan_limit_to_client_output_limit() {
     let mut plan = host_http_plan();
     plan.response_body_limit = None;
@@ -829,7 +883,7 @@ async fn concrete_mcp_http_client_rejects_invalid_session_id_before_reuse() {
         .await
         .expect_err("invalid upstream session ids must not be reused as request headers");
 
-    assert_eq!(error, "response_error");
+    assert_eq!(error.stable_reason(), "response_error");
 }
 
 #[tokio::test]
@@ -854,9 +908,9 @@ async fn concrete_mcp_http_client_sanitizes_shared_egress_failures() {
         .await
         .expect_err("raw shared-egress errors must not leak through the MCP client");
 
-    assert_eq!(error, "network_error");
-    assert!(!error.contains("sk-test-secret"));
-    assert!(!error.contains("10.0.0.7"));
+    assert_eq!(error.stable_reason(), "network_error");
+    assert!(!format!("{error:?}").contains("sk-test-secret"));
+    assert!(!format!("{error:?}").contains("10.0.0.7"));
 }
 
 #[tokio::test]
@@ -929,7 +983,7 @@ async fn mcp_runtime_denies_budget_before_adapter_call() {
 #[tokio::test]
 async fn mcp_runtime_releases_reservation_when_adapter_fails() {
     let package = package_from_manifest(MCP_MANIFEST);
-    let client = RecordingMcpClient::new(Err("server disconnected".to_string()));
+    let client = RecordingMcpClient::new(Err(McpClientError::client("server disconnected")));
     let runtime = McpRuntime::new(McpRuntimeConfig::for_testing(), client.clone());
     let governor = InMemoryResourceGovernor::new();
     let scope = sample_scope();
@@ -962,7 +1016,7 @@ async fn mcp_runtime_releases_reservation_when_adapter_fails() {
 #[tokio::test]
 async fn mcp_runtime_preserves_adapter_error_when_release_cleanup_fails() {
     let package = package_from_manifest(MCP_MANIFEST);
-    let client = RecordingMcpClient::new(Err("server disconnected".to_string()));
+    let client = RecordingMcpClient::new(Err(McpClientError::client("server disconnected")));
     let runtime = McpRuntime::new(McpRuntimeConfig::for_testing(), client);
     let governor = ReleaseFailingGovernor::new();
 
@@ -1185,13 +1239,13 @@ async fn mcp_runtime_rejects_output_when_adapter_under_reports_size() {
 
 #[derive(Clone)]
 struct RecordingMcpClient {
-    output: Result<McpClientOutput, String>,
+    output: Result<McpClientOutput, McpClientError>,
     requests: Arc<Mutex<Vec<McpClientRequest>>>,
     host_mediated_http: bool,
 }
 
 impl RecordingMcpClient {
-    fn new(output: Result<McpClientOutput, String>) -> Self {
+    fn new(output: Result<McpClientOutput, McpClientError>) -> Self {
         Self {
             output,
             requests: Arc::new(Mutex::new(Vec::new())),
@@ -1199,7 +1253,7 @@ impl RecordingMcpClient {
         }
     }
 
-    fn direct_network(output: Result<McpClientOutput, String>) -> Self {
+    fn direct_network(output: Result<McpClientOutput, McpClientError>) -> Self {
         Self {
             output,
             requests: Arc::new(Mutex::new(Vec::new())),
@@ -1214,7 +1268,10 @@ impl McpClient for RecordingMcpClient {
         self.host_mediated_http
     }
 
-    async fn call_tool(&self, request: McpClientRequest) -> Result<McpClientOutput, String> {
+    async fn call_tool(
+        &self,
+        request: McpClientRequest,
+    ) -> Result<McpClientOutput, McpClientError> {
         self.requests.lock().unwrap().push(request);
         self.output.clone()
     }
@@ -1223,6 +1280,7 @@ impl McpClient for RecordingMcpClient {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RecordedResponseMode {
     Json,
+    AuthRequired,
     JsonMissingProtocolVersion,
     Sse,
 }
@@ -1243,6 +1301,14 @@ impl RecordingRuntimeEgress {
         Self {
             mode: RecordedResponseMode::Json,
             protocol_version,
+            requests: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn auth_required() -> Self {
+        Self {
+            mode: RecordedResponseMode::AuthRequired,
+            protocol_version: "2025-06-18",
             requests: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -1276,6 +1342,17 @@ impl RuntimeHttpEgress for RecordingRuntimeEgress {
     ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
         let method = json_rpc_method(&request.body);
         self.requests.lock().unwrap().push(request.clone());
+        if self.mode == RecordedResponseMode::AuthRequired {
+            return Ok(RuntimeHttpEgressResponse {
+                status: 401,
+                headers: vec![],
+                body: br#"{"error":"unauthorized"}"#.to_vec(),
+                saved_body: None,
+                request_bytes: request.body.len() as u64,
+                response_bytes: 24,
+                redaction_applied: false,
+            });
+        }
         match method.as_str() {
             "initialize" => {
                 let mut result = json!({
@@ -1319,6 +1396,9 @@ impl RuntimeHttpEgress for RecordingRuntimeEgress {
                         id,
                         json!({"content":[{"type":"text","text":"ok from sse"}],"isError":false}),
                     )),
+                    RecordedResponseMode::AuthRequired => {
+                        unreachable!("auth-required mode returns before JSON-RPC method dispatch")
+                    }
                 }
             }
             "tools/list" => Ok(runtime_json_response(

@@ -77,6 +77,92 @@ pub enum LlmError {
     Io(#[from] std::io::Error),
 }
 
+pub(crate) fn context_length_error(status_code: u16, response_text: &str) -> Option<LlmError> {
+    if status_code != 413 && status_code != 400 {
+        return None;
+    }
+
+    let lower = response_text.to_ascii_lowercase();
+    let is_context_overflow = status_code == 413 || is_context_length_error_message(&lower);
+    if !is_context_overflow {
+        return None;
+    }
+
+    let (used, limit) = parse_context_token_counts(&lower);
+    Some(LlmError::ContextLengthExceeded { used, limit })
+}
+
+pub(crate) fn is_context_length_error_message(lower: &str) -> bool {
+    const CONTEXT_PATTERNS: &[&str] = &[
+        "context_length_exceeded",
+        "maximum context length",
+        "too many tokens",
+        "payload too large",
+        "longer than the model's context length",
+    ];
+
+    CONTEXT_PATTERNS
+        .iter()
+        .any(|pattern| lower.contains(pattern))
+}
+
+/// Try to extract token counts from a context-length error message.
+///
+/// Handles patterns like:
+/// - "maximum context length is 128000 tokens. However, your messages resulted in 150000 tokens."
+/// - "The input (150000 tokens) is longer than the model's context length (128000 tokens)."
+///
+/// Returns `(0, 0)` if parsing fails.
+pub(crate) fn parse_context_token_counts(lower: &str) -> (usize, usize) {
+    let numbers = token_count_numbers(lower);
+    if numbers.len() < 2 {
+        return (0, 0);
+    }
+
+    // OpenAI pattern: "maximum context length is {limit} tokens. ... resulted in {used} tokens".
+    if lower.contains("maximum context length") {
+        return (numbers[1], numbers[0]);
+    }
+
+    // NEAR/OpenAI-compatible proxy pattern:
+    // "The input ({used} tokens) is longer than the model's context length ({limit} tokens)."
+    if lower.contains("longer than the model's context length") {
+        return (numbers[0], numbers[1]);
+    }
+
+    (0, 0)
+}
+
+fn token_count_numbers(lower: &str) -> Vec<usize> {
+    lower
+        .split("tokens")
+        .filter_map(number_immediately_before)
+        .filter(|&n| n > 0)
+        .collect()
+}
+
+fn number_immediately_before(segment: &str) -> Option<usize> {
+    let mut skipped_alphabetic = false;
+    let digits = segment
+        .chars()
+        .rev()
+        .skip_while(|ch| {
+            if ch.is_alphabetic() {
+                skipped_alphabetic = true;
+            }
+            !ch.is_ascii_digit()
+        })
+        .take_while(|ch| ch.is_ascii_digit())
+        .collect::<Vec<_>>();
+
+    if skipped_alphabetic || digits.is_empty() {
+        return None;
+    }
+
+    let digits = digits.into_iter().rev().collect::<String>();
+    digits.parse().ok().filter(|&n| n > 0)
+}
+
 /// Return actionable setup guidance for a provider's authentication failure.
 ///
 /// This helps users who see an `AuthFailed` error know exactly what to do
@@ -183,6 +269,14 @@ mod tests {
         assert!(auth_guidance("groq").contains("GROQ_API_KEY"));
         assert!(auth_guidance("ollama").contains("Ollama is running"));
         assert!(auth_guidance("bedrock").contains("AWS"));
+    }
+
+    #[test]
+    fn parse_context_token_counts_ignores_non_adjacent_digits_before_tokens() {
+        let msg = "provider model 3 has some tokens available. this model's maximum context length is 128000 tokens. however, your messages resulted in 150000 tokens.";
+        let (used, limit) = parse_context_token_counts(msg);
+        assert_eq!(used, 150000);
+        assert_eq!(limit, 128000);
     }
 
     // ------------------------------------------------------------------

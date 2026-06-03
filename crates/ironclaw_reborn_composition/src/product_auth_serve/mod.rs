@@ -879,7 +879,7 @@ pub(super) async fn scoped_update_binding_for_requester(
         .product_auth
         .runtime_credential_account_selection_service()
         .select_unique_configured_runtime_account(RuntimeCredentialAccountSelectionRequest::new(
-            CredentialAccountSelectionRequest::new(scope.clone(), provider)
+            CredentialAccountSelectionRequest::new(scope.clone(), provider.clone())
                 .for_extension(requester_extension.clone()),
             scope.clone(),
             provider_scopes,
@@ -893,6 +893,15 @@ pub(super) async fn scoped_update_binding_for_requester(
         Err(AuthProductError::CredentialMissing) => Ok(None),
         Err(AuthProductError::CrossScopeDenied) => Ok(None),
         Err(AuthProductError::AccountSelectionRequired) => Ok(None),
+        Err(AuthProductError::BackendUnavailable) => {
+            tracing::warn!(
+                target: "ironclaw::reborn::product_auth::oauth",
+                provider = %provider.as_str(),
+                requester_extension = %requester_extension.as_str(),
+                "credential account status unavailable during extension OAuth start; starting setup without update binding"
+            );
+            Ok(None)
+        }
         Err(error) => Err(ProductAuthRouteFailure::from(error)),
     }
 }
@@ -1318,8 +1327,9 @@ mod tests {
     use axum::body::{Body, to_bytes};
     use axum::http::{Method, Request, header};
     use ironclaw_auth::{
-        AuthFlowManager, CredentialAccountService, CredentialAccountStatus, CredentialOwnership,
-        NewCredentialAccount,
+        AuthFlowManager, AuthInteractionService, AuthProviderClient,
+        CredentialAccountLookupRequest, CredentialAccountService, CredentialAccountStatus,
+        CredentialOwnership, CredentialSetupService, NewCredentialAccount, SecretCleanupService,
     };
     use ironclaw_capabilities::{CapabilityObligationHandler, CapabilityObligationRequest};
     use ironclaw_host_api::{
@@ -1621,6 +1631,133 @@ mod tests {
             .expect("flow lookup")
             .expect("flow");
         assert!(flow.update_binding.is_none());
+    }
+
+    #[tokio::test]
+    async fn extension_google_oauth_start_continues_when_update_binding_lookup_is_unavailable() {
+        let shared = Arc::new(ironclaw_auth::InMemoryAuthProductServices::new());
+        let flow_manager: Arc<dyn AuthFlowManager> = shared.clone();
+        let interaction_service: Arc<dyn AuthInteractionService> = shared.clone();
+        let credential_setup_service: Arc<dyn CredentialSetupService> = shared.clone();
+        let credential_account_service: Arc<dyn CredentialAccountService> = shared.clone();
+        let provider_client: Arc<dyn AuthProviderClient> = shared.clone();
+        let cleanup_service: Arc<dyn SecretCleanupService> = shared.clone();
+        let product_auth = Arc::new(RebornProductAuthServices::new(
+            flow_manager,
+            interaction_service,
+            credential_setup_service,
+            credential_account_service,
+            provider_client,
+            cleanup_service,
+            Arc::new(NoopDispatcher),
+        ));
+        let state = ProductAuthRouteState::new(
+            product_auth,
+            TenantId::new("tenant-alpha").expect("tenant"),
+            None,
+            None,
+        )
+        .with_google_oauth(
+            GoogleOAuthRouteConfig::new(
+                "google-client.apps.googleusercontent.com",
+                "http://127.0.0.1:3000/api/reborn/product-auth/oauth/google/callback",
+            )
+            .expect("google oauth route config"),
+        );
+        let app = product_auth_route_mount(state.clone())
+            .protected
+            .layer(axum::Extension(test_caller()));
+        let flow_invocation_id = InvocationId::new();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/webchat/v2/extensions/google-drive/setup/oauth/start")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "provider": GOOGLE_PROVIDER_ID,
+                            "account_label": "google-drive google",
+                            "scopes": ["https://www.googleapis.com/auth/drive"],
+                            "expires_at": (Utc::now() + ChronoDuration::minutes(5)).to_rfc3339(),
+                            "invocation_id": flow_invocation_id.to_string(),
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("route response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("start json");
+        let flow_id = AuthFlowId::from_uuid(
+            Uuid::parse_str(json["flow_id"].as_str().expect("flow id")).expect("flow uuid"),
+        );
+        let mut flow_resource = test_resource_scope();
+        flow_resource.invocation_id = flow_invocation_id;
+        let flow_scope = AuthProductScope::new(flow_resource, AuthSurface::Callback);
+        let flow = shared
+            .get_flow(&flow_scope, flow_id)
+            .await
+            .expect("flow lookup")
+            .expect("flow");
+        assert!(flow.update_binding.is_none());
+
+        let authorization_url = json["authorization_url"]
+            .as_str()
+            .expect("authorization url");
+        let state_value = Url::parse(authorization_url)
+            .expect("authorization url")
+            .query_pairs()
+            .find_map(|(name, value)| (name == "state").then(|| value.into_owned()))
+            .expect("oauth state");
+        let encoded_state =
+            url::form_urlencoded::byte_serialize(state_value.as_bytes()).collect::<String>();
+        let encoded_scope = url::form_urlencoded::byte_serialize(
+            "https://www.googleapis.com/auth/drive".as_bytes(),
+        )
+        .collect::<String>();
+        let uri = format!(
+            "{GOOGLE_OAUTH_CALLBACK_PATH}?state={encoded_state}&code=google-auth-code&scope={encoded_scope}"
+        )
+        .parse::<Uri>()
+        .expect("callback uri");
+
+        let response = oauth::google_oauth_callback_handler(
+            State(state),
+            RawQuery(uri.query().map(str::to_string)),
+            uri,
+            HeaderMap::new(),
+        )
+        .await
+        .expect("extension google callback should complete");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let completed_flow = shared
+            .get_flow(&flow_scope, flow_id)
+            .await
+            .expect("completed flow lookup")
+            .expect("completed flow");
+        let account_id = completed_flow
+            .credential_account_id
+            .expect("callback should persist account id");
+        let account = shared
+            .get_account(CredentialAccountLookupRequest {
+                scope: flow_scope,
+                account_id,
+                requester_extension: Some(ExtensionId::new("google-drive").expect("extension")),
+            })
+            .await
+            .expect("account lookup")
+            .expect("account");
+
+        assert_eq!(account.status, CredentialAccountStatus::Configured);
+        assert_eq!(account.provider.as_str(), GOOGLE_PROVIDER_ID);
     }
 
     #[tokio::test]

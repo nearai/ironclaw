@@ -287,7 +287,8 @@ async fn first_party_adapter_maps_panicking_handler_to_backend() {
         matches!(
             result,
             Err(DispatchError::FirstParty {
-                kind: RuntimeDispatchErrorKind::Backend
+                kind: RuntimeDispatchErrorKind::Backend,
+                ..
             })
         ),
         "panicking handler must be contained as Backend, got {result:?}"
@@ -471,7 +472,8 @@ async fn first_party_adapter_releases_reservation_when_reconcile_fails_after_suc
         matches!(
             result,
             Err(DispatchError::FirstParty {
-                kind: RuntimeDispatchErrorKind::Resource
+                kind: RuntimeDispatchErrorKind::Resource,
+                ..
             })
         ),
         "reconcile failure must produce FirstParty{{Resource}}, got {result:?}"

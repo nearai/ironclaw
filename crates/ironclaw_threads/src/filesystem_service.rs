@@ -40,7 +40,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use futures::future::join_all;
+use futures::{StreamExt, future::join_all};
 use ironclaw_filesystem::{
     CasExpectation, ContentType, Entry, FileType, FilesystemError, FilesystemOperation,
     RecordVersion, RootFilesystem, ScopedFilesystem,
@@ -52,6 +52,7 @@ use uuid::Uuid;
 
 use crate::identifiers::SummaryArtifactId;
 use crate::summary_artifacts::find_overlapping_summary;
+use crate::title::derive_title_from_message;
 use crate::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
     AppendAssistantDraftRequest, AppendCapabilityDisplayPreviewRequest,
@@ -75,6 +76,8 @@ const FILESYSTEM_CAS_RETRIES: usize = 8;
 
 /// Conservative fan-out for indexed range materialization.
 const INDEXED_RANGE_MESSAGE_READ_CONCURRENCY: usize = 8;
+/// Conservative fan-out for per-thread title derivation during sidebar listing.
+const TITLE_DERIVATION_READ_CONCURRENCY: usize = 8;
 
 #[derive(Debug, Clone, Copy)]
 enum MessageRangeFallbackPolicy {
@@ -332,6 +335,38 @@ where
         }
         messages.sort_by_key(|message| message.sequence);
         Ok(Some(messages))
+    }
+
+    async fn first_user_message_for_title(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        next_sequence: u64,
+    ) -> Result<Option<ThreadMessageRecord>, SessionThreadError> {
+        let index_store = MessageSequenceIndexStore::new(self.filesystem.as_ref());
+        for sequence in 1..next_sequence {
+            let Some(index) = index_store.read(scope, thread_id, sequence).await? else {
+                return Ok(self
+                    .list_thread_messages(scope, thread_id)
+                    .await?
+                    .into_iter()
+                    .find(|message| message.kind == MessageKind::User));
+            };
+            let Some((message, _)) = self
+                .read_message_versioned(scope, thread_id, index.message_id)
+                .await?
+            else {
+                return Ok(self
+                    .list_thread_messages(scope, thread_id)
+                    .await?
+                    .into_iter()
+                    .find(|message| message.kind == MessageKind::User));
+            };
+            if message.kind == MessageKind::User {
+                return Ok(Some(message));
+            }
+        }
+        Ok(None)
     }
 
     async fn materialize_message_range(
@@ -1400,10 +1435,22 @@ where
         let results: Vec<Result<Option<(StoredThreadRecord, RecordVersion)>, SessionThreadError>> =
             futures::future::join_all(reads).await;
         let mut page: Vec<SessionThreadRecord> = Vec::with_capacity(thread_ids_page.len());
+        // Records whose `title` is `None` need a sidebar-friendly
+        // label derived from their first user message. We collect
+        // their page indices here and fan-out the indexed first-user
+        // reads below so we don't serialize N transcript probes
+        // behind the thread-record fan-out.
+        let mut needs_title: Vec<(usize, ThreadId, u64)> = Vec::new();
         for (thread_id, result) in thread_ids_page.iter().zip(results) {
             match result {
                 Ok(Some((stored, _))) if stored.record.scope == request.scope => {
+                    let needs_derive = stored.record.title.is_none();
+                    let next_sequence = stored.next_sequence;
+                    let idx = page.len();
                     page.push(stored.record);
+                    if needs_derive {
+                        needs_title.push((idx, thread_id.clone(), next_sequence));
+                    }
                 }
                 Ok(_) => {
                     // Absent record or scope-mismatched payload (e.g.
@@ -1422,6 +1469,53 @@ where
                         ?error,
                         "skipping unreadable thread record during list_threads_for_scope",
                     );
+                }
+            }
+        }
+        // Derive titles in parallel from each thread's first user
+        // message. v1's libSQL list path did the same thing in SQL
+        // (`SELECT substr(content, 1, 100) FROM conversation_messages
+        // WHERE role='user' ORDER BY created_at LIMIT 1`); Reborn's
+        // filesystem layout reads via `RootFilesystem` instead. Errors
+        // are silent-ok — the sidebar entry simply falls back to its
+        // thread-id label, matching the WebUI fallback path.
+        if !needs_title.is_empty() {
+            let title_results: Vec<(
+                usize,
+                ThreadId,
+                Result<Option<ThreadMessageRecord>, SessionThreadError>,
+            )> = futures::stream::iter(needs_title)
+                .map(|(idx, thread_id, next_sequence)| {
+                    let scope = request.scope.clone();
+                    async move {
+                        let result = self
+                            .first_user_message_for_title(&scope, &thread_id, next_sequence)
+                            .await;
+                        (idx, thread_id, result)
+                    }
+                })
+                .buffer_unordered(TITLE_DERIVATION_READ_CONCURRENCY)
+                .collect()
+                .await;
+            for (idx, thread_id, msg_result) in title_results {
+                match msg_result {
+                    Ok(first_user) => {
+                        if let Some(title) = first_user
+                            .as_ref()
+                            .and_then(|message| message.content.as_deref())
+                            .and_then(derive_title_from_message)
+                        {
+                            page[idx].title = Some(title);
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            thread_id = %thread_id.as_str(),
+                            scope = ?request.scope,
+                            ?error,
+                            "skipping thread-title derivation during list_threads_for_scope",
+                        );
+                    }
                 }
             }
         }

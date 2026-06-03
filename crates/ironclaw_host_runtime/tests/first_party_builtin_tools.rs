@@ -2208,8 +2208,8 @@ async fn builtin_skill_install_accepts_and_replays_named_plain_markdown_content(
     let (filesystem, mounts) = mounted_skill_filesystem(temp.path());
     let runtime = runtime_with_filesystem(filesystem);
     let input = json!({
-        "name": "qa-smoke-skill",
-        "content": "# QA Smoke\n\nSay \"qa skill loaded\" when asked.\n"
+        "name": "daily digest email docs",
+        "content": "# Daily Digest\n\nSummarize updates for an email.\n"
     });
 
     let installed = invoke_with_context(
@@ -2228,7 +2228,7 @@ async fn builtin_skill_install_accepts_and_replays_named_plain_markdown_content(
     .unwrap();
 
     assert_eq!(installed["installed"], json!(true));
-    assert_eq!(installed["name"], json!("qa-smoke-skill"));
+    assert_eq!(installed["name"], json!("daily-digest-email-docs"));
     assert_eq!(installed["source"], json!("user"));
 
     let replayed = invoke_with_context(
@@ -2245,7 +2245,7 @@ async fn builtin_skill_install_accepts_and_replays_named_plain_markdown_content(
     .unwrap();
 
     assert_eq!(replayed["installed"], json!(true));
-    assert_eq!(replayed["name"], json!("qa-smoke-skill"));
+    assert_eq!(replayed["name"], json!("daily-digest-email-docs"));
 
     let listed = invoke_with_context(
         &runtime,
@@ -2256,7 +2256,10 @@ async fn builtin_skill_install_accepts_and_replays_named_plain_markdown_content(
     .await
     .unwrap();
     assert_eq!(listed["count"], json!(1));
-    assert_eq!(listed["skills"][0]["name"], json!("qa-smoke-skill"));
+    assert_eq!(
+        listed["skills"][0]["name"],
+        json!("daily-digest-email-docs")
+    );
 }
 
 #[tokio::test]

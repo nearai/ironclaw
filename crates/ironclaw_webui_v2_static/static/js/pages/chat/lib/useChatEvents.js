@@ -76,7 +76,7 @@ export function useChatEvents({
                 ? current
                 : { runId: progress.turn_run_id, threadId, status: "running" },
             );
-            clearPendingGateForRun(
+            clearPendingNonAuthGateForRun(
               setPendingGate,
               progress.turn_run_id,
               promptRunIdRef,
@@ -207,6 +207,19 @@ function clearPendingGateForRun(setPendingGate, runId, promptRunIdRef) {
     promptRunIdRef.current = null;
   }
   setPendingGate((current) => (current?.runId === runId ? null : current));
+}
+
+function clearPendingNonAuthGateForRun(setPendingGate, runId, promptRunIdRef) {
+  if (!runId) return;
+  setPendingGate((current) => {
+    if (current?.runId !== runId || current.kind === "auth_required") {
+      return current;
+    }
+    if (promptRunIdRef?.current === runId) {
+      promptRunIdRef.current = null;
+    }
+    return null;
+  });
 }
 
 function applyProjectionItems({
@@ -351,6 +364,7 @@ function applyProjectionItems({
           role: "thinking",
           content: item.thinking.body || "",
           timestamp: new Date().toISOString(),
+          turnRunId: item.thinking.run_id || null,
         };
         if (existing >= 0) {
           const copy = [...prev];
@@ -454,6 +468,7 @@ function upsertToolFromActivity(setMessages, invocationId, card) {
         toolStatus: nextStatus,
         toolError: card.toolError || current.toolError,
         updatedAt: card.updatedAt || current.updatedAt,
+        turnRunId: card.turnRunId || current.turnRunId || null,
       };
       return copy;
     }

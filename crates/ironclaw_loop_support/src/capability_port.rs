@@ -794,6 +794,7 @@ impl HostRuntimeLoopCapabilityPort {
         self.milestone_sink
             .publish_loop_milestone(LoopHostMilestone {
                 scope: self.run_context.scope.clone(),
+                actor: self.run_context.actor.clone(),
                 turn_id: self.run_context.turn_id,
                 run_id: self.run_context.run_id,
                 loop_driver_id: self.run_context.loop_driver_id.clone(),
@@ -2177,6 +2178,22 @@ mod tests {
             CapabilityOutcome::Denied(denied)
                 if denied.reason_kind.as_str() == "policy_denied"
                     && denied.safe_summary == "policy denied request"
+        ));
+
+        let operation_failed = runtime_failure_to_loop(RuntimeCapabilityFailure::new(
+            capability_id.clone(),
+            RuntimeFailureKind::OperationFailed,
+            Some(
+                "apply_patch failed for path workspace main.rs: old_string matched 0 times"
+                    .to_string(),
+            ),
+        ))
+        .expect("convert operation failure");
+        assert!(matches!(
+            operation_failed,
+            CapabilityOutcome::Failed(failure)
+                if failure.error_kind == CapabilityFailureKind::OperationFailed
+                    && failure.safe_summary == "apply_patch failed for path workspace main.rs: old_string matched 0 times"
         ));
 
         let missing_runtime = runtime_failure_to_loop(RuntimeCapabilityFailure::new(

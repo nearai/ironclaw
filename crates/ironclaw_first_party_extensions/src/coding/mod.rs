@@ -91,15 +91,33 @@ impl<'a> CodingCapabilityRequest<'a> {
 #[error("coding capability dispatch failed: {kind}")]
 pub struct CodingCapabilityError {
     kind: RuntimeDispatchErrorKind,
+    safe_summary: Option<String>,
 }
 
 impl CodingCapabilityError {
     pub fn new(kind: RuntimeDispatchErrorKind) -> Self {
-        Self { kind }
+        Self {
+            kind,
+            safe_summary: None,
+        }
+    }
+
+    pub fn with_safe_summary(
+        kind: RuntimeDispatchErrorKind,
+        safe_summary: impl Into<String>,
+    ) -> Self {
+        Self {
+            kind,
+            safe_summary: Some(bound_safe_summary(safe_summary.into())),
+        }
     }
 
     pub fn kind(&self) -> RuntimeDispatchErrorKind {
         self.kind
+    }
+
+    pub fn safe_summary(&self) -> Option<&str> {
+        self.safe_summary.as_deref()
     }
 }
 
@@ -147,6 +165,25 @@ fn operation_error() -> CodingCapabilityError {
     CodingCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed)
 }
 
+fn operation_error_with_summary(summary: impl Into<String>) -> CodingCapabilityError {
+    CodingCapabilityError::with_safe_summary(RuntimeDispatchErrorKind::OperationFailed, summary)
+}
+
+fn bound_safe_summary(summary: String) -> String {
+    const MAX_CHARS: usize = 512;
+    const ELLIPSIS: &str = "...";
+    let summary = summary.trim();
+    let mut chars = summary.chars();
+    let bounded: String = chars.by_ref().take(MAX_CHARS).collect();
+    if chars.next().is_some() {
+        let truncated_limit = MAX_CHARS - ELLIPSIS.chars().count();
+        let bounded: String = bounded.chars().take(truncated_limit).collect();
+        format!("{bounded}{ELLIPSIS}")
+    } else {
+        bounded
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -161,5 +198,20 @@ mod tests {
             assert!(!source.contains("ProcessBackendKind"));
             assert!(!source.contains("FilesystemBackendKind"));
         }
+    }
+
+    #[test]
+    fn safe_summary_bound_includes_ellipsis_in_limit() {
+        let summary = super::bound_safe_summary("x".repeat(600));
+
+        assert_eq!(summary.chars().count(), 512);
+        assert!(summary.ends_with("..."));
+    }
+
+    #[test]
+    fn safe_summary_bound_leaves_exact_limit_unchanged() {
+        let input = "x".repeat(512);
+
+        assert_eq!(super::bound_safe_summary(input.clone()), input);
     }
 }

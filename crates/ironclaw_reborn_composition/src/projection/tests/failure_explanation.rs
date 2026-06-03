@@ -2,10 +2,33 @@ use super::*;
 
 #[tokio::test]
 async fn webui_event_stream_projects_failed_run_failure_summary() {
+    assert_failed_run_status_summary(
+        "webui-events-failed-thread",
+        "lease_expired",
+        "The run failed because its runner lease expired.",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn webui_event_stream_projects_no_progress_failure_summary() {
+    assert_failed_run_status_summary(
+        "webui-events-no-progress-thread",
+        "no_progress_detected",
+        "The run stopped because it repeated the same step without making progress.",
+    )
+    .await;
+}
+
+async fn assert_failed_run_status_summary(
+    thread_id: &str,
+    failure_category: &str,
+    expected_summary: &str,
+) {
     let tenant_id = TenantId::new("webui-events-tenant").unwrap();
     let user_id = UserId::new("webui-events-user").unwrap();
     let agent_id = AgentId::new("webui-events-agent").unwrap();
-    let thread_id = ThreadId::new("webui-events-failed-thread").unwrap();
+    let thread_id = ThreadId::new(thread_id).unwrap();
     let turn_run = TurnRunId::new();
     let scope = TurnScope::new(
         tenant_id.clone(),
@@ -30,7 +53,7 @@ async fn webui_event_stream_projects_failed_run_failure_summary() {
                 status: TurnStatus::Failed,
                 kind: TurnEventKind::Failed,
                 blocked_gate: None,
-                sanitized_reason: Some("lease_expired".to_string()),
+                sanitized_reason: Some(failure_category.to_string()),
             }],
         }),
         Arc::new(FakeTurnCoordinator {
@@ -59,8 +82,8 @@ async fn webui_event_stream_projects_failed_run_failure_summary() {
                     failure_summary: Some(summary),
                 } if *run_id == turn_run
                     && status == "failed"
-                    && category.category() == "lease_expired"
-                    && summary == "The run failed because its runner lease expired."
+                    && category.category() == failure_category
+                    && summary == expected_summary
             )
         }),
         _ => false,

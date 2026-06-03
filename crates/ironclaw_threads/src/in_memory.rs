@@ -10,6 +10,7 @@ use uuid::Uuid;
 
 use crate::identifiers::SummaryArtifactId;
 use crate::summary_artifacts::find_overlapping_summary;
+use crate::title::derive_thread_title;
 use crate::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
     AppendAssistantDraftRequest, AppendCapabilityDisplayPreviewRequest,
@@ -642,11 +643,26 @@ impl SessionThreadService for InMemorySessionThreadService {
         // scan is still acceptable here; a scope-indexed secondary
         // map would help with very large stores but local-dev never
         // gets close to that scale.
+        //
+        // Derive a sidebar-friendly title from the first user message
+        // when the record itself has none. Matches v1's libSQL list
+        // semantics: titles aren't stored, they're computed on read
+        // from the first user message in the transcript. The
+        // filesystem backend does the same thing via
+        // `list_thread_messages` + `derive_title_from_message`.
         let mut matching: Vec<SessionThreadRecord> = state
             .threads
             .values()
             .filter(|stored| stored.record.scope == request.scope)
-            .map(|stored| stored.record.clone())
+            .map(|stored| {
+                let mut record = stored.record.clone();
+                if record.title.is_none()
+                    && let Some(title) = derive_thread_title(&stored.messages)
+                {
+                    record.title = Some(title);
+                }
+                record
+            })
             .collect();
         // Stable order so opaque cursor → resumption is deterministic.
         matching.sort_by(|a, b| a.thread_id.as_str().cmp(b.thread_id.as_str()));

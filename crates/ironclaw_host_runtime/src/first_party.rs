@@ -122,6 +122,7 @@ pub enum FirstPartyCapabilityError {
     #[error("first-party capability dispatch failed: {kind}")]
     Dispatch {
         kind: RuntimeDispatchErrorKind,
+        safe_summary: Option<String>,
         usage: Option<ResourceUsage>,
     },
     /// Dispatch was blocked because a staged credential is missing or expired.
@@ -139,7 +140,22 @@ pub enum FirstPartyCapabilityError {
 impl FirstPartyCapabilityError {
     /// Construct a dispatch failure with no auth context.
     pub fn new(kind: RuntimeDispatchErrorKind) -> Self {
-        Self::Dispatch { kind, usage: None }
+        Self::Dispatch {
+            kind,
+            safe_summary: None,
+            usage: None,
+        }
+    }
+
+    pub fn with_safe_summary(
+        kind: RuntimeDispatchErrorKind,
+        safe_summary: impl Into<String>,
+    ) -> Self {
+        Self::Dispatch {
+            kind,
+            safe_summary: Some(safe_summary.into()),
+            usage: None,
+        }
     }
 
     /// Construct an auth-required failure with no specific secret handles.
@@ -178,8 +194,11 @@ impl FirstPartyCapabilityError {
     /// Attach resource usage. Builder-style for use in handler return expressions.
     pub fn with_usage(self, usage: ResourceUsage) -> Self {
         match self {
-            Self::Dispatch { kind, .. } => Self::Dispatch {
+            Self::Dispatch {
+                kind, safe_summary, ..
+            } => Self::Dispatch {
                 kind,
+                safe_summary,
                 usage: Some(usage),
             },
             Self::AuthRequired {
@@ -205,6 +224,13 @@ impl FirstPartyCapabilityError {
     pub fn usage(&self) -> Option<&ResourceUsage> {
         match self {
             Self::Dispatch { usage, .. } | Self::AuthRequired { usage, .. } => usage.as_ref(),
+        }
+    }
+
+    pub fn safe_summary(&self) -> Option<&str> {
+        match self {
+            Self::Dispatch { safe_summary, .. } => safe_summary.as_deref(),
+            Self::AuthRequired { .. } => None,
         }
     }
 

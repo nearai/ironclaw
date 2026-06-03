@@ -91,9 +91,15 @@ impl LiveProjectionPublisher {
         self.next_sequence.fetch_add(1, Ordering::Relaxed) + 1
     }
 
-    fn publish_live_item(&self, scope: &TurnScope, sequence: u64, item: ThreadLiveProjectionItem) {
+    fn publish_live_item(
+        &self,
+        owner: Option<&UserId>,
+        scope: &TurnScope,
+        sequence: u64,
+        item: ThreadLiveProjectionItem,
+    ) {
         let cursor = EventProjectionCursor::for_scope(
-            self.projection_scope(scope),
+            self.projection_scope(owner, scope),
             EventCursor::new(LIVE_PROGRESS_CURSOR_BASE.saturating_add(sequence)),
         );
         let update = ThreadLiveProjectionUpdate {
@@ -112,11 +118,20 @@ impl LiveProjectionPublisher {
         }
     }
 
-    fn projection_scope(&self, scope: &TurnScope) -> EventProjectionScope {
+    /// Build the projection scope for a live item. The stream key is keyed
+    /// to the per-run `owner` (the authenticated caller) when one is
+    /// threaded through, falling back to the runtime owner only for host
+    /// paths that bind no actor. This MUST match the per-request actor the
+    /// SSE/WS subscribe side uses
+    /// (`projection::runtime_projection_scope`) — otherwise a turn run by
+    /// an SSO user whose id differs from the runtime owner would publish
+    /// live progress to the operator's stream instead of the user's.
+    fn projection_scope(&self, owner: Option<&UserId>, scope: &TurnScope) -> EventProjectionScope {
+        let owner = owner.unwrap_or(&self.actor_user_id);
         EventProjectionScope {
             stream: EventStreamKey::new(
                 scope.tenant_id.clone(),
-                self.actor_user_id.clone(),
+                owner.clone(),
                 scope.agent_id.clone(),
             ),
             read_scope: ReadScope {
@@ -136,17 +151,20 @@ pub(super) fn product_items_for_live_update(
         .items
         .iter()
         .filter_map(|item| match item {
-            ThreadLiveProjectionItem::Thinking { id, body } => {
+            ThreadLiveProjectionItem::Thinking { id, run_id, body } => {
                 Some(ProductProjectionItem::Thinking {
                     id: id.clone(),
+                    run_id: Some(*run_id),
                     body: body.clone(),
                 })
             }
             ThreadLiveProjectionItem::CapabilityActivity {
+                run_id,
                 invocation_id,
                 capability_id,
             } => match CapabilityActivityView::new(CapabilityActivityViewInput {
                 invocation_id: *invocation_id,
+                turn_run_id: Some(*run_id),
                 thread_id: Some(update.thread_id.clone()),
                 capability_id: capability_id.clone(),
                 status: CapabilityActivityStatusView::Started,
@@ -216,10 +234,12 @@ impl LiveProgressMilestoneSink {
         }
         let sequence = self.publisher.next_live_sequence();
         self.publisher.publish_live_item(
+            milestone.actor.as_ref().map(|actor| &actor.user_id),
             &milestone.scope,
             sequence,
             ThreadLiveProjectionItem::Thinking {
                 id: thinking_id(milestone.run_id, sequence),
+                run_id: milestone.run_id,
                 body: safe_delta,
             },
         );
@@ -233,9 +253,11 @@ impl LiveProgressMilestoneSink {
     ) {
         let sequence = self.publisher.next_live_sequence();
         self.publisher.publish_live_item(
+            milestone.actor.as_ref().map(|actor| &actor.user_id),
             &milestone.scope,
             sequence,
             ThreadLiveProjectionItem::CapabilityActivity {
+                run_id: milestone.run_id,
                 invocation_id,
                 capability_id: capability_id.clone(),
             },
@@ -265,6 +287,7 @@ impl LiveProgressMilestoneSink {
         };
         let sequence = self.publisher.next_live_sequence();
         self.publisher.publish_live_item(
+            milestone.actor.as_ref().map(|actor| &actor.user_id),
             &milestone.scope,
             sequence,
             ThreadLiveProjectionItem::WorkSummary {
@@ -305,6 +328,7 @@ impl SkillActivationObserver for LiveSkillActivationObserver {
         }
         let sequence = self.publisher.next_live_sequence();
         self.publisher.publish_live_item(
+            event.run_context.actor().map(|actor| &actor.user_id),
             &event.run_context.scope,
             sequence,
             ThreadLiveProjectionItem::SkillActivation {

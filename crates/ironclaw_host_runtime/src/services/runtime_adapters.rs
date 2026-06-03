@@ -8,6 +8,7 @@ use async_trait::async_trait;
 use futures_util::FutureExt;
 use serde::Deserialize;
 
+use super::wasm_diagnostics::{log_wasm_guest_error, log_wasm_runtime_error};
 use super::{
     CapabilityId, DenyWasmHostHttp, DispatchError, ExtensionRuntime, FirstPartyCapabilityRegistry,
     FirstPartyCapabilityRequest, InvocationServicesResolutionRequest, InvocationServicesResolver,
@@ -172,8 +173,18 @@ where
                 },
             )
             .await
-            .map_err(|error| DispatchError::Mcp {
-                kind: mcp_error_kind(&error),
+            .map_err(|error| match error {
+                McpError::AuthRequired {
+                    required_secrets,
+                    credential_requirements,
+                } => DispatchError::AuthRequired {
+                    capability: request.capability_id.clone(),
+                    required_secrets,
+                    credential_requirements,
+                },
+                error => DispatchError::Mcp {
+                    kind: mcp_error_kind(&error),
+                },
             })?;
 
         Ok(RuntimeAdapterResult {
@@ -236,6 +247,7 @@ where
             tracing::debug!("first-party runtime adapter missing handler");
             return Err(DispatchError::FirstParty {
                 kind: RuntimeDispatchErrorKind::UndeclaredCapability,
+                safe_summary: None,
             });
         };
 
@@ -250,6 +262,7 @@ where
                 }
                 DispatchError::FirstParty {
                     kind: planner_error_kind(&error),
+                    safe_summary: None,
                 }
             })?;
         tracing::debug!(
@@ -274,7 +287,10 @@ where
                 if let Some(reservation) = &request.resource_reservation {
                     release_first_party_reservation(request.governor, reservation.id);
                 }
-                DispatchError::FirstParty { kind: error.kind() }
+                DispatchError::FirstParty {
+                    kind: error.kind(),
+                    safe_summary: None,
+                }
             })?;
         tracing::debug!("first-party runtime adapter services resolved");
 
@@ -288,6 +304,7 @@ where
                     tracing::debug!("first-party runtime adapter resource reservation failed");
                     DispatchError::FirstParty {
                         kind: RuntimeDispatchErrorKind::Resource,
+                        safe_summary: None,
                     }
                 })?,
         };
@@ -341,9 +358,9 @@ where
                         required_secrets,
                         credential_requirements,
                     }),
-                    FirstPartyCapabilityError::Dispatch { kind, .. } => {
-                        Err(DispatchError::FirstParty { kind })
-                    }
+                    FirstPartyCapabilityError::Dispatch {
+                        kind, safe_summary, ..
+                    } => Err(DispatchError::FirstParty { kind, safe_summary }),
                 };
             }
             Err(_) => {
@@ -354,6 +371,7 @@ where
                 release_first_party_reservation(request.governor, reservation.id);
                 return Err(DispatchError::FirstParty {
                     kind: RuntimeDispatchErrorKind::Backend,
+                    safe_summary: None,
                 });
             }
         };
@@ -368,6 +386,7 @@ where
                 release_first_party_reservation(request.governor, reservation.id);
                 DispatchError::FirstParty {
                     kind: RuntimeDispatchErrorKind::OutputDecode,
+                    safe_summary: None,
                 }
             })?;
         let mut usage = result.usage;
@@ -388,6 +407,7 @@ where
                 }
                 return Err(DispatchError::FirstParty {
                     kind: RuntimeDispatchErrorKind::Resource,
+                    safe_summary: None,
                 });
             }
         };
@@ -589,6 +609,7 @@ where
     ) {
         Ok(execution) => execution,
         Err(error) => {
+            log_wasm_runtime_error(request.capability_id, &error);
             if let Some(usage) = preserved_wasm_error_usage(&error) {
                 account_or_release_failed_wasm_execution(request.governor, reservation.id, &usage)?;
             } else {
@@ -600,6 +621,7 @@ where
         }
     };
     if let Some(error) = execution.error {
+        log_wasm_guest_error(request.capability_id, &execution.logs, &error);
         account_or_release_failed_wasm_execution(
             request.governor,
             reservation.id,
@@ -679,6 +701,7 @@ where
         release_first_party_reservation(governor, reservation_id);
         return Err(DispatchError::FirstParty {
             kind: RuntimeDispatchErrorKind::Resource,
+            safe_summary: None,
         });
     }
 
@@ -766,7 +789,10 @@ fn dispatch_error_for_runtime(
         RuntimeKind::Mcp => DispatchError::Mcp { kind },
         RuntimeKind::Script => DispatchError::Script { kind },
         RuntimeKind::Wasm => DispatchError::Wasm { kind },
-        RuntimeKind::FirstParty | RuntimeKind::System => DispatchError::FirstParty { kind },
+        RuntimeKind::FirstParty | RuntimeKind::System => DispatchError::FirstParty {
+            kind,
+            safe_summary: None,
+        },
     }
 }
 
@@ -904,6 +930,7 @@ fn mcp_error_kind(error: &McpError) -> RuntimeDispatchErrorKind {
     match error {
         McpError::Resource(_) => RuntimeDispatchErrorKind::Resource,
         McpError::Client { .. } => RuntimeDispatchErrorKind::Client,
+        McpError::AuthRequired { .. } => RuntimeDispatchErrorKind::Client,
         McpError::UnsupportedTransport { .. } => RuntimeDispatchErrorKind::UnsupportedRunner,
         McpError::HostHttpEgressRequired { .. } => RuntimeDispatchErrorKind::NetworkDenied,
         McpError::ExternalStdioTransportUnsupported => RuntimeDispatchErrorKind::UnsupportedRunner,
