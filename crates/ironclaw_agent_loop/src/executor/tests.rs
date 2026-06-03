@@ -712,6 +712,33 @@ async fn model_context_overflow_retries_through_canonical_compaction_stage() {
 }
 
 #[tokio::test]
+async fn model_shrink_context_call_scope_returns_planner_contract() {
+    let host =
+        MockHost::new(vec![reply_response()]).with_model_errors(vec![AgentLoopHostError::new(
+            AgentLoopHostErrorKind::BudgetExceeded,
+            "model request exceeded its context budget",
+        )]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let err = executor
+        .execute_family(
+            &family_with_shrink_context_call_scope_recovery(),
+            &host,
+            state,
+        )
+        .await
+        .expect_err("call-scoped ShrinkContext must violate the planner contract");
+
+    assert!(matches!(
+        err,
+        AgentLoopExecutorError::PlannerContract {
+            detail: "context shrink retry requires iteration scope"
+        }
+    ));
+}
+
+#[tokio::test]
 async fn input_stage_steering_drain_carries_pending_ack() {
     let host = MockHost::new(Vec::new());
     let run_context = host.run_context().clone();

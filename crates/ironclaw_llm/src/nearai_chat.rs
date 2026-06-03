@@ -315,7 +315,7 @@ impl NearAiChatProvider {
                 });
             }
 
-            if let Some(error) = context_length_error(status_code, &response_text) {
+            if let Some(error) = crate::error::context_length_error(status_code, &response_text) {
                 return Err(error);
             }
 
@@ -954,21 +954,6 @@ async fn fetch_pricing(
     Ok(map)
 }
 
-fn context_length_error(status_code: u16, response_text: &str) -> Option<LlmError> {
-    // Payload-size and context-window failures are deterministic caller-side
-    // overflows, not transient service failures. Use the shared
-    // OpenAI-compatible matcher so provider adapters do not drift on upstream
-    // wording variants.
-    let lower = response_text.to_ascii_lowercase();
-    let is_context_overflow = status_code == 413
-        || (status_code == 400 && crate::rig_adapter::is_context_length_error_message(&lower));
-    if !is_context_overflow {
-        return None;
-    }
-    let (used, limit) = crate::rig_adapter::parse_token_counts(&lower);
-    Some(LlmError::ContextLengthExceeded { used, limit })
-}
-
 impl From<ChatMessage> for ChatCompletionMessage {
     fn from(msg: ChatMessage) -> Self {
         let role = match msg.role {
@@ -1221,7 +1206,7 @@ mod tests {
     #[test]
     fn context_length_error_detects_provider_longer_than_context_wording() {
         let body = r#"{"error":{"message":"Provider failed for model 'Qwen/Qwen3.6-35B-A3B-FP8': The input (314325 tokens) is longer than the model's context length (262144 tokens).","type":"invalid_request_error"}}"#;
-        match context_length_error(400, body) {
+        match crate::error::context_length_error(400, body) {
             Some(LlmError::ContextLengthExceeded { used, limit }) => {
                 assert_eq!(used, 314325);
                 assert_eq!(limit, 262144);
@@ -1233,7 +1218,64 @@ mod tests {
     #[test]
     fn context_length_error_does_not_treat_all_bad_requests_as_overflow() {
         let body = r#"{"error":{"message":"invalid tool schema"}}"#;
-        assert!(context_length_error(400, body).is_none());
+        assert!(crate::error::context_length_error(400, body).is_none());
+    }
+
+    #[tokio::test]
+    async fn complete_maps_context_overflow_http_400_to_context_length_exceeded() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                let mut request = vec![0_u8; 4096];
+                let Ok(n) = socket.read(&mut request).await else {
+                    continue;
+                };
+                let request = String::from_utf8_lossy(&request[..n]);
+                let (status, body) = if request.starts_with("POST /v1/chat/completions ") {
+                    (
+                        "400 Bad Request",
+                        serde_json::json!({
+                            "error": {
+                                "message": "Provider failed: The input (314325 tokens) is longer than the model's context length (262144 tokens)."
+                            }
+                        })
+                        .to_string(),
+                    )
+                } else {
+                    ("200 OK", serde_json::json!({ "models": [] }).to_string())
+                };
+                let response = format!(
+                    "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+            }
+        });
+
+        let provider = NearAiChatProvider::new(test_nearai_config(&base_url), test_session())
+            .expect("provider");
+        let err = provider
+            .complete(CompletionRequest::new(vec![ChatMessage::user(
+                "read my email",
+            )]))
+            .await
+            .expect_err("context overflow should fail the completion");
+
+        match err {
+            LlmError::ContextLengthExceeded { used, limit } => {
+                assert_eq!(used, 314325);
+                assert_eq!(limit, 262144);
+            }
+            other => panic!("expected context-length error, got {other:?}"),
+        }
     }
 
     #[test]

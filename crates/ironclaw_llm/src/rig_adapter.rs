@@ -799,76 +799,14 @@ fn map_rig_error(model_name: &str, e: impl std::fmt::Display) -> LlmError {
     let msg = e.to_string();
     let lower = msg.to_ascii_lowercase();
 
-    if is_context_length_error_message(&lower) {
-        let (used, limit) = parse_token_counts(&lower);
+    if crate::error::is_context_length_error_message(&lower) {
+        let (used, limit) = crate::error::parse_context_token_counts(&lower);
         return LlmError::ContextLengthExceeded { used, limit };
     }
     LlmError::RequestFailed {
         provider: model_name.to_string(),
         reason: msg,
     }
-}
-
-pub(crate) fn is_context_length_error_message(lower: &str) -> bool {
-    const CONTEXT_PATTERNS: &[&str] = &[
-        "context_length_exceeded",
-        "maximum context length",
-        "too many tokens",
-        "payload too large",
-        "longer than the model's context length",
-    ];
-
-    CONTEXT_PATTERNS
-        .iter()
-        .any(|pattern| lower.contains(pattern))
-}
-
-/// Try to extract token counts from a context-length error message.
-///
-/// Handles patterns like:
-/// - "maximum context length is 128000 tokens. However, your messages resulted in 150000 tokens."
-/// - "context_length_exceeded ... 150000 tokens ... limit 128000"
-///
-/// Returns `(0, 0)` if parsing fails.
-pub(crate) fn parse_token_counts(lower: &str) -> (usize, usize) {
-    let numbers = token_count_numbers(lower);
-    if numbers.len() < 2 {
-        return (0, 0);
-    }
-
-    // OpenAI pattern: "maximum context length is {limit} tokens. ... resulted in {used} tokens".
-    if lower.contains("maximum context length") {
-        return (numbers[1], numbers[0]);
-    }
-
-    // NEAR/OpenAI-compatible proxy pattern:
-    // "The input ({used} tokens) is longer than the model's context length ({limit} tokens)."
-    if lower.contains("longer than the model's context length") {
-        return (numbers[0], numbers[1]);
-    }
-
-    (0, 0)
-}
-
-fn token_count_numbers(lower: &str) -> Vec<usize> {
-    lower
-        .split("tokens")
-        .filter_map(number_immediately_before)
-        .filter(|&n| n > 0)
-        .collect()
-}
-
-fn number_immediately_before(segment: &str) -> Option<usize> {
-    let digits = segment
-        .chars()
-        .rev()
-        .skip_while(|ch| !ch.is_ascii_digit())
-        .take_while(|ch| ch.is_ascii_digit())
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect::<String>();
-    digits.parse().ok().filter(|&n| n > 0)
 }
 
 /// Normalize a tool call name returned by an OpenAI-compatible provider.
@@ -893,6 +831,39 @@ fn normalize_tool_name(name: &str, known_tools: &HashSet<String>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rig::completion::CompletionError;
+    use rig::streaming::StreamingCompletionResponse;
+
+    #[derive(Clone)]
+    struct FailingCompletionModel;
+
+    impl CompletionModel for FailingCompletionModel {
+        type Response = serde_json::Value;
+        type StreamingResponse = ();
+        type Client = ();
+
+        fn make(_client: &Self::Client, _model: impl Into<String>) -> Self {
+            Self
+        }
+
+        async fn completion(
+            &self,
+            _request: RigRequest,
+        ) -> Result<rig::completion::CompletionResponse<Self::Response>, CompletionError> {
+            Err(CompletionError::ProviderError(
+                "HTTP 400 Bad Request: The input (314325 tokens) is longer than the model's context length (262144 tokens).".to_string(),
+            ))
+        }
+
+        async fn stream(
+            &self,
+            _request: RigRequest,
+        ) -> Result<StreamingCompletionResponse<Self::StreamingResponse>, CompletionError> {
+            Err(CompletionError::ProviderError(
+                "stream unsupported".to_string(),
+            ))
+        }
+    }
 
     #[test]
     fn test_round_f32_to_f64_no_precision_artifacts() {
@@ -2557,6 +2528,25 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn complete_maps_longer_than_context_error_to_context_length_exceeded() {
+        let adapter = RigAdapter::new(FailingCompletionModel, "nearai");
+        let err = adapter
+            .complete(CompletionRequest::new(vec![ChatMessage::user(
+                "read my email",
+            )]))
+            .await
+            .expect_err("context overflow should fail the completion");
+
+        match err {
+            LlmError::ContextLengthExceeded { used, limit } => {
+                assert_eq!(used, 314325);
+                assert_eq!(limit, 262144);
+            }
+            other => panic!("expected context-length error, got {other:?}"),
+        }
+    }
+
     #[test]
     fn test_map_rig_error_bare_413_no_false_positive() {
         // Bare "413" should NOT trigger ContextLengthExceeded — avoids false
@@ -2587,7 +2577,7 @@ mod tests {
     #[test]
     fn test_parse_token_counts_openai_format() {
         let msg = "this model's maximum context length is 128000 tokens. however, your messages resulted in 150000 tokens.";
-        let (used, limit) = parse_token_counts(msg);
+        let (used, limit) = crate::error::parse_context_token_counts(msg);
         assert_eq!(limit, 128000);
         assert_eq!(used, 150000);
     }
@@ -2595,7 +2585,7 @@ mod tests {
     #[test]
     fn test_parse_token_counts_unparseable_returns_zero() {
         let msg = "context_length_exceeded";
-        let (used, limit) = parse_token_counts(msg);
+        let (used, limit) = crate::error::parse_context_token_counts(msg);
         assert_eq!(used, 0);
         assert_eq!(limit, 0);
     }
