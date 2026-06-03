@@ -778,6 +778,60 @@ async fn filesystem_account_record_source_projects_session_scoped_accounts_for_r
 }
 
 #[tokio::test]
+async fn filesystem_account_record_source_skips_malformed_scan_records() {
+    let filesystem = test_filesystem();
+    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let scope = test_scope();
+    let service = test_service(Arc::clone(&filesystem), secret_store);
+    let account = service
+        .create_account(NewCredentialAccount {
+            scope: scope.clone(),
+            provider: google_provider(),
+            label: account_label(),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: Vec::new(),
+            access_secret: Some(SecretHandle::new("valid-account-access").unwrap()),
+            refresh_secret: None,
+            scopes: Vec::new(),
+        })
+        .await
+        .unwrap();
+
+    let malformed_account_id = ironclaw_auth::CredentialAccountId::new();
+    let malformed_path = super::paths::account_path(&scope, malformed_account_id)
+        .expect("account path derivation must succeed");
+    let malformed = ironclaw_filesystem::Entry::bytes(b"{ malformed account json".to_vec())
+        .with_content_type(ironclaw_filesystem::ContentType::json());
+    filesystem
+        .put(
+            &scope.resource,
+            &malformed_path,
+            malformed,
+            ironclaw_filesystem::CasExpectation::Absent,
+        )
+        .await
+        .expect("malformed account fixture must write");
+
+    let accounts = service
+        .accounts_for_owner(&scope)
+        .await
+        .expect("owner projection should skip malformed account records");
+
+    assert_eq!(accounts.len(), 1);
+    assert_eq!(accounts[0].id, account.id);
+
+    assert!(
+        matches!(
+            service.read_account(&scope, malformed_account_id).await,
+            Err(AuthProductError::BackendUnavailable)
+        ),
+        "exact account reads should remain strict"
+    );
+}
+
+#[tokio::test]
 async fn filesystem_oauth_callback_claim_is_one_shot_and_completion_persists() {
     let filesystem = test_filesystem();
     let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());

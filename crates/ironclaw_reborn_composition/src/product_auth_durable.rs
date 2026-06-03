@@ -127,6 +127,28 @@ where
         Ok(Some((value, versioned.version)))
     }
 
+    async fn read_account_record_for_scan(
+        &self,
+        scope: &ResourceScope,
+        path: &ScopedPath,
+    ) -> Result<Option<CredentialAccount>, AuthProductError> {
+        let Some(versioned) = self.filesystem.get(scope, path).await.map_err(fs_error)? else {
+            return Ok(None);
+        };
+        match serde_json::from_slice(&versioned.entry.body) {
+            Ok(account) => Ok(Some(account)),
+            Err(error) => {
+                tracing::warn!(
+                    target = "ironclaw::reborn::product_auth",
+                    path = %path.as_str(),
+                    error = %error,
+                    "skipping malformed product-auth account record during projection scan",
+                );
+                Ok(None)
+            }
+        }
+    }
+
     async fn write_record<T>(
         &self,
         scope: &ResourceScope,
@@ -358,7 +380,7 @@ where
                     let path = join_scoped(&root, &entry.name);
                     async move {
                         let path = path?;
-                        self.read_record::<CredentialAccount>(&scope.resource, &path)
+                        self.read_account_record_for_scan(&scope.resource, &path)
                             .await
                     }
                 }),
@@ -368,7 +390,6 @@ where
         .await?
         .into_iter()
         .flatten()
-        .map(|(account, _)| account)
         .collect();
         accounts.sort_by_key(|account| account.id);
         Ok(accounts)
