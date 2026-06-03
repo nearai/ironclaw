@@ -1300,6 +1300,10 @@ tick_jitter_max_secs = 5
         assert_eq!(tp.enabled, Some(true));
         assert_eq!(tp.poll_interval_secs, Some(30));
         assert_eq!(tp.fires_per_tick, Some(50));
+        // max_concurrent_fires_per_trigger is intentionally not 1 here: this test
+        // exercises the parse layer, which deliberately accepts any u32. The CLI
+        // settings layer (trigger_poller_settings) enforces the V1 invariant that
+        // the value must equal 1 — see runtime/trigger_poller.rs.
         assert_eq!(tp.max_concurrent_fires_per_trigger, Some(3));
         assert_eq!(tp.startup_jitter_max_secs, Some(10));
         assert_eq!(tp.tick_jitter_max_secs, Some(5));

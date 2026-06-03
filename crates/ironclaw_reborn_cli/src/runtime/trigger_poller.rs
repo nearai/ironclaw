@@ -4,6 +4,21 @@ use ironclaw_reborn_composition::TriggerPollerSettings;
 
 use super::optional_nonempty_env;
 
+/// Truncate an env-var value to a bounded length before echoing it in an
+/// error message. Prevents the value from blowing up startup logs if the
+/// operator accidentally pastes a long string (e.g. a credential) into the
+/// env slot. Char-aware so we cannot split a multi-byte UTF-8 codepoint.
+fn truncate_env_value_for_display(raw: &str) -> String {
+    const MAX_CHARS: usize = 64;
+    let mut iter = raw.chars();
+    let truncated: String = iter.by_ref().take(MAX_CHARS).collect();
+    if iter.next().is_some() {
+        format!("{truncated}…")
+    } else {
+        truncated
+    }
+}
+
 /// Build [`TriggerPollerSettings`] by merging three layers of configuration.
 ///
 /// Precedence (highest first):
@@ -81,16 +96,20 @@ pub(super) fn trigger_poller_settings(
         match raw.to_ascii_lowercase().as_str() {
             "1" | "true" => settings.enabled = true,
             "0" | "false" => settings.enabled = false,
-            other => anyhow::bail!(
-                "IRONCLAW_TRIGGER_POLLER_ENABLED must be one of 1, true, 0, false (got {other:?})"
-            ),
+            other => {
+                let display = truncate_env_value_for_display(other);
+                anyhow::bail!(
+                    "IRONCLAW_TRIGGER_POLLER_ENABLED must be one of 1, true, 0, false (got {display:?})"
+                )
+            }
         }
     }
 
     if let Some(raw) = optional_nonempty_env("IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS") {
         let secs: u64 = raw.parse().map_err(|e| {
+            let display = truncate_env_value_for_display(&raw);
             anyhow::anyhow!(
-                "IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS must be a positive integer, got {raw:?}: {e}"
+                "IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS must be a positive integer, got {display:?}: {e}"
             )
         })?;
         if secs == 0 {
@@ -267,6 +286,27 @@ mod tests {
         assert!(
             settings.enabled,
             "IRONCLAW_TRIGGER_POLLER_ENABLED=true must override config enabled=false"
+        );
+    }
+
+    #[test]
+    fn trigger_poller_settings_env_disabled_overrides_config_enabled() {
+        // Operator kill-switch: config has enabled=true but the env var disables.
+        let _lock = lock_trigger_env();
+        let _interval = EnvGuard::clear("IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS");
+        let _enabled = EnvGuard::set("IRONCLAW_TRIGGER_POLLER_ENABLED", "false");
+
+        let section = TriggerPollerConfigSection {
+            enabled: Some(true),
+            ..Default::default()
+        };
+        let config = make_config_with_trigger_poller(section);
+
+        let settings =
+            trigger_poller_settings(Some(&config)).expect("env kill-switch should succeed");
+        assert!(
+            !settings.enabled,
+            "IRONCLAW_TRIGGER_POLLER_ENABLED=false must override config enabled=true"
         );
     }
 

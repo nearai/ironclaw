@@ -792,6 +792,68 @@ default_project = "project-alpha"
     }
 
     #[test]
+    fn build_runtime_input_maps_trigger_poller_enabled_config() {
+        // Inline RAII guards so the test is self-contained and does not
+        // depend on anything inside trigger_poller::tests.
+        struct EnvGuard {
+            key: &'static str,
+            prior: Option<String>,
+        }
+        impl EnvGuard {
+            fn clear(key: &'static str) -> Self {
+                let prior = std::env::var(key).ok();
+                // SAFETY: env mutation is process-global; Drop restores on
+                // unwind. Cleared keys are only read by trigger_poller_settings
+                // in this test's call stack.
+                unsafe { std::env::remove_var(key) };
+                Self { key, prior }
+            }
+        }
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                match self.prior.take() {
+                    Some(v) => unsafe { std::env::set_var(self.key, v) },
+                    None => unsafe { std::env::remove_var(self.key) },
+                }
+            }
+        }
+        let _g1 = EnvGuard::clear("IRONCLAW_TRIGGER_POLLER_ENABLED");
+        let _g2 = EnvGuard::clear("IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS");
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("reborn-home");
+        std::fs::create_dir_all(&reborn_home).expect("mkdir");
+        std::fs::write(
+            reborn_home.join("config.toml"),
+            r#"
+[trigger_poller]
+enabled = true
+poll_interval_secs = 42
+"#,
+        )
+        .expect("write config");
+        let config = RebornBootConfig::resolve_from_env_parts(
+            Some(reborn_home.into_os_string()),
+            None,
+            None,
+            None,
+        )
+        .expect("boot config");
+
+        let input = build_runtime_input(&config, RuntimeInputCaller::Run).expect("runtime input");
+
+        assert!(
+            input.trigger_poller.enabled,
+            "[trigger_poller] enabled=true in config must reach runtime_input.trigger_poller.enabled"
+        );
+        assert_eq!(
+            input.trigger_poller.worker.poll_interval,
+            std::time::Duration::from_secs(42),
+            "config poll_interval_secs must reach worker.poll_interval"
+        );
+    }
+
+    #[test]
     fn resolve_google_oauth_config_returns_none_when_no_vars_set() {
         let config =
             resolve_google_oauth_config(|_| None).expect("empty env should not fail setup");
