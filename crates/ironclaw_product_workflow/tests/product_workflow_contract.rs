@@ -1,5 +1,6 @@
 //! Contract tests for the product workflow facade.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration as StdDuration;
 
@@ -29,11 +30,12 @@ use ironclaw_product_workflow::{
     InboundTurnService, InboundUserMessageDispatch, LinkedThreadActionId,
     ListPendingApprovalsRequest, ListPendingApprovalsResponse, ListPendingAuthInteractionsRequest,
     ListPendingAuthInteractionsResponse, PendingApprovalInteractionView,
-    PendingAuthInteractionView, ProductCommandName, ProductConversationBindingService,
-    ProductInstallationKey, ProductInstallationScope, ProductWorkflowError,
-    ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
-    ResolveAuthInteractionRequest, ResolveAuthInteractionResponse, ResolvedBinding,
-    SourceBindingKey, StaticProductInstallationResolver, approval_gate_ref,
+    PendingAuthInteractionView, ProductActorUserResolutionRequest, ProductActorUserResolver,
+    ProductCommandName, ProductConversationBindingService, ProductInstallationKey,
+    ProductInstallationScope, ProductWorkflowError, ResolveApprovalInteractionRequest,
+    ResolveApprovalInteractionResponse, ResolveAuthInteractionRequest,
+    ResolveAuthInteractionResponse, ResolvedBinding, SourceBindingKey,
+    StaticProductInstallationResolver, approval_gate_ref,
 };
 use ironclaw_threads::InMemorySessionThreadService;
 use ironclaw_turns::{
@@ -1758,6 +1760,79 @@ async fn preconfigured_actor_binding_rejects_unconfigured_actor() {
 }
 
 #[tokio::test]
+async fn actor_user_resolver_accepts_user_message_without_legacy_pairing() {
+    let conversations = Arc::new(InMemoryConversationServices::default());
+    let (binding, actor_resolver) = product_binding_service_with_actor_user_resolver(
+        conversations,
+        [(
+            ExternalActorRef::new("test", "user1", None::<String>).expect("actor"),
+            UserId::new("user:resolved-slack").expect("user"),
+        )],
+    );
+    let coordinator = Arc::new(RecordingTurnCoordinator::default());
+    let inbound = Arc::new(DefaultInboundTurnService::new(
+        binding.clone(),
+        InMemorySessionThreadService::default(),
+        coordinator.clone(),
+    ));
+    let workflow = DefaultProductWorkflow::new(
+        inbound,
+        Arc::new(InMemoryIdempotencyLedger::new()),
+        Arc::new(binding),
+    );
+
+    let ack = workflow
+        .accept_inbound(sample_envelope("resolver-actor"))
+        .await
+        .expect("resolved actor should be accepted");
+
+    assert!(matches!(ack, ProductInboundAck::Accepted { .. }));
+    let submission = coordinator
+        .submissions()
+        .into_iter()
+        .next()
+        .expect("turn should be submitted");
+    assert_eq!(submission.actor.user_id.as_str(), "user:resolved-slack");
+    assert_eq!(actor_resolver.calls().len(), 1);
+}
+
+#[tokio::test]
+async fn actor_user_resolver_rejects_unknown_actor_before_turn_submission() {
+    let conversations = Arc::new(InMemoryConversationServices::default());
+    let (binding, actor_resolver) = product_binding_service_with_actor_user_resolver(
+        conversations,
+        std::iter::empty::<(ExternalActorRef, UserId)>(),
+    );
+    let coordinator = Arc::new(RecordingTurnCoordinator::default());
+    let workflow = DefaultProductWorkflow::new(
+        Arc::new(DefaultInboundTurnService::new(
+            binding.clone(),
+            InMemorySessionThreadService::default(),
+            coordinator.clone(),
+        )),
+        Arc::new(InMemoryIdempotencyLedger::new()),
+        Arc::new(binding),
+    );
+
+    let err = workflow
+        .accept_inbound(sample_envelope("resolver-missing-actor"))
+        .await
+        .expect_err("unknown actor should require binding");
+
+    assert!(coordinator.submissions().is_empty());
+    assert_eq!(actor_resolver.calls().len(), 1);
+    assert!(matches!(
+        err,
+        ProductAdapterError::WorkflowRejected {
+            kind: ProductWorkflowRejectionKind::ScopeNotFound,
+            status_code: 404,
+            retryable: false,
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
 async fn concrete_product_workflow_accepts_user_message_for_trusted_installation() {
     let conversations = Arc::new(InMemoryConversationServices::default());
     conversations
@@ -2777,6 +2852,74 @@ fn product_binding_service_with_preconfigured_actor(
     )]);
     ProductConversationBindingService::new(conversation_port, resolver)
         .with_actor_pairings(actor_pairings)
+}
+
+fn product_binding_service_with_actor_user_resolver(
+    conversations: Arc<InMemoryConversationServices>,
+    bindings: impl IntoIterator<Item = (ExternalActorRef, UserId)>,
+) -> (
+    ProductConversationBindingService,
+    Arc<RecordingProductActorUserResolver>,
+) {
+    let conversation_port: Arc<dyn ironclaw_conversations::ConversationBindingService> =
+        conversations.clone();
+    let actor_pairings: Arc<dyn ironclaw_conversations::ConversationActorPairingService> =
+        conversations;
+    let actor_resolver = Arc::new(RecordingProductActorUserResolver::new(bindings));
+    let scope = ProductInstallationScope::with_default_scope(
+        TenantId::new("tenant:alpha").expect("tenant"),
+        AgentId::new("agent:alpha").expect("agent"),
+        Some(ProjectId::new("project:alpha").expect("project")),
+    )
+    .with_actor_user_resolver(actor_resolver.clone());
+    let resolver = StaticProductInstallationResolver::new([(
+        ProductInstallationKey::new(
+            ProductAdapterId::new("test_adapter").expect("adapter"),
+            AdapterInstallationId::new("install_alpha").expect("installation"),
+        ),
+        scope,
+    )]);
+    (
+        ProductConversationBindingService::new(conversation_port, resolver)
+            .with_actor_pairings(actor_pairings),
+        actor_resolver,
+    )
+}
+
+#[derive(Debug)]
+struct RecordingProductActorUserResolver {
+    bindings: HashMap<ExternalActorRef, UserId>,
+    calls: Mutex<Vec<ProductActorUserResolutionRequest>>,
+}
+
+impl RecordingProductActorUserResolver {
+    fn new(bindings: impl IntoIterator<Item = (ExternalActorRef, UserId)>) -> Self {
+        Self {
+            bindings: bindings.into_iter().collect(),
+            calls: Mutex::default(),
+        }
+    }
+
+    fn calls(&self) -> Vec<ProductActorUserResolutionRequest> {
+        self.calls
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+}
+
+#[async_trait]
+impl ProductActorUserResolver for RecordingProductActorUserResolver {
+    async fn resolve_product_actor_user(
+        &self,
+        request: ProductActorUserResolutionRequest,
+    ) -> Result<Option<UserId>, ProductWorkflowError> {
+        self.calls
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(request.clone());
+        Ok(self.bindings.get(&request.external_actor_ref).cloned())
+    }
 }
 
 #[tokio::test]

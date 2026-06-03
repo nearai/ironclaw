@@ -72,6 +72,8 @@ mod runtime;
 mod runtime_input;
 mod skill_listing;
 #[cfg(feature = "slack-v2-host-beta")]
+mod slack_actor_identity;
+#[cfg(feature = "slack-v2-host-beta")]
 mod slack_delivery;
 #[cfg(feature = "slack-v2-host-beta")]
 mod slack_egress;
@@ -167,6 +169,11 @@ pub use runtime_input::{
 };
 pub use skill_listing::{RebornSkillListError, list_reborn_local_skills};
 #[cfg(feature = "slack-v2-host-beta")]
+pub use slack_actor_identity::{
+    RebornUserIdentityLookup, RebornUserIdentityLookupError, SlackUserIdentityActorResolver,
+    slack_user_identity_provider, slack_user_identity_provider_user_id,
+};
+#[cfg(feature = "slack-v2-host-beta")]
 pub use slack_delivery::{
     SlackFinalReplyDeliveryObserver, SlackFinalReplyDeliveryServices,
     SlackFinalReplyDeliverySettings,
@@ -179,6 +186,7 @@ pub use slack_egress::{
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack_host_beta::{
     SlackHostBetaBuildError, SlackHostBetaConfig, build_slack_events_route_mount,
+    build_slack_events_route_mount_with_actor_user_resolver,
 };
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack_serve::{

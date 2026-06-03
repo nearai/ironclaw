@@ -17,8 +17,8 @@ use ironclaw_product_adapters::{
 };
 use ironclaw_product_workflow::{
     DefaultInboundTurnService, DefaultProductWorkflow, InMemoryIdempotencyLedger,
-    ProductConversationBindingService, ProductInstallationKey, ProductInstallationScope,
-    StaticProductInstallationResolver,
+    ProductActorUserResolver, ProductConversationBindingService, ProductInstallationKey,
+    ProductInstallationScope, StaticProductActorUserResolver, StaticProductInstallationResolver,
 };
 use ironclaw_slack_v2_adapter::{
     SLACK_USER_ACTOR_KIND, SlackV2Adapter, SlackV2AdapterConfig,
@@ -64,7 +64,10 @@ pub struct SlackHostBetaConfig {
     pub project_id: Option<ProjectId>,
     pub installation_id: AdapterInstallationId,
     pub installation_selector: SlackInstallationSelector,
+    /// Slack actor used by the legacy static personal-binding builder.
     pub slack_actor: ExternalActorRef,
+    /// Host user used by the legacy static personal-binding builder and as the
+    /// resource owner for Slack bot-token egress.
     pub user_id: UserId,
     pub signing_secret: SecretString,
     pub bot_token: SecretString,
@@ -136,6 +139,20 @@ pub fn build_slack_events_route_mount(
     runtime: &RebornRuntime,
     config: SlackHostBetaConfig,
 ) -> Result<PublicRouteMount, SlackHostBetaBuildError> {
+    let actor_user_resolver = Arc::new(StaticProductActorUserResolver::new([(
+        config.slack_actor.clone(),
+        config.user_id.clone(),
+    )]));
+    build_slack_events_route_mount_with_actor_user_resolver(runtime, config, actor_user_resolver)
+}
+
+pub fn build_slack_events_route_mount_with_actor_user_resolver(
+    runtime: &RebornRuntime,
+    config: SlackHostBetaConfig,
+    actor_user_resolver: Arc<dyn ProductActorUserResolver>,
+) -> Result<PublicRouteMount, SlackHostBetaBuildError> {
+    // The resolver controls inbound Slack actor binding. `config.user_id` still
+    // scopes the host-mediated Slack bot-token egress for this beta route.
     let adapter_id = ProductAdapterId::new(SLACK_ADAPTER_ID)
         .map_err(|reason| invalid_config("adapter_id", reason.to_string()))?;
     let token_handle = EgressCredentialHandle::new(SLACK_BOT_TOKEN_HANDLE)
@@ -157,7 +174,7 @@ pub fn build_slack_events_route_mount(
         config.agent_id.clone(),
         config.project_id.clone(),
     )
-    .with_preconfigured_actor_binding(config.slack_actor.clone(), config.user_id.clone());
+    .with_actor_user_resolver(actor_user_resolver);
     let installation_resolver = StaticProductInstallationResolver::new([(
         ProductInstallationKey::new(adapter_id, config.installation_id.clone()),
         scope,

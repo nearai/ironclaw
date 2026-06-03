@@ -28,9 +28,10 @@ use ironclaw_product_workflow::{
     ApprovalInteractionActionView, ApprovalInteractionDecision, ApprovalInteractionScope,
     ApprovalInteractionService, DefaultInboundTurnService, DefaultProductWorkflow,
     InMemoryIdempotencyLedger, ListPendingApprovalsRequest, ListPendingApprovalsResponse,
-    PendingApprovalInteractionView, ProductConversationBindingService, ProductInstallationKey,
-    ProductInstallationScope, ProductWorkflowError, ResolveApprovalInteractionRequest,
-    ResolveApprovalInteractionResponse, StaticProductInstallationResolver,
+    PendingApprovalInteractionView, ProductActorUserResolver, ProductConversationBindingService,
+    ProductInstallationKey, ProductInstallationScope, ProductWorkflowError,
+    ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
+    StaticProductActorUserResolver, StaticProductInstallationResolver,
 };
 use ironclaw_slack_v2_adapter::{
     SLACK_USER_ACTOR_KIND, SlackV2Adapter, SlackV2AdapterConfig,
@@ -55,6 +56,9 @@ use super::*;
 use crate::slack_delivery::{
     SlackFinalReplyDeliveryObserver, SlackFinalReplyDeliveryServices,
     SlackFinalReplyDeliverySettings,
+};
+use crate::{
+    RebornUserIdentityLookup, RebornUserIdentityLookupError, SlackUserIdentityActorResolver,
 };
 
 const TENANT: &str = "tenant:slack";
@@ -139,6 +143,13 @@ impl Harness {
 }
 
 async fn build_harness(mode: TurnMode) -> Harness {
+    build_harness_with_actor_user_resolver(mode, static_personal_actor_user_resolver()).await
+}
+
+async fn build_harness_with_actor_user_resolver(
+    mode: TurnMode,
+    actor_user_resolver: Arc<dyn ProductActorUserResolver>,
+) -> Harness {
     let conversations = Arc::new(InMemoryConversationServices::default());
     let conversation_port: Arc<dyn ironclaw_conversations::ConversationBindingService> =
         conversations.clone();
@@ -161,10 +172,7 @@ async fn build_harness(mode: TurnMode) -> Harness {
             ProjectId::new(PROJECT).expect("project"), // safety: static test project id is valid.
         ),
     )
-    .with_preconfigured_actor_binding(
-        ExternalActorRef::new(SLACK_USER_ACTOR_KIND, SLACK_USER, None::<String>).expect("actor"), // safety: static Slack actor ref is valid.
-        UserId::new(USER).expect("user"), // safety: static test user id is valid.
-    );
+    .with_actor_user_resolver(actor_user_resolver);
     let resolver = StaticProductInstallationResolver::new([(
         ProductInstallationKey::new(adapter_id, installation_id.clone()),
         scope,
@@ -251,6 +259,22 @@ async fn build_harness(mode: TurnMode) -> Harness {
     }
 }
 
+fn static_personal_actor_user_resolver() -> Arc<dyn ProductActorUserResolver> {
+    Arc::new(StaticProductActorUserResolver::new([(
+        ExternalActorRef::new(SLACK_USER_ACTOR_KIND, SLACK_USER, None::<String>).expect("actor"), // safety: static Slack actor ref is valid.
+        UserId::new(USER).expect("user"), // safety: static test user id is valid.
+    )]))
+}
+
+fn user_identity_actor_user_resolver() -> Arc<dyn ProductActorUserResolver> {
+    Arc::new(SlackUserIdentityActorResolver::new(Arc::new(
+        RecordingUserIdentityLookup::new([(
+            format!("{INSTALLATION}:{SLACK_USER}"),
+            UserId::new(USER).expect("user"), // safety: static test user id is valid.
+        )]),
+    )))
+}
+
 #[tokio::test]
 async fn slack_events_rejects_forged_hmac_signature() {
     let harness = build_harness(TurnMode::Complete {
@@ -288,6 +312,28 @@ async fn slack_dm_delivers_final_reply_after_immediate_ack() {
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0]["channel"], CHANNEL);
     assert_eq!(messages[0]["text"], "hello from reborn");
+}
+
+#[tokio::test]
+async fn slack_dm_for_personally_bound_user_routes_through_reborn_identity() {
+    let harness = build_harness_with_actor_user_resolver(
+        TurnMode::Complete {
+            assistant_text: "hello personal Slack binding".into(),
+        },
+        user_identity_actor_user_resolver(),
+    )
+    .await;
+
+    let response = harness.post_event(dm_message("Ev-identity", "hello")).await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_body(response, "ok").await;
+    harness.drain().await;
+
+    let messages = harness.slack_messages();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0]["channel"], CHANNEL);
+    assert_eq!(messages[0]["text"], "hello personal Slack binding");
 }
 
 #[tokio::test]
@@ -697,6 +743,33 @@ impl OutboundDeliverySink for RecordingDeliverySink {
     }
 }
 
+#[derive(Debug, Default)]
+struct RecordingUserIdentityLookup {
+    bindings: std::collections::HashMap<String, UserId>,
+}
+
+impl RecordingUserIdentityLookup {
+    fn new(bindings: impl IntoIterator<Item = (String, UserId)>) -> Self {
+        Self {
+            bindings: bindings.into_iter().collect(),
+        }
+    }
+}
+
+#[async_trait]
+impl RebornUserIdentityLookup for RecordingUserIdentityLookup {
+    async fn resolve_user_identity(
+        &self,
+        provider: &str,
+        provider_user_id: &str,
+    ) -> Result<Option<UserId>, RebornUserIdentityLookupError> {
+        if provider != "slack" {
+            return Ok(None);
+        }
+        Ok(self.bindings.get(provider_user_id).cloned())
+    }
+}
+
 fn dm_message(event_id: &'static str, text: &'static str) -> &'static str {
     match (event_id, text) {
         ("Ev-final", "hello") => DM_FINAL,
@@ -704,6 +777,7 @@ fn dm_message(event_id: &'static str, text: &'static str) -> &'static str {
         ("Ev-block", "needs approval") => DM_BLOCK,
         ("Ev-approve", "approve") => DM_APPROVE,
         ("Ev-forged", "hello") => DM_FORGED,
+        ("Ev-identity", "hello") => DM_IDENTITY,
         _ => panic!("unknown fixture"),
     }
 }
@@ -756,4 +830,12 @@ const DM_FORGED: &str = r#"{
 	  "api_app_id":"A-slack",
 	  "event_id":"Ev-forged",
 	  "event":{"type":"message","channel_type":"im","user":"U123","channel":"D123","text":"hello","ts":"1710000000.000005"}
+	}"#;
+
+const DM_IDENTITY: &str = r#"{
+	  "type":"event_callback",
+	  "team_id":"T-A",
+	  "api_app_id":"A-slack",
+	  "event_id":"Ev-identity",
+	  "event":{"type":"message","channel_type":"im","user":"U123","channel":"D123","text":"hello","ts":"1710000000.000006"}
 	}"#;
