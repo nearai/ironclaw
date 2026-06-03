@@ -6,9 +6,39 @@ use crate::{TriggerError, TriggerFire, TriggerId, TriggerInboundContentRef};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrustedTriggerSubmitRequest {
-    pub fire: TriggerFire,
-    pub content_ref: TriggerInboundContentRef,
-    pub received_at: Timestamp,
+    fire: TriggerFire,
+    content_ref: TriggerInboundContentRef,
+    received_at: Timestamp,
+}
+
+impl TrustedTriggerSubmitRequest {
+    pub(crate) fn new(
+        fire: TriggerFire,
+        content_ref: TriggerInboundContentRef,
+        received_at: Timestamp,
+    ) -> Self {
+        Self {
+            fire,
+            content_ref,
+            received_at,
+        }
+    }
+
+    pub fn fire(&self) -> &TriggerFire {
+        &self.fire
+    }
+
+    pub fn content_ref(&self) -> &TriggerInboundContentRef {
+        &self.content_ref
+    }
+
+    pub fn received_at(&self) -> Timestamp {
+        self.received_at
+    }
+
+    pub fn into_parts(self) -> (TriggerFire, TriggerInboundContentRef, Timestamp) {
+        (self.fire, self.content_ref, self.received_at)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -14,4 +14,3 @@ publish = false
 
 [features]
 default = []
-composition-root = []

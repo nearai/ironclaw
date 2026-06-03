@@ -228,12 +228,21 @@ async fn tick_processes_one_due_trigger_happy_path() {
     assert_eq!(materializer.fires().len(), 1);
     assert_eq!(submitter.requests().len(), 1);
     let request = submitter.requests().pop().expect("submit request");
-    assert_eq!(request.fire.identity.trigger_id, trigger_id);
-    assert_eq!(request.fire.identity.fire_slot, fire_slot);
-    assert_eq!(request.fire.creator_user_id, record.creator_user_id);
-    assert_eq!(request.fire.agent_id, record.agent_id);
-    assert_eq!(request.fire.project_id, record.project_id);
-    assert_eq!(request.content_ref.as_str(), "content:trigger-fire");
+    assert_eq!(request.fire().identity.trigger_id, trigger_id);
+    assert_eq!(request.fire().identity.fire_slot, fire_slot);
+    assert_eq!(request.fire().creator_user_id, record.creator_user_id);
+    assert_eq!(request.fire().agent_id, record.agent_id);
+    assert_eq!(request.fire().project_id, record.project_id);
+    assert_eq!(request.content_ref().as_str(), "content:trigger-fire");
+    assert_eq!(request.received_at(), fire_slot);
+    let (fire, content_ref, received_at) = request.into_parts();
+    assert_eq!(fire.identity.trigger_id, trigger_id);
+    assert_eq!(fire.identity.fire_slot, fire_slot);
+    assert_eq!(fire.creator_user_id, record.creator_user_id);
+    assert_eq!(fire.agent_id, record.agent_id);
+    assert_eq!(fire.project_id, record.project_id);
+    assert_eq!(content_ref.as_str(), "content:trigger-fire");
+    assert_eq!(received_at, fire_slot);
 
     let persisted = repo
         .get_trigger(tenant("tenant-a"), trigger_id)

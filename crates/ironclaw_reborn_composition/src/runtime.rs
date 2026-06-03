@@ -94,10 +94,9 @@ use crate::local_dev_capability_policy::local_dev_capability_policy;
 use crate::projection::{RebornProjectionServices, build_reborn_projection_services};
 use crate::runtime_input::{PollSettings, RebornRuntimeIdentity, RebornRuntimeInput};
 use crate::trigger_poller::{
-    ConversationContentRefMaterializer, ConversationTrustedTriggerSubmitter,
-    LocalTriggerTurnSnapshotSource, SnapshotActiveRunLookup, TRIGGER_POLLER_SHUTDOWN_TIMEOUT,
-    TriggerPollerCompositionDeps, TriggerPollerRuntimeHandle, TriggerTurnSnapshotSource,
-    TrustedTenantTriggerFireAuthorizer, spawn_trigger_poller,
+    ConversationContentRefMaterializer, LocalTriggerTurnSnapshotSource, SnapshotActiveRunLookup,
+    TRIGGER_POLLER_SHUTDOWN_TIMEOUT, TriggerPollerCompositionDeps, TriggerPollerRuntimeHandle,
+    TriggerTurnSnapshotSource, TrustedTenantTriggerFireAuthorizer, spawn_trigger_poller,
 };
 use crate::{
     RebornBuildError, RebornCompositionProfile, RebornProductAuthServices, RebornServices,
@@ -269,8 +268,6 @@ async fn build_trigger_poller_services(
     default_agent_id: AgentId,
 ) -> Result<TriggerPollerServices, RebornRuntimeError> {
     let authorizer = Arc::new(TrustedTenantTriggerFireAuthorizer::new(tenant_id));
-    let trusted_ingress =
-        ironclaw_trusted_ingress::HostTrustedTriggerIngress::new_for_composition_root();
     #[cfg(any(feature = "libsql", feature = "postgres"))]
     {
         let conversations = RebornFilesystemConversationServices::new(Arc::clone(
@@ -294,7 +291,6 @@ async fn build_trigger_poller_services(
             thread_service,
             default_agent_id,
             authorizer,
-            trusted_ingress,
         );
         Ok(TriggerPollerServices {
             materializer,
@@ -321,7 +317,6 @@ async fn build_trigger_poller_services(
             thread_service,
             default_agent_id,
             authorizer,
-            trusted_ingress,
         );
         Ok(TriggerPollerServices {
             materializer,
@@ -344,7 +339,6 @@ fn build_trigger_poller_services_from_conversation_services<B, S>(
     thread_service: Arc<dyn SessionThreadService>,
     default_agent_id: AgentId,
     authorizer: Arc<dyn crate::trigger_poller_trusted_submit::TriggerFireAuthorizer>,
-    trusted_ingress: ironclaw_trusted_ingress::HostTrustedTriggerIngress,
 ) -> TriggerPollerServicesInner
 where
     B: ironclaw_conversations::ConversationBindingService + Clone + 'static,
@@ -356,12 +350,11 @@ where
         default_agent_id.clone(),
         authorizer,
     ));
-    let trusted_submitter = Arc::new(ConversationTrustedTriggerSubmitter::new(
+    let trusted_submitter = ironclaw_conversations::trusted_trigger_fire_submitter(
         binding_service,
         session_thread_service,
         turn_coordinator,
-        trusted_ingress,
-    ));
+    );
     TriggerPollerServicesInner {
         materializer,
         trusted_submitter,

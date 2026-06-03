@@ -1,12 +1,20 @@
 use std::sync::Arc;
 
+use async_trait::async_trait;
+use ironclaw_safety::{InjectionScanner, Sanitizer, Severity};
+use ironclaw_triggers::{
+    TriggerError, TrustedTriggerFireSubmitOutcome, TrustedTriggerFireSubmitter,
+    TrustedTriggerSubmitRequest,
+};
 use ironclaw_turns::{AdmissionRejectionReason, SubmitTurnRequest, TurnCoordinator, TurnError};
 
+use crate::types::TrustedInboundTurnRequest;
 use crate::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageLookup,
-    ConversationBindingResolution, ConversationBindingService, InboundTurnError,
-    InboundTurnRequest, InboundTurnResponse, MessageIdempotencyStatus, ResolveConversationRequest,
-    SessionThreadService, TrustedInboundTurnRequest,
+    AdapterInstallationId, AdapterKind, ConversationBindingResolution, ConversationBindingService,
+    ConversationRouteKind, ExternalActorRef, ExternalConversationRef, ExternalEventId,
+    InboundMessageContentRef, InboundTurnError, InboundTurnRequest, InboundTurnResponse,
+    MessageIdempotencyStatus, ResolveConversationRequest, SessionThreadService,
 };
 
 #[derive(Clone)]
@@ -38,7 +46,7 @@ where
             .await
     }
 
-    pub async fn handle_inbound_turn_with_trusted_scope(
+    async fn handle_inbound_turn_with_trusted_scope(
         &self,
         request: TrustedInboundTurnRequest,
     ) -> Result<InboundTurnResponse, InboundTurnError> {
@@ -213,6 +221,108 @@ where
     }
 }
 
+#[derive(Clone)]
+pub(crate) struct ConversationTrustedTriggerSubmitter<B, S, C: ?Sized> {
+    inbound: InboundTurnService<B, S, C>,
+    prompt_safety: Arc<dyn InjectionScanner>,
+}
+
+impl<B, S, C> ConversationTrustedTriggerSubmitter<B, S, C>
+where
+    B: ConversationBindingService,
+    S: SessionThreadService,
+    C: TurnCoordinator + ?Sized,
+{
+    pub(crate) fn new(
+        binding_service: B,
+        session_thread_service: S,
+        turn_coordinator: Arc<C>,
+    ) -> Self {
+        Self {
+            inbound: InboundTurnService::new(
+                binding_service,
+                session_thread_service,
+                turn_coordinator,
+            ),
+            prompt_safety: Arc::new(Sanitizer::new()),
+        }
+    }
+}
+
+pub fn trusted_trigger_fire_submitter<B, S, C>(
+    binding_service: B,
+    session_thread_service: S,
+    turn_coordinator: Arc<C>,
+) -> Arc<dyn TrustedTriggerFireSubmitter>
+where
+    B: ConversationBindingService + 'static,
+    S: SessionThreadService + 'static,
+    C: TurnCoordinator + ?Sized + 'static,
+{
+    Arc::new(ConversationTrustedTriggerSubmitter::new(
+        binding_service,
+        session_thread_service,
+        turn_coordinator,
+    ))
+}
+
+#[async_trait]
+impl<B, S, C> TrustedTriggerFireSubmitter for ConversationTrustedTriggerSubmitter<B, S, C>
+where
+    B: ConversationBindingService,
+    S: SessionThreadService,
+    C: TurnCoordinator + ?Sized,
+{
+    async fn submit_trusted_trigger_fire(
+        &self,
+        request: TrustedTriggerSubmitRequest,
+    ) -> Result<TrustedTriggerFireSubmitOutcome, TriggerError> {
+        let submitted_at = request.received_at();
+        validate_trigger_prompt(&*self.prompt_safety, &request.fire().prompt)?;
+        let response = self
+            .inbound
+            .handle_inbound_turn_with_trusted_scope(
+                trusted_inbound_request_from_trigger(request)
+                    .map_err(classify_trusted_trigger_inbound_error)?,
+            )
+            .await
+            .map_err(classify_trusted_trigger_inbound_error)?;
+        submit_trusted_trigger_outcome(&response, submitted_at)
+    }
+}
+
+fn trusted_inbound_request_from_trigger(
+    request: TrustedTriggerSubmitRequest,
+) -> Result<TrustedInboundTurnRequest, InboundTurnError> {
+    let (fire, content_ref, received_at) = request.into_parts();
+    let trigger_id = fire.identity.trigger_id();
+    let route_thread_id = fire.identity.route_thread_id().as_str().to_string();
+    let external_event_id = fire.identity.external_event_id().as_str().to_string();
+    Ok(TrustedInboundTurnRequest::new(
+        InboundTurnRequest {
+            tenant_id: fire.identity.tenant_id().clone(),
+            adapter_kind: AdapterKind::new("trigger")?,
+            adapter_installation_id: AdapterInstallationId::new("reborn-trigger-poller")?,
+            external_actor_ref: ExternalActorRef::new("user", fire.creator_user_id.as_str())?,
+            external_conversation_ref: ExternalConversationRef::new(
+                None,
+                format!("trigger-{trigger_id}"),
+                Some(&route_thread_id),
+                None,
+            )?,
+            external_event_id: ExternalEventId::new(&external_event_id)?,
+            route_kind: ConversationRouteKind::Direct,
+            content_ref: InboundMessageContentRef::new(content_ref.as_str())?,
+            requested_agent_id: None,
+            requested_project_id: None,
+            received_at,
+            requested_run_profile: None,
+        },
+        fire.agent_id,
+        fire.project_id,
+    ))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum BindingResolutionPolicy {
     Untrusted,
@@ -278,26 +388,126 @@ fn should_rotate_submit_key(error: &TurnError) -> bool {
     }
 }
 
+fn submit_trusted_trigger_outcome(
+    response: &InboundTurnResponse,
+    submitted_at: chrono::DateTime<chrono::Utc>,
+) -> Result<TrustedTriggerFireSubmitOutcome, TriggerError> {
+    let Some(ironclaw_turns::SubmitTurnResponse::Accepted { run_id, .. }) =
+        &response.turn_submission
+    else {
+        return Err(TriggerError::Backend {
+            reason: "trusted trigger fire accepted no turn submission".to_string(),
+        });
+    };
+    if response.accepted_message.idempotency == MessageIdempotencyStatus::Duplicate {
+        return Ok(TrustedTriggerFireSubmitOutcome::Replayed {
+            original_run_id: *run_id,
+            replayed_at: submitted_at,
+        });
+    }
+    Ok(TrustedTriggerFireSubmitOutcome::Accepted {
+        run_id: *run_id,
+        submitted_at,
+    })
+}
+
+fn classify_trusted_trigger_inbound_error(error: InboundTurnError) -> TriggerError {
+    match error {
+        InboundTurnError::TurnSubmissionFailed {
+            error: TurnError::ThreadBusy(_),
+        } => TriggerError::Backend {
+            reason: format!("trusted trigger submit retryable failure: {error}"),
+        },
+        InboundTurnError::TurnSubmissionFailed {
+            error: TurnError::AdmissionRejected(ref rejection),
+        } => match rejection.reason {
+            AdmissionRejectionReason::TenantLimit | AdmissionRejectionReason::Unavailable => {
+                TriggerError::Backend {
+                    reason: format!("trusted trigger submit retryable failure: {error}"),
+                }
+            }
+            AdmissionRejectionReason::ProfileRejected
+            | AdmissionRejectionReason::Policy
+            | AdmissionRejectionReason::Unauthorized => TriggerError::InvalidMaterialization {
+                reason: format!("trusted trigger submit permanent admission failure: {error}"),
+            },
+        },
+        InboundTurnError::TurnSubmissionFailed {
+            error:
+                TurnError::Unavailable { .. }
+                | TurnError::CapacityExceeded { .. }
+                | TurnError::Conflict { .. },
+        } => TriggerError::Backend {
+            reason: format!("trusted trigger submit retryable failure: {error}"),
+        },
+        InboundTurnError::DurableState { reason } => TriggerError::Backend {
+            reason: format!("trusted trigger durable state unavailable: {reason}"),
+        },
+        _ => TriggerError::InvalidMaterialization {
+            reason: format!("trusted trigger inbound request invalid: {error}"),
+        },
+    }
+}
+
+fn validate_trigger_prompt(
+    prompt_safety: &dyn InjectionScanner,
+    prompt: &str,
+) -> Result<(), TriggerError> {
+    let warnings = prompt_safety.scan_injection(prompt);
+    let non_blocking_warnings: Vec<_> = warnings
+        .iter()
+        .filter(|warning| warning.severity < Severity::High)
+        .collect();
+    if let Some(max_severity) = non_blocking_warnings
+        .iter()
+        .map(|warning| warning.severity)
+        .max()
+    {
+        tracing::debug!(
+            warning_count = non_blocking_warnings.len(),
+            max_severity = ?max_severity,
+            "trusted trigger prompt safety warnings observed"
+        );
+    }
+    let blocked = warnings
+        .iter()
+        .find(|warning| warning.severity >= Severity::High);
+    if let Some(warning) = blocked {
+        return Err(TriggerError::InvalidMaterialization {
+            reason: format!(
+                "trusted trigger prompt rejected by safety scan: {}",
+                warning.description
+            ),
+        });
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
 
     use async_trait::async_trait;
     use chrono::{TimeZone, Utc};
-    use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
+    use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
+    use ironclaw_triggers::TrustedTriggerFireSubmitOutcome;
     use ironclaw_turns::{
-        CancelRunRequest, CancelRunResponse, EventCursor, GetRunStateRequest, ResumeTurnRequest,
-        ResumeTurnResponse, RunProfileId, RunProfileVersion, SubmitTurnRequest, SubmitTurnResponse,
+        AcceptedMessageRef, CancelRunRequest, CancelRunResponse, EventCursor, GetRunStateRequest,
+        ReplyTargetBindingRef, ResumeTurnRequest, ResumeTurnResponse, RunProfileId,
+        RunProfileVersion, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse,
         TurnCoordinator, TurnError, TurnId, TurnRunId, TurnRunState, TurnScope, TurnStatus,
     };
 
+    use super::submit_trusted_trigger_outcome;
+    use crate::types::TrustedInboundTurnRequest;
     use crate::{
-        AdapterInstallationId, AdapterKind, ConversationBindingResolution,
+        AcceptedInboundMessage, AdapterInstallationId, AdapterKind, ConversationBindingResolution,
         ConversationBindingService, ConversationRouteKind, ExternalActorRef,
         ExternalConversationRef, ExternalEventId, InMemoryConversationServices,
-        InboundMessageContentRef, InboundTurnError, InboundTurnRequest, InboundTurnService,
-        LinkConversationRequest, LinkedConversationBinding, MessageIdempotencyStatus,
-        ReplyTargetBinding, TrustedInboundTurnRequest, ValidateReplyTargetRequest,
+        InboundMessageContentRef, InboundTurnError, InboundTurnRequest, InboundTurnResponse,
+        InboundTurnService, LinkConversationRequest, LinkedConversationBinding,
+        MessageIdempotencyStatus, ReplyTargetBinding, ThreadAccessDecision,
+        ValidateReplyTargetRequest,
     };
 
     #[tokio::test]
@@ -307,23 +517,16 @@ mod tests {
         services
             .pair_external_actor(
                 tenant(),
-                telegram(),
-                default_installation(),
-                external_actor("telegram-user-1"),
+                trigger_adapter(),
+                trigger_installation(),
+                external_actor("alice"),
                 user("alice"),
             )
             .await;
         let coordinator = Arc::new(RecordingTurnCoordinator::default());
         let inbound =
             InboundTurnService::new(services.clone(), services.clone(), coordinator.clone());
-        let request = trusted_inbound_request(
-            telegram(),
-            external_actor("telegram-user-1"),
-            external_conversation("trusted-chat-1", None),
-            "trusted-event-1",
-            Some(agent()),
-            Some(project()),
-        );
+        let request = trusted_inbound_request(Some(agent()), Some(project()));
 
         let first = inbound
             .handle_inbound_turn_with_trusted_scope(request.clone())
@@ -359,9 +562,9 @@ mod tests {
         services
             .pair_external_actor(
                 tenant(),
-                telegram(),
-                default_installation(),
-                external_actor("telegram-user-1"),
+                trigger_adapter(),
+                trigger_installation(),
+                external_actor("alice"),
                 user("alice"),
             )
             .await;
@@ -369,14 +572,7 @@ mod tests {
         let coordinator = Arc::new(RecordingTurnCoordinator::default());
         let inbound =
             InboundTurnService::new(binding.clone(), services.clone(), coordinator.clone());
-        let request = trusted_inbound_request(
-            telegram(),
-            external_actor("telegram-user-1"),
-            external_conversation("trusted-chat-1", None),
-            "trusted-event-1",
-            Some(agent()),
-            Some(project()),
-        );
+        let request = trusted_inbound_request(Some(agent()), Some(project()));
 
         let first = inbound
             .handle_inbound_turn_with_trusted_scope(request.clone())
@@ -416,14 +612,7 @@ mod tests {
         let coordinator = Arc::new(RecordingTurnCoordinator::default());
         let inbound =
             InboundTurnService::new(binding.clone(), services.clone(), coordinator.clone());
-        let request = trusted_inbound_request(
-            telegram(),
-            external_actor("telegram-user-1"),
-            external_conversation("trusted-chat-reject", None),
-            "trusted-event-reject",
-            Some(agent()),
-            Some(project()),
-        );
+        let request = trusted_inbound_request(Some(agent()), Some(project()));
 
         let err = inbound
             .handle_inbound_turn_with_trusted_scope(request)
@@ -448,9 +637,9 @@ mod tests {
         services
             .pair_external_actor(
                 tenant(),
-                telegram(),
-                default_installation(),
-                external_actor("telegram-user-1"),
+                trigger_adapter(),
+                trigger_installation(),
+                external_actor("alice"),
                 user("alice"),
             )
             .await;
@@ -458,14 +647,7 @@ mod tests {
         let coordinator = Arc::new(RecordingTurnCoordinator::default());
         let inbound =
             InboundTurnService::new(binding.clone(), services.clone(), coordinator.clone());
-        let request = trusted_inbound_request(
-            telegram(),
-            external_actor("telegram-user-1"),
-            external_conversation("trusted-chat-none", None),
-            "trusted-event-none",
-            None,
-            None,
-        );
+        let request = trusted_inbound_request(None, None);
 
         inbound
             .handle_inbound_turn_with_trusted_scope(request)
@@ -479,67 +661,129 @@ mod tests {
         assert_eq!(resolve_requests[0].requested_project_id, None);
     }
 
+    #[test]
+    fn submit_trusted_trigger_outcome_preserves_received_at_for_accepted_and_replayed_fires() {
+        let submitted_at = Utc.with_ymd_and_hms(2026, 5, 6, 12, 30, 0).unwrap();
+        let run_id = TurnRunId::new();
+
+        let accepted = trusted_trigger_response(run_id, MessageIdempotencyStatus::Inserted);
+        let accepted_outcome = submit_trusted_trigger_outcome(&accepted, submitted_at).unwrap();
+        assert!(matches!(
+            accepted_outcome,
+            TrustedTriggerFireSubmitOutcome::Accepted {
+                run_id: observed_run_id,
+                submitted_at: observed_submitted_at,
+            } if observed_run_id == run_id && observed_submitted_at == submitted_at
+        ));
+
+        let replayed = trusted_trigger_response(run_id, MessageIdempotencyStatus::Duplicate);
+        let replayed_outcome = submit_trusted_trigger_outcome(&replayed, submitted_at).unwrap();
+        assert!(matches!(
+            replayed_outcome,
+            TrustedTriggerFireSubmitOutcome::Replayed {
+                original_run_id,
+                replayed_at,
+            } if original_run_id == run_id && replayed_at == submitted_at
+        ));
+    }
+
+    fn trusted_trigger_response(
+        run_id: TurnRunId,
+        idempotency: MessageIdempotencyStatus,
+    ) -> InboundTurnResponse {
+        let tenant_id = tenant();
+        let actor_user_id = user("alice");
+        let actor = ironclaw_turns::TurnActor::new(actor_user_id);
+        let thread_id = ThreadId::new("trusted-trigger-outcome-thread").unwrap();
+        let source_binding_ref = SourceBindingRef::new("trusted-trigger-outcome-source").unwrap();
+        let reply_target_binding_ref =
+            ReplyTargetBindingRef::new("trusted-trigger-outcome-reply").unwrap();
+        let accepted_message_ref =
+            AcceptedMessageRef::new("message:trusted-trigger-outcome").unwrap();
+        let received_at = Utc.with_ymd_and_hms(2026, 5, 6, 12, 0, 0).unwrap();
+        InboundTurnResponse {
+            resolution: ConversationBindingResolution {
+                tenant_id: tenant_id.clone(),
+                actor: actor.clone(),
+                turn_scope: TurnScope::new(
+                    tenant_id.clone(),
+                    Some(agent()),
+                    Some(project()),
+                    thread_id.clone(),
+                ),
+                source_binding_ref: source_binding_ref.clone(),
+                reply_target_binding_ref: reply_target_binding_ref.clone(),
+                access: ThreadAccessDecision::Allowed,
+            },
+            accepted_message: AcceptedInboundMessage {
+                tenant_id,
+                thread_id,
+                actor,
+                message_ref: accepted_message_ref.clone(),
+                source_binding_ref,
+                reply_target_binding_ref: reply_target_binding_ref.clone(),
+                received_at,
+                requested_run_profile: None,
+                idempotency,
+            },
+            turn_submission: Some(SubmitTurnResponse::Accepted {
+                turn_id: TurnId::new(),
+                run_id,
+                status: TurnStatus::Completed,
+                resolved_run_profile_id: RunProfileId::default_profile(),
+                resolved_run_profile_version: RunProfileVersion::new(1),
+                event_cursor: EventCursor(0),
+                accepted_message_ref,
+                reply_target_binding_ref,
+            }),
+        }
+    }
+
     fn trusted_inbound_request(
-        adapter_kind: AdapterKind,
-        external_actor_ref: ExternalActorRef,
-        external_conversation_ref: ExternalConversationRef,
-        external_event_id: &str,
         trusted_agent_id: Option<AgentId>,
         trusted_project_id: Option<ProjectId>,
     ) -> TrustedInboundTurnRequest {
-        TrustedInboundTurnRequest::for_conversation_tests(
-            inbound_request(
-                adapter_kind,
-                external_actor_ref,
-                external_conversation_ref,
-                external_event_id,
-            ),
+        let fire_slot = Utc.with_ymd_and_hms(2026, 5, 6, 12, 0, 0).unwrap();
+        TrustedInboundTurnRequest::new(
+            InboundTurnRequest {
+                tenant_id: tenant(),
+                adapter_kind: trigger_adapter(),
+                adapter_installation_id: trigger_installation(),
+                external_actor_ref: external_actor("alice"),
+                external_conversation_ref: ExternalConversationRef::new(
+                    None,
+                    "trigger-test",
+                    Some("route-trigger-test"),
+                    None,
+                )
+                .unwrap(),
+                external_event_id: ExternalEventId::new("external-event-trigger-test").unwrap(),
+                route_kind: ConversationRouteKind::Direct,
+                content_ref: InboundMessageContentRef::new("content:trigger-test").unwrap(),
+                requested_agent_id: None,
+                requested_project_id: None,
+                received_at: fire_slot,
+                requested_run_profile: None,
+            },
             trusted_agent_id,
             trusted_project_id,
         )
-    }
-
-    fn inbound_request(
-        adapter_kind: AdapterKind,
-        external_actor_ref: ExternalActorRef,
-        external_conversation_ref: ExternalConversationRef,
-        external_event_id: &str,
-    ) -> InboundTurnRequest {
-        InboundTurnRequest {
-            tenant_id: tenant(),
-            adapter_kind,
-            adapter_installation_id: default_installation(),
-            external_actor_ref,
-            external_conversation_ref,
-            external_event_id: ExternalEventId::new(external_event_id).unwrap(),
-            route_kind: ConversationRouteKind::Direct,
-            content_ref: InboundMessageContentRef::new(format!("content:{external_event_id}"))
-                .unwrap(),
-            requested_agent_id: Some(agent()),
-            requested_project_id: Some(project()),
-            received_at: Utc.with_ymd_and_hms(2026, 5, 6, 12, 0, 0).unwrap(),
-            requested_run_profile: None,
-        }
     }
 
     fn tenant() -> TenantId {
         TenantId::new("tenant").unwrap()
     }
 
-    fn telegram() -> AdapterKind {
-        AdapterKind::new("telegram").unwrap()
+    fn trigger_adapter() -> AdapterKind {
+        AdapterKind::new("trigger").unwrap()
     }
 
-    fn default_installation() -> AdapterInstallationId {
-        AdapterInstallationId::new("installation").unwrap()
+    fn trigger_installation() -> AdapterInstallationId {
+        AdapterInstallationId::new("reborn-trigger-poller").unwrap()
     }
 
     fn external_actor(value: &str) -> ExternalActorRef {
         ExternalActorRef::new("user", value).unwrap()
-    }
-
-    fn external_conversation(value: &str, message_id: Option<&str>) -> ExternalConversationRef {
-        ExternalConversationRef::new(None, value, None, message_id).unwrap()
     }
 
     fn user(value: &str) -> UserId {

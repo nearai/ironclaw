@@ -122,11 +122,7 @@ impl TriggerPollerWorker {
         match self
             .deps
             .trusted_submitter
-            .submit_trusted_trigger_fire(TrustedTriggerSubmitRequest {
-                fire,
-                content_ref,
-                received_at: now,
-            })
+            .submit_trusted_trigger_fire(TrustedTriggerSubmitRequest::new(fire, content_ref, now))
             .await
         {
             Ok(TrustedTriggerFireSubmitOutcome::Accepted {

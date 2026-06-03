@@ -93,19 +93,18 @@ fn reborn_crate_dependency_boundaries_hold() {
 }
 
 #[test]
-fn trusted_trigger_ingress_constructor_stays_composition_owned() {
+fn conversation_trusted_trigger_submitter_stays_conversation_or_composition_owned() {
     let root = workspace_root();
     let mut uses = Vec::new();
     collect_forbidden_string_uses(
         &root.join("crates"),
-        "for_host_trigger_fire",
+        "ConversationTrustedTriggerSubmitter",
         &root,
         &mut uses,
     );
     let allowed = BTreeSet::from([
         "crates/ironclaw_architecture/tests/reborn_dependency_boundaries.rs",
-        "crates/ironclaw_conversations/src/types.rs",
-        "crates/ironclaw_reborn_composition/src/trigger_poller_trusted_submit.rs",
+        "crates/ironclaw_conversations/src/inbound.rs",
     ]);
     let violations = uses
         .into_iter()
@@ -114,7 +113,7 @@ fn trusted_trigger_ingress_constructor_stays_composition_owned() {
 
     assert!(
         violations.is_empty(),
-        "Trusted trigger ingress construction must stay host/composition-owned; \
+        "Conversation trusted trigger submission must stay conversations/composition-owned; \
          product adapters and capabilities must use untrusted inbound requests. \
          Unexpected call sites:\n{}",
         violations.join("\n")
@@ -122,7 +121,48 @@ fn trusted_trigger_ingress_constructor_stays_composition_owned() {
 }
 
 #[test]
-fn host_trusted_ingress_authority_stays_host_owned() {
+fn conversation_trusted_trigger_submitter_stays_out_of_root_exports() {
+    let root = workspace_root();
+    let lib_source = std::fs::read_to_string(root.join("crates/ironclaw_conversations/src/lib.rs"))
+        .expect("conversation lib source must be readable");
+
+    assert!(
+        !lib_source.contains("ConversationTrustedTriggerSubmitter"),
+        "ConversationTrustedTriggerSubmitter must not be re-exported from ironclaw_conversations; \
+         composition should use the trusted_trigger_fire_submitter factory returning the trait object"
+    );
+}
+
+#[test]
+fn trusted_trigger_submit_request_minting_stays_worker_owned() {
+    let root = workspace_root();
+    let mut struct_literal_uses = Vec::new();
+    collect_forbidden_string_uses(
+        &root.join("crates"),
+        "TrustedTriggerSubmitRequest {",
+        &root,
+        &mut struct_literal_uses,
+    );
+    let allowed_struct_literals = BTreeSet::from([
+        "crates/ironclaw_architecture/tests/reborn_dependency_boundaries.rs",
+        "crates/ironclaw_triggers/src/worker/ports.rs",
+    ]);
+    let struct_literal_violations = struct_literal_uses
+        .into_iter()
+        .filter(|path| !allowed_struct_literals.contains(path.as_str()))
+        .collect::<Vec<_>>();
+
+    assert!(
+        struct_literal_violations.is_empty(),
+        "TrustedTriggerSubmitRequest fields must stay private; trusted trigger requests \
+         are minted by the trigger worker, not by downstream submitter callers. \
+         Unexpected struct literal use:\n{}",
+        struct_literal_violations.join("\n")
+    );
+}
+
+#[test]
+fn retired_host_trusted_ingress_token_has_no_production_dependents() {
     let metadata = cargo_metadata();
     let packages = metadata["packages"]
         .as_array()
@@ -131,8 +171,6 @@ fn host_trusted_ingress_authority_stays_host_owned() {
         .iter()
         .filter_map(package_dependencies)
         .collect::<HashMap<_, _>>();
-    let allowed_dependents =
-        BTreeSet::from(["ironclaw_conversations", "ironclaw_reborn_composition"]);
     let violations = dependencies
         .iter()
         .filter_map(|(crate_name, deps)| {
@@ -140,14 +178,70 @@ fn host_trusted_ingress_authority_stays_host_owned() {
                 .any(|dependency| dependency == "ironclaw_trusted_ingress")
                 .then_some(crate_name.as_str())
         })
-        .filter(|crate_name| !allowed_dependents.contains(crate_name))
         .collect::<Vec<_>>();
 
     assert!(
         violations.is_empty(),
-        "Host trusted ingress authority must stay conversations/composition-owned; \
-         product adapters, product workflow, capabilities, and host-runtime handlers \
-         must not depend on ironclaw_trusted_ingress. Unexpected dependents:\n{}",
+        "The retired host trusted ingress token crate must not regain production dependents; \
+         trusted trigger submission is now owned inside ironclaw_conversations. Unexpected dependents:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn untrusted_ingress_paths_cannot_submit_host_trusted_inbound() {
+    let root = workspace_root();
+    let forbidden = [
+        ForbiddenUse {
+            pattern: "ConversationTrustedTriggerSubmitter",
+            reason: "untrusted ingress paths must not construct conversation-owned trusted trigger submitters",
+        },
+        ForbiddenUse {
+            pattern: "trusted_trigger_fire_submitter",
+            reason: "untrusted ingress paths must not build host-trusted trigger submitters",
+        },
+        ForbiddenUse {
+            pattern: "TrustedTriggerSubmitRequest",
+            reason: "untrusted ingress paths must not submit host-trusted trigger fires",
+        },
+        ForbiddenUse {
+            pattern: "TrustedTriggerFireSubmitter",
+            reason: "untrusted ingress paths must not implement host-trusted trigger submission",
+        },
+        ForbiddenUse {
+            pattern: "ironclaw_trusted_ingress",
+            reason: "untrusted ingress paths must not depend on retired host-trusted trigger authority",
+        },
+    ];
+    let untrusted_src_roots = [
+        "crates/ironclaw_capabilities/src",
+        "crates/ironclaw_first_party_extension_ports/src",
+        "crates/ironclaw_first_party_extensions/src",
+        "crates/ironclaw_host_runtime/src",
+        "crates/ironclaw_product_adapters/src",
+        "crates/ironclaw_product_adapter_registry/src",
+        "crates/ironclaw_product_workflow/src",
+        "crates/ironclaw_product_workflow_storage/src",
+        "crates/ironclaw_reborn_webui_ingress/src",
+        "crates/ironclaw_wasm_product_adapters/src",
+        "crates/ironclaw_webui_v2/src",
+        "crates/ironclaw_telegram_v2_adapter/src",
+        "crates/ironclaw_slack_v2_adapter/src",
+    ];
+
+    let mut violations = Vec::new();
+    for relative_root in untrusted_src_roots {
+        let dir = root.join(relative_root);
+        if !dir.exists() {
+            continue;
+        }
+        collect_forbidden_uses(&dir, &root, &forbidden, &mut violations);
+    }
+
+    assert!(
+        violations.is_empty(),
+        "Untrusted ingress, product, and capability paths must not submit or construct host-trusted synthetic inbound requests; \
+         those operations belong to the conversations/composition boundary only:\n{}",
         violations.join("\n")
     );
 }
