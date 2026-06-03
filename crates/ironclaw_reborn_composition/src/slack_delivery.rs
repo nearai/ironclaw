@@ -51,7 +51,7 @@ impl Default for SlackFinalReplyDeliverySettings {
         Self {
             poll_interval: Duration::from_millis(250),
             max_wait: Duration::from_secs(120),
-            max_concurrent_deliveries: NonZeroUsize::new(64).expect("non-zero literal"),
+            max_concurrent_deliveries: NonZeroUsize::new(64).expect("non-zero literal"), // safety: static default literal is non-zero.
         }
     }
 }

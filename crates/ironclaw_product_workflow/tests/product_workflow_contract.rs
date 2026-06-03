@@ -186,7 +186,7 @@ impl RecordingApprovalInteractionService {
         let fallback_run_id = pending
             .first()
             .map(|(_, run_id)| *run_id)
-            .unwrap_or_else(TurnRunId::new);
+            .unwrap_or_default();
         Self {
             pending,
             fallback_run_id,

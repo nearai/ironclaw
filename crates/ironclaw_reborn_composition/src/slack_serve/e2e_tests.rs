@@ -83,12 +83,12 @@ type HmacSha256 = Hmac<sha2::Sha256>;
 fn current_unix_timestamp() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .expect("system clock must be after Unix epoch")
+        .expect("system clock must be after Unix epoch") // safety: supported test platforms have post-epoch clocks.
         .as_secs()
 }
 
 fn slack_signature(timestamp: u64, body: &str) -> String {
-    let mut mac = HmacSha256::new_from_slice(SECRET.as_bytes()).expect("HMAC accepts any key size");
+    let mut mac = HmacSha256::new_from_slice(SECRET.as_bytes()).expect("HMAC accepts any key size"); // safety: HMAC-SHA256 accepts arbitrary key lengths.
     mac.update(format!("v0:{timestamp}:").as_bytes());
     mac.update(body.as_bytes());
     format!("v0={:x}", mac.finalize().into_bytes())
