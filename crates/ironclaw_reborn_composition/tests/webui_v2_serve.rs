@@ -1334,6 +1334,14 @@ async fn static_chat_events_clear_gate_when_run_resumes() {
         body.contains("clearPendingGateForRun(setPendingGate, progress.turn_run_id)"),
         "typed running/progress events must clear stale gates for the resumed run"
     );
+    assert!(
+        body.contains("clearPendingAuthGateForForwardProgress(setPendingGate)"),
+        "tool/reasoning/text forward progress must clear stale auth gates"
+    );
+    assert!(
+        body.contains("current?.kind === \"auth_required\" ? null : current"),
+        "forward progress must clear auth gates without dismissing approval/resource gates"
+    );
 }
 
 #[tokio::test]

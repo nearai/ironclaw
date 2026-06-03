@@ -89,6 +89,7 @@ export function useChatEvents({
           // upgrade the same bubble in place.
           const activity = frame.activity;
           if (!activity || !activity.invocation_id) return;
+          clearPendingAuthGateForForwardProgress(setPendingGate);
           const card = toolCardFromActivity(activity);
           upsertToolFromActivity(setMessages, activity.invocation_id, card);
           return;
@@ -101,6 +102,7 @@ export function useChatEvents({
           // card for the same invocation_id.
           const preview = frame.preview;
           if (!preview || !preview.invocation_id) return;
+          clearPendingAuthGateForForwardProgress(setPendingGate);
           const card = toolCardFromPreview(preview);
           upsertToolFromPreview(setMessages, preview.invocation_id, card);
           return;
@@ -196,9 +198,11 @@ const PROMPT_RUN_STATUSES = new Set([
 
 function clearPendingGateForRun(setPendingGate, runId) {
   if (!runId) return;
-  setPendingGate((current) =>
-    current?.runId === runId ? null : current,
-  );
+  setPendingGate((current) => (current?.runId === runId ? null : current));
+}
+
+function clearPendingAuthGateForForwardProgress(setPendingGate) {
+  setPendingGate((current) => (current?.kind === "auth_required" ? null : current));
 }
 
 function applyProjectionItems({
@@ -304,9 +308,9 @@ function applyProjectionItems({
       // ProductProjectionItem::Text { id, body } — the body is the
       // assistant-visible reply text accumulated through projection.
       // Dedup by item id so repeated snapshots don't duplicate the
-      // same bubble. Text can arrive in the same projection snapshot
-      // as a still-blocked gate, so run_status remains the source of
-      // truth for clearing pendingGate.
+      // same bubble. Text is forward progress after an auth prompt,
+      // so any pending auth gate for the prior blocked state is stale.
+      clearPendingAuthGateForForwardProgress(setPendingGate);
       const messageId = `text-${item.text.id}`;
       setMessages((prev) => {
         const existing = prev.findIndex((m) => m.id === messageId);
@@ -327,6 +331,7 @@ function applyProjectionItems({
     }
 
     if (item.thinking) {
+      clearPendingAuthGateForForwardProgress(setPendingGate);
       const messageId = `thinking-${item.thinking.id}`;
       setMessages((prev) => {
         const existing = prev.findIndex((m) => m.id === messageId);
