@@ -11,6 +11,8 @@ use ironclaw_turns::{
     },
 };
 
+use crate::model_capability_view::intersect_model_capability_view;
+
 pub(crate) const DEFAULT_SUBAGENT_GOAL_RAW_MAX_BYTES: usize = 128 * 1024;
 pub const DEFAULT_SUBAGENT_GOAL_MAX_BYTES: usize = 64 * 1024;
 
@@ -120,10 +122,12 @@ impl SubagentPromptComposer {
                 goal_message,
             ],
         );
-        request.capability_view = Some(subagent_prompt_capability_view(
+        let capability_view = intersect_model_capability_view(
             material.allowed_capabilities,
             request.capability_view.take(),
-        ));
+        );
+        log_dropped_subagent_prompt_capabilities(&capability_view.dropped_capabilities);
+        request.capability_view = Some(capability_view.view);
         Ok(request)
     }
 }
@@ -203,35 +207,18 @@ pub fn materialize_goal_message(
     })
 }
 
-fn subagent_prompt_capability_view(
-    mut allowed_capabilities: BTreeSet<CapabilityId>,
-    existing_view: Option<ironclaw_turns::run_profile::LoopModelCapabilityView>,
-) -> ironclaw_turns::run_profile::LoopModelCapabilityView {
-    if let Some(existing_view) = existing_view {
-        let existing = existing_view
-            .visible_capability_ids
-            .into_iter()
-            .collect::<BTreeSet<_>>();
-        let mut dropped = None;
-        allowed_capabilities.retain(|capability| {
-            let keep = existing.contains(capability);
-            if !keep {
-                dropped
-                    .get_or_insert_with(Vec::new)
-                    .push(capability.as_str().to_string());
-            }
-            keep
-        });
-        if let Some(dropped) = dropped {
-            tracing::warn!(
-                dropped_capabilities = ?dropped,
-                "subagent flavor capability allowlist was narrowed by parent capability view"
-            );
-        }
+fn log_dropped_subagent_prompt_capabilities(dropped_capabilities: &[CapabilityId]) {
+    if dropped_capabilities.is_empty() {
+        return;
     }
-    ironclaw_turns::run_profile::LoopModelCapabilityView {
-        visible_capability_ids: allowed_capabilities.into_iter().collect(),
-    }
+    let dropped_capabilities = dropped_capabilities
+        .iter()
+        .map(|capability| capability.as_str().to_string())
+        .collect::<Vec<_>>();
+    tracing::warn!(
+        dropped_capabilities = ?dropped_capabilities,
+        "subagent flavor capability allowlist was narrowed by parent capability view"
+    );
 }
 
 fn loop_safe_inline_text(value: impl Into<String>) -> String {
@@ -253,6 +240,7 @@ mod tests {
     use tracing_test::traced_test;
 
     use super::*;
+    use crate::model_capability_view::intersect_model_capability_view;
 
     fn cap(value: &str) -> CapabilityId {
         CapabilityId::new(value).expect("valid test capability")
@@ -377,10 +365,11 @@ mod tests {
 
     #[test]
     fn capability_view_with_no_existing_surface_returns_full_allowlist() {
-        let view = subagent_prompt_capability_view(
+        let view = intersect_model_capability_view(
             BTreeSet::from([cap("demo.write"), cap("demo.read")]),
             None,
-        );
+        )
+        .view;
 
         assert_eq!(
             view.visible_capability_ids
@@ -394,12 +383,14 @@ mod tests {
     #[traced_test]
     #[tokio::test]
     async fn capability_view_intersects_existing_host_surface() {
-        let view = subagent_prompt_capability_view(
+        let intersection = intersect_model_capability_view(
             BTreeSet::from([cap("demo.write"), cap("demo.read")]),
             Some(LoopModelCapabilityView {
                 visible_capability_ids: vec![cap("demo.read"), cap("demo.other")],
             }),
         );
+        log_dropped_subagent_prompt_capabilities(&intersection.dropped_capabilities);
+        let view = intersection.view;
 
         assert!(logs_contain(
             "subagent flavor capability allowlist was narrowed by parent capability view"

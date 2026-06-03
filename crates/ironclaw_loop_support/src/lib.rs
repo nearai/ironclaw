@@ -27,6 +27,7 @@ mod filesystem_skill_bundle_source;
 pub mod identity_context;
 mod input_port;
 mod input_queue;
+mod model_capability_view;
 mod skill_bundle_context_source;
 mod skill_bundle_source;
 mod skill_context;
