@@ -146,6 +146,15 @@ fn catalog_rate_limit(
     }
 }
 
+/// Map an internal error to a generic INTERNAL_SERVER_ERROR response while
+/// logging the underlying detail server-side. Per the channel-boundary rule
+/// in `.claude/rules/error-handling.md`, raw error strings from `SecretsStore`,
+/// `hmac`, or any other internal source must not cross to the user.
+fn internal_err(context: &'static str, err: impl std::fmt::Display) -> (StatusCode, String) {
+    tracing::error!(error = %err, "{context}");
+    (StatusCode::INTERNAL_SERVER_ERROR, context.to_string())
+}
+
 pub async fn ironhub_install_handler(
     State(state): State<Arc<GatewayState>>,
     AdminUser(user): AdminUser,
@@ -173,7 +182,9 @@ pub async fn ironhub_install_handler(
                 "no signing key configured on this agent".to_string(),
             ));
         }
-        Err(SignedInstallError::Internal(e)) => return Err((StatusCode::INTERNAL_SERVER_ERROR, e)),
+        Err(SignedInstallError::Internal(e)) => {
+            return Err(internal_err("install request failed", e));
+        }
     }
 
     // verify-intent is a repeatable preview, so the one-shot nonce is only burned
@@ -315,6 +326,22 @@ fn hmac_hex(shared_key: &str, msg: &str) -> Result<String, String> {
     Ok(hex::encode(mac.finalize().into_bytes()))
 }
 
+/// Reject any payload field that contains the canonical ':' delimiter used by
+/// `install_payload` and `register_payload`. Without escaping, two distinct
+/// field tuples could canonical-serialize to the same HMAC input, so the
+/// verifier rejects colons in any field. `slug` is independently validated by
+/// `validate_hub_name`, which already excludes ':'.
+fn assert_no_delimiter(fields: &[(&'static str, &str)]) -> Result<(), String> {
+    for (name, value) in fields {
+        if value.contains(':') {
+            return Err(format!(
+                "field '{name}' contains ':' delimiter; ambiguous canonical payload"
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn install_payload(
     slug: &str,
     version: &str,
@@ -356,6 +383,15 @@ async fn verify_signed_install(
     if let Err(e) = crate::cli::hub_install::validate_hub_name(signed.slug) {
         return Err(SignedInstallError::Rejected(format!("invalid slug: {e}")));
     }
+
+    assert_no_delimiter(&[
+        ("version", signed.version),
+        ("uid", signed.uid),
+        ("aid", signed.aid),
+        ("nonce", signed.nonce),
+        ("artifact_digest", signed.artifact_digest),
+    ])
+    .map_err(SignedInstallError::Rejected)?;
 
     let drift = now_unix().abs_diff(signed.ts);
     if drift > VERIFY_INTENT_WINDOW_SECS {
@@ -409,12 +445,12 @@ pub async fn ironhub_signing_key_set_handler(
             CreateSecretParams::new(IRONHUB_SIGNING_KEY_NAME, shared_key),
         )
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|e| internal_err("signing-key set failed", e))?;
 
     let stored = store
         .get_decrypted(&user.user_id, IRONHUB_SIGNING_KEY_NAME)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|e| internal_err("signing-key set failed", e))?;
 
     Ok(Json(IronhubSigningKeyMetadata {
         fingerprint: fingerprint(stored.expose()),
@@ -432,12 +468,12 @@ pub async fn ironhub_signing_key_get_handler(
         Err(SecretError::NotFound(_)) => {
             return Err((StatusCode::NOT_FOUND, "no signing key set".to_string()));
         }
-        Err(e) => return Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+        Err(e) => return Err(internal_err("signing-key read failed", e)),
     };
     let decrypted = store
         .get_decrypted(&user.user_id, IRONHUB_SIGNING_KEY_NAME)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|e| internal_err("signing-key read failed", e))?;
     Ok(Json(IronhubSigningKeyMetadata {
         fingerprint: fingerprint(decrypted.expose()),
         created_at: meta.created_at.to_rfc3339(),
@@ -452,7 +488,7 @@ pub async fn ironhub_signing_key_delete_handler(
     let removed = store
         .delete(&user.user_id, IRONHUB_SIGNING_KEY_NAME)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|e| internal_err("signing-key delete failed", e))?;
     if removed {
         Ok(StatusCode::NO_CONTENT)
     } else {
@@ -490,7 +526,9 @@ pub async fn ironhub_verify_intent_handler(
             valid: false,
             reason: Some("no signing key configured on this agent".to_string()),
         })),
-        Err(SignedInstallError::Internal(e)) => Err((StatusCode::INTERNAL_SERVER_ERROR, e)),
+        Err(SignedInstallError::Internal(e)) => {
+            Err(internal_err("install-intent verification failed", e))
+        }
     }
 }
 
@@ -508,6 +546,12 @@ pub async fn ironhub_register_handler(
         ));
     }
 
+    if let Err(reason) =
+        assert_no_delimiter(&[("uid", &req.uid), ("aid", &req.aid), ("nonce", &req.nonce)])
+    {
+        return Err((StatusCode::BAD_REQUEST, reason));
+    }
+
     let store = secrets_store_or_503(&state)?;
     let decrypted = match store
         .get_decrypted(&state.owner_id, IRONHUB_SIGNING_KEY_NAME)
@@ -520,12 +564,12 @@ pub async fn ironhub_register_handler(
                 "no signing key configured on this agent".to_string(),
             ));
         }
-        Err(e) => return Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+        Err(e) => return Err(internal_err("register request failed", e)),
     };
 
     let payload = register_payload(&req.uid, &req.aid, req.ts, &req.nonce);
     let expected = hmac_hex(decrypted.expose(), &payload)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|e| internal_err("register request failed", e))?;
 
     use subtle::ConstantTimeEq;
     let supplied = req.sig.as_bytes();
@@ -1301,6 +1345,62 @@ mod tests {
             1,
             "a replayed signed install must not dispatch the tool twice"
         );
+    }
+
+    #[test]
+    fn assert_no_delimiter_rejects_colon_in_any_field() {
+        assert!(assert_no_delimiter(&[("version", "1.0.0")]).is_ok());
+        assert!(assert_no_delimiter(&[("uid", "user-1")]).is_ok());
+        assert!(assert_no_delimiter(&[("nonce", "n1"), ("aid", "a1")]).is_ok());
+        let err = assert_no_delimiter(&[("version", "1.0:malicious")])
+            .expect_err("colon in version must be rejected");
+        assert!(
+            err.contains("version") && err.contains("':' delimiter"),
+            "expected named-field delimiter message, got: {err}"
+        );
+    }
+
+    #[test]
+    fn internal_err_returns_generic_message_without_inner_detail() {
+        let (status, body) = internal_err("widget failed", "secret /path/internal/file");
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body, "widget failed");
+        assert!(
+            !body.contains("secret") && !body.contains("/path"),
+            "internal detail must not cross the channel boundary: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn verify_signed_install_rejects_version_with_colon() {
+        let store = crate::channels::web::test_helpers::test_secrets_store();
+        let signed = SignedInstall {
+            slug: "clickup",
+            version: "1.0:malicious",
+            uid: "u1",
+            aid: "a1",
+            ts: now_unix(),
+            nonce: "n1",
+            sig: "deadbeef",
+            artifact_digest: "deadbeef",
+        };
+        let err = verify_signed_install(store.as_ref(), "test-user", &signed)
+            .await
+            .expect_err("colon in version must be rejected");
+        match err {
+            SignedInstallError::Rejected(msg) => {
+                assert!(
+                    msg.contains("version") && msg.contains("delimiter"),
+                    "expected delimiter rejection through verify_signed_install, got: {msg}"
+                );
+            }
+            SignedInstallError::NoSigningKey => {
+                panic!("delimiter check must reject before the store is touched")
+            }
+            SignedInstallError::Internal(msg) => {
+                panic!("expected Rejected, got Internal({msg})")
+            }
+        }
     }
 
     #[test]
