@@ -286,7 +286,9 @@ where
         request: TrustedTriggerSubmitRequest,
     ) -> Result<TrustedTriggerFireSubmitOutcome, TriggerError> {
         let submitted_at = request.received_at();
-        // Re-validate the worker-minted prompt at the final trusted submission boundary.
+        // Defense in depth: composition scans before materializing/recording the
+        // prompt, and conversations scans again at the final trusted submission
+        // boundary before converting into the private trusted inbound request.
         validate_trigger_prompt(&*self.prompt_safety, &request.fire().prompt)?;
         let response = self
             .inbound
