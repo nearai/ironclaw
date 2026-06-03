@@ -10,6 +10,7 @@ use ironclaw_triggers::{
 };
 use ironclaw_turns::{AdmissionRejectionReason, SubmitTurnRequest, TurnCoordinator, TurnError};
 
+use crate::trusted_trigger::{TrustedTriggerInboundFailureKind, classify_inbound_error};
 use crate::types::TrustedInboundTurnRequest;
 use crate::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageLookup,
@@ -439,47 +440,19 @@ fn trigger_prompt_safety_rejection(error: PromptSafetyRejection) -> TriggerError
 /// This helper is private submitter policy. Composition classifies its own
 /// materialization failures before it mints a sealed submit request.
 fn classify_trusted_trigger_inbound_error(error: InboundTurnError) -> TriggerError {
-    match error {
-        InboundTurnError::TurnSubmissionFailed {
-            error: TurnError::ThreadBusy(_),
-        } => retryable_trusted_trigger_backend_error(&error),
-        InboundTurnError::TurnSubmissionFailed {
-            error: TurnError::AdmissionRejected(ref rejection),
-        } => match rejection.reason {
-            AdmissionRejectionReason::TenantLimit | AdmissionRejectionReason::Unavailable => {
-                retryable_trusted_trigger_backend_error(&error)
-            }
-            AdmissionRejectionReason::ProfileRejected
-            | AdmissionRejectionReason::Policy
-            | AdmissionRejectionReason::Unauthorized => {
-                opaque_trusted_trigger_inbound_rejection("trusted trigger submit rejected", &error)
-            }
-        },
-        InboundTurnError::TurnSubmissionFailed {
-            error:
-                TurnError::Unavailable { .. }
-                | TurnError::CapacityExceeded { .. }
-                | TurnError::Conflict { .. },
-        } => retryable_trusted_trigger_backend_error(&error),
-        InboundTurnError::TurnSubmissionFailed {
-            error:
-                TurnError::ScopeNotFound
-                | TurnError::Unauthorized
-                | TurnError::InvalidRequest { .. }
-                | TurnError::InvalidTransition { .. }
-                | TurnError::LeaseMismatch,
-        } => opaque_trusted_trigger_inbound_rejection("trusted trigger submit rejected", &error),
-        InboundTurnError::InvalidExternalRef { .. }
-        | InboundTurnError::BindingRequired { .. }
-        | InboundTurnError::AccessDenied { .. }
-        | InboundTurnError::BindingConflict { .. }
-        | InboundTurnError::ThreadNotFound { .. }
-        | InboundTurnError::StatePoisoned
-        | InboundTurnError::InvalidCanonicalRef { .. } => opaque_trusted_trigger_inbound_rejection(
-            "trusted trigger inbound request rejected",
-            &error,
-        ),
-        InboundTurnError::DurableState { .. } => retryable_trusted_trigger_backend_error(&error),
+    match classify_inbound_error(&error) {
+        TrustedTriggerInboundFailureKind::RetryableBackend => {
+            retryable_trusted_trigger_backend_error(&error)
+        }
+        TrustedTriggerInboundFailureKind::SubmitRejected => {
+            opaque_trusted_trigger_inbound_rejection("trusted trigger submit rejected", &error)
+        }
+        TrustedTriggerInboundFailureKind::InboundRequestRejected => {
+            opaque_trusted_trigger_inbound_rejection(
+                "trusted trigger inbound request rejected",
+                &error,
+            )
+        }
     }
 }
 

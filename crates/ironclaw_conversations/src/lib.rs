@@ -19,6 +19,7 @@ mod inbound;
 mod memory;
 mod state_store;
 mod traits;
+pub mod trusted_trigger;
 mod types;
 
 pub use error::InboundTurnError;
