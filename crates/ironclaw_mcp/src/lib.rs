@@ -19,9 +19,10 @@ use futures_util::FutureExt as _;
 use ironclaw_extensions::{ExtensionPackage, ExtensionRuntime};
 use ironclaw_host_api::{
     CapabilityId, ExtensionId, NetworkMethod, NetworkPolicy, ResourceEstimate, ResourceReservation,
-    ResourceReservationId, ResourceScope, ResourceUsage, RuntimeCredentialInjection,
+    ResourceReservationId, ResourceScope, ResourceUsage, RuntimeCredentialAuthRequirement,
+    RuntimeCredentialInjection, RuntimeCredentialRequirement, RuntimeCredentialRequirementSource,
     RuntimeCredentialSource, RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
-    RuntimeHttpEgressResponse, RuntimeKind,
+    RuntimeHttpEgressResponse, RuntimeKind, SecretHandle,
 };
 use ironclaw_resources::{ResourceError, ResourceGovernor, ResourceReceipt};
 use serde_json::Value;
@@ -83,6 +84,18 @@ pub struct McpClientRequest {
     pub max_output_bytes: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct McpAuthContext {
+    required_secrets: Vec<SecretHandle>,
+    credential_requirements: Vec<RuntimeCredentialAuthRequirement>,
+}
+
+#[derive(Debug)]
+struct PreparedMcpClientRequest {
+    request: McpClientRequest,
+    auth_context: McpAuthContext,
+}
+
 /// Raw MCP adapter output before resource reconciliation.
 #[derive(Debug, Clone, PartialEq)]
 pub struct McpClientOutput {
@@ -140,14 +153,43 @@ pub trait McpClient: Send + Sync {
         false
     }
 
-    async fn call_tool(&self, request: McpClientRequest) -> Result<McpClientOutput, String>;
+    async fn call_tool(&self, request: McpClientRequest)
+    -> Result<McpClientOutput, McpClientError>;
 
     async fn discover_tools(
         &self,
         request: McpClientRequest,
-    ) -> Result<McpToolDiscoveryOutput, String> {
+    ) -> Result<McpToolDiscoveryOutput, McpClientError> {
         let _ = request;
-        Err(request_denied())
+        Err(McpClientError::client(request_denied()))
+    }
+}
+
+/// Stable, sanitized MCP client-side failure categories.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum McpClientError {
+    Client { reason: String },
+    AuthRequired,
+}
+
+impl McpClientError {
+    pub fn client(reason: impl Into<String>) -> Self {
+        Self::Client {
+            reason: reason.into(),
+        }
+    }
+
+    pub fn stable_reason(&self) -> &str {
+        match self {
+            Self::Client { reason } => reason,
+            Self::AuthRequired => "auth_required",
+        }
+    }
+}
+
+impl From<String> for McpClientError {
+    fn from(reason: String) -> Self {
+        Self::client(reason)
     }
 }
 
@@ -439,7 +481,7 @@ where
         id: Option<u64>,
         method: McpJsonRpcMethod,
         params: Option<Value>,
-    ) -> Result<McpJsonRpcExchange, String> {
+    ) -> Result<McpJsonRpcExchange, McpClientError> {
         let planned = self.plan_json_rpc(request, id, method, params)?;
         self.send_planned_json_rpc(request, session_key, planned)
             .await
@@ -451,9 +493,13 @@ where
         id: Option<u64>,
         method: McpJsonRpcMethod,
         params: Option<Value>,
-    ) -> Result<PlannedMcpJsonRpc, String> {
-        let url = request.url.as_deref().ok_or_else(request_denied)?;
-        let body = encode_json_rpc_request(id, method.as_str(), params)?;
+    ) -> Result<PlannedMcpJsonRpc, McpClientError> {
+        let url = request
+            .url
+            .as_deref()
+            .ok_or_else(|| McpClientError::client(request_denied()))?;
+        let body =
+            encode_json_rpc_request(id, method.as_str(), params).map_err(McpClientError::client)?;
         let policy_headers = vec![
             ("Content-Type".to_string(), "application/json".to_string()),
             (
@@ -487,7 +533,7 @@ where
         request: &McpClientRequest,
         session_key: &McpHostHttpSessionKey,
         planned: PlannedMcpJsonRpc,
-    ) -> Result<McpJsonRpcExchange, String> {
+    ) -> Result<McpJsonRpcExchange, McpClientError> {
         let mut headers = planned.policy_headers;
         if let Some(session) = self.current_session(session_key)? {
             headers.push((
@@ -529,9 +575,12 @@ where
         };
 
         if !(200..300).contains(&response.status) {
-            return Err(response_error());
+            if is_mcp_auth_response_status(response.status) {
+                return Err(McpClientError::AuthRequired);
+            }
+            return Err(McpClientError::client(response_error()));
         }
-        let session_id = mcp_session_id_from_response(&response)?;
+        let session_id = mcp_session_id_from_response(&response).map_err(McpClientError::client)?;
 
         if response.status == 202 && planned.id.is_none() {
             return Ok(McpJsonRpcExchange {
@@ -545,7 +594,7 @@ where
         }
 
         Ok(McpJsonRpcExchange {
-            response: parse_mcp_response(&response, planned.id)?,
+            response: parse_mcp_response(&response, planned.id).map_err(McpClientError::client)?,
             session_id,
             usage,
         })
@@ -554,20 +603,24 @@ where
     fn current_session(
         &self,
         session_key: &McpHostHttpSessionKey,
-    ) -> Result<Option<McpHostHttpSession>, String> {
+    ) -> Result<Option<McpHostHttpSession>, McpClientError> {
         self.state
             .sessions
             .lock()
             .map(|guard| guard.get(session_key).cloned())
-            .map_err(|_| request_denied())
+            .map_err(|_| McpClientError::client(request_denied()))
     }
 
     fn store_session(
         &self,
         session_key: &McpHostHttpSessionKey,
         session: McpHostHttpSession,
-    ) -> Result<(), String> {
-        let mut guard = self.state.sessions.lock().map_err(|_| request_denied())?;
+    ) -> Result<(), McpClientError> {
+        let mut guard = self
+            .state
+            .sessions
+            .lock()
+            .map_err(|_| McpClientError::client(request_denied()))?;
         guard.insert(session_key.clone(), session);
         Ok(())
     }
@@ -576,11 +629,15 @@ where
         &self,
         session_key: &McpHostHttpSessionKey,
         session_id: Option<String>,
-    ) -> Result<(), String> {
+    ) -> Result<(), McpClientError> {
         let Some(session_id) = session_id else {
             return Ok(());
         };
-        let mut guard = self.state.sessions.lock().map_err(|_| request_denied())?;
+        let mut guard = self
+            .state
+            .sessions
+            .lock()
+            .map_err(|_| McpClientError::client(request_denied()))?;
         if let Some(session) = guard.get_mut(session_key) {
             session.session_id = Some(session_id);
         }
@@ -591,7 +648,7 @@ where
         &self,
         request: &McpClientRequest,
         session_key: &McpHostHttpSessionKey,
-    ) -> Result<ResourceUsage, String> {
+    ) -> Result<ResourceUsage, McpClientError> {
         let mut usage = ResourceUsage::default();
         let initialize_id = self.next_request_id();
         let initialize = self
@@ -605,13 +662,14 @@ where
             .await?;
         accumulate_usage(&mut usage, initialize.usage);
         if initialize.response.error {
-            return Err(response_error());
+            return Err(McpClientError::client(response_error()));
         }
         self.store_session(
             session_key,
             McpHostHttpSession {
                 session_id: initialize.session_id,
-                protocol_version: protocol_version_from_initialize_response(&initialize.response)?,
+                protocol_version: protocol_version_from_initialize_response(&initialize.response)
+                    .map_err(McpClientError::client)?,
             },
         )?;
 
@@ -627,7 +685,7 @@ where
         accumulate_usage(&mut usage, initialized.usage);
         self.update_session_id(session_key, initialized.session_id.clone())?;
         if initialized.response.error {
-            return Err(response_error());
+            return Err(McpClientError::client(response_error()));
         }
         Ok(usage)
     }
@@ -643,12 +701,18 @@ where
         true
     }
 
-    async fn call_tool(&self, request: McpClientRequest) -> Result<McpClientOutput, String> {
+    async fn call_tool(
+        &self,
+        request: McpClientRequest,
+    ) -> Result<McpClientOutput, McpClientError> {
         if !requires_host_http_egress(&request.transport) {
-            return Err(request_denied());
+            return Err(McpClientError::client(request_denied()));
         }
 
-        let url = request.url.as_deref().ok_or_else(request_denied)?;
+        let url = request
+            .url
+            .as_deref()
+            .ok_or_else(|| McpClientError::client(request_denied()))?;
         let session_key = McpHostHttpSessionKey::new(&request.scope, &request.provider, url);
         let _session_cleanup =
             McpHostHttpSessionCleanup::new(Arc::clone(&self.state), session_key.clone());
@@ -665,7 +729,8 @@ where
             McpJsonRpcMethod::ToolsCall,
             Some(tool_call_params),
         )?;
-        validate_tools_call_credential_injections(&tool_call_plan.plan.credential_injections)?;
+        validate_tools_call_credential_injections(&tool_call_plan.plan.credential_injections)
+            .map_err(McpClientError::client)?;
 
         let mut usage = self.initialize_session(&request, &session_key).await?;
 
@@ -675,12 +740,15 @@ where
         accumulate_usage(&mut usage, call.usage);
         self.update_session_id(&session_key, call.session_id.clone())?;
         if call.response.error {
-            return Err(response_error());
+            return Err(McpClientError::client(response_error()));
         }
-        let output = call.response.result.ok_or_else(response_error)?;
+        let output = call
+            .response
+            .result
+            .ok_or_else(|| McpClientError::client(response_error()))?;
         let output_bytes = serde_json::to_vec(&output)
             .map(|bytes| bytes.len() as u64)
-            .map_err(|_| response_error())?;
+            .map_err(|_| McpClientError::client(response_error()))?;
         usage.output_bytes = usage.output_bytes.max(output_bytes);
 
         Ok(McpClientOutput {
@@ -693,12 +761,15 @@ where
     async fn discover_tools(
         &self,
         request: McpClientRequest,
-    ) -> Result<McpToolDiscoveryOutput, String> {
+    ) -> Result<McpToolDiscoveryOutput, McpClientError> {
         if !requires_host_http_egress(&request.transport) {
-            return Err(request_denied());
+            return Err(McpClientError::client(request_denied()));
         }
 
-        let url = request.url.as_deref().ok_or_else(request_denied)?;
+        let url = request
+            .url
+            .as_deref()
+            .ok_or_else(|| McpClientError::client(request_denied()))?;
         let session_key = McpHostHttpSessionKey::new(&request.scope, &request.provider, url);
         let _session_cleanup =
             McpHostHttpSessionCleanup::new(Arc::clone(&self.state), session_key.clone());
@@ -710,7 +781,8 @@ where
             McpJsonRpcMethod::ToolsList,
             None,
         )?;
-        validate_staged_credential_injections(&tools_list_plan.plan.credential_injections)?;
+        validate_staged_credential_injections(&tools_list_plan.plan.credential_injections)
+            .map_err(McpClientError::client)?;
 
         let mut usage = self.initialize_session(&request, &session_key).await?;
         let tools = self
@@ -719,11 +791,14 @@ where
         accumulate_usage(&mut usage, tools.usage);
         self.update_session_id(&session_key, tools.session_id.clone())?;
         if tools.response.error {
-            return Err(response_error());
+            return Err(McpClientError::client(response_error()));
         }
-        let result = tools.response.result.ok_or_else(response_error)?;
+        let result = tools
+            .response
+            .result
+            .ok_or_else(|| McpClientError::client(response_error()))?;
         Ok(McpToolDiscoveryOutput {
-            tools: parse_tools_list_result(&result)?,
+            tools: parse_tools_list_result(&result).map_err(McpClientError::client)?,
             usage,
         })
     }
@@ -804,10 +879,14 @@ fn validate_staged_credential_injections(
     Ok(())
 }
 
-fn mcp_client_http_error(error: McpHostHttpError) -> String {
+fn mcp_client_http_error(error: McpHostHttpError) -> McpClientError {
     match error {
-        McpHostHttpError::Egress { reason } => reason,
+        McpHostHttpError::Egress { reason } => McpClientError::client(reason),
     }
+}
+
+fn is_mcp_auth_response_status(status: u16) -> bool {
+    matches!(status, 401 | 403)
 }
 
 fn effective_mcp_response_body_limit(host_limit: Option<u64>, client_limit: u64) -> Option<u64> {
@@ -1161,6 +1240,11 @@ pub enum McpError {
     Resource(Box<ResourceError>),
     #[error("MCP client error: {reason}")]
     Client { reason: String },
+    #[error("MCP capability requires authentication")]
+    AuthRequired {
+        required_secrets: Vec<SecretHandle>,
+        credential_requirements: Vec<RuntimeCredentialAuthRequirement>,
+    },
     #[error("unsupported MCP transport {transport}")]
     UnsupportedTransport { transport: String },
     #[error("MCP transport {transport} requires host-mediated HTTP egress")]
@@ -1216,6 +1300,8 @@ where
         G: ResourceGovernor + ?Sized,
     {
         let client_request = self.prepare_client_request(&request)?;
+        let auth_context = client_request.auth_context;
+        let client_request = client_request.request;
         let transport = client_request.transport.clone();
         if requires_host_http_egress(&transport) && !self.client.uses_host_mediated_http_egress() {
             return Err(McpError::HostHttpEgressRequired { transport });
@@ -1229,11 +1315,11 @@ where
 
         let output = match self.client.call_tool(client_request).await {
             Ok(output) => output,
-            Err(reason) => {
+            Err(error) => {
                 return Err(release_after_failure(
                     governor,
                     reservation.id,
-                    McpError::Client { reason },
+                    mcp_error_from_client_error(error, auth_context),
                 ));
             }
         };
@@ -1284,7 +1370,7 @@ where
     fn prepare_client_request(
         &self,
         request: &McpExecutionRequest<'_>,
-    ) -> Result<McpClientRequest, McpError> {
+    ) -> Result<PreparedMcpClientRequest, McpError> {
         let descriptor = request
             .package
             .capabilities
@@ -1339,17 +1425,58 @@ where
             });
         }
 
-        Ok(McpClientRequest {
-            provider: request.package.id.clone(),
-            capability_id: request.capability_id.clone(),
-            scope: request.scope.clone(),
-            transport: transport.clone(),
-            command: command.clone(),
-            args: args.clone(),
-            url: url.clone(),
-            input: request.invocation.input.clone(),
-            max_output_bytes: self.config.max_output_bytes,
+        let auth_context = mcp_auth_context(&descriptor.provider, &descriptor.runtime_credentials);
+
+        Ok(PreparedMcpClientRequest {
+            request: McpClientRequest {
+                provider: request.package.id.clone(),
+                capability_id: request.capability_id.clone(),
+                scope: request.scope.clone(),
+                transport: transport.clone(),
+                command: command.clone(),
+                args: args.clone(),
+                url: url.clone(),
+                input: request.invocation.input.clone(),
+                max_output_bytes: self.config.max_output_bytes,
+            },
+            auth_context,
         })
+    }
+}
+
+fn mcp_error_from_client_error(error: McpClientError, auth_context: McpAuthContext) -> McpError {
+    match error {
+        McpClientError::Client { reason } => McpError::Client { reason },
+        McpClientError::AuthRequired => McpError::AuthRequired {
+            required_secrets: auth_context.required_secrets,
+            credential_requirements: auth_context.credential_requirements,
+        },
+    }
+}
+
+fn mcp_auth_context(
+    requester_extension: &ExtensionId,
+    credentials: &[RuntimeCredentialRequirement],
+) -> McpAuthContext {
+    let mut required_secrets = Vec::new();
+    let mut credential_requirements = Vec::new();
+    for credential in credentials.iter().filter(|credential| credential.required) {
+        match &credential.source {
+            RuntimeCredentialRequirementSource::SecretHandle => {
+                required_secrets.push(credential.handle.clone());
+            }
+            RuntimeCredentialRequirementSource::ProductAuthAccount { provider, .. } => {
+                credential_requirements.push(RuntimeCredentialAuthRequirement {
+                    provider: provider.clone(),
+                    requester_extension: requester_extension.clone(),
+                    provider_scopes: credential.provider_scopes.clone(),
+                });
+            }
+        }
+    }
+    McpAuthContext {
+        required_secrets,
+        credential_requirements,
     }
 }
 

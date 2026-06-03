@@ -172,8 +172,18 @@ where
                 },
             )
             .await
-            .map_err(|error| DispatchError::Mcp {
-                kind: mcp_error_kind(&error),
+            .map_err(|error| match error {
+                McpError::AuthRequired {
+                    required_secrets,
+                    credential_requirements,
+                } => DispatchError::AuthRequired {
+                    capability: request.capability_id.clone(),
+                    required_secrets,
+                    credential_requirements,
+                },
+                error => DispatchError::Mcp {
+                    kind: mcp_error_kind(&error),
+                },
             })?;
 
         Ok(RuntimeAdapterResult {
@@ -904,6 +914,7 @@ fn mcp_error_kind(error: &McpError) -> RuntimeDispatchErrorKind {
     match error {
         McpError::Resource(_) => RuntimeDispatchErrorKind::Resource,
         McpError::Client { .. } => RuntimeDispatchErrorKind::Client,
+        McpError::AuthRequired { .. } => RuntimeDispatchErrorKind::Client,
         McpError::UnsupportedTransport { .. } => RuntimeDispatchErrorKind::UnsupportedRunner,
         McpError::HostHttpEgressRequired { .. } => RuntimeDispatchErrorKind::NetworkDenied,
         McpError::ExternalStdioTransportUnsupported => RuntimeDispatchErrorKind::UnsupportedRunner,

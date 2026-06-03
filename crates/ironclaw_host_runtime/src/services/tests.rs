@@ -29,15 +29,17 @@ use serde_json::{Value, json};
 use super::{
     CapabilitySurfaceVersion, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
     FirstPartyCapabilityRegistry, FirstPartyRuntimeAdapter, HostRuntimeServices,
-    LocalHostProcessPort, LocalInvocationServicesResolver, NetworkMode, ProcessBackendKind,
-    ProcessResultStore, ProcessStore, ProductionWiringComponent, ProductionWiringConfig,
-    ProductionWiringIssueKind, RootFilesystem, RuntimeAdapter, RuntimeAdapterRequest,
-    RuntimeAdapterResult, RuntimeProfile, SecretMode, ServiceResolvedRuntimeAdapter,
+    LocalHostProcessPort, LocalInvocationServicesResolver, McpRuntimeAdapter, NetworkMode,
+    ProcessBackendKind, ProcessResultStore, ProcessStore, ProductionWiringComponent,
+    ProductionWiringConfig, ProductionWiringIssueKind, RootFilesystem, RuntimeAdapter,
+    RuntimeAdapterRequest, RuntimeAdapterResult, RuntimeProfile, SecretMode,
+    ServiceResolvedRuntimeAdapter,
 };
 use crate::CommandExecutionRequest;
 use crate::obligations::{NetworkObligationPolicyStore, RuntimeSecretInjectionStore};
 
 mod first_party_runtime_adapter;
+mod mcp_runtime_adapter;
 
 #[tokio::test]
 async fn shared_extension_registry_returns_same_instance() {

@@ -2390,7 +2390,7 @@ async fn mcp_http_client_cannot_use_direct_secret_store_lease_with_production_eg
         .await
         .expect_err("production MCP egress must require staged credentials");
 
-    assert_eq!(error, "request_denied");
+    assert_eq!(error.stable_reason(), "request_denied");
     let requests = network_recorder.lock().unwrap();
     assert_eq!(
         requests.len(),

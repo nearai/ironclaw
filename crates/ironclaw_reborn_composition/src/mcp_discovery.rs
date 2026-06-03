@@ -76,7 +76,7 @@ pub(crate) async fn discover_hosted_mcp_package(
             max_output_bytes: MCP_RESPONSE_BODY_LIMIT,
         })
         .await
-        .map_err(HostedMcpDiscoveryError::Transient)?;
+        .map_err(|error| HostedMcpDiscoveryError::Transient(error.stable_reason().to_string()))?;
     if output.tools.is_empty() {
         return Err(HostedMcpDiscoveryError::Transient(format!(
             "hosted MCP provider {} returned no discoverable tools",
