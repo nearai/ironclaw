@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -10,6 +10,7 @@ use ironclaw_triggers::{
     TriggerRepository, TrustedTriggerFireSubmitter,
 };
 use ironclaw_turns::TurnPersistenceSnapshot;
+use rand::Rng;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -25,8 +26,9 @@ pub(crate) struct TriggerPollerRuntimeHandle {
 }
 
 impl TriggerPollerRuntimeHandle {
-    pub(crate) fn cancel(&self) {
+    pub(crate) async fn shutdown(self, timeout: Duration) {
         self.cancel.cancel();
+        self.join_with_timeout(timeout).await;
     }
 
     pub(crate) async fn join_with_timeout(self, timeout: Duration) {
@@ -129,13 +131,9 @@ fn jitter_delay(max: Duration) -> Duration {
     if max.is_zero() {
         return Duration::ZERO;
     }
-    let max_nanos = max.as_nanos();
-    let now_nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or(0);
-    let bounded = now_nanos % (max_nanos + 1);
-    let nanos = u64::try_from(bounded).unwrap_or(u64::MAX);
+    let max_nanos = max.as_nanos().min(u64::MAX as u128);
+    let nanos = rand::thread_rng().gen_range(0..=max_nanos);
+    let nanos = u64::try_from(nanos).unwrap_or(u64::MAX);
     Duration::from_nanos(nanos)
 }
 
@@ -164,6 +162,9 @@ impl TriggerActiveRunLookup for SnapshotActiveRunLookup {
         &self,
         requests: Vec<TriggerActiveRunStateRequest>,
     ) -> Vec<Result<TriggerActiveRunState, TriggerError>> {
+        if requests.is_empty() {
+            return Vec::new();
+        }
         let snapshot = match self.snapshot_source.snapshot().await {
             Ok(snapshot) => snapshot,
             Err(error) => {
@@ -289,6 +290,27 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct FailingSnapshotSource {
+        calls: std::sync::Mutex<usize>,
+    }
+
+    impl FailingSnapshotSource {
+        fn calls(&self) -> usize {
+            *self.calls.lock().expect("snapshot calls lock")
+        }
+    }
+
+    #[async_trait]
+    impl TriggerTurnSnapshotSource for FailingSnapshotSource {
+        async fn snapshot(&self) -> Result<TurnPersistenceSnapshot, TriggerError> {
+            *self.calls.lock().expect("snapshot calls lock") += 1;
+            Err(TriggerError::Backend {
+                reason: "snapshot failed".to_string(),
+            })
+        }
+    }
+
     #[test]
     fn jitter_is_disabled_when_max_is_zero() {
         assert_eq!(jitter_delay(Duration::ZERO), Duration::ZERO);
@@ -331,10 +353,7 @@ mod tests {
         });
         let runtime_handle = TriggerPollerRuntimeHandle { cancel, handle };
 
-        runtime_handle.cancel();
-        runtime_handle
-            .join_with_timeout(Duration::from_millis(1))
-            .await;
+        runtime_handle.shutdown(Duration::from_millis(1)).await;
     }
 
     #[tokio::test]
@@ -368,5 +387,48 @@ mod tests {
                 .into_iter()
                 .all(|result| matches!(result, Ok(TriggerActiveRunState::Missing)))
         );
+    }
+
+    #[tokio::test]
+    async fn active_run_batch_lookup_returns_empty_without_snapshot() {
+        let snapshot_source = Arc::new(CountingSnapshotSource::default());
+        let lookup = SnapshotActiveRunLookup::new(snapshot_source.clone());
+
+        let results = lookup.active_run_states(Vec::new()).await;
+
+        assert!(results.is_empty());
+        assert_eq!(snapshot_source.calls(), 0);
+    }
+
+    #[tokio::test]
+    async fn snapshot_source_error_fans_out_to_all_batch_results() {
+        let snapshot_source = Arc::new(FailingSnapshotSource::default());
+        let lookup = SnapshotActiveRunLookup::new(snapshot_source.clone());
+        let tenant_id = TenantId::new("trigger-active-error-tenant").expect("tenant id");
+        let fire_slot = Utc::now();
+
+        let results = lookup
+            .active_run_states(vec![
+                TriggerActiveRunStateRequest {
+                    tenant_id: tenant_id.clone(),
+                    trigger_id: TriggerId::new(),
+                    fire_slot,
+                    run_id: TurnRunId::new(),
+                },
+                TriggerActiveRunStateRequest {
+                    tenant_id,
+                    trigger_id: TriggerId::new(),
+                    fire_slot,
+                    run_id: TurnRunId::new(),
+                },
+            ])
+            .await;
+
+        assert_eq!(snapshot_source.calls(), 1);
+        assert_eq!(results.len(), 2);
+        assert!(results.into_iter().all(|result| matches!(
+            result,
+            Err(TriggerError::Backend { reason }) if reason.contains("snapshot failed")
+        )));
     }
 }

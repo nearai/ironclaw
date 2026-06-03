@@ -247,26 +247,46 @@ async fn build_trigger_submitter(
         .map_err(|error| RebornRuntimeError::InvalidArgument {
             reason: format!("trigger conversation services unavailable: {error}"),
         })?;
-        Ok(Arc::new(ConversationTrustedTriggerSubmitter::new(
+        Ok(build_trigger_submitter_from_conversation_services(
             conversations.clone(),
             conversations,
             turn_coordinator,
             thread_service,
             default_agent_id,
-        )))
+        ))
     }
     #[cfg(not(any(feature = "libsql", feature = "postgres")))]
     {
         let _ = local_runtime;
         let conversations = InMemoryConversationServices::default();
-        Ok(Arc::new(ConversationTrustedTriggerSubmitter::new(
+        Ok(build_trigger_submitter_from_conversation_services(
             conversations.clone(),
             conversations,
             turn_coordinator,
             thread_service,
             default_agent_id,
-        )))
+        ))
     }
+}
+
+fn build_trigger_submitter_from_conversation_services<B, S>(
+    binding_service: B,
+    session_thread_service: S,
+    turn_coordinator: Arc<dyn TurnCoordinator>,
+    thread_service: Arc<dyn SessionThreadService>,
+    default_agent_id: AgentId,
+) -> Arc<dyn ironclaw_triggers::TrustedTriggerFireSubmitter>
+where
+    B: ironclaw_conversations::ConversationBindingService + 'static,
+    S: ironclaw_conversations::SessionThreadService + 'static,
+{
+    Arc::new(ConversationTrustedTriggerSubmitter::new(
+        binding_service,
+        session_thread_service,
+        turn_coordinator,
+        thread_service,
+        default_agent_id,
+    ))
 }
 
 fn build_trigger_active_run_lookup(
@@ -797,12 +817,9 @@ impl RebornRuntime {
     /// Awaits both tasks before returning so background state is fully
     /// drained when the runtime drops.
     pub async fn shutdown(self) -> Result<(), RebornRuntimeError> {
-        if let Some(trigger_poller) = &self.trigger_poller_handle {
-            trigger_poller.cancel();
-        }
         if let Some(trigger_poller) = self.trigger_poller_handle {
             trigger_poller
-                .join_with_timeout(TRIGGER_POLLER_SHUTDOWN_TIMEOUT)
+                .shutdown(TRIGGER_POLLER_SHUTDOWN_TIMEOUT)
                 .await;
         }
         self.worker_cancel.cancel();

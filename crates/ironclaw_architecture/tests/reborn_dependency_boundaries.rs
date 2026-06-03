@@ -96,7 +96,7 @@ fn reborn_crate_dependency_boundaries_hold() {
 fn trusted_trigger_ingress_constructor_stays_composition_owned() {
     let root = workspace_root();
     let mut uses = Vec::new();
-    collect_string_uses(
+    collect_forbidden_string_uses(
         &root.join("crates"),
         "for_host_trigger_fire",
         &root,
@@ -1299,7 +1299,7 @@ fn collect_forbidden_turns_identifier_uses(
     }
 }
 
-fn collect_string_uses(
+fn collect_forbidden_string_uses(
     dir: &std::path::Path,
     needle: &str,
     root: &std::path::Path,
@@ -1311,7 +1311,7 @@ fn collect_string_uses(
         let entry = entry.unwrap_or_else(|err| panic!("failed to read dir entry: {err}"));
         let path = entry.path();
         if path.is_dir() {
-            collect_string_uses(&path, needle, root, matches);
+            collect_forbidden_string_uses(&path, needle, root, matches);
             continue;
         }
         if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {

@@ -487,7 +487,7 @@ mod tests {
         trusted_agent_id: Option<AgentId>,
         trusted_project_id: Option<ProjectId>,
     ) -> TrustedInboundTurnRequest {
-        TrustedInboundTurnRequest::new(
+        TrustedInboundTurnRequest::for_conversation_tests(
             inbound_request(
                 adapter_kind,
                 external_actor_ref,

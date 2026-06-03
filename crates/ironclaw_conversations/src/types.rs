@@ -173,10 +173,8 @@ pub struct TrustedInboundTurnRequest {
     trusted_project_id: Option<ProjectId>,
 }
 
-#[allow(dead_code)]
 impl TrustedInboundTurnRequest {
-    /// Crate-local constructor for host-owned trusted ingress.
-    pub(crate) fn new(
+    fn new(
         request: InboundTurnRequest,
         trusted_agent_id: Option<AgentId>,
         trusted_project_id: Option<ProjectId>,
@@ -196,6 +194,15 @@ impl TrustedInboundTurnRequest {
     /// boundary.
     pub fn for_host_trigger_fire(
         _authority: &HostTrustedTriggerIngress,
+        request: InboundTurnRequest,
+        trusted_agent_id: Option<AgentId>,
+        trusted_project_id: Option<ProjectId>,
+    ) -> Self {
+        Self::new(request, trusted_agent_id, trusted_project_id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_conversation_tests(
         request: InboundTurnRequest,
         trusted_agent_id: Option<AgentId>,
         trusted_project_id: Option<ProjectId>,

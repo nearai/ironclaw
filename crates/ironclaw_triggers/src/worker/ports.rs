@@ -60,6 +60,13 @@ pub enum TriggerActiveRunState {
 
 #[async_trait]
 pub trait TriggerActiveRunLookup: Send + Sync {
+    /// Resolve a single active-run state.
+    ///
+    /// The default composition-root implementation reads a full
+    /// `TurnPersistenceSnapshot` for each call, so batch-oriented
+    /// implementations should prefer overriding `active_run_states` and
+    /// handling single-record lookups through the shared batch path when
+    /// they need to amortize snapshot reads.
     async fn active_run_state(
         &self,
         request: TriggerActiveRunStateRequest,

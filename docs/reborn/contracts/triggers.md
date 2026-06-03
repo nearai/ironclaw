@@ -196,12 +196,20 @@ plumbing, not capability APIs.
 A trigger fire is synthetic inbound, not a parallel agent loop.
 
 - The fire must enter the normal Reborn inbound/turn pipeline.
-- The trusted facade is `InboundTurnService::handle_inbound_turn_with_trusted_scope(TrustedInboundTurnRequest)`. PR 8 seals the trusted request constructor locally in `ironclaw_conversations`; a later trigger-worker/composition PR will add the host-owned construction shim once that caller exists.
+- The trusted facade is `InboundTurnService::handle_inbound_turn_with_trusted_scope(TrustedInboundTurnRequest)`. The raw trusted request constructor stays private inside `ironclaw_conversations`; host/composition code must enter through a host-owned trigger ingress seam instead of constructing trusted requests directly.
 - Binding resolution for trigger fires must use the trusted-scope path from `conversation-binding.md`.
-- The host-trusted ingress marker and witness used for trigger submission must be type-sealed and unconstructible by product adapters.
+- The host-trusted ingress marker and witness used for trigger submission must be inaccessible to product adapters. PR18 enforces this with a host-only trusted ingress crate plus architecture dependency tests; before trigger delivery launches, the trusted ingress authority should be hardened into a compile-time host facade or equivalent sealed factory so adapter crates cannot mint it merely by adding a dependency.
 - The host mints the trusted trigger ingress request from `TriggerRecord` state:
   `tenant_id`, `creator_user_id`, `agent_id`, and `project_id` are host state,
   not product payload data.
+- Before a trusted trigger fire is submitted, host composition must scan the
+  materialized trigger prompt for prompt-injection patterns and reject high- or
+  critical-severity findings as permanent materialization failures. The prompt
+  must not be silently rewritten before turn submission.
+- Before trigger delivery launches, host composition must also verify at fire
+  time that `creator_user_id` is still authorized for the target
+  `tenant_id`/`agent_id`/`project_id`; revoked or unauthorized creators must
+  produce a permanent authorization failure instead of submitting a turn.
 - The trusted inbound request is a host-owned wrapper around the ordinary inbound fields. It carries only ingress identity and turn scope data needed to create the canonical turn, and it discards adapter-supplied requested-scope hints before binding resolution.
 - It must not encode delivery targets, notification targets, or any other outbound routing policy.
 

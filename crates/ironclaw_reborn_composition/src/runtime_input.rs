@@ -155,13 +155,6 @@ impl TriggerPollerSettings {
             ..Self::default()
         }
     }
-
-    pub fn disabled() -> Self {
-        Self {
-            enabled: false,
-            ..Self::default()
-        }
-    }
 }
 
 /// Full input for `build_reborn_runtime` — substrate config plus the extras
