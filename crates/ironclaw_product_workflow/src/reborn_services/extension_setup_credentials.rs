@@ -225,7 +225,12 @@ fn credential_label(
     extension_id: &ExtensionId,
     requirement: &LifecycleExtensionCredentialRequirement,
 ) -> String {
-    format!("{} {}", extension_id.as_str(), requirement.provider)
+    let base = format!("{} {}", extension_id.as_str(), requirement.provider);
+    if requirement.name.contains("__") {
+        format!("{base} {}", requirement.name)
+    } else {
+        base
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]

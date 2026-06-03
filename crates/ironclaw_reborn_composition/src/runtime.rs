@@ -1813,7 +1813,7 @@ mod tests {
     use std::time::Duration;
 
     use async_trait::async_trait;
-    use ironclaw_auth::GOOGLE_CALENDAR_READONLY_SCOPE;
+    use ironclaw_auth::{GOOGLE_CALENDAR_EVENTS_SCOPE, GOOGLE_CALENDAR_READONLY_SCOPE};
 
     /// Wiring guard: the `regex_skill_activation_enabled` flag from
     /// [`RebornRuntimeInput`] must reach
@@ -3766,16 +3766,36 @@ mod tests {
             )
             .await
             .expect("google setup extension lifecycle projection");
-        assert_eq!(google_setup.secrets.len(), 1);
-        assert_eq!(google_setup.secrets[0].provider, "google");
-        assert!(!google_setup.secrets[0].provided);
-        assert!(matches!(
-            &google_setup.secrets[0].setup,
-            RebornExtensionCredentialSetup::OAuth {
-                scopes,
-                ..
-            } if scopes == &vec![GOOGLE_CALENDAR_READONLY_SCOPE.to_string()]
-        ));
+        assert_eq!(google_setup.secrets.len(), 2);
+        let google_oauth_setups = google_setup
+            .secrets
+            .iter()
+            .map(|secret| {
+                assert_eq!(secret.provider, "google");
+                assert!(!secret.provided);
+                match &secret.setup {
+                    RebornExtensionCredentialSetup::OAuth {
+                        account_label,
+                        scopes,
+                        ..
+                    } => (account_label.clone(), scopes.clone()),
+                    RebornExtensionCredentialSetup::ManualToken => {
+                        panic!("Google setup secret should use OAuth")
+                    }
+                }
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            google_oauth_setups
+                .iter()
+                .map(|(_, scopes)| scopes.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                vec![GOOGLE_CALENDAR_READONLY_SCOPE.to_string()],
+                vec![GOOGLE_CALENDAR_EVENTS_SCOPE.to_string()],
+            ]
+        );
+        assert_ne!(google_oauth_setups[0].0, google_oauth_setups[1].0);
         let google_setup_json =
             serde_json::to_value(&google_setup.secrets[0]).expect("serialize setup secret");
         assert_eq!(google_setup_json["setup"]["kind"], "oauth");
