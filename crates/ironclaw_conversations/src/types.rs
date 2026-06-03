@@ -195,4 +195,6 @@ pub struct InboundTurnResponse {
     pub resolution: ConversationBindingResolution,
     pub accepted_message: AcceptedInboundMessage,
     pub turn_submission: Option<SubmitTurnResponse>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub replayed_turn_submission: bool,
 }
