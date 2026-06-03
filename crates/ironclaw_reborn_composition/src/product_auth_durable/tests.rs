@@ -1603,9 +1603,11 @@ async fn filesystem_list_accounts_rejects_zero_and_oversized_limit() {
 
 #[tokio::test]
 async fn filesystem_oauth_reauth_purges_previous_provider_secrets() {
-    // After a successful OAuth re-auth (exchange.account_id == Some(_)),
-    // the OLD access and refresh secret handles must be deleted from SecretStore
-    // so repeated re-auths do not accumulate dead handles.
+    // After a successful OAuth re-auth through a bound flow, the OLD access
+    // and refresh secret handles must be deleted from SecretStore so repeated
+    // re-auths do not accumulate dead handles. Host OAuth provider clients
+    // return exchange.account_id == None, so the durable flow must use the
+    // update_binding account id rather than rejecting the callback.
     use ironclaw_auth::{CredentialAccountUpdateBinding, ProviderCallbackOutcome};
     use ironclaw_secrets::SecretMaterial;
 
@@ -1787,7 +1789,7 @@ async fn filesystem_oauth_reauth_purges_previous_provider_secrets() {
                         access_secret: access_v2.clone(),
                         refresh_secret: Some(refresh_v2.clone()),
                         scopes: vec![ProviderScope::new("gmail.readonly").unwrap()],
-                        account_id: Some(account_id),
+                        account_id: None,
                     },
                 },
             },

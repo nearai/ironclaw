@@ -1327,9 +1327,9 @@ mod tests {
     use axum::body::{Body, to_bytes};
     use axum::http::{Method, Request, header};
     use ironclaw_auth::{
-        AuthFlowManager, AuthInteractionService, AuthProviderClient, CredentialAccountService,
-        CredentialAccountStatus, CredentialOwnership, CredentialSetupService, NewCredentialAccount,
-        SecretCleanupService,
+        AuthFlowManager, AuthInteractionService, AuthProviderClient,
+        CredentialAccountLookupRequest, CredentialAccountService, CredentialAccountStatus,
+        CredentialOwnership, CredentialSetupService, NewCredentialAccount, SecretCleanupService,
     };
     use ironclaw_capabilities::{CapabilityObligationHandler, CapabilityObligationRequest};
     use ironclaw_host_api::{
@@ -1664,7 +1664,7 @@ mod tests {
             )
             .expect("google oauth route config"),
         );
-        let app = product_auth_route_mount(state)
+        let app = product_auth_route_mount(state.clone())
             .protected
             .layer(axum::Extension(test_caller()));
         let flow_invocation_id = InvocationId::new();
@@ -1707,6 +1707,57 @@ mod tests {
             .expect("flow lookup")
             .expect("flow");
         assert!(flow.update_binding.is_none());
+
+        let authorization_url = json["authorization_url"]
+            .as_str()
+            .expect("authorization url");
+        let state_value = Url::parse(authorization_url)
+            .expect("authorization url")
+            .query_pairs()
+            .find_map(|(name, value)| (name == "state").then(|| value.into_owned()))
+            .expect("oauth state");
+        let encoded_state =
+            url::form_urlencoded::byte_serialize(state_value.as_bytes()).collect::<String>();
+        let encoded_scope = url::form_urlencoded::byte_serialize(
+            "https://www.googleapis.com/auth/drive".as_bytes(),
+        )
+        .collect::<String>();
+        let uri = format!(
+            "{GOOGLE_OAUTH_CALLBACK_PATH}?state={encoded_state}&code=google-auth-code&scope={encoded_scope}"
+        )
+        .parse::<Uri>()
+        .expect("callback uri");
+
+        let response = oauth::google_oauth_callback_handler(
+            State(state),
+            RawQuery(uri.query().map(str::to_string)),
+            uri,
+            HeaderMap::new(),
+        )
+        .await
+        .expect("extension google callback should complete");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let completed_flow = shared
+            .get_flow(&flow_scope, flow_id)
+            .await
+            .expect("completed flow lookup")
+            .expect("completed flow");
+        let account_id = completed_flow
+            .credential_account_id
+            .expect("callback should persist account id");
+        let account = shared
+            .get_account(CredentialAccountLookupRequest {
+                scope: flow_scope,
+                account_id,
+                requester_extension: Some(ExtensionId::new("google-drive").expect("extension")),
+            })
+            .await
+            .expect("account lookup")
+            .expect("account");
+
+        assert_eq!(account.status, CredentialAccountStatus::Configured);
+        assert_eq!(account.provider.as_str(), GOOGLE_PROVIDER_ID);
     }
 
     #[tokio::test]
