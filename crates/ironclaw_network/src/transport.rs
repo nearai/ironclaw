@@ -7,7 +7,7 @@ use std::{
 
 use async_trait::async_trait;
 use ironclaw_host_api::NetworkMethod;
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::{
     egress::NetworkHttpTransport,
@@ -120,6 +120,8 @@ fn build_reqwest_client(key: &ReqwestClientKey) -> Result<reqwest::Client, reqwe
 /// the request is dispatched. Parse failures use a fixed diagnostic rather
 /// than `url::ParseError` formatting because those diagnostics may include
 /// raw input that contains injected credentials.
+/// The source request URL is consumed even on parse failure so callers cannot
+/// later inspect a credential-bearing raw URL for diagnostics.
 fn take_request_url(
     request: &mut NetworkTransportRequest,
     request_bytes: u64,
@@ -145,6 +147,8 @@ fn apply_request_headers(
         name.zeroize();
         value.zeroize();
     }
+    // reqwest's internal HeaderMap retains its copied values until the request
+    // builder is consumed and the response future completes.
     req
 }
 
@@ -191,11 +195,11 @@ impl NetworkHttpTransport for ReqwestNetworkTransport {
             )
             .await?;
 
-        let mut headers = std::mem::take(&mut request.headers);
+        let mut headers = Zeroizing::new(std::mem::take(&mut request.headers));
         let mut req = client
             .request(reqwest_method(request.method), url)
             .body(std::mem::take(&mut request.body));
-        req = apply_request_headers(req, &mut headers);
+        req = apply_request_headers(req, &mut headers[..]);
         let mut response = req
             .send()
             .await
