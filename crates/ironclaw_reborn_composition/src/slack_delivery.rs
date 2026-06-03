@@ -5,6 +5,7 @@
 //! the submitted run to finish, reads the finalized assistant reply, and sends it
 //! through the host-mediated product outbound delivery seam.
 
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -28,14 +29,13 @@ use ironclaw_product_workflow::{
     VerifiedProductOutboundTargetMetadata, prepare_and_render_product_outbound,
     route_kind_for_inbound_payload,
 };
-use ironclaw_threads::{
-    MessageKind, MessageStatus, SessionThreadService, ThreadHistoryRequest, ThreadScope,
-};
+use ironclaw_threads::{FinalizedAssistantMessageByRunRequest, SessionThreadService, ThreadScope};
 use ironclaw_turns::{
     GetRunStateRequest, ReplyTargetBindingRef, TurnActor, TurnCoordinator, TurnRunId, TurnScope,
     TurnStatus,
 };
 use ironclaw_wasm_product_adapters::ImmediateAckWorkflowObserver;
+use tokio::sync::Semaphore;
 
 const MAX_SLACK_RUN_POLL_INTERVAL: Duration = Duration::from_secs(5);
 
@@ -43,6 +43,7 @@ const MAX_SLACK_RUN_POLL_INTERVAL: Duration = Duration::from_secs(5);
 pub struct SlackFinalReplyDeliverySettings {
     pub poll_interval: Duration,
     pub max_wait: Duration,
+    pub max_concurrent_deliveries: NonZeroUsize,
 }
 
 impl Default for SlackFinalReplyDeliverySettings {
@@ -50,6 +51,7 @@ impl Default for SlackFinalReplyDeliverySettings {
         Self {
             poll_interval: Duration::from_millis(250),
             max_wait: Duration::from_secs(120),
+            max_concurrent_deliveries: NonZeroUsize::new(64).expect("non-zero literal"),
         }
     }
 }
@@ -68,6 +70,7 @@ pub struct SlackFinalReplyDeliveryServices {
 pub struct SlackFinalReplyDeliveryObserver {
     services: SlackFinalReplyDeliveryServices,
     settings: SlackFinalReplyDeliverySettings,
+    delivery_permits: Arc<Semaphore>,
 }
 
 impl SlackFinalReplyDeliveryObserver {
@@ -79,7 +82,11 @@ impl SlackFinalReplyDeliveryObserver {
         services: SlackFinalReplyDeliveryServices,
         settings: SlackFinalReplyDeliverySettings,
     ) -> Self {
-        Self { services, settings }
+        Self {
+            services,
+            settings,
+            delivery_permits: Arc::new(Semaphore::new(settings.max_concurrent_deliveries.get())),
+        }
     }
 
     async fn deliver_final_reply(
@@ -261,24 +268,15 @@ impl SlackFinalReplyDeliveryObserver {
         binding: &ResolvedBinding,
         run_id: TurnRunId,
     ) -> Result<Option<String>, SlackFinalReplyDeliveryError> {
-        let history = self
+        Ok(self
             .services
             .thread_service
-            .list_thread_history(ThreadHistoryRequest {
+            .finalized_assistant_message_by_run(FinalizedAssistantMessageByRunRequest {
                 scope: thread_scope.clone(),
                 thread_id: binding.thread_id.clone(),
+                turn_run_id: run_id.to_string(),
             })
-            .await?;
-        let run_id = run_id.to_string();
-        Ok(history
-            .messages
-            .into_iter()
-            .rev()
-            .find(|message| {
-                message.kind == MessageKind::Assistant
-                    && message.status == MessageStatus::Finalized
-                    && message.turn_run_id.as_deref() == Some(run_id.as_str())
-            })
+            .await?
             .and_then(|message| message.content))
     }
 }
@@ -286,11 +284,18 @@ impl SlackFinalReplyDeliveryObserver {
 #[async_trait]
 impl ImmediateAckWorkflowObserver for SlackFinalReplyDeliveryObserver {
     async fn observe_workflow_ack(&self, envelope: ProductInboundEnvelope, ack: ProductInboundAck) {
+        let Ok(_permit) = self.delivery_permits.clone().acquire_owned().await else {
+            tracing::warn!(
+                target = "ironclaw::reborn::slack_delivery",
+                "Slack final reply delivery skipped because delivery semaphore was closed"
+            );
+            return;
+        };
         if let Err(error) = self.deliver_final_reply(envelope, ack).await {
-            tracing::debug!(
+            tracing::warn!(
                 target = "ironclaw::reborn::slack_delivery",
                 error = %error,
-                "Slack final reply delivery skipped or failed after immediate ACK"
+                "Slack final reply delivery failed after immediate ACK"
             );
         }
     }
@@ -371,7 +376,7 @@ fn submitted_run_id(ack: &ProductInboundAck) -> Option<TurnRunId> {
         ProductInboundAck::Accepted {
             submitted_run_id, ..
         } => Some(*submitted_run_id),
-        ProductInboundAck::Duplicate { .. } => None,
+        ProductInboundAck::Duplicate { prior } => submitted_run_id(prior),
         ProductInboundAck::DeferredBusy { .. }
         | ProductInboundAck::Rejected(_)
         | ProductInboundAck::CommandResult { .. }

@@ -18,6 +18,7 @@ use ironclaw_product_adapters::{
     ProtocolHttpEgressError, RedactedString,
 };
 use ironclaw_wasm_product_adapters::{EgressPolicy, EgressPolicyError, EgressPolicyTarget};
+use secrecy::{ExposeSecret, SecretString};
 use thiserror::Error;
 
 const SLACK_EGRESS_TIMEOUT_MS: u32 = 10_000;
@@ -34,18 +35,18 @@ pub enum SlackEgressCredentialError {
 }
 
 pub struct SlackEgressCredential {
-    bearer_token: String,
+    bearer_token: SecretString,
 }
 
 impl SlackEgressCredential {
     pub fn bearer_token(token: impl Into<String>) -> Self {
         Self {
-            bearer_token: token.into(),
+            bearer_token: SecretString::from(token.into()),
         }
     }
 
     fn as_bearer_token(&self) -> &str {
-        &self.bearer_token
+        self.bearer_token.expose_secret()
     }
 }
 
@@ -136,11 +137,9 @@ impl ProtocolHttpEgress for SlackProtocolHttpEgress {
                 .resolve_slack_egress_credential(handle)
                 .await
                 .map_err(map_credential_error)?;
+            let authorization = bearer_authorization_value(&credential)?;
             headers.retain(|(name, _)| !name.eq_ignore_ascii_case("authorization"));
-            headers.push((
-                "authorization".to_string(),
-                format!("Bearer {}", credential.as_bearer_token()),
-            ));
+            headers.push(("authorization".to_string(), authorization));
         }
 
         let response = self
@@ -164,6 +163,18 @@ impl ProtocolHttpEgress for SlackProtocolHttpEgress {
 
         Ok(EgressResponse::new(response.status, response.body))
     }
+}
+
+fn bearer_authorization_value(
+    credential: &SlackEgressCredential,
+) -> Result<String, ProtocolHttpEgressError> {
+    let token = credential.as_bearer_token();
+    if token.bytes().any(|byte| byte < 0x20 || byte == 0x7f) {
+        return Err(ProtocolHttpEgressError::PolicyDenied {
+            reason: RedactedString::new("Slack bearer token contains control characters"),
+        });
+    }
+    Ok(format!("Bearer {token}"))
 }
 
 fn slack_network_policy(host: &str) -> NetworkPolicy {
@@ -335,6 +346,35 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(auth_headers.len(), 1);
         assert_eq!(auth_headers[0].1, "Bearer xoxb-secret");
+    }
+
+    #[tokio::test]
+    async fn slack_protocol_http_egress_rejects_control_chars_in_bearer_before_network() {
+        let network = Arc::new(RecordingNetwork::default());
+        let handle = slack_handle();
+        let egress = SlackProtocolHttpEgress::new(
+            network.clone(),
+            Arc::new(StaticSlackEgressCredentialProvider::new(
+                handle.clone(),
+                "xoxb-secret\r\nX-Injected: true",
+            )),
+            EgressPolicy::new([DeclaredEgressTarget::new(
+                slack_host(),
+                Some(handle.clone()),
+            )]),
+            ResourceScope::system(),
+        );
+
+        let error = egress
+            .send(slack_request(handle))
+            .await
+            .expect_err("invalid bearer token should fail before network");
+
+        assert!(matches!(
+            error,
+            ProtocolHttpEgressError::PolicyDenied { .. }
+        ));
+        assert!(network.requests().is_empty());
     }
 
     #[tokio::test]

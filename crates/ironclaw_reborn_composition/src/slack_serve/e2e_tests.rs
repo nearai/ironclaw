@@ -7,11 +7,12 @@
 
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use hmac::{Hmac, Mac};
 use http_body_util::BodyExt;
 use ironclaw_conversations::InMemoryConversationServices;
 use ironclaw_host_api::{AgentId, ApprovalRequestId, ProjectId, TenantId, UserId};
@@ -19,8 +20,8 @@ use ironclaw_outbound::{
     CommunicationPreferenceRepository, InMemoryOutboundStateStore, OutboundStateStore,
 };
 use ironclaw_product_adapters::{
-    AdapterInstallationId, AuthRequirement, DeliveryStatus, EgressCredentialHandle, EgressRequest,
-    EgressResponse, ExternalActorRef, OutboundDeliverySink, ProductAdapter, ProtocolHttpEgress,
+    AdapterInstallationId, DeliveryStatus, EgressCredentialHandle, EgressRequest, EgressResponse,
+    ExternalActorRef, OutboundDeliverySink, ProductAdapter, ProtocolHttpEgress,
     ProtocolHttpEgressError,
 };
 use ironclaw_product_workflow::{
@@ -31,7 +32,10 @@ use ironclaw_product_workflow::{
     ProductInstallationScope, ProductWorkflowError, ResolveApprovalInteractionRequest,
     ResolveApprovalInteractionResponse, StaticProductInstallationResolver,
 };
-use ironclaw_slack_v2_adapter::{SLACK_USER_ACTOR_KIND, SlackV2Adapter, SlackV2AdapterConfig};
+use ironclaw_slack_v2_adapter::{
+    SLACK_USER_ACTOR_KIND, SlackV2Adapter, SlackV2AdapterConfig,
+    slack_request_signature_auth_requirement,
+};
 use ironclaw_threads::{
     AppendAssistantDraftRequest, InMemorySessionThreadService, MessageContent,
     SessionThreadService, ThreadScope,
@@ -43,8 +47,7 @@ use ironclaw_turns::{
     TurnError, TurnId, TurnRunId, TurnRunState, TurnScope, TurnStatus,
 };
 use ironclaw_wasm_product_adapters::{
-    NativeProductAdapterRunner, NativeProductAdapterRunnerConfig, SharedSecretHeaderAuth,
-    WebhookAuth,
+    HmacWebhookAuth, NativeProductAdapterRunner, NativeProductAdapterRunnerConfig, WebhookAuth,
 };
 use tower::ServiceExt;
 
@@ -63,7 +66,8 @@ const INSTALLATION: &str = "install_alpha";
 const TEAM: &str = "T-A";
 const SLACK_USER: &str = "U123";
 const CHANNEL: &str = "D-A";
-const SECRET_HEADER: &str = "X-Test-Secret";
+const SLACK_SIGNATURE_HEADER: &str = "X-Slack-Signature";
+const SLACK_TIMESTAMP_HEADER: &str = "X-Slack-Request-Timestamp";
 const SECRET: &str = "topsecret";
 const GATE: &str = "gate:approve-slack";
 
@@ -74,8 +78,35 @@ struct Harness {
     approvals: Arc<RecordingApprovalInteractionService>,
 }
 
+type HmacSha256 = Hmac<sha2::Sha256>;
+
+fn current_unix_timestamp() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock must be after Unix epoch")
+        .as_secs()
+}
+
+fn slack_signature(timestamp: u64, body: &str) -> String {
+    let mut mac = HmacSha256::new_from_slice(SECRET.as_bytes()).expect("HMAC accepts any key size");
+    mac.update(format!("v0:{timestamp}:").as_bytes());
+    mac.update(body.as_bytes());
+    format!("v0={:x}", mac.finalize().into_bytes())
+}
+
 impl Harness {
     async fn post_event(&self, body: &'static str) -> axum::response::Response {
+        let timestamp = current_unix_timestamp();
+        self.post_event_with_signature(body, timestamp, slack_signature(timestamp, body))
+            .await
+    }
+
+    async fn post_event_with_signature(
+        &self,
+        body: &'static str,
+        timestamp: u64,
+        signature: String,
+    ) -> axum::response::Response {
         self.mount
             .router
             .clone()
@@ -83,7 +114,8 @@ impl Harness {
                 Request::builder()
                     .method("POST")
                     .uri(SLACK_EVENTS_PATH)
-                    .header(SECRET_HEADER, SECRET)
+                    .header(SLACK_TIMESTAMP_HEADER, timestamp.to_string())
+                    .header(SLACK_SIGNATURE_HEADER, signature)
                     .body(Body::from(body))
                     .expect("request should build"), // safety: static test request fixtures are valid.
             )
@@ -119,9 +151,7 @@ async fn build_harness(mode: TurnMode) -> Harness {
         adapter_id: adapter_id.clone(),
         installation_id: installation_id.clone(),
         egress_credential_handle: EgressCredentialHandle::new("slack_bot_token").expect("handle"), // safety: static test handle is valid.
-        auth_requirement: AuthRequirement::SharedSecretHeader {
-            header_name: SECRET_HEADER.into(),
-        },
+        auth_requirement: slack_request_signature_auth_requirement(),
     }));
 
     let scope = ProductInstallationScope::with_default_scope(
@@ -166,11 +196,12 @@ async fn build_harness(mode: TurnMode) -> Harness {
     let runner = Arc::new(NativeProductAdapterRunner::with_config(
         adapter.clone(),
         workflow,
-        WebhookAuth::SharedSecretHeader(SharedSecretHeaderAuth {
-            header_name: SECRET_HEADER.into(),
-            expected_secret: SECRET.into(),
-            subject: INSTALLATION.into(),
-        }),
+        WebhookAuth::Hmac(HmacWebhookAuth::new(
+            SLACK_SIGNATURE_HEADER,
+            SLACK_TIMESTAMP_HEADER,
+            SECRET.as_bytes().to_vec(),
+            INSTALLATION,
+        )),
         NativeProductAdapterRunnerConfig::new(
             Duration::from_secs(2),
             NonZeroUsize::new(4).expect("nonzero"), // safety: 4 is non-zero.
@@ -196,6 +227,7 @@ async fn build_harness(mode: TurnMode) -> Harness {
         SlackFinalReplyDeliverySettings {
             poll_interval: Duration::from_millis(1),
             max_wait: Duration::from_secs(2),
+            max_concurrent_deliveries: std::num::NonZeroUsize::new(4).expect("nonzero"), // safety: static test literal is non-zero.
         },
     ));
 
@@ -217,6 +249,26 @@ async fn build_harness(mode: TurnMode) -> Harness {
         egress,
         approvals,
     }
+}
+
+#[tokio::test]
+async fn slack_events_rejects_forged_hmac_signature() {
+    let harness = build_harness(TurnMode::Complete {
+        assistant_text: "must not send".into(),
+    })
+    .await;
+
+    let response = harness
+        .post_event_with_signature(
+            dm_message("Ev-forged", "hello"),
+            current_unix_timestamp(),
+            "v0=deadbeef".to_string(),
+        )
+        .await;
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    harness.drain().await;
+    assert!(harness.slack_messages().is_empty());
 }
 
 #[tokio::test]

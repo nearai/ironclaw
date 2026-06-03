@@ -323,6 +323,13 @@ pub struct LatestThreadMessageRequest {
     pub status: MessageStatus,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FinalizedAssistantMessageByRunRequest {
+    pub scope: ThreadScope,
+    pub thread_id: ThreadId,
+    pub turn_run_id: String,
+}
+
 /// Browser-driven list-threads query scoped to a single caller.
 ///
 /// Pagination is opaque: `cursor` is whatever value the backend

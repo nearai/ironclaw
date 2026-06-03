@@ -13,8 +13,8 @@ use ironclaw_product_adapters::{
     ProductWorkflowRejectionKind, ProjectionSubscriptionRequest, RedactedString,
 };
 use ironclaw_turns::{
-    AcceptedMessageRef, AdmissionRejectionReason, GateRef, IdempotencyKey, LoopGateRef, TurnActor,
-    TurnError, TurnErrorCategory, TurnRunId, TurnScope,
+    AcceptedMessageRef, AdmissionRejectionReason, GateRef, IdempotencyKey, TurnActor, TurnError,
+    TurnErrorCategory, TurnRunId, TurnScope,
 };
 use sha2::{Digest, Sha256};
 use tracing::debug;
@@ -488,16 +488,12 @@ async fn dispatch_scoped_approval_resolution(
         })
         .await?;
     let submitted_run_id = run_id_from_approval_resolution(response);
-    let dispatch_gate_ref = LoopGateRef::new(gate_ref.as_str())
-        .map_err(|reason| ProductWorkflowError::TurnSubmissionRejected { reason })?;
     Ok(DispatchedAction {
         ack: ProductInboundAck::Accepted {
             accepted_message_ref: interaction_accepted_message_ref("approval", envelope)?,
             submitted_run_id,
         },
-        dispatch_kind: ActionDispatchKind::ApprovalResolution {
-            gate_ref: dispatch_gate_ref,
-        },
+        dispatch_kind: ActionDispatchKind::ScopedApprovalResolution,
     })
 }
 
@@ -587,6 +583,14 @@ fn interaction_accepted_message_ref(
         .extend_from_slice(b"ironclaw_product_workflow:interaction_accepted_message_ref:v1");
     push_length_prefixed_component(&mut digest_input, kind);
     push_length_prefixed_component(&mut digest_input, envelope.installation_id().as_str());
+    push_length_prefixed_component(&mut digest_input, envelope.external_actor_ref().kind());
+    push_length_prefixed_component(&mut digest_input, envelope.external_actor_ref().id());
+    push_length_prefixed_component(
+        &mut digest_input,
+        &envelope
+            .external_conversation_ref()
+            .conversation_fingerprint(),
+    );
     push_length_prefixed_component(&mut digest_input, envelope.external_event_id().as_str());
 
     let stable_ref = lower_hex(&Sha256::digest(&digest_input));
@@ -850,10 +854,63 @@ fn rejection_kind_for_approval_interaction(
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_product_adapters::{ProductInboundAck, ProductInboundPayload};
+    use chrono::Utc;
+    use ironclaw_product_adapters::{
+        AdapterInstallationId, AuthRequirement, ExternalActorRef, ExternalConversationRef,
+        ExternalEventId, ParsedProductInbound, ProductAdapterId, ProductInboundAck,
+        ProductInboundEnvelope, ProductInboundPayload, ProtocolAuthEvidence, TrustedInboundContext,
+    };
     use ironclaw_turns::{AcceptedMessageRef, AdmissionRejection, TurnRunId};
 
     use super::*;
+
+    fn interaction_ref_envelope(
+        external_event_id: &str,
+        actor_id: &str,
+        conversation_id: &str,
+    ) -> ProductInboundEnvelope {
+        let adapter_id = ProductAdapterId::new("test_adapter").expect("adapter");
+        let installation_id = AdapterInstallationId::new("install_alpha").expect("install");
+        let evidence = ProtocolAuthEvidence::test_verified(
+            AuthRequirement::SharedSecretHeader {
+                header_name: "X-Secret".into(),
+            },
+            installation_id.as_str(),
+        );
+        let context = TrustedInboundContext::from_verified_evidence(
+            adapter_id,
+            installation_id,
+            Utc::now(),
+            &evidence,
+        )
+        .expect("trusted context");
+        let parsed = ParsedProductInbound::new(
+            ExternalEventId::new(external_event_id).expect("event"),
+            ExternalActorRef::new("test", actor_id, None::<String>).expect("actor"),
+            ExternalConversationRef::new(None, conversation_id, None, None).expect("conversation"),
+            ProductInboundPayload::NoOp,
+        )
+        .expect("parsed inbound");
+        ProductInboundEnvelope::from_trusted_parse(context, parsed).expect("envelope")
+    }
+
+    #[test]
+    fn interaction_accepted_message_ref_includes_actor_and_conversation_identity() {
+        let base = interaction_ref_envelope("evt:same", "user1", "conv1");
+        let other_actor = interaction_ref_envelope("evt:same", "user2", "conv1");
+        let other_conversation = interaction_ref_envelope("evt:same", "user1", "conv2");
+
+        let base_ref = interaction_accepted_message_ref("approval", &base).expect("base ref");
+        assert_ne!(
+            base_ref,
+            interaction_accepted_message_ref("approval", &other_actor).expect("actor ref")
+        );
+        assert_ne!(
+            base_ref,
+            interaction_accepted_message_ref("approval", &other_conversation)
+                .expect("conversation ref")
+        );
+    }
 
     #[test]
     fn dispatch_kind_from_ack_uses_submitted_or_active_run_ids() {

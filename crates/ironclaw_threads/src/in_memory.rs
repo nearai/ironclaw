@@ -543,6 +543,24 @@ impl SessionThreadService for InMemorySessionThreadService {
             .map(history_message))
     }
 
+    async fn finalized_assistant_message_by_run(
+        &self,
+        request: crate::FinalizedAssistantMessageByRunRequest,
+    ) -> Result<Option<ThreadMessageRecord>, SessionThreadError> {
+        let state = self.state.lock().await;
+        let thread = get_thread(&state, &request.scope, &request.thread_id)?;
+        Ok(thread
+            .messages
+            .iter()
+            .rev()
+            .find(|message| {
+                message.kind == MessageKind::Assistant
+                    && message.status == MessageStatus::Finalized
+                    && message.turn_run_id.as_deref() == Some(request.turn_run_id.as_str())
+            })
+            .map(history_message))
+    }
+
     async fn read_thread(
         &self,
         request: ThreadHistoryRequest,

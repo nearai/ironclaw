@@ -1,6 +1,9 @@
 //! Adapter from product workflow binding requests to `ironclaw_conversations`.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{Arc, Mutex},
+};
 
 use async_trait::async_trait;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
@@ -32,7 +35,8 @@ impl ProductInstallationKey {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum ProductActorBindingPolicy {
     /// Resolve only actor pairings that already exist in the canonical
-    /// conversations service.
+    /// conversations service. This policy is fail-closed: first-time external
+    /// actors are rejected instead of being auto-bound.
     #[default]
     ExistingConversationPairings,
     /// Allow only these host-preconfigured external actors and write their
@@ -130,6 +134,14 @@ impl StaticProductInstallationResolver {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct PreconfiguredActorCacheKey {
+    adapter_id: ProductAdapterId,
+    installation_id: AdapterInstallationId,
+    external_actor_ref: ExternalActorRef,
+    user_id: UserId,
+}
+
 /// Product workflow binding service backed by the canonical conversations
 /// service. Tenant selection comes only from trusted installation config.
 #[derive(Clone)]
@@ -137,6 +149,7 @@ pub struct ProductConversationBindingService {
     conversations: Arc<dyn ironclaw_conversations::ConversationBindingService>,
     actor_pairings: Option<Arc<dyn ironclaw_conversations::ConversationActorPairingService>>,
     installations: StaticProductInstallationResolver,
+    preconfigured_pairing_cache: Arc<Mutex<HashSet<PreconfiguredActorCacheKey>>>,
 }
 
 impl ProductConversationBindingService {
@@ -148,6 +161,7 @@ impl ProductConversationBindingService {
             conversations,
             actor_pairings: None,
             installations,
+            preconfigured_pairing_cache: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -167,6 +181,17 @@ impl ProductConversationBindingService {
         let Some(user_id) = ensure_preconfigured_actor_allowed(installation_scope, request)? else {
             return Ok(());
         };
+        let cache_key = preconfigured_actor_cache_key(request, user_id.clone());
+        if self
+            .preconfigured_pairing_cache
+            .lock()
+            .map_err(|_| ProductWorkflowError::BindingResolutionFailed {
+                reason: "preconfigured actor binding cache lock poisoned".into(),
+            })?
+            .contains(&cache_key)
+        {
+            return Ok(());
+        }
         let Some(actor_pairings) = &self.actor_pairings else {
             return Err(ProductWorkflowError::BindingResolutionFailed {
                 reason:
@@ -183,7 +208,26 @@ impl ProductConversationBindingService {
                 user_id.clone(),
             )
             .await
-            .map_err(map_conversation_error)
+            .map_err(map_conversation_error)?;
+        self.preconfigured_pairing_cache
+            .lock()
+            .map_err(|_| ProductWorkflowError::BindingResolutionFailed {
+                reason: "preconfigured actor binding cache lock poisoned".into(),
+            })?
+            .insert(cache_key);
+        Ok(())
+    }
+}
+
+fn preconfigured_actor_cache_key(
+    request: &ResolveBindingRequest,
+    user_id: UserId,
+) -> PreconfiguredActorCacheKey {
+    PreconfiguredActorCacheKey {
+        adapter_id: request.adapter_id.clone(),
+        installation_id: request.installation_id.clone(),
+        external_actor_ref: request.external_actor_ref.clone(),
+        user_id,
     }
 }
 

@@ -138,6 +138,7 @@ uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 async-trait = "0.1"
+hmac = "0.12"
 http = "1"
 http-body-util = "0.1"
 ironclaw_common = { path = "../ironclaw_common" }
@@ -151,6 +152,7 @@ ironclaw_product_workflow = { path = "../ironclaw_product_workflow", features = 
 ironclaw_product_adapters = { path = "../ironclaw_product_adapters" }
 rust_decimal = { version = "1", features = ["serde", "serde-with-str"] }
 rust_decimal_macros = "1"
+sha2 = "0.10"
 tempfile = "3"
 testcontainers-modules = { version = "0.11", features = ["postgres"] }
 tokio = { version = "1", features = ["macros", "net", "rt", "rt-multi-thread", "time"] }

@@ -15,7 +15,8 @@ use ironclaw_product_adapters::{
     ProductAdapterError, ProductAdapterId, ProductInboundAck, ProductInboundEnvelope,
     ProductInboundPayload, ProductRejection, ProductRejectionDisposition, ProductRejectionKind,
     ProductTriggerReason, ProductWorkflow, ProductWorkflowRejectionKind, ProjectionCursor,
-    ProjectionSubscriptionPayload, ProtocolAuthEvidence, TrustedInboundContext, UserMessagePayload,
+    ProjectionSubscriptionPayload, ProtocolAuthEvidence, ScopedApprovalResolutionPayload,
+    TrustedInboundContext, UserMessagePayload,
 };
 use ironclaw_product_workflow::{
     ActionDispatchKind, ActionFingerprintKey, ApprovalInteractionDecision,
@@ -167,16 +168,28 @@ impl TurnCoordinator for RecordingTurnCoordinator {
 }
 
 struct RecordingApprovalInteractionService {
-    gate_ref: GateRef,
-    run_id: TurnRunId,
+    pending: Vec<(GateRef, TurnRunId)>,
+    fallback_run_id: TurnRunId,
     resolutions: Mutex<Vec<ResolveApprovalInteractionRequest>>,
 }
 
 impl RecordingApprovalInteractionService {
     fn new(gate_ref: GateRef, run_id: TurnRunId) -> Self {
         Self {
-            gate_ref,
-            run_id,
+            pending: vec![(gate_ref, run_id)],
+            fallback_run_id: run_id,
+            resolutions: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn with_pending(pending: Vec<(GateRef, TurnRunId)>) -> Self {
+        let fallback_run_id = pending
+            .first()
+            .map(|(_, run_id)| *run_id)
+            .unwrap_or_else(TurnRunId::new);
+        Self {
+            pending,
+            fallback_run_id,
             resolutions: Mutex::new(Vec::new()),
         }
     }
@@ -194,14 +207,18 @@ impl ApprovalInteractionService for RecordingApprovalInteractionService {
     ) -> Result<ListPendingApprovalsResponse, ProductWorkflowError> {
         let scope = ApprovalInteractionScope::from_turn(&request.scope, &request.actor);
         Ok(ListPendingApprovalsResponse {
-            approvals: vec![PendingApprovalInteractionView {
-                scope,
-                run_id: self.run_id,
-                gate_ref: self.gate_ref.clone(),
-                approval_request_id: ApprovalRequestId::new(),
-                summary: "Approval required".to_string(),
-                action: ironclaw_product_workflow::ApprovalInteractionActionView::Other,
-            }],
+            approvals: self
+                .pending
+                .iter()
+                .map(|(gate_ref, run_id)| PendingApprovalInteractionView {
+                    scope: scope.clone(),
+                    run_id: *run_id,
+                    gate_ref: gate_ref.clone(),
+                    approval_request_id: ApprovalRequestId::new(),
+                    summary: "Approval required".to_string(),
+                    action: ironclaw_product_workflow::ApprovalInteractionActionView::Other,
+                })
+                .collect(),
         })
     }
 
@@ -209,7 +226,7 @@ impl ApprovalInteractionService for RecordingApprovalInteractionService {
         &self,
         request: ResolveApprovalInteractionRequest,
     ) -> Result<ResolveApprovalInteractionResponse, ProductWorkflowError> {
-        let run_id = request.run_id_hint.unwrap_or(self.run_id);
+        let run_id = request.run_id_hint.unwrap_or(self.fallback_run_id);
         self.resolutions.lock().expect("lock").push(request);
         Ok(
             match self
@@ -623,6 +640,50 @@ async fn approval_resolution_payload_routes_through_approval_interaction_service
 }
 
 #[tokio::test]
+async fn concrete_approval_resolution_rejects_unknown_installation_via_product_binding_service() {
+    let conversations = Arc::new(InMemoryConversationServices::default());
+    let conversation_port: Arc<dyn ironclaw_conversations::ConversationBindingService> =
+        conversations;
+    let binding = Arc::new(ProductConversationBindingService::new(
+        conversation_port,
+        StaticProductInstallationResolver::default(),
+    ));
+    let gate_ref = approval_gate_ref(ApprovalRequestId::new()).expect("approval gate ref");
+    let approval_service = Arc::new(RecordingApprovalInteractionService::new(
+        gate_ref.clone(),
+        TurnRunId::new(),
+    ));
+    let workflow = DefaultProductWorkflow::new(
+        Arc::new(FakeInboundTurnService::new()),
+        Arc::new(InMemoryIdempotencyLedger::new()),
+        binding,
+    )
+    .with_approval_interaction_service(approval_service.clone());
+    let envelope = sample_envelope_with_payload(
+        "approval-unknown-installation",
+        ProductInboundPayload::ApprovalResolution(
+            ApprovalResolutionPayload::new(gate_ref.as_str(), ApprovalDecision::ApproveOnce)
+                .expect("approval payload"),
+        ),
+    );
+
+    let ack = workflow
+        .accept_inbound(envelope)
+        .await
+        .expect("unknown installation should settle as rejected ack");
+
+    assert!(matches!(
+        ack,
+        ProductInboundAck::Rejected(ProductRejection {
+            kind: ProductRejectionKind::UnknownInstallation,
+            disposition: ProductRejectionDisposition::Permanent,
+            ..
+        })
+    ));
+    assert!(approval_service.resolutions().is_empty());
+}
+
+#[tokio::test]
 async fn auth_resolution_payload_routes_through_auth_interaction_service() {
     let inbound = Arc::new(FakeInboundTurnService::new());
     let ledger = Arc::new(FakeIdempotencyLedger::new());
@@ -864,6 +925,43 @@ async fn approval_resolution_always_allow_is_rejected_without_approval_interacti
             retryable: false,
             ..
         }
+    ));
+    assert!(approval_service.resolutions().is_empty());
+}
+
+#[tokio::test]
+async fn scoped_approval_resolution_rejects_ambiguous_gate() {
+    let inbound = Arc::new(FakeInboundTurnService::new());
+    let ledger = Arc::new(FakeIdempotencyLedger::new());
+    let binding = Arc::new(FakeConversationBindingService::new());
+    let first_gate = approval_gate_ref(ApprovalRequestId::new()).expect("first gate ref");
+    let second_gate = approval_gate_ref(ApprovalRequestId::new()).expect("second gate ref");
+    let approval_service = Arc::new(RecordingApprovalInteractionService::with_pending(vec![
+        (first_gate, TurnRunId::new()),
+        (second_gate, TurnRunId::new()),
+    ]));
+    let workflow = DefaultProductWorkflow::new(inbound, ledger, binding)
+        .with_approval_interaction_service(approval_service.clone());
+    let envelope = sample_envelope_with_payload(
+        "scoped-approval-ambiguous",
+        ProductInboundPayload::ScopedApprovalResolution(
+            ScopedApprovalResolutionPayload::new(ApprovalDecision::ApproveOnce)
+                .expect("scoped approval payload"),
+        ),
+    );
+
+    let ack = workflow
+        .accept_inbound(envelope)
+        .await
+        .expect("ambiguous gate should settle as rejected ack");
+
+    assert!(matches!(
+        ack,
+        ProductInboundAck::Rejected(ProductRejection {
+            kind: ProductRejectionKind::PolicyDenied,
+            disposition: ProductRejectionDisposition::Permanent,
+            ..
+        })
     ));
     assert!(approval_service.resolutions().is_empty());
 }
@@ -1654,6 +1752,44 @@ async fn preconfigured_actor_binding_rejects_unconfigured_actor() {
             retryable: false,
             ..
         }
+    ));
+}
+
+#[tokio::test]
+async fn existing_pairings_policy_rejects_new_user_without_binding() {
+    let conversations = Arc::new(InMemoryConversationServices::default());
+    let binding = product_binding_service(
+        conversations,
+        vec![(
+            "test_adapter",
+            "install_alpha",
+            "tenant:alpha",
+            "agent:alpha",
+            Some("project:alpha"),
+        )],
+    );
+    let workflow = DefaultProductWorkflow::new(
+        Arc::new(DefaultInboundTurnService::new(
+            binding.clone(),
+            InMemorySessionThreadService::default(),
+            Arc::new(RecordingTurnCoordinator::default()),
+        )),
+        Arc::new(InMemoryIdempotencyLedger::new()),
+        Arc::new(binding),
+    );
+
+    let ack = workflow
+        .accept_inbound(sample_envelope("existing-pairings-new-user"))
+        .await
+        .expect("missing existing pairing should settle as rejected ack");
+
+    assert!(matches!(
+        ack,
+        ProductInboundAck::Rejected(ProductRejection {
+            kind: ProductRejectionKind::BindingRequired,
+            disposition: ProductRejectionDisposition::Permanent,
+            ..
+        })
     ));
 }
 
