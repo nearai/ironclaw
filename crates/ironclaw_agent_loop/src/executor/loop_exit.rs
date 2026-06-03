@@ -1,5 +1,8 @@
 use async_trait::async_trait;
-use ironclaw_turns::{LoopExit, LoopFailureKind};
+use ironclaw_turns::{
+    LoopExit, LoopMessageRef,
+    run_profile::{AssistantReply, FinalizeAssistantMessage},
+};
 
 use crate::{
     state::{CheckpointKind, LoopExecutionState},
@@ -10,6 +13,12 @@ use super::{
     AgentLoopExecutorError, CheckpointStage, ExecutorStage, StageContext, completed_exit,
     failed_exit,
 };
+
+const NO_PROGRESS_FALLBACK_REPLY: &str = concat!(
+    "I stopped because I was repeating the same step without making progress. ",
+    "The recent tool activity shows the repeated calls, results, and any failure summaries. ",
+    "Try again with a narrower request, or fix the failed tool/resource and rerun it."
+);
 
 #[derive(Debug, Default, Clone, Copy)]
 pub(crate) struct ExitStage;
@@ -47,15 +56,13 @@ impl ExitStage {
                 completed_exit(ctx.host, checked.state, Some(checked.checkpoint_id))
             }
             StopKind::NoProgressDetected => {
+                let mut state = state;
+                let reply_ref = finalize_no_progress_fallback(ctx).await?;
+                state.assistant_refs.push(reply_ref);
                 let checked = CheckpointStage
                     .write(ctx, state, CheckpointKind::Final)
                     .await?;
-                failed_exit(
-                    ctx.host,
-                    checked.state,
-                    LoopFailureKind::NoProgressDetected,
-                    Some(checked.checkpoint_id),
-                )
+                completed_exit(ctx.host, checked.state, Some(checked.checkpoint_id))
             }
             StopKind::Aborted(failure_kind) => {
                 let checked = CheckpointStage
@@ -70,4 +77,21 @@ impl ExitStage {
             }
         }
     }
+}
+
+async fn finalize_no_progress_fallback(
+    ctx: StageContext<'_>,
+) -> Result<LoopMessageRef, AgentLoopExecutorError> {
+    let reply_ref = ctx
+        .host
+        .finalize_assistant_message(FinalizeAssistantMessage {
+            reply: AssistantReply {
+                content: NO_PROGRESS_FALLBACK_REPLY.to_string(),
+            },
+        })
+        .await
+        .map_err(|_| AgentLoopExecutorError::HostUnavailable {
+            stage: super::HostStage::Transcript,
+        })?;
+    Ok(reply_ref)
 }

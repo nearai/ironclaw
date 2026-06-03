@@ -93,6 +93,25 @@ impl UserDirectory for WebuiUserDirectory {
         // on, so an allowlisted verified secondary email wins over an
         // off-list primary.
         let Some(admitted_email) = self.admitted_email(profile) else {
+            // Redacted diagnostic so an operator can see which domain to add
+            // to IRONCLAW_REBORN_WEBUI_ALLOWED_EMAIL_DOMAINS. Logs only the
+            // email DOMAINS the provider returned (never the local-part or
+            // full address) plus whether the canonical email was verified.
+            let candidate_domains: std::collections::BTreeSet<String> = profile
+                .email
+                .as_deref()
+                .into_iter()
+                .chain(profile.verified_emails.iter().map(String::as_str))
+                .filter_map(|email| email.rsplit_once('@').map(|(_, d)| d.to_ascii_lowercase()))
+                .collect();
+            tracing::warn!(
+                target: "ironclaw::reborn::webui_ingress::auth",
+                provider = provider.as_str(),
+                email_verified = profile.email_verified,
+                candidate_domains = ?candidate_domains,
+                allowed_domains = ?self.allowed_email_domains,
+                "WebChat SSO admission denied: no verified email on an allowlisted domain"
+            );
             return Err(UserDirectoryError::Unknown);
         };
         self.store

@@ -93,6 +93,10 @@ pub fn build_webui_services(
             lifecycle_facade =
                 lifecycle_facade.with_extension_management(extension_management.clone());
         }
+        if let Some(runtime_http_egress) = &local_runtime.runtime_http_egress {
+            lifecycle_facade =
+                lifecycle_facade.with_runtime_http_egress(runtime_http_egress.clone());
+        }
         api = api.with_lifecycle_product_facade(Arc::new(lifecycle_facade));
     }
     if let Some(product_auth) = &services.product_auth {

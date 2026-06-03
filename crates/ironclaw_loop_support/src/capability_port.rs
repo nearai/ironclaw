@@ -47,6 +47,7 @@ use self::surface_snapshot::{
 // snapshot logic in `capability_port/surface_snapshot.rs` while preserving the
 // existing adapter boundary.
 const PROVIDER_TOOL_NAME_DIGEST_BYTES: usize = 32;
+const PROVIDER_TOOL_CALL_INPUT_REF_PREFIX: &str = "input:provider-tool-";
 
 #[async_trait]
 pub trait LoopCapabilityInputResolver: Send + Sync {
@@ -1115,8 +1116,26 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
             .input_resolver
             .resolve_capability_input(&self.run_context, &request.input_ref)
             .await?;
-        let input =
-            prepare_provider_arguments(&input, &capability.parameters_schema, "capability input")?;
+        let input = match prepare_provider_arguments(
+            &input,
+            &capability.parameters_schema,
+            "capability input",
+        ) {
+            Ok(input) => input,
+            Err(error)
+                if error.kind == AgentLoopHostErrorKind::InvalidInvocation
+                    && is_provider_tool_call_input_ref(&request.input_ref) =>
+            {
+                let result = Ok(CapabilityOutcome::Failed(CapabilityFailure {
+                    error_kind: CapabilityFailureKind::InvalidInput,
+                    safe_summary: error.safe_summary,
+                }));
+                guard.commit();
+                self.record_loop_completed(&idempotency_key, result.clone())?;
+                return result;
+            }
+            Err(error) => return Err(error),
+        };
         let input = host_runtime_input_for_capability(&request.capability_id, input)?;
         let invocation_context = invocation_context_from_visible(
             &self.visible_request.context,
@@ -1586,12 +1605,20 @@ fn provider_tool_call_input_ref(
     );
     let digest = sha256_digest_token(payload.as_bytes());
     let digest = digest.strip_prefix("sha256:").unwrap_or(&digest);
-    CapabilityInputRef::new(format!("input:provider-tool-{digest}")).map_err(|_| {
-        AgentLoopHostError::new(
-            AgentLoopHostErrorKind::Internal,
-            "provider tool-call input ref could not be represented",
-        )
-    })
+    CapabilityInputRef::new(format!("{PROVIDER_TOOL_CALL_INPUT_REF_PREFIX}{digest}")).map_err(
+        |_| {
+            AgentLoopHostError::new(
+                AgentLoopHostErrorKind::Internal,
+                "provider tool-call input ref could not be represented",
+            )
+        },
+    )
+}
+
+fn is_provider_tool_call_input_ref(input_ref: &CapabilityInputRef) -> bool {
+    input_ref
+        .as_str()
+        .starts_with(PROVIDER_TOOL_CALL_INPUT_REF_PREFIX)
 }
 
 fn loop_surface_version(
@@ -2567,6 +2594,9 @@ mod tests {
 
         assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
         assert!(error.safe_summary.contains("schema validation"));
+        assert!(
+            ironclaw_turns::run_profile::LoopSafeSummary::new(error.safe_summary.clone()).is_ok()
+        );
     }
 
     #[test]
@@ -2596,6 +2626,9 @@ mod tests {
 
         assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
         assert!(error.safe_summary.contains("schema validation"));
+        assert!(
+            ironclaw_turns::run_profile::LoopSafeSummary::new(error.safe_summary.clone()).is_ok()
+        );
     }
 
     #[test]
@@ -2639,6 +2672,27 @@ mod tests {
         )
         .expect_err("composed schema constraints should fail before dispatch");
         assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+    }
+
+    #[test]
+    fn provider_argument_schema_failure_sanitizes_sensitive_path_markers() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "secret_api_key": { "type": "integer" }
+            }
+        });
+
+        let error = prepare_provider_arguments(
+            &serde_json::json!({ "secret_api_key": "not an integer" }),
+            &schema,
+            "provider arguments",
+        )
+        .expect_err("schema failure should remain a model-visible invocation error");
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+        assert!(!error.safe_summary.contains("secret"));
+        assert!(!error.safe_summary.contains("api_key"));
     }
 
     /// Regression for Gemini review comment: a plain string that starts with
@@ -3934,6 +3988,87 @@ mod tests {
         assert!(
             runtime.take_requests().is_empty(),
             "invalid direct input must not reach the runtime"
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_runtime_tool_call_schema_failure_is_model_visible() {
+        let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
+        let provider_id = ExtensionId::new("demo").expect("valid provider id");
+        let mut visible = visible_capability(capability_id.clone(), provider_id.clone());
+        visible.descriptor.parameters_schema = serde_json::json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "message": { "type": "string" }
+            },
+            "required": ["message"]
+        });
+        let runtime = Arc::new(RecordingHostRuntime::new(vec![visible]));
+        let result_writer = Arc::new(RecordingResultWriter::default());
+        let context = execution_context("thread-provider-runtime-schema-validation");
+        let run_context = loop_run_context(&context).await;
+        let port = HostRuntimeLoopCapabilityPortFactory::new(
+            runtime.clone(),
+            visible_request(context).with_provider_trust(std::collections::BTreeMap::from([(
+                provider_id,
+                dispatch_trust_decision(),
+            )])),
+            dummy_input_resolver(),
+            result_writer.clone(),
+            dummy_milestone_sink(),
+        )
+        .port_for_run_context(run_context);
+        let surface = port
+            .visible_capabilities(VisibleCapabilityRequest {})
+            .await
+            .expect("visible capabilities load");
+        let tool_definition = port
+            .tool_definitions()
+            .expect("tool definitions")
+            .into_iter()
+            .find(|definition| definition.capability_id == capability_id)
+            .expect("runtime capability advertised to provider");
+
+        let mut call = provider_tool_call();
+        call.name = tool_definition.name;
+        call.arguments = serde_json::json!({});
+        port.validate_provider_tool_call(&call)
+            .expect("schema-invalid provider calls should stage for model-visible failure");
+        let candidate = port
+            .register_provider_tool_call(call)
+            .await
+            .expect("schema-invalid provider calls should register");
+        assert!(
+            candidate
+                .input_ref
+                .as_str()
+                .starts_with("input:provider-tool-")
+        );
+
+        let outcome = port
+            .invoke_capability(CapabilityInvocation {
+                surface_version: surface.version,
+                capability_id,
+                input_ref: candidate.input_ref,
+            })
+            .await
+            .expect("schema-invalid provider calls should produce a capability failure");
+
+        assert!(matches!(
+            outcome,
+            CapabilityOutcome::Failed(CapabilityFailure {
+                error_kind: CapabilityFailureKind::InvalidInput,
+                safe_summary
+            }) if safe_summary.contains("schema validation")
+        ));
+        assert!(
+            runtime.take_requests().is_empty(),
+            "schema-invalid provider input must not reach the runtime"
+        );
+        assert!(
+            result_writer.records().is_empty(),
+            "schema-invalid provider calls should report through the provider error-result path"
         );
     }
 

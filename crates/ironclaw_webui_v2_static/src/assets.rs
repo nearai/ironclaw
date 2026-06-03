@@ -96,6 +96,34 @@ mod tests {
     }
 
     #[test]
+    fn chat_pending_reconciliation_has_caller_level_js_regression() {
+        let use_chat = asset_text("js/pages/chat/hooks/useChat.js");
+        assert!(use_chat.contains("recordAcceptedMessageRef("));
+        assert!(use_chat.contains("pendingMessagesRef.current"));
+        assert!(use_chat.contains("response?.accepted_message_ref"));
+
+        let pending_messages = asset_text("js/pages/chat/lib/pending-messages.js");
+        assert!(pending_messages.contains("timelineMessageIdFromAcceptedRef"));
+        assert!(
+            pending_messages
+                .contains("return ref.startsWith(\"msg:\") ? ref.slice(\"msg:\".length) : null;")
+        );
+
+        let regression = asset_text("js/pages/chat/lib/useChat-send.test.mjs");
+        assert!(regression.contains("useChat.send: accepted ref reconciles"));
+        assert!(regression.contains("accepted_message_ref: \"msg:message-1\""));
+        assert!(regression.contains("await loadHistory();"));
+        assert!(regression.contains("[\"msg-message-1\"]"));
+
+        let pending_regression = asset_text("js/pages/chat/lib/pending-messages.test.mjs");
+        assert!(pending_regression.contains(
+            "recordAcceptedMessageRef: null and non-msg refs leave pending record unchanged"
+        ));
+        assert!(pending_regression.contains("\"thread:1\""));
+        assert!(pending_regression.contains("\"message-1\""));
+    }
+
+    #[test]
     fn chat_projection_text_preserves_pending_gate() {
         let events = asset_text("js/pages/chat/lib/useChatEvents.js");
         let text_branch = events
@@ -106,7 +134,7 @@ mod tests {
             .next()
             .expect("thinking branch follows text branch");
         assert!(
-            text_branch.contains("terminal run_status is the only"),
+            text_branch.contains("run_status remains the source of"),
             "text branch should document that run_status owns gate clearing"
         );
         assert!(
@@ -121,8 +149,9 @@ mod tests {
         assert!(groups.contains("function isFinalAssistantReply"));
         assert!(groups.contains("msg.isFinalReply === true"));
         assert!(groups.contains("msg.status === \"finalized\""));
-        assert!(groups.contains("appendGroupedMessages(items, reordered.before);"));
-        assert!(groups.contains("appendGroupedMessages(items, reordered.activity);"));
+        assert!(groups.contains("function followingActivity"));
+        assert!(groups.contains("type: \"activity-run\""));
+        assert!(groups.contains("appendActivityRun(items, activity);"));
         assert!(!groups.contains("lastAssistantReplyIndex"));
 
         let history = asset_text("js/pages/chat/lib/history-messages.js");
@@ -156,6 +185,26 @@ mod tests {
         assert!(
             extension_card.contains("${onboardingHint}"),
             "extension cards must render the projected onboarding hint"
+        );
+    }
+
+    #[test]
+    fn extension_oauth_setup_refreshes_while_popup_is_open() {
+        let use_extensions = asset_text("js/pages/extensions/hooks/useExtensions.js");
+
+        assert!(
+            use_extensions.contains("OAUTH_SETUP_REFRESH_MS = 2000"),
+            "OAuth setup should poll often enough for setup-complete state to appear promptly"
+        );
+        assert!(
+            use_extensions.contains("const watchOauthProgress = React.useCallback"),
+            "OAuth setup should watch in-flight authorization, not only popup close"
+        );
+        assert!(
+            use_extensions.contains(
+                "refreshSetupState();\n        if (\n          setupIsConfigured() ||\n          (popup && popup.closed)"
+            ),
+            "OAuth setup must refresh setup state before waiting for popup close"
         );
     }
 }

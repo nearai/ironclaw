@@ -7,9 +7,9 @@
  * Opens `gate.authorizationUrl` in a new browser tab via a user-gesture
  * click. The OAuth callback is handled server-side
  * (`/api/reborn/product-auth/oauth/callback/{flow_id}`), which resumes the
- * paused run. The WebUI observes the resume via the next projection_update
- * (terminal run_status flip), so this card unmounts automatically only after
- * the run leaves the blocked auth state.
+ * paused run. The callback page emits a same-origin completion signal so the
+ * WebUI can clear this gate immediately, then projection_update confirms the
+ * resumed run state.
  *
  * Security invariants (issue #4112):
  * - No raw token, PKCE verifier, opaque state, or auth code is ever handled

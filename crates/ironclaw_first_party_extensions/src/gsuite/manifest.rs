@@ -211,6 +211,13 @@ const CALENDAR_EVENTS_SCOPES: &[&str] = &[ironclaw_auth::GOOGLE_CALENDAR_EVENTS_
 const GMAIL_READONLY_SCOPES: &[&str] = &[ironclaw_auth::GOOGLE_GMAIL_READONLY_SCOPE];
 const GMAIL_SEND_SCOPES: &[&str] = &[ironclaw_auth::GOOGLE_GMAIL_SEND_SCOPE];
 const GMAIL_MODIFY_SCOPES: &[&str] = &[ironclaw_auth::GOOGLE_GMAIL_MODIFY_SCOPE];
+pub const GSUITE_PROVIDER_SCOPES: &[&str] = &[
+    ironclaw_auth::GOOGLE_CALENDAR_READONLY_SCOPE,
+    ironclaw_auth::GOOGLE_CALENDAR_EVENTS_SCOPE,
+    ironclaw_auth::GOOGLE_GMAIL_READONLY_SCOPE,
+    ironclaw_auth::GOOGLE_GMAIL_SEND_SCOPE,
+    ironclaw_auth::GOOGLE_GMAIL_MODIFY_SCOPE,
+];
 
 pub fn gsuite_package_specs() -> &'static [GsuitePackageSpec] {
     &GSUITE_PACKAGE_SPECS

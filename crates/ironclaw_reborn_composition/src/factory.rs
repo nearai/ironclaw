@@ -34,7 +34,8 @@ use ironclaw_filesystem::{LocalFilesystem, ScopedFilesystem};
 use ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy;
 use ironclaw_host_api::runtime_policy::{FilesystemBackendKind, ProcessBackendKind, SecretMode};
 use ironclaw_host_api::{
-    EffectKind, ExtensionId, HostPath, MountPermissions, MountView, PackageId, UserId, VirtualPath,
+    EffectKind, ExtensionId, HostPath, MountPermissions, MountView, PackageId, RuntimeHttpEgress,
+    UserId, VirtualPath,
 };
 #[cfg(feature = "libsql")]
 use ironclaw_host_api::{MountAlias, MountGrant};
@@ -346,6 +347,7 @@ pub(crate) struct RebornLocalRuntimeServices {
     // wiring need scoped storage/registry ownership before this is reused
     // outside local-dev composition. Tracked in #4091.
     pub(crate) extension_management: Option<Arc<RebornLocalExtensionManagementPort>>,
+    pub(crate) runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
     pub(crate) skill_mounts: MountView,
     pub(crate) memory_mounts: MountView,
     pub(crate) skill_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
@@ -664,6 +666,7 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     register_bundled_gsuite_first_party_handlers(
         &mut first_party_registry,
         product_auth.credential_account_service(),
+        product_auth.credential_account_record_source(),
         Arc::new(ProductAuthRuntimeGsuiteCredentialStager::new(
             product_auth_runtime_ports.clone(),
         )),
@@ -736,6 +739,7 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     services = services.with_first_party_capabilities(Arc::new(first_party_registry));
     if let Some(local_runtime) = Arc::get_mut(&mut store_graph.local_runtime) {
         local_runtime.extension_management = Some(extension_management);
+        local_runtime.runtime_http_egress = Some(product_auth_runtime_ports.runtime_http_egress());
     } else {
         return Err(RebornBuildError::InvalidConfig {
             reason: "local-dev extension lifecycle facade could not be attached".to_string(),
@@ -826,6 +830,7 @@ fn build_local_dev_store_graph(
         budget_gate_store,
         skill_management,
         extension_management: None,
+        runtime_http_egress: None,
         skill_mounts,
         memory_mounts,
         skill_filesystem,
@@ -911,6 +916,7 @@ fn build_local_dev_store_graph(
         budget_gate_store,
         skill_management,
         extension_management: None,
+        runtime_http_egress: None,
         skill_mounts,
         memory_mounts,
         skill_filesystem,
@@ -2132,6 +2138,7 @@ where
     register_bundled_gsuite_first_party_handlers(
         &mut first_party_registry,
         product_auth_services.credential_account_service(),
+        product_auth_services.credential_account_record_source(),
         Arc::new(ProductAuthRuntimeGsuiteCredentialStager::new(
             product_auth_runtime_ports.clone(),
         )),

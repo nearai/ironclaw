@@ -259,8 +259,9 @@ async fn filesystem_runtime_account_selection_matches_new_thread_reusable_accoun
         .await
         .unwrap();
 
-    assert_eq!(created.access_secret, Some(resolved.clone()));
-    assert_eq!(resolved, access_secret);
+    assert_eq!(created.access_secret, Some(resolved.handle.clone()));
+    assert_eq!(resolved.handle, access_secret);
+    assert_eq!(resolved.scope, created.scope.resource);
 }
 
 #[tokio::test]

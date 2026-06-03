@@ -1176,7 +1176,7 @@ fn sanitize_result_ref_suffix_handles_empty_special_chars_and_truncation() {
 }
 
 #[tokio::test]
-async fn exit_stage_no_progress_detected_exits_with_failed_loop_exit() {
+async fn exit_stage_no_progress_detected_finalizes_fallback_reply() {
     let host = MockHost::new(Vec::new());
     let family = crate::families::default();
     let ctx = StageContext {
@@ -1197,11 +1197,11 @@ async fn exit_stage_no_progress_detected_exits_with_failed_loop_exit() {
         .expect("exit stage");
 
     match exit {
-        LoopExit::Failed(failed) => {
-            assert_eq!(failed.reason_kind, LoopFailureKind::NoProgressDetected);
-            assert!(failed.checkpoint_id.is_some());
+        LoopExit::Completed(completed) => {
+            assert_eq!(completed.reply_message_refs.len(), 1);
+            assert!(completed.final_checkpoint_id.is_some());
         }
-        other => panic!("expected failed exit, got {other:?}"),
+        other => panic!("expected completed exit with fallback reply, got {other:?}"),
     }
 }
 
@@ -2165,6 +2165,11 @@ async fn model_visible_provider_tool_failures_append_failure_tool_result_for_rep
             CapabilityFailureKind::InvalidInput,
             "invalid input",
             "capability failed with invalid_input: invalid input",
+        ),
+        (
+            CapabilityFailureKind::InvalidInput,
+            "provider arguments failed schema validation at instance path root against schema path required",
+            "capability failed with invalid_input: provider arguments failed schema validation at instance path root against schema path required",
         ),
         (
             CapabilityFailureKind::MissingRuntime,

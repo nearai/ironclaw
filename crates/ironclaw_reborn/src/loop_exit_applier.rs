@@ -12,9 +12,9 @@ use ironclaw_threads::{
     ThreadMessageId, ThreadMessageRecord, ThreadScope, ToolResultReferenceEnvelope,
 };
 use ironclaw_turns::{
-    GetLoopCheckpointRequest, GetRunStateRequest, LoopBlockedKind, LoopCheckpointKind,
-    LoopMessageRef, LoopResultRef, TurnError, TurnId, TurnRunId, TurnScope, TurnStateStore,
-    TurnStatus,
+    CheckpointStateStore, GetCheckpointStateRequest, GetLoopCheckpointRequest, GetRunStateRequest,
+    LoopBlockedKind, LoopCheckpointKind, LoopMessageRef, LoopResultRef, TurnError, TurnId,
+    TurnRunId, TurnScope, TurnStateStore, TurnStatus,
 };
 
 pub use ironclaw_turns::loop_exit::{
@@ -163,6 +163,7 @@ where
     thread_service: Arc<S>,
     turn_state_store: Arc<dyn TurnStateStore>,
     loop_checkpoint_store: Arc<dyn ironclaw_turns::LoopCheckpointStore>,
+    checkpoint_state_store: Option<Arc<dyn CheckpointStateStore>>,
     thread_scope: Option<ThreadScope>,
     cancellation_factory: Option<Arc<dyn RunCancellationFactory>>,
 }
@@ -180,6 +181,7 @@ where
             thread_service,
             turn_state_store,
             loop_checkpoint_store,
+            checkpoint_state_store: None,
             thread_scope: None,
             cancellation_factory: None,
         }
@@ -195,9 +197,18 @@ where
             thread_service,
             turn_state_store,
             loop_checkpoint_store,
+            checkpoint_state_store: None,
             thread_scope: Some(thread_scope),
             cancellation_factory: None,
         }
+    }
+
+    pub fn with_checkpoint_state_store(
+        mut self,
+        checkpoint_state_store: Arc<dyn CheckpointStateStore>,
+    ) -> Self {
+        self.checkpoint_state_store = Some(checkpoint_state_store);
+        self
     }
 
     pub fn with_cancellation_factory(
@@ -336,12 +347,54 @@ where
 
     async fn verify_failure_evidence(
         &self,
-        _request: FailureEvidenceRequest<'_>,
+        request: FailureEvidenceRequest<'_>,
     ) -> Result<bool, TurnError> {
-        // Failure exits require durable diagnostic evidence before trusting the
-        // driver-supplied failure kind. The text-only adapter does not yet own
-        // that diagnostics store, so it fails closed.
-        Ok(false)
+        let Some(checkpoint_id) = request.failed.checkpoint_id else {
+            return Ok(false);
+        };
+        let Some(checkpoint_state_store) = &self.checkpoint_state_store else {
+            return Ok(false);
+        };
+        let Some(checkpoint) = self
+            .loop_checkpoint_store
+            .get_loop_checkpoint(GetLoopCheckpointRequest {
+                scope: request.scope.clone(),
+                turn_id: request.turn_id,
+                run_id: request.run_id,
+                checkpoint_id,
+            })
+            .await?
+        else {
+            return Ok(false);
+        };
+        if checkpoint.kind != LoopCheckpointKind::Final {
+            return Ok(false);
+        }
+        let Some(checkpoint_state) = checkpoint_state_store
+            .get_checkpoint_state(GetCheckpointStateRequest {
+                scope: request.scope.clone(),
+                turn_id: request.turn_id,
+                run_id: request.run_id,
+                state_ref: checkpoint.state_ref,
+                schema_id: checkpoint.schema_id,
+                schema_version: checkpoint.schema_version,
+                kind: checkpoint.kind,
+            })
+            .await?
+        else {
+            return Ok(false);
+        };
+        let state = match ironclaw_agent_loop::state::LoopExecutionState::from_checkpoint_payload(
+            checkpoint_state.payload.as_bytes(),
+            ironclaw_agent_loop::state::CheckpointKind::Final,
+        ) {
+            Ok(state) => state,
+            Err(_) => return Ok(false),
+        };
+        Ok(state
+            .recent_failure_kinds
+            .iter()
+            .any(|kind| *kind == request.failed.reason_kind))
     }
 
     async fn is_cancellation_observed(

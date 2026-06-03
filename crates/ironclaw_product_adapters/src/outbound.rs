@@ -608,6 +608,7 @@ pub enum ProductProjectionItem {
         id: String,
         body: String,
     },
+    CapabilityActivity(CapabilityActivityView),
     WorkSummary {
         id: String,
         run_id: TurnRunId,
@@ -648,6 +649,7 @@ impl ProductProjectionItem {
                 validate_bounded_text("projection_item_id", id, PROJECTION_ITEM_ID_MAX_BYTES)?;
                 validate_bounded_text("projection_text", body, PROJECTION_TEXT_MAX_BYTES)
             }
+            Self::CapabilityActivity(activity) => activity.validate(),
             Self::WorkSummary { id, body, .. } => {
                 validate_bounded_text("projection_item_id", id, PROJECTION_ITEM_ID_MAX_BYTES)?;
                 validate_bounded_text(
@@ -743,6 +745,7 @@ impl<'de> Deserialize<'de> for ProductProjectionItem {
                 id: String,
                 body: String,
             },
+            CapabilityActivity(CapabilityActivityView),
             WorkSummary {
                 id: String,
                 run_id: TurnRunId,
@@ -771,6 +774,9 @@ impl<'de> Deserialize<'de> for ProductProjectionItem {
         let value = match Wire::deserialize(deserializer)? {
             Wire::Text { id, body } => ProductProjectionItem::Text { id, body },
             Wire::Thinking { id, body } => ProductProjectionItem::Thinking { id, body },
+            Wire::CapabilityActivity(activity) => {
+                ProductProjectionItem::CapabilityActivity(activity)
+            }
             Wire::WorkSummary {
                 id,
                 run_id,
@@ -993,6 +999,42 @@ mod tests {
         assert_eq!(value["items"][0]["thinking"]["body"], "checking context");
         let decoded: ProductProjectionState =
             serde_json::from_value(value).expect("deserialize thinking projection");
+        assert_eq!(decoded, state);
+    }
+
+    #[test]
+    fn projection_state_round_trips_capability_activity_item() {
+        let invocation_id = InvocationId::new();
+        let state = ProductProjectionState::new(
+            "thread-1",
+            vec![ProductProjectionItem::CapabilityActivity(
+                CapabilityActivityView::new(CapabilityActivityViewInput {
+                    invocation_id,
+                    thread_id: Some(ThreadId::new("thread-1").unwrap()),
+                    capability_id: CapabilityId::new("builtin.http").unwrap(),
+                    status: CapabilityActivityStatusView::Started,
+                    provider: None,
+                    runtime: None,
+                    process_id: None,
+                    output_bytes: None,
+                    error_kind: None,
+                    updated_at: Utc::now(),
+                })
+                .expect("valid capability activity"),
+            )],
+        )
+        .expect("valid capability activity projection");
+        let value = serde_json::to_value(&state).expect("serialize");
+        assert_eq!(
+            value["items"][0]["capability_activity"]["capability_id"],
+            "builtin.http"
+        );
+        assert_eq!(
+            value["items"][0]["capability_activity"]["status"],
+            "started"
+        );
+        let decoded: ProductProjectionState =
+            serde_json::from_value(value).expect("deserialize capability activity projection");
         assert_eq!(decoded, state);
     }
 

@@ -209,18 +209,29 @@ impl ProductAuthProviderRuntimePorts {
         capability_id: &CapabilityId,
         handle: &SecretHandle,
     ) -> Result<(), ProductAuthCredentialStageError> {
+        self.stage_secret_from_scope_once(scope, scope, capability_id, handle)
+            .await
+    }
+
+    pub async fn stage_secret_from_scope_once(
+        &self,
+        source_scope: &ResourceScope,
+        target_scope: &ResourceScope,
+        capability_id: &CapabilityId,
+        handle: &SecretHandle,
+    ) -> Result<(), ProductAuthCredentialStageError> {
         let lease = self
             .secret_store
-            .lease_once(scope, handle)
+            .lease_once(source_scope, handle)
             .await
             .map_err(stage_secret_error)?;
         let secret = self
             .secret_store
-            .consume(scope, lease.id)
+            .consume(source_scope, lease.id)
             .await
             .map_err(stage_secret_error)?;
         self.secret_injection_store
-            .insert(scope, capability_id, handle, secret)
+            .insert(target_scope, capability_id, handle, secret)
             .map_err(|_| ProductAuthCredentialStageError::Backend)
     }
 }

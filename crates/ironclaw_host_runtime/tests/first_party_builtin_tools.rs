@@ -2203,18 +2203,19 @@ async fn builtin_skill_install_accepts_content_without_url_fetch() {
 }
 
 #[tokio::test]
-async fn builtin_skill_install_accepts_named_plain_markdown_content() {
+async fn builtin_skill_install_accepts_and_replays_named_plain_markdown_content() {
     let temp = tempfile::tempdir().unwrap();
     let (filesystem, mounts) = mounted_skill_filesystem(temp.path());
     let runtime = runtime_with_filesystem(filesystem);
+    let input = json!({
+        "name": "qa-smoke-skill",
+        "content": "# QA Smoke\n\nSay \"qa skill loaded\" when asked.\n"
+    });
 
     let installed = invoke_with_context(
         &runtime,
         SKILL_INSTALL_CAPABILITY_ID,
-        json!({
-            "name": "qa-smoke-skill",
-            "content": "# QA Smoke\n\nSay \"qa skill loaded\" when asked.\n"
-        }),
+        input.clone(),
         // skill_install currently declares Network for URL installs too, so the
         // first-party harness needs a non-empty policy even for content input.
         execution_context_with_mounts_and_network(
@@ -2229,6 +2230,22 @@ async fn builtin_skill_install_accepts_named_plain_markdown_content() {
     assert_eq!(installed["installed"], json!(true));
     assert_eq!(installed["name"], json!("qa-smoke-skill"));
     assert_eq!(installed["source"], json!("user"));
+
+    let replayed = invoke_with_context(
+        &runtime,
+        SKILL_INSTALL_CAPABILITY_ID,
+        input,
+        execution_context_with_mounts_and_network(
+            [SKILL_INSTALL_CAPABILITY_ID],
+            mounts.clone(),
+            http_test_policy(),
+        ),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(replayed["installed"], json!(true));
+    assert_eq!(replayed["name"], json!("qa-smoke-skill"));
 
     let listed = invoke_with_context(
         &runtime,

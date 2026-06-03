@@ -3,7 +3,7 @@ use std::sync::Arc;
 use ironclaw_event_projections::{
     ProjectionCursor, ProjectionReplay, ProjectionScope, ProjectionSnapshot,
 };
-use ironclaw_host_api::{InvocationId, MissionId, ProcessId, ThreadId};
+use ironclaw_host_api::{CapabilityId, InvocationId, MissionId, ProcessId, ThreadId};
 use ironclaw_outbound::{OutboundPushKind, ProjectionUpdateRef};
 use ironclaw_turns::{ReplyTargetBindingRef, TurnActor, TurnRunId, TurnScope};
 use serde::{Deserialize, Serialize};
@@ -171,6 +171,10 @@ pub enum ThreadLiveProjectionItem {
     Thinking {
         id: String,
         body: String,
+    },
+    CapabilityActivity {
+        invocation_id: InvocationId,
+        capability_id: CapabilityId,
     },
     WorkSummary {
         id: String,

@@ -26,8 +26,8 @@ use ironclaw_extensions::{ExtensionPackage, ExtensionRegistry, SharedExtensionRe
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
     ApprovalRequestId, CapabilityDispatcher, CapabilityId, DispatchFailureKind, InvocationId,
-    PackageSource, ResourceScope, RuntimeDispatchErrorKind, RuntimeKind, SecretHandle,
-    runtime_policy::EffectiveRuntimePolicy,
+    PackageSource, ResourceScope, RuntimeCredentialAuthRequirement, RuntimeDispatchErrorKind,
+    RuntimeKind, SecretHandle, runtime_policy::EffectiveRuntimePolicy, sha256_digest_token,
 };
 use ironclaw_process_sandbox::{
     PROCESS_SANDBOX_CAPABILITY_ID, SandboxProcessPlan, ValidatedSandboxProcessPlan,
@@ -1300,12 +1300,51 @@ fn auth_required_outcome(
     credential_requirements: Vec<ironclaw_host_api::RuntimeCredentialAuthRequirement>,
 ) -> RuntimeCapabilityOutcome {
     RuntimeCapabilityOutcome::AuthRequired(RuntimeAuthGate {
-        gate_id: RuntimeGateId::new(),
+        gate_id: stable_auth_gate_id(&capability_id, &required_secrets, &credential_requirements),
         capability_id,
         reason: RuntimeBlockedReason::AuthRequired,
         required_secrets,
         credential_requirements,
     })
+}
+
+fn stable_auth_gate_id(
+    capability_id: &CapabilityId,
+    required_secrets: &[SecretHandle],
+    credential_requirements: &[RuntimeCredentialAuthRequirement],
+) -> RuntimeGateId {
+    let mut parts = Vec::new();
+    parts.push(format!("capability={}", capability_id.as_str()));
+
+    let mut secret_handles = required_secrets
+        .iter()
+        .map(|handle| handle.as_str().to_string())
+        .collect::<Vec<_>>();
+    secret_handles.sort();
+    for handle in secret_handles {
+        parts.push(format!("secret={handle}"));
+    }
+
+    let mut requirements = credential_requirements
+        .iter()
+        .map(|requirement| {
+            let mut scopes = requirement.provider_scopes.clone();
+            scopes.sort();
+            format!(
+                "credential={}:{}:{}",
+                requirement.provider.as_str(),
+                requirement.requester_extension.as_str(),
+                scopes.join(",")
+            )
+        })
+        .collect::<Vec<_>>();
+    requirements.sort();
+    parts.extend(requirements);
+
+    let digest = sha256_digest_token(parts.join("\n").as_bytes());
+    let suffix = digest.strip_prefix("sha256:").unwrap_or(&digest);
+    RuntimeGateId::from_stable_suffix(&format!("auth-{suffix}"))
+        .unwrap_or_else(|_| RuntimeGateId::new())
 }
 
 fn spawned_process_outcome_from(
@@ -1506,8 +1545,9 @@ mod tests {
     use ironclaw_extensions::{ExtensionManifest, ManifestSource};
     use ironclaw_filesystem::{FilesystemError, FilesystemOperation};
     use ironclaw_host_api::{
-        CapabilityId, DispatchFailureKind, HostPortCatalog, PackageSource,
-        RuntimeDispatchErrorKind, VirtualPath, sha256_digest_token,
+        CapabilityId, DispatchFailureKind, ExtensionId, HostPortCatalog, PackageSource,
+        RuntimeCredentialAccountProviderId, RuntimeCredentialAuthRequirement,
+        RuntimeDispatchErrorKind, SecretHandle, VirtualPath, sha256_digest_token,
     };
 
     fn cap() -> CapabilityId {
@@ -1516,6 +1556,14 @@ mod tests {
 
     fn dispatch(kind: DispatchFailureKind) -> CapabilityInvocationError {
         CapabilityInvocationError::Dispatch { kind }
+    }
+
+    fn auth_requirement(scopes: &[&str]) -> RuntimeCredentialAuthRequirement {
+        RuntimeCredentialAuthRequirement {
+            provider: RuntimeCredentialAccountProviderId::new("notion").unwrap(),
+            requester_extension: ExtensionId::new("notion").unwrap(),
+            provider_scopes: scopes.iter().map(|scope| scope.to_string()).collect(),
+        }
     }
 
     #[test]
@@ -1568,6 +1616,44 @@ output_schema_ref = "schemas/test.output.json"
             input.identity.digest.as_deref(),
             Some(expected_digest.as_str())
         );
+    }
+
+    #[test]
+    fn auth_required_outcome_uses_stable_gate_for_identical_requirements() {
+        let capability_id = cap();
+        let secrets = vec![SecretHandle::new("notion-token").unwrap()];
+        let requirements = vec![auth_requirement(&["read", "write"])];
+
+        let first =
+            auth_required_outcome(capability_id.clone(), secrets.clone(), requirements.clone());
+        let second = auth_required_outcome(capability_id, secrets, requirements);
+
+        let RuntimeCapabilityOutcome::AuthRequired(first_gate) = first else {
+            panic!("expected auth gate");
+        };
+        let RuntimeCapabilityOutcome::AuthRequired(second_gate) = second else {
+            panic!("expected auth gate");
+        };
+        assert_eq!(first_gate.gate_id, second_gate.gate_id);
+        assert!(
+            first_gate.gate_id.as_str().starts_with("auth-"),
+            "gate id should be stable and auth-specific: {}",
+            first_gate.gate_id.as_str()
+        );
+    }
+
+    #[test]
+    fn auth_required_outcome_changes_gate_when_requirements_change() {
+        let first = auth_required_outcome(cap(), Vec::new(), vec![auth_requirement(&["read"])]);
+        let second = auth_required_outcome(cap(), Vec::new(), vec![auth_requirement(&["write"])]);
+
+        let RuntimeCapabilityOutcome::AuthRequired(first_gate) = first else {
+            panic!("expected auth gate");
+        };
+        let RuntimeCapabilityOutcome::AuthRequired(second_gate) = second else {
+            panic!("expected auth gate");
+        };
+        assert_ne!(first_gate.gate_id, second_gate.gate_id);
     }
 
     #[test]

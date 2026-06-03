@@ -92,8 +92,8 @@ pub use invocation_services::{
 };
 pub use obligations::{
     BuiltinObligationHandler, BuiltinObligationServices, LEAK_REDACT_FAILED_CODE,
-    ProcessObligationLifecycleStore, RuntimeCredentialAccountRequest,
-    RuntimeCredentialAccountResolver,
+    ProcessObligationLifecycleStore, RuntimeCredentialAccessSecret,
+    RuntimeCredentialAccountRequest, RuntimeCredentialAccountResolver,
 };
 pub use planner::{ExecutionPlan, PlannerError, plan_capability};
 pub use process_output::{SavedCommandOutput, SavedCommandOutputSanitization};
@@ -185,6 +185,14 @@ pub struct RuntimeGateId(String);
 impl RuntimeGateId {
     pub fn new() -> Self {
         Self(CorrelationId::new().to_string())
+    }
+
+    pub fn from_stable_suffix(suffix: &str) -> Result<Self, HostRuntimeError> {
+        Ok(Self(validate_bounded_contract_string(
+            suffix.to_string(),
+            "runtime gate id",
+            128,
+        )?))
     }
 
     pub fn as_str(&self) -> &str {

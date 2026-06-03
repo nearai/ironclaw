@@ -36,9 +36,10 @@ export function messagesFromTimeline(records, pendingMessages = []) {
     const id = `msg-${record.message_id}`;
     if (seen.has(id)) continue;
     seen.add(id);
+    const role = roleForRecord(record);
     messages.push({
       id,
-      role: roleForRecord(record),
+      role,
       content: record.content || "",
       timestamp: timestampForRecord(record),
       kind: record.kind,
@@ -51,10 +52,22 @@ export function messagesFromTimeline(records, pendingMessages = []) {
 
   for (const pending of pendingMessages) {
     if (seen.has(pending.id)) continue;
-    messages.push(pending);
+    const message = pendingMessageForRender(pending);
+    if (message.timelineMessageId && seen.has(`msg-${message.timelineMessageId}`)) {
+      continue;
+    }
+    messages.push(message);
   }
 
   return messages;
+}
+
+function pendingMessageForRender(pending) {
+  return {
+    ...pending,
+    role: pending.role || "user",
+    isOptimistic: pending.isOptimistic !== false,
+  };
 }
 
 function isFinalAssistantRecord(record) {
