@@ -832,6 +832,96 @@ async fn filesystem_account_record_source_skips_malformed_scan_records() {
 }
 
 #[tokio::test]
+async fn filesystem_runtime_account_selection_tolerates_many_session_account_roots() {
+    let filesystem = test_filesystem();
+    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let service = Arc::new(test_service(filesystem, secret_store));
+    let mut setup_scope = test_scope();
+    setup_scope.surface = AuthSurface::Callback;
+    setup_scope.resource.thread_id = Some(ThreadId::new("thread-many-sessions").unwrap());
+    let mut runtime_scope = AuthProductScope::new(setup_scope.resource.clone(), AuthSurface::Web);
+    runtime_scope.resource.invocation_id = InvocationId::new();
+
+    for index in 0..70 {
+        let mut account_scope = setup_scope.clone();
+        account_scope.session_id = Some(AuthSessionId::new(format!("session-{index:03}")).unwrap());
+        service
+            .create_account(NewCredentialAccount {
+                scope: account_scope,
+                provider: google_provider(),
+                label: account_label(),
+                status: CredentialAccountStatus::Configured,
+                ownership: CredentialOwnership::UserReusable,
+                owner_extension: None,
+                granted_extensions: Vec::new(),
+                access_secret: Some(
+                    SecretHandle::new(format!("many-session-access-{index}")).unwrap(),
+                ),
+                refresh_secret: None,
+                scopes: vec![ProviderScope::new("drive.readonly").unwrap()],
+            })
+            .await
+            .unwrap();
+    }
+
+    let selector = ProductAuthRuntimeCredentialAccountSelector::new(service);
+    let selected = selector
+        .select_unique_configured_runtime_account(RuntimeCredentialAccountSelectionRequest::new(
+            CredentialAccountSelectionRequest::new(runtime_scope.clone(), google_provider()),
+            runtime_scope,
+            vec![ProviderScope::new("drive.readonly").unwrap()],
+        ))
+        .await
+        .expect("session-root fanout must not make credential selection unavailable");
+
+    assert_eq!(selected.provider, google_provider());
+}
+
+#[tokio::test]
+async fn filesystem_runtime_account_selection_tolerates_many_account_records_per_root() {
+    let filesystem = test_filesystem();
+    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let service = Arc::new(test_service(filesystem, secret_store));
+    let mut setup_scope = test_scope();
+    setup_scope.surface = AuthSurface::Callback;
+    setup_scope.resource.thread_id = Some(ThreadId::new("thread-many-accounts").unwrap());
+    let mut runtime_scope = AuthProductScope::new(setup_scope.resource.clone(), AuthSurface::Web);
+    runtime_scope.resource.invocation_id = InvocationId::new();
+
+    for index in 0..70 {
+        service
+            .create_account(NewCredentialAccount {
+                scope: setup_scope.clone(),
+                provider: google_provider(),
+                label: account_label(),
+                status: CredentialAccountStatus::Configured,
+                ownership: CredentialOwnership::UserReusable,
+                owner_extension: None,
+                granted_extensions: Vec::new(),
+                access_secret: Some(
+                    SecretHandle::new(format!("many-account-access-{index}")).unwrap(),
+                ),
+                refresh_secret: None,
+                scopes: vec![ProviderScope::new("drive.readonly").unwrap()],
+            })
+            .await
+            .unwrap();
+    }
+
+    let selector = ProductAuthRuntimeCredentialAccountSelector::new(service);
+    let selected = selector
+        .select_unique_configured_runtime_account(RuntimeCredentialAccountSelectionRequest::new(
+            CredentialAccountSelectionRequest::new(runtime_scope.clone(), google_provider()),
+            runtime_scope,
+            vec![ProviderScope::new("drive.readonly").unwrap()],
+        ))
+        .await
+        .expect("account-record fanout must not make credential selection unavailable");
+
+    assert_eq!(selected.provider, google_provider());
+}
+
+#[tokio::test]
 async fn filesystem_oauth_callback_claim_is_one_shot_and_completion_persists() {
     let filesystem = test_filesystem();
     let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
