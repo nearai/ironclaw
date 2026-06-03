@@ -44,10 +44,10 @@ impl TriggerPollerRuntimeHandle {
                     "trigger poller task did not stop before shutdown timeout; aborting"
                 );
                 handle.abort();
-                if let Err(error) = handle.await {
-                    if error.is_panic() {
-                        tracing::warn!(?error, "aborted trigger poller task panicked");
-                    }
+                if let Err(error) = handle.await
+                    && error.is_panic()
+                {
+                    tracing::warn!(?error, "aborted trigger poller task panicked");
                 }
             }
         }

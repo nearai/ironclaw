@@ -247,12 +247,12 @@ fn submit_outcome(
     };
     if response.accepted_message.idempotency == MessageIdempotencyStatus::Duplicate {
         return Ok(TrustedTriggerFireSubmitOutcome::Replayed {
-            original_run_id: run_id.clone(),
+            original_run_id: *run_id,
             replayed_at: submitted_at,
         });
     }
     Ok(TrustedTriggerFireSubmitOutcome::Accepted {
-        run_id: run_id.clone(),
+        run_id: *run_id,
         submitted_at,
     })
 }
