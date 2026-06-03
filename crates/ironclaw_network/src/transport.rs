@@ -117,14 +117,16 @@ fn build_reqwest_client(key: &ReqwestClientKey) -> Result<reqwest::Client, reqwe
 /// Parses the URL while scrubbing only the source request carrier copy.
 ///
 /// The returned `url::Url` and reqwest internals still retain plaintext while
-/// the request is dispatched.
+/// the request is dispatched. Parse failures use a fixed diagnostic rather
+/// than `url::ParseError` formatting because those diagnostics may include
+/// raw input that contains injected credentials.
 fn parse_request_url_scrubbing_source_carrier(
     request: &mut NetworkTransportRequest,
     request_bytes: u64,
 ) -> Result<url::Url, NetworkHttpError> {
     let mut raw_url = std::mem::take(&mut request.url);
-    let parsed = url::Url::parse(&raw_url).map_err(|error| NetworkHttpError::InvalidUrl {
-        reason: format!("URL parse error: {error:?}"),
+    let parsed = url::Url::parse(&raw_url).map_err(|_| NetworkHttpError::InvalidUrl {
+        reason: "URL parse error: invalid format".to_string(),
         request_bytes,
         response_bytes: 0,
     });
@@ -330,8 +332,31 @@ mod tests {
         let NetworkHttpError::InvalidUrl { reason, .. } = error else {
             panic!("expected invalid URL error");
         };
-        assert!(reason.starts_with("URL parse error: "));
+        assert_eq!(reason, "URL parse error: invalid format");
         assert!(!reason.contains("api.example.test"));
+        assert!(!reason.contains("sk-query-secret"));
+        assert!(request.url.is_empty());
+    }
+
+    #[test]
+    fn parse_request_url_relative_error_does_not_include_source_url() {
+        let mut request = NetworkTransportRequest {
+            method: NetworkMethod::Get,
+            url: "/relative/path?token=sk-query-secret".to_string(),
+            headers: Vec::new(),
+            body: Vec::new(),
+            resolved_ips: Vec::new(),
+            response_body_limit: None,
+            timeout_ms: None,
+        };
+
+        let error = parse_request_url_scrubbing_source_carrier(&mut request, 0).unwrap_err();
+
+        let NetworkHttpError::InvalidUrl { reason, .. } = error else {
+            panic!("expected invalid URL error");
+        };
+        assert_eq!(reason, "URL parse error: invalid format");
+        assert!(!reason.contains("/relative/path"));
         assert!(!reason.contains("sk-query-secret"));
         assert!(request.url.is_empty());
     }
