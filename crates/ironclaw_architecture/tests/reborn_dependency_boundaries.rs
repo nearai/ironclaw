@@ -195,22 +195,27 @@ fn untrusted_ingress_paths_cannot_submit_host_trusted_inbound() {
         ForbiddenUse {
             pattern: "ConversationTrustedTriggerSubmitter",
             reason: "untrusted ingress paths must not construct conversation-owned trusted trigger submitters",
+            exempt: None,
         },
         ForbiddenUse {
             pattern: "trusted_trigger_fire_submitter",
             reason: "untrusted ingress paths must not build host-trusted trigger submitters",
+            exempt: None,
         },
         ForbiddenUse {
             pattern: "TrustedTriggerSubmitRequest",
             reason: "untrusted ingress paths must not submit host-trusted trigger fires",
+            exempt: None,
         },
         ForbiddenUse {
             pattern: "TrustedTriggerFireSubmitter",
             reason: "untrusted ingress paths must not implement host-trusted trigger submission",
+            exempt: None,
         },
         ForbiddenUse {
             pattern: "ironclaw_trusted_ingress",
             reason: "untrusted ingress paths must not depend on retired host-trusted trigger authority",
+            exempt: None,
         },
     ];
     let untrusted_src_roots = [
@@ -1166,30 +1171,37 @@ fn reborn_product_api_crates_do_not_bind_http_ingress() {
         ForbiddenUse {
             pattern: "tokio::net::TcpListener::bind",
             reason: "Reborn product/API crates must expose route descriptors, not bind listeners",
+            exempt: None,
         },
         ForbiddenUse {
             pattern: "std::net::TcpListener::bind",
             reason: "Reborn product/API crates must expose route descriptors, not bind listeners",
+            exempt: None,
         },
         ForbiddenUse {
             pattern: "TcpListener::bind",
             reason: "Reborn product/API crates must expose route descriptors, not bind listeners",
+            exempt: None,
         },
         ForbiddenUse {
             pattern: "axum::serve",
             reason: "Reborn product/API crates must not own server lifecycle",
+            exempt: None,
         },
         ForbiddenUse {
             pattern: "hyper::Server",
             reason: "Reborn product/API crates must not own server lifecycle",
+            exempt: None,
         },
         ForbiddenUse {
             pattern: "Server::bind",
             reason: "Reborn product/API crates must not own server lifecycle",
+            exempt: None,
         },
         ForbiddenUse {
             pattern: "axum_server::bind",
             reason: "Reborn product/API crates must not own server lifecycle",
+            exempt: None,
         },
     ];
 
@@ -1242,78 +1254,97 @@ fn reborn_product_auth_contract_stays_reborn_native() {
         ForbiddenUse {
             pattern: "ironclaw::",
             reason: "Reborn product auth must not depend on the v1 root crate",
+            exempt: Some(is_reborn_tracing_target_line),
         },
         ForbiddenUse {
             pattern: "src/extensions",
             reason: "v1 extension paths are inventory only, not Reborn auth implementation",
+            exempt: None,
         },
         ForbiddenUse {
             pattern: "src/channels/web",
             reason: "v1 web routes are inventory only, not Reborn auth implementation",
+            exempt: None,
         },
         ForbiddenUse {
             pattern: "ExtensionManager",
             reason: "Reborn product auth must not call through the v1 extension manager",
+            exempt: None,
         },
         ForbiddenUse {
             pattern: "PendingOAuth",
             reason: "Reborn product auth must not reuse v1 pending OAuth maps",
+            exempt: None,
         },
         ForbiddenUse {
             pattern: "PendingGate",
             reason: "Reborn product auth must not reuse v1 pending gate maps",
+            exempt: None,
         },
         ForbiddenUse {
             pattern: "SecretsStore",
             reason: "Reborn product auth must use opaque handles, not raw v1 secrets storage",
+            exempt: None,
         },
         ForbiddenUse {
             pattern: "get_decrypted",
             reason: "Reborn product auth must not retrieve raw secret material directly",
+            exempt: None,
         },
         ForbiddenUse {
             pattern: "auth-token",
             reason: "Reborn manual-token setup must not fall back to v1 chat token route names",
+            exempt: None,
         },
         ForbiddenUse {
             pattern: "auth_token",
             reason: "Reborn manual-token setup must not fall back to v1 chat token command paths",
+            exempt: None,
         },
         ForbiddenUse {
             pattern: "IncomingMessage",
             reason: "Reborn product auth must not capture manual tokens through chat transcripts",
+            exempt: None,
         },
         ForbiddenUse {
             pattern: "ChatMessage",
             reason: "Reborn product auth must not capture manual tokens through chat transcripts",
+            exempt: None,
         },
         ForbiddenUse {
             pattern: "secret_name",
             reason: "Reborn product auth must use scoped credential accounts and opaque handles, not raw v1 secret names",
+            exempt: None,
         },
         ForbiddenUse {
             pattern: "SecretName",
             reason: "Reborn product auth must use scoped credential accounts and opaque handles, not raw v1 secret names",
+            exempt: None,
         },
         ForbiddenUse {
             pattern: "reqwest",
             reason: "Reborn product auth must not own outbound HTTP transport",
+            exempt: None,
         },
         ForbiddenUse {
             pattern: "authorization_code: String",
             reason: "raw OAuth codes must be one-shot non-serializable provider inputs",
+            exempt: None,
         },
         ForbiddenUse {
             pattern: "pkce_verifier: String",
             reason: "raw PKCE verifiers must be one-shot non-serializable provider inputs",
+            exempt: None,
         },
         ForbiddenUse {
             pattern: "access_token: String",
             reason: "raw provider tokens must not enter product auth contract records",
+            exempt: None,
         },
         ForbiddenUse {
             pattern: "refresh_token: String",
             reason: "raw provider tokens must not enter product auth contract records",
+            exempt: None,
         },
     ];
 
@@ -1363,6 +1394,7 @@ struct ForbiddenRuntimeNetworkUse {
 struct ForbiddenUse {
     pattern: &'static str,
     reason: &'static str,
+    exempt: Option<fn(&str) -> bool>,
 }
 
 fn collect_forbidden_turns_identifier_uses(
@@ -2678,7 +2710,7 @@ fn collect_forbidden_uses(
             .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
         for (line_number, line) in contents.lines().enumerate() {
             for rule in forbidden {
-                if rule.pattern == "ironclaw::" && is_reborn_tracing_target_line(line) {
+                if rule.exempt.is_some_and(|exempt| exempt(line)) {
                     continue;
                 }
                 if line.contains(rule.pattern) {
@@ -2723,7 +2755,7 @@ fn collect_forbidden_reborn_auth_file_uses(
     let contents = std::fs::read_to_string(path).expect(&message);
     for (line_number, line) in contents.lines().enumerate() {
         for rule in forbidden {
-            if rule.pattern == "ironclaw::" && is_reborn_tracing_target_line(line) {
+            if rule.exempt.is_some_and(|exempt| exempt(line)) {
                 continue;
             }
             if !line.contains(rule.pattern) {
@@ -2763,6 +2795,7 @@ fn collect_forbidden_reborn_auth_file_uses_detects_violation() {
         &[ForbiddenUse {
             pattern: "reqwest",
             reason: "provider transport must stay outside product auth composition",
+            exempt: None,
         }],
         &mut violations,
     );
@@ -2804,6 +2837,7 @@ fn collect_forbidden_reborn_auth_file_uses_allows_reborn_tracing_targets() {
         &[ForbiddenUse {
             pattern: "ironclaw::",
             reason: "Reborn product auth must not depend on the v1 root crate",
+            exempt: Some(is_reborn_tracing_target_line),
         }],
         &mut violations,
     );
@@ -2839,6 +2873,7 @@ fn collect_forbidden_uses_allows_reborn_tracing_targets() {
         &[ForbiddenUse {
             pattern: "ironclaw::",
             reason: "Reborn product auth must not depend on the v1 root crate",
+            exempt: Some(is_reborn_tracing_target_line),
         }],
         &mut violations,
     );
@@ -2848,6 +2883,45 @@ fn collect_forbidden_uses_allows_reborn_tracing_targets() {
     assert!(
         violations.is_empty(),
         "Directory scanner should treat Reborn tracing targets as log namespaces: {:?}",
+        violations
+    );
+}
+
+#[test]
+fn collect_forbidden_uses_detects_violation() {
+    let root = std::env::temp_dir().join(format!(
+        "ironclaw-forbidden-use-dir-test-{}",
+        std::process::id()
+    ));
+    let src = root.join("crates/example/src");
+    std::fs::create_dir_all(&src).expect("test source directory must be created");
+    let mod_rs = src.join("mod.rs");
+    std::fs::write(&mod_rs, "fn forbidden() { let _ = \"reqwest\"; }\n")
+        .expect("test mod.rs must be written");
+
+    let mut violations = Vec::new();
+    collect_forbidden_uses(
+        &src,
+        &root,
+        &[ForbiddenUse {
+            pattern: "reqwest",
+            reason: "provider transport must stay outside product auth composition",
+            exempt: None,
+        }],
+        &mut violations,
+    );
+
+    std::fs::remove_dir_all(&root).expect("test source directory must be removed");
+
+    assert_eq!(violations.len(), 1);
+    assert!(
+        violations[0].contains("crates/example/src/mod.rs"),
+        "violation should report the relative mod.rs path: {:?}",
+        violations
+    );
+    assert!(
+        violations[0].contains("provider transport must stay outside product auth composition"),
+        "violation should report the forbidden-use reason: {:?}",
         violations
     );
 }

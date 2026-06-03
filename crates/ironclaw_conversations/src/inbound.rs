@@ -429,16 +429,12 @@ fn classify_trusted_trigger_inbound_error(error: InboundTurnError) -> TriggerErr
     match error {
         InboundTurnError::TurnSubmissionFailed {
             error: TurnError::ThreadBusy(_),
-        } => TriggerError::Backend {
-            reason: format!("trusted trigger submit retryable failure: {error}"),
-        },
+        } => retryable_trusted_trigger_backend_error(&error),
         InboundTurnError::TurnSubmissionFailed {
             error: TurnError::AdmissionRejected(ref rejection),
         } => match rejection.reason {
             AdmissionRejectionReason::TenantLimit | AdmissionRejectionReason::Unavailable => {
-                TriggerError::Backend {
-                    reason: format!("trusted trigger submit retryable failure: {error}"),
-                }
+                retryable_trusted_trigger_backend_error(&error)
             }
             AdmissionRejectionReason::ProfileRejected
             | AdmissionRejectionReason::Policy
@@ -451,9 +447,7 @@ fn classify_trusted_trigger_inbound_error(error: InboundTurnError) -> TriggerErr
                 TurnError::Unavailable { .. }
                 | TurnError::CapacityExceeded { .. }
                 | TurnError::Conflict { .. },
-        } => TriggerError::Backend {
-            reason: format!("trusted trigger submit retryable failure: {error}"),
-        },
+        } => retryable_trusted_trigger_backend_error(&error),
         InboundTurnError::TurnSubmissionFailed {
             error:
                 TurnError::ScopeNotFound
@@ -468,11 +462,18 @@ fn classify_trusted_trigger_inbound_error(error: InboundTurnError) -> TriggerErr
         | InboundTurnError::BindingConflict { .. }
         | InboundTurnError::ThreadNotFound { .. }
         | InboundTurnError::StatePoisoned
-        | InboundTurnError::InvalidCanonicalRef { .. }
-        | InboundTurnError::DurableState { .. } => opaque_trusted_trigger_inbound_rejection(
+        | InboundTurnError::InvalidCanonicalRef { .. } => opaque_trusted_trigger_inbound_rejection(
             "trusted trigger inbound request rejected",
             &error,
         ),
+        InboundTurnError::DurableState { .. } => retryable_trusted_trigger_backend_error(&error),
+    }
+}
+
+fn retryable_trusted_trigger_backend_error(error: &InboundTurnError) -> TriggerError {
+    tracing::debug!(error = ?error, "trusted trigger submit retryable failure");
+    TriggerError::Backend {
+        reason: "trusted trigger submit retryable failure".to_string(),
     }
 }
 
@@ -495,15 +496,14 @@ pub fn validate_trigger_prompt(
     let mut max_severity: Option<Severity> = None;
     let mut blocked_warning = None;
     for warning in &warnings {
-        if warning.severity >= Severity::High {
-            blocked_warning = Some(warning);
-            continue;
-        }
         warning_count += 1;
         max_severity = Some(match max_severity {
             Some(current) => current.max(warning.severity),
             None => warning.severity,
         });
+        if blocked_warning.is_none() && warning.severity >= Severity::High {
+            blocked_warning = Some(warning);
+        }
     }
     if let Some(max_severity) = max_severity {
         tracing::debug!(
@@ -530,16 +530,19 @@ mod tests {
     use async_trait::async_trait;
     use chrono::{TimeZone, Utc};
     use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
-    use ironclaw_safety::Sanitizer;
+    use ironclaw_safety::{InjectionScanner, InjectionWarning, Sanitizer, Severity};
     use ironclaw_triggers::TrustedTriggerFireSubmitOutcome;
     use ironclaw_turns::{
         AcceptedMessageRef, CancelRunRequest, CancelRunResponse, EventCursor, GetRunStateRequest,
         ReplyTargetBindingRef, ResumeTurnRequest, ResumeTurnResponse, RunProfileId,
-        RunProfileVersion, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse,
+        RunProfileVersion, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy,
         TurnCoordinator, TurnError, TurnId, TurnRunId, TurnRunState, TurnScope, TurnStatus,
     };
 
-    use super::{submit_trusted_trigger_outcome, validate_trigger_prompt};
+    use super::{
+        classify_trusted_trigger_inbound_error, submit_trusted_trigger_outcome,
+        validate_trigger_prompt,
+    };
     use crate::types::TrustedInboundTurnRequest;
     use crate::{
         AcceptedInboundMessage, AdapterInstallationId, AdapterKind, ConversationBindingResolution,
@@ -728,6 +731,25 @@ mod tests {
     }
 
     #[test]
+    fn validate_trigger_prompt_rejects_first_high_severity_warning() {
+        let scanner = FixedInjectionScanner {
+            warnings: vec![
+                injection_warning(Severity::High, "first high warning"),
+                injection_warning(Severity::Medium, "middle warning"),
+                injection_warning(Severity::High, "second high warning"),
+            ],
+        };
+
+        let error = validate_trigger_prompt(&scanner, "ignored").unwrap_err();
+
+        assert!(matches!(
+            error,
+            ironclaw_triggers::TriggerError::InvalidMaterialization { reason }
+                if reason.contains("first high warning") && !reason.contains("second high warning")
+        ));
+    }
+
+    #[test]
     fn submit_trusted_trigger_outcome_preserves_received_at_for_accepted_and_replayed_fires() {
         let submitted_at = Utc.with_ymd_and_hms(2026, 5, 6, 12, 30, 0).unwrap();
         let run_id = TurnRunId::new();
@@ -779,6 +801,66 @@ mod tests {
             error,
             ironclaw_triggers::TriggerError::Backend { reason }
                 if reason.contains("no turn submission")
+        ));
+    }
+
+    #[test]
+    fn classify_trusted_trigger_inbound_error_maps_retryable_backend_cases_to_opaque_backend() {
+        let thread_busy =
+            classify_trusted_trigger_inbound_error(InboundTurnError::TurnSubmissionFailed {
+                error: TurnError::ThreadBusy(ThreadBusy {
+                    active_run_id: TurnRunId::new(),
+                    status: TurnStatus::Running,
+                    event_cursor: EventCursor(7),
+                }),
+            });
+        assert!(matches!(
+            thread_busy,
+            ironclaw_triggers::TriggerError::Backend { reason }
+                if reason == "trusted trigger submit retryable failure"
+        ));
+
+        let conflict =
+            classify_trusted_trigger_inbound_error(InboundTurnError::TurnSubmissionFailed {
+                error: TurnError::Conflict {
+                    reason: "cas mismatch".to_string(),
+                },
+            });
+        assert!(matches!(
+            conflict,
+            ironclaw_triggers::TriggerError::Backend { reason }
+                if reason == "trusted trigger submit retryable failure"
+        ));
+
+        let unauthorized =
+            classify_trusted_trigger_inbound_error(InboundTurnError::TurnSubmissionFailed {
+                error: TurnError::Unauthorized,
+            });
+        assert!(matches!(
+            unauthorized,
+            ironclaw_triggers::TriggerError::InvalidMaterialization { reason }
+                if reason == "trusted trigger submit rejected"
+        ));
+
+        let durable_state =
+            classify_trusted_trigger_inbound_error(InboundTurnError::DurableState {
+                reason: "disk write failed".to_string(),
+            });
+        assert!(matches!(
+            durable_state,
+            ironclaw_triggers::TriggerError::Backend { reason }
+                if reason == "trusted trigger submit retryable failure"
+        ));
+
+        let invalid_external_ref =
+            classify_trusted_trigger_inbound_error(InboundTurnError::InvalidExternalRef {
+                kind: "adapter_kind",
+                reason: "empty".to_string(),
+            });
+        assert!(matches!(
+            invalid_external_ref,
+            ironclaw_triggers::TriggerError::InvalidMaterialization { reason }
+                if reason == "trusted trigger inbound request rejected"
         ));
     }
 
@@ -893,6 +975,26 @@ mod tests {
 
     fn project() -> ProjectId {
         ProjectId::new("project").unwrap()
+    }
+
+    #[derive(Clone)]
+    struct FixedInjectionScanner {
+        warnings: Vec<InjectionWarning>,
+    }
+
+    impl InjectionScanner for FixedInjectionScanner {
+        fn scan_injection(&self, _content: &str) -> Vec<InjectionWarning> {
+            self.warnings.clone()
+        }
+    }
+
+    fn injection_warning(severity: Severity, description: &str) -> InjectionWarning {
+        InjectionWarning {
+            pattern: "test-pattern".to_string(),
+            severity,
+            location: 0..1,
+            description: description.to_string(),
+        }
     }
 
     type TrustedScopeRecord = (Option<AgentId>, Option<ProjectId>);
