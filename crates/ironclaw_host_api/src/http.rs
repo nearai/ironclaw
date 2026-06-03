@@ -64,6 +64,10 @@ impl Drop for RuntimeHttpEgressRequest {
 
 impl RuntimeHttpEgressRequest {
     fn scrub_sensitive_url_and_headers(&mut self) {
+        // Host credential injection currently writes secrets into URL components
+        // and header values. Header names and body payloads are separate
+        // caller-controlled data and need an explicit threat-model decision
+        // before broadening this carrier scrub scope.
         self.url.zeroize();
         for (_, value) in &mut self.headers {
             value.zeroize();

@@ -48,6 +48,10 @@ impl Drop for NetworkHttpRequest {
 
 impl NetworkHttpRequest {
     fn scrub_sensitive_url_and_headers(&mut self) {
+        // Host credential injection currently writes secrets into URL components
+        // and header values. Header names and body payloads are separate
+        // caller-controlled data and need an explicit threat-model decision
+        // before broadening this carrier scrub scope.
         self.url.zeroize();
         for (_, value) in &mut self.headers {
             value.zeroize();
@@ -85,6 +89,10 @@ impl Drop for NetworkTransportRequest {
 
 impl NetworkTransportRequest {
     fn scrub_sensitive_url_and_headers(&mut self) {
+        // Host credential injection currently writes secrets into URL components
+        // and header values. Header names and body payloads are separate
+        // caller-controlled data and need an explicit threat-model decision
+        // before broadening this carrier scrub scope.
         self.url.zeroize();
         for (_, value) in &mut self.headers {
             value.zeroize();
@@ -141,6 +149,25 @@ mod tests {
         assert!(request.url.is_empty());
         assert_eq!(request.headers[0].0, "authorization");
         assert!(request.headers[0].1.is_empty());
+    }
+
+    #[test]
+    fn network_http_request_scrubs_url_with_empty_headers() {
+        let mut request = NetworkHttpRequest {
+            scope: sample_scope(),
+            method: NetworkMethod::Get,
+            url: "https://api.example.test/v1?token=sk-query-secret".to_string(),
+            headers: Vec::new(),
+            body: Vec::new(),
+            policy: sample_policy(),
+            response_body_limit: Some(4096),
+            timeout_ms: None,
+        };
+
+        request.scrub_sensitive_url_and_headers();
+
+        assert!(request.url.is_empty());
+        assert!(request.headers.is_empty());
     }
 
     #[test]

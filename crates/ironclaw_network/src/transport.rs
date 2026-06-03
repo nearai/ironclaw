@@ -114,12 +114,14 @@ fn build_reqwest_client(key: &ReqwestClientKey) -> Result<reqwest::Client, reqwe
     builder.build()
 }
 
-fn parse_request_url(
+/// Parses the URL while scrubbing only the source request carrier copy.
+///
+/// The returned `url::Url` and reqwest internals still retain plaintext while
+/// the request is dispatched.
+fn parse_request_url_scrubbing_source_carrier(
     request: &mut NetworkTransportRequest,
     request_bytes: u64,
 ) -> Result<url::Url, NetworkHttpError> {
-    // Taking empties the request carrier before reqwest sees the URL. The
-    // parsed Url and reqwest internals still retain plaintext while dispatching.
     let mut raw_url = std::mem::take(&mut request.url);
     let parsed = url::Url::parse(&raw_url).map_err(|error| NetworkHttpError::InvalidUrl {
         reason: error.to_string(),
@@ -138,7 +140,7 @@ impl NetworkHttpTransport for ReqwestNetworkTransport {
     ) -> Result<NetworkHttpResponse, NetworkHttpError> {
         let request_bytes = request.body.len() as u64;
         reject_caller_host_header(&request.headers)?;
-        let url = parse_request_url(&mut request, request_bytes)?;
+        let url = parse_request_url_scrubbing_source_carrier(&mut request, request_bytes)?;
         let host = url
             .host_str()
             .ok_or_else(|| NetworkHttpError::InvalidUrl {
@@ -290,7 +292,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_request_url_takes_the_source_string_carrier() {
+    fn parse_request_url_scrubs_only_source_carrier_copy() {
         let mut request = NetworkTransportRequest {
             method: NetworkMethod::Get,
             url: "https://api.example.test/v1?token=sk-query-secret".to_string(),
@@ -301,9 +303,13 @@ mod tests {
             timeout_ms: None,
         };
 
-        let parsed = parse_request_url(&mut request, 0).unwrap();
+        let parsed = parse_request_url_scrubbing_source_carrier(&mut request, 0).unwrap();
 
         assert_eq!(parsed.host_str(), Some("api.example.test"));
+        assert_eq!(
+            parsed.as_str(),
+            "https://api.example.test/v1?token=sk-query-secret"
+        );
         assert!(request.url.is_empty());
     }
 

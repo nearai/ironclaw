@@ -329,6 +329,41 @@ async fn reqwest_transport_does_not_follow_redirects() {
 }
 
 #[tokio::test]
+async fn reqwest_transport_forwards_all_headers_to_http_client() {
+    let (url, request_bytes, server) =
+        captured_request_server("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
+    let transport = ReqwestNetworkTransport::new(Duration::from_secs(2));
+
+    let response = transport
+        .execute(NetworkTransportRequest {
+            method: NetworkMethod::Get,
+            url,
+            headers: vec![
+                (
+                    "authorization".to_string(),
+                    "Bearer sk-header-secret".to_string(),
+                ),
+                (
+                    "x-api-key".to_string(),
+                    "sk-second-header-secret".to_string(),
+                ),
+            ],
+            body: vec![],
+            resolved_ips: vec![IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))],
+            response_body_limit: Some(1024),
+            timeout_ms: None,
+        })
+        .await
+        .expect("transport should forward borrowed header values");
+    server.join().unwrap();
+
+    let raw_request = String::from_utf8(request_bytes.lock().unwrap().clone()).unwrap();
+    assert_eq!(response.status, 200);
+    assert!(raw_request.contains("\r\nauthorization: Bearer sk-header-secret\r\n"));
+    assert!(raw_request.contains("\r\nx-api-key: sk-second-header-secret\r\n"));
+}
+
+#[tokio::test]
 async fn reqwest_transport_uses_all_resolved_addresses_for_connection_fallback() {
     let (url, server) = single_response_server_for_host(
         "fallback.example.test",
@@ -567,6 +602,30 @@ fn sample_request(url: &str) -> NetworkHttpRequest {
 
 fn single_response_server(response: &'static str) -> (String, std::thread::JoinHandle<()>) {
     single_response_server_for_host("127.0.0.1", response)
+}
+
+fn captured_request_server(
+    response: &'static str,
+) -> (String, Arc<Mutex<Vec<u8>>>, std::thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let request_bytes = Arc::new(Mutex::new(Vec::new()));
+    let captured = request_bytes.clone();
+    let handle = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0_u8; 2048];
+        let bytes_read = stream.read(&mut request).unwrap();
+        captured
+            .lock()
+            .unwrap()
+            .extend_from_slice(&request[..bytes_read]);
+        stream.write_all(response.as_bytes()).unwrap();
+    });
+    (
+        format!("http://127.0.0.1:{port}/test"),
+        request_bytes,
+        handle,
+    )
 }
 
 fn single_response_server_for_host(
