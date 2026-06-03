@@ -136,17 +136,20 @@ pub(super) fn product_items_for_live_update(
         .items
         .iter()
         .filter_map(|item| match item {
-            ThreadLiveProjectionItem::Thinking { id, body } => {
+            ThreadLiveProjectionItem::Thinking { id, run_id, body } => {
                 Some(ProductProjectionItem::Thinking {
                     id: id.clone(),
+                    run_id: Some(*run_id),
                     body: body.clone(),
                 })
             }
             ThreadLiveProjectionItem::CapabilityActivity {
+                run_id,
                 invocation_id,
                 capability_id,
             } => match CapabilityActivityView::new(CapabilityActivityViewInput {
                 invocation_id: *invocation_id,
+                turn_run_id: Some(*run_id),
                 thread_id: Some(update.thread_id.clone()),
                 capability_id: capability_id.clone(),
                 status: CapabilityActivityStatusView::Started,
@@ -220,6 +223,7 @@ impl LiveProgressMilestoneSink {
             sequence,
             ThreadLiveProjectionItem::Thinking {
                 id: thinking_id(milestone.run_id, sequence),
+                run_id: milestone.run_id,
                 body: safe_delta,
             },
         );
@@ -236,6 +240,7 @@ impl LiveProgressMilestoneSink {
             &milestone.scope,
             sequence,
             ThreadLiveProjectionItem::CapabilityActivity {
+                run_id: milestone.run_id,
                 invocation_id,
                 capability_id: capability_id.clone(),
             },

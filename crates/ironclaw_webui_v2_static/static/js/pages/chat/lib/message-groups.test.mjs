@@ -123,6 +123,69 @@ test("groupMessages: follow-up user does not break prior final reply ordering", 
   assert.equal(grouped[2].message.id, "u");
 });
 
+test("groupMessages: delayed same-run activity moves before its final reply", () => {
+  const grouped = groupMessages([
+    { id: "u1", role: "user", content: "check email", turnRunId: "run-1" },
+    {
+      id: "m1",
+      role: "assistant",
+      content: "Here are the top emails.",
+      isFinalReply: true,
+      turnRunId: "run-1",
+    },
+    { id: "u2", role: "user", content: "now check calendar", turnRunId: "run-2" },
+    {
+      id: "thinking-thinking:run-1:3",
+      role: "thinking",
+      content: "rank emails",
+      turnRunId: "run-1",
+    },
+    {
+      id: "tool-gmail",
+      role: "tool_activity",
+      toolName: "gmail",
+      turnRunId: "run-1",
+    },
+  ]);
+
+  assert.equal(grouped.length, 4);
+  assert.deepEqual(
+    grouped.map((item) => item.type === "activity-run" ? item.id : item.message.id),
+    ["u1", "activity-run-thinking-thinking:run-1:3", "m1", "u2"],
+  );
+  assert.deepEqual(
+    grouped[1].activity.map((item) => item.id),
+    ["thinking-thinking:run-1:3", "tool-gmail"],
+  );
+});
+
+test("groupMessages: delayed different-run activity stays with the later turn", () => {
+  const grouped = groupMessages([
+    {
+      id: "m1",
+      role: "assistant",
+      content: "Done.",
+      isFinalReply: true,
+      turnRunId: "run-1",
+    },
+    { id: "u2", role: "user", content: "next", turnRunId: "run-2" },
+    {
+      id: "tool-calendar",
+      role: "tool_activity",
+      toolName: "calendar",
+      turnRunId: "run-2",
+    },
+  ]);
+
+  assert.equal(grouped.length, 3);
+  assert.equal(grouped[0].type, "message");
+  assert.equal(grouped[0].message.id, "m1");
+  assert.equal(grouped[1].type, "message");
+  assert.equal(grouped[1].message.id, "u2");
+  assert.equal(grouped[2].type, "activity-run");
+  assert.deepEqual(grouped[2].activity.map((item) => item.id), ["tool-calendar"]);
+});
+
 test("groupMessages: system note after activity keeps original order", () => {
   const grouped = groupMessages([
     { id: "m", role: "assistant", content: "answer", isFinalReply: true },

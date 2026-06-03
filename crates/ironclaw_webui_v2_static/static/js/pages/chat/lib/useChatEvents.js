@@ -351,6 +351,7 @@ function applyProjectionItems({
           role: "thinking",
           content: item.thinking.body || "",
           timestamp: new Date().toISOString(),
+          turnRunId: item.thinking.run_id || null,
         };
         if (existing >= 0) {
           const copy = [...prev];
@@ -454,6 +455,7 @@ function upsertToolFromActivity(setMessages, invocationId, card) {
         toolStatus: nextStatus,
         toolError: card.toolError || current.toolError,
         updatedAt: card.updatedAt || current.updatedAt,
+        turnRunId: card.turnRunId || current.turnRunId || null,
       };
       return copy;
     }

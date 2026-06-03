@@ -1,8 +1,7 @@
 // Map v2 `ThreadMessageRecord[]` from RebornTimelineResponse into
 // the message shape the UI components render. Kept narrow: the v2
-// timeline contract has no attachments, no generated images, no
-// turn-grouping metadata — those v1 affordances are out of scope
-// for issue #3886.
+// timeline contract has no attachments or generated images; turn grouping
+// consumes the normalized `turnRunId` carried by records and previews.
 
 export function messagesFromTimeline(records, pendingMessages = []) {
   const seen = new Set();
@@ -143,6 +142,7 @@ export function toolCardFromPreview(preview) {
     truncated: Boolean(preview.truncated),
     outputBytes: preview.output_bytes ?? null,
     outputKind: preview.output_kind || null,
+    turnRunId: preview.turn_run_id || null,
   };
 }
 
@@ -166,6 +166,7 @@ export function toolCardFromActivity(activity) {
     truncated: false,
     outputBytes: activity.output_bytes ?? null,
     outputKind: null,
+    turnRunId: activity.turn_run_id || null,
   };
 }
 

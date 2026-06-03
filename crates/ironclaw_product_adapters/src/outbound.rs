@@ -216,6 +216,7 @@ pub enum ProductWorkSummaryPhase {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapabilityActivityView {
     pub invocation_id: InvocationId,
+    pub turn_run_id: Option<TurnRunId>,
     pub thread_id: Option<ThreadId>,
     pub capability_id: CapabilityId,
     pub status: CapabilityActivityStatusView,
@@ -237,6 +238,8 @@ impl Serialize for CapabilityActivityView {
         #[derive(Serialize)]
         struct Wire<'a> {
             invocation_id: &'a InvocationId,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            turn_run_id: &'a Option<TurnRunId>,
             thread_id: &'a Option<ThreadId>,
             capability_id: &'a CapabilityId,
             status: CapabilityActivityStatusView,
@@ -250,6 +253,7 @@ impl Serialize for CapabilityActivityView {
 
         Wire {
             invocation_id: &self.invocation_id,
+            turn_run_id: &self.turn_run_id,
             thread_id: &self.thread_id,
             capability_id: &self.capability_id,
             status: self.status,
@@ -268,6 +272,7 @@ impl CapabilityActivityView {
     pub fn new(input: CapabilityActivityViewInput) -> Result<Self, ProductAdapterError> {
         let value = Self {
             invocation_id: input.invocation_id,
+            turn_run_id: input.turn_run_id,
             thread_id: input.thread_id,
             capability_id: input.capability_id,
             status: input.status,
@@ -293,6 +298,7 @@ impl CapabilityActivityView {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapabilityActivityViewInput {
     pub invocation_id: InvocationId,
+    pub turn_run_id: Option<TurnRunId>,
     pub thread_id: Option<ThreadId>,
     pub capability_id: CapabilityId,
     pub status: CapabilityActivityStatusView,
@@ -312,6 +318,8 @@ impl<'de> Deserialize<'de> for CapabilityActivityView {
         #[derive(Deserialize)]
         struct Wire {
             invocation_id: InvocationId,
+            #[serde(default)]
+            turn_run_id: Option<TurnRunId>,
             thread_id: Option<ThreadId>,
             capability_id: CapabilityId,
             status: CapabilityActivityStatusView,
@@ -325,6 +333,7 @@ impl<'de> Deserialize<'de> for CapabilityActivityView {
         let wire = Wire::deserialize(deserializer)?;
         Self::new(CapabilityActivityViewInput {
             invocation_id: wire.invocation_id,
+            turn_run_id: wire.turn_run_id,
             thread_id: wire.thread_id,
             capability_id: wire.capability_id,
             status: wire.status,
@@ -353,6 +362,7 @@ pub enum CapabilityActivityStatusView {
 pub struct CapabilityDisplayPreviewView {
     pub timeline_message_id: Option<String>,
     pub invocation_id: InvocationId,
+    pub turn_run_id: Option<TurnRunId>,
     pub thread_id: Option<ThreadId>,
     pub capability_id: CapabilityId,
     pub status: CapabilityActivityStatusView,
@@ -373,6 +383,7 @@ impl CapabilityDisplayPreviewView {
         let value = Self {
             timeline_message_id: input.timeline_message_id,
             invocation_id: input.invocation_id,
+            turn_run_id: input.turn_run_id,
             thread_id: input.thread_id,
             capability_id: input.capability_id,
             status: input.status,
@@ -439,6 +450,8 @@ impl Serialize for CapabilityDisplayPreviewView {
         struct Wire<'a> {
             timeline_message_id: &'a Option<String>,
             invocation_id: &'a InvocationId,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            turn_run_id: &'a Option<TurnRunId>,
             thread_id: &'a Option<ThreadId>,
             capability_id: &'a CapabilityId,
             status: CapabilityActivityStatusView,
@@ -457,6 +470,7 @@ impl Serialize for CapabilityDisplayPreviewView {
         Wire {
             timeline_message_id: &self.timeline_message_id,
             invocation_id: &self.invocation_id,
+            turn_run_id: &self.turn_run_id,
             thread_id: &self.thread_id,
             capability_id: &self.capability_id,
             status: self.status,
@@ -479,6 +493,7 @@ impl Serialize for CapabilityDisplayPreviewView {
 pub struct CapabilityDisplayPreviewViewInput {
     pub timeline_message_id: Option<String>,
     pub invocation_id: InvocationId,
+    pub turn_run_id: Option<TurnRunId>,
     pub thread_id: Option<ThreadId>,
     pub capability_id: CapabilityId,
     pub status: CapabilityActivityStatusView,
@@ -504,6 +519,8 @@ impl<'de> Deserialize<'de> for CapabilityDisplayPreviewView {
             #[serde(default)]
             timeline_message_id: Option<String>,
             invocation_id: InvocationId,
+            #[serde(default)]
+            turn_run_id: Option<TurnRunId>,
             thread_id: Option<ThreadId>,
             capability_id: CapabilityId,
             status: CapabilityActivityStatusView,
@@ -522,6 +539,7 @@ impl<'de> Deserialize<'de> for CapabilityDisplayPreviewView {
         Self::new(CapabilityDisplayPreviewViewInput {
             timeline_message_id: wire.timeline_message_id,
             invocation_id: wire.invocation_id,
+            turn_run_id: wire.turn_run_id,
             thread_id: wire.thread_id,
             capability_id: wire.capability_id,
             status: wire.status,
@@ -606,6 +624,8 @@ pub enum ProductProjectionItem {
     },
     Thinking {
         id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        run_id: Option<TurnRunId>,
         body: String,
     },
     CapabilityActivity(CapabilityActivityView),
@@ -645,7 +665,7 @@ pub enum ProductProjectionItem {
 impl ProductProjectionItem {
     fn validate(&self) -> Result<(), ProductAdapterError> {
         match self {
-            Self::Text { id, body } | Self::Thinking { id, body } => {
+            Self::Text { id, body } | Self::Thinking { id, body, .. } => {
                 validate_bounded_text("projection_item_id", id, PROJECTION_ITEM_ID_MAX_BYTES)?;
                 validate_bounded_text("projection_text", body, PROJECTION_TEXT_MAX_BYTES)
             }
@@ -743,6 +763,8 @@ impl<'de> Deserialize<'de> for ProductProjectionItem {
             },
             Thinking {
                 id: String,
+                #[serde(default)]
+                run_id: Option<TurnRunId>,
                 body: String,
             },
             CapabilityActivity(CapabilityActivityView),
@@ -773,7 +795,9 @@ impl<'de> Deserialize<'de> for ProductProjectionItem {
         }
         let value = match Wire::deserialize(deserializer)? {
             Wire::Text { id, body } => ProductProjectionItem::Text { id, body },
-            Wire::Thinking { id, body } => ProductProjectionItem::Thinking { id, body },
+            Wire::Thinking { id, run_id, body } => {
+                ProductProjectionItem::Thinking { id, run_id, body }
+            }
             Wire::CapabilityActivity(activity) => {
                 ProductProjectionItem::CapabilityActivity(activity)
             }
@@ -987,15 +1011,18 @@ mod tests {
 
     #[test]
     fn projection_state_round_trips_thinking_item() {
+        let run_id = TurnRunId::new();
         let state = ProductProjectionState::new(
             "thread-1",
             vec![ProductProjectionItem::Thinking {
                 id: "thinking:run:1".to_string(),
+                run_id: Some(run_id),
                 body: "checking context".to_string(),
             }],
         )
         .expect("valid thinking projection");
         let value = serde_json::to_value(&state).expect("serialize");
+        assert_eq!(value["items"][0]["thinking"]["run_id"], run_id.to_string());
         assert_eq!(value["items"][0]["thinking"]["body"], "checking context");
         let decoded: ProductProjectionState =
             serde_json::from_value(value).expect("deserialize thinking projection");
@@ -1010,6 +1037,7 @@ mod tests {
             vec![ProductProjectionItem::CapabilityActivity(
                 CapabilityActivityView::new(CapabilityActivityViewInput {
                     invocation_id,
+                    turn_run_id: None,
                     thread_id: Some(ThreadId::new("thread-1").unwrap()),
                     capability_id: CapabilityId::new("builtin.http").unwrap(),
                     status: CapabilityActivityStatusView::Started,
@@ -1199,8 +1227,10 @@ mod tests {
 
     #[test]
     fn capability_activity_view_is_metadata_only() {
+        let run_id = TurnRunId::new();
         let view = CapabilityActivityView::new(CapabilityActivityViewInput {
             invocation_id: InvocationId::new(),
+            turn_run_id: Some(run_id),
             thread_id: Some(ThreadId::new("thread-tool-activity").expect("thread id")),
             capability_id: CapabilityId::new("script.echo").expect("capability id"),
             status: CapabilityActivityStatusView::Completed,
@@ -1216,6 +1246,7 @@ mod tests {
         let rendered = serde_json::to_string(&json).expect("render");
 
         assert_eq!(json["status"], "completed");
+        assert_eq!(json["turn_run_id"], run_id.to_string());
         assert_eq!(json["output_bytes"], 12);
         for forbidden in [
             "arguments",
@@ -1234,9 +1265,11 @@ mod tests {
 
     #[test]
     fn capability_display_preview_view_allows_bounded_display_material() {
+        let run_id = TurnRunId::new();
         let view = CapabilityDisplayPreviewView::new(CapabilityDisplayPreviewViewInput {
             timeline_message_id: Some("timeline-message-1".to_string()),
             invocation_id: InvocationId::new(),
+            turn_run_id: Some(run_id),
             thread_id: Some(ThreadId::new("thread-tool-preview").expect("thread id")),
             capability_id: CapabilityId::new("builtin.read_file").expect("capability id"),
             status: CapabilityActivityStatusView::Completed,
@@ -1255,6 +1288,7 @@ mod tests {
 
         let json = serde_json::to_value(&view).expect("serialize");
         assert_eq!(json["title"], "read_file");
+        assert_eq!(json["turn_run_id"], run_id.to_string());
         assert_eq!(json["subtitle"], "src/main.rs");
         assert_eq!(json["output_kind"], "text");
     }
@@ -1424,6 +1458,7 @@ mod tests {
     fn capability_activity_view_rejects_unsafe_error_kind_on_serialize() {
         let view = CapabilityActivityView {
             invocation_id: InvocationId::new(),
+            turn_run_id: Some(TurnRunId::new()),
             thread_id: Some(ThreadId::new("thread-tool-activity").expect("thread id")),
             capability_id: CapabilityId::new("script.echo").expect("capability id"),
             status: CapabilityActivityStatusView::Failed,

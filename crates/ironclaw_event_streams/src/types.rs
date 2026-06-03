@@ -170,9 +170,11 @@ pub struct ThreadLiveProjectionUpdate {
 pub enum ThreadLiveProjectionItem {
     Thinking {
         id: String,
+        run_id: TurnRunId,
         body: String,
     },
     CapabilityActivity {
+        run_id: TurnRunId,
         invocation_id: InvocationId,
         capability_id: CapabilityId,
     },

@@ -68,10 +68,12 @@ test("useChatEvents: projection activity preserves reasoning/tool chronology", (
     frame: {
       state: {
         items: [
-          { thinking: { id: "run-1:1", body: "before tool" } },
+          { run_status: { run_id: "run-1", status: "running" } },
+          { thinking: { id: "run-1:1", run_id: "run-1", body: "before tool" } },
           {
             capability_activity: {
               invocation_id: "invocation-1",
+              turn_run_id: "run-1",
               thread_id: threadId,
               capability_id: "builtin.http",
               status: "started",
@@ -83,7 +85,7 @@ test("useChatEvents: projection activity preserves reasoning/tool chronology", (
               updated_at: "2026-06-03T11:44:43Z",
             },
           },
-          { thinking: { id: "run-1:2", body: "after tool" } },
+          { thinking: { id: "run-1:2", run_id: "run-1", body: "after tool" } },
         ],
       },
     },
@@ -99,4 +101,8 @@ test("useChatEvents: projection activity preserves reasoning/tool chronology", (
   );
   assert.equal(messages[1].toolName, "builtin.http");
   assert.equal(messages[1].toolStatus, "running");
+  assert.deepEqual(
+    Array.from(messages, (message) => message.turnRunId),
+    ["run-1", "run-1", "run-1"],
+  );
 });
