@@ -277,12 +277,11 @@ fn validate_trigger_prompt(
         .iter()
         .filter(|warning| warning.severity < Severity::High)
         .collect();
-    if !non_blocking_warnings.is_empty() {
-        let max_severity = non_blocking_warnings
-            .iter()
-            .map(|warning| warning.severity)
-            .max()
-            .expect("non-empty warning list");
+    if let Some(max_severity) = non_blocking_warnings
+        .iter()
+        .map(|warning| warning.severity)
+        .max()
+    {
         tracing::debug!(
             warning_count = non_blocking_warnings.len(),
             max_severity = ?max_severity,
