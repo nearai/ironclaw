@@ -1,6 +1,8 @@
 mod cli;
 mod commands;
 mod context;
+mod dto;
+mod render;
 mod runtime;
 
 fn main() -> anyhow::Result<()> {

@@ -13,6 +13,11 @@ impl RebornCliContext {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn from_boot_config(boot_config: RebornBootConfig) -> Self {
+        Self { boot_config }
+    }
+
     pub(crate) fn boot_config(&self) -> &RebornBootConfig {
         &self.boot_config
     }

@@ -1122,12 +1122,8 @@ fn doctor_uses_reborn_home_override_without_touching_v1_state() {
         stdout.contains(reborn_home.to_str().expect("utf8 path")),
         "stdout: {stdout}"
     );
-    assert!(stdout.contains("profile: local-dev"), "stdout: {stdout}");
-    assert!(stdout.contains("v1_state: not-used"), "stdout: {stdout}");
-    assert!(
-        stdout.contains("driver_registry: initialized"),
-        "stdout: {stdout}"
-    );
+    assert!(stdout.contains("local-dev"), "stdout: {stdout}");
+    assert!(stdout.contains("text_only_driver"), "stdout: {stdout}");
     assert!(
         !reborn_home.exists(),
         "doctor should not create state directories"
@@ -1548,8 +1544,8 @@ fn doctor_default_home_is_reborn_scoped_and_dry_run() {
         stdout.contains(reborn_home.to_str().expect("utf8 path")),
         "stdout: {stdout}"
     );
-    assert!(stdout.contains("home_source: default"), "stdout: {stdout}");
-    assert!(stdout.contains("profile: local-dev"), "stdout: {stdout}");
+    assert!(stdout.contains("(default)"), "stdout: {stdout}");
+    assert!(stdout.contains("local-dev"), "stdout: {stdout}");
     assert!(
         !temp.path().join(".ironclaw").exists(),
         "doctor should not create default Reborn or v1 state directories"
@@ -1573,7 +1569,7 @@ fn doctor_reports_explicit_profile() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("profile: production"), "stdout: {stdout}");
+    assert!(stdout.contains("production"), "stdout: {stdout}");
 }
 
 #[test]
