@@ -120,7 +120,7 @@ fn build_reqwest_client(key: &ReqwestClientKey) -> Result<reqwest::Client, reqwe
 /// the request is dispatched. Parse failures use a fixed diagnostic rather
 /// than `url::ParseError` formatting because those diagnostics may include
 /// raw input that contains injected credentials.
-fn parse_request_url_scrubbing_source_carrier(
+fn take_request_url(
     request: &mut NetworkTransportRequest,
     request_bytes: u64,
 ) -> Result<url::Url, NetworkHttpError> {
@@ -134,6 +134,20 @@ fn parse_request_url_scrubbing_source_carrier(
     parsed
 }
 
+fn apply_request_headers(
+    mut req: reqwest::RequestBuilder,
+    headers: &mut [(String, String)],
+) -> reqwest::RequestBuilder {
+    for (name, value) in headers.iter() {
+        req = req.header(name.as_str(), value.as_str());
+    }
+    for (name, value) in headers.iter_mut() {
+        name.zeroize();
+        value.zeroize();
+    }
+    req
+}
+
 #[async_trait]
 impl NetworkHttpTransport for ReqwestNetworkTransport {
     async fn execute(
@@ -142,7 +156,7 @@ impl NetworkHttpTransport for ReqwestNetworkTransport {
     ) -> Result<NetworkHttpResponse, NetworkHttpError> {
         let request_bytes = request.body.len() as u64;
         reject_caller_host_header(&request.headers)?;
-        let url = parse_request_url_scrubbing_source_carrier(&mut request, request_bytes)?;
+        let url = take_request_url(&mut request, request_bytes)?;
         let host = url
             .host_str()
             .ok_or_else(|| NetworkHttpError::InvalidUrl {
@@ -177,12 +191,11 @@ impl NetworkHttpTransport for ReqwestNetworkTransport {
             )
             .await?;
 
+        let mut headers = std::mem::take(&mut request.headers);
         let mut req = client
             .request(reqwest_method(request.method), url)
             .body(std::mem::take(&mut request.body));
-        for (name, value) in &request.headers {
-            req = req.header(name.as_str(), value.as_str());
-        }
+        req = apply_request_headers(req, &mut headers);
         let mut response = req
             .send()
             .await
@@ -292,9 +305,10 @@ mod tests {
     use std::net::IpAddr;
 
     use super::*;
+    use reqwest::Method;
 
     #[test]
-    fn parse_request_url_scrubs_only_source_carrier_copy() {
+    fn take_request_url_scrubs_only_source_carrier_copy() {
         let mut request = NetworkTransportRequest {
             method: NetworkMethod::Get,
             url: "https://api.example.test/v1?token=sk-query-secret".to_string(),
@@ -305,7 +319,7 @@ mod tests {
             timeout_ms: None,
         };
 
-        let parsed = parse_request_url_scrubbing_source_carrier(&mut request, 0).unwrap();
+        let parsed = take_request_url(&mut request, 0).unwrap();
 
         assert_eq!(parsed.host_str(), Some("api.example.test"));
         assert_eq!(
@@ -316,7 +330,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_request_url_error_does_not_include_source_url() {
+    fn take_request_url_error_does_not_include_source_url() {
         let mut request = NetworkTransportRequest {
             method: NetworkMethod::Get,
             url: "https://api.example.test:bad-port/v1?token=sk-query-secret".to_string(),
@@ -327,7 +341,7 @@ mod tests {
             timeout_ms: None,
         };
 
-        let error = parse_request_url_scrubbing_source_carrier(&mut request, 0).unwrap_err();
+        let error = take_request_url(&mut request, 0).unwrap_err();
 
         let NetworkHttpError::InvalidUrl { reason, .. } = error else {
             panic!("expected invalid URL error");
@@ -339,7 +353,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_request_url_relative_error_does_not_include_source_url() {
+    fn take_request_url_relative_error_does_not_include_source_url() {
         let mut request = NetworkTransportRequest {
             method: NetworkMethod::Get,
             url: "/relative/path?token=sk-query-secret".to_string(),
@@ -350,7 +364,7 @@ mod tests {
             timeout_ms: None,
         };
 
-        let error = parse_request_url_scrubbing_source_carrier(&mut request, 0).unwrap_err();
+        let error = take_request_url(&mut request, 0).unwrap_err();
 
         let NetworkHttpError::InvalidUrl { reason, .. } = error else {
             panic!("expected invalid URL error");
@@ -359,6 +373,22 @@ mod tests {
         assert!(!reason.contains("/relative/path"));
         assert!(!reason.contains("sk-query-secret"));
         assert!(request.url.is_empty());
+    }
+
+    #[test]
+    fn apply_request_headers_zeroizes_source_carrier_copy_after_reqwest_build() {
+        let client = reqwest::Client::new();
+        let req = client.request(Method::GET, "http://example.com");
+        let mut headers = vec![
+            ("authorization".to_string(), "Bearer sk-header-secret".to_string()),
+            ("x-api-key".to_string(), "sk-second-header-secret".to_string()),
+        ];
+
+        let req = apply_request_headers(req, &mut headers);
+
+        assert_eq!(headers[0], (String::new(), String::new()));
+        assert_eq!(headers[1], (String::new(), String::new()));
+        let _ = req;
     }
 
     #[test]
