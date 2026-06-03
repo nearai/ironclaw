@@ -493,6 +493,26 @@ mod tests {
             .cloned()
             .expect("object trigger");
         paused.insert("state".to_string(), json!("paused"));
+        let mut scheduled = raw_automation(
+            "trigger-scheduled",
+            "Scheduled status",
+            "0 10 * * *",
+            Some("ok"),
+        )
+        .as_object()
+        .cloned()
+        .expect("object trigger");
+        scheduled.insert("state".to_string(), json!("scheduled"));
+        let mut completed = raw_automation(
+            "trigger-completed",
+            "Completed status",
+            "0 11 * * *",
+            Some("ok"),
+        )
+        .as_object()
+        .cloned()
+        .expect("object trigger");
+        completed.insert("state".to_string(), json!("completed"));
         let future = json!({
             "trigger_id": "trigger-future",
             "name": "Future status",
@@ -505,7 +525,12 @@ mod tests {
             "created_at": "2026-06-02T18:00:00Z"
         });
         let facade = RebornWebuiAutomationFacade::new(Arc::new(OutputHostRuntime::new(json!({
-            "triggers": [Value::Object(paused), future]
+            "triggers": [
+                Value::Object(paused),
+                Value::Object(scheduled),
+                Value::Object(completed),
+                future
+            ]
         }))));
 
         let automations = facade
@@ -513,9 +538,11 @@ mod tests {
             .await
             .expect("list automations");
 
-        assert_eq!(automations.len(), 2);
+        assert_eq!(automations.len(), 4);
         assert_eq!(automations[0].state, RebornAutomationState::Paused);
-        assert_eq!(automations[1].state, RebornAutomationState::Unknown);
+        assert_eq!(automations[1].state, RebornAutomationState::Scheduled);
+        assert_eq!(automations[2].state, RebornAutomationState::Completed);
+        assert_eq!(automations[3].state, RebornAutomationState::Unknown);
     }
 
     #[tokio::test]

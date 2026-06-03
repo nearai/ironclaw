@@ -219,9 +219,11 @@ pub enum RebornAutomationRunStatus {
 #[serde(rename_all = "snake_case")]
 pub enum RebornAutomationState {
     Active,
+    Scheduled,
     Paused,
     Disabled,
     Inactive,
+    Completed,
     Unknown,
 }
 
@@ -245,9 +247,11 @@ impl<'de> Deserialize<'de> for RebornAutomationState {
             {
                 Ok(match value {
                     "active" => RebornAutomationState::Active,
+                    "scheduled" => RebornAutomationState::Scheduled,
                     "paused" => RebornAutomationState::Paused,
                     "disabled" => RebornAutomationState::Disabled,
                     "inactive" => RebornAutomationState::Inactive,
+                    "completed" => RebornAutomationState::Completed,
                     "unknown" => RebornAutomationState::Unknown,
                     _ => RebornAutomationState::Unknown,
                 })
@@ -289,7 +293,7 @@ pub struct RebornAutomationInfo {
 
 /// Source discriminator for automation rows.
 ///
-/// V1 exposes only user-facing schedules. The wire tag remains
+/// WebUI v2 exposes only user-facing schedules. The wire tag remains
 /// source-discriminated so future sources can be added without overloading the
 /// schedule fields or advertising unsupported sources early.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

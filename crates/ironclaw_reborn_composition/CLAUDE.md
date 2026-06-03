@@ -117,10 +117,10 @@ Inbound order (outer → inner → handler):
    `ConnectInfo<SocketAddr>`, never `X-Forwarded-For` / `X-Real-IP`.
    Composition fails closed if a future descriptor declares an unsupported
    scope.
-9. `webui_v2_router(WebUiV2State::new(bundle.api))` — the nine v2
+9. `webui_v2_router(WebUiV2State::new(bundle.api))` — the v2
    handlers from `ironclaw_webui_v2` (create-thread, list-threads,
    send-message, get-timeline, stream-events SSE, stream-events WS,
-   cancel-run, resolve-gate, setup-extension).
+   cancel-run, resolve-gate, setup-extension, list-automations).
 
 ### Product-auth routes
 

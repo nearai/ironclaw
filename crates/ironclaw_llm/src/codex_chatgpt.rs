@@ -1166,6 +1166,18 @@ data: {"type":"response.completed","response":{"usage":{"input_tokens":10,"outpu
     }
 
     #[test]
+    fn test_parse_sse_completed_response_prefers_output_text_over_message_fallback() {
+        let sse = r#"data: {"type":"response.completed","response":{"output_text":"Hello from output_text.","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Duplicate fallback text."}]}],"usage":{"input_tokens":10,"output_tokens":5}}}
+
+"#;
+        let result = CodexChatGptProvider::parse_sse_response(sse).unwrap();
+        assert_eq!(result.text, "Hello from output_text.");
+        assert_eq!(result.input_tokens, 10);
+        assert_eq!(result.output_tokens, 5);
+        assert!(result.pending_tool_calls.is_empty());
+    }
+
+    #[test]
     fn test_parse_sse_reasoning_summary_response() {
         let sse = r#"event: response.reasoning_summary_text.delta
 data: {"delta":"Thinking Steps\n"}
