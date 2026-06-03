@@ -293,6 +293,34 @@ fn webui_extension_setup_scope(extension_id: &str) -> AuthProductScope {
 
 // ─── tests ────────────────────────────────────────────────────────────
 
+#[tokio::test]
+async fn webui_v2_http_list_automations_uses_composed_runtime_facade() {
+    let harness = build_harness().await;
+
+    let response = harness
+        .router
+        .clone()
+        .oneshot(bearer_get("/api/webchat/v2/automations?limit=10"))
+        .await
+        .expect("list automations oneshot");
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "list_automations must be wired through the real composed bundle"
+    );
+    let body = read_json(response).await;
+    assert!(
+        body["automations"].as_array().is_some(),
+        "list_automations response must include an automations array, got: {body:#?}"
+    );
+
+    harness
+        .runtime
+        .shutdown()
+        .await
+        .expect("runtime shutdown clean");
+}
+
 /// Step 2 of Lane 7: drive `create_thread` → `submit_turn` → poll
 /// `timeline` through the composed v2 HTTP surface, against a real
 /// local-dev runtime whose LLM gateway is scripted to call

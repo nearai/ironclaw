@@ -65,8 +65,8 @@ impl WebUiV2State {
     }
 }
 
-/// Build a [`Router`] mounting the six WebChat v2 routes against the
-/// supplied facade. Path patterns match
+/// Build a [`Router`] mounting the WebChat v2 routes against the supplied
+/// facade. Path patterns match
 /// [`crate::descriptors::webui_v2_routes`] exactly; host composition is
 /// expected to apply its own auth / CORS / body-limit middleware in front
 /// of this router.

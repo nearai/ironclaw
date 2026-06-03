@@ -3682,6 +3682,29 @@ async fn list_automations_clamps_zero_limit_before_product_facade() {
 }
 
 #[tokio::test]
+async fn list_automations_uses_default_limit_when_omitted() {
+    let automation_facade = Arc::new(RecordingAutomationFacade::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_automation_product_facade(automation_facade.clone());
+
+    services
+        .list_automations(caller(), WebUiListAutomationsRequest { limit: None })
+        .await
+        .expect("list automations");
+
+    let list_calls = automation_facade.list_calls();
+    assert_eq!(list_calls.len(), 1);
+    assert_eq!(
+        list_calls[0].limit,
+        Some(50),
+        "omitted automation list limit must use the browser-facing default page size"
+    );
+}
+
+#[tokio::test]
 async fn list_automations_returns_empty_list() {
     let services = RebornServices::new(
         Arc::new(InMemorySessionThreadService::default()),

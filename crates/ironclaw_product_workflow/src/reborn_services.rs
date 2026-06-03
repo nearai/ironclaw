@@ -117,15 +117,11 @@ pub trait AutomationProductFacade: Send + Sync {
 }
 
 #[derive(Debug)]
-pub struct UnsupportedAutomationProductFacade {
-    runtime_ref: String,
-}
+pub struct UnsupportedAutomationProductFacade;
 
 impl UnsupportedAutomationProductFacade {
-    pub fn new_static(runtime_ref: &'static str) -> Self {
-        Self {
-            runtime_ref: runtime_ref.to_string(),
-        }
+    pub fn new_static() -> Self {
+        Self
     }
 }
 
@@ -136,7 +132,7 @@ impl AutomationProductFacade for UnsupportedAutomationProductFacade {
         _caller: WebUiAuthenticatedCaller,
         _limit: Option<usize>,
     ) -> Result<Value, RebornServicesError> {
-        Err(automation_unavailable(&self.runtime_ref))
+        Err(automation_unavailable())
     }
 }
 
@@ -334,9 +330,7 @@ impl RebornServices {
             lifecycle_facade: Arc::new(UnsupportedLifecycleProductFacade::new_static(
                 "reborn_lifecycle_facade_unwired",
             )),
-            automation_facade: Arc::new(UnsupportedAutomationProductFacade::new_static(
-                "reborn_automation_facade_unwired",
-            )),
+            automation_facade: Arc::new(UnsupportedAutomationProductFacade::new_static()),
             approval_interactions: Arc::new(RejectingApprovalInteractionService),
             auth_interactions: Arc::new(RejectingAuthInteractionService),
             extension_credentials: None,
@@ -1052,7 +1046,7 @@ fn sanitize_automation_list_output(output: &mut Value) {
     }
 }
 
-fn automation_unavailable(_runtime_ref: &str) -> RebornServicesError {
+fn automation_unavailable() -> RebornServicesError {
     RebornServicesError::service_unavailable(true)
 }
 
