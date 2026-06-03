@@ -394,6 +394,10 @@ pub struct ListThreadsQuery {
 }
 
 /// `GET /api/webchat/v2/automations`
+///
+/// Lists the caller-scoped schedule automations visible to the browser. The
+/// optional `?limit=N` query is capped by the product workflow facade; the
+/// response is a single bounded page and does not include a cursor.
 pub async fn list_automations(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
@@ -406,6 +410,7 @@ pub async fn list_automations(
 
 #[derive(Debug, Default, Deserialize)]
 pub struct ListAutomationsQuery {
+    /// Optional maximum number of schedule automations to return.
     #[serde(default)]
     pub limit: Option<u32>,
 }

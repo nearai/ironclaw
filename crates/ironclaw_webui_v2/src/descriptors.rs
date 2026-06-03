@@ -171,7 +171,7 @@ fn list_threads_descriptor() -> IngressRouteDescriptor {
         read_policy(
             read_rate_limit(),
             AuditTraceClass::UserAction,
-            AllowedEffectPath::ProductWorkflow,
+            AllowedEffectPath::ProjectionOnly,
             StreamingMode::None,
         ),
     )

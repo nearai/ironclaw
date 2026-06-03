@@ -247,11 +247,9 @@ pub trait RebornServicesApi: Send + Sync {
 
     async fn list_automations(
         &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: WebUiListAutomationsRequest,
-    ) -> Result<RebornListAutomationsResponse, RebornServicesError> {
-        Err(RebornServicesError::service_unavailable(true))
-    }
+        caller: WebUiAuthenticatedCaller,
+        request: WebUiListAutomationsRequest,
+    ) -> Result<RebornListAutomationsResponse, RebornServicesError>;
 
     async fn list_extensions(
         &self,

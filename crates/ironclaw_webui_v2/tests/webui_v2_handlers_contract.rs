@@ -756,6 +756,62 @@ async fn list_automations_forwards_query_limit_to_facade() {
 }
 
 #[tokio::test]
+async fn list_automations_omits_limit_and_forwards_none() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/automations")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(body["automations"][0]["automation_id"], "automation-listed");
+
+    let calls = services
+        .list_automations_calls
+        .lock()
+        .expect("lock")
+        .clone();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].limit, None);
+}
+
+#[tokio::test]
+async fn list_automations_rejects_invalid_limit_query_with_400() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/automations?limit=not-a-number")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        services
+            .list_automations_calls
+            .lock()
+            .expect("lock")
+            .is_empty(),
+        "invalid query input must be rejected before reaching the facade"
+    );
+}
+
+#[tokio::test]
 async fn list_automations_error_maps_to_http_status() {
     let services = Arc::new(StubServices::default());
     services.fail_list_automations(RebornServicesError {
@@ -1300,6 +1356,13 @@ async fn stream_events_releases_slot_when_facade_drain_stalls_past_max_lifetime(
             _caller: WebUiAuthenticatedCaller,
             _request: WebUiListThreadsRequest,
         ) -> Result<RebornListThreadsResponse, RebornServicesError> {
+            unreachable!("not exercised by this test")
+        }
+        async fn list_automations(
+            &self,
+            _caller: WebUiAuthenticatedCaller,
+            _request: WebUiListAutomationsRequest,
+        ) -> Result<RebornListAutomationsResponse, RebornServicesError> {
             unreachable!("not exercised by this test")
         }
         async fn list_extensions(
