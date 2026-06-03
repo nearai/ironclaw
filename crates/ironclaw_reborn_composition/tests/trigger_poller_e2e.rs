@@ -285,8 +285,10 @@ async fn trigger_poller_drives_trusted_ingress_for_due_scheduled_trigger() {
          — captured_messages: {captured_contents:?}"
     );
     // CompleteAfterFirstFire: the settle write (mark_fire_accepted) records last_fired_slot
-    // and last_run_at. State transitions to Completed only when the terminal-failure path is
-    // taken; successful first-fire keeps state=Scheduled until a separate lifecycle step.
+    // and last_run_at. `state` transitions to `Completed` only when the terminal-failure
+    // path runs (`mark_fire_terminally_failed`); the policy field is currently stored but
+    // never consulted by `mark_fire_accepted` — see issue #4420 for the production gap.
+    // Once that is fixed, tighten this to `assert_eq!(state, TriggerState::Completed, ...)`.
     assert!(
         final_record.last_fired_slot.is_some(),
         "CompleteAfterFirstFire policy: last_fired_slot should be set after fire — record: {final_record:?}",
