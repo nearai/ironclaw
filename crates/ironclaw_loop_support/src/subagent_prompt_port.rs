@@ -49,7 +49,9 @@ pub struct SubagentPromptLimits {
 
 impl Default for SubagentPromptLimits {
     fn default() -> Self {
-        // Keep the raw DoS guard internal; callers should use `Default`.
+        // Keep the raw DoS guard internal. The default allows 2x the sanitized
+        // budget so whitespace-heavy handoffs can collapse before the visible
+        // prompt budget is enforced without permitting unbounded raw input.
         Self {
             max_goal_bytes: DEFAULT_SUBAGENT_GOAL_MAX_BYTES,
             max_raw_goal_bytes: DEFAULT_SUBAGENT_GOAL_RAW_MAX_BYTES,
@@ -64,6 +66,7 @@ impl SubagentPromptLimits {
 
     pub fn with_goal_bytes(mut self, max_goal_bytes: usize) -> Self {
         self.max_goal_bytes = max_goal_bytes;
+        self.max_raw_goal_bytes = max_goal_bytes.saturating_mul(2);
         self
     }
 }
@@ -226,7 +229,7 @@ fn log_dropped_subagent_prompt_capabilities(dropped_capabilities: &[CapabilityId
         .iter()
         .map(|capability| capability.as_str().to_string())
         .collect::<Vec<_>>();
-    tracing::warn!(
+    tracing::debug!(
         dropped_capabilities = ?dropped_capabilities,
         "subagent flavor capability allowlist was narrowed by parent capability view"
     );
@@ -326,6 +329,21 @@ mod tests {
         assert_eq!(error.kind, AgentLoopHostErrorKind::Invalid);
         assert!(error.safe_summary.contains("too large"));
         assert!(!error.safe_summary.contains("before sanitization"));
+    }
+
+    #[test]
+    fn custom_goal_budget_scales_raw_guard_with_sanitized_budget() {
+        let error = materialize_goal_message(
+            &SubagentPromptGoal {
+                task: "abcde".to_string(),
+                handoff: None,
+            },
+            SubagentPromptLimits::new(9),
+        )
+        .expect_err("raw goal should fail before sanitization");
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::Invalid);
+        assert!(error.safe_summary.contains("before sanitization"));
     }
 
     #[test]
