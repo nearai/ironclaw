@@ -420,6 +420,9 @@ impl IronhubInstallTool {
                     .await
                     .map_err(|e| install_error_to_tool_error(&parsed.name, e))?;
                 let mut json = install_outcome_to_json(kind, &outcome);
+                // std::sync::RwLock matches the rest of the repo. spawn_blocking with
+                // a fresh current-thread runtime avoids deadlock under outer-runtime
+                // saturation; poison recovery keeps a prior writer panic from sticking.
                 if let Some(reg) = &self.deps.skill_registry {
                     let reg = Arc::clone(reg);
                     let loaded = tokio::task::spawn_blocking(

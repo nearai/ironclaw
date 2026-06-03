@@ -10,6 +10,18 @@ pub const DEFAULT_HUB_MANIFEST_URL: &str = "https://hub.ironclaw.com/api/catalog
 // IRONHUB_MANIFEST_SIGNING_KEY) and must never appear in this repo or binary.
 // Embedding the public half is deliberate: changing which key the agent trusts
 // requires changing this source, not compromising the catalog host.
+//
+// Rotation procedure (when rolling the signing keypair):
+//   1. Generate the new keypair off-host. Put the new public key here as a
+//      second entry alongside the existing one; ship a release. Both old and
+//      new manifests verify during the rollout window.
+//   2. Deploy the new private key to IronHub so it signs with the new key_id.
+//      `verify_signed_manifest` selects the entry by `key_id`, so signing
+//      switches over atomically without breaking agents still on the old
+//      release.
+//   3. After agents have updated past step 1, ship a follow-up release that
+//      removes the old entry from this slice. Older agents continue to
+//      verify the older signed manifests until they update.
 pub const MANIFEST_VERIFY_KEYS: &[(&str, &str)] = &[(
     "5895a21abea89672",
     "f64d2d3a3228b16ca59450364d26b278071a1a425544f242504033341d8459bd",
