@@ -20,7 +20,8 @@ use axum::http::{HeaderValue, Method, Request, StatusCode, header};
 use http_body_util::BodyExt;
 use ironclaw_host_api::{AgentId, NetworkMethod, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_product_workflow::{
-    ExtensionName, LifecyclePhase, RebornCancelRunResponse, RebornCreateThreadResponse,
+    LifecyclePackageRef, LifecyclePhase, RebornCancelRunResponse, RebornCreateThreadResponse,
+    RebornExtensionActionResponse, RebornExtensionListResponse, RebornExtensionRegistryResponse,
     RebornGetRunStateRequest, RebornGetRunStateResponse, RebornListThreadsResponse,
     RebornResolveGateResponse, RebornServicesApi, RebornServicesError, RebornServicesErrorCode,
     RebornServicesErrorKind, RebornSetupExtensionResponse, RebornStreamEventsRequest,
@@ -209,19 +210,74 @@ impl RebornServicesApi for StubServices {
         })
     }
 
+    async fn list_extensions(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornExtensionListResponse, RebornServicesError> {
+        Ok(RebornExtensionListResponse {
+            extensions: Vec::new(),
+        })
+    }
+
+    async fn list_extension_registry(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornExtensionRegistryResponse, RebornServicesError> {
+        Ok(RebornExtensionRegistryResponse {
+            entries: Vec::new(),
+        })
+    }
+
+    async fn install_extension(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _package_ref: LifecyclePackageRef,
+    ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
+        Err(unused_services_error())
+    }
+
+    async fn activate_extension(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _package_ref: LifecyclePackageRef,
+    ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
+        Err(unused_services_error())
+    }
+
+    async fn remove_extension(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _package_ref: LifecyclePackageRef,
+    ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
+        Err(unused_services_error())
+    }
+
     async fn setup_extension(
         &self,
         _caller: WebUiAuthenticatedCaller,
-        extension_name: ExtensionName,
+        package_ref: LifecyclePackageRef,
         _request: WebUiSetupExtensionRequest,
     ) -> Result<RebornSetupExtensionResponse, RebornServicesError> {
         Ok(RebornSetupExtensionResponse {
-            extension_name,
+            package_ref,
             phase: LifecyclePhase::UnsupportedOrLegacy,
             blockers: Vec::new(),
-            package_ref: None,
             payload: None,
+            secrets: Vec::new(),
+            fields: Vec::new(),
+            onboarding: None,
         })
+    }
+}
+
+fn unused_services_error() -> RebornServicesError {
+    RebornServicesError {
+        code: RebornServicesErrorCode::Internal,
+        kind: RebornServicesErrorKind::Internal,
+        status_code: 500,
+        retryable: false,
+        field: None,
+        validation_code: None,
     }
 }
 
@@ -956,8 +1012,8 @@ async fn setup_extension_returns_lifecycle_projection_via_facade() {
         "setup_extension must not surface legacy status aliases, got: {body}",
     );
     assert!(
-        body.contains("\"extension_name\":\"telegram\""),
-        "setup_extension must echo the path-bound extension name, got: {body}",
+        body.contains("\"package_ref\":{\"kind\":\"extension\",\"id\":\"telegram\"}"),
+        "setup_extension must echo the path-bound package ref, got: {body}",
     );
 }
 
@@ -1087,14 +1143,12 @@ async fn every_webui_v2_descriptor_is_mounted_on_composed_app() {
 
 fn expand_route_pattern(pattern: &str) -> String {
     // Stand-in values for the four path params the v2 descriptors use.
-    // All must satisfy each handler's path-segment validation (handlers
-    // only validate `extension_name` before facade dispatch; the others
-    // pass straight through to the stub services).
+    // All must satisfy each handler's path-segment validation.
     pattern
         .replace("{thread_id}", "thread.fake")
         .replace("{run_id}", "11111111-1111-1111-1111-111111111111")
         .replace("{gate_ref}", "gate.fake")
-        .replace("{extension_name}", "ext_fake")
+        .replace("{package_id}", "ext-fake")
 }
 
 // ─── static SPA mount (`ironclaw_webui_v2_static`) ────────────────────
@@ -1213,6 +1267,94 @@ async fn static_chat_oauth_card_exposes_https_only_authorization_link() {
     assert!(
         body.contains("noopener,noreferrer"),
         "OAuth authorization popup must keep opener isolation"
+    );
+}
+
+#[tokio::test]
+async fn static_chat_hook_listens_for_oauth_callback_completion() {
+    let (app, _) = build_app();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/v2/js/pages/chat/hooks/useChat.js")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_body_string(response).await;
+
+    assert!(
+        body.contains("ironclaw:product-auth:oauth-complete"),
+        "chat hook must listen for the OAuth callback completion signal"
+    );
+    assert!(
+        body.contains("new window.BroadcastChannel(OAUTH_CALLBACK_CHANNEL)"),
+        "chat hook must consume same-origin OAuth callback broadcasts"
+    );
+    assert!(
+        body.contains("window.addEventListener(\"storage\", onStorage)"),
+        "chat hook must keep a localStorage fallback for browsers without BroadcastChannel"
+    );
+    assert!(
+        body.contains("window.localStorage?.getItem?.(OAUTH_CALLBACK_STORAGE_KEY)"),
+        "chat hook must poll localStorage in case the callback write happened before the storage event listener observed it"
+    );
+    assert!(
+        body.contains("oauthCompletionMatchesGate(payload, pendingGate, listeningSince)"),
+        "chat hook must match callback completion to the visible OAuth gate when continuation metadata is present"
+    );
+    assert!(
+        body.contains(
+            "setPendingGate((current) => (isPendingOAuthGate(current) ? null : current))"
+        ),
+        "OAuth callback completion must clear only a pending OAuth auth gate"
+    );
+}
+
+#[tokio::test]
+async fn static_chat_events_clear_gate_when_run_resumes() {
+    let (app, _) = build_app();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/v2/js/pages/chat/lib/useChatEvents.js")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_body_string(response).await;
+
+    assert!(
+        body.contains("const PROMPT_RUN_STATUSES = new Set"),
+        "chat event handler must distinguish active prompts from resumed runs"
+    );
+    assert!(
+        body.contains("clearPendingGateForRun(setPendingGate, runId, promptRunIdRef)"),
+        "non-blocked run_status updates must clear stale gates for the resumed run"
+    );
+    assert!(
+        !body.contains(
+            "clearPendingGateForRun(\n              setPendingGate,\n              progress.turn_run_id,"
+        ),
+        "typed running/progress events must not clear blocked auth gates"
+    );
+    assert!(
+        body.contains("clearPendingNonAuthGateForRun(\n              setPendingGate,\n              progress.turn_run_id,\n              promptRunIdRef,"),
+        "typed running/progress events should still clear stale non-auth gates"
+    );
+    assert!(
+        body.contains("promptRunIdRef?.current === activeRunId"),
+        "projection gates must not be restored after the run has resumed"
+    );
+    assert!(
+        !body.contains("clearPendingAuthGateForForwardProgress"),
+        "tool/reasoning/text progress must not hide a still-blocked auth gate"
     );
 }
 
@@ -1544,10 +1686,7 @@ async fn public_route_mount_is_merged_without_bearer_auth_and_keeps_descriptor_p
     )
     .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
     .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
-    .with_public_route_mount(PublicRouteMount {
-        router: public,
-        descriptors: vec![descriptor],
-    });
+    .with_public_route_mount(PublicRouteMount::new(public, vec![descriptor]));
     let app = webui_v2_app(bundle, config).expect("webui v2 app");
 
     // No Authorization header — `with_public_route_mount` MUST

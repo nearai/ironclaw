@@ -8,12 +8,20 @@ import {
 import { queryClient } from "../../../lib/query-client.js";
 import { React } from "../../../lib/html.js";
 import { useChatEvents } from "../lib/useChatEvents.js";
+import {
+  addPending,
+  recordAcceptedMessageRef,
+  removePending,
+} from "../lib/pending-messages.js";
 import { useHistory } from "./useHistory.js";
 import { useSSE } from "./useSSE.js";
 
 const AUTH_TOKEN_FLOW_TIMEOUT_MS = 30000;
 const AUTH_GATE_CREDENTIAL_STORED_ERROR =
   "credential_stored_gate_resolution_failed";
+const OAUTH_CALLBACK_CHANNEL = "ironclaw-product-auth";
+const OAUTH_CALLBACK_STORAGE_KEY = "ironclaw:product-auth:oauth-complete";
+const OAUTH_CALLBACK_MESSAGE_TYPE = "ironclaw:product-auth:oauth-complete";
 
 async function withAuthTokenTimeout(task) {
   const controller = new AbortController();
@@ -33,11 +41,43 @@ function credentialStoredGateResolutionError(cause) {
 }
 
 function threadNeedsSidebarRefresh(threadId) {
-  const cached = queryClient.getQueryData(["threads"]);
+  const cached = queryClient.getQueryData?.(["threads"]);
   const threads = cached?.threads;
   if (!Array.isArray(threads)) return true;
   const thread = threads.find((item) => item.thread_id === threadId || item.id === threadId);
   return !thread?.title;
+}
+
+function submitResponseResumedTurnGate(response) {
+  return response?.continuation?.type === "turn_gate_resume";
+}
+
+function isPendingOAuthGate(gate) {
+  return gate?.kind === "auth_required" && gate?.challengeKind === "oauth_url";
+}
+
+function isOAuthCallbackCompletion(payload) {
+  return payload?.type === OAUTH_CALLBACK_MESSAGE_TYPE && payload?.status === "completed";
+}
+
+function oauthCompletionMatchesGate(payload, gate, listeningSince) {
+  if (!isOAuthCallbackCompletion(payload)) return false;
+  const continuation = payload?.continuation;
+  if (!continuation || continuation.type !== "turn_gate_resume") {
+    return Number(payload?.completedAt || 0) >= listeningSince;
+  }
+  if (continuation.turn_run_ref && continuation.turn_run_ref !== gate?.runId) return false;
+  if (continuation.gate_ref && continuation.gate_ref !== gate?.gateRef) return false;
+  return true;
+}
+
+function parseOAuthCallbackStoragePayload(value) {
+  if (!value) return null;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
 }
 
 // v2 chat hook. Differences from the fork's v1 hook:
@@ -121,6 +161,47 @@ export function useChat(threadId) {
     }
   }, [pendingAuthGateKey]);
 
+  React.useEffect(() => {
+    if (!isPendingOAuthGate(pendingGate)) return;
+    const listeningSince = Date.now();
+
+    const handleCompletion = (payload) => {
+      if (!oauthCompletionMatchesGate(payload, pendingGate, listeningSince)) return;
+      setPendingGate((current) => (isPendingOAuthGate(current) ? null : current));
+      setIsProcessing(true);
+    };
+
+    let channel = null;
+    if (typeof window.BroadcastChannel === "function") {
+      channel = new window.BroadcastChannel(OAUTH_CALLBACK_CHANNEL);
+      channel.onmessage = (event) => handleCompletion(event.data);
+    }
+
+    const onStorage = (event) => {
+      if (event.key !== OAUTH_CALLBACK_STORAGE_KEY) return;
+      handleCompletion(parseOAuthCallbackStoragePayload(event.newValue));
+    };
+
+    window.addEventListener("storage", onStorage);
+    handleCompletion(
+      parseOAuthCallbackStoragePayload(
+        window.localStorage?.getItem?.(OAUTH_CALLBACK_STORAGE_KEY),
+      ),
+    );
+    const timer = window.setInterval(() => {
+      handleCompletion(
+        parseOAuthCallbackStoragePayload(
+          window.localStorage?.getItem?.(OAUTH_CALLBACK_STORAGE_KEY),
+        ),
+      );
+    }, 500);
+    return () => {
+      window.clearInterval(timer);
+      if (channel) channel.close();
+      window.removeEventListener("storage", onStorage);
+    };
+  }, [pendingGate]);
+
   const handleEvent = useChatEvents({
     threadId,
     setMessages,
@@ -175,8 +256,10 @@ export function useChat(threadId) {
       const pendingKey = sendThreadId;
       const pendingRecord = {
         id: `pending-${pendingSeqRef.current++}`,
+        role: "user",
         content,
         timestamp: new Date().toISOString(),
+        isOptimistic: true,
       };
       addPending(pendingMessagesRef.current, pendingKey, pendingRecord);
 
@@ -212,6 +295,19 @@ export function useChat(threadId) {
             threadId: response.thread_id || sendThreadId,
             status: response.status || null,
           });
+        }
+        const timelineMessageId = recordAcceptedMessageRef(
+          pendingMessagesRef.current,
+          pendingKey,
+          optimisticId,
+          response?.accepted_message_ref,
+        );
+        if (timelineMessageId) {
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === optimisticId ? { ...m, timelineMessageId } : m,
+            ),
+          );
         }
         return response;
       } catch (err) {
@@ -266,8 +362,13 @@ export function useChat(threadId) {
         always: opts.always,
         credentialRef: opts.credentialRef,
       });
+      const shouldContinueProcessing =
+        resolution === "approved" || resolution === "credential_provided";
       setPendingGate(null);
-      setIsProcessing(true);
+      setIsProcessing(shouldContinueProcessing);
+      if (!shouldContinueProcessing) {
+        setActiveRun(null);
+      }
     },
     [pendingGate, threadId],
   );
@@ -277,10 +378,14 @@ export function useChat(threadId) {
       if (!pendingGate) {
         throw new Error("auth gate is no longer pending");
       }
-      const { runId, gateRef, provider, accountLabel } = pendingGate;
-      if (!runId || !gateRef || !provider || !accountLabel) {
+      const { runId, gateRef, provider } = pendingGate;
+      if (!runId || !gateRef || !provider) {
         throw new Error("auth gate is missing required credential metadata");
       }
+      // `account_label` is optional on the prompt (gates.js defaults it to
+      // an empty string), so don't gate submission on it — derive a sensible
+      // label when the prompt didn't carry one.
+      const accountLabel = pendingGate.accountLabel || `${provider} credential`;
       const gateKey = `${runId}\n${gateRef}`;
       if (authTokenSubmitRef.current.gateKey !== gateKey) {
         authTokenSubmitRef.current = {
@@ -296,8 +401,9 @@ export function useChat(threadId) {
 
       try {
         let credentialRef = authTokenSubmitRef.current.credentialRef;
+        let submitted = null;
         if (!credentialRef) {
-          const submitted = await withAuthTokenTimeout((signal) =>
+          submitted = await withAuthTokenTimeout((signal) =>
             submitManualToken({
               provider,
               accountLabel,
@@ -315,19 +421,21 @@ export function useChat(threadId) {
           authTokenSubmitRef.current.credentialRef = credentialRef;
         }
 
-        try {
-          await withAuthTokenTimeout((signal) =>
-            resolveGateRequest({
-              threadId,
-              runId,
-              gateRef,
-              resolution: "credential_provided",
-              credentialRef,
-              signal,
-            }),
-          );
-        } catch (err) {
-          throw credentialStoredGateResolutionError(err);
+        if (!submitResponseResumedTurnGate(submitted)) {
+          try {
+            await withAuthTokenTimeout((signal) =>
+              resolveGateRequest({
+                threadId,
+                runId,
+                gateRef,
+                resolution: "credential_provided",
+                credentialRef,
+                signal,
+              }),
+            );
+          } catch (err) {
+            throw credentialStoredGateResolutionError(err);
+          }
         }
 
         authTokenSubmitRef.current = {
@@ -413,17 +521,6 @@ export function useChat(threadId) {
     recoverHistory: noop,
     recoveryNotice: null,
   };
-}
-
-function addPending(store, key, record) {
-  const existing = store.get(key) || [];
-  store.set(key, [...existing, record]);
-}
-
-function removePending(store, key, pendingId) {
-  const next = (store.get(key) || []).filter((r) => r.id !== pendingId);
-  if (next.length > 0) store.set(key, next);
-  else store.delete(key);
 }
 
 function retryAfterMs(err) {

@@ -128,14 +128,18 @@ impl CapabilityObligationHandler for AuthRequiredObligationHandler {
         &self,
         _request: CapabilityObligationRequest<'_>,
     ) -> Result<(), CapabilityObligationError> {
-        Err(CapabilityObligationError::AuthRequired)
+        Err(CapabilityObligationError::AuthRequired {
+            credential_requirements: Vec::new(),
+        })
     }
 
     async fn prepare(
         &self,
         _request: CapabilityObligationRequest<'_>,
     ) -> Result<CapabilityObligationOutcome, CapabilityObligationError> {
-        Err(CapabilityObligationError::AuthRequired)
+        Err(CapabilityObligationError::AuthRequired {
+            credential_requirements: Vec::new(),
+        })
     }
 }
 
@@ -161,7 +165,9 @@ impl CapabilityObligationHandler for PostDispatchAuthRequiredObligationHandler {
         &self,
         _request: CapabilityObligationCompletionRequest<'_>,
     ) -> Result<CapabilityDispatchResult, CapabilityObligationError> {
-        Err(CapabilityObligationError::AuthRequired)
+        Err(CapabilityObligationError::AuthRequired {
+            credential_requirements: Vec::new(),
+        })
     }
 }
 
@@ -195,6 +201,7 @@ impl CapabilityDispatcher for AuthRequiredDispatcher {
         Err(DispatchError::AuthRequired {
             capability: request.capability_id,
             required_secrets: vec![],
+            credential_requirements: Vec::new(),
         })
     }
 }

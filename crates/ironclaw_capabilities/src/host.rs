@@ -1652,18 +1652,13 @@ fn prepare_obligation_error_to_invocation(
                 obligations,
             }
         }
-        CapabilityObligationError::AuthRequired => {
-            // CapabilityObligationError::AuthRequired is a unit variant (no secret
-            // handle list).  The obligation handler does not surface which staged
-            // secret was missing, so required_secrets is left empty here.  The
-            // runtime auth gate accepts an empty list and falls back to the generic
-            // re-auth prompt; the dispatch-side conversion in error.rs forwards the
-            // real list when DispatchError::AuthRequired is raised instead.
-            CapabilityInvocationError::AuthorizationRequiresAuth {
-                capability: capability_id.clone(),
-                required_secrets: Vec::new(),
-            }
-        }
+        CapabilityObligationError::AuthRequired {
+            credential_requirements,
+        } => CapabilityInvocationError::AuthorizationRequiresAuth {
+            capability: capability_id.clone(),
+            required_secrets: Vec::new(),
+            credential_requirements,
+        },
         CapabilityObligationError::Failed { kind } => CapabilityInvocationError::ObligationFailed {
             capability: capability_id.clone(),
             kind,
@@ -1676,10 +1671,12 @@ fn completion_obligation_error_to_invocation(
     error: CapabilityObligationError,
 ) -> CapabilityInvocationError {
     match error {
-        CapabilityObligationError::AuthRequired => CapabilityInvocationError::ObligationFailed {
-            capability: capability_id.clone(),
-            kind: CapabilityObligationFailureKind::Secret,
-        },
+        CapabilityObligationError::AuthRequired { .. } => {
+            CapabilityInvocationError::ObligationFailed {
+                capability: capability_id.clone(),
+                kind: CapabilityObligationFailureKind::Secret,
+            }
+        }
         other => prepare_obligation_error_to_invocation(capability_id, other),
     }
 }

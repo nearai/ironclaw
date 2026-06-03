@@ -14,7 +14,7 @@ export const primaryRoutes = [
   { id: "routines", path: "/routines", labelKey: "nav.routines", hidden: true },
   { id: "missions", path: "/missions", labelKey: "nav.missions", hidden: true },
   { id: "extensions", path: "/extensions", labelKey: "nav.extensions" },
-  { id: "settings", path: "/settings", labelKey: "nav.settings", hidden: true },
+  { id: "settings", path: "/settings", labelKey: "nav.settings", hidden: false },
   { id: "admin", path: "/admin", labelKey: "nav.admin", hidden: true },
 ];
 
@@ -30,13 +30,13 @@ export const routeSectionDefs = [
 ];
 
 export const SETTINGS_SUB_ROUTES = [
-  { id: "inference", labelKey: "settings.inference", icon: "spark" },
-  { id: "agent", labelKey: "settings.agent", icon: "bolt" },
-  { id: "channels", labelKey: "settings.channels", icon: "send" },
-  { id: "networking", labelKey: "settings.networking", icon: "pulse" },
-  { id: "tools", labelKey: "settings.tools", icon: "tool" },
-  { id: "skills", labelKey: "settings.skills", icon: "file" },
-  { id: "users", labelKey: "settings.users", icon: "lock" },
+  // { id: "inference", labelKey: "settings.inference", icon: "spark" },
+  // { id: "agent", labelKey: "settings.agent", icon: "bolt" },
+  // { id: "channels", labelKey: "settings.channels", icon: "send" },
+  // { id: "networking", labelKey: "settings.networking", icon: "pulse" },
+  // { id: "tools", labelKey: "settings.tools", icon: "tool" },
+  // { id: "skills", labelKey: "settings.skills", icon: "file" },
+  // { id: "users", labelKey: "settings.users", icon: "lock" },
   { id: "language", labelKey: "settings.language", icon: "globe" },
 ];
 

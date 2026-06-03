@@ -706,6 +706,7 @@ pub struct CapabilityDispatchRequest {
     pub input: serde_json::Value,
 }
 pub struct CapabilityDispatchResult;
+pub struct CapabilityDisplayOutputPreview;
 pub trait CapabilityDispatcher;
 pub enum DispatchError;
 pub enum RuntimeDispatchErrorKind;
@@ -714,7 +715,8 @@ pub enum RuntimeDispatchErrorKind;
 Rules:
 
 - `CapabilityDispatchRequest` is already authorized; grant checks and approvals happen before this boundary. Optional `mounts` and `resource_reservation` fields are prepared obligation effects, not new authority grants.
-- `CapabilityDispatchResult` exposes normalized host facts: capability ID, provider, runtime, output, usage, and resource receipt.
+- `CapabilityDispatchResult` exposes normalized host facts: capability ID, provider, runtime, output, optional display-preview metadata, usage, and resource receipt.
+- `CapabilityDisplayOutputPreview` is a display-only side channel for renderer-ready output such as unified diffs. It must not change model-visible capability output, grant authority, or carry backend-private paths/secrets.
 - `DispatchError` uses stable control-plane variants for registry/routing failures and `RuntimeDispatchErrorKind` for WASM/Script/MCP failures.
 - `RuntimeDispatchErrorKind::OperationFailed` is for model-visible capability-domain failures after a valid invocation reaches the capability implementation; runtime-lane execution failures such as guest traps remain runtime failures, not operation failures.
 - Runtime output contract failures such as `OutputDecode` and `InvalidResult` must not be conflated with malformed caller input.

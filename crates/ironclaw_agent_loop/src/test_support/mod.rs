@@ -59,6 +59,7 @@ pub struct MockAgentLoopDriverHost {
     compaction_result: Mutex<Result<LoopCompactionResponse, LoopCompactionError>>,
     progress_events: Mutex<Vec<LoopProgressEvent>>,
     acked_tokens: Mutex<Vec<LoopInputAckToken>>,
+    finalized_assistant_messages: Mutex<Vec<String>>,
     cancellation: Mutex<Option<LoopCancellationSignal>>,
     cancellation_notify: tokio::sync::Notify,
 }
@@ -90,6 +91,11 @@ impl MockAgentLoopDriverHost {
     /// Returns loop progress events emitted through the host progress port.
     pub fn progress_events(&self) -> Vec<LoopProgressEvent> {
         clone_mutex_vec(&self.progress_events)
+    }
+
+    /// Returns finalized assistant message contents in call order.
+    pub fn finalized_assistant_messages(&self) -> Vec<String> {
+        clone_mutex_vec(&self.finalized_assistant_messages)
     }
 
     /// Sets the exact cancellation signal and wakes async waiters.
@@ -210,6 +216,7 @@ impl MockAgentLoopDriverHostBuilder {
                 compaction_result: Mutex::new(self.compaction_result),
                 progress_events: Mutex::new(Vec::new()),
                 acked_tokens: Mutex::new(Vec::new()),
+                finalized_assistant_messages: Mutex::new(Vec::new()),
                 cancellation: Mutex::new(self.cancellation),
                 cancellation_notify: tokio::sync::Notify::new(),
             },
@@ -754,8 +761,9 @@ impl ironclaw_turns::run_profile::LoopCapabilityPort for MockAgentLoopDriverHost
 impl ironclaw_turns::run_profile::LoopTranscriptPort for MockAgentLoopDriverHost {
     async fn finalize_assistant_message(
         &self,
-        _request: FinalizeAssistantMessage,
+        request: FinalizeAssistantMessage,
     ) -> Result<LoopMessageRef, AgentLoopHostError> {
+        lock_or_panic(&self.finalized_assistant_messages).push(request.reply.content);
         self.record_call(MockHostCall::FinalizeAssistantMessage);
         Ok(loop_message_ref("msg:assistant"))
     }
@@ -967,6 +975,7 @@ fn scripted_model_response(
         output,
         effective_model_profile_id: ModelProfileId::new("model")
             .unwrap_or_else(|error| panic!("test model id should be valid: {error}")),
+        usage: None,
     })
 }
 
@@ -1003,6 +1012,7 @@ fn scripted_capability_outcome(
         ScriptedCapabilityOutcome::AuthRequired { gate_ref } => {
             Ok(CapabilityOutcome::AuthRequired {
                 gate_ref: loop_gate_ref(&gate_ref),
+                credential_requirements: Vec::new(),
                 safe_summary: "auth required".to_string(),
             })
         }

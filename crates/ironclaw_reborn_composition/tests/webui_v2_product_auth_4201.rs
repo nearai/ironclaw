@@ -21,14 +21,15 @@ use ironclaw_auth::{
 use ironclaw_auth::{AuthProviderId, CredentialAccountId, CredentialAccountService};
 use ironclaw_host_api::{AgentId, InvocationId, ProjectId, ResourceScope, TenantId, UserId};
 use ironclaw_product_workflow::{
-    ExtensionName, RebornCancelRunResponse, RebornCreateThreadResponse, RebornGetRunStateRequest,
-    RebornGetRunStateResponse, RebornListThreadsResponse, RebornResolveGateResponse,
-    RebornServicesApi, RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
+    LifecyclePackageRef, RebornCancelRunResponse, RebornCreateThreadResponse,
+    RebornExtensionActionResponse, RebornExtensionListResponse, RebornExtensionRegistryResponse,
+    RebornGetRunStateRequest, RebornGetRunStateResponse, RebornListThreadsResponse,
+    RebornResolveGateResponse, RebornServicesApi, RebornServicesError,
     RebornSetupExtensionResponse, RebornStreamEventsRequest, RebornStreamEventsResponse,
     RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
     WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
     WebUiListThreadsRequest, WebUiResolveGateRequest, WebUiSendMessageRequest,
-    WebUiSetupExtensionRequest,
+    WebUiSetupExtensionRequest, rejecting_reborn_services_error,
 };
 use ironclaw_reborn_composition::{
     RebornAuthContinuationDispatcher, RebornProductAuthServices, RebornReadiness,
@@ -77,7 +78,7 @@ impl RebornServicesApi for UnusedServices {
         _caller: WebUiAuthenticatedCaller,
         _request: WebUiCreateThreadRequest,
     ) -> Result<RebornCreateThreadResponse, RebornServicesError> {
-        Err(unused_service_error())
+        Err(rejecting_reborn_services_error())
     }
 
     async fn submit_turn(
@@ -85,7 +86,7 @@ impl RebornServicesApi for UnusedServices {
         _caller: WebUiAuthenticatedCaller,
         _request: WebUiSendMessageRequest,
     ) -> Result<RebornSubmitTurnResponse, RebornServicesError> {
-        Err(unused_service_error())
+        Err(rejecting_reborn_services_error())
     }
 
     async fn get_timeline(
@@ -93,7 +94,7 @@ impl RebornServicesApi for UnusedServices {
         _caller: WebUiAuthenticatedCaller,
         _request: RebornTimelineRequest,
     ) -> Result<RebornTimelineResponse, RebornServicesError> {
-        Err(unused_service_error())
+        Err(rejecting_reborn_services_error())
     }
 
     async fn stream_events(
@@ -101,7 +102,7 @@ impl RebornServicesApi for UnusedServices {
         _caller: WebUiAuthenticatedCaller,
         _request: RebornStreamEventsRequest,
     ) -> Result<RebornStreamEventsResponse, RebornServicesError> {
-        Err(unused_service_error())
+        Err(rejecting_reborn_services_error())
     }
 
     async fn get_run_state(
@@ -109,7 +110,7 @@ impl RebornServicesApi for UnusedServices {
         _caller: WebUiAuthenticatedCaller,
         _request: RebornGetRunStateRequest,
     ) -> Result<RebornGetRunStateResponse, RebornServicesError> {
-        Err(unused_service_error())
+        Err(rejecting_reborn_services_error())
     }
 
     async fn cancel_run(
@@ -117,7 +118,7 @@ impl RebornServicesApi for UnusedServices {
         _caller: WebUiAuthenticatedCaller,
         _request: WebUiCancelRunRequest,
     ) -> Result<RebornCancelRunResponse, RebornServicesError> {
-        Err(unused_service_error())
+        Err(rejecting_reborn_services_error())
     }
 
     async fn resolve_gate(
@@ -125,7 +126,7 @@ impl RebornServicesApi for UnusedServices {
         _caller: WebUiAuthenticatedCaller,
         _request: WebUiResolveGateRequest,
     ) -> Result<RebornResolveGateResponse, RebornServicesError> {
-        Err(unused_service_error())
+        Err(rejecting_reborn_services_error())
     }
 
     async fn list_threads(
@@ -133,27 +134,54 @@ impl RebornServicesApi for UnusedServices {
         _caller: WebUiAuthenticatedCaller,
         _request: WebUiListThreadsRequest,
     ) -> Result<RebornListThreadsResponse, RebornServicesError> {
-        Err(unused_service_error())
+        Err(rejecting_reborn_services_error())
+    }
+
+    async fn list_extensions(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornExtensionListResponse, RebornServicesError> {
+        Err(rejecting_reborn_services_error())
+    }
+
+    async fn list_extension_registry(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornExtensionRegistryResponse, RebornServicesError> {
+        Err(rejecting_reborn_services_error())
+    }
+
+    async fn install_extension(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _package_ref: LifecyclePackageRef,
+    ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
+        Err(rejecting_reborn_services_error())
+    }
+
+    async fn activate_extension(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _package_ref: LifecyclePackageRef,
+    ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
+        Err(rejecting_reborn_services_error())
+    }
+
+    async fn remove_extension(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _package_ref: LifecyclePackageRef,
+    ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
+        Err(rejecting_reborn_services_error())
     }
 
     async fn setup_extension(
         &self,
         _caller: WebUiAuthenticatedCaller,
-        _extension_name: ExtensionName,
+        _package_ref: LifecyclePackageRef,
         _request: WebUiSetupExtensionRequest,
     ) -> Result<RebornSetupExtensionResponse, RebornServicesError> {
-        Err(unused_service_error())
-    }
-}
-
-fn unused_service_error() -> RebornServicesError {
-    RebornServicesError {
-        code: RebornServicesErrorCode::Internal,
-        kind: RebornServicesErrorKind::Internal,
-        status_code: 500,
-        retryable: false,
-        field: None,
-        validation_code: None,
+        Err(rejecting_reborn_services_error())
     }
 }
 
@@ -217,18 +245,19 @@ fn caller_scope_with_invocation_and_thread(
     )
 }
 
-async fn seed_configured_account(
+async fn seed_account_with_status(
     shared: &InMemoryAuthProductServices,
     invocation_id: InvocationId,
     provider: &str,
     label: &str,
+    status: CredentialAccountStatus,
 ) -> ironclaw_auth::CredentialAccountId {
     let account = shared
         .create_account(NewCredentialAccount {
             scope: caller_scope_with_invocation(invocation_id),
             provider: AuthProviderId::new(provider.to_string()).expect("provider"),
             label: CredentialAccountLabel::new(label.to_string()).expect("label"),
-            status: CredentialAccountStatus::Configured,
+            status,
             ownership: CredentialOwnership::UserReusable,
             owner_extension: None,
             granted_extensions: Vec::new(),
@@ -239,6 +268,22 @@ async fn seed_configured_account(
         .await
         .expect("seeded account");
     account.id
+}
+
+async fn seed_configured_account(
+    shared: &InMemoryAuthProductServices,
+    invocation_id: InvocationId,
+    provider: &str,
+    label: &str,
+) -> ironclaw_auth::CredentialAccountId {
+    seed_account_with_status(
+        shared,
+        invocation_id,
+        provider,
+        label,
+        CredentialAccountStatus::Configured,
+    )
+    .await
 }
 
 async fn read_body_string(response: axum::response::Response) -> String {
@@ -526,6 +571,60 @@ async fn accounts_select_rejects_account_from_different_invocation_scope() {
     );
     let body = read_body_string(response).await;
     assert!(body.contains("\"code\":\"cross_scope_denied\""));
+}
+
+#[tokio::test]
+async fn accounts_select_rejects_wrong_provider_as_missing() {
+    let fixture = build_fixture();
+    let invocation_id = InvocationId::new();
+    let account_id =
+        seed_configured_account(&fixture.shared, invocation_id, "github", "work github").await;
+
+    let response = post_authenticated(
+        &fixture.app,
+        "/api/reborn/product-auth/accounts/select",
+        json!({
+            "provider": "slack",
+            "account_id": account_id.to_string(),
+            "invocation_id": invocation_id.to_string()
+        }),
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::CONFLICT,
+        "wrong provider must not reveal that the account id exists"
+    );
+    let body = read_body_string(response).await;
+    assert!(body.contains("\"code\":\"credential_missing\""));
+}
+
+#[tokio::test]
+async fn accounts_select_rejects_unconfigured_account() {
+    let fixture = build_fixture();
+    let invocation_id = InvocationId::new();
+    let account_id = seed_account_with_status(
+        &fixture.shared,
+        invocation_id,
+        "github",
+        "expired github",
+        CredentialAccountStatus::Expired,
+    )
+    .await;
+
+    let response = post_authenticated(
+        &fixture.app,
+        "/api/reborn/product-auth/accounts/select",
+        json!({
+            "provider": "github",
+            "account_id": account_id.to_string(),
+            "invocation_id": invocation_id.to_string()
+        }),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body = read_body_string(response).await;
+    assert!(body.contains("\"code\":\"credential_missing\""));
 }
 
 #[tokio::test]
@@ -1129,6 +1228,7 @@ async fn challenge_for_gate_returns_oauth_url_view_for_seeded_flow() {
 
     shared
         .create_flow(NewAuthFlow {
+            id: None,
             // Flow must carry the same thread_id as the TurnScope — thread_id matching
             // is fail-closed: a flow with None thread_id does not match any scoped request.
             scope: caller_scope_with_invocation_and_thread(InvocationId::new(), thread_id.clone()),
@@ -1164,8 +1264,10 @@ async fn challenge_for_gate_returns_oauth_url_view_for_seeded_flow() {
             &UserId::new(USER).expect("user"),
             turn_run_id,
             gate_ref_str,
+            &[],
         )
         .await
+        .expect("lookup")
         .expect("found");
     assert!(matches!(view.kind, AuthPromptChallengeKind::OAuthUrl));
     assert_eq!(view.provider.as_str(), "google");
@@ -1184,8 +1286,10 @@ async fn challenge_for_gate_returns_oauth_url_view_for_seeded_flow() {
                 &UserId::new("other-user-4201").expect("user"),
                 turn_run_id,
                 gate_ref_str,
+                &[],
             )
             .await
+            .expect("lookup")
             .is_none(),
         "challenge lookup must reject the wrong owner user"
     );
@@ -1196,8 +1300,10 @@ async fn challenge_for_gate_returns_oauth_url_view_for_seeded_flow() {
                 &UserId::new(USER).expect("user"),
                 TurnRunId::new(),
                 gate_ref_str,
+                &[],
             )
             .await
+            .expect("lookup")
             .is_none(),
         "challenge lookup must reject the wrong turn run"
     );
@@ -1250,6 +1356,7 @@ async fn challenge_for_gate_cancelled_flow_returns_none() {
 
     let flow = shared
         .create_flow(NewAuthFlow {
+            id: None,
             scope: scope.clone(),
             kind: AuthFlowKind::IntegrationCredential,
             provider: AuthProviderId::new("google".to_string()).unwrap(),
@@ -1288,8 +1395,10 @@ async fn challenge_for_gate_cancelled_flow_returns_none() {
             &UserId::new(USER).expect("user"),
             turn_run_id,
             gate_ref_str,
+            &[],
         )
-        .await;
+        .await
+        .expect("lookup");
     assert!(
         result.is_none(),
         "cancelled flow must not be surfaced by challenge_for_gate"
@@ -1322,6 +1431,7 @@ async fn challenge_for_gate_threadless_flow_returns_none_for_thread_scope() {
     let turn_run_id = TurnRunId::new();
     shared
         .create_flow(NewAuthFlow {
+            id: None,
             scope: caller_scope_with_invocation(InvocationId::new()),
             kind: AuthFlowKind::IntegrationCredential,
             provider: AuthProviderId::new("google".to_string()).unwrap(),
@@ -1357,8 +1467,10 @@ async fn challenge_for_gate_threadless_flow_returns_none_for_thread_scope() {
             &UserId::new(USER).expect("user"),
             turn_run_id,
             gate_ref_str,
+            &[],
         )
-        .await;
+        .await
+        .expect("lookup");
     assert!(
         result.is_none(),
         "thread-scoped lookup must reject matching flows that lack thread_id"
@@ -1398,6 +1510,7 @@ async fn challenge_for_gate_wrong_tenant_returns_none() {
     // Create the flow under TENANT (the test tenant).
     shared
         .create_flow(NewAuthFlow {
+            id: None,
             scope: caller_scope_with_invocation(InvocationId::new()),
             kind: AuthFlowKind::IntegrationCredential,
             provider: AuthProviderId::new("google".to_string()).unwrap(),
@@ -1432,8 +1545,10 @@ async fn challenge_for_gate_wrong_tenant_returns_none() {
             &UserId::new(USER).expect("user"),
             turn_run_id,
             gate_ref_str,
+            &[],
         )
-        .await;
+        .await
+        .expect("lookup");
     assert!(
         result.is_none(),
         "different-tenant caller must not receive another tenant's challenge"
@@ -1471,6 +1586,7 @@ async fn challenge_for_gate_returns_manual_token_view_for_seeded_flow() {
 
     shared
         .create_flow(NewAuthFlow {
+            id: None,
             scope: caller_scope_with_invocation_and_thread(InvocationId::new(), thread_id.clone()),
             kind: AuthFlowKind::IntegrationCredential,
             provider: AuthProviderId::new("slack".to_string()).unwrap(),
@@ -1505,8 +1621,10 @@ async fn challenge_for_gate_returns_manual_token_view_for_seeded_flow() {
             &UserId::new(USER).expect("user"),
             turn_run_id,
             gate_ref_str,
+            &[],
         )
         .await
+        .expect("lookup")
         .expect("found");
     assert!(matches!(view.kind, AuthPromptChallengeKind::ManualToken));
     assert_eq!(view.provider.as_str(), "slack");
@@ -1548,6 +1666,7 @@ async fn challenge_for_gate_returns_other_kind_view_for_setup_required_flow() {
 
     shared
         .create_flow(NewAuthFlow {
+            id: None,
             scope: caller_scope_with_invocation_and_thread(InvocationId::new(), thread_id.clone()),
             kind: AuthFlowKind::IntegrationCredential,
             provider: AuthProviderId::new("github".to_string()).unwrap(),
@@ -1580,8 +1699,10 @@ async fn challenge_for_gate_returns_other_kind_view_for_setup_required_flow() {
             &UserId::new(USER).expect("user"),
             turn_run_id,
             gate_ref_str,
+            &[],
         )
         .await
+        .expect("lookup")
         .expect("found");
     assert!(matches!(view.kind, AuthPromptChallengeKind::Other));
     assert_eq!(view.provider.as_str(), "github");

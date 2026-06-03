@@ -26,8 +26,9 @@
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    ApprovalRequestId, CapabilityId, CorrelationId, ExecutionContext, ExtensionId, ProcessId,
-    ResourceEstimate, ResourceScope, ResourceUsage, RuntimeKind, SecretHandle,
+    ApprovalRequestId, CapabilityDisplayOutputPreview, CapabilityId, CorrelationId,
+    ExecutionContext, ExtensionId, ProcessId, ResourceEstimate, ResourceScope, ResourceUsage,
+    RuntimeCredentialAuthRequirement, RuntimeKind, SecretHandle,
     runtime_policy::{DeploymentMode, EffectiveRuntimePolicy, RuntimeProfile},
 };
 use ironclaw_trust::TrustDecision;
@@ -72,10 +73,17 @@ pub use first_party::{
 pub use first_party_tools::{
     APPLY_PATCH_CAPABILITY_ID, BUILTIN_FIRST_PARTY_PROVIDER, BuiltinFirstPartyTools,
     ECHO_CAPABILITY_ID, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID,
-    HTTP_SAVE_CAPABILITY_ID, JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, READ_FILE_CAPABILITY_ID,
-    SHELL_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID,
-    SKILL_REMOVE_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID, TIME_CAPABILITY_ID,
-    WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers, builtin_first_party_package,
+    HTTP_SAVE_CAPABILITY_ID, JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, MEMORY_READ_CAPABILITY_ID,
+    MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
+    READ_FILE_CAPABILITY_ID, SHELL_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID,
+    SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID,
+    TIME_CAPABILITY_ID, TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID,
+    TRIGGER_REMOVE_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers,
+    builtin_first_party_package,
+};
+#[cfg(any(test, feature = "test-support"))]
+pub use first_party_tools::{
+    TriggerManagementClock, builtin_first_party_handlers_with_trigger_clock,
 };
 pub use http_body::{RuntimeHttpBodyStore, RuntimeHttpBodyStoreError};
 pub use invocation_services::{
@@ -84,8 +92,8 @@ pub use invocation_services::{
 };
 pub use obligations::{
     BuiltinObligationHandler, BuiltinObligationServices, LEAK_REDACT_FAILED_CODE,
-    ProcessObligationLifecycleStore, RuntimeCredentialAccountRequest,
-    RuntimeCredentialAccountResolver,
+    ProcessObligationLifecycleStore, RuntimeCredentialAccessSecret,
+    RuntimeCredentialAccountRequest, RuntimeCredentialAccountResolver,
 };
 pub use planner::{ExecutionPlan, PlannerError, plan_capability};
 pub use process_output::{SavedCommandOutput, SavedCommandOutputSanitization};
@@ -177,6 +185,14 @@ pub struct RuntimeGateId(String);
 impl RuntimeGateId {
     pub fn new() -> Self {
         Self(CorrelationId::new().to_string())
+    }
+
+    pub fn from_stable_suffix(suffix: &str) -> Result<Self, HostRuntimeError> {
+        Ok(Self(validate_bounded_contract_string(
+            suffix.to_string(),
+            "runtime gate id",
+            128,
+        )?))
     }
 
     pub fn as_str(&self) -> &str {
@@ -462,6 +478,7 @@ pub struct VisibleCapabilitySurface {
 pub struct RuntimeCapabilityCompleted {
     pub capability_id: CapabilityId,
     pub output: Value,
+    pub display_preview: Option<CapabilityDisplayOutputPreview>,
     pub usage: ResourceUsage,
 }
 
@@ -480,6 +497,7 @@ pub struct RuntimeAuthGate {
     pub capability_id: CapabilityId,
     pub reason: RuntimeBlockedReason,
     pub required_secrets: Vec<SecretHandle>,
+    pub credential_requirements: Vec<RuntimeCredentialAuthRequirement>,
 }
 
 /// Resource suspension state.
@@ -701,13 +719,16 @@ impl RuntimeCapabilityFailure {
 }
 
 fn bounded_runtime_failure_summary(summary: &str) -> String {
+    const ELLIPSIS: &str = "...";
     let mut chars = summary.chars();
     let bounded: String = chars
         .by_ref()
         .take(MAX_RUNTIME_FAILURE_SUMMARY_CHARS)
         .collect();
     if chars.next().is_some() {
-        format!("{bounded}...")
+        let truncated_limit = MAX_RUNTIME_FAILURE_SUMMARY_CHARS - ELLIPSIS.chars().count();
+        let bounded: String = bounded.chars().take(truncated_limit).collect();
+        format!("{bounded}{ELLIPSIS}")
     } else {
         bounded
     }

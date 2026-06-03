@@ -9,6 +9,7 @@ use ironclaw_product_workflow::{
 use crate::{
     RebornBuildError, RebornProductAuthServices, RebornReadiness, RebornRuntime,
     lifecycle::RebornLocalLifecycleFacade,
+    webui_extension_credentials::ProductAuthExtensionCredentialSetup,
 };
 
 /// WebUI-facing Reborn service bundle for host composition.
@@ -92,7 +93,16 @@ pub fn build_webui_services(
             lifecycle_facade =
                 lifecycle_facade.with_extension_management(extension_management.clone());
         }
+        if let Some(runtime_http_egress) = &local_runtime.runtime_http_egress {
+            lifecycle_facade =
+                lifecycle_facade.with_runtime_http_egress(runtime_http_egress.clone());
+        }
         api = api.with_lifecycle_product_facade(Arc::new(lifecycle_facade));
+    }
+    if let Some(product_auth) = &services.product_auth {
+        api = api.with_extension_credentials(Arc::new(ProductAuthExtensionCredentialSetup::new(
+            Arc::clone(product_auth),
+        )));
     }
     api = api.with_event_stream(event_stream.unwrap_or_else(|| runtime.webui_event_stream()));
 

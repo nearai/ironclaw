@@ -56,20 +56,27 @@ jobs:
             cargo metadata --no-deps --format-version 1 \
               | jq -c '
                   (
-                    .packages[]
-                    | select(.name == "ironclaw_reborn_cli")
-                    | (
-                        [.name]
-                        + [
-                            .dependencies[]
-                            | select(
-                                .source == null
-                                and (.path // "" | contains("/crates/"))
-                                and (.name | startswith("ironclaw_"))
-                              )
-                            | .name
-                          ]
-                      )
+                    (
+                      .packages[]
+                      | select(.name == "ironclaw_reborn_cli")
+                      | (
+                          [.name]
+                          + [
+                              .dependencies[]
+                              | select(
+                                  .source == null
+                                  and (.path // "" | contains("/crates/"))
+                                  and (.name | startswith("ironclaw_"))
+                                )
+                              | .name
+                            ]
+                        )
+                    )
+                    + [
+                        "ironclaw_product_adapters",
+                        "ironclaw_product_workflow",
+                        "ironclaw_slack_v2_adapter"
+                      ]
                   )
                   | unique
                 '
@@ -120,6 +127,8 @@ jobs:
           feature_flags=""
           if [ "${{ matrix.package }}" = "ironclaw_reborn_cli" ]; then
             feature_flags="--features webui-v2-beta"
+          elif [ "${{ matrix.package }}" = "ironclaw_product_adapters" ]; then
+            feature_flags="--features test-support"
           fi
 
           # shellcheck disable=SC2086 # feature_flags intentionally expands to zero or more Cargo args.

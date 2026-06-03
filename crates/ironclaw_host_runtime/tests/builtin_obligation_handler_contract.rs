@@ -17,7 +17,8 @@ use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     BuiltinObligationHandler, BuiltinObligationServices, CapabilitySurfaceVersion,
     DefaultHostRuntime, HostRuntime, RuntimeCapabilityOutcome, RuntimeCapabilityRequest,
-    RuntimeCredentialAccountRequest, RuntimeCredentialAccountResolver, RuntimeFailureKind,
+    RuntimeCredentialAccessSecret, RuntimeCredentialAccountRequest,
+    RuntimeCredentialAccountResolver, RuntimeFailureKind,
 };
 use ironclaw_resources::{InMemoryResourceGovernor, ResourceAccount};
 use ironclaw_secrets::{InMemorySecretStore, SecretMaterial, SecretStore};
@@ -1114,6 +1115,7 @@ impl CapabilityDispatcher for RecordingDispatcher {
             provider: ExtensionId::new("echo").unwrap(),
             runtime: RuntimeKind::Wasm,
             output: json!({"ok": true}),
+            display_preview: None,
             usage: ResourceUsage::default(),
             receipt: ResourceReceipt {
                 id: request
@@ -1140,6 +1142,7 @@ fn sample_dispatch(
         provider: ExtensionId::new("echo").unwrap(),
         runtime: RuntimeKind::Wasm,
         output,
+        display_preview: None,
         usage: ResourceUsage::default(),
         receipt: ResourceReceipt {
             id: ResourceReservationId::new(),
@@ -1257,7 +1260,7 @@ impl RuntimeCredentialAccountResolver for AlwaysAuthRequiredResolver {
     async fn resolve_access_secret(
         &self,
         _request: RuntimeCredentialAccountRequest<'_>,
-    ) -> Result<ironclaw_host_api::SecretHandle, ironclaw_host_api::CredentialStageError> {
+    ) -> Result<RuntimeCredentialAccessSecret, ironclaw_host_api::CredentialStageError> {
         Err(ironclaw_host_api::CredentialStageError::AuthRequired)
     }
 }
@@ -1269,9 +1272,31 @@ struct FixedHandleResolver(ironclaw_host_api::SecretHandle);
 impl RuntimeCredentialAccountResolver for FixedHandleResolver {
     async fn resolve_access_secret(
         &self,
+        request: RuntimeCredentialAccountRequest<'_>,
+    ) -> Result<RuntimeCredentialAccessSecret, ironclaw_host_api::CredentialStageError> {
+        Ok(RuntimeCredentialAccessSecret {
+            scope: request.scope.clone(),
+            handle: self.0.clone(),
+        })
+    }
+}
+
+#[derive(Debug)]
+struct SourceScopedHandleResolver {
+    source_scope: ResourceScope,
+    handle: ironclaw_host_api::SecretHandle,
+}
+
+#[async_trait::async_trait]
+impl RuntimeCredentialAccountResolver for SourceScopedHandleResolver {
+    async fn resolve_access_secret(
+        &self,
         _request: RuntimeCredentialAccountRequest<'_>,
-    ) -> Result<ironclaw_host_api::SecretHandle, ironclaw_host_api::CredentialStageError> {
-        Ok(self.0.clone())
+    ) -> Result<RuntimeCredentialAccessSecret, ironclaw_host_api::CredentialStageError> {
+        Ok(RuntimeCredentialAccessSecret {
+            scope: self.source_scope.clone(),
+            handle: self.handle.clone(),
+        })
     }
 }
 
@@ -1292,6 +1317,7 @@ async fn inject_credential_account_once_fails_when_no_resolver_wired() {
     let obligations = vec![Obligation::InjectCredentialAccountOnce {
         handle: ironclaw_host_api::SecretHandle::new("github_runtime_token").unwrap(),
         provider: ironclaw_host_api::RuntimeCredentialAccountProviderId::new("github").unwrap(),
+        provider_scopes: Vec::new(),
         requester_extension: ironclaw_host_api::ExtensionId::new("github").unwrap(),
     }];
 
@@ -1327,9 +1353,11 @@ async fn inject_credential_account_once_fails_when_resolver_returns_auth_require
     let context = execution_context(CapabilitySet::default());
     let capability_id = capability_id();
     let estimate = ResourceEstimate::default();
+    let provider_scopes = vec!["https://www.googleapis.com/auth/drive.readonly".to_string()];
     let obligations = vec![Obligation::InjectCredentialAccountOnce {
         handle: ironclaw_host_api::SecretHandle::new("github_runtime_token").unwrap(),
         provider: ironclaw_host_api::RuntimeCredentialAccountProviderId::new("github").unwrap(),
+        provider_scopes: provider_scopes.clone(),
         requester_extension: ironclaw_host_api::ExtensionId::new("github").unwrap(),
     }];
 
@@ -1344,10 +1372,19 @@ async fn inject_credential_account_once_fails_when_resolver_returns_auth_require
         .await
         .unwrap_err();
 
-    assert!(
-        matches!(err, CapabilityObligationError::AuthRequired),
-        "expected AuthRequired, got {err:?}"
+    let CapabilityObligationError::AuthRequired {
+        credential_requirements,
+    } = err
+    else {
+        panic!("expected AuthRequired, got {err:?}");
+    };
+    assert_eq!(credential_requirements.len(), 1);
+    assert_eq!(credential_requirements[0].provider.as_str(), "github");
+    assert_eq!(
+        credential_requirements[0].requester_extension.as_str(),
+        "github"
     );
+    assert_eq!(credential_requirements[0].provider_scopes, provider_scopes);
 }
 
 #[tokio::test]
@@ -1382,6 +1419,7 @@ async fn inject_credential_account_once_resolves_and_stages_secret() {
     let obligations = vec![Obligation::InjectCredentialAccountOnce {
         handle: injection_slot.clone(),
         provider: ironclaw_host_api::RuntimeCredentialAccountProviderId::new("github").unwrap(),
+        provider_scopes: Vec::new(),
         requester_extension: ironclaw_host_api::ExtensionId::new("github").unwrap(),
     }];
 
@@ -1395,6 +1433,58 @@ async fn inject_credential_account_once_resolves_and_stages_secret() {
         })
         .await
         .expect("obligation should be satisfied");
+}
+
+#[tokio::test]
+async fn inject_credential_account_once_reads_from_resolved_source_scope() {
+    let access_handle = ironclaw_host_api::SecretHandle::new("github_access_secret").unwrap();
+    let injection_slot = ironclaw_host_api::SecretHandle::new("github_runtime_token").unwrap();
+    let source_scope =
+        ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new()).unwrap();
+    let mut target_scope = source_scope.clone();
+    target_scope.project_id = Some(ProjectId::new("project-a").unwrap());
+    target_scope.invocation_id = InvocationId::new();
+    let secret_store = Arc::new(ironclaw_secrets::InMemorySecretStore::new());
+    secret_store
+        .put(
+            source_scope.clone(),
+            access_handle.clone(),
+            ironclaw_secrets::SecretMaterial::from("test-github-token"),
+        )
+        .await
+        .unwrap();
+    let governor = Arc::new(ironclaw_resources::InMemoryResourceGovernor::new());
+    let services = BuiltinObligationServices::new(
+        Arc::new(ironclaw_events::InMemoryAuditSink::new()),
+        secret_store,
+        governor,
+    )
+    .with_credential_account_resolver(Arc::new(SourceScopedHandleResolver {
+        source_scope,
+        handle: access_handle,
+    }));
+    let handler = services.obligation_handler();
+    let mut context = execution_context(CapabilitySet::default());
+    context.resource_scope = target_scope;
+    let capability_id = capability_id();
+    let estimate = ResourceEstimate::default();
+    let obligations = vec![Obligation::InjectCredentialAccountOnce {
+        handle: injection_slot,
+        provider: ironclaw_host_api::RuntimeCredentialAccountProviderId::new("github").unwrap(),
+        provider_scopes: Vec::new(),
+        requester_extension: ironclaw_host_api::ExtensionId::new("github").unwrap(),
+    }];
+
+    handler
+        .satisfy(CapabilityObligationRequest {
+            phase: CapabilityObligationPhase::Invoke,
+            context: &context,
+            capability_id: &capability_id,
+            estimate: &estimate,
+            obligations: &obligations,
+        })
+        .await
+        .expect("obligation should read credential from resolved source scope");
 }
 
 #[tokio::test]
@@ -1422,6 +1512,7 @@ async fn inject_credential_account_once_maps_unknown_resolved_secret_to_auth_req
     let obligations = vec![Obligation::InjectCredentialAccountOnce {
         handle: ironclaw_host_api::SecretHandle::new("github_runtime_token").unwrap(),
         provider: ironclaw_host_api::RuntimeCredentialAccountProviderId::new("github").unwrap(),
+        provider_scopes: Vec::new(),
         requester_extension: ironclaw_host_api::ExtensionId::new("github").unwrap(),
     }];
 
@@ -1436,9 +1527,17 @@ async fn inject_credential_account_once_maps_unknown_resolved_secret_to_auth_req
         .await
         .unwrap_err();
 
-    assert!(
-        matches!(err, CapabilityObligationError::AuthRequired),
-        "expected AuthRequired when resolved handle not in store, got {err:?}"
+    let CapabilityObligationError::AuthRequired {
+        credential_requirements,
+    } = err
+    else {
+        panic!("expected AuthRequired when resolved handle not in store, got {err:?}");
+    };
+    assert_eq!(credential_requirements.len(), 1);
+    assert_eq!(credential_requirements[0].provider.as_str(), "github");
+    assert_eq!(
+        credential_requirements[0].requester_extension.as_str(),
+        "github"
     );
 }
 

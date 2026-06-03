@@ -124,10 +124,15 @@ where
         pending: &StoredManualTokenInteraction,
         secret: SecretString,
     ) -> Result<CredentialAccount, AuthProductError> {
+        let reusable_account = match pending.update_binding.as_ref() {
+            Some(_) => None,
+            None => self.find_reusable_manual_token_account(pending).await?,
+        };
         let account_id = pending
             .update_binding
             .as_ref()
             .map(|binding| binding.account_id)
+            .or_else(|| reusable_account.as_ref().map(|account| account.id))
             .unwrap_or_else(|| CredentialAccountId::from_uuid(pending.id.as_uuid()));
         let access_secret = manual_token_secret_handle(account_id, pending.id)?;
 
@@ -142,8 +147,12 @@ where
                 )
             })
             .unwrap_or((CredentialOwnership::UserReusable, None, Vec::new()));
+        let request_scope = reusable_account
+            .as_ref()
+            .map(|account| account.scope.clone())
+            .unwrap_or_else(|| pending.scope.clone());
         let request = NewCredentialAccount {
-            scope: pending.scope.clone(),
+            scope: request_scope,
             provider: pending.provider.clone(),
             label: pending.label.clone(),
             status: credential_status_for_completed_flow(),
@@ -154,8 +163,8 @@ where
             refresh_secret: None,
             scopes: Vec::new(),
         };
-        match pending.update_binding.as_ref() {
-            Some(binding) => {
+        match (pending.update_binding.as_ref(), reusable_account.as_ref()) {
+            (Some(binding), _) => {
                 let lock = self.lock_for(format!("account:{}", binding.account_id));
                 let _guard = lock.lock().await;
                 let (mut account, version) = self
@@ -188,7 +197,34 @@ where
                 }
                 Ok(account)
             }
-            None => {
+            (None, Some(reusable)) => {
+                let lock = self.lock_for(format!("account:{}", reusable.id));
+                let _guard = lock.lock().await;
+                let (mut account, version) = self
+                    .read_account(&reusable.scope, reusable.id)
+                    .await?
+                    .ok_or(AuthProductError::CredentialMissing)?;
+                validate_reusable_manual_token_account(&account, pending)?;
+                validate_account_update_target(&account, &request)?;
+                let previous_access_secret = account.access_secret.clone();
+                self.store_manual_secret(pending, access_secret, secret)
+                    .await?;
+                update_account_from_request(&mut account, request, Utc::now())?;
+                if let Err(error) = self
+                    .write_account(&account, CasExpectation::Version(version))
+                    .await
+                {
+                    self.cleanup_manual_secret(&pending.scope.resource, &account.access_secret)
+                        .await;
+                    return Err(error);
+                }
+                if previous_access_secret.as_ref() != account.access_secret.as_ref() {
+                    self.cleanup_manual_secret(&account.scope.resource, &previous_access_secret)
+                        .await;
+                }
+                Ok(account)
+            }
+            (None, None) => {
                 validate_new_credential_account(&request)?;
                 self.store_manual_secret(pending, access_secret, secret)
                     .await?;
@@ -205,6 +241,21 @@ where
                 }
             }
         }
+    }
+
+    async fn find_reusable_manual_token_account(
+        &self,
+        pending: &StoredManualTokenInteraction,
+    ) -> Result<Option<CredentialAccount>, AuthProductError> {
+        let owner = ironclaw_auth::CredentialAccountOwnerScope::from_scope(&pending.scope);
+        let mut matches = self
+            .account_records_for_owner(&owner)
+            .await?
+            .into_iter()
+            .filter(|account| validate_reusable_manual_token_account(account, pending).is_ok())
+            .collect::<Vec<_>>();
+        matches.sort_by_key(|account| (account.updated_at, account.created_at, account.id));
+        Ok(matches.pop())
     }
 
     async fn store_manual_secret(
@@ -233,6 +284,23 @@ where
             let _ = self.secret_store.delete(scope, access_secret).await;
         }
     }
+}
+
+fn validate_reusable_manual_token_account(
+    account: &CredentialAccount,
+    pending: &StoredManualTokenInteraction,
+) -> Result<(), AuthProductError> {
+    if account.provider != pending.provider
+        || account.label != pending.label
+        || account.ownership != CredentialOwnership::UserReusable
+        || account.owner_extension.is_some()
+        || !account.granted_extensions.is_empty()
+        || account.access_secret.is_none()
+        || account.status == ironclaw_auth::CredentialAccountStatus::Revoked
+    {
+        return Err(AuthProductError::CredentialMissing);
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

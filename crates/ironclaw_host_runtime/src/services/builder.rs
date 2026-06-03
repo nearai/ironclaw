@@ -896,4 +896,8 @@ where
         )?);
         Ok(self.with_wasm_runtime(adapter))
     }
+
+    pub fn try_with_default_wasm_runtime(self) -> Result<Self, WasmError> {
+        self.try_with_wasm_runtime(WitToolRuntimeConfig::default(), WitToolHost::deny_all())
+    }
 }

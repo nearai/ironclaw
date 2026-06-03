@@ -34,14 +34,15 @@ use chrono::Duration as ChronoDuration;
 use http_body_util::BodyExt;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_product_workflow::{
-    ExtensionName, LifecyclePhase, RebornCancelRunResponse, RebornCreateThreadResponse,
+    LifecyclePackageRef, RebornCancelRunResponse, RebornCreateThreadResponse,
+    RebornExtensionActionResponse, RebornExtensionListResponse, RebornExtensionRegistryResponse,
     RebornGetRunStateRequest, RebornGetRunStateResponse, RebornListThreadsResponse,
     RebornResolveGateResponse, RebornServicesApi, RebornServicesError,
     RebornSetupExtensionResponse, RebornStreamEventsRequest, RebornStreamEventsResponse,
     RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
     WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
     WebUiListThreadsRequest, WebUiResolveGateRequest, WebUiSendMessageRequest,
-    WebUiSetupExtensionRequest,
+    WebUiSetupExtensionRequest, rejecting_reborn_services_error,
 };
 use ironclaw_reborn_composition::{
     RebornReadiness, RebornWebuiBundle, WebuiServeConfig, webui_v2_app,
@@ -164,19 +165,51 @@ impl RebornServicesApi for StubServices {
         })
     }
 
+    async fn list_extensions(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornExtensionListResponse, RebornServicesError> {
+        Err(rejecting_reborn_services_error())
+    }
+
+    async fn list_extension_registry(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornExtensionRegistryResponse, RebornServicesError> {
+        Err(rejecting_reborn_services_error())
+    }
+
+    async fn install_extension(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _package_ref: LifecyclePackageRef,
+    ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
+        Err(rejecting_reborn_services_error())
+    }
+
+    async fn activate_extension(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _package_ref: LifecyclePackageRef,
+    ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
+        Err(rejecting_reborn_services_error())
+    }
+
+    async fn remove_extension(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _package_ref: LifecyclePackageRef,
+    ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
+        Err(rejecting_reborn_services_error())
+    }
+
     async fn setup_extension(
         &self,
         _caller: WebUiAuthenticatedCaller,
-        extension_name: ExtensionName,
+        _package_ref: LifecyclePackageRef,
         _request: WebUiSetupExtensionRequest,
     ) -> Result<RebornSetupExtensionResponse, RebornServicesError> {
-        Ok(RebornSetupExtensionResponse {
-            extension_name,
-            phase: LifecyclePhase::UnsupportedOrLegacy,
-            blockers: Vec::new(),
-            package_ref: None,
-            payload: None,
-        })
+        Err(rejecting_reborn_services_error())
     }
 }
 
@@ -229,6 +262,7 @@ fn alice_profile() -> OAuthUserProfile {
         provider_user_id: "google-sub-123".to_string(),
         email: Some("alice@example.com".to_string()),
         email_verified: true,
+        verified_emails: vec!["alice@example.com".to_string()],
         display_name: Some("Alice".to_string()),
     }
 }

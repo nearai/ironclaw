@@ -7,8 +7,9 @@ use ironclaw_auth::{
     AuthFlowStatus, AuthGateRef, AuthProductError, AuthProductScope, AuthSurface,
     CredentialAccountId, CredentialAccountLabel, CredentialAccountProjection,
     CredentialAccountStatus, CredentialAccountUpdateBinding, CredentialOwnership,
-    CredentialSelectionInput, NewAuthFlow, OAuthAuthorizationUrl, OAuthCallbackClaimRequest,
-    OAuthCallbackFailureInput, OAuthCallbackInput, Timestamp, TurnRunRef,
+    CredentialSelectionInput, ManualTokenCompletionInput, NewAuthFlow, OAuthAuthorizationUrl,
+    OAuthCallbackClaimRequest, OAuthCallbackFailureInput, OAuthCallbackInput, Timestamp,
+    TurnRunRef,
 };
 use ironclaw_host_api::{
     AgentId, ExtensionId, InvocationId, ProjectId, ResourceScope, TenantId, ThreadId, UserId,
@@ -157,6 +158,22 @@ impl AuthFlowManager for RecordingFlowManager {
         Ok(record.clone())
     }
 
+    async fn complete_manual_token(
+        &self,
+        _scope: &AuthProductScope,
+        _input: ManualTokenCompletionInput,
+    ) -> Result<AuthFlowRecord, AuthProductError> {
+        Err(AuthProductError::BackendUnavailable)
+    }
+
+    async fn cancel_manual_token(
+        &self,
+        _scope: &AuthProductScope,
+        _interaction_id: ironclaw_auth::AuthInteractionId,
+    ) -> Result<Option<AuthFlowRecord>, AuthProductError> {
+        Err(AuthProductError::BackendUnavailable)
+    }
+
     async fn fail_oauth_callback(
         &self,
         _scope: &AuthProductScope,
@@ -297,6 +314,7 @@ impl TurnCoordinator for RecordingTurnCoordinator {
             received_at: Utc::now(),
             checkpoint_id: None,
             gate_ref: self.gate_ref.lock().expect("lock").clone(),
+            credential_requirements: Vec::new(),
             failure: None,
             event_cursor: EventCursor(47),
         })
@@ -722,6 +740,89 @@ async fn denied_auth_cancels_flow_and_run() {
     ));
     assert_eq!(flow_manager.cancellations().len(), 1);
     assert_eq!(coordinator.cancellations().len(), 1);
+    assert!(coordinator.resumes().is_empty());
+}
+
+#[tokio::test]
+async fn denied_auth_without_flow_record_cancels_parked_auth_run() {
+    let actor = TurnActor::new(UserId::new("alice").unwrap());
+    let scope = turn_scope("alice", "thread-a");
+    let run_id = TurnRunId::new();
+    let gate_ref = make_gate_ref("gate:auth-deny-no-flow");
+    let flow = auth_flow(
+        AuthFlowStatus::AwaitingUser,
+        &scope,
+        &actor,
+        run_id,
+        &gate_ref,
+        None,
+        setup_challenge(),
+    );
+    let (service, flow_manager, coordinator) =
+        service_parts(flow, Vec::new(), actor.clone(), gate_ref.clone());
+
+    let response = service
+        .resolve(ResolveAuthInteractionRequest {
+            scope,
+            actor,
+            run_id_hint: Some(run_id),
+            gate_ref,
+            decision: AuthInteractionDecision::Deny,
+            idempotency_key: IdempotencyKey::new("auth-action-deny-no-flow").unwrap(),
+        })
+        .await
+        .expect("deny parked auth without flow record");
+
+    assert!(matches!(
+        response,
+        ResolveAuthInteractionResponse::Canceled(_)
+    ));
+    assert!(
+        flow_manager.cancellations().is_empty(),
+        "no auth flow record should mean there is no flow to cancel"
+    );
+    assert_eq!(coordinator.cancellations().len(), 1);
+    assert!(coordinator.resumes().is_empty());
+}
+
+#[tokio::test]
+async fn denied_auth_without_flow_record_requires_current_parked_auth_gate() {
+    let actor = TurnActor::new(UserId::new("alice").unwrap());
+    let scope = turn_scope("alice", "thread-a");
+    let run_id = TurnRunId::new();
+    let gate_ref = make_gate_ref("gate:auth-deny-no-flow-stale");
+    let flow = auth_flow(
+        AuthFlowStatus::AwaitingUser,
+        &scope,
+        &actor,
+        run_id,
+        &gate_ref,
+        None,
+        setup_challenge(),
+    );
+    let (service, _flow_manager, coordinator) =
+        service_parts(flow, Vec::new(), actor.clone(), gate_ref.clone());
+    coordinator.set_status(TurnStatus::Queued);
+
+    let error = service
+        .resolve(ResolveAuthInteractionRequest {
+            scope,
+            actor,
+            run_id_hint: Some(run_id),
+            gate_ref,
+            decision: AuthInteractionDecision::Deny,
+            idempotency_key: IdempotencyKey::new("auth-action-deny-no-flow-stale").unwrap(),
+        })
+        .await
+        .expect_err("missing auth flow must not cancel a non-parked run");
+
+    assert!(matches!(
+        error,
+        ProductWorkflowError::AuthInteractionRejected {
+            kind: AuthInteractionRejectionKind::MissingAuth
+        }
+    ));
+    assert!(coordinator.cancellations().is_empty());
     assert!(coordinator.resumes().is_empty());
 }
 

@@ -15,6 +15,7 @@ use ironclaw_host_runtime::{
 use ironclaw_product_workflow::{LifecyclePackageKind, LifecyclePackageRef, ProductWorkflowError};
 use serde::Deserialize;
 
+use crate::extension_lifecycle::ExtensionActivationMode;
 use crate::extension_lifecycle::RebornLocalExtensionManagementPort;
 
 pub(crate) const EXTENSION_SEARCH_CAPABILITY_ID: &str = "builtin.extension_search";
@@ -66,7 +67,11 @@ fn manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
         lifecycle_manifest(
             EXTENSION_ACTIVATE_CAPABILITY_ID,
             "Activate an installed Reborn extension for the model-visible local-dev capability surface",
-            vec![EffectKind::ReadFilesystem, EffectKind::WriteFilesystem],
+            vec![
+                EffectKind::ReadFilesystem,
+                EffectKind::WriteFilesystem,
+                EffectKind::Network,
+            ],
             PermissionMode::Ask,
         )?,
         lifecycle_manifest(
@@ -147,9 +152,12 @@ impl FirstPartyCapabilityHandler for ExtensionLifecycleToolHandler {
             }
             EXTENSION_ACTIVATE_CAPABILITY_ID => {
                 let input: ExtensionIdInput = parse_input(request.input)?;
-                self.extension_management
-                    .activate(extension_package_ref(input.extension_id)?)
-                    .await
+                let package_ref = extension_package_ref(input.extension_id)?;
+                let mode = ExtensionActivationMode::from_dispatch_context(
+                    request.scope.clone(),
+                    request.services.runtime_http_egress.clone(),
+                );
+                self.extension_management.activate(package_ref, mode).await
             }
             EXTENSION_REMOVE_CAPABILITY_ID => {
                 let input: ExtensionIdInput = parse_input(request.input)?;
@@ -258,6 +266,12 @@ mod tests {
             install.parameters_schema["required"],
             serde_json::json!(["extension_id"])
         );
+
+        let activate = descriptor_for(&surface, EXTENSION_ACTIVATE_CAPABILITY_ID);
+        assert!(
+            activate.effects.contains(&EffectKind::Network),
+            "hosted MCP activation needs runtime HTTP egress for discovery"
+        );
     }
 
     #[tokio::test]
@@ -323,6 +337,11 @@ mod tests {
         let after_activate = active_extension_capability_ids(&extension_management).await;
         assert!(after_activate.iter().any(|id| id == "github.search_issues"));
         assert!(after_activate.iter().any(|id| id == "github.get_issue"));
+        let health = runtime.health().await.expect("runtime health");
+        assert!(
+            !health.missing_runtime_backends.contains(&RuntimeKind::Wasm),
+            "activated GitHub WASM capabilities require a registered WASM runtime"
+        );
 
         let remove = invoke_json(
             runtime.as_ref(),
@@ -336,6 +355,52 @@ mod tests {
         let after_remove = active_extension_capability_ids(&extension_management).await;
         assert!(!after_remove.iter().any(|id| id == "github.search_issues"));
         assert!(!storage_root.join("system/extensions/github").exists());
+    }
+
+    #[tokio::test]
+    async fn local_dev_extension_activate_routes_hosted_mcp_discovery_through_runtime_egress() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage_root = dir.path().join("local-dev");
+        let services = build_reborn_services(RebornBuildInput::local_dev(
+            "extension-tools-hosted-mcp-owner",
+            storage_root.clone(),
+        ))
+        .await
+        .expect("local-dev services build");
+        let extension_management = services
+            .local_runtime
+            .as_ref()
+            .expect("local runtime substrate")
+            .extension_management
+            .as_ref()
+            .expect("extension management")
+            .clone();
+        let runtime = services.host_runtime.expect("host runtime composed");
+
+        invoke_json(
+            runtime.as_ref(),
+            EXTENSION_INSTALL_CAPABILITY_ID,
+            serde_json::json!({"extension_id": "notion"}),
+        )
+        .await
+        .expect("install succeeds");
+
+        let activate = invoke_json(
+            runtime.as_ref(),
+            EXTENSION_ACTIVATE_CAPABILITY_ID,
+            serde_json::json!({"extension_id": "notion"}),
+        )
+        .await
+        .expect("hosted MCP activation succeeds");
+        assert_eq!(activate["payload"]["activated"], true);
+
+        let active = active_extension_capability_ids(&extension_management).await;
+        assert!(active.iter().any(|id| id == "notion.notion-get-self"));
+        assert!(
+            storage_root
+                .join("system/extensions/notion/manifest.toml")
+                .exists()
+        );
     }
 
     #[tokio::test]

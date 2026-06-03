@@ -869,6 +869,12 @@ The compaction task adapter:
 7. Prepends `ANTI_INJECTION_PREFIX`, wraps response into `<summary>...</summary>` for the artifact `content`.
 8. Persists via `create_summary_artifact` with `summary_kind = SummaryKind::Compaction`.
 
+`create_summary_artifact` treats an exact replay of an already-persisted
+compaction replacement summary as idempotent: same thread, range,
+`SummaryKind::Compaction`, `ReplaceRangeWhenSelected` policy, and stored
+content returns the existing artifact. Partial overlaps or same-range writes
+with different content still fail closed as overlapping replacement summaries.
+
 ## 8. Goal refresh prompt template
 
 File: `crates/ironclaw_loop_support/prompts/goal_extractor.md`

@@ -99,6 +99,16 @@ const paths = {
     />`,
 
   chevron: html`<path d="m6 9 6 6 6-6" />`,
+
+  more: html`<path d="M12 5.6h.01M12 12h.01M12 18.4h.01" />`,
+
+  copy: html`<path d="M9 9h9a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H9a1 1 0 0 1-1-1v-9a1 1 0 0 1 1-1Z" /><path
+      d="M5 15a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1h9a1 1 0 0 1 1 1"
+    />`,
+
+  arrowDown: html`<path d="M12 5v14" /><path d="m6 13 6 6 6-6" />`,
+
+  retry: html`<path d="M3.5 12a8.5 8.5 0 1 1 2.6 6.1" /><path d="M3.2 18.5v-5h5" />`,
 };
 
 export function Icon({ name, className = "", strokeWidth = 1.7 }) {

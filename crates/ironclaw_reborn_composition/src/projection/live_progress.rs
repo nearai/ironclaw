@@ -4,6 +4,7 @@ use std::sync::{
 };
 
 use async_trait::async_trait;
+use chrono::Utc;
 use ironclaw_event_projections::{
     ProjectionCursor as EventProjectionCursor, ProjectionScope as EventProjectionScope,
 };
@@ -13,8 +14,9 @@ use ironclaw_event_streams::{
 };
 use ironclaw_events::{EventCursor, EventStreamKey, ReadScope};
 use ironclaw_first_party_extension_ports::{SkillActivationObservedEvent, SkillActivationObserver};
-use ironclaw_host_api::UserId;
+use ironclaw_host_api::{CapabilityId, InvocationId, UserId};
 use ironclaw_product_adapters::{
+    CapabilityActivityStatusView, CapabilityActivityView, CapabilityActivityViewInput,
     PROJECTION_SKILL_ACTIVATION_MAX_ITEMS, PROJECTION_SKILL_FEEDBACK_MAX_BYTES,
     PROJECTION_SKILL_NAME_MAX_BYTES, ProductProjectionItem, ProductWorkSummaryPhase,
 };
@@ -89,9 +91,15 @@ impl LiveProjectionPublisher {
         self.next_sequence.fetch_add(1, Ordering::Relaxed) + 1
     }
 
-    fn publish_live_item(&self, scope: &TurnScope, sequence: u64, item: ThreadLiveProjectionItem) {
+    fn publish_live_item(
+        &self,
+        owner: Option<&UserId>,
+        scope: &TurnScope,
+        sequence: u64,
+        item: ThreadLiveProjectionItem,
+    ) {
         let cursor = EventProjectionCursor::for_scope(
-            self.projection_scope(scope),
+            self.projection_scope(owner, scope),
             EventCursor::new(LIVE_PROGRESS_CURSOR_BASE.saturating_add(sequence)),
         );
         let update = ThreadLiveProjectionUpdate {
@@ -110,11 +118,20 @@ impl LiveProjectionPublisher {
         }
     }
 
-    fn projection_scope(&self, scope: &TurnScope) -> EventProjectionScope {
+    /// Build the projection scope for a live item. The stream key is keyed
+    /// to the per-run `owner` (the authenticated caller) when one is
+    /// threaded through, falling back to the runtime owner only for host
+    /// paths that bind no actor. This MUST match the per-request actor the
+    /// SSE/WS subscribe side uses
+    /// (`projection::runtime_projection_scope`) — otherwise a turn run by
+    /// an SSO user whose id differs from the runtime owner would publish
+    /// live progress to the operator's stream instead of the user's.
+    fn projection_scope(&self, owner: Option<&UserId>, scope: &TurnScope) -> EventProjectionScope {
+        let owner = owner.unwrap_or(&self.actor_user_id);
         EventProjectionScope {
             stream: EventStreamKey::new(
                 scope.tenant_id.clone(),
-                self.actor_user_id.clone(),
+                owner.clone(),
                 scope.agent_id.clone(),
             ),
             read_scope: ReadScope {
@@ -133,33 +150,64 @@ pub(super) fn product_items_for_live_update(
     update
         .items
         .iter()
-        .map(|item| match item {
-            ThreadLiveProjectionItem::Thinking { id, body } => ProductProjectionItem::Thinking {
-                id: id.clone(),
-                body: body.clone(),
+        .filter_map(|item| match item {
+            ThreadLiveProjectionItem::Thinking { id, run_id, body } => {
+                Some(ProductProjectionItem::Thinking {
+                    id: id.clone(),
+                    run_id: Some(*run_id),
+                    body: body.clone(),
+                })
+            }
+            ThreadLiveProjectionItem::CapabilityActivity {
+                run_id,
+                invocation_id,
+                capability_id,
+            } => match CapabilityActivityView::new(CapabilityActivityViewInput {
+                invocation_id: *invocation_id,
+                turn_run_id: Some(*run_id),
+                thread_id: Some(update.thread_id.clone()),
+                capability_id: capability_id.clone(),
+                status: CapabilityActivityStatusView::Started,
+                provider: None,
+                runtime: None,
+                process_id: None,
+                output_bytes: None,
+                error_kind: None,
+                updated_at: Utc::now(),
+            }) {
+                Ok(activity) => Some(ProductProjectionItem::CapabilityActivity(activity)),
+                Err(error) => {
+                    tracing::debug!(
+                        error = %error,
+                        invocation_id = %invocation_id,
+                        capability_id = %capability_id,
+                        "live capability activity rejected by product adapter boundary"
+                    );
+                    None
+                }
             },
             ThreadLiveProjectionItem::WorkSummary {
                 id,
                 run_id,
                 phase,
                 body,
-            } => ProductProjectionItem::WorkSummary {
+            } => Some(ProductProjectionItem::WorkSummary {
                 id: id.clone(),
                 run_id: *run_id,
                 phase: live_work_summary_phase_to_product_phase(*phase),
                 body: body.clone(),
-            },
+            }),
             ThreadLiveProjectionItem::SkillActivation {
                 id,
                 run_id,
                 skill_names,
                 feedback,
-            } => ProductProjectionItem::SkillActivation {
+            } => Some(ProductProjectionItem::SkillActivation {
                 id: id.clone(),
                 run_id: *run_id,
                 skill_names: skill_names.clone(),
                 feedback: feedback.clone(),
-            },
+            }),
         })
         .collect()
 }
@@ -186,11 +234,32 @@ impl LiveProgressMilestoneSink {
         }
         let sequence = self.publisher.next_live_sequence();
         self.publisher.publish_live_item(
+            milestone.actor.as_ref().map(|actor| &actor.user_id),
             &milestone.scope,
             sequence,
             ThreadLiveProjectionItem::Thinking {
                 id: thinking_id(milestone.run_id, sequence),
+                run_id: milestone.run_id,
                 body: safe_delta,
+            },
+        );
+    }
+
+    fn publish_capability_activity(
+        &self,
+        milestone: &LoopHostMilestone,
+        invocation_id: InvocationId,
+        capability_id: &CapabilityId,
+    ) {
+        let sequence = self.publisher.next_live_sequence();
+        self.publisher.publish_live_item(
+            milestone.actor.as_ref().map(|actor| &actor.user_id),
+            &milestone.scope,
+            sequence,
+            ThreadLiveProjectionItem::CapabilityActivity {
+                run_id: milestone.run_id,
+                invocation_id,
+                capability_id: capability_id.clone(),
             },
         );
     }
@@ -218,6 +287,7 @@ impl LiveProgressMilestoneSink {
         };
         let sequence = self.publisher.next_live_sequence();
         self.publisher.publish_live_item(
+            milestone.actor.as_ref().map(|actor| &actor.user_id),
             &milestone.scope,
             sequence,
             ThreadLiveProjectionItem::WorkSummary {
@@ -258,6 +328,7 @@ impl SkillActivationObserver for LiveSkillActivationObserver {
         }
         let sequence = self.publisher.next_live_sequence();
         self.publisher.publish_live_item(
+            event.run_context.actor().map(|actor| &actor.user_id),
             &event.run_context.scope,
             sequence,
             ThreadLiveProjectionItem::SkillActivation {
@@ -280,6 +351,16 @@ impl LoopHostMilestoneSink for LiveProgressMilestoneSink {
         match &milestone.kind {
             LoopHostMilestoneKind::ModelReasoningDelta { safe_delta } => {
                 self.publish_reasoning_delta(&milestone, safe_delta);
+            }
+            LoopHostMilestoneKind::CapabilityInvoked {
+                activity_id,
+                capability_id,
+            } => {
+                self.publish_capability_activity(
+                    &milestone,
+                    InvocationId::from_uuid(activity_id.as_uuid()),
+                    capability_id,
+                );
             }
             LoopHostMilestoneKind::DriverNote { kind, safe_summary } => {
                 self.publish_work_summary(&milestone, *kind, safe_summary.as_str());

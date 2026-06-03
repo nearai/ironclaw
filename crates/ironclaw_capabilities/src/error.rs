@@ -1,7 +1,7 @@
 use ironclaw_authorization::CapabilityLeaseError;
 use ironclaw_host_api::{
     CapabilityId, DenyReason, DispatchError, DispatchFailureKind, HostApiError, Obligation,
-    SecretHandle,
+    RuntimeCredentialAuthRequirement, SecretHandle,
 };
 use ironclaw_processes::ProcessError;
 
@@ -42,6 +42,7 @@ pub enum CapabilityInvocationError {
     AuthorizationRequiresAuth {
         capability: CapabilityId,
         required_secrets: Vec<SecretHandle>,
+        credential_requirements: Vec<RuntimeCredentialAuthRequirement>,
     },
     #[error("capability {capability} invocation fingerprint failed: {source}")]
     InvocationFingerprint {
@@ -96,7 +97,10 @@ pub enum CapabilityInvocationError {
     /// of the public contract for routing, metrics, and audit grouping, but
     /// callers that stay in-process can keep typed failure identity.
     #[error("dispatch failed: {kind}")]
-    Dispatch { kind: DispatchFailureKind },
+    Dispatch {
+        kind: DispatchFailureKind,
+        safe_summary: Option<String>,
+    },
 }
 
 impl From<RunStateError> for CapabilityInvocationError {
@@ -117,12 +121,23 @@ impl From<DispatchError> for CapabilityInvocationError {
             DispatchError::AuthRequired {
                 capability,
                 required_secrets,
+                credential_requirements,
             } => Self::AuthorizationRequiresAuth {
                 capability,
                 required_secrets,
+                credential_requirements,
             },
-            other => Self::Dispatch {
+            other @ (DispatchError::UnknownCapability { .. }
+            | DispatchError::UnknownProvider { .. }
+            | DispatchError::RuntimeMismatch { .. }
+            | DispatchError::MissingRuntimeBackend { .. }
+            | DispatchError::UnsupportedRuntime { .. }
+            | DispatchError::Mcp { .. }
+            | DispatchError::Script { .. }
+            | DispatchError::Wasm { .. }
+            | DispatchError::FirstParty { .. }) => Self::Dispatch {
                 kind: dispatch_error_kind(&other),
+                safe_summary: dispatch_error_safe_summary(&other),
             },
         }
     }
@@ -132,10 +147,20 @@ fn dispatch_error_kind(error: &DispatchError) -> DispatchFailureKind {
     error.failure_kind()
 }
 
+fn dispatch_error_safe_summary(error: &DispatchError) -> Option<String> {
+    match error {
+        DispatchError::FirstParty { safe_summary, .. } => safe_summary.clone(),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_host_api::{ExtensionId, RuntimeDispatchErrorKind, RuntimeKind, SecretHandle};
+    use ironclaw_host_api::{
+        ExtensionId, RuntimeCredentialAccountProviderId, RuntimeCredentialAuthRequirement,
+        RuntimeDispatchErrorKind, RuntimeKind, SecretHandle,
+    };
 
     fn cap() -> CapabilityId {
         CapabilityId::new("test.cap").unwrap()
@@ -215,6 +240,7 @@ mod tests {
     fn dispatch_error_kind_forwards_first_party_runtime_kind_as_str() {
         let kind = dispatch_error_kind(&DispatchError::FirstParty {
             kind: RuntimeDispatchErrorKind::UndeclaredCapability,
+            safe_summary: None,
         });
         assert_eq!(kind.as_str(), "UndeclaredCapability");
     }
@@ -224,7 +250,7 @@ mod tests {
         let err =
             CapabilityInvocationError::from(DispatchError::UnknownCapability { capability: cap() });
         match err {
-            CapabilityInvocationError::Dispatch { kind } => {
+            CapabilityInvocationError::Dispatch { kind, .. } => {
                 assert_eq!(kind, DispatchFailureKind::UnknownCapability)
             }
             other => panic!("expected Dispatch variant, got {other:?}"),
@@ -237,7 +263,7 @@ mod tests {
             kind: RuntimeDispatchErrorKind::Guest,
         });
         match err {
-            CapabilityInvocationError::Dispatch { kind } => {
+            CapabilityInvocationError::Dispatch { kind, .. } => {
                 assert_eq!(
                     kind,
                     DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Guest)
@@ -262,17 +288,47 @@ mod tests {
             let err = CapabilityInvocationError::from(DispatchError::AuthRequired {
                 capability: cap(),
                 required_secrets: secrets.clone(),
+                credential_requirements: Vec::new(),
             });
             match err {
                 CapabilityInvocationError::AuthorizationRequiresAuth {
                     capability,
                     required_secrets,
+                    credential_requirements,
                 } => {
                     assert_eq!(capability, cap(), "handles: {handles:?}");
                     assert_eq!(required_secrets, secrets, "handles: {handles:?}");
+                    assert_eq!(credential_requirements, Vec::new(), "handles: {handles:?}");
                 }
                 other => panic!("expected AuthorizationRequiresAuth, got {other:?}"),
             }
+        }
+    }
+
+    #[test]
+    fn from_dispatch_auth_required_round_trips_credential_requirements() {
+        let requirement = RuntimeCredentialAuthRequirement {
+            provider: RuntimeCredentialAccountProviderId::new("google").unwrap(),
+            requester_extension: ExtensionId::new("gmail").unwrap(),
+            provider_scopes: vec!["https://www.googleapis.com/auth/gmail.readonly".to_string()],
+        };
+        let err = CapabilityInvocationError::from(DispatchError::AuthRequired {
+            capability: cap(),
+            required_secrets: Vec::new(),
+            credential_requirements: vec![requirement.clone()],
+        });
+
+        match err {
+            CapabilityInvocationError::AuthorizationRequiresAuth {
+                capability,
+                required_secrets,
+                credential_requirements,
+            } => {
+                assert_eq!(capability, cap());
+                assert!(required_secrets.is_empty());
+                assert_eq!(credential_requirements, vec![requirement]);
+            }
+            other => panic!("expected AuthorizationRequiresAuth, got {other:?}"),
         }
     }
 }

@@ -6,7 +6,9 @@ use std::{
 
 use async_trait::async_trait;
 use futures_util::FutureExt;
+use serde::Deserialize;
 
+use super::wasm_diagnostics::{log_wasm_guest_error, log_wasm_runtime_error};
 use super::{
     CapabilityId, DenyWasmHostHttp, DispatchError, ExtensionRuntime, FirstPartyCapabilityRegistry,
     FirstPartyCapabilityRequest, InvocationServicesResolutionRequest, InvocationServicesResolver,
@@ -126,6 +128,7 @@ where
 
         Ok(RuntimeAdapterResult {
             output: execution.result.output,
+            display_preview: None,
             usage: execution.result.usage,
             receipt: execution.receipt,
             output_bytes: execution.result.output_bytes,
@@ -170,12 +173,23 @@ where
                 },
             )
             .await
-            .map_err(|error| DispatchError::Mcp {
-                kind: mcp_error_kind(&error),
+            .map_err(|error| match error {
+                McpError::AuthRequired {
+                    required_secrets,
+                    credential_requirements,
+                } => DispatchError::AuthRequired {
+                    capability: request.capability_id.clone(),
+                    required_secrets,
+                    credential_requirements,
+                },
+                error => DispatchError::Mcp {
+                    kind: mcp_error_kind(&error),
+                },
             })?;
 
         Ok(RuntimeAdapterResult {
             output: execution.result.output,
+            display_preview: None,
             usage: execution.result.usage,
             receipt: execution.receipt,
             output_bytes: execution.result.output_bytes,
@@ -233,6 +247,7 @@ where
             tracing::debug!("first-party runtime adapter missing handler");
             return Err(DispatchError::FirstParty {
                 kind: RuntimeDispatchErrorKind::UndeclaredCapability,
+                safe_summary: None,
             });
         };
 
@@ -247,6 +262,7 @@ where
                 }
                 DispatchError::FirstParty {
                     kind: planner_error_kind(&error),
+                    safe_summary: None,
                 }
             })?;
         tracing::debug!(
@@ -271,7 +287,10 @@ where
                 if let Some(reservation) = &request.resource_reservation {
                     release_first_party_reservation(request.governor, reservation.id);
                 }
-                DispatchError::FirstParty { kind: error.kind() }
+                DispatchError::FirstParty {
+                    kind: error.kind(),
+                    safe_summary: None,
+                }
             })?;
         tracing::debug!("first-party runtime adapter services resolved");
 
@@ -285,6 +304,7 @@ where
                     tracing::debug!("first-party runtime adapter resource reservation failed");
                     DispatchError::FirstParty {
                         kind: RuntimeDispatchErrorKind::Resource,
+                        safe_summary: None,
                     }
                 })?,
         };
@@ -330,14 +350,17 @@ where
                 }
                 return match error {
                     FirstPartyCapabilityError::AuthRequired {
-                        required_secrets, ..
+                        required_secrets,
+                        credential_requirements,
+                        ..
                     } => Err(DispatchError::AuthRequired {
                         capability: request.capability_id.clone(),
                         required_secrets,
+                        credential_requirements,
                     }),
-                    FirstPartyCapabilityError::Dispatch { kind, .. } => {
-                        Err(DispatchError::FirstParty { kind })
-                    }
+                    FirstPartyCapabilityError::Dispatch {
+                        kind, safe_summary, ..
+                    } => Err(DispatchError::FirstParty { kind, safe_summary }),
                 };
             }
             Err(_) => {
@@ -348,6 +371,7 @@ where
                 release_first_party_reservation(request.governor, reservation.id);
                 return Err(DispatchError::FirstParty {
                     kind: RuntimeDispatchErrorKind::Backend,
+                    safe_summary: None,
                 });
             }
         };
@@ -362,6 +386,7 @@ where
                 release_first_party_reservation(request.governor, reservation.id);
                 DispatchError::FirstParty {
                     kind: RuntimeDispatchErrorKind::OutputDecode,
+                    safe_summary: None,
                 }
             })?;
         let mut usage = result.usage;
@@ -382,6 +407,7 @@ where
                 }
                 return Err(DispatchError::FirstParty {
                     kind: RuntimeDispatchErrorKind::Resource,
+                    safe_summary: None,
                 });
             }
         };
@@ -393,6 +419,7 @@ where
 
         Ok(RuntimeAdapterResult {
             output: result.output,
+            display_preview: result.display_preview,
             usage,
             receipt,
             output_bytes,
@@ -582,6 +609,7 @@ where
     ) {
         Ok(execution) => execution,
         Err(error) => {
+            log_wasm_runtime_error(request.capability_id, &error);
             if let Some(usage) = preserved_wasm_error_usage(&error) {
                 account_or_release_failed_wasm_execution(request.governor, reservation.id, &usage)?;
             } else {
@@ -592,15 +620,14 @@ where
             });
         }
     };
-    if execution.error.is_some() {
+    if let Some(error) = execution.error {
+        log_wasm_guest_error(request.capability_id, &execution.logs, &error);
         account_or_release_failed_wasm_execution(
             request.governor,
             reservation.id,
             &execution.usage,
         )?;
-        return Err(DispatchError::Wasm {
-            kind: RuntimeDispatchErrorKind::OperationFailed,
-        });
+        return Err(wasm_guest_dispatch_error(&error, request.capability_id));
     }
     let Some(output_json) = execution.output_json else {
         account_or_release_failed_wasm_execution(
@@ -639,6 +666,7 @@ where
     };
     Ok(RuntimeAdapterResult {
         output,
+        display_preview: None,
         output_bytes: execution.usage.output_bytes,
         usage: execution.usage,
         receipt,
@@ -673,6 +701,7 @@ where
         release_first_party_reservation(governor, reservation_id);
         return Err(DispatchError::FirstParty {
             kind: RuntimeDispatchErrorKind::Resource,
+            safe_summary: None,
         });
     }
 
@@ -760,7 +789,108 @@ fn dispatch_error_for_runtime(
         RuntimeKind::Mcp => DispatchError::Mcp { kind },
         RuntimeKind::Script => DispatchError::Script { kind },
         RuntimeKind::Wasm => DispatchError::Wasm { kind },
-        RuntimeKind::FirstParty | RuntimeKind::System => DispatchError::FirstParty { kind },
+        RuntimeKind::FirstParty | RuntimeKind::System => DispatchError::FirstParty {
+            kind,
+            safe_summary: None,
+        },
+    }
+}
+
+fn wasm_guest_dispatch_error(error: &str, capability: &CapabilityId) -> DispatchError {
+    match wasm_guest_error_kind(error) {
+        WasmGuestErrorKind::AuthRequired => DispatchError::AuthRequired {
+            capability: capability.clone(),
+            required_secrets: Vec::new(),
+            credential_requirements: Vec::new(),
+        },
+        WasmGuestErrorKind::Runtime(kind) => DispatchError::Wasm { kind },
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WasmGuestErrorKind {
+    AuthRequired,
+    Runtime(RuntimeDispatchErrorKind),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum StructuredWasmGuestErrorKind {
+    AuthRequired,
+    Input,
+    OutputTooLarge,
+    Executor,
+    NetworkDenied,
+    Client,
+    OperationFailed,
+}
+
+#[derive(Debug, Deserialize)]
+struct StructuredWasmGuestError {
+    #[allow(dead_code)]
+    code: String,
+    kind: StructuredWasmGuestErrorKind,
+}
+
+fn wasm_guest_error_kind(error: &str) -> WasmGuestErrorKind {
+    if let Ok(payload) = serde_json::from_str::<StructuredWasmGuestError>(error) {
+        return match payload.kind {
+            StructuredWasmGuestErrorKind::AuthRequired => WasmGuestErrorKind::AuthRequired,
+            StructuredWasmGuestErrorKind::Input => {
+                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::InputEncode)
+            }
+            StructuredWasmGuestErrorKind::OutputTooLarge => {
+                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::OutputTooLarge)
+            }
+            StructuredWasmGuestErrorKind::Executor => {
+                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::Executor)
+            }
+            StructuredWasmGuestErrorKind::NetworkDenied => {
+                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::NetworkDenied)
+            }
+            StructuredWasmGuestErrorKind::Client => {
+                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::Client)
+            }
+            StructuredWasmGuestErrorKind::OperationFailed => {
+                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::OperationFailed)
+            }
+        };
+    }
+
+    match error {
+        "AuthRequired" => WasmGuestErrorKind::AuthRequired,
+        "missing_invocation_context"
+        | "invalid_invocation_context"
+        | "unsupported_capability"
+        | "invalid_parameters"
+        | "invalid_repository"
+        | "invalid_query_empty"
+        | "invalid_query_too_large"
+        | "invalid_author"
+        | "invalid_assignee"
+        | "invalid_involves"
+        | "invalid_state"
+        | "invalid_type"
+        | "invalid_sort"
+        | "invalid_order"
+        | "invalid_page"
+        | "invalid_limit"
+        | "invalid_issue_number"
+        | "invalid_body_empty"
+        | "invalid_body_too_large" => {
+            WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::InputEncode)
+        }
+        "host_http_body_limit" => {
+            WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::OutputTooLarge)
+        }
+        "host_http_timeout" => WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::Executor),
+        "host_http_network_denied" => {
+            WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::NetworkDenied)
+        }
+        "host_http_forbidden" | "host_http_rate_limited" => {
+            WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::Client)
+        }
+        _ => WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::OperationFailed),
     }
 }
 
@@ -800,6 +930,7 @@ fn mcp_error_kind(error: &McpError) -> RuntimeDispatchErrorKind {
     match error {
         McpError::Resource(_) => RuntimeDispatchErrorKind::Resource,
         McpError::Client { .. } => RuntimeDispatchErrorKind::Client,
+        McpError::AuthRequired { .. } => RuntimeDispatchErrorKind::Client,
         McpError::UnsupportedTransport { .. } => RuntimeDispatchErrorKind::UnsupportedRunner,
         McpError::HostHttpEgressRequired { .. } => RuntimeDispatchErrorKind::NetworkDenied,
         McpError::ExternalStdioTransportUnsupported => RuntimeDispatchErrorKind::UnsupportedRunner,
@@ -822,5 +953,99 @@ fn wasm_error_kind(error: &WasmError) -> RuntimeDispatchErrorKind {
         WasmError::InstantiationFailed(_) => RuntimeDispatchErrorKind::MethodMissing,
         WasmError::ExecutionFailed { .. } => RuntimeDispatchErrorKind::Guest,
         WasmError::InvalidSchema(_) => RuntimeDispatchErrorKind::Manifest,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wasm_guest_error_kind_maps_structured_payloads() {
+        let cases = [
+            (
+                r#"{"code":"AuthRequired","kind":"auth_required"}"#,
+                WasmGuestErrorKind::AuthRequired,
+            ),
+            (
+                r#"{"code":"invalid_repository","kind":"input"}"#,
+                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::InputEncode),
+            ),
+            (
+                r#"{"code":"host_http_body_limit","kind":"output_too_large"}"#,
+                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::OutputTooLarge),
+            ),
+            (
+                r#"{"code":"host_http_timeout","kind":"executor"}"#,
+                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::Executor),
+            ),
+            (
+                r#"{"code":"host_http_network_denied","kind":"network_denied"}"#,
+                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::NetworkDenied),
+            ),
+            (
+                r#"{"code":"host_http_forbidden","kind":"client"}"#,
+                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::Client),
+            ),
+            (
+                r#"{"code":"host_http_request_failed","kind":"operation_failed"}"#,
+                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::OperationFailed),
+            ),
+        ];
+
+        for (error, expected) in cases {
+            assert_eq!(wasm_guest_error_kind(error), expected);
+        }
+    }
+
+    #[test]
+    fn wasm_guest_error_kind_preserves_legacy_error_mapping_without_prefix_catch_all() {
+        let cases = [
+            ("AuthRequired", WasmGuestErrorKind::AuthRequired),
+            (
+                "invalid_repository",
+                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::InputEncode),
+            ),
+            (
+                "missing_invocation_context",
+                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::InputEncode),
+            ),
+            (
+                "unsupported_capability",
+                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::InputEncode),
+            ),
+            (
+                "host_http_body_limit",
+                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::OutputTooLarge),
+            ),
+            (
+                "host_http_timeout",
+                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::Executor),
+            ),
+            (
+                "host_http_network_denied",
+                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::NetworkDenied),
+            ),
+            (
+                "host_http_forbidden",
+                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::Client),
+            ),
+            (
+                "host_http_rate_limited",
+                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::Client),
+            ),
+            (
+                "invalid_internal_state",
+                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::OperationFailed),
+            ),
+            (
+                "unknown_error",
+                WasmGuestErrorKind::Runtime(RuntimeDispatchErrorKind::OperationFailed),
+            ),
+        ];
+
+        for (error, expected) in cases {
+            assert_eq!(wasm_guest_error_kind(error), expected);
+        }
     }
 }

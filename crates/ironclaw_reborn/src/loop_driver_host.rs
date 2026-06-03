@@ -20,17 +20,18 @@ use ironclaw_loop_support::{
     CapabilityResolveError, CapabilitySurfaceProfileFilter, CapabilitySurfaceProfileResolver,
     EmptyLoopCapabilityPort, GuardedSystemInferencePort, HostIdentityContextSource, HostInputQueue,
     HostManagedModelGateway, HostQueueLoopInputPort, HostSkillContextSource,
-    LoopCapabilityInputResolver, ModelGatewayBackedSystemInferencePort, RunCancellationFactory,
-    RunCancellationObservationKind, RunStateLoopCancellationPort, SubagentLoopPromptPort,
-    SubagentPromptComposer, ThreadBackedLoopContextPort, ThreadBackedLoopTranscriptPort,
-    TurnStateRunCancellationFactory, default_host_managed_loop_compaction_port,
+    LoopCapabilityInputResolver, LoopCapabilityPortFactory, ModelGatewayBackedSystemInferencePort,
+    RunCancellationFactory, RunCancellationObservationKind, RunStateLoopCancellationPort,
+    SubagentLoopPromptPort, SubagentPromptComposer, ThreadBackedLoopContextPort,
+    ThreadBackedLoopTranscriptPort, TurnStateRunCancellationFactory,
+    default_host_managed_loop_compaction_port,
 };
 use ironclaw_threads::{SessionThreadService, ThreadScope};
 
 use crate::driver_registry::{DriverRequirements, LoopDriverRegistryKey, RequirementLevel};
 use crate::hook_gate_refs::HookGateInvocationScopePort;
 use crate::model_routes::{ModelRouteError, ModelRouteResolver, ModelSlot};
-use crate::planned_driver_factory::SUBAGENT_PLANNED_PROFILE_ID;
+use crate::planned_driver_factory::is_subagent_planned_run_profile;
 use crate::text_loop_driver::{TEXT_ONLY_DRIVER_ID, TEXT_ONLY_DRIVER_VERSION};
 
 mod config;
@@ -78,14 +79,6 @@ use ironclaw_turns::{
     runner::ClaimedTurnRun,
 };
 use tokio::task::JoinHandle;
-
-#[async_trait]
-pub trait LoopCapabilityPortFactory: Send + Sync {
-    async fn create_capability_port(
-        &self,
-        run_context: &LoopRunContext,
-    ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError>;
-}
 
 struct ProfiledCapabilityHostRuntime {
     capability_factory: Arc<dyn LoopCapabilityPortFactory>,
@@ -725,6 +718,7 @@ async fn emit_subscription_terminated_note(
     };
     let milestone = ironclaw_turns::run_profile::LoopHostMilestone {
         scope: run_context.scope.clone(),
+        actor: run_context.actor.clone(),
         turn_id: run_context.turn_id,
         run_id: run_context.run_id,
         loop_driver_id: run_context.loop_driver_id.clone(),
@@ -802,7 +796,7 @@ where
     /// Optional durable runtime-event subscription for event-triggered hooks.
     /// The subscription starts only when a hook dispatcher is also installed.
     event_subscription: Option<EventTriggeredHookSubscription>,
-    safety_context: Option<InstructionSafetyContext>,
+    safety_context: InstructionSafetyContext,
     identity_context_source: Option<Arc<dyn HostIdentityContextSource>>,
     input_queue: Option<Arc<dyn HostInputQueue>>,
     profiled_capabilities: Option<ProfiledCapabilityHostRuntime>,
@@ -840,6 +834,7 @@ where
         loop_checkpoint_store: Arc<dyn LoopCheckpointStore>,
         milestone_sink: Arc<dyn LoopHostMilestoneSink>,
         config: TextOnlyLoopHostConfig,
+        safety_context: InstructionSafetyContext,
     ) -> Self {
         let cancellation_factory: Arc<dyn RunCancellationFactory> = Arc::new(
             TurnStateRunCancellationFactory::new(Arc::clone(&turn_state_store)),
@@ -863,7 +858,7 @@ where
             hook_gate_ref_factory: None,
             hook_gate_ref_factory_builder: None,
             event_subscription: None,
-            safety_context: None,
+            safety_context,
             identity_context_source: None,
             input_queue: None,
             profiled_capabilities: None,
@@ -879,6 +874,24 @@ where
 
     pub fn cancellation_observation_kind(&self) -> RunCancellationObservationKind {
         self.cancellation_factory.observation_kind()
+    }
+
+    /// Per-run thread scope: the factory's installation scope
+    /// (tenant/agent/project) with `owner_user_id` re-pointed at the
+    /// run's authenticated actor. This is what makes the WebChat v2
+    /// surface multi-user — each caller's thread reads and writes land
+    /// in their own `owners/<user>` subtree (via
+    /// [`ThreadScope::to_resource_scope`]), matching the owner the
+    /// product facade already creates threads under
+    /// (`reborn_services::create_thread` scopes to `caller.user_id`).
+    ///
+    /// The re-scoping applies only when the factory is owner-scoped (it
+    /// declares an owner, as the serve path does by pinning the runtime
+    /// owner). An owner-less factory keeps its shared/system slot, so
+    /// owner-agnostic flows and runs without an actor (background tasks,
+    /// triggers) are unaffected.
+    fn effective_thread_scope(&self, run_context: &LoopRunContext) -> ThreadScope {
+        crate::thread_scope::ThreadScopeResolver::resolve(&self.thread_scope, run_context.actor())
     }
 
     fn build_compaction_ports(&self, run_context: &LoopRunContext) -> Arc<dyn LoopCompactionPort> {
@@ -897,7 +910,7 @@ where
         default_host_managed_loop_compaction_port(
             system_inference,
             Arc::clone(&self.thread_service),
-            self.thread_scope.clone(),
+            self.effective_thread_scope(run_context),
             include_str!("../../ironclaw_loop_support/prompts/compaction_summarizer_fresh.md"),
         )
     }
@@ -1077,11 +1090,6 @@ where
         self.with_hook_dispatcher(builder.build_arc())
     }
 
-    pub fn with_safety_context(mut self, safety_context: InstructionSafetyContext) -> Self {
-        self.safety_context = Some(safety_context);
-        self
-    }
-
     // Queue ownership follows the same factory used for capability/context
     // ports. PlannedDriver delegates fully to the host for input port
     // construction.
@@ -1156,7 +1164,10 @@ where
         surface_resolver: Arc<dyn CapabilitySurfaceProfileResolver>,
     ) -> Result<RebornLoopDriverHost, RebornLoopDriverHostError> {
         validate_claimed_run_context(&request.claimed_run, &request.loop_run_context)?;
-        validate_thread_scope(&self.thread_scope, &request.loop_run_context)?;
+        validate_thread_scope(
+            &self.effective_thread_scope(&request.loop_run_context),
+            &request.loop_run_context,
+        )?;
         let allow_set = Arc::new(
             surface_resolver
                 .resolve(&request.loop_run_context)
@@ -1175,13 +1186,17 @@ where
         capabilities: Arc<dyn LoopCapabilityPort>,
     ) -> Result<RebornLoopDriverHost, RebornLoopDriverHostError> {
         validate_claimed_run_context(&request.claimed_run, &request.loop_run_context)?;
-        validate_thread_scope(&self.thread_scope, &request.loop_run_context)?;
+        // Resolve the per-caller thread scope once; every thread read/write
+        // port below uses it so a logged-in user's turn touches only their
+        // own `owners/<user>` subtree.
+        let effective_scope = self.effective_thread_scope(&request.loop_run_context);
+        validate_thread_scope(&effective_scope, &request.loop_run_context)?;
 
         let max_messages = self.config.max_messages.max(1);
         let run_context = self.attach_model_route_snapshot(request.loop_run_context)?;
         let mut context_adapter = ThreadBackedLoopContextPort::new(
             Arc::clone(&self.thread_service),
-            self.thread_scope.clone(),
+            effective_scope.clone(),
             run_context.clone(),
             max_messages,
         );
@@ -1232,7 +1247,7 @@ where
                 // would silently dispatch B's hook events into A's
                 // dispatcher with A's context tenant.
                 subscription
-                    .validate_against_run_scope(&run_context.scope, &self.thread_scope)
+                    .validate_against_run_scope(&run_context.scope, &effective_scope)
                     .map_err(|reason| RebornLoopDriverHostError::ScopeMismatch { reason })?;
                 Some(subscription.clone_for_independent_spawn().spawn(
                     Arc::clone(dispatcher),
@@ -1302,7 +1317,7 @@ where
             })?;
         let prompt_authority = LoopPromptBundleAuthority::shared();
         let surface_state_for_prompt = Arc::clone(&surface_state);
-        let mut prompt_port = HostManagedLoopPromptPort::new(
+        let prompt_port = HostManagedLoopPromptPort::new(
             run_context.clone(),
             Arc::clone(&context),
             Arc::clone(&self.milestone_sink),
@@ -1310,10 +1325,8 @@ where
         .with_prompt_bundle_authority(prompt_authority.clone())
         .with_default_message_limit(max_messages)
         .with_current_surface_lookup(move || surface_state_for_prompt.current())
-        .with_instruction_materialization_store(Arc::clone(&instruction_materialization_store));
-        if let Some(safety_context) = self.safety_context.clone() {
-            prompt_port = prompt_port.with_safety_context(safety_context);
-        }
+        .with_instruction_materialization_store(Arc::clone(&instruction_materialization_store))
+        .with_safety_context(self.safety_context.clone());
         let mut prompt: Arc<dyn LoopPromptPort> = Arc::new(prompt_port);
         if let Some(dispatcher) = per_build_dispatcher.as_ref() {
             // Pass a sink backed by the host's instruction materialization
@@ -1336,7 +1349,7 @@ where
                 .with_bundle_authority(prompt_authority.clone(), run_context.clone()),
             );
         }
-        if run_context.resolved_run_profile.profile_id.as_str() == SUBAGENT_PLANNED_PROFILE_ID {
+        if is_subagent_planned_run_profile(&run_context) {
             let Some(composer) = self.subagent_prompt_composer.clone() else {
                 return Err(RebornLoopDriverHostError::InvalidRequest {
                     reason: "subagent prompt composer is required for subagent run profile"
@@ -1358,7 +1371,7 @@ where
         };
         let model_gateway = Arc::new(ThreadResolvingLoopModelGateway {
             thread_service: Arc::clone(&self.thread_service),
-            thread_scope: self.thread_scope.clone(),
+            thread_scope: effective_scope.clone(),
             host_gateway: Arc::clone(&self.model_gateway),
             max_messages,
             skill_context_source: self.skill_context_source.clone(),
@@ -1384,7 +1397,7 @@ where
         let mut transcript: Arc<dyn LoopTranscriptPort> =
             Arc::new(ThreadBackedLoopTranscriptPort::with_milestone_sink(
                 Arc::clone(&self.thread_service),
-                self.thread_scope.clone(),
+                effective_scope.clone(),
                 run_context.clone(),
                 Arc::clone(&self.milestone_sink),
             ));
@@ -2215,11 +2228,11 @@ mod port_adapter_tests;
 mod tests {
     use super::*;
 
-    use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId};
+    use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
     use ironclaw_turns::{
         InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore, InMemoryRunProfileResolver,
-        PutLoopCheckpointRequest, RunProfileResolver, TurnCheckpointId, TurnId, TurnRunId,
-        TurnScope,
+        PutLoopCheckpointRequest, RunProfileResolver, TurnActor, TurnCheckpointId, TurnId,
+        TurnRunId, TurnScope,
         run_profile::{
             AgentLoopHostErrorKind, CheckpointSchemaId, InMemoryLoopHostMilestoneSink,
             LoadCheckpointPayloadRequest, LoopCheckpointKind, LoopCheckpointRequest,
@@ -2238,6 +2251,57 @@ mod tests {
             .await
             .unwrap();
         LoopRunContext::new(turn_scope, TurnId::new(), TurnRunId::new(), resolved)
+    }
+
+    #[tokio::test]
+    async fn owner_scoped_thread_scope_isolates_each_caller() {
+        let base = ThreadScope {
+            tenant_id: TenantId::new("tenant-scope-test").unwrap(),
+            agent_id: AgentId::new("agent-scope-test").unwrap(),
+            project_id: None,
+            owner_user_id: Some(UserId::new("operator").unwrap()),
+            mission_id: None,
+        };
+
+        // This drives the resolution exactly as the host does — through
+        // `run_context.actor()` — so it locks the host's call pattern, not
+        // just the resolver rule (which has its own tests in
+        // `crate::thread_scope`).
+        use crate::thread_scope::ThreadScopeResolver;
+
+        // No actor → the factory's owner is kept (background / system runs).
+        let ctx = test_run_context().await;
+        assert_eq!(
+            ThreadScopeResolver::resolve(&base, ctx.actor()).owner_user_id,
+            Some(UserId::new("operator").unwrap()),
+        );
+
+        // Distinct actors → distinct owners: this is the per-caller thread
+        // isolation. user-a's run can only ever touch owners/user-a.
+        let ctx_a = test_run_context()
+            .await
+            .with_actor(TurnActor::new(UserId::new("user-a").unwrap()));
+        let ctx_b = test_run_context()
+            .await
+            .with_actor(TurnActor::new(UserId::new("user-b").unwrap()));
+        assert_eq!(
+            ThreadScopeResolver::resolve(&base, ctx_a.actor()).owner_user_id,
+            Some(UserId::new("user-a").unwrap()),
+        );
+        assert_eq!(
+            ThreadScopeResolver::resolve(&base, ctx_b.actor()).owner_user_id,
+            Some(UserId::new("user-b").unwrap()),
+        );
+
+        // Owner-less base → unchanged even with an actor (shared/system slot).
+        let ownerless = ThreadScope {
+            owner_user_id: None,
+            ..base.clone()
+        };
+        assert_eq!(
+            ThreadScopeResolver::resolve(&ownerless, ctx_a.actor()).owner_user_id,
+            None,
+        );
     }
 
     fn test_checkpoint_port(

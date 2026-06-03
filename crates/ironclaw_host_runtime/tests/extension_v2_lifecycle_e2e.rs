@@ -204,6 +204,7 @@ async fn github_v2_package_discovers_and_publishes_issue_hot_catalog() {
             credential.source,
             RuntimeCredentialRequirementSource::ProductAuthAccount {
                 provider: RuntimeCredentialAccountProviderId::new("github").unwrap(),
+                setup: Default::default(),
             }
         );
         assert_eq!(
@@ -408,6 +409,7 @@ impl RuntimeAdapter<LocalFilesystem, InMemoryResourceGovernor> for RecordingAdap
 
         Ok(RuntimeAdapterResult {
             output: self.output.clone(),
+            display_preview: None,
             usage,
             receipt,
             output_bytes,

@@ -1,8 +1,8 @@
 //! First-party Reborn GitHub WASM tool.
 //!
-//! This component intentionally exposes only the Reborn GitHub slice:
-//! `github.search_issues`, `github.get_issue`, and `github.comment_issue`.
-//! Authentication is mediated by the host HTTP egress path; the component never
+//! Ports the v1 GitHub WASM capability surface to the Reborn product capability
+//! model. The host selects the operation via the invocation context capability id
+//! and mediates GitHub credentials through HTTP egress; this component never
 //! reads or constructs a GitHub token.
 
 wit_bindgen::generate!({
@@ -10,413 +10,122 @@ wit_bindgen::generate!({
     path: "../../../../../wit/tool.wit",
 });
 
-use serde::Deserialize;
-
-const GITHUB_API_ROOT: &str = "https://api.github.com";
-const GITHUB_API_VERSION: &str = "2026-03-10";
-const HTTP_TIMEOUT_MS: u32 = 10_000;
-const MAX_QUERY_LENGTH: usize = 512;
-const MAX_COMMENT_BODY_LENGTH: usize = 65_536;
-const MAX_REPOSITORY_SEGMENT_LENGTH: usize = 100;
+mod api;
+mod dispatch;
+mod request;
+mod schema;
+mod types;
+mod validation;
+mod webhook;
 
 struct GitHubTool;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum GitHubOperation {
-    SearchIssues,
-    GetIssue,
-    CommentIssue,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ToolContext {
-    capability_id: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SearchIssuesParams {
-    query: String,
-    page: Option<u32>,
-    limit: Option<u32>,
-    sort: Option<String>,
-    order: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct GetIssueParams {
-    owner: String,
-    repo: String,
-    issue_number: u32,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CommentIssueParams {
-    owner: String,
-    repo: String,
-    issue_number: u32,
-    body: String,
-}
-
 impl exports::near::agent::tool::Guest for GitHubTool {
     fn execute(req: exports::near::agent::tool::Request) -> exports::near::agent::tool::Response {
-        match execute_inner(&req.params, req.context.as_deref()) {
+        match dispatch::execute_inner(&req.params, req.context.as_deref()) {
             Ok(result) => exports::near::agent::tool::Response {
                 output: Some(result),
                 error: None,
             },
             Err(error) => exports::near::agent::tool::Response {
                 output: None,
-                error: Some(error),
+                error: Some(guest_error_payload(&error)),
             },
         }
     }
 
     fn schema() -> String {
-        let search = schema_value(include_str!(
-            "../../schemas/github/search_issues.input.v1.json"
-        ));
-        let get_issue = schema_value(include_str!("../../schemas/github/get_issue.input.v1.json"));
-        let comment_issue = schema_value(include_str!(
-            "../../schemas/github/comment_issue.input.v1.json"
-        ));
-        serde_json::json!({
-            "type": "object",
-            "oneOf": [search, get_issue, comment_issue]
-        })
-        .to_string()
+        schema::schema()
     }
 
     fn description() -> String {
-        "First-party GitHub Reborn tool for searching issues, fetching one issue, and commenting on an issue. GitHub credentials are injected only by host HTTP egress."
+        "First-party GitHub Reborn tool: repositories, issues, pull requests, reviews/comments, search, branches, code reads, file writes, releases, workflow dispatch/runs, forks, and webhook normalization. GitHub credentials are injected only by host HTTP egress."
             .to_string()
     }
 }
 
-fn schema_value(schema: &str) -> serde_json::Value {
-    serde_json::from_str(schema).expect("bundled GitHub schema must be valid JSON") // safety: bundled schemas are static assets covered by `validates_static_schema_json`.
+fn guest_error_payload(code: &str) -> String {
+    serde_json::json!({
+        "code": code,
+        "kind": guest_error_kind(code),
+    })
+    .to_string()
 }
 
-fn execute_inner(params: &str, context: Option<&str>) -> Result<String, String> {
-    match operation_from_context(context)? {
-        GitHubOperation::SearchIssues => search_issues(
-            serde_json::from_str(params).map_err(|_| "invalid_parameters".to_string())?,
-        ),
-        GitHubOperation::GetIssue => {
-            get_issue(serde_json::from_str(params).map_err(|_| "invalid_parameters".to_string())?)
-        }
-        GitHubOperation::CommentIssue => comment_issue(
-            serde_json::from_str(params).map_err(|_| "invalid_parameters".to_string())?,
-        ),
+fn guest_error_kind(code: &str) -> &'static str {
+    match code {
+        "AuthRequired" => "auth_required",
+        "missing_invocation_context"
+        | "invalid_invocation_context"
+        | "unsupported_github_capability"
+        | "invalid_parameters"
+        | "invalid_repository"
+        | "invalid_query_empty"
+        | "invalid_query_too_large"
+        | "invalid_author"
+        | "invalid_assignee"
+        | "invalid_involves"
+        | "invalid_state"
+        | "invalid_type"
+        | "invalid_sort"
+        | "invalid_order"
+        | "invalid_page"
+        | "invalid_limit"
+        | "invalid_labels"
+        | "Invalid owner or repo name"
+        | "Invalid repository name"
+        | "Invalid org name"
+        | "Invalid fork name"
+        | "Invalid username"
+        | "Invalid path: relative path segments not allowed"
+        | "Invalid path: empty segment not allowed"
+        | "Unsupported from_ref: use a branch or tag ref, not a raw commit SHA"
+        | "Unsupported from_ref: only refs/heads/* and refs/tags/* are supported"
+        | "Source ref response missing object.sha" => "input",
+        "github_api_body_limit" => "output_too_large",
+        "github_api_timeout" => "executor",
+        "github_api_egress_denied" | "github_api_redirect_denied" => "network_denied",
+        "github_api_error_status_401" => "auth_required",
+        "github_api_error_status_403" | "github_api_error_status_429" => "client",
+        _ => "operation_failed",
     }
-}
-
-fn operation_from_context(context: Option<&str>) -> Result<GitHubOperation, String> {
-    let context = context.ok_or_else(|| "missing_invocation_context".to_string())?;
-    let context: ToolContext =
-        serde_json::from_str(context).map_err(|_| "invalid_invocation_context".to_string())?;
-    match context.capability_id.as_str() {
-        "github.search_issues" => Ok(GitHubOperation::SearchIssues),
-        "github.get_issue" => Ok(GitHubOperation::GetIssue),
-        "github.comment_issue" => Ok(GitHubOperation::CommentIssue),
-        _ => Err("unsupported_github_capability".to_string()),
-    }
-}
-
-fn search_issues(params: SearchIssuesParams) -> Result<String, String> {
-    validate_text(&params.query, "query", MAX_QUERY_LENGTH)?;
-    validate_search_page(params.page)?;
-    validate_search_limit(params.limit)?;
-    validate_search_sort(params.sort.as_deref())?;
-    validate_order(params.order.as_deref())?;
-
-    let limit = params.limit.unwrap_or(30);
-    let mut path = format!(
-        "/search/issues?q={}&per_page={}",
-        url_encode_query(&params.query),
-        limit
-    );
-
-    if let Some(page) = params.page {
-        path.push_str("&page=");
-        path.push_str(&page.to_string());
-    }
-    if let Some(sort) = params.sort {
-        path.push_str("&sort=");
-        path.push_str(&url_encode_query(&sort));
-    }
-    if let Some(order) = params.order {
-        path.push_str("&order=");
-        path.push_str(&order);
-    }
-
-    github_request("GET", &path, None)
-}
-
-fn get_issue(params: GetIssueParams) -> Result<String, String> {
-    validate_repo(&params.owner, &params.repo)?;
-    validate_issue_number(params.issue_number)?;
-
-    let path = format!(
-        "/repos/{}/{}/issues/{}",
-        url_encode_path(&params.owner),
-        url_encode_path(&params.repo),
-        params.issue_number
-    );
-
-    github_request("GET", &path, None)
-}
-
-fn comment_issue(params: CommentIssueParams) -> Result<String, String> {
-    validate_repo(&params.owner, &params.repo)?;
-    validate_issue_number(params.issue_number)?;
-    validate_text(&params.body, "body", MAX_COMMENT_BODY_LENGTH)?;
-
-    let path = format!(
-        "/repos/{}/{}/issues/{}/comments",
-        url_encode_path(&params.owner),
-        url_encode_path(&params.repo),
-        params.issue_number
-    );
-    let body = serde_json::json!({ "body": params.body }).to_string();
-
-    github_request("POST", &path, Some(body))
-}
-
-fn github_request(method: &str, path: &str, body: Option<String>) -> Result<String, String> {
-    let url = format!("{GITHUB_API_ROOT}{path}");
-    let headers = serde_json::json!({
-        "Accept": "application/vnd.github+json",
-        "Content-Type": "application/json",
-        "X-GitHub-Api-Version": GITHUB_API_VERSION,
-        "User-Agent": "IronClaw-GitHub-Reborn-WASM"
-    });
-
-    let body_bytes = body.map(String::into_bytes);
-    let response = near::agent::host::http_request(
-        method,
-        &url,
-        &headers.to_string(),
-        body_bytes.as_deref(),
-        Some(HTTP_TIMEOUT_MS),
-    )
-    .map_err(|error| sanitize_host_error(&error))?;
-
-    if (200..300).contains(&response.status) {
-        let body =
-            String::from_utf8(response.body).map_err(|_| "github_api_invalid_utf8".to_string())?;
-        return Ok(body);
-    }
-
-    Err(format!("github_api_error_status_{}", response.status))
-}
-
-fn sanitize_host_error(error: &str) -> String {
-    let lower = error.to_ascii_lowercase();
-    if lower.contains("auth")
-        || lower.contains("credential")
-        || lower.contains("secret")
-        || lower.contains("token")
-    {
-        return "AuthRequired".to_string();
-    }
-    if lower.contains("timeout") || lower.contains("deadline") {
-        return "github_api_timeout".to_string();
-    }
-    if lower.contains("redirect") {
-        return "github_api_redirect_denied".to_string();
-    }
-    if lower.contains("body") || lower.contains("size") || lower.contains("large") {
-        return "github_api_body_limit".to_string();
-    }
-    if lower.contains("deny") || lower.contains("allow") || lower.contains("host") {
-        return "github_api_egress_denied".to_string();
-    }
-    "github_api_request_failed".to_string()
-}
-
-fn validate_repo(owner: &str, repo: &str) -> Result<(), String> {
-    if validate_path_segment(owner) && validate_path_segment(repo) {
-        Ok(())
-    } else {
-        Err("invalid_repository".to_string())
-    }
-}
-
-fn validate_text(value: &str, field: &str, max_length: usize) -> Result<(), String> {
-    if value.is_empty() {
-        Err(format!("invalid_{field}_empty"))
-    } else if value.len() > max_length {
-        Err(format!("invalid_{field}_too_large"))
-    } else {
-        Ok(())
-    }
-}
-
-fn validate_path_segment(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= MAX_REPOSITORY_SEGMENT_LENGTH
-        && !value.contains('/')
-        && !value.contains("..")
-        && !value.contains('?')
-        && !value.contains('#')
-        && !value
-            .chars()
-            .any(|ch| ch.is_control() || ch.is_whitespace())
-}
-
-fn validate_search_sort(sort: Option<&str>) -> Result<(), String> {
-    match sort {
-        None | Some("comments" | "created" | "updated") => Ok(()),
-        Some(_) => Err("invalid_sort".to_string()),
-    }
-}
-
-fn validate_order(order: Option<&str>) -> Result<(), String> {
-    match order {
-        None | Some("asc" | "desc") => Ok(()),
-        Some(_) => Err("invalid_order".to_string()),
-    }
-}
-
-fn validate_search_page(page: Option<u32>) -> Result<(), String> {
-    match page {
-        None | Some(1..=100) => Ok(()),
-        Some(_) => Err("invalid_page".to_string()),
-    }
-}
-
-fn validate_search_limit(limit: Option<u32>) -> Result<(), String> {
-    match limit {
-        None | Some(1..=100) => Ok(()),
-        Some(_) => Err("invalid_limit".to_string()),
-    }
-}
-
-fn validate_issue_number(issue_number: u32) -> Result<(), String> {
-    if issue_number == 0 {
-        Err("invalid_issue_number".to_string())
-    } else {
-        Ok(())
-    }
-}
-
-fn url_encode_path(value: &str) -> String {
-    let mut out = String::with_capacity(value.len() * 2);
-    for byte in value.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' => {
-                out.push(byte as char);
-            }
-            _ => {
-                out.push('%');
-                out.push(char::from(b"0123456789ABCDEF"[(byte >> 4) as usize]));
-                out.push(char::from(b"0123456789ABCDEF"[(byte & 0x0F) as usize]));
-            }
-        }
-    }
-    out
-}
-
-fn url_encode_query(value: &str) -> String {
-    url_encode_path(value)
 }
 
 export!(GitHubTool);
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::GitHubTool;
+    use crate::dispatch::{action_from_context, execute_inner};
     use crate::exports::near::agent::tool::Guest;
+    use crate::request::sanitize_host_error;
+    use crate::types::{GitHubAction, GitHubWebhookRequest};
+    use crate::validation::{normalize_ref_lookup, validate_repo_path};
+    use crate::webhook::handle_webhook;
+    use serde_json::json;
+    use std::collections::HashMap;
 
     #[test]
     fn operation_comes_from_host_context_not_param_shape() {
         assert_eq!(
-            operation_from_context(Some(r#"{"capability_id":"github.get_issue"}"#)).unwrap(),
-            GitHubOperation::GetIssue
+            action_from_context(Some(r#"{"capability_id":"github.get_issue"}"#)).unwrap(),
+            "get_issue"
+        );
+        assert_eq!(
+            action_from_context(Some(r#"{"capability_id":"github.comment_issue"}"#)).unwrap(),
+            "create_issue_comment"
         );
     }
 
     #[test]
     fn operation_rejects_missing_or_unknown_context() {
         assert_eq!(
-            operation_from_context(None).unwrap_err(),
+            action_from_context(None).unwrap_err(),
             "missing_invocation_context"
         );
         assert_eq!(
-            operation_from_context(Some(r#"{"capability_id":"github.create_issue"}"#)).unwrap_err(),
+            action_from_context(Some(r#"{"capability_id":"github.unknown"}"#)).unwrap_err(),
             "unsupported_github_capability"
-        );
-    }
-
-    #[test]
-    fn rejects_parameters_that_do_not_match_advertised_schema() {
-        assert_eq!(
-            search_issues(SearchIssuesParams {
-                query: String::new(),
-                page: None,
-                limit: None,
-                sort: None,
-                order: None,
-            })
-            .unwrap_err(),
-            "invalid_query_empty"
-        );
-        assert_eq!(
-            search_issues(SearchIssuesParams {
-                query: "repo:nearai/ironclaw is:issue".to_string(),
-                page: Some(0),
-                limit: None,
-                sort: None,
-                order: None,
-            })
-            .unwrap_err(),
-            "invalid_page"
-        );
-        assert_eq!(
-            search_issues(SearchIssuesParams {
-                query: "repo:nearai/ironclaw is:issue".to_string(),
-                page: None,
-                limit: Some(0),
-                sort: None,
-                order: None,
-            })
-            .unwrap_err(),
-            "invalid_limit"
-        );
-        assert_eq!(
-            search_issues(SearchIssuesParams {
-                query: "repo:nearai/ironclaw is:issue".to_string(),
-                page: None,
-                limit: None,
-                sort: Some("reactions".to_string()),
-                order: None,
-            })
-            .unwrap_err(),
-            "invalid_sort"
-        );
-        assert_eq!(
-            comment_issue(CommentIssueParams {
-                owner: "nearai".to_string(),
-                repo: "ironclaw".to_string(),
-                issue_number: 0,
-                body: "comment".to_string(),
-            })
-            .unwrap_err(),
-            "invalid_issue_number"
-        );
-        assert_eq!(
-            comment_issue(CommentIssueParams {
-                owner: "nearai".to_string(),
-                repo: "ironclaw".to_string(),
-                issue_number: 1,
-                body: String::new(),
-            })
-            .unwrap_err(),
-            "invalid_body_empty"
         );
     }
 
@@ -433,12 +142,47 @@ mod tests {
     }
 
     #[test]
+    fn serde_accepts_common_pr_number_aliases() {
+        let action: GitHubAction = serde_json::from_value(json!({
+            "action": "get_pull_request",
+            "owner": "nearai",
+            "repo": "ironclaw",
+            "number": 4286
+        }))
+        .expect("number should be accepted as a pull request number alias");
+        assert!(matches!(
+            action,
+            GitHubAction::GetPullRequest {
+                pr_number: 4286,
+                ..
+            }
+        ));
+
+        let action: GitHubAction = serde_json::from_value(json!({
+            "action": "get_pull_request_files",
+            "owner": "nearai",
+            "repo": "ironclaw",
+            "pull_number": 4286
+        }))
+        .expect("pull_number should be accepted as a pull request number alias");
+        assert!(matches!(
+            action,
+            GitHubAction::GetPullRequestFiles {
+                pr_number: 4286,
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn validates_static_schema_json() {
         let schema = GitHubTool::schema();
         let parsed: serde_json::Value =
             serde_json::from_str(&schema).expect("schema should be valid JSON");
         assert_eq!(parsed["type"], "object");
-        assert!(parsed["oneOf"].as_array().is_some_and(|schemas| schemas.len() == 3));
+        assert!(parsed["oneOf"]
+            .as_array()
+            .is_some_and(|schemas| schemas.len() >= 30));
     }
 
     #[test]
@@ -447,16 +191,206 @@ mod tests {
             sanitize_host_error("missing token ghp_secret_value"),
             "AuthRequired"
         );
-        assert_eq!(sanitize_host_error("deadline exceeded"), "github_api_timeout");
-        assert_eq!(sanitize_host_error("redirect blocked"), "github_api_redirect_denied");
+        assert_eq!(
+            sanitize_host_error("deadline exceeded"),
+            "github_api_timeout"
+        );
+        assert_eq!(
+            sanitize_host_error("redirect blocked"),
+            "github_api_redirect_denied"
+        );
         assert_eq!(
             sanitize_host_error("response body too large"),
             "github_api_body_limit"
         );
-        assert_eq!(sanitize_host_error("host not allowed"), "github_api_egress_denied");
+        assert_eq!(
+            sanitize_host_error("host not allowed"),
+            "github_api_egress_denied"
+        );
         assert_eq!(
             sanitize_host_error("connection reset with token ghp_secret_value"),
             "AuthRequired"
+        );
+    }
+
+    #[test]
+    fn normalize_ref_lookup_handles_branch_tag_and_unsupported_refs() {
+        assert_eq!(
+            normalize_ref_lookup("refs/heads/main").unwrap(),
+            "heads/main"
+        );
+        assert_eq!(
+            normalize_ref_lookup("refs/tags/v1.0.0").unwrap(),
+            "tags/v1.0.0"
+        );
+        assert_eq!(normalize_ref_lookup("heads/dev").unwrap(), "heads/dev");
+        assert_eq!(normalize_ref_lookup("tags/v2").unwrap(), "tags/v2");
+        assert_eq!(
+            normalize_ref_lookup("feature/reborn").unwrap(),
+            "heads/feature/reborn"
+        );
+        assert_eq!(
+            normalize_ref_lookup("refs/remotes/origin/main").unwrap_err(),
+            "Unsupported from_ref: only refs/heads/* and refs/tags/* are supported"
+        );
+        assert_eq!(
+            normalize_ref_lookup("0123456789abcdef0123456789abcdef01234567").unwrap_err(),
+            "Unsupported from_ref: use a branch or tag ref, not a raw commit SHA"
+        );
+    }
+
+    #[test]
+    fn validate_repo_path_rejects_relative_segments() {
+        assert_eq!(
+            validate_repo_path("../src/main.rs").unwrap_err(),
+            "Invalid path: relative path segments not allowed"
+        );
+        assert_eq!(
+            validate_repo_path("src/./main.rs").unwrap_err(),
+            "Invalid path: relative path segments not allowed"
+        );
+        assert_eq!(
+            validate_repo_path("src//main.rs").unwrap_err(),
+            "Invalid path: empty segment not allowed"
+        );
+        assert!(validate_repo_path("src/main.rs").is_ok());
+    }
+
+    #[test]
+    fn handle_webhook_rejects_missing_event_or_body() {
+        assert_eq!(
+            handle_webhook(GitHubWebhookRequest {
+                headers: HashMap::new(),
+                body_json: Some(json!({}))
+            })
+            .unwrap_err(),
+            "Missing X-GitHub-Event header"
+        );
+
+        let mut headers = HashMap::new();
+        headers.insert("X-GitHub-Event".to_string(), "issues".to_string());
+        assert_eq!(
+            handle_webhook(GitHubWebhookRequest {
+                headers,
+                body_json: None
+            })
+            .unwrap_err(),
+            "Missing webhook.body_json"
+        );
+    }
+
+    #[test]
+    fn handle_webhook_normalizes_pull_request_opened_event() {
+        let mut headers = HashMap::new();
+        headers.insert("X-GitHub-Event".to_string(), "pull_request".to_string());
+
+        let response = handle_webhook(GitHubWebhookRequest {
+            headers,
+            body_json: Some(json!({
+                "action": "opened",
+                "repository": {
+                    "full_name": "nearai/ironclaw",
+                    "owner": {"login": "nearai"}
+                },
+                "pull_request": {
+                    "number": 4280,
+                    "state": "open",
+                    "merged": false,
+                    "draft": true,
+                    "base": {"ref": "reborn-integration"},
+                    "head": {"ref": "codex/reborn-github-capabilities"}
+                },
+                "sender": {"login": "reviewer"}
+            })),
+        })
+        .expect("pull_request webhook should normalize");
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&response).expect("webhook response should be JSON");
+        let payload = &parsed["emit_events"][0]["payload"];
+        assert_eq!(parsed["emit_events"][0]["event_type"], json!("pr.opened"));
+        assert_eq!(payload["pr_number"], json!(4280));
+        assert_eq!(payload["pr_state"], json!("open"));
+        assert_eq!(payload["pr_merged"], json!(false));
+        assert_eq!(payload["pr_draft"], json!(true));
+        assert_eq!(payload["base_branch"], json!("reborn-integration"));
+        assert_eq!(
+            payload["head_branch"],
+            json!("codex/reborn-github-capabilities")
+        );
+    }
+
+    #[test]
+    fn handle_webhook_normalizes_check_run_event() {
+        let mut headers = HashMap::new();
+        headers.insert("X-GitHub-Event".to_string(), "check_run".to_string());
+
+        let response = handle_webhook(GitHubWebhookRequest {
+            headers,
+            body_json: Some(json!({
+                "action": "completed",
+                "repository": {
+                    "full_name": "nearai/ironclaw",
+                    "owner": {"login": "nearai"}
+                },
+                "check_run": {
+                    "status": "completed",
+                    "conclusion": "success"
+                }
+            })),
+        })
+        .expect("check_run webhook should normalize");
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&response).expect("webhook response should be JSON");
+        let payload = &parsed["emit_events"][0]["payload"];
+        assert_eq!(
+            parsed["emit_events"][0]["event_type"],
+            json!("ci.check_run.completed")
+        );
+        assert_eq!(payload["ci_status"], json!("completed"));
+        assert_eq!(payload["ci_conclusion"], json!("success"));
+    }
+
+    #[test]
+    fn handle_webhook_normalizes_pr_comment_event() {
+        let mut headers = HashMap::new();
+        headers.insert("X-GitHub-Event".to_string(), "issue_comment".to_string());
+        headers.insert("X-GitHub-Delivery".to_string(), "delivery-123".to_string());
+
+        let response = handle_webhook(GitHubWebhookRequest {
+            headers,
+            body_json: Some(json!({
+                "action": "created",
+                "repository": {"full_name": "nearai/ironclaw"},
+                "issue": {
+                    "number": 4280,
+                    "pull_request": {"url": "https://api.github.com/repos/nearai/ironclaw/pulls/4280"}
+                },
+                "comment": {"id": 99, "body": "looks good"}
+            })),
+        })
+        .expect("webhook should normalize");
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&response).expect("webhook response should be JSON");
+        assert_eq!(parsed["accepted"], json!(true));
+        assert_eq!(parsed["emit_events"][0]["source"], json!("github"));
+        assert_eq!(
+            parsed["emit_events"][0]["event_type"],
+            json!("pr.comment.created")
+        );
+        assert_eq!(
+            parsed["emit_events"][0]["payload"]["delivery_id"],
+            json!("delivery-123")
+        );
+        assert_eq!(
+            parsed["emit_events"][0]["payload"]["repository_name"],
+            json!("nearai/ironclaw")
+        );
+        assert_eq!(
+            parsed["emit_events"][0]["payload"]["pr_number"],
+            json!(4280)
         );
     }
 }

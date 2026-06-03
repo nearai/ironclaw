@@ -23,10 +23,12 @@ export function useChannels() {
   const extensions = extensionsQuery.data?.extensions || [];
   const registry = registryQuery.data?.entries || [];
 
-  const channels = extensions.filter((e) => e.kind === "channel");
-  const channelRegistry = registry.filter((e) => e.kind === "channel");
+  const channels = extensions.filter((e) => e.kind === "wasm_channel" || e.kind === "channel");
+  const channelRegistry = registry.filter(
+    (e) => (e.kind === "wasm_channel" || e.kind === "channel") && !e.installed
+  );
   const mcpServers = extensions.filter((e) => e.kind === "mcp_server");
-  const mcpRegistry = registry.filter((e) => e.kind === "mcp_server");
+  const mcpRegistry = registry.filter((e) => e.kind === "mcp_server" && !e.installed);
 
   const isLoading = statusQuery.isLoading || extensionsQuery.isLoading;
 

@@ -160,6 +160,7 @@ mod tests {
                 provider: ExtensionId::new("demo").unwrap(),
                 runtime: RuntimeKind::Script,
                 output: json!({"ok": true}),
+                display_preview: None,
                 usage: ResourceUsage::default(),
                 receipt: ResourceReceipt {
                     id: ResourceReservationId::new(),

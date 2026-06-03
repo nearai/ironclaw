@@ -6,8 +6,9 @@ use std::sync::Arc;
 use anyhow::{Context, anyhow};
 use clap::Args;
 use ironclaw_reborn_composition::{
-    RebornReadiness, RebornRuntimeIdentity, RebornRuntimeInput, RebornWebuiBundle,
-    WebuiServeConfig, build_reborn_runtime, build_webui_services, webui_v2_app,
+    GoogleOAuthRouteConfig, RebornBuildInput, RebornReadiness, RebornRuntimeIdentity,
+    RebornRuntimeInput, RebornWebuiBundle, WebuiAuthenticator, WebuiServeConfig,
+    build_reborn_runtime, build_webui_services, webui_v2_app_with_lifecycle,
 };
 use ironclaw_reborn_config::IdentitySection;
 use ironclaw_reborn_webui_ingress::{
@@ -16,7 +17,7 @@ use ironclaw_reborn_webui_ingress::{
 use secrecy::SecretString;
 
 use crate::context::RebornCliContext;
-use crate::runtime::RuntimeInputOptions;
+use crate::runtime::{RuntimeInputOptions, resolve_google_oauth_config_from_env};
 
 const DEFAULT_SERVE_HOST: &str = "127.0.0.1";
 const DEFAULT_SERVE_PORT: u16 = 3000;
@@ -110,7 +111,15 @@ impl ServeCommand {
         let user_id = ironclaw_reborn_composition::host_api::UserId::new(&user_id_raw)
             .map_err(|err| anyhow!("{env_user_id_var} value `{user_id_raw}` is invalid: {err}"))?;
 
-        let authenticator = Arc::new(EnvBearerAuthenticator::new(
+        // Keep a copy of the operator secret to key the SSO session-token
+        // HMAC before the value is moved into the env-bearer authenticator.
+        // Held as `SecretString` so it is redacted in `Debug`/logs and
+        // zeroed on drop — it doubles as the session-signing key. Capture
+        // its byte length first (for the SSO entropy floor below) since the
+        // value is consumed here.
+        let token_byte_len = token_value.len();
+        let session_signing_secret = SecretString::from(token_value.clone());
+        let env_authenticator: Arc<dyn WebuiAuthenticator> = Arc::new(EnvBearerAuthenticator::new(
             SecretString::from(token_value),
             user_id,
         )?);
@@ -129,7 +138,7 @@ impl ServeCommand {
         // runtime owner stays at `[identity].default_owner` (a different
         // identity source) and every turn fails with `UnknownThread`.
         let runtime_owner = resolve_webui_runtime_owner(identity_section, &user_id_raw)?;
-        let runtime_input = runtime_input.with_owner_id(runtime_owner);
+        let mut runtime_input = runtime_input.with_owner_id(runtime_owner);
         let default_agent_raw =
             resolve_webui_default_agent(identity_section, &runtime_input.identity);
         let default_agent_id =
@@ -178,8 +187,79 @@ impl ServeCommand {
         } else {
             DEFAULT_SERVE_PORT
         };
+        // Canonical host for WS same-origin check (defense against
+        // reverse-proxy passthrough-Host attacks). Validate as
+        // `host` or `host:port` — refuse multi-segment paths or
+        // scheme prefixes which would silently never match Origin.
+        let canonical_host = webui_section
+            .and_then(|section| section.canonical_host.as_deref())
+            .map(|raw| -> anyhow::Result<String> {
+                if raw.is_empty() {
+                    anyhow::bail!("[webui].canonical_host must not be empty");
+                }
+                if raw.contains("://") {
+                    anyhow::bail!(
+                        "[webui].canonical_host `{raw}` must be `host` or `host:port`, \
+                         not a scheme-qualified URL",
+                    );
+                }
+                if raw.contains('/') {
+                    anyhow::bail!("[webui].canonical_host `{raw}` must not contain `/`",);
+                }
+                Ok(raw.to_string())
+            })
+            .transpose()?;
+
         let listen_addr = SocketAddr::new(host, port);
         reject_non_loopback_privileged_local_runtime(host, &runtime_input)?;
+        if let Some(callback_origin) =
+            webui_oauth_callback_origin(listen_addr, canonical_host.as_deref())
+        {
+            let services = runtime_input.services.take().ok_or_else(|| {
+                anyhow!("WebChat v2 serve requires Reborn runtime services before OAuth wiring")
+            })?;
+            runtime_input.services = Some(
+                with_notion_dcr_oauth_backend(services, &callback_origin)
+                    .context("failed to configure Notion DCR OAuth for WebChat v2")?,
+            );
+        } else {
+            tracing::warn!(
+                target = "ironclaw::reborn::cli::serve",
+                %listen_addr,
+                "Notion DCR OAuth is not configured because the WebChat v2 listener origin is not a stable loopback HTTP origin"
+            );
+        }
+
+        // WebChat v2 SSO login startup config (providers + base URL +
+        // cleartext guard). Resolved here so misconfiguration fails fast
+        // before the runtime is built; the DB-backed user directory and
+        // the login wiring are assembled inside the async runtime below,
+        // because opening the libSQL user store is async.
+        let sso_startup = crate::commands::serve_sso::sso_startup_config_from_env(listen_addr)?;
+        // When SSO is enabled this same token keys the stateless session
+        // HMAC, so a weak value becomes an OFFLINE forgery target: an
+        // attacker who completes one legitimate login holds a
+        // `{payload}.{hmac}` pair and can brute-force a low-entropy key
+        // locally, then mint a session for any user/tenant. Pre-SSO the
+        // token only ever gated an online, rate-limited bearer guess.
+        // Require real entropy; fail closed rather than warn.
+        if sso_startup.is_some() && token_byte_len < 32 {
+            return Err(anyhow!(
+                "{env_token_var} is also the WebChat SSO session-signing key and must be at \
+                 least 32 bytes of high-entropy random material when an SSO provider is \
+                 configured (it signs stateless, user-visible session tokens). The current \
+                 value is {token_byte_len} bytes — generate one with e.g. `openssl rand -hex 32`."
+            ));
+        }
+        // The user-identity tables live IN the reborn local-dev substrate
+        // database (a second handle to the same `reborn-local-dev.db` the
+        // runtime opens), not a separate identity-store file — so there is
+        // one durable user source, not two.
+        let user_store_path = boot_config
+            .home()
+            .path()
+            .join("local-dev")
+            .join("reborn-local-dev.db");
 
         // CORS allow-origin list. Empty = fail-closed on every
         // cross-origin preflight; operators MUST opt in to the
@@ -202,29 +282,6 @@ impl ServeCommand {
                     usize::try_from(raw)
                         .map_err(|_| anyhow!("[webui].max_body_bytes_fallback exceeds usize"))
                 }
-            })
-            .transpose()?;
-
-        // Canonical host for WS same-origin check (defense against
-        // reverse-proxy passthrough-Host attacks). Validate as
-        // `host` or `host:port` — refuse multi-segment paths or
-        // scheme prefixes which would silently never match Origin.
-        let canonical_host = webui_section
-            .and_then(|section| section.canonical_host.as_deref())
-            .map(|raw| -> anyhow::Result<String> {
-                if raw.is_empty() {
-                    anyhow::bail!("[webui].canonical_host must not be empty");
-                }
-                if raw.contains("://") {
-                    anyhow::bail!(
-                        "[webui].canonical_host `{raw}` must be `host` or `host:port`, \
-                         not a scheme-qualified URL",
-                    );
-                }
-                if raw.contains('/') {
-                    anyhow::bail!("[webui].canonical_host `{raw}` must not contain `/`",);
-                }
-                Ok(raw.to_string())
             })
             .transpose()?;
 
@@ -262,6 +319,22 @@ impl ServeCommand {
                 .context("failed to assemble Reborn runtime for `serve`")?;
             let bundle: RebornWebuiBundle = build_webui_services(&runtime, None)?;
 
+            // Assemble the WebChat v2 auth surface (authenticator + optional
+            // public login mount). The auth/identity module owns the store
+            // opening + signed-session wiring; `serve` only supplies host
+            // config.
+            let crate::commands::webui_auth::WebuiAuthSurface {
+                authenticator,
+                public_mount,
+            } = crate::commands::webui_auth::build_webui_auth_surface(
+                sso_startup,
+                &user_store_path,
+                tenant_id.clone(),
+                session_signing_secret,
+                env_authenticator,
+            )
+            .await?;
+
             print_serve_banner(
                 listen_addr,
                 env_token_var,
@@ -275,6 +348,21 @@ impl ServeCommand {
             if let Some(project_id) = default_project_id {
                 serve_config = serve_config.with_default_project_id(project_id);
             }
+            if let Some(google_oauth) = resolve_google_oauth_config_from_env()
+                .context("failed to resolve Google OAuth setup config for WebUI")?
+            {
+                let mut route_config = GoogleOAuthRouteConfig::new(
+                    google_oauth.client.client_id.as_str(),
+                    google_oauth.client.redirect_uri.as_str(),
+                )
+                .context("invalid Google OAuth route config for WebUI")?;
+                if let Some(hosted_domain_hint) = google_oauth.hosted_domain_hint {
+                    route_config = route_config
+                        .with_hosted_domain_hint(hosted_domain_hint)
+                        .context("invalid Google OAuth hosted-domain hint for WebUI")?;
+                }
+                serve_config = serve_config.with_google_oauth(route_config);
+            }
             if let Some(value) = csp_override {
                 serve_config = serve_config
                     .with_csp_header_str(value)
@@ -286,8 +374,12 @@ impl ServeCommand {
             if let Some(host) = canonical_host {
                 serve_config = serve_config.with_canonical_host(host);
             }
-            let router =
-                webui_v2_app(bundle, serve_config).context("failed to compose v2 Router")?;
+            if let Some(mount) = public_mount {
+                serve_config = serve_config.with_public_route_mount(mount);
+            }
+            let webui_app = webui_v2_app_with_lifecycle(bundle, serve_config)
+                .context("failed to compose v2 Router")?;
+            let (router, public_route_drains) = webui_app.into_parts();
 
             let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
             tokio::spawn(async move {
@@ -307,6 +399,13 @@ impl ServeCommand {
                 bound_addr_tx: None,
             })
             .await;
+
+            // Always drain public route mounts before shutting down the
+            // Reborn runtime. Protocol webhooks such as Slack can ACK a
+            // request before product workflow dispatch completes, so their
+            // route-owned work must finish after ingress stops accepting new
+            // requests but before shared runtime services are torn down.
+            public_route_drains.drain().await;
 
             // Always drain the Reborn runtime, even on serve error, so
             // background tasks and turn-runner state shut down cleanly.
@@ -334,6 +433,77 @@ fn reject_non_loopback_privileged_local_runtime(
          process, direct network, inherited environment). Bind to a loopback host such as \
          127.0.0.1 or ::1, or choose a less privileged profile."
     );
+}
+
+fn with_notion_dcr_oauth_backend(
+    services: RebornBuildInput,
+    callback_origin: &str,
+) -> anyhow::Result<RebornBuildInput> {
+    // Provider-visible DCR client display name shown during Notion OAuth consent.
+    services
+        .with_notion_dcr_oauth_backend(callback_origin, "Ironclaw")
+        .map_err(|error| anyhow!("Notion DCR OAuth backend rejected callback origin: {error}"))
+}
+
+fn webui_oauth_callback_origin(
+    listen_addr: SocketAddr,
+    canonical_host: Option<&str>,
+) -> Option<String> {
+    if let Some(host) = canonical_host {
+        return Some(format!(
+            "{}://{}",
+            callback_origin_scheme(host),
+            canonical_host_for_origin_url(host)
+        ));
+    }
+
+    let port = listen_addr.port();
+    if port == 0 {
+        return None;
+    }
+    match listen_addr.ip() {
+        IpAddr::V4(host) if host.is_unspecified() => Some(format!("http://localhost:{port}")),
+        IpAddr::V6(host) if host.is_unspecified() => Some(format!("http://localhost:{port}")),
+        IpAddr::V4(host) if host.is_loopback() => Some(format!("http://{host}:{port}")),
+        IpAddr::V6(host) if host.is_loopback() => Some(format!("http://[{host}]:{port}")),
+        _ => None,
+    }
+}
+
+fn callback_origin_scheme(host: &str) -> &'static str {
+    if canonical_host_is_loopback(host) {
+        "http"
+    } else {
+        "https"
+    }
+}
+
+fn canonical_host_is_loopback(host: &str) -> bool {
+    let host_name = canonical_host_name(host);
+    host_name == "localhost"
+        || host_name
+            .parse::<IpAddr>()
+            .is_ok_and(|host| host.is_loopback())
+}
+
+fn canonical_host_for_origin_url(host: &str) -> String {
+    if host.starts_with('[') {
+        return host.to_string();
+    }
+    if matches!(host.parse::<IpAddr>(), Ok(IpAddr::V6(_))) {
+        return format!("[{host}]");
+    }
+    host.to_string()
+}
+
+fn canonical_host_name(host: &str) -> &str {
+    if let Some(rest) = host.strip_prefix('[') {
+        return rest.split_once(']').map(|(host, _)| host).unwrap_or(host);
+    }
+    if host.parse::<IpAddr>().is_ok() {
+        return host;
+    }
+    host.split_once(':').map(|(host, _)| host).unwrap_or(host)
 }
 
 fn resolve_webui_default_agent(
@@ -471,5 +641,125 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains("reborn-cli"), "message: {message}");
         assert!(message.contains("local-user"), "message: {message}");
+    }
+
+    #[test]
+    fn webui_oauth_callback_origin_uses_loopback_http() {
+        assert_eq!(
+            webui_oauth_callback_origin(SocketAddr::from(([127, 0, 0, 1], 3000)), None).as_deref(),
+            Some("http://127.0.0.1:3000")
+        );
+    }
+
+    #[test]
+    fn webui_oauth_callback_origin_maps_unspecified_bind_to_localhost() {
+        assert_eq!(
+            webui_oauth_callback_origin(SocketAddr::from(([0, 0, 0, 0], 3000)), None).as_deref(),
+            Some("http://localhost:3000")
+        );
+    }
+
+    #[test]
+    fn webui_oauth_callback_origin_brackets_ipv6_loopback() {
+        let listen_addr = SocketAddr::new(IpAddr::from_str("::1").unwrap(), 3000);
+
+        assert_eq!(
+            webui_oauth_callback_origin(listen_addr, None).as_deref(),
+            Some("http://[::1]:3000")
+        );
+    }
+
+    #[test]
+    fn webui_oauth_callback_origin_skips_unstable_or_non_loopback_origin() {
+        assert_eq!(
+            webui_oauth_callback_origin(SocketAddr::from(([127, 0, 0, 1], 0)), None),
+            None
+        );
+        assert_eq!(
+            webui_oauth_callback_origin(SocketAddr::from(([192, 168, 1, 42], 3000)), None),
+            None
+        );
+    }
+
+    #[test]
+    fn webui_oauth_callback_origin_uses_https_canonical_host() {
+        assert_eq!(
+            webui_oauth_callback_origin(
+                SocketAddr::from(([0, 0, 0, 0], 3000)),
+                Some("app.example.com"),
+            )
+            .as_deref(),
+            Some("https://app.example.com")
+        );
+    }
+
+    #[test]
+    fn webui_oauth_callback_origin_uses_http_for_loopback_canonical_host() {
+        assert_eq!(
+            webui_oauth_callback_origin(
+                SocketAddr::from(([0, 0, 0, 0], 3000)),
+                Some("127.0.0.1:3000"),
+            )
+            .as_deref(),
+            Some("http://127.0.0.1:3000")
+        );
+    }
+
+    #[test]
+    fn webui_oauth_callback_origin_brackets_ipv6_canonical_host() {
+        assert_eq!(
+            webui_oauth_callback_origin(SocketAddr::from(([0, 0, 0, 0], 3000)), Some("::1"))
+                .as_deref(),
+            Some("http://[::1]")
+        );
+    }
+
+    #[tokio::test]
+    async fn webui_serve_wires_notion_dcr_into_runtime_services() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let services_input = with_notion_dcr_oauth_backend(
+            RebornBuildInput::local_dev("notion-dcr-owner", dir.path().join("local-dev")),
+            "http://127.0.0.1:3000",
+        )
+        .expect("notion dcr wiring");
+        let services = ironclaw_reborn_composition::build_reborn_services(services_input)
+            .await
+            .expect("reborn services build");
+
+        assert!(
+            services
+                .product_auth
+                .as_ref()
+                .and_then(|product_auth| product_auth.as_auth_challenge_provider())
+                .is_some(),
+            "serve wiring must expose the DCR-backed auth challenge provider"
+        );
+    }
+
+    #[tokio::test]
+    async fn webui_serve_wires_notion_dcr_with_canonical_host_origin() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let services_input = with_notion_dcr_oauth_backend(
+            RebornBuildInput::local_dev("notion-dcr-owner", dir.path().join("local-dev")),
+            webui_oauth_callback_origin(
+                SocketAddr::from(([0, 0, 0, 0], 3000)),
+                Some("app.example.com"),
+            )
+            .as_deref()
+            .expect("canonical callback origin"),
+        )
+        .expect("notion dcr wiring");
+        let services = ironclaw_reborn_composition::build_reborn_services(services_input)
+            .await
+            .expect("reborn services build");
+
+        assert!(
+            services
+                .product_auth
+                .as_ref()
+                .and_then(|product_auth| product_auth.as_auth_challenge_provider())
+                .is_some(),
+            "serve wiring must expose the DCR-backed auth challenge provider"
+        );
     }
 }

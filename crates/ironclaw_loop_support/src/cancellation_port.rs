@@ -597,6 +597,7 @@ mod tests {
             received_at: Utc::now(),
             checkpoint_id: None,
             gate_ref: None,
+            credential_requirements: Vec::new(),
             failure: None,
             event_cursor: EventCursor(1),
         }

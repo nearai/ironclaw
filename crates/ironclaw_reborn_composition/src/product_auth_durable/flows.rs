@@ -5,17 +5,19 @@ use ironclaw_filesystem::{CasExpectation, RootFilesystem};
 use super::domain::{
     PreparedCallbackFlow, prepare_callback_flow, update_account_from_exchange,
     update_account_from_request, validate_bound_update_authority, validate_callback_claim,
-    validate_flow_update_binding, validate_selection_flow,
+    validate_flow_update_binding, validate_manual_token_flow, validate_selection_flow,
 };
 use super::{
     FilesystemAuthProductServices, credential_status_for_completed_flow, is_terminal_status,
     scope_matches,
 };
 use ironclaw_auth::{
-    AuthErrorCode, AuthFlowId, AuthFlowManager, AuthFlowRecord, AuthFlowStatus, AuthProductError,
-    CredentialAccountId, CredentialAccountStatus, CredentialOwnership, CredentialSelectionInput,
-    NewAuthFlow, NewCredentialAccount, OAuthCallbackClaimRequest, OAuthCallbackFailureInput,
-    OAuthCallbackInput, OAuthProviderExchange, ProviderCallbackOutcome,
+    AuthChallenge, AuthErrorCode, AuthFlowId, AuthFlowManager, AuthFlowRecord,
+    AuthFlowRecordSource, AuthFlowStatus, AuthProductError, CredentialAccountId,
+    CredentialAccountStatus, CredentialOwnership, CredentialSelectionInput,
+    ManualTokenCompletionInput, NewAuthFlow, NewCredentialAccount, OAuthCallbackClaimRequest,
+    OAuthCallbackFailureInput, OAuthCallbackInput, OAuthProviderExchange, ProviderCallbackOutcome,
+    TurnGateAuthFlowQuery, flow_matches_turn_gate_query,
 };
 
 #[async_trait]
@@ -34,7 +36,7 @@ where
         }
         let now = Utc::now();
         let record = AuthFlowRecord {
-            id: AuthFlowId::new(),
+            id: request.id.unwrap_or_default(),
             scope: request.scope,
             kind: request.kind,
             status: AuthFlowStatus::AwaitingUser,
@@ -90,7 +92,7 @@ where
                     .await?;
                 return Err(AuthProductError::UnknownOrExpiredFlow);
             }
-            Err(e) => return Err(e),
+            Err(error) => return Err(error),
         }
         if record.status == AuthFlowStatus::Completed {
             return Ok(record);
@@ -101,7 +103,6 @@ where
             .await?;
         Ok(record)
     }
-
     async fn complete_oauth_callback(
         &self,
         scope: &ironclaw_auth::AuthProductScope,
@@ -197,6 +198,102 @@ where
         Ok(record)
     }
 
+    async fn complete_manual_token(
+        &self,
+        scope: &ironclaw_auth::AuthProductScope,
+        input: ManualTokenCompletionInput,
+    ) -> Result<AuthFlowRecord, AuthProductError> {
+        let flow_id = self
+            .flows_for_scope(scope)
+            .await?
+            .into_iter()
+            .find_map(|(flow, _)| {
+                let matches_interaction = matches!(
+                    &flow.challenge,
+                    Some(AuthChallenge::ManualTokenRequired { interaction_id, .. })
+                        if interaction_id == &input.interaction_id
+                );
+                matches_interaction.then_some(flow.id)
+            })
+            .ok_or(AuthProductError::UnknownOrExpiredFlow)?;
+        let lock = self.lock_for(format!("flow:{flow_id}"));
+        let _guard = lock.lock().await;
+        let now = Utc::now();
+        let (mut record, version) = self
+            .read_flow(scope, flow_id)
+            .await?
+            .ok_or(AuthProductError::UnknownOrExpiredFlow)?;
+        match validate_manual_token_flow(&mut record, scope, &input, now) {
+            Ok(()) => {}
+            Err(AuthProductError::UnknownOrExpiredFlow) => {
+                self.write_flow(scope, &record, CasExpectation::Version(version))
+                    .await?;
+                return Err(AuthProductError::UnknownOrExpiredFlow);
+            }
+            Err(error) => return Err(error),
+        }
+        if record.status == AuthFlowStatus::Completed {
+            return Ok(record);
+        }
+        let account = self
+            .read_account(scope, input.credential_account_id)
+            .await?
+            .map(|(account, _)| account)
+            .ok_or(AuthProductError::CredentialMissing)?;
+        if !scope_matches(&record.scope, &account.scope)
+            || account.provider != record.provider
+            || account.status != CredentialAccountStatus::Configured
+        {
+            return Err(AuthProductError::CrossScopeDenied);
+        }
+        record.status = AuthFlowStatus::Completed;
+        record.error = None;
+        record.credential_account_id = Some(input.credential_account_id);
+        record.updated_at = now;
+        self.write_flow(scope, &record, CasExpectation::Version(version))
+            .await?;
+        Ok(record)
+    }
+
+    async fn cancel_manual_token(
+        &self,
+        scope: &ironclaw_auth::AuthProductScope,
+        interaction_id: ironclaw_auth::AuthInteractionId,
+    ) -> Result<Option<AuthFlowRecord>, AuthProductError> {
+        let Some(flow_id) = self
+            .flows_for_scope(scope)
+            .await?
+            .into_iter()
+            .find_map(|(flow, _)| {
+                let matches_interaction = matches!(
+                    &flow.challenge,
+                    Some(AuthChallenge::ManualTokenRequired { interaction_id: id, .. })
+                        if id == &interaction_id
+                );
+                matches_interaction.then_some(flow.id)
+            })
+        else {
+            return Ok(None);
+        };
+        let lock = self.lock_for(format!("flow:{flow_id}"));
+        let _guard = lock.lock().await;
+        let (mut record, version) = self
+            .read_flow(scope, flow_id)
+            .await?
+            .ok_or(AuthProductError::UnknownOrExpiredFlow)?;
+        if !scope_matches(scope, &record.scope) {
+            return Err(AuthProductError::CrossScopeDenied);
+        }
+        if !is_terminal_status(record.status) {
+            record.status = AuthFlowStatus::Canceled;
+            record.error = Some(AuthErrorCode::Canceled);
+            record.updated_at = Utc::now();
+            self.write_flow(scope, &record, CasExpectation::Version(version))
+                .await?;
+        }
+        Ok(Some(record))
+    }
+
     async fn fail_oauth_callback(
         &self,
         scope: &ironclaw_auth::AuthProductScope,
@@ -285,6 +382,30 @@ where
     }
 }
 
+#[async_trait]
+impl<F> AuthFlowRecordSource for FilesystemAuthProductServices<F>
+where
+    F: RootFilesystem + 'static,
+{
+    async fn flow_for_turn_gate(
+        &self,
+        query: TurnGateAuthFlowQuery,
+    ) -> Result<Option<AuthFlowRecord>, AuthProductError> {
+        Ok(self
+            .flow_records_for_owner(&query.owner)
+            .await?
+            .into_iter()
+            .find(|flow| flow_matches_turn_gate_query(flow, &query)))
+    }
+
+    async fn flows_for_owner(
+        &self,
+        owner: ironclaw_auth::AuthFlowOwnerScope,
+    ) -> Result<Vec<AuthFlowRecord>, AuthProductError> {
+        self.flow_records_for_owner(&owner).await
+    }
+}
+
 impl<F> FilesystemAuthProductServices<F>
 where
     F: RootFilesystem + 'static,
@@ -304,46 +425,15 @@ where
                 if binding.account_id != account_id {
                     return Err(AuthProductError::CrossScopeDenied);
                 }
-                let lock = self.lock_for(format!("account:{account_id}"));
-                let _guard = lock.lock().await;
-                let (mut account, version) = self
-                    .read_account(&callback.scope, account_id)
-                    .await?
-                    .ok_or(AuthProductError::CredentialMissing)?;
-                if !scope_matches(&callback.scope, &account.scope) {
-                    return Err(AuthProductError::CrossScopeDenied);
-                }
-                if account.provider != exchange.provider {
-                    return Err(AuthProductError::TokenExchangeFailed);
-                }
-                validate_bound_update_authority(&account, binding)?;
-                // Capture previous secret handles before overwriting so we can
-                // delete orphaned material from SecretStore after a successful
-                // write.  New tokens are written first; a write failure leaves
-                // the old handles still referenced by the on-disk record.
-                let previous_access_secret = account.access_secret.clone();
-                let previous_refresh_secret = account.refresh_secret.clone();
-                update_account_from_exchange(&mut account, exchange, Utc::now());
-                self.write_account(&account, CasExpectation::Version(version))
+                self.update_bound_oauth_account(&callback.scope, binding, exchange)
                     .await?;
-                // Best-effort purge of replaced handles.  Failures are
-                // non-fatal: orphans in SecretStore are recoverable; errors
-                // must not propagate to the caller.
-                if let Some(h) = &previous_access_secret
-                    && previous_access_secret.as_ref() != account.access_secret.as_ref()
-                {
-                    let _ = self.secret_store.delete(&callback.scope.resource, h).await;
-                }
-                if let Some(h) = &previous_refresh_secret
-                    && previous_refresh_secret.as_ref() != account.refresh_secret.as_ref()
-                {
-                    let _ = self.secret_store.delete(&callback.scope.resource, h).await;
-                }
                 Ok(account_id)
             }
             None => {
-                if callback.update_binding.is_some() {
-                    return Err(AuthProductError::CrossScopeDenied);
+                if let Some(binding) = &callback.update_binding {
+                    return self
+                        .update_bound_oauth_account(&callback.scope, binding, exchange)
+                        .await;
                 }
                 let account_id = CredentialAccountId::from_uuid(flow_id.as_uuid());
                 let request = NewCredentialAccount {
@@ -398,5 +488,50 @@ where
                 }
             }
         }
+    }
+
+    async fn update_bound_oauth_account(
+        &self,
+        scope: &ironclaw_auth::AuthProductScope,
+        binding: &ironclaw_auth::CredentialAccountUpdateBinding,
+        exchange: &OAuthProviderExchange,
+    ) -> Result<CredentialAccountId, AuthProductError> {
+        let account_id = binding.account_id;
+        let lock = self.lock_for(format!("account:{account_id}"));
+        let _guard = lock.lock().await;
+        let (mut account, version) = self
+            .read_account(scope, account_id)
+            .await?
+            .ok_or(AuthProductError::CredentialMissing)?;
+        if !scope_matches(scope, &account.scope) {
+            return Err(AuthProductError::CrossScopeDenied);
+        }
+        if account.provider != exchange.provider {
+            return Err(AuthProductError::TokenExchangeFailed);
+        }
+        validate_bound_update_authority(&account, binding)?;
+        // Capture previous secret handles before overwriting so we can delete
+        // orphaned material from SecretStore after a successful write. New
+        // tokens are written first; a write failure leaves the old handles
+        // still referenced by the on-disk record.
+        let previous_access_secret = account.access_secret.clone();
+        let previous_refresh_secret = account.refresh_secret.clone();
+        update_account_from_exchange(&mut account, exchange, Utc::now());
+        self.write_account(&account, CasExpectation::Version(version))
+            .await?;
+        // Best-effort purge of replaced handles. Failures are non-fatal:
+        // orphans in SecretStore are recoverable; errors must not propagate to
+        // the caller.
+        if let Some(h) = &previous_access_secret
+            && previous_access_secret.as_ref() != account.access_secret.as_ref()
+        {
+            let _ = self.secret_store.delete(&scope.resource, h).await;
+        }
+        if let Some(h) = &previous_refresh_secret
+            && previous_refresh_secret.as_ref() != account.refresh_secret.as_ref()
+        {
+            let _ = self.secret_store.delete(&scope.resource, h).await;
+        }
+        Ok(account_id)
     }
 }

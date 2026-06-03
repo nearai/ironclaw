@@ -33,6 +33,7 @@ fn progress(kind: ProgressKind) -> ProgressUpdateView {
 fn capability_activity() -> CapabilityActivityView {
     CapabilityActivityView {
         invocation_id: InvocationId::new(),
+        turn_run_id: Some(run_id()),
         thread_id: Some(ThreadId::new("thread-alpha").expect("thread")),
         capability_id: CapabilityId::new("script.echo").expect("capability"),
         status: CapabilityActivityStatusView::Running,
@@ -49,6 +50,7 @@ fn capability_display_preview() -> CapabilityDisplayPreviewView {
     CapabilityDisplayPreviewView {
         timeline_message_id: Some("timeline-message-1".to_string()),
         invocation_id: InvocationId::new(),
+        turn_run_id: Some(run_id()),
         thread_id: Some(ThreadId::new("thread-alpha").expect("thread")),
         capability_id: CapabilityId::new("builtin.read_file").expect("capability"),
         status: CapabilityActivityStatusView::Completed,
@@ -145,6 +147,18 @@ fn projection_state() -> ProductProjectionState {
             ProductProjectionItem::RunStatus {
                 run_id: run_id(),
                 status: "running".to_string(),
+                failure_category: None,
+                failure_summary: None,
+            },
+            ProductProjectionItem::RunStatus {
+                run_id: run_id(),
+                status: "failed".to_string(),
+                failure_category: Some(
+                    ironclaw_turns::SanitizedFailure::new("driver_failed").unwrap(),
+                ),
+                failure_summary: Some(
+                    "The run failed because the execution driver reported an error.".to_string(),
+                ),
             },
             ProductProjectionItem::WorkSummary {
                 id: "work-summary-1".to_string(),

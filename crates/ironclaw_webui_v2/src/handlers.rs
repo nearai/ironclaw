@@ -22,14 +22,15 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use futures::SinkExt;
 use futures::stream::Stream;
 use ironclaw_product_workflow::{
-    ExtensionName, ProjectionCursor, RebornCancelRunResponse, RebornCreateThreadResponse,
-    RebornListThreadsResponse, RebornResolveGateResponse, RebornServicesApi, RebornServicesError,
-    RebornServicesErrorCode, RebornServicesErrorKind, RebornSetupExtensionResponse,
-    RebornStreamEventsRequest, RebornSubmitTurnResponse, RebornTimelineRequest,
-    RebornTimelineResponse, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
-    WebUiCreateThreadRequest, WebUiInboundValidationCode, WebUiInboundValidationError,
-    WebUiListThreadsRequest, WebUiResolveGateRequest, WebUiSendMessageRequest,
-    WebUiSetupExtensionRequest,
+    LifecyclePackageKind, LifecyclePackageRef, ProductWorkflowError, ProjectionCursor,
+    RebornCancelRunResponse, RebornCreateThreadResponse, RebornExtensionActionResponse,
+    RebornExtensionListResponse, RebornExtensionRegistryResponse, RebornListThreadsResponse,
+    RebornResolveGateResponse, RebornServicesApi, RebornServicesError, RebornServicesErrorCode,
+    RebornServicesErrorKind, RebornSetupExtensionResponse, RebornStreamEventsRequest,
+    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
+    WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
+    WebUiInboundValidationCode, WebUiInboundValidationError, WebUiListThreadsRequest,
+    WebUiResolveGateRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
 };
 use serde::{Deserialize, Serialize};
 
@@ -391,41 +392,138 @@ pub struct ListThreadsQuery {
     pub cursor: Option<String>,
 }
 
-/// `POST /api/webchat/v2/extensions/{extension_name}/setup`
+/// `GET /api/webchat/v2/extensions`
+pub async fn list_extensions(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+) -> Result<Json<RebornExtensionListResponse>, WebUiV2HttpError> {
+    let response = state.services().list_extensions(caller).await?;
+    Ok(Json(response))
+}
+
+/// `GET /api/webchat/v2/extensions/registry`
+pub async fn list_extension_registry(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+) -> Result<Json<RebornExtensionRegistryResponse>, WebUiV2HttpError> {
+    let response = state.services().list_extension_registry(caller).await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/extensions/install`
+pub async fn install_extension(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Json(body): Json<InstallExtensionBody>,
+) -> Result<Json<RebornExtensionActionResponse>, WebUiV2HttpError> {
+    let package_ref = extension_package_ref_for_request(Ok(body.package_ref), "package_ref")?;
+    let response = state
+        .services()
+        .install_extension(caller, package_ref)
+        .await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/extensions/{package_id}/activate`
+pub async fn activate_extension(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path(ExtensionPackagePath { package_id }): Path<ExtensionPackagePath>,
+) -> Result<Json<RebornExtensionActionResponse>, WebUiV2HttpError> {
+    let package_ref = extension_package_ref_for_request(
+        LifecyclePackageRef::new(LifecyclePackageKind::Extension, package_id),
+        "package_id",
+    )?;
+    let response = state
+        .services()
+        .activate_extension(caller, package_ref)
+        .await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/extensions/{package_id}/remove`
+pub async fn remove_extension(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path(ExtensionPackagePath { package_id }): Path<ExtensionPackagePath>,
+) -> Result<Json<RebornExtensionActionResponse>, WebUiV2HttpError> {
+    let package_ref = extension_package_ref_for_request(
+        LifecyclePackageRef::new(LifecyclePackageKind::Extension, package_id),
+        "package_id",
+    )?;
+    let response = state
+        .services()
+        .remove_extension(caller, package_ref)
+        .await?;
+    Ok(Json(response))
+}
+
+/// `GET /api/webchat/v2/extensions/{package_id}/setup`
+pub async fn get_extension_setup(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path(ExtensionPackagePath { package_id }): Path<ExtensionPackagePath>,
+) -> Result<Json<RebornSetupExtensionResponse>, WebUiV2HttpError> {
+    let package_ref = extension_package_ref_for_request(
+        LifecyclePackageRef::new(LifecyclePackageKind::Extension, package_id),
+        "package_id",
+    )?;
+    let response = state
+        .services()
+        .setup_extension(caller, package_ref, WebUiSetupExtensionRequest::default())
+        .await?;
+    Ok(Json(response))
+}
+
+/// `POST /api/webchat/v2/extensions/{package_id}/setup`
 ///
 /// V2-native route that returns a product-safe lifecycle projection. The route
 /// exists so the v2 entrypoint inventory is complete and so future onboarding
 /// port work has a stable surface to fill in without coupling this crate to v1
 /// onboarding controllers.
 ///
-/// The path segment is validated against
-/// [`ExtensionName`] at the handler/facade boundary; a
-/// malformed identifier returns `400 invalid_argument` before the
-/// facade is called. The typed value is threaded through the facade
-/// argument so internal request/response state never carries a raw
-/// `String` extension name (see `.claude/rules/types.md`).
+/// The path segment is lifted into a lifecycle package ref at the
+/// handler/facade boundary; a malformed identifier returns `400
+/// invalid_argument` before the facade is called.
 pub async fn setup_extension(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
-    Path(SetupExtensionPath { extension_name }): Path<SetupExtensionPath>,
+    Path(ExtensionPackagePath { package_id }): Path<ExtensionPackagePath>,
     Json(body): Json<WebUiSetupExtensionRequest>,
 ) -> Result<Json<RebornSetupExtensionResponse>, WebUiV2HttpError> {
-    let extension_name = ExtensionName::new(&extension_name).map_err(|_| {
-        RebornServicesError::from(WebUiInboundValidationError::new(
-            "extension_name",
-            WebUiInboundValidationCode::InvalidId,
-        ))
-    })?;
+    let package_ref = extension_package_ref_for_request(
+        LifecyclePackageRef::new(LifecyclePackageKind::Extension, package_id),
+        "package_id",
+    )?;
     let response = state
         .services()
-        .setup_extension(caller, extension_name, body)
+        .setup_extension(caller, package_ref, body)
         .await?;
     Ok(Json(response))
 }
 
 #[derive(Debug, Deserialize)]
-pub struct SetupExtensionPath {
-    pub extension_name: String,
+pub struct ExtensionPackagePath {
+    pub package_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct InstallExtensionBody {
+    pub package_ref: LifecyclePackageRef,
+}
+
+fn extension_package_ref_for_request(
+    package_ref: Result<LifecyclePackageRef, ProductWorkflowError>,
+    field: &'static str,
+) -> Result<LifecyclePackageRef, RebornServicesError> {
+    package_ref
+        .and_then(LifecyclePackageRef::require_extension)
+        .map_err(|_| {
+            RebornServicesError::from(WebUiInboundValidationError::new(
+                field,
+                WebUiInboundValidationCode::InvalidId,
+            ))
+        })
 }
 
 /// `GET /api/webchat/v2/threads/{thread_id}/ws`

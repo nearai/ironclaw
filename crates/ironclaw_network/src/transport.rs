@@ -7,6 +7,7 @@ use std::{
 
 use async_trait::async_trait;
 use ironclaw_host_api::NetworkMethod;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::{
     egress::NetworkHttpTransport,
@@ -113,19 +114,53 @@ fn build_reqwest_client(key: &ReqwestClientKey) -> Result<reqwest::Client, reqwe
     builder.build()
 }
 
+/// Parses the URL while scrubbing only the source request carrier copy.
+///
+/// The returned `url::Url` and reqwest internals still retain plaintext while
+/// the request is dispatched. Parse failures use a fixed diagnostic rather
+/// than `url::ParseError` formatting because those diagnostics may include
+/// raw input that contains injected credentials.
+/// The source request URL is consumed even on parse failure so callers cannot
+/// later inspect a credential-bearing raw URL for diagnostics.
+fn take_request_url(
+    request: &mut NetworkTransportRequest,
+    request_bytes: u64,
+) -> Result<url::Url, NetworkHttpError> {
+    let mut raw_url = std::mem::take(&mut request.url);
+    let parsed = url::Url::parse(&raw_url).map_err(|_| NetworkHttpError::InvalidUrl {
+        reason: "URL parse error: invalid format".to_string(),
+        request_bytes,
+        response_bytes: 0,
+    });
+    raw_url.zeroize();
+    parsed
+}
+
+fn apply_request_headers(
+    mut req: reqwest::RequestBuilder,
+    headers: &mut [(String, String)],
+) -> reqwest::RequestBuilder {
+    for (name, value) in headers.iter() {
+        req = req.header(name.as_str(), value.as_str());
+    }
+    for (name, value) in headers.iter_mut() {
+        name.zeroize();
+        value.zeroize();
+    }
+    // reqwest's internal HeaderMap retains its copied values until the request
+    // builder is consumed and the response future completes.
+    req
+}
+
 #[async_trait]
 impl NetworkHttpTransport for ReqwestNetworkTransport {
     async fn execute(
         &self,
-        request: NetworkTransportRequest,
+        mut request: NetworkTransportRequest,
     ) -> Result<NetworkHttpResponse, NetworkHttpError> {
         let request_bytes = request.body.len() as u64;
         reject_caller_host_header(&request.headers)?;
-        let url = url::Url::parse(&request.url).map_err(|error| NetworkHttpError::InvalidUrl {
-            reason: error.to_string(),
-            request_bytes,
-            response_bytes: 0,
-        })?;
+        let url = take_request_url(&mut request, request_bytes)?;
         let host = url
             .host_str()
             .ok_or_else(|| NetworkHttpError::InvalidUrl {
@@ -160,12 +195,11 @@ impl NetworkHttpTransport for ReqwestNetworkTransport {
             )
             .await?;
 
+        let mut headers = Zeroizing::new(std::mem::take(&mut request.headers));
         let mut req = client
             .request(reqwest_method(request.method), url)
-            .body(request.body);
-        for (name, value) in request.headers {
-            req = req.header(name, value);
-        }
+            .body(std::mem::take(&mut request.body));
+        req = apply_request_headers(req, &mut headers[..]);
         let mut response = req
             .send()
             .await
@@ -275,6 +309,97 @@ mod tests {
     use std::net::IpAddr;
 
     use super::*;
+    use reqwest::Method;
+
+    #[test]
+    fn take_request_url_scrubs_only_source_carrier_copy() {
+        let mut request = NetworkTransportRequest {
+            method: NetworkMethod::Get,
+            url: "https://api.example.test/v1?token=sk-query-secret".to_string(),
+            headers: Vec::new(),
+            body: Vec::new(),
+            resolved_ips: Vec::new(),
+            response_body_limit: None,
+            timeout_ms: None,
+        };
+
+        let parsed = take_request_url(&mut request, 0).unwrap();
+
+        assert_eq!(parsed.host_str(), Some("api.example.test"));
+        assert_eq!(
+            parsed.as_str(),
+            "https://api.example.test/v1?token=sk-query-secret"
+        );
+        assert!(request.url.is_empty());
+    }
+
+    #[test]
+    fn take_request_url_error_does_not_include_source_url() {
+        let mut request = NetworkTransportRequest {
+            method: NetworkMethod::Get,
+            url: "https://api.example.test:bad-port/v1?token=sk-query-secret".to_string(),
+            headers: Vec::new(),
+            body: Vec::new(),
+            resolved_ips: Vec::new(),
+            response_body_limit: None,
+            timeout_ms: None,
+        };
+
+        let error = take_request_url(&mut request, 0).unwrap_err();
+
+        let NetworkHttpError::InvalidUrl { reason, .. } = error else {
+            panic!("expected invalid URL error");
+        };
+        assert_eq!(reason, "URL parse error: invalid format");
+        assert!(!reason.contains("api.example.test"));
+        assert!(!reason.contains("sk-query-secret"));
+        assert!(request.url.is_empty());
+    }
+
+    #[test]
+    fn take_request_url_relative_error_does_not_include_source_url() {
+        let mut request = NetworkTransportRequest {
+            method: NetworkMethod::Get,
+            url: "/relative/path?token=sk-query-secret".to_string(),
+            headers: Vec::new(),
+            body: Vec::new(),
+            resolved_ips: Vec::new(),
+            response_body_limit: None,
+            timeout_ms: None,
+        };
+
+        let error = take_request_url(&mut request, 0).unwrap_err();
+
+        let NetworkHttpError::InvalidUrl { reason, .. } = error else {
+            panic!("expected invalid URL error");
+        };
+        assert_eq!(reason, "URL parse error: invalid format");
+        assert!(!reason.contains("/relative/path"));
+        assert!(!reason.contains("sk-query-secret"));
+        assert!(request.url.is_empty());
+    }
+
+    #[test]
+    fn apply_request_headers_zeroizes_source_carrier_copy_after_reqwest_build() {
+        let client = reqwest::Client::new();
+        let req = client.request(Method::GET, "http://example.com");
+        let mut headers = vec![
+            (
+                "authorization".to_string(),
+                "Bearer sk-header-secret".to_string(),
+            ),
+            (
+                "x-api-key".to_string(),
+                "sk-second-header-secret".to_string(),
+            ),
+        ];
+
+        let req = apply_request_headers(req, &mut headers);
+
+        assert_eq!(headers[0], (String::new(), String::new()));
+        assert_eq!(headers[1], (String::new(), String::new()));
+        let _ = req;
+    }
 
     #[test]
     fn effective_request_timeout_clamps_requested_timeout_to_transport_default() {

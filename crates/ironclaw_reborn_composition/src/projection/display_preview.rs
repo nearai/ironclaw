@@ -2,13 +2,16 @@ use std::{collections::HashMap, sync::Mutex};
 
 use async_trait::async_trait;
 use ironclaw_event_projections::{CapabilityActivityProjection, CapabilityActivityStatus};
-use ironclaw_host_api::{CapabilityId, InvocationId};
+use ironclaw_host_api::{
+    CapabilityDisplayOutputPreview, CapabilityDisplayText, CapabilityId, InvocationId,
+    truncate_capability_display_text,
+};
 use ironclaw_product_adapters::{
     CAPABILITY_DISPLAY_PREVIEW_MAX_BYTES, CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES,
     CapabilityDisplayPreviewView, CapabilityDisplayPreviewViewInput, ProductAdapterError,
 };
 use ironclaw_threads::ThreadMessageId;
-use ironclaw_turns::run_profile::CapabilityInputRef;
+use ironclaw_turns::{TurnRunId, run_profile::CapabilityInputRef};
 
 use super::capability_activity_status_wire;
 
@@ -112,7 +115,16 @@ impl CapabilityDisplayPreviewStore {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn record_result(&self, result: CapabilityDisplayPreviewResult<'_>) {
+        self.record_result_with_preview(result, None);
+    }
+
+    pub(crate) fn record_result_with_preview(
+        &self,
+        result: CapabilityDisplayPreviewResult<'_>,
+        display_preview: Option<&CapabilityDisplayOutputPreview>,
+    ) {
         let input = self
             .pending
             .lock()
@@ -122,11 +134,15 @@ impl CapabilityDisplayPreviewStore {
             .as_ref()
             .map(|input| input.title.clone())
             .unwrap_or_else(|| safe_capability_title(result.capability_id.as_str()).to_string());
-        let output = output_preview(result.output);
+        let output = display_preview
+            .map(output_preview_from_display)
+            .unwrap_or_else(|| output_preview(result.output));
         let record = CapabilityDisplayPreviewRecord {
             timeline_message_id: None,
             title,
-            subtitle: input.as_ref().and_then(|input| input.subtitle.clone()),
+            subtitle: display_preview
+                .and_then(|preview| preview.subtitle.as_deref().and_then(safe_preview_subtitle))
+                .or_else(|| input.as_ref().and_then(|input| input.subtitle.clone())),
             input_summary: input.as_ref().and_then(|input| input.input_summary.clone()),
             output_summary: output.summary,
             output_preview: output.preview,
@@ -220,6 +236,7 @@ fn capability_display_preview_from_store(
             .timeline_message_id
             .map(|message_id| message_id.to_string()),
         invocation_id: activity.invocation_id,
+        turn_run_id: turn_run_id_for_activity(activity),
         thread_id: activity.thread_id.clone(),
         capability_id: activity.capability_id.clone(),
         status: capability_activity_status_wire(activity.status),
@@ -254,6 +271,7 @@ fn failed_capability_display_preview(
     CapabilityDisplayPreviewView::new(CapabilityDisplayPreviewViewInput {
         timeline_message_id: None,
         invocation_id: activity.invocation_id,
+        turn_run_id: turn_run_id_for_activity(activity),
         thread_id: activity.thread_id.clone(),
         capability_id: activity.capability_id.clone(),
         status: capability_activity_status_wire(activity.status),
@@ -275,6 +293,12 @@ fn failed_capability_display_preview(
     .map(Some)
 }
 
+fn turn_run_id_for_activity(activity: &CapabilityActivityProjection) -> Option<TurnRunId> {
+    activity
+        .run_id
+        .map(|run_id| TurnRunId::from_uuid(run_id.as_uuid()))
+}
+
 #[derive(Debug, Clone)]
 struct OutputPreview {
     summary: Option<String>,
@@ -285,45 +309,55 @@ struct OutputPreview {
 
 fn output_preview(value: &serde_json::Value) -> OutputPreview {
     let (kind, text, json_truncated) = if let Some(text) = value.as_str() {
-        ("text", text.to_string(), false)
+        ("text".to_string(), text.to_string(), false)
     } else if let Some(text) = value
         .get("content")
         .or_else(|| value.get("text"))
         .or_else(|| value.get("stdout"))
         .and_then(serde_json::Value::as_str)
     {
-        ("text", text.to_string(), false)
+        ("text".to_string(), text.to_string(), false)
     } else {
         let safe_value = sanitize_json_value_with_truncation(value);
         (
-            "json",
+            "json".to_string(),
             serde_json::to_string_pretty(&safe_value.value).unwrap_or_else(|_| "{}".to_string()),
             safe_value.truncated,
         )
     };
     let preview = bounded_preview_text(&text);
     let summary = bounded_display_text(
-        match kind {
-            "text" => "text output",
-            _ => "json output",
+        if kind == "text" {
+            "text output"
+        } else {
+            "json output"
         },
         CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES,
     );
     OutputPreview {
         summary: non_empty(summary.text),
         preview: non_empty(preview.text),
-        kind: kind.to_string(),
+        kind,
         truncated: summary.truncated || preview.truncated || json_truncated,
     }
 }
 
-#[derive(Debug, Clone)]
-struct DisplayText {
-    text: String,
-    truncated: bool,
+fn output_preview_from_display(value: &CapabilityDisplayOutputPreview) -> OutputPreview {
+    let summary = value
+        .output_summary
+        .as_deref()
+        .map(|summary| bounded_display_text(summary, CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES));
+    let summary_truncated = summary.as_ref().is_some_and(|summary| summary.truncated);
+    let preview = bounded_preview_text(&value.output_preview);
+    OutputPreview {
+        summary: summary.and_then(|summary| non_empty(summary.text)),
+        preview: non_empty(preview.text),
+        kind: value.output_kind.clone(),
+        truncated: value.truncated || summary_truncated || preview.truncated,
+    }
 }
 
-fn input_summary(capability_id: &str, value: &serde_json::Value) -> Option<DisplayText> {
+fn input_summary(capability_id: &str, value: &serde_json::Value) -> Option<CapabilityDisplayText> {
     if (capability_id == "read_file"
         || capability_id == "builtin.read_file"
         || capability_id.ends_with(".read_file"))
@@ -364,17 +398,56 @@ fn safe_path_subtitle(value: &serde_json::Value) -> Option<String> {
     safe_display_path(path)
 }
 
-fn safe_display_path(path: &str) -> Option<String> {
-    if path.is_empty()
-        || path.starts_with('/')
+/// Returns `true` when the path contains characters that are inherently unsafe
+/// to display: traversals, home-dir sigils, backslashes, or control characters.
+///
+/// Both subtitle validators call this before their own path-shape checks so
+/// rejection rules stay in one place.
+fn has_unsafe_path_chars(path: &str) -> bool {
+    path.is_empty()
         || path.starts_with('~')
         || path.contains("..")
         || path.contains('\\')
         || path.chars().any(char::is_control)
+}
+
+/// Returns a safe display subtitle for input-argument paths (pending-state UI).
+///
+/// Strips the scoped-root prefix so only the workspace-relative portion is
+/// shown. Any other absolute path is rejected.
+fn safe_display_path(path: &str) -> Option<String> {
+    if has_unsafe_path_chars(path) {
+        return None;
+    }
+    let display = if let Some(rel) = path
+        .strip_prefix("/workspace/")
+        .or_else(|| path.strip_prefix("/project/"))
+    {
+        rel
+    } else if path.starts_with('/') {
+        return None;
+    } else {
+        path
+    };
+    Some(bounded_display_text(display, CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES).text)
+}
+
+/// Returns a safe display subtitle for output-side preview subtitles.
+///
+/// Keeps the full scoped path (including the `/workspace/` or `/project/`
+/// prefix) because the renderer uses it as a file identifier. Rejects all
+/// other absolute paths.
+fn safe_preview_subtitle(subtitle: &str) -> Option<String> {
+    if has_unsafe_path_chars(subtitle) {
+        return None;
+    }
+    if subtitle.starts_with('/')
+        && !subtitle.starts_with("/workspace/")
+        && !subtitle.starts_with("/project/")
     {
         return None;
     }
-    Some(bounded_display_text(path, CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES).text)
+    Some(truncate_bytes(subtitle, CAPABILITY_DISPLAY_SUMMARY_MAX_BYTES).text)
 }
 
 #[derive(Debug, Clone)]
@@ -460,12 +533,12 @@ fn is_sensitive_key(key: &str) -> bool {
         || key == "key"
 }
 
-fn bounded_display_text(text: &str, max_bytes: usize) -> DisplayText {
+fn bounded_display_text(text: &str, max_bytes: usize) -> CapabilityDisplayText {
     let sanitized = sanitize_text(text);
     truncate_bytes(&sanitized, max_bytes)
 }
 
-fn bounded_preview_text(text: &str) -> DisplayText {
+fn bounded_preview_text(text: &str) -> CapabilityDisplayText {
     let sanitized = sanitize_text(text);
     truncate_bytes(&sanitized, CAPABILITY_DISPLAY_PREVIEW_MAX_BYTES)
 }
@@ -474,21 +547,8 @@ fn non_empty(text: String) -> Option<String> {
     if text.is_empty() { None } else { Some(text) }
 }
 
-fn truncate_bytes(text: &str, max_bytes: usize) -> DisplayText {
-    if text.len() <= max_bytes {
-        return DisplayText {
-            text: text.to_string(),
-            truncated: false,
-        };
-    }
-    let mut end = max_bytes;
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    DisplayText {
-        text: text[..end].to_string(), // safety: end is adjusted to a UTF-8 char boundary above.
-        truncated: true,
-    }
+fn truncate_bytes(text: &str, max_bytes: usize) -> CapabilityDisplayText {
+    truncate_capability_display_text(text, max_bytes)
 }
 
 pub(crate) fn sanitize_text(text: &str) -> String {

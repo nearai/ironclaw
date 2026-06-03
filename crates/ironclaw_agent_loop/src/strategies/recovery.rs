@@ -274,7 +274,7 @@ impl RecoveryStrategy for DefaultRecoveryStrategy {
                     self.max_attempts_per_class,
                     kind,
                     RetryScope::Iteration,
-                    |_| Some(RetryAlteration::ShrinkContext { drop_messages: 4 }),
+                    |_| Some(RetryAlteration::ShrinkContext),
                 )
             }
             ModelErrorClass::Transient
@@ -426,7 +426,7 @@ fn backoff_for(attempt: u32) -> BackoffDelayMs {
 #[serde(rename_all = "snake_case", tag = "alteration")]
 pub(crate) enum RetryAlteration {
     /// Shrink context for the next attempt (e.g. on context-overflow).
-    ShrinkContext { drop_messages: u32 },
+    ShrinkContext,
     /// Backoff before retry (executor honors as a sleep).
     Backoff { delay_ms: BackoffDelayMs },
     /// Reserved for future `ModelRouteChain` landing. Skeleton executor MUST
@@ -624,16 +624,10 @@ mod tests {
 
     #[test]
     fn retry_alteration_shrink_context_round_trips() {
-        let alteration = RetryAlteration::ShrinkContext { drop_messages: 4 };
+        let alteration = RetryAlteration::ShrinkContext;
         let value = serde_json::to_value(&alteration).expect("serialize");
         let restored: RetryAlteration = serde_json::from_value(value).expect("deserialize");
         assert_eq!(restored, alteration);
-        match restored {
-            RetryAlteration::ShrinkContext { drop_messages } => {
-                assert_eq!(drop_messages, 4)
-            }
-            other => panic!("unexpected variant: {other:?}"),
-        }
     }
 
     #[test]
@@ -666,7 +660,7 @@ mod tests {
         let outcome = RecoveryOutcome::Retry {
             recovery: sample_recovery(),
             scope: RetryScope::Call,
-            alter: Some(RetryAlteration::ShrinkContext { drop_messages: 2 }),
+            alter: Some(RetryAlteration::ShrinkContext),
         };
         let value = serde_json::to_value(&outcome).expect("serialize");
         let restored: RecoveryOutcome = serde_json::from_value(value).expect("deserialize");
@@ -679,10 +673,7 @@ mod tests {
             } => {
                 assert_eq!(recovery, sample_recovery());
                 assert_eq!(scope, RetryScope::Call);
-                assert_eq!(
-                    alter,
-                    Some(RetryAlteration::ShrinkContext { drop_messages: 2 })
-                );
+                assert_eq!(alter, Some(RetryAlteration::ShrinkContext));
             }
             other => panic!("unexpected variant: {other:?}"),
         }
@@ -1007,10 +998,7 @@ mod tests {
                         1
                     );
                     assert_eq!(scope, RetryScope::Iteration);
-                    assert_eq!(
-                        alter,
-                        Some(RetryAlteration::ShrinkContext { drop_messages: 4 })
-                    );
+                    assert_eq!(alter, Some(RetryAlteration::ShrinkContext));
                 }
                 other => panic!("expected context overflow retry, got {other:?}"),
             }

@@ -5,6 +5,7 @@ import {
   toolCardFromActivity,
   toolCardFromPreview,
 } from "./history-messages.js";
+import { failureMessageForRunStatus } from "./failureMessages.js";
 
 // Handler factory for v2 `WebChatV2EventFrame` events.
 //
@@ -18,7 +19,7 @@ import {
 // the item shapes.
 //
 // Items are externally-tagged enums so each entry carries exactly
-// one of `{ run_status, text, gate }` as a sub-object.
+// one of `{ run_status, thinking, text, gate }` as a sub-object.
 //
 // Status mapping (from `RunStatus.status`):
 //   "queued" | "running"           → processing
@@ -45,6 +46,7 @@ export function useChatEvents({
   // (which doesn't carry `run_id`) with the active run so resolveGate
   // can build its `/runs/{run_id}/gates/{gate_ref}/resolve` URL.
   const latestRunIdRef = React.useRef(null);
+  const promptRunIdRef = React.useRef(null);
 
   return React.useCallback(
     (envelope) => {
@@ -73,6 +75,11 @@ export function useChatEvents({
               current && current.runId === progress.turn_run_id
                 ? current
                 : { runId: progress.turn_run_id, threadId, status: "running" },
+            );
+            clearPendingNonAuthGateForRun(
+              setPendingGate,
+              progress.turn_run_id,
+              promptRunIdRef,
             );
           }
           setIsProcessing(true);
@@ -129,6 +136,7 @@ export function useChatEvents({
               content: reply.text || "",
               timestamp: reply.generated_at || new Date().toISOString(),
               turnRunId: reply.turn_run_id,
+              isFinalReply: true,
             },
           ]);
           setPendingGate(null);
@@ -157,6 +165,7 @@ export function useChatEvents({
             onRunCompleted,
             completedRunsRef,
             latestRunIdRef,
+            promptRunIdRef,
           });
           return;
         }
@@ -186,6 +195,32 @@ const TERMINAL_RUN_STATUSES = new Set([
 ]);
 
 const SUCCESS_RUN_STATUSES = new Set(["completed", "succeeded"]);
+const PROMPT_RUN_STATUSES = new Set([
+  "blocked_auth",
+  "blocked_approval",
+  "blocked_resource",
+]);
+
+function clearPendingGateForRun(setPendingGate, runId, promptRunIdRef) {
+  if (!runId) return;
+  if (promptRunIdRef?.current === runId) {
+    promptRunIdRef.current = null;
+  }
+  setPendingGate((current) => (current?.runId === runId ? null : current));
+}
+
+function clearPendingNonAuthGateForRun(setPendingGate, runId, promptRunIdRef) {
+  if (!runId) return;
+  setPendingGate((current) => {
+    if (current?.runId !== runId || current.kind === "auth_required") {
+      return current;
+    }
+    if (promptRunIdRef?.current === runId) {
+      promptRunIdRef.current = null;
+    }
+    return null;
+  });
+}
 
 function applyProjectionItems({
   items,
@@ -197,6 +232,7 @@ function applyProjectionItems({
   onRunCompleted,
   completedRunsRef,
   latestRunIdRef,
+  promptRunIdRef,
 }) {
   // Snapshot the run_id surfaced by the most recent `run_status` item
   // we've seen — either earlier in this same items batch, or carried
@@ -210,7 +246,12 @@ function applyProjectionItems({
   let activeRunId = latestRunIdRef?.current ?? null;
   for (const item of items) {
     if (item.run_status) {
-      const { run_id: runId, status } = item.run_status;
+      const {
+        run_id: runId,
+        status,
+        failure_category: failureCategory,
+        failure_summary: failureSummary,
+      } = item.run_status;
       if (runId) {
         activeRunId = runId;
         setActiveRun?.((current) =>
@@ -219,8 +260,20 @@ function applyProjectionItems({
             : { runId, threadId, status },
         );
       }
+      if (runId && PROMPT_RUN_STATUSES.has(status)) {
+        if (promptRunIdRef) promptRunIdRef.current = runId;
+      } else if (runId && promptRunIdRef?.current === runId) {
+        promptRunIdRef.current = null;
+      }
       if (TERMINAL_RUN_STATUSES.has(status)) {
         setIsProcessing(false);
+        setPendingGate(null);
+        setActiveRun?.(null);
+        activeRunId = null;
+        if (latestRunIdRef) latestRunIdRef.current = null;
+        if (runId && promptRunIdRef?.current === runId) {
+          promptRunIdRef.current = null;
+        }
         if (
           SUCCESS_RUN_STATUSES.has(status) &&
           onRunCompleted &&
@@ -243,22 +296,34 @@ function applyProjectionItems({
           // bubble instead of stacking.
           const messageId = `err-${runId || "unknown"}`;
           setMessages((prev) => {
-            if (prev.some((m) => m.id === messageId)) return prev;
+            const existing = prev.findIndex((m) => m.id === messageId);
+            const content = failureMessageForRunStatus({
+              status,
+              failureCategory,
+              failureSummary,
+            });
+            if (existing >= 0) {
+              if (!failureSummary || prev[existing].content === content) return prev;
+              const next = [...prev];
+              next[existing] = {
+                ...next[existing],
+                content,
+              };
+              return next;
+            }
             return [
               ...prev,
               {
                 id: messageId,
                 role: "error",
-                content:
-                  status === "recovery_required"
-                    ? "The run is awaiting recovery — backend reported `recovery_required`."
-                    : "The run failed before producing a reply.",
+                content,
                 timestamp: new Date().toISOString(),
               },
             ];
           });
         }
-      } else {
+      } else if (!PROMPT_RUN_STATUSES.has(status)) {
+        clearPendingGateForRun(setPendingGate, runId, promptRunIdRef);
         setIsProcessing(true);
       }
     }
@@ -267,7 +332,9 @@ function applyProjectionItems({
       // ProductProjectionItem::Text { id, body } — the body is the
       // assistant-visible reply text accumulated through projection.
       // Dedup by item id so repeated snapshots don't duplicate the
-      // same bubble.
+      // same bubble. Text can arrive in the same projection snapshot
+      // as a still-blocked gate, so run_status remains the source of
+      // truth for clearing pendingGate.
       const messageId = `text-${item.text.id}`;
       setMessages((prev) => {
         const existing = prev.findIndex((m) => m.id === messageId);
@@ -276,6 +343,7 @@ function applyProjectionItems({
           role: "assistant",
           content: item.text.body || "",
           timestamp: new Date().toISOString(),
+          isFinalReply: true,
         };
         if (existing >= 0) {
           const copy = [...prev];
@@ -285,7 +353,34 @@ function applyProjectionItems({
         return [...prev, next];
       });
       setIsProcessing(false);
-      setPendingGate(null);
+    }
+
+    if (item.thinking) {
+      const messageId = `thinking-${item.thinking.id}`;
+      setMessages((prev) => {
+        const existing = prev.findIndex((m) => m.id === messageId);
+        const next = {
+          id: messageId,
+          role: "thinking",
+          content: item.thinking.body || "",
+          timestamp: new Date().toISOString(),
+          turnRunId: item.thinking.run_id || null,
+        };
+        if (existing >= 0) {
+          const copy = [...prev];
+          copy[existing] = next;
+          return copy;
+        }
+        return [...prev, next];
+      });
+    }
+
+    if (item.capability_activity) {
+      const activity = item.capability_activity;
+      if (activity.invocation_id) {
+        const card = toolCardFromActivity(activity);
+        upsertToolFromActivity(setMessages, activity.invocation_id, card);
+      }
     }
 
     if (item.gate) {
@@ -296,7 +391,7 @@ function applyProjectionItems({
       // construction in `api.js`), so skip emitting the gate entirely
       // if no run is active yet — a later projection_update will
       // re-surface it once a run_status arrives.
-      if (activeRunId) {
+      if (activeRunId && promptRunIdRef?.current === activeRunId) {
         setPendingGate((current) => current || {
           kind: "gate",
           runId: activeRunId,
@@ -373,6 +468,7 @@ function upsertToolFromActivity(setMessages, invocationId, card) {
         toolStatus: nextStatus,
         toolError: card.toolError || current.toolError,
         updatedAt: card.updatedAt || current.updatedAt,
+        turnRunId: card.turnRunId || current.turnRunId || null,
       };
       return copy;
     }

@@ -93,6 +93,66 @@ fn reborn_crate_dependency_boundaries_hold() {
 }
 
 #[test]
+fn trusted_trigger_ingress_constructor_stays_composition_owned() {
+    let root = workspace_root();
+    let mut uses = Vec::new();
+    collect_forbidden_string_uses(
+        &root.join("crates"),
+        "for_host_trigger_fire",
+        &root,
+        &mut uses,
+    );
+    let allowed = BTreeSet::from([
+        "crates/ironclaw_architecture/tests/reborn_dependency_boundaries.rs",
+        "crates/ironclaw_conversations/src/types.rs",
+        "crates/ironclaw_reborn_composition/src/trigger_poller_trusted_submit.rs",
+    ]);
+    let violations = uses
+        .into_iter()
+        .filter(|path| !allowed.contains(path.as_str()))
+        .collect::<Vec<_>>();
+
+    assert!(
+        violations.is_empty(),
+        "Trusted trigger ingress construction must stay host/composition-owned; \
+         product adapters and capabilities must use untrusted inbound requests. \
+         Unexpected call sites:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn host_trusted_ingress_authority_stays_host_owned() {
+    let metadata = cargo_metadata();
+    let packages = metadata["packages"]
+        .as_array()
+        .expect("cargo metadata must include packages");
+    let dependencies = packages
+        .iter()
+        .filter_map(package_dependencies)
+        .collect::<HashMap<_, _>>();
+    let allowed_dependents =
+        BTreeSet::from(["ironclaw_conversations", "ironclaw_reborn_composition"]);
+    let violations = dependencies
+        .iter()
+        .filter_map(|(crate_name, deps)| {
+            deps.iter()
+                .any(|dependency| dependency == "ironclaw_trusted_ingress")
+                .then_some(crate_name.as_str())
+        })
+        .filter(|crate_name| !allowed_dependents.contains(crate_name))
+        .collect::<Vec<_>>();
+
+    assert!(
+        violations.is_empty(),
+        "Host trusted ingress authority must stay conversations/composition-owned; \
+         product adapters, product workflow, capabilities, and host-runtime handlers \
+         must not depend on ironclaw_trusted_ingress. Unexpected dependents:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
 fn reborn_cli_binary_crate_stays_separate_from_v1_root() {
     let metadata = cargo_metadata();
     let packages = metadata["packages"]
@@ -174,9 +234,9 @@ fn reborn_cli_binary_crate_stays_separate_from_v1_root() {
         "ironclaw_reborn_config must remain a standalone boot contract crate with no IronClaw workspace dependencies of any dependency kind",
     );
 
-    let cli_runtime_source =
-        std::fs::read_to_string(root.join("crates/ironclaw_reborn_cli/src/runtime.rs"))
-            .expect("Reborn CLI runtime.rs must be readable");
+    let runtime_dir = root.join("crates/ironclaw_reborn_cli/src/runtime");
+    let mut cli_runtime_source = String::new();
+    collect_runtime_rs(&runtime_dir, &mut cli_runtime_source);
     assert!(
         cli_runtime_source.contains("build_reborn_runtime"),
         "Reborn CLI should enter the assembled runtime through ironclaw_reborn_composition::build_reborn_runtime"
@@ -191,7 +251,7 @@ fn reborn_cli_binary_crate_stays_separate_from_v1_root() {
     ] {
         assert!(
             !cli_runtime_source.contains(forbidden),
-            "Reborn CLI runtime.rs must not wire lower-level Reborn runtime pieces directly via `{forbidden}`; keep REPL as a UX shell over ironclaw_reborn_composition."
+            "Reborn CLI runtime/ must not wire lower-level Reborn runtime pieces directly via `{forbidden}`; keep REPL as a UX shell over ironclaw_reborn_composition."
         );
     }
 }
@@ -524,8 +584,9 @@ fn reborn_internal_crate_keeps_directory_of_modules_lib_rs() {
         );
     }
     assert!(
-        composition_runtime_sources.contains("use ironclaw_reborn::loop_driver_host::"),
-        "composition runtime module set missing `use ironclaw_reborn::loop_driver_host::` -- \
+        composition_runtime_sources.contains("use ironclaw_loop_support::")
+            && composition_runtime_sources.contains("LoopCapabilityPortFactory"),
+        "composition runtime module set missing loop-support capability factory wiring -- \
          the host adapter assembly may live in a runtime submodule, but it must stay inside \
          `ironclaw_reborn_composition` rather than the CLI or other ingress points."
     );
@@ -1050,6 +1111,7 @@ fn reborn_product_api_crates_do_not_bind_http_ingress() {
         "crates/ironclaw_product_workflow/src",
         "crates/ironclaw_wasm_product_adapters/src",
         "crates/ironclaw_telegram_v2_adapter/src",
+        "crates/ironclaw_slack_v2_adapter/src",
         "crates/ironclaw_outbound/src",
         "crates/ironclaw_conversations/src",
         "crates/ironclaw_turns/src",
@@ -1234,6 +1296,37 @@ fn collect_forbidden_turns_identifier_uses(
                     path.strip_prefix(root).unwrap_or(&path).display()
                 ));
             }
+        }
+    }
+}
+
+fn collect_forbidden_string_uses(
+    dir: &std::path::Path,
+    needle: &str,
+    root: &std::path::Path,
+    matches: &mut Vec<String>,
+) {
+    let entries = std::fs::read_dir(dir)
+        .unwrap_or_else(|err| panic!("failed to read {}: {err}", dir.display()));
+    for entry in entries {
+        let entry = entry.unwrap_or_else(|err| panic!("failed to read dir entry: {err}"));
+        let path = entry.path();
+        if path.is_dir() {
+            collect_forbidden_string_uses(&path, needle, root, matches);
+            continue;
+        }
+        if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+            continue;
+        }
+        let contents = std::fs::read_to_string(&path)
+            .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
+        if contents.contains(needle) {
+            matches.push(
+                path.strip_prefix(root)
+                    .unwrap_or(&path)
+                    .to_string_lossy()
+                    .to_string(),
+            );
         }
     }
 }
@@ -1799,6 +1892,60 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             ],
         },
         BoundaryRule {
+            // Concrete Slack protocol adapter owns only Slack payload
+            // normalization/rendering over the ProductAdapter DTO surface.
+            // Host auth verification, credential resolution, delivery fanout,
+            // workflow admission, and runtime/network authority stay outside
+            // the adapter crate.
+            crate_name: "ironclaw_slack_v2_adapter",
+            forbidden: vec![
+                "ironclaw",
+                "ironclaw_authorization",
+                "ironclaw_approvals",
+                "ironclaw_auth",
+                "ironclaw_capabilities",
+                "ironclaw_conversations",
+                "ironclaw_dispatcher",
+                "ironclaw_engine",
+                "ironclaw_event_projections",
+                "ironclaw_events",
+                "ironclaw_extensions",
+                "ironclaw_filesystem",
+                "ironclaw_gateway",
+                "ironclaw_host_api",
+                "ironclaw_host_runtime",
+                "ironclaw_llm",
+                "ironclaw_loop_support",
+                "ironclaw_mcp",
+                "ironclaw_memory",
+                "ironclaw_network",
+                "ironclaw_outbound",
+                "ironclaw_processes",
+                "ironclaw_product_adapter_registry",
+                "ironclaw_product_workflow",
+                "ironclaw_product_workflow_storage",
+                "ironclaw_reborn",
+                "ironclaw_reborn_cli",
+                "ironclaw_reborn_composition",
+                "ironclaw_reborn_config",
+                "ironclaw_reborn_event_store",
+                "ironclaw_resources",
+                "ironclaw_run_state",
+                "ironclaw_runtime_policy",
+                "ironclaw_safety",
+                "ironclaw_scripts",
+                "ironclaw_secrets",
+                "ironclaw_skills",
+                "ironclaw_telegram_v2_adapter",
+                "ironclaw_threads",
+                "ironclaw_trust",
+                "ironclaw_tui",
+                "ironclaw_wasm",
+                "ironclaw_wasm_product_adapters",
+                "ironclaw_webui_v2",
+            ],
+        },
+        BoundaryRule {
             crate_name: "ironclaw_outbound",
             forbidden: vec![
                 "ironclaw",
@@ -2342,6 +2489,38 @@ fn assert_no_normal_workspace_deps<'a>(
             !actual.iter().any(|dependency| dependency == forbidden),
             "{crate_name} must not have a normal dependency on {forbidden}; actual normal ironclaw deps: {actual:?}"
         );
+    }
+}
+
+/// Recursively concatenate every `.rs` file under `dir` into `out`,
+/// descending into subdirectories. Matches the recursion pattern used by
+/// `collect_forbidden_*` walkers above so future boundary checks over
+/// `runtime/` can reuse the same helper. Used by
+/// `reborn_cli_binary_crate_stays_separate_from_v1_root` to scan the
+/// entire `runtime/` module tree for forbidden imports.
+fn collect_runtime_rs(dir: &std::path::Path, out: &mut String) {
+    for entry in std::fs::read_dir(dir).unwrap_or_else(|err| {
+        panic!(
+            "Reborn CLI runtime directory must be readable at {}: {err}",
+            dir.display()
+        )
+    }) {
+        let path = entry.expect("dir entry").path();
+        if path.is_dir() {
+            collect_runtime_rs(&path, out);
+            continue;
+        }
+        if path.extension().and_then(|s| s.to_str()) != Some("rs") {
+            continue;
+        }
+        let content = std::fs::read_to_string(&path).unwrap_or_else(|err| {
+            panic!(
+                "Reborn CLI runtime file {} unreadable: {err}",
+                path.display()
+            )
+        });
+        out.push_str(&content);
+        out.push('\n');
     }
 }
 

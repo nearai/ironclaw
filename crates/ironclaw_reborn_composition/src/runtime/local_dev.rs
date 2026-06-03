@@ -15,12 +15,12 @@ use ironclaw_host_runtime::{
     VisibleCapabilityRequest as HostVisibleCapabilityRequest,
 };
 use ironclaw_loop_support::{
-    HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
-    HostManagedModelMessageRole, HostManagedModelRequest, HostManagedModelResponse,
-    HostManagedToolResultContent, HostRuntimeLoopCapabilityPortFactory,
-    LoopCapabilityInputResolver, LoopCapabilityResultWriter, loop_driver_execution_extension_id,
+    CapabilityResultWrite, HostManagedModelError, HostManagedModelErrorKind,
+    HostManagedModelGateway, HostManagedModelMessageRole, HostManagedModelRequest,
+    HostManagedModelResponse, HostManagedToolResultContent, HostRuntimeLoopCapabilityPortFactory,
+    LoopCapabilityInputResolver, LoopCapabilityPortFactory, LoopCapabilityResultWriter,
+    loop_driver_execution_extension_id,
 };
-use ironclaw_reborn::loop_driver_host::LoopCapabilityPortFactory;
 use ironclaw_threads::{
     AppendCapabilityDisplayPreviewRequest, CapabilityDisplayPreviewEnvelope,
     CapabilityDisplayPreviewEnvelopeInput, CapabilityDisplayPreviewStatus, SessionThreadService,
@@ -79,6 +79,7 @@ pub(super) fn capability_wiring(
     let local_runtime = services.local_runtime.as_ref()?;
     let workspace_mounts = local_runtime.workspace_mounts.clone();
     let skill_mounts = local_runtime.skill_mounts.clone();
+    let memory_mounts = local_runtime.memory_mounts.clone();
     let extension_surface_source =
         LocalDevExtensionSurfaceSource::new(local_runtime.extension_management.clone());
     let display_previews = Arc::new(CapabilityDisplayPreviewStore::default());
@@ -96,6 +97,7 @@ pub(super) fn capability_wiring(
             policy,
             workspace_mounts,
             skill_mounts,
+            memory_mounts,
             extension_surface_source,
             input_resolver: Arc::clone(&capability_input_resolver),
             result_writer: Arc::clone(&capability_result_writer),
@@ -122,6 +124,7 @@ struct LocalDevLoopCapabilityPortFactory {
     policy: Arc<LocalDevCapabilityPolicy>,
     workspace_mounts: MountView,
     skill_mounts: MountView,
+    memory_mounts: MountView,
     extension_surface_source: LocalDevExtensionSurfaceSource,
     input_resolver: Arc<dyn LoopCapabilityInputResolver>,
     result_writer: Arc<dyn LoopCapabilityResultWriter>,
@@ -137,6 +140,7 @@ impl LoopCapabilityPortFactory for LocalDevLoopCapabilityPortFactory {
     ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
         let workspace_mounts = self.workspace_mounts.clone();
         let skill_mounts = self.skill_mounts.clone();
+        let memory_mounts = self.memory_mounts.clone();
         let extension_surface = self
             .extension_surface_source
             .snapshot()
@@ -147,6 +151,7 @@ impl LoopCapabilityPortFactory for LocalDevLoopCapabilityPortFactory {
             self.user_id.clone(),
             workspace_mounts.clone(),
             skill_mounts.clone(),
+            memory_mounts.clone(),
             &self.policy,
             &extension_surface,
         )?;
@@ -162,6 +167,10 @@ impl LoopCapabilityPortFactory for LocalDevLoopCapabilityPortFactory {
         for capability_id in self.policy.skill_management_capability_ids() {
             factory = factory
                 .with_capability_execution_mount(capability_id.clone(), skill_mounts.clone());
+        }
+        for capability_id in self.policy.memory_capability_ids() {
+            factory = factory
+                .with_capability_execution_mount(capability_id.clone(), memory_mounts.clone());
         }
         let port = factory.for_run_context(run_context.clone());
         let synthetic_capabilities = match &self.skill_activation_source {
@@ -458,12 +467,16 @@ impl LoopCapabilityInputResolver for LocalDevCapabilityIo {
 impl LoopCapabilityResultWriter for LocalDevCapabilityIo {
     async fn write_capability_result(
         &self,
-        run_context: &LoopRunContext,
-        input_ref: &CapabilityInputRef,
-        invocation_id: InvocationId,
-        _capability_id: &CapabilityId,
-        output: serde_json::Value,
+        write: CapabilityResultWrite<'_>,
     ) -> Result<LoopResultRef, AgentLoopHostError> {
+        let CapabilityResultWrite {
+            run_context,
+            input_ref,
+            invocation_id,
+            capability_id,
+            output,
+            display_preview,
+        } = write;
         let result_ref =
             LoopResultRef::new(format!("result:{}.{}", run_context.run_id, Uuid::new_v4()))
                 .map_err(|_| {
@@ -477,17 +490,19 @@ impl LoopCapabilityResultWriter for LocalDevCapabilityIo {
             let mut results = self.results.lock().map_err(|_| capability_io_error())?;
             results.insert_with_oldest_eviction(result_ref.as_str().to_string(), output.clone())?;
         }
-        self.display_previews
-            .record_result(CapabilityDisplayPreviewResult {
+        self.display_previews.record_result_with_preview(
+            CapabilityDisplayPreviewResult {
                 run_id: &run_context.run_id.to_string(),
                 input_ref,
                 invocation_id,
-                capability_id: _capability_id,
+                capability_id,
                 result_ref: result_ref.as_str(),
                 output: &output,
                 output_bytes,
-            });
-        self.append_durable_display_preview(run_context, invocation_id, _capability_id)
+            },
+            display_preview.as_ref(),
+        );
+        self.append_durable_display_preview(run_context, invocation_id, capability_id)
             .await?;
         Ok(result_ref)
     }
@@ -709,11 +724,17 @@ fn local_dev_visible_capability_request(
     user_id: UserId,
     workspace_mounts: MountView,
     skill_mounts: MountView,
+    memory_mounts: MountView,
     policy: &LocalDevCapabilityPolicy,
     extension_surface: &LocalDevExtensionSurface,
 ) -> Result<HostVisibleCapabilityRequest, AgentLoopHostError> {
     let extension_id = loop_driver_execution_extension_id(run_context)?;
-    let mut grants = policy.builtin_grants(&extension_id, &workspace_mounts, &skill_mounts);
+    let mut grants = policy.builtin_grants(
+        &extension_id,
+        &workspace_mounts,
+        &skill_mounts,
+        &memory_mounts,
+    );
     grants
         .grants
         .extend(extension_surface.grants(&extension_id));

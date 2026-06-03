@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use ironclaw_turns::run_profile::{AssistantReply, FinalizeAssistantMessage};
+use ironclaw_turns::run_profile::{AssistantReply, FinalizeAssistantMessage, LoopModelUsage};
 
 use crate::{state::LoopExecutionState, strategies::TurnSummary};
 
@@ -14,6 +14,7 @@ pub(crate) struct AssistantReplyStage;
 pub(super) struct AssistantReplyInput {
     pub(super) state: LoopExecutionState,
     pub(super) reply: AssistantReply,
+    pub(super) usage: Option<LoopModelUsage>,
 }
 
 #[async_trait]
@@ -34,6 +35,9 @@ impl ExecutorStage<AssistantReplyInput> for AssistantReplyStage {
                 stage: HostStage::Transcript,
             })?;
         state.assistant_refs.push(reply_ref.clone());
+        if let Some(usage) = input.usage {
+            state.recent_output_token_counts.push(usage.output_tokens);
+        }
         state = match CheckpointStage.cancel_if_requested(ctx, state).await? {
             CancelCheck::Continue(state) => *state,
             CancelCheck::Exit(exit) => return Ok(TurnCompletedStep::Exit(exit)),

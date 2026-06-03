@@ -1,0 +1,150 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "GitHub search_issues_pull_requests input",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "query": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "description": "GitHub issue search query. Use qualifiers such as repo:, org:, is:issue, is:pr, label:, state:, author:, assignee:, or involves:."
+    },
+    "repository": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 201,
+      "pattern": "^[^/\\s]+/[^/\\s]+$",
+      "description": "Optional owner/repo shorthand used to build a repo: qualifier when query is omitted or structured filters are supplied."
+    },
+    "owner": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 100,
+      "description": "Optional repository owner. Must be paired with repo."
+    },
+    "repo": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 201,
+      "pattern": "^[^/:\\s]+(/?[^/:\\s]+)?$",
+      "description": "Optional repository name when paired with owner, or owner/repo shorthand when owner is omitted."
+    },
+    "author": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 100,
+      "description": "Optional author login used to build an author: qualifier."
+    },
+    "assignee": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 100,
+      "description": "Optional assignee login used to build an assignee: qualifier."
+    },
+    "involves": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 100,
+      "description": "Optional login used to build an involves: qualifier."
+    },
+    "state": {
+      "type": "string",
+      "enum": ["open", "closed"],
+      "description": "Optional issue state qualifier."
+    },
+    "type": {
+      "type": "string",
+      "enum": ["issue", "pr"],
+      "description": "Optional result type qualifier."
+    },
+    "page": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 100,
+      "default": 1,
+      "description": "1-based results page."
+    },
+    "limit": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 100,
+      "default": 30,
+      "description": "Maximum number of results to return."
+    },
+    "sort": {
+      "type": "string",
+      "enum": ["comments", "created", "updated"],
+      "description": "Optional GitHub issue search sort field."
+    },
+    "order": {
+      "type": "string",
+      "enum": ["asc", "desc"],
+      "default": "desc",
+      "description": "Sort order when sort is supplied."
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "required": ["repository"]
+      },
+      "then": {
+        "properties": {
+          "repository": {
+            "pattern": "^[^/\\s]{1,100}/[^/\\s]{1,100}$"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": ["owner"]
+      },
+      "then": {
+        "required": ["repo"],
+        "properties": {
+          "repo": {
+            "maxLength": 100,
+            "pattern": "^[^/\\s]+$"
+          }
+        }
+      },
+      "else": {
+        "if": {
+          "required": ["repo"]
+        },
+        "then": {
+          "properties": {
+            "repo": {
+              "pattern": "^[^/\\s]{1,100}/[^/\\s]{1,100}$"
+            }
+          }
+        }
+      }
+    }
+  ],
+  "anyOf": [
+    {
+      "required": ["query"]
+    },
+    {
+      "required": ["repository"]
+    },
+    {
+      "required": ["owner", "repo"]
+    },
+    {
+      "required": ["repo"]
+    },
+    {
+      "required": ["author"]
+    },
+    {
+      "required": ["assignee"]
+    },
+    {
+      "required": ["involves"]
+    }
+  ]
+}

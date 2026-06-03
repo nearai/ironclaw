@@ -21,12 +21,13 @@ async fn repetition_escape_after_three_iterations() {
         .expect("loop execution should succeed");
 
     match exit {
-        LoopExit::Failed(failed) => {
-            assert_eq!(failed.reason_kind, LoopFailureKind::NoProgressDetected);
-            assert!(failed.checkpoint_id.is_some());
+        LoopExit::Completed(completed) => {
+            assert_eq!(completed.reply_message_refs.len(), 1);
+            assert!(completed.final_checkpoint_id.is_some());
         }
-        other => panic!("expected no-progress failure, got {other:?}"),
+        other => panic!("expected no-progress fallback completion, got {other:?}"),
     }
+    assert_no_progress_fallback(&host);
     assert_eq!(host.model_call_count(), 3);
     assert_eq!(
         checkpoints.kinds(),
@@ -59,11 +60,13 @@ async fn failure_run_length_escape() {
         .expect("loop execution should succeed");
 
     match exit {
-        LoopExit::Failed(failed) => {
-            assert_eq!(failed.reason_kind, LoopFailureKind::NoProgressDetected);
+        LoopExit::Completed(completed) => {
+            assert_eq!(completed.reply_message_refs.len(), 1);
+            assert!(completed.final_checkpoint_id.is_some());
         }
-        other => panic!("expected no-progress failure, got {other:?}"),
+        other => panic!("expected no-progress fallback completion, got {other:?}"),
     }
+    assert_no_progress_fallback(&host);
 }
 
 #[tokio::test]
@@ -136,4 +139,11 @@ async fn recovery_budget_exhaustion_uses_single_call_retry() {
             .count(),
         2
     );
+}
+
+fn assert_no_progress_fallback(host: &MockAgentLoopDriverHost) {
+    let messages = host.finalized_assistant_messages();
+    assert_eq!(messages.len(), 1);
+    assert!(messages[0].contains("repeating the same step without making progress"));
+    assert!(messages[0].contains("repeated calls, results, and any failure summaries"));
 }

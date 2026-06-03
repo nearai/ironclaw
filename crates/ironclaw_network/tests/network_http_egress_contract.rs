@@ -94,6 +94,60 @@ async fn http_egress_forwards_timeout_to_transport() {
 }
 
 #[tokio::test]
+async fn http_egress_forwards_sensitive_headers_in_zeroizing_transport_carrier() {
+    let transport = RecordingTransport::ok(NetworkHttpResponse {
+        status: 200,
+        headers: vec![],
+        body: b"ok".to_vec(),
+        usage: NetworkUsage {
+            request_bytes: 0,
+            response_bytes: 2,
+            resolved_ip: None,
+        },
+    });
+    let requests = transport.requests.clone();
+    let egress = PolicyNetworkHttpEgress::new_with_resolver(
+        transport,
+        StaticResolver::new(vec![IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))]),
+    );
+
+    egress
+        .execute(NetworkHttpRequest {
+            scope: sample_scope(),
+            method: NetworkMethod::Get,
+            url: "https://api.example.test/v1?token=sk-query-secret".to_string(),
+            headers: vec![(
+                "authorization".to_string(),
+                "Bearer sk-header-secret".to_string(),
+            )],
+            body: vec![],
+            policy: policy("api.example.test", Some(443), true, None),
+            response_body_limit: Some(1024),
+            timeout_ms: None,
+        })
+        .await
+        .expect("network response should be returned");
+
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    require_zeroize_on_drop(&requests[0]);
+    assert_eq!(
+        requests[0].url,
+        "https://api.example.test/v1?token=sk-query-secret"
+    );
+    assert_eq!(
+        requests[0]
+            .headers
+            .iter()
+            .find(|(name, _)| name == "authorization"),
+        Some(&(
+            "authorization".to_string(),
+            "Bearer sk-header-secret".to_string()
+        ))
+    );
+}
+
+#[tokio::test]
 async fn http_egress_denies_private_resolved_host_before_transport() {
     let transport = RecordingTransport::ok(NetworkHttpResponse {
         status: 200,
@@ -272,6 +326,41 @@ async fn reqwest_transport_does_not_follow_redirects() {
     assert_eq!(response.status, 302);
     assert_eq!(response.usage.request_bytes, 0);
     assert_eq!(response.usage.response_bytes, 0);
+}
+
+#[tokio::test]
+async fn reqwest_transport_forwards_all_headers_to_http_client() {
+    let (url, request_bytes, server) =
+        captured_request_server("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
+    let transport = ReqwestNetworkTransport::new(Duration::from_secs(2));
+
+    let response = transport
+        .execute(NetworkTransportRequest {
+            method: NetworkMethod::Get,
+            url,
+            headers: vec![
+                (
+                    "authorization".to_string(),
+                    "Bearer sk-header-secret".to_string(),
+                ),
+                (
+                    "x-api-key".to_string(),
+                    "sk-second-header-secret".to_string(),
+                ),
+            ],
+            body: vec![],
+            resolved_ips: vec![IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))],
+            response_body_limit: Some(1024),
+            timeout_ms: None,
+        })
+        .await
+        .expect("transport should forward borrowed header values");
+    server.join().unwrap();
+
+    let raw_request = String::from_utf8(request_bytes.lock().unwrap().clone()).unwrap();
+    assert_eq!(response.status, 200);
+    assert!(raw_request.contains("\r\nauthorization: Bearer sk-header-secret\r\n"));
+    assert!(raw_request.contains("\r\nx-api-key: sk-second-header-secret\r\n"));
 }
 
 #[tokio::test]
@@ -496,6 +585,8 @@ impl NetworkResolver for PanickingResolver {
     }
 }
 
+fn require_zeroize_on_drop<T: ?Sized + zeroize::ZeroizeOnDrop>(_: &T) {}
+
 fn sample_request(url: &str) -> NetworkHttpRequest {
     NetworkHttpRequest {
         scope: sample_scope(),
@@ -511,6 +602,30 @@ fn sample_request(url: &str) -> NetworkHttpRequest {
 
 fn single_response_server(response: &'static str) -> (String, std::thread::JoinHandle<()>) {
     single_response_server_for_host("127.0.0.1", response)
+}
+
+fn captured_request_server(
+    response: &'static str,
+) -> (String, Arc<Mutex<Vec<u8>>>, std::thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let request_bytes = Arc::new(Mutex::new(Vec::new()));
+    let captured = request_bytes.clone();
+    let handle = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0_u8; 2048];
+        let bytes_read = stream.read(&mut request).unwrap();
+        captured
+            .lock()
+            .unwrap()
+            .extend_from_slice(&request[..bytes_read]);
+        stream.write_all(response.as_bytes()).unwrap();
+    });
+    (
+        format!("http://127.0.0.1:{port}/test"),
+        request_bytes,
+        handle,
+    )
 }
 
 fn single_response_server_for_host(

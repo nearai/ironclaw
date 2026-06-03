@@ -12,7 +12,7 @@ use thiserror::Error;
 
 use crate::{
     CapabilityId, ExtensionId, MountView, ResourceEstimate, ResourceReceipt, ResourceReservation,
-    ResourceScope, ResourceUsage, RuntimeKind, SecretHandle,
+    ResourceScope, ResourceUsage, RuntimeCredentialAuthRequirement, RuntimeKind, SecretHandle,
 };
 
 /// Request for one already-authorized declared capability dispatch.
@@ -26,6 +26,47 @@ pub struct CapabilityDispatchRequest {
     pub input: Value,
 }
 
+/// Display-only preview metadata for a completed capability result.
+///
+/// This side channel lets runtime/tool implementations provide renderer-ready
+/// material without changing the model-visible capability output shape.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapabilityDisplayOutputPreview {
+    pub output_summary: Option<String>,
+    /// Raw, unsanitized content — callers MUST sanitize before display or logging.
+    /// The canonical sanitization point is the projection layer in
+    /// `ironclaw_reborn_composition`. New consumers must not read this field
+    /// without sanitizing.
+    pub output_preview: String,
+    pub output_kind: String,
+    pub subtitle: Option<String>,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapabilityDisplayText {
+    pub text: String,
+    pub truncated: bool,
+}
+
+pub fn truncate_capability_display_text(text: &str, max_bytes: usize) -> CapabilityDisplayText {
+    if text.len() <= max_bytes {
+        return CapabilityDisplayText {
+            text: text.to_string(),
+            truncated: false,
+        };
+    }
+
+    let mut end = max_bytes;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    CapabilityDisplayText {
+        text: text[..end].to_string(),
+        truncated: true,
+    }
+}
+
 /// Normalized dispatch result returned by a runtime dispatcher.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapabilityDispatchResult {
@@ -33,6 +74,7 @@ pub struct CapabilityDispatchResult {
     pub provider: ExtensionId,
     pub runtime: RuntimeKind,
     pub output: Value,
+    pub display_preview: Option<CapabilityDisplayOutputPreview>,
     pub usage: ResourceUsage,
     pub receipt: ResourceReceipt,
 }
@@ -195,6 +237,7 @@ pub enum DispatchError {
     AuthRequired {
         capability: CapabilityId,
         required_secrets: Vec<SecretHandle>,
+        credential_requirements: Vec<RuntimeCredentialAuthRequirement>,
     },
     #[error("MCP dispatch failed: {kind}")]
     Mcp { kind: RuntimeDispatchErrorKind },
@@ -203,7 +246,10 @@ pub enum DispatchError {
     #[error("WASM dispatch failed: {kind}")]
     Wasm { kind: RuntimeDispatchErrorKind },
     #[error("first-party dispatch failed: {kind}")]
-    FirstParty { kind: RuntimeDispatchErrorKind },
+    FirstParty {
+        kind: RuntimeDispatchErrorKind,
+        safe_summary: Option<String>,
+    },
 }
 
 impl fmt::Debug for DispatchError {
@@ -248,6 +294,7 @@ impl fmt::Debug for DispatchError {
             Self::AuthRequired {
                 capability,
                 required_secrets,
+                credential_requirements,
             } => f
                 .debug_struct("AuthRequired")
                 .field("capability", capability)
@@ -255,11 +302,20 @@ impl fmt::Debug for DispatchError {
                     "required_secrets",
                     &format!("[{} handle(s) redacted]", required_secrets.len()),
                 )
+                .field(
+                    "credential_requirements",
+                    &format!(
+                        "[{} requirement(s) redacted]",
+                        credential_requirements.len()
+                    ),
+                )
                 .finish(),
             Self::Mcp { kind } => f.debug_struct("Mcp").field("kind", kind).finish(),
             Self::Script { kind } => f.debug_struct("Script").field("kind", kind).finish(),
             Self::Wasm { kind } => f.debug_struct("Wasm").field("kind", kind).finish(),
-            Self::FirstParty { kind } => f.debug_struct("FirstParty").field("kind", kind).finish(),
+            Self::FirstParty { kind, .. } => {
+                f.debug_struct("FirstParty").field("kind", kind).finish()
+            }
         }
     }
 }
@@ -289,7 +345,7 @@ impl DispatchError {
             Self::Mcp { kind }
             | Self::Script { kind }
             | Self::Wasm { kind }
-            | Self::FirstParty { kind } => DispatchFailureKind::Runtime(*kind),
+            | Self::FirstParty { kind, .. } => DispatchFailureKind::Runtime(*kind),
         }
     }
 
@@ -308,7 +364,7 @@ impl DispatchError {
             Self::Mcp { kind }
             | Self::Script { kind }
             | Self::Wasm { kind }
-            | Self::FirstParty { kind } => kind.event_kind(),
+            | Self::FirstParty { kind, .. } => kind.event_kind(),
         }
     }
 }

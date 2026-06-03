@@ -26,6 +26,7 @@ axum = "0.8"
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
 hex = "0.4.3"
+hmac = "0.12"
 ironclaw_host_api = { path = "../ironclaw_host_api" }
 ironclaw_reborn_composition = { path = "../ironclaw_reborn_composition", features = ["webui-v2-beta"] }
 jsonwebtoken = "9"
@@ -38,7 +39,7 @@ serde_json = "1"
 sha2 = "0.10"
 subtle = "2"
 thiserror = "2"
-tokio = { version = "1", features = ["macros", "net", "rt", "rt-multi-thread", "signal", "sync"] }
+tokio = { version = "1", features = ["macros", "net", "rt", "rt-multi-thread", "signal", "sync", "time"] }
 tracing = "0.1"
 url = "2"
 urlencoding = "2"
@@ -59,7 +60,7 @@ http-body-util = "0.1"
 # together. The runtime `ironclaw_reborn_composition` dep already
 # enables `webui-v2-beta`; the three crates below supply the trait
 # + DTO shapes the stub implements.
-ironclaw_product_workflow = { path = "../ironclaw_product_workflow" }
+ironclaw_product_workflow = { path = "../ironclaw_product_workflow", features = ["test-support"] }
 ironclaw_threads = { path = "../ironclaw_threads" }
 ironclaw_turns = { path = "../ironclaw_turns" }
 tower = { version = "0.5", features = ["util"] }
@@ -70,4 +71,4 @@ rand = "0.8"
 base64 = "0.22"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde_json = "1"
-tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "net", "time"] }
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "net", "time", "io-util"] }

@@ -9,6 +9,8 @@ export const KIND_LABELS = {
   wasm_tool: "WASM Tool",
   wasm_channel: "Channel",
   mcp_server: "MCP Server",
+  first_party: "First-party",
+  system: "System",
   channel_relay: "Relay",
 };
 

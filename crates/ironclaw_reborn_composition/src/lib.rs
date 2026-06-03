@@ -21,7 +21,11 @@
 use std::sync::Arc;
 
 mod auth;
+#[cfg(test)]
+mod auth_dcr_tests;
 mod available_extensions;
+mod budget;
+mod budget_events;
 mod bundled_skills;
 mod default_system_prompt;
 mod error;
@@ -39,10 +43,17 @@ mod llm_catalog;
 mod local_dev_capability_policy;
 mod local_dev_mounts;
 mod local_runtime_profile;
+mod manual_token_flow;
 mod mcp;
-mod mcp_router;
+mod mcp_discovery;
 mod nearai_mcp;
+mod notion_oauth;
+mod oauth_dcr;
+mod oauth_dcr_protocol;
+mod oauth_gate;
+mod oauth_provider_client;
 mod product_auth_durable;
+mod product_auth_providers;
 mod product_auth_runtime_credentials;
 #[cfg(feature = "webui-v2-beta")]
 mod product_auth_serve;
@@ -51,6 +62,7 @@ mod product_live_adapters;
 mod production_runtime_policy;
 mod profile;
 mod projection;
+pub use projection::{AuthChallengeProvider, AuthChallengeView};
 #[cfg(feature = "root-llm-provider")]
 mod provider_admin;
 #[cfg(feature = "root-llm-provider")]
@@ -59,10 +71,21 @@ mod readiness;
 mod runtime;
 mod runtime_input;
 mod skill_listing;
+#[cfg(feature = "slack-v2-host-beta")]
+mod slack_delivery;
+#[cfg(feature = "slack-v2-host-beta")]
+mod slack_egress;
+#[cfg(feature = "slack-v2-host-beta")]
+pub mod slack_serve;
+#[cfg(feature = "test-support")]
+pub mod test_support;
+mod trigger_poller;
+mod trigger_poller_trusted_submit;
 mod web_access;
 mod webui;
 #[cfg(feature = "webui-v2-beta")]
 mod webui_body_limit;
+mod webui_extension_credentials;
 #[cfg(feature = "webui-v2-beta")]
 mod webui_rate_limit;
 #[cfg(feature = "webui-v2-beta")]
@@ -79,6 +102,8 @@ pub use auth::{
     RebornOAuthCallbackOutcome, RebornOAuthCallbackRequest, RebornOAuthCallbackResponse,
     RebornProductAuthServicePorts, RebornProductAuthServices,
 };
+pub use budget::build_default_budget_accountant;
+pub use budget_events::{BudgetEventObserver, TracingBudgetEventObserver};
 pub use error::RebornBuildError;
 pub use extension_lifecycle_command::{
     RebornExtensionLifecycleCommand, RebornExtensionLifecycleCommandError,
@@ -87,6 +112,8 @@ pub use extension_lifecycle_command::{
 pub use factory::{RebornServices, build_reborn_services};
 pub use gsuite::{bundled_gsuite_extension_packages, bundled_gsuite_first_party_handlers};
 pub use input::{OAuthClientConfig, RebornBuildInput, RebornRuntimeProcessBinding};
+#[cfg(feature = "webui-v2-beta")]
+pub use ironclaw_auth::GoogleOAuthRouteConfig;
 pub use ironclaw_product_workflow::{
     LifecycleExtensionSource, LifecycleExtensionSummary, LifecyclePhase, LifecycleProductPayload,
     LifecycleProductResponse,
@@ -122,7 +149,9 @@ pub use provider_admin::{
 };
 #[cfg(feature = "root-llm-provider")]
 pub use provider_admin_product_command::RebornProviderAdminProductCommandService;
-pub use readiness::{RebornFacadeReadiness, RebornReadiness, RebornReadinessState};
+pub use readiness::{
+    RebornFacadeReadiness, RebornReadiness, RebornReadinessState, RebornWorkerReadiness,
+};
 pub use runtime::{
     AssistantReply, ConversationId, RebornRuntime, RebornRuntimeError, RebornSkillActivation,
     RebornSkillActivationMode, RebornSkillAsset, RebornSkillBundle, RebornSkillExecutionPlan,
@@ -132,16 +161,31 @@ pub use runtime::{
 pub use runtime_input::ResolvedRebornLlm;
 pub use runtime_input::{
     DEFAULT_TURN_RUNNER_HEARTBEAT_INTERVAL, DEFAULT_TURN_RUNNER_POLL_INTERVAL, PollSettings,
-    RebornRuntimeIdentity, RebornRuntimeInput, TurnRunnerSettings,
+    RebornRuntimeIdentity, RebornRuntimeInput, TriggerPollerSettings, TurnRunnerSettings,
 };
 pub use skill_listing::{RebornSkillListError, list_reborn_local_skills};
+#[cfg(feature = "slack-v2-host-beta")]
+pub use slack_delivery::{
+    SlackFinalReplyDeliveryObserver, SlackFinalReplyDeliveryServices,
+    SlackFinalReplyDeliverySettings,
+};
+#[cfg(feature = "slack-v2-host-beta")]
+pub use slack_egress::{
+    SlackEgressCredential, SlackEgressCredentialError, SlackEgressCredentialProvider,
+    SlackProtocolHttpEgress, StaticSlackEgressCredentialProvider,
+};
+#[cfg(feature = "slack-v2-host-beta")]
+pub use slack_serve::{
+    SLACK_EVENTS_PATH, SlackEventsRouteState, SlackEventsWebhookDispatcher,
+    slack_events_route_descriptors, slack_events_route_mount,
+};
 pub use webui::{RebornWebuiBundle, build_webui_services};
 #[cfg(feature = "webui-v2-beta")]
 pub use webui_rate_limit::RateLimitConfigError;
 #[cfg(feature = "webui-v2-beta")]
 pub use webui_serve::{
-    PublicRouteMount, WebuiAuthenticator, WebuiServeConfig, WebuiServeConfigError, WebuiServeError,
-    webui_v2_app,
+    PublicRouteDrain, PublicRouteDrains, PublicRouteMount, WebuiAuthenticator, WebuiServeConfig,
+    WebuiServeConfigError, WebuiServeError, WebuiV2App, webui_v2_app, webui_v2_app_with_lifecycle,
 };
 
 /// Re-exported identity vocabulary host binaries need to construct
@@ -152,6 +196,39 @@ pub use webui_serve::{
 #[cfg(feature = "webui-v2-beta")]
 pub mod host_api {
     pub use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
+}
+
+/// Reborn-owned WebChat user-identity store, re-exported so host
+/// binaries reach it through this composition facade instead of taking a
+/// direct `ironclaw_reborn` dependency (the
+/// `reborn_cli_binary_crate_stays_separate_from_v1_root` architecture
+/// boundary forbids that). The store is a reborn-owned repository;
+/// [`open_webui_user_store`] opens it so the libSQL substrate handle
+/// stays private to this facade and callers never construct one.
+#[cfg(feature = "webui-v2-beta")]
+pub use ironclaw_reborn::webui_users::{
+    RebornLibSqlUserStore, RebornUserStoreError, ResolveIdentity,
+};
+
+/// Open the reborn-owned WebChat user-identity store on the substrate DB
+/// at `path`, creating the parent directory and running its idempotent
+/// migrations. Keeps the libSQL handle private to the composition layer
+/// (composition CLAUDE.md: "keep lower substrate handles private").
+#[cfg(feature = "webui-v2-beta")]
+pub async fn open_webui_user_store(
+    path: &std::path::Path,
+) -> Result<std::sync::Arc<RebornLibSqlUserStore>, RebornUserStoreError> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|err| RebornUserStoreError::Backend(err.to_string()))?;
+    }
+    let db = std::sync::Arc::new(
+        libsql::Builder::new_local(path)
+            .build()
+            .await
+            .map_err(|err| RebornUserStoreError::Backend(err.to_string()))?,
+    );
+    Ok(std::sync::Arc::new(RebornLibSqlUserStore::open(db).await?))
 }
 
 /// Reborn model purpose slot names exposed for diagnostic callers.

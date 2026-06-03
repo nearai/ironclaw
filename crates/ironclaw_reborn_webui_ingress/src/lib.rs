@@ -24,19 +24,26 @@
 mod auth;
 mod oidc;
 mod session;
+mod signed_session_login;
 
 #[cfg(any(test, feature = "dev-in-memory-session"))]
 pub use auth::EmailUserDirectory;
 pub use auth::{
-    GoogleOAuthConfig, GoogleProvider, OAuthError, OAuthProvider, OAuthProviderName,
-    OAuthProviderNameError, OAuthRouterConfig, OAuthUserProfile, PublicRouteMount, UserDirectory,
-    UserDirectoryError, webui_v2_auth_router,
+    GitHubOAuthConfig, GitHubProvider, GoogleOAuthConfig, GoogleProvider, OAuthError,
+    OAuthProvider, OAuthProviderName, OAuthProviderNameError, OAuthRouterConfig, OAuthUserProfile,
+    ProviderInitError, PublicRouteMount, UserDirectory, UserDirectoryError, webui_v2_auth_router,
 };
 pub use oidc::{
     AudienceClaim, ClaimToUserIdFn, IdTokenClaims, OidcAuthenticator, OidcAuthenticatorConfig,
     OidcAuthenticatorError,
 };
 pub use session::{SessionAuthenticator, SessionRecord, SessionStore, SessionStoreError};
+// Host-owned signed-token login surface (production-suitable, non-dev):
+// the standalone `serve` binary supplies env config and calls the
+// builder; the auth/session model lives here, not in the command crate.
+pub use signed_session_login::{
+    SignedSessionLoginConfig, SignedSessionLoginWiring, build_signed_session_login,
+};
 // `InMemorySessionStore` is gated behind `dev-in-memory-session` so a
 // production binary cannot accidentally wire a process-local store as
 // a `SessionStore` impl. Local dev and tests opt in via the feature.

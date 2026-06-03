@@ -3,6 +3,10 @@ import { html } from "../../../lib/html.js";
 import { ExtensionCard, RegistryCard } from "./extension-card.js";
 import { PairingSection } from "./pairing-section.js";
 
+function packageId(item) {
+  return item.package_ref?.id || "";
+}
+
 export function ChannelsTab({
   status,
   channels,
@@ -60,22 +64,24 @@ export function ChannelsTab({
           >
             Messaging channels
           </h3>
-          ${channels.map(
-            (ch) => html`
-              <div key=${ch.name}>
-                <${ExtensionCard}
-                  ext=${ch}
-                  onActivate=${onActivate}
-                  onConfigure=${onConfigure}
-                  onRemove=${onRemove}
-                  isBusy=${isBusy}
-                />
-                ${(ch.onboarding_state === "pairing_required" ||
-                  ch.onboarding_state === "pairing") &&
-                html` <${PairingSection} channel=${ch.name} /> `}
-              </div>
-            `
-          )}
+          <div className="grid grid-cols-1 gap-4">
+            ${channels.map(
+              (ch) => html`
+                <div key=${packageId(ch)} className="flex flex-col gap-3">
+                  <${ExtensionCard}
+                    ext=${ch}
+                    onActivate=${onActivate}
+                    onConfigure=${onConfigure}
+                    onRemove=${onRemove}
+                    isBusy=${isBusy}
+                  />
+                  ${(ch.onboarding_state === "pairing_required" ||
+                    ch.onboarding_state === "pairing") &&
+                  html` <${PairingSection} channel=${packageId(ch)} /> `}
+                </div>
+              `
+            )}
+          </div>
         </div>
       `}
       ${channelRegistry.length > 0 &&
@@ -86,16 +92,18 @@ export function ChannelsTab({
           >
             Available channels
           </h3>
-          ${channelRegistry.map(
-            (entry) => html`
-              <${RegistryCard}
-                key=${entry.name}
-                entry=${entry}
-                onInstall=${onInstall}
-                isBusy=${isBusy}
-              />
-            `
-          )}
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 2xl:grid-cols-3">
+            ${channelRegistry.map(
+              (entry) => html`
+                <${RegistryCard}
+                  key=${packageId(entry)}
+                  entry=${entry}
+                  onInstall=${onInstall}
+                  isBusy=${isBusy}
+                />
+              `
+            )}
+          </div>
         </div>
       `}
     </div>

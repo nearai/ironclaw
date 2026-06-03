@@ -14,11 +14,12 @@ use libsql::params;
 
 #[cfg(feature = "libsql")]
 use crate::{
-    ClaimDueFireOutcome, ClaimDueFireRequest, ClaimedTriggerFire, FireAcceptedRequest,
-    FirePermanentFailedRequest, FireReplayedRequest, FireRetryableFailedRequest,
-    TriggerCompletionPolicy, TriggerError, TriggerId, TriggerRecord, TriggerRepository,
-    TriggerRunStatus, TriggerSchedule, TriggerSourceKind, TriggerState,
-    reject_failed_result_after_active_run, reject_non_future_next_run_at, reject_run_ref_rewrite,
+    ActiveTriggerScanCursor, ClaimDueFireOutcome, ClaimDueFireRequest, ClaimedTriggerFire,
+    ClearActiveFireRequest, FireAcceptedRequest, FirePermanentFailedRequest, FireReplayedRequest,
+    FireRetryableFailedRequest, FireTerminalFailedRequest, TriggerCompletionPolicy, TriggerError,
+    TriggerId, TriggerRecord, TriggerRepository, TriggerRunStatus, TriggerSchedule,
+    TriggerSourceKind, TriggerState, reject_failed_result_after_active_run,
+    reject_non_future_next_run_at, reject_run_ref_rewrite,
 };
 
 #[cfg(feature = "libsql")]
@@ -133,6 +134,27 @@ impl LibSqlTriggerRepository {
             )
             .await
             .map_err(|error| backend_error("create trigger tenant list index", error))?;
+            conn.execute(
+                &format!(
+                    "CREATE INDEX IF NOT EXISTS trigger_records_scoped_list_idx
+                     ON {TRIGGER_TABLE} (
+                        tenant_id, creator_user_id, agent_id, project_id, created_at, trigger_id
+                     )"
+                ),
+                (),
+            )
+            .await
+            .map_err(|error| backend_error("create trigger scoped list index", error))?;
+            conn.execute(
+                &format!(
+                    "CREATE INDEX IF NOT EXISTS trigger_records_active_fire_slot_idx
+                     ON {TRIGGER_TABLE} (active_fire_slot, tenant_id, trigger_id)
+                     WHERE active_fire_slot IS NOT NULL"
+                ),
+                (),
+            )
+            .await
+            .map_err(|error| backend_error("create trigger active scan index", error))?;
             Ok::<(), TriggerError>(())
         }
         .await;
@@ -145,7 +167,7 @@ impl LibSqlTriggerRepository {
                 .map_err(|error| backend_error("commit trigger migration", error)),
             Err(error) => {
                 if let Err(rollback_error) = conn.execute("ROLLBACK", ()).await {
-                    tracing::warn!(
+                    tracing::debug!(
                         migration_error = %error,
                         rollback_error = %rollback_error,
                         "ROLLBACK failed after libSQL trigger migration error"
@@ -228,6 +250,54 @@ impl TriggerRepository for LibSqlTriggerRepository {
         Ok(records)
     }
 
+    async fn list_scoped_triggers(
+        &self,
+        tenant_id: TenantId,
+        creator_user_id: UserId,
+        agent_id: Option<AgentId>,
+        project_id: Option<ProjectId>,
+        limit: usize,
+    ) -> Result<Vec<TriggerRecord>, TriggerError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let limit = limit.min(crate::MAX_TRIGGER_LIST_LIMIT) as i64;
+        let conn = self.connect().await?;
+        let agent_id = agent_id.as_ref().map(AgentId::as_str);
+        let project_id = project_id.as_ref().map(ProjectId::as_str);
+        let mut rows = conn
+            .query(
+                &format!(
+                    "SELECT {TRIGGER_COLUMNS}
+                     FROM {TRIGGER_TABLE}
+                     WHERE tenant_id = ?1
+                       AND creator_user_id = ?2
+                       AND agent_id IS ?3
+                       AND project_id IS ?4
+                     ORDER BY created_at, trigger_id
+                     LIMIT ?5"
+                ),
+                params![
+                    tenant_id.as_str(),
+                    creator_user_id.as_str(),
+                    agent_id,
+                    project_id,
+                    limit
+                ],
+            )
+            .await
+            .map_err(|error| backend_error("query scoped trigger records", error))?;
+        let mut records = Vec::new();
+        loop {
+            match rows.next().await {
+                Ok(Some(row)) => records.push(row_to_record(&row)?),
+                Ok(None) => break,
+                Err(error) => return Err(backend_error("read scoped trigger record row", error)),
+            }
+        }
+        Ok(records)
+    }
+
     async fn remove_trigger(
         &self,
         tenant_id: TenantId,
@@ -249,6 +319,48 @@ impl TriggerRepository for LibSqlTriggerRepository {
             Ok(Some(row)) => Ok(Some(row_to_record(&row)?)),
             Ok(None) => Ok(None),
             Err(error) => Err(backend_error("read removed trigger record row", error)),
+        }
+    }
+
+    async fn remove_scoped_trigger(
+        &self,
+        tenant_id: TenantId,
+        creator_user_id: UserId,
+        agent_id: Option<AgentId>,
+        project_id: Option<ProjectId>,
+        trigger_id: TriggerId,
+    ) -> Result<Option<TriggerRecord>, TriggerError> {
+        let conn = self.connect().await?;
+        let agent_id = agent_id.as_ref().map(AgentId::as_str);
+        let project_id = project_id.as_ref().map(ProjectId::as_str);
+        let mut rows = conn
+            .query(
+                &format!(
+                    "DELETE FROM {TRIGGER_TABLE}
+                     WHERE tenant_id = ?1
+                       AND creator_user_id = ?2
+                       AND agent_id IS ?3
+                       AND project_id IS ?4
+                       AND trigger_id = ?5
+                     RETURNING {TRIGGER_COLUMNS}"
+                ),
+                params![
+                    tenant_id.as_str(),
+                    creator_user_id.as_str(),
+                    agent_id,
+                    project_id,
+                    trigger_id.to_string(),
+                ],
+            )
+            .await
+            .map_err(|error| backend_error("remove scoped trigger record", error))?;
+        match rows.next().await {
+            Ok(Some(row)) => Ok(Some(row_to_record(&row)?)),
+            Ok(None) => Ok(None),
+            Err(error) => Err(backend_error(
+                "read removed scoped trigger record row",
+                error,
+            )),
         }
     }
 
@@ -288,6 +400,70 @@ impl TriggerRepository for LibSqlTriggerRepository {
                 Ok(Some(row)) => records.push(row_to_record(&row)?),
                 Ok(None) => break,
                 Err(error) => return Err(backend_error("read due trigger record row", error)),
+            }
+        }
+        Ok(records)
+    }
+
+    async fn list_active_triggers(&self, limit: usize) -> Result<Vec<TriggerRecord>, TriggerError> {
+        self.list_active_triggers_after(None, limit).await
+    }
+
+    async fn list_active_triggers_after(
+        &self,
+        after: Option<ActiveTriggerScanCursor>,
+        limit: usize,
+    ) -> Result<Vec<TriggerRecord>, TriggerError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let limit = limit.min(super::MAX_DUE_TRIGGER_POLL_LIMIT);
+        let conn = self.connect().await?;
+        let mut rows = match after {
+            Some(cursor) => {
+                conn.query(
+                    &format!(
+                        "SELECT {TRIGGER_COLUMNS}
+                         FROM {TRIGGER_TABLE}
+                         WHERE active_fire_slot IS NOT NULL
+                           AND (
+                             active_fire_slot > ?1
+                             OR (active_fire_slot = ?1 AND tenant_id > ?2)
+                             OR (active_fire_slot = ?1 AND tenant_id = ?2 AND trigger_id > ?3)
+                           )
+                         ORDER BY active_fire_slot, tenant_id, trigger_id
+                         LIMIT ?4"
+                    ),
+                    params![
+                        fmt_ts(&cursor.active_fire_slot()),
+                        cursor.tenant_id().as_str(),
+                        cursor.trigger_id().to_string(),
+                        limit as i64,
+                    ],
+                )
+                .await
+            }
+            None => {
+                conn.query(
+                    &format!(
+                        "SELECT {TRIGGER_COLUMNS}
+                         FROM {TRIGGER_TABLE}
+                         WHERE active_fire_slot IS NOT NULL
+                         ORDER BY active_fire_slot, tenant_id, trigger_id
+                         LIMIT ?1"
+                    ),
+                    params![limit as i64],
+                )
+                .await
+            }
+        }
+        .map_err(|error| backend_error("query active trigger records", error))?;
+        let mut records = Vec::new();
+        loop {
+            match rows.next().await {
+                Ok(Some(row)) => records.push(row_to_record(&row)?),
+                Ok(None) => break,
+                Err(error) => return Err(backend_error("read active trigger record row", error)),
             }
         }
         Ok(records)
@@ -508,6 +684,82 @@ impl TriggerRepository for LibSqlTriggerRepository {
         }
         resolve_missed_fire_result_update(&conn, &tenant_id, trigger_id, fire_slot, None, None)
             .await
+    }
+
+    async fn mark_fire_terminally_failed(
+        &self,
+        request: FireTerminalFailedRequest,
+    ) -> Result<Option<TriggerRecord>, TriggerError> {
+        let FireTerminalFailedRequest {
+            tenant_id,
+            trigger_id,
+            fire_slot,
+        } = request;
+        let fire_slot_text = fmt_ts(&fire_slot);
+        let last_status = status_text(TriggerRunStatus::Error);
+        let completed = state_text(TriggerState::Completed);
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                &format!(
+                    "UPDATE {TRIGGER_TABLE}
+                     SET state = ?3,
+                         last_status = ?4,
+                         active_fire_slot = NULL,
+                         active_run_ref = NULL
+                     WHERE tenant_id = ?1
+                       AND trigger_id = ?2
+                       AND active_fire_slot = ?5
+                       AND active_run_ref IS NULL
+                     RETURNING {TRIGGER_COLUMNS}"
+                ),
+                params![
+                    tenant_id.as_str(),
+                    trigger_id.to_string(),
+                    completed,
+                    last_status,
+                    fire_slot_text,
+                ],
+            )
+            .await
+            .map_err(|error| backend_error("mark terminal trigger fire failure", error))?;
+        if let Some(record) =
+            returned_record(&mut rows, "read terminal trigger fire failure").await?
+        {
+            return Ok(Some(record));
+        }
+        resolve_missed_fire_result_update(&conn, &tenant_id, trigger_id, fire_slot, None, None)
+            .await
+    }
+
+    async fn clear_active_fire(
+        &self,
+        request: ClearActiveFireRequest,
+    ) -> Result<Option<TriggerRecord>, TriggerError> {
+        let conn = self.connect().await?;
+        // Keep active-fire clearing atomic as one predicate-guarded write.
+        let mut rows = conn
+            .query(
+                &format!(
+                    "UPDATE {TRIGGER_TABLE}
+                     SET active_fire_slot = NULL,
+                         active_run_ref = NULL
+                     WHERE tenant_id = ?1
+                       AND trigger_id = ?2
+                       AND active_fire_slot = ?3
+                       AND active_run_ref = ?4
+                     RETURNING {TRIGGER_COLUMNS}"
+                ),
+                params![
+                    request.tenant_id.as_str(),
+                    request.trigger_id.to_string(),
+                    fmt_ts(&request.fire_slot),
+                    request.run_id.to_string(),
+                ],
+            )
+            .await
+            .map_err(|error| backend_error("clear active trigger fire", error))?;
+        returned_record(&mut rows, "read cleared trigger fire").await
     }
 }
 

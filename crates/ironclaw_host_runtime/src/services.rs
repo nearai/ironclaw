@@ -93,6 +93,7 @@ mod builder;
 mod production_services;
 mod production_wiring;
 mod runtime_adapters;
+mod wasm_diagnostics;
 
 use production_wiring::{
     ProductionComponentType, ProductionComponentTypes, ProductionImplementationReadiness,
@@ -209,18 +210,29 @@ impl ProductAuthProviderRuntimePorts {
         capability_id: &CapabilityId,
         handle: &SecretHandle,
     ) -> Result<(), ProductAuthCredentialStageError> {
+        self.stage_secret_from_scope_once(scope, scope, capability_id, handle)
+            .await
+    }
+
+    pub async fn stage_secret_from_scope_once(
+        &self,
+        source_scope: &ResourceScope,
+        target_scope: &ResourceScope,
+        capability_id: &CapabilityId,
+        handle: &SecretHandle,
+    ) -> Result<(), ProductAuthCredentialStageError> {
         let lease = self
             .secret_store
-            .lease_once(scope, handle)
+            .lease_once(source_scope, handle)
             .await
             .map_err(stage_secret_error)?;
         let secret = self
             .secret_store
-            .consume(scope, lease.id)
+            .consume(source_scope, lease.id)
             .await
             .map_err(stage_secret_error)?;
         self.secret_injection_store
-            .insert(scope, capability_id, handle, secret)
+            .insert(target_scope, capability_id, handle, secret)
             .map_err(|_| ProductAuthCredentialStageError::Backend)
     }
 }
@@ -369,6 +381,10 @@ where
             Arc::clone(&self.process_port),
             self.secret_store.clone(),
         );
+        if let Some(audit_sink) = &self.audit_sink {
+            invocation_services_resolver =
+                invocation_services_resolver.with_audit_sink(Arc::clone(audit_sink));
+        }
         if let Some(process_port) = &self.tenant_sandbox_process_port {
             invocation_services_resolver = invocation_services_resolver
                 .with_tenant_sandbox_process_port(Arc::clone(process_port));
@@ -495,6 +511,7 @@ where
             .runtime_policy
             .clone()
             .unwrap_or_else(local_testing_runtime_policy);
+        let surface_filesystem: Arc<dyn RootFilesystem> = self.filesystem.clone();
 
         let mut runtime = DefaultHostRuntime::from_shared_registry(
             Arc::clone(&self.registry),
@@ -503,6 +520,7 @@ where
             self.surface_version.clone(),
             runtime_policy,
         )
+        .with_surface_filesystem(surface_filesystem)
         .with_trust_policy_dyn(Arc::clone(&self.trust_policy))
         .with_process_manager(process_manager)
         .with_process_store(process_store)

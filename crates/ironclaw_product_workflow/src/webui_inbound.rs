@@ -111,12 +111,9 @@ pub struct WebUiListThreadsRequest {
 /// remain blockers owned by their dedicated Reborn services, not lifecycle
 /// phases.
 ///
-/// `extension_name` is not part of the body — it is bound from the
-/// route path as an [`ironclaw_common::ExtensionName`] and threaded
-/// through the facade as a typed parameter. The handler/facade
-/// boundary validates the path segment so a malformed identifier
-/// never crosses into facade-internal request/response state as a
-/// raw `String`.
+/// The package id is not part of the body — it is bound from the route
+/// path and lifted into a lifecycle package ref by the handler before
+/// it crosses the facade boundary.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct WebUiSetupExtensionRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]

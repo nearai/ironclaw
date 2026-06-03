@@ -175,6 +175,20 @@ must not be surfaced as an active scheduled fire.
 
 The skip policy is per-trigger, not global. Other triggers may continue to fire on the same tick.
 
+### 5.1 Trusted poller scope
+
+The global due/active repository queries are intentionally host-owned poller
+plumbing, not capability APIs.
+
+- `list_due_triggers` and `list_active_triggers` are the raw repository
+  queries used by the trusted poller path.
+- Trigger-owned poller code must keep worker-local call sites explicit about the
+  trusted poller transition without adding a user-facing capability surface.
+- Product adapters, first-party capability code, and other untrusted callers
+  must not treat the global list methods as a user-facing surface.
+- The poller may continue to use the raw repository methods internally, but the
+  contract treats them as implementation plumbing, not a capability contract.
+
 ---
 
 ## 6. Trusted inbound and turn execution
@@ -182,12 +196,20 @@ The skip policy is per-trigger, not global. Other triggers may continue to fire 
 A trigger fire is synthetic inbound, not a parallel agent loop.
 
 - The fire must enter the normal Reborn inbound/turn pipeline.
-- The trusted facade is `InboundTurnService::handle_inbound_turn_with_trusted_scope(TrustedInboundTurnRequest)`. PR 8 seals the trusted request constructor locally in `ironclaw_conversations`; a later trigger-worker/composition PR will add the host-owned construction shim once that caller exists.
+- The trusted facade is `InboundTurnService::handle_inbound_turn_with_trusted_scope(TrustedInboundTurnRequest)`. The raw trusted request constructor stays private inside `ironclaw_conversations`; host/composition code must enter through a host-owned trigger ingress seam instead of constructing trusted requests directly.
 - Binding resolution for trigger fires must use the trusted-scope path from `conversation-binding.md`.
-- The host-trusted ingress marker and witness used for trigger submission must be type-sealed and unconstructible by product adapters.
+- The host-trusted ingress marker and witness used for trigger submission must be inaccessible to product adapters. PR18 enforces this with a host-only trusted ingress crate plus architecture dependency tests; before trigger delivery launches, the trusted ingress authority should be hardened into a compile-time host facade or equivalent sealed factory so adapter crates cannot mint it merely by adding a dependency.
 - The host mints the trusted trigger ingress request from `TriggerRecord` state:
   `tenant_id`, `creator_user_id`, `agent_id`, and `project_id` are host state,
   not product payload data.
+- Before a trusted trigger fire is submitted, host composition must scan the
+  materialized trigger prompt for prompt-injection patterns and reject high- or
+  critical-severity findings as permanent materialization failures. The prompt
+  must not be silently rewritten before turn submission.
+- Before trigger delivery launches, host composition must also verify at fire
+  time that `creator_user_id` is still authorized for the target
+  `tenant_id`/`agent_id`/`project_id`; revoked or unauthorized creators must
+  produce a permanent authorization failure instead of submitting a turn.
 - The trusted inbound request is a host-owned wrapper around the ordinary inbound fields. It carries only ingress identity and turn scope data needed to create the canonical turn, and it discards adapter-supplied requested-scope hints before binding resolution.
 - It must not encode delivery targets, notification targets, or any other outbound routing policy.
 
@@ -203,6 +225,12 @@ Trusted trigger ingress request fields are:
 - `route_kind`: direct;
 - `actor`: `TurnActor` for `creator_user_id`;
 - `content_ref`: materialized trigger prompt.
+
+The trigger-owned materialization seam keeps `ironclaw_triggers` free of
+conversation and product-workflow dependencies: `TriggerPromptMaterializer`
+accepts a `TriggerFire` and returns an opaque `TriggerInboundContentRef`.
+Composition owns the concrete adapter that writes or resolves that content ref
+for the trusted inbound path.
 
 The sealed marker/installation/actor/conversation tuple must resolve to the same
 `SourceBindingRef` on every retry of the same tenant-scoped fire identity. Replay
@@ -245,11 +273,33 @@ Slot bookkeeping is tied to acceptance, not merely polling:
 - permanent validation or authorization failures write `last_status = Error`,
   clear `active_fire_slot` and `active_run_ref`, leave `last_fired_slot` and
   `last_run_at` unchanged, and advance `next_run_at` beyond the failed
-  fire_slot.
+  fire_slot;
+- permanent failures on a schedule with no future fire slot mark the trigger
+  `Completed`, write `last_status = Error`, clear active-fire fields, and leave
+  `next_run_at` at the failed fire slot. The `Completed` state, not a sentinel
+  timestamp, removes the trigger from future due queries.
 
-Turn terminal lookup and clearing stay on the later PR 14+ seam; PR 12 and
-PR 13 define the fire-claim contract and submit-result bookkeeping but do not
-consult turn state yet.
+Turn terminal lookup and clearing are a narrow seam layered above fire-claim
+and submit-result bookkeeping:
+
+- `ironclaw_turns::active_run_ref_state` classifies
+  `active_run_ref` through `get_run_state` and `TurnStatus::is_terminal`;
+- `ironclaw_triggers::ClearActiveFireRequest` plus
+  `TriggerRepository::clear_active_fire` clears only the exact matching
+  `(tenant_id, trigger_id, active_fire_slot, active_run_ref)` after the caller
+  has observed a terminal turn outcome.
+
+The poller treats per-record due-fire processing and active-run terminal lookup
+errors as structured tick report outcomes so one bad record does not block other
+eligible triggers in the same tick. Batch-level repository list failures remain
+fail-fast because the worker cannot know which records were safely observed.
+
+Approval waits are owned by the normal turn pipeline. While a submitted trigger
+turn is waiting for approval, the trigger remains active through
+`active_run_ref` back-pressure. Later lifecycle/notification work must define
+durable approval expiry, stale approval rejection, reminder throttling, and
+user/admin notification paths without making the trigger poller deliver outbound
+messages directly.
 
 ---
 
@@ -262,6 +312,19 @@ The trigger system must expose `trigger_create`, `trigger_list`, and `trigger_re
 - `trigger_remove` is caller-scoped delete.
 
 Exact wiring of the capability registry and handler dependencies may land in later implementation PRs, but the capability names and semantics are frozen here.
+
+Capability follow-ups before launch:
+
+- Trigger count quotas must be enforced through an atomic repository/database
+  policy when they are added. A handler-only precheck is not sufficient because
+  concurrent creates can race past the cap.
+- Durable backend hydration must keep malformed stored trigger rows observable
+  as repository errors. Optimizing schedule hydration to avoid cron re-parsing
+  is allowed only if the replacement keeps an explicit malformed-row validation
+  boundary.
+- PostgreSQL scoped-list NULL handling is performance tuning, not a V1
+  correctness gate. The schema owns a composite scoped-list index; add
+  NULL-specific partial indexes only with `EXPLAIN` or benchmark evidence.
 
 ---
 
@@ -285,6 +348,8 @@ V1 acceptance does not require external delivery. A valid V1 trigger fire is one
 - PostgreSQL/libSQL parity is required for trigger persistence.
 - `trigger_create` caller-level tests must prove sub-minute and second-level
   schedules are rejected before persistence.
+- `trigger_create` caller-level tests must prove accepted finite schedules with
+  no future slot at dispatch time are rejected before persistence.
 - Trusted inbound caller-level tests must prove duplicate scheduled-slot retries
   replay the original accepted message and turn submission before binding
   creation.

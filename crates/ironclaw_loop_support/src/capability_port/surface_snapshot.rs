@@ -48,6 +48,7 @@ pub(super) struct PreparedSurfaceCapabilityCall {
     pub(super) capability_id: CapabilityId,
     pub(super) normalized_arguments: serde_json::Value,
     pub(super) effective_capability_ids: Vec<CapabilityId>,
+    pub(super) capability_info_target_missing: bool,
 }
 
 impl SurfaceSnapshot {
@@ -209,16 +210,27 @@ impl RuntimeSurfaceCapabilitySnapshot {
                 "provider tool call was not advertised to the model",
             ));
         }
-        let normalized_arguments = super::normalize_provider_arguments(
+        let normalized_arguments = match super::prepare_provider_arguments(
             &tool_call.arguments,
             &self.parameters_schema,
             "provider arguments",
-        )?;
+        ) {
+            Ok(arguments) => arguments,
+            // Advertised runtime tool calls with schema-invalid arguments are
+            // staged so invocation can return a model-visible invalid_input
+            // result instead of terminalizing the run before the model can
+            // recover.
+            Err(error) if error.kind == AgentLoopHostErrorKind::InvalidInvocation => {
+                tool_call.arguments.clone()
+            }
+            Err(error) => return Err(error),
+        };
         super::validate_provider_arguments(&normalized_arguments)?;
         Ok(PreparedSurfaceCapabilityCall {
             capability_id: capability_id.clone(),
             normalized_arguments,
             effective_capability_ids: vec![capability_id.clone()],
+            capability_info_target_missing: false,
         })
     }
 }
@@ -275,22 +287,28 @@ impl SyntheticSurfaceCapabilitySnapshot {
                     "provider arguments",
                 )?;
                 super::validate_provider_arguments(&normalized_arguments)?;
-                let request = capability_info::CapabilityInfoRequest::parse(&normalized_arguments)?;
-                let target = snapshot
-                    .capability_info(request.requested_name())
-                    .ok_or_else(|| {
-                        AgentLoopHostError::new(
-                            AgentLoopHostErrorKind::InvalidInvocation,
-                            "capability_info target is not on the visible surface",
-                        )
-                    })?;
+                let mut effective_capability_ids = Vec::with_capacity(2);
+                effective_capability_ids.push(capability_id.clone());
+                let capability_info_target_missing =
+                    match capability_info::requested_name(&normalized_arguments) {
+                        Ok(requested_name) => {
+                            if let Some(target) = snapshot.capability_info(requested_name) {
+                                effective_capability_ids.push(target.capability_id.clone());
+                                false
+                            } else {
+                                true
+                            }
+                        }
+                        Err(error) if error.kind == AgentLoopHostErrorKind::InvalidInvocation => {
+                            false
+                        }
+                        Err(error) => return Err(error),
+                    };
                 Ok(PreparedSurfaceCapabilityCall {
                     capability_id: capability_id.clone(),
                     normalized_arguments,
-                    effective_capability_ids: vec![
-                        capability_id.clone(),
-                        target.capability_id.clone(),
-                    ],
+                    effective_capability_ids,
+                    capability_info_target_missing,
                 })
             }
         }

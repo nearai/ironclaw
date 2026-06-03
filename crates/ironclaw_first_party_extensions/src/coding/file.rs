@@ -7,16 +7,17 @@ use ironclaw_filesystem::{FileType, FilesystemOperation};
 use ironclaw_host_api::RuntimeDispatchErrorKind;
 use serde_json::{Value, json};
 
-use super::{CodingCapabilityError, CodingCapabilityRequest};
+use super::{CodingCapabilityError, CodingCapabilityOutput, CodingCapabilityRequest};
 
 use super::{
     config::{
         DEFAULT_LINE_LIMIT, MAX_DIR_ENTRIES, MAX_PATCH_SIZE, MAX_READ_SIZE, MAX_VISITED_ENTRIES,
         MAX_WRITE_SIZE,
     },
+    diff_preview::{file_diff_preview, will_use_large_diff_path},
     input_error,
     inputs::{optional_usize, required_str},
-    operation_error,
+    operation_error_with_summary,
     paths::{
         create_parent_dir_unless_sensitive, deny_sensitive_existing_path, filesystem_error,
         is_excluded_name, is_sensitive_scoped_path, is_workspace_path, operation_allowed,
@@ -39,15 +40,21 @@ pub(super) async fn read_file(
         .filesystem
         .stat(&resolved.virtual_path)
         .await
-        .map_err(filesystem_error)?;
+        .map_err(|error| {
+            filesystem_error_with_summary("read_file", resolved.scoped_path.as_str(), error)
+        })?;
     if stat.sensitive {
         return Err(CodingCapabilityError::new(
             RuntimeDispatchErrorKind::FilesystemDenied,
         ));
     }
     if stat.file_type != FileType::File || stat.len > MAX_READ_SIZE {
-        return Err(CodingCapabilityError::new(
+        return Err(CodingCapabilityError::with_safe_summary(
             RuntimeDispatchErrorKind::Resource,
+            format!(
+                "read_file failed for {}: target is not a readable file or exceeds the size limit",
+                safe_summary_path(resolved.scoped_path.as_str())
+            ),
         ));
     }
 
@@ -55,7 +62,9 @@ pub(super) async fn read_file(
         .filesystem
         .read_file(&resolved.virtual_path)
         .await
-        .map_err(filesystem_error)?;
+        .map_err(|error| {
+            filesystem_error_with_summary("read_file", resolved.scoped_path.as_str(), error)
+        })?;
     reject_binary_probe(&bytes)?;
     let (content, _encoding, _line_ending) = decode_text(&bytes)?;
     let lines: Vec<&str> = content.lines().collect();
@@ -86,7 +95,7 @@ pub(super) async fn read_file(
 pub(super) async fn write_file(
     request: &CodingCapabilityRequest<'_>,
     edit_locks: &SharedCodingEditLocks,
-) -> Result<Value, CodingCapabilityError> {
+) -> Result<CodingCapabilityOutput, CodingCapabilityError> {
     let path_str = required_str(request.input, "path")?;
     if is_workspace_path(path_str) {
         return Err(input_error());
@@ -100,24 +109,42 @@ pub(super) async fn write_file(
     let _edit_guard = edit_locks
         .lock_edit(&scope, resolved.virtual_path.as_str())
         .await;
-    if let Some(stat) = stat_optional(request, &resolved.virtual_path).await?
+    let existing_stat = stat_optional(request, &resolved.virtual_path).await?;
+    if let Some(stat) = &existing_stat
         && stat.sensitive
     {
         return Err(CodingCapabilityError::new(
             RuntimeDispatchErrorKind::FilesystemDenied,
         ));
     }
+    // Skip reading the old file when the write-only permission is absent or when
+    // new content alone would trigger the large-diff fast path in file_diff_preview
+    // (the old file read would be wasted).
+    let old_content =
+        if !operation_allowed(&resolved.grant.permissions, FilesystemOperation::ReadFile)
+            || will_use_large_diff_path(content)
+        {
+            None
+        } else {
+            existing_text_for_preview(request, &resolved, existing_stat.as_ref()).await
+        };
     create_parent_dir_unless_sensitive(request, &resolved.virtual_path).await?;
     request
         .filesystem
         .write_file(&resolved.virtual_path, content.as_bytes())
         .await
         .map_err(filesystem_error)?;
-    Ok(json!({
+    let output = json!({
         "path": resolved.scoped_path.as_str(),
         "bytes_written": content.len(),
         "success": true
-    }))
+    });
+    let display_preview = old_content
+        .map(|old_content| file_diff_preview(resolved.scoped_path.as_str(), &old_content, content));
+    Ok(CodingCapabilityOutput::with_display_preview(
+        output,
+        display_preview,
+    ))
 }
 
 pub(super) async fn list_dir(
@@ -234,7 +261,7 @@ fn format_size(bytes: u64) -> String {
 pub(super) async fn apply_patch(
     request: &CodingCapabilityRequest<'_>,
     edit_locks: &SharedCodingEditLocks,
-) -> Result<Value, CodingCapabilityError> {
+) -> Result<CodingCapabilityOutput, CodingCapabilityError> {
     let path_str = required_str(request.input, "path")?;
     if is_workspace_path(path_str) {
         return Err(input_error());
@@ -263,30 +290,44 @@ pub(super) async fn apply_patch(
         .filesystem
         .stat(&resolved.virtual_path)
         .await
-        .map_err(filesystem_error)?;
+        .map_err(|error| {
+            filesystem_error_with_summary("apply_patch", resolved.scoped_path.as_str(), error)
+        })?;
     if stat.sensitive {
         return Err(CodingCapabilityError::new(
             RuntimeDispatchErrorKind::FilesystemDenied,
         ));
     }
     if stat.file_type != FileType::File || stat.len > MAX_PATCH_SIZE {
-        return Err(CodingCapabilityError::new(
+        return Err(CodingCapabilityError::with_safe_summary(
             RuntimeDispatchErrorKind::Resource,
+            format!(
+                "apply_patch failed for {}: target is not a file or exceeds the patch size limit",
+                safe_summary_path(resolved.scoped_path.as_str())
+            ),
         ));
     }
     let bytes = request
         .filesystem
         .read_file(&resolved.virtual_path)
         .await
-        .map_err(filesystem_error)?;
+        .map_err(|error| {
+            filesystem_error_with_summary("apply_patch", resolved.scoped_path.as_str(), error)
+        })?;
     reject_binary_probe(&bytes)?;
     let (content, encoding, line_ending) = decode_text(&bytes)?;
     let (match_count, match_method) = count_matches(&content, old_string);
     if match_count == 0 {
-        return Err(operation_error());
+        return Err(operation_error_with_summary(format!(
+            "apply_patch failed for {}: old_string matched 0 times",
+            safe_summary_path(resolved.scoped_path.as_str())
+        )));
     }
     if !replace_all && match_count > 1 {
-        return Err(operation_error());
+        return Err(operation_error_with_summary(format!(
+            "apply_patch failed for {}: old_string matched {match_count} times; set replace_all=true or provide a unique old_string",
+            safe_summary_path(resolved.scoped_path.as_str())
+        )));
     }
 
     let (new_content, replacements) =
@@ -296,7 +337,9 @@ pub(super) async fn apply_patch(
         .filesystem
         .write_file(&resolved.virtual_path, &output)
         .await
-        .map_err(filesystem_error)?;
+        .map_err(|error| {
+            filesystem_error_with_summary("apply_patch", resolved.scoped_path.as_str(), error)
+        })?;
     let mut result = json!({
         "path": resolved.scoped_path.as_str(),
         "replacements": replacements,
@@ -305,5 +348,71 @@ pub(super) async fn apply_patch(
     if match_method != MatchMethod::Exact {
         result["match_method"] = json!(format!("{match_method:?}"));
     }
-    Ok(result)
+    let display_preview = file_diff_preview(resolved.scoped_path.as_str(), &content, &new_content);
+    Ok(CodingCapabilityOutput::with_display_preview(
+        result,
+        Some(display_preview),
+    ))
+}
+
+fn filesystem_error_with_summary(
+    operation: &str,
+    scoped_path: &str,
+    error: ironclaw_filesystem::FilesystemError,
+) -> CodingCapabilityError {
+    let scoped_path = safe_summary_path(scoped_path);
+    let summary = match &error {
+        ironclaw_filesystem::FilesystemError::NotFound { .. } => {
+            format!("{operation} failed for {scoped_path}: file not found")
+        }
+        ironclaw_filesystem::FilesystemError::PermissionDenied { .. }
+        | ironclaw_filesystem::FilesystemError::MountNotFound { .. }
+        | ironclaw_filesystem::FilesystemError::PathOutsideMount { .. }
+        | ironclaw_filesystem::FilesystemError::SymlinkEscape { .. }
+        | ironclaw_filesystem::FilesystemError::MountConflict { .. }
+        | ironclaw_filesystem::FilesystemError::VersionMismatch { .. }
+        | ironclaw_filesystem::FilesystemError::Unsupported { .. }
+        | ironclaw_filesystem::FilesystemError::IndexConflict { .. } => {
+            format!("{operation} failed for {scoped_path}: permission denied or unsupported path")
+        }
+        ironclaw_filesystem::FilesystemError::Backend { .. }
+        | ironclaw_filesystem::FilesystemError::BackendInfrastructure { .. } => {
+            format!("{operation} failed for {scoped_path}: filesystem backend error")
+        }
+        ironclaw_filesystem::FilesystemError::Contract(_) => {
+            format!("{operation} failed for {scoped_path}: invalid path")
+        }
+        _ => format!("{operation} failed for {scoped_path}: filesystem error"),
+    };
+    let kind = filesystem_error(error).kind();
+    CodingCapabilityError::with_safe_summary(kind, summary)
+}
+
+fn safe_summary_path(scoped_path: &str) -> String {
+    let path_hint = scoped_path
+        .trim_start_matches('/')
+        .replace(['/', '\\'], " ");
+    format!("path {path_hint}")
+}
+
+async fn existing_text_for_preview(
+    request: &CodingCapabilityRequest<'_>,
+    resolved: &ResolvedPath,
+    stat: Option<&ironclaw_filesystem::FileStat>,
+) -> Option<String> {
+    let Some(stat) = stat else {
+        return Some(String::new());
+    };
+    if stat.file_type != FileType::File || stat.len > MAX_WRITE_SIZE as u64 {
+        return None;
+    }
+    let bytes = request
+        .filesystem
+        .read_file(&resolved.virtual_path)
+        .await
+        // silent-ok: write_file display preview is best-effort; the write result is canonical.
+        .ok()?;
+    reject_binary_probe(&bytes).ok()?;
+    let (content, _encoding, _line_ending) = decode_text(&bytes).ok()?;
+    Some(content)
 }

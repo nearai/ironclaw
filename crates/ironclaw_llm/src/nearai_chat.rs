@@ -315,29 +315,8 @@ impl NearAiChatProvider {
                 });
             }
 
-            // Payload too large — the accumulated context exceeds the provider's
-            // request size limit. Map to ContextLengthExceeded so the dispatcher
-            // can trigger automatic compaction instead of crashing.
-            if status_code == 413 {
-                let lower = response_text.to_ascii_lowercase();
-                let (used, limit) = crate::rig_adapter::parse_token_counts(&lower);
-                return Err(LlmError::ContextLengthExceeded { used, limit });
-            }
-
-            // Some providers return 400 with "context_length_exceeded" in the body
-            // (e.g., OpenAI-compatible endpoints behind NEAR AI).
-            if status_code == 400 {
-                let lower = response_text.to_ascii_lowercase();
-                const CONTEXT_PATTERNS: &[&str] = &[
-                    "context_length_exceeded",
-                    "maximum context length",
-                    "too many tokens",
-                    "payload too large",
-                ];
-                if CONTEXT_PATTERNS.iter().any(|p| lower.contains(p)) {
-                    let (used, limit) = crate::rig_adapter::parse_token_counts(&lower);
-                    return Err(LlmError::ContextLengthExceeded { used, limit });
-                }
+            if let Some(error) = crate::error::context_length_error(status_code, &response_text) {
+                return Err(error);
             }
 
             // Any HTTP 5xx from the upstream LLM gateway — map to BadGateway
@@ -648,6 +627,7 @@ impl LlmProvider for NearAiChatProvider {
             .filter(|s| !s.trim().is_empty())
             .or_else(|| reasoning.filter(|s| !s.trim().is_empty()));
         emit_reasoning_trace(reasoning_fallback.as_deref());
+        let provider_reasoning = reasoning_fallback.clone();
 
         let tool_calls: Vec<ToolCall> = message_tool_calls
             .unwrap_or_default()
@@ -701,7 +681,7 @@ impl LlmProvider for NearAiChatProvider {
             output_tokens,
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
-            reasoning: None,
+            reasoning: provider_reasoning,
         })
     }
 
@@ -1221,6 +1201,81 @@ mod tests {
             provider.api_url("/chat/completions"),
             "http://127.0.0.1:8318/v1/chat/completions"
         );
+    }
+
+    #[test]
+    fn context_length_error_detects_provider_longer_than_context_wording() {
+        let body = r#"{"error":{"message":"Provider failed for model 'Qwen/Qwen3.6-35B-A3B-FP8': The input (314325 tokens) is longer than the model's context length (262144 tokens).","type":"invalid_request_error"}}"#;
+        match crate::error::context_length_error(400, body) {
+            Some(LlmError::ContextLengthExceeded { used, limit }) => {
+                assert_eq!(used, 314325);
+                assert_eq!(limit, 262144);
+            }
+            other => panic!("expected context-length error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn context_length_error_does_not_treat_all_bad_requests_as_overflow() {
+        let body = r#"{"error":{"message":"invalid tool schema"}}"#;
+        assert!(crate::error::context_length_error(400, body).is_none());
+    }
+
+    #[tokio::test]
+    async fn complete_maps_context_overflow_http_400_to_context_length_exceeded() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                let mut request = vec![0_u8; 4096];
+                let Ok(n) = socket.read(&mut request).await else {
+                    continue;
+                };
+                let request = String::from_utf8_lossy(&request[..n]);
+                let (status, body) = if request.starts_with("POST /v1/chat/completions ") {
+                    (
+                        "400 Bad Request",
+                        serde_json::json!({
+                            "error": {
+                                "message": "Provider failed: The input (314325 tokens) is longer than the model's context length (262144 tokens)."
+                            }
+                        })
+                        .to_string(),
+                    )
+                } else {
+                    ("200 OK", serde_json::json!({ "models": [] }).to_string())
+                };
+                let response = format!(
+                    "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+            }
+        });
+
+        let provider = NearAiChatProvider::new(test_nearai_config(&base_url), test_session())
+            .expect("provider");
+        let err = provider
+            .complete(CompletionRequest::new(vec![ChatMessage::user(
+                "read my email",
+            )]))
+            .await
+            .expect_err("context overflow should fail the completion");
+
+        match err {
+            LlmError::ContextLengthExceeded { used, limit } => {
+                assert_eq!(used, 314325);
+                assert_eq!(limit, 262144);
+            }
+            other => panic!("expected context-length error, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1770,6 +1825,92 @@ mod tests {
             "emission should use ironclaw_llm::reasoning target"
         );
         assert!(logs_contain("trace-target-marker"));
+    }
+
+    #[tokio::test]
+    async fn complete_with_tools_preserves_provider_reasoning_without_content_leak() {
+        use crate::provider::ToolDefinition;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                let mut request = vec![0_u8; 4096];
+                let Ok(n) = socket.read(&mut request).await else {
+                    continue;
+                };
+                let request = String::from_utf8_lossy(&request[..n]);
+                let body = if request.starts_with("POST /v1/chat/completions ") {
+                    serde_json::json!({
+                        "id": "chatcmpl-test",
+                        "choices": [{
+                            "message": {
+                                "role": "assistant",
+                                "content": null,
+                                "reasoning_content": "Thinking Steps\n[] Inspect context.",
+                                "tool_calls": [{
+                                    "id": "call_abc123",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "search",
+                                        "arguments": "{\"query\":\"test\"}"
+                                    }
+                                }]
+                            },
+                            "finish_reason": "tool_calls"
+                        }],
+                        "usage": { "prompt_tokens": 100, "completion_tokens": 50 }
+                    })
+                    .to_string()
+                } else {
+                    serde_json::json!({ "models": [] }).to_string()
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+            }
+        });
+
+        let provider = NearAiChatProvider::new_with_options(
+            test_nearai_config(&base_url),
+            test_session(),
+            false,
+            5,
+        )
+        .expect("provider");
+        let response = provider
+            .complete_with_tools(ToolCompletionRequest::new(
+                vec![ChatMessage::user("Search for test")],
+                vec![ToolDefinition {
+                    name: "search".to_string(),
+                    description: "Search".to_string(),
+                    parameters: serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "query": { "type": "string" }
+                        },
+                        "required": ["query"]
+                    }),
+                }],
+            ))
+            .await
+            .expect("tool completion");
+
+        assert_eq!(response.content, None);
+        assert_eq!(
+            response.reasoning.as_deref(),
+            Some("Thinking Steps\n[] Inspect context.")
+        );
+        assert_eq!(response.tool_calls.len(), 1);
+        assert_eq!(response.tool_calls[0].name, "search");
     }
 
     /// Regression: payloads that include BOTH reasoning fields must parse

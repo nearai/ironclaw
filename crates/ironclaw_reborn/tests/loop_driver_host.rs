@@ -11,9 +11,9 @@ use ironclaw_filesystem::LocalFilesystem;
 use ironclaw_host_api::{
     AgentId, ApprovalRequestId, CapabilityDescriptor, CapabilityGrant, CapabilityGrantId,
     CapabilityId, CapabilitySet, EffectKind, ExecutionContext, ExtensionId, GrantConstraints,
-    HostPortCatalog, InvocationId, MountView, NetworkPolicy, PackageId, PermissionMode, Principal,
-    ProcessId, ProjectId, ResourceEstimate, ResourceUsage, RuntimeKind, SecretHandle, TenantId,
-    ThreadId, TrustClass, UserId, VirtualPath,
+    HostPortCatalog, MountView, NetworkPolicy, PackageId, PermissionMode, Principal, ProcessId,
+    ProjectId, ResourceEstimate, ResourceUsage, RuntimeKind, SecretHandle, TenantId, ThreadId,
+    TrustClass, UserId, VirtualPath,
 };
 use ironclaw_host_runtime::{
     CancelRuntimeWorkOutcome, CancelRuntimeWorkRequest, CapabilitySurfacePolicy, HostRuntime,
@@ -25,14 +25,15 @@ use ironclaw_host_runtime::{
     VisibleCapability, VisibleCapabilityAccess,
 };
 use ironclaw_loop_support::{
-    CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
-    EmptyLoopCapabilityPort, HostIdentityContextBuildError, HostIdentityContextCandidate,
-    HostIdentityContextSource, HostIdentityMessageContent, HostInputBatch, HostInputEnvelope,
-    HostInputQueue, HostInputQueueError, HostManagedModelError, HostManagedModelErrorKind,
-    HostManagedModelGateway, HostManagedModelMessageRole, HostManagedModelRequest,
-    HostManagedModelResponse, HostRuntimeLoopCapabilityPort, HostSkillContextBuildError,
-    HostSkillContextCandidate, HostSkillContextSource, IdentityApplicability, IdentityFileName,
-    JsonSpawnSubagentInputCodec, LoopCapabilityInputResolver, LoopCapabilityResultWriter,
+    CapabilityAllowSet, CapabilityResolveError, CapabilityResultWrite,
+    CapabilitySurfaceProfileResolver, EmptyLoopCapabilityPort, HostIdentityContextBuildError,
+    HostIdentityContextCandidate, HostIdentityContextSource, HostIdentityMessageContent,
+    HostInputBatch, HostInputEnvelope, HostInputQueue, HostInputQueueError, HostManagedModelError,
+    HostManagedModelErrorKind, HostManagedModelGateway, HostManagedModelMessageRole,
+    HostManagedModelRequest, HostManagedModelResponse, HostRuntimeLoopCapabilityPort,
+    HostSkillContextBuildError, HostSkillContextCandidate, HostSkillContextSource,
+    IdentityApplicability, IdentityFileName, JsonSpawnSubagentInputCodec,
+    LoopCapabilityInputResolver, LoopCapabilityPortFactory, LoopCapabilityResultWriter,
     ProductLiveCancellationProbe, RunCancellationFactory, RunCancellationHandle,
     identity_message_ref,
 };
@@ -41,8 +42,8 @@ use ironclaw_reborn::driver_registry::{
     DriverKind, DriverRegistry, DriverRequirements, LoopDriverRegistryKey,
 };
 use ironclaw_reborn::loop_driver_host::{
-    LoopCapabilityPortFactory, RebornLoopDriverHost, RebornLoopDriverHostFactory,
-    RebornLoopDriverHostRequest, TextOnlyLoopHostConfig,
+    RebornLoopDriverHost, RebornLoopDriverHostFactory, RebornLoopDriverHostRequest,
+    TextOnlyLoopHostConfig,
 };
 use ironclaw_reborn::loop_exit_applier::{
     BlockedEvidenceRequest, CompletionEvidenceRequest, FailureEvidenceRequest,
@@ -201,7 +202,7 @@ async fn text_only_host_factory_builds_complete_agent_loop_driver_host() {
         })
         .await
         .unwrap();
-    assert_eq!(prompt_bundle.messages.len(), 1);
+    assert_eq!(prompt_bundle.messages.len(), 2);
     assert!(prompt_bundle.instruction_fingerprint.is_some());
 
     let model_response = host_dyn
@@ -264,9 +265,16 @@ async fn text_only_host_factory_builds_complete_agent_loop_driver_host() {
     assert_eq!(assistant.content.as_deref(), Some("model says hi"));
 
     assert_eq!(fixture.gateway.requests().len(), 1);
-    assert_eq!(
-        fixture.gateway.requests()[0].messages[0].content,
-        "hello reborn"
+    let request_messages = &fixture.gateway.requests()[0].messages;
+    assert!(request_messages.iter().any(|message| {
+        message
+            .content
+            .contains("No instruction safety scanner is configured")
+    }));
+    assert!(
+        request_messages
+            .iter()
+            .any(|message| message.content == "hello reborn")
     );
 
     let milestone_names = fixture.milestone_names();
@@ -826,6 +834,7 @@ async fn text_only_model_reply_driver_redacts_credential_marker_reply_text() {
         output: ParentLoopOutput::AssistantReply(AssistantReply {
             content: "Use OPENAI_API_KEY in the environment".to_string(),
         }),
+        usage: None,
     }));
     let driver = TextOnlyModelReplyDriver::default();
     assign_driver_to_fixture(&mut fixture, driver.descriptor());
@@ -934,12 +943,22 @@ async fn text_only_model_reply_driver_rejects_profiles_not_assigned_to_driver() 
 #[tokio::test]
 async fn text_only_host_factory_includes_safety_context_in_prompt_bundle() {
     let fixture = HostFixture::new("thread-host-safety-context", "hello safety").await;
-    let host = fixture
-        .factory()
-        .with_safety_context(
-            InstructionSafetyContext::new("safety:prompt-write", "prompt write safety enforced")
-                .unwrap(),
-        )
+    let factory = RebornLoopDriverHostFactory::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        Arc::clone(&fixture.gateway),
+        fixture.checkpoint_state_store.clone(),
+        fixture.turn_state_store.clone(),
+        fixture.loop_checkpoint_store.clone(),
+        fixture.milestone_sink.clone(),
+        TextOnlyLoopHostConfig {
+            max_messages: 8,
+            require_model_route_snapshot: false,
+        },
+        InstructionSafetyContext::new("safety:prompt-write", "prompt write safety enforced")
+            .unwrap(),
+    );
+    let host = factory
         .build_text_only_host(RebornLoopDriverHostRequest {
             claimed_run: fixture.claimed.clone(),
             loop_run_context: fixture.context.clone(),
@@ -977,6 +996,57 @@ async fn text_only_host_factory_includes_safety_context_in_prompt_bundle() {
             .messages
             .iter()
             .any(|message| message.content == "prompt write safety enforced")
+    );
+    assert!(
+        requests[0]
+            .messages
+            .iter()
+            .all(|message| !message.content.contains("No instruction safety scanner"))
+    );
+}
+
+#[tokio::test]
+async fn text_only_host_factory_uses_explicit_local_noop_safety_context() {
+    let fixture = HostFixture::new("thread-host-default-safety-context", "hello safety").await;
+    let host = fixture
+        .factory()
+        .build_text_only_host(RebornLoopDriverHostRequest {
+            claimed_run: fixture.claimed.clone(),
+            loop_run_context: fixture.context.clone(),
+        })
+        .await
+        .unwrap();
+    let host_dyn: &(dyn AgentLoopDriverHost + Send + Sync) = &host;
+
+    let prompt_bundle = host_dyn
+        .build_prompt_bundle(LoopPromptBundleRequest {
+            mode: PromptMode::TextOnly,
+            context_cursor: None,
+            surface_version: None,
+            checkpoint_state_ref: None,
+            max_messages: Some(8),
+            inline_messages: Vec::new(),
+            capability_view: None,
+        })
+        .await
+        .unwrap();
+    host_dyn
+        .stream_model(LoopModelRequest {
+            messages: prompt_bundle.messages,
+            surface_version: None,
+            model_preference: None,
+            capability_view: None,
+        })
+        .await
+        .unwrap();
+
+    let requests = fixture.gateway.requests();
+    assert_eq!(requests.len(), 1);
+    assert!(
+        requests[0]
+            .messages
+            .iter()
+            .any(|message| message.content.contains("No instruction safety scanner"))
     );
 }
 
@@ -1231,6 +1301,7 @@ async fn turn_runner_worker_completes_after_libsql_turn_and_thread_services_reop
             max_messages: 8,
             require_model_route_snapshot: false,
         },
+        InstructionSafetyContext::local_development_noop(),
     );
     let mut registry = DriverRegistry::new();
     registry
@@ -1979,6 +2050,7 @@ async fn turn_runner_worker_fails_when_real_host_factory_rejects_claimed_scope()
             max_messages: 8,
             require_model_route_snapshot: false,
         },
+        InstructionSafetyContext::local_development_noop(),
     );
 
     let (_wake_sender, wake_receiver) = TurnRunnerWakeReceiver::new();
@@ -2553,6 +2625,45 @@ async fn product_live_runtime_builds_when_all_required_adapters_are_present() {
         .await
         .unwrap();
     assert_eq!(resolved.profile_id.as_str(), "reborn-planned-default");
+
+    let host = composition
+        .host_factory
+        .build_text_only_host(RebornLoopDriverHostRequest {
+            claimed_run: fixture.claimed.clone(),
+            loop_run_context: fixture.context.clone(),
+        })
+        .await
+        .unwrap();
+    let host_dyn: &(dyn AgentLoopDriverHost + Send + Sync) = &host;
+    let prompt_bundle = host_dyn
+        .build_prompt_bundle(LoopPromptBundleRequest {
+            mode: PromptMode::TextOnly,
+            context_cursor: None,
+            surface_version: None,
+            checkpoint_state_ref: None,
+            max_messages: Some(8),
+            inline_messages: Vec::new(),
+            capability_view: None,
+        })
+        .await
+        .unwrap();
+    host_dyn
+        .stream_model(LoopModelRequest {
+            messages: prompt_bundle.messages,
+            surface_version: None,
+            model_preference: None,
+            capability_view: None,
+        })
+        .await
+        .unwrap();
+    let requests = fixture.gateway.requests();
+    assert_eq!(requests.len(), 1);
+    assert!(
+        requests[0]
+            .messages
+            .iter()
+            .any(|message| message.content == "test safety context")
+    );
 }
 
 /// Build a fully-populated `DefaultPlannedRuntimeParts` for product-live
@@ -3364,6 +3475,7 @@ async fn text_only_host_default_cancellation_factory_observes_durable_cancel_req
             max_messages: 8,
             require_model_route_snapshot: false,
         },
+        InstructionSafetyContext::local_development_noop(),
     );
 
     assert!(factory.cancellation_observation_kind().is_live_capable());
@@ -3398,6 +3510,7 @@ async fn text_only_host_factory_rejects_thread_scope_mismatch() {
             max_messages: 8,
             require_model_route_snapshot: false,
         },
+        InstructionSafetyContext::local_development_noop(),
     );
 
     let error = factory
@@ -3982,6 +4095,7 @@ async fn text_only_host_routes_capability_invocation_through_host_runtime() {
         RuntimeCapabilityCompleted {
             capability_id: capability_id.clone(),
             output: json!({"echoed": true}),
+            display_preview: None,
             usage: ResourceUsage::default(),
         },
     )));
@@ -4193,6 +4307,7 @@ async fn text_only_host_uses_fresh_execution_context_per_capability_invocation()
             RuntimeCapabilityCompleted {
                 capability_id: capability_id.clone(),
                 output,
+                display_preview: None,
                 usage: ResourceUsage::default(),
             },
         )));
@@ -4395,10 +4510,7 @@ async fn text_only_host_sanitizes_runtime_failure_message_before_driver_output()
     let CapabilityOutcome::Failed(failure) = outcome else {
         panic!("expected failed capability outcome");
     };
-    assert_eq!(
-        failure.safe_summary,
-        "capability invocation could not safely continue"
-    );
+    assert_eq!(failure.safe_summary, "capability invocation failed");
 }
 
 #[tokio::test]
@@ -4426,6 +4538,7 @@ async fn text_only_host_maps_runtime_suspension_and_process_outcomes() {
         capability_id: auth_id.clone(),
         reason: RuntimeBlockedReason::AuthRequired,
         required_secrets: vec![SecretHandle::new("api_key").unwrap()],
+        credential_requirements: Vec::new(),
     }));
     runtime.push_outcome(RuntimeCapabilityOutcome::ResourceBlocked(
         RuntimeResourceGate {
@@ -4508,7 +4621,11 @@ async fn text_only_host_maps_runtime_suspension_and_process_outcomes() {
     ));
     assert!(matches!(
         &outcomes[1],
-        CapabilityOutcome::AuthRequired { gate_ref, safe_summary }
+        CapabilityOutcome::AuthRequired {
+            gate_ref,
+            safe_summary,
+            ..
+        }
             if gate_ref.as_str().starts_with("gate:auth-")
                 && safe_summary == "capability requires authentication"
     ));
@@ -4682,6 +4799,7 @@ async fn text_only_host_batch_stops_on_first_suspension_before_later_invocations
         RuntimeCapabilityCompleted {
             capability_id: echo_id.clone(),
             output: json!({"should_not_run": true}),
+            display_preview: None,
             usage: ResourceUsage::default(),
         },
     )));
@@ -4869,6 +4987,7 @@ async fn text_only_host_waits_for_concurrent_duplicate_invocation_result() {
             RuntimeCapabilityCompleted {
                 capability_id: capability_id.clone(),
                 output,
+                display_preview: None,
                 usage: ResourceUsage::default(),
             },
         )));
@@ -4936,6 +5055,7 @@ async fn text_only_host_bounds_completed_dispatch_records() {
             RuntimeCapabilityCompleted {
                 capability_id: capability_id.clone(),
                 output: json!({"call": index}),
+                display_preview: None,
                 usage: ResourceUsage::default(),
             },
         )));
@@ -4947,6 +5067,7 @@ async fn text_only_host_bounds_completed_dispatch_records() {
         RuntimeCapabilityCompleted {
             capability_id: capability_id.clone(),
             output: json!({"call": "retried-after-eviction"}),
+            display_preview: None,
             usage: ResourceUsage::default(),
         },
     )));
@@ -5048,6 +5169,7 @@ async fn text_only_host_does_not_reinvoke_runtime_after_result_write_failure_ret
         RuntimeCapabilityCompleted {
             capability_id: capability_id.clone(),
             output: json!({"write": "fails"}),
+            display_preview: None,
             usage: ResourceUsage::default(),
         },
     )));
@@ -5055,6 +5177,7 @@ async fn text_only_host_does_not_reinvoke_runtime_after_result_write_failure_ret
         RuntimeCapabilityCompleted {
             capability_id: capability_id.clone(),
             output: json!({"duplicate": true}),
+            display_preview: None,
             usage: ResourceUsage::default(),
         },
     )));
@@ -5120,6 +5243,7 @@ async fn text_only_host_rejects_runtime_outcome_for_different_capability() {
         RuntimeCapabilityCompleted {
             capability_id: returned_id,
             output: json!({"wrong": true}),
+            display_preview: None,
             usage: ResourceUsage::default(),
         },
     )));
@@ -5178,6 +5302,7 @@ async fn text_only_host_rejects_previous_surface_after_refetch() {
         RuntimeCapabilityCompleted {
             capability_id: first_id.clone(),
             output: json!({"stale": true}),
+            display_preview: None,
             usage: ResourceUsage::default(),
         },
     )));
@@ -5406,6 +5531,7 @@ async fn text_only_host_allows_retry_after_missing_capability_input_is_staged() 
         RuntimeCapabilityCompleted {
             capability_id: capability_id.clone(),
             output: json!({"retried": true}),
+            display_preview: None,
             usage: ResourceUsage::default(),
         },
     )));
@@ -5798,11 +5924,7 @@ impl LoopCapabilityInputResolver for InMemoryCapabilityIo {
 impl LoopCapabilityResultWriter for InMemoryCapabilityIo {
     async fn write_capability_result(
         &self,
-        run_context: &LoopRunContext,
-        _input_ref: &CapabilityInputRef,
-        _invocation_id: InvocationId,
-        capability_id: &CapabilityId,
-        output: Value,
+        write: CapabilityResultWrite<'_>,
     ) -> Result<LoopResultRef, AgentLoopHostError> {
         let mut remaining_failures = self.fail_result_writes_remaining.lock().unwrap();
         if *remaining_failures > 0 {
@@ -5816,8 +5938,12 @@ impl LoopCapabilityResultWriter for InMemoryCapabilityIo {
         self.results
             .lock()
             .unwrap()
-            .push((capability_id.clone(), output));
-        let result_ref = format!("result:{}-{}", run_context.run_id, capability_id.as_str());
+            .push((write.capability_id.clone(), write.output));
+        let result_ref = format!(
+            "result:{}-{}",
+            write.run_context.run_id,
+            write.capability_id.as_str()
+        );
         self.result_refs.lock().unwrap().push(result_ref.clone());
         LoopResultRef::new(result_ref).map_err(|_| {
             AgentLoopHostError::new(
@@ -6228,6 +6354,7 @@ impl HostFactory for CapabilityHostFactory {
                 max_messages: 8,
                 require_model_route_snapshot: false,
             },
+            InstructionSafetyContext::local_development_noop(),
         )
         .build_text_only_host_with_capabilities(
             RebornLoopDriverHostRequest {
@@ -6353,6 +6480,7 @@ impl AgentLoopDriver for ApprovalBlockThenFinalReplyDriver {
         Ok(LoopExit::Blocked(LoopBlocked {
             kind: LoopBlockedKind::Approval,
             gate_ref: LoopGateRef::new("gate:approval-resume-e2e").unwrap(),
+            credential_requirements: Vec::new(),
             checkpoint_id: ironclaw_turns::TurnCheckpointId::new(),
             state_ref: LoopCheckpointStateRef::new("checkpoint:approval-resume-state").unwrap(),
             exit_id: LoopExitId::new("exit:approval-resume-blocked").unwrap(),
@@ -6667,6 +6795,7 @@ impl HostFixture {
             received_at: Utc::now(),
             checkpoint_id: None,
             gate_ref: None,
+            credential_requirements: Vec::new(),
             failure: None,
             event_cursor: EventCursor(1),
         };
@@ -6749,6 +6878,7 @@ impl HostFixture {
             loop_checkpoint_store,
             self.milestone_sink.clone(),
             config,
+            InstructionSafetyContext::local_development_noop(),
         )
     }
 
@@ -6925,6 +7055,7 @@ impl RecordingGateway {
         *self.response.lock().unwrap() = Ok(HostManagedModelResponse {
             safe_text_deltas: Vec::new(),
             safe_reasoning_deltas: Vec::new(),
+            usage: None,
             output: ParentLoopOutput::CapabilityCalls(vec![
                 ironclaw_turns::run_profile::CapabilityCallCandidate {
                     surface_version: CapabilitySurfaceVersion::new("empty:v1").unwrap(),

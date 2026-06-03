@@ -4,8 +4,8 @@ use crate::{
     AuthChallenge, AuthErrorCode, AuthFlowRecord, AuthFlowStatus, AuthProductError,
     CredentialAccount, CredentialAccountUpdateBinding, CredentialOwnership, CredentialRecoveryKind,
     CredentialRecoveryProjection, CredentialRecoveryReason, CredentialRefreshRequest,
-    CredentialSelectionInput, ManualTokenSetupRequest, NewAuthFlow, NewCredentialAccount,
-    OAuthCallbackClaimRequest, OAuthProviderExchange, Timestamp,
+    CredentialSelectionInput, ManualTokenCompletionInput, ManualTokenSetupRequest, NewAuthFlow,
+    NewCredentialAccount, OAuthCallbackClaimRequest, OAuthProviderExchange, Timestamp,
     flow::credential_status_for_completed_flow, scope_matches,
 };
 
@@ -126,6 +126,51 @@ pub fn validate_selection_flow(
             && account.status == crate::CredentialAccountStatus::Configured
     }) {
         return Err(AuthProductError::CredentialMissing);
+    }
+    Ok(())
+}
+
+pub fn validate_manual_token_flow(
+    record: &mut AuthFlowRecord,
+    scope: &crate::AuthProductScope,
+    input: &ManualTokenCompletionInput,
+    now: Timestamp,
+) -> Result<(), AuthProductError> {
+    if !scope_matches(scope, &record.scope) {
+        return Err(AuthProductError::CrossScopeDenied);
+    }
+    let Some(AuthChallenge::ManualTokenRequired {
+        interaction_id,
+        provider,
+        ..
+    }) = &record.challenge
+    else {
+        return Err(AuthProductError::invalid_request(
+            "auth flow is not awaiting manual token",
+        ));
+    };
+    if interaction_id != &input.interaction_id {
+        return Err(AuthProductError::CrossScopeDenied);
+    }
+    if provider != &record.provider {
+        return Err(AuthProductError::invalid_request(
+            "auth flow manual-token provider mismatch",
+        ));
+    }
+    if crate::is_terminal_status(record.status) {
+        return match (record.status, record.credential_account_id) {
+            (AuthFlowStatus::Completed, Some(completed))
+                if completed == input.credential_account_id =>
+            {
+                Ok(())
+            }
+            (AuthFlowStatus::Canceled, _) => Err(AuthProductError::Canceled),
+            _ => Err(AuthProductError::FlowAlreadyTerminal),
+        };
+    }
+    expire_if_needed(record, now)?;
+    if record.status != AuthFlowStatus::AwaitingUser {
+        return Err(AuthProductError::FlowAlreadyTerminal);
     }
     Ok(())
 }
@@ -266,16 +311,7 @@ pub fn account_is_authorized_for_requester(
     account: &CredentialAccount,
     requester_extension: Option<&ExtensionId>,
 ) -> bool {
-    match account.ownership {
-        CredentialOwnership::UserReusable => true,
-        CredentialOwnership::ExtensionOwned => account
-            .owner_extension
-            .as_ref()
-            .is_some_and(|owner_extension| requester_extension == Some(owner_extension)),
-        CredentialOwnership::SharedAdminManaged => requester_extension
-            .is_some_and(|requester| account.granted_extensions.contains(requester)),
-        CredentialOwnership::System => false,
-    }
+    account.is_authorized_for_requester(requester_extension)
 }
 
 pub fn validate_new_credential_account(
@@ -430,5 +466,70 @@ fn recovery_kind_and_reason_for_status(
             CredentialRecoveryKind::ReauthorizeRequired,
             CredentialRecoveryReason::AccountRevoked,
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        AuthProviderId, CredentialAccountId, CredentialAccountLabel, CredentialAccountStatus,
+        OAuthAuthorizationCode, OAuthProviderExchange, PkceVerifierSecret, ProviderScope,
+    };
+    use chrono::Utc;
+    use ironclaw_host_api::{InvocationId, ResourceScope, SecretHandle, UserId};
+    use secrecy::SecretString;
+
+    #[test]
+    fn update_account_from_exchange_replaces_provider_reported_scopes() {
+        let mut account = CredentialAccount {
+            id: CredentialAccountId::new(),
+            scope: crate::AuthProductScope::new(
+                ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new())
+                    .unwrap(),
+                crate::AuthSurface::Api,
+            ),
+            provider: AuthProviderId::new("github").unwrap(),
+            label: CredentialAccountLabel::new("github").unwrap(),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: Vec::new(),
+            access_secret: Some(SecretHandle::new("old-access").unwrap()),
+            refresh_secret: Some(SecretHandle::new("old-refresh").unwrap()),
+            scopes: vec![
+                ProviderScope::new("repo").unwrap(),
+                ProviderScope::new("admin:org").unwrap(),
+            ],
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let exchange = OAuthProviderExchange {
+            provider: AuthProviderId::new("github").unwrap(),
+            account_label: CredentialAccountLabel::new("github").unwrap(),
+            authorization_code_hash: crate::authorization_code_hash(
+                &OAuthAuthorizationCode::new(SecretString::from("code")).unwrap(),
+            )
+            .unwrap(),
+            pkce_verifier_hash: crate::pkce_verifier_hash(
+                &PkceVerifierSecret::new(SecretString::from("pkce")).unwrap(),
+            )
+            .unwrap(),
+            access_secret: SecretHandle::new("new-access").unwrap(),
+            refresh_secret: Some(SecretHandle::new("new-refresh").unwrap()),
+            scopes: vec![ProviderScope::new("repo").unwrap()],
+            account_id: None,
+        };
+
+        update_account_from_exchange(&mut account, &exchange, Utc::now());
+
+        assert_eq!(
+            account
+                .scopes
+                .iter()
+                .map(|scope| scope.as_str())
+                .collect::<Vec<_>>(),
+            vec!["repo"]
+        );
     }
 }

@@ -12,8 +12,8 @@ use std::collections::HashSet;
 
 use crate::ApprovalRequest;
 use crate::{
-    ExtensionId, HostApiError, MountView, NetworkPolicy, ResourceCeiling, ResourceReservationId,
-    RuntimeCredentialAccountProviderId, SecretHandle,
+    CapabilityId, ExtensionId, HostApiError, MountView, NetworkPolicy, ResourceCeiling,
+    ResourceReservationId, RuntimeCredentialAccountProviderId, SecretHandle,
 };
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -58,7 +58,12 @@ pub enum Obligation {
     InjectCredentialAccountOnce {
         handle: SecretHandle,
         provider: RuntimeCredentialAccountProviderId,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        provider_scopes: Vec<String>,
         requester_extension: ExtensionId,
+    },
+    FirstPartyCredentialStagedViaHostPort {
+        capability_id: CapabilityId,
     },
     ApplyNetworkPolicy {
         policy: NetworkPolicy,
@@ -71,6 +76,14 @@ pub enum Obligation {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeCredentialAuthRequirement {
+    pub provider: RuntimeCredentialAccountProviderId,
+    pub requester_extension: ExtensionId,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub provider_scopes: Vec<String>,
+}
+
 /// Canonical obligation evaluation classes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -80,6 +93,7 @@ pub enum ObligationKind {
     ApplyNetworkPolicy,
     InjectSecretOnce,
     InjectCredentialAccountOnce,
+    FirstPartyCredentialStagedViaHostPort,
     AuditBefore,
     RedactOutput,
     EnforceResourceCeiling,
@@ -94,6 +108,7 @@ pub const OBLIGATION_EVALUATION_ORDER: &[ObligationKind] = &[
     ObligationKind::ApplyNetworkPolicy,
     ObligationKind::InjectSecretOnce,
     ObligationKind::InjectCredentialAccountOnce,
+    ObligationKind::FirstPartyCredentialStagedViaHostPort,
     ObligationKind::AuditBefore,
     ObligationKind::RedactOutput,
     ObligationKind::EnforceResourceCeiling,
@@ -220,6 +235,9 @@ impl Obligation {
             Self::UseScopedMounts { .. } => ObligationKind::UseScopedMounts,
             Self::InjectSecretOnce { .. } => ObligationKind::InjectSecretOnce,
             Self::InjectCredentialAccountOnce { .. } => ObligationKind::InjectCredentialAccountOnce,
+            Self::FirstPartyCredentialStagedViaHostPort { .. } => {
+                ObligationKind::FirstPartyCredentialStagedViaHostPort
+            }
             Self::ApplyNetworkPolicy { .. } => ObligationKind::ApplyNetworkPolicy,
             Self::EnforceResourceCeiling { .. } => ObligationKind::EnforceResourceCeiling,
             Self::EnforceOutputLimit { .. } => ObligationKind::EnforceOutputLimit,

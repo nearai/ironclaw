@@ -89,6 +89,20 @@ pub fn subagent_planned_profile_id() -> Result<RunProfileId, String> {
     RunProfileId::new(SUBAGENT_PLANNED_PROFILE_ID)
 }
 
+pub(crate) fn is_subagent_planned_profile(
+    profile: &ironclaw_turns::run_profile::ResolvedRunProfile,
+) -> bool {
+    profile.profile_id.as_str() == SUBAGENT_PLANNED_PROFILE_ID
+        && profile.loop_driver.id.as_str() == SUBAGENT_PLANNED_DRIVER_ID
+        && profile.loop_driver.version == planned_driver_default_version()
+}
+
+pub(crate) fn is_subagent_planned_run_profile(
+    run_context: &ironclaw_turns::run_profile::LoopRunContext,
+) -> bool {
+    is_subagent_planned_profile(&run_context.resolved_run_profile)
+}
+
 pub fn planned_driver_default_version() -> RunProfileVersion {
     RunProfileVersion::new(PLANNED_DRIVER_DEFAULT_VERSION)
 }
@@ -414,6 +428,34 @@ mod tests {
             snapshot.capability_surface_profile_id.as_str(),
             SUBAGENT_CAPABILITY_SURFACE_PROFILE_ID
         );
+    }
+
+    #[tokio::test]
+    async fn subagent_predicate_requires_profile_and_driver_identity() {
+        let mut registry = InMemoryRunProfileRegistry::with_builtin_profiles();
+        register_subagent_planned_profile(&mut registry).expect("profile should register");
+        let resolver = InMemoryRunProfileResolver::new(registry);
+        let snapshot = resolver
+            .resolve_run_profile(
+                RunProfileResolutionRequest::interactive_default().with_requested_run_profile(
+                    RunProfileRequest::new(SUBAGENT_PLANNED_PROFILE_ID).unwrap(),
+                ),
+            )
+            .await
+            .expect("profile should resolve");
+
+        assert!(is_subagent_planned_profile(&snapshot));
+
+        let mut mismatched_driver = snapshot.clone();
+        mismatched_driver.loop_driver.id =
+            LoopDriverId::new(PLANNED_DRIVER_DEFAULT_ID).expect("valid test driver id");
+
+        assert!(!is_subagent_planned_profile(&mismatched_driver));
+
+        let mut mismatched_version = snapshot;
+        mismatched_version.loop_driver.version = RunProfileVersion::new(99);
+
+        assert!(!is_subagent_planned_profile(&mismatched_version));
     }
 
     #[tokio::test]

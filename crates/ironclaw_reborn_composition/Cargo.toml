@@ -22,6 +22,14 @@ root-llm-provider = [
     "ironclaw_llm/registry-provider-factory",
     "ironclaw_reborn/root-llm-provider",
 ]
+# Expose test-only helpers (mock LLM gateway, budget runtime accessors)
+# so integration tests in this crate's `tests/` directory and downstream
+# crates can drive `build_reborn_runtime` with a stub model gateway
+# (via `RebornRuntimeInput::with_model_gateway_override`) and inspect the
+# budget pipeline end-to-end. Enable with `cargo test --features
+# test-support` (plus whatever feature surface the test crate also
+# requires, e.g. `webui-v2-beta`).
+test-support = []
 # Compose the Reborn WebChat v2 HTTP gateway in this crate. Off by
 # default; turning this on pulls in the v2 route crate plus the axum /
 # tower-http middleware stack used by the `webui_serve` module. The
@@ -33,11 +41,20 @@ webui-v2-beta = [
     "ironclaw_webui_v2/webui-v2-beta",
     "dep:ironclaw_webui_v2_static",
     "ironclaw_webui_v2_static/webui-v2-beta",
+    "ironclaw_reborn/webui-user-store",
     "libsql",
     "dep:axum",
     "dep:tower",
     "dep:tower-http",
     "dep:lru",
+]
+# Host-mounted Slack Events API ingress fragment for the Reborn ProductAdapter
+# MVP. Off by default; host binaries opt in and mount it behind their Slack
+# enablement/config checks.
+slack-v2-host-beta = [
+    "webui-v2-beta",
+    "dep:ironclaw_slack_v2_adapter",
+    "dep:ironclaw_wasm_product_adapters",
 ]
 libsql = [
     "dep:libsql",
@@ -47,6 +64,7 @@ libsql = [
     "ironclaw_reborn_event_store/libsql",
     "ironclaw_resources/libsql",
     "ironclaw_run_state/libsql",
+    "ironclaw_triggers/libsql",
 ]
 postgres = [
     "dep:deadpool-postgres",
@@ -56,16 +74,11 @@ postgres = [
     "ironclaw_reborn_event_store/postgres",
     "ironclaw_resources/postgres",
     "ironclaw_run_state/postgres",
+    "ironclaw_triggers/postgres",
 ]
-# Expose hooks that production builds keep private but integration
-# tests in `tests/*.rs` need (e.g. injecting a recording/replay
-# `HostManagedModelGateway` via `RebornRuntimeInput::with_model_gateway_override`).
-# Off by default; enable with `cargo test --features test-support` (and
-# whatever feature surface the test crate also requires, e.g. `webui-v2-beta`).
-test-support = []
-
 [dependencies]
 async-trait = "0.1"
+base64 = "0.22"
 chrono = "0.4"
 deadpool-postgres = { version = "0.14", optional = true }
 futures = "0.3"
@@ -74,6 +87,7 @@ ironclaw_common = { path = "../ironclaw_common" }
 ironclaw_capabilities = { path = "../ironclaw_capabilities" }
 ironclaw_approvals = { path = "../ironclaw_approvals" }
 ironclaw_authorization = { path = "../ironclaw_authorization" }
+ironclaw_conversations = { path = "../ironclaw_conversations" }
 ironclaw_event_projections = { path = "../ironclaw_event_projections" }
 ironclaw_event_streams = { path = "../ironclaw_event_streams" }
 ironclaw_events = { path = "../ironclaw_events" }
@@ -97,15 +111,20 @@ ironclaw_first_party_extension_ports = { path = "../ironclaw_first_party_extensi
 ironclaw_resources = { path = "../ironclaw_resources" }
 ironclaw_run_state = { path = "../ironclaw_run_state" }
 ironclaw_runtime_policy = { path = "../ironclaw_runtime_policy" }
+ironclaw_safety = { path = "../ironclaw_safety" }
 ironclaw_secrets = { path = "../ironclaw_secrets" }
 ironclaw_skills = { path = "../ironclaw_skills" }
+ironclaw_slack_v2_adapter = { path = "../ironclaw_slack_v2_adapter", optional = true }
 ironclaw_threads = { path = "../ironclaw_threads" }
+ironclaw_trusted_ingress = { path = "../ironclaw_trusted_ingress", features = ["composition-root"] }
+ironclaw_triggers = { path = "../ironclaw_triggers" }
 ironclaw_trust = { path = "../ironclaw_trust" }
 ironclaw_turns = { path = "../ironclaw_turns" }
 # WebUI v2 route surface — feature-gated; only used by `webui_serve`.
 ironclaw_webui_v2 = { path = "../ironclaw_webui_v2", optional = true }
 # WebUI v2 static SPA bundle — feature-gated; mounted under `/v2`.
 ironclaw_webui_v2_static = { path = "../ironclaw_webui_v2_static", optional = true }
+ironclaw_wasm_product_adapters = { path = "../ironclaw_wasm_product_adapters", optional = true }
 libsql = { version = "0.6", optional = true, default-features = false, features = ["core", "replication", "remote", "tls"] }
 # axum + tower middleware stack used by the `webui_serve` module. Each
 # entry is feature-gated so non-beta builds carry no HTTP surface code.
@@ -113,6 +132,8 @@ axum = { version = "0.8", optional = true }
 tower = { version = "0.5", optional = true }
 tower-http = { version = "0.6", optional = true, features = ["cors", "set-header", "limit", "catch-panic"] }
 lru = { version = "0.16", optional = true }
+rand = "0.8"
+rust_decimal = { version = "1", features = ["serde", "serde-with-str"] }
 secrecy = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -126,15 +147,21 @@ uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 async-trait = "0.1"
+hmac = "0.12"
 http = "1"
 http-body-util = "0.1"
 ironclaw_common = { path = "../ironclaw_common" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
 ironclaw_host_runtime = { path = "../ironclaw_host_runtime", features = ["test-support"] }
+ironclaw_conversations = { path = "../ironclaw_conversations" }
+ironclaw_reborn_composition = { path = ".", features = ["test-support"] }
 ironclaw_threads = { path = "../ironclaw_threads" }
 ironclaw_turns = { path = "../ironclaw_turns" }
 ironclaw_product_workflow = { path = "../ironclaw_product_workflow", features = ["test-support"] }
 ironclaw_product_adapters = { path = "../ironclaw_product_adapters" }
+rust_decimal = { version = "1", features = ["serde", "serde-with-str"] }
+rust_decimal_macros = "1"
+sha2 = "0.10"
 tempfile = "3"
 testcontainers-modules = { version = "0.11", features = ["postgres"] }
 tokio = { version = "1", features = ["macros", "net", "rt", "rt-multi-thread", "time"] }
@@ -145,6 +172,7 @@ tokio = { version = "1", features = ["macros", "net", "rt", "rt-multi-thread", "
 # proper WS client.
 tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect"] }
 tower = { version = "0.5", features = ["util"] }
+tracing-test = "0.2"
 
 [build-dependencies]
 ironclaw_skills = { path = "../ironclaw_skills" }

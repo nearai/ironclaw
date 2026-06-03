@@ -69,21 +69,9 @@ impl<'a> OutboundResolutionEngine<'a> {
     ) -> Result<CommunicationDeliveryResolution, OutboundError> {
         let kind = context.delivery_kind();
         let target = match &context.origin {
-            RunNotificationOrigin::LiveSourceRoute { source_route } => match kind {
-                CommunicationDeliveryKind::ApprovalPrompt => {
-                    self.load_preference_target(scope, actor, PreferenceTargetKind::ApprovalPrompt)
-                        .await?
-                }
-                CommunicationDeliveryKind::AuthPrompt => {
-                    self.load_preference_target(scope, actor, PreferenceTargetKind::AuthPrompt)
-                        .await?
-                }
-                CommunicationDeliveryKind::FinalReply
-                | CommunicationDeliveryKind::ProgressUpdate
-                | CommunicationDeliveryKind::DeliveryStatus => {
-                    source_route.reply_target_binding_ref.clone()
-                }
-            },
+            RunNotificationOrigin::LiveSourceRoute { source_route } => {
+                source_route.reply_target_binding_ref.clone()
+            }
             RunNotificationOrigin::Triggered { .. } => {
                 self.resolve_triggered_target(scope, actor, kind).await?
             }
@@ -344,7 +332,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn live_source_route_approval_needed_uses_the_approval_prompt_preference() {
+    async fn live_source_route_approval_needed_uses_the_source_route() {
         let store = InMemoryOutboundStateStore::default();
         let engine = OutboundResolutionEngine::new(&store);
 
@@ -366,14 +354,14 @@ mod tests {
                     reply_target_binding_ref: reply_ref("reply:source-route"),
                 },
             },
-            "reply:approval",
+            "reply:source-route",
             CommunicationDeliveryKind::ApprovalPrompt,
         )
         .await;
     }
 
     #[tokio::test]
-    async fn live_source_route_auth_required_uses_the_auth_prompt_preference() {
+    async fn live_source_route_auth_required_uses_the_source_route() {
         let store = InMemoryOutboundStateStore::default();
         let engine = OutboundResolutionEngine::new(&store);
 
@@ -395,7 +383,7 @@ mod tests {
                     reply_target_binding_ref: reply_ref("reply:source-route"),
                 },
             },
-            "reply:auth",
+            "reply:source-route",
             CommunicationDeliveryKind::AuthPrompt,
         )
         .await;

@@ -670,6 +670,75 @@ async fn prompt_stage_cancellation_after_compaction_success_skips_final_bundle_r
 }
 
 #[tokio::test]
+async fn model_context_overflow_retries_through_canonical_compaction_stage() {
+    let host = MockHost::new(vec![reply_response()])
+        .with_model_errors(vec![AgentLoopHostError::new(
+            AgentLoopHostErrorKind::BudgetExceeded,
+            "model request exceeded its context budget",
+        )])
+        .with_prompt_compaction_indexes(vec![
+            vec![compaction_metadata(1, LoopContextCompactionKind::User, 10)],
+            vec![compaction_metadata(1, LoopContextCompactionKind::User, 10)],
+            Vec::new(),
+        ])
+        .with_compaction_result(Ok(LoopCompactionResponse {
+            summary_artifact_id: LoopSummaryArtifactId::new("summary:overflow-retry")
+                .expect("valid summary id"),
+            compression_ratio_ppm: 100_000,
+        }));
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("execute");
+
+    assert!(matches!(exit, LoopExit::Completed(_)));
+    assert_eq!(host.model_requests().len(), 2);
+    assert_eq!(
+        host.prompt_requests().len(),
+        3,
+        "retry must return to PromptStage so compaction can run before the next model call"
+    );
+    assert!(host.progress_event_names().contains(&"compaction_started"));
+
+    let final_state = final_staged_state(&host);
+    assert_eq!(
+        final_state.compaction_state.last_compacted_through_seq,
+        Some(1)
+    );
+    assert!(!final_state.compaction_state.force_compact_on_next_iteration);
+}
+
+#[tokio::test]
+async fn model_shrink_context_call_scope_returns_planner_contract() {
+    let host =
+        MockHost::new(vec![reply_response()]).with_model_errors(vec![AgentLoopHostError::new(
+            AgentLoopHostErrorKind::BudgetExceeded,
+            "model request exceeded its context budget",
+        )]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let err = executor
+        .execute_family(
+            &family_with_shrink_context_call_scope_recovery(),
+            &host,
+            state,
+        )
+        .await
+        .expect_err("call-scoped ShrinkContext must violate the planner contract");
+
+    assert!(matches!(
+        err,
+        AgentLoopExecutorError::PlannerContract {
+            detail: "context shrink retry requires iteration scope"
+        }
+    ));
+}
+
+#[tokio::test]
 async fn input_stage_steering_drain_carries_pending_ack() {
     let host = MockHost::new(Vec::new());
     let run_context = host.run_context().clone();
@@ -830,7 +899,14 @@ async fn assistant_reply_stage_returns_reply_summary() {
     };
 
     let step = AssistantReplyStage
-        .process(ctx, AssistantReplyInput { state, reply })
+        .process(
+            ctx,
+            AssistantReplyInput {
+                state,
+                reply,
+                usage: None,
+            },
+        )
         .await
         .expect("assistant reply stage");
 
@@ -1169,7 +1245,7 @@ fn sanitize_result_ref_suffix_handles_empty_special_chars_and_truncation() {
 }
 
 #[tokio::test]
-async fn exit_stage_no_progress_detected_exits_with_failed_loop_exit() {
+async fn exit_stage_no_progress_detected_finalizes_fallback_reply() {
     let host = MockHost::new(Vec::new());
     let family = crate::families::default();
     let ctx = StageContext {
@@ -1190,11 +1266,11 @@ async fn exit_stage_no_progress_detected_exits_with_failed_loop_exit() {
         .expect("exit stage");
 
     match exit {
-        LoopExit::Failed(failed) => {
-            assert_eq!(failed.reason_kind, LoopFailureKind::NoProgressDetected);
-            assert!(failed.checkpoint_id.is_some());
+        LoopExit::Completed(completed) => {
+            assert_eq!(completed.reply_message_refs.len(), 1);
+            assert!(completed.final_checkpoint_id.is_some());
         }
-        other => panic!("expected failed exit, got {other:?}"),
+        other => panic!("expected completed exit with fallback reply, got {other:?}"),
     }
 }
 
@@ -1452,6 +1528,7 @@ async fn gate_stage_skips_and_continues_records_skipped_summary() {
                 call,
                 kind: GateKind::Auth,
                 gate_ref,
+                credential_requirements: Vec::new(),
             },
         )
         .await
@@ -1494,6 +1571,7 @@ async fn gate_stage_aborts_returns_failed_exit() {
                 call,
                 kind: GateKind::Auth,
                 gate_ref,
+                credential_requirements: Vec::new(),
             },
         )
         .await
@@ -2156,6 +2234,11 @@ async fn model_visible_provider_tool_failures_append_failure_tool_result_for_rep
             CapabilityFailureKind::InvalidInput,
             "invalid input",
             "capability failed with invalid_input: invalid input",
+        ),
+        (
+            CapabilityFailureKind::InvalidInput,
+            "provider arguments failed schema validation at instance path root against schema path required",
+            "capability failed with invalid_input: provider arguments failed schema validation at instance path root against schema path required",
         ),
         (
             CapabilityFailureKind::MissingRuntime,
