@@ -803,6 +803,7 @@ async fn webui_event_stream_live_cursor_does_not_poison_runtime_failure_resume()
 
     sink.publish_loop_milestone(LoopHostMilestone {
         scope: scope.clone(),
+        actor: None,
         turn_id: TurnId::new(),
         run_id: TurnRunId::from_uuid(invocation_id.as_uuid()),
         loop_driver_id: LoopDriverId::new("test_loop").unwrap(),
