@@ -300,9 +300,7 @@ where
 }
 
 fn local_development_noop_safety_context() -> InstructionSafetyContext {
-    // Intentional warn: this fallback is a startup composition warning, not a
-    // loop hot-path event, and product-live builders fail closed before this path.
-    tracing::warn!(
+    tracing::debug!(
         "using local-development no-op instruction safety context; configure a real instruction safety scanner before product-live use"
     );
     InstructionSafetyContext::local_development_noop()

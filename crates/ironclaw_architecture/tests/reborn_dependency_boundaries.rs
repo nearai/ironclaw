@@ -524,8 +524,9 @@ fn reborn_internal_crate_keeps_directory_of_modules_lib_rs() {
         );
     }
     assert!(
-        composition_runtime_sources.contains("use ironclaw_reborn::loop_driver_host::"),
-        "composition runtime module set missing `use ironclaw_reborn::loop_driver_host::` -- \
+        composition_runtime_sources.contains("use ironclaw_loop_support::")
+            && composition_runtime_sources.contains("LoopCapabilityPortFactory"),
+        "composition runtime module set missing loop-support capability factory wiring -- \
          the host adapter assembly may live in a runtime submodule, but it must stay inside \
          `ironclaw_reborn_composition` rather than the CLI or other ingress points."
     );
