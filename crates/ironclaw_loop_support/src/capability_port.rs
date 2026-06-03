@@ -495,6 +495,7 @@ pub struct HostRuntimeLoopCapabilityPort {
     snapshots: Mutex<HashMap<String, SurfaceSnapshot>>,
     current_surface_version: Mutex<Option<String>>,
     dispatch_records: Mutex<DispatchRecordStore>,
+    provider_tool_call_effective_capability_ids: Mutex<HashMap<String, Vec<CapabilityId>>>,
 }
 
 /// Lock a poisoned-aware `Mutex` and wrap a poison error as the canonical
@@ -536,6 +537,7 @@ impl HostRuntimeLoopCapabilityPort {
             snapshots: Mutex::new(HashMap::new()),
             current_surface_version: Mutex::new(None),
             dispatch_records: Mutex::new(DispatchRecordStore::default()),
+            provider_tool_call_effective_capability_ids: Mutex::new(HashMap::new()),
         }
     }
 
@@ -665,6 +667,31 @@ impl HostRuntimeLoopCapabilityPort {
             notify.notify_waiters();
         }
         Ok(())
+    }
+
+    fn record_provider_tool_call_effective_capability_ids(
+        &self,
+        input_ref: &CapabilityInputRef,
+        capability_ids: Vec<CapabilityId>,
+    ) -> Result<(), AgentLoopHostError> {
+        lock_mut(
+            &self.provider_tool_call_effective_capability_ids,
+            "provider tool-call effective capability id store",
+        )?
+        .insert(input_ref.as_str().to_string(), capability_ids);
+        Ok(())
+    }
+
+    fn provider_tool_call_effective_capability_ids(
+        &self,
+        input_ref: &CapabilityInputRef,
+    ) -> Result<Option<Vec<CapabilityId>>, AgentLoopHostError> {
+        Ok(lock_mut(
+            &self.provider_tool_call_effective_capability_ids,
+            "provider tool-call effective capability id store",
+        )?
+        .get(input_ref.as_str())
+        .cloned())
     }
 
     /// Drop guard for an `InFlight` dispatch reservation. Releases the
@@ -813,22 +840,32 @@ impl HostRuntimeLoopCapabilityPort {
             .input_resolver
             .resolve_capability_input(&self.run_context, &request.input_ref)
             .await?;
-        let output =
-            match capability.output(&input, |requested| snapshot.capability_info(requested)) {
-                Ok(output) => output,
-                Err(error) if error.kind == AgentLoopHostErrorKind::InvalidInvocation => {
-                    // Synthetic capability InvalidInvocation errors are model-side input failures
-                    // such as bad arguments or an unknown capability_info target. Keep those
-                    // model-visible so the driver can retry instead of terminalizing the host.
-                    // INVARIANT: synthetic capabilities must not use InvalidInvocation for
-                    // internal or host-fatal conditions.
-                    return Ok(CapabilityOutcome::Failed(CapabilityFailure {
-                        error_kind: CapabilityFailureKind::InvalidInput,
-                        safe_summary: error.safe_summary,
-                    }));
-                }
-                Err(error) => return Err(error),
-            };
+        let effective_capability_ids =
+            self.provider_tool_call_effective_capability_ids(&request.input_ref)?;
+        let output = match capability.output(&input, |requested| {
+            let capability = snapshot.capability_info(requested)?;
+            if !effective_capability_ids
+                .as_ref()
+                .is_some_and(|capability_ids| capability_ids.contains(capability.capability_id))
+            {
+                return None;
+            }
+            Some(capability)
+        }) {
+            Ok(output) => output,
+            Err(error) if error.kind == AgentLoopHostErrorKind::InvalidInvocation => {
+                // Synthetic capability InvalidInvocation errors are model-side input failures
+                // such as bad arguments or an unknown capability_info target. Keep those
+                // model-visible so the driver can retry instead of terminalizing the host.
+                // INVARIANT: synthetic capabilities must not use InvalidInvocation for
+                // internal or host-fatal conditions.
+                return Ok(CapabilityOutcome::Failed(CapabilityFailure {
+                    error_kind: CapabilityFailureKind::InvalidInput,
+                    safe_summary: error.safe_summary,
+                }));
+            }
+            Err(error) => return Err(error),
+        };
         let result_ref = self
             .result_writer
             .write_capability_result(CapabilityResultWrite {
@@ -933,6 +970,10 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
             .input_resolver
             .register_provider_tool_call_input(&self.run_context, &normalized_tool_call)
             .await?;
+        self.record_provider_tool_call_effective_capability_ids(
+            &input_ref,
+            prepared.effective_capability_ids.clone(),
+        )?;
         Ok(ironclaw_turns::run_profile::CapabilityCallCandidate {
             surface_version: prepared.surface_version,
             capability_id: prepared.capability_id,
@@ -1278,7 +1319,7 @@ fn provider_schema_is_usable(schema: &serde_json::Value) -> bool {
         .and_then(serde_json::Value::as_str)
         .is_some()
     {
-        return true;
+        return false;
     }
     matches!(
         object.get("type").and_then(serde_json::Value::as_str),
@@ -2265,7 +2306,7 @@ mod tests {
         assert!(provider_schema_is_usable(
             &serde_json::json!({"type":"object","properties":{}})
         ));
-        assert!(provider_schema_is_usable(&serde_json::json!({
+        assert!(!provider_schema_is_usable(&serde_json::json!({
             "$ref": "schemas/builtin/write-file.input.v1.json"
         })));
         assert!(!provider_schema_is_usable(
@@ -2613,6 +2654,59 @@ mod tests {
         assert!(
             ironclaw_turns::run_profile::LoopSafeSummary::new(error.safe_summary.clone()).is_ok()
         );
+    }
+
+    #[test]
+    fn provider_argument_preparation_rejects_unresolved_ref_schema() {
+        let schema = serde_json::json!({
+            "$ref": "schemas/demo/echo.input.v1.json"
+        });
+
+        let error = prepare_provider_arguments(
+            &serde_json::json!({ "message": "hello" }),
+            &schema,
+            "provider arguments",
+        )
+        .expect_err("unresolved ref schemas must fail closed");
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::StaleSurface);
+    }
+
+    #[test]
+    fn provider_argument_normalization_rejects_excessive_schema_depth() {
+        fn wrap_object_property(
+            name: String,
+            inner_schema: serde_json::Value,
+        ) -> serde_json::Value {
+            let mut properties = serde_json::Map::new();
+            properties.insert(name, inner_schema);
+            let mut schema = serde_json::Map::new();
+            schema.insert("type".to_string(), serde_json::json!("object"));
+            schema.insert(
+                "properties".to_string(),
+                serde_json::Value::Object(properties),
+            );
+            serde_json::Value::Object(schema)
+        }
+
+        fn wrap_object_value(name: String, inner_value: serde_json::Value) -> serde_json::Value {
+            let mut object = serde_json::Map::new();
+            object.insert(name, inner_value);
+            serde_json::Value::Object(object)
+        }
+
+        let mut schema = serde_json::json!({ "type": "integer" });
+        let mut value = serde_json::json!("1");
+        for depth in (0..40).rev() {
+            let property = format!("level_{depth}");
+            schema = wrap_object_property(property.clone(), schema);
+            value = wrap_object_value(property, value);
+        }
+
+        let error = normalize_provider_arguments(&value, &schema, "provider arguments")
+            .expect_err("excessively deep schema normalization should fail closed");
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
     }
 
     #[test]
@@ -3542,6 +3636,61 @@ mod tests {
         assert!(
             result_writer.records().is_empty(),
             "failed capability_info calls are reported through the provider error-result path"
+        );
+        assert!(
+            runtime.take_requests().is_empty(),
+            "capability_info failure must not dispatch to the host runtime"
+        );
+    }
+
+    #[tokio::test]
+    async fn capability_info_output_requires_staged_effective_target() {
+        let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
+        let provider_id = ExtensionId::new("demo").expect("valid provider id");
+        let context = execution_context("thread-capability-info-unstaged-target");
+        let run_context = loop_run_context(&context).await;
+        let runtime = Arc::new(RecordingHostRuntime::new(vec![visible_capability(
+            capability_id.clone(),
+            provider_id,
+        )]));
+        let result_writer = Arc::new(RecordingResultWriter::default());
+        let port = HostRuntimeLoopCapabilityPortFactory::new(
+            runtime.clone(),
+            visible_request(context),
+            Arc::new(JsonInputResolver(serde_json::json!({
+                "name": capability_id.as_str(),
+                "detail": "schema"
+            }))),
+            result_writer.clone(),
+            dummy_milestone_sink(),
+        )
+        .port_for_run_context(run_context);
+        let surface = port
+            .visible_capabilities(VisibleCapabilityRequest {})
+            .await
+            .expect("visible capabilities load");
+
+        let outcome = port
+            .invoke_capability(CapabilityInvocation {
+                surface_version: surface.version,
+                capability_id: CapabilityId::new(capability_info::CAPABILITY_ID)
+                    .expect("synthetic capability id"),
+                input_ref: CapabilityInputRef::new("input:direct-capability-info")
+                    .expect("test input ref"),
+            })
+            .await
+            .expect("unstaged synthetic invocation should return a model-visible failure");
+
+        assert!(matches!(
+            outcome,
+            CapabilityOutcome::Failed(CapabilityFailure {
+                error_kind: CapabilityFailureKind::InvalidInput,
+                safe_summary
+            }) if safe_summary == "capability_info target is not on the visible surface"
+        ));
+        assert!(
+            result_writer.records().is_empty(),
+            "unstaged capability_info calls must not write hidden schema output"
         );
         assert!(
             runtime.take_requests().is_empty(),
