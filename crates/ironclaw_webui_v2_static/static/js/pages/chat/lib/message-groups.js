@@ -116,7 +116,7 @@ function isActivity(msg) {
 }
 
 function hasToolCalls(msg) {
-  return msg.toolCalls && msg.toolCalls.length > 0;
+  return msg?.toolCalls && msg.toolCalls.length > 0;
 }
 
 function turnRunIdForMessage(msg) {
