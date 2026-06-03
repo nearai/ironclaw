@@ -235,30 +235,40 @@ fn reborn_cli_binary_crate_stays_separate_from_v1_root() {
     );
 
     // The runtime entry point lives at `runtime/mod.rs`; helpers (e.g.
-    // `trigger_poller.rs`) live alongside as child modules. Boundary checks
-    // must scan every `.rs` file under the runtime module so a forbidden
-    // import cannot slip in through a child file.
+    // `trigger_poller.rs`) live alongside as child modules, and a future
+    // child could live in a nested directory. Boundary checks recurse so
+    // a forbidden import cannot slip in through any descendant `.rs`
+    // file. Mirrors the recursion in `collect_forbidden_*` walkers
+    // elsewhere in this file.
+    fn collect_runtime_rs(dir: &std::path::Path, out: &mut String) {
+        for entry in std::fs::read_dir(dir).unwrap_or_else(|err| {
+            panic!(
+                "Reborn CLI runtime directory must be readable at {}: {err}",
+                dir.display()
+            )
+        }) {
+            let path = entry.expect("dir entry").path();
+            if path.is_dir() {
+                collect_runtime_rs(&path, out);
+                continue;
+            }
+            if path.extension().and_then(|s| s.to_str()) != Some("rs") {
+                continue;
+            }
+            let content = std::fs::read_to_string(&path).unwrap_or_else(|err| {
+                panic!(
+                    "Reborn CLI runtime file {} unreadable: {err}",
+                    path.display()
+                )
+            });
+            out.push_str(&content);
+            out.push('\n');
+        }
+    }
+
     let runtime_dir = root.join("crates/ironclaw_reborn_cli/src/runtime");
     let mut cli_runtime_source = String::new();
-    for entry in std::fs::read_dir(&runtime_dir).unwrap_or_else(|err| {
-        panic!(
-            "Reborn CLI runtime/ directory must be readable at {}: {err}",
-            runtime_dir.display()
-        )
-    }) {
-        let path = entry.expect("dir entry").path();
-        if path.extension().and_then(|s| s.to_str()) != Some("rs") {
-            continue;
-        }
-        let content = std::fs::read_to_string(&path).unwrap_or_else(|err| {
-            panic!(
-                "Reborn CLI runtime file {} unreadable: {err}",
-                path.display()
-            )
-        });
-        cli_runtime_source.push_str(&content);
-        cli_runtime_source.push('\n');
-    }
+    collect_runtime_rs(&runtime_dir, &mut cli_runtime_source);
     assert!(
         cli_runtime_source.contains("build_reborn_runtime"),
         "Reborn CLI should enter the assembled runtime through ironclaw_reborn_composition::build_reborn_runtime"

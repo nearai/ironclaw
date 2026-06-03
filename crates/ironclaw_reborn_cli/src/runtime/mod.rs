@@ -430,7 +430,14 @@ fn resolve_google_oauth_config(
     }))
 }
 
-pub(super) fn optional_nonempty_env(name: &str) -> Option<String> {
+/// Read an env var with lenient presence semantics: unset OR
+/// present-but-blank both collapse to `None`. Used for optional-config
+/// callers (OAuth client overrides, etc.) where a blank slot is benign.
+///
+/// **Not** for operator-control knobs like `IRONCLAW_TRIGGER_POLLER_*` —
+/// those use `runtime::trigger_poller::strict_env_var`, which treats
+/// present-blank as a fatal misconfiguration.
+fn optional_nonempty_env(name: &str) -> Option<String> {
     std::env::var(name)
         .ok()
         .map(|value| value.trim().to_string())
@@ -830,6 +837,71 @@ poll_interval_secs = 42
             input.trigger_poller.worker.poll_interval,
             std::time::Duration::from_secs(42),
             "config poll_interval_secs must reach worker.poll_interval"
+        );
+    }
+
+    #[test]
+    fn build_runtime_input_env_enables_trigger_poller_with_no_config_section() {
+        // No [trigger_poller] in config; env var enables → input.trigger_poller.enabled must be true.
+        let _lock = lock_trigger_env();
+        let _enabled = EnvGuard::set("IRONCLAW_TRIGGER_POLLER_ENABLED", "true");
+        let _interval = EnvGuard::clear("IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS");
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("reborn-home");
+        std::fs::create_dir_all(&reborn_home).expect("mkdir");
+        // No config.toml written → no [trigger_poller] section at all.
+
+        let config = RebornBootConfig::resolve_from_env_parts(
+            Some(reborn_home.to_string_lossy().to_string().into()),
+            None,
+            None,
+            None,
+        )
+        .expect("boot config");
+
+        let input = build_runtime_input(&config, RuntimeInputCaller::Run).expect("runtime input");
+
+        assert!(
+            input.trigger_poller.enabled,
+            "IRONCLAW_TRIGGER_POLLER_ENABLED=true must reach input.trigger_poller.enabled through build_runtime_input"
+        );
+    }
+
+    #[test]
+    fn build_runtime_input_env_interval_overrides_config_interval() {
+        // Config says interval=15s, env says interval=45s → env must win at the caller boundary.
+        let _lock = lock_trigger_env();
+        let _enabled = EnvGuard::clear("IRONCLAW_TRIGGER_POLLER_ENABLED");
+        let _interval = EnvGuard::set("IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS", "45");
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("reborn-home");
+        std::fs::create_dir_all(&reborn_home).expect("mkdir");
+        std::fs::write(
+            reborn_home.join("config.toml"),
+            r#"
+[trigger_poller]
+enabled = true
+poll_interval_secs = 15
+"#,
+        )
+        .expect("write config");
+
+        let config = RebornBootConfig::resolve_from_env_parts(
+            Some(reborn_home.to_string_lossy().to_string().into()),
+            None,
+            None,
+            None,
+        )
+        .expect("boot config");
+
+        let input = build_runtime_input(&config, RuntimeInputCaller::Run).expect("runtime input");
+
+        assert_eq!(
+            input.trigger_poller.worker.poll_interval,
+            std::time::Duration::from_secs(45),
+            "env IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS=45 must override config poll_interval_secs=15 through build_runtime_input"
         );
     }
 

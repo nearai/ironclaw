@@ -256,7 +256,7 @@ pub struct BudgetSection {
 ///
 /// All fields are optional so a sparse or absent section is valid; the
 /// composition root applies its own compiled defaults for any field not set
-/// here. Env vars override this section; CLI flags override env vars.
+/// here. Env vars (`IRONCLAW_TRIGGER_POLLER_*`) override this section.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TriggerPollerConfigSection {

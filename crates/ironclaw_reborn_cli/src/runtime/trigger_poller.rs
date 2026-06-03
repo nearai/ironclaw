@@ -2,7 +2,38 @@ use std::time::Duration;
 
 use ironclaw_reborn_composition::TriggerPollerSettings;
 
-use super::optional_nonempty_env;
+/// Read a trigger-poller env var with **strict** presence semantics.
+///
+/// `IRONCLAW_TRIGGER_POLLER_*` env vars are operator-control knobs: presence
+/// is authoritative, not just non-empty content. Treat the var as
+///
+/// - unset → `Ok(None)` (fall through to the config/default layer)
+/// - set, empty or all-whitespace → fatal (operator must unset or fix)
+/// - set, non-empty → `Ok(Some(value))` (caller validates content)
+///
+/// Distinct from the broader `optional_nonempty_env` used by optional-config
+/// callers (OAuth, etc.), which intentionally collapses present-blank to
+/// absent. Here, a present-but-blank env slot is almost always a bug — a
+/// shell typo, a half-set deployment template, or a credential injector
+/// that failed to populate the slot — and falling through silently would
+/// drop the operator's intended kill-switch or interval override with no
+/// visible signal.
+fn strict_env_var(name: &str) -> anyhow::Result<Option<String>> {
+    match std::env::var(name) {
+        Ok(value) => {
+            if value.trim().is_empty() {
+                anyhow::bail!(
+                    "{name} is set but empty or whitespace-only; either unset it or provide a valid value"
+                );
+            }
+            Ok(Some(value))
+        }
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => anyhow::bail!(
+            "{name} contains non-UTF-8 bytes; either unset it or provide a valid value"
+        ),
+    }
+}
 
 /// Upper bound on `poll_interval_secs` (config) and
 /// `IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS` (env). One hour caps the
@@ -124,9 +155,11 @@ pub(super) fn trigger_poller_settings(
         settings.worker = worker;
     }
 
-    // Layer 1: environment variable overrides.
-    if let Some(raw) = optional_nonempty_env("IRONCLAW_TRIGGER_POLLER_ENABLED") {
-        match raw.to_ascii_lowercase().as_str() {
+    // Layer 1: environment variable overrides. Uses strict presence
+    // semantics — a present-but-blank value is fatal, not a silent
+    // fall-through to config/default.
+    if let Some(raw) = strict_env_var("IRONCLAW_TRIGGER_POLLER_ENABLED")? {
+        match raw.trim().to_ascii_lowercase().as_str() {
             "1" | "true" => settings.enabled = true,
             "0" | "false" => settings.enabled = false,
             _ => {
@@ -140,8 +173,8 @@ pub(super) fn trigger_poller_settings(
         }
     }
 
-    if let Some(raw) = optional_nonempty_env("IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS") {
-        let secs: u64 = raw.parse().map_err(|e| {
+    if let Some(raw) = strict_env_var("IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS")? {
+        let secs: u64 = raw.trim().parse().map_err(|e| {
             let display = truncate_env_value_for_display(&raw);
             anyhow::anyhow!(
                 "IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS must be a positive integer, got {display:?}: {e}"
@@ -607,6 +640,66 @@ mod tests {
         assert!(
             !msg.contains(&long_value),
             "full untruncated value must not appear in error, got: {msg}",
+        );
+    }
+
+    // --- strict env contract: present-blank is fatal, not fall-through ---
+
+    #[test]
+    fn trigger_poller_settings_env_enabled_empty_is_error() {
+        // ENABLED="" must NOT silently fall through to config — operator's
+        // env slot is present but empty, almost always a deployment bug.
+        let _lock = lock_trigger_env();
+        let _enabled = EnvGuard::set("IRONCLAW_TRIGGER_POLLER_ENABLED", "");
+        let _interval = EnvGuard::clear("IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS");
+
+        let section = TriggerPollerConfigSection {
+            enabled: Some(true),
+            ..Default::default()
+        };
+        let config = make_config_with_trigger_poller(section);
+
+        let err = trigger_poller_settings(Some(&config)).expect_err(
+            "empty IRONCLAW_TRIGGER_POLLER_ENABLED must be rejected, not silently dropped",
+        );
+
+        assert!(
+            err.to_string().contains("IRONCLAW_TRIGGER_POLLER_ENABLED"),
+            "error must mention the env var, got: {err}",
+        );
+    }
+
+    #[test]
+    fn trigger_poller_settings_env_enabled_whitespace_is_error() {
+        // ENABLED="   " (all-whitespace) hits the same fatal path as "".
+        let _lock = lock_trigger_env();
+        let _enabled = EnvGuard::set("IRONCLAW_TRIGGER_POLLER_ENABLED", "   ");
+        let _interval = EnvGuard::clear("IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS");
+
+        let err = trigger_poller_settings(None)
+            .expect_err("whitespace-only IRONCLAW_TRIGGER_POLLER_ENABLED must be rejected");
+
+        assert!(
+            err.to_string().contains("IRONCLAW_TRIGGER_POLLER_ENABLED"),
+            "error must mention the env var, got: {err}",
+        );
+    }
+
+    #[test]
+    fn trigger_poller_settings_env_interval_empty_is_error() {
+        // INTERVAL_SECS="" follows the same strict contract.
+        let _lock = lock_trigger_env();
+        let _enabled = EnvGuard::clear("IRONCLAW_TRIGGER_POLLER_ENABLED");
+        let _interval = EnvGuard::set("IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS", "");
+
+        let err = trigger_poller_settings(None).expect_err(
+            "empty IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS must be rejected, not silently dropped",
+        );
+
+        assert!(
+            err.to_string()
+                .contains("IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS"),
+            "error must mention the env var, got: {err}",
         );
     }
 }
