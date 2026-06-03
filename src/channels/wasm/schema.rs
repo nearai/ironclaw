@@ -47,7 +47,9 @@ use crate::channels::wasm::capabilities::{
     ChannelCapabilities, EmitRateLimitConfig, MIN_POLL_INTERVAL_MS,
 };
 use crate::channels::wasm::is_reserved_runtime_config_key;
-use crate::tools::wasm::{CapabilitiesFile as ToolCapabilitiesFile, RateLimitSchema};
+use crate::tools::wasm::{
+    CapabilitiesFile as ToolCapabilitiesFile, RateLimitSchema, ResourceLimits,
+};
 
 /// Root schema for a channel capabilities JSON file.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -140,6 +142,20 @@ impl ChannelCapabilitiesFile {
     /// Convert to runtime ChannelCapabilities.
     pub fn to_capabilities(&self) -> ChannelCapabilities {
         self.capabilities.to_channel_capabilities(&self.name)
+    }
+
+    /// Get channel-specific resource limit overrides.
+    pub fn resource_limits(&self, defaults: &ResourceLimits) -> Option<ResourceLimits> {
+        let channel = self.capabilities.channel.as_ref()?;
+        let mut limits = defaults.clone();
+        let mut overridden = false;
+
+        if let Some(fuel) = channel.callback_fuel {
+            limits.fuel = fuel;
+            overridden = true;
+        }
+
+        overridden.then_some(limits)
     }
 
     /// Get the channel config as JSON string.
@@ -426,6 +442,10 @@ pub struct ChannelSpecificCapabilitiesSchema {
     #[serde(default)]
     pub callback_timeout_secs: Option<u64>,
 
+    /// Optional callback fuel limit override.
+    #[serde(default)]
+    pub callback_fuel: Option<u64>,
+
     /// Webhook configuration (secret header, etc.).
     #[serde(default)]
     pub webhook: Option<WebhookSchema>,
@@ -637,7 +657,10 @@ pub struct PollConfigSchema {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use crate::channels::wasm::schema::ChannelCapabilitiesFile;
+    use crate::tools::wasm::ResourceLimits;
 
     #[test]
     fn test_parse_minimal() {
@@ -700,6 +723,45 @@ mod tests {
         // Check config
         let config_json = file.config_json();
         assert!(config_json.contains("signing_secret_name"));
+    }
+
+    #[test]
+    fn test_channel_callback_fuel_overrides_default_resource_limit() {
+        let json = r#"{
+            "name": "wecom",
+            "capabilities": {
+                "channel": {
+                    "callback_fuel": 2000000000
+                }
+            }
+        }"#;
+        let file = ChannelCapabilitiesFile::from_json(json).unwrap();
+        let defaults = ResourceLimits::default()
+            .with_memory(42 * 1024 * 1024)
+            .with_timeout(Duration::from_secs(12));
+
+        let limits = file
+            .resource_limits(&defaults)
+            .expect("callback_fuel should produce a resource override");
+
+        assert_eq!(limits.fuel, 2_000_000_000);
+        assert_eq!(limits.memory_bytes, defaults.memory_bytes);
+        assert_eq!(limits.timeout, defaults.timeout);
+    }
+
+    #[test]
+    fn test_channel_resource_limits_absent_without_overrides() {
+        let json = r#"{
+            "name": "telegram",
+            "capabilities": {
+                "channel": {
+                    "allow_polling": true
+                }
+            }
+        }"#;
+        let file = ChannelCapabilitiesFile::from_json(json).unwrap();
+
+        assert!(file.resource_limits(&ResourceLimits::default()).is_none());
     }
 
     #[test]

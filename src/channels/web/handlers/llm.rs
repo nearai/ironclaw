@@ -309,7 +309,7 @@ async fn fetch_provider_models(req: ListModelsRequest) -> ListModelsResponse {
         }
         _ => {
             // OpenAI-compatible, Anthropic, and NEAR AI all support GET /models.
-            // NEAR AI private endpoints and Anthropic need a /v1 prefix.
+            // NEAR AI and Anthropic expose it under /v1.
             let effective_base = models_endpoint_base(&req.adapter, base);
             let url = format!("{effective_base}/models");
             let mut builder = client.get(&url);
@@ -657,39 +657,21 @@ fn builtin_api_key_env_var(provider_id: &str) -> Option<String> {
 
 /// Compute the effective base URL for a provider's `/models` endpoint.
 ///
-/// Adapters that expose `/models` under `/v1` (Anthropic, NEAR AI private)
+/// Adapters that expose `/models` under `/v1` (Anthropic and NEAR AI)
 /// need a `/v1` segment injected — but only when the operator-supplied base
 /// URL doesn't already include one. Operators commonly configure the base
-/// with or without the suffix (`https://us.private-chat-stg.near.ai` vs
-/// `https://us.private-chat-stg.near.ai/v1`) and both shapes must resolve
-/// to the same `/v1/models` URL without producing `/v1/v1/models`.
+/// with or without the suffix (`https://cloud-stg-api.near.ai` vs
+/// `https://cloud-stg-api.near.ai/v1`) and both shapes must resolve to the
+/// same `/v1/models` URL without producing `/v1/v1/models`.
 fn models_endpoint_base(adapter: &str, base: &str) -> String {
+    let base = base.trim_end_matches('/');
     let has_v1 = base.ends_with("/v1") || base.contains("/v1/");
-    let requires_v1 =
-        (adapter == "nearai" && is_nearai_private_endpoint(base)) || adapter == "anthropic";
+    let requires_v1 = adapter == "nearai" || adapter == "anthropic";
     if requires_v1 && !has_v1 {
         format!("{base}/v1")
     } else {
         base.to_string()
     }
-}
-
-/// Check if a base URL belongs to a NEAR AI private endpoint.
-///
-/// Matches `private.near.ai` and `private-chat-stg.near.ai` exactly,
-/// or any subdomain of either (e.g. `us.private.near.ai`,
-/// `us.private-chat-stg.near.ai`). Rejects lookalikes like
-/// `private-evil.near.ai` or `myprivate.near.ai`.
-fn is_nearai_private_endpoint(base_url: &str) -> bool {
-    const PRIVATE_HOSTS: &[&str] = &["private.near.ai", "private-chat-stg.near.ai"];
-    url::Url::parse(base_url)
-        .ok()
-        .and_then(|u| u.host_str().map(|h| h.to_lowercase()))
-        .is_some_and(|host| {
-            PRIVATE_HOSTS
-                .iter()
-                .any(|root| host == *root || host.ends_with(&format!(".{root}")))
-        })
 }
 
 #[cfg(test)]
@@ -1104,70 +1086,40 @@ mod tests {
         );
     }
 
-    // --- is_nearai_private_endpoint tests ---
-
-    #[test]
-    fn test_nearai_private_exact_match() {
-        assert!(is_nearai_private_endpoint("https://private.near.ai/v1"));
-    }
-
-    #[test]
-    fn test_nearai_private_subdomain() {
-        assert!(is_nearai_private_endpoint("https://us.private.near.ai/v1"));
-    }
-
-    #[test]
-    fn test_nearai_private_stg_exact_match() {
-        assert!(is_nearai_private_endpoint(
-            "https://private-chat-stg.near.ai/"
-        ));
-    }
-
-    #[test]
-    fn test_nearai_private_stg_subdomain() {
-        assert!(is_nearai_private_endpoint(
-            "https://us.private-chat-stg.near.ai/v1"
-        ));
-    }
-
-    #[test]
-    fn test_nearai_public_endpoint_not_private() {
-        assert!(!is_nearai_private_endpoint("https://cloud-api.near.ai/v1"));
-    }
-
-    #[test]
-    fn test_nearai_private_lookalike_rejected() {
-        // "private" appears in the hostname but not as the correct domain
-        assert!(!is_nearai_private_endpoint(
-            "https://private-evil.near.ai/v1"
-        ));
-        assert!(!is_nearai_private_endpoint("https://myprivate.near.ai/v1"));
-    }
-
-    #[test]
-    fn test_nearai_private_non_near_ai_rejected() {
-        assert!(!is_nearai_private_endpoint("https://private.evil.com/v1"));
-    }
-
     // --- models_endpoint_base tests (URL-construction path in fetch_provider_models) ---
     //
     // These exercise the URL-construction gate the list-models handler uses,
     // so a future refactor that drops the /v1 guard on the NEAR AI branch
-    // fails here — not just in the is_nearai_private_endpoint unit tests.
+    // fails here.
 
     #[test]
-    fn test_models_endpoint_base_nearai_private_stg_adds_v1() {
+    fn test_models_endpoint_base_nearai_public_stg_adds_v1() {
         assert_eq!(
-            models_endpoint_base("nearai", "https://us.private-chat-stg.near.ai"),
-            "https://us.private-chat-stg.near.ai/v1"
+            models_endpoint_base("nearai", "https://cloud-stg-api.near.ai"),
+            "https://cloud-stg-api.near.ai/v1"
+        );
+    }
+
+    #[test]
+    fn test_models_endpoint_base_nearai_public_adds_v1() {
+        assert_eq!(
+            models_endpoint_base("nearai", "https://cloud-api.near.ai"),
+            "https://cloud-api.near.ai/v1"
+        );
+    }
+
+    #[test]
+    fn test_models_endpoint_base_trims_trailing_slash_before_v1() {
+        assert_eq!(
+            models_endpoint_base("nearai", "https://cloud-api.near.ai/"),
+            "https://cloud-api.near.ai/v1"
         );
     }
 
     #[test]
     fn test_models_endpoint_base_nearai_private_stg_with_v1_suffix_no_double() {
         // Regression: operators who include /v1 in the base URL must not get
-        // /v1/v1/models (404). Before the fix, the NEAR AI branch appended
-        // /v1 unconditionally for any private host.
+        // /v1/v1/models (404).
         assert_eq!(
             models_endpoint_base("nearai", "https://us.private-chat-stg.near.ai/v1"),
             "https://us.private-chat-stg.near.ai/v1"
@@ -1183,9 +1135,7 @@ mod tests {
     }
 
     #[test]
-    fn test_models_endpoint_base_nearai_public_unchanged() {
-        // Public NEAR AI already embeds /v1 and doesn't need the private-host
-        // treatment at all.
+    fn test_models_endpoint_base_nearai_public_with_v1_suffix_no_double() {
         assert_eq!(
             models_endpoint_base("nearai", "https://cloud-api.near.ai/v1"),
             "https://cloud-api.near.ai/v1"
@@ -1404,7 +1354,7 @@ mod tests {
         let captured_auth: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let captured_auth_clone = Arc::clone(&captured_auth);
         let mock = axum::Router::new().route(
-            "/models",
+            "/v1/models",
             axum::routing::get(move |headers: axum::http::HeaderMap| {
                 let auth = headers
                     .get("authorization")
