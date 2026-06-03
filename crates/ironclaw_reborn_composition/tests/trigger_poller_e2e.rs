@@ -1,0 +1,477 @@
+//! Full-path integration test for the composition-owned trigger poller.
+//!
+//! Drives a real `RebornRuntime` with the trigger poller enabled, seeds a
+//! due `TriggerRecord` via the in-memory repository, and asserts that the
+//! spawned background task (a) mutates the record and (b) causes the LLM
+//! gateway to receive a request whose content includes the trigger prompt.
+
+#![cfg(feature = "test-support")]
+
+use std::sync::{Arc, Mutex as StdMutex};
+use std::time::{Duration, Instant};
+
+use async_trait::async_trait;
+use chrono::Utc;
+use ironclaw_conversations::{AdapterInstallationId, AdapterKind, ExternalActorRef};
+use ironclaw_host_api::runtime_policy::{
+    ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
+    NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
+};
+use ironclaw_host_api::{AgentId, TenantId, UserId};
+use ironclaw_loop_support::{
+    HostManagedModelError, HostManagedModelGateway, HostManagedModelRequest,
+    HostManagedModelResponse,
+};
+use ironclaw_reborn_composition::{
+    RebornBuildInput, RebornRuntime, RebornRuntimeIdentity, RebornRuntimeInput,
+    TriggerPollerSettings, build_reborn_runtime,
+};
+use ironclaw_triggers::{
+    TriggerCompletionPolicy, TriggerId, TriggerPollerWorkerConfig, TriggerRecord, TriggerSchedule,
+    TriggerSourceKind, TriggerState,
+};
+
+const TENANT: &str = "trigger-e2e-tenant";
+const USER: &str = "trigger-e2e-owner";
+const AGENT: &str = "trigger-e2e-agent";
+const TRIGGER_PROMPT: &str = "trigger-e2e-prompt-marker-do-not-rephrase";
+
+fn local_dev_runtime_policy() -> EffectiveRuntimePolicy {
+    EffectiveRuntimePolicy {
+        deployment: DeploymentMode::LocalSingleUser,
+        requested_profile: RuntimeProfile::LocalDev,
+        resolved_profile: RuntimeProfile::LocalDev,
+        filesystem_backend: FilesystemBackendKind::HostWorkspace,
+        process_backend: ProcessBackendKind::LocalHost,
+        network_mode: NetworkMode::DirectLogged,
+        secret_mode: SecretMode::ScrubbedEnv,
+        approval_policy: ApprovalPolicy::AskDestructive,
+        audit_mode: AuditMode::LocalMinimal,
+    }
+}
+
+#[derive(Debug, Default)]
+struct RecordingGateway {
+    requests: Arc<StdMutex<Vec<HostManagedModelRequest>>>,
+}
+
+impl RecordingGateway {
+    fn captured_message_contents(&self) -> Vec<String> {
+        let snapshot = self
+            .requests
+            .lock()
+            .expect("recording gateway lock poisoned")
+            .clone();
+        snapshot
+            .iter()
+            .flat_map(|req| req.messages.iter().map(|m| m.content.clone()))
+            .collect()
+    }
+}
+
+#[async_trait]
+impl HostManagedModelGateway for RecordingGateway {
+    async fn stream_model(
+        &self,
+        request: HostManagedModelRequest,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        self.requests
+            .lock()
+            .expect("recording gateway lock poisoned")
+            .push(request);
+        Ok(HostManagedModelResponse::assistant_reply(
+            "trigger e2e ok".to_string(),
+        ))
+    }
+}
+
+/// Shared runtime builder. Every test passes the `TriggerPollerSettings` it
+/// wants; identity, runtime policy, and model-gateway override are shared.
+async fn build_runtime_with(
+    root: &tempfile::TempDir,
+    recording_gateway: Arc<RecordingGateway>,
+    trigger_poller: TriggerPollerSettings,
+) -> RebornRuntime {
+    let input =
+        RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev(USER, root.path().join("local-dev"))
+                .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: TENANT.to_string(),
+            agent_id: AGENT.to_string(),
+            source_binding_id: "trigger-e2e-source".to_string(),
+            reply_target_binding_id: "trigger-e2e-reply".to_string(),
+        })
+        .with_trigger_poller_settings(trigger_poller)
+        .with_model_gateway_override(
+            Arc::clone(&recording_gateway) as Arc<dyn HostManagedModelGateway>
+        );
+
+    build_reborn_runtime(input).await.expect("runtime builds")
+}
+
+#[tokio::test]
+async fn trigger_poller_drives_trusted_ingress_for_due_scheduled_trigger() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let recording_gateway = Arc::new(RecordingGateway {
+        requests: Arc::new(StdMutex::new(Vec::new())),
+    });
+
+    let runtime = build_runtime_with(
+        &root,
+        Arc::clone(&recording_gateway),
+        TriggerPollerSettings {
+            enabled: true,
+            worker: TriggerPollerWorkerConfig {
+                poll_interval: Duration::from_millis(20),
+                ..Default::default()
+            },
+            startup_jitter_max: Duration::ZERO,
+            tick_jitter_max: Duration::ZERO,
+        },
+    )
+    .await;
+
+    let repo = runtime
+        .trigger_repository()
+        .expect("local-dev runtime exposes trigger repository");
+    let pairing = runtime
+        .trigger_conversation_pairing()
+        .expect("trigger poller runtime exposes conversation pairing service");
+
+    let tenant_id = TenantId::new(TENANT).expect("tenant id");
+    let user_id = UserId::new(USER).expect("user id");
+    let agent_id = AgentId::new(AGENT).expect("agent id");
+    let trigger_id = TriggerId::new();
+
+    // Seed the trigger creator's actor pairing through the production
+    // `ConversationActorPairingService` API. The trusted trigger
+    // submission path fails closed for unpaired actors by design; in
+    // production, onboarding establishes this pairing before any trigger
+    // can be created. The adapter kind / installation id / external actor
+    // ref must match the values
+    // `crates/ironclaw_reborn_composition/src/trigger_poller_trusted_submit.rs`
+    // hardcodes for trigger fires.
+    pairing
+        .pair_external_actor(
+            tenant_id.clone(),
+            AdapterKind::new("trigger").expect("adapter kind"),
+            AdapterInstallationId::new("reborn-trigger-poller").expect("installation id"),
+            ExternalActorRef::new("user", user_id.as_str()).expect("actor ref"),
+            user_id.clone(),
+        )
+        .await
+        .expect("pair external actor for trigger creator");
+
+    let record = TriggerRecord {
+        trigger_id,
+        tenant_id: tenant_id.clone(),
+        creator_user_id: user_id,
+        agent_id: Some(agent_id),
+        project_id: None,
+        name: "trigger-e2e-test".to_string(),
+        source: TriggerSourceKind::Schedule,
+        schedule: TriggerSchedule::cron("* * * * *").expect("valid cron expression"),
+        completion_policy: TriggerCompletionPolicy::CompleteAfterFirstFire,
+        prompt: TRIGGER_PROMPT.to_string(),
+        state: TriggerState::Scheduled,
+        next_run_at: Utc::now() - chrono::Duration::seconds(120),
+        last_run_at: None,
+        last_fired_slot: None,
+        last_status: None,
+        active_fire_slot: None,
+        active_run_ref: None,
+        created_at: Utc::now(),
+    };
+
+    repo.upsert_trigger(record.clone())
+        .await
+        .expect("upsert trigger record");
+
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut record_was_mutated = false;
+    let mut prompt_seen = false;
+    let mut final_record: Option<TriggerRecord> = None;
+    let mut captured_contents: Vec<String> = Vec::new();
+
+    while Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let current = repo
+            .get_trigger(tenant_id.clone(), record.trigger_id)
+            .await
+            .expect("get_trigger")
+            .expect("record present");
+
+        let mutated = current.last_fired_slot.is_some()
+            || current.last_run_at.is_some()
+            || current.last_status.is_some()
+            || current.active_fire_slot.is_some()
+            || current.state == TriggerState::Completed;
+
+        let contents = recording_gateway.captured_message_contents();
+        let trigger_prompt_seen = contents
+            .iter()
+            .any(|content| content.contains(TRIGGER_PROMPT));
+
+        final_record = Some(current);
+        captured_contents = contents;
+
+        if mutated {
+            record_was_mutated = true;
+        }
+        if trigger_prompt_seen {
+            prompt_seen = true;
+        }
+
+        if record_was_mutated && prompt_seen {
+            break;
+        }
+    }
+
+    runtime.shutdown().await.expect("runtime shutdown");
+
+    assert!(
+        record_was_mutated,
+        "poller did not mutate trigger record within 15s — record: {final_record:?}"
+    );
+    assert!(
+        prompt_seen,
+        "LLM gateway never received a request containing the trigger prompt within 15s \
+         — captured_messages: {captured_contents:?}"
+    );
+}
+
+#[tokio::test]
+async fn trigger_conversation_pairing_returns_none_when_poller_disabled() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let recording_gateway = Arc::new(RecordingGateway {
+        requests: Arc::new(StdMutex::new(Vec::new())),
+    });
+
+    // Use the default settings (enabled: false) — do NOT call
+    // with_trigger_poller_settings with enabled: true.
+    let runtime = build_runtime_with(
+        &root,
+        Arc::clone(&recording_gateway),
+        TriggerPollerSettings::default(),
+    )
+    .await;
+
+    // The trigger repository is built regardless of poller state.
+    assert!(
+        runtime.trigger_repository().is_some(),
+        "trigger repository should be present even when poller is disabled"
+    );
+
+    // When the poller is disabled, no conversation pairing service is wired.
+    assert!(
+        runtime.trigger_conversation_pairing().is_none(),
+        "trigger_conversation_pairing should be None when poller is disabled"
+    );
+
+    runtime.shutdown().await.expect("runtime shutdown");
+}
+
+#[tokio::test]
+async fn trigger_poller_does_not_fire_trigger_with_future_next_run_at() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let recording_gateway = Arc::new(RecordingGateway {
+        requests: Arc::new(StdMutex::new(Vec::new())),
+    });
+
+    let runtime = build_runtime_with(
+        &root,
+        Arc::clone(&recording_gateway),
+        TriggerPollerSettings {
+            enabled: true,
+            worker: TriggerPollerWorkerConfig {
+                poll_interval: Duration::from_millis(20),
+                ..Default::default()
+            },
+            startup_jitter_max: Duration::ZERO,
+            tick_jitter_max: Duration::ZERO,
+        },
+    )
+    .await;
+
+    let repo = runtime
+        .trigger_repository()
+        .expect("local-dev runtime exposes trigger repository");
+    let pairing = runtime
+        .trigger_conversation_pairing()
+        .expect("trigger poller runtime exposes conversation pairing service");
+
+    let tenant_id = TenantId::new(TENANT).expect("tenant id");
+    let user_id = UserId::new(USER).expect("user id");
+    let agent_id = AgentId::new(AGENT).expect("agent id");
+    let trigger_id = TriggerId::new();
+
+    pairing
+        .pair_external_actor(
+            tenant_id.clone(),
+            AdapterKind::new("trigger").expect("adapter kind"),
+            AdapterInstallationId::new("reborn-trigger-poller").expect("installation id"),
+            ExternalActorRef::new("user", user_id.as_str()).expect("actor ref"),
+            user_id.clone(),
+        )
+        .await
+        .expect("pair external actor for trigger creator");
+
+    // Seed a trigger that is NOT due — next_run_at is one hour in the future.
+    let record = TriggerRecord {
+        trigger_id,
+        tenant_id: tenant_id.clone(),
+        creator_user_id: user_id,
+        agent_id: Some(agent_id),
+        project_id: None,
+        name: "trigger-e2e-future".to_string(),
+        source: TriggerSourceKind::Schedule,
+        schedule: TriggerSchedule::cron("* * * * *").expect("valid cron expression"),
+        completion_policy: TriggerCompletionPolicy::CompleteAfterFirstFire,
+        prompt: TRIGGER_PROMPT.to_string(),
+        state: TriggerState::Scheduled,
+        next_run_at: Utc::now() + chrono::Duration::seconds(3600),
+        last_run_at: None,
+        last_fired_slot: None,
+        last_status: None,
+        active_fire_slot: None,
+        active_run_ref: None,
+        created_at: Utc::now(),
+    };
+
+    repo.upsert_trigger(record.clone())
+        .await
+        .expect("upsert trigger record");
+
+    // Sleep for ~500ms — 25 poll cycles at 20ms. Generous margin.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let current = repo
+        .get_trigger(tenant_id.clone(), record.trigger_id)
+        .await
+        .expect("get_trigger")
+        .expect("record present");
+
+    runtime.shutdown().await.expect("runtime shutdown");
+
+    assert!(
+        current.last_fired_slot.is_none(),
+        "poller should not have fired a future trigger — last_fired_slot: {:?}",
+        current.last_fired_slot
+    );
+    assert!(
+        current.last_run_at.is_none(),
+        "poller should not have run a future trigger — last_run_at: {:?}",
+        current.last_run_at
+    );
+    assert!(
+        current.last_status.is_none(),
+        "poller should not have set a status on a future trigger — last_status: {:?}",
+        current.last_status
+    );
+    assert!(
+        current.active_fire_slot.is_none(),
+        "poller should not have set active_fire_slot on a future trigger — active_fire_slot: {:?}",
+        current.active_fire_slot
+    );
+    assert_eq!(
+        current.state,
+        TriggerState::Scheduled,
+        "future trigger should remain Scheduled — state: {:?}",
+        current.state
+    );
+    assert!(
+        recording_gateway.captured_message_contents().is_empty(),
+        "LLM gateway should not have received any requests for a future trigger"
+    );
+}
+
+#[tokio::test]
+async fn trigger_poller_does_not_submit_turn_for_unpaired_actor() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let recording_gateway = Arc::new(RecordingGateway {
+        requests: Arc::new(StdMutex::new(Vec::new())),
+    });
+
+    let runtime = build_runtime_with(
+        &root,
+        Arc::clone(&recording_gateway),
+        TriggerPollerSettings {
+            enabled: true,
+            worker: TriggerPollerWorkerConfig {
+                poll_interval: Duration::from_millis(20),
+                ..Default::default()
+            },
+            startup_jitter_max: Duration::ZERO,
+            tick_jitter_max: Duration::ZERO,
+        },
+    )
+    .await;
+
+    let repo = runtime
+        .trigger_repository()
+        .expect("local-dev runtime exposes trigger repository");
+
+    // Intentionally do NOT call pair_external_actor — the actor is unpaired.
+
+    let tenant_id = TenantId::new(TENANT).expect("tenant id");
+    let user_id = UserId::new(USER).expect("user id");
+    let agent_id = AgentId::new(AGENT).expect("agent id");
+    let trigger_id = TriggerId::new();
+
+    // Seed a past-due trigger.
+    let record = TriggerRecord {
+        trigger_id,
+        tenant_id: tenant_id.clone(),
+        creator_user_id: user_id,
+        agent_id: Some(agent_id),
+        project_id: None,
+        name: "trigger-e2e-unpaired".to_string(),
+        source: TriggerSourceKind::Schedule,
+        schedule: TriggerSchedule::cron("* * * * *").expect("valid cron expression"),
+        completion_policy: TriggerCompletionPolicy::CompleteAfterFirstFire,
+        prompt: TRIGGER_PROMPT.to_string(),
+        state: TriggerState::Scheduled,
+        next_run_at: Utc::now() - chrono::Duration::seconds(120),
+        last_run_at: None,
+        last_fired_slot: None,
+        last_status: None,
+        active_fire_slot: None,
+        active_run_ref: None,
+        created_at: Utc::now(),
+    };
+
+    repo.upsert_trigger(record.clone())
+        .await
+        .expect("upsert trigger record");
+
+    // Sleep for ~1s — 50 poll cycles at 20ms — to give the poller multiple chances.
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    let current = repo
+        .get_trigger(tenant_id.clone(), record.trigger_id)
+        .await
+        .expect("get_trigger")
+        .expect("record present");
+
+    runtime.shutdown().await.expect("runtime shutdown");
+
+    // Safety guarantee: no turn was ever submitted to the LLM gateway.
+    assert!(
+        recording_gateway.captured_message_contents().is_empty(),
+        "LLM gateway should not have received any requests for an unpaired actor — \
+         captured: {:?}",
+        recording_gateway.captured_message_contents()
+    );
+
+    // The trigger must not be marked Completed (failure-closed behavior).
+    assert_ne!(
+        current.state,
+        TriggerState::Completed,
+        "unpaired trigger must not be marked Completed — state: {:?}, last_status: {:?}",
+        current.state,
+        current.last_status
+    );
+}
