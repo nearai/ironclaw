@@ -101,14 +101,25 @@ impl GsuiteExecutor {
                 network_egress_bytes,
             } => {
                 self.resolver
-                    .refresh(request.scope, &extension, credential.account_id)
+                    .refresh(
+                        request.scope,
+                        &credential.account_scope,
+                        &extension,
+                        credential.account_id,
+                    )
                     .await
                     .map_err(|error| {
                         add_network_usage(map_credential_error(error), network_egress_bytes)
                     })?;
                 let refreshed = self
                     .resolver
-                    .resolve_account(request.scope, &extension, credential.account_id, &scopes)
+                    .resolve_account(
+                        request.scope,
+                        &credential.account_scope,
+                        &extension,
+                        credential.account_id,
+                        &scopes,
+                    )
                     .await
                     .map_err(|error| {
                         add_network_usage(map_credential_error(error), network_egress_bytes)

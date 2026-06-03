@@ -572,6 +572,21 @@ where
         Ok(())
     }
 
+    fn update_session_id(
+        &self,
+        session_key: &McpHostHttpSessionKey,
+        session_id: Option<String>,
+    ) -> Result<(), String> {
+        let Some(session_id) = session_id else {
+            return Ok(());
+        };
+        let mut guard = self.state.sessions.lock().map_err(|_| request_denied())?;
+        if let Some(session) = guard.get_mut(session_key) {
+            session.session_id = Some(session_id);
+        }
+        Ok(())
+    }
+
     async fn initialize_session(
         &self,
         request: &McpClientRequest,
@@ -610,6 +625,7 @@ where
             )
             .await?;
         accumulate_usage(&mut usage, initialized.usage);
+        self.update_session_id(session_key, initialized.session_id.clone())?;
         if initialized.response.error {
             return Err(response_error());
         }
@@ -657,6 +673,7 @@ where
             .send_planned_json_rpc(&request, &session_key, tool_call_plan)
             .await?;
         accumulate_usage(&mut usage, call.usage);
+        self.update_session_id(&session_key, call.session_id.clone())?;
         if call.response.error {
             return Err(response_error());
         }
@@ -700,6 +717,7 @@ where
             .send_planned_json_rpc(&request, &session_key, tools_list_plan)
             .await?;
         accumulate_usage(&mut usage, tools.usage);
+        self.update_session_id(&session_key, tools.session_id.clone())?;
         if tools.response.error {
             return Err(response_error());
         }

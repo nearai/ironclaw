@@ -21,9 +21,10 @@ use ironclaw_first_party_extensions::{
     CALENDAR_UPDATE_EVENT_CAPABILITY_ID, GMAIL_CREATE_DRAFT_CAPABILITY_ID,
     GMAIL_GET_MESSAGE_CAPABILITY_ID, GMAIL_LIST_MESSAGES_CAPABILITY_ID,
     GMAIL_REPLY_TO_MESSAGE_CAPABILITY_ID, GMAIL_SEND_MESSAGE_CAPABILITY_ID,
-    GMAIL_TRASH_MESSAGE_CAPABILITY_ID, GSUITE_OUTPUT_BYTES_LIMIT, GSUITE_REQUEST_BODY_LIMIT,
-    GSUITE_RESPONSE_BODY_LIMIT, GsuiteCredentialDispatchReason, GsuiteDispatchRequest,
-    GsuiteExecutor, google_provider_id, gsuite_package_specs, gsuite_resource_profile,
+    GMAIL_TRASH_MESSAGE_CAPABILITY_ID, GSUITE_OUTPUT_BYTES_LIMIT, GSUITE_PROVIDER_SCOPES,
+    GSUITE_REQUEST_BODY_LIMIT, GSUITE_RESPONSE_BODY_LIMIT, GsuiteCredentialDispatchReason,
+    GsuiteDispatchRequest, GsuiteExecutor, google_provider_id, gsuite_package_specs,
+    gsuite_resource_profile,
 };
 use ironclaw_host_api::{
     ExtensionId, NetworkMethod, NetworkScheme, RUNTIME_HTTP_REASON_RESPONSE_BODY_LIMIT_EXCEEDED,
@@ -51,6 +52,21 @@ fn gsuite_packages_declare_calendar_and_gmail_capabilities() {
 #[test]
 fn google_provider_id_returns_valid_provider() {
     assert_eq!(google_provider_id().unwrap().as_str(), "google");
+}
+
+#[test]
+fn gsuite_provider_scope_union_covers_every_capability_scope() {
+    for package in gsuite_package_specs() {
+        for capability in package.capabilities {
+            for scope in capability.required_scopes {
+                assert!(
+                    GSUITE_PROVIDER_SCOPES.contains(scope),
+                    "{} is missing required scope {scope} from the shared provider scope union",
+                    capability.id
+                );
+            }
+        }
+    }
 }
 
 #[tokio::test]

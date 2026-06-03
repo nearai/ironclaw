@@ -2,9 +2,9 @@ use std::sync::Arc;
 
 use ironclaw_auth::{
     AuthProductError, AuthProductScope, AuthProviderId, AuthSurface, CredentialAccount,
-    CredentialAccountId, CredentialAccountRecordSource, CredentialAccountSelectionRequest,
-    CredentialAccountService, CredentialAccountStatus, CredentialRecoveryProjection,
-    CredentialRefreshRequest, GOOGLE_PROVIDER_ID, ProviderScope,
+    CredentialAccountId, CredentialAccountLookupRequest, CredentialAccountRecordSource,
+    CredentialAccountSelectionRequest, CredentialAccountService, CredentialAccountStatus,
+    CredentialRecoveryProjection, CredentialRefreshRequest, GOOGLE_PROVIDER_ID, ProviderScope,
 };
 use ironclaw_host_api::{ExtensionId, ResourceScope, SecretHandle};
 use thiserror::Error;
@@ -12,6 +12,7 @@ use thiserror::Error;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GoogleCredential {
     pub account_id: CredentialAccountId,
+    pub account_scope: AuthProductScope,
     pub access_secret_scope: ResourceScope,
     pub access_secret: SecretHandle,
     pub granted_scopes: Vec<ProviderScope>,
@@ -86,16 +87,16 @@ impl GoogleCredentialResolver {
     pub async fn resolve_account(
         &self,
         scope: &ResourceScope,
+        account_scope: &AuthProductScope,
         requester_extension: &ExtensionId,
         account_id: CredentialAccountId,
         required_scopes: &[ProviderScope],
     ) -> Result<GoogleCredential, GoogleCredentialError> {
-        let auth_scope = AuthProductScope::new(scope.clone(), AuthSurface::Api);
         let provider = google_provider_id()?;
         let account = self
             .recoverable_lookup(
-                self.account_for_owner(
-                    auth_scope,
+                self.account_by_id(
+                    account_scope,
                     provider.clone(),
                     requester_extension.clone(),
                     account_id,
@@ -143,7 +144,8 @@ impl GoogleCredentialResolver {
         }
         Ok(GoogleCredential {
             account_id: account.id,
-            access_secret_scope: account.scope.resource,
+            account_scope: account.scope.clone(),
+            access_secret_scope: account.scope.resource.clone(),
             access_secret,
             granted_scopes: account.scopes,
             missing_scopes,
@@ -153,15 +155,15 @@ impl GoogleCredentialResolver {
     pub async fn refresh(
         &self,
         scope: &ResourceScope,
+        account_scope: &AuthProductScope,
         requester_extension: &ExtensionId,
         account_id: CredentialAccountId,
     ) -> Result<(), GoogleCredentialError> {
-        let auth_scope = AuthProductScope::new(scope.clone(), AuthSurface::Api);
         let provider = google_provider_id()?;
         let account = self
             .recoverable_lookup(
-                self.account_for_owner(
-                    auth_scope,
+                self.account_by_id(
+                    account_scope,
                     provider.clone(),
                     requester_extension.clone(),
                     account_id,
@@ -187,27 +189,30 @@ impl GoogleCredentialResolver {
         .map(|_| ())
     }
 
-    async fn account_for_owner(
+    async fn account_by_id(
         &self,
-        scope: AuthProductScope,
+        scope: &AuthProductScope,
         provider: AuthProviderId,
         requester_extension: ExtensionId,
         account_id: CredentialAccountId,
     ) -> Result<Option<CredentialAccount>, AuthProductError> {
-        let accounts = self.account_records.accounts_for_owner(&scope).await?;
-        for account in accounts {
-            if account.id != account_id {
-                continue;
-            }
-            if account.provider != provider {
-                return Ok(None);
-            }
-            if !account.is_authorized_for_requester(Some(&requester_extension)) {
-                return Err(AuthProductError::CrossScopeDenied);
-            }
-            return Ok(Some(account));
+        let account = self
+            .accounts
+            .get_account(
+                CredentialAccountLookupRequest::new(scope.clone(), account_id)
+                    .for_extension(requester_extension.clone()),
+            )
+            .await?;
+        let Some(account) = account else {
+            return Ok(None);
+        };
+        if account.provider != provider {
+            return Ok(None);
         }
-        Ok(None)
+        if !account.is_authorized_for_requester(Some(&requester_extension)) {
+            return Err(AuthProductError::CrossScopeDenied);
+        }
+        Ok(Some(account))
     }
 
     async fn recovery_required(
@@ -419,7 +424,7 @@ mod tests {
         let auth = InMemoryAuthProductServices::new();
         let mut account = auth
             .create_account(new_credential_account(
-                auth_scope,
+                auth_scope.clone(),
                 CredentialAccountStatus::Configured,
             ))
             .await
@@ -506,6 +511,41 @@ mod tests {
             SecretHandle::new("google-access-token").unwrap()
         );
         assert!(credential.missing_scopes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn resolve_account_returns_recovery_when_account_has_wrong_provider() {
+        let scope =
+            ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new())
+                .unwrap();
+        let auth_scope = AuthProductScope::new(scope.clone(), AuthSurface::Api);
+        let auth = InMemoryAuthProductServices::new();
+        let mut account = auth
+            .create_account(new_credential_account(
+                auth_scope.clone(),
+                CredentialAccountStatus::Configured,
+            ))
+            .await
+            .unwrap();
+        account.provider = AuthProviderId::new("github").unwrap();
+        let account_service = Arc::new(FakeCredentialAccountService {
+            account: account.clone(),
+        });
+        let resolver =
+            GoogleCredentialResolver::new(account_service.clone(), account_service.clone());
+
+        let error = resolver
+            .resolve_account(
+                &scope,
+                &auth_scope,
+                &ExtensionId::new("gmail").unwrap(),
+                account.id,
+                &[],
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, GoogleCredentialError::Recovery(_)));
     }
 
     fn new_credential_account(

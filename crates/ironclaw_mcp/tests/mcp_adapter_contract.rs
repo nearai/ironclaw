@@ -326,6 +326,37 @@ async fn concrete_mcp_http_client_uses_negotiated_protocol_version_header() {
 }
 
 #[tokio::test]
+async fn concrete_mcp_http_client_reuses_rotated_session_id_after_initialized() {
+    let egress = RotatingSessionRuntimeEgress::new();
+    let client = McpHostHttpClient::new(
+        McpRuntimeHttpAdapter::new(Arc::new(egress.clone())),
+        StaticMcpHostHttpEgressPlanner::new(host_http_plan()),
+    );
+
+    client
+        .call_tool(McpClientRequest {
+            provider: ExtensionId::new("github-mcp").unwrap(),
+            capability_id: CapabilityId::new("github-mcp.search").unwrap(),
+            scope: sample_scope(),
+            transport: "http".to_string(),
+            command: None,
+            args: vec![],
+            url: Some("https://mcp.example.test/mcp".to_string()),
+            input: json!({"query": "ironclaw"}),
+            max_output_bytes: 4096,
+        })
+        .await
+        .unwrap();
+
+    let requests = egress.requests();
+    assert_eq!(json_rpc_method(&requests[2].body), "tools/call");
+    assert_eq!(
+        header_value(&requests[2].headers, "Mcp-Session-Id"),
+        Some("session-rotated")
+    );
+}
+
+#[tokio::test]
 async fn concrete_mcp_http_client_rejects_missing_or_unsafe_initialize_protocol_version() {
     for egress in [
         RecordingRuntimeEgress::json_rpc_without_protocol_version(),
@@ -1504,6 +1535,60 @@ impl RuntimeHttpEgress for ScopedSessionRuntimeEgress {
             "notifications/initialized" => Ok(RuntimeHttpEgressResponse {
                 status: 202,
                 headers: vec![],
+                body: vec![],
+                saved_body: None,
+                request_bytes: request.body.len() as u64,
+                response_bytes: 0,
+                redaction_applied: false,
+            }),
+            "tools/call" => Ok(runtime_json_response(
+                json_rpc_id(&request.body),
+                json!({"content":[{"type":"text","text":"ok"}],"isError":false}),
+                vec![],
+            )),
+            other => panic!("unexpected MCP JSON-RPC method {other}"),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct RotatingSessionRuntimeEgress {
+    requests: Arc<Mutex<Vec<RuntimeHttpEgressRequest>>>,
+}
+
+impl RotatingSessionRuntimeEgress {
+    fn new() -> Self {
+        Self {
+            requests: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn requests(&self) -> Vec<RuntimeHttpEgressRequest> {
+        self.requests.lock().unwrap().clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl RuntimeHttpEgress for RotatingSessionRuntimeEgress {
+    async fn execute(
+        &self,
+        request: RuntimeHttpEgressRequest,
+    ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
+        let method = json_rpc_method(&request.body);
+        self.requests.lock().unwrap().push(request.clone());
+        match method.as_str() {
+            "initialize" => Ok(runtime_json_response(
+                Some(json_rpc_id(&request.body).unwrap()),
+                json!({
+                    "protocolVersion": "2025-06-18",
+                    "capabilities": {"tools": {"listChanged": false}},
+                    "serverInfo": {"name": "mock-mcp", "version": "1.0.0"}
+                }),
+                vec![("Mcp-Session-Id".to_string(), "session-initial".to_string())],
+            )),
+            "notifications/initialized" => Ok(RuntimeHttpEgressResponse {
+                status: 202,
+                headers: vec![("Mcp-Session-Id".to_string(), "session-rotated".to_string())],
                 body: vec![],
                 saved_body: None,
                 request_bytes: request.body.len() as u64,
