@@ -1344,6 +1344,7 @@ fn make_capability_activity_envelope(cursor: &str) -> ProductOutboundEnvelope {
         cursor,
         ProductOutboundPayload::CapabilityActivity(CapabilityActivityView {
             invocation_id: InvocationId::new(),
+            turn_run_id: Some(TurnRunId::new()),
             thread_id: Some(ThreadId::new("thread-x").expect("thread id")),
             capability_id: CapabilityId::new("script.echo").expect("capability id"),
             status: CapabilityActivityStatusView::Running,
