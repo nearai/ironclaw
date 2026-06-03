@@ -92,9 +92,10 @@ use crate::local_dev_capability_policy::local_dev_capability_policy;
 use crate::projection::{RebornProjectionServices, build_reborn_projection_services};
 use crate::runtime_input::{PollSettings, RebornRuntimeIdentity, RebornRuntimeInput};
 use crate::trigger_poller::{
-    ConversationTrustedTriggerSubmitter, LocalTriggerTurnSnapshotSource, SnapshotActiveRunLookup,
-    TRIGGER_POLLER_SHUTDOWN_TIMEOUT, TriggerPollerCompositionDeps, TriggerPollerRuntimeHandle,
-    TriggerTurnSnapshotSource, spawn_trigger_poller,
+    ConversationContentRefMaterializer, ConversationTrustedTriggerSubmitter,
+    LocalTriggerTurnSnapshotSource, SnapshotActiveRunLookup, TRIGGER_POLLER_SHUTDOWN_TIMEOUT,
+    TriggerPollerCompositionDeps, TriggerPollerRuntimeHandle, TriggerTurnSnapshotSource,
+    TrustedTenantTriggerFireAuthorizer, spawn_trigger_poller,
 };
 use crate::{
     RebornBuildError, RebornCompositionProfile, RebornProductAuthServices, RebornServices,
@@ -232,12 +233,21 @@ pub(crate) type LocalDevSelectableSkillContextSource =
 type LocalDevSkillExecutionAdapter =
     SkillExecutionAdapter<FilesystemSkillBundleSource<LocalDevRootFilesystem>>;
 
-async fn build_trigger_submitter(
+struct TriggerPollerServices {
+    materializer: Arc<dyn ironclaw_triggers::TriggerPromptMaterializer>,
+    trusted_submitter: Arc<dyn ironclaw_triggers::TrustedTriggerFireSubmitter>,
+}
+
+async fn build_trigger_poller_services(
     local_runtime: &crate::factory::RebornLocalRuntimeServices,
     turn_coordinator: Arc<dyn TurnCoordinator>,
     thread_service: Arc<dyn SessionThreadService>,
+    tenant_id: TenantId,
     default_agent_id: AgentId,
-) -> Result<Arc<dyn ironclaw_triggers::TrustedTriggerFireSubmitter>, RebornRuntimeError> {
+) -> Result<TriggerPollerServices, RebornRuntimeError> {
+    let authorizer = Arc::new(TrustedTenantTriggerFireAuthorizer::new(tenant_id));
+    let trusted_ingress =
+        ironclaw_trusted_ingress::HostTrustedTriggerIngress::new_for_composition_root();
     #[cfg(any(feature = "libsql", feature = "postgres"))]
     {
         let conversations = RebornFilesystemConversationServices::new(Arc::clone(
@@ -247,46 +257,61 @@ async fn build_trigger_submitter(
         .map_err(|error| RebornRuntimeError::InvalidArgument {
             reason: format!("trigger conversation services unavailable: {error}"),
         })?;
-        Ok(build_trigger_submitter_from_conversation_services(
+        Ok(build_trigger_poller_services_from_conversation_services(
             conversations.clone(),
             conversations,
             turn_coordinator,
             thread_service,
             default_agent_id,
+            authorizer,
+            trusted_ingress,
         ))
     }
     #[cfg(not(any(feature = "libsql", feature = "postgres")))]
     {
         let _ = local_runtime;
         let conversations = InMemoryConversationServices::default();
-        Ok(build_trigger_submitter_from_conversation_services(
+        Ok(build_trigger_poller_services_from_conversation_services(
             conversations.clone(),
             conversations,
             turn_coordinator,
             thread_service,
             default_agent_id,
+            authorizer,
+            trusted_ingress,
         ))
     }
 }
 
-fn build_trigger_submitter_from_conversation_services<B, S>(
+fn build_trigger_poller_services_from_conversation_services<B, S>(
     binding_service: B,
     session_thread_service: S,
     turn_coordinator: Arc<dyn TurnCoordinator>,
     thread_service: Arc<dyn SessionThreadService>,
     default_agent_id: AgentId,
-) -> Arc<dyn ironclaw_triggers::TrustedTriggerFireSubmitter>
+    authorizer: Arc<dyn crate::trigger_poller_trusted_submit::TriggerFireAuthorizer>,
+    trusted_ingress: ironclaw_trusted_ingress::HostTrustedTriggerIngress,
+) -> TriggerPollerServices
 where
-    B: ironclaw_conversations::ConversationBindingService + 'static,
+    B: ironclaw_conversations::ConversationBindingService + Clone + 'static,
     S: ironclaw_conversations::SessionThreadService + 'static,
 {
-    Arc::new(ConversationTrustedTriggerSubmitter::new(
+    let materializer = Arc::new(ConversationContentRefMaterializer::new(
+        binding_service.clone(),
+        Arc::clone(&thread_service),
+        default_agent_id.clone(),
+        authorizer,
+    ));
+    let trusted_submitter = Arc::new(ConversationTrustedTriggerSubmitter::new(
         binding_service,
         session_thread_service,
         turn_coordinator,
-        thread_service,
-        default_agent_id,
-    ))
+        trusted_ingress,
+    ));
+    TriggerPollerServices {
+        materializer,
+        trusted_submitter,
+    }
 }
 
 fn build_trigger_active_run_lookup(
@@ -1420,10 +1445,11 @@ pub async fn build_reborn_runtime(
     services.turn_coordinator = Some(Arc::clone(&planned_turn_coordinator));
 
     let trigger_poller_handle = if trigger_poller.enabled {
-        let trusted_submitter = build_trigger_submitter(
+        let trigger_poller_services = build_trigger_poller_services(
             local_runtime,
             Arc::clone(&planned_turn_coordinator),
             Arc::clone(&thread_service),
+            thread_scope.tenant_id.clone(),
             validated_identity.agent_id.clone(),
         )
         .await?;
@@ -1432,7 +1458,8 @@ pub async fn build_reborn_runtime(
             trigger_poller,
             TriggerPollerCompositionDeps {
                 repository: Arc::clone(&local_runtime.trigger_repository),
-                trusted_submitter,
+                materializer: trigger_poller_services.materializer,
+                trusted_submitter: trigger_poller_services.trusted_submitter,
                 active_run_lookup,
             },
         )

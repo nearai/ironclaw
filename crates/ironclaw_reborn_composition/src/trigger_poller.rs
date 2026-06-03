@@ -7,7 +7,7 @@ use chrono::Utc;
 use ironclaw_triggers::{
     ScheduleTriggerSourceProvider, TriggerActiveRunLookup, TriggerActiveRunState,
     TriggerActiveRunStateRequest, TriggerError, TriggerPollerWorker, TriggerPollerWorkerDeps,
-    TriggerRepository, TrustedTriggerFireSubmitter,
+    TriggerPromptMaterializer, TriggerRepository, TrustedTriggerFireSubmitter,
 };
 use ironclaw_turns::TurnPersistenceSnapshot;
 use rand::Rng;
@@ -15,8 +15,10 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::runtime_input::TriggerPollerSettings;
-use crate::trigger_poller_trusted_submit::ConversationContentRefMaterializer;
-pub(crate) use crate::trigger_poller_trusted_submit::ConversationTrustedTriggerSubmitter;
+pub(crate) use crate::trigger_poller_trusted_submit::{
+    ConversationContentRefMaterializer, ConversationTrustedTriggerSubmitter,
+    TrustedTenantTriggerFireAuthorizer,
+};
 
 pub(crate) const TRIGGER_POLLER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -57,6 +59,7 @@ impl TriggerPollerRuntimeHandle {
 #[derive(Clone)]
 pub(crate) struct TriggerPollerCompositionDeps {
     pub(crate) repository: Arc<dyn TriggerRepository>,
+    pub(crate) materializer: Arc<dyn TriggerPromptMaterializer>,
     pub(crate) trusted_submitter: Arc<dyn TrustedTriggerFireSubmitter>,
     pub(crate) active_run_lookup: Arc<dyn TriggerActiveRunLookup>,
 }
@@ -74,7 +77,7 @@ pub(crate) fn spawn_trigger_poller(
         TriggerPollerWorkerDeps {
             repository: deps.repository,
             source_provider: Arc::new(ScheduleTriggerSourceProvider),
-            materializer: Arc::new(ConversationContentRefMaterializer),
+            materializer: deps.materializer,
             trusted_submitter: deps.trusted_submitter,
             active_run_lookup: deps.active_run_lookup,
         },
@@ -269,7 +272,15 @@ mod tests {
     use super::*;
     use ironclaw_host_api::TenantId;
     use ironclaw_triggers::{TriggerId, TriggerPollerWorkerConfig};
-    use ironclaw_turns::TurnRunId;
+    use ironclaw_turns::{
+        AcceptedMessageRef, AgentLoopDriverDescriptor, CancellationPolicy,
+        CapabilitySurfaceProfileId, CheckpointPolicy, CheckpointSchemaId, ConcurrencyClass,
+        ContextProfileId, EventCursor, LoopDriverId, ModelProfileId, RedactedRunProfileProvenance,
+        ResolvedRunProfile, ResourceBudgetPolicy, ResourceBudgetTier, RunClassId,
+        RunProfileFingerprint, RunProfileId, RunProfileVersion, RuntimeProfileConstraints,
+        SchedulingClass, SourceBindingRef, SteeringPolicy, TurnId, TurnPersistenceSnapshot,
+        TurnRunId, TurnRunProfile, TurnRunRecord, TurnScope, TurnStatus,
+    };
 
     #[derive(Default)]
     struct CountingSnapshotSource {
@@ -287,6 +298,17 @@ mod tests {
         async fn snapshot(&self) -> Result<TurnPersistenceSnapshot, TriggerError> {
             *self.calls.lock().expect("snapshot calls lock") += 1;
             Ok(TurnPersistenceSnapshot::default())
+        }
+    }
+
+    struct StaticSnapshotSource {
+        snapshot: TurnPersistenceSnapshot,
+    }
+
+    #[async_trait]
+    impl TriggerTurnSnapshotSource for StaticSnapshotSource {
+        async fn snapshot(&self) -> Result<TurnPersistenceSnapshot, TriggerError> {
+            Ok(self.snapshot.clone())
         }
     }
 
@@ -390,6 +412,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn active_run_batch_lookup_returns_nonterminal_and_terminal_states_from_snapshot() {
+        let tenant_id = TenantId::new("trigger-active-state-tenant").expect("tenant id");
+        let nonterminal_run_id = TurnRunId::new();
+        let terminal_run_id = TurnRunId::new();
+        let missing_run_id = TurnRunId::new();
+        let snapshot_source = Arc::new(StaticSnapshotSource {
+            snapshot: TurnPersistenceSnapshot {
+                runs: vec![
+                    turn_run_record(&tenant_id, nonterminal_run_id, TurnStatus::Running),
+                    turn_run_record(&tenant_id, terminal_run_id, TurnStatus::Completed),
+                ],
+                ..TurnPersistenceSnapshot::default()
+            },
+        });
+        let lookup = SnapshotActiveRunLookup::new(snapshot_source);
+        let fire_slot = Utc::now();
+
+        let results = lookup
+            .active_run_states(vec![
+                TriggerActiveRunStateRequest {
+                    tenant_id: tenant_id.clone(),
+                    trigger_id: TriggerId::new(),
+                    fire_slot,
+                    run_id: nonterminal_run_id,
+                },
+                TriggerActiveRunStateRequest {
+                    tenant_id: tenant_id.clone(),
+                    trigger_id: TriggerId::new(),
+                    fire_slot,
+                    run_id: terminal_run_id,
+                },
+                TriggerActiveRunStateRequest {
+                    tenant_id,
+                    trigger_id: TriggerId::new(),
+                    fire_slot,
+                    run_id: missing_run_id,
+                },
+            ])
+            .await;
+
+        assert!(matches!(results[0], Ok(TriggerActiveRunState::Nonterminal)));
+        assert!(matches!(results[1], Ok(TriggerActiveRunState::Terminal)));
+        assert!(matches!(results[2], Ok(TriggerActiveRunState::Missing)));
+    }
+
+    #[tokio::test]
     async fn active_run_batch_lookup_returns_empty_without_snapshot() {
         let snapshot_source = Arc::new(CountingSnapshotSource::default());
         let lookup = SnapshotActiveRunLookup::new(snapshot_source.clone());
@@ -430,5 +498,107 @@ mod tests {
             result,
             Err(TriggerError::Backend { reason }) if reason.contains("snapshot failed")
         )));
+    }
+
+    fn turn_run_record(
+        tenant_id: &TenantId,
+        run_id: TurnRunId,
+        status: TurnStatus,
+    ) -> TurnRunRecord {
+        let scope = TurnScope::new(
+            tenant_id.clone(),
+            None,
+            None,
+            ironclaw_host_api::ThreadId::new(format!("thread-{run_id}")).expect("thread id"),
+        );
+        TurnRunRecord {
+            run_id,
+            turn_id: TurnId::new(),
+            scope,
+            accepted_message_ref: AcceptedMessageRef::new(format!("message:{run_id}"))
+                .expect("message ref"),
+            source_binding_ref: SourceBindingRef::new(format!("source:{run_id}"))
+                .expect("source binding ref"),
+            reply_target_binding_ref: ironclaw_turns::ReplyTargetBindingRef::new(format!(
+                "reply:{run_id}"
+            ))
+            .expect("reply target binding ref"),
+            status,
+            profile: TurnRunProfile::from_resolved(resolved_run_profile()),
+            resolved_model_route: None,
+            checkpoint_id: None,
+            gate_ref: None,
+            credential_requirements: Vec::new(),
+            failure: None,
+            event_cursor: EventCursor(1),
+            runner_id: None,
+            lease_token: None,
+            lease_expires_at: None,
+            last_heartbeat_at: None,
+            claim_count: 0,
+            received_at: Utc::now(),
+            parent_run_id: None,
+            subagent_depth: 0,
+            spawn_tree_root_run_id: None,
+        }
+    }
+
+    fn resolved_run_profile() -> ResolvedRunProfile {
+        let checkpoint_schema_id =
+            CheckpointSchemaId::new("trigger_active_checkpoint").expect("checkpoint schema");
+        ResolvedRunProfile {
+            run_class_id: RunClassId::new("trigger_active").expect("run class"),
+            profile_id: RunProfileId::default_profile(),
+            profile_version: RunProfileVersion::new(1),
+            loop_driver: AgentLoopDriverDescriptor {
+                id: LoopDriverId::new("trigger_active_loop").expect("loop driver"),
+                version: RunProfileVersion::new(1),
+                checkpoint_schema_id: Some(checkpoint_schema_id.clone()),
+                checkpoint_schema_version: Some(RunProfileVersion::new(1)),
+            },
+            checkpoint_schema_id,
+            checkpoint_schema_version: RunProfileVersion::new(1),
+            model_profile_id: ModelProfileId::new("trigger_active_model").expect("model profile"),
+            capability_surface_profile_id: CapabilitySurfaceProfileId::new("trigger_active_caps")
+                .expect("capability surface profile"),
+            context_profile_id: ContextProfileId::new("trigger_active_context")
+                .expect("context profile"),
+            steering_policy: SteeringPolicy {
+                allow_steering: false,
+                allow_interrupt: true,
+                allow_driver_specific_nudges: false,
+            },
+            cancellation_policy: CancellationPolicy {
+                allow_cancel: true,
+                require_checkpoint_before_cancel: false,
+            },
+            checkpoint_policy: CheckpointPolicy {
+                require_before_model: false,
+                require_before_side_effect: true,
+                require_before_block: true,
+                max_checkpoint_bytes: 64 * 1024,
+                require_final_checkpoint: false,
+                allow_no_reply_completion: false,
+            },
+            resource_budget_policy: ResourceBudgetPolicy {
+                tier: ResourceBudgetTier::new("trigger_active_budget").expect("budget tier"),
+                max_model_calls: 1,
+                max_capability_invocations: 1,
+            },
+            personal_context_policy: Default::default(),
+            runtime_constraints: RuntimeProfileConstraints {
+                allow_raw_runtime_backend_selection: false,
+                allow_broad_capability_surface: false,
+            },
+            runner_pool_id: None,
+            scheduling_class: SchedulingClass::new("trigger_active").expect("scheduling class"),
+            concurrency_class: ConcurrencyClass::new("trigger_active").expect("concurrency class"),
+            resolution_fingerprint: RunProfileFingerprint::new("trigger-active-profile-v1")
+                .expect("run profile fingerprint"),
+            provenance: RedactedRunProfileProvenance {
+                sources: Vec::new(),
+                effective_privileges: Vec::new(),
+            },
+        }
     }
 }

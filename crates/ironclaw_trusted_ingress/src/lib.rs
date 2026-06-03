@@ -19,7 +19,13 @@ pub struct HostTrustedTriggerIngress {
 
 impl HostTrustedTriggerIngress {
     /// Mint host-owned trigger ingress authority at the composition root.
+    #[cfg(feature = "composition-root")]
     pub fn new_for_composition_root() -> Self {
+        Self { _private: () }
+    }
+
+    #[cfg(test)]
+    fn new_for_tests() -> Self {
         Self { _private: () }
     }
 }
@@ -30,7 +36,7 @@ mod tests {
 
     #[test]
     fn trigger_ingress_authority_is_zero_sized() {
-        let authority = HostTrustedTriggerIngress::new_for_composition_root();
+        let authority = HostTrustedTriggerIngress::new_for_tests();
 
         assert_eq!(core::mem::size_of_val(&authority), 0);
     }

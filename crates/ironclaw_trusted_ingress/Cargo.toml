@@ -12,3 +12,6 @@ publish = false
 
 [dependencies]
 
+[features]
+default = []
+composition-root = []
