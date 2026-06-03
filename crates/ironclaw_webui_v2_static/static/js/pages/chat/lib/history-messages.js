@@ -48,8 +48,17 @@ export function messagesFromTimeline(records, pendingMessages = []) {
     });
   }
 
+  // Drop optimistic pending messages whose content already landed as a
+  // server user record. On the first message of a freshly-created thread,
+  // the timeline load races the pending clear, and pending ids
+  // (`pending-N`) never match server ids (`msg-<id>`), so an id-only dedup
+  // renders the user's message twice. Reconcile by content as well.
+  const serverUserContents = new Set(
+    messages.filter((m) => m.role === "user").map((m) => m.content),
+  );
   for (const pending of pendingMessages) {
     if (seen.has(pending.id)) continue;
+    if (serverUserContents.has(pending.content)) continue;
     messages.push(pending);
   }
 

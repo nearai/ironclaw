@@ -158,6 +158,7 @@ export function useChat(threadId) {
       const pendingKey = sendThreadId;
       const pendingRecord = {
         id: `pending-${pendingSeqRef.current++}`,
+        role: "user",
         content,
         timestamp: new Date().toISOString(),
       };
