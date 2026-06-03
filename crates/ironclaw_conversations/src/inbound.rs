@@ -591,6 +591,8 @@ mod tests {
             duplicate.accepted_message.idempotency,
             MessageIdempotencyStatus::Duplicate
         );
+        assert!(!first.replayed_turn_submission);
+        assert!(duplicate.replayed_turn_submission);
         assert_eq!(services.accepted_messages().await.len(), 1);
         assert_eq!(coordinator.submissions().len(), 1);
     }
@@ -641,6 +643,8 @@ mod tests {
             duplicate.accepted_message.idempotency,
             MessageIdempotencyStatus::Duplicate
         );
+        assert!(!first.replayed_turn_submission);
+        assert!(duplicate.replayed_turn_submission);
     }
 
     #[tokio::test]
@@ -756,6 +760,23 @@ mod tests {
                 run_id: observed_run_id,
                 submitted_at: observed_submitted_at,
             } if observed_run_id == run_id && observed_submitted_at == submitted_at
+        ));
+    }
+
+    #[test]
+    fn submit_trusted_trigger_outcome_rejects_missing_turn_submission() {
+        let submitted_at = Utc.with_ymd_and_hms(2026, 5, 6, 12, 30, 0).unwrap();
+        let run_id = TurnRunId::new();
+        let mut response =
+            trusted_trigger_response(run_id, MessageIdempotencyStatus::Inserted, false);
+        response.turn_submission = None;
+
+        let error = submit_trusted_trigger_outcome(&response, submitted_at).unwrap_err();
+
+        assert!(matches!(
+            error,
+            ironclaw_triggers::TriggerError::Backend { reason }
+                if reason.contains("no turn submission")
         ));
     }
 
