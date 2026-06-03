@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use ironclaw_auth::{
     AuthProductScope, AuthProviderId, CredentialAccountId, CredentialAccountProjection,
     CredentialAccountUpdateBinding, ProviderScope,
@@ -28,8 +28,6 @@ use ironclaw_turns::{
     TurnCoordinator, TurnError, TurnRunId, TurnScope, TurnStatus,
 };
 use secrecy::SecretString;
-use serde::Deserialize;
-use serde_json::Value;
 use uuid::Uuid;
 
 use crate::{
@@ -113,7 +111,7 @@ pub trait AutomationProductFacade: Send + Sync {
         &self,
         caller: WebUiAuthenticatedCaller,
         limit: Option<usize>,
-    ) -> Result<Value, RebornServicesError>;
+    ) -> Result<Vec<RebornAutomationInfo>, RebornServicesError>;
 }
 
 #[derive(Debug)]
@@ -131,7 +129,7 @@ impl AutomationProductFacade for UnsupportedAutomationProductFacade {
         &self,
         _caller: WebUiAuthenticatedCaller,
         _limit: Option<usize>,
-    ) -> Result<Value, RebornServicesError> {
+    ) -> Result<Vec<RebornAutomationInfo>, RebornServicesError> {
         Err(automation_unavailable())
     }
 }
@@ -886,18 +884,12 @@ impl RebornServicesApi for RebornServices {
                 false,
             ));
         }
-        let command = request.into_command(caller);
-        let WebUiInboundCommand::ListAutomations { caller, limit } = command else {
-            return Err(RebornServicesError::internal_invariant());
-        };
-        let limit = Some(clamp_automation_list_limit(limit));
-        let output = self
+        let limit = Some(clamp_automation_list_limit(request.limit));
+        let automations = self
             .automation_facade
             .list_automations(caller, limit)
             .await?;
-        Ok(RebornListAutomationsResponse {
-            automations: parse_list_automations_output(output)?,
-        })
+        Ok(RebornListAutomationsResponse { automations })
     }
 
     async fn list_extensions(
@@ -952,97 +944,6 @@ impl RebornServicesApi for RebornServices {
             request,
         )
         .await
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct RawAutomationListEnvelope {
-    triggers: Vec<RawAutomationRecord>,
-}
-
-#[derive(Debug, Deserialize)]
-struct RawAutomationRecord {
-    trigger_id: String,
-    name: String,
-    schedule: RawAutomationSchedule,
-    state: String,
-    #[serde(default)]
-    next_run_at: Option<DateTime<Utc>>,
-    #[serde(default)]
-    last_run_at: Option<DateTime<Utc>>,
-    #[serde(default)]
-    last_status: Option<RebornAutomationRunStatus>,
-    #[serde(default)]
-    is_active: bool,
-    #[serde(default)]
-    created_at: Option<DateTime<Utc>>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "snake_case", tag = "kind")]
-enum RawAutomationSchedule {
-    Cron {
-        expression: String,
-    },
-    #[serde(other)]
-    Unknown,
-}
-
-fn parse_list_automations_output(
-    mut output: Value,
-) -> Result<Vec<RebornAutomationInfo>, RebornServicesError> {
-    sanitize_automation_list_output(&mut output);
-    let envelope: RawAutomationListEnvelope = serde_json::from_value(output).map_err(|error| {
-        tracing::warn!(
-            error = %error,
-            "malformed automation list output from product facade"
-        );
-        RebornServicesError::internal_invariant()
-    })?;
-    Ok(envelope
-        .triggers
-        .into_iter()
-        .filter_map(automation_info)
-        .collect())
-}
-
-fn automation_info(record: RawAutomationRecord) -> Option<RebornAutomationInfo> {
-    Some(RebornAutomationInfo {
-        automation_id: record.trigger_id,
-        name: record.name,
-        source: automation_source(record.schedule)?,
-        state: record.state,
-        next_run_at: record.next_run_at,
-        last_run_at: record.last_run_at,
-        last_status: record.last_status,
-        is_active: record.is_active,
-        created_at: record.created_at,
-    })
-}
-
-fn automation_source(schedule: RawAutomationSchedule) -> Option<RebornAutomationSource> {
-    match schedule {
-        RawAutomationSchedule::Cron { expression } => {
-            Some(RebornAutomationSource::Schedule { cron: expression })
-        }
-        RawAutomationSchedule::Unknown => None,
-    }
-}
-
-fn sanitize_automation_list_output(output: &mut Value) {
-    let Some(triggers) = output.get_mut("triggers").and_then(Value::as_array_mut) else {
-        return;
-    };
-    for trigger in triggers {
-        let Some(trigger_object) = trigger.as_object_mut() else {
-            continue;
-        };
-        let status = match trigger_object.get("last_status").and_then(Value::as_str) {
-            Some("ok") => Value::String("ok".to_string()),
-            Some("error") => Value::String("error".to_string()),
-            _ => Value::Null,
-        };
-        trigger_object.insert("last_status".to_string(), status);
     }
 }
 

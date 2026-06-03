@@ -212,10 +212,6 @@ pub enum WebUiInboundCommand {
         client_action_id: IdempotencyKey,
         resolution: WebUiGateResolution,
     },
-    ListAutomations {
-        caller: WebUiAuthenticatedCaller,
-        limit: Option<u32>,
-    },
 }
 
 impl WebUiCreateThreadRequest {
@@ -301,15 +297,6 @@ impl WebUiResolveGateRequest {
             client_action_id,
             resolution,
         })
-    }
-}
-
-impl WebUiListAutomationsRequest {
-    pub fn into_command(self, caller: WebUiAuthenticatedCaller) -> WebUiInboundCommand {
-        WebUiInboundCommand::ListAutomations {
-            caller,
-            limit: self.limit,
-        }
     }
 }
 
