@@ -35,7 +35,8 @@ impl ProductInstallationKey {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum ProductActorBindingPolicy {
     /// Use the canonical conversations service's trusted installation path,
-    /// creating the first external actor/conversation binding when needed.
+    /// creating the first external conversation binding for an already paired
+    /// actor when needed.
     #[default]
     ExistingConversationPairings,
     /// Allow only these host-preconfigured external actors and write their

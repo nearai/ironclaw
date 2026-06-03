@@ -1758,39 +1758,6 @@ async fn preconfigured_actor_binding_rejects_unconfigured_actor() {
 }
 
 #[tokio::test]
-async fn default_actor_binding_policy_creates_first_binding_for_trusted_installation() {
-    let conversations = Arc::new(InMemoryConversationServices::default());
-    let binding = product_binding_service(
-        conversations,
-        vec![(
-            "test_adapter",
-            "install_alpha",
-            "tenant:alpha",
-            "agent:alpha",
-            Some("project:alpha"),
-        )],
-    );
-    let coordinator = Arc::new(RecordingTurnCoordinator::default());
-    let workflow = DefaultProductWorkflow::new(
-        Arc::new(DefaultInboundTurnService::new(
-            binding.clone(),
-            InMemorySessionThreadService::default(),
-            coordinator.clone(),
-        )),
-        Arc::new(InMemoryIdempotencyLedger::new()),
-        Arc::new(binding),
-    );
-
-    let ack = workflow
-        .accept_inbound(sample_envelope("default-policy-new-user"))
-        .await
-        .expect("trusted default policy should create first binding");
-
-    assert!(matches!(ack, ProductInboundAck::Accepted { .. }));
-    assert_eq!(coordinator.submissions().len(), 1);
-}
-
-#[tokio::test]
 async fn concrete_product_workflow_accepts_user_message_for_trusted_installation() {
     let conversations = Arc::new(InMemoryConversationServices::default());
     conversations
