@@ -509,10 +509,11 @@ mod tests {
     use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
     use ironclaw_triggers::TrustedTriggerFireSubmitOutcome;
     use ironclaw_turns::{
-        AcceptedMessageRef, CancelRunRequest, CancelRunResponse, EventCursor, GetRunStateRequest,
-        ReplyTargetBindingRef, ResumeTurnRequest, ResumeTurnResponse, RunProfileId,
-        RunProfileVersion, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy,
-        TurnCoordinator, TurnError, TurnId, TurnRunId, TurnRunState, TurnScope, TurnStatus,
+        AcceptedMessageRef, AdmissionRejection, AdmissionRejectionReason, CancelRunRequest,
+        CancelRunResponse, EventCursor, GetRunStateRequest, ReplyTargetBindingRef,
+        ResumeTurnRequest, ResumeTurnResponse, RunProfileId, RunProfileVersion, SourceBindingRef,
+        SubmitTurnRequest, SubmitTurnResponse, ThreadBusy, TurnCapacityResource, TurnCoordinator,
+        TurnError, TurnId, TurnRunId, TurnRunState, TurnScope, TurnStatus,
     };
 
     use super::{classify_trusted_trigger_inbound_error, submit_trusted_trigger_outcome};
@@ -739,62 +740,128 @@ mod tests {
 
     #[test]
     fn classify_trusted_trigger_inbound_error_maps_retryable_backend_cases_to_opaque_backend() {
-        let thread_busy =
-            classify_trusted_trigger_inbound_error(InboundTurnError::TurnSubmissionFailed {
+        for error in [
+            InboundTurnError::TurnSubmissionFailed {
                 error: TurnError::ThreadBusy(ThreadBusy {
                     active_run_id: TurnRunId::new(),
                     status: TurnStatus::Running,
                     event_cursor: EventCursor(7),
                 }),
-            });
-        assert!(matches!(
-            thread_busy,
-            ironclaw_triggers::TriggerError::Backend { reason }
-                if reason == "trusted trigger submit retryable failure"
-        ));
-
-        let conflict =
-            classify_trusted_trigger_inbound_error(InboundTurnError::TurnSubmissionFailed {
+            },
+            InboundTurnError::TurnSubmissionFailed {
+                error: TurnError::AdmissionRejected(AdmissionRejection::new(
+                    AdmissionRejectionReason::TenantLimit,
+                )),
+            },
+            InboundTurnError::TurnSubmissionFailed {
+                error: TurnError::AdmissionRejected(AdmissionRejection::new(
+                    AdmissionRejectionReason::Unavailable,
+                )),
+            },
+            InboundTurnError::TurnSubmissionFailed {
+                error: TurnError::Unavailable {
+                    reason: "turn store unavailable".to_string(),
+                },
+            },
+            InboundTurnError::TurnSubmissionFailed {
+                error: TurnError::CapacityExceeded {
+                    resource: TurnCapacityResource::SubmitTurn,
+                    cap: 1,
+                },
+            },
+            InboundTurnError::TurnSubmissionFailed {
                 error: TurnError::Conflict {
                     reason: "cas mismatch".to_string(),
                 },
-            });
-        assert!(matches!(
-            conflict,
-            ironclaw_triggers::TriggerError::Backend { reason }
-                if reason == "trusted trigger submit retryable failure"
-        ));
-
-        let unauthorized =
-            classify_trusted_trigger_inbound_error(InboundTurnError::TurnSubmissionFailed {
-                error: TurnError::Unauthorized,
-            });
-        assert!(matches!(
-            unauthorized,
-            ironclaw_triggers::TriggerError::InvalidMaterialization { reason }
-                if reason == "trusted trigger submit rejected"
-        ));
-
-        let durable_state =
-            classify_trusted_trigger_inbound_error(InboundTurnError::DurableState {
+            },
+            InboundTurnError::DurableState {
                 reason: "disk write failed".to_string(),
-            });
-        assert!(matches!(
-            durable_state,
-            ironclaw_triggers::TriggerError::Backend { reason }
-                if reason == "trusted trigger submit retryable failure"
-        ));
+            },
+        ] {
+            let classified = classify_trusted_trigger_inbound_error(error);
+            assert!(matches!(
+                classified,
+                ironclaw_triggers::TriggerError::Backend { reason }
+                    if reason == "trusted trigger submit retryable failure"
+            ));
+        }
 
-        let invalid_external_ref =
-            classify_trusted_trigger_inbound_error(InboundTurnError::InvalidExternalRef {
+        for error in [
+            InboundTurnError::TurnSubmissionFailed {
+                error: TurnError::AdmissionRejected(AdmissionRejection::new(
+                    AdmissionRejectionReason::ProfileRejected,
+                )),
+            },
+            InboundTurnError::TurnSubmissionFailed {
+                error: TurnError::AdmissionRejected(AdmissionRejection::new(
+                    AdmissionRejectionReason::Policy,
+                )),
+            },
+            InboundTurnError::TurnSubmissionFailed {
+                error: TurnError::AdmissionRejected(AdmissionRejection::new(
+                    AdmissionRejectionReason::Unauthorized,
+                )),
+            },
+            InboundTurnError::TurnSubmissionFailed {
+                error: TurnError::ScopeNotFound,
+            },
+            InboundTurnError::TurnSubmissionFailed {
+                error: TurnError::Unauthorized,
+            },
+            InboundTurnError::TurnSubmissionFailed {
+                error: TurnError::InvalidRequest {
+                    reason: "bad request".to_string(),
+                },
+            },
+            InboundTurnError::TurnSubmissionFailed {
+                error: TurnError::InvalidTransition {
+                    from: TurnStatus::Queued,
+                    to: TurnStatus::Completed,
+                },
+            },
+            InboundTurnError::TurnSubmissionFailed {
+                error: TurnError::LeaseMismatch,
+            },
+        ] {
+            let classified = classify_trusted_trigger_inbound_error(error);
+            assert!(matches!(
+                classified,
+                ironclaw_triggers::TriggerError::InvalidMaterialization { reason }
+                    if reason == "trusted trigger submit rejected"
+            ));
+        }
+
+        for error in [
+            InboundTurnError::InvalidExternalRef {
                 kind: "adapter_kind",
                 reason: "empty".to_string(),
-            });
-        assert!(matches!(
-            invalid_external_ref,
-            ironclaw_triggers::TriggerError::InvalidMaterialization { reason }
-                if reason == "trusted trigger inbound request rejected"
-        ));
+            },
+            InboundTurnError::BindingRequired {
+                adapter_kind: "trigger".to_string(),
+                external_actor_id: "actor".to_string(),
+            },
+            InboundTurnError::AccessDenied {
+                actor_id: "actor".to_string(),
+                thread_id: "thread".to_string(),
+            },
+            InboundTurnError::BindingConflict {
+                thread_id: "conflicting-thread".to_string(),
+            },
+            InboundTurnError::ThreadNotFound {
+                thread_id: "missing-thread".to_string(),
+            },
+            InboundTurnError::StatePoisoned,
+            InboundTurnError::InvalidCanonicalRef {
+                reason: "too long".to_string(),
+            },
+        ] {
+            let classified = classify_trusted_trigger_inbound_error(error);
+            assert!(matches!(
+                classified,
+                ironclaw_triggers::TriggerError::InvalidMaterialization { reason }
+                    if reason == "trusted trigger inbound request rejected"
+            ));
+        }
     }
 
     fn trusted_trigger_response(
