@@ -124,7 +124,7 @@ fn parse_request_url_scrubbing_source_carrier(
 ) -> Result<url::Url, NetworkHttpError> {
     let mut raw_url = std::mem::take(&mut request.url);
     let parsed = url::Url::parse(&raw_url).map_err(|error| NetworkHttpError::InvalidUrl {
-        reason: error.to_string(),
+        reason: format!("URL parse error: {error:?}"),
         request_bytes,
         response_bytes: 0,
     });
@@ -310,6 +310,29 @@ mod tests {
             parsed.as_str(),
             "https://api.example.test/v1?token=sk-query-secret"
         );
+        assert!(request.url.is_empty());
+    }
+
+    #[test]
+    fn parse_request_url_error_does_not_include_source_url() {
+        let mut request = NetworkTransportRequest {
+            method: NetworkMethod::Get,
+            url: "https://api.example.test:bad-port/v1?token=sk-query-secret".to_string(),
+            headers: Vec::new(),
+            body: Vec::new(),
+            resolved_ips: Vec::new(),
+            response_body_limit: None,
+            timeout_ms: None,
+        };
+
+        let error = parse_request_url_scrubbing_source_carrier(&mut request, 0).unwrap_err();
+
+        let NetworkHttpError::InvalidUrl { reason, .. } = error else {
+            panic!("expected invalid URL error");
+        };
+        assert!(reason.starts_with("URL parse error: "));
+        assert!(!reason.contains("api.example.test"));
+        assert!(!reason.contains("sk-query-secret"));
         assert!(request.url.is_empty());
     }
 
