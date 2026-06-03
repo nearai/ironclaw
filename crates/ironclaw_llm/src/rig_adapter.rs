@@ -799,14 +799,7 @@ fn map_rig_error(model_name: &str, e: impl std::fmt::Display) -> LlmError {
     let msg = e.to_string();
     let lower = msg.to_ascii_lowercase();
 
-    const CONTEXT_PATTERNS: &[&str] = &[
-        "context_length_exceeded",
-        "maximum context length",
-        "too many tokens",
-        "payload too large",
-    ];
-
-    if CONTEXT_PATTERNS.iter().any(|p| lower.contains(p)) {
+    if is_context_length_error_message(&lower) {
         let (used, limit) = parse_token_counts(&lower);
         return LlmError::ContextLengthExceeded { used, limit };
     }
@@ -814,6 +807,20 @@ fn map_rig_error(model_name: &str, e: impl std::fmt::Display) -> LlmError {
         provider: model_name.to_string(),
         reason: msg,
     }
+}
+
+pub(crate) fn is_context_length_error_message(lower: &str) -> bool {
+    const CONTEXT_PATTERNS: &[&str] = &[
+        "context_length_exceeded",
+        "maximum context length",
+        "too many tokens",
+        "payload too large",
+        "longer than the model's context length",
+    ];
+
+    CONTEXT_PATTERNS
+        .iter()
+        .any(|pattern| lower.contains(pattern))
 }
 
 /// Try to extract token counts from a context-length error message.
@@ -824,20 +831,44 @@ fn map_rig_error(model_name: &str, e: impl std::fmt::Display) -> LlmError {
 ///
 /// Returns `(0, 0)` if parsing fails.
 pub(crate) fn parse_token_counts(lower: &str) -> (usize, usize) {
-    // OpenAI pattern: "maximum context length is {limit} tokens. ... resulted in {used} tokens"
-    if lower.contains("maximum context length") {
-        let numbers: Vec<usize> = lower
-            .split(|c: char| !c.is_ascii_digit())
-            .filter(|s| !s.is_empty())
-            .filter_map(|s| s.parse().ok())
-            .filter(|&n| n > 0)
-            .collect();
-        if numbers.len() >= 2 {
-            // First large number is typically the limit, second is the used count
-            return (numbers[1], numbers[0]);
-        }
+    let numbers = token_count_numbers(lower);
+    if numbers.len() < 2 {
+        return (0, 0);
     }
+
+    // OpenAI pattern: "maximum context length is {limit} tokens. ... resulted in {used} tokens".
+    if lower.contains("maximum context length") {
+        return (numbers[1], numbers[0]);
+    }
+
+    // NEAR/OpenAI-compatible proxy pattern:
+    // "The input ({used} tokens) is longer than the model's context length ({limit} tokens)."
+    if lower.contains("longer than the model's context length") {
+        return (numbers[0], numbers[1]);
+    }
+
     (0, 0)
+}
+
+fn token_count_numbers(lower: &str) -> Vec<usize> {
+    lower
+        .split("tokens")
+        .filter_map(number_immediately_before)
+        .filter(|&n| n > 0)
+        .collect()
+}
+
+fn number_immediately_before(segment: &str) -> Option<usize> {
+    let digits = segment
+        .chars()
+        .rev()
+        .skip_while(|ch| !ch.is_ascii_digit())
+        .take_while(|ch| ch.is_ascii_digit())
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<String>();
+    digits.parse().ok().filter(|&n| n > 0)
 }
 
 /// Normalize a tool call name returned by an OpenAI-compatible provider.
@@ -2509,6 +2540,21 @@ mod tests {
             matches!(err, LlmError::ContextLengthExceeded { .. }),
             "Should detect payload too large: {err:?}"
         );
+    }
+
+    #[test]
+    fn test_map_rig_error_detects_longer_than_model_context_length() {
+        let err = map_rig_error(
+            "nearai",
+            "HTTP 400 Bad Request: The input (314325 tokens) is longer than the model's context length (262144 tokens).",
+        );
+        match err {
+            LlmError::ContextLengthExceeded { used, limit } => {
+                assert_eq!(used, 314325);
+                assert_eq!(limit, 262144);
+            }
+            other => panic!("Expected ContextLengthExceeded, got: {other:?}"),
+        }
     }
 
     #[test]

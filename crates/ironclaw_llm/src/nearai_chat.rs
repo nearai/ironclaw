@@ -315,29 +315,8 @@ impl NearAiChatProvider {
                 });
             }
 
-            // Payload too large — the accumulated context exceeds the provider's
-            // request size limit. Map to ContextLengthExceeded so the dispatcher
-            // can trigger automatic compaction instead of crashing.
-            if status_code == 413 {
-                let lower = response_text.to_ascii_lowercase();
-                let (used, limit) = crate::rig_adapter::parse_token_counts(&lower);
-                return Err(LlmError::ContextLengthExceeded { used, limit });
-            }
-
-            // Some providers return 400 with "context_length_exceeded" in the body
-            // (e.g., OpenAI-compatible endpoints behind NEAR AI).
-            if status_code == 400 {
-                let lower = response_text.to_ascii_lowercase();
-                const CONTEXT_PATTERNS: &[&str] = &[
-                    "context_length_exceeded",
-                    "maximum context length",
-                    "too many tokens",
-                    "payload too large",
-                ];
-                if CONTEXT_PATTERNS.iter().any(|p| lower.contains(p)) {
-                    let (used, limit) = crate::rig_adapter::parse_token_counts(&lower);
-                    return Err(LlmError::ContextLengthExceeded { used, limit });
-                }
+            if let Some(error) = context_length_error(status_code, &response_text) {
+                return Err(error);
             }
 
             // Any HTTP 5xx from the upstream LLM gateway — map to BadGateway
@@ -975,6 +954,21 @@ async fn fetch_pricing(
     Ok(map)
 }
 
+fn context_length_error(status_code: u16, response_text: &str) -> Option<LlmError> {
+    // Payload-size and context-window failures are deterministic caller-side
+    // overflows, not transient service failures. Use the shared
+    // OpenAI-compatible matcher so provider adapters do not drift on upstream
+    // wording variants.
+    let lower = response_text.to_ascii_lowercase();
+    let is_context_overflow = status_code == 413
+        || (status_code == 400 && crate::rig_adapter::is_context_length_error_message(&lower));
+    if !is_context_overflow {
+        return None;
+    }
+    let (used, limit) = crate::rig_adapter::parse_token_counts(&lower);
+    Some(LlmError::ContextLengthExceeded { used, limit })
+}
+
 impl From<ChatMessage> for ChatCompletionMessage {
     fn from(msg: ChatMessage) -> Self {
         let role = match msg.role {
@@ -1222,6 +1216,24 @@ mod tests {
             provider.api_url("/chat/completions"),
             "http://127.0.0.1:8318/v1/chat/completions"
         );
+    }
+
+    #[test]
+    fn context_length_error_detects_provider_longer_than_context_wording() {
+        let body = r#"{"error":{"message":"Provider failed for model 'Qwen/Qwen3.6-35B-A3B-FP8': The input (314325 tokens) is longer than the model's context length (262144 tokens).","type":"invalid_request_error"}}"#;
+        match context_length_error(400, body) {
+            Some(LlmError::ContextLengthExceeded { used, limit }) => {
+                assert_eq!(used, 314325);
+                assert_eq!(limit, 262144);
+            }
+            other => panic!("expected context-length error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn context_length_error_does_not_treat_all_bad_requests_as_overflow() {
+        let body = r#"{"error":{"message":"invalid tool schema"}}"#;
+        assert!(context_length_error(400, body).is_none());
     }
 
     #[test]

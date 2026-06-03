@@ -131,6 +131,10 @@ impl DefaultExecutorPipeline {
                     state = *next;
                     response
                 }
+                ModelStep::RetryIteration(next) => {
+                    state = *next;
+                    continue;
+                }
                 ModelStep::Exit(exit) => return Ok(exit),
             };
 
