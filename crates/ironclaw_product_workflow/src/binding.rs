@@ -9,7 +9,8 @@ use async_trait::async_trait;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_product_adapters::{
     AdapterInstallationId, ExternalActorRef, ExternalConversationRef, ExternalEventId,
-    ProductAdapterId, VerifiedAuthClaim,
+    ProductAdapterId, ProductInboundEnvelope, ProductInboundPayload, ProductTriggerReason,
+    VerifiedAuthClaim,
 };
 use serde::{Deserialize, Serialize};
 
@@ -48,6 +49,54 @@ pub enum ProductConversationRouteKind {
     Direct,
     /// A shared channel/group route where allowed participants may post.
     Shared,
+}
+
+impl ResolveBindingRequest {
+    pub fn from_envelope(envelope: &ProductInboundEnvelope) -> Self {
+        Self {
+            adapter_id: envelope.adapter_id().clone(),
+            installation_id: envelope.installation_id().clone(),
+            external_actor_ref: envelope.external_actor_ref().clone(),
+            external_conversation_ref: envelope.external_conversation_ref().clone(),
+            external_event_id: envelope.external_event_id().clone(),
+            route_kind: route_kind_for_inbound_payload(envelope.payload()),
+            auth_claim: envelope.auth_claim().clone(),
+        }
+    }
+}
+
+pub fn route_kind_for_inbound_payload(
+    payload: &ProductInboundPayload,
+) -> ProductConversationRouteKind {
+    match payload {
+        ProductInboundPayload::UserMessage(message) => route_kind_for_trigger(message.trigger),
+        ProductInboundPayload::Command(command) => route_kind_for_trigger(command.trigger),
+        ProductInboundPayload::ApprovalResolution(resolution) => resolution
+            .source_trigger
+            .map(route_kind_for_trigger)
+            .unwrap_or(ProductConversationRouteKind::Direct),
+        ProductInboundPayload::ScopedApprovalResolution(resolution) => resolution
+            .source_trigger
+            .map(route_kind_for_trigger)
+            .unwrap_or(ProductConversationRouteKind::Direct),
+        ProductInboundPayload::AuthResolution(resolution) => resolution
+            .source_trigger
+            .map(route_kind_for_trigger)
+            .unwrap_or(ProductConversationRouteKind::Direct),
+        ProductInboundPayload::SubscriptionRequest(_)
+        | ProductInboundPayload::LinkedThreadAction(_)
+        | ProductInboundPayload::NoOp => ProductConversationRouteKind::Direct,
+    }
+}
+
+fn route_kind_for_trigger(trigger: ProductTriggerReason) -> ProductConversationRouteKind {
+    match trigger {
+        ProductTriggerReason::DirectChat => ProductConversationRouteKind::Direct,
+        ProductTriggerReason::BotMention
+        | ProductTriggerReason::ReplyToBot
+        | ProductTriggerReason::BotCommand
+        | ProductTriggerReason::LinkedThreadAction => ProductConversationRouteKind::Shared,
+    }
 }
 
 /// Conversation binding resolution contract. Host implementations wire this to

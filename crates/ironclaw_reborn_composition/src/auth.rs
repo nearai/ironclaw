@@ -113,6 +113,10 @@ pub(crate) struct RebornOAuthStartFlowRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(
+    dead_code,
+    reason = "used by the webui-v2-beta extension OAuth route through product-auth route composition"
+)]
 pub(crate) struct RebornDcrOAuthStartFlowRequest {
     pub(crate) scope: AuthProductScope,
     pub(crate) provider: AuthProviderId,
@@ -991,6 +995,10 @@ impl RebornProductAuthServices {
             .await
     }
 
+    #[allow(
+        dead_code,
+        reason = "used by the webui-v2-beta extension OAuth route through product-auth route composition"
+    )]
     pub(crate) async fn start_dcr_setup_oauth_flow(
         &self,
         request: RebornDcrOAuthStartFlowRequest,

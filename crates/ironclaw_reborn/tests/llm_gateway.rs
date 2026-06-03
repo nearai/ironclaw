@@ -9,7 +9,7 @@ use ironclaw_llm::{
 use ironclaw_loop_support::{
     HostManagedModelErrorKind, HostManagedModelGateway, HostManagedModelMessage,
     HostManagedModelMessageRole, HostManagedModelRequest, HostManagedModelRouteSnapshot,
-    HostManagedToolResultContent,
+    HostManagedToolResultContent, ThreadBackedLoopContextPort,
 };
 use ironclaw_reborn::model_gateway::{
     LlmModelProfilePolicy, LlmProviderModelGateway, RoutedLlmProviderModelGateway,
@@ -27,15 +27,23 @@ use ironclaw_turns::{
     LoopMessageRef, RunProfileResolutionRequest, RunProfileResolver, TurnId, TurnRunId, TurnScope,
     run_profile::{
         AgentLoopHostErrorKind, CapabilitySurfaceVersion, HostManagedLoopModelPort,
-        InMemoryLoopHostMilestoneSink, InMemoryRunProfileResolver, LoopCapabilityPort,
-        LoopHostMilestoneKind, LoopModelMessage, LoopModelPort, LoopModelRequest, LoopRunContext,
-        ModelProfileId, ParentLoopOutput, ProviderToolCall, ProviderToolCallReplay,
-        ProviderToolDefinition, VisibleCapabilityRequest, VisibleCapabilitySurface,
+        HostManagedLoopPromptPort, InMemoryInstructionMaterializationStore,
+        InMemoryLoopHostMilestoneSink, InMemoryRunProfileResolver, InstructionSafetyContext,
+        LoopCapabilityPort, LoopHostMilestoneKind, LoopModelGateway, LoopModelGatewayRequest,
+        LoopModelMessage, LoopModelPort, LoopModelRequest, LoopPromptBundleRequest, LoopPromptPort,
+        LoopRunContext, ModelProfileId, ParentLoopOutput, PromptMode, ProviderToolCall,
+        ProviderToolCallReplay, ProviderToolDefinition, VisibleCapabilityRequest,
+        VisibleCapabilitySurface,
     },
 };
 use rust_decimal::Decimal;
+use tokio::sync::Barrier;
 
 const STATIC_PROVIDER_ID: &str = "static-test-provider";
+
+fn local_development_safety_context() -> InstructionSafetyContext {
+    InstructionSafetyContext::local_development_noop()
+}
 
 #[tokio::test]
 async fn gateway_calls_llm_provider_for_allowed_model_profile() {
@@ -339,6 +347,99 @@ async fn gateway_with_tool_surface_calls_complete_with_tools_and_returns_capabil
         registered[0].arguments,
         serde_json::json!({"message":"hello"})
     );
+}
+
+#[tokio::test]
+async fn gateway_rejects_empty_tool_capable_stop_response_without_text_only_retry() {
+    let provider = Arc::new(ToolAwareProvider::tool_response(ToolCompletionResponse {
+        content: None,
+        tool_calls: Vec::new(),
+        input_tokens: 1,
+        output_tokens: 1,
+        finish_reason: FinishReason::Stop,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+        reasoning: None,
+    }));
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider.clone(),
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+    let capabilities = Arc::new(GatewayCapabilityPort::with_tool_surface());
+
+    let error = gateway
+        .stream_model_with_capabilities(model_request(interactive_model()), capabilities.clone())
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.kind, HostManagedModelErrorKind::InvalidOutput);
+    assert!(capabilities.registered.lock().unwrap().is_empty());
+    assert_eq!(provider.tool_requests.lock().unwrap().len(), 1);
+    assert!(provider.complete_requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn gateway_recovers_capability_calls_from_textual_tool_syntax() {
+    let provider = Arc::new(ToolAwareProvider::tool_stop_reply(
+        "Searching now.\nto=demo__echo weirdjson\n{\"message\":\"hello\"}",
+    ));
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider.clone(),
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+    let capabilities = Arc::new(GatewayCapabilityPort::with_tool_surface());
+
+    let response = gateway
+        .stream_model_with_capabilities(model_request(interactive_model()), capabilities.clone())
+        .await
+        .unwrap();
+
+    let ParentLoopOutput::CapabilityCalls(calls) = response.output else {
+        panic!("expected capability calls");
+    };
+    assert_eq!(calls.len(), 1);
+    assert_eq!(
+        calls[0].capability_id,
+        CapabilityId::new("demo.echo").unwrap()
+    );
+    assert_eq!(provider.tool_requests.lock().unwrap().len(), 1);
+    assert!(provider.complete_requests.lock().unwrap().is_empty());
+
+    let registered = capabilities.registered.lock().unwrap();
+    assert_eq!(registered.len(), 1);
+    assert_eq!(registered[0].name, "demo__echo");
+    assert_eq!(
+        registered[0].arguments,
+        serde_json::json!({"message":"hello"})
+    );
+}
+
+#[tokio::test]
+async fn gateway_rejects_unrecovered_textual_tool_syntax() {
+    let provider = Arc::new(ToolAwareProvider::tool_stop_reply(
+        "Searching now.\nto=hidden.tool weirdjson\n{\"message\":\"hello\"}",
+    ));
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider.clone(),
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+    let capabilities = Arc::new(GatewayCapabilityPort::with_tool_surface());
+
+    let error = gateway
+        .stream_model_with_capabilities(model_request(interactive_model()), capabilities.clone())
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.kind, HostManagedModelErrorKind::InvalidOutput);
+    assert!(capabilities.registered.lock().unwrap().is_empty());
+    assert_eq!(provider.tool_requests.lock().unwrap().len(), 1);
+    assert!(provider.complete_requests.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -1214,6 +1315,7 @@ async fn production_loop_model_gateway_resolves_thread_refs_and_emits_milestones
         fixture.thread_scope.clone(),
         provider_gateway,
         16,
+        local_development_safety_context(),
     ));
     let milestones = Arc::new(InMemoryLoopHostMilestoneSink::default());
     let port = HostManagedLoopModelPort::new(
@@ -1223,16 +1325,7 @@ async fn production_loop_model_gateway_resolves_thread_refs_and_emits_milestones
     );
 
     let response = port
-        .stream_model(LoopModelRequest {
-            messages: vec![LoopModelMessage {
-                role: "user".to_string(),
-                content_ref: LoopMessageRef::new(format!("msg:{}", fixture.user_message_id))
-                    .unwrap(),
-            }],
-            surface_version: None,
-            model_preference: None,
-            capability_view: None,
-        })
+        .stream_model(production_loop_request(&fixture, None).await)
         .await
         .unwrap();
 
@@ -1240,7 +1333,17 @@ async fn production_loop_model_gateway_resolves_thread_refs_and_emits_milestones
     let requests = provider.requests.lock().unwrap();
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].model.as_deref(), Some("host-selected-model"));
-    assert_eq!(requests[0].messages[0].content, "hello production gateway");
+    assert!(requests[0].messages.iter().any(|message| {
+        message
+            .content
+            .contains("No instruction safety scanner is configured")
+    }));
+    assert!(
+        requests[0]
+            .messages
+            .iter()
+            .any(|message| message.content == "hello production gateway")
+    );
     let milestone_kinds = milestones
         .milestones()
         .into_iter()
@@ -1260,6 +1363,115 @@ async fn production_loop_model_gateway_resolves_thread_refs_and_emits_milestones
 }
 
 #[tokio::test]
+async fn production_loop_model_gateway_keeps_instruction_stores_isolated_across_concurrent_calls() {
+    let fixture = ThreadFixture::new().await;
+    let provider = Arc::new(BarrierRecordingLlmProvider::new(
+        "recording-model",
+        2,
+        "production response",
+    ));
+    let provider_gateway = Arc::new(LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider.clone(),
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    ));
+    let model_gateway = Arc::new(ThreadBackedLoopModelGateway::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        provider_gateway,
+        16,
+        local_development_safety_context(),
+    ));
+
+    let request = production_loop_request(&fixture, None).await;
+    let gateway_request = LoopModelGatewayRequest {
+        context: fixture.run_context.clone(),
+        request,
+    };
+    let first_gateway = Arc::clone(&model_gateway);
+    let second_gateway = Arc::clone(&model_gateway);
+    let first_request = gateway_request.clone();
+    let second_request = gateway_request;
+
+    let (first, second) = tokio::join!(
+        async move { first_gateway.stream_model(first_request).await },
+        async move { second_gateway.stream_model(second_request).await },
+    );
+
+    let first = first.expect("first concurrent call should succeed");
+    let second = second.expect("second concurrent call should succeed");
+    assert_eq!(first.chunks[0].safe_text_delta, "production response");
+    assert_eq!(second.chunks[0].safe_text_delta, "production response");
+
+    let requests = provider.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(requests.iter().all(|request| {
+        request
+            .messages
+            .iter()
+            .any(|message| message.content == "hello production gateway")
+    }));
+    let first_messages = requests[0]
+        .messages
+        .iter()
+        .map(|message| (format!("{:?}", message.role), message.content.clone()))
+        .collect::<Vec<_>>();
+    let second_messages = requests[1]
+        .messages
+        .iter()
+        .map(|message| (format!("{:?}", message.role), message.content.clone()))
+        .collect::<Vec<_>>();
+    assert_eq!(first_messages, second_messages);
+}
+
+#[tokio::test]
+async fn production_loop_model_gateway_includes_configured_safety_context() {
+    let fixture = ThreadFixture::new().await;
+    let provider = Arc::new(RecordingLlmProvider::reply("production response"));
+    let provider_gateway = Arc::new(LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider.clone(),
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    ));
+    let safety_context =
+        InstructionSafetyContext::new("safety:configured", "configured safety enforced").unwrap();
+    let model_gateway = Arc::new(ThreadBackedLoopModelGateway::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        provider_gateway,
+        16,
+        safety_context.clone(),
+    ));
+    let milestones = Arc::new(InMemoryLoopHostMilestoneSink::default());
+    let port = HostManagedLoopModelPort::new(
+        fixture.run_context.clone(),
+        model_gateway,
+        milestones.clone(),
+    );
+
+    port.stream_model(production_loop_request_with_safety(&fixture, None, safety_context).await)
+        .await
+        .unwrap();
+
+    let requests = provider.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert!(
+        requests[0]
+            .messages
+            .iter()
+            .any(|message| message.content == "configured safety enforced")
+    );
+    assert!(
+        requests[0]
+            .messages
+            .iter()
+            .all(|message| !message.content.contains("No instruction safety scanner"))
+    );
+}
+
+#[tokio::test]
 async fn production_loop_model_gateway_sanitizes_provider_output_before_public_chunks() {
     let fixture = ThreadFixture::new().await;
     let provider = Arc::new(RecordingLlmProvider::reply(
@@ -1276,6 +1488,7 @@ async fn production_loop_model_gateway_sanitizes_provider_output_before_public_c
         fixture.thread_scope.clone(),
         provider_gateway,
         16,
+        local_development_safety_context(),
     ));
     let milestones = Arc::new(InMemoryLoopHostMilestoneSink::default());
     let port = HostManagedLoopModelPort::new(
@@ -1285,16 +1498,7 @@ async fn production_loop_model_gateway_sanitizes_provider_output_before_public_c
     );
 
     let response = port
-        .stream_model(LoopModelRequest {
-            messages: vec![LoopModelMessage {
-                role: "user".to_string(),
-                content_ref: LoopMessageRef::new(format!("msg:{}", fixture.user_message_id))
-                    .unwrap(),
-            }],
-            surface_version: None,
-            model_preference: None,
-            capability_view: None,
-        })
+        .stream_model(production_loop_request(&fixture, None).await)
         .await
         .unwrap();
 
@@ -1338,6 +1542,7 @@ async fn production_loop_model_gateway_maps_provider_auth_and_session_to_credent
             fixture.thread_scope.clone(),
             provider_gateway,
             16,
+            local_development_safety_context(),
         ));
         let milestones = Arc::new(InMemoryLoopHostMilestoneSink::default());
         let port = HostManagedLoopModelPort::new(
@@ -1347,16 +1552,7 @@ async fn production_loop_model_gateway_maps_provider_auth_and_session_to_credent
         );
 
         let error = port
-            .stream_model(LoopModelRequest {
-                messages: vec![LoopModelMessage {
-                    role: "user".to_string(),
-                    content_ref: LoopMessageRef::new(format!("msg:{}", fixture.user_message_id))
-                        .unwrap(),
-                }],
-                surface_version: None,
-                model_preference: None,
-                capability_view: None,
-            })
+            .stream_model(production_loop_request(&fixture, None).await)
             .await
             .unwrap_err();
 
@@ -1387,6 +1583,7 @@ async fn production_loop_model_gateway_fails_closed_before_provider_call() {
         fixture.thread_scope.clone(),
         provider_gateway,
         16,
+        local_development_safety_context(),
     ));
     let milestones = Arc::new(InMemoryLoopHostMilestoneSink::default());
     let port = HostManagedLoopModelPort::new(
@@ -1396,16 +1593,13 @@ async fn production_loop_model_gateway_fails_closed_before_provider_call() {
     );
 
     let error = port
-        .stream_model(LoopModelRequest {
-            messages: vec![LoopModelMessage {
-                role: "user".to_string(),
-                content_ref: LoopMessageRef::new(format!("msg:{}", fixture.user_message_id))
-                    .unwrap(),
-            }],
-            surface_version: None,
-            model_preference: Some(ModelProfileId::new("mission_model").unwrap()),
-            capability_view: None,
-        })
+        .stream_model(
+            production_loop_request(
+                &fixture,
+                Some(ModelProfileId::new("mission_model").unwrap()),
+            )
+            .await,
+        )
         .await
         .unwrap_err();
 
@@ -1434,6 +1628,7 @@ async fn production_loop_model_gateway_rejects_forged_context_summary_before_pro
         fixture.thread_scope.clone(),
         provider_gateway,
         16,
+        local_development_safety_context(),
     ));
     let milestones = Arc::new(InMemoryLoopHostMilestoneSink::default());
     let port = HostManagedLoopModelPort::new(
@@ -1481,6 +1676,7 @@ async fn production_loop_model_gateway_rejects_unvalidated_surface_before_provid
         fixture.thread_scope.clone(),
         provider_gateway,
         16,
+        local_development_safety_context(),
     ));
     let milestones = Arc::new(InMemoryLoopHostMilestoneSink::default());
     let port = HostManagedLoopModelPort::new(
@@ -1525,22 +1721,14 @@ async fn production_loop_model_gateway_preserves_error_kind_when_summary_is_resa
         fixture.thread_scope.clone(),
         invalid_summary_gateway,
         16,
+        local_development_safety_context(),
     ));
     let milestones = Arc::new(InMemoryLoopHostMilestoneSink::default());
     let port =
         HostManagedLoopModelPort::new(fixture.run_context.clone(), model_gateway, milestones);
 
     let error = port
-        .stream_model(LoopModelRequest {
-            messages: vec![LoopModelMessage {
-                role: "user".to_string(),
-                content_ref: LoopMessageRef::new(format!("msg:{}", fixture.user_message_id))
-                    .unwrap(),
-            }],
-            surface_version: None,
-            model_preference: None,
-            capability_view: None,
-        })
+        .stream_model(production_loop_request(&fixture, None).await)
         .await
         .unwrap_err();
 
@@ -1868,6 +2056,58 @@ impl ThreadFixture {
     }
 }
 
+async fn production_loop_request(
+    fixture: &ThreadFixture,
+    model_preference: Option<ModelProfileId>,
+) -> LoopModelRequest {
+    production_loop_request_with_safety(
+        fixture,
+        model_preference,
+        InstructionSafetyContext::local_development_noop(),
+    )
+    .await
+}
+
+async fn production_loop_request_with_safety(
+    fixture: &ThreadFixture,
+    model_preference: Option<ModelProfileId>,
+    safety_context: InstructionSafetyContext,
+) -> LoopModelRequest {
+    let context_port = Arc::new(ThreadBackedLoopContextPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        16,
+    ));
+    let prompt_port = HostManagedLoopPromptPort::new(
+        fixture.run_context.clone(),
+        context_port,
+        Arc::new(InMemoryLoopHostMilestoneSink::default()),
+    )
+    .with_safety_context(safety_context)
+    .with_instruction_materialization_store(Arc::new(
+        InMemoryInstructionMaterializationStore::default(),
+    ));
+    let prompt_bundle = prompt_port
+        .build_prompt_bundle(LoopPromptBundleRequest {
+            mode: PromptMode::TextOnly,
+            context_cursor: None,
+            surface_version: None,
+            checkpoint_state_ref: None,
+            max_messages: Some(16),
+            inline_messages: Vec::new(),
+            capability_view: None,
+        })
+        .await
+        .expect("test prompt bundle should build");
+    LoopModelRequest {
+        messages: prompt_bundle.messages,
+        surface_version: None,
+        model_preference,
+        capability_view: None,
+    }
+}
+
 fn interactive_model() -> ModelProfileId {
     ModelProfileId::new("interactive_model").unwrap()
 }
@@ -2147,6 +2387,67 @@ impl RecordingLlmProvider {
             requests: Mutex::new(Vec::new()),
             response: Mutex::new(Some(Err(error))),
         }
+    }
+}
+
+struct BarrierRecordingLlmProvider {
+    model_name: String,
+    barrier: Arc<Barrier>,
+    requests: Mutex<Vec<CompletionRequest>>,
+    content: String,
+}
+
+impl BarrierRecordingLlmProvider {
+    fn new(model_name: &str, parties: usize, content: &str) -> Self {
+        Self {
+            model_name: model_name.to_string(),
+            barrier: Arc::new(Barrier::new(parties)),
+            requests: Mutex::new(Vec::new()),
+            content: content.to_string(),
+        }
+    }
+}
+
+#[async_trait]
+impl LlmProvider for BarrierRecordingLlmProvider {
+    fn model_name(&self) -> &str {
+        &self.model_name
+    }
+
+    fn active_model_name(&self) -> String {
+        self.model_name.clone()
+    }
+
+    fn effective_model_name(&self, _requested_model: Option<&str>) -> String {
+        self.active_model_name()
+    }
+
+    fn cost_per_token(&self) -> (Decimal, Decimal) {
+        (Decimal::ZERO, Decimal::ZERO)
+    }
+
+    async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+        self.requests.lock().unwrap().push(request);
+        self.barrier.wait().await;
+        Ok(CompletionResponse {
+            content: self.content.clone(),
+            input_tokens: 1,
+            output_tokens: 1,
+            finish_reason: FinishReason::Stop,
+            reasoning: None,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+        })
+    }
+
+    async fn complete_with_tools(
+        &self,
+        _request: ToolCompletionRequest,
+    ) -> Result<ToolCompletionResponse, LlmError> {
+        Err(LlmError::RequestFailed {
+            provider: self.model_name.clone(),
+            reason: "tool completion is not used by the loop support gateway".to_string(),
+        })
     }
 }
 

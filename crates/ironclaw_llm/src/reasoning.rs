@@ -1842,7 +1842,123 @@ pub fn recover_tool_calls_from_content(
         }
     }
 
+    recover_codex_text_tool_calls(content, &tool_names, &mut calls);
+
     calls
+}
+
+/// Recover Codex textual tool-call syntax such as
+/// `to=tool.name json\n{...}` when the tool name is present in the
+/// advertised tool surface.
+pub fn recover_codex_text_tool_calls_from_content(
+    content: &str,
+    available_tools: &[ToolDefinition],
+) -> Vec<ToolCall> {
+    let tool_names = available_tools
+        .iter()
+        .map(|tool| tool.name.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    recover_codex_text_tool_calls_from_name_set(content, &tool_names)
+}
+
+pub fn recover_codex_text_tool_calls_from_tool_names(
+    content: &str,
+    tool_names: &[String],
+) -> Vec<ToolCall> {
+    let tool_names = tool_names
+        .iter()
+        .map(String::as_str)
+        .collect::<std::collections::HashSet<_>>();
+    recover_codex_text_tool_calls_from_name_set(content, &tool_names)
+}
+
+fn recover_codex_text_tool_calls_from_name_set(
+    content: &str,
+    tool_names: &std::collections::HashSet<&str>,
+) -> Vec<ToolCall> {
+    let mut calls = Vec::new();
+    recover_codex_text_tool_calls(content, tool_names, &mut calls);
+    calls
+}
+
+fn recover_codex_text_tool_calls(
+    content: &str,
+    tool_names: &std::collections::HashSet<&str>,
+    calls: &mut Vec<ToolCall>,
+) {
+    let code_regions = find_code_regions(content);
+    let mut search_from = 0;
+    while let Some(offset) = content[search_from..].find("to=") {
+        let start = search_from + offset;
+        let Some((name, arguments, end)) = parse_codex_text_tool_call_at(content, start) else {
+            search_from = start + "to=".len();
+            continue;
+        };
+        search_from = end.max(start + 1);
+
+        if !is_recoverable_tool_call_segment(content, start, end, &code_regions) {
+            continue;
+        }
+
+        if !tool_names.contains(name.as_str()) {
+            continue;
+        }
+
+        calls.push(ToolCall {
+            id: super::provider::generate_tool_call_id(calls.len(), RECOVERED_TOOL_CALL_SEED),
+            name,
+            arguments,
+            reasoning: None,
+            signature: None,
+        });
+    }
+}
+
+pub fn contains_codex_text_tool_call_syntax(content: &str) -> bool {
+    let code_regions = find_code_regions(content);
+    let mut search_from = 0;
+    while let Some(offset) = content[search_from..].find("to=") {
+        let start = search_from + offset;
+        if let Some((_, _, end)) = parse_codex_text_tool_call_at(content, start)
+            && is_recoverable_tool_call_segment(content, start, end, &code_regions)
+        {
+            return true;
+        }
+        search_from = start + "to=".len();
+    }
+    false
+}
+
+fn parse_codex_text_tool_call_at(
+    content: &str,
+    start: usize,
+) -> Option<(String, serde_json::Value, usize)> {
+    let after_prefix = content.get(start..)?.strip_prefix("to=")?;
+    let name_start = start + "to=".len();
+    let name_end = after_prefix
+        .find(|ch: char| ch.is_whitespace() || ch == '{')
+        .map(|relative| name_start + relative)
+        .unwrap_or(content.len());
+    let name = &content[name_start..name_end];
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.'))
+    {
+        return None;
+    }
+
+    let separator = &content[name_end..];
+    let brace_relative = separator.find('{')?;
+    if !separator[..brace_relative].trim_end().ends_with("json") {
+        return None;
+    }
+    let brace_start = name_end + brace_relative;
+    let mut json_stream = serde_json::Deserializer::from_str(&content[brace_start..])
+        .into_iter::<serde_json::Value>();
+    let arguments = json_stream.next()?.ok()?;
+    let consumed = json_stream.byte_offset();
+    Some((name.to_string(), arguments, brace_start + consumed.max(1)))
 }
 
 /// `<tool_call>tool_list</tool_call>` or `<|tool_call|>` in the content field
@@ -1901,8 +2017,43 @@ pub fn clean_response(text: &str) -> String {
         result = strip_markdown_fence_block(&result, tag);
     }
 
+    // 6d. Strip Codex textual tool-call syntax emitted by fallback model
+    // paths, e.g. `to=tool.name ...json\n{...}`. Recovery handles valid
+    // advertised tools before cleanup; this prevents residual call syntax
+    // from becoming user-visible prose.
+    result = strip_codex_text_tool_calls(&result);
+
     // 7. Collapse triple+ newlines, trim
     collapse_newlines(&result)
+}
+
+fn strip_codex_text_tool_calls(text: &str) -> String {
+    let code_regions = find_code_regions(text);
+    let mut result = String::with_capacity(text.len());
+    let mut cursor = 0;
+    while let Some(offset) = text[cursor..].find("to=") {
+        let start = cursor + offset;
+        if let Some((_, _, end)) = parse_codex_text_tool_call_at(text, start)
+            && is_recoverable_tool_call_segment(text, start, end, &code_regions)
+        {
+            result.push_str(&text[cursor..start]);
+            if result.chars().last().is_some_and(|ch| !ch.is_whitespace())
+                && text[end..]
+                    .chars()
+                    .next()
+                    .is_some_and(|ch| !ch.is_whitespace())
+            {
+                result.push(' ');
+            }
+            cursor = end;
+        } else {
+            let consumed = start + "to=".len();
+            result.push_str(&text[cursor..consumed]);
+            cursor = consumed;
+        }
+    }
+    result.push_str(&text[cursor..]);
+    result
 }
 
 /// Strip markdown-fenced tool-call blocks like ` ```tool_call\n{...}\n``` `.
@@ -3094,12 +3245,71 @@ That's my plan."#;
     }
 
     #[test]
+    fn test_recover_codex_text_tool_call() {
+        let tools = make_tools(&["notion.notion-search"]);
+        let content =
+            "to=notion.notion-search weirdjson\n{\"query\":\"\",\"query_type\":\"internal\"}";
+        let calls = recover_tool_calls_from_content(content, &tools);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "notion.notion-search");
+        assert_eq!(
+            calls[0].arguments,
+            serde_json::json!({"query":"","query_type":"internal"})
+        );
+    }
+
+    #[test]
+    fn test_recover_multiple_codex_text_tool_calls() {
+        let tools = make_tools(&["demo__echo"]);
+        let content =
+            "to=demo__echo json\n{\"message\":\"one\"}\nto=demo__echo json\n{\"message\":\"two\"}";
+        let calls = recover_tool_calls_from_content(content, &tools);
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].arguments, serde_json::json!({"message":"one"}));
+        assert_eq!(calls[1].arguments, serde_json::json!({"message":"two"}));
+    }
+
+    #[test]
+    fn test_recover_codex_text_unknown_tool_ignored() {
+        let tools = make_tools(&["http"]);
+        let content = "to=hidden.tool json\n{}";
+        let calls = recover_tool_calls_from_content(content, &tools);
+        assert!(calls.is_empty());
+    }
+
+    #[test]
+    fn test_recover_codex_text_inline_prose_ignored() {
+        let tools = make_tools(&["demo__echo"]);
+        let content = "Here is an example: to=demo__echo json\n{\"message\":\"hello\"}";
+        let calls = recover_tool_calls_from_content(content, &tools);
+        assert!(calls.is_empty());
+    }
+
+    #[test]
+    fn test_recover_codex_text_in_fenced_code_ignored() {
+        let tools = make_tools(&["demo__echo"]);
+        let content = "```text\nto=demo__echo json\n{\"message\":\"hello\"}\n```";
+        let calls = recover_tool_calls_from_content(content, &tools);
+        assert!(calls.is_empty());
+    }
+
+    #[test]
     fn test_clean_response_strips_bracket_tool_calls() {
         let input = "Let me fetch that.\n[Called tool `http` with arguments: {\"method\":\"GET\",\"url\":\"https://example.com\"}]\nHere are the results.";
         let cleaned = clean_response(input);
         assert!(!cleaned.contains("[Called tool"));
         assert!(cleaned.contains("Let me fetch that."));
         assert!(cleaned.contains("Here are the results."));
+    }
+
+    #[test]
+    fn test_clean_response_strips_codex_text_tool_calls() {
+        let input = "Searching now.\nto=notion.notion-search weirdjson\n{\"query\":\"\",\"query_type\":\"internal\"}\nI am waiting for results.";
+        let cleaned = clean_response(input);
+        assert!(!cleaned.contains("to=notion.notion-search"));
+        assert!(!cleaned.contains("\"query_type\""));
+        assert!(cleaned.contains("Searching now."));
+        assert!(cleaned.contains("I am waiting for results."));
     }
 
     #[test]

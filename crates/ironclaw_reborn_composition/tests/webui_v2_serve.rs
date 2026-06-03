@@ -1335,12 +1335,16 @@ async fn static_chat_events_clear_gate_when_run_resumes() {
         "chat event handler must distinguish active prompts from resumed runs"
     );
     assert!(
-        body.contains("clearPendingGateForRun(setPendingGate, runId)"),
+        body.contains("clearPendingGateForRun(setPendingGate, runId, promptRunIdRef)"),
         "non-blocked run_status updates must clear stale gates for the resumed run"
     );
     assert!(
-        body.contains("clearPendingGateForRun(setPendingGate, progress.turn_run_id)"),
+        body.contains("progress.turn_run_id,\n              promptRunIdRef,"),
         "typed running/progress events must clear stale gates for the resumed run"
+    );
+    assert!(
+        body.contains("promptRunIdRef?.current === activeRunId"),
+        "projection gates must not be restored after the run has resumed"
     );
     assert!(
         !body.contains("clearPendingAuthGateForForwardProgress"),

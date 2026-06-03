@@ -49,7 +49,19 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "Natural language search query for persistent memory"
+                    "description": "Preferred natural language search query for persistent memory"
+                },
+                "q": {
+                    "type": "string",
+                    "description": "Alias for query"
+                },
+                "text": {
+                    "type": "string",
+                    "description": "Alias for query"
+                },
+                "pattern": {
+                    "type": "string",
+                    "description": "Alias for query"
                 },
                 "limit": {
                     "type": "integer",
@@ -284,6 +296,42 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                 "name": { "type": "string", "description": "Name of the installed skill to remove" }
             },
             "required": ["name"],
+            "additionalProperties": false
+        }),
+        "schemas/builtin/trigger_create.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Human-readable trigger name. Runtime validation caps UTF-8 content at 256 bytes."
+                },
+                "prompt": {
+                    "type": "string",
+                    "description": "Prompt submitted when the trigger fires. Runtime validation caps UTF-8 content at 32768 bytes."
+                },
+                "cron": { "type": "string", "description": "Five-, six-, or seven-field cron expression; fire cadence must be at least one minute" }
+            },
+            "required": ["name", "prompt", "cron"],
+            "additionalProperties": false
+        }),
+        "schemas/builtin/trigger_list.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "limit": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 100,
+                    "description": "Maximum triggers to return. Defaults to 100."
+                }
+            },
+            "additionalProperties": false
+        }),
+        "schemas/builtin/trigger_remove.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "trigger_id": { "type": "string", "description": "Trigger id returned by trigger_create or trigger_list" }
+            },
+            "required": ["trigger_id"],
             "additionalProperties": false
         }),
         _ => return None,

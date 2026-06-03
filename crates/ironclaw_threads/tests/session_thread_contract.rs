@@ -1499,6 +1499,154 @@ async fn overlapping_replacement_summaries_are_rejected() {
 }
 
 #[tokio::test]
+async fn exact_compaction_replacement_summary_replay_is_idempotent() {
+    let service = InMemorySessionThreadService::default();
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope("a"),
+            thread_id: None,
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    for text in ["one", "two"] {
+        service
+            .accept_inbound_message(AcceptInboundMessageRequest {
+                scope: scope("a"),
+                thread_id: thread.thread_id.clone(),
+                actor_id: "actor-a".into(),
+                source_binding_id: None,
+                reply_target_binding_id: None,
+                external_event_id: None,
+                content: user_message(text),
+            })
+            .await
+            .unwrap();
+    }
+
+    let first = service
+        .create_summary_artifact(CreateSummaryArtifactRequest {
+            scope: scope("a"),
+            thread_id: thread.thread_id.clone(),
+            start_sequence: 1,
+            end_sequence: 2,
+            summary_kind: SummaryKind::Compaction,
+            content: MessageContent::text("one and two summarized"),
+            model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
+        })
+        .await
+        .unwrap();
+    let replay = service
+        .create_summary_artifact(CreateSummaryArtifactRequest {
+            scope: scope("a"),
+            thread_id: thread.thread_id.clone(),
+            start_sequence: 1,
+            end_sequence: 2,
+            summary_kind: SummaryKind::Compaction,
+            content: MessageContent::text("one and two summarized"),
+            model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
+        })
+        .await
+        .unwrap();
+    assert_eq!(replay.summary_id, first.summary_id);
+
+    let changed_content = service
+        .create_summary_artifact(CreateSummaryArtifactRequest {
+            scope: scope("a"),
+            thread_id: thread.thread_id.clone(),
+            start_sequence: 1,
+            end_sequence: 2,
+            summary_kind: SummaryKind::Compaction,
+            content: MessageContent::text("different summary"),
+            model_context_policy: Some(SummaryModelContextPolicy::ReplaceRangeWhenSelected),
+        })
+        .await;
+    assert!(matches!(
+        changed_content,
+        Err(SessionThreadError::OverlappingSummaryRange { .. })
+    ));
+
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: scope("a"),
+            thread_id: thread.thread_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(history.summary_artifacts.len(), 1);
+    assert_eq!(history.summary_artifacts[0].summary_id, first.summary_id);
+}
+
+#[tokio::test]
+async fn policy_none_overlapping_summaries_are_allowed() {
+    let service = InMemorySessionThreadService::default();
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope("a"),
+            thread_id: None,
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    for text in ["one", "two", "three"] {
+        service
+            .accept_inbound_message(AcceptInboundMessageRequest {
+                scope: scope("a"),
+                thread_id: thread.thread_id.clone(),
+                actor_id: "actor-a".into(),
+                source_binding_id: None,
+                reply_target_binding_id: None,
+                external_event_id: None,
+                content: user_message(text),
+            })
+            .await
+            .unwrap();
+    }
+
+    let first = service
+        .create_summary_artifact(CreateSummaryArtifactRequest {
+            scope: scope("a"),
+            thread_id: thread.thread_id.clone(),
+            start_sequence: 1,
+            end_sequence: 2,
+            summary_kind: SummaryKind::Compaction,
+            content: MessageContent::text("one and two summarized"),
+            model_context_policy: None,
+        })
+        .await
+        .unwrap();
+    let second = service
+        .create_summary_artifact(CreateSummaryArtifactRequest {
+            scope: scope("a"),
+            thread_id: thread.thread_id.clone(),
+            start_sequence: 2,
+            end_sequence: 3,
+            summary_kind: SummaryKind::Compaction,
+            content: MessageContent::text("two and three summarized"),
+            model_context_policy: None,
+        })
+        .await
+        .unwrap();
+
+    assert_ne!(first.summary_id, second.summary_id);
+
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: scope("a"),
+            thread_id: thread.thread_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(history.summary_artifacts.len(), 2);
+    assert_eq!(history.summary_artifacts[0].start_sequence, 1);
+    assert_eq!(history.summary_artifacts[1].start_sequence, 2);
+}
+
+#[tokio::test]
 async fn summary_replacement_still_applies_when_range_starts_with_redacted_message() {
     let service = InMemorySessionThreadService::default();
     let thread = service

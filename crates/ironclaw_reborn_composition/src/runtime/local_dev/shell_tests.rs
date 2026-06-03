@@ -2,7 +2,9 @@ use std::sync::Arc;
 
 use ironclaw_host_api::{AgentId, CapabilityId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_host_runtime::SHELL_CAPABILITY_ID;
-use ironclaw_loop_support::{LoopCapabilityInputResolver, LoopCapabilityResultWriter};
+use ironclaw_loop_support::{
+    LoopCapabilityInputResolver, LoopCapabilityPortFactory, LoopCapabilityResultWriter,
+};
 use ironclaw_turns::{
     RunProfileResolutionRequest, RunProfileResolver, TurnId, TurnRunId, TurnScope,
     run_profile::{
@@ -14,7 +16,6 @@ use ironclaw_turns::{
 use super::{
     LocalDevCapabilityIo, LocalDevExtensionSurfaceSource, LocalDevLoopCapabilityPortFactory,
 };
-use ironclaw_reborn::loop_driver_host::LoopCapabilityPortFactory;
 
 async fn run_context(label: &str) -> LoopRunContext {
     let resolved = InMemoryRunProfileResolver::default()

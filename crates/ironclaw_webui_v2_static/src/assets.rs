@@ -96,6 +96,34 @@ mod tests {
     }
 
     #[test]
+    fn chat_pending_reconciliation_has_caller_level_js_regression() {
+        let use_chat = asset_text("js/pages/chat/hooks/useChat.js");
+        assert!(use_chat.contains("recordAcceptedMessageRef("));
+        assert!(use_chat.contains("pendingMessagesRef.current"));
+        assert!(use_chat.contains("response?.accepted_message_ref"));
+
+        let pending_messages = asset_text("js/pages/chat/lib/pending-messages.js");
+        assert!(pending_messages.contains("timelineMessageIdFromAcceptedRef"));
+        assert!(
+            pending_messages
+                .contains("return ref.startsWith(\"msg:\") ? ref.slice(\"msg:\".length) : null;")
+        );
+
+        let regression = asset_text("js/pages/chat/lib/useChat-send.test.mjs");
+        assert!(regression.contains("useChat.send: accepted ref reconciles"));
+        assert!(regression.contains("accepted_message_ref: \"msg:message-1\""));
+        assert!(regression.contains("await loadHistory();"));
+        assert!(regression.contains("[\"msg-message-1\"]"));
+
+        let pending_regression = asset_text("js/pages/chat/lib/pending-messages.test.mjs");
+        assert!(pending_regression.contains(
+            "recordAcceptedMessageRef: null and non-msg refs leave pending record unchanged"
+        ));
+        assert!(pending_regression.contains("\"thread:1\""));
+        assert!(pending_regression.contains("\"message-1\""));
+    }
+
+    #[test]
     fn chat_projection_text_preserves_pending_gate() {
         let events = asset_text("js/pages/chat/lib/useChatEvents.js");
         let text_branch = events
@@ -113,6 +141,24 @@ mod tests {
             !text_branch.contains("setPendingGate(null);"),
             "projection text must not hide a still-blocked auth gate"
         );
+    }
+
+    #[test]
+    fn chat_message_grouping_hoists_only_final_replies() {
+        let groups = asset_text("js/pages/chat/lib/message-groups.js");
+        assert!(groups.contains("function isFinalAssistantReply"));
+        assert!(groups.contains("msg.isFinalReply === true"));
+        assert!(groups.contains("msg.status === \"finalized\""));
+        assert!(groups.contains("appendGroupedMessages(items, reordered.before);"));
+        assert!(groups.contains("appendGroupedMessages(items, reordered.activity);"));
+        assert!(!groups.contains("lastAssistantReplyIndex"));
+
+        let history = asset_text("js/pages/chat/lib/history-messages.js");
+        assert!(history.contains("isFinalReply: isFinalAssistantRecord(record)"));
+        assert!(history.contains("record.status === \"finalized\""));
+
+        let events = asset_text("js/pages/chat/lib/useChatEvents.js");
+        assert!(events.contains("isFinalReply: true"));
     }
 
     #[test]

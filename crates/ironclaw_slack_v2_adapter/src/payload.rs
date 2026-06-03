@@ -6,9 +6,11 @@
 //! trusted context outside this crate after verifying Slack request signatures.
 
 use ironclaw_product_adapters::{
-    AdapterInstallationId, ExternalActorRef, ExternalConversationRef, ExternalEventId,
+    AdapterInstallationId, ApprovalDecision, ApprovalResolutionPayload, AuthResolutionPayload,
+    AuthResolutionResult, ExternalActorRef, ExternalConversationRef, ExternalEventId,
     ParsedProductInbound, ProductAdapterError, ProductAttachmentDescriptor, ProductAttachmentKind,
-    ProductInboundPayload, ProductTriggerReason, ProtocolAuthEvidence, UserMessagePayload,
+    ProductInboundPayload, ProductTriggerReason, ProtocolAuthEvidence,
+    ScopedApprovalResolutionPayload, UserMessagePayload,
 };
 use serde::Deserialize;
 use thiserror::Error;
@@ -112,6 +114,14 @@ fn parse_app_mention(
     team_id: Option<&str>,
     event: &SlackEvent,
 ) -> Result<ParsedProductInbound, SlackPayloadParseError> {
+    if let Some(parsed) = try_parse_resolution_message(
+        event_id.clone(),
+        team_id,
+        event,
+        ProductTriggerReason::BotMention,
+    )? {
+        return Ok(parsed);
+    }
     try_parse_user_message(event_id, team_id, event, SlackMessageKind::AppMention)
 }
 
@@ -120,10 +130,27 @@ fn parse_message_event(
     team_id: Option<&str>,
     event: &SlackEvent,
 ) -> Result<ParsedProductInbound, SlackPayloadParseError> {
-    try_parse_user_message(event_id, team_id, event, SlackMessageKind::Dm)
+    if is_dm_channel(
+        event.channel.as_deref().unwrap_or_default(),
+        event.channel_type.as_deref(),
+    ) {
+        if let Some(parsed) = try_parse_resolution_message(
+            event_id.clone(),
+            team_id,
+            event,
+            ProductTriggerReason::DirectChat,
+        )? {
+            return Ok(parsed);
+        }
+        return try_parse_user_message(event_id, team_id, event, SlackMessageKind::Dm);
+    }
+    if event.thread_ts.is_some() {
+        return parse_thread_interaction(event_id, team_id, event);
+    }
+    noop_parsed_inbound(event_id, team_id, Some(event))
 }
 
-/// Two fixed message routing strategies in this first slice.
+/// Fixed user-message routing strategies in this first slice.
 /// `AppMention`: public channel, strip leading `@mention`, thread fallback to `ts`.
 /// `Dm`: direct-message channel required, keep text verbatim, no thread fallback.
 #[derive(Debug, Clone, Copy)]
@@ -170,19 +197,85 @@ fn try_parse_user_message(
         ),
     };
 
-    build_user_message(
-        event_id,
-        SlackUserMessageParts {
-            team_id,
-            user,
-            channel,
-            thread_ts,
-            message_ts: Some(ts),
-            text,
-            attachments: collect_attachments(&event.files)?,
-            trigger,
-        },
-    )
+    let attachments = collect_attachments(&event.files)?;
+    let parts = SlackUserMessageParts {
+        team_id,
+        user,
+        channel,
+        thread_ts,
+        message_ts: Some(ts),
+        text,
+        attachments,
+        trigger,
+    };
+    build_user_message(event_id, parts)
+}
+
+fn parse_thread_interaction(
+    event_id: ExternalEventId,
+    team_id: Option<&str>,
+    event: &SlackEvent,
+) -> Result<ParsedProductInbound, SlackPayloadParseError> {
+    let Some(parsed) = try_parse_resolution_message(
+        event_id.clone(),
+        team_id,
+        event,
+        ProductTriggerReason::ReplyToBot,
+    )?
+    else {
+        return noop_parsed_inbound(event_id, team_id, Some(event));
+    };
+    Ok(parsed)
+}
+
+fn try_parse_resolution_message(
+    event_id: ExternalEventId,
+    team_id: Option<&str>,
+    event: &SlackEvent,
+    source_trigger: ProductTriggerReason,
+) -> Result<Option<ParsedProductInbound>, SlackPayloadParseError> {
+    if event.bot_id.is_some() || !is_user_generated_message_subtype(event.subtype.as_deref()) {
+        return Ok(None);
+    }
+    let Some(user) = event.user.as_deref() else {
+        return Ok(None);
+    };
+    let Some(channel) = event.channel.as_deref() else {
+        return Ok(None);
+    };
+    let Some(ts) = event.ts.as_deref() else {
+        return Ok(None);
+    };
+
+    let raw_text = event.text.as_deref().unwrap_or_default();
+    let text = match source_trigger {
+        ProductTriggerReason::BotMention => strip_leading_bot_mention(raw_text),
+        ProductTriggerReason::DirectChat
+        | ProductTriggerReason::ReplyToBot
+        | ProductTriggerReason::BotCommand
+        | ProductTriggerReason::LinkedThreadAction => raw_text.to_string(),
+    };
+    let Some(payload) = parse_interaction_resolution(&text, source_trigger)? else {
+        return Ok(None);
+    };
+    let thread_ts = match source_trigger {
+        ProductTriggerReason::BotMention => event.thread_ts.as_deref().or(Some(ts)),
+        ProductTriggerReason::DirectChat
+        | ProductTriggerReason::ReplyToBot
+        | ProductTriggerReason::BotCommand
+        | ProductTriggerReason::LinkedThreadAction => event.thread_ts.as_deref(),
+    };
+    let parts = SlackUserMessageParts {
+        team_id,
+        user,
+        channel,
+        thread_ts,
+        message_ts: Some(ts),
+        text,
+        attachments: Vec::new(),
+        trigger: source_trigger,
+    };
+    build_payload_message(event_id, &parts, payload).map(Some)
 }
 
 struct SlackUserMessageParts<'a> {
@@ -219,6 +312,97 @@ fn build_user_message(
         ProductInboundPayload::UserMessage(user_message),
     )
     .map_err(adapter_error_to_payload_error)
+}
+
+fn build_payload_message(
+    event_id: ExternalEventId,
+    parts: &SlackUserMessageParts<'_>,
+    payload: ProductInboundPayload,
+) -> Result<ParsedProductInbound, SlackPayloadParseError> {
+    let actor_ref = build_actor_ref(Some(parts.user))?;
+    let conversation_ref = build_conversation_ref(
+        parts.team_id,
+        Some(parts.channel),
+        parts.thread_ts,
+        parts.message_ts,
+    )?;
+    ParsedProductInbound::new(event_id, actor_ref, conversation_ref, payload)
+        .map_err(adapter_error_to_payload_error)
+}
+
+fn parse_interaction_resolution(
+    text: &str,
+    source_trigger: ProductTriggerReason,
+) -> Result<Option<ProductInboundPayload>, SlackPayloadParseError> {
+    let mut parts = text.split_whitespace();
+    let Some(first) = parts.next() else {
+        return Ok(None);
+    };
+    match first.to_ascii_lowercase().as_str() {
+        "approve" => parse_approval_resolution(
+            parts.next(),
+            parts.next(),
+            ApprovalDecision::ApproveOnce,
+            source_trigger,
+        ),
+        "deny" => parse_approval_resolution(
+            parts.next(),
+            parts.next(),
+            ApprovalDecision::Deny,
+            source_trigger,
+        ),
+        "auth" => {
+            let Some(action) = parts.next() else {
+                return malformed_interaction_noop("auth");
+            };
+            if action.eq_ignore_ascii_case("deny") {
+                let Some(auth_request_ref) = parts.next() else {
+                    return malformed_interaction_noop("auth deny");
+                };
+                if parts.next().is_some() {
+                    return malformed_interaction_noop("auth deny");
+                }
+                AuthResolutionPayload::new(auth_request_ref, AuthResolutionResult::Denied)
+                    .map(|payload| payload.with_source_trigger(source_trigger))
+                    .map(ProductInboundPayload::AuthResolution)
+                    .map(Some)
+                    .map_err(adapter_error_to_payload_error)
+            } else {
+                malformed_interaction_noop("auth")
+            }
+        }
+        _ => Ok(None),
+    }
+}
+
+fn parse_approval_resolution(
+    gate_ref: Option<&str>,
+    extra_token: Option<&str>,
+    decision: ApprovalDecision,
+    source_trigger: ProductTriggerReason,
+) -> Result<Option<ProductInboundPayload>, SlackPayloadParseError> {
+    if extra_token.is_some() {
+        return malformed_interaction_noop("approval");
+    }
+
+    match gate_ref {
+        Some(gate_ref) => ApprovalResolutionPayload::new(gate_ref, decision)
+            .map(|payload| payload.with_source_trigger(source_trigger))
+            .map(ProductInboundPayload::ApprovalResolution)
+            .map(Some)
+            .map_err(adapter_error_to_payload_error),
+        None => ScopedApprovalResolutionPayload::new(decision)
+            .map(|payload| payload.with_source_trigger(source_trigger))
+            .map(ProductInboundPayload::ScopedApprovalResolution)
+            .map(Some)
+            .map_err(adapter_error_to_payload_error),
+    }
+}
+
+fn malformed_interaction_noop(
+    _command: &'static str,
+) -> Result<Option<ProductInboundPayload>, SlackPayloadParseError> {
+    Ok(Some(ProductInboundPayload::NoOp))
 }
 
 fn noop_parsed_inbound(
@@ -618,6 +802,39 @@ mod tests {
         }));
 
         assert!(matches!(inbound.payload, ProductInboundPayload::NoOp));
+    }
+
+    #[test]
+    fn channel_thread_interaction_reply_becomes_approval_resolution() {
+        let inbound = parse(serde_json::json!({
+            "type": "event_callback",
+            "team_id": "T123",
+            "event_id": "EvThreadApproval",
+            "event": {
+                "type": "message",
+                "user": "U123",
+                "channel": "C123",
+                "text": "approve gate:abc123",
+                "ts": "1710000000.000011",
+                "thread_ts": "1710000000.000010"
+            }
+        }));
+
+        assert_eq!(inbound.external_conversation_ref.conversation_id(), "C123");
+        assert_eq!(
+            inbound.external_conversation_ref.topic_id(),
+            Some("1710000000.000010")
+        );
+        match inbound.payload {
+            ProductInboundPayload::ApprovalResolution(payload) => {
+                assert_eq!(payload.gate_ref, "gate:abc123");
+                assert_eq!(
+                    payload.source_trigger,
+                    Some(ProductTriggerReason::ReplyToBot)
+                );
+            }
+            other => panic!("expected approval resolution, got {other:?}"),
+        }
     }
 
     #[test]

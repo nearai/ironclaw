@@ -46,6 +46,7 @@ export function useChatEvents({
   // (which doesn't carry `run_id`) with the active run so resolveGate
   // can build its `/runs/{run_id}/gates/{gate_ref}/resolve` URL.
   const latestRunIdRef = React.useRef(null);
+  const promptRunIdRef = React.useRef(null);
 
   return React.useCallback(
     (envelope) => {
@@ -75,7 +76,11 @@ export function useChatEvents({
                 ? current
                 : { runId: progress.turn_run_id, threadId, status: "running" },
             );
-            clearPendingGateForRun(setPendingGate, progress.turn_run_id);
+            clearPendingGateForRun(
+              setPendingGate,
+              progress.turn_run_id,
+              promptRunIdRef,
+            );
           }
           setIsProcessing(true);
           return;
@@ -131,6 +136,7 @@ export function useChatEvents({
               content: reply.text || "",
               timestamp: reply.generated_at || new Date().toISOString(),
               turnRunId: reply.turn_run_id,
+              isFinalReply: true,
             },
           ]);
           setPendingGate(null);
@@ -159,6 +165,7 @@ export function useChatEvents({
             onRunCompleted,
             completedRunsRef,
             latestRunIdRef,
+            promptRunIdRef,
           });
           return;
         }
@@ -194,8 +201,11 @@ const PROMPT_RUN_STATUSES = new Set([
   "blocked_resource",
 ]);
 
-function clearPendingGateForRun(setPendingGate, runId) {
+function clearPendingGateForRun(setPendingGate, runId, promptRunIdRef) {
   if (!runId) return;
+  if (promptRunIdRef?.current === runId) {
+    promptRunIdRef.current = null;
+  }
   setPendingGate((current) => (current?.runId === runId ? null : current));
 }
 
@@ -209,6 +219,7 @@ function applyProjectionItems({
   onRunCompleted,
   completedRunsRef,
   latestRunIdRef,
+  promptRunIdRef,
 }) {
   // Snapshot the run_id surfaced by the most recent `run_status` item
   // we've seen — either earlier in this same items batch, or carried
@@ -236,12 +247,20 @@ function applyProjectionItems({
             : { runId, threadId, status },
         );
       }
+      if (runId && PROMPT_RUN_STATUSES.has(status)) {
+        if (promptRunIdRef) promptRunIdRef.current = runId;
+      } else if (runId && promptRunIdRef?.current === runId) {
+        promptRunIdRef.current = null;
+      }
       if (TERMINAL_RUN_STATUSES.has(status)) {
         setIsProcessing(false);
         setPendingGate(null);
         setActiveRun?.(null);
         activeRunId = null;
         if (latestRunIdRef) latestRunIdRef.current = null;
+        if (runId && promptRunIdRef?.current === runId) {
+          promptRunIdRef.current = null;
+        }
         if (
           SUCCESS_RUN_STATUSES.has(status) &&
           onRunCompleted &&
@@ -290,10 +309,8 @@ function applyProjectionItems({
             ];
           });
         }
-      } else {
-        if (!PROMPT_RUN_STATUSES.has(status)) {
-          clearPendingGateForRun(setPendingGate, runId);
-        }
+      } else if (!PROMPT_RUN_STATUSES.has(status)) {
+        clearPendingGateForRun(setPendingGate, runId, promptRunIdRef);
         setIsProcessing(true);
       }
     }
@@ -313,6 +330,7 @@ function applyProjectionItems({
           role: "assistant",
           content: item.text.body || "",
           timestamp: new Date().toISOString(),
+          isFinalReply: true,
         };
         if (existing >= 0) {
           const copy = [...prev];
@@ -351,7 +369,7 @@ function applyProjectionItems({
       // construction in `api.js`), so skip emitting the gate entirely
       // if no run is active yet — a later projection_update will
       // re-surface it once a run_status arrives.
-      if (activeRunId) {
+      if (activeRunId && promptRunIdRef?.current === activeRunId) {
         setPendingGate((current) => current || {
           kind: "gate",
           runId: activeRunId,

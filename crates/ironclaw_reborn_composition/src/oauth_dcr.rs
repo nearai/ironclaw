@@ -216,6 +216,10 @@ impl OAuthDcrProvider {
         challenge_view_from_flow(&flow)
     }
 
+    #[allow(
+        dead_code,
+        reason = "used by the webui-v2-beta extension OAuth route through RebornProductAuthServices"
+    )]
     pub(crate) async fn start_setup_flow(
         &self,
         flow_manager: &Arc<dyn AuthFlowManager>,
@@ -905,6 +909,10 @@ impl OAuthDcrProviderRegistry {
         dcr_provider.pkce_verifier_for_flow(scope, flow_id).await
     }
 
+    #[allow(
+        dead_code,
+        reason = "used by the webui-v2-beta extension OAuth route through RebornProductAuthServices"
+    )]
     pub(crate) async fn start_setup_flow(
         &self,
         flow_manager: &Arc<dyn AuthFlowManager>,
@@ -949,6 +957,10 @@ enum DcrFlowContext<'a> {
         turn_run_ref: &'a TurnRunRef,
         gate_ref: &'a AuthGateRef,
     },
+    #[allow(
+        dead_code,
+        reason = "used by the webui-v2-beta extension OAuth route through RebornProductAuthServices"
+    )]
     Setup {
         account_label: &'a CredentialAccountLabel,
     },

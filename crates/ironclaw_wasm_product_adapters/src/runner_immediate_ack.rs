@@ -17,9 +17,21 @@
 
 use std::sync::Arc;
 
-use ironclaw_product_adapters::{InboundRetryDisposition, ProtocolAuthEvidence};
+use async_trait::async_trait;
+use ironclaw_product_adapters::{
+    InboundRetryDisposition, ProductInboundAck, ProductInboundEnvelope, ProtocolAuthEvidence,
+};
 
 use crate::runner::{NativeProductAdapterRunner, RunnerError, WebhookProcessOutcome};
+
+/// Observer for workflow outcomes scheduled after an immediate protocol ACK.
+///
+/// Implementations run outside the webhook response path and must not assume the
+/// protocol can retry when delivery fails.
+#[async_trait]
+pub trait ImmediateAckWorkflowObserver: Send + Sync {
+    async fn observe_workflow_ack(&self, envelope: ProductInboundEnvelope, ack: ProductInboundAck);
+}
 
 impl NativeProductAdapterRunner {
     /// Verify, parse, stamp, and schedule workflow dispatch without waiting for
@@ -44,7 +56,22 @@ impl NativeProductAdapterRunner {
         body: &[u8],
         evidence: &ProtocolAuthEvidence,
     ) -> Result<WebhookProcessOutcome, RunnerError> {
+        self.process_verified_webhook_immediate_ack_with_observer(body, evidence, None)
+            .await
+    }
+
+    /// Same as [`Self::process_verified_webhook_immediate_ack`], but notifies a
+    /// host-owned observer after the asynchronous workflow dispatch returns an
+    /// ack. This lets product hosts trigger follow-up delivery (for example a
+    /// final reply push) without delaying the protocol-level ACK.
+    pub async fn process_verified_webhook_immediate_ack_with_observer(
+        &self,
+        body: &[u8],
+        evidence: &ProtocolAuthEvidence,
+        observer: Option<Arc<dyn ImmediateAckWorkflowObserver>>,
+    ) -> Result<WebhookProcessOutcome, RunnerError> {
         let (envelope, permit) = self.prepare_inbound_envelope(body, evidence).await?;
+        let workflow_envelope = envelope.clone();
         let workflow = Arc::clone(&self.workflow);
         let workflow_timeout = self.config.workflow_timeout;
         let mut tasks = self.immediate_ack_tasks.lock().await;
@@ -59,19 +86,29 @@ impl NativeProductAdapterRunner {
         }
         tasks.spawn(async move {
             let _permit = permit;
+            // The admission permit bounds the whole tracked post-ACK task, including
+            // observer follow-up. Otherwise quick workflow acks could release permits
+            // while long-running observers accumulate without backpressure.
             // Timeout drops the in-flight workflow future. That is the intended
             // cancellation boundary for this generic async trait call: the
             // runner does not hold a separate task handle or protocol-specific
             // resource owner to abort. Workflows that open DB/network resources
             // must make their own futures cancellation-safe at await points.
-            match tokio::time::timeout(workflow_timeout, workflow.accept_inbound(envelope)).await {
-                Ok(Ok(ack)) if ack.retry_disposition() == InboundRetryDisposition::Retry => {
-                    tracing::warn!(
-                        target = "ironclaw::product_adapter::runner",
-                        "async webhook workflow dispatch requested retry after protocol ack; event was not retried by protocol transport"
-                    );
+            let workflow_result =
+                tokio::time::timeout(workflow_timeout, workflow.accept_inbound(workflow_envelope))
+                    .await;
+            match workflow_result {
+                Ok(Ok(ack)) => {
+                    if ack.retry_disposition() == InboundRetryDisposition::Retry {
+                        tracing::warn!(
+                            target = "ironclaw::product_adapter::runner",
+                            "async webhook workflow dispatch requested retry after protocol ack; event was not retried by protocol transport"
+                        );
+                    }
+                    if let Some(observer) = observer {
+                        observer.observe_workflow_ack(envelope, ack).await;
+                    }
                 }
-                Ok(Ok(_)) => {}
                 Ok(Err(error)) => {
                     tracing::debug!(
                         target = "ironclaw::product_adapter::runner",

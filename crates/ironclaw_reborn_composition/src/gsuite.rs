@@ -12,9 +12,11 @@ use ironclaw_first_party_extensions::{
     GsuitePackageSpec, find_gsuite_capability, gsuite_package_specs, gsuite_resource_profile,
 };
 use ironclaw_host_api::{
-    CapabilityId, CapabilityProfileSchemaRef, ExtensionId, HostApiError, RequestedTrustClass,
-    RuntimeCredentialAccountProviderId, RuntimeCredentialAuthRequirement, RuntimeDispatchErrorKind,
-    TrustClass, VirtualPath,
+    CapabilityId, CapabilityProfileSchemaRef, ExtensionId, HostApiError, NetworkScheme,
+    NetworkTargetPattern, RequestedTrustClass, RuntimeCredentialAccountProviderId,
+    RuntimeCredentialAccountSetup, RuntimeCredentialAuthRequirement, RuntimeCredentialRequirement,
+    RuntimeCredentialRequirementSource, RuntimeCredentialTarget, RuntimeDispatchErrorKind,
+    SecretHandle, TrustClass, VirtualPath,
 };
 use ironclaw_host_runtime::{
     FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
@@ -108,7 +110,7 @@ fn package_from_spec(spec: &GsuitePackageSpec) -> Result<ExtensionPackage, Exten
     let capabilities = spec
         .capabilities
         .iter()
-        .map(|capability| capability_manifest(capability, spec.schema_prefix))
+        .map(|capability| capability_manifest(capability, spec))
         .collect::<Result<Vec<_>, _>>()?;
     ExtensionPackage::from_manifest(
         ExtensionManifest {
@@ -132,7 +134,7 @@ fn package_from_spec(spec: &GsuitePackageSpec) -> Result<ExtensionPackage, Exten
 
 fn capability_manifest(
     capability: &GsuiteCapabilitySpec,
-    schema_prefix: &str,
+    spec: &GsuitePackageSpec,
 ) -> Result<CapabilityManifest, ExtensionError> {
     Ok(CapabilityManifest {
         id: CapabilityId::new(capability.id)?,
@@ -143,20 +145,55 @@ fn capability_manifest(
         visibility: CapabilityVisibility::Model,
         input_schema_ref: CapabilityProfileSchemaRef::new(format!(
             "schemas/{}/{}.input.v1.json",
-            schema_prefix, capability.short_name
+            spec.schema_prefix, capability.short_name
         ))?,
         output_schema_ref: CapabilityProfileSchemaRef::new(format!(
             "schemas/{}/{}.output.v1.json",
-            schema_prefix, capability.short_name
+            spec.schema_prefix, capability.short_name
         ))?,
         prompt_doc_ref: Some(CapabilityProfileSchemaRef::new(format!(
             "prompts/{}/{}.md",
-            schema_prefix, capability.short_name
+            spec.schema_prefix, capability.short_name
         ))?),
         required_host_ports: Vec::new(),
-        runtime_credentials: Vec::new(),
+        runtime_credentials: runtime_credentials(capability, spec)?,
         resource_profile: Some(gsuite_resource_profile()),
     })
+}
+
+fn runtime_credentials(
+    capability: &GsuiteCapabilitySpec,
+    spec: &GsuitePackageSpec,
+) -> Result<Vec<RuntimeCredentialRequirement>, ExtensionError> {
+    let provider_scopes = required_provider_scopes(capability);
+    Ok(vec![RuntimeCredentialRequirement {
+        handle: SecretHandle::new(spec.credential_handle)?,
+        source: RuntimeCredentialRequirementSource::ProductAuthAccount {
+            provider: RuntimeCredentialAccountProviderId::new(ironclaw_auth::GOOGLE_PROVIDER_ID)?,
+            setup: RuntimeCredentialAccountSetup::OAuth {
+                scopes: provider_scopes.clone(),
+            },
+        },
+        provider_scopes,
+        audience: NetworkTargetPattern {
+            scheme: Some(NetworkScheme::Https),
+            host_pattern: spec.credential_host_pattern.to_string(),
+            port: None,
+        },
+        target: RuntimeCredentialTarget::Header {
+            name: "authorization".to_string(),
+            prefix: Some("Bearer ".to_string()),
+        },
+        required: true,
+    }])
+}
+
+fn required_provider_scopes(capability: &GsuiteCapabilitySpec) -> Vec<String> {
+    capability
+        .required_scopes
+        .iter()
+        .map(|scope| (*scope).to_string())
+        .collect()
 }
 
 /// Convert a [`GsuiteDispatchError`] into the neutral [`FirstPartyCapabilityError`].
@@ -195,11 +232,7 @@ fn gsuite_credential_requirements(
     Ok(vec![RuntimeCredentialAuthRequirement {
         provider,
         requester_extension,
-        provider_scopes: capability
-            .required_scopes
-            .iter()
-            .map(|scope| (*scope).to_string())
-            .collect(),
+        provider_scopes: required_provider_scopes(capability),
     }])
 }
 

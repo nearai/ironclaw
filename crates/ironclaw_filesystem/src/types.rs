@@ -461,9 +461,10 @@ impl BackendCapabilities {
     }
 
     /// Convenience: every capability the in-memory reference backend
-    /// implements. Includes Events on top of `sql_typical`.
+    /// implements. Includes Events, FTS, and Vector on top of
+    /// `sql_typical`.
     pub const fn in_memory_full() -> Self {
-        Self::sql_typical().with(Capability::Events)
+        Self::sql_typical_full()
     }
 
     /// Convenience: read + write + append + list + stat + delete only.
@@ -514,5 +515,19 @@ impl<'de> Deserialize<'de> for BackendCapabilities {
             out = out.with(cap);
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn in_memory_full_includes_fts_vector_events() {
+        let capabilities = BackendCapabilities::in_memory_full();
+
+        assert!(capabilities.has(Capability::IndexFts));
+        assert!(capabilities.has(Capability::IndexVector));
+        assert!(capabilities.has(Capability::Events));
     }
 }

@@ -9,6 +9,7 @@ authority_effects = [
     "spawn_process",
     "execute_code",
     "network",
+    "external_write",
 ]
 
 [approval_defaults.spawn_capability]
@@ -167,4 +168,22 @@ network = "local_dev_wildcard"
 capability = "builtin.skill_remove"
 effects = ["dispatch_capability", "read_filesystem", "write_filesystem", "delete_filesystem"]
 mounts = "skill_management"
+network = "default"
+
+[[grants]]
+capability = "builtin.trigger_create"
+effects = ["dispatch_capability", "external_write"]
+mounts = "ambient"
+network = "default"
+
+[[grants]]
+capability = "builtin.trigger_list"
+effects = ["dispatch_capability"]
+mounts = "ambient"
+network = "default"
+
+[[grants]]
+capability = "builtin.trigger_remove"
+effects = ["dispatch_capability", "external_write"]
+mounts = "ambient"
 network = "default"

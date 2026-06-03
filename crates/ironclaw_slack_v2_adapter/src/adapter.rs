@@ -4,16 +4,17 @@ use async_trait::async_trait;
 use ironclaw_product_adapters::redaction::RedactedString;
 use ironclaw_product_adapters::{
     AdapterInstallationId, AuthRequirement, DeclaredEgressHost, DeclaredEgressTarget,
-    DeliveryStatus, EgressCredentialHandle, OutboundDeliverySink, ParsedProductInbound,
-    ProductAdapter, ProductAdapterCapabilities, ProductAdapterError, ProductAdapterId,
-    ProductCapabilityFlag, ProductOutboundEnvelope, ProductOutboundPayload, ProductRenderOutcome,
-    ProductSurfaceKind, ProtocolAuthEvidence, ProtocolHttpEgress, ProtocolHttpEgressError,
+    DeliveryStatus, EgressCredentialHandle, EgressRequest, OutboundDeliverySink,
+    ParsedProductInbound, ProductAdapter, ProductAdapterCapabilities, ProductAdapterError,
+    ProductAdapterId, ProductCapabilityFlag, ProductOutboundEnvelope, ProductOutboundPayload,
+    ProductOutboundTarget, ProductRenderOutcome, ProductSurfaceKind, ProtocolAuthEvidence,
+    ProtocolHttpEgress, ProtocolHttpEgressError,
 };
 use ironclaw_turns::TurnRunId;
 use serde::Deserialize;
 
 use crate::payload::{SLACK_API_HOST, SlackPayloadParseError, parse_slack_event};
-use crate::render::{SlackRenderError, render_final_reply};
+use crate::render::{SlackRenderError, render_auth_prompt, render_final_reply, render_gate_prompt};
 
 /// Timeout for recording a delivery status to the sink.
 /// Guards against a hung sink blocking the delivery hot path indefinitely.
@@ -153,48 +154,13 @@ impl ProductAdapter for SlackV2Adapter {
         let target_binding = envelope.target.reply_target_binding_ref.clone();
         let run_id = payload_run_id(&envelope.payload);
 
-        let request = match envelope.payload {
-            ProductOutboundPayload::FinalReply(view) => {
-                match render_final_reply(
-                    &envelope.target,
-                    &view,
-                    self.config.egress_credential_handle.clone(),
-                ) {
-                    Ok(req) => req,
-                    Err(render_err) => {
-                        record_status(
-                            delivery_sink,
-                            DeliveryStatus::FailedPermanent {
-                                attempt_id,
-                                target: target_binding.clone(),
-                                run_id,
-                                reason: RedactedString::new(render_err.to_string()),
-                            },
-                        )
-                        .await;
-                        return Err(map_render_error(render_err));
-                    }
-                }
-            }
-            ProductOutboundPayload::GatePrompt(_) | ProductOutboundPayload::AuthPrompt(_) => {
-                record_status(
-                    delivery_sink,
-                    DeliveryStatus::Deferred {
-                        attempt_id,
-                        target: target_binding,
-                        run_id,
-                        reason: RedactedString::new("gate/auth prompts deferred to #3094 on Slack"),
-                    },
-                )
-                .await;
-                return Ok(ProductRenderOutcome::Deferred);
-            }
-            ProductOutboundPayload::Progress(_)
-            | ProductOutboundPayload::CapabilityActivity(_)
-            | ProductOutboundPayload::CapabilityDisplayPreview(_)
-            | ProductOutboundPayload::ProjectionSnapshot { .. }
-            | ProductOutboundPayload::ProjectionUpdate { .. }
-            | ProductOutboundPayload::KeepAlive => {
+        let request = match render_supported_payload(
+            &envelope.target,
+            &envelope.payload,
+            self.config.egress_credential_handle.clone(),
+        ) {
+            Ok(Some(request)) => request,
+            Ok(None) => {
                 record_status(
                     delivery_sink,
                     DeliveryStatus::Deferred {
@@ -202,12 +168,25 @@ impl ProductAdapter for SlackV2Adapter {
                         target: target_binding,
                         run_id,
                         reason: RedactedString::new(
-                            "slack first slice only renders final reply envelopes",
+                            "slack first slice only renders final reply and prompt envelopes",
                         ),
                     },
                 )
                 .await;
                 return Ok(ProductRenderOutcome::Deferred);
+            }
+            Err(render_err) => {
+                record_status(
+                    delivery_sink,
+                    DeliveryStatus::FailedPermanent {
+                        attempt_id,
+                        target: target_binding.clone(),
+                        run_id,
+                        reason: RedactedString::new(render_err.to_string()),
+                    },
+                )
+                .await;
+                return Err(map_render_error(render_err));
             }
         };
 
@@ -326,6 +305,30 @@ impl ProductAdapter for SlackV2Adapter {
         )
         .await;
         Ok(ProductRenderOutcome::DeliveryRecorded)
+    }
+}
+
+fn render_supported_payload(
+    target: &ProductOutboundTarget,
+    payload: &ProductOutboundPayload,
+    credential_handle: EgressCredentialHandle,
+) -> Result<Option<EgressRequest>, SlackRenderError> {
+    match payload {
+        ProductOutboundPayload::FinalReply(view) => {
+            render_final_reply(target, view, credential_handle).map(Some)
+        }
+        ProductOutboundPayload::GatePrompt(view) => {
+            render_gate_prompt(target, view, credential_handle).map(Some)
+        }
+        ProductOutboundPayload::AuthPrompt(view) => {
+            render_auth_prompt(target, view, credential_handle).map(Some)
+        }
+        ProductOutboundPayload::Progress(_)
+        | ProductOutboundPayload::CapabilityActivity(_)
+        | ProductOutboundPayload::CapabilityDisplayPreview(_)
+        | ProductOutboundPayload::ProjectionSnapshot { .. }
+        | ProductOutboundPayload::ProjectionUpdate { .. }
+        | ProductOutboundPayload::KeepAlive => Ok(None),
     }
 }
 
@@ -668,13 +671,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn gate_prompts_are_deferred_to_approval_service() {
+    async fn auth_prompts_render_to_slack_http_egress() {
         let adapter = SlackV2Adapter::new(config());
         let egress = FakeProtocolHttpEgress::new(vec![SLACK_API_HOST.to_string()]);
+        egress.allow_credential_handle("slack_bot_token");
         let sink = FakeOutboundDeliverySink::new();
+        let run_id = TurnRunId::new();
         let payload =
             ProductOutboundPayload::AuthPrompt(ironclaw_product_adapters::AuthPromptView {
-                turn_run_id: TurnRunId::new(),
+                turn_run_id: run_id,
                 auth_request_ref: "auth-1".to_string(),
                 headline: "Auth required".to_string(),
                 body: "Open WebUI".to_string(),
@@ -688,13 +693,22 @@ mod tests {
         let outcome = adapter
             .render_outbound(envelope(payload), &egress, &sink)
             .await
-            .expect("deferred");
+            .expect("auth prompt renders");
 
-        assert_eq!(outcome, ProductRenderOutcome::Deferred);
-        assert!(egress.calls().is_empty());
+        assert_eq!(outcome, ProductRenderOutcome::DeliveryRecorded);
+        let calls = egress.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].path, "/api/chat.postMessage");
+        let body: serde_json::Value = serde_json::from_slice(&calls[0].body).expect("body json");
+        assert_eq!(body["channel"], "C123");
+        assert_eq!(
+            body["text"],
+            "Auth required\n\nOpen WebUI\n\nMention this app in this Slack thread with `auth deny auth-1` to cancel this blocked run."
+        );
+        assert_eq!(body["thread_ts"], "1710000000.000001");
         assert!(matches!(
             sink.statuses().as_slice(),
-            [DeliveryStatus::Deferred { reason, .. }] if reason.to_string() == RedactedString::placeholder()
+            [DeliveryStatus::Delivered { run_id: Some(delivered), .. }] if delivered == &run_id
         ));
     }
 
