@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{Duration as ChronoDuration, Utc};
 use ironclaw_auth::{
     AuthChallenge, AuthContinuationRef, AuthFlowId, AuthFlowKind, AuthFlowManager,
@@ -325,11 +326,19 @@ impl OAuthDcrProvider {
     ) -> Result<PreparedDcrFlow, AuthProductError> {
         let metadata = self.discover_authorization_server(&scope.resource).await?;
         let pkce_verifier = SecretString::from(ironclaw_common::pkce::generate_code_verifier());
-        let state = ironclaw_common::pkce::generate_code_verifier();
         let account_label = match context {
             DcrFlowContext::BlockedGate { .. } => &self.account_label,
             DcrFlowContext::Setup { account_label } => account_label,
         };
+        let provider = AuthProviderId::new(self.spec.provider_id)?;
+        let state_value = DcrOAuthCallbackState::new(
+            flow_id,
+            scope.clone(),
+            provider,
+            account_label.clone(),
+            self.scopes.clone(),
+        )
+        .encode()?;
         let redirect_uri = self.callback_redirect_uri(scope, flow_id, account_label)?;
         let registration = self
             .register_client(
@@ -341,7 +350,6 @@ impl OAuthDcrProvider {
         let client_id = OAuthClientId::new(registration.client_id.clone())?;
         let authorization_endpoint =
             OAuthAuthorizationEndpoint::new(metadata.authorization_endpoint.clone())?;
-        let state_value = OAuthState::new(state.clone())?;
         let pkce_secret = PkceVerifierSecret::new(SecretString::from(
             pkce_verifier.expose_secret().to_string(),
         ))?;
@@ -385,7 +393,7 @@ impl OAuthDcrProvider {
         }
         Ok(PreparedDcrFlow {
             authorization_url,
-            opaque_state_hash: opaque_state_hash(&state)?,
+            opaque_state_hash: opaque_state_hash(state_value.as_str())?,
             pkce_verifier_hash: pkce_verifier_hash(&pkce_secret)?,
             pkce_verifier,
             client_material,
@@ -979,6 +987,115 @@ pub(crate) struct DcrSetupFlowRequest {
     pub(crate) provider_scopes: Vec<ProviderScope>,
     pub(crate) update_binding: Option<CredentialAccountUpdateBinding>,
     pub(crate) expires_at: ironclaw_auth::Timestamp,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct DcrOAuthCallbackState {
+    flow_id: AuthFlowId,
+    scope: AuthProductScope,
+    provider: AuthProviderId,
+    account_label: CredentialAccountLabel,
+    requested_scopes: Vec<ProviderScope>,
+    nonce: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct DcrOAuthCallbackStateWire {
+    flow_id: AuthFlowId,
+    resource: ResourceScope,
+    session_id: Option<ironclaw_auth::AuthSessionId>,
+    provider: AuthProviderId,
+    account_label: CredentialAccountLabel,
+    requested_scopes: Vec<ProviderScope>,
+    nonce: String,
+}
+
+impl DcrOAuthCallbackState {
+    const PREFIX: &'static str = "icd1.";
+
+    fn new(
+        flow_id: AuthFlowId,
+        scope: AuthProductScope,
+        provider: AuthProviderId,
+        account_label: CredentialAccountLabel,
+        requested_scopes: Vec<ProviderScope>,
+    ) -> Self {
+        Self {
+            flow_id,
+            scope,
+            provider,
+            account_label,
+            requested_scopes,
+            nonce: ironclaw_common::pkce::generate_code_verifier(),
+        }
+    }
+
+    pub(crate) fn has_prefix(raw: &str) -> bool {
+        raw.starts_with(Self::PREFIX)
+    }
+
+    pub(crate) fn flow_id(&self) -> AuthFlowId {
+        self.flow_id
+    }
+
+    pub(crate) fn scope(&self) -> &AuthProductScope {
+        &self.scope
+    }
+
+    pub(crate) fn provider(&self) -> &AuthProviderId {
+        &self.provider
+    }
+
+    pub(crate) fn account_label(&self) -> &CredentialAccountLabel {
+        &self.account_label
+    }
+
+    pub(crate) fn requested_scopes(&self) -> &[ProviderScope] {
+        &self.requested_scopes
+    }
+
+    fn encode(&self) -> Result<OAuthState, AuthProductError> {
+        let wire = DcrOAuthCallbackStateWire {
+            flow_id: self.flow_id,
+            resource: self.scope.resource.clone(),
+            session_id: self.scope.session_id.clone(),
+            provider: self.provider.clone(),
+            account_label: self.account_label.clone(),
+            requested_scopes: self.requested_scopes.clone(),
+            nonce: self.nonce.clone(),
+        };
+        let payload =
+            serde_json::to_vec(&wire).map_err(|_| AuthProductError::BackendUnavailable)?;
+        OAuthState::new(format!(
+            "{}{}",
+            Self::PREFIX,
+            URL_SAFE_NO_PAD.encode(payload)
+        ))
+    }
+
+    pub(crate) fn decode(raw: &str) -> Result<Self, AuthProductError> {
+        let encoded = raw
+            .strip_prefix(Self::PREFIX)
+            .ok_or(AuthProductError::MalformedCallback)?;
+        let payload = URL_SAFE_NO_PAD
+            .decode(encoded)
+            .map_err(|_| AuthProductError::MalformedCallback)?;
+        let wire: DcrOAuthCallbackStateWire =
+            serde_json::from_slice(&payload).map_err(|_| AuthProductError::MalformedCallback)?;
+        OAuthState::new(wire.nonce.clone()).map_err(|_| AuthProductError::MalformedCallback)?;
+        let mut scope = AuthProductScope::new(wire.resource, ironclaw_auth::AuthSurface::Callback);
+        if let Some(session_id) = wire.session_id {
+            scope = scope.with_session_id(session_id);
+        }
+        Ok(Self {
+            flow_id: wire.flow_id,
+            scope,
+            provider: wire.provider,
+            account_label: wire.account_label,
+            requested_scopes: wire.requested_scopes,
+            nonce: wire.nonce,
+        })
+    }
 }
 
 fn auth_scope_for_blocked_turn(

@@ -170,7 +170,7 @@ mod tests {
     use ironclaw_auth::{
         AuthContinuationEvent, AuthProductError, AuthProductScope, AuthProviderId, AuthSurface,
         CredentialAccountLabel, CredentialAccountService, CredentialAccountStatus,
-        CredentialOwnership, InMemoryAuthProductServices, NewCredentialAccount,
+        CredentialOwnership, InMemoryAuthProductServices, NewCredentialAccount, ProviderScope,
     };
     use ironclaw_host_api::{
         ExtensionId, InvocationId, ResourceScope, SecretHandle, TenantId, UserId,
@@ -194,13 +194,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn credential_status_treats_ambiguous_accounts_as_reconnectable() {
+    async fn credential_status_reports_most_recent_of_multiple_reusable_accounts() {
+        // Runtime default rule (#auth-gate-reuse): multiple reusable, unbound
+        // accounts for one provider no longer surface as ambiguous. The runtime
+        // resolver — which `credential_status` shares — deterministically selects
+        // the most-recently-created account, so the extension is reported as
+        // connected against that account rather than as needing reconnect. This
+        // keeps the status surface consistent with the credential the runtime
+        // gate will actually use. (Per-account selection is a setup-time picker
+        // concern, tracked separately.)
         let shared = Arc::new(InMemoryAuthProductServices::new());
         let service = ProductAuthExtensionCredentialSetup::new(Arc::new(
             RebornProductAuthServices::from_shared(shared.clone(), Arc::new(NoopDispatcher)),
         ));
         let scope = test_scope();
         seed_account(&shared, scope.clone(), "notion primary").await;
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
         seed_account(&shared, scope.clone(), "notion secondary").await;
 
         let status = service
@@ -213,7 +222,8 @@ mod tests {
             .await
             .expect("status lookup should not block setup");
 
-        assert!(status.is_none());
+        let account = status.expect("most-recent reusable account must resolve, not stay ambiguous");
+        assert_eq!(account.label.as_str(), "notion secondary");
     }
 
     #[tokio::test]
@@ -250,6 +260,60 @@ mod tests {
             .expect("status lookup should not block setup");
 
         assert!(status.is_none());
+    }
+
+    #[tokio::test]
+    async fn credential_status_finds_callback_surface_google_oauth_account_for_gsuite_extensions() {
+        let shared = Arc::new(InMemoryAuthProductServices::new());
+        let service = ProductAuthExtensionCredentialSetup::new(Arc::new(
+            RebornProductAuthServices::from_shared(shared.clone(), Arc::new(NoopDispatcher)),
+        ));
+        let ui_scope = test_scope();
+        let callback_scope =
+            AuthProductScope::new(ui_scope.resource.clone(), AuthSurface::Callback);
+        shared
+            .create_account(NewCredentialAccount {
+                scope: callback_scope,
+                provider: AuthProviderId::new("google").expect("provider"),
+                label: CredentialAccountLabel::new("work google").expect("label"),
+                status: CredentialAccountStatus::Configured,
+                ownership: CredentialOwnership::UserReusable,
+                owner_extension: None,
+                granted_extensions: Vec::new(),
+                access_secret: Some(SecretHandle::new("google-access").expect("secret")),
+                refresh_secret: None,
+                scopes: vec![
+                    ProviderScope::new("https://www.googleapis.com/auth/gmail.modify")
+                        .expect("gmail scope"),
+                    ProviderScope::new("https://www.googleapis.com/auth/calendar.events")
+                        .expect("calendar scope"),
+                ],
+            })
+            .await
+            .expect("seed google account");
+
+        for (extension, scope) in [
+            ("gmail", "https://www.googleapis.com/auth/gmail.modify"),
+            (
+                "google-calendar",
+                "https://www.googleapis.com/auth/calendar.events",
+            ),
+        ] {
+            let status = service
+                .credential_status(ExtensionCredentialStatusRequest {
+                    scope: ui_scope.clone(),
+                    provider: AuthProviderId::new("google").expect("provider"),
+                    provider_scopes: vec![ProviderScope::new(scope).expect("scope")],
+                    requester_extension: ExtensionId::new(extension).expect("extension"),
+                })
+                .await
+                .expect("status lookup should succeed");
+
+            assert!(
+                status.is_some(),
+                "{extension} should see callback-surface Google OAuth account as configured"
+            );
+        }
     }
 
     async fn seed_account(

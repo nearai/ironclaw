@@ -14,6 +14,9 @@ import {
   approvePairingCode,
 } from "../lib/extensions-api.js";
 
+const OAUTH_SETUP_REFRESH_MS = 2000;
+const OAUTH_SETUP_TIMEOUT_MS = 10 * 60 * 1000;
+
 export function useExtensions() {
   const queryClient = useQueryClient();
 
@@ -193,16 +196,16 @@ export function useOauthSetup(packageRef) {
     queryClient.invalidateQueries({ queryKey: ["extension-setup", packageKey] });
   }, [packageKey, queryClient]);
 
-  const watchPopupClose = React.useCallback(
+  const watchOauthProgress = React.useCallback(
     (popup) => {
-      if (!popup) return;
       const startedAt = Date.now();
       const timer = window.setInterval(() => {
-        if (popup.closed || Date.now() - startedAt > 10 * 60 * 1000) {
+        refreshSetupState();
+        if ((popup && popup.closed) || Date.now() - startedAt > OAUTH_SETUP_TIMEOUT_MS) {
           window.clearInterval(timer);
           refreshSetupState();
         }
-      }, 1000);
+      }, OAUTH_SETUP_REFRESH_MS);
     },
     [refreshSetupState]
   );
@@ -211,15 +214,16 @@ export function useOauthSetup(packageRef) {
     mutationFn: ({ secret, popup }) =>
       startExtensionOauth(packageRef, secret).then((res) => ({ res, popup })),
     onSuccess: ({ res, popup }) => {
+      let authPopup = popup;
       if (res.authorization_url && popup && !popup.closed) {
         popup.location.href = res.authorization_url;
       } else if (res.authorization_url) {
-        window.open(res.authorization_url, "_blank", "noopener,noreferrer");
+        authPopup = window.open(res.authorization_url, "_blank", "noopener,noreferrer");
       } else if (popup && !popup.closed) {
         popup.close();
       }
       refreshSetupState();
-      watchPopupClose(popup);
+      watchOauthProgress(authPopup);
     },
     onError: (_err, variables) => {
       const popup = variables?.popup;

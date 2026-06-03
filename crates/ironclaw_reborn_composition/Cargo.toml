@@ -75,6 +75,7 @@ postgres = [
 ]
 [dependencies]
 async-trait = "0.1"
+base64 = "0.22"
 chrono = "0.4"
 deadpool-postgres = { version = "0.14", optional = true }
 futures = "0.3"

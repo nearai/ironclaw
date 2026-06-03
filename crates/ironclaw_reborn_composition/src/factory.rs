@@ -662,6 +662,7 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     register_bundled_gsuite_first_party_handlers(
         &mut first_party_registry,
         product_auth.credential_account_service(),
+        product_auth.credential_account_record_source(),
         Arc::new(ProductAuthRuntimeGsuiteCredentialStager::new(
             product_auth_runtime_ports.clone(),
         )),
@@ -2090,6 +2091,7 @@ where
     register_bundled_gsuite_first_party_handlers(
         &mut first_party_registry,
         product_auth_services.credential_account_service(),
+        product_auth_services.credential_account_record_source(),
         Arc::new(ProductAuthRuntimeGsuiteCredentialStager::new(
             product_auth_runtime_ports.clone(),
         )),

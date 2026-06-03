@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_auth::CredentialAccountService;
+use ironclaw_auth::{CredentialAccountRecordSource, CredentialAccountService};
 use ironclaw_extensions::{
     CapabilityManifest, CapabilityVisibility, ExtensionError, ExtensionManifest, ExtensionPackage,
     ExtensionRuntime, MANIFEST_SCHEMA_VERSION, ManifestSource,
@@ -40,20 +40,27 @@ pub fn bundled_gsuite_extension_packages() -> Result<Vec<ExtensionPackage>, Exte
 /// dispatch still requires active package descriptors.
 pub fn bundled_gsuite_first_party_handlers(
     accounts: Arc<dyn CredentialAccountService>,
+    account_records: Arc<dyn CredentialAccountRecordSource>,
     credential_stager: Arc<dyn GsuiteCredentialStager>,
 ) -> Result<FirstPartyCapabilityRegistry, HostApiError> {
     let mut registry = FirstPartyCapabilityRegistry::new();
-    register_bundled_gsuite_first_party_handlers(&mut registry, accounts, credential_stager)?;
+    register_bundled_gsuite_first_party_handlers(
+        &mut registry,
+        accounts,
+        account_records,
+        credential_stager,
+    )?;
     Ok(registry)
 }
 
 pub(crate) fn register_bundled_gsuite_first_party_handlers(
     registry: &mut FirstPartyCapabilityRegistry,
     accounts: Arc<dyn CredentialAccountService>,
+    account_records: Arc<dyn CredentialAccountRecordSource>,
     credential_stager: Arc<dyn GsuiteCredentialStager>,
 ) -> Result<(), HostApiError> {
     let handler = Arc::new(GsuiteFirstPartyHandler {
-        executor: GsuiteExecutor::new(accounts, credential_stager),
+        executor: GsuiteExecutor::new(accounts, account_records, credential_stager),
     });
     for package in gsuite_package_specs() {
         for capability in package.capabilities {
@@ -215,7 +222,12 @@ impl GsuiteCredentialStager for ProductAuthRuntimeGsuiteCredentialStager {
         // Both GsuiteCredentialStageError and ProductAuthCredentialStageError are
         // type aliases for ironclaw_host_api::CredentialStageError — no conversion needed.
         self.runtime_ports
-            .stage_secret_once(request.scope, request.capability_id, request.access_secret)
+            .stage_secret_from_scope_once(
+                request.source_scope,
+                request.target_scope,
+                request.capability_id,
+                request.access_secret,
+            )
             .await
     }
 }

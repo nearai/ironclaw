@@ -9,7 +9,8 @@ use std::{
 use async_trait::async_trait;
 use futures_util::FutureExt as _;
 use ironclaw_auth::{
-    CredentialAccountService, CredentialRecoveryKind, CredentialRecoveryProjection, ProviderScope,
+    CredentialAccountRecordSource, CredentialAccountService, CredentialRecoveryKind,
+    CredentialRecoveryProjection, ProviderScope,
 };
 use ironclaw_host_api::{
     CapabilityId, ExtensionId, NetworkMethod, ResourceScope, ResourceUsage,
@@ -20,6 +21,7 @@ use ironclaw_host_api::{
 use serde_json::{Value, json};
 
 use crate::gsuite::{
+    credential::GoogleCredential,
     credential::{GoogleCredentialError, GoogleCredentialResolver},
     manifest::{
         GSUITE_REQUEST_BODY_LIMIT, GSUITE_RESPONSE_BODY_LIMIT, GSUITE_TIMEOUT_MS,
@@ -57,10 +59,11 @@ pub struct GsuiteExecutor {
 impl GsuiteExecutor {
     pub fn new(
         accounts: Arc<dyn CredentialAccountService>,
+        account_records: Arc<dyn CredentialAccountRecordSource>,
         credential_stager: Arc<dyn GsuiteCredentialStager>,
     ) -> Self {
         Self {
-            resolver: Arc::new(GoogleCredentialResolver::new(accounts)),
+            resolver: Arc::new(GoogleCredentialResolver::new(accounts, account_records)),
             credential_stager,
         }
     }
@@ -85,14 +88,9 @@ impl GsuiteExecutor {
         // Stage after parsing so a parse failure doesn't leave a staged credential
         // behind in the injection store.
         let execution = capability_execution(capability, request.input)?;
-        self.stage_credential(&request, credential.access_secret.clone())
-            .await?;
+        self.stage_credential(&request, &credential).await?;
         let (response, network_egress_bytes) = match execution
-            .execute(
-                &request,
-                credential.access_secret,
-                self.credential_stager.as_ref(),
-            )
+            .execute(&request, &credential, self.credential_stager.as_ref())
             .await?
         {
             CapabilityExecutionOutcome::Response {
@@ -118,15 +116,11 @@ impl GsuiteExecutor {
                 // Parse before staging for the same reason as the primary path:
                 // a parse failure should not leave a credential staged.
                 let retry_execution = capability_execution(capability, request.input)?;
-                self.stage_credential(&request, refreshed.access_secret.clone())
+                self.stage_credential(&request, &refreshed)
                     .await
                     .map_err(|error| add_network_usage(error, network_egress_bytes))?;
                 match retry_execution
-                    .execute(
-                        &request,
-                        refreshed.access_secret,
-                        self.credential_stager.as_ref(),
-                    )
+                    .execute(&request, &refreshed, self.credential_stager.as_ref())
                     .await
                     .map_err(|error| add_network_usage(error, network_egress_bytes))?
                 {
@@ -170,16 +164,17 @@ impl GsuiteExecutor {
     async fn stage_credential(
         &self,
         request: &GsuiteDispatchRequest<'_>,
-        access_secret: ironclaw_host_api::SecretHandle,
+        credential: &GoogleCredential,
     ) -> Result<(), GsuiteDispatchError> {
         self.credential_stager
             .stage(GsuiteCredentialStageRequest {
-                scope: request.scope,
+                source_scope: &credential.access_secret_scope,
+                target_scope: request.scope,
                 capability_id: request.capability_id,
-                access_secret: &access_secret,
+                access_secret: &credential.access_secret,
             })
             .await
-            .map_err(|error| map_stage_error(error, access_secret))
+            .map_err(|error| map_stage_error(error, credential.access_secret.clone()))
     }
 }
 
@@ -285,7 +280,8 @@ impl GsuiteDispatchError {
 }
 
 pub struct GsuiteCredentialStageRequest<'a> {
-    pub scope: &'a ResourceScope,
+    pub source_scope: &'a ResourceScope,
+    pub target_scope: &'a ResourceScope,
     pub capability_id: &'a CapabilityId,
     pub access_secret: &'a ironclaw_host_api::SecretHandle,
 }
@@ -328,13 +324,13 @@ impl CapabilityExecution {
     async fn execute(
         self,
         request: &GsuiteDispatchRequest<'_>,
-        access_secret: ironclaw_host_api::SecretHandle,
+        credential: &GoogleCredential,
         stager: &dyn GsuiteCredentialStager,
     ) -> Result<CapabilityExecutionOutcome, GsuiteDispatchError> {
         match self {
             Self::Single { method, url, body } => {
                 let response = execute_runtime_http(
-                    runtime_request(request, access_secret, method, url, body),
+                    runtime_request(request, credential.access_secret.clone(), method, url, body),
                     Arc::clone(&request.runtime_http_egress),
                 )
                 .await?;
@@ -342,7 +338,7 @@ impl CapabilityExecution {
                 Ok(response_outcome(response, network_egress_bytes))
             }
             Self::AddAttendees(input) => {
-                execute_add_attendees(request, access_secret, stager, input).await
+                execute_add_attendees(request, credential, stager, input).await
             }
         }
     }
@@ -350,11 +346,12 @@ impl CapabilityExecution {
 
 async fn execute_add_attendees(
     request: &GsuiteDispatchRequest<'_>,
-    access_secret: ironclaw_host_api::SecretHandle,
+    credential: &GoogleCredential,
     stager: &dyn GsuiteCredentialStager,
     input: CalendarAddAttendeesInput,
 ) -> Result<CapabilityExecutionOutcome, GsuiteDispatchError> {
     let url = input.event_path.url();
+    let access_secret = credential.access_secret.clone();
     let current_response = execute_runtime_http(
         runtime_request(
             request,
@@ -385,7 +382,8 @@ async fn execute_add_attendees(
     // PATCH egress has its credential available.
     stager
         .stage(GsuiteCredentialStageRequest {
-            scope: request.scope,
+            source_scope: &credential.access_secret_scope,
+            target_scope: request.scope,
             capability_id: request.capability_id,
             access_secret: &access_secret,
         })

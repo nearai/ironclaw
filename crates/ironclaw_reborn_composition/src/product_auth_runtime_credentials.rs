@@ -201,13 +201,34 @@ fn account_visible_from_runtime_scope(
         && account.scope.session_id == runtime_scope.session_id
 }
 
+/// Runtime "default account" rule for the credential gate.
+///
+/// The runtime auth gate has no interactive account picker: when a capability
+/// needs a provider credential the engine must resolve to exactly one account
+/// or it raises an auth gate. When more than one reusable account matches
+/// (which happens because the OAuth `account_label` historically encoded the
+/// triggering capability — "gmail google", "google-calendar google", "google"
+/// — so the same login produced several rows), we deterministically select the
+/// **most-recently-used** account rather than failing with
+/// `AccountSelectionRequired` (→ `AuthRequired`), which re-prompted the user on
+/// every capability call (#auth-gate-reuse).
+///
+/// Recency *is* the default: the setup-time account picker controls which
+/// account wins at runtime by touching it (overwrite bumps `updated_at`;
+/// create-new starts a fresh, now-latest account). Account *selection* between
+/// genuinely distinct logins is a setup-time concern; at runtime we always have
+/// a usable default.
+///
+/// We still restrict to the *reusable, unbound* class — `UserReusable`, no
+/// `owner_extension`, no `granted_extensions`, `access_secret` present — so this
+/// never auto-selects across extension-owned or requester-bound accounts; those
+/// keep their explicit binding semantics.
 fn select_latest_duplicate_user_reusable_account(
     accounts: &[CredentialAccount],
 ) -> Option<CredentialAccount> {
     let first = accounts.first()?;
     if !accounts.iter().all(|account| {
         account.provider == first.provider
-            && account.label == first.label
             && account.ownership == CredentialOwnership::UserReusable
             && account.owner_extension.is_none()
             && account.granted_extensions.is_empty()
@@ -613,36 +634,57 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resolver_maps_multiple_accounts_to_auth_required() {
-        // AccountSelectionRequired fires when two accounts match the same provider/scope.
+    async fn resolver_uses_most_recent_account_across_multiple_reusable_logins() {
+        // Runtime default rule (#auth-gate-reuse): when several reusable,
+        // unbound accounts match the same provider — even under different
+        // labels — the gate has no interactive picker, so the resolver selects
+        // the most-recently-used account rather than failing with
+        // `AccountSelectionRequired` (which re-prompted on every call). The
+        // setup-time picker controls which one wins by bumping its recency.
         let accounts = Arc::new(InMemoryAuthProductServices::new());
         let scope =
             ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new())
                 .unwrap();
         let auth_scope = AuthProductScope::new(scope.clone(), AuthSurface::Api);
-        // Create two accounts for the same provider.
-        for label in ["personal github", "work github"] {
-            accounts
-                .create_account(NewCredentialAccount {
-                    scope: auth_scope.clone(),
-                    provider: AuthProviderId::new("github").unwrap(),
-                    label: CredentialAccountLabel::new(label).unwrap(),
-                    status: CredentialAccountStatus::Configured,
-                    ownership: CredentialOwnership::UserReusable,
-                    owner_extension: None,
-                    granted_extensions: Vec::new(),
-                    access_secret: Some(SecretHandle::new("token").unwrap()),
-                    refresh_secret: None,
-                    scopes: Vec::new(),
-                })
-                .await
-                .unwrap();
-        }
+        let latest_secret = SecretHandle::new("work-token").unwrap();
+        // Two reusable accounts for the same provider under distinct labels.
+        // The second one is created later, so it is the most-recently-used.
+        accounts
+            .create_account(NewCredentialAccount {
+                scope: auth_scope.clone(),
+                provider: AuthProviderId::new("github").unwrap(),
+                label: CredentialAccountLabel::new("personal github").unwrap(),
+                status: CredentialAccountStatus::Configured,
+                ownership: CredentialOwnership::UserReusable,
+                owner_extension: None,
+                granted_extensions: Vec::new(),
+                access_secret: Some(SecretHandle::new("personal-token").unwrap()),
+                refresh_secret: None,
+                scopes: Vec::new(),
+            })
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        accounts
+            .create_account(NewCredentialAccount {
+                scope: auth_scope,
+                provider: AuthProviderId::new("github").unwrap(),
+                label: CredentialAccountLabel::new("work github").unwrap(),
+                status: CredentialAccountStatus::Configured,
+                ownership: CredentialOwnership::UserReusable,
+                owner_extension: None,
+                granted_extensions: Vec::new(),
+                access_secret: Some(latest_secret.clone()),
+                refresh_secret: None,
+                scopes: Vec::new(),
+            })
+            .await
+            .unwrap();
         let resolver = ProductAuthRuntimeCredentialResolver::new(Arc::new(
             ProductAuthRuntimeCredentialAccountSelector::new(accounts),
         ));
 
-        let error = resolver
+        let resolved = resolver
             .resolve_access_secret(RuntimeCredentialAccountRequest {
                 scope: &scope,
                 provider: &RuntimeCredentialAccountProviderId::new("github").unwrap(),
@@ -650,9 +692,9 @@ mod tests {
                 requester_extension: &ExtensionId::new("github").unwrap(),
             })
             .await
-            .unwrap_err();
+            .expect("runtime must resolve to the most-recent reusable account, not re-prompt");
 
-        assert_eq!(error, CredentialStageError::AuthRequired);
+        assert_eq!(resolved.handle, latest_secret);
     }
 
     #[tokio::test]
@@ -708,6 +750,70 @@ mod tests {
             })
             .await
             .unwrap();
+
+        assert_eq!(resolved.handle, latest_secret);
+    }
+
+    /// Direct reproduction of the reported bug (#auth-gate-reuse): a single
+    /// Google login authenticated through different gate/setup surfaces ends up
+    /// stored as multiple reusable accounts under capability-derived labels
+    /// ("gmail google", "google-calendar google"). The runtime resolver must
+    /// pick the most-recent usable credential instead of returning
+    /// `AuthRequired`, which re-prompted the user on every gmail/calendar call.
+    #[tokio::test]
+    async fn resolver_resolves_google_capability_labeled_duplicates() {
+        let accounts = Arc::new(InMemoryAuthProductServices::new());
+        let scope =
+            ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new())
+                .unwrap();
+        let auth_scope = AuthProductScope::new(scope.clone(), AuthSurface::Api);
+        let gmail_scope =
+            ProviderScope::new("https://www.googleapis.com/auth/gmail.modify").unwrap();
+        let latest_secret = SecretHandle::new("calendar-surface-token").unwrap();
+        accounts
+            .create_account(NewCredentialAccount {
+                scope: auth_scope.clone(),
+                provider: AuthProviderId::new("google").unwrap(),
+                label: CredentialAccountLabel::new("gmail google").unwrap(),
+                status: CredentialAccountStatus::Configured,
+                ownership: CredentialOwnership::UserReusable,
+                owner_extension: None,
+                granted_extensions: Vec::new(),
+                access_secret: Some(SecretHandle::new("gmail-surface-token").unwrap()),
+                refresh_secret: None,
+                scopes: vec![gmail_scope.clone()],
+            })
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        accounts
+            .create_account(NewCredentialAccount {
+                scope: auth_scope,
+                provider: AuthProviderId::new("google").unwrap(),
+                label: CredentialAccountLabel::new("google-calendar google").unwrap(),
+                status: CredentialAccountStatus::Configured,
+                ownership: CredentialOwnership::UserReusable,
+                owner_extension: None,
+                granted_extensions: Vec::new(),
+                access_secret: Some(latest_secret.clone()),
+                refresh_secret: None,
+                scopes: vec![gmail_scope.clone()],
+            })
+            .await
+            .unwrap();
+        let resolver = ProductAuthRuntimeCredentialResolver::new(Arc::new(
+            ProductAuthRuntimeCredentialAccountSelector::new(accounts),
+        ));
+
+        let resolved = resolver
+            .resolve_access_secret(RuntimeCredentialAccountRequest {
+                scope: &scope,
+                provider: &RuntimeCredentialAccountProviderId::new("google").unwrap(),
+                provider_scopes: &[gmail_scope.as_str().to_string()],
+                requester_extension: &ExtensionId::new("gmail").unwrap(),
+            })
+            .await
+            .expect("capability-labeled google duplicates must resolve, not re-prompt");
 
         assert_eq!(resolved.handle, latest_secret);
     }

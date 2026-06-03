@@ -59,7 +59,7 @@ const CALENDAR_CAPABILITIES: &[GsuiteCapabilitySpec] = &[
         description: "List Google calendars.",
         default_permission: PermissionMode::Allow,
         effects: READ_EFFECTS,
-        required_scopes: CALENDAR_READONLY_SCOPES,
+        required_scopes: GSUITE_PROVIDER_SCOPES,
         operation: GsuiteCapabilityOperation::CalendarListCalendars,
     },
     GsuiteCapabilitySpec {
@@ -68,7 +68,7 @@ const CALENDAR_CAPABILITIES: &[GsuiteCapabilitySpec] = &[
         description: "List Google Calendar events.",
         default_permission: PermissionMode::Allow,
         effects: READ_EFFECTS,
-        required_scopes: CALENDAR_READONLY_SCOPES,
+        required_scopes: GSUITE_PROVIDER_SCOPES,
         operation: GsuiteCapabilityOperation::CalendarListEvents,
     },
     GsuiteCapabilitySpec {
@@ -77,7 +77,7 @@ const CALENDAR_CAPABILITIES: &[GsuiteCapabilitySpec] = &[
         description: "Get a Google Calendar event.",
         default_permission: PermissionMode::Allow,
         effects: READ_EFFECTS,
-        required_scopes: CALENDAR_READONLY_SCOPES,
+        required_scopes: GSUITE_PROVIDER_SCOPES,
         operation: GsuiteCapabilityOperation::CalendarGetEvent,
     },
     GsuiteCapabilitySpec {
@@ -86,7 +86,7 @@ const CALENDAR_CAPABILITIES: &[GsuiteCapabilitySpec] = &[
         description: "Find Google Calendar free slots.",
         default_permission: PermissionMode::Allow,
         effects: READ_EFFECTS,
-        required_scopes: CALENDAR_READONLY_SCOPES,
+        required_scopes: GSUITE_PROVIDER_SCOPES,
         operation: GsuiteCapabilityOperation::CalendarFindFreeSlots,
     },
     GsuiteCapabilitySpec {
@@ -95,7 +95,7 @@ const CALENDAR_CAPABILITIES: &[GsuiteCapabilitySpec] = &[
         description: "Create a Google Calendar event.",
         default_permission: PermissionMode::Ask,
         effects: WRITE_EFFECTS,
-        required_scopes: CALENDAR_EVENTS_SCOPES,
+        required_scopes: GSUITE_PROVIDER_SCOPES,
         operation: GsuiteCapabilityOperation::CalendarCreateEvent,
     },
     GsuiteCapabilitySpec {
@@ -104,7 +104,7 @@ const CALENDAR_CAPABILITIES: &[GsuiteCapabilitySpec] = &[
         description: "Update a Google Calendar event.",
         default_permission: PermissionMode::Ask,
         effects: WRITE_EFFECTS,
-        required_scopes: CALENDAR_EVENTS_SCOPES,
+        required_scopes: GSUITE_PROVIDER_SCOPES,
         operation: GsuiteCapabilityOperation::CalendarUpdateEvent,
     },
     GsuiteCapabilitySpec {
@@ -113,7 +113,7 @@ const CALENDAR_CAPABILITIES: &[GsuiteCapabilitySpec] = &[
         description: "Delete a Google Calendar event.",
         default_permission: PermissionMode::Ask,
         effects: WRITE_EFFECTS,
-        required_scopes: CALENDAR_EVENTS_SCOPES,
+        required_scopes: GSUITE_PROVIDER_SCOPES,
         operation: GsuiteCapabilityOperation::CalendarDeleteEvent,
     },
     GsuiteCapabilitySpec {
@@ -122,7 +122,7 @@ const CALENDAR_CAPABILITIES: &[GsuiteCapabilitySpec] = &[
         description: "Add attendees to a Google Calendar event.",
         default_permission: PermissionMode::Ask,
         effects: WRITE_EFFECTS,
-        required_scopes: CALENDAR_EVENTS_SCOPES,
+        required_scopes: GSUITE_PROVIDER_SCOPES,
         operation: GsuiteCapabilityOperation::CalendarAddAttendees,
     },
     GsuiteCapabilitySpec {
@@ -131,7 +131,7 @@ const CALENDAR_CAPABILITIES: &[GsuiteCapabilitySpec] = &[
         description: "Set Google Calendar event reminders.",
         default_permission: PermissionMode::Ask,
         effects: WRITE_EFFECTS,
-        required_scopes: CALENDAR_EVENTS_SCOPES,
+        required_scopes: GSUITE_PROVIDER_SCOPES,
         operation: GsuiteCapabilityOperation::CalendarSetReminder,
     },
 ];
@@ -143,7 +143,7 @@ const GMAIL_CAPABILITIES: &[GsuiteCapabilitySpec] = &[
         description: "List Gmail messages.",
         default_permission: PermissionMode::Allow,
         effects: READ_EFFECTS,
-        required_scopes: GMAIL_READONLY_SCOPES,
+        required_scopes: GSUITE_PROVIDER_SCOPES,
         operation: GsuiteCapabilityOperation::GmailListMessages,
     },
     GsuiteCapabilitySpec {
@@ -152,7 +152,7 @@ const GMAIL_CAPABILITIES: &[GsuiteCapabilitySpec] = &[
         description: "Get a Gmail message.",
         default_permission: PermissionMode::Allow,
         effects: READ_EFFECTS,
-        required_scopes: GMAIL_READONLY_SCOPES,
+        required_scopes: GSUITE_PROVIDER_SCOPES,
         operation: GsuiteCapabilityOperation::GmailGetMessage,
     },
     GsuiteCapabilitySpec {
@@ -161,7 +161,7 @@ const GMAIL_CAPABILITIES: &[GsuiteCapabilitySpec] = &[
         description: "Send a Gmail message.",
         default_permission: PermissionMode::Ask,
         effects: WRITE_EFFECTS,
-        required_scopes: GMAIL_SEND_SCOPES,
+        required_scopes: GSUITE_PROVIDER_SCOPES,
         operation: GsuiteCapabilityOperation::GmailSendMessage,
     },
     GsuiteCapabilitySpec {
@@ -170,7 +170,7 @@ const GMAIL_CAPABILITIES: &[GsuiteCapabilitySpec] = &[
         description: "Create a Gmail draft.",
         default_permission: PermissionMode::Ask,
         effects: WRITE_EFFECTS,
-        required_scopes: GMAIL_MODIFY_SCOPES,
+        required_scopes: GSUITE_PROVIDER_SCOPES,
         operation: GsuiteCapabilityOperation::GmailCreateDraft,
     },
     GsuiteCapabilitySpec {
@@ -179,7 +179,7 @@ const GMAIL_CAPABILITIES: &[GsuiteCapabilitySpec] = &[
         description: "Reply to a Gmail message.",
         default_permission: PermissionMode::Ask,
         effects: WRITE_EFFECTS,
-        required_scopes: GMAIL_SEND_SCOPES,
+        required_scopes: GSUITE_PROVIDER_SCOPES,
         operation: GsuiteCapabilityOperation::GmailReplyToMessage,
     },
     GsuiteCapabilitySpec {
@@ -188,7 +188,7 @@ const GMAIL_CAPABILITIES: &[GsuiteCapabilitySpec] = &[
         description: "Move a Gmail message to trash.",
         default_permission: PermissionMode::Ask,
         effects: WRITE_EFFECTS,
-        required_scopes: GMAIL_MODIFY_SCOPES,
+        required_scopes: GSUITE_PROVIDER_SCOPES,
         operation: GsuiteCapabilityOperation::GmailTrashMessage,
     },
 ];
@@ -204,11 +204,13 @@ const WRITE_EFFECTS: &[EffectKind] = &[
     EffectKind::UseSecret,
     EffectKind::ExternalWrite,
 ];
-const CALENDAR_READONLY_SCOPES: &[&str] = &[ironclaw_auth::GOOGLE_CALENDAR_READONLY_SCOPE];
-const CALENDAR_EVENTS_SCOPES: &[&str] = &[ironclaw_auth::GOOGLE_CALENDAR_EVENTS_SCOPE];
-const GMAIL_READONLY_SCOPES: &[&str] = &[ironclaw_auth::GOOGLE_GMAIL_READONLY_SCOPE];
-const GMAIL_SEND_SCOPES: &[&str] = &[ironclaw_auth::GOOGLE_GMAIL_SEND_SCOPE];
-const GMAIL_MODIFY_SCOPES: &[&str] = &[ironclaw_auth::GOOGLE_GMAIL_MODIFY_SCOPE];
+pub const GSUITE_PROVIDER_SCOPES: &[&str] = &[
+    ironclaw_auth::GOOGLE_CALENDAR_READONLY_SCOPE,
+    ironclaw_auth::GOOGLE_CALENDAR_EVENTS_SCOPE,
+    ironclaw_auth::GOOGLE_GMAIL_READONLY_SCOPE,
+    ironclaw_auth::GOOGLE_GMAIL_SEND_SCOPE,
+    ironclaw_auth::GOOGLE_GMAIL_MODIFY_SCOPE,
+];
 
 pub fn gsuite_package_specs() -> &'static [GsuitePackageSpec] {
     &GSUITE_PACKAGE_SPECS

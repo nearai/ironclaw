@@ -666,8 +666,8 @@ pub(crate) struct OAuthCallbackScopeHint {
 
 #[derive(Deserialize)]
 pub(super) struct OAuthCallbackQuery {
-    user_id: String,
-    invocation_id: String,
+    user_id: Option<String>,
+    invocation_id: Option<String>,
     state: Option<RawCallbackValue>,
     provider: Option<String>,
     account_label: Option<String>,
@@ -900,10 +900,20 @@ pub(super) fn scope_from_callback_query(
     state: &ProductAuthRouteState,
     query: &OAuthCallbackQuery,
 ) -> Result<AuthProductScope, ProductAuthRouteFailure> {
-    let user_id = UserId::new(query.user_id.clone())
-        .map_err(|_| ProductAuthRouteFailure::malformed_callback())?;
-    let invocation_id = InvocationId::parse(&query.invocation_id)
-        .map_err(|_| ProductAuthRouteFailure::malformed_callback())?;
+    let user_id = UserId::new(
+        query
+            .user_id
+            .clone()
+            .ok_or_else(ProductAuthRouteFailure::malformed_callback)?,
+    )
+    .map_err(|_| ProductAuthRouteFailure::malformed_callback())?;
+    let invocation_id = InvocationId::parse(
+        query
+            .invocation_id
+            .as_deref()
+            .ok_or_else(ProductAuthRouteFailure::malformed_callback)?,
+    )
+    .map_err(|_| ProductAuthRouteFailure::malformed_callback())?;
     let agent_id = query
         .agent_id
         .as_ref()
@@ -969,8 +979,16 @@ pub(super) fn validate_callback_raw_query(
 pub(super) fn validate_callback_query_fields(
     query: &OAuthCallbackQuery,
 ) -> Result<(), ProductAuthRouteFailure> {
-    validate_callback_field(&query.user_id, OAUTH_CALLBACK_FIELD_MAX_BYTES, false)?;
-    validate_callback_field(&query.invocation_id, OAUTH_CALLBACK_FIELD_MAX_BYTES, false)?;
+    validate_optional_callback_field(
+        query.user_id.as_deref(),
+        OAUTH_CALLBACK_FIELD_MAX_BYTES,
+        false,
+    )?;
+    validate_optional_callback_field(
+        query.invocation_id.as_deref(),
+        OAUTH_CALLBACK_FIELD_MAX_BYTES,
+        false,
+    )?;
     validate_optional_callback_field(
         query.provider.as_deref(),
         OAUTH_CALLBACK_FIELD_MAX_BYTES,
@@ -1293,6 +1311,7 @@ mod tests {
     use super::*;
     use crate::oauth_dcr::{OAuthDcrProvider, OAuthDcrProviderConfig, OAuthDcrProviderRegistry};
     use crate::oauth_dcr_protocol::flow_secret_handle;
+    use crate::projection::AuthChallengeProvider;
     use crate::{RebornAuthContinuationDispatcher, notion_oauth::notion_provider_spec};
     use async_trait::async_trait;
     use axum::body::{Body, to_bytes};
@@ -1303,10 +1322,11 @@ mod tests {
     };
     use ironclaw_capabilities::{CapabilityObligationHandler, CapabilityObligationRequest};
     use ironclaw_host_api::{
-        NetworkMethod, RuntimeHttpEgress, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse,
-        SecretHandle,
+        NetworkMethod, RuntimeCredentialAccountProviderId, RuntimeCredentialAuthRequirement,
+        RuntimeHttpEgress, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, SecretHandle,
     };
     use ironclaw_secrets::{InMemorySecretStore, SecretMaterial, SecretStore};
+    use ironclaw_turns::{TurnRunId, TurnScope};
     use tower::ServiceExt;
 
     struct NoopDispatcher;
@@ -1317,6 +1337,34 @@ mod tests {
             &self,
             _event: ironclaw_auth::AuthContinuationEvent,
         ) -> Result<(), AuthProductError> {
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingDispatcher {
+        events: Mutex<Vec<ironclaw_auth::AuthContinuationEvent>>,
+    }
+
+    impl RecordingDispatcher {
+        fn events(&self) -> Vec<ironclaw_auth::AuthContinuationEvent> {
+            self.events
+                .lock()
+                .expect("recording dispatcher lock")
+                .clone()
+        }
+    }
+
+    #[async_trait]
+    impl RebornAuthContinuationDispatcher for RecordingDispatcher {
+        async fn dispatch_auth_continuation(
+            &self,
+            event: ironclaw_auth::AuthContinuationEvent,
+        ) -> Result<(), AuthProductError> {
+            self.events
+                .lock()
+                .expect("recording dispatcher lock")
+                .push(event);
             Ok(())
         }
     }
@@ -1660,8 +1708,8 @@ mod tests {
             .expect("stored DCR PKCE verifier");
 
         let query = OAuthCallbackQuery {
-            user_id: scope.resource.user_id.to_string(),
-            invocation_id: scope.resource.invocation_id.to_string(),
+            user_id: Some(scope.resource.user_id.to_string()),
+            invocation_id: Some(scope.resource.invocation_id.to_string()),
             state: Some(RawCallbackValue::new("opaque-state".to_string()).expect("state")),
             provider: Some("notion".to_string()),
             account_label: Some("notion".to_string()),
@@ -1674,10 +1722,16 @@ mod tests {
             scopes: None,
         };
 
-        let outcome =
-            oauth::callback_outcome_from_query(&state, flow_id, &scope, Some(&provider), &query)
-                .await
-                .expect("callback outcome");
+        let outcome = oauth::callback_outcome_from_query(
+            &state,
+            flow_id,
+            &scope,
+            Some(&provider),
+            None,
+            &query,
+        )
+        .await
+        .expect("callback outcome");
 
         let RebornOAuthCallbackOutcome::Authorized { provider_request } = outcome else {
             panic!("expected authorized callback outcome");
@@ -1685,6 +1739,112 @@ mod tests {
         assert_eq!(provider_request.provider, provider);
         assert_eq!(provider_request.account_label.as_str(), "notion");
         assert_eq!(provider_request.pkce_verifier.expose_secret(), verifier);
+    }
+
+    #[tokio::test]
+    async fn dcr_oauth_callback_resumes_blocked_turn_gate() {
+        let shared = Arc::new(ironclaw_auth::InMemoryAuthProductServices::new());
+        let secret_store = Arc::new(InMemorySecretStore::new());
+        let secret_store_for_provider: Arc<dyn SecretStore> = secret_store;
+        let dispatcher = Arc::new(RecordingDispatcher::default());
+        let dcr_provider = Arc::new(
+            OAuthDcrProvider::new(
+                OAuthDcrProviderConfig {
+                    spec: notion_provider_spec(),
+                    callback_origin: "http://127.0.0.1:3000".to_string(),
+                    client_name: "Ironclaw".to_string(),
+                    account_label: CredentialAccountLabel::new("notion").expect("label"),
+                    scopes: Vec::new(),
+                },
+                Arc::new(RouteDcrSetupEgress),
+                secret_store_for_provider,
+                Arc::new(NoopObligationHandler),
+            )
+            .expect("DCR provider"),
+        );
+        let product_auth = Arc::new(
+            RebornProductAuthServices::from_shared(shared.clone(), dispatcher.clone())
+                .with_flow_record_source(shared)
+                .with_dcr_oauth_registry(Arc::new(OAuthDcrProviderRegistry::new(vec![
+                    dcr_provider,
+                ]))),
+        );
+        let state = ProductAuthRouteState::new(
+            product_auth.clone(),
+            TenantId::new("tenant-alpha").expect("tenant"),
+            None,
+            None,
+        );
+        let turn_scope = TurnScope::new(
+            TenantId::new("tenant-alpha").expect("tenant"),
+            None,
+            None,
+            ThreadId::new("thread-alpha").expect("thread"),
+        );
+        let owner_user_id = UserId::new("user-alpha").expect("user");
+        let run_id = TurnRunId::new();
+        let gate_ref = "gate:notion-auth";
+        let requirements = vec![RuntimeCredentialAuthRequirement {
+            provider: RuntimeCredentialAccountProviderId::new("notion").expect("provider"),
+            requester_extension: ExtensionId::new("notion").expect("extension"),
+            provider_scopes: Vec::new(),
+        }];
+
+        let challenge = product_auth
+            .challenge_for_gate(&turn_scope, &owner_user_id, run_id, gate_ref, &requirements)
+            .await
+            .expect("challenge lookup")
+            .expect("notion oauth challenge");
+        let authorization_url = challenge.authorization_url.expect("authorization url");
+        let parsed_authorization =
+            Url::parse(authorization_url.as_str()).expect("authorization URL");
+        let state_value = parsed_authorization
+            .query_pairs()
+            .find_map(|(name, value)| (name == "state").then(|| value.into_owned()))
+            .expect("oauth state");
+        let redirect_uri = parsed_authorization
+            .query_pairs()
+            .find_map(|(name, value)| (name == "redirect_uri").then(|| value.into_owned()))
+            .expect("redirect uri");
+        let mut callback_url = Url::parse(&redirect_uri).expect("callback redirect URL");
+        {
+            let mut query = callback_url.query_pairs_mut();
+            query.append_pair("state", &state_value);
+            query.append_pair("code", "notion-auth-code");
+        }
+        let uri = format!(
+            "{}?{}",
+            callback_url.path(),
+            callback_url.query().expect("callback query")
+        )
+        .parse::<Uri>()
+        .expect("callback uri");
+        let flow_id = callback_url
+            .path_segments()
+            .and_then(|mut segments| segments.next_back())
+            .expect("flow id")
+            .to_string();
+
+        let response = oauth::oauth_callback_handler(
+            State(state),
+            Path(flow_id),
+            RawQuery(uri.query().map(str::to_string)),
+            uri,
+        )
+        .await
+        .expect("notion callback")
+        .0;
+
+        assert_eq!(response.status, AuthFlowStatus::Completed);
+        let events = dispatcher.events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].continuation,
+            AuthContinuationRef::TurnGateResume {
+                turn_run_ref: TurnRunRef::new(run_id.to_string()).expect("run ref"),
+                gate_ref: AuthGateRef::new(gate_ref).expect("gate ref"),
+            }
+        );
     }
 
     #[derive(Debug)]

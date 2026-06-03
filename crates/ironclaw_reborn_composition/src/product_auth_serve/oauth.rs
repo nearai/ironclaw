@@ -1,6 +1,7 @@
 //! OAuth start and callback handlers.
 
 use super::*;
+use crate::oauth_dcr::DcrOAuthCallbackState;
 
 pub(super) async fn oauth_start_handler(
     State(state): State<ProductAuthRouteState>,
@@ -270,16 +271,24 @@ pub(super) async fn oauth_callback_handler(
     let flow_id = AuthFlowId::from_uuid(
         Uuid::parse_str(&flow_id).map_err(|_| ProductAuthRouteFailure::malformed_callback())?,
     );
-    let scope = scope_from_callback_query(&state, &query)?;
-    let state_hash = opaque_state_hash(
-        query
-            .state
-            .as_ref()
-            .ok_or_else(ProductAuthRouteFailure::malformed_callback)?
-            .as_str(),
-    )?;
+    let state_value = query
+        .state
+        .as_ref()
+        .ok_or_else(ProductAuthRouteFailure::malformed_callback)?;
+    let decoded_state = dcr_callback_state_from_oauth_state(state_value.as_str())?;
+    if let Some(decoded) = &decoded_state
+        && decoded.flow_id() != flow_id
+    {
+        return Err(ProductAuthRouteFailure::malformed_callback());
+    }
+    let scope = decoded_state
+        .as_ref()
+        .map(|decoded| decoded.scope().clone())
+        .map(Ok)
+        .unwrap_or_else(|| scope_from_callback_query(&state, &query))?;
+    let state_hash = opaque_state_hash(state_value.as_str())?;
 
-    let flow_provider = if is_authorized_callback_candidate(&query) {
+    let flow_provider = if is_authorized_callback_candidate(&query, decoded_state.as_ref()) {
         Some(
             run_with_backend_timeout(
                 state
@@ -291,9 +300,15 @@ pub(super) async fn oauth_callback_handler(
     } else {
         None
     };
-    let outcome =
-        callback_outcome_from_query(&state, flow_id, &scope, flow_provider.as_ref(), &query)
-            .await?;
+    let outcome = callback_outcome_from_query(
+        &state,
+        flow_id,
+        &scope,
+        flow_provider.as_ref(),
+        decoded_state.as_ref(),
+        &query,
+    )
+    .await?;
 
     let response = match run_with_backend_timeout(state.product_auth.handle_oauth_callback(
         RebornOAuthCallbackRequest {
@@ -446,6 +461,7 @@ pub(super) async fn callback_outcome_from_query(
     flow_id: AuthFlowId,
     scope: &AuthProductScope,
     flow_provider: Option<&AuthProviderId>,
+    callback_state: Option<&DcrOAuthCallbackState>,
     query: &OAuthCallbackQuery,
 ) -> Result<RebornOAuthCallbackOutcome, ProductAuthRouteFailure> {
     if query
@@ -456,13 +472,23 @@ pub(super) async fn callback_outcome_from_query(
         return Ok(RebornOAuthCallbackOutcome::ProviderDenied);
     }
 
-    let provider = required_callback_value(query.provider.as_deref())?;
-    let provider = AuthProviderId::new(provider.to_string())
-        .map_err(|_| ProductAuthRouteFailure::malformed_callback())?;
+    let provider = match query.provider.as_deref() {
+        Some(provider) => AuthProviderId::new(provider.to_string())
+            .map_err(|_| ProductAuthRouteFailure::malformed_callback())?,
+        None => callback_state
+            .map(|state| state.provider().clone())
+            .ok_or_else(ProductAuthRouteFailure::malformed_callback)?,
+    };
     if flow_provider.is_some_and(|known_provider| known_provider != &provider) {
         return Err(ProductAuthRouteFailure::malformed_callback());
     }
-    let account_label = required_callback_value(query.account_label.as_deref())?;
+    let account_label = match query.account_label.as_deref() {
+        Some(account_label) => CredentialAccountLabel::new(account_label.to_string())
+            .map_err(|_| ProductAuthRouteFailure::malformed_callback())?,
+        None => callback_state
+            .map(|state| state.account_label().clone())
+            .ok_or_else(ProductAuthRouteFailure::malformed_callback)?,
+    };
     let code = query
         .code
         .as_ref()
@@ -474,15 +500,19 @@ pub(super) async fn callback_outcome_from_query(
         flow_id,
     )
     .await?;
-    let scopes = parse_provider_scopes(query.scopes.as_deref())?;
+    let scopes = match query.scopes.as_deref() {
+        Some(raw) => parse_provider_scopes(Some(raw))?,
+        None => callback_state
+            .map(|state| state.requested_scopes().to_vec())
+            .unwrap_or_default(),
+    };
     let authorization_code_hash = authorization_code_hash(code.expose_secret())?;
     let pkce_verifier_hash = pkce_verifier_hash(pkce_verifier.expose_secret())?;
 
     Ok(RebornOAuthCallbackOutcome::Authorized {
         provider_request: OAuthProviderCallbackRequest {
             provider,
-            account_label: CredentialAccountLabel::new(account_label.to_string())
-                .map_err(|_| ProductAuthRouteFailure::malformed_callback())?,
+            account_label,
             authorization_code: OAuthAuthorizationCode::new(code.clone_secret())
                 .map_err(ProductAuthRouteFailure::from)?,
             authorization_code_hash,
@@ -529,17 +559,14 @@ fn validate_google_callback_query_fields(
     Ok(())
 }
 
-pub(super) fn is_authorized_callback_candidate(query: &OAuthCallbackQuery) -> bool {
+pub(super) fn is_authorized_callback_candidate(
+    query: &OAuthCallbackQuery,
+    callback_state: Option<&DcrOAuthCallbackState>,
+) -> bool {
     query.error.as_deref().is_none_or(|value| value.is_empty())
-        && query.provider.is_some()
-        && query.account_label.is_some()
+        && (query.provider.is_some() || callback_state.is_some())
+        && (query.account_label.is_some() || callback_state.is_some())
         && query.code.is_some()
-}
-
-pub(super) fn required_callback_value(
-    value: Option<&str>,
-) -> Result<&str, ProductAuthRouteFailure> {
-    value.ok_or_else(ProductAuthRouteFailure::malformed_callback)
 }
 
 pub(super) fn should_forget_pkce_verifier(code: AuthErrorCode) -> bool {
@@ -553,6 +580,17 @@ pub(super) fn should_forget_pkce_verifier(code: AuthErrorCode) -> bool {
             | AuthErrorCode::CredentialMissing
             | AuthErrorCode::AccountSelectionRequired
     )
+}
+
+fn dcr_callback_state_from_oauth_state(
+    state: &str,
+) -> Result<Option<DcrOAuthCallbackState>, ProductAuthRouteFailure> {
+    if !DcrOAuthCallbackState::has_prefix(state) {
+        return Ok(None);
+    }
+    DcrOAuthCallbackState::decode(state)
+        .map(Some)
+        .map_err(ProductAuthRouteFailure::from)
 }
 
 #[cfg(test)]

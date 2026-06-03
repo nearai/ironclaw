@@ -4,8 +4,9 @@ use crate::{
     AuthChallenge, AuthErrorCode, AuthFlowRecord, AuthFlowStatus, AuthProductError,
     CredentialAccount, CredentialAccountUpdateBinding, CredentialOwnership, CredentialRecoveryKind,
     CredentialRecoveryProjection, CredentialRecoveryReason, CredentialRefreshRequest,
-    CredentialSelectionInput, ManualTokenCompletionInput, ManualTokenSetupRequest, NewAuthFlow,
-    NewCredentialAccount, OAuthCallbackClaimRequest, OAuthProviderExchange, Timestamp,
+    CredentialSelectionInput, ManualTokenCompletionInput, ManualTokenSetupRequest,
+    NewAuthFlow, NewCredentialAccount, OAuthCallbackClaimRequest, OAuthProviderExchange,
+    ProviderScope, Timestamp,
     flow::credential_status_for_completed_flow, scope_matches,
 };
 
@@ -194,8 +195,21 @@ pub fn update_account_from_exchange(
     account.status = credential_status_for_completed_flow();
     account.access_secret = Some(exchange.access_secret.clone());
     account.refresh_secret = exchange.refresh_secret.clone();
-    account.scopes = exchange.scopes.clone();
+    account.scopes = merge_provider_scopes(&account.scopes, &exchange.scopes);
     account.updated_at = now;
+}
+
+pub fn merge_provider_scopes(
+    existing: &[ProviderScope],
+    incoming: &[ProviderScope],
+) -> Vec<ProviderScope> {
+    let mut merged = existing.to_vec();
+    for scope in incoming {
+        if !merged.iter().any(|existing| existing == scope) {
+            merged.push(scope.clone());
+        }
+    }
+    merged
 }
 
 pub fn update_account_from_request(
@@ -466,5 +480,27 @@ fn recovery_kind_and_reason_for_status(
             CredentialRecoveryKind::ReauthorizeRequired,
             CredentialRecoveryReason::AccountRevoked,
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn merge_provider_scopes_preserves_existing_order_and_appends_new_scopes() {
+        let existing = vec![
+            ProviderScope::new("scope:read").expect("scope"),
+            ProviderScope::new("scope:write").expect("scope"),
+        ];
+        let incoming = vec![
+            ProviderScope::new("scope:write").expect("scope"),
+            ProviderScope::new("scope:calendar").expect("scope"),
+        ];
+
+        let merged = merge_provider_scopes(&existing, &incoming);
+
+        let merged = merged.iter().map(|scope| scope.as_str()).collect::<Vec<_>>();
+        assert_eq!(merged, vec!["scope:read", "scope:write", "scope:calendar"]);
     }
 }
