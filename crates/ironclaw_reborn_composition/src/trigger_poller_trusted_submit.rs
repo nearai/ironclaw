@@ -613,34 +613,34 @@ mod tests {
         }
     }
 
-    struct FailingPromptThreadService {
+    struct InterceptingPromptThreadService {
         inner: InMemorySessionThreadService,
+        accept_failure: PromptThreadAcceptFailure,
     }
 
-    impl FailingPromptThreadService {
-        fn new() -> Self {
+    enum PromptThreadAcceptFailure {
+        Always,
+        Once(AtomicUsize),
+    }
+
+    impl InterceptingPromptThreadService {
+        fn fail_accept_always() -> Self {
             Self {
                 inner: InMemorySessionThreadService::default(),
+                accept_failure: PromptThreadAcceptFailure::Always,
             }
         }
-    }
 
-    struct FlakyPromptThreadService {
-        inner: InMemorySessionThreadService,
-        fail_accept_once: AtomicUsize,
-    }
-
-    impl FlakyPromptThreadService {
-        fn new() -> Self {
+        fn fail_accept_once() -> Self {
             Self {
                 inner: InMemorySessionThreadService::default(),
-                fail_accept_once: AtomicUsize::new(1),
+                accept_failure: PromptThreadAcceptFailure::Once(AtomicUsize::new(1)),
             }
         }
     }
 
     #[async_trait]
-    impl CanonicalSessionThreadService for FlakyPromptThreadService {
+    impl CanonicalSessionThreadService for InterceptingPromptThreadService {
         async fn ensure_thread(
             &self,
             request: EnsureThreadRequest,
@@ -652,10 +652,19 @@ mod tests {
             &self,
             request: ThreadAcceptInboundMessageRequest,
         ) -> Result<CanonicalAcceptedInboundMessage, SessionThreadError> {
-            if self.fail_accept_once.fetch_sub(1, Ordering::SeqCst) > 0 {
-                return Err(SessionThreadError::Backend(
-                    "prompt thread write failed once".to_string(),
-                ));
+            match &self.accept_failure {
+                PromptThreadAcceptFailure::Always => {
+                    return Err(SessionThreadError::Backend(
+                        "prompt thread write failed".to_string(),
+                    ));
+                }
+                PromptThreadAcceptFailure::Once(failures_remaining) => {
+                    if failures_remaining.swap(0, Ordering::SeqCst) > 0 {
+                        return Err(SessionThreadError::Backend(
+                            "prompt thread write failed once".to_string(),
+                        ));
+                    }
+                }
             }
             self.inner.accept_inbound_message(request).await
         }
@@ -786,160 +795,6 @@ mod tests {
             request: ListThreadsForScopeRequest,
         ) -> Result<ListThreadsForScopeResponse, SessionThreadError> {
             self.inner.list_threads_for_scope(request).await
-        }
-
-        async fn update_thread_goal(
-            &self,
-            _request: UpdateThreadGoalRequest,
-        ) -> Result<ThreadGoal, SessionThreadError> {
-            unimplemented!("trigger prompt recorder tests do not update thread goals")
-        }
-    }
-
-    #[async_trait]
-    impl CanonicalSessionThreadService for FailingPromptThreadService {
-        async fn ensure_thread(
-            &self,
-            request: EnsureThreadRequest,
-        ) -> Result<SessionThreadRecord, SessionThreadError> {
-            self.inner.ensure_thread(request).await
-        }
-
-        async fn accept_inbound_message(
-            &self,
-            _request: ThreadAcceptInboundMessageRequest,
-        ) -> Result<CanonicalAcceptedInboundMessage, SessionThreadError> {
-            Err(SessionThreadError::Backend(
-                "prompt thread write failed".to_string(),
-            ))
-        }
-
-        async fn replay_accepted_inbound_message(
-            &self,
-            _request: ReplayAcceptedInboundMessageRequest,
-        ) -> Result<Option<CanonicalAcceptedInboundMessageReplay>, SessionThreadError> {
-            unimplemented!("trigger prompt recorder tests do not replay canonical inbound messages")
-        }
-
-        async fn mark_message_submitted(
-            &self,
-            _scope: &ThreadScope,
-            _thread_id: &ThreadId,
-            _message_id: ThreadMessageId,
-            _turn_id: String,
-            _turn_run_id: String,
-        ) -> Result<ThreadMessageRecord, SessionThreadError> {
-            unimplemented!("trigger prompt recorder tests do not mark messages submitted")
-        }
-
-        async fn mark_message_deferred_busy(
-            &self,
-            _scope: &ThreadScope,
-            _thread_id: &ThreadId,
-            _message_id: ThreadMessageId,
-        ) -> Result<ThreadMessageRecord, SessionThreadError> {
-            unimplemented!("trigger prompt recorder tests do not defer messages")
-        }
-
-        async fn append_assistant_draft(
-            &self,
-            _request: AppendAssistantDraftRequest,
-        ) -> Result<ThreadMessageRecord, SessionThreadError> {
-            unimplemented!("trigger prompt recorder tests do not append assistant drafts")
-        }
-
-        async fn append_tool_result_reference(
-            &self,
-            _request: AppendToolResultReferenceRequest,
-        ) -> Result<ThreadMessageRecord, SessionThreadError> {
-            unimplemented!("trigger prompt recorder tests do not append tool results")
-        }
-
-        async fn append_capability_display_preview(
-            &self,
-            _request: AppendCapabilityDisplayPreviewRequest,
-        ) -> Result<ThreadMessageRecord, SessionThreadError> {
-            unimplemented!("trigger prompt recorder tests do not append display previews")
-        }
-
-        async fn update_tool_result_reference(
-            &self,
-            _request: UpdateToolResultReferenceRequest,
-        ) -> Result<ThreadMessageRecord, SessionThreadError> {
-            unimplemented!("trigger prompt recorder tests do not update tool results")
-        }
-
-        async fn update_assistant_draft(
-            &self,
-            _request: UpdateAssistantDraftRequest,
-        ) -> Result<ThreadMessageRecord, SessionThreadError> {
-            unimplemented!("trigger prompt recorder tests do not update assistant drafts")
-        }
-
-        async fn finalize_assistant_message(
-            &self,
-            _scope: &ThreadScope,
-            _thread_id: &ThreadId,
-            _message_id: ThreadMessageId,
-            _content: MessageContent,
-        ) -> Result<ThreadMessageRecord, SessionThreadError> {
-            unimplemented!("trigger prompt recorder tests do not finalize assistant messages")
-        }
-
-        async fn redact_message(
-            &self,
-            _request: RedactMessageRequest,
-        ) -> Result<ThreadMessageRecord, SessionThreadError> {
-            unimplemented!("trigger prompt recorder tests do not redact messages")
-        }
-
-        async fn load_context_window(
-            &self,
-            _request: LoadContextWindowRequest,
-        ) -> Result<ContextWindow, SessionThreadError> {
-            unimplemented!("trigger prompt recorder tests do not load context windows")
-        }
-
-        async fn load_context_messages(
-            &self,
-            _request: LoadContextMessagesRequest,
-        ) -> Result<ContextMessages, SessionThreadError> {
-            unimplemented!("trigger prompt recorder tests do not load context messages")
-        }
-
-        async fn list_thread_history(
-            &self,
-            _request: ThreadHistoryRequest,
-        ) -> Result<ironclaw_threads::ThreadHistory, SessionThreadError> {
-            unimplemented!("trigger prompt recorder tests do not list history")
-        }
-
-        async fn list_thread_messages_range(
-            &self,
-            _request: ThreadMessageRangeRequest,
-        ) -> Result<ThreadMessageRange, SessionThreadError> {
-            unimplemented!("trigger prompt recorder tests do not list message ranges")
-        }
-
-        async fn latest_thread_message(
-            &self,
-            _request: LatestThreadMessageRequest,
-        ) -> Result<Option<ThreadMessageRecord>, SessionThreadError> {
-            unimplemented!("trigger prompt recorder tests do not read latest messages")
-        }
-
-        async fn create_summary_artifact(
-            &self,
-            _request: CreateSummaryArtifactRequest,
-        ) -> Result<SummaryArtifact, SessionThreadError> {
-            unimplemented!("trigger prompt recorder tests do not create summaries")
-        }
-
-        async fn list_threads_for_scope(
-            &self,
-            _request: ListThreadsForScopeRequest,
-        ) -> Result<ListThreadsForScopeResponse, SessionThreadError> {
-            unimplemented!("trigger prompt recorder tests do not list threads")
         }
 
         async fn update_thread_goal(
@@ -1303,7 +1158,7 @@ mod tests {
     #[tokio::test]
     async fn retry_after_prompt_record_failure_submits_once_after_materialization_succeeds() {
         let conversations = ironclaw_conversations::InMemoryConversationServices::default();
-        let thread_service = Arc::new(FlakyPromptThreadService::new());
+        let thread_service = Arc::new(InterceptingPromptThreadService::fail_accept_once());
         let run_id = TurnRunId::new();
         let submit_turn_count = Arc::new(AtomicUsize::new(0));
         let tenant_id = TenantId::new("trigger-retry-tenant").expect("tenant id");
@@ -1607,7 +1462,7 @@ mod tests {
     #[tokio::test]
     async fn materializer_returns_retryable_error_when_prompt_recording_fails() {
         let conversations = ironclaw_conversations::InMemoryConversationServices::default();
-        let thread_service = Arc::new(FailingPromptThreadService::new());
+        let thread_service = Arc::new(InterceptingPromptThreadService::fail_accept_always());
         let tenant_id = TenantId::new("trigger-prompt-failure-tenant").expect("tenant id");
         let agent_id = AgentId::new("trigger-prompt-failure-agent").expect("agent id");
         let creator_user_id = UserId::new("trigger-prompt-failure-user").expect("user id");
