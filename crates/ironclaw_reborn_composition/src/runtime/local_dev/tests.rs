@@ -59,6 +59,52 @@ mod tests {
         )
     }
 
+    #[tokio::test]
+    async fn local_dev_visible_capability_request_uses_run_actor_for_runtime_scope() {
+        let run_context = run_context("actor-runtime-scope")
+            .await
+            .with_actor(TurnActor::new(
+                UserId::new("sso-user").expect("actor user id"),
+            ));
+        let fallback_user_id = UserId::new("env-operator").expect("fallback user id");
+        let request = visible_request_for_runtime_scope(&run_context, &fallback_user_id);
+
+        assert_eq!(request.context.user_id.as_str(), "sso-user");
+        assert_eq!(request.context.resource_scope.user_id.as_str(), "sso-user");
+    }
+
+    #[tokio::test]
+    async fn local_dev_visible_capability_request_keeps_fallback_user_without_actor() {
+        let run_context = run_context("fallback-runtime-scope").await;
+        let fallback_user_id = UserId::new("env-operator").expect("fallback user id");
+        let request = visible_request_for_runtime_scope(&run_context, &fallback_user_id);
+
+        assert_eq!(request.context.user_id.as_str(), "env-operator");
+        assert_eq!(
+            request.context.resource_scope.user_id.as_str(),
+            "env-operator"
+        );
+    }
+
+    fn visible_request_for_runtime_scope(
+        run_context: &LoopRunContext,
+        fallback_user_id: &UserId,
+    ) -> HostVisibleCapabilityRequest {
+        let policy = crate::local_dev_capability_policy::local_dev_capability_policy()
+            .expect("policy parses");
+
+        local_dev_visible_capability_request(
+            run_context,
+            fallback_user_id,
+            MountView::default(),
+            MountView::default(),
+            MountView::default(),
+            &policy,
+            &LocalDevExtensionSurface::default(),
+        )
+        .expect("visible request")
+    }
+
     fn provider_tool_call_with_name(
         name: impl Into<String>,
         arguments: serde_json::Value,
@@ -809,7 +855,7 @@ mod tests {
         let skill_mounts = local_runtime.skill_mounts.clone();
         let factory = LocalDevLoopCapabilityPortFactory {
             runtime,
-            user_id: UserId::new("skill-activate-user").expect("user id"),
+            fallback_user_id: UserId::new("skill-activate-user").expect("user id"),
             policy,
             workspace_mounts: local_runtime.workspace_mounts.clone(),
             skill_mounts,
@@ -1003,7 +1049,7 @@ mod tests {
         let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
         let factory = LocalDevLoopCapabilityPortFactory {
             runtime,
-            user_id: UserId::new("local-yolo-host-user").expect("user id"), // safety: literal test id is valid.
+            fallback_user_id: UserId::new("local-yolo-host-user").expect("user id"), // safety: literal test id is valid.
             policy,
             workspace_mounts,
             skill_mounts,
@@ -1219,7 +1265,7 @@ mod tests {
         let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
         let factory = LocalDevLoopCapabilityPortFactory {
             runtime,
-            user_id: UserId::new("local-dev-skill-port-user").expect("user id"), // safety: literal test id is valid.
+            fallback_user_id: UserId::new("local-dev-skill-port-user").expect("user id"), // safety: literal test id is valid.
             policy,
             workspace_mounts,
             skill_mounts,
@@ -1305,7 +1351,7 @@ mod tests {
         let result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
         let factory = LocalDevLoopCapabilityPortFactory {
             runtime,
-            user_id: UserId::new("local-dev-no-host-user").expect("user id"), // safety: literal test id is valid.
+            fallback_user_id: UserId::new("local-dev-no-host-user").expect("user id"), // safety: literal test id is valid.
             policy,
             workspace_mounts,
             skill_mounts,

@@ -69,7 +69,7 @@ pub(super) fn capability_wiring(
     services: &RebornServices,
     thread_service: Arc<dyn SessionThreadService>,
     thread_scope: ThreadScope,
-    user_id: UserId,
+    fallback_user_id: UserId,
     policy: Arc<LocalDevCapabilityPolicy>,
     model_gateway: Arc<dyn HostManagedModelGateway>,
     milestone_sink: Arc<dyn LoopHostMilestoneSink>,
@@ -93,7 +93,7 @@ pub(super) fn capability_wiring(
     let capability_factory: Arc<dyn LoopCapabilityPortFactory> =
         Arc::new(LocalDevLoopCapabilityPortFactory {
             runtime,
-            user_id,
+            fallback_user_id,
             policy,
             workspace_mounts,
             skill_mounts,
@@ -120,7 +120,7 @@ pub(super) fn capability_wiring(
 #[derive(Clone)]
 struct LocalDevLoopCapabilityPortFactory {
     runtime: Arc<dyn HostRuntime>,
-    user_id: UserId,
+    fallback_user_id: UserId,
     policy: Arc<LocalDevCapabilityPolicy>,
     workspace_mounts: MountView,
     skill_mounts: MountView,
@@ -148,7 +148,7 @@ impl LoopCapabilityPortFactory for LocalDevLoopCapabilityPortFactory {
             .map_err(host_api_agent_loop_error)?;
         let visible_request = local_dev_visible_capability_request(
             run_context,
-            self.user_id.clone(),
+            &self.fallback_user_id,
             workspace_mounts.clone(),
             skill_mounts.clone(),
             memory_mounts.clone(),
@@ -721,7 +721,7 @@ fn model_capability_io_error(error: AgentLoopHostError) -> HostManagedModelError
 
 fn local_dev_visible_capability_request(
     run_context: &LoopRunContext,
-    user_id: UserId,
+    fallback_user_id: &UserId,
     workspace_mounts: MountView,
     skill_mounts: MountView,
     memory_mounts: MountView,
@@ -738,6 +738,10 @@ fn local_dev_visible_capability_request(
     grants
         .grants
         .extend(extension_surface.grants(&extension_id));
+    let user_id = run_context
+        .actor()
+        .map(|actor| actor.user_id.clone())
+        .unwrap_or_else(|| fallback_user_id.clone());
     let mut context = ExecutionContext::local_default(
         user_id,
         extension_id,
