@@ -404,6 +404,7 @@ impl ConfigValue {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::context::RebornCliContext;
     use ironclaw_reborn_config::RebornConfigFile;
 
     #[test]
@@ -512,5 +513,53 @@ model = "claude-3-5-sonnet-latest"
             find("llm.mission.model").value,
             Some(ConfigValue::String(ref s)) if s == "claude-3-5-sonnet-latest"
         ));
+    }
+
+    #[test]
+    fn flatten_llm_without_default_slot_still_emits_default_placeholders() {
+        let toml = r#"
+[llm.mission]
+provider_id = "anthropic"
+model = "claude-3-5-sonnet-latest"
+"#;
+        let config = RebornConfigFile::parse_text(toml, std::path::Path::new("/test/config.toml"))
+            .expect("must parse");
+        let entries = flatten_config(&config);
+
+        let find = |key: &str| entries.iter().find(|e| e.key == key);
+
+        assert!(
+            find("llm.default.provider_id").is_some(),
+            "llm.default.provider_id must be present as a placeholder"
+        );
+        assert!(find("llm.default.provider_id").unwrap().value.is_none());
+        assert!(find("llm.default.model").unwrap().value.is_none());
+        assert!(find("llm.default.api_key_env").unwrap().value.is_none());
+        assert!(find("llm.default.base_url").unwrap().value.is_none());
+
+        assert!(matches!(
+            find("llm.mission.provider_id").unwrap().value,
+            Some(ConfigValue::String(ref s)) if s == "anthropic"
+        ));
+    }
+
+    #[test]
+    fn build_config_get_dto_known_key_none_value_returns_ok_none() {
+        let (_tmp, context) = RebornCliContext::test_context();
+        let dto = build_config_get_dto(&context, "identity.tenant").expect("must succeed");
+        assert_eq!(dto.key, "identity.tenant");
+        assert!(dto.value.is_none());
+    }
+
+    #[test]
+    fn build_config_get_dto_unknown_key_returns_err() {
+        let (_tmp, context) = RebornCliContext::test_context();
+        let result = build_config_get_dto(&context, "nonexistent.key");
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("unknown config key"),
+            "error should mention unknown key: {err_msg}"
+        );
     }
 }

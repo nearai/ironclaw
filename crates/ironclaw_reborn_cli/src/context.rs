@@ -18,6 +18,19 @@ impl RebornCliContext {
         Self { boot_config }
     }
 
+    #[cfg(test)]
+    pub(crate) fn test_context() -> (tempfile::TempDir, Self) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let config = RebornBootConfig::resolve_from_env_parts(
+            None,
+            Some(tmp.path().as_os_str().to_os_string()),
+            None,
+            None,
+        )
+        .expect("config must resolve with HOME set");
+        (tmp, Self::from_boot_config(config))
+    }
+
     pub(crate) fn boot_config(&self) -> &RebornBootConfig {
         &self.boot_config
     }

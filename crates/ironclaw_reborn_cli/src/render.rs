@@ -265,6 +265,30 @@ mod tests {
     }
 
     #[test]
+    fn status_render_text_contains_all_fields() {
+        let text = render_to_string(&sample_status());
+        assert!(text.contains("IronClaw Reborn status"));
+        assert!(text.contains("version:"));
+        assert!(text.contains("0.1.0"));
+        assert!(text.contains("reborn_home:"));
+        assert!(text.contains("/home/user/.ironclaw/reborn"));
+        assert!(text.contains("home_source:"));
+        assert!(text.contains("profile:"));
+        assert!(text.contains("local-dev"));
+        assert!(text.contains("config_file:"));
+        assert!(text.contains("(present)"));
+        assert!(text.contains("providers_file:"));
+        assert!(text.contains("(absent)"));
+        assert!(text.contains("model_slots:"));
+        assert!(text.contains("default, mission"));
+        assert!(text.contains("drivers:"));
+        assert!(text.contains("text_only: initialized"));
+        assert!(text.contains("planned: initialized"));
+        assert!(text.contains("subagent_planned: unavailable (missing loop family)"));
+        assert!(text.contains("planned_default_profile: initialized"));
+    }
+
+    #[test]
     fn doctor_json_round_trips() {
         let dto = sample_doctor();
         let json = serde_json::to_string_pretty(&dto).expect("serialize");
@@ -285,6 +309,19 @@ mod tests {
         assert_eq!(parsed["entries"][0]["value"], "local-dev");
         assert!(parsed["entries"][1]["value"].is_null());
         assert_eq!(parsed["entries"][2]["value"], 5);
+    }
+
+    #[test]
+    fn config_list_render_text_covers_entries() {
+        let text = render_to_string(&sample_config_list());
+        assert!(text.contains("IronClaw Reborn config"));
+        assert!(text.contains("config.toml"));
+        assert!(text.contains("boot.profile"));
+        assert!(text.contains("local-dev"));
+        assert!(text.contains("identity.tenant"));
+        assert!(text.contains("(not set)"));
+        assert!(text.contains("runner.heartbeat_interval_secs"));
+        assert!(text.contains("5"));
     }
 
     #[test]
@@ -324,5 +361,26 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("parse");
         assert_eq!(parsed["key"], "identity.tenant");
         assert!(parsed["value"].is_null());
+    }
+
+    #[test]
+    fn config_get_render_text_set_value() {
+        let dto = ConfigGetDto {
+            key: "boot.profile".to_string(),
+            value: Some(ConfigValue::String("local-dev".to_string())),
+        };
+        let text = render_to_string(&dto);
+        assert!(text.contains("local-dev"));
+        assert!(!text.contains("(not set)"));
+    }
+
+    #[test]
+    fn config_get_render_text_unset_value() {
+        let dto = ConfigGetDto {
+            key: "identity.tenant".to_string(),
+            value: None,
+        };
+        let text = render_to_string(&dto);
+        assert!(text.contains("(not set)"));
     }
 }

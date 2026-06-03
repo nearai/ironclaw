@@ -73,28 +73,26 @@ pub(super) fn convert_component_status(status: &RebornRuntimeComponentStatus) ->
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_reborn_config::RebornBootConfig;
-
-    fn test_context() -> (tempfile::TempDir, crate::context::RebornCliContext) {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let config = RebornBootConfig::resolve_from_env_parts(
-            None,
-            Some(tmp.path().as_os_str().to_os_string()),
-            None,
-            None,
-        )
-        .expect("config must resolve with HOME set");
-        (
-            tmp,
-            crate::context::RebornCliContext::from_boot_config(config),
-        )
-    }
+    use crate::context::RebornCliContext;
+    use ironclaw_reborn_composition::RebornRuntimeComponentStatus;
 
     #[test]
     fn status_dto_builds_without_config_file() {
-        let (_tmp, context) = test_context();
+        let (_tmp, context) = RebornCliContext::test_context();
         let dto = build_status_dto(&context).expect("must build");
         assert_eq!(dto.version, env!("CARGO_PKG_VERSION"));
         assert!(!dto.model_slots.is_empty());
+    }
+
+    #[test]
+    fn convert_component_status_failed_maps_correctly() {
+        let status = RebornRuntimeComponentStatus::Failed("db connection refused".to_string());
+        let result = convert_component_status(&status);
+        match result {
+            ComponentStatus::Failed { reason } => {
+                assert_eq!(reason, "db connection refused");
+            }
+            ComponentStatus::Initialized => panic!("expected Failed variant"),
+        }
     }
 }
