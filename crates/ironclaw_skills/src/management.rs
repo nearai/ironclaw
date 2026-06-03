@@ -18,6 +18,8 @@ use ironclaw_host_api::{HostApiError, MountView, ResourceScope, ScopedPath, Virt
 
 mod install_bundle;
 #[cfg(test)]
+mod install_name_tests;
+#[cfg(test)]
 mod tests;
 
 pub use install_bundle::{
@@ -211,7 +213,6 @@ pub struct SkillInstallResult {
 struct PreparedSkillInstall {
     content: String,
     parsed: ParsedSkill,
-    synthesized_frontmatter: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -322,19 +323,6 @@ pub async fn install_skill(
             SkillManagementErrorKind::Resource,
         ));
     }
-    if let Some(requested_name) = request.name
-        && !prepared.synthesized_frontmatter
-        && requested_name != prepared.parsed.manifest.name
-    {
-        tracing::debug!(
-            requested_name,
-            parsed_name = %prepared.parsed.manifest.name,
-            "skill install rejected name mismatch"
-        );
-        return Err(SkillManagementError::new(
-            SkillManagementErrorKind::InvalidInput,
-        ));
-    }
     validate_install_bundle_files(request.files)?;
 
     let skill_name = prepared.parsed.manifest.name;
@@ -417,11 +405,13 @@ fn prepare_install_content(
 ) -> Result<PreparedSkillInstall, SkillManagementError> {
     let normalized_content = normalize_line_endings(content);
     match parse_skill_md(&normalized_content) {
-        Ok(parsed) => Ok(PreparedSkillInstall {
-            content: normalized_content,
-            parsed,
-            synthesized_frontmatter: false,
-        }),
+        Ok(parsed) => {
+            validate_requested_name_matches_manifest(requested_name, &parsed.manifest.name)?;
+            Ok(PreparedSkillInstall {
+                content: normalized_content,
+                parsed,
+            })
+        }
         Err(SkillParseError::MissingFrontmatter)
             if !starts_with_frontmatter_delimiter(&normalized_content) =>
         {
@@ -430,17 +420,32 @@ fn prepare_install_content(
                 tracing::debug!(%error, "skill install failed to parse synthesized SKILL.md content");
                 skill_parse_error(error)
             })?;
-            Ok(PreparedSkillInstall {
-                content,
-                parsed,
-                synthesized_frontmatter: true,
-            })
+            Ok(PreparedSkillInstall { content, parsed })
         }
         Err(error) => {
             tracing::debug!(%error, "skill install failed to parse SKILL.md content");
             Err(skill_parse_error(error))
         }
     }
+}
+
+fn validate_requested_name_matches_manifest(
+    requested_name: Option<&str>,
+    manifest_name: &str,
+) -> Result<(), SkillManagementError> {
+    if let Some(requested_name) = requested_name
+        && normalize_skill_identifier(requested_name).as_deref() != Some(manifest_name)
+    {
+        tracing::debug!(
+            requested_name,
+            parsed_name = %manifest_name,
+            "skill install rejected name mismatch"
+        );
+        return Err(SkillManagementError::new(
+            SkillManagementErrorKind::InvalidInput,
+        ));
+    }
+    Ok(())
 }
 
 fn synthesize_install_frontmatter(
