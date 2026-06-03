@@ -410,21 +410,22 @@ fn submit_trusted_trigger_outcome(
     response: &InboundTurnResponse,
     submitted_at: chrono::DateTime<chrono::Utc>,
 ) -> Result<TrustedTriggerFireSubmitOutcome, TriggerError> {
-    let Some(ironclaw_turns::SubmitTurnResponse::Accepted { run_id, .. }) =
-        &response.turn_submission
-    else {
-        return Err(TriggerError::Backend {
-            reason: "trusted trigger fire accepted no turn submission".to_string(),
-        });
+    let run_id = match &response.turn_submission {
+        Some(ironclaw_turns::SubmitTurnResponse::Accepted { run_id, .. }) => *run_id,
+        None => {
+            return Err(TriggerError::Backend {
+                reason: "trusted trigger fire accepted no turn submission".to_string(),
+            });
+        }
     };
     if response.replayed_turn_submission {
         return Ok(TrustedTriggerFireSubmitOutcome::Replayed {
-            original_run_id: *run_id,
+            original_run_id: run_id,
             replayed_at: submitted_at,
         });
     }
     Ok(TrustedTriggerFireSubmitOutcome::Accepted {
-        run_id: *run_id,
+        run_id,
         submitted_at,
     })
 }
