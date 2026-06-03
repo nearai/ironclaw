@@ -34,9 +34,8 @@ impl ProductInstallationKey {
 /// Host-owned actor binding policy for one adapter installation.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum ProductActorBindingPolicy {
-    /// Resolve only actor pairings that already exist in the canonical
-    /// conversations service. This policy is fail-closed: first-time external
-    /// actors are rejected instead of being auto-bound.
+    /// Use the canonical conversations service's trusted installation path,
+    /// creating the first external actor/conversation binding when needed.
     #[default]
     ExistingConversationPairings,
     /// Allow only these host-preconfigured external actors and write their

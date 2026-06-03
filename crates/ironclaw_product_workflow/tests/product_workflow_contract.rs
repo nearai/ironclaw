@@ -622,7 +622,7 @@ async fn approval_resolution_payload_routes_through_approval_interaction_service
 
     let ack = workflow.accept_inbound(envelope).await.expect("accept");
 
-    assert_eq!(ack, ProductInboundAck::NoOp);
+    assert!(matches!(ack, ProductInboundAck::Accepted { .. }));
     let resolutions = approval_service.resolutions();
     assert_eq!(resolutions.len(), 1);
     assert_eq!(resolutions[0].gate_ref, gate_ref);
@@ -667,18 +667,19 @@ async fn concrete_approval_resolution_rejects_unknown_installation_via_product_b
         ),
     );
 
-    let ack = workflow
+    let err = workflow
         .accept_inbound(envelope)
         .await
-        .expect("unknown installation should settle as rejected ack");
+        .expect_err("unknown installation should reject before interaction dispatch");
 
     assert!(matches!(
-        ack,
-        ProductInboundAck::Rejected(ProductRejection {
-            kind: ProductRejectionKind::UnknownInstallation,
-            disposition: ProductRejectionDisposition::Permanent,
+        err,
+        ProductAdapterError::WorkflowRejected {
+            kind: ProductWorkflowRejectionKind::Unauthorized,
+            status_code: 403,
+            retryable: false,
             ..
-        })
+        }
     ));
     assert!(approval_service.resolutions().is_empty());
 }
@@ -712,7 +713,7 @@ async fn auth_resolution_payload_routes_through_auth_interaction_service() {
 
     let ack = workflow.accept_inbound(envelope).await.expect("accept");
 
-    assert_eq!(ack, ProductInboundAck::NoOp);
+    assert!(matches!(ack, ProductInboundAck::Accepted { .. }));
     let resolutions = auth_service.resolutions();
     assert_eq!(resolutions.len(), 1);
     assert_eq!(resolutions[0].gate_ref, gate_ref);
@@ -766,7 +767,7 @@ async fn auth_callback_and_denied_payloads_route_through_auth_interaction_servic
 
         let ack = workflow.accept_inbound(envelope).await.expect("accept");
 
-        assert_eq!(ack, ProductInboundAck::NoOp);
+        assert!(matches!(ack, ProductInboundAck::Accepted { .. }));
         let resolutions = auth_service.resolutions();
         assert_eq!(resolutions.len(), 1);
         assert_eq!(resolutions[0].gate_ref, gate_ref);
@@ -884,7 +885,7 @@ async fn approval_resolution_deny_routes_through_approval_interaction_service() 
 
     let ack = workflow.accept_inbound(envelope).await.expect("accept");
 
-    assert_eq!(ack, ProductInboundAck::NoOp);
+    assert!(matches!(ack, ProductInboundAck::Accepted { .. }));
     let resolutions = approval_service.resolutions();
     assert_eq!(resolutions.len(), 1);
     assert_eq!(resolutions[0].gate_ref, gate_ref);
@@ -950,18 +951,19 @@ async fn scoped_approval_resolution_rejects_ambiguous_gate() {
         ),
     );
 
-    let ack = workflow
+    let err = workflow
         .accept_inbound(envelope)
         .await
-        .expect("ambiguous gate should settle as rejected ack");
+        .expect_err("ambiguous gate should reject before interaction dispatch");
 
     assert!(matches!(
-        ack,
-        ProductInboundAck::Rejected(ProductRejection {
-            kind: ProductRejectionKind::PolicyDenied,
-            disposition: ProductRejectionDisposition::Permanent,
+        err,
+        ProductAdapterError::WorkflowRejected {
+            kind: ProductWorkflowRejectionKind::Conflict,
+            status_code: 409,
+            retryable: false,
             ..
-        })
+        }
     ));
     assert!(approval_service.resolutions().is_empty());
 }
@@ -1756,7 +1758,7 @@ async fn preconfigured_actor_binding_rejects_unconfigured_actor() {
 }
 
 #[tokio::test]
-async fn existing_pairings_policy_rejects_new_user_without_binding() {
+async fn default_actor_binding_policy_creates_first_binding_for_trusted_installation() {
     let conversations = Arc::new(InMemoryConversationServices::default());
     let binding = product_binding_service(
         conversations,
@@ -1768,29 +1770,24 @@ async fn existing_pairings_policy_rejects_new_user_without_binding() {
             Some("project:alpha"),
         )],
     );
+    let coordinator = Arc::new(RecordingTurnCoordinator::default());
     let workflow = DefaultProductWorkflow::new(
         Arc::new(DefaultInboundTurnService::new(
             binding.clone(),
             InMemorySessionThreadService::default(),
-            Arc::new(RecordingTurnCoordinator::default()),
+            coordinator.clone(),
         )),
         Arc::new(InMemoryIdempotencyLedger::new()),
         Arc::new(binding),
     );
 
     let ack = workflow
-        .accept_inbound(sample_envelope("existing-pairings-new-user"))
+        .accept_inbound(sample_envelope("default-policy-new-user"))
         .await
-        .expect("missing existing pairing should settle as rejected ack");
+        .expect("trusted default policy should create first binding");
 
-    assert!(matches!(
-        ack,
-        ProductInboundAck::Rejected(ProductRejection {
-            kind: ProductRejectionKind::BindingRequired,
-            disposition: ProductRejectionDisposition::Permanent,
-            ..
-        })
-    ));
+    assert!(matches!(ack, ProductInboundAck::Accepted { .. }));
+    assert_eq!(coordinator.submissions().len(), 1);
 }
 
 #[tokio::test]

@@ -127,6 +127,8 @@ jobs:
           feature_flags=""
           if [ "${{ matrix.package }}" = "ironclaw_reborn_cli" ]; then
             feature_flags="--features webui-v2-beta"
+          elif [ "${{ matrix.package }}" = "ironclaw_product_adapters" ]; then
+            feature_flags="--features test-support"
           fi
 
           # shellcheck disable=SC2086 # feature_flags intentionally expands to zero or more Cargo args.
