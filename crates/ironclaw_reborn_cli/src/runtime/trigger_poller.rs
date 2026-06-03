@@ -4,6 +4,23 @@ use ironclaw_reborn_composition::TriggerPollerSettings;
 
 use super::optional_nonempty_env;
 
+/// Upper bound on `poll_interval_secs` (config) and
+/// `IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS` (env). One hour caps the
+/// common typo class of writing a value in milliseconds — `60_000`,
+/// `86_400_000` — which would otherwise suspend the poller for hours
+/// or years before the operator notices nothing is firing.
+const MAX_POLL_INTERVAL_SECS: u64 = 3600;
+
+/// Upper bound on the two jitter knobs. Larger than this, jitter no
+/// longer feels like jitter and a misconfig has effectively replaced
+/// the poll interval with a multi-hour randomised pause.
+const MAX_JITTER_SECS: u64 = 3600;
+
+/// Upper bound on `fires_per_tick`. The compiled default is 32; 1000
+/// leaves plenty of headroom for a future high-throughput deployment
+/// while rejecting accidents like `u32::MAX` (~4B dispatches per tick).
+const MAX_FIRES_PER_TICK: u32 = 1000;
+
 /// Truncate an env-var value to a bounded length before echoing it in an
 /// error message. Prevents the value from blowing up startup logs if the
 /// operator accidentally pastes a long string (e.g. a credential) into the
@@ -54,17 +71,21 @@ pub(super) fn trigger_poller_settings(
         let mut worker = settings.worker;
 
         if let Some(secs) = section.poll_interval_secs {
-            if secs == 0 {
+            if secs == 0 || secs > MAX_POLL_INTERVAL_SECS {
                 anyhow::bail!(
-                    "config file [trigger_poller].poll_interval_secs must be greater than 0"
+                    "config file [trigger_poller].poll_interval_secs must be in 1..={MAX_POLL_INTERVAL_SECS}; \
+                     got {secs}"
                 );
             }
             worker.poll_interval = Duration::from_secs(secs);
         }
 
         if let Some(fires) = section.fires_per_tick {
-            if fires == 0 {
-                anyhow::bail!("config file [trigger_poller].fires_per_tick must be greater than 0");
+            if fires == 0 || fires > MAX_FIRES_PER_TICK {
+                anyhow::bail!(
+                    "config file [trigger_poller].fires_per_tick must be in 1..={MAX_FIRES_PER_TICK}; \
+                     got {fires}"
+                );
             }
             worker.fires_per_tick = fires as usize;
         }
@@ -81,10 +102,22 @@ pub(super) fn trigger_poller_settings(
         }
 
         if let Some(jitter_secs) = section.startup_jitter_max_secs {
+            if jitter_secs > MAX_JITTER_SECS {
+                anyhow::bail!(
+                    "config file [trigger_poller].startup_jitter_max_secs must be <= {MAX_JITTER_SECS}; \
+                     got {jitter_secs}"
+                );
+            }
             settings.startup_jitter_max = Duration::from_secs(jitter_secs);
         }
 
         if let Some(jitter_secs) = section.tick_jitter_max_secs {
+            if jitter_secs > MAX_JITTER_SECS {
+                anyhow::bail!(
+                    "config file [trigger_poller].tick_jitter_max_secs must be <= {MAX_JITTER_SECS}; \
+                     got {jitter_secs}"
+                );
+            }
             settings.tick_jitter_max = Duration::from_secs(jitter_secs);
         }
 
@@ -112,8 +145,10 @@ pub(super) fn trigger_poller_settings(
                 "IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS must be a positive integer, got {display:?}: {e}"
             )
         })?;
-        if secs == 0 {
-            anyhow::bail!("IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS must be greater than 0");
+        if secs == 0 || secs > MAX_POLL_INTERVAL_SECS {
+            anyhow::bail!(
+                "IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS must be in 1..={MAX_POLL_INTERVAL_SECS}; got {secs}"
+            );
         }
         settings.worker.poll_interval = Duration::from_secs(secs);
     }
@@ -395,6 +430,98 @@ mod tests {
         assert!(
             err.to_string().contains("fires_per_tick"),
             "error must mention the field, got: {err}",
+        );
+    }
+
+    #[test]
+    fn trigger_poller_settings_config_poll_interval_above_cap_is_error() {
+        // 86_400 secs = 1 day = far above the 3600s cap. Models the
+        // common typo class of writing a millisecond value (e.g. 86_400_000).
+        let section = TriggerPollerConfigSection {
+            enabled: Some(true),
+            poll_interval_secs: Some(86_400),
+            ..Default::default()
+        };
+        let config = make_config_with_trigger_poller(section);
+
+        let err = trigger_poller_settings(Some(&config))
+            .expect_err("poll_interval_secs above the cap must be rejected");
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("poll_interval_secs") && msg.contains("86400"),
+            "error must mention the field and the offending value, got: {msg}",
+        );
+    }
+
+    #[test]
+    fn trigger_poller_settings_config_fires_per_tick_above_cap_is_error() {
+        let section = TriggerPollerConfigSection {
+            enabled: Some(true),
+            fires_per_tick: Some(10_000),
+            ..Default::default()
+        };
+        let config = make_config_with_trigger_poller(section);
+
+        let err = trigger_poller_settings(Some(&config))
+            .expect_err("fires_per_tick above the cap must be rejected");
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("fires_per_tick") && msg.contains("10000"),
+            "error must mention the field and the offending value, got: {msg}",
+        );
+    }
+
+    #[test]
+    fn trigger_poller_settings_config_startup_jitter_above_cap_is_error() {
+        let section = TriggerPollerConfigSection {
+            enabled: Some(true),
+            startup_jitter_max_secs: Some(3601),
+            ..Default::default()
+        };
+        let config = make_config_with_trigger_poller(section);
+
+        let err = trigger_poller_settings(Some(&config))
+            .expect_err("startup_jitter_max_secs above the cap must be rejected");
+
+        assert!(
+            err.to_string().contains("startup_jitter_max_secs"),
+            "error must mention the field, got: {err}",
+        );
+    }
+
+    #[test]
+    fn trigger_poller_settings_config_tick_jitter_above_cap_is_error() {
+        let section = TriggerPollerConfigSection {
+            enabled: Some(true),
+            tick_jitter_max_secs: Some(3601),
+            ..Default::default()
+        };
+        let config = make_config_with_trigger_poller(section);
+
+        let err = trigger_poller_settings(Some(&config))
+            .expect_err("tick_jitter_max_secs above the cap must be rejected");
+
+        assert!(
+            err.to_string().contains("tick_jitter_max_secs"),
+            "error must mention the field, got: {err}",
+        );
+    }
+
+    #[test]
+    fn trigger_poller_settings_env_interval_above_cap_is_error() {
+        let _lock = lock_trigger_env();
+        let _enabled = EnvGuard::clear("IRONCLAW_TRIGGER_POLLER_ENABLED");
+        let _interval = EnvGuard::set("IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS", "86400");
+
+        let err = trigger_poller_settings(None)
+            .expect_err("IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS above the cap must be rejected");
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS") && msg.contains("86400"),
+            "error must surface env var name and value, got: {msg}",
         );
     }
 }
