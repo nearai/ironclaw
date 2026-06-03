@@ -314,7 +314,9 @@ where
         run_context: &LoopRunContext,
         skill_names: &[String],
     ) -> Result<SkillActivationPlan, SkillActivationSelectionError> {
-        let candidate_set = self.load_activation_candidate_set(run_context).await?;
+        let candidate_set = self
+            .load_named_activation_candidate_set(run_context, skill_names)
+            .await?;
         // Account for already-active skills so repeated activate calls respect max_active_skills
         // across the merged set, not just each individual call.
         let already_active = self
@@ -427,7 +429,9 @@ where
         let Some(plan) = self.active_plan(run_context)? else {
             return Ok(Vec::new());
         };
-        let candidate_set = self.load_activation_candidate_set(run_context).await?;
+        let candidate_set = self
+            .load_active_plan_candidate_set(run_context, &plan)
+            .await?;
         Ok(context_candidates_for_plan(&plan, candidate_set.candidates))
     }
 
@@ -473,14 +477,52 @@ where
         &self,
         run_context: &LoopRunContext,
     ) -> Result<ActivationCandidateSet, SkillActivationSelectionError> {
-        let mut descriptors = self
-            .bundle_source
-            .list_skill_bundles(run_context)
+        let descriptors = self.load_activation_descriptors(run_context).await?;
+        self.load_activation_candidate_set_for_descriptors(run_context, descriptors)
             .await
-            .map_err(skill_bundle_source_error_to_selection_error)?;
-        sort_skill_bundle_descriptors(&mut descriptors);
-        validate_descriptor_policy_metadata(&descriptors)?;
+    }
 
+    async fn load_named_activation_candidate_set(
+        &self,
+        run_context: &LoopRunContext,
+        skill_names: &[String],
+    ) -> Result<ActivationCandidateSet, SkillActivationSelectionError> {
+        let descriptors = self.load_activation_descriptors(run_context).await?;
+        let requested_names = skill_names
+            .iter()
+            .map(|name| name.to_ascii_lowercase())
+            .collect::<HashSet<_>>();
+        let descriptors = descriptors
+            .into_iter()
+            .filter(|descriptor| {
+                requested_names.contains(&descriptor.id().name().to_ascii_lowercase())
+            })
+            .collect::<Vec<_>>();
+        self.load_activation_candidate_set_for_descriptors(run_context, descriptors)
+            .await
+    }
+
+    async fn load_active_plan_candidate_set(
+        &self,
+        run_context: &LoopRunContext,
+        plan: &SkillActivationPlan,
+    ) -> Result<ActivationCandidateSet, SkillActivationSelectionError> {
+        let active_bundles = plan.activated_bundles().iter().collect::<HashSet<_>>();
+        let descriptors = self
+            .load_activation_descriptors(run_context)
+            .await?
+            .into_iter()
+            .filter(|descriptor| active_bundles.contains(descriptor.id()))
+            .collect::<Vec<_>>();
+        self.load_activation_candidate_set_for_descriptors(run_context, descriptors)
+            .await
+    }
+
+    async fn load_activation_candidate_set_for_descriptors(
+        &self,
+        run_context: &LoopRunContext,
+        descriptors: Vec<SkillBundleDescriptor>,
+    ) -> Result<ActivationCandidateSet, SkillActivationSelectionError> {
         let candidates = self
             .load_activation_candidates(run_context, &descriptors)
             .await?;
@@ -491,6 +533,20 @@ where
             candidates,
             satisfied_setup_markers,
         })
+    }
+
+    async fn load_activation_descriptors(
+        &self,
+        run_context: &LoopRunContext,
+    ) -> Result<Vec<SkillBundleDescriptor>, SkillActivationSelectionError> {
+        let mut descriptors = self
+            .bundle_source
+            .list_skill_bundles(run_context)
+            .await
+            .map_err(skill_bundle_source_error_to_selection_error)?;
+        sort_skill_bundle_descriptors(&mut descriptors);
+        validate_descriptor_policy_metadata(&descriptors)?;
+        Ok(descriptors)
     }
 
     async fn satisfied_setup_markers(
@@ -1261,6 +1317,11 @@ mod tests {
         reads: std::sync::atomic::AtomicUsize,
     }
 
+    struct ReadCountingSkillBundleSource {
+        inner: StaticSkillBundleSource,
+        reads: Mutex<Vec<String>>,
+    }
+
     #[derive(Debug)]
     struct StaticSetupMarkerSource {
         satisfied_markers: HashSet<String>,
@@ -1307,6 +1368,22 @@ mod tests {
                 second: second.into_bytes(),
                 reads: std::sync::atomic::AtomicUsize::new(0),
             }
+        }
+    }
+
+    impl ReadCountingSkillBundleSource {
+        fn new(skills: Vec<(SkillSourceKind, &str, &str)>) -> Self {
+            Self {
+                inner: StaticSkillBundleSource::new(skills),
+                reads: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn reads(&self) -> Vec<String> {
+            self.reads
+                .lock()
+                .map(|reads| reads.clone())
+                .unwrap_or_default()
         }
     }
 
@@ -1383,6 +1460,31 @@ mod tests {
             } else {
                 Ok(self.second.clone())
             }
+        }
+    }
+
+    #[async_trait]
+    impl SkillBundleSource for ReadCountingSkillBundleSource {
+        async fn list_skill_bundles(
+            &self,
+            run_context: &LoopRunContext,
+        ) -> Result<Vec<SkillBundleDescriptor>, SkillBundleSourceError> {
+            self.inner.list_skill_bundles(run_context).await
+        }
+
+        async fn read_skill_bundle_file(
+            &self,
+            run_context: &LoopRunContext,
+            bundle_id: &SkillBundleId,
+            path: &SkillFilePath,
+        ) -> Result<Vec<u8>, SkillBundleSourceError> {
+            self.reads
+                .lock()
+                .map_err(|_| SkillBundleSourceError::Internal)?
+                .push(bundle_id.name().to_string());
+            self.inner
+                .read_skill_bundle_file(run_context, bundle_id, path)
+                .await
         }
     }
 
@@ -1720,6 +1822,54 @@ mod tests {
         assert_eq!(selected_again.len(), 1);
         assert!(
             selected_again[0]
+                .skill_md
+                .as_ref()
+                .expect("skill context")
+                .contains("CODE_REVIEW_SENTINEL")
+        );
+    }
+
+    #[tokio::test]
+    async fn model_selected_activation_reads_only_requested_skill_bodies() {
+        let source = Arc::new(ReadCountingSkillBundleSource::new(vec![
+            (
+                SkillSourceKind::User,
+                "code-review",
+                &skill_md("code-review", "Review code", &[], "CODE_REVIEW_SENTINEL"),
+            ),
+            (
+                SkillSourceKind::User,
+                "large-audit",
+                &skill_md("large-audit", "Large audit", &[], "LARGE_AUDIT_SENTINEL"),
+            ),
+        ]));
+        let selectable = SelectableSkillContextSource::new(
+            source.clone(),
+            SkillActivationSelectorConfig {
+                selection_mode: SkillActivationSelectionMode::ExplicitOnly,
+                ..SkillActivationSelectorConfig::default()
+            },
+        );
+        let context = run_context().await;
+
+        selectable
+            .activate_skills_for_run(&context, &["code-review".to_string()])
+            .await
+            .expect("model-selected skill activates");
+        assert_eq!(source.reads(), vec!["code-review".to_string()]);
+
+        let selected = selectable
+            .load_skill_context_candidates(&context)
+            .await
+            .expect("active plan context loads");
+
+        assert_eq!(selected.len(), 1);
+        assert_eq!(
+            source.reads(),
+            vec!["code-review".to_string(), "code-review".to_string()]
+        );
+        assert!(
+            selected[0]
                 .skill_md
                 .as_ref()
                 .expect("skill context")

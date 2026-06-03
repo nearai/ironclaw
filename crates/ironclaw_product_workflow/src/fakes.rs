@@ -21,6 +21,19 @@ use crate::error::ProductWorkflowError;
 use crate::inbound_turn::{InboundTurnOutcome, InboundTurnService, check_before_inbound_policy};
 use crate::ledger::{IdempotencyDecision, IdempotencyLedger};
 use crate::policy::{BeforeInboundPolicy, BeforeInboundPolicyOutcome, BeforeInboundPolicyRequest};
+use crate::{RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind};
+
+#[allow(dead_code)]
+pub fn rejecting_reborn_services_error() -> RebornServicesError {
+    RebornServicesError {
+        code: RebornServicesErrorCode::Internal,
+        kind: RebornServicesErrorKind::Internal,
+        status_code: 500,
+        retryable: false,
+        field: None,
+        validation_code: None,
+    }
+}
 
 // ---------------------------------------------------------------------------
 // FakeConversationBindingService

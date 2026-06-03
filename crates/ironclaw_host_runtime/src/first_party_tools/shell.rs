@@ -284,7 +284,7 @@ mod tests {
         assert!(rendered.contains("Full output saved to: /workspace/command-outputs/command.log"));
         assert!(!rendered.contains("/tmp/command.log"));
         assert!(rendered.contains("secret-like values redacted"));
-        assert!(rendered.contains("use file_read to inspect it"));
+        assert!(rendered.contains("Use file_read to inspect it"));
     }
 
     #[test]

@@ -1,6 +1,9 @@
 import { React, html } from "../../../lib/html.js";
 import { useT } from "../../../lib/i18n.js";
 import { MessageBubble } from "./message-bubble.js";
+import { ToolRun } from "./tool-activity.js";
+import { Icon } from "../../../design-system/icons.js";
+import { groupMessages } from "../lib/message-groups.js";
 
 export function MessageList({
   messages,
@@ -13,6 +16,7 @@ export function MessageList({
   const t = useT();
   const containerRef = React.useRef(null);
   const shouldScrollRef = React.useRef(true);
+  const [atBottom, setAtBottom] = React.useState(true);
 
   React.useEffect(() => {
     const el = containerRef.current;
@@ -24,15 +28,27 @@ export function MessageList({
     const el = containerRef.current;
     if (!el) return;
     const threshold = 100;
-    shouldScrollRef.current =
-      el.scrollHeight - el.scrollTop - el.clientHeight < threshold;
+    const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
+    shouldScrollRef.current = distance < threshold;
+    setAtBottom(distance < threshold);
 
     if (hasMore && el.scrollTop < threshold && onLoadMore && !isLoading) {
       onLoadMore();
     }
   }, [hasMore, onLoadMore, isLoading]);
 
+  const jumpToBottom = React.useCallback(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+    shouldScrollRef.current = true;
+    setAtBottom(true);
+  }, []);
+
+  const grouped = React.useMemo(() => groupMessages(messages), [messages]);
+
   return html`
+    <div className="relative flex min-h-0 flex-1">
     <div
       ref=${containerRef}
       onScroll=${onScroll}
@@ -53,11 +69,30 @@ export function MessageList({
             </button>
           </div>
         `}
-        ${messages.map(
-          (msg) => html`<${MessageBubble} key=${msg.id} message=${msg} onRetry=${onRetryMessage} />`
+        ${grouped.map((item) =>
+          item.type === "tool-run"
+            ? html`<${ToolRun} key=${item.id} tools=${item.tools} />`
+            : html`<${MessageBubble}
+                key=${item.id}
+                message=${item.message}
+                onRetry=${onRetryMessage}
+              />`
         )}
         ${children}
       </div>
+    </div>
+    ${!atBottom &&
+    html`
+      <button
+        type="button"
+        onClick=${jumpToBottom}
+        aria-label=${t("chat.jumpToLatest")}
+        className="absolute bottom-4 left-1/2 inline-flex -translate-x-1/2 items-center gap-1.5 rounded-full border border-[var(--v2-panel-border)] bg-[var(--v2-surface)] px-3 py-1.5 text-xs font-medium text-[var(--v2-text-strong)] shadow-[0_10px_30px_-12px_rgba(0,0,0,0.7)] hover:border-[color-mix(in_srgb,var(--v2-accent)_40%,var(--v2-panel-border))]"
+      >
+        <${Icon} name="arrowDown" className="h-3.5 w-3.5" />
+        ${t("chat.jumpToLatest")}
+      </button>
+    `}
     </div>
   `;
 }

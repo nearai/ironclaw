@@ -150,6 +150,66 @@ async fn upsert_manifest_rejects_manifest_hash_change_for_existing_installation(
 }
 
 #[tokio::test]
+async fn upsert_manifest_and_installation_replaces_coherent_manifest_hash_pair() {
+    let store = InMemoryExtensionInstallationStore::default();
+    store.upsert_manifest(manifest("sha256:old")).await.unwrap();
+    store
+        .upsert_installation(installation("sha256:old"))
+        .await
+        .unwrap();
+
+    store
+        .upsert_manifest_and_installation(manifest("sha256:new"), installation("sha256:new"))
+        .await
+        .unwrap();
+
+    let manifest = store
+        .get_manifest(&extension_id("acme-tools"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(manifest.manifest_hash(), Some(&manifest_hash("sha256:new")));
+    let installation = store
+        .get_installation(&installation_id("acme-tools-prod"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        installation.manifest_ref().manifest_hash(),
+        Some(&manifest_hash("sha256:new"))
+    );
+}
+
+#[tokio::test]
+async fn upsert_manifest_and_installation_rejects_mismatched_manifest_hash_pair() {
+    let store = InMemoryExtensionInstallationStore::default();
+
+    let err = store
+        .upsert_manifest_and_installation(manifest("sha256:new"), installation("sha256:old"))
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        ExtensionInstallationError::ManifestHashMismatch { .. }
+    ));
+    assert!(
+        store
+            .get_manifest(&extension_id("acme-tools"))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        store
+            .get_installation(&installation_id("acme-tools-prod"))
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
 async fn missing_installation_mutations_return_not_found() {
     let store = InMemoryExtensionInstallationStore::default();
     let missing = installation_id("missing-prod");

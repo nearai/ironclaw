@@ -23,15 +23,12 @@ use ironclaw_host_runtime::{
 use ironclaw_loop_support::{
     CapabilityAllowSet, CapabilityResolveError, CapabilityResultWrite,
     CapabilitySurfaceProfileResolver, HostIdentityContextSource, HostInputQueue,
-    HostRuntimeLoopCapabilityPortFactory, LoopCapabilityInputResolver, LoopCapabilityResultWriter,
-    RunCancellationFactory, loop_driver_execution_extension_id,
+    HostRuntimeLoopCapabilityPortFactory, LoopCapabilityInputResolver, LoopCapabilityPortFactory,
+    LoopCapabilityResultWriter, RunCancellationFactory, loop_driver_execution_extension_id,
 };
-use ironclaw_reborn::{
-    loop_driver_host::LoopCapabilityPortFactory,
-    model_routes::{
-        ModelRoute, ModelRouteError, ModelRoutePolicy, ModelRouteResolver, ModelSelectionMode,
-        ModelSlot, StaticModelRouteResolver,
-    },
+use ironclaw_reborn::model_routes::{
+    ModelRoute, ModelRouteError, ModelRoutePolicy, ModelRouteResolver, ModelSelectionMode,
+    ModelSlot, StaticModelRouteResolver,
 };
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 use ironclaw_turns::{

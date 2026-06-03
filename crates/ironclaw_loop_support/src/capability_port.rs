@@ -30,9 +30,11 @@ use ironclaw_turns::{
 };
 use tokio::sync::Notify;
 
+mod provider_input;
 mod provider_validation;
 mod surface_snapshot;
 
+use self::provider_input::{normalize_provider_arguments, prepare_provider_arguments};
 use self::provider_validation::{
     PROVIDER_TOOL_NAME_MAX_BYTES, validate_provider_arguments, validate_provider_tool_call,
 };
@@ -169,6 +171,55 @@ pub struct CapabilityResultWrite<'a> {
     pub display_preview: Option<CapabilityDisplayOutputPreview>,
 }
 
+#[async_trait]
+pub trait LoopCapabilityPortFactory: Send + Sync {
+    async fn create_capability_port(
+        &self,
+        run_context: &LoopRunContext,
+    ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError>;
+}
+
+pub trait LoopCapabilityPortDecorator: Send + Sync {
+    fn decorate(
+        &self,
+        run_context: &LoopRunContext,
+        inner: Arc<dyn LoopCapabilityPort>,
+    ) -> Arc<dyn LoopCapabilityPort>;
+}
+
+pub struct DecoratingLoopCapabilityPortFactory {
+    inner: Arc<dyn LoopCapabilityPortFactory>,
+    decorators: Vec<Arc<dyn LoopCapabilityPortDecorator>>,
+}
+
+impl DecoratingLoopCapabilityPortFactory {
+    pub fn new(inner: Arc<dyn LoopCapabilityPortFactory>) -> Self {
+        Self {
+            inner,
+            decorators: Vec::new(),
+        }
+    }
+
+    pub fn with_decorator(mut self, decorator: Arc<dyn LoopCapabilityPortDecorator>) -> Self {
+        self.decorators.push(decorator);
+        self
+    }
+}
+
+#[async_trait]
+impl LoopCapabilityPortFactory for DecoratingLoopCapabilityPortFactory {
+    async fn create_capability_port(
+        &self,
+        run_context: &LoopRunContext,
+    ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
+        let mut port = self.inner.create_capability_port(run_context).await?;
+        for decorator in &self.decorators {
+            port = decorator.decorate(run_context, port);
+        }
+        Ok(port)
+    }
+}
+
 #[derive(Clone)]
 pub struct HostRuntimeLoopCapabilityPortFactory {
     runtime: Arc<dyn HostRuntime>,
@@ -232,12 +283,23 @@ impl HostRuntimeLoopCapabilityPortFactory {
     }
 }
 
+#[async_trait]
+impl LoopCapabilityPortFactory for HostRuntimeLoopCapabilityPortFactory {
+    async fn create_capability_port(
+        &self,
+        run_context: &LoopRunContext,
+    ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
+        Ok(self.for_run_context(run_context.clone()))
+    }
+}
+
 struct PreparedProviderToolCall {
     surface_version: ironclaw_turns::run_profile::CapabilitySurfaceVersion,
     capability_id: CapabilityId,
     provider_turn_id: String,
     normalized_arguments: serde_json::Value,
     effective_capability_ids: Vec<CapabilityId>,
+    capability_info_target_missing: bool,
 }
 
 const MAX_IN_MEMORY_DISPATCH_RECORDS: usize = 128;
@@ -810,6 +872,7 @@ impl HostRuntimeLoopCapabilityPort {
             provider_turn_id,
             normalized_arguments: prepared.normalized_arguments,
             effective_capability_ids: prepared.effective_capability_ids,
+            capability_info_target_missing: prepared.capability_info_target_missing,
         })
     }
 }
@@ -837,7 +900,7 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
     ) -> Result<ProviderToolCallCapabilityIds, AgentLoopHostError> {
         let prepared = self.prepare_provider_tool_call(tool_call)?;
         if prepared.capability_id.as_str() == crate::capability_info::CAPABILITY_ID
-            && prepared.effective_capability_ids.len() == 1
+            && prepared.capability_info_target_missing
         {
             return Err(AgentLoopHostError::new(
                 AgentLoopHostErrorKind::InvalidInvocation,
@@ -1051,6 +1114,8 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
             .input_resolver
             .resolve_capability_input(&self.run_context, &request.input_ref)
             .await?;
+        let input =
+            prepare_provider_arguments(&input, &capability.parameters_schema, "capability input")?;
         let input = host_runtime_input_for_capability(&request.capability_id, input)?;
         let invocation_context = invocation_context_from_visible(
             &self.visible_request.context,
@@ -1201,226 +1266,6 @@ fn provider_schema_is_usable(schema: &serde_json::Value) -> bool {
     ) && object
         .get("properties")
         .is_none_or(serde_json::Value::is_object)
-}
-
-fn normalize_provider_arguments(
-    arguments: &serde_json::Value,
-    schema: &serde_json::Value,
-    label: &'static str,
-) -> Result<serde_json::Value, AgentLoopHostError> {
-    normalize_provider_value(arguments, schema, label)
-}
-
-fn normalize_provider_value(
-    value: &serde_json::Value,
-    schema: &serde_json::Value,
-    label: &'static str,
-) -> Result<serde_json::Value, AgentLoopHostError> {
-    // `oneOf` / `anyOf`: pick the variant whose declared `type` matches the
-    // value's shape, after attempting to coerce stringified containers. This
-    // lets schemas like `{ oneOf: [{type:object}, {type:array}] }` accept both
-    // a real array and a stringified array (e.g. an LLM that double-encoded
-    // the argument). Without this, the variant-less top-level schema slips
-    // through the type-matched branches below as a no-op and the stringified
-    // container is forwarded raw to the tool.
-    if let Some(variants) = schema_variants(schema) {
-        return normalize_one_of_variants(value, variants, label);
-    }
-
-    if schema_type_matches(schema, "object") {
-        let object_value = coerce_json_string(value, label)?;
-        let Some(object) = object_value.as_object() else {
-            if is_json_container_string(value) {
-                return Err(provider_coercion_error(label, "object"));
-            }
-            return Ok(object_value);
-        };
-        let Some(properties) = schema
-            .get("properties")
-            .and_then(serde_json::Value::as_object)
-        else {
-            return Ok(object_value);
-        };
-        let mut normalized = object.clone();
-        for (property, property_schema) in properties {
-            if let Some(property_value) = normalized.get(property).cloned() {
-                normalized.insert(
-                    property.clone(),
-                    normalize_provider_value(&property_value, property_schema, label)?,
-                );
-            }
-        }
-        return Ok(serde_json::Value::Object(normalized));
-    }
-
-    if schema_type_matches(schema, "array") {
-        let array_value = coerce_json_string(value, label)?;
-        let Some(array) = array_value.as_array() else {
-            if is_json_container_string(value) {
-                return Err(provider_coercion_error(label, "array"));
-            }
-            return Ok(array_value);
-        };
-        let Some(items) = schema.get("items") else {
-            return Ok(array_value);
-        };
-        return array
-            .iter()
-            .map(|item| normalize_provider_value(item, items, label))
-            .collect::<Result<Vec<_>, _>>()
-            .map(serde_json::Value::Array);
-    }
-
-    if schema_type_matches(schema, "integer") {
-        return coerce_integer_string(value, label);
-    }
-
-    if schema_type_matches(schema, "number") {
-        return coerce_number_string(value, label);
-    }
-
-    if schema_type_matches(schema, "boolean") {
-        return coerce_boolean_string(value, label);
-    }
-
-    Ok(value.clone())
-}
-
-fn schema_variants(schema: &serde_json::Value) -> Option<&Vec<serde_json::Value>> {
-    schema
-        .get("oneOf")
-        .or_else(|| schema.get("anyOf"))
-        .and_then(serde_json::Value::as_array)
-}
-
-fn normalize_one_of_variants(
-    value: &serde_json::Value,
-    variants: &[serde_json::Value],
-    label: &'static str,
-) -> Result<serde_json::Value, AgentLoopHostError> {
-    // Coerce stringified containers up front so we match by parsed shape.
-    // Coerce stringified containers up front so we match by parsed shape.
-    // Use `unwrap_or_else` rather than `?` so that an unparseable string
-    // (e.g. a plain string that starts with `{` or `[` but is not valid
-    // JSON) can still fall through to a `string` variant in the schema
-    // instead of producing a false-positive `InvalidInvocation` error.
-    let candidate = coerce_json_string(value, label).unwrap_or_else(|_| value.clone());
-    let shape = value_shape(&candidate);
-    for variant in variants {
-        // In JSON Schema every `integer` is also a valid `number`, so allow
-        // integer-shaped values to match `number` variants as well.
-        if schema_type_matches(variant, shape)
-            || (shape == "integer" && schema_type_matches(variant, "number"))
-        {
-            return normalize_provider_value(&candidate, variant, label);
-        }
-    }
-    // No declared variant matches the value's shape; leave the original value
-    // alone so the tool's own input validation can produce a precise error.
-    Ok(value.clone())
-}
-
-fn value_shape(value: &serde_json::Value) -> &'static str {
-    match value {
-        serde_json::Value::Object(_) => "object",
-        serde_json::Value::Array(_) => "array",
-        serde_json::Value::String(_) => "string",
-        serde_json::Value::Number(number) if number.is_i64() || number.is_u64() => "integer",
-        serde_json::Value::Number(_) => "number",
-        serde_json::Value::Bool(_) => "boolean",
-        serde_json::Value::Null => "null",
-    }
-}
-
-fn schema_type_matches(schema: &serde_json::Value, expected: &str) -> bool {
-    match schema.get("type") {
-        Some(serde_json::Value::String(actual)) => actual == expected,
-        Some(serde_json::Value::Array(types)) => {
-            types.iter().any(|actual| actual.as_str() == Some(expected))
-        }
-        _ => false,
-    }
-}
-
-fn is_json_container_string(value: &serde_json::Value) -> bool {
-    value
-        .as_str()
-        .map(str::trim)
-        .is_some_and(|text| text.starts_with('{') || text.starts_with('['))
-}
-
-fn coerce_json_string(
-    value: &serde_json::Value,
-    label: &'static str,
-) -> Result<serde_json::Value, AgentLoopHostError> {
-    let Some(text) = value.as_str() else {
-        return Ok(value.clone());
-    };
-    let trimmed = text.trim();
-    if !(trimmed.starts_with('{') || trimmed.starts_with('[')) {
-        return Ok(value.clone());
-    }
-    serde_json::from_str(trimmed).map_err(|_| {
-        AgentLoopHostError::new(
-            AgentLoopHostErrorKind::InvalidInvocation,
-            format!("{label} could not be parsed as schema-declared JSON"),
-        )
-    })
-}
-
-fn coerce_integer_string(
-    value: &serde_json::Value,
-    label: &'static str,
-) -> Result<serde_json::Value, AgentLoopHostError> {
-    let Some(text) = value.as_str() else {
-        return Ok(value.clone());
-    };
-    let trimmed = text.trim();
-    if trimmed.is_empty() || trimmed.contains('.') || trimmed.contains('e') || trimmed.contains('E')
-    {
-        return Err(provider_coercion_error(label, "integer"));
-    }
-    let parsed = trimmed
-        .parse::<i64>()
-        .map_err(|_| provider_coercion_error(label, "integer"))?;
-    Ok(serde_json::Value::Number(parsed.into()))
-}
-
-fn coerce_number_string(
-    value: &serde_json::Value,
-    label: &'static str,
-) -> Result<serde_json::Value, AgentLoopHostError> {
-    let Some(text) = value.as_str() else {
-        return Ok(value.clone());
-    };
-    let parsed = text
-        .trim()
-        .parse::<f64>()
-        .map_err(|_| provider_coercion_error(label, "number"))?;
-    let number = serde_json::Number::from_f64(parsed)
-        .ok_or_else(|| provider_coercion_error(label, "number"))?;
-    Ok(serde_json::Value::Number(number))
-}
-
-fn coerce_boolean_string(
-    value: &serde_json::Value,
-    label: &'static str,
-) -> Result<serde_json::Value, AgentLoopHostError> {
-    let Some(text) = value.as_str() else {
-        return Ok(value.clone());
-    };
-    match text.trim().to_ascii_lowercase().as_str() {
-        "true" => Ok(serde_json::Value::Bool(true)),
-        "false" => Ok(serde_json::Value::Bool(false)),
-        _ => Err(provider_coercion_error(label, "boolean")),
-    }
-}
-
-fn provider_coercion_error(label: &'static str, expected: &'static str) -> AgentLoopHostError {
-    AgentLoopHostError::new(
-        AgentLoopHostErrorKind::InvalidInvocation,
-        format!("{label} could not be coerced to schema-declared {expected}"),
-    )
 }
 
 fn provider_tool_name(
@@ -2046,7 +1891,10 @@ mod tests {
 
     use std::{
         collections::VecDeque,
-        sync::atomic::{AtomicUsize, Ordering},
+        sync::{
+            Mutex,
+            atomic::{AtomicUsize, Ordering},
+        },
     };
 
     use async_trait::async_trait;
@@ -2110,6 +1958,93 @@ mod tests {
                 "{effect:?}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn decorating_factory_with_no_decorators_delegates_to_inner() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let inner = Arc::new(DecoratorTestPort {
+            label: "inner",
+            log: Arc::clone(&log),
+        });
+        let factory = DecoratingLoopCapabilityPortFactory::new(Arc::new(DecoratorTestFactory {
+            port: inner,
+        }));
+
+        let port = factory
+            .create_capability_port(&loop_run_context(&execution_context("decorator-empty")).await)
+            .await
+            .expect("decorated port");
+
+        let error = port
+            .visible_capabilities(VisibleCapabilityRequest {})
+            .await
+            .expect_err("test inner port should fail");
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::Unavailable);
+        assert_eq!(&*log.lock().expect("log lock"), &["inner"]);
+    }
+
+    #[tokio::test]
+    async fn decorating_factory_applies_decorators_in_declared_order() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let inner = Arc::new(DecoratorTestPort {
+            label: "inner",
+            log: Arc::clone(&log),
+        });
+        let factory = DecoratingLoopCapabilityPortFactory::new(Arc::new(DecoratorTestFactory {
+            port: inner,
+        }))
+        .with_decorator(Arc::new(LoggingDecorator {
+            label: "first",
+            log: Arc::clone(&log),
+        }))
+        .with_decorator(Arc::new(LoggingDecorator {
+            label: "second",
+            log: Arc::clone(&log),
+        }));
+
+        let port = factory
+            .create_capability_port(&loop_run_context(&execution_context("decorator-order")).await)
+            .await
+            .expect("decorated port");
+
+        let error = port
+            .visible_capabilities(VisibleCapabilityRequest {})
+            .await
+            .expect_err("test inner port should fail");
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::Unavailable);
+        assert_eq!(
+            &*log.lock().expect("log lock"),
+            &["second", "first", "inner"]
+        );
+    }
+
+    #[tokio::test]
+    async fn decorating_factory_propagates_inner_error() {
+        let decorate_calls = Arc::new(AtomicUsize::new(0));
+        let factory = DecoratingLoopCapabilityPortFactory::new(Arc::new(FailingDecoratorFactory {
+            error: AgentLoopHostError::new(
+                AgentLoopHostErrorKind::Unavailable,
+                "inner factory failed",
+            ),
+        }))
+        .with_decorator(Arc::new(NoopDecorator {
+            decorate_calls: Arc::clone(&decorate_calls),
+        }));
+
+        let error = match factory
+            .create_capability_port(&loop_run_context(&execution_context("decorator-error")).await)
+            .await
+        {
+            Ok(_) => panic!("inner factory error should propagate"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::Unavailable);
+        assert_eq!(error.safe_summary, "inner factory failed");
+        assert_eq!(decorate_calls.load(Ordering::SeqCst), 0);
     }
 
     #[test]
@@ -2609,6 +2544,102 @@ mod tests {
         assert_eq!(normalized, serde_json::json!({ "payload": ["a", "b"] }));
     }
 
+    #[test]
+    fn provider_argument_preparation_validates_required_fields_before_dispatch() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "owner": { "type": "string" },
+                "repo": { "type": "string" },
+                "pr_number": { "type": "integer", "minimum": 1 }
+            },
+            "required": ["owner", "repo", "pr_number"]
+        });
+
+        let error = prepare_provider_arguments(
+            &serde_json::json!({ "owner": "nearai", "repo": "ironclaw" }),
+            &schema,
+            "provider arguments",
+        )
+        .expect_err("missing required fields should fail before dispatch");
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+        assert!(error.safe_summary.contains("schema validation"));
+    }
+
+    #[test]
+    fn provider_argument_preparation_rejects_unknown_fields_before_dispatch() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "owner": { "type": "string" },
+                "repo": { "type": "string" },
+                "pr_number": { "type": "integer" }
+            },
+            "required": ["owner", "repo", "pr_number"]
+        });
+
+        let error = prepare_provider_arguments(
+            &serde_json::json!({
+                "owner": "nearai",
+                "repo": "ironclaw",
+                "pr_number": 4286,
+                "number": 4286
+            }),
+            &schema,
+            "provider arguments",
+        )
+        .expect_err("additional properties should fail before dispatch");
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+        assert!(error.safe_summary.contains("schema validation"));
+    }
+
+    #[test]
+    fn provider_argument_preparation_validates_composed_object_schema_after_normalization() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "query": { "type": "string" },
+                "page": { "type": "integer", "minimum": 1 },
+                "owner": { "type": "string" },
+                "repo": { "type": "string" }
+            },
+            "allOf": [
+                {
+                    "if": { "required": ["owner"] },
+                    "then": { "required": ["repo"] }
+                }
+            ],
+            "anyOf": [
+                { "required": ["query"] },
+                { "required": ["owner", "repo"] }
+            ]
+        });
+
+        let normalized = prepare_provider_arguments(
+            &serde_json::json!({ "query": "repo:nearai/ironclaw", "page": "2" }),
+            &schema,
+            "provider arguments",
+        )
+        .expect("top-level anyOf object schema should still normalize properties");
+        assert_eq!(
+            normalized,
+            serde_json::json!({ "query": "repo:nearai/ironclaw", "page": 2 })
+        );
+
+        let error = prepare_provider_arguments(
+            &serde_json::json!({ "owner": "nearai" }),
+            &schema,
+            "provider arguments",
+        )
+        .expect_err("composed schema constraints should fail before dispatch");
+        assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+    }
+
     /// Regression for Gemini review comment: a plain string that starts with
     /// `{` or `[` but is not valid JSON must not cause an `InvalidInvocation`
     /// error when a `string` variant is available. The coercion attempt should
@@ -3037,11 +3068,8 @@ mod tests {
             .find(|definition| definition.name == capability_info::TOOL_NAME)
             .expect("capability_info definition is advertised");
         assert_eq!(
-            capability_info_definition.parameters["anyOf"],
-            serde_json::json!([
-                { "required": ["name"] },
-                { "required": ["capability_id"] }
-            ])
+            capability_info_definition.parameters["required"],
+            serde_json::json!(["name"])
         );
         assert!(
             tool_definitions
@@ -3209,7 +3237,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn capability_info_rejects_invalid_detail_arguments() {
+    async fn capability_info_reports_invalid_detail_arguments_as_model_visible_failure() {
         let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
         let provider_id = ExtensionId::new("demo").expect("valid provider id");
         let context = execution_context("thread-capability-info-invalid-detail");
@@ -3218,35 +3246,83 @@ mod tests {
             capability_id.clone(),
             provider_id,
         )]));
+        let result_writer = Arc::new(RecordingResultWriter::default());
         let port = HostRuntimeLoopCapabilityPortFactory::new(
-            runtime,
+            runtime.clone(),
             visible_request(context),
             dummy_input_resolver(),
-            dummy_result_writer(),
+            result_writer.clone(),
             dummy_milestone_sink(),
         )
         .port_for_run_context(run_context);
-        port.visible_capabilities(VisibleCapabilityRequest {})
+        let surface = port
+            .visible_capabilities(VisibleCapabilityRequest {})
             .await
             .expect("visible capabilities load");
 
-        for arguments in [
-            serde_json::json!({ "name": capability_id.as_str(), "include_schema": 1 }),
-            serde_json::json!({ "name": capability_id.as_str(), "detail": "everything" }),
-        ] {
+        for (index, (arguments, expected_summary)) in [
+            (
+                serde_json::json!({ "name": capability_id.as_str(), "include_schema": 1 }),
+                "capability_info include_schema must be boolean",
+            ),
+            (
+                serde_json::json!({ "name": capability_id.as_str(), "detail": "everything" }),
+                "capability_info detail must be names, summary, or schema",
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
             let mut call = provider_tool_call();
+            call.id = format!("call_invalid_detail_{index}");
             call.name = capability_info::TOOL_NAME.to_string();
             call.arguments = arguments;
-            let error = port
+
+            port.validate_provider_tool_call(&call).expect(
+                "invalid capability_info arguments should be staged for model-visible failure",
+            );
+            let candidate = port
                 .register_provider_tool_call(call)
                 .await
-                .expect_err("invalid capability_info arguments should fail");
-            assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+                .expect("invalid capability_info arguments should stage");
+
+            assert_eq!(
+                candidate.effective_capability_ids,
+                vec![
+                    CapabilityId::new(capability_info::CAPABILITY_ID).expect("synthetic id"),
+                    capability_id.clone()
+                ]
+            );
+
+            let outcome = port
+                .invoke_capability(CapabilityInvocation {
+                    surface_version: surface.version.clone(),
+                    capability_id: candidate.capability_id,
+                    input_ref: candidate.input_ref,
+                })
+                .await
+                .expect("invalid arguments should return a capability failure, not a host error");
+
+            assert!(matches!(
+                outcome,
+                CapabilityOutcome::Failed(CapabilityFailure {
+                    error_kind: CapabilityFailureKind::InvalidInput,
+                    safe_summary
+                }) if safe_summary == expected_summary
+            ));
         }
+        assert!(
+            result_writer.records().is_empty(),
+            "failed capability_info calls are reported through the provider error-result path"
+        );
+        assert!(
+            runtime.take_requests().is_empty(),
+            "capability_info failure must not dispatch to the host runtime"
+        );
     }
 
     #[tokio::test]
-    async fn capability_info_rejects_invalid_name_inputs() {
+    async fn capability_info_reports_invalid_name_inputs_as_model_visible_failure() {
         let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
         let provider_id = ExtensionId::new("demo").expect("valid provider id");
         let context = execution_context("thread-capability-info-invalid-name");
@@ -3255,35 +3331,73 @@ mod tests {
             capability_id,
             provider_id,
         )]));
+        let result_writer = Arc::new(RecordingResultWriter::default());
         let port = HostRuntimeLoopCapabilityPortFactory::new(
-            runtime,
+            runtime.clone(),
             visible_request(context),
             dummy_input_resolver(),
-            dummy_result_writer(),
+            result_writer.clone(),
             dummy_milestone_sink(),
         )
         .port_for_run_context(run_context);
-        port.visible_capabilities(VisibleCapabilityRequest {})
+        let surface = port
+            .visible_capabilities(VisibleCapabilityRequest {})
             .await
             .expect("visible capabilities load");
 
-        for arguments in [
+        for (index, arguments) in [
             serde_json::json!({}),
             serde_json::json!({ "name": "" }),
             serde_json::json!({ "name": "demo echo" }),
             serde_json::json!({ "name": "demo.echo!" }),
             serde_json::json!({ "name": "demo.écho" }),
             serde_json::json!({ "name": "a".repeat(161) }),
-        ] {
+        ]
+        .into_iter()
+        .enumerate()
+        {
             let mut call = provider_tool_call();
+            call.id = format!("call_invalid_name_{index}");
             call.name = capability_info::TOOL_NAME.to_string();
             call.arguments = arguments;
-            let error = port
+
+            port.validate_provider_tool_call(&call)
+                .expect("invalid capability_info names should be staged for model-visible failure");
+            let candidate = port
                 .register_provider_tool_call(call)
                 .await
-                .expect_err("invalid capability_info name should fail");
-            assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+                .expect("invalid capability_info name should stage");
+
+            assert_eq!(
+                candidate.effective_capability_ids,
+                vec![CapabilityId::new(capability_info::CAPABILITY_ID).expect("synthetic id")]
+            );
+
+            let outcome = port
+                .invoke_capability(CapabilityInvocation {
+                    surface_version: surface.version.clone(),
+                    capability_id: candidate.capability_id,
+                    input_ref: candidate.input_ref,
+                })
+                .await
+                .expect("invalid name should return a capability failure, not a host error");
+
+            assert!(matches!(
+                outcome,
+                CapabilityOutcome::Failed(CapabilityFailure {
+                    error_kind: CapabilityFailureKind::InvalidInput,
+                    ..
+                })
+            ));
         }
+        assert!(
+            result_writer.records().is_empty(),
+            "failed capability_info calls are reported through the provider error-result path"
+        );
+        assert!(
+            runtime.take_requests().is_empty(),
+            "capability_info failure must not dispatch to the host runtime"
+        );
     }
 
     #[tokio::test]
@@ -3316,6 +3430,16 @@ mod tests {
         let error = port
             .provider_tool_call_capability_ids(&call)
             .expect_err("approval-time capability id lookup should reject unknown targets");
+        assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+
+        let mut malformed_call = provider_tool_call();
+        malformed_call.id = "call_malformed_unknown_target".to_string();
+        malformed_call.name = capability_info::TOOL_NAME.to_string();
+        malformed_call.arguments =
+            serde_json::json!({ "name": "demo.missing", "detail": "everything" });
+        let error = port
+            .provider_tool_call_capability_ids(&malformed_call)
+            .expect_err("approval-time target lookup should still reject unknown targets");
         assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
 
         let candidate = port
@@ -3757,6 +3881,112 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn runtime_capability_invocation_validates_schema_before_dispatch() {
+        let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
+        let provider_id = ExtensionId::new("demo").expect("valid provider id");
+        let mut visible = visible_capability(capability_id.clone(), provider_id.clone());
+        visible.descriptor.parameters_schema = serde_json::json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "message": { "type": "string" }
+            },
+            "required": ["message"]
+        });
+        let runtime = Arc::new(RecordingHostRuntime::new(vec![visible]));
+        let mut context = execution_context("thread-runtime-schema-validation");
+        let run_context = loop_run_context(&context).await;
+        let loop_driver_extension =
+            loop_driver_execution_extension_id(&run_context).expect("valid extension id");
+        context.grants.grants.push(dispatch_capability_grant(
+            &capability_id,
+            &loop_driver_extension,
+        ));
+        let port = HostRuntimeLoopCapabilityPortFactory::new(
+            runtime.clone(),
+            visible_request(context).with_provider_trust(std::collections::BTreeMap::from([(
+                provider_id.clone(),
+                dispatch_trust_decision(),
+            )])),
+            Arc::new(JsonInputResolver(serde_json::json!({"number": 4286}))),
+            Arc::new(RecordingResultWriter::default()),
+            dummy_milestone_sink(),
+        )
+        .port_for_run_context(run_context);
+        let surface = port
+            .visible_capabilities(VisibleCapabilityRequest {})
+            .await
+            .expect("visible capabilities load");
+
+        let error = port
+            .invoke_capability(CapabilityInvocation {
+                surface_version: surface.version,
+                capability_id,
+                input_ref: CapabilityInputRef::new("input:direct-invalid")
+                    .expect("valid input ref"),
+            })
+            .await
+            .expect_err("invalid direct input should fail before runtime dispatch");
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+        assert!(error.safe_summary.contains("schema validation"));
+        assert!(
+            runtime.take_requests().is_empty(),
+            "invalid direct input must not reach the runtime"
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_capability_invocation_normalizes_input_before_dispatch() {
+        let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
+        let provider_id = ExtensionId::new("demo").expect("valid provider id");
+        let mut visible = visible_capability(capability_id.clone(), provider_id.clone());
+        visible.descriptor.parameters_schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "limit": { "type": "integer" }
+            },
+            "required": ["limit"]
+        });
+        let runtime = Arc::new(RecordingHostRuntime::new(vec![visible]));
+        let mut context = execution_context("thread-runtime-input-normalization");
+        let run_context = loop_run_context(&context).await;
+        let loop_driver_extension =
+            loop_driver_execution_extension_id(&run_context).expect("valid extension id");
+        context.grants.grants.push(dispatch_capability_grant(
+            &capability_id,
+            &loop_driver_extension,
+        ));
+        let port = HostRuntimeLoopCapabilityPortFactory::new(
+            runtime.clone(),
+            visible_request(context).with_provider_trust(std::collections::BTreeMap::from([(
+                provider_id.clone(),
+                dispatch_trust_decision(),
+            )])),
+            Arc::new(JsonInputResolver(serde_json::json!({"limit": "10"}))),
+            Arc::new(RecordingResultWriter::default()),
+            dummy_milestone_sink(),
+        )
+        .port_for_run_context(run_context);
+        let surface = port
+            .visible_capabilities(VisibleCapabilityRequest {})
+            .await
+            .expect("visible capabilities load");
+
+        port.invoke_capability(CapabilityInvocation {
+            surface_version: surface.version,
+            capability_id,
+            input_ref: CapabilityInputRef::new("input:direct-normalized").expect("valid input ref"),
+        })
+        .await
+        .expect("valid direct input should dispatch");
+
+        let requests = runtime.take_requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].input, serde_json::json!({"limit": 10}));
+    }
+
+    #[tokio::test]
     async fn process_sandbox_capability_rejects_invalid_plan_before_runtime_spawn() {
         let capability_id =
             CapabilityId::new(ironclaw_process_sandbox::PROCESS_SANDBOX_CAPABILITY_ID)
@@ -4159,6 +4389,142 @@ mod tests {
         )
     }
 
+    struct DecoratorTestFactory {
+        port: Arc<dyn LoopCapabilityPort>,
+    }
+
+    #[async_trait]
+    impl LoopCapabilityPortFactory for DecoratorTestFactory {
+        async fn create_capability_port(
+            &self,
+            _run_context: &LoopRunContext,
+        ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
+            Ok(Arc::clone(&self.port))
+        }
+    }
+
+    struct FailingDecoratorFactory {
+        error: AgentLoopHostError,
+    }
+
+    #[async_trait]
+    impl LoopCapabilityPortFactory for FailingDecoratorFactory {
+        async fn create_capability_port(
+            &self,
+            _run_context: &LoopRunContext,
+        ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError> {
+            Err(self.error.clone())
+        }
+    }
+
+    struct DecoratorTestPort {
+        label: &'static str,
+        log: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    #[async_trait]
+    impl LoopCapabilityPort for DecoratorTestPort {
+        async fn visible_capabilities(
+            &self,
+            _request: VisibleCapabilityRequest,
+        ) -> Result<ironclaw_turns::run_profile::VisibleCapabilitySurface, AgentLoopHostError>
+        {
+            self.log.lock().expect("log lock").push(self.label);
+            Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::Unavailable,
+                format!("{label} failed", label = self.label),
+            ))
+        }
+
+        async fn invoke_capability(
+            &self,
+            _request: CapabilityInvocation,
+        ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+            Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::Unavailable,
+                format!("{label} unused", label = self.label),
+            ))
+        }
+
+        async fn invoke_capability_batch(
+            &self,
+            _request: CapabilityBatchInvocation,
+        ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
+            Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::Unavailable,
+                format!("{label} unused", label = self.label),
+            ))
+        }
+    }
+
+    struct LoggingDecorator {
+        label: &'static str,
+        log: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    impl LoopCapabilityPortDecorator for LoggingDecorator {
+        fn decorate(
+            &self,
+            _run_context: &LoopRunContext,
+            inner: Arc<dyn LoopCapabilityPort>,
+        ) -> Arc<dyn LoopCapabilityPort> {
+            Arc::new(LoggingDecoratorPort {
+                label: self.label,
+                log: Arc::clone(&self.log),
+                inner,
+            })
+        }
+    }
+
+    struct LoggingDecoratorPort {
+        label: &'static str,
+        log: Arc<Mutex<Vec<&'static str>>>,
+        inner: Arc<dyn LoopCapabilityPort>,
+    }
+
+    #[async_trait]
+    impl LoopCapabilityPort for LoggingDecoratorPort {
+        async fn visible_capabilities(
+            &self,
+            request: VisibleCapabilityRequest,
+        ) -> Result<ironclaw_turns::run_profile::VisibleCapabilitySurface, AgentLoopHostError>
+        {
+            self.log.lock().expect("log lock").push(self.label);
+            self.inner.visible_capabilities(request).await
+        }
+
+        async fn invoke_capability(
+            &self,
+            request: CapabilityInvocation,
+        ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+            self.log.lock().expect("log lock").push(self.label);
+            self.inner.invoke_capability(request).await
+        }
+
+        async fn invoke_capability_batch(
+            &self,
+            request: CapabilityBatchInvocation,
+        ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
+            self.log.lock().expect("log lock").push(self.label);
+            self.inner.invoke_capability_batch(request).await
+        }
+    }
+
+    struct NoopDecorator {
+        decorate_calls: Arc<AtomicUsize>,
+    }
+
+    impl LoopCapabilityPortDecorator for NoopDecorator {
+        fn decorate(
+            &self,
+            _run_context: &LoopRunContext,
+            inner: Arc<dyn LoopCapabilityPort>,
+        ) -> Arc<dyn LoopCapabilityPort> {
+            self.decorate_calls.fetch_add(1, Ordering::SeqCst);
+            inner
+        }
+    }
+
     fn execution_mounts() -> MountView {
         MountView::new(vec![MountGrant::new(
             MountAlias::new("/execution").expect("valid mount alias"),
@@ -4542,6 +4908,19 @@ mod tests {
             _input_ref: &CapabilityInputRef,
         ) -> Result<serde_json::Value, AgentLoopHostError> {
             Ok(serde_json::json!({"ok": true}))
+        }
+    }
+
+    struct JsonInputResolver(serde_json::Value);
+
+    #[async_trait]
+    impl LoopCapabilityInputResolver for JsonInputResolver {
+        async fn resolve_capability_input(
+            &self,
+            _run_context: &LoopRunContext,
+            _input_ref: &CapabilityInputRef,
+        ) -> Result<serde_json::Value, AgentLoopHostError> {
+            Ok(self.0.clone())
         }
     }
 

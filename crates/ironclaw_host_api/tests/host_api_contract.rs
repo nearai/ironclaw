@@ -285,6 +285,7 @@ fn dispatch_errors_preserve_typed_failure_kind() {
         DispatchError::AuthRequired {
             capability: CapabilityId::new("test.cap").unwrap(),
             required_secrets: required_secrets.clone(),
+            credential_requirements: Vec::new(),
         }
         .failure_kind(),
         DispatchFailureKind::AuthRequired
@@ -294,6 +295,7 @@ fn dispatch_errors_preserve_typed_failure_kind() {
         DispatchError::AuthRequired {
             capability: CapabilityId::new("test.cap").unwrap(),
             required_secrets: Vec::new(),
+            credential_requirements: Vec::new(),
         }
         .failure_kind(),
         DispatchFailureKind::AuthRequired
@@ -970,6 +972,9 @@ fn obligations_are_unique_and_canonicalized() {
         Obligation::AuditAfter,
         Obligation::EnforceResourceCeiling { ceiling },
         Obligation::ReserveResources { reservation_id },
+        Obligation::FirstPartyCredentialStagedViaHostPort {
+            capability_id: CapabilityId::new("gmail.list_messages").unwrap(),
+        },
         Obligation::AuditBefore,
     ])
     .unwrap();
@@ -982,6 +987,7 @@ fn obligations_are_unique_and_canonicalized() {
             .collect::<Vec<_>>(),
         vec![
             ObligationKind::ReserveResources,
+            ObligationKind::FirstPartyCredentialStagedViaHostPort,
             ObligationKind::AuditBefore,
             ObligationKind::EnforceResourceCeiling,
             ObligationKind::AuditAfter,
@@ -1701,6 +1707,7 @@ fn dispatch_error_event_kind_pins_auth_required_token() {
         DispatchError::AuthRequired {
             capability: cap(),
             required_secrets: vec![handle],
+            credential_requirements: Vec::new(),
         }
         .event_kind(),
         "auth_required"
@@ -1710,6 +1717,7 @@ fn dispatch_error_event_kind_pins_auth_required_token() {
         DispatchError::AuthRequired {
             capability: cap(),
             required_secrets: Vec::new(),
+            credential_requirements: Vec::new(),
         }
         .event_kind(),
         "auth_required"
@@ -1722,6 +1730,7 @@ fn dispatch_error_auth_required_debug_redacts_required_secrets() {
     let error = DispatchError::AuthRequired {
         capability: CapabilityId::new("test.cap").unwrap(),
         required_secrets: vec![handle],
+        credential_requirements: Vec::new(),
     };
     let debug = format!("{error:?}");
     assert!(
@@ -1736,10 +1745,38 @@ fn dispatch_error_auth_required_debug_redacts_required_secrets() {
     let empty = DispatchError::AuthRequired {
         capability: CapabilityId::new("test.cap").unwrap(),
         required_secrets: Vec::new(),
+        credential_requirements: Vec::new(),
     };
     let debug_empty = format!("{empty:?}");
     assert!(
         debug_empty.contains("0 handle(s) redacted"),
         "zero redaction count must appear; got: {debug_empty}"
+    );
+    let requirement = RuntimeCredentialAuthRequirement {
+        provider: RuntimeCredentialAccountProviderId::new("google").unwrap(),
+        requester_extension: ExtensionId::new("gmail").unwrap(),
+        provider_scopes: vec!["https://www.googleapis.com/auth/gmail.readonly".to_string()],
+    };
+    let with_requirement = DispatchError::AuthRequired {
+        capability: CapabilityId::new("test.cap").unwrap(),
+        required_secrets: Vec::new(),
+        credential_requirements: vec![requirement],
+    };
+    let debug_with_requirement = format!("{with_requirement:?}");
+    assert!(
+        debug_with_requirement.contains("1 requirement(s) redacted"),
+        "credential requirement redaction count must appear; got: {debug_with_requirement}"
+    );
+    assert!(
+        !debug_with_requirement.contains("gmail"),
+        "requester extension must not appear in Debug output; got: {debug_with_requirement}"
+    );
+    assert!(
+        !debug_with_requirement.contains("gmail.readonly"),
+        "provider scope must not appear in Debug output; got: {debug_with_requirement}"
+    );
+    assert!(
+        !debug_with_requirement.contains("google"),
+        "provider id must not appear in Debug output; got: {debug_with_requirement}"
     );
 }

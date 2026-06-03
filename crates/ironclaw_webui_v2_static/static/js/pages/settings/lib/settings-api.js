@@ -1,5 +1,8 @@
+import { apiFetch } from "../../../lib/api.js";
+
 // Settings endpoints depend on v1 `/api/settings/*`, `/api/llm/*`,
-// `/api/tools/*`, `/api/skills/*`, etc. TODO stubs.
+// `/api/tools/*`, `/api/skills/*`, etc. Extension reads use the v2
+// registry/list endpoints; the remaining settings APIs are TODO stubs.
 
 export function fetchSettingsExport() {
   return Promise.resolve({ settings: {}, todo: true });
@@ -29,10 +32,10 @@ export function updateToolPermission(_name, _state) {
   return Promise.resolve({ success: false, message: "TODO: requires v2 tools endpoint" });
 }
 export function fetchExtensions() {
-  return Promise.resolve({ extensions: [], todo: true });
+  return apiFetch("/api/webchat/v2/extensions");
 }
 export function fetchExtensionRegistry() {
-  return Promise.resolve({ entries: [], todo: true });
+  return apiFetch("/api/webchat/v2/extensions/registry");
 }
 export function fetchSkills() {
   return Promise.resolve({ skills: [], todo: true });

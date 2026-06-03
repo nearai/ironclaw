@@ -12,7 +12,8 @@ use ironclaw_first_party_extensions::{
     google_provider_id, gsuite_package_specs,
 };
 use ironclaw_host_api::{
-    CapabilityId, InvocationId, ResourceScope, RuntimeCredentialSource, RuntimeDispatchErrorKind,
+    CapabilityId, InvocationId, ResourceScope, RuntimeCredentialAccountSetup,
+    RuntimeCredentialRequirementSource, RuntimeCredentialSource, RuntimeDispatchErrorKind,
     RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse,
     SecretHandle, TrustClass, UserId,
 };
@@ -230,6 +231,32 @@ async fn bundled_gsuite_asset_manifests_match_package_specs() {
                         .prompt_doc_ref
                         .as_ref()
                         .map(|prompt| prompt.as_str().to_string()),
+                    capability
+                        .runtime_credentials
+                        .iter()
+                        .map(|credential| {
+                            let RuntimeCredentialRequirementSource::ProductAuthAccount {
+                                provider,
+                                setup:
+                                    RuntimeCredentialAccountSetup::OAuth {
+                                        scopes: setup_scopes,
+                                    },
+                            } = &credential.source
+                            else {
+                                panic!(
+                                    "GSuite capability {} must use product-auth OAuth credentials",
+                                    capability.id.as_str()
+                                );
+                            };
+                            (
+                                credential.handle.as_str().to_string(),
+                                provider.as_str().to_string(),
+                                setup_scopes.clone(),
+                                credential.provider_scopes.clone(),
+                                credential.audience.host_pattern.clone(),
+                            )
+                        })
+                        .collect::<Vec<_>>(),
                 )
             })
             .collect::<Vec<_>>();
@@ -237,6 +264,11 @@ async fn bundled_gsuite_asset_manifests_match_package_specs() {
             .capabilities
             .iter()
             .map(|capability| {
+                let required_scopes = capability
+                    .required_scopes
+                    .iter()
+                    .map(|scope| (*scope).to_string())
+                    .collect::<Vec<_>>();
                 (
                     capability.id.to_string(),
                     capability.effects.to_vec(),
@@ -253,6 +285,13 @@ async fn bundled_gsuite_asset_manifests_match_package_specs() {
                         "prompts/{}/{}.md",
                         spec.schema_prefix, capability.short_name
                     )),
+                    vec![(
+                        spec.credential_handle.to_string(),
+                        ironclaw_auth::GOOGLE_PROVIDER_ID.to_string(),
+                        required_scopes.clone(),
+                        required_scopes,
+                        spec.credential_host_pattern.to_string(),
+                    )],
                 )
             })
             .collect::<Vec<_>>();
@@ -462,6 +501,20 @@ async fn bundled_gsuite_handler_projects_stage_auth_required_to_first_party_auth
         error.kind(),
         None,
         "AuthRequired variant must have no dispatch kind"
+    );
+    let credential_requirements = error
+        .credential_requirements()
+        .expect("stage AuthRequired should surface OAuth requirements");
+    assert_eq!(credential_requirements.len(), 1);
+    let requirement = &credential_requirements[0];
+    assert_eq!(
+        requirement.provider.as_str(),
+        ironclaw_auth::GOOGLE_PROVIDER_ID
+    );
+    assert_eq!(requirement.requester_extension.as_str(), "gmail");
+    assert_eq!(
+        requirement.provider_scopes,
+        vec![GOOGLE_GMAIL_SEND_SCOPE.to_string()]
     );
 }
 

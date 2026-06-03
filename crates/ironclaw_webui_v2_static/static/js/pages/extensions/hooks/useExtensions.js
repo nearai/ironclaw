@@ -9,6 +9,7 @@ import {
   removeExtension,
   fetchExtensionSetup,
   submitExtensionSetup,
+  startExtensionOauth,
   fetchPairingRequests,
   approvePairingCode,
 } from "../lib/extensions-api.js";
@@ -43,10 +44,16 @@ export function useExtensions() {
   const clearResult = React.useCallback(() => setActionResult(null), []);
 
   const installMutation = useMutation({
-    mutationFn: ({ name, kind }) => installExtension(name, kind),
+    mutationFn: ({ packageRef }) => installExtension(packageRef),
     onSuccess: (res, { displayName }) => {
       if (res.success) {
-        setActionResult({ type: "success", message: `${displayName || "Extension"} installed` });
+        setActionResult({
+          type: "success",
+          message:
+            res.message ||
+            res.instructions ||
+            `${displayName || "Extension"} installed`,
+        });
         if (res.auth_url) {
           window.open(res.auth_url, "_blank", "noopener,noreferrer");
         }
@@ -62,10 +69,16 @@ export function useExtensions() {
   });
 
   const activateMutation = useMutation({
-    mutationFn: ({ name }) => activateExtension(name),
-    onSuccess: (res, { name }) => {
+    mutationFn: ({ packageRef }) => activateExtension(packageRef),
+    onSuccess: (res, { displayName }) => {
       if (res.success) {
-        setActionResult({ type: "success", message: `${name} activated` });
+        setActionResult({
+          type: "success",
+          message:
+            res.message ||
+            res.instructions ||
+            `${displayName || "Extension"} activated`,
+        });
         if (res.auth_url) {
           window.open(res.auth_url, "_blank", "noopener,noreferrer");
         }
@@ -85,10 +98,10 @@ export function useExtensions() {
   });
 
   const removeMutation = useMutation({
-    mutationFn: ({ name }) => removeExtension(name),
-    onSuccess: (res, { name }) => {
+    mutationFn: ({ packageRef }) => removeExtension(packageRef),
+    onSuccess: (res, { displayName }) => {
       if (res.success) {
-        setActionResult({ type: "success", message: `${name} removed` });
+        setActionResult({ type: "success", message: `${displayName || "Extension"} removed` });
       } else {
         setActionResult({ type: "error", message: res.message || "Remove failed" });
       }
@@ -103,16 +116,18 @@ export function useExtensions() {
   const extensions = extensionsQuery.data?.extensions || [];
   const registry = registryQuery.data?.entries || [];
 
-  const installedNames = new Set(extensions.map((e) => e.name));
-
   const channels = extensions.filter((e) => e.kind === "wasm_channel");
   const mcpServers = extensions.filter((e) => e.kind === "mcp_server");
   const tools = extensions.filter((e) => e.kind !== "wasm_channel" && e.kind !== "mcp_server");
 
-  const channelRegistry = registry.filter((e) => (e.kind === "wasm_channel" || e.kind === "channel") && !installedNames.has(e.name));
-  const mcpRegistry = registry.filter((e) => e.kind === "mcp_server" && !installedNames.has(e.name));
+  const channelRegistry = registry.filter((e) => (e.kind === "wasm_channel" || e.kind === "channel") && !e.installed);
+  const mcpRegistry = registry.filter((e) => e.kind === "mcp_server" && !e.installed);
   const toolRegistry = registry.filter(
-    (e) => e.kind !== "mcp_server" && e.kind !== "wasm_channel" && e.kind !== "channel" && !installedNames.has(e.name)
+    (e) =>
+      e.kind !== "mcp_server" &&
+      e.kind !== "wasm_channel" &&
+      e.kind !== "channel" &&
+      !e.installed
   );
 
   const isLoading = extensionsQuery.isLoading || registryQuery.isLoading;
@@ -139,11 +154,11 @@ export function useExtensions() {
   };
 }
 
-export function useExtensionSetup(name) {
+export function useExtensionSetup(packageRef) {
   const query = useQuery({
-    queryKey: ["extension-setup", name],
-    queryFn: () => fetchExtensionSetup(name),
-    enabled: Boolean(name),
+    queryKey: ["extension-setup", packageRef?.id || packageRef],
+    queryFn: () => fetchExtensionSetup(packageRef),
+    enabled: Boolean(packageRef),
   });
 
   return {
@@ -155,15 +170,40 @@ export function useExtensionSetup(name) {
   };
 }
 
-export function useSetupSubmit(name, onSuccess) {
+export function useSetupSubmit(packageRef, onSuccess) {
   const queryClient = useQueryClient();
+  const packageKey = packageRef?.id || packageRef;
 
   return useMutation({
-    mutationFn: ({ secrets, fields }) => submitExtensionSetup(name, secrets, fields),
+    mutationFn: ({ secrets, fields }) => submitExtensionSetup(packageRef, secrets, fields),
     onSuccess: (res) => {
       queryClient.invalidateQueries({ queryKey: ["extensions"] });
-      queryClient.invalidateQueries({ queryKey: ["extension-setup", name] });
+      queryClient.invalidateQueries({ queryKey: ["extension-setup", packageKey] });
       if (onSuccess) onSuccess(res);
+    },
+  });
+}
+
+export function useOauthSetup(packageRef) {
+  const queryClient = useQueryClient();
+  const packageKey = packageRef?.id || packageRef;
+
+  return useMutation({
+    mutationFn: ({ secret, popup }) =>
+      startExtensionOauth(packageRef, secret).then((res) => ({ res, popup })),
+    onSuccess: ({ res, popup }) => {
+      if (res.authorization_url && popup && !popup.closed) {
+        popup.location.href = res.authorization_url;
+      } else if (res.authorization_url) {
+        window.open(res.authorization_url, "_blank", "noopener,noreferrer");
+      } else if (popup && !popup.closed) {
+        popup.close();
+      }
+      queryClient.invalidateQueries({ queryKey: ["extension-setup", packageKey] });
+    },
+    onError: (_err, variables) => {
+      const popup = variables?.popup;
+      if (popup && !popup.closed) popup.close();
     },
   });
 }

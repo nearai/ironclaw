@@ -258,14 +258,15 @@ impl AuthChallengeProvider for FakeAuthChallengeProvider {
         owner_user_id: &UserId,
         run_id: TurnRunId,
         gate_ref: &str,
-    ) -> Option<AuthChallengeView> {
+        _credential_requirements: &[ironclaw_host_api::RuntimeCredentialAuthRequirement],
+    ) -> Result<Option<AuthChallengeView>, ironclaw_auth::AuthProductError> {
         if owner_user_id != &self.expected_owner_user_id
             || run_id != self.expected_run_id
             || gate_ref != self.expected_gate_ref
         {
-            return None;
+            return Ok(None);
         }
-        Some(AuthChallengeView {
+        Ok(Some(AuthChallengeView {
             kind: AuthPromptChallengeKind::OAuthUrl,
             provider: AuthProviderId::new("github".to_string()).unwrap(),
             account_label: None,
@@ -274,7 +275,7 @@ impl AuthChallengeProvider for FakeAuthChallengeProvider {
                     .unwrap(),
             ),
             expires_at: Some(chrono::Utc::now() + chrono::Duration::minutes(10)),
-        })
+        }))
     }
 }
 

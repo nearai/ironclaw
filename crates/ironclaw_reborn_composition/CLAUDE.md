@@ -35,9 +35,10 @@
   through chat commands, model-visible messages, serializable DTOs,
   projections, or route-local pending maps.
 - `RebornProductAuthServices::flow_record_source` is an optional WebUI/local-dev
-  read-projection port, not a required product-auth capability. Local-dev
-  in-memory composition wires it so pending auth gates can be rendered from
-  blocked turn state plus auth-flow records. If a supplied product-auth bundle
+  read-projection port, not a required product-auth capability. Filesystem-backed
+  local-dev composition wires the durable product-auth service itself as this
+  source so pending auth gates can be rendered from blocked turn state plus
+  auth-flow records. If a supplied product-auth bundle
   omits it, runtime composition must expose the WebUI auth interaction surface
   as explicitly unavailable; do not fabricate a route-local or unscoped pending
   auth read model.
@@ -245,7 +246,7 @@ rows are inventoried here, not implemented in the current PR.
 | Resolve gate | `POST /api/chat/gate/resolve` | `POST /api/webchat/v2/threads/{tid}/runs/{run_id}/gates/{gate_ref}/resolve` | Mapped |
 | Approval shim | `POST /api/chat/approval` | (Subsumed by `resolve_gate`) | Mapped |
 | Auth-token / auth-cancel | `POST /api/chat/auth-{token,cancel}` | (Engine v1 compatibility shim; delete with v1) | v1-only (legacy) |
-| Extensions onboarding | `GET\|POST /api/extensions/{name}/setup` | `POST /api/webchat/v2/extensions/{name}/setup` | Mapped to lifecycle projection; no production setup side effects yet |
+| Extensions registry/list/install/activate/remove/setup | `GET\|POST /api/extensions/*` | `GET /api/webchat/v2/extensions`, `GET /api/webchat/v2/extensions/registry`, `POST /api/webchat/v2/extensions/install`, `POST /api/webchat/v2/extensions/{package_id}/{activate,remove,setup}` | Mapped to lifecycle package refs and registry projections; setup still has no production setup side effects yet |
 | SSO login (Google) | `GET /auth/providers`, `GET /auth/login/{p}`, `GET /auth/callback/{p}`, `POST /auth/logout` | Same paths on the v2 listener via `ironclaw_reborn_webui_ingress::webui_v2_auth_router`, merged into `webui_v2_app` through [`WebuiServeConfig::with_public_route_mount`] (typed `{ router, descriptors }` so the per-route body-limit / rate-limit middleware applies) | Mapped (Google); GitHub + NEAR follow under #4116 |
 
 ### Security invariants on every "Mapped" row

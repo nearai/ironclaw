@@ -201,6 +201,7 @@ impl CapabilityDispatcher for AuthRequiredDispatcher {
         Err(DispatchError::AuthRequired {
             capability: request.capability_id,
             required_secrets: vec![],
+            credential_requirements: Vec::new(),
         })
     }
 }

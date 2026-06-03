@@ -58,9 +58,15 @@ browser-reachable.
 | `webui.v2.stream_events_ws` | GET | `/api/webchat/v2/threads/{thread_id}/ws` | WebSocket | `ProjectionOnly` |
 | `webui.v2.cancel_run` | POST | `/api/webchat/v2/threads/{thread_id}/runs/{run_id}/cancel` | None | `TurnCoordinator` |
 | `webui.v2.resolve_gate` | POST | `/api/webchat/v2/threads/{thread_id}/runs/{run_id}/gates/{gate_ref}/resolve` | None | `TurnCoordinator` |
-| `webui.v2.setup_extension` | POST | `/api/webchat/v2/extensions/{extension_name}/setup` | None | `ProductWorkflow` |
+| `webui.v2.list_extensions` | GET | `/api/webchat/v2/extensions` | None | `ProjectionOnly` |
+| `webui.v2.list_extension_registry` | GET | `/api/webchat/v2/extensions/registry` | None | `ProjectionOnly` |
+| `webui.v2.install_extension` | POST | `/api/webchat/v2/extensions/install` | None | `ProductWorkflow` |
+| `webui.v2.activate_extension` | POST | `/api/webchat/v2/extensions/{package_id}/activate` | None | `ProductWorkflow` |
+| `webui.v2.remove_extension` | POST | `/api/webchat/v2/extensions/{package_id}/remove` | None | `ProductWorkflow` |
+| `webui.v2.get_extension_setup` | GET | `/api/webchat/v2/extensions/{package_id}/setup` | None | `ProjectionOnly` |
+| `webui.v2.setup_extension` | POST | `/api/webchat/v2/extensions/{package_id}/setup` | None | `ProductWorkflow` |
 
-All nine routes require `BearerToken` auth with `AuthenticatedCaller`
+All routes require `BearerToken` auth with `AuthenticatedCaller`
 scope source. The host's bearer middleware is responsible for
 constructing the `WebUiAuthenticatedCaller` and injecting it as an
 axum `Extension` before the handler runs.
@@ -111,19 +117,21 @@ stream lifetime.
 `setup_extension` is the v2 entrypoint for extension onboarding.
 The native facade exposes the route surface as a lifecycle
 projection: responses carry `phase`, `blockers`, optional
-`package_ref`, and optional payload. Auth, pairing, approval,
+payload, and the lifecycle `package_ref`. Auth, pairing, approval,
 policy, credential, and runtime requirements must be represented
 as blockers owned by their dedicated services, not as legacy
 setup status aliases or lifecycle phases. The route still does
 not perform production setup/configure/activate side effects.
 
-The path segment is validated at the handler/facade boundary via
-`ExtensionName::new(...)`. A malformed identifier returns
-`400 invalid_request` with `field: "extension_name"` and
-`validation_code: "invalid_id"` before the facade is called; the
-typed value is threaded through the facade argument so the
-internal request/response contract never carries a raw `String`
-extension name (see `.claude/rules/types.md`).
+Extension lifecycle side effects use `LifecyclePackageRef`
+end-to-end. Install accepts a JSON `package_ref` body; activate,
+remove, and setup lift `{package_id}` path segments into
+`LifecyclePackageRef { kind: extension, id: ... }` at the
+handler/facade boundary. A malformed package id returns
+`400 invalid_request` with `field: "package_id"` and
+`validation_code: "invalid_id"` before the facade is called.
+Browsers should render registry `display_name` for users and send
+`package_ref` for lifecycle operations.
 
 ## Boundary rules
 

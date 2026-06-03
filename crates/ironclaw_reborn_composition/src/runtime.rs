@@ -31,6 +31,10 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+#[cfg(not(any(feature = "libsql", feature = "postgres")))]
+use ironclaw_conversations::InMemoryConversationServices;
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+use ironclaw_conversations::RebornFilesystemConversationServices;
 use ironclaw_events::{DurableAuditLog, DurableEventLog, InMemoryAuditSink, RuntimeEvent};
 use ironclaw_first_party_extension_ports::{
     FirstPartySkillsExtension, FirstPartySkillsExtensionHandles, SelectableSkillContextSource,
@@ -87,6 +91,12 @@ use crate::factory::{LocalDevRootFilesystem, LocalDevTurnStateStore};
 use crate::local_dev_capability_policy::local_dev_capability_policy;
 use crate::projection::{RebornProjectionServices, build_reborn_projection_services};
 use crate::runtime_input::{PollSettings, RebornRuntimeIdentity, RebornRuntimeInput};
+use crate::trigger_poller::{
+    ConversationContentRefMaterializer, ConversationTrustedTriggerSubmitter,
+    LocalTriggerTurnSnapshotSource, SnapshotActiveRunLookup, TRIGGER_POLLER_SHUTDOWN_TIMEOUT,
+    TriggerPollerCompositionDeps, TriggerPollerRuntimeHandle, TriggerTurnSnapshotSource,
+    TrustedTenantTriggerFireAuthorizer, spawn_trigger_poller,
+};
 use crate::{
     RebornBuildError, RebornCompositionProfile, RebornProductAuthServices, RebornServices,
     build_reborn_services,
@@ -199,6 +209,8 @@ pub struct RebornRuntime {
     thread_scope: ThreadScope,
     worker_handle: JoinHandle<()>,
     worker_cancel: CancellationToken,
+    trigger_poller_handle: Option<TriggerPollerRuntimeHandle>,
+    budget_event_projection: Option<crate::budget_events::BudgetEventProjection>,
     poll_settings: PollSettings,
     actor_user_id: UserId,
     source_binding_ref: SourceBindingRef,
@@ -220,6 +232,95 @@ pub(crate) type LocalDevSelectableSkillContextSource =
     SelectableSkillContextSource<FilesystemSkillBundleSource<LocalDevRootFilesystem>>;
 type LocalDevSkillExecutionAdapter =
     SkillExecutionAdapter<FilesystemSkillBundleSource<LocalDevRootFilesystem>>;
+
+struct TriggerPollerServices {
+    materializer: Arc<dyn ironclaw_triggers::TriggerPromptMaterializer>,
+    trusted_submitter: Arc<dyn ironclaw_triggers::TrustedTriggerFireSubmitter>,
+}
+
+async fn build_trigger_poller_services(
+    local_runtime: &crate::factory::RebornLocalRuntimeServices,
+    turn_coordinator: Arc<dyn TurnCoordinator>,
+    thread_service: Arc<dyn SessionThreadService>,
+    tenant_id: TenantId,
+    default_agent_id: AgentId,
+) -> Result<TriggerPollerServices, RebornRuntimeError> {
+    let authorizer = Arc::new(TrustedTenantTriggerFireAuthorizer::new(tenant_id));
+    let trusted_ingress =
+        ironclaw_trusted_ingress::HostTrustedTriggerIngress::new_for_composition_root();
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
+    {
+        let conversations = RebornFilesystemConversationServices::new(Arc::clone(
+            &local_runtime.subagent_goal_filesystem,
+        ))
+        .await
+        .map_err(|error| RebornRuntimeError::InvalidArgument {
+            reason: format!("trigger conversation services unavailable: {error}"),
+        })?;
+        Ok(build_trigger_poller_services_from_conversation_services(
+            conversations.clone(),
+            conversations,
+            turn_coordinator,
+            thread_service,
+            default_agent_id,
+            authorizer,
+            trusted_ingress,
+        ))
+    }
+    #[cfg(not(any(feature = "libsql", feature = "postgres")))]
+    {
+        let _ = local_runtime;
+        let conversations = InMemoryConversationServices::default();
+        Ok(build_trigger_poller_services_from_conversation_services(
+            conversations.clone(),
+            conversations,
+            turn_coordinator,
+            thread_service,
+            default_agent_id,
+            authorizer,
+            trusted_ingress,
+        ))
+    }
+}
+
+fn build_trigger_poller_services_from_conversation_services<B, S>(
+    binding_service: B,
+    session_thread_service: S,
+    turn_coordinator: Arc<dyn TurnCoordinator>,
+    thread_service: Arc<dyn SessionThreadService>,
+    default_agent_id: AgentId,
+    authorizer: Arc<dyn crate::trigger_poller_trusted_submit::TriggerFireAuthorizer>,
+    trusted_ingress: ironclaw_trusted_ingress::HostTrustedTriggerIngress,
+) -> TriggerPollerServices
+where
+    B: ironclaw_conversations::ConversationBindingService + Clone + 'static,
+    S: ironclaw_conversations::SessionThreadService + 'static,
+{
+    let materializer = Arc::new(ConversationContentRefMaterializer::new(
+        binding_service.clone(),
+        Arc::clone(&thread_service),
+        default_agent_id.clone(),
+        authorizer,
+    ));
+    let trusted_submitter = Arc::new(ConversationTrustedTriggerSubmitter::new(
+        binding_service,
+        session_thread_service,
+        turn_coordinator,
+        trusted_ingress,
+    ));
+    TriggerPollerServices {
+        materializer,
+        trusted_submitter,
+    }
+}
+
+fn build_trigger_active_run_lookup(
+    turn_state_store: Arc<LocalDevTurnStateStore>,
+) -> Arc<dyn ironclaw_triggers::TriggerActiveRunLookup> {
+    let snapshot_source: Arc<dyn TriggerTurnSnapshotSource> =
+        Arc::new(LocalTriggerTurnSnapshotSource::new(turn_state_store));
+    Arc::new(SnapshotActiveRunLookup::new(snapshot_source))
+}
 
 struct LocalDevApprovalTurnRunLocator {
     turn_state: Arc<LocalDevTurnStateStore>,
@@ -396,6 +497,105 @@ impl RebornRuntime {
         &self,
     ) -> Option<Arc<LocalDevSelectableSkillContextSource>> {
         self.skill_activation_source.clone()
+    }
+
+    /// Test-only handle on the resource governor backing the budget
+    /// accountant. Exposed under `test-support` so integration tests can
+    /// assert ledger state after a `send_user_message` round-trip.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn budget_resource_governor(
+        &self,
+    ) -> Option<Arc<dyn ironclaw_resources::ResourceGovernor>> {
+        self.services
+            .local_runtime
+            .as_ref()
+            .map(|rt| Arc::clone(&rt.resource_governor))
+    }
+
+    /// Test-only handle on the in-memory budget event sink wired to the
+    /// governor. Tests use `.drain()` / `.snapshot()` to inspect the
+    /// audit-event stream produced by a run.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn budget_event_sink(&self) -> Option<Arc<ironclaw_resources::InMemoryBudgetEventSink>> {
+        self.services
+            .local_runtime
+            .as_ref()
+            .map(|rt| Arc::clone(&rt.in_memory_budget_event_sink))
+    }
+
+    /// Broadcast sink that fans every emitted `BudgetEvent` to any
+    /// subscriber. The runtime always spawns its own subscriber — the
+    /// [`crate::budget_events::BudgetEventProjection`] task wired by
+    /// `build_reborn_runtime` and shut down via [`Self::shutdown`] —
+    /// so this sink is never a no-op even when the caller does not
+    /// install a custom observer (review feedback Thermo-Nuclear #3
+    /// / follow-up A2). Callers that need a richer projection
+    /// (multi-channel fan-out, telemetry exporters) should pass an
+    /// observer through
+    /// [`crate::RebornRuntimeInput::with_budget_event_observer`]
+    /// rather than re-subscribing here; spawning a second long-lived
+    /// receiver risks one of them lagging while the other drains.
+    pub fn broadcast_budget_event_sink(
+        &self,
+    ) -> Option<Arc<ironclaw_resources::BroadcastBudgetEventSink>> {
+        self.services
+            .local_runtime
+            .as_ref()
+            .map(|rt| Arc::clone(&rt.broadcast_budget_event_sink))
+    }
+
+    /// Test-only handle on the budget approval-gate store. Tests resolve
+    /// pending gates here (Approve / Cancel / let-expire) to drive the
+    /// F3/F4/F5 approval-flow scenarios.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn budget_gate_store(&self) -> Option<Arc<dyn ironclaw_resources::BudgetGateStore>> {
+        self.services
+            .local_runtime
+            .as_ref()
+            .map(|rt| Arc::clone(&rt.budget_gate_store))
+    }
+
+    /// Apply the outcome of a resolved [`BudgetApprovalGate`]: when the
+    /// gate is approved, raise the affected account's limit so a
+    /// subsequent `send_user_message` can re-issue the reservation that
+    /// previously crossed the pause threshold. Returns the resolved
+    /// gate.
+    ///
+    /// Production wires this through a gate-resolution route on the web
+    /// gateway; the test-only accessor lets E2E tests drive F3 / F4 / F5
+    /// without booting that surface.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn apply_resolved_budget_gate(
+        &self,
+        scope: &ironclaw_host_api::ResourceScope,
+        gate_id: ironclaw_resources::BudgetGateId,
+    ) -> Result<ironclaw_resources::BudgetApprovalGate, RebornRuntimeError> {
+        let local_runtime = self.services.local_runtime.as_ref().ok_or_else(|| {
+            RebornRuntimeError::InvalidArgument {
+                reason: "local-dev runtime substrate required to apply a budget gate".to_string(),
+            }
+        })?;
+        let gate = local_runtime
+            .budget_gate_store
+            .get(scope, gate_id)
+            .map_err(|error| RebornRuntimeError::InvalidArgument {
+                reason: format!("budget gate read failed: {error}"),
+            })?
+            .ok_or_else(|| RebornRuntimeError::InvalidArgument {
+                reason: format!("unknown budget gate: {gate_id}"),
+            })?;
+        if let ironclaw_resources::BudgetGateStatus::Approved {
+            increased_limit, ..
+        } = &gate.status
+        {
+            local_runtime
+                .resource_governor
+                .set_limit(gate.needed.account.clone(), increased_limit.clone())
+                .map_err(|error| RebornRuntimeError::InvalidArgument {
+                    reason: format!("failed to apply approved budget limit: {error}"),
+                })?;
+        }
+        Ok(gate)
     }
 
     /// Create a fresh conversation. Returns the opaque conversation id used
@@ -638,10 +838,19 @@ impl RebornRuntime {
             .map_err(skill_asset_error)
     }
 
-    /// Stop the turn-runner worker. Awaits the worker task to finish before
-    /// returning.
+    /// Stop the turn-runner worker and the budget-event projection.
+    /// Awaits both tasks before returning so background state is fully
+    /// drained when the runtime drops.
     pub async fn shutdown(self) -> Result<(), RebornRuntimeError> {
+        if let Some(trigger_poller) = self.trigger_poller_handle {
+            trigger_poller
+                .shutdown(TRIGGER_POLLER_SHUTDOWN_TIMEOUT)
+                .await;
+        }
         self.worker_cancel.cancel();
+        if let Some(projection) = self.budget_event_projection {
+            projection.shutdown().await;
+        }
         if let Err(error) = self.worker_handle.await {
             if error.is_panic() {
                 tracing::error!(%error, "reborn worker task panicked during shutdown");
@@ -844,12 +1053,17 @@ pub async fn build_reborn_runtime(
         #[cfg(feature = "root-llm-provider")]
         llm,
         runner,
+        trigger_poller,
         poll,
         identity,
         regex_skill_activation_enabled,
         skill_context_source: configured_skill_context_source,
+        budget_defaults,
+        budget_event_observer,
         #[cfg(any(test, feature = "test-support"))]
         model_gateway_override,
+        #[cfg(any(test, feature = "test-support"))]
+        model_cost_table_override,
     } = input;
 
     let services_input = services_input.ok_or(RebornRuntimeError::InvalidArgument {
@@ -924,37 +1138,108 @@ pub async fn build_reborn_runtime(
         mission_id: None,
     };
 
+    // Resolve the model gateway in three flat steps so the cfg gates
+    // don't multiply into a 4-way permutation:
+    //
+    // 1. Normalize the test-only override into a plain `Option`.
+    //    Off-feature builds get a hard `None` so downstream control flow
+    //    stays plain.
+    // 2. Build the production gateway + cost table from the LLM config
+    //    (cfg-gated helper); without `root-llm-provider` the helper
+    //    short-circuits to a stub.
+    // 3. The test override wins over the production gateway when set;
+    //    the LLM-derived cost table is kept regardless so the
+    //    accountant can fire against a stub gateway too.
+    #[cfg(any(test, feature = "test-support"))]
+    let test_model_gateway_override = model_gateway_override;
     #[cfg(feature = "root-llm-provider")]
-    let model_gateway = {
-        #[cfg(any(test, feature = "test-support"))]
-        if let Some(gateway) = model_gateway_override {
-            gateway
-        } else {
-            match llm {
-                Some(cfg) => build_llm_gateway(cfg).await?,
-                None => build_stub_gateway(),
-            }
-        }
-        #[cfg(not(any(test, feature = "test-support")))]
-        {
-            match llm {
-                Some(cfg) => build_llm_gateway(cfg).await?,
-                None => build_stub_gateway(),
-            }
-        }
-    };
+    let (production_gateway, llm_cost_table) = build_production_model_gateway(llm).await?;
     #[cfg(not(feature = "root-llm-provider"))]
-    let model_gateway = {
-        #[cfg(any(test, feature = "test-support"))]
-        if let Some(gateway) = model_gateway_override {
-            gateway
-        } else {
-            build_stub_gateway()
+    let (production_gateway, llm_cost_table) = build_production_model_gateway()?;
+
+    #[cfg(any(test, feature = "test-support"))]
+    let model_gateway = test_model_gateway_override.unwrap_or(production_gateway);
+    #[cfg(not(any(test, feature = "test-support")))]
+    let model_gateway = production_gateway;
+
+    // Resolved cost table is either: the LLM-policy-derived table (real
+    // LLM wired), a test override (so tests can drive deterministic
+    // prices through stub gateways), or None — in which case the
+    // accountant doesn't get built (no spend, no cascade). The test
+    // override (when set) wins over the LLM-derived table — the test is
+    // being explicit about the prices it wants.
+    let llm_cost_table_arc: Option<Arc<dyn ironclaw_loop_support::ModelCostTable>> = llm_cost_table
+        .map(|table| Arc::new(table) as Arc<dyn ironclaw_loop_support::ModelCostTable>);
+    #[cfg(any(test, feature = "test-support"))]
+    let resolved_cost_table = model_cost_table_override.or(llm_cost_table_arc);
+    #[cfg(not(any(test, feature = "test-support")))]
+    let resolved_cost_table = llm_cost_table_arc;
+
+    // Build the model budget accountant from the resolved cost table plus
+    // the local-dev governor. `local-dev-yolo` is the explicit local
+    // exception: it inherits host trust and must not pause on budget gates.
+    // When neither an LLM policy nor a test override supplies a cost table
+    // we deliberately skip the accountant — there's no spend to track and
+    // the cascade would never fire.
+    //
+    // The accountant is wired with a seeding policy derived from the
+    // caller-supplied `BudgetDefaults` (or `compiled_defaults().with_env()`
+    // as the composition-root fallback when no caller pre-resolves them)
+    // so a fresh user / project account picks up the default daily cap on
+    // the first model call. Without this seeding step the local-dev
+    // governor starts empty and `reserve_with_outcome_in_state` skips
+    // accounts that have no configured limit — model calls would record
+    // usage but never enforce a cap (review feedback High #2 + Thermo-
+    // Nuclear #1: defaults resolve once at the composition root with
+    // explicit precedence and a `validate()` call instead of being
+    // re-read by the wiring helper).
+    let model_budget_accountant: Option<
+        Arc<dyn ironclaw_turns::run_profile::LoopModelBudgetAccountant>,
+    > = match (profile, resolved_cost_table) {
+        (RebornCompositionProfile::LocalDevYolo, _) => None,
+        (_, Some(cost_table)) => {
+            let resolved_budget_defaults = match budget_defaults {
+                Some(defaults) => {
+                    defaults
+                        .validate()
+                        .map_err(|error| RebornRuntimeError::InvalidArgument {
+                            reason: format!("supplied budget defaults invalid: {error}"),
+                        })?;
+                    defaults
+                }
+                None => {
+                    let defaults = ironclaw_reborn_config::BudgetDefaults::compiled_defaults()
+                        .with_env()
+                        .map_err(|error| RebornRuntimeError::InvalidArgument {
+                            reason: format!("budget defaults env-override invalid: {error}"),
+                        })?;
+                    defaults
+                        .validate()
+                        .map_err(|error| RebornRuntimeError::InvalidArgument {
+                            reason: format!("resolved budget defaults invalid: {error}"),
+                        })?;
+                    defaults
+                }
+            };
+            // Shared helper — same wiring shape used by any production
+            // loop composer that wants the accountant.
+            // The accountant uses the same broadcast-backed sink that
+            // the governor writes to, so `BudgetEvent::GateOpened`
+            // (emitted by the accountant) lands on the same downstream
+            // projection as the governor's `Warned` / `Denied` events.
+            let event_sink: Arc<dyn ironclaw_resources::BudgetEventSink> =
+                Arc::clone(&local_runtime.broadcast_budget_event_sink)
+                    as Arc<dyn ironclaw_resources::BudgetEventSink>;
+            let accountant = crate::build_default_budget_accountant(
+                Arc::clone(&local_runtime.resource_governor),
+                cost_table,
+                Arc::clone(&local_runtime.budget_gate_store),
+                event_sink,
+                &resolved_budget_defaults,
+            );
+            Some(accountant)
         }
-        #[cfg(not(any(test, feature = "test-support")))]
-        {
-            build_stub_gateway()
-        }
+        (_, None) => None,
     };
 
     let loop_exit_evidence = Arc::new(ThreadCheckpointLoopExitEvidencePort::new_with_thread_scope(
@@ -1070,7 +1355,7 @@ pub async fn build_reborn_runtime(
             })?,
         ),
         model_policy_guard: None,
-        model_budget_accountant: None,
+        model_budget_accountant,
         safety_context: None,
         turn_event_sink: None,
     })?;
@@ -1130,6 +1415,7 @@ pub async fn build_reborn_runtime(
                 local_dev_capability_policy,
                 local_runtime.workspace_mounts.clone(),
                 local_runtime.skill_mounts.clone(),
+                local_runtime.memory_mounts.clone(),
             )),
             approval_resolver,
             Arc::clone(&planned_turn_coordinator),
@@ -1158,14 +1444,59 @@ pub async fn build_reborn_runtime(
     };
     services.turn_coordinator = Some(Arc::clone(&planned_turn_coordinator));
 
+    let trigger_poller_handle = if trigger_poller.enabled {
+        let trigger_poller_services = build_trigger_poller_services(
+            local_runtime,
+            Arc::clone(&planned_turn_coordinator),
+            Arc::clone(&thread_service),
+            thread_scope.tenant_id.clone(),
+            validated_identity.agent_id.clone(),
+        )
+        .await?;
+        let active_run_lookup = build_trigger_active_run_lookup(Arc::clone(&turn_state_store));
+        spawn_trigger_poller(
+            trigger_poller,
+            TriggerPollerCompositionDeps {
+                repository: Arc::clone(&local_runtime.trigger_repository),
+                materializer: trigger_poller_services.materializer,
+                trusted_submitter: trigger_poller_services.trusted_submitter,
+                active_run_lookup,
+            },
+        )
+        .map_err(|error| RebornRuntimeError::InvalidArgument {
+            reason: format!("trigger poller could not be started: {error}"),
+        })?
+    } else {
+        None
+    };
     let worker_cancel = CancellationToken::new();
     let worker = Arc::clone(&composition.worker);
     let worker_cancel_clone = worker_cancel.clone();
     let worker_handle = tokio::spawn(async move {
         worker.run(worker_cancel_clone).await;
     });
+    services.readiness.workers.turn_runner = true;
+    services.readiness.workers.trigger_poller = trigger_poller_handle.is_some();
     let turn_coordinator = planned_turn_coordinator;
     let wake_sender = composition.wake_sender;
+
+    // Spawn the budget-event projection task as the production owner
+    // of the broadcast sink — review feedback Thermo-Nuclear #3
+    // (#3841 follow-up A2). The runtime's `broadcast_budget_event_sink`
+    // accessor used to expose a sink that no one subscribed to; with
+    // this projection the runtime always has at least the tracing
+    // observer attached, and callers can install a richer observer
+    // (SSE projection, telemetry export) through
+    // `RebornRuntimeInput::with_budget_event_observer`.
+    let budget_event_projection = services.local_runtime.as_ref().map(|local_runtime| {
+        let observer = budget_event_observer.unwrap_or_else(|| {
+            Arc::new(crate::TracingBudgetEventObserver) as Arc<dyn crate::BudgetEventObserver>
+        });
+        crate::budget_events::BudgetEventProjection::spawn(
+            local_runtime.broadcast_budget_event_sink.as_ref(),
+            observer,
+        )
+    });
 
     Ok(RebornRuntime {
         services,
@@ -1174,6 +1505,8 @@ pub async fn build_reborn_runtime(
         thread_scope,
         worker_handle,
         worker_cancel,
+        trigger_poller_handle,
+        budget_event_projection,
         poll_settings: poll,
         actor_user_id,
         source_binding_ref: validated_identity.source_binding_ref,
@@ -1280,6 +1613,8 @@ struct LocalDevSkillContextSource {
     execution_adapter: Arc<LocalDevSkillExecutionAdapter>,
 }
 
+const LOCAL_DEV_MAX_SKILL_CONTEXT_TOKENS: usize = 6000;
+
 /// Build the [`SkillActivationSelectorConfig`] used by the local-dev
 /// filesystem skill context source. Extracted from
 /// [`local_dev_filesystem_skill_context_source`] so the wiring of the
@@ -1293,6 +1628,7 @@ fn local_dev_selector_config(
     regex_skill_activation_enabled: bool,
 ) -> SkillActivationSelectorConfig {
     SkillActivationSelectorConfig {
+        max_context_tokens: LOCAL_DEV_MAX_SKILL_CONTEXT_TOKENS,
         selection_mode:
             ironclaw_first_party_extension_ports::SkillActivationSelectionMode::ExplicitOnly,
         regex_activation_enabled: regex_skill_activation_enabled,
@@ -1378,10 +1714,50 @@ impl CapabilitySurfaceProfileResolver for AllowAllCapabilitySurfaceResolver {
     }
 }
 
+/// Build the production model gateway and its (optional) LLM-derived
+/// cost table. Cfg-gated so off-feature builds short-circuit to the
+/// stub without referencing types that don't exist.
 #[cfg(feature = "root-llm-provider")]
-async fn build_llm_gateway(
-    llm: ResolvedRebornLlm,
-) -> Result<Arc<dyn ironclaw_loop_support::HostManagedModelGateway>, RebornRuntimeError> {
+async fn build_production_model_gateway(
+    llm: Option<crate::runtime_input::ResolvedRebornLlm>,
+) -> Result<
+    (
+        Arc<dyn ironclaw_loop_support::HostManagedModelGateway>,
+        Option<ironclaw_loop_support::StaticModelCostTable>,
+    ),
+    RebornRuntimeError,
+> {
+    match llm {
+        Some(cfg) => {
+            let LlmGatewayBundle { gateway, policy } = build_llm_gateway(cfg).await?;
+            Ok((gateway, Some(policy.build_cost_table())))
+        }
+        None => Ok((build_stub_gateway(), None)),
+    }
+}
+
+#[cfg(not(feature = "root-llm-provider"))]
+fn build_production_model_gateway() -> Result<
+    (
+        Arc<dyn ironclaw_loop_support::HostManagedModelGateway>,
+        Option<ironclaw_loop_support::StaticModelCostTable>,
+    ),
+    RebornRuntimeError,
+> {
+    Ok((build_stub_gateway(), None))
+}
+
+#[cfg(feature = "root-llm-provider")]
+struct LlmGatewayBundle {
+    gateway: Arc<dyn ironclaw_loop_support::HostManagedModelGateway>,
+    /// Policy used to derive the budget accountant's cost table — kept
+    /// alongside the gateway so the composer doesn't re-derive the
+    /// `ModelProfileId → provider-model` mapping in two places.
+    policy: ironclaw_reborn::model_gateway::LlmModelProfilePolicy,
+}
+
+#[cfg(feature = "root-llm-provider")]
+async fn build_llm_gateway(llm: ResolvedRebornLlm) -> Result<LlmGatewayBundle, RebornRuntimeError> {
     use ironclaw_reborn::model_gateway::{LlmModelProfilePolicy, LlmProviderModelGateway};
     use ironclaw_turns::run_profile::ModelProfileId;
 
@@ -1395,8 +1771,11 @@ async fn build_llm_gateway(
         RebornRuntimeError::LlmProvider(format!("invalid interactive model profile id: {reason}"))
     })?;
     let policy = LlmModelProfilePolicy::new().allow_model_profile(model_profile_id, Some(model));
-    let gateway = LlmProviderModelGateway::new(provider, policy);
-    Ok(Arc::new(gateway))
+    let gateway = LlmProviderModelGateway::new(provider, policy.clone());
+    Ok(LlmGatewayBundle {
+        gateway: Arc::new(gateway),
+        policy,
+    })
 }
 
 fn build_stub_gateway() -> Arc<dyn ironclaw_loop_support::HostManagedModelGateway> {
@@ -1434,6 +1813,7 @@ mod tests {
     use std::time::Duration;
 
     use async_trait::async_trait;
+    use ironclaw_auth::GOOGLE_CALENDAR_READONLY_SCOPE;
 
     /// Wiring guard: the `regex_skill_activation_enabled` flag from
     /// [`RebornRuntimeInput`] must reach
@@ -1464,6 +1844,15 @@ mod tests {
             "regex_skill_activation_enabled=true must propagate into SkillActivationSelectorConfig"
         );
     }
+
+    #[test]
+    fn local_dev_selector_config_uses_large_skill_context_budget() {
+        let cfg = super::local_dev_selector_config(true);
+        assert_eq!(
+            cfg.max_context_tokens, 6000,
+            "local-dev Reborn skill activation should match the legacy 6000-token skill budget"
+        );
+    }
     use ironclaw_authorization::CapabilityLeaseStore;
     use ironclaw_events::{EventStreamKey, ReadScope};
     use ironclaw_host_api::{
@@ -1478,14 +1867,15 @@ mod tests {
     use ironclaw_loop_support::{
         HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
         HostManagedModelMessageRole, HostManagedModelRequest, HostManagedModelResponse,
-        HostSkillContextBuildError, HostSkillContextCandidate, HostSkillContextSource,
+        HostSkillContextBuildError, HostSkillContextCandidate, HostSkillContextSource, ModelCost,
     };
     use ironclaw_product_adapters::{ProductOutboundPayload, ProductProjectionItem};
     use ironclaw_product_workflow::{
-        ExtensionName, LifecycleReadinessBlocker, RebornServicesErrorCode, RebornServicesErrorKind,
-        RebornStreamEventsRequest, RebornSubmitTurnResponse, WebUiAuthenticatedCaller,
-        WebUiCreateThreadRequest, WebUiResolveGateRequest, WebUiSendMessageRequest,
-        WebUiSetupExtensionRequest, approval_gate_ref,
+        LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase, LifecycleProductPayload,
+        LifecycleReadinessBlocker, RebornExtensionCredentialSetup, RebornServicesErrorCode,
+        RebornServicesErrorKind, RebornStreamEventsRequest, RebornSubmitTurnResponse,
+        WebUiAuthenticatedCaller, WebUiCreateThreadRequest, WebUiResolveGateRequest,
+        WebUiSendMessageRequest, WebUiSetupExtensionRequest, approval_gate_ref,
     };
     use ironclaw_run_state::ApprovalRequestStore;
     use ironclaw_skills::SkillTrust;
@@ -1496,15 +1886,18 @@ mod tests {
         TurnRunId, TurnRunnerId, TurnStatus,
         run_profile::{
             InMemoryRunProfileResolver, LoopCapabilityPort, LoopCheckpointStateRef, LoopRunContext,
-            ProviderToolCall, RunProfileResolutionRequest, RunProfileResolver, SkillVisibility,
-            VisibleCapabilityRequest,
+            ModelProfileId, ProviderToolCall, RunProfileResolutionRequest, RunProfileResolver,
+            SkillVisibility, VisibleCapabilityRequest,
         },
         runner::{BlockRunRequest, ClaimRunRequest, TurnRunTransitionPort},
     };
+    use rust_decimal_macros::dec;
 
     use crate::RebornReadinessState;
     use crate::input::RebornBuildInput;
-    use crate::runtime_input::{PollSettings, RebornRuntimeIdentity, RebornRuntimeInput};
+    use crate::runtime_input::{
+        PollSettings, RebornRuntimeIdentity, RebornRuntimeInput, TriggerPollerSettings,
+    };
     use crate::webui::build_webui_services;
 
     use super::{
@@ -1957,8 +2350,9 @@ mod tests {
         };
         let llm = crate::runtime_input::ResolvedRebornLlm::from_llm_config(config);
 
-        let gateway = super::build_llm_gateway(llm).await.expect("gateway builds");
-        let response = gateway
+        let bundle = super::build_llm_gateway(llm).await.expect("gateway builds");
+        let response = bundle
+            .gateway
             .stream_model(nearai_gateway_test_request())
             .await
             .expect("gateway calls NEAR AI provider");
@@ -2035,6 +2429,214 @@ mod tests {
         );
         assert_eq!(audit.decision.kind, "allowed");
         runtime.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test]
+    async fn local_dev_runtime_readiness_reports_trigger_poller_worker() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let gateway = Arc::new(RecordingGateway {
+            reply: "trigger readiness".to_string(),
+            requests: Arc::new(StdMutex::new(Vec::new())),
+        });
+
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev(
+                "runtime-trigger-readiness-owner",
+                root.path().join("local-dev"),
+            )
+            .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-trigger-readiness-tenant".to_string(),
+            agent_id: "runtime-trigger-readiness-agent".to_string(),
+            source_binding_id: "runtime-trigger-readiness-source".to_string(),
+            reply_target_binding_id: "runtime-trigger-readiness-reply".to_string(),
+        })
+        .with_trigger_poller_settings(TriggerPollerSettings::enabled())
+        .with_model_gateway_override(gateway);
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+
+        assert!(runtime.services().readiness.workers.turn_runner);
+        assert!(runtime.services().readiness.workers.trigger_poller);
+
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    #[tokio::test]
+    async fn local_dev_runtime_disables_trigger_poller_worker_by_default() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let gateway = Arc::new(RecordingGateway {
+            reply: "trigger disabled".to_string(),
+            requests: Arc::new(StdMutex::new(Vec::new())),
+        });
+
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev(
+                "runtime-trigger-disabled-owner",
+                root.path().join("local-dev"),
+            )
+            .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-trigger-disabled-tenant".to_string(),
+            agent_id: "runtime-trigger-disabled-agent".to_string(),
+            source_binding_id: "runtime-trigger-disabled-source".to_string(),
+            reply_target_binding_id: "runtime-trigger-disabled-reply".to_string(),
+        })
+        .with_model_gateway_override(gateway);
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+
+        assert!(runtime.services().readiness.workers.turn_runner);
+        assert!(!runtime.services().readiness.workers.trigger_poller);
+
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    #[tokio::test]
+    async fn local_dev_runtime_rejects_invalid_trigger_poller_worker_config() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let gateway = Arc::new(RecordingGateway {
+            reply: "trigger invalid config".to_string(),
+            requests: Arc::new(StdMutex::new(Vec::new())),
+        });
+        let trigger_poller = TriggerPollerSettings {
+            enabled: true,
+            worker: ironclaw_triggers::TriggerPollerWorkerConfig {
+                poll_interval: Duration::ZERO,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev(
+                "runtime-trigger-invalid-config-owner",
+                root.path().join("local-dev"),
+            )
+            .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-trigger-invalid-config-tenant".to_string(),
+            agent_id: "runtime-trigger-invalid-config-agent".to_string(),
+            source_binding_id: "runtime-trigger-invalid-config-source".to_string(),
+            reply_target_binding_id: "runtime-trigger-invalid-config-reply".to_string(),
+        })
+        .with_trigger_poller_settings(trigger_poller)
+        .with_model_gateway_override(gateway);
+
+        let err = match build_reborn_runtime(input).await {
+            Ok(runtime) => {
+                runtime
+                    .shutdown()
+                    .await
+                    .expect("unexpected runtime shutdown");
+                panic!("invalid trigger poller config must fail runtime build");
+            }
+            Err(err) => err,
+        };
+
+        assert!(
+            matches!(err, super::RebornRuntimeError::InvalidArgument { reason } if reason.contains("poll_interval must be non-zero"))
+        );
+    }
+
+    #[tokio::test]
+    async fn local_dev_runtime_shutdown_cancels_trigger_poller_worker() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let gateway = Arc::new(RecordingGateway {
+            reply: "trigger shutdown".to_string(),
+            requests: Arc::new(StdMutex::new(Vec::new())),
+        });
+
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev(
+                "runtime-trigger-shutdown-owner",
+                root.path().join("local-dev"),
+            )
+            .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-trigger-shutdown-tenant".to_string(),
+            agent_id: "runtime-trigger-shutdown-agent".to_string(),
+            source_binding_id: "runtime-trigger-shutdown-source".to_string(),
+            reply_target_binding_id: "runtime-trigger-shutdown-reply".to_string(),
+        })
+        .with_trigger_poller_settings(TriggerPollerSettings::enabled())
+        .with_model_gateway_override(gateway);
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        assert!(runtime.services().readiness.workers.trigger_poller);
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), runtime.shutdown())
+            .await
+            .expect("shutdown returns before timeout")
+            .expect("runtime shutdown");
+    }
+
+    #[tokio::test]
+    async fn local_dev_yolo_message_flow_ignores_model_budget_gate() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let host_home = root.path().join("host-home");
+        std::fs::create_dir_all(&host_home).expect("host home");
+        let requests = Arc::new(StdMutex::new(Vec::new()));
+        let gateway = Arc::new(RecordingGateway {
+            reply: "yolo budget bypass reply".to_string(),
+            requests: Arc::clone(&requests),
+        });
+        let cost_table = ironclaw_loop_support::StaticModelCostTable::new().with_entry(
+            ModelProfileId::new("interactive_model").expect("model profile id"),
+            ModelCost {
+                input_per_token: dec!(1.00),
+                output_per_token: dec!(1.00),
+                max_output_tokens: 8_192,
+            },
+        );
+
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev_with_profile(
+                crate::RebornCompositionProfile::LocalDevYolo,
+                "runtime-yolo-budget-owner",
+                root.path().join("local-dev"),
+            )
+            .with_runtime_policy(
+                crate::local_dev_yolo_runtime_policy(true).expect("local-yolo policy resolves"),
+            )
+            .with_local_dev_confirmed_host_home_root(host_home),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-yolo-budget-tenant".to_string(),
+            agent_id: "runtime-yolo-budget-agent".to_string(),
+            source_binding_id: "runtime-yolo-budget-source".to_string(),
+            reply_target_binding_id: "runtime-yolo-budget-reply".to_string(),
+        })
+        .with_poll_settings(PollSettings {
+            interval: Duration::from_millis(10),
+            max_total: Duration::from_secs(3),
+        })
+        .with_model_gateway_override(gateway)
+        .with_model_cost_table_override(Arc::new(cost_table));
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        let conversation = runtime.new_conversation().await.expect("conversation");
+        let reply = tokio::time::timeout(
+            Duration::from_secs(3),
+            runtime.send_user_message(&conversation, "ping"),
+        )
+        .await
+        .expect("runtime send should finish")
+        .expect("runtime send should succeed");
+
+        assert_eq!(reply.status, TurnStatus::Completed);
+        assert_eq!(reply.text.as_deref(), Some("yolo budget bypass reply"));
+        assert_eq!(
+            recorded_request_count(&requests),
+            1,
+            "local-dev-yolo must reach the model gateway even when a paid cost table is present"
+        );
+
+        runtime.shutdown().await.expect("runtime shutdown");
     }
 
     #[tokio::test]
@@ -3134,20 +3736,59 @@ mod tests {
         let setup = bundle
             .api
             .setup_extension(
-                caller,
-                ExtensionName::new("github").expect("valid extension name"),
+                caller.clone(),
+                LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github")
+                    .expect("valid package ref"),
                 WebUiSetupExtensionRequest::default(),
             )
             .await
             .expect("setup extension lifecycle projection");
 
+        assert_eq!(setup.package_ref.id.as_str(), "github");
+        assert_eq!(setup.phase, LifecyclePhase::Discovered);
+        assert!(setup.blockers.is_empty());
+        assert_eq!(setup.secrets.len(), 1);
+        assert_eq!(setup.secrets[0].name, "github_runtime_token");
+        assert_eq!(setup.secrets[0].provider, "github");
+        assert!(!setup.secrets[0].optional);
+        assert!(!setup.secrets[0].provided);
+        assert!(matches!(
+            setup.secrets[0].setup,
+            RebornExtensionCredentialSetup::ManualToken
+        ));
+        let google_setup = bundle
+            .api
+            .setup_extension(
+                caller.clone(),
+                LifecyclePackageRef::new(LifecyclePackageKind::Extension, "google-calendar")
+                    .expect("valid package ref"),
+                WebUiSetupExtensionRequest::default(),
+            )
+            .await
+            .expect("google setup extension lifecycle projection");
+        assert_eq!(google_setup.secrets.len(), 1);
+        assert_eq!(google_setup.secrets[0].provider, "google");
+        assert!(!google_setup.secrets[0].provided);
+        assert!(matches!(
+            &google_setup.secrets[0].setup,
+            RebornExtensionCredentialSetup::OAuth {
+                scopes,
+                ..
+            } if scopes == &vec![GOOGLE_CALENDAR_READONLY_SCOPE.to_string()]
+        ));
+        let google_setup_json =
+            serde_json::to_value(&google_setup.secrets[0]).expect("serialize setup secret");
+        assert_eq!(google_setup_json["setup"]["kind"], "oauth");
         assert!(
-            setup.blockers.iter().any(|blocker| matches!(
-                blocker,
-                LifecycleReadinessBlocker::Runtime { ref_id: Some(ref_id) }
-                    if ref_id.as_str() == "extension_lifecycle_local_runtime_unwired"
-            )),
-            "local webui bundle should use the local lifecycle facade projection"
+            matches!(
+                setup.payload.as_ref(),
+                Some(LifecycleProductPayload::ExtensionList { extensions, count })
+                    if *count == 1
+                        && extensions.len() == 1
+                        && extensions[0].summary.package_ref.id.as_str() == "github"
+                        && extensions[0].summary.credential_requirements.len() == 1
+            ),
+            "local webui bundle should use the local lifecycle facade package projection"
         );
         assert!(
             !setup.blockers.iter().any(|blocker| matches!(
@@ -3156,6 +3797,95 @@ mod tests {
                     if ref_id.as_str() == "reborn_lifecycle_facade_unwired"
             )),
             "local webui bundle must not fall back to the default unwired facade"
+        );
+
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    #[tokio::test]
+    async fn local_dev_webui_setup_extension_stores_and_rotates_runtime_credentials() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let gateway = Arc::new(RecordingGateway {
+            reply: "webui lifecycle ok".to_string(),
+            requests: Arc::new(StdMutex::new(Vec::new())),
+        });
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev(
+                "runtime-webui-credential-owner",
+                root.path().join("local-dev"),
+            )
+            .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-webui-credential-tenant".to_string(),
+            agent_id: "runtime-webui-credential-agent".to_string(),
+            source_binding_id: "runtime-webui-credential-source".to_string(),
+            reply_target_binding_id: "runtime-webui-credential-reply".to_string(),
+        })
+        .with_poll_settings(PollSettings {
+            interval: Duration::from_millis(10),
+            max_total: Duration::from_secs(3),
+        })
+        .with_model_gateway_override(gateway);
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        let bundle = build_webui_services(&runtime, None).expect("webui bundle");
+        let caller = WebUiAuthenticatedCaller::new(
+            TenantId::new("runtime-webui-credential-tenant").unwrap(),
+            UserId::new("runtime-webui-credential-owner").unwrap(),
+            Some(AgentId::new("runtime-webui-credential-agent").unwrap()),
+            None,
+        );
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github").unwrap();
+
+        let first = bundle
+            .api
+            .setup_extension(
+                caller.clone(),
+                package_ref.clone(),
+                WebUiSetupExtensionRequest {
+                    action: Some("submit".to_string()),
+                    payload: Some(serde_json::json!({
+                        "secrets": {
+                            "github_runtime_token": "ghp_first_token"
+                        },
+                        "fields": {}
+                    })),
+                },
+            )
+            .await
+            .expect("submit github runtime token");
+        assert_eq!(first.secrets.len(), 1);
+        assert!(first.secrets[0].provided);
+        let first_credential_ref = first.secrets[0]
+            .credential_ref
+            .clone()
+            .expect("credential ref");
+
+        let second = bundle
+            .api
+            .setup_extension(
+                caller,
+                package_ref,
+                WebUiSetupExtensionRequest {
+                    action: Some("submit".to_string()),
+                    payload: Some(serde_json::json!({
+                        "secrets": {
+                            "github_runtime_token": "ghp_second_token"
+                        },
+                        "fields": {}
+                    })),
+                },
+            )
+            .await
+            .expect("rotate github runtime token");
+        assert_eq!(second.secrets.len(), 1);
+        assert!(second.secrets[0].provided);
+        assert_eq!(
+            second.secrets[0].credential_ref.as_deref(),
+            Some(first_credential_ref.as_str()),
+            "reconfigure should rotate the existing account instead of creating a duplicate"
         );
 
         runtime.shutdown().await.expect("runtime shutdown");

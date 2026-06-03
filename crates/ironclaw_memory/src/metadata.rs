@@ -40,7 +40,6 @@ impl DocumentMetadata {
             Err(error) => {
                 tracing::warn!(
                     error = %error,
-                    raw = %value,
                     "failed to deserialize DocumentMetadata; falling back to defaults"
                 );
                 Self::default()
@@ -83,6 +82,12 @@ fn default_retention_days() -> u32 {
 pub struct MemoryWriteOptions {
     pub metadata: DocumentMetadata,
     pub changed_by: Option<String>,
+}
+
+/// Backend-facing options for a document write.
+#[derive(Debug, Clone, Default)]
+pub struct MemoryBackendWriteOptions {
+    pub metadata_overlay: Option<DocumentMetadata>,
 }
 
 pub(crate) async fn resolve_document_metadata<R>(

@@ -26,6 +26,8 @@ use std::time::Duration;
 #[cfg(any(test, feature = "test-support"))]
 use ironclaw_loop_support::HostManagedModelGateway;
 use ironclaw_loop_support::HostSkillContextSource;
+use ironclaw_reborn_config::BudgetDefaults;
+use ironclaw_triggers::TriggerPollerWorkerConfig;
 
 use crate::input::RebornBuildInput;
 
@@ -121,6 +123,40 @@ impl Default for PollSettings {
     }
 }
 
+/// Configuration for the composition-owned scheduled-trigger poller.
+///
+/// This is intentionally separate from [`PollSettings`], which controls
+/// caller-side waiting for an already submitted turn. The trigger poller is a
+/// background worker that scans due trigger records and submits trusted inbound
+/// turns.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TriggerPollerSettings {
+    pub enabled: bool,
+    pub worker: TriggerPollerWorkerConfig,
+    pub startup_jitter_max: Duration,
+    pub tick_jitter_max: Duration,
+}
+
+impl Default for TriggerPollerSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            worker: TriggerPollerWorkerConfig::default(),
+            startup_jitter_max: Duration::ZERO,
+            tick_jitter_max: Duration::ZERO,
+        }
+    }
+}
+
+impl TriggerPollerSettings {
+    pub fn enabled() -> Self {
+        Self {
+            enabled: true,
+            ..Self::default()
+        }
+    }
+}
+
 /// Full input for `build_reborn_runtime` — substrate config plus the extras
 /// needed to assemble a runnable Reborn agent.
 #[derive(Default)]
@@ -129,12 +165,36 @@ pub struct RebornRuntimeInput {
     #[cfg(feature = "root-llm-provider")]
     pub llm: Option<ResolvedRebornLlm>,
     pub runner: TurnRunnerSettings,
+    pub trigger_poller: TriggerPollerSettings,
     pub poll: PollSettings,
     pub identity: RebornRuntimeIdentity,
     pub regex_skill_activation_enabled: bool,
     pub skill_context_source: Option<Arc<dyn HostSkillContextSource>>,
+    /// Pre-resolved budget defaults to seed the model-budget accountant.
+    /// The caller owns the config-layer precedence (compiled -> section
+    /// -> env) and must call [`BudgetDefaults::validate`] before
+    /// supplying. When unset, `build_reborn_runtime` falls back to
+    /// `BudgetDefaults::compiled_defaults().with_env()` + validate so
+    /// existing call sites keep working; new call sites should provide
+    /// a resolved value to avoid the runtime reading process env
+    /// (review feedback Thermo-Nuclear #1).
+    pub budget_defaults: Option<BudgetDefaults>,
+    /// Observer that receives every `BudgetEvent` emitted by the model
+    /// budget accountant / resource governor. When unset, the runtime
+    /// installs [`TracingBudgetEventObserver`](crate::TracingBudgetEventObserver)
+    /// so events still reach the tracing pipeline; production owners
+    /// supply their own observer (SSE projection, WS fan-out,
+    /// telemetry export) here.
+    pub budget_event_observer: Option<Arc<dyn crate::BudgetEventObserver>>,
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) model_gateway_override: Option<Arc<dyn HostManagedModelGateway>>,
+    /// Cost table to pair with the model-gateway override. Without this,
+    /// tests that use `with_test_model_gateway` would lose the accountant
+    /// entirely (the LLM-resolved cost table comes from
+    /// `LlmModelProfilePolicy::build_cost_table()` which the test
+    /// override skips).
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) model_cost_table_override: Option<Arc<dyn ironclaw_loop_support::ModelCostTable>>,
 }
 
 impl RebornRuntimeInput {
@@ -148,13 +208,42 @@ impl RebornRuntimeInput {
             #[cfg(feature = "root-llm-provider")]
             llm: None,
             runner: TurnRunnerSettings::default(),
+            trigger_poller: TriggerPollerSettings::default(),
             poll: PollSettings::default(),
             identity: RebornRuntimeIdentity::default(),
             regex_skill_activation_enabled: true,
             skill_context_source: None,
+            budget_defaults: None,
+            budget_event_observer: None,
             #[cfg(any(test, feature = "test-support"))]
             model_gateway_override: None,
+            #[cfg(any(test, feature = "test-support"))]
+            model_cost_table_override: None,
         }
+    }
+
+    /// Supply pre-resolved budget defaults. The caller is responsible
+    /// for applying the desired config-layer precedence (compiled,
+    /// TOML, env) and calling [`BudgetDefaults::validate`] before
+    /// passing. Without this, `build_reborn_runtime` falls back to
+    /// `compiled_defaults().with_env()` + validate (review feedback
+    /// Thermo-Nuclear #1: budget defaults belong to the composition
+    /// root, not a wiring helper).
+    pub fn with_budget_defaults(mut self, defaults: BudgetDefaults) -> Self {
+        self.budget_defaults = Some(defaults);
+        self
+    }
+
+    /// Install a custom observer for the model budget event stream.
+    /// Production callers wire this to project events onto SSE / WS /
+    /// telemetry; without it, the runtime installs the tracing-only
+    /// observer so events still surface in structured logs.
+    pub fn with_budget_event_observer(
+        mut self,
+        observer: Arc<dyn crate::BudgetEventObserver>,
+    ) -> Self {
+        self.budget_event_observer = Some(observer);
+        self
     }
 
     #[cfg(feature = "root-llm-provider")]
@@ -165,6 +254,11 @@ impl RebornRuntimeInput {
 
     pub fn with_runner_settings(mut self, runner: TurnRunnerSettings) -> Self {
         self.runner = runner;
+        self
+    }
+
+    pub fn with_trigger_poller_settings(mut self, trigger_poller: TriggerPollerSettings) -> Self {
+        self.trigger_poller = trigger_poller;
         self
     }
 
@@ -205,17 +299,33 @@ impl RebornRuntimeInput {
             .is_some_and(|services| services.grants_trusted_laptop_access())
     }
 
-    /// Inject a custom `HostManagedModelGateway` in place of whatever the
-    /// build flow would otherwise derive from `[llm]` config. Exposed for
-    /// the crate's own tests plus downstream integration tests that need
-    /// to drive `build_reborn_runtime` against a recording / replay gateway
-    /// without standing up a live provider.
+    /// Test-only hook: drive `build_reborn_runtime` with a stub
+    /// `HostManagedModelGateway` (e.g. [`crate::test_support::BudgetTestGateway`])
+    /// instead of the LLM-backed gateway. Gated on `cfg(any(test,
+    /// feature = "test-support"))` so it is available to this crate's
+    /// own tests and to downstream integration tests that opt in via
+    /// the `test-support` feature.
     #[cfg(any(test, feature = "test-support"))]
     pub fn with_model_gateway_override(
         mut self,
         gateway: Arc<dyn HostManagedModelGateway>,
     ) -> Self {
         self.model_gateway_override = Some(gateway);
+        self
+    }
+
+    /// Test-only hook: pair the model gateway override with a custom
+    /// cost table. Without this, gateway overrides produce no
+    /// accountant and budget tests cannot assert ledger state — the
+    /// LLM-derived cost table comes from
+    /// `LlmModelProfilePolicy::build_cost_table()` which the test
+    /// override skips.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_model_cost_table_override(
+        mut self,
+        cost_table: Arc<dyn ironclaw_loop_support::ModelCostTable>,
+    ) -> Self {
+        self.model_cost_table_override = Some(cost_table);
         self
     }
 }

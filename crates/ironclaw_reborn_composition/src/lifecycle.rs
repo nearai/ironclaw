@@ -251,6 +251,12 @@ impl RebornLocalLifecycleFacade {
                 };
                 extension_management.search(&query).await
             }
+            LifecycleProductAction::ExtensionList => {
+                let Some(extension_management) = &self.extension_management else {
+                    return unsupported_projection(None);
+                };
+                extension_management.list_installed().await
+            }
             LifecycleProductAction::ExtensionInstall { package_ref } => {
                 let Some(extension_management) = &self.extension_management else {
                     return unsupported_projection(Some(package_ref));
@@ -261,7 +267,25 @@ impl RebornLocalLifecycleFacade {
                 let Some(extension_management) = &self.extension_management else {
                     return unsupported_projection(Some(package_ref));
                 };
-                extension_management.activate(package_ref).await
+                if extension_management
+                    .package_requires_hosted_mcp_discovery(&package_ref)
+                    .await?
+                {
+                    return Err(ProductWorkflowError::InvalidBindingRequest {
+                        reason: format!(
+                            "extension {} requires hosted MCP schema discovery and cannot be activated through the static lifecycle facade",
+                            package_ref.id
+                        ),
+                    });
+                }
+                // This projection facade has no runtime egress services, so it
+                // intentionally only supports static extension activation.
+                extension_management
+                    .activate(
+                        package_ref,
+                        crate::extension_lifecycle::ExtensionActivationMode::Static,
+                    )
+                    .await
             }
             LifecycleProductAction::ExtensionRemove { package_ref } => {
                 let Some(extension_management) = &self.extension_management else {
@@ -292,6 +316,12 @@ impl LifecycleProductFacade for RebornLocalLifecycleFacade {
         _context: LifecycleProductContext,
         package_ref: LifecyclePackageRef,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+        if package_ref.kind == LifecyclePackageKind::Extension {
+            let Some(extension_management) = &self.extension_management else {
+                return unsupported_projection(Some(package_ref));
+            };
+            return extension_management.project(package_ref).await;
+        }
         unsupported_projection(Some(package_ref))
     }
 }

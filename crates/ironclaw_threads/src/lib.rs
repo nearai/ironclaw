@@ -16,6 +16,7 @@ mod filesystem_service;
 mod identifiers;
 mod in_memory;
 mod service;
+mod summary_artifacts;
 mod tool_result_reference;
 
 pub use filesystem_service::FilesystemSessionThreadService;

@@ -83,6 +83,7 @@ async fn credential_selection_completes_account_selection_flow_once() {
         .expect("account");
     let flow = services
         .create_flow(NewAuthFlow {
+            id: None,
             scope: owner.clone(),
             kind: AuthFlowKind::IntegrationCredential,
             provider: provider(),
@@ -136,7 +137,7 @@ async fn auth_flow_record_source_returns_stable_sorted_snapshot() {
     let alice = oauth_flow(&services, scope("alice")).await;
     let bob = oauth_flow(&services, scope("bob")).await;
 
-    let snapshot = ironclaw_auth::AuthFlowRecordSource::flow_records_snapshot(&services);
+    let snapshot = services.flow_records_snapshot();
 
     let ids = snapshot.iter().map(|flow| flow.id).collect::<Vec<_>>();
     let mut sorted = ids.clone();
@@ -167,6 +168,7 @@ async fn credential_selection_rejects_unlisted_or_cross_scope_account() {
         .expect("account");
     let flow = services
         .create_flow(NewAuthFlow {
+            id: None,
             scope: owner.clone(),
             kind: AuthFlowKind::IntegrationCredential,
             provider: provider(),
@@ -471,6 +473,7 @@ async fn create_flow_rejects_invalid_update_binding() {
 
     let missing = services
         .create_flow(NewAuthFlow {
+            id: None,
             scope: owner.clone(),
             kind: AuthFlowKind::IntegrationCredential,
             provider: provider(),
@@ -511,6 +514,7 @@ async fn create_flow_rejects_invalid_update_binding() {
     };
     let authority_mismatch = services
         .create_flow(NewAuthFlow {
+            id: None,
             scope: owner,
             kind: AuthFlowKind::IntegrationCredential,
             provider: provider(),
@@ -644,6 +648,7 @@ async fn terminal_flow_status_is_not_rewritten_after_expiry() {
     let owner = scope("alice");
     let flow = services
         .create_flow(NewAuthFlow {
+            id: None,
             scope: owner.clone(),
             kind: AuthFlowKind::IntegrationCredential,
             provider: provider(),
@@ -690,6 +695,7 @@ async fn oauth_callback_marks_expired_flow_and_rejects_completion() {
     let owner = scope("alice");
     let flow = services
         .create_flow(NewAuthFlow {
+            id: None,
             scope: owner.clone(),
             kind: AuthFlowKind::IntegrationCredential,
             provider: provider(),

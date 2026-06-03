@@ -1,18 +1,61 @@
-import { html } from "../../../lib/html.js";
+import { React, html } from "../../../lib/html.js";
 import { MarkdownRenderer } from "./markdown-renderer.js";
 import { ToolActivity } from "./tool-activity.js";
 import { Icon } from "../../../design-system/icons.js";
+import { toast } from "../../../lib/toast.js";
 
+/* User keeps a tinted bubble; assistant is borderless (document-like);
+   system / error stay as centered tinted notices. Reasoning ("thinking")
+   renders as a collapsible disclosure (see ThinkingDisclosure). */
 const ROLE_STYLES = {
-  user: "ml-auto bg-signal/10 text-iron-100 border-signal/25",
-  assistant: "mr-auto bg-iron-800/58 text-iron-100 border-white/10",
-  system: "mx-auto bg-copper/10 text-copper border-copper/20 text-center",
-  error: "mx-auto bg-red-500/10 text-red-200 border-red-400/20 text-center",
+  user: "ml-auto rounded-[18px] border border-signal/25 bg-signal/10 px-4 py-3 text-iron-100",
+  assistant: "mr-auto px-1 text-iron-100",
+  system: "mx-auto rounded-[18px] border border-copper/20 bg-copper/10 px-4 py-3 text-center text-copper",
+  error: "mx-auto rounded-[18px] border border-red-400/20 bg-red-500/10 px-4 py-3 text-center text-red-200",
 };
 
+function formatTimestamp(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+}
+
+/* Collapsible provider-reasoning summary. Collapsed by default so the
+   thread stays clean; expands to the full reasoning markdown. Data comes
+   from the `thinking` projection item (PR #4230). */
+function ThinkingDisclosure({ content }) {
+  const [open, setOpen] = React.useState(false);
+  if (!content) return null;
+  return html`
+    <div className="flex flex-col items-start">
+      <button
+        type="button"
+        onClick=${() => setOpen((v) => !v)}
+        aria-expanded=${open ? "true" : "false"}
+        className="v2-button inline-flex items-center gap-1.5 border-0 bg-transparent px-1 py-1 text-xs font-medium text-iron-400 hover:text-iron-200"
+      >
+        <${Icon} name="spark" className="h-3.5 w-3.5" />
+        <span>${open ? "Hide reasoning" : "Reasoning"}</span>
+        <${Icon}
+          name="chevron"
+          className=${["h-3 w-3", open ? "rotate-180" : ""].join(" ")}
+        />
+      </button>
+      ${open &&
+      html`
+        <div className="mt-1 border-l-2 border-white/10 pl-3 text-iron-300">
+          <${MarkdownRenderer} content=${content} className="text-[13px]" />
+        </div>
+      `}
+    </div>
+  `;
+}
+
 export function MessageBubble({ message, onRetry }) {
-  const { role, content, images, attachments, generatedImages, isOptimistic, status, error, toolCalls } = message;
+  const { role, content, images, attachments, generatedImages, isOptimistic, status, error, toolCalls, timestamp } = message;
   const isUser = role === "user";
+  const [copied, setCopied] = React.useState(false);
 
   if (role === "tool_activity" || (toolCalls && toolCalls.length > 0)) {
     const activity = (toolCalls && toolCalls.length > 0)
@@ -22,6 +65,10 @@ export function MessageBubble({ message, onRetry }) {
         }
       : message;
     return html`<${ToolActivity} activity=${activity} />`;
+  }
+
+  if (role === "thinking") {
+    return html`<${ThinkingDisclosure} content=${content} />`;
   }
 
   if (role === "image") {
@@ -44,12 +91,26 @@ export function MessageBubble({ message, onRetry }) {
     `;
   }
 
+  const copy = React.useCallback(async () => {
+    try {
+      await navigator.clipboard.writeText(typeof content === "string" ? content : "");
+      setCopied(true);
+      toast("Copied to clipboard", { tone: "success" });
+      setTimeout(() => setCopied(false), 1400);
+    } catch {
+      // clipboard unavailable — no-op
+    }
+  }, [content]);
+
+  const timeLabel = formatTimestamp(timestamp);
+  const showActions = (role === "assistant" || role === "user") && !isOptimistic;
+
   return html`
-    <div className=${["flex", isUser ? "justify-end" : "justify-start"].join(" ")}>
+    <div className=${["group flex flex-col", isUser ? "items-end" : "items-start"].join(" ")}>
       <div className="flex min-w-0 max-w-[85%] flex-col gap-1">
         <div
           className=${[
-            "rounded-[18px] border px-4 py-3 text-sm leading-6",
+            "text-sm leading-6",
             ROLE_STYLES[role] || ROLE_STYLES.assistant,
             isOptimistic ? "opacity-70" : "",
           ].join(" ")}
@@ -61,15 +122,6 @@ export function MessageBubble({ message, onRetry }) {
           ${status === "error" && html`
             <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-red-300">
               <span>${error}</span>
-              ${onRetry && html`
-                <button
-                  type="button"
-                  onClick=${() => onRetry(message)}
-                  className="rounded-md border border-red-300/30 px-2 py-1 text-red-100 hover:bg-red-500/10"
-                >
-                  Retry
-                </button>
-              `}
             </div>
           `}
 
@@ -91,6 +143,39 @@ export function MessageBubble({ message, onRetry }) {
             </div>
           `}
         </div>
+
+        ${(showActions || status === "error" || timeLabel) && html`
+          <div
+            className=${[
+              "flex items-center gap-1.5 px-1 text-iron-400 opacity-0 group-hover:opacity-100 focus-within:opacity-100",
+              isUser ? "justify-end" : "justify-start",
+            ].join(" ")}
+          >
+            ${showActions && html`
+              <button
+                type="button"
+                onClick=${copy}
+                aria-label="Copy message"
+                className="v2-button inline-flex items-center gap-1 rounded-md border-0 bg-transparent px-1.5 py-1 text-[11px] hover:text-iron-100"
+              >
+                <${Icon} name=${copied ? "check" : "copy"} className="h-3.5 w-3.5" />
+                ${copied ? "Copied" : "Copy"}
+              </button>
+            `}
+            ${status === "error" && onRetry && html`
+              <button
+                type="button"
+                onClick=${() => onRetry(message)}
+                aria-label="Retry message"
+                className="v2-button inline-flex items-center gap-1 rounded-md border-0 bg-transparent px-1.5 py-1 text-[11px] text-red-300 hover:text-red-200"
+              >
+                <${Icon} name="retry" className="h-3.5 w-3.5" />
+                Retry
+              </button>
+            `}
+            ${timeLabel && html`<span className="font-mono text-[10px] text-iron-500">${timeLabel}</span>`}
+          </div>
+        `}
       </div>
     </div>
   `;

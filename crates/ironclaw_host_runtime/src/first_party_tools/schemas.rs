@@ -44,6 +44,106 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
         }),
         "schemas/builtin/http.input.v1.json" => http_schema(false),
         "schemas/builtin/http-save.input.v1.json" => http_schema(true),
+        "schemas/builtin/memory_search.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Preferred natural language search query for persistent memory"
+                },
+                "q": {
+                    "type": "string",
+                    "description": "Alias for query"
+                },
+                "text": {
+                    "type": "string",
+                    "description": "Alias for query"
+                },
+                "pattern": {
+                    "type": "string",
+                    "description": "Alias for query"
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 20,
+                    "default": 5,
+                    "description": "Maximum number of memory results to return"
+                }
+            },
+            "required": ["query"],
+            "additionalProperties": false
+        }),
+        "schemas/builtin/memory_write.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "content": {
+                    "type": "string",
+                    "description": "Full content to write or append"
+                },
+                "target": {
+                    "type": "string",
+                    "description": "Where to write: 'memory' for MEMORY.md, 'daily_log' for today's log, 'heartbeat' for HEARTBEAT.md checklist, 'bootstrap' to clear BOOTSTRAP.md (content is ignored; the file is always cleared), or a relative memory document path.",
+                    "default": "daily_log"
+                },
+                "append": {
+                    "type": "boolean",
+                    "description": "Append to existing content when true; replace when false",
+                    "default": true
+                },
+                "metadata": {
+                    "type": "object",
+                    "description": "Optional document metadata such as skip_indexing or skip_versioning"
+                },
+                "old_string": {
+                    "type": "string",
+                    "description": "Exact text to replace; switches to patch mode"
+                },
+                "new_string": {
+                    "type": "string",
+                    "description": "Replacement text for patch mode"
+                },
+                "replace_all": {
+                    "type": "boolean",
+                    "description": "Replace every old_string occurrence in patch mode",
+                    "default": false
+                },
+                "timezone": {
+                    "type": "string",
+                    "description": "IANA timezone used only for daily_log target date resolution"
+                }
+            },
+            "additionalProperties": false
+        }),
+        "schemas/builtin/memory_read.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Relative memory document path to read"
+                }
+            },
+            "required": ["path"],
+            "additionalProperties": false
+        }),
+        "schemas/builtin/memory_tree.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Relative memory directory path to list; omit for the memory root",
+                    "default": ""
+                },
+                "depth": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 10,
+                    "default": 1,
+                    "description": "Maximum directory depth to include"
+                }
+            },
+            "additionalProperties": false
+        }),
         "schemas/builtin/shell.input.v1.json" => json!({
             "type": "object",
             "properties": {
@@ -196,6 +296,42 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                 "name": { "type": "string", "description": "Name of the installed skill to remove" }
             },
             "required": ["name"],
+            "additionalProperties": false
+        }),
+        "schemas/builtin/trigger_create.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Human-readable trigger name. Runtime validation caps UTF-8 content at 256 bytes."
+                },
+                "prompt": {
+                    "type": "string",
+                    "description": "Prompt submitted when the trigger fires. Runtime validation caps UTF-8 content at 32768 bytes."
+                },
+                "cron": { "type": "string", "description": "Five-, six-, or seven-field cron expression; fire cadence must be at least one minute" }
+            },
+            "required": ["name", "prompt", "cron"],
+            "additionalProperties": false
+        }),
+        "schemas/builtin/trigger_list.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "limit": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 100,
+                    "description": "Maximum triggers to return. Defaults to 100."
+                }
+            },
+            "additionalProperties": false
+        }),
+        "schemas/builtin/trigger_remove.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "trigger_id": { "type": "string", "description": "Trigger id returned by trigger_create or trigger_list" }
+            },
+            "required": ["trigger_id"],
             "additionalProperties": false
         }),
         _ => return None,

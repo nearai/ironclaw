@@ -15,6 +15,7 @@ use ironclaw_host_runtime::{
 use ironclaw_product_workflow::{LifecyclePackageKind, LifecyclePackageRef, ProductWorkflowError};
 use serde::Deserialize;
 
+use crate::extension_lifecycle::ExtensionActivationMode;
 use crate::extension_lifecycle::RebornLocalExtensionManagementPort;
 
 pub(crate) const EXTENSION_SEARCH_CAPABILITY_ID: &str = "builtin.extension_search";
@@ -147,9 +148,12 @@ impl FirstPartyCapabilityHandler for ExtensionLifecycleToolHandler {
             }
             EXTENSION_ACTIVATE_CAPABILITY_ID => {
                 let input: ExtensionIdInput = parse_input(request.input)?;
-                self.extension_management
-                    .activate(extension_package_ref(input.extension_id)?)
-                    .await
+                let package_ref = extension_package_ref(input.extension_id)?;
+                let mode = ExtensionActivationMode::from_dispatch_context(
+                    request.scope.clone(),
+                    request.services.runtime_http_egress.clone(),
+                );
+                self.extension_management.activate(package_ref, mode).await
             }
             EXTENSION_REMOVE_CAPABILITY_ID => {
                 let input: ExtensionIdInput = parse_input(request.input)?;
@@ -323,6 +327,11 @@ mod tests {
         let after_activate = active_extension_capability_ids(&extension_management).await;
         assert!(after_activate.iter().any(|id| id == "github.search_issues"));
         assert!(after_activate.iter().any(|id| id == "github.get_issue"));
+        let health = runtime.health().await.expect("runtime health");
+        assert!(
+            !health.missing_runtime_backends.contains(&RuntimeKind::Wasm),
+            "activated GitHub WASM capabilities require a registered WASM runtime"
+        );
 
         let remove = invoke_json(
             runtime.as_ref(),

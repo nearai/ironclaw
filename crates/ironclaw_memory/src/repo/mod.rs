@@ -26,6 +26,13 @@ pub enum MemoryAppendOutcome {
     Conflict,
 }
 
+/// Result of an optimistic atomic document replacement attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryWriteOutcome {
+    Written,
+    Conflict,
+}
+
 /// Repository for file-shaped memory documents.
 ///
 /// Implementations own the actual source of truth, such as the existing
@@ -66,6 +73,21 @@ pub trait MemoryDocumentRepository: Send + Sync {
             path.virtual_path().unwrap_or_else(|_| valid_memory_path()),
             FilesystemOperation::AppendFile,
             "memory document repository does not support atomic append",
+        ))
+    }
+
+    async fn compare_and_write_document_with_options(
+        &self,
+        path: &MemoryDocumentPath,
+        expected_previous_hash: Option<&str>,
+        bytes: &[u8],
+        options: &MemoryWriteOptions,
+    ) -> Result<MemoryWriteOutcome, FilesystemError> {
+        let _ = (expected_previous_hash, bytes, options);
+        Err(memory_error(
+            path.virtual_path().unwrap_or_else(|_| valid_memory_path()),
+            FilesystemOperation::WriteFile,
+            "memory document repository does not support atomic write",
         ))
     }
 

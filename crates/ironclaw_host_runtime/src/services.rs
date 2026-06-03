@@ -369,6 +369,10 @@ where
             Arc::clone(&self.process_port),
             self.secret_store.clone(),
         );
+        if let Some(audit_sink) = &self.audit_sink {
+            invocation_services_resolver =
+                invocation_services_resolver.with_audit_sink(Arc::clone(audit_sink));
+        }
         if let Some(process_port) = &self.tenant_sandbox_process_port {
             invocation_services_resolver = invocation_services_resolver
                 .with_tenant_sandbox_process_port(Arc::clone(process_port));
@@ -495,6 +499,7 @@ where
             .runtime_policy
             .clone()
             .unwrap_or_else(local_testing_runtime_policy);
+        let surface_filesystem: Arc<dyn RootFilesystem> = self.filesystem.clone();
 
         let mut runtime = DefaultHostRuntime::from_shared_registry(
             Arc::clone(&self.registry),
@@ -503,6 +508,7 @@ where
             self.surface_version.clone(),
             runtime_policy,
         )
+        .with_surface_filesystem(surface_filesystem)
         .with_trust_policy_dyn(Arc::clone(&self.trust_policy))
         .with_process_manager(process_manager)
         .with_process_store(process_store)

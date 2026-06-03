@@ -17,22 +17,27 @@ use ironclaw_host_api::sha256_digest_token;
 use ironclaw_llm::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmProvider, Role,
     ToolCall, ToolCompletionRequest, ToolCompletionResponse, ToolDefinition, clean_response,
+    contains_codex_text_tool_call_syntax,
+    costs::{default_cost, model_cost},
+    recover_codex_text_tool_calls_from_tool_names,
 };
 use ironclaw_loop_support::{
     HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
     HostManagedModelMessage, HostManagedModelMessageRole, HostManagedModelRequest,
     HostManagedModelResponse, HostManagedModelRouteSnapshot, HostManagedToolResultContent,
-    ThreadBackedLoopContextPort, ThreadBackedLoopModelPort,
+    ModelCost, StaticModelCostTable, ThreadBackedLoopContextPort, ThreadBackedLoopModelPort,
 };
 use ironclaw_threads::{ProviderToolCallReferenceEnvelope, SessionThreadService, ThreadScope};
+use ironclaw_turns::run_profile::LoopModelUsage;
 use ironclaw_turns::{
     TurnId, TurnRunId,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, HostManagedLoopPromptPort,
-        InMemoryLoopHostMilestoneSink, LoopModelGateway, LoopModelGatewayError,
-        LoopModelGatewayRequest, LoopModelPort, LoopModelRequest, LoopModelResponse,
-        LoopPromptBundleRequest, LoopPromptPort, LoopRunContext, LoopSafeSummary, ModelProfileId,
-        PromptMode, ProviderToolCall, ProviderToolDefinition,
+        InMemoryInstructionMaterializationStore, InMemoryLoopHostMilestoneSink,
+        InstructionMaterializationStore, InstructionSafetyContext, LoopModelGateway,
+        LoopModelGatewayError, LoopModelGatewayRequest, LoopModelPort, LoopModelRequest,
+        LoopModelResponse, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext,
+        LoopSafeSummary, ModelProfileId, PromptMode, ProviderToolCall, ProviderToolDefinition,
     },
 };
 use tracing::debug;
@@ -67,6 +72,35 @@ impl LlmModelProfilePolicy {
     fn route_for(&self, model_profile_id: &ModelProfileId) -> Option<&LlmModelProfileRoute> {
         self.routes.get(model_profile_id)
     }
+
+    /// Build a [`StaticModelCostTable`] mapping every allowed `ModelProfileId`
+    /// to its per-token price via [`ironclaw_llm::costs::model_cost`].
+    /// Profiles whose `model_override` is unknown to the LLM cost table
+    /// fall back to [`ironclaw_llm::costs::default_cost`] (roughly GPT-4o
+    /// pricing) so the accountant always reconciles to a non-zero spend
+    /// for an unknown provider — fail-safe, not silent.
+    pub fn build_cost_table(&self) -> StaticModelCostTable {
+        let mut table = StaticModelCostTable::new();
+        for (profile_id, route) in &self.routes {
+            let cost = route
+                .model_override
+                .as_deref()
+                .and_then(model_cost)
+                .unwrap_or_else(default_cost);
+            table.insert(
+                profile_id.clone(),
+                ModelCost {
+                    input_per_token: cost.0,
+                    output_per_token: cost.1,
+                    // 0 = unknown; accountant falls back to its
+                    // `DEFAULT_MAX_OUTPUT_TOKENS` (8 KiB) for the
+                    // upfront reservation estimate.
+                    max_output_tokens: 0,
+                },
+            );
+        }
+        table
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -90,6 +124,7 @@ where
     thread_scope: ThreadScope,
     host_gateway: Arc<G>,
     max_messages: usize,
+    safety_context: InstructionSafetyContext,
 }
 
 impl<S, G> ThreadBackedLoopModelGateway<S, G>
@@ -102,12 +137,14 @@ where
         thread_scope: ThreadScope,
         host_gateway: Arc<G>,
         max_messages: usize,
+        safety_context: InstructionSafetyContext,
     ) -> Self {
         Self {
             thread_service,
             thread_scope,
             host_gateway,
             max_messages,
+            safety_context,
         }
     }
 }
@@ -122,8 +159,14 @@ where
         &self,
         request: LoopModelGatewayRequest,
     ) -> Result<LoopModelResponse, LoopModelGatewayError> {
-        self.issue_host_prompt_bundle(&request.context, &request.request)
-            .await?;
+        let instruction_materialization_store: Arc<dyn InstructionMaterializationStore> =
+            Arc::new(InMemoryInstructionMaterializationStore::default());
+        self.issue_host_prompt_bundle(
+            &request.context,
+            &request.request,
+            Arc::clone(&instruction_materialization_store),
+        )
+        .await?;
         ThreadBackedLoopModelPort::new(
             Arc::clone(&self.thread_service),
             self.thread_scope.clone(),
@@ -131,6 +174,7 @@ where
             Arc::clone(&self.host_gateway),
             self.max_messages,
         )
+        .with_instruction_materialization_store(instruction_materialization_store)
         .stream_model(request.request)
         .await
         .map_err(host_error_to_model_gateway_error)
@@ -146,6 +190,7 @@ where
         &self,
         context: &LoopRunContext,
         request: &LoopModelRequest,
+        instruction_materialization_store: Arc<dyn InstructionMaterializationStore>,
     ) -> Result<(), LoopModelGatewayError> {
         let context_port = Arc::new(ThreadBackedLoopContextPort::new(
             Arc::clone(&self.thread_service),
@@ -157,7 +202,9 @@ where
             context.clone(),
             context_port,
             Arc::new(InMemoryLoopHostMilestoneSink::default()),
-        );
+        )
+        .with_safety_context(self.safety_context.clone())
+        .with_instruction_materialization_store(instruction_materialization_store);
         let prompt_bundle = prompt_port
             .build_prompt_bundle(LoopPromptBundleRequest {
                 mode: PromptMode::TextOnly,
@@ -751,18 +798,23 @@ where
             );
         }
         if !tool_definitions.is_empty() {
-            let tool_request = ToolCompletionRequest::from_completion_request(
-                completion,
-                tool_definitions
-                    .into_iter()
-                    .map(provider_tool_definition_to_llm)
-                    .collect(),
-            );
+            let mut recovery_tool_names = Vec::with_capacity(tool_definitions.len());
+            let llm_tool_definitions = tool_definitions
+                .into_iter()
+                .map(|definition| {
+                    recovery_tool_names.push(definition.name.clone());
+                    provider_tool_definition_to_llm(definition)
+                })
+                .collect::<Vec<_>>();
+            let tool_request =
+                ToolCompletionRequest::from_completion_request(completion, llm_tool_definitions);
             debug!("reborn model gateway dispatching tool-capable provider request");
             let response = provider
                 .complete_with_tools(tool_request)
                 .await
                 .map_err(map_provider_error)?;
+            let response =
+                recover_textual_tool_calls_from_tool_response(response, &recovery_tool_names)?;
             return tool_response_to_host(
                 response,
                 capabilities,
@@ -792,6 +844,44 @@ where
         "reborn model gateway received text-only provider response"
     );
     response_to_host_reply(response)
+}
+
+fn recover_textual_tool_calls_from_tool_response(
+    response: ToolCompletionResponse,
+    tool_names: &[String],
+) -> Result<ToolCompletionResponse, HostManagedModelError> {
+    if !response.tool_calls.is_empty() {
+        return Ok(response);
+    }
+    let Some(content) = response.content.as_deref() else {
+        return Ok(response);
+    };
+    let recovered_tool_calls = recover_codex_text_tool_calls_from_tool_names(content, tool_names);
+    if recovered_tool_calls.is_empty() {
+        if contains_codex_text_tool_call_syntax(content) {
+            debug!("reborn model gateway rejected unrecovered textual provider tool-call syntax");
+            return Err(HostManagedModelError::safe(
+                HostManagedModelErrorKind::InvalidOutput,
+                "model returned textual tool-call syntax instead of structured tool calls",
+            ));
+        }
+        return Ok(response);
+    }
+
+    debug!(
+        recovered_tool_call_count = recovered_tool_calls.len(),
+        "reborn model gateway recovered capability calls from textual provider response"
+    );
+    Ok(ToolCompletionResponse {
+        content: Some(clean_response(content)),
+        tool_calls: recovered_tool_calls,
+        input_tokens: response.input_tokens,
+        output_tokens: response.output_tokens,
+        finish_reason: FinishReason::ToolUse,
+        cache_read_input_tokens: response.cache_read_input_tokens,
+        cache_creation_input_tokens: response.cache_creation_input_tokens,
+        reasoning: response.reasoning,
+    })
 }
 
 fn provider_tool_definition_to_llm(definition: ProviderToolDefinition) -> ToolDefinition {
@@ -871,13 +961,13 @@ async fn tool_response_to_host(
         for provider_call in &provider_calls {
             capabilities
                 .validate_provider_tool_call(provider_call)
-                .map_err(map_capability_host_error)?;
+                .map_err(map_provider_tool_output_error)?;
         }
         for provider_call in provider_calls {
             let candidate = capabilities
                 .register_provider_tool_call(provider_call)
                 .await
-                .map_err(map_capability_host_error)?;
+                .map_err(map_provider_tool_output_error)?;
             candidates.push(candidate);
         }
         debug!(
@@ -888,12 +978,22 @@ async fn tool_response_to_host(
             candidates,
             response.content.unwrap_or_default(),
             response.reasoning,
-        ));
+        )
+        .with_usage(LoopModelUsage {
+            input_tokens: response.input_tokens,
+            output_tokens: response.output_tokens,
+        }));
     }
 
     match response.finish_reason {
         FinishReason::Stop => {
             let content = clean_response(&response.content.unwrap_or_default());
+            if content.trim().is_empty() {
+                return Err(HostManagedModelError::safe(
+                    HostManagedModelErrorKind::InvalidOutput,
+                    "model returned an empty assistant response",
+                ));
+            }
             debug!(
                 content_bytes = content.len(),
                 "reborn model gateway classified tool-capable provider response as assistant reply"
@@ -901,7 +1001,11 @@ async fn tool_response_to_host(
             Ok(HostManagedModelResponse::assistant_reply_with_reasoning(
                 content,
                 response.reasoning,
-            ))
+            )
+            .with_usage(LoopModelUsage {
+                input_tokens: response.input_tokens,
+                output_tokens: response.output_tokens,
+            }))
         }
         FinishReason::Length => Err(HostManagedModelError::safe(
             HostManagedModelErrorKind::BudgetExceeded,
@@ -967,13 +1071,18 @@ fn sha256_hex_prefix(input: &[u8], len: usize) -> String {
 fn response_to_host_reply(
     response: CompletionResponse,
 ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+    let usage = LoopModelUsage {
+        input_tokens: response.input_tokens,
+        output_tokens: response.output_tokens,
+    };
     match response.finish_reason {
         FinishReason::Stop => {
             let content = clean_response(&response.content);
             Ok(HostManagedModelResponse::assistant_reply_with_reasoning(
                 content,
                 response.reasoning,
-            ))
+            )
+            .with_usage(usage))
         }
         FinishReason::Length => Err(HostManagedModelError::safe(
             HostManagedModelErrorKind::BudgetExceeded,
@@ -1018,6 +1127,18 @@ fn map_capability_host_error(error: AgentLoopHostError) -> HostManagedModelError
         | AgentLoopHostErrorKind::Internal => HostManagedModelErrorKind::Unavailable,
     };
     HostManagedModelError::safe(kind, error.safe_summary)
+}
+
+fn map_provider_tool_output_error(error: AgentLoopHostError) -> HostManagedModelError {
+    match error.kind {
+        AgentLoopHostErrorKind::Invalid | AgentLoopHostErrorKind::InvalidInvocation => {
+            HostManagedModelError::safe(
+                HostManagedModelErrorKind::InvalidOutput,
+                error.safe_summary,
+            )
+        }
+        _ => map_capability_host_error(error),
+    }
 }
 
 fn convert_messages(

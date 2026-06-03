@@ -150,6 +150,11 @@ async fn slack_events_handler(request: HttpRequest) -> HttpResponse {
 
 Function names in this sketch are illustrative. The actual implementation should bind to stable ProductWorkflow/RebornServices entrypoints and use the repo's owned Reborn task/runtime abstraction, not an ad-hoc unmanaged background process.
 
+**Immediate-ACK follow-up tracking**
+
+- The host ingress descriptor can only express pre-auth rate-limit buckets today. Slack verified-installation/workspace scoped buckets require either a post-verification Slack limiter or a generic ingress extension that can derive the bucket from verified webhook identity. Until that exists, PR1 uses a coarse pre-auth guard and tracks verified-installation scoping as follow-up work.
+- After Slack receives `200 OK`, transport retry is no longer available. If async ProductWorkflow dispatch later returns a retry disposition, the event is treated as a potential permanent drop and surfaced in logs. Durable post-ACK retry requires landing events in a durable queue/tracked runtime before the protocol ACK.
+
 ### PR2 — Shared outbound/final-reply delivery to Slack
 
 **Scope**

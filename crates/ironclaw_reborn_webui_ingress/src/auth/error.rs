@@ -10,6 +10,17 @@
 
 use thiserror::Error;
 
+/// Error raised while constructing an [`OAuthProvider`](super::provider::OAuthProvider).
+///
+/// The only failure today is the provider's `reqwest::Client` build,
+/// which only fails if the rustls / tokio runtime cannot initialize.
+/// Surfacing it as a `Result` from the provider factory (rather than
+/// panicking inside a constructor) lets the host composition layer
+/// fail startup loudly instead of aborting the process.
+#[derive(Debug, Error)]
+#[error("OAuth provider HTTP client init failed: {0}")]
+pub struct ProviderInitError(pub(crate) String);
+
 /// Errors produced by the OAuth backend.
 #[derive(Debug, Error)]
 pub enum OAuthError {

@@ -19,7 +19,7 @@ import { failureMessageForRunStatus } from "./failureMessages.js";
 // the item shapes.
 //
 // Items are externally-tagged enums so each entry carries exactly
-// one of `{ run_status, text, gate }` as a sub-object.
+// one of `{ run_status, thinking, text, gate }` as a sub-object.
 //
 // Status mapping (from `RunStatus.status`):
 //   "queued" | "running"           → processing
@@ -227,6 +227,10 @@ function applyProjectionItems({
       }
       if (TERMINAL_RUN_STATUSES.has(status)) {
         setIsProcessing(false);
+        setPendingGate(null);
+        setActiveRun?.(null);
+        activeRunId = null;
+        if (latestRunIdRef) latestRunIdRef.current = null;
         if (
           SUCCESS_RUN_STATUSES.has(status) &&
           onRunCompleted &&
@@ -284,7 +288,9 @@ function applyProjectionItems({
       // ProductProjectionItem::Text { id, body } — the body is the
       // assistant-visible reply text accumulated through projection.
       // Dedup by item id so repeated snapshots don't duplicate the
-      // same bubble.
+      // same bubble. Text can arrive in the same projection snapshot
+      // as a still-blocked gate, so terminal run_status is the only
+      // projection item that clears pendingGate.
       const messageId = `text-${item.text.id}`;
       setMessages((prev) => {
         const existing = prev.findIndex((m) => m.id === messageId);
@@ -302,7 +308,25 @@ function applyProjectionItems({
         return [...prev, next];
       });
       setIsProcessing(false);
-      setPendingGate(null);
+    }
+
+    if (item.thinking) {
+      const messageId = `thinking-${item.thinking.id}`;
+      setMessages((prev) => {
+        const existing = prev.findIndex((m) => m.id === messageId);
+        const next = {
+          id: messageId,
+          role: "thinking",
+          content: item.thinking.body || "",
+          timestamp: new Date().toISOString(),
+        };
+        if (existing >= 0) {
+          const copy = [...prev];
+          copy[existing] = next;
+          return copy;
+        }
+        return [...prev, next];
+      });
     }
 
     if (item.gate) {

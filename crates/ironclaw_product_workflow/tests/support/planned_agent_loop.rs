@@ -17,8 +17,8 @@ use ironclaw_loop_support::{
     HostIdentityContextSource, HostInputBatch, HostInputQueue, HostInputQueueError,
     HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
     HostManagedModelRequest, HostManagedModelResponse, JsonSpawnSubagentInputCodec,
-    LoopCapabilityResultWriter, ProductLiveCancellationProbe, RunCancellationFactory,
-    RunCancellationHandle,
+    LoopCapabilityPortFactory, LoopCapabilityResultWriter, ProductLiveCancellationProbe,
+    RunCancellationFactory, RunCancellationHandle,
 };
 use ironclaw_product_adapters::{
     AdapterInstallationId, AuthRequirement, ExternalActorRef, ExternalConversationRef,
@@ -31,7 +31,6 @@ use ironclaw_product_workflow::{
     InboundTurnService, ResolvedBinding,
 };
 use ironclaw_reborn::{
-    loop_driver_host::LoopCapabilityPortFactory,
     loop_exit_applier::ThreadCheckpointLoopExitEvidencePort,
     model_routes::{
         ModelRoute, ModelRoutePolicy, ModelSelectionMode, ModelSlot, StaticModelRouteResolver,
@@ -146,6 +145,7 @@ pub fn capability_call_response(
     HostManagedModelResponse {
         safe_text_deltas: Vec::new(),
         safe_reasoning_deltas: Vec::new(),
+        usage: None,
         output: ParentLoopOutput::CapabilityCalls(vec![CapabilityCallCandidate {
             surface_version: harness_surface_version(),
             capability_id: harness_capability_id(capability_id.into()),
@@ -548,6 +548,7 @@ impl ScriptedHostRuntimeToolCall {
         Ok(Some(HostManagedModelResponse {
             safe_text_deltas: Vec::new(),
             safe_reasoning_deltas: Vec::new(),
+            usage: None,
             output: ParentLoopOutput::CapabilityCalls(vec![CapabilityCallCandidate {
                 surface_version,
                 capability_id: self.capability_id.clone(),

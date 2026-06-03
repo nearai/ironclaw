@@ -8,12 +8,19 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::{
     CapabilityId, HostApiError, MountGrant, NetworkMethod, NetworkPolicy, ResourceScope,
     RuntimeKind, ScopedPath, SecretHandle,
 };
 
+/// Runtime HTTP request accepted by the host-owned egress service.
+///
+/// URL and header values may contain host-injected credential material after
+/// the service resolves approved credential injections. Those buffers are
+/// zeroized when the request is dropped; transport code may still need
+/// plaintext while dispatching the request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeHttpEgressRequest {
     pub runtime: RuntimeKind,
@@ -48,6 +55,32 @@ pub struct RuntimeHttpEgressRequest {
     /// runtime to its remaining execution deadline when applicable.
     pub timeout_ms: Option<u32>,
 }
+
+impl Drop for RuntimeHttpEgressRequest {
+    fn drop(&mut self) {
+        self.scrub_sensitive_url_and_headers();
+    }
+}
+
+impl RuntimeHttpEgressRequest {
+    fn scrub_sensitive_url_and_headers(&mut self) {
+        // Host credential injection currently writes secrets into URL components
+        // and header values. Header names and body payloads are separate
+        // caller-controlled data and need an explicit threat-model decision
+        // before broadening this carrier scrub scope.
+        self.url.zeroize();
+        for (_, value) in &mut self.headers {
+            value.zeroize();
+        }
+    }
+}
+
+impl ZeroizeOnDrop for RuntimeHttpEgressRequest {}
+
+const _: fn(&RuntimeHttpEgressRequest) = |request| {
+    fn require_zeroize_on_drop<T: ?Sized + ZeroizeOnDrop>(_: &T) {}
+    require_zeroize_on_drop(request);
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeHttpSaveTarget {
@@ -393,5 +426,43 @@ where
         request: RuntimeHttpEgressRequest,
     ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
         self.as_ref().execute(request).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{InvocationId, UserId};
+
+    #[test]
+    fn runtime_http_egress_request_scrubs_url_and_header_values() {
+        let mut request = RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::Script,
+            scope: ResourceScope::local_default(UserId::new("user1").unwrap(), InvocationId::new())
+                .unwrap(),
+            capability_id: CapabilityId::new("runtime.http").unwrap(),
+            method: NetworkMethod::Post,
+            url: "https://api.example.test/v1?token=sk-query-secret".to_string(),
+            headers: vec![(
+                "authorization".to_string(),
+                "Bearer sk-header-secret".to_string(),
+            )],
+            body: b"hello".to_vec(),
+            network_policy: NetworkPolicy {
+                allowed_targets: vec![],
+                deny_private_ip_ranges: true,
+                max_egress_bytes: Some(4096),
+            },
+            credential_injections: vec![],
+            response_body_limit: Some(4096),
+            save_body_to: None,
+            timeout_ms: None,
+        };
+
+        request.scrub_sensitive_url_and_headers();
+
+        assert!(request.url.is_empty());
+        assert_eq!(request.headers[0].0, "authorization");
+        assert!(request.headers[0].1.is_empty());
     }
 }

@@ -79,6 +79,18 @@ impl ExtensionInstallationStore for FilesystemExtensionInstallationStore {
         self.save_snapshot().await
     }
 
+    async fn upsert_manifest_and_installation(
+        &self,
+        manifest: ExtensionManifestRecord,
+        installation: ExtensionInstallation,
+    ) -> Result<(), ExtensionInstallationError> {
+        let _guard = self.save_lock.lock().await;
+        self.inner
+            .upsert_manifest_and_installation(manifest, installation)
+            .await?;
+        self.save_snapshot().await
+    }
+
     async fn list_installations(
         &self,
     ) -> Result<Vec<ExtensionInstallation>, ExtensionInstallationError> {

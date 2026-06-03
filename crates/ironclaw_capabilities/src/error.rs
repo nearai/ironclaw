@@ -118,12 +118,21 @@ impl From<DispatchError> for CapabilityInvocationError {
             DispatchError::AuthRequired {
                 capability,
                 required_secrets,
+                credential_requirements,
             } => Self::AuthorizationRequiresAuth {
                 capability,
                 required_secrets,
-                credential_requirements: Vec::new(),
+                credential_requirements,
             },
-            other => Self::Dispatch {
+            other @ (DispatchError::UnknownCapability { .. }
+            | DispatchError::UnknownProvider { .. }
+            | DispatchError::RuntimeMismatch { .. }
+            | DispatchError::MissingRuntimeBackend { .. }
+            | DispatchError::UnsupportedRuntime { .. }
+            | DispatchError::Mcp { .. }
+            | DispatchError::Script { .. }
+            | DispatchError::Wasm { .. }
+            | DispatchError::FirstParty { .. }) => Self::Dispatch {
                 kind: dispatch_error_kind(&other),
             },
         }
@@ -137,7 +146,10 @@ fn dispatch_error_kind(error: &DispatchError) -> DispatchFailureKind {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_host_api::{ExtensionId, RuntimeDispatchErrorKind, RuntimeKind, SecretHandle};
+    use ironclaw_host_api::{
+        ExtensionId, RuntimeCredentialAccountProviderId, RuntimeCredentialAuthRequirement,
+        RuntimeDispatchErrorKind, RuntimeKind, SecretHandle,
+    };
 
     fn cap() -> CapabilityId {
         CapabilityId::new("test.cap").unwrap()
@@ -264,6 +276,7 @@ mod tests {
             let err = CapabilityInvocationError::from(DispatchError::AuthRequired {
                 capability: cap(),
                 required_secrets: secrets.clone(),
+                credential_requirements: Vec::new(),
             });
             match err {
                 CapabilityInvocationError::AuthorizationRequiresAuth {
@@ -277,6 +290,33 @@ mod tests {
                 }
                 other => panic!("expected AuthorizationRequiresAuth, got {other:?}"),
             }
+        }
+    }
+
+    #[test]
+    fn from_dispatch_auth_required_round_trips_credential_requirements() {
+        let requirement = RuntimeCredentialAuthRequirement {
+            provider: RuntimeCredentialAccountProviderId::new("google").unwrap(),
+            requester_extension: ExtensionId::new("gmail").unwrap(),
+            provider_scopes: vec!["https://www.googleapis.com/auth/gmail.readonly".to_string()],
+        };
+        let err = CapabilityInvocationError::from(DispatchError::AuthRequired {
+            capability: cap(),
+            required_secrets: Vec::new(),
+            credential_requirements: vec![requirement.clone()],
+        });
+
+        match err {
+            CapabilityInvocationError::AuthorizationRequiresAuth {
+                capability,
+                required_secrets,
+                credential_requirements,
+            } => {
+                assert_eq!(capability, cap());
+                assert!(required_secrets.is_empty());
+                assert_eq!(credential_requirements, vec![requirement]);
+            }
+            other => panic!("expected AuthorizationRequiresAuth, got {other:?}"),
         }
     }
 }

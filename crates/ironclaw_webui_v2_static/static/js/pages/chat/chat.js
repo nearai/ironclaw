@@ -6,6 +6,7 @@ import { AuthTokenCard } from "./components/auth-token-card.js";
 import { ChatInput } from "./components/chat-input.js";
 import { ConnectionStatus } from "./components/connection-status.js";
 import { EmptyState } from "./components/empty-state.js";
+import { KeyboardShortcuts } from "./components/keyboard-shortcuts.js";
 import { MessageList } from "./components/message-list.js";
 import { RecoveryNotice } from "./components/recovery-notice.js";
 import { SuggestionChips } from "./components/suggestion-chips.js";
@@ -79,6 +80,24 @@ export function Chat({
     },
     [handleSend, setSuggestions]
   );
+
+  const [shortcutsOpen, setShortcutsOpen] = React.useState(false);
+  React.useEffect(() => {
+    const onKeyDown = (event) => {
+      if (event.key === "Escape") {
+        setShortcutsOpen(false);
+        return;
+      }
+      if (event.key !== "?") return;
+      const target = event.target;
+      const tag = target?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || target?.isContentEditable) return;
+      event.preventDefault();
+      setShortcutsOpen((open) => !open);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
 
   return html`
     <div className="flex h-full min-h-0 overflow-hidden">
@@ -168,6 +187,10 @@ export function Chat({
           />
         `}
       </div>
+      <${KeyboardShortcuts}
+        open=${shortcutsOpen}
+        onClose=${() => setShortcutsOpen(false)}
+      />
     </div>
   `;
 }

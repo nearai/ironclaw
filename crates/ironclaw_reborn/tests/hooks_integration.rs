@@ -98,10 +98,10 @@ use ironclaw_turns::{
         AgentLoopHostError, CapabilityBatchInvocation, CapabilityBatchOutcome,
         CapabilityDeniedReasonKind, CapabilityDescriptorView, CapabilityInputRef,
         CapabilityInvocation, CapabilityOutcome, CapabilityResultMessage, CapabilitySurfaceVersion,
-        InMemoryLoopHostMilestoneSink, LoopCapabilityPort, LoopCheckpointKind, LoopCheckpointPort,
-        LoopCheckpointRequest, LoopHostMilestoneKind, LoopModelPort, LoopModelRequest,
-        LoopPromptPort, LoopRunContext, LoopTranscriptPort, RunScopedHookMilestoneSink,
-        VisibleCapabilityRequest, VisibleCapabilitySurface,
+        InMemoryLoopHostMilestoneSink, InstructionSafetyContext, LoopCapabilityPort,
+        LoopCheckpointKind, LoopCheckpointPort, LoopCheckpointRequest, LoopHostMilestoneKind,
+        LoopModelPort, LoopModelRequest, LoopPromptPort, LoopRunContext, LoopTranscriptPort,
+        RunScopedHookMilestoneSink, VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
     runner::ClaimedTurnRun,
 };
@@ -1005,6 +1005,7 @@ impl Fixture {
                 max_messages: 8,
                 require_model_route_snapshot: false,
             },
+            InstructionSafetyContext::local_development_noop(),
         )
     }
 

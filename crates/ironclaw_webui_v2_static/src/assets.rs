@@ -62,6 +62,7 @@ mod tests {
         let use_chat = asset_text("js/pages/chat/hooks/useChat.js");
         assert!(use_chat.contains("AUTH_TOKEN_FLOW_TIMEOUT_MS"));
         assert!(use_chat.contains("authTokenSubmitRef"));
+        assert!(use_chat.contains("submitResponseResumedTurnGate"));
         assert!(use_chat.contains("submitManualToken({"));
         assert!(use_chat.contains("authTokenSubmitRef.current.credentialRef"));
         assert!(use_chat.contains("authTokenSubmitRef.current.inFlight"));
@@ -72,7 +73,71 @@ mod tests {
         );
         assert!(use_chat.contains("resolveGateRequest({"));
         assert!(use_chat.contains("resolution: \"credential_provided\""));
+        assert!(use_chat.contains("continuation?.type === \"turn_gate_resume\""));
         assert!(use_chat.contains("credentialRef"));
         assert!(use_chat.contains("safeAuthGateCode"));
+    }
+
+    #[test]
+    fn chat_cancelled_gate_resolution_exits_processing_state() {
+        let use_chat = asset_text("js/pages/chat/hooks/useChat.js");
+        assert!(
+            use_chat
+                .contains("resolution === \"approved\" || resolution === \"credential_provided\"")
+        );
+        assert!(use_chat.contains("setIsProcessing(shouldContinueProcessing);"));
+        assert!(use_chat.contains("setActiveRun(null);"));
+
+        let events = asset_text("js/pages/chat/lib/useChatEvents.js");
+        assert!(events.contains("TERMINAL_RUN_STATUSES.has(status)"));
+        assert!(events.contains("setPendingGate(null);"));
+        assert!(events.contains("setActiveRun?.(null);"));
+        assert!(events.contains("latestRunIdRef.current = null;"));
+    }
+
+    #[test]
+    fn chat_projection_text_preserves_pending_gate() {
+        let events = asset_text("js/pages/chat/lib/useChatEvents.js");
+        let text_branch = events
+            .split("if (item.text)")
+            .nth(1)
+            .expect("text projection branch exists")
+            .split("if (item.thinking)")
+            .next()
+            .expect("thinking branch follows text branch");
+        assert!(
+            text_branch.contains("terminal run_status is the only"),
+            "text branch should document that run_status owns gate clearing"
+        );
+        assert!(
+            !text_branch.contains("setPendingGate(null);"),
+            "projection text must not hide a still-blocked auth gate"
+        );
+    }
+
+    #[test]
+    fn extensions_onboarding_messages_render_in_cards() {
+        let extension_card = asset_text("js/pages/extensions/components/extension-card.js");
+
+        assert!(
+            extension_card.contains("state === \"setup_required\" || state === \"auth_required\""),
+            "setup/auth states must prefer credential setup instructions"
+        );
+        assert!(
+            extension_card.contains(
+                "ext.onboarding?.credential_instructions || ext.onboarding?.credential_next_step"
+            ),
+            "setup/auth onboarding should render credential instructions before next-step copy"
+        );
+        assert!(
+            extension_card.contains(
+                "ext.onboarding?.credential_next_step || ext.onboarding?.credential_instructions"
+            ),
+            "configured/no-credential onboarding should render next-step copy before setup copy"
+        );
+        assert!(
+            extension_card.contains("${onboardingHint}"),
+            "extension cards must render the projected onboarding hint"
+        );
     }
 }

@@ -5,11 +5,12 @@ use ironclaw_turns::TurnRunId;
 use tokio_postgres::Row;
 
 use crate::{
-    ClaimDueFireOutcome, ClaimDueFireRequest, ClaimedTriggerFire, FireAcceptedRequest,
-    FirePermanentFailedRequest, FireReplayedRequest, FireRetryableFailedRequest,
-    TriggerCompletionPolicy, TriggerError, TriggerId, TriggerRecord, TriggerRepository,
-    TriggerRunStatus, TriggerSchedule, TriggerSourceKind, TriggerState,
-    reject_failed_result_after_active_run, reject_non_future_next_run_at, reject_run_ref_rewrite,
+    ActiveTriggerScanCursor, ClaimDueFireOutcome, ClaimDueFireRequest, ClaimedTriggerFire,
+    ClearActiveFireRequest, FireAcceptedRequest, FirePermanentFailedRequest, FireReplayedRequest,
+    FireRetryableFailedRequest, FireTerminalFailedRequest, TriggerCompletionPolicy, TriggerError,
+    TriggerId, TriggerRecord, TriggerRepository, TriggerRunStatus, TriggerSchedule,
+    TriggerSourceKind, TriggerState, reject_failed_result_after_active_run,
+    reject_non_future_next_run_at, reject_run_ref_rewrite,
 };
 
 const TRIGGER_TABLE: &str = "trigger_records";
@@ -179,6 +180,46 @@ impl TriggerRepository for PostgresTriggerRepository {
         rows.into_iter().map(|row| row_to_record(&row)).collect()
     }
 
+    async fn list_scoped_triggers(
+        &self,
+        tenant_id: TenantId,
+        creator_user_id: UserId,
+        agent_id: Option<AgentId>,
+        project_id: Option<ProjectId>,
+        limit: usize,
+    ) -> Result<Vec<TriggerRecord>, TriggerError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let client = self.connect().await?;
+        let limit = limit.min(crate::MAX_TRIGGER_LIST_LIMIT) as i64;
+        let agent_id = agent_id.as_ref().map(AgentId::as_str);
+        let project_id = project_id.as_ref().map(ProjectId::as_str);
+        let rows = client
+            .query(
+                &format!(
+                    "SELECT {TRIGGER_COLUMNS}
+                     FROM {TRIGGER_TABLE}
+                     WHERE tenant_id = $1
+                       AND creator_user_id = $2
+                       AND agent_id IS NOT DISTINCT FROM $3
+                       AND project_id IS NOT DISTINCT FROM $4
+                     ORDER BY created_at, trigger_id
+                     LIMIT $5"
+                ),
+                &[
+                    &tenant_id.as_str(),
+                    &creator_user_id.as_str(),
+                    &agent_id,
+                    &project_id,
+                    &limit,
+                ],
+            )
+            .await
+            .map_err(|error| backend_error("query scoped trigger records", error))?;
+        rows.into_iter().map(|row| row_to_record(&row)).collect()
+    }
+
     async fn remove_trigger(
         &self,
         tenant_id: TenantId,
@@ -197,6 +238,45 @@ impl TriggerRepository for PostgresTriggerRepository {
             )
             .await
             .map_err(|error| backend_error("remove trigger record", error))?;
+        match row {
+            Some(row) => Ok(Some(row_to_record(&row)?)),
+            None => Ok(None),
+        }
+    }
+
+    async fn remove_scoped_trigger(
+        &self,
+        tenant_id: TenantId,
+        creator_user_id: UserId,
+        agent_id: Option<AgentId>,
+        project_id: Option<ProjectId>,
+        trigger_id: TriggerId,
+    ) -> Result<Option<TriggerRecord>, TriggerError> {
+        let client = self.connect().await?;
+        let trigger_id = trigger_id.to_string();
+        let agent_id = agent_id.as_ref().map(AgentId::as_str);
+        let project_id = project_id.as_ref().map(ProjectId::as_str);
+        let row = client
+            .query_opt(
+                &format!(
+                    "DELETE FROM {TRIGGER_TABLE}
+                     WHERE tenant_id = $1
+                       AND creator_user_id = $2
+                       AND agent_id IS NOT DISTINCT FROM $3
+                       AND project_id IS NOT DISTINCT FROM $4
+                       AND trigger_id = $5
+                     RETURNING {TRIGGER_COLUMNS}"
+                ),
+                &[
+                    &tenant_id.as_str(),
+                    &creator_user_id.as_str(),
+                    &agent_id,
+                    &project_id,
+                    &trigger_id,
+                ],
+            )
+            .await
+            .map_err(|error| backend_error("remove scoped trigger record", error))?;
         match row {
             Some(row) => Ok(Some(row_to_record(&row)?)),
             None => Ok(None),
@@ -230,6 +310,66 @@ impl TriggerRepository for PostgresTriggerRepository {
             )
             .await
             .map_err(|error| backend_error("query due trigger records", error))?;
+        rows.into_iter().map(|row| row_to_record(&row)).collect()
+    }
+
+    async fn list_active_triggers(&self, limit: usize) -> Result<Vec<TriggerRecord>, TriggerError> {
+        self.list_active_triggers_after(None, limit).await
+    }
+
+    async fn list_active_triggers_after(
+        &self,
+        after: Option<ActiveTriggerScanCursor>,
+        limit: usize,
+    ) -> Result<Vec<TriggerRecord>, TriggerError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let limit = limit.min(super::MAX_DUE_TRIGGER_POLL_LIMIT) as i64;
+        let client = self.connect().await?;
+        let rows = match after {
+            Some(cursor) => {
+                let active_fire_slot = fmt_ts(&cursor.active_fire_slot());
+                let trigger_id = cursor.trigger_id().to_string();
+                client
+                    .query(
+                        &format!(
+                            "SELECT {TRIGGER_COLUMNS}
+                             FROM {TRIGGER_TABLE}
+                             WHERE active_fire_slot IS NOT NULL
+                               AND (
+                                 active_fire_slot > $1
+                                 OR (active_fire_slot = $1 AND tenant_id > $2)
+                                 OR (active_fire_slot = $1 AND tenant_id = $2 AND trigger_id > $3)
+                               )
+                             ORDER BY active_fire_slot, tenant_id, trigger_id
+                             LIMIT $4"
+                        ),
+                        &[
+                            &active_fire_slot,
+                            &cursor.tenant_id().as_str(),
+                            &trigger_id,
+                            &limit,
+                        ],
+                    )
+                    .await
+            }
+            None => {
+                client
+                    .query(
+                        &format!(
+                            "SELECT {TRIGGER_COLUMNS}
+                             FROM {TRIGGER_TABLE}
+                             WHERE active_fire_slot IS NOT NULL
+                             ORDER BY active_fire_slot, tenant_id, trigger_id
+                             LIMIT $1"
+                        ),
+                        &[&limit],
+                    )
+                    .await
+            }
+        }
+        .map_err(|error| backend_error("query active trigger records", error))?;
         rows.into_iter().map(|row| row_to_record(&row)).collect()
     }
 
@@ -298,9 +438,15 @@ impl TriggerRepository for PostgresTriggerRepository {
         let trigger_id = request.trigger_id.to_string();
         let Some(record) = locked_record(&tx, request.tenant_id.as_str(), &trigger_id).await?
         else {
+            tx.rollback()
+                .await
+                .map_err(|error| backend_error("rollback terminal trigger fire failure", error))?;
             return Ok(None);
         };
         if record.active_fire_slot != Some(request.fire_slot) {
+            tx.rollback()
+                .await
+                .map_err(|error| backend_error("rollback terminal trigger fire failure", error))?;
             return Ok(None);
         }
         if let Some(active_run_ref) = record.active_run_ref {
@@ -309,40 +455,19 @@ impl TriggerRepository for PostgresTriggerRepository {
         }
         reject_non_future_next_run_at(request.fire_slot, request.next_run_at)?;
 
-        let submitted_at = fmt_ts(&request.submitted_at);
-        let fire_slot = fmt_ts(&request.fire_slot);
-        let next_run_at = fmt_ts(&request.next_run_at);
-        let active_run_ref = request.run_id.to_string();
-        let last_status = status_text(TriggerRunStatus::Ok);
-        let row = tx
-            .query_one(
-                &format!(
-                    "UPDATE {TRIGGER_TABLE}
-                     SET last_run_at = $3,
-                         last_fired_slot = $4,
-                         last_status = $5,
-                         next_run_at = $6,
-                         active_fire_slot = $4,
-                         active_run_ref = $7
-                     WHERE tenant_id = $1
-                       AND trigger_id = $2
-                       AND active_fire_slot = $4
-                       AND active_run_ref IS NULL
-                     RETURNING {TRIGGER_COLUMNS}"
-                ),
-                &[
-                    &request.tenant_id.as_str(),
-                    &trigger_id,
-                    &submitted_at,
-                    &fire_slot,
-                    &last_status,
-                    &next_run_at,
-                    &active_run_ref,
-                ],
-            )
-            .await
-            .map_err(|error| backend_error("mark accepted trigger fire", error))?;
-        let record = row_to_record(&row)?;
+        let record = mark_successful_fire_result(
+            &tx,
+            SuccessfulFireResultUpdate {
+                tenant_id: request.tenant_id.as_str(),
+                trigger_id: &trigger_id,
+                fire_slot: request.fire_slot,
+                run_id: request.run_id,
+                result_at: request.submitted_at,
+                next_run_at: request.next_run_at,
+                operation: "mark accepted trigger fire",
+            },
+        )
+        .await?;
         tx.commit()
             .await
             .map_err(|error| backend_error("commit accepted trigger fire", error))?;
@@ -372,40 +497,19 @@ impl TriggerRepository for PostgresTriggerRepository {
         }
         reject_non_future_next_run_at(request.fire_slot, request.next_run_at)?;
 
-        let replayed_at = fmt_ts(&request.replayed_at);
-        let fire_slot = fmt_ts(&request.fire_slot);
-        let next_run_at = fmt_ts(&request.next_run_at);
-        let active_run_ref = request.original_run_id.to_string();
-        let last_status = status_text(TriggerRunStatus::Ok);
-        let row = tx
-            .query_one(
-                &format!(
-                    "UPDATE {TRIGGER_TABLE}
-                     SET last_run_at = $3,
-                         last_fired_slot = $4,
-                         last_status = $5,
-                         next_run_at = $6,
-                         active_fire_slot = $4,
-                         active_run_ref = $7
-                     WHERE tenant_id = $1
-                       AND trigger_id = $2
-                       AND active_fire_slot = $4
-                       AND active_run_ref IS NULL
-                     RETURNING {TRIGGER_COLUMNS}"
-                ),
-                &[
-                    &request.tenant_id.as_str(),
-                    &trigger_id,
-                    &replayed_at,
-                    &fire_slot,
-                    &last_status,
-                    &next_run_at,
-                    &active_run_ref,
-                ],
-            )
-            .await
-            .map_err(|error| backend_error("mark replayed trigger fire", error))?;
-        let record = row_to_record(&row)?;
+        let record = mark_successful_fire_result(
+            &tx,
+            SuccessfulFireResultUpdate {
+                tenant_id: request.tenant_id.as_str(),
+                trigger_id: &trigger_id,
+                fire_slot: request.fire_slot,
+                run_id: request.original_run_id,
+                result_at: request.replayed_at,
+                next_run_at: request.next_run_at,
+                operation: "mark replayed trigger fire",
+            },
+        )
+        .await?;
         tx.commit()
             .await
             .map_err(|error| backend_error("commit replayed trigger fire", error))?;
@@ -522,6 +626,101 @@ impl TriggerRepository for PostgresTriggerRepository {
             .map_err(|error| backend_error("commit permanent trigger fire failure", error))?;
         Ok(Some(record))
     }
+
+    async fn mark_fire_terminally_failed(
+        &self,
+        request: FireTerminalFailedRequest,
+    ) -> Result<Option<TriggerRecord>, TriggerError> {
+        let mut client = self.connect().await?;
+        let tx = client
+            .transaction()
+            .await
+            .map_err(|error| backend_error("begin terminal trigger fire failure", error))?;
+        let trigger_id = request.trigger_id.to_string();
+        let Some(record) = locked_record(&tx, request.tenant_id.as_str(), &trigger_id).await?
+        else {
+            return Ok(None);
+        };
+        if record.active_fire_slot != Some(request.fire_slot) {
+            return Ok(None);
+        }
+        reject_failed_result_after_active_run(record.active_run_ref)?;
+
+        let last_status = status_text(TriggerRunStatus::Error);
+        let completed = state_text(TriggerState::Completed);
+        let fire_slot = fmt_ts(&request.fire_slot);
+        let row = tx
+            .query_opt(
+                &format!(
+                    "UPDATE {TRIGGER_TABLE}
+                     SET state = $3,
+                         last_status = $4,
+                         active_fire_slot = NULL,
+                         active_run_ref = NULL
+                     WHERE tenant_id = $1
+                       AND trigger_id = $2
+                       AND active_fire_slot = $5
+                       AND active_run_ref IS NULL
+                     RETURNING {TRIGGER_COLUMNS}"
+                ),
+                &[
+                    &request.tenant_id.as_str(),
+                    &trigger_id,
+                    &completed,
+                    &last_status,
+                    &fire_slot,
+                ],
+            )
+            .await
+            .map_err(|error| backend_error("mark terminal trigger fire failure", error))?;
+        let Some(row) = row else {
+            tx.commit()
+                .await
+                .map_err(|error| backend_error("commit terminal trigger fire failure", error))?;
+            return Ok(None);
+        };
+        let record = row_to_record(&row)?;
+        tx.commit()
+            .await
+            .map_err(|error| backend_error("commit terminal trigger fire failure", error))?;
+        Ok(Some(record))
+    }
+
+    async fn clear_active_fire(
+        &self,
+        request: ClearActiveFireRequest,
+    ) -> Result<Option<TriggerRecord>, TriggerError> {
+        let client = self.connect().await?;
+        let trigger_id = request.trigger_id.to_string();
+        let fire_slot = fmt_ts(&request.fire_slot);
+        let run_id = request.run_id.to_string();
+        // Keep active-fire clearing atomic as one predicate-guarded write.
+        let row = client
+            .query_opt(
+                &format!(
+                    "UPDATE {TRIGGER_TABLE}
+                     SET active_fire_slot = NULL,
+                         active_run_ref = NULL
+                     WHERE tenant_id = $1
+                       AND trigger_id = $2
+                       AND active_fire_slot = $3
+                       AND active_run_ref = $4
+                     RETURNING {TRIGGER_COLUMNS}"
+                ),
+                &[
+                    &request.tenant_id.as_str(),
+                    &trigger_id,
+                    &fire_slot,
+                    &run_id,
+                ],
+            )
+            .await
+            .map_err(|error| backend_error("clear active trigger fire", error))?;
+        match row {
+            Some(row) => Ok(Some(row_to_record(&row)?)),
+            None => Ok(None),
+        }
+    }
 }
 
 async fn locked_record(
@@ -542,6 +741,56 @@ async fn locked_record(
         .await
         .map_err(|error| backend_error("lock trigger record", error))?;
     row.map(|row| row_to_record(&row)).transpose()
+}
+
+async fn mark_successful_fire_result(
+    tx: &tokio_postgres::Transaction<'_>,
+    update: SuccessfulFireResultUpdate<'_>,
+) -> Result<TriggerRecord, TriggerError> {
+    let result_at = fmt_ts(&update.result_at);
+    let fire_slot = fmt_ts(&update.fire_slot);
+    let next_run_at = fmt_ts(&update.next_run_at);
+    let active_run_ref = update.run_id.to_string();
+    let last_status = status_text(TriggerRunStatus::Ok);
+    let row = tx
+        .query_one(
+            &format!(
+                "UPDATE {TRIGGER_TABLE}
+                 SET last_run_at = $3,
+                     last_fired_slot = $4,
+                     last_status = $5,
+                     next_run_at = $6,
+                     active_fire_slot = $4,
+                     active_run_ref = $7
+                 WHERE tenant_id = $1
+                   AND trigger_id = $2
+                   AND active_fire_slot = $4
+                   AND active_run_ref IS NULL
+                 RETURNING {TRIGGER_COLUMNS}"
+            ),
+            &[
+                &update.tenant_id,
+                &update.trigger_id,
+                &result_at,
+                &fire_slot,
+                &last_status,
+                &next_run_at,
+                &active_run_ref,
+            ],
+        )
+        .await
+        .map_err(|error| backend_error(update.operation, error))?;
+    row_to_record(&row)
+}
+
+struct SuccessfulFireResultUpdate<'a> {
+    tenant_id: &'a str,
+    trigger_id: &'a str,
+    fire_slot: Timestamp,
+    run_id: TurnRunId,
+    result_at: Timestamp,
+    next_run_at: Timestamp,
+    operation: &'static str,
 }
 
 fn row_to_record(row: &Row) -> Result<TriggerRecord, TriggerError> {
@@ -743,4 +992,11 @@ CREATE INDEX IF NOT EXISTS trigger_records_state_next_run_at_idx
 
 CREATE INDEX IF NOT EXISTS trigger_records_tenant_created_at_idx
     ON trigger_records (tenant_id, created_at, trigger_id);
+
+CREATE INDEX IF NOT EXISTS trigger_records_scoped_list_idx
+    ON trigger_records (tenant_id, creator_user_id, agent_id, project_id, created_at, trigger_id);
+
+CREATE INDEX IF NOT EXISTS trigger_records_active_fire_slot_idx
+    ON trigger_records (active_fire_slot, tenant_id, trigger_id)
+    WHERE active_fire_slot IS NOT NULL;
 "#;
