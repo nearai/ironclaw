@@ -1299,6 +1299,14 @@ async fn static_chat_hook_listens_for_oauth_callback_completion() {
         "chat hook must keep a localStorage fallback for browsers without BroadcastChannel"
     );
     assert!(
+        body.contains("window.localStorage?.getItem?.(OAUTH_CALLBACK_STORAGE_KEY)"),
+        "chat hook must poll localStorage in case the callback write happened before the storage event listener observed it"
+    );
+    assert!(
+        body.contains("oauthCompletionMatchesGate(payload, pendingGate, listeningSince)"),
+        "chat hook must match callback completion to the visible OAuth gate when continuation metadata is present"
+    );
+    assert!(
         body.contains(
             "setPendingGate((current) => (isPendingOAuthGate(current) ? null : current))"
         ),
@@ -1335,12 +1343,8 @@ async fn static_chat_events_clear_gate_when_run_resumes() {
         "typed running/progress events must clear stale gates for the resumed run"
     );
     assert!(
-        body.contains("clearPendingAuthGateForForwardProgress(setPendingGate)"),
-        "tool/reasoning/text forward progress must clear stale auth gates"
-    );
-    assert!(
-        body.contains("current?.kind === \"auth_required\" ? null : current"),
-        "forward progress must clear auth gates without dismissing approval/resource gates"
+        !body.contains("clearPendingAuthGateForForwardProgress"),
+        "tool/reasoning/text progress must not hide a still-blocked auth gate"
     );
 }
 

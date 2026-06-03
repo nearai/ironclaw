@@ -47,6 +47,17 @@ function isOAuthCallbackCompletion(payload) {
   return payload?.type === OAUTH_CALLBACK_MESSAGE_TYPE && payload?.status === "completed";
 }
 
+function oauthCompletionMatchesGate(payload, gate, listeningSince) {
+  if (!isOAuthCallbackCompletion(payload)) return false;
+  const continuation = payload?.continuation;
+  if (!continuation || continuation.type !== "turn_gate_resume") {
+    return Number(payload?.completedAt || 0) >= listeningSince;
+  }
+  if (continuation.turn_run_ref && continuation.turn_run_ref !== gate?.runId) return false;
+  if (continuation.gate_ref && continuation.gate_ref !== gate?.gateRef) return false;
+  return true;
+}
+
 function parseOAuthCallbackStoragePayload(value) {
   if (!value) return null;
   try {
@@ -126,9 +137,10 @@ export function useChat(threadId) {
 
   React.useEffect(() => {
     if (!isPendingOAuthGate(pendingGate)) return;
+    const listeningSince = Date.now();
 
     const handleCompletion = (payload) => {
-      if (!isOAuthCallbackCompletion(payload)) return;
+      if (!oauthCompletionMatchesGate(payload, pendingGate, listeningSince)) return;
       setPendingGate((current) => (isPendingOAuthGate(current) ? null : current));
       setIsProcessing(true);
     };
@@ -145,7 +157,20 @@ export function useChat(threadId) {
     };
 
     window.addEventListener("storage", onStorage);
+    handleCompletion(
+      parseOAuthCallbackStoragePayload(
+        window.localStorage?.getItem?.(OAUTH_CALLBACK_STORAGE_KEY),
+      ),
+    );
+    const timer = window.setInterval(() => {
+      handleCompletion(
+        parseOAuthCallbackStoragePayload(
+          window.localStorage?.getItem?.(OAUTH_CALLBACK_STORAGE_KEY),
+        ),
+      );
+    }, 500);
     return () => {
+      window.clearInterval(timer);
       if (channel) channel.close();
       window.removeEventListener("storage", onStorage);
     };

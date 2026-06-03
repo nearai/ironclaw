@@ -490,6 +490,7 @@ fn oauth_callback_completion_html(response: &RebornOAuthCallbackResponse) -> Res
         "type": MESSAGE_TYPE,
         "flowId": response.flow_id,
         "status": response.status,
+        "continuation": response.continuation,
     })
     .to_string();
     let html = format!(

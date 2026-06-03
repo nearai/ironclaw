@@ -1255,6 +1255,7 @@ async fn product_auth_google_oauth_browser_callback_notifies_chat_without_secret
     assert!(callback_body.contains("ironclaw:product-auth:oauth-complete"));
     assert!(callback_body.contains("ironclaw-product-auth"));
     assert!(callback_body.contains(start_json["flow_id"].as_str().expect("flow id")));
+    assert!(callback_body.contains("\"continuation\""));
     assert!(!callback_body.contains(&state));
     assert!(!callback_body.contains("google-auth-code"));
     assert_eq!(dispatcher.events().len(), 1);
