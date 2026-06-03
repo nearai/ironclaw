@@ -203,6 +203,14 @@ pub struct RebornListAutomationsResponse {
     pub automations: Vec<RebornAutomationInfo>,
 }
 
+/// Allowlisted terminal status exposed by automation list projections.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RebornAutomationRunStatus {
+    Ok,
+    Error,
+}
+
 /// Browser-safe automation row returned by the WebUI facade.
 ///
 /// This deliberately exposes source, state, run timestamps, and sanitized
@@ -218,7 +226,7 @@ pub struct RebornAutomationInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_run_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_status: Option<serde_json::Value>,
+    pub last_status: Option<RebornAutomationRunStatus>,
     #[serde(default)]
     pub is_active: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]

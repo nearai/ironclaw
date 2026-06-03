@@ -173,7 +173,7 @@ fn expected_table() -> Vec<Expected> {
             websocket_origin: WebSocketOriginPolicy::NotApplicable,
             streaming: StreamingMode::None,
             audit: AuditTraceClass::UserAction,
-            effect_path: AllowedEffectPath::ProjectionOnly,
+            effect_path: AllowedEffectPath::ProductWorkflow,
         },
         Expected {
             route_id: WEBUI_V2_ROUTE_STREAM_EVENTS_WS,
@@ -207,7 +207,7 @@ fn expected_table() -> Vec<Expected> {
             websocket_origin: WebSocketOriginPolicy::NotApplicable,
             streaming: StreamingMode::None,
             audit: AuditTraceClass::UserAction,
-            effect_path: AllowedEffectPath::ProjectionOnly,
+            effect_path: AllowedEffectPath::ProductWorkflow,
         },
         Expected {
             route_id: WEBUI_V2_ROUTE_LIST_EXTENSIONS,

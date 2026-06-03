@@ -62,7 +62,7 @@ impl RebornWebuiAutomationFacade {
             CapabilityId::new(capability_id).map_err(|_| internal_invariant())?,
             ResourceEstimate::default(),
             input,
-            trigger_trust_decision(capability_id),
+            trigger_trust_decision(),
         );
 
         match self.host_runtime.invoke_capability(request).await {
@@ -136,7 +136,7 @@ fn trigger_execution_context(
             grantee: Principal::Extension(extension_id.clone()),
             issued_by: Principal::HostRuntime,
             constraints: GrantConstraints {
-                allowed_effects: trigger_allowed_effects(capability_id),
+                allowed_effects: trigger_allowed_effects(),
                 mounts: MountView::new(Vec::new()).map_err(|_| internal_invariant())?,
                 network: NetworkPolicy::default(),
                 secrets: Vec::new(),
@@ -168,11 +168,11 @@ fn trigger_execution_context(
     Ok(context)
 }
 
-fn trigger_trust_decision(capability_id: &str) -> TrustDecision {
+fn trigger_trust_decision() -> TrustDecision {
     TrustDecision {
         effective_trust: EffectiveTrustClass::user_trusted(),
         authority_ceiling: AuthorityCeiling {
-            allowed_effects: trigger_allowed_effects(capability_id),
+            allowed_effects: trigger_allowed_effects(),
             max_resource_ceiling: None,
         },
         provenance: TrustProvenance::Default,
@@ -180,8 +180,7 @@ fn trigger_trust_decision(capability_id: &str) -> TrustDecision {
     }
 }
 
-fn trigger_allowed_effects(capability_id: &str) -> Vec<EffectKind> {
-    let _ = capability_id;
+fn trigger_allowed_effects() -> Vec<EffectKind> {
     vec![EffectKind::DispatchCapability]
 }
 
@@ -280,11 +279,14 @@ mod tests {
     use std::sync::Arc;
 
     use async_trait::async_trait;
-    use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
+    use ironclaw_host_api::{
+        AgentId, ApprovalRequestId, ProcessId, ProjectId, SecretHandle, TenantId, UserId,
+    };
     use ironclaw_host_runtime::{
-        HostRuntime, HostRuntimeError, RuntimeCapabilityCompleted, RuntimeCapabilityFailure,
-        RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeFailureKind,
-        TRIGGER_LIST_CAPABILITY_ID,
+        HostRuntime, HostRuntimeError, RuntimeApprovalGate, RuntimeAuthGate, RuntimeBlockedReason,
+        RuntimeCapabilityCompleted, RuntimeCapabilityFailure, RuntimeCapabilityOutcome,
+        RuntimeCapabilityRequest, RuntimeCapabilityUnknown, RuntimeFailureKind, RuntimeGateId,
+        RuntimeProcessHandle, RuntimeResourceGate, TRIGGER_LIST_CAPABILITY_ID,
     };
     use ironclaw_product_workflow::{
         RebornServicesErrorCode, RebornServicesErrorKind, WebUiAuthenticatedCaller,
@@ -340,6 +342,170 @@ mod tests {
         assert_eq!(error.status_code, 503);
         assert!(error.retryable);
         assert!(!format!("{error:?}").contains("redacted runtime details"));
+    }
+
+    #[tokio::test]
+    async fn automation_facade_maps_blocked_and_unknown_outcomes() {
+        let capability_id =
+            ironclaw_host_api::CapabilityId::new(TRIGGER_LIST_CAPABILITY_ID).expect("capability");
+        let cases = [
+            (
+                RuntimeCapabilityOutcome::ApprovalRequired(RuntimeApprovalGate {
+                    approval_request_id: ApprovalRequestId::new(),
+                    capability_id: capability_id.clone(),
+                    reason: RuntimeBlockedReason::ApprovalRequired,
+                }),
+                RebornServicesErrorCode::Conflict,
+                RebornServicesErrorKind::BlockedApproval,
+                409,
+                false,
+            ),
+            (
+                RuntimeCapabilityOutcome::AuthRequired(RuntimeAuthGate {
+                    gate_id: RuntimeGateId::new(),
+                    capability_id: capability_id.clone(),
+                    reason: RuntimeBlockedReason::AuthRequired,
+                    required_secrets: vec![SecretHandle::new("automation_token").expect("secret")],
+                    credential_requirements: Vec::new(),
+                }),
+                RebornServicesErrorCode::Forbidden,
+                RebornServicesErrorKind::BlockedAuthentication,
+                403,
+                false,
+            ),
+            (
+                RuntimeCapabilityOutcome::ResourceBlocked(RuntimeResourceGate {
+                    gate_id: RuntimeGateId::new(),
+                    capability_id: capability_id.clone(),
+                    reason: RuntimeBlockedReason::ResourceLimit,
+                    estimate: ironclaw_host_api::ResourceEstimate::default(),
+                }),
+                RebornServicesErrorCode::Unavailable,
+                RebornServicesErrorKind::BlockedResource,
+                503,
+                true,
+            ),
+            (
+                RuntimeCapabilityOutcome::SpawnedProcess(RuntimeProcessHandle {
+                    process_id: ProcessId::new(),
+                    capability_id: capability_id.clone(),
+                }),
+                RebornServicesErrorCode::Unavailable,
+                RebornServicesErrorKind::ServiceUnavailable,
+                503,
+                true,
+            ),
+            (
+                RuntimeCapabilityOutcome::Unknown(RuntimeCapabilityUnknown {
+                    capability_id,
+                    kind: "future_outcome".to_string(),
+                    message: Some("internal details".to_string()),
+                }),
+                RebornServicesErrorCode::Internal,
+                RebornServicesErrorKind::Internal,
+                500,
+                false,
+            ),
+        ];
+
+        for (outcome, code, kind, status_code, retryable) in cases {
+            let facade =
+                RebornWebuiAutomationFacade::new(Arc::new(OutcomeHostRuntime::new(outcome)));
+
+            let error = facade
+                .list_triggers(caller(), None)
+                .await
+                .expect_err("outcome should map to services error");
+
+            assert_eq!(error.code, code);
+            assert_eq!(error.kind, kind);
+            assert_eq!(error.status_code, status_code);
+            assert_eq!(error.retryable, retryable);
+        }
+    }
+
+    #[tokio::test]
+    async fn automation_facade_maps_runtime_failure_branches() {
+        let cases = [
+            (
+                RuntimeFailureKind::InvalidInput,
+                RebornServicesErrorCode::InvalidRequest,
+                RebornServicesErrorKind::Validation,
+                400,
+                false,
+            ),
+            (
+                RuntimeFailureKind::Authorization,
+                RebornServicesErrorCode::Forbidden,
+                RebornServicesErrorKind::ParticipantDenied,
+                403,
+                false,
+            ),
+            (
+                RuntimeFailureKind::PolicyDenied,
+                RebornServicesErrorCode::Forbidden,
+                RebornServicesErrorKind::ParticipantDenied,
+                403,
+                false,
+            ),
+            (
+                RuntimeFailureKind::Cancelled,
+                RebornServicesErrorCode::Conflict,
+                RebornServicesErrorKind::Conflict,
+                409,
+                false,
+            ),
+        ];
+
+        for (failure_kind, code, kind, status_code, retryable) in cases {
+            let facade =
+                RebornWebuiAutomationFacade::new(Arc::new(FailingHostRuntime::new(failure_kind)));
+
+            let error = facade
+                .list_triggers(caller(), Some(10))
+                .await
+                .expect_err("runtime failure should map to services error");
+
+            assert_eq!(error.code, code);
+            assert_eq!(error.kind, kind);
+            assert_eq!(error.status_code, status_code);
+            assert_eq!(error.retryable, retryable);
+        }
+    }
+
+    #[tokio::test]
+    async fn automation_facade_maps_host_runtime_errors() {
+        let cases = [
+            (
+                HostRuntimeError::invalid_request("bad runtime request"),
+                RebornServicesErrorCode::Internal,
+                RebornServicesErrorKind::Internal,
+                500,
+                false,
+            ),
+            (
+                HostRuntimeError::unavailable("runtime down"),
+                RebornServicesErrorCode::Unavailable,
+                RebornServicesErrorKind::ServiceUnavailable,
+                503,
+                true,
+            ),
+        ];
+
+        for (host_error, code, kind, status_code, retryable) in cases {
+            let facade =
+                RebornWebuiAutomationFacade::new(Arc::new(ErrorHostRuntime::new(host_error)));
+
+            let error = facade
+                .list_triggers(caller(), Some(10))
+                .await
+                .expect_err("host runtime error should map to services error");
+
+            assert_eq!(error.code, code);
+            assert_eq!(error.kind, kind);
+            assert_eq!(error.status_code, status_code);
+            assert_eq!(error.retryable, retryable);
+        }
     }
 
     fn caller() -> WebUiAuthenticatedCaller {
@@ -422,6 +588,114 @@ mod tests {
     impl FailingHostRuntime {
         fn new(kind: RuntimeFailureKind) -> Self {
             Self { kind }
+        }
+    }
+
+    struct OutcomeHostRuntime {
+        outcome: RuntimeCapabilityOutcome,
+    }
+
+    impl OutcomeHostRuntime {
+        fn new(outcome: RuntimeCapabilityOutcome) -> Self {
+            Self { outcome }
+        }
+    }
+
+    #[async_trait]
+    impl HostRuntime for OutcomeHostRuntime {
+        async fn invoke_capability(
+            &self,
+            _request: RuntimeCapabilityRequest,
+        ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
+            Ok(self.outcome.clone())
+        }
+
+        async fn resume_capability(
+            &self,
+            _request: ironclaw_host_runtime::RuntimeCapabilityResumeRequest,
+        ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
+            unreachable!("resume capability is not used in automation facade tests")
+        }
+
+        async fn visible_capabilities(
+            &self,
+            _request: ironclaw_host_runtime::VisibleCapabilityRequest,
+        ) -> Result<ironclaw_host_runtime::VisibleCapabilitySurface, HostRuntimeError> {
+            unreachable!("visible capabilities are not used in automation facade tests")
+        }
+
+        async fn cancel_work(
+            &self,
+            _request: ironclaw_host_runtime::CancelRuntimeWorkRequest,
+        ) -> Result<ironclaw_host_runtime::CancelRuntimeWorkOutcome, HostRuntimeError> {
+            unreachable!("cancel work is not used in automation facade tests")
+        }
+
+        async fn runtime_status(
+            &self,
+            _request: ironclaw_host_runtime::RuntimeStatusRequest,
+        ) -> Result<ironclaw_host_runtime::HostRuntimeStatus, HostRuntimeError> {
+            unreachable!("runtime status is not used in automation facade tests")
+        }
+
+        async fn health(
+            &self,
+        ) -> Result<ironclaw_host_runtime::HostRuntimeHealth, HostRuntimeError> {
+            unreachable!("health is not used in automation facade tests")
+        }
+    }
+
+    struct ErrorHostRuntime {
+        error: HostRuntimeError,
+    }
+
+    impl ErrorHostRuntime {
+        fn new(error: HostRuntimeError) -> Self {
+            Self { error }
+        }
+    }
+
+    #[async_trait]
+    impl HostRuntime for ErrorHostRuntime {
+        async fn invoke_capability(
+            &self,
+            _request: RuntimeCapabilityRequest,
+        ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
+            Err(self.error.clone())
+        }
+
+        async fn resume_capability(
+            &self,
+            _request: ironclaw_host_runtime::RuntimeCapabilityResumeRequest,
+        ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
+            unreachable!("resume capability is not used in automation facade tests")
+        }
+
+        async fn visible_capabilities(
+            &self,
+            _request: ironclaw_host_runtime::VisibleCapabilityRequest,
+        ) -> Result<ironclaw_host_runtime::VisibleCapabilitySurface, HostRuntimeError> {
+            unreachable!("visible capabilities are not used in automation facade tests")
+        }
+
+        async fn cancel_work(
+            &self,
+            _request: ironclaw_host_runtime::CancelRuntimeWorkRequest,
+        ) -> Result<ironclaw_host_runtime::CancelRuntimeWorkOutcome, HostRuntimeError> {
+            unreachable!("cancel work is not used in automation facade tests")
+        }
+
+        async fn runtime_status(
+            &self,
+            _request: ironclaw_host_runtime::RuntimeStatusRequest,
+        ) -> Result<ironclaw_host_runtime::HostRuntimeStatus, HostRuntimeError> {
+            unreachable!("runtime status is not used in automation facade tests")
+        }
+
+        async fn health(
+            &self,
+        ) -> Result<ironclaw_host_runtime::HostRuntimeHealth, HostRuntimeError> {
+            unreachable!("health is not used in automation facade tests")
         }
     }
 

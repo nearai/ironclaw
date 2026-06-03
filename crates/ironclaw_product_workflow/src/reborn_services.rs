@@ -60,15 +60,15 @@ mod types;
 
 pub use error::{RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind};
 pub use types::{
-    RebornAutomationInfo, RebornAutomationSource, RebornCancelRunResponse,
-    RebornCreateThreadResponse, RebornExtensionActionResponse, RebornExtensionCredentialSetup,
-    RebornExtensionInfo, RebornExtensionListResponse, RebornExtensionOnboardingPayload,
-    RebornExtensionOnboardingState, RebornExtensionRegistryEntry, RebornExtensionRegistryResponse,
-    RebornExtensionSetupField, RebornExtensionSetupSecret, RebornGetRunStateRequest,
-    RebornGetRunStateResponse, RebornListAutomationsResponse, RebornListThreadsResponse,
-    RebornResolveGateResponse, RebornResumeGateResponse, RebornSetupExtensionResponse,
-    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
-    RebornTimelineRequest, RebornTimelineResponse,
+    RebornAutomationInfo, RebornAutomationRunStatus, RebornAutomationSource,
+    RebornCancelRunResponse, RebornCreateThreadResponse, RebornExtensionActionResponse,
+    RebornExtensionCredentialSetup, RebornExtensionInfo, RebornExtensionListResponse,
+    RebornExtensionOnboardingPayload, RebornExtensionOnboardingState, RebornExtensionRegistryEntry,
+    RebornExtensionRegistryResponse, RebornExtensionSetupField, RebornExtensionSetupSecret,
+    RebornGetRunStateRequest, RebornGetRunStateResponse, RebornListAutomationsResponse,
+    RebornListThreadsResponse, RebornResolveGateResponse, RebornResumeGateResponse,
+    RebornSetupExtensionResponse, RebornStreamEventsRequest, RebornStreamEventsResponse,
+    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
 };
 
 type SkillActivationRecorder =
@@ -885,6 +885,13 @@ impl RebornServicesApi for RebornServices {
         caller: WebUiAuthenticatedCaller,
         request: WebUiListAutomationsRequest,
     ) -> Result<RebornListAutomationsResponse, RebornServicesError> {
+        if caller.agent_id.is_none() {
+            return Err(RebornServicesError::from_status(
+                RebornServicesErrorCode::InvalidRequest,
+                400,
+                false,
+            ));
+        }
         let command = request.into_command(caller);
         let WebUiInboundCommand::ListAutomations { caller, limit } = command else {
             return Err(RebornServicesError::internal_invariant());
@@ -970,7 +977,7 @@ struct RawAutomationRecord {
     #[serde(default)]
     last_run_at: Option<DateTime<Utc>>,
     #[serde(default)]
-    last_status: Option<Value>,
+    last_status: Option<RebornAutomationRunStatus>,
     #[serde(default)]
     is_active: bool,
     #[serde(default)]
@@ -980,36 +987,68 @@ struct RawAutomationRecord {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 enum RawAutomationSchedule {
-    Cron { expression: String },
+    Cron {
+        expression: String,
+    },
+    #[serde(other)]
+    Unknown,
 }
 
 fn parse_list_automations_output(
-    output: Value,
+    mut output: Value,
 ) -> Result<Vec<RebornAutomationInfo>, RebornServicesError> {
-    let envelope: RawAutomationListEnvelope =
-        serde_json::from_value(output).map_err(|_| RebornServicesError::internal_invariant())?;
-    Ok(envelope.triggers.into_iter().map(automation_info).collect())
+    sanitize_automation_list_output(&mut output);
+    let envelope: RawAutomationListEnvelope = serde_json::from_value(output).map_err(|error| {
+        tracing::warn!(
+            error = %error,
+            "malformed automation list output from product facade"
+        );
+        RebornServicesError::internal_invariant()
+    })?;
+    Ok(envelope
+        .triggers
+        .into_iter()
+        .filter_map(automation_info)
+        .collect())
 }
 
-fn automation_info(record: RawAutomationRecord) -> RebornAutomationInfo {
-    RebornAutomationInfo {
+fn automation_info(record: RawAutomationRecord) -> Option<RebornAutomationInfo> {
+    Some(RebornAutomationInfo {
         automation_id: record.trigger_id,
         name: record.name,
-        source: automation_source(record.schedule),
+        source: automation_source(record.schedule)?,
         state: record.state,
         next_run_at: record.next_run_at,
         last_run_at: record.last_run_at,
         last_status: record.last_status,
         is_active: record.is_active,
         created_at: record.created_at,
+    })
+}
+
+fn automation_source(schedule: RawAutomationSchedule) -> Option<RebornAutomationSource> {
+    match schedule {
+        RawAutomationSchedule::Cron { expression } => {
+            Some(RebornAutomationSource::Schedule { cron: expression })
+        }
+        RawAutomationSchedule::Unknown => None,
     }
 }
 
-fn automation_source(schedule: RawAutomationSchedule) -> RebornAutomationSource {
-    match schedule {
-        RawAutomationSchedule::Cron { expression } => {
-            RebornAutomationSource::Schedule { cron: expression }
-        }
+fn sanitize_automation_list_output(output: &mut Value) {
+    let Some(triggers) = output.get_mut("triggers").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for trigger in triggers {
+        let Some(trigger_object) = trigger.as_object_mut() else {
+            continue;
+        };
+        let status = match trigger_object.get("last_status").and_then(Value::as_str) {
+            Some("ok") => Value::String("ok".to_string()),
+            Some("error") => Value::String("error".to_string()),
+            _ => Value::Null,
+        };
+        trigger_object.insert("last_status".to_string(), status);
     }
 }
 

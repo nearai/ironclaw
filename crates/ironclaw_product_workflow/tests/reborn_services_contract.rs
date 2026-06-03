@@ -21,15 +21,15 @@ use ironclaw_product_workflow::{
     LifecycleProductFacade, LifecycleProductPayload, LifecycleProductResponse,
     LifecycleReadinessBlocker, ListPendingApprovalsRequest, ListPendingApprovalsResponse,
     ListPendingAuthInteractionsRequest, ListPendingAuthInteractionsResponse, ProductWorkflowError,
-    RebornAutomationSource, RebornExtensionOnboardingState, RebornGetRunStateRequest,
-    RebornResolveGateResponse, RebornServices, RebornServicesApi, RebornServicesError,
-    RebornServicesErrorCode, RebornServicesErrorKind, RebornStreamEventsRequest,
-    RebornSubmitTurnResponse, RebornTimelineRequest, ResolveApprovalInteractionRequest,
-    ResolveApprovalInteractionResponse, ResolveAuthInteractionRequest,
-    ResolveAuthInteractionResponse, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
-    WebUiCreateThreadRequest, WebUiInboundValidationCode, WebUiListAutomationsRequest,
-    WebUiListThreadsRequest, WebUiResolveGateRequest, WebUiSendMessageRequest,
-    WebUiSetupExtensionRequest, approval_gate_ref,
+    RebornAutomationRunStatus, RebornAutomationSource, RebornExtensionOnboardingState,
+    RebornGetRunStateRequest, RebornResolveGateResponse, RebornServices, RebornServicesApi,
+    RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
+    RebornStreamEventsRequest, RebornSubmitTurnResponse, RebornTimelineRequest,
+    ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
+    ResolveAuthInteractionRequest, ResolveAuthInteractionResponse, WebUiAuthenticatedCaller,
+    WebUiCancelRunRequest, WebUiCreateThreadRequest, WebUiInboundValidationCode,
+    WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiResolveGateRequest,
+    WebUiSendMessageRequest, WebUiSetupExtensionRequest, approval_gate_ref,
 };
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
@@ -66,6 +66,15 @@ fn turn_actor_for_user(user_id: &str) -> TurnActor {
 
 fn caller_with_project(project_id: Option<&str>) -> WebUiAuthenticatedCaller {
     caller_for_user_with_project("user-alpha", project_id)
+}
+
+fn caller_without_agent() -> WebUiAuthenticatedCaller {
+    WebUiAuthenticatedCaller::new(
+        TenantId::new("tenant-alpha").expect("valid tenant"),
+        UserId::new("user-alpha").expect("valid user"),
+        None,
+        Some(ProjectId::new("project-alpha").expect("valid project")),
+    )
 }
 
 fn caller_for_user_with_project(
@@ -653,13 +662,39 @@ impl AutomationProductFacade for RecordingAutomationFacade {
             .push(ListAutomationCall { caller, limit });
         Ok(json!({
             "triggers": [
-                raw_automation("trigger-listed", "Daily status", "0 9 * * *")
+                raw_automation(
+                    "trigger-listed",
+                    "Daily status",
+                    "0 9 * * *",
+                    Some(RebornAutomationRunStatus::Ok),
+                )
             ]
         }))
     }
 }
 
-fn raw_automation(trigger_id: &str, name: impl Into<String>, cron: impl Into<String>) -> Value {
+#[derive(Clone)]
+struct StaticAutomationFacade {
+    output: Value,
+}
+
+#[async_trait]
+impl AutomationProductFacade for StaticAutomationFacade {
+    async fn list_automations(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _limit: Option<usize>,
+    ) -> Result<Value, RebornServicesError> {
+        Ok(self.output.clone())
+    }
+}
+
+fn raw_automation(
+    trigger_id: &str,
+    name: impl Into<String>,
+    cron: impl Into<String>,
+    last_status: Option<RebornAutomationRunStatus>,
+) -> Value {
     json!({
         "trigger_id": trigger_id,
         "name": name.into(),
@@ -670,7 +705,7 @@ fn raw_automation(trigger_id: &str, name: impl Into<String>, cron: impl Into<Str
         "state": "active",
         "next_run_at": "2026-06-03T09:00:00Z",
         "last_run_at": null,
-        "last_status": null,
+        "last_status": last_status,
         "is_active": true,
         "created_at": "2026-06-02T18:00:00Z"
     })
@@ -3562,11 +3597,37 @@ async fn list_automation_dispatches_through_product_facade() {
             cron: "0 9 * * *".to_string()
         }
     );
+    assert_eq!(
+        listed.automations[0].last_status,
+        Some(RebornAutomationRunStatus::Ok)
+    );
 
     let list_calls = automation_facade.list_calls();
     assert_eq!(list_calls.len(), 1);
     assert_eq!(list_calls[0].caller.user_id.as_str(), "user-alpha");
     assert_eq!(list_calls[0].limit, Some(10));
+}
+
+#[tokio::test]
+async fn list_automations_rejects_missing_agent_id() {
+    let automation_facade = Arc::new(RecordingAutomationFacade::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_automation_product_facade(automation_facade.clone());
+
+    let err = services
+        .list_automations(
+            caller_without_agent(),
+            WebUiListAutomationsRequest { limit: Some(10) },
+        )
+        .await
+        .expect_err("missing agent id should fail closed");
+
+    assert_eq!(err.code, RebornServicesErrorCode::InvalidRequest);
+    assert_eq!(err.status_code, 400);
+    assert_eq!(automation_facade.list_calls().len(), 0);
 }
 
 #[tokio::test]
@@ -3618,6 +3679,120 @@ async fn list_automations_clamps_zero_limit_before_product_facade() {
         Some(1),
         "automation list limit must be clamped to at least one row"
     );
+}
+
+#[tokio::test]
+async fn list_automations_returns_empty_list() {
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_automation_product_facade(Arc::new(StaticAutomationFacade {
+        output: json!({
+            "triggers": []
+        }),
+    }));
+
+    let listed = services
+        .list_automations(caller(), WebUiListAutomationsRequest::default())
+        .await
+        .expect("list automations");
+
+    assert!(listed.automations.is_empty());
+}
+
+#[tokio::test]
+async fn list_automations_rejects_malformed_facade_output() {
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_automation_product_facade(Arc::new(StaticAutomationFacade {
+        output: json!({
+            "unexpected": true
+        }),
+    }));
+
+    let err = services
+        .list_automations(caller(), WebUiListAutomationsRequest::default())
+        .await
+        .expect_err("malformed automation output should fail closed");
+
+    assert_eq!(err.code, RebornServicesErrorCode::Internal);
+    assert_eq!(err.status_code, 500);
+}
+
+#[tokio::test]
+async fn list_automations_drops_unallowlisted_status_payloads() {
+    let mut trigger = raw_automation(
+        "trigger-listed",
+        "Daily status",
+        "0 9 * * *",
+        Some(RebornAutomationRunStatus::Error),
+    )
+    .as_object()
+    .cloned()
+    .expect("object trigger");
+    trigger.insert(
+        "last_status".to_string(),
+        json!({"trace": "internal details", "secret": "token"}),
+    );
+
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_automation_product_facade(Arc::new(StaticAutomationFacade {
+        output: json!({
+            "triggers": [
+                Value::Object(trigger)
+            ]
+        }),
+    }));
+
+    let listed = services
+        .list_automations(caller(), WebUiListAutomationsRequest::default())
+        .await
+        .expect("list automations");
+
+    assert_eq!(listed.automations.len(), 1);
+    assert_eq!(listed.automations[0].last_status, None);
+}
+
+#[tokio::test]
+async fn list_automations_filters_unknown_future_sources() {
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_automation_product_facade(Arc::new(StaticAutomationFacade {
+        output: json!({
+            "triggers": [
+                raw_automation(
+                    "trigger-schedule",
+                    "Daily status",
+                    "0 9 * * *",
+                    Some(RebornAutomationRunStatus::Ok),
+                ),
+                {
+                    "trigger_id": "trigger-webhook",
+                    "name": "Future webhook",
+                    "schedule": {"kind": "webhook"},
+                    "state": "active",
+                    "last_status": "ok",
+                    "is_active": false
+                }
+            ]
+        }),
+    }));
+
+    let listed = services
+        .list_automations(caller(), WebUiListAutomationsRequest::default())
+        .await
+        .expect("list automations");
+
+    assert_eq!(listed.automations.len(), 1);
+    assert_eq!(listed.automations[0].automation_id, "trigger-schedule");
 }
 
 #[tokio::test]

@@ -73,6 +73,7 @@ struct StubServices {
     cancel_run_calls: Mutex<Vec<WebUiCancelRunRequest>>,
     resolve_gate_calls: Mutex<Vec<WebUiResolveGateRequest>>,
     list_automations_calls: Mutex<Vec<WebUiListAutomationsRequest>>,
+    next_list_automations_error: Mutex<Option<RebornServicesError>>,
     list_extensions_calls: Mutex<usize>,
     list_extension_registry_calls: Mutex<usize>,
     install_extension_calls: Mutex<Vec<String>>,
@@ -90,6 +91,10 @@ struct StubServices {
 impl StubServices {
     fn fail_create_thread(&self, error: RebornServicesError) {
         *self.next_create_thread_error.lock().expect("lock") = Some(error);
+    }
+
+    fn fail_list_automations(&self, error: RebornServicesError) {
+        *self.next_list_automations_error.lock().expect("lock") = Some(error);
     }
 
     /// Queue one response for the next `stream_events` call. Tests use this
@@ -296,6 +301,14 @@ impl RebornServicesApi for StubServices {
             .lock()
             .expect("lock")
             .push(request);
+        if let Some(error) = self
+            .next_list_automations_error
+            .lock()
+            .expect("lock")
+            .take()
+        {
+            return Err(error);
+        }
         Ok(RebornListAutomationsResponse {
             automations: vec![automation_info(
                 "automation-listed",
@@ -740,6 +753,37 @@ async fn list_automations_forwards_query_limit_to_facade() {
         .clone();
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].limit, Some(5));
+}
+
+#[tokio::test]
+async fn list_automations_error_maps_to_http_status() {
+    let services = Arc::new(StubServices::default());
+    services.fail_list_automations(RebornServicesError {
+        code: RebornServicesErrorCode::Forbidden,
+        kind: RebornServicesErrorKind::ParticipantDenied,
+        status_code: 403,
+        retryable: false,
+        field: None,
+        validation_code: None,
+    });
+    let router = router_with(services);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/automations")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let body = read_json(response).await;
+    assert_eq!(body["error"], "forbidden");
+    assert_eq!(body["kind"], "participant_denied");
+    assert_eq!(body["retryable"], false);
 }
 
 #[tokio::test]
