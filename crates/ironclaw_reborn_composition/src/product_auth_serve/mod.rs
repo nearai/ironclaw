@@ -895,7 +895,7 @@ pub(super) async fn scoped_update_binding_for_requester(
         Err(AuthProductError::AccountSelectionRequired) => Ok(None),
         Err(AuthProductError::BackendUnavailable) => {
             tracing::warn!(
-                target: "ironclaw::reborn::product_auth::oauth",
+                target: "ironclaw_reborn_composition::product_auth::oauth",
                 provider = %provider.as_str(),
                 requester_extension = %requester_extension.as_str(),
                 "credential account status unavailable during extension OAuth start; starting setup without update binding"
