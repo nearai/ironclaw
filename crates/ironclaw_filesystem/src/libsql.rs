@@ -1,5 +1,4 @@
-use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use ironclaw_host_api::VirtualPath;
@@ -23,6 +22,11 @@ use crate::{
 pub struct LibSqlRootFilesystem {
     db: Arc<libsql::Database>,
 }
+
+#[cfg(feature = "libsql")]
+const LIBSQL_CONNECT_ATTEMPTS: u32 = 3;
+#[cfg(feature = "libsql")]
+const LIBSQL_CONNECT_INITIAL_BACKOFF: Duration = Duration::from_millis(50);
 
 #[cfg(feature = "libsql")]
 impl LibSqlRootFilesystem {
@@ -66,14 +70,49 @@ impl LibSqlRootFilesystem {
     }
 
     async fn connect(&self) -> Result<libsql::Connection, FilesystemError> {
-        let conn = self.db.connect().map_err(|error| {
-            crate::db::infrastructure_error(FilesystemOperation::Stat, error.to_string())
-        })?;
-        conn.query("PRAGMA busy_timeout = 5000", ())
-            .await
-            .map_err(|error| infrastructure_libsql_error(FilesystemOperation::Stat, error))?;
-        Ok(conn)
+        // Match the legacy libSQL backend's connection policy: every
+        // operation gets its own connection, concurrent writers wait on
+        // SQLite locks, and transient file-open races get a short retry
+        // budget before surfacing as infrastructure errors.
+        let mut last_error = None;
+        for attempt in 0..LIBSQL_CONNECT_ATTEMPTS {
+            match self.db.connect() {
+                Ok(conn) => {
+                    conn.query("PRAGMA busy_timeout = 5000", ())
+                        .await
+                        .map_err(|error| {
+                            infrastructure_libsql_error(FilesystemOperation::Stat, error)
+                        })?;
+                    return Ok(conn);
+                }
+                Err(error) => {
+                    last_error = Some(error);
+                    if attempt + 1 < LIBSQL_CONNECT_ATTEMPTS {
+                        tokio::time::sleep(connect_backoff(attempt)).await;
+                    }
+                }
+            }
+        }
+
+        let reason = last_error
+            .map(|error| {
+                format!(
+                    "failed to create libSQL connection after {LIBSQL_CONNECT_ATTEMPTS} attempts: {error}"
+                )
+            })
+            .unwrap_or_else(|| {
+                format!("failed to create libSQL connection after {LIBSQL_CONNECT_ATTEMPTS} attempts")
+            });
+        Err(crate::db::infrastructure_error(
+            FilesystemOperation::Stat,
+            reason,
+        ))
     }
+}
+
+#[cfg(feature = "libsql")]
+fn connect_backoff(attempt: u32) -> Duration {
+    LIBSQL_CONNECT_INITIAL_BACKOFF * 2u32.pow(attempt)
 }
 
 #[cfg(feature = "libsql")]
@@ -1763,5 +1802,47 @@ mod tests {
         let (fs, _dir) = fresh_backend().await;
         let out = fs.materialize_ranked(Vec::new()).await.unwrap();
         assert!(out.is_empty());
+    }
+
+    #[tokio::test]
+    async fn connect_sets_busy_timeout_under_concurrent_file_backed_opens() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("connect-retry-test.db");
+        let db = Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
+        let fs = Arc::new(LibSqlRootFilesystem::new(db));
+        fs.run_migrations().await.unwrap();
+
+        let mut handles = Vec::new();
+        for _ in 0..10 {
+            let fs = Arc::clone(&fs);
+            handles.push(tokio::spawn(async move {
+                let conn = fs.connect().await?;
+                let mut rows = conn
+                    .query("PRAGMA busy_timeout", ())
+                    .await
+                    .map_err(|error| {
+                        infrastructure_libsql_error(FilesystemOperation::Stat, error)
+                    })?;
+                let row = rows
+                    .next()
+                    .await
+                    .map_err(|error| infrastructure_libsql_error(FilesystemOperation::Stat, error))?
+                    .ok_or_else(|| {
+                        crate::db::infrastructure_error(
+                            FilesystemOperation::Stat,
+                            "PRAGMA busy_timeout returned no rows",
+                        )
+                    })?;
+                let timeout: i64 = row.get(0).map_err(|error| {
+                    crate::db::infrastructure_error(FilesystemOperation::Stat, error.to_string())
+                })?;
+                Ok::<_, FilesystemError>(timeout)
+            }));
+        }
+
+        for handle in handles {
+            let timeout = handle.await.unwrap().unwrap();
+            assert_eq!(timeout, 5000);
+        }
     }
 }
