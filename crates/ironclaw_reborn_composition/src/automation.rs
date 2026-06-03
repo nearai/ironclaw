@@ -398,8 +398,8 @@ mod tests {
 
     use async_trait::async_trait;
     use ironclaw_host_api::{
-        AgentId, ApprovalRequestId, ProcessId, ProjectId, SecretHandle, TenantId, UserId,
-        TrustClass,
+        AgentId, ApprovalRequestId, ProcessId, ProjectId, SecretHandle, TenantId, TrustClass,
+        UserId,
     };
     use ironclaw_host_runtime::{
         HostRuntime, HostRuntimeError, RuntimeApprovalGate, RuntimeAuthGate, RuntimeBlockedReason,
