@@ -223,7 +223,7 @@ export function useOauthSetup(packageRef) {
         popup.close();
       }
       refreshSetupState();
-      watchOauthProgress(authPopup);
+      if (authPopup) watchOauthProgress(authPopup);
     },
     onError: (_err, variables) => {
       const popup = variables?.popup;

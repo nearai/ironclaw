@@ -222,7 +222,8 @@ mod tests {
             .await
             .expect("status lookup should not block setup");
 
-        let account = status.expect("most-recent reusable account must resolve, not stay ambiguous");
+        let account =
+            status.expect("most-recent reusable account must resolve, not stay ambiguous");
         assert_eq!(account.label.as_str(), "notion secondary");
     }
 

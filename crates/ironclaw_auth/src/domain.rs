@@ -4,10 +4,9 @@ use crate::{
     AuthChallenge, AuthErrorCode, AuthFlowRecord, AuthFlowStatus, AuthProductError,
     CredentialAccount, CredentialAccountUpdateBinding, CredentialOwnership, CredentialRecoveryKind,
     CredentialRecoveryProjection, CredentialRecoveryReason, CredentialRefreshRequest,
-    CredentialSelectionInput, ManualTokenCompletionInput, ManualTokenSetupRequest,
-    NewAuthFlow, NewCredentialAccount, OAuthCallbackClaimRequest, OAuthProviderExchange,
-    ProviderScope, Timestamp,
-    flow::credential_status_for_completed_flow, scope_matches,
+    CredentialSelectionInput, ManualTokenCompletionInput, ManualTokenSetupRequest, NewAuthFlow,
+    NewCredentialAccount, OAuthCallbackClaimRequest, OAuthProviderExchange, ProviderScope,
+    Timestamp, flow::credential_status_for_completed_flow, scope_matches,
 };
 
 pub struct PreparedCallbackFlow {
@@ -500,7 +499,10 @@ mod tests {
 
         let merged = merge_provider_scopes(&existing, &incoming);
 
-        let merged = merged.iter().map(|scope| scope.as_str()).collect::<Vec<_>>();
+        let merged = merged
+            .iter()
+            .map(|scope| scope.as_str())
+            .collect::<Vec<_>>();
         assert_eq!(merged, vec!["scope:read", "scope:write", "scope:calendar"]);
     }
 }

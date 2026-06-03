@@ -39,6 +39,7 @@ mod display_preview;
 mod failure_explanation;
 mod runtime_stream;
 mod turn_stream;
+mod turn_stream_auth;
 
 fn long_test_id(prefix: &str, character: char) -> String {
     format!("{prefix}-{}", character.to_string().repeat(96))
