@@ -37,7 +37,7 @@ use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::secrets_guard::{InlineSecretError, reject_inline_secret};
@@ -82,6 +82,9 @@ pub struct RebornConfigFile {
     /// `budget_set` tool or CLI at runtime. Setting any limit to `0` means
     /// "unlimited" for that dimension.
     pub budget: Option<BudgetSection>,
+    /// Trigger poller lifecycle settings. All fields optional; absent section
+    /// leaves all limits at the compiled defaults in the composition root.
+    pub trigger_poller: Option<TriggerPollerConfigSection>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -247,6 +250,38 @@ pub struct BudgetSection {
     /// Default `1.20` (20% safety margin); reconcile releases the
     /// overshoot.
     pub overestimate_factor: Option<f64>,
+}
+
+/// `[trigger_poller]` section. Controls the background trigger-poller worker.
+///
+/// All fields are optional so a sparse or absent section is valid; the
+/// composition root applies its own compiled defaults for any field not set
+/// here. Env vars override this section; CLI flags override env vars.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct TriggerPollerConfigSection {
+    /// Enable or disable the trigger poller. Default `false` (off) in
+    /// composition; operators MUST set `enabled = true` to activate it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    /// How often the poller ticks, in seconds. Default in composition is 60.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub poll_interval_secs: Option<u64>,
+    /// Maximum triggers to fire per tick. Default in composition is 100.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fires_per_tick: Option<u32>,
+    /// Maximum concurrent fires allowed for a single trigger. Default in
+    /// composition is 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_concurrent_fires_per_trigger: Option<u32>,
+    /// Upper bound (seconds) of a random jitter delay before the first tick.
+    /// Spreads startup load across instances. Default in composition is 0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub startup_jitter_max_secs: Option<u64>,
+    /// Upper bound (seconds) of a random jitter added to each tick interval.
+    /// Prevents synchronized thundering-herd across instances. Default 0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tick_jitter_max_secs: Option<u64>,
 }
 
 /// One `[llm.<slot>]` entry. The slot name (typically `"default"` or
@@ -1248,6 +1283,68 @@ not_a_field = 1.0
 "#;
         let err = RebornConfigFile::parse_text(toml, &attributed())
             .expect_err("deny_unknown_fields must catch typos in [budget]");
+        assert!(matches!(err, RebornConfigFileError::Toml { .. }));
+    }
+
+    #[test]
+    fn trigger_poller_full_section_parses() {
+        let toml = r#"
+[trigger_poller]
+enabled = true
+poll_interval_secs = 30
+fires_per_tick = 50
+max_concurrent_fires_per_trigger = 3
+startup_jitter_max_secs = 10
+tick_jitter_max_secs = 5
+"#;
+        let cfg = RebornConfigFile::parse_text(toml, &attributed())
+            .expect("full trigger_poller section must parse");
+        let tp = cfg
+            .trigger_poller
+            .as_ref()
+            .expect("trigger_poller section present");
+        assert_eq!(tp.enabled, Some(true));
+        assert_eq!(tp.poll_interval_secs, Some(30));
+        assert_eq!(tp.fires_per_tick, Some(50));
+        assert_eq!(tp.max_concurrent_fires_per_trigger, Some(3));
+        assert_eq!(tp.startup_jitter_max_secs, Some(10));
+        assert_eq!(tp.tick_jitter_max_secs, Some(5));
+    }
+
+    #[test]
+    fn trigger_poller_absent_section_yields_none() {
+        let cfg = RebornConfigFile::parse_text("", &attributed()).expect("empty TOML must parse");
+        assert!(cfg.trigger_poller.is_none());
+    }
+
+    #[test]
+    fn trigger_poller_partial_section_other_fields_none() {
+        let toml = r#"
+[trigger_poller]
+enabled = true
+"#;
+        let cfg = RebornConfigFile::parse_text(toml, &attributed())
+            .expect("partial trigger_poller section must parse");
+        let tp = cfg
+            .trigger_poller
+            .as_ref()
+            .expect("trigger_poller section present");
+        assert_eq!(tp.enabled, Some(true));
+        assert_eq!(tp.poll_interval_secs, None);
+        assert_eq!(tp.fires_per_tick, None);
+        assert_eq!(tp.max_concurrent_fires_per_trigger, None);
+        assert_eq!(tp.startup_jitter_max_secs, None);
+        assert_eq!(tp.tick_jitter_max_secs, None);
+    }
+
+    #[test]
+    fn trigger_poller_rejects_unknown_key() {
+        let toml = r#"
+[trigger_poller]
+not_a_field = true
+"#;
+        let err = RebornConfigFile::parse_text(toml, &attributed())
+            .expect_err("deny_unknown_fields must catch typos in [trigger_poller]");
         assert!(matches!(err, RebornConfigFileError::Toml { .. }));
     }
 }

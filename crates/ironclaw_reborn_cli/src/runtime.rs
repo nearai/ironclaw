@@ -7,7 +7,8 @@ use anyhow::Context;
 use ironclaw_reborn_composition::{
     OAuthClientConfig, PollSettings, RebornBuildInput, RebornCompositionProfile,
     RebornLocalRuntimeProfileOptions, RebornRuntimeIdentity, RebornRuntimeInput,
-    TurnRunnerSettings, build_reborn_runtime, local_runtime_build_input_with_options,
+    TriggerPollerSettings, TurnRunnerSettings, build_reborn_runtime,
+    local_runtime_build_input_with_options,
 };
 use ironclaw_reborn_config::{REBORN_PROFILE_ENV, RebornBootConfig, RebornProfile};
 use secrecy::SecretString;
@@ -256,6 +257,9 @@ pub(crate) fn build_runtime_input_with_options(
     #[allow(unused_mut)]
     let mut runtime_input = RebornRuntimeInput::from_services(runtime_services.services_input)
         .with_runner_settings(runner_settings(runtime_services.config_file.as_ref())?)
+        .with_trigger_poller_settings(trigger_poller_settings(
+            runtime_services.config_file.as_ref(),
+        )?)
         .with_poll_settings(PollSettings {
             interval: Duration::from_millis(200),
             max_total: Duration::from_secs(180),
@@ -592,6 +596,98 @@ fn runner_settings(
     Ok(settings)
 }
 
+/// Build [`TriggerPollerSettings`] by merging three layers of configuration.
+///
+/// Precedence (highest first):
+/// 1. Environment variables:
+///    - `IRONCLAW_TRIGGER_POLLER_ENABLED` — `1`/`true` → enabled, `0`/`false` → disabled
+///      (case-insensitive). Overrides any `enabled` value from the config file.
+///    - `IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS` — parse as `u64`; overrides the
+///      config-file `poll_interval_secs`.  Must be > 0.
+/// 2. Config-file `[trigger_poller]` section — all fields are optional; any field
+///    absent here falls through to the compiled default.
+/// 3. Compiled default — `TriggerPollerSettings::default()` (disabled, all limits
+///    at the `ironclaw_triggers` crate defaults).
+///
+/// V1 invariant: `max_concurrent_fires_per_trigger` must be exactly 1. Passing
+/// any other value (via config or, were an env override ever added, env) returns
+/// an error rather than silently breaking per-trigger serialisation.
+fn trigger_poller_settings(
+    config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
+) -> anyhow::Result<TriggerPollerSettings> {
+    // Layer 3: compiled default (disabled).
+    let mut settings = TriggerPollerSettings::default();
+
+    // Layer 2: config-file [trigger_poller] section.
+    if let Some(section) = config_file.and_then(|file| file.trigger_poller.as_ref()) {
+        if let Some(enabled) = section.enabled {
+            settings.enabled = enabled;
+        }
+
+        // Build a mutable worker config to apply section overrides.
+        let mut worker = settings.worker;
+
+        if let Some(secs) = section.poll_interval_secs {
+            if secs == 0 {
+                anyhow::bail!(
+                    "config file [trigger_poller].poll_interval_secs must be greater than 0"
+                );
+            }
+            worker.poll_interval = Duration::from_secs(secs);
+        }
+
+        if let Some(fires) = section.fires_per_tick {
+            worker.fires_per_tick = fires as usize;
+        }
+
+        if let Some(max_concurrent) = section.max_concurrent_fires_per_trigger {
+            // V1 invariant: per-trigger concurrency is locked at 1.
+            if max_concurrent != 1 {
+                anyhow::bail!(
+                    "config file [trigger_poller].max_concurrent_fires_per_trigger must be 1 \
+                     (V1 per-trigger serialisation invariant); got {max_concurrent}"
+                );
+            }
+            worker.max_concurrent_fires_per_trigger = max_concurrent as usize;
+        }
+
+        if let Some(jitter_secs) = section.startup_jitter_max_secs {
+            settings.startup_jitter_max = Duration::from_secs(jitter_secs);
+        }
+
+        if let Some(jitter_secs) = section.tick_jitter_max_secs {
+            settings.tick_jitter_max = Duration::from_secs(jitter_secs);
+        }
+
+        settings.worker = worker;
+    }
+
+    // Layer 1: environment variable overrides.
+    if let Some(raw) = optional_nonempty_env("IRONCLAW_TRIGGER_POLLER_ENABLED") {
+        match raw.to_ascii_lowercase().as_str() {
+            "1" | "true" => settings.enabled = true,
+            "0" | "false" => settings.enabled = false,
+            other => anyhow::bail!(
+                "IRONCLAW_TRIGGER_POLLER_ENABLED must be one of 1, true, 0, false (got {other:?})"
+            ),
+        }
+    }
+
+    if let Some(raw) = optional_nonempty_env("IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS") {
+        let secs: u64 = raw.parse().map_err(|_| {
+            anyhow::anyhow!(
+                "IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS must be a positive integer, got {raw:?}"
+            )
+        })?;
+        if secs == 0 {
+            anyhow::bail!("IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS must be greater than 0");
+        }
+        settings.worker.poll_interval = Duration::from_secs(secs);
+    }
+
+    Ok(settings)
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -872,5 +968,102 @@ default_project = "project-alpha"
                 .expect_err("legacy client vars without redirect URI must not be ignored");
 
         assert!(error.to_string().contains("GOOGLE_OAUTH_REDIRECT_URI"));
+    }
+
+    // --- trigger_poller_settings tests ---
+
+    use super::trigger_poller_settings;
+    use ironclaw_reborn_config::TriggerPollerConfigSection;
+    use std::time::Duration;
+
+    fn make_config_with_trigger_poller(
+        section: TriggerPollerConfigSection,
+    ) -> ironclaw_reborn_config::RebornConfigFile {
+        ironclaw_reborn_config::RebornConfigFile {
+            trigger_poller: Some(section),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn trigger_poller_settings_default_is_disabled() {
+        // No config file, no env → disabled with zero jitter.
+        let settings = trigger_poller_settings(None).expect("default trigger poller settings");
+
+        assert!(!settings.enabled, "default must be disabled");
+        assert_eq!(settings.startup_jitter_max, Duration::ZERO);
+        assert_eq!(settings.tick_jitter_max, Duration::ZERO);
+    }
+
+    #[test]
+    fn trigger_poller_settings_config_enabled_maps_worker_fields() {
+        let section = TriggerPollerConfigSection {
+            enabled: Some(true),
+            poll_interval_secs: Some(15),
+            fires_per_tick: Some(50),
+            max_concurrent_fires_per_trigger: Some(1),
+            startup_jitter_max_secs: Some(3),
+            tick_jitter_max_secs: Some(7),
+        };
+        let config = make_config_with_trigger_poller(section);
+
+        let settings =
+            trigger_poller_settings(Some(&config)).expect("trigger poller settings from config");
+
+        assert!(settings.enabled, "config enabled=true must be reflected");
+        assert_eq!(settings.worker.poll_interval, Duration::from_secs(15));
+        assert_eq!(settings.worker.fires_per_tick, 50);
+        assert_eq!(settings.worker.max_concurrent_fires_per_trigger, 1);
+        assert_eq!(settings.startup_jitter_max, Duration::from_secs(3));
+        assert_eq!(settings.tick_jitter_max, Duration::from_secs(7));
+    }
+
+    #[test]
+    fn trigger_poller_settings_max_concurrent_fires_greater_than_1_is_error() {
+        let section = TriggerPollerConfigSection {
+            enabled: Some(true),
+            max_concurrent_fires_per_trigger: Some(2),
+            ..Default::default()
+        };
+        let config = make_config_with_trigger_poller(section);
+
+        let err = trigger_poller_settings(Some(&config))
+            .expect_err("max_concurrent_fires_per_trigger=2 must be rejected");
+
+        assert!(
+            err.to_string().contains("max_concurrent_fires_per_trigger"),
+            "error must mention the field, got: {err}",
+        );
+    }
+
+    // NOTE: tests that mutate real process env vars are inherently racy when
+    // run in parallel with other tests in the same process. We follow the
+    // pattern used elsewhere in this crate: set the variable, run the
+    // assertion, then always restore the original value in a defer-style
+    // guard so a panicking assertion cannot leave the env dirty.
+    #[test]
+    fn trigger_poller_settings_env_enabled_overrides_config_disabled() {
+        // Config says disabled; env says enabled — env must win.
+        let section = TriggerPollerConfigSection {
+            enabled: Some(false),
+            ..Default::default()
+        };
+        let config = make_config_with_trigger_poller(section);
+
+        let key = "IRONCLAW_TRIGGER_POLLER_ENABLED";
+        let prior = std::env::var(key).ok();
+        // Safety: single-threaded test binary segment; restored below.
+        unsafe { std::env::set_var(key, "true") };
+        let result = trigger_poller_settings(Some(&config));
+        match prior {
+            Some(v) => unsafe { std::env::set_var(key, v) },
+            None => unsafe { std::env::remove_var(key) },
+        }
+
+        let settings = result.expect("env override should succeed");
+        assert!(
+            settings.enabled,
+            "IRONCLAW_TRIGGER_POLLER_ENABLED=true must override config enabled=false"
+        );
     }
 }
