@@ -135,7 +135,7 @@ pub trait AutomationProductFacade: Send + Sync {
     async fn list_automations(
         &self,
         caller: ProductAgentBoundCaller,
-        limit: Option<usize>,
+        limit: usize,
     ) -> Result<Vec<RebornAutomationInfo>, RebornServicesError>;
 }
 
@@ -153,7 +153,7 @@ impl AutomationProductFacade for UnsupportedAutomationProductFacade {
     async fn list_automations(
         &self,
         _caller: ProductAgentBoundCaller,
-        _limit: Option<usize>,
+        _limit: usize,
     ) -> Result<Vec<RebornAutomationInfo>, RebornServicesError> {
         Err(automation_unavailable())
     }
@@ -907,7 +907,7 @@ impl RebornServicesApi for RebornServices {
                 false,
             ));
         };
-        let limit = Some(clamp_automation_list_limit(request.limit));
+        let limit = clamp_automation_list_limit(request.limit);
         let automations = self
             .automation_facade
             .list_automations(caller, limit)

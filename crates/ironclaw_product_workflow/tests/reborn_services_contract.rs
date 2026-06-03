@@ -636,7 +636,7 @@ impl LifecycleProductFacade for ListingLifecycleFacade {
 #[derive(Debug, Clone)]
 struct ListAutomationCall {
     caller: ProductAgentBoundCaller,
-    limit: Option<usize>,
+    limit: usize,
 }
 
 #[derive(Default)]
@@ -655,7 +655,7 @@ impl AutomationProductFacade for RecordingAutomationFacade {
     async fn list_automations(
         &self,
         caller: ProductAgentBoundCaller,
-        limit: Option<usize>,
+        limit: usize,
     ) -> Result<Vec<RebornAutomationInfo>, RebornServicesError> {
         self.list_calls
             .lock()
@@ -680,7 +680,7 @@ impl AutomationProductFacade for StaticAutomationFacade {
     async fn list_automations(
         &self,
         _caller: ProductAgentBoundCaller,
-        _limit: Option<usize>,
+        _limit: usize,
     ) -> Result<Vec<RebornAutomationInfo>, RebornServicesError> {
         Ok(self.output.clone())
     }
@@ -3609,7 +3609,7 @@ async fn list_automation_dispatches_through_product_facade() {
             .map(ProjectId::as_str),
         Some("project-alpha")
     );
-    assert_eq!(list_calls[0].limit, Some(10));
+    assert_eq!(list_calls[0].limit, 10);
 }
 
 #[tokio::test]
@@ -3656,8 +3656,7 @@ async fn list_automations_clamps_oversize_limit_before_product_facade() {
     let list_calls = automation_facade.list_calls();
     assert_eq!(list_calls.len(), 1);
     assert_eq!(
-        list_calls[0].limit,
-        Some(100),
+        list_calls[0].limit, 100,
         "automation list limit must be clamped before the product facade"
     );
 }
@@ -3679,8 +3678,7 @@ async fn list_automations_clamps_zero_limit_before_product_facade() {
     let list_calls = automation_facade.list_calls();
     assert_eq!(list_calls.len(), 1);
     assert_eq!(
-        list_calls[0].limit,
-        Some(1),
+        list_calls[0].limit, 1,
         "automation list limit must be clamped to at least one row"
     );
 }
@@ -3702,10 +3700,30 @@ async fn list_automations_uses_default_limit_when_omitted() {
     let list_calls = automation_facade.list_calls();
     assert_eq!(list_calls.len(), 1);
     assert_eq!(
-        list_calls[0].limit,
-        Some(50),
+        list_calls[0].limit, 50,
         "omitted automation list limit must use the browser-facing default page size"
     );
+}
+
+#[test]
+fn reborn_automation_state_round_trips_serde_for_every_variant() {
+    let cases = [
+        (RebornAutomationState::Active, "\"active\""),
+        (RebornAutomationState::Scheduled, "\"scheduled\""),
+        (RebornAutomationState::Paused, "\"paused\""),
+        (RebornAutomationState::Disabled, "\"disabled\""),
+        (RebornAutomationState::Inactive, "\"inactive\""),
+        (RebornAutomationState::Completed, "\"completed\""),
+        (RebornAutomationState::Unknown, "\"unknown\""),
+    ];
+
+    for (state, expected_wire) in cases {
+        let serialized = serde_json::to_string(&state).expect("serialize state");
+        assert_eq!(serialized, expected_wire);
+        let deserialized: RebornAutomationState =
+            serde_json::from_str(&serialized).expect("deserialize state");
+        assert_eq!(deserialized, state);
+    }
 }
 
 #[tokio::test]

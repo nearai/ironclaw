@@ -96,7 +96,7 @@ impl AutomationProductFacade for RebornWebuiAutomationFacade {
     async fn list_automations(
         &self,
         caller: ProductAgentBoundCaller,
-        limit: Option<usize>,
+        limit: usize,
     ) -> Result<Vec<RebornAutomationInfo>, RebornServicesError> {
         let output = self
             .invoke_trigger(
@@ -198,7 +198,12 @@ fn sanitize_automation_list_output(output: &mut Value) {
             Some("error") => Value::String("error".to_string()),
             _ => Value::Null,
         };
+        let state = match trigger_object.get("state").and_then(Value::as_str) {
+            Some(state) => Value::String(state.to_string()),
+            None => Value::String("unknown".to_string()),
+        };
         trigger_object.insert("last_status".to_string(), status);
+        trigger_object.insert("state".to_string(), state);
     }
 }
 
@@ -393,7 +398,7 @@ mod tests {
         let caller = caller();
 
         let automations = facade
-            .list_automations(caller.clone(), Some(25))
+            .list_automations(caller.clone(), 25)
             .await
             .expect("trigger list output");
 
@@ -437,7 +442,7 @@ mod tests {
         }))));
 
         let error = facade
-            .list_automations(caller(), None)
+            .list_automations(caller(), 50)
             .await
             .expect_err("malformed automation output should fail closed");
 
@@ -454,7 +459,7 @@ mod tests {
         }))));
 
         let error = facade
-            .list_automations(caller(), None)
+            .list_automations(caller(), 50)
             .await
             .expect_err("malformed automation output should fail closed");
 
@@ -478,7 +483,7 @@ mod tests {
         }))));
 
         let automations = facade
-            .list_automations(caller(), None)
+            .list_automations(caller(), 50)
             .await
             .expect("list automations");
 
@@ -513,10 +518,20 @@ mod tests {
         .cloned()
         .expect("object trigger");
         completed.insert("state".to_string(), json!("completed"));
+        let mut non_string = raw_automation(
+            "trigger-non-string",
+            "Malformed state",
+            "0 12 * * *",
+            Some("ok"),
+        )
+        .as_object()
+        .cloned()
+        .expect("object trigger");
+        non_string.insert("state".to_string(), json!({"raw": "backend-only"}));
         let future = json!({
             "trigger_id": "trigger-future",
             "name": "Future status",
-            "schedule": {"kind": "cron", "expression": "0 12 * * *"},
+            "schedule": {"kind": "cron", "expression": "0 13 * * *"},
             "state": "future_state",
             "next_run_at": "2026-06-03T09:00:00Z",
             "last_run_at": null,
@@ -529,20 +544,22 @@ mod tests {
                 Value::Object(paused),
                 Value::Object(scheduled),
                 Value::Object(completed),
+                Value::Object(non_string),
                 future
             ]
         }))));
 
         let automations = facade
-            .list_automations(caller(), None)
+            .list_automations(caller(), 50)
             .await
             .expect("list automations");
 
-        assert_eq!(automations.len(), 4);
+        assert_eq!(automations.len(), 5);
         assert_eq!(automations[0].state, RebornAutomationState::Paused);
         assert_eq!(automations[1].state, RebornAutomationState::Scheduled);
         assert_eq!(automations[2].state, RebornAutomationState::Completed);
         assert_eq!(automations[3].state, RebornAutomationState::Unknown);
+        assert_eq!(automations[4].state, RebornAutomationState::Unknown);
     }
 
     #[tokio::test]
@@ -562,7 +579,7 @@ mod tests {
         }))));
 
         let automations = facade
-            .list_automations(caller(), None)
+            .list_automations(caller(), 50)
             .await
             .expect("list automations");
 
@@ -583,7 +600,7 @@ mod tests {
         }))));
 
         let error = facade
-            .list_automations(caller(), None)
+            .list_automations(caller(), 50)
             .await
             .expect_err("malformed record should fail closed");
 
@@ -599,7 +616,7 @@ mod tests {
         let caller = caller();
 
         let error = facade
-            .list_automations(caller, Some(10))
+            .list_automations(caller, 10)
             .await
             .expect_err("runtime failure should map to services error");
 
@@ -679,7 +696,7 @@ mod tests {
                 RebornWebuiAutomationFacade::new(Arc::new(OutcomeHostRuntime::new(outcome)));
 
             let error = facade
-                .list_automations(caller(), None)
+                .list_automations(caller(), 50)
                 .await
                 .expect_err("outcome should map to services error");
 
@@ -728,7 +745,7 @@ mod tests {
                 RebornWebuiAutomationFacade::new(Arc::new(FailingHostRuntime::new(failure_kind)));
 
             let error = facade
-                .list_automations(caller(), Some(10))
+                .list_automations(caller(), 10)
                 .await
                 .expect_err("runtime failure should map to services error");
 
@@ -763,7 +780,7 @@ mod tests {
                 RebornWebuiAutomationFacade::new(Arc::new(ErrorHostRuntime::new(host_error)));
 
             let error = facade
-                .list_automations(caller(), Some(10))
+                .list_automations(caller(), 10)
                 .await
                 .expect_err("host runtime error should map to services error");
 
