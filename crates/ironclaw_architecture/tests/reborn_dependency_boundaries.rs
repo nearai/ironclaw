@@ -234,38 +234,6 @@ fn reborn_cli_binary_crate_stays_separate_from_v1_root() {
         "ironclaw_reborn_config must remain a standalone boot contract crate with no IronClaw workspace dependencies of any dependency kind",
     );
 
-    // The runtime entry point lives at `runtime/mod.rs`; helpers (e.g.
-    // `trigger_poller.rs`) live alongside as child modules, and a future
-    // child could live in a nested directory. Boundary checks recurse so
-    // a forbidden import cannot slip in through any descendant `.rs`
-    // file. Mirrors the recursion in `collect_forbidden_*` walkers
-    // elsewhere in this file.
-    fn collect_runtime_rs(dir: &std::path::Path, out: &mut String) {
-        for entry in std::fs::read_dir(dir).unwrap_or_else(|err| {
-            panic!(
-                "Reborn CLI runtime directory must be readable at {}: {err}",
-                dir.display()
-            )
-        }) {
-            let path = entry.expect("dir entry").path();
-            if path.is_dir() {
-                collect_runtime_rs(&path, out);
-                continue;
-            }
-            if path.extension().and_then(|s| s.to_str()) != Some("rs") {
-                continue;
-            }
-            let content = std::fs::read_to_string(&path).unwrap_or_else(|err| {
-                panic!(
-                    "Reborn CLI runtime file {} unreadable: {err}",
-                    path.display()
-                )
-            });
-            out.push_str(&content);
-            out.push('\n');
-        }
-    }
-
     let runtime_dir = root.join("crates/ironclaw_reborn_cli/src/runtime");
     let mut cli_runtime_source = String::new();
     collect_runtime_rs(&runtime_dir, &mut cli_runtime_source);
@@ -2521,6 +2489,38 @@ fn assert_no_normal_workspace_deps<'a>(
             !actual.iter().any(|dependency| dependency == forbidden),
             "{crate_name} must not have a normal dependency on {forbidden}; actual normal ironclaw deps: {actual:?}"
         );
+    }
+}
+
+/// Recursively concatenate every `.rs` file under `dir` into `out`,
+/// descending into subdirectories. Matches the recursion pattern used by
+/// `collect_forbidden_*` walkers above so future boundary checks over
+/// `runtime/` can reuse the same helper. Used by
+/// `reborn_cli_binary_crate_stays_separate_from_v1_root` to scan the
+/// entire `runtime/` module tree for forbidden imports.
+fn collect_runtime_rs(dir: &std::path::Path, out: &mut String) {
+    for entry in std::fs::read_dir(dir).unwrap_or_else(|err| {
+        panic!(
+            "Reborn CLI runtime directory must be readable at {}: {err}",
+            dir.display()
+        )
+    }) {
+        let path = entry.expect("dir entry").path();
+        if path.is_dir() {
+            collect_runtime_rs(&path, out);
+            continue;
+        }
+        if path.extension().and_then(|s| s.to_str()) != Some("rs") {
+            continue;
+        }
+        let content = std::fs::read_to_string(&path).unwrap_or_else(|err| {
+            panic!(
+                "Reborn CLI runtime file {} unreadable: {err}",
+                path.display()
+            )
+        });
+        out.push_str(&content);
+        out.push('\n');
     }
 }
 

@@ -435,8 +435,8 @@ fn resolve_google_oauth_config(
 /// callers (OAuth client overrides, etc.) where a blank slot is benign.
 ///
 /// **Not** for operator-control knobs like `IRONCLAW_TRIGGER_POLLER_*` —
-/// those use `runtime::trigger_poller::strict_env_var`, which treats
-/// present-blank as a fatal misconfiguration.
+/// those use a strict-presence variant in the `trigger_poller` submodule,
+/// which treats a present-but-blank value as a fatal misconfiguration.
 fn optional_nonempty_env(name: &str) -> Option<String> {
     std::env::var(name)
         .ok()
@@ -902,6 +902,39 @@ poll_interval_secs = 15
             input.trigger_poller.worker.poll_interval,
             std::time::Duration::from_secs(45),
             "env IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS=45 must override config poll_interval_secs=15 through build_runtime_input"
+        );
+    }
+
+    #[test]
+    fn build_runtime_input_rejects_invalid_trigger_poller_enabled_env() {
+        // Invalid env value (`yes`) must error out through build_runtime_input,
+        // not slip through to the runtime input. Closes the caller-level gap
+        // for the error path; previous tests covered only happy/override paths.
+        let _lock = lock_trigger_env();
+        let _enabled = EnvGuard::set("IRONCLAW_TRIGGER_POLLER_ENABLED", "yes");
+        let _interval = EnvGuard::clear("IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS");
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("reborn-home");
+        std::fs::create_dir_all(&reborn_home).expect("mkdir");
+
+        let config = RebornBootConfig::resolve_from_env_parts(
+            Some(reborn_home.to_string_lossy().to_string().into()),
+            None,
+            None,
+            None,
+        )
+        .expect("boot config");
+
+        let err = match build_runtime_input(&config, RuntimeInputCaller::Run) {
+            Ok(_) => panic!(
+                "invalid IRONCLAW_TRIGGER_POLLER_ENABLED must propagate as Err through build_runtime_input"
+            ),
+            Err(e) => e,
+        };
+        assert!(
+            err.to_string().contains("IRONCLAW_TRIGGER_POLLER_ENABLED"),
+            "caller-level error must surface the env var name, got: {err}",
         );
     }
 

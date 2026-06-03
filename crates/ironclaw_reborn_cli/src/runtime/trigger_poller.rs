@@ -527,6 +527,9 @@ mod tests {
 
     #[test]
     fn trigger_poller_settings_config_poll_interval_at_cap_is_accepted() {
+        let _lock = lock_trigger_env();
+        let _enabled = EnvGuard::clear("IRONCLAW_TRIGGER_POLLER_ENABLED");
+        let _interval = EnvGuard::clear("IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS");
         let section = TriggerPollerConfigSection {
             enabled: Some(true),
             poll_interval_secs: Some(3600),
@@ -541,6 +544,9 @@ mod tests {
 
     #[test]
     fn trigger_poller_settings_config_fires_per_tick_at_cap_is_accepted() {
+        let _lock = lock_trigger_env();
+        let _enabled = EnvGuard::clear("IRONCLAW_TRIGGER_POLLER_ENABLED");
+        let _interval = EnvGuard::clear("IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS");
         let section = TriggerPollerConfigSection {
             enabled: Some(true),
             fires_per_tick: Some(1000),
@@ -555,6 +561,9 @@ mod tests {
 
     #[test]
     fn trigger_poller_settings_config_jitter_at_cap_is_accepted() {
+        let _lock = lock_trigger_env();
+        let _enabled = EnvGuard::clear("IRONCLAW_TRIGGER_POLLER_ENABLED");
+        let _interval = EnvGuard::clear("IRONCLAW_TRIGGER_POLLER_INTERVAL_SECS");
         let section = TriggerPollerConfigSection {
             enabled: Some(true),
             startup_jitter_max_secs: Some(3600),

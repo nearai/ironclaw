@@ -5,8 +5,6 @@
 //!
 //! Not exposed outside `#[cfg(test)]`.
 
-#![cfg(test)]
-
 use std::sync::{LazyLock, Mutex, MutexGuard};
 
 /// Serializes every test that touches `IRONCLAW_TRIGGER_*` env vars so
