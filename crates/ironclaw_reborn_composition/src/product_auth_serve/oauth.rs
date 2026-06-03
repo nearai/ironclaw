@@ -261,7 +261,8 @@ pub(super) async fn oauth_callback_handler(
     Path(flow_id): Path<String>,
     RawQuery(raw_query): RawQuery,
     uri: Uri,
-) -> Result<Json<RebornOAuthCallbackResponse>, ProductAuthRouteFailure> {
+    headers: HeaderMap,
+) -> Result<Response, ProductAuthRouteFailure> {
     validate_callback_raw_query(raw_query.as_deref())?;
     let query = axum::extract::Query::<OAuthCallbackQuery>::try_from_uri(&uri)
         .map_err(|_| ProductAuthRouteFailure::malformed_callback())?
@@ -332,14 +333,15 @@ pub(super) async fn oauth_callback_handler(
         }
     };
 
-    Ok(Json(response))
+    Ok(oauth_callback_response(&headers, response))
 }
 
 pub(super) async fn google_oauth_callback_handler(
     State(state): State<ProductAuthRouteState>,
     RawQuery(raw_query): RawQuery,
     uri: Uri,
-) -> Result<Json<RebornOAuthCallbackResponse>, ProductAuthRouteFailure> {
+    headers: HeaderMap,
+) -> Result<Response, ProductAuthRouteFailure> {
     validate_callback_raw_query(raw_query.as_deref())?;
     let query = axum::extract::Query::<GoogleOAuthCallbackQuery>::try_from_uri(&uri)
         .map_err(|_| ProductAuthRouteFailure::malformed_callback())?
@@ -370,7 +372,7 @@ pub(super) async fn google_oauth_callback_handler(
         ))
         .await;
         state.remove_pkce_verifier(flow_id);
-        return response.map(Json);
+        return response.map(|response| oauth_callback_response(&headers, response));
     }
 
     let provider = match run_with_backend_timeout(
@@ -453,7 +455,71 @@ pub(super) async fn google_oauth_callback_handler(
         }
     };
 
-    Ok(Json(response))
+    Ok(oauth_callback_response(&headers, response))
+}
+
+fn oauth_callback_response(headers: &HeaderMap, response: RebornOAuthCallbackResponse) -> Response {
+    if wants_oauth_callback_html(headers) {
+        return oauth_callback_completion_html(&response);
+    }
+    Json(response).into_response()
+}
+
+fn wants_oauth_callback_html(headers: &HeaderMap) -> bool {
+    let Some(accept) = headers
+        .get(header::ACCEPT)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return false;
+    };
+    let accepts_html = accept
+        .split(',')
+        .any(|part| part.trim_start().starts_with("text/html"));
+    let accepts_json = accept
+        .split(',')
+        .any(|part| part.trim_start().starts_with("application/json"));
+    accepts_html && !accepts_json
+}
+
+fn oauth_callback_completion_html(response: &RebornOAuthCallbackResponse) -> Response {
+    const CHANNEL: &str = "ironclaw-product-auth";
+    const STORAGE_KEY: &str = "ironclaw:product-auth:oauth-complete";
+    const MESSAGE_TYPE: &str = "ironclaw:product-auth:oauth-complete";
+
+    let payload = json!({
+        "type": MESSAGE_TYPE,
+        "flowId": response.flow_id,
+        "status": response.status,
+    })
+    .to_string();
+    let html = format!(
+        r#"<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Authorization complete</title>
+</head>
+<body>
+  <p>Authorization complete. You can close this window.</p>
+  <script>
+    (() => {{
+      const payload = {payload};
+      try {{
+        new BroadcastChannel("{CHANNEL}").postMessage(payload);
+      }} catch (_err) {{}}
+      try {{
+        localStorage.setItem(
+          "{STORAGE_KEY}",
+          JSON.stringify({{ ...payload, completedAt: Date.now() }})
+        );
+      }} catch (_err) {{}}
+      window.close();
+    }})();
+  </script>
+</body>
+</html>"#
+    );
+    ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response()
 }
 
 pub(super) async fn callback_outcome_from_query(

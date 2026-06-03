@@ -574,6 +574,12 @@ fn callback_request(uri: String) -> Request<Body> {
     callback_request_with_options(uri, Body::empty(), callback_peer(10), None)
 }
 
+fn callback_request_accept(uri: String, accept: HeaderValue) -> Request<Body> {
+    let mut request = callback_request_with_options(uri, Body::empty(), callback_peer(10), None);
+    request.headers_mut().insert(header::ACCEPT, accept);
+    request
+}
+
 fn callback_request_with_body(uri: String, body: Body) -> Request<Body> {
     callback_request_with_options(uri, body, callback_peer(10), None)
 }
@@ -1217,6 +1223,40 @@ async fn product_auth_google_oauth_callback_completes_setup_flow() {
         serde_json::from_str(&callback_body).expect("callback json");
     assert_eq!(callback_json["flow_id"], start_json["flow_id"]);
     assert_eq!(callback_json["status"], "completed");
+    assert_eq!(dispatcher.events().len(), 1);
+}
+
+#[tokio::test]
+async fn product_auth_google_oauth_browser_callback_notifies_chat_without_secrets() {
+    let (app, dispatcher) = build_app_with_google_oauth();
+    let (start_json, state) = start_google_oauth_flow(&app).await;
+    let scopes = format!("{GOOGLE_GMAIL_READONLY_SCOPE}%20{GOOGLE_CALENDAR_READONLY_SCOPE}");
+
+    let callback_response = app
+        .oneshot(callback_request_accept(
+            format!(
+                "/api/reborn/product-auth/oauth/google/callback?state={state}&code=google-auth-code&scope={scopes}"
+            ),
+            HeaderValue::from_static("text/html,application/xhtml+xml"),
+        ))
+        .await
+        .expect("oneshot");
+
+    assert_eq!(callback_response.status(), StatusCode::OK);
+    let content_type = callback_response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    assert!(content_type.starts_with("text/html"));
+
+    let callback_body = read_body_string(callback_response).await;
+    assert!(callback_body.contains("ironclaw:product-auth:oauth-complete"));
+    assert!(callback_body.contains("ironclaw-product-auth"));
+    assert!(callback_body.contains(start_json["flow_id"].as_str().expect("flow id")));
+    assert!(!callback_body.contains(&state));
+    assert!(!callback_body.contains("google-auth-code"));
     assert_eq!(dispatcher.events().len(), 1);
 }
 
