@@ -121,6 +121,15 @@ pub fn build_signed_session_login(
     })
 }
 
+/// Hard cap on the revocation denylist, mirroring the bounded discipline
+/// of the sibling `PendingFlowStore` / `SessionTicketStore`. Without it the
+/// map would grow with logout-rate × session-lifetime (up to 30 days),
+/// unbounded. At the cap, expired entries are swept and — if still full of
+/// live entries — the one closest to expiry is dropped (it leaves the
+/// denylist slightly early but its token still expires on schedule via
+/// `exp`).
+const MAX_REVOKED_ENTRIES: usize = 4096;
+
 /// Stateless `SessionStore` whose "record" is the cryptographic
 /// signature itself (HMAC-SHA256 over the base64url payload), plus a
 /// process-local denylist that makes `revoke` (logout) effective.
@@ -129,9 +138,11 @@ struct SignedTokenSessionStore {
     /// Host tenant this store is bound to. The signing key is derived from
     /// it, and `lookup` re-checks it as defense in depth.
     tenant_id: TenantId,
-    /// Revoked session ids → their expiry (unix seconds). Pruned lazily
-    /// on each `revoke` so the set stays bounded by "live revoked
-    /// sessions", never "every session ever revoked".
+    /// Revoked session ids → their expiry (unix seconds). Bounded by
+    /// [`MAX_REVOKED_ENTRIES`]; the common-case logout is an O(1) insert,
+    /// with an expired-entry sweep only when the map reaches the cap (so
+    /// the hot per-request `lookup` read-lock is not blocked by an O(n)
+    /// scan under the write lock on every logout).
     revoked: RwLock<HashMap<String, i64>>,
 }
 
@@ -277,16 +288,32 @@ impl SessionStore for SignedTokenSessionStore {
 
     async fn revoke(&self, candidate: &str) -> Result<(), SessionStoreError> {
         // Only a validly-signed, not-yet-expired token carries a session
-        // id worth denying; a garbage or expired bearer has nothing to
-        // revoke, so logout is a silent success. Prune expired denylist
-        // entries on the way so the set stays bounded.
+        // id worth denying; a garbage or already-expired bearer has nothing
+        // to revoke, so logout is a silent success.
         if let Some(payload) = self.verify(candidate) {
             let now = Utc::now().timestamp();
-            let mut guard = self.revoked.write();
-            guard.retain(|_, exp| *exp > now);
-            if payload.exp > now {
-                guard.insert(payload.sid, payload.exp);
+            if payload.exp <= now {
+                return Ok(());
             }
+            let mut guard = self.revoked.write();
+            // Common case: O(1) insert. Only when the map reaches the cap do
+            // we pay the O(n) expired-entry sweep (keeping the per-logout
+            // write-lock hold time off the hot per-request `lookup` path in
+            // the common case).
+            if guard.len() >= MAX_REVOKED_ENTRIES {
+                guard.retain(|_, exp| *exp > now);
+                // Still at the cap with all-live entries → evict the one
+                // closest to expiry so the set stays bounded.
+                if guard.len() >= MAX_REVOKED_ENTRIES
+                    && let Some(soonest) = guard
+                        .iter()
+                        .min_by_key(|(_, exp)| **exp)
+                        .map(|(sid, _)| sid.clone())
+                {
+                    guard.remove(&soonest);
+                }
+            }
+            guard.insert(payload.sid, payload.exp);
         }
         Ok(())
     }
@@ -510,6 +537,31 @@ mod tests {
             .lookup(&token)
             .await
             .expect_err("malformed tenant in a signed token must surface an error");
+        assert!(matches!(err, SessionStoreError::Backend(_)));
+    }
+
+    #[tokio::test]
+    async fn lookup_surfaces_backend_error_on_malformed_user() {
+        // Symmetric to the malformed-tenant case: a validly-signed token
+        // with this host's tenant but an empty (invalid) user id is a
+        // backend inconsistency, not a silent auth miss. A regression that
+        // swallowed it into `Ok(None)` (or panicked) must fail here.
+        let store = signed_store("operator-secret");
+        let now = Utc::now().timestamp();
+        let token = signed_raw(
+            &store,
+            &TokenPayload {
+                sid: "session-1".to_string(),
+                tenant: tenant().as_str().to_string(),
+                user: String::new(),
+                iat: now,
+                exp: now + 3600,
+            },
+        );
+        let err = store
+            .lookup(&token)
+            .await
+            .expect_err("malformed user in a signed token must surface an error");
         assert!(matches!(err, SessionStoreError::Backend(_)));
     }
 

@@ -25,7 +25,7 @@ use super::config::GoogleOAuthConfig;
 use super::error::{OAuthError, ProviderInitError};
 use super::profile::OAuthUserProfile;
 use super::provider::OAuthProvider;
-use super::provider_http::{describe_transport_error, sanitize_error_code};
+use super::provider_http::{describe_transport_error, read_capped_body, sanitize_error_code};
 use super::provider_name::OAuthProviderName;
 
 const GOOGLE_AUTH_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
@@ -173,8 +173,12 @@ impl OAuthProvider for GoogleProvider {
 
         if !resp.status().is_success() {
             let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            let error_code = serde_json::from_str::<GoogleTokenErrorResponse>(&body)
+            // Read through the shared size cap (same hardened path the
+            // GitHub provider uses) so a misconfigured / overridden token
+            // endpoint cannot force an unbounded allocation in the callback
+            // task. `reqwest` applies no body cap of its own.
+            let body = read_capped_body(resp).await.unwrap_or_default();
+            let error_code = serde_json::from_slice::<GoogleTokenErrorResponse>(&body)
                 .ok()
                 .and_then(|error| error.error);
             if let Some(error_code) = error_code {
@@ -189,7 +193,7 @@ impl OAuthProvider for GoogleProvider {
             }
             tracing::debug!(
                 %status,
-                body = %body,
+                body = %String::from_utf8_lossy(&body),
                 "google token endpoint returned non-success response"
             );
             return Err(OAuthError::CodeExchange(format!(
@@ -197,9 +201,10 @@ impl OAuthProvider for GoogleProvider {
             )));
         }
 
-        let tokens: GoogleTokenResponse = resp
-            .json()
+        let body = read_capped_body(resp)
             .await
+            .map_err(OAuthError::CodeExchange)?;
+        let tokens: GoogleTokenResponse = serde_json::from_slice(&body)
             .map_err(|err| OAuthError::CodeExchange(err.to_string()))?;
         let id_token = tokens.id_token.ok_or_else(|| {
             OAuthError::CodeExchange("Google did not return an id_token".to_string())

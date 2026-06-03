@@ -399,4 +399,42 @@ mod tests {
 
         clear_sso_env();
     }
+
+    /// Caller-level coverage of the missing-secret fail-closed arms (Google
+    /// and GitHub) inside `oauth_providers_from_env`: opting a provider in
+    /// by its CLIENT_ID without the matching CLIENT_SECRET must abort
+    /// startup, not silently skip the provider (which would surface a login
+    /// button whose code exchange always fails). Exercised through the
+    /// caller `sso_startup_config_from_env`, since the helper is private.
+    #[test]
+    fn client_id_without_secret_fails_startup() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+
+        for id_var in [
+            "IRONCLAW_REBORN_WEBUI_GOOGLE_CLIENT_ID",
+            "IRONCLAW_REBORN_WEBUI_GITHUB_CLIENT_ID",
+        ] {
+            clear_sso_env();
+            // SAFETY: serialized by ENV_LOCK; cleared before/after.
+            unsafe { std::env::set_var(id_var, "client-id") };
+            assert!(
+                sso_startup_config_from_env(addr("127.0.0.1:3000")).is_err(),
+                "{id_var} set without its CLIENT_SECRET must abort startup",
+            );
+        }
+        clear_sso_env();
+    }
+
+    /// With no provider CLIENT_ID configured, the caller returns
+    /// `Ok(None)` — the listener keeps its plain env-bearer auth and mounts
+    /// no public login routes. (No allowlist is required in this branch,
+    /// since the allowlist gate only fires once a provider is configured.)
+    #[test]
+    fn no_provider_configured_returns_none() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        clear_sso_env();
+        let resolved = sso_startup_config_from_env(addr("127.0.0.1:3000"))
+            .expect("no provider configured is not an error");
+        assert!(resolved.is_none(), "no CLIENT_ID → no SSO config mounted",);
+    }
 }
