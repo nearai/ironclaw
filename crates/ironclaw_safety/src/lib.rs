@@ -10,6 +10,7 @@
 mod credential_detect;
 mod leak_detector;
 mod policy;
+mod prompt_validation;
 mod provider_validation;
 mod redaction;
 mod sanitizer;
@@ -24,6 +25,7 @@ pub use leak_detector::{
     LeakSeverity,
 };
 pub use policy::{Policy, PolicyAction, PolicyRule, Severity};
+pub use prompt_validation::{PromptSafetyRejection, validate_trusted_trigger_prompt};
 pub use provider_validation::{
     PROVIDER_TOOL_NAME_MAX_BYTES, ProviderValidationError,
     validate_optional_provider_metadata_text, validate_provider_arguments,

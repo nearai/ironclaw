@@ -4,10 +4,13 @@ use async_trait::async_trait;
 use ironclaw_conversations::{
     AcceptedInboundMessage, AdapterInstallationId, AdapterKind, ConversationBindingResolution,
     ConversationBindingService, ConversationRouteKind, ExternalActorRef, ExternalConversationRef,
-    ExternalEventId, InboundTurnError, ResolveConversationRequest, validate_trigger_prompt,
+    ExternalEventId, InboundTurnError, ResolveConversationRequest,
+    classify_trusted_trigger_inbound_error,
 };
 use ironclaw_host_api::{AgentId, TenantId};
-use ironclaw_safety::{InjectionScanner, Sanitizer};
+use ironclaw_safety::{
+    InjectionScanner, PromptSafetyRejection, Sanitizer, validate_trusted_trigger_prompt,
+};
 use ironclaw_threads::{
     AcceptInboundMessageRequest as ThreadAcceptInboundMessageRequest, EnsureThreadRequest,
     MessageContent, SessionThreadService as CanonicalSessionThreadService, ThreadScope,
@@ -16,7 +19,6 @@ use ironclaw_triggers::{
     TriggerError, TriggerFire, TriggerMaterializedPrompt, TriggerPromptMaterializer,
     TriggerTrustedInboundBinding,
 };
-use ironclaw_turns::{AdmissionRejectionReason, TurnError};
 
 #[async_trait]
 pub(crate) trait TriggerFireAuthorizer: Send + Sync {
@@ -91,7 +93,8 @@ where
             .authorize_trigger_fire(&fire)
             .await
             .map_err(trigger_authorization_error)?;
-        validate_trigger_prompt(&*self.prompt_safety, &fire.prompt)?;
+        validate_trusted_trigger_prompt(&*self.prompt_safety, &fire.prompt)
+            .map_err(trigger_prompt_safety_rejection)?;
         let trusted_inbound_binding = TriggerTrustedInboundBinding::for_fire(&fire);
         let resolve_request = trigger_resolve_request(&fire, &trusted_inbound_binding)?;
         let resolution = self
@@ -102,7 +105,7 @@ where
                 fire.project_id.clone(),
             )
             .await
-            .map_err(classify_inbound_error)?;
+            .map_err(classify_trusted_trigger_inbound_error)?;
         let accepted = record_trigger_prompt(
             Arc::clone(&self.thread_service),
             &resolution,
@@ -112,7 +115,7 @@ where
             None,
         )
         .await
-        .map_err(classify_inbound_error)?;
+        .map_err(classify_trusted_trigger_inbound_error)?;
         let content_ref = ironclaw_triggers::TriggerInboundContentRef::new(format!(
             "thread-message:{}",
             accepted.message_id
@@ -237,49 +240,17 @@ async fn record_trigger_prompt(
         })
 }
 
-fn classify_inbound_error(error: InboundTurnError) -> TriggerError {
-    match error {
-        InboundTurnError::TurnSubmissionFailed {
-            error: TurnError::ThreadBusy(_),
-        } => TriggerError::Backend {
-            reason: format!("trusted trigger submit retryable failure: {error}"),
-        },
-        InboundTurnError::TurnSubmissionFailed {
-            error: TurnError::AdmissionRejected(ref rejection),
-        } => match rejection.reason {
-            AdmissionRejectionReason::TenantLimit | AdmissionRejectionReason::Unavailable => {
-                TriggerError::Backend {
-                    reason: format!("trusted trigger submit retryable failure: {error}"),
-                }
-            }
-            AdmissionRejectionReason::ProfileRejected
-            | AdmissionRejectionReason::Policy
-            | AdmissionRejectionReason::Unauthorized => TriggerError::InvalidMaterialization {
-                reason: format!("trusted trigger submit permanent admission failure: {error}"),
-            },
-        },
-        InboundTurnError::TurnSubmissionFailed {
-            error:
-                TurnError::Unavailable { .. }
-                | TurnError::CapacityExceeded { .. }
-                | TurnError::Conflict { .. },
-        } => TriggerError::Backend {
-            reason: format!("trusted trigger submit retryable failure: {error}"),
-        },
-        InboundTurnError::DurableState { reason } => TriggerError::Backend {
-            reason: format!("trusted trigger durable state unavailable: {reason}"),
-        },
-        _ => TriggerError::InvalidMaterialization {
-            reason: format!("trusted trigger inbound request invalid: {error}"),
-        },
-    }
-}
-
 fn trigger_authorization_error(error: TriggerFireAuthError) -> TriggerError {
     match error {
         TriggerFireAuthError::Denied { reason } => TriggerError::InvalidMaterialization {
             reason: format!("trusted trigger fire authorization denied: {reason}"),
         },
+    }
+}
+
+fn trigger_prompt_safety_rejection(error: PromptSafetyRejection) -> TriggerError {
+    TriggerError::InvalidMaterialization {
+        reason: error.to_string(),
     }
 }
 
@@ -319,11 +290,11 @@ mod tests {
         TriggerSchedule, TriggerSourceKind, TriggerState,
     };
     use ironclaw_turns::{
-        AcceptedMessageRef, AdmissionRejection, CancelRunRequest, CancelRunResponse, EventCursor,
-        GetRunStateRequest, ReplyTargetBindingRef, ResumeTurnRequest, ResumeTurnResponse,
-        RunProfileId, RunProfileVersion, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse,
-        TurnActor, TurnCoordinator, TurnError, TurnId, TurnRunId, TurnRunState, TurnScope,
-        TurnStatus,
+        AcceptedMessageRef, AdmissionRejection, AdmissionRejectionReason, CancelRunRequest,
+        CancelRunResponse, EventCursor, GetRunStateRequest, ReplyTargetBindingRef,
+        ResumeTurnRequest, ResumeTurnResponse, RunProfileId, RunProfileVersion, SourceBindingRef,
+        SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError, TurnId,
+        TurnRunId, TurnRunState, TurnScope, TurnStatus,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -702,26 +673,29 @@ mod tests {
 
     #[test]
     fn durable_inbound_errors_are_retryable_backend_failures() {
-        let error = classify_inbound_error(InboundTurnError::DurableState {
+        let error = classify_trusted_trigger_inbound_error(InboundTurnError::DurableState {
             reason: "thread store unavailable".to_string(),
         });
 
         assert!(
-            matches!(error, TriggerError::Backend { reason } if reason.contains("thread store unavailable"))
+            matches!(error, TriggerError::Backend { reason } if reason == "trusted trigger submit retryable failure")
         );
     }
 
     #[test]
     fn thread_busy_inbound_errors_are_retryable_backend_failures() {
-        let error = classify_inbound_error(InboundTurnError::TurnSubmissionFailed {
-            error: TurnError::ThreadBusy(ironclaw_turns::ThreadBusy {
-                active_run_id: TurnRunId::new(),
-                status: TurnStatus::Queued,
-                event_cursor: EventCursor(1),
-            }),
-        });
+        let error =
+            classify_trusted_trigger_inbound_error(InboundTurnError::TurnSubmissionFailed {
+                error: TurnError::ThreadBusy(ironclaw_turns::ThreadBusy {
+                    active_run_id: TurnRunId::new(),
+                    status: TurnStatus::Queued,
+                    event_cursor: EventCursor(1),
+                }),
+            });
 
-        assert!(matches!(error, TriggerError::Backend { reason } if reason.contains("retryable")));
+        assert!(
+            matches!(error, TriggerError::Backend { reason } if reason == "trusted trigger submit retryable failure")
+        );
     }
 
     #[test]
@@ -739,47 +713,53 @@ mod tests {
             },
         ] {
             let classified =
-                classify_inbound_error(InboundTurnError::TurnSubmissionFailed { error });
+                classify_trusted_trigger_inbound_error(InboundTurnError::TurnSubmissionFailed {
+                    error,
+                });
 
             assert!(
-                matches!(classified, TriggerError::Backend { reason } if reason.contains("retryable"))
+                matches!(classified, TriggerError::Backend { reason } if reason == "trusted trigger submit retryable failure")
             );
         }
     }
 
     #[test]
     fn transient_admission_rejections_are_retryable_backend_failures() {
-        let error = classify_inbound_error(InboundTurnError::TurnSubmissionFailed {
-            error: TurnError::AdmissionRejected(AdmissionRejection::new(
-                AdmissionRejectionReason::TenantLimit,
-            )),
-        });
+        let error =
+            classify_trusted_trigger_inbound_error(InboundTurnError::TurnSubmissionFailed {
+                error: TurnError::AdmissionRejected(AdmissionRejection::new(
+                    AdmissionRejectionReason::TenantLimit,
+                )),
+            });
 
-        assert!(matches!(error, TriggerError::Backend { reason } if reason.contains("retryable")));
+        assert!(
+            matches!(error, TriggerError::Backend { reason } if reason == "trusted trigger submit retryable failure")
+        );
     }
 
     #[test]
     fn permanent_admission_rejections_are_terminal_materialization_failures() {
-        let error = classify_inbound_error(InboundTurnError::TurnSubmissionFailed {
-            error: TurnError::AdmissionRejected(AdmissionRejection::new(
-                AdmissionRejectionReason::Policy,
-            )),
-        });
+        let error =
+            classify_trusted_trigger_inbound_error(InboundTurnError::TurnSubmissionFailed {
+                error: TurnError::AdmissionRejected(AdmissionRejection::new(
+                    AdmissionRejectionReason::Policy,
+                )),
+            });
 
         assert!(
-            matches!(error, TriggerError::InvalidMaterialization { reason } if reason.contains("permanent admission"))
+            matches!(error, TriggerError::InvalidMaterialization { reason } if reason == "trusted trigger submit rejected")
         );
     }
 
     #[test]
     fn non_submission_inbound_errors_are_permanent_materialization_failures() {
-        let error = classify_inbound_error(InboundTurnError::AccessDenied {
+        let error = classify_trusted_trigger_inbound_error(InboundTurnError::AccessDenied {
             actor_id: "actor-1".to_string(),
             thread_id: "thread-1".to_string(),
         });
 
         assert!(
-            matches!(error, TriggerError::InvalidMaterialization { reason } if reason.contains("trusted trigger inbound request invalid"))
+            matches!(error, TriggerError::InvalidMaterialization { reason } if reason == "trusted trigger inbound request rejected")
         );
     }
 
@@ -802,7 +782,7 @@ mod tests {
             description: "Potential role manipulation".to_string(),
         };
 
-        validate_trigger_prompt(
+        validate_trusted_trigger_prompt(
             &FixedWarningScanner {
                 warnings: vec![warning],
             },
@@ -1238,7 +1218,7 @@ mod tests {
             .unwrap_err();
 
         assert!(
-            matches!(error, TriggerError::Backend { reason } if reason.contains("prompt thread write failed"))
+            matches!(error, TriggerError::Backend { reason } if reason == "trusted trigger submit retryable failure")
         );
     }
 }
