@@ -21,7 +21,7 @@ use ironclaw_product_workflow::{
     LifecycleProductFacade, LifecycleProductPayload, LifecycleProductResponse,
     LifecycleReadinessBlocker, ListPendingApprovalsRequest, ListPendingApprovalsResponse,
     ListPendingAuthInteractionsRequest, ListPendingAuthInteractionsResponse, ProductWorkflowError,
-    RebornAutomationInfo, RebornAutomationRunStatus, RebornAutomationSource,
+    RebornAutomationInfo, RebornAutomationRunStatus, RebornAutomationSource, RebornAutomationState,
     RebornExtensionOnboardingState, RebornGetRunStateRequest, RebornResolveGateResponse,
     RebornServices, RebornServicesApi, RebornServicesError, RebornServicesErrorCode,
     RebornServicesErrorKind, RebornStreamEventsRequest, RebornSubmitTurnResponse,
@@ -695,7 +695,7 @@ fn automation_info(
         automation_id: trigger_id.to_string(),
         name: name.into(),
         source: RebornAutomationSource::Schedule { cron: cron.into() },
-        state: "active".to_string(),
+        state: RebornAutomationState::Active,
         next_run_at: Some("2026-06-03T09:00:00Z".parse().expect("next run")),
         last_run_at: None,
         last_status,
@@ -3590,6 +3590,7 @@ async fn list_automation_dispatches_through_product_facade() {
             cron: "0 9 * * *".to_string()
         }
     );
+    assert_eq!(listed.automations[0].state, RebornAutomationState::Active);
     assert_eq!(
         listed.automations[0].last_status,
         Some(RebornAutomationRunStatus::Ok)

@@ -12,8 +12,8 @@ use ironclaw_host_runtime::{
 };
 use ironclaw_product_workflow::{
     AutomationProductFacade, RebornAutomationInfo, RebornAutomationRunStatus,
-    RebornAutomationSource, RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
-    WebUiAuthenticatedCaller,
+    RebornAutomationSource, RebornAutomationState, RebornServicesError, RebornServicesErrorCode,
+    RebornServicesErrorKind, WebUiAuthenticatedCaller,
 };
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 use serde::Deserialize;
@@ -36,23 +36,6 @@ impl std::fmt::Debug for RebornWebuiAutomationFacade {
 impl RebornWebuiAutomationFacade {
     pub(crate) fn new(host_runtime: Arc<dyn HostRuntime>) -> Self {
         Self { host_runtime }
-    }
-
-    pub(crate) async fn list_triggers(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        limit: Option<usize>,
-    ) -> Result<Vec<RebornAutomationInfo>, RebornServicesError> {
-        let output = self
-            .invoke_trigger(
-                caller,
-                TRIGGER_LIST_CAPABILITY_ID,
-                json!({
-                    "limit": limit,
-                }),
-            )
-            .await?;
-        parse_list_automations_output(output)
     }
 
     async fn invoke_trigger(
@@ -115,7 +98,16 @@ impl AutomationProductFacade for RebornWebuiAutomationFacade {
         caller: WebUiAuthenticatedCaller,
         limit: Option<usize>,
     ) -> Result<Vec<RebornAutomationInfo>, RebornServicesError> {
-        self.list_triggers(caller, limit).await
+        let output = self
+            .invoke_trigger(
+                caller,
+                TRIGGER_LIST_CAPABILITY_ID,
+                json!({
+                    "limit": limit,
+                }),
+            )
+            .await?;
+        parse_list_automations_output(output)
     }
 }
 
@@ -129,7 +121,7 @@ struct RawAutomationRecord {
     trigger_id: String,
     name: String,
     schedule: RawAutomationSchedule,
-    state: String,
+    state: RebornAutomationState,
     #[serde(default)]
     next_run_at: Option<DateTime<Utc>>,
     #[serde(default)]
@@ -385,8 +377,9 @@ mod tests {
         RuntimeProcessHandle, RuntimeResourceGate, TRIGGER_LIST_CAPABILITY_ID,
     };
     use ironclaw_product_workflow::{
-        RebornAutomationRunStatus, RebornAutomationSource, RebornServicesErrorCode,
-        RebornServicesErrorKind, WebUiAuthenticatedCaller,
+        AutomationProductFacade, RebornAutomationRunStatus, RebornAutomationSource,
+        RebornAutomationState, RebornServicesErrorCode, RebornServicesErrorKind,
+        WebUiAuthenticatedCaller,
     };
     use serde_json::{Value, json};
     use tokio::sync::Mutex;
@@ -400,7 +393,7 @@ mod tests {
         let caller = caller();
 
         let automations = facade
-            .list_triggers(caller.clone(), Some(25))
+            .list_automations(caller.clone(), Some(25))
             .await
             .expect("trigger list output");
 
@@ -441,7 +434,24 @@ mod tests {
         }))));
 
         let error = facade
-            .list_triggers(caller(), None)
+            .list_automations(caller(), None)
+            .await
+            .expect_err("malformed automation output should fail closed");
+
+        assert_eq!(error.code, RebornServicesErrorCode::Internal);
+        assert_eq!(error.status_code, 500);
+    }
+
+    #[tokio::test]
+    async fn automation_facade_rejects_non_array_trigger_list_output() {
+        let facade = RebornWebuiAutomationFacade::new(Arc::new(OutputHostRuntime::new(json!({
+            "triggers": {
+                "trigger_id": "trigger-listed"
+            }
+        }))));
+
+        let error = facade
+            .list_automations(caller(), None)
             .await
             .expect_err("malformed automation output should fail closed");
 
@@ -465,12 +475,44 @@ mod tests {
         }))));
 
         let automations = facade
-            .list_triggers(caller(), None)
+            .list_automations(caller(), None)
             .await
             .expect("list automations");
 
         assert_eq!(automations.len(), 1);
         assert_eq!(automations[0].last_status, None);
+    }
+
+    #[tokio::test]
+    async fn automation_facade_parses_known_and_unknown_states() {
+        let mut paused = raw_automation("trigger-paused", "Paused status", "0 9 * * *", Some("ok"))
+            .as_object()
+            .cloned()
+            .expect("object trigger");
+        paused.insert("state".to_string(), json!("paused"));
+        let future = json!({
+            "trigger_id": "trigger-future",
+            "name": "Future status",
+            "schedule": {"kind": "cron", "expression": "0 12 * * *"},
+            "state": "future_state",
+            "next_run_at": "2026-06-03T09:00:00Z",
+            "last_run_at": null,
+            "last_status": "ok",
+            "is_active": true,
+            "created_at": "2026-06-02T18:00:00Z"
+        });
+        let facade = RebornWebuiAutomationFacade::new(Arc::new(OutputHostRuntime::new(json!({
+            "triggers": [Value::Object(paused), future]
+        }))));
+
+        let automations = facade
+            .list_automations(caller(), None)
+            .await
+            .expect("list automations");
+
+        assert_eq!(automations.len(), 2);
+        assert_eq!(automations[0].state, RebornAutomationState::Paused);
+        assert_eq!(automations[1].state, RebornAutomationState::Unknown);
     }
 
     #[tokio::test]
@@ -490,7 +532,7 @@ mod tests {
         }))));
 
         let automations = facade
-            .list_triggers(caller(), None)
+            .list_automations(caller(), None)
             .await
             .expect("list automations");
 
@@ -505,7 +547,7 @@ mod tests {
         let caller = caller();
 
         let error = facade
-            .list_triggers(caller, Some(10))
+            .list_automations(caller, Some(10))
             .await
             .expect_err("runtime failure should map to services error");
 
@@ -585,7 +627,7 @@ mod tests {
                 RebornWebuiAutomationFacade::new(Arc::new(OutcomeHostRuntime::new(outcome)));
 
             let error = facade
-                .list_triggers(caller(), None)
+                .list_automations(caller(), None)
                 .await
                 .expect_err("outcome should map to services error");
 
@@ -634,7 +676,7 @@ mod tests {
                 RebornWebuiAutomationFacade::new(Arc::new(FailingHostRuntime::new(failure_kind)));
 
             let error = facade
-                .list_triggers(caller(), Some(10))
+                .list_automations(caller(), Some(10))
                 .await
                 .expect_err("runtime failure should map to services error");
 
@@ -669,7 +711,7 @@ mod tests {
                 RebornWebuiAutomationFacade::new(Arc::new(ErrorHostRuntime::new(host_error)));
 
             let error = facade
-                .list_triggers(caller(), Some(10))
+                .list_automations(caller(), Some(10))
                 .await
                 .expect_err("host runtime error should map to services error");
 
