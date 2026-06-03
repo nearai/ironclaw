@@ -743,12 +743,12 @@ mod tests {
             State(state),
             RawQuery(uri.query().map(str::to_string)),
             uri,
+            HeaderMap::new(),
         )
         .await
-        .expect("google callback")
-        .0;
+        .expect("google callback");
 
-        assert_eq!(response.status, AuthFlowStatus::Completed);
+        assert_eq!(response.status(), StatusCode::OK);
         let events = dispatcher.events();
         assert_eq!(events.len(), 1);
         assert_eq!(
@@ -758,6 +758,60 @@ mod tests {
                 gate_ref: AuthGateRef::new(gate_ref).expect("gate ref"),
             }
         );
+    }
+
+    #[tokio::test]
+    async fn oauth_callback_rejects_dcr_state_with_mismatched_path_flow_id() {
+        let shared = Arc::new(InMemoryAuthProductServices::new());
+        let product_auth = Arc::new(RebornProductAuthServices::from_shared(
+            shared,
+            Arc::new(RecordingDispatcher::default()),
+        ));
+        let state = ProductAuthRouteState::new(
+            product_auth,
+            TenantId::new("tenant-alpha").expect("tenant"),
+            None,
+            None,
+        );
+        let state_flow_id = AuthFlowId::new();
+        let path_flow_id = AuthFlowId::new();
+        let scope = AuthProductScope::new(
+            ResourceScope::local_default(
+                UserId::new("user-alpha").expect("user"),
+                InvocationId::new(),
+            )
+            .expect("scope"),
+            AuthSurface::Callback,
+        );
+        let dcr_state = DcrOAuthCallbackState::new(
+            state_flow_id,
+            scope,
+            AuthProviderId::new("notion").expect("provider"),
+            CredentialAccountLabel::new("work notion").expect("label"),
+            Vec::new(),
+        )
+        .encode()
+        .expect("encoded DCR state");
+        let encoded_state =
+            url::form_urlencoded::byte_serialize(dcr_state.as_str().as_bytes()).collect::<String>();
+        let uri = format!(
+            "/api/reborn/product-auth/oauth/callback/{path_flow_id}?state={encoded_state}&code=notion-code"
+        )
+        .parse::<Uri>()
+        .expect("callback uri");
+
+        let error = oauth_callback_handler(
+            State(state),
+            Path(path_flow_id.to_string()),
+            RawQuery(uri.query().map(str::to_string)),
+            uri,
+            HeaderMap::new(),
+        )
+        .await
+        .expect_err("DCR state bound to another flow must be rejected");
+
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert_eq!(error.body.code, AuthErrorCode::MalformedCallback);
     }
 
     #[derive(Default)]

@@ -1831,12 +1831,12 @@ mod tests {
             Path(flow_id),
             RawQuery(uri.query().map(str::to_string)),
             uri,
+            HeaderMap::new(),
         )
         .await
-        .expect("notion callback")
-        .0;
+        .expect("notion callback");
 
-        assert_eq!(response.status, AuthFlowStatus::Completed);
+        assert_eq!(response.status(), StatusCode::OK);
         let events = dispatcher.events();
         assert_eq!(events.len(), 1);
         assert_eq!(

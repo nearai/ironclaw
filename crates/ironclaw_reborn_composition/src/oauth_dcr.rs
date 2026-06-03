@@ -1013,7 +1013,7 @@ struct DcrOAuthCallbackStateWire {
 impl DcrOAuthCallbackState {
     const PREFIX: &'static str = "icd1.";
 
-    fn new(
+    pub(crate) fn new(
         flow_id: AuthFlowId,
         scope: AuthProductScope,
         provider: AuthProviderId,
@@ -1054,7 +1054,7 @@ impl DcrOAuthCallbackState {
         &self.requested_scopes
     }
 
-    fn encode(&self) -> Result<OAuthState, AuthProductError> {
+    pub(crate) fn encode(&self) -> Result<OAuthState, AuthProductError> {
         let wire = DcrOAuthCallbackStateWire {
             flow_id: self.flow_id,
             resource: self.scope.resource.clone(),
