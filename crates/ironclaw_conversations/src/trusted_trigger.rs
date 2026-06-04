@@ -9,13 +9,13 @@ use crate::InboundTurnError;
 /// `InboundTurnError`. Callers keep their own local `TriggerError` wording and
 /// logging, so this module does not become a generic trusted-ingress facade.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TrustedTriggerInboundFailureKind {
+pub(crate) enum TrustedTriggerInboundFailureKind {
     RetryableBackend,
     SubmitRejected,
     InboundRequestRejected,
 }
 
-pub fn classify_inbound_error(error: &InboundTurnError) -> TrustedTriggerInboundFailureKind {
+pub(crate) fn classify_inbound_error(error: &InboundTurnError) -> TrustedTriggerInboundFailureKind {
     match error {
         InboundTurnError::TurnSubmissionFailed {
             error: TurnError::ThreadBusy(_),

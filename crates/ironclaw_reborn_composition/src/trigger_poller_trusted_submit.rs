@@ -5,7 +5,6 @@ use ironclaw_conversations::{
     AcceptedInboundMessage, AdapterInstallationId, AdapterKind, ConversationBindingResolution,
     ConversationBindingService, ConversationRouteKind, ExternalActorRef, ExternalConversationRef,
     ExternalEventId, InboundTurnError, ResolveConversationRequest,
-    TrustedTriggerInboundFailureKind, classify_inbound_error,
 };
 use ironclaw_host_api::{AgentId, TenantId};
 use ironclaw_safety::{
@@ -19,6 +18,7 @@ use ironclaw_triggers::{
     TriggerError, TriggerFire, TriggerMaterializedPrompt, TriggerPromptMaterializer,
     TriggerTrustedInboundBinding,
 };
+use ironclaw_turns::{AdmissionRejectionReason, TurnError};
 
 #[async_trait]
 pub(crate) trait TriggerFireAuthorizer: Send + Sync {
@@ -249,16 +249,46 @@ fn trigger_authorization_error(error: TriggerFireAuthError) -> TriggerError {
 }
 
 fn classify_materializer_inbound_error(error: InboundTurnError) -> TriggerError {
-    match classify_inbound_error(&error) {
-        TrustedTriggerInboundFailureKind::RetryableBackend => {
-            retryable_trigger_materializer_backend_error()
-        }
-        TrustedTriggerInboundFailureKind::SubmitRejected => {
-            rejected_trigger_materialization("trusted trigger submit rejected")
-        }
-        TrustedTriggerInboundFailureKind::InboundRequestRejected => {
+    match error {
+        InboundTurnError::TurnSubmissionFailed {
+            error: TurnError::ThreadBusy(_),
+        } => retryable_trigger_materializer_backend_error(),
+        InboundTurnError::TurnSubmissionFailed {
+            error: TurnError::AdmissionRejected(ref rejection),
+        } => match rejection.reason {
+            AdmissionRejectionReason::TenantLimit | AdmissionRejectionReason::Unavailable => {
+                retryable_trigger_materializer_backend_error()
+            }
+            AdmissionRejectionReason::ProfileRejected
+            | AdmissionRejectionReason::Policy
+            | AdmissionRejectionReason::Unauthorized => {
+                rejected_trigger_materialization("trusted trigger submit rejected")
+            }
+        },
+        InboundTurnError::TurnSubmissionFailed {
+            error:
+                TurnError::Unavailable { .. }
+                | TurnError::CapacityExceeded { .. }
+                | TurnError::Conflict { .. },
+        } => retryable_trigger_materializer_backend_error(),
+        InboundTurnError::TurnSubmissionFailed {
+            error:
+                TurnError::ScopeNotFound
+                | TurnError::Unauthorized
+                | TurnError::InvalidRequest { .. }
+                | TurnError::InvalidTransition { .. }
+                | TurnError::LeaseMismatch,
+        } => rejected_trigger_materialization("trusted trigger submit rejected"),
+        InboundTurnError::InvalidExternalRef { .. }
+        | InboundTurnError::BindingRequired { .. }
+        | InboundTurnError::AccessDenied { .. }
+        | InboundTurnError::BindingConflict { .. }
+        | InboundTurnError::ThreadNotFound { .. }
+        | InboundTurnError::StatePoisoned
+        | InboundTurnError::InvalidCanonicalRef { .. } => {
             rejected_trigger_materialization("trusted trigger inbound request rejected")
         }
+        InboundTurnError::DurableState { .. } => retryable_trigger_materializer_backend_error(),
     }
 }
 

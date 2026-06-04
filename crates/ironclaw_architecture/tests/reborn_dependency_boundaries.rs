@@ -146,6 +146,16 @@ fn conversation_trusted_trigger_classifier_stays_out_of_root_exports() {
          local errors"
     );
     assert!(
+        !lib_source.contains("classify_inbound_error"),
+        "trusted trigger inbound classification must not be re-exported from \
+         ironclaw_conversations; keep it private to conversations-owned submitter policy"
+    );
+    assert!(
+        !lib_source.contains("TrustedTriggerInboundFailureKind"),
+        "trusted trigger inbound classification types must not be re-exported from \
+         ironclaw_conversations; keep them private to conversations-owned submitter policy"
+    );
+    assert!(
         !lib_source.contains("pub mod trusted_trigger"),
         "trusted_trigger must stay a private implementation module; root exports should name only \
          the narrow symbols downstream composition needs"
