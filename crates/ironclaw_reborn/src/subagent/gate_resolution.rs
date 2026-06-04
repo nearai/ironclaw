@@ -194,6 +194,38 @@ impl BoundedSubagentGateResolutionStore {
         Ok(states.iter().all(|state| state.delivered_to_parent))
     }
 
+    pub fn undo_mark_child_delivered(
+        &self,
+        gate_ref: &GateRef,
+        child_run_id: TurnRunId,
+    ) -> Result<(), AgentLoopHostError> {
+        let mut inner = lock(&self.inner)?;
+        let should_requeue = if let Some(states) = inner.by_gate.get_mut(gate_ref) {
+            let mut requeue = false;
+            for state in states
+                .iter_mut()
+                .filter(|state| state.record.child_run_id == child_run_id)
+            {
+                if state.delivered_to_parent {
+                    state.delivered_to_parent = false;
+                    if state.terminal_status.is_some() && !state.delivery_claimed {
+                        requeue = true;
+                    }
+                }
+            }
+            requeue
+        } else {
+            false
+        };
+        if should_requeue {
+            let queue = inner.deliverable_by_child.entry(child_run_id).or_default();
+            if !queue.iter().any(|queued| queued == gate_ref) {
+                queue.push_front(gate_ref.clone());
+            }
+        }
+        Ok(())
+    }
+
     pub fn release_terminal_claim(&self, gate_ref: &GateRef) -> Result<(), AgentLoopHostError> {
         let mut inner = lock(&self.inner)?;
         let to_requeue: Vec<TurnRunId> = if let Some(states) = inner.by_gate.get_mut(gate_ref) {
@@ -312,32 +344,6 @@ impl BoundedSubagentGateResolutionStore {
             .flat_map(|states| states.iter())
             .find(|state| state.record.child_run_id == child_run_id)
             .cloned())
-    }
-
-    pub fn delete_child_state(
-        &self,
-        gate_ref: &GateRef,
-        child_run_id: TurnRunId,
-    ) -> Result<(), AgentLoopHostError> {
-        let mut inner = lock(&self.inner)?;
-        let (removed, gate_empty) = {
-            let Some(states) = inner.by_gate.get_mut(gate_ref) else {
-                return Ok(());
-            };
-            let before = states.len();
-            states.retain(|state| state.record.child_run_id != child_run_id);
-            let removed = before.saturating_sub(states.len());
-            (removed, states.is_empty())
-        };
-        if removed == 0 {
-            return Ok(());
-        }
-        inner.total_states = inner.total_states.saturating_sub(removed);
-        prune_child_index(&mut inner.gates_by_child, child_run_id, gate_ref);
-        if gate_empty {
-            inner.by_gate.remove(gate_ref);
-        }
-        Ok(())
     }
 
     pub fn subagent_kind_for_child(
@@ -723,11 +729,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn delete_child_state_removes_only_one_shared_gate_child() {
+    async fn undo_mark_child_delivered_requeues_child_without_removing_state() {
         let store = BoundedSubagentGateResolutionStore::new();
         let child_a = TurnRunId::new();
         let child_b = TurnRunId::new();
-        let gate = GateRef::new("gate:subagent-delete-child-state").unwrap();
+        let gate = GateRef::new("gate:subagent-undo-delivered").unwrap();
         store
             .record_awaited_child(record(gate.as_str(), child_a))
             .await
@@ -736,16 +742,33 @@ mod tests {
             .record_awaited_child(record(gate.as_str(), child_b))
             .await
             .unwrap();
-
-        store.delete_child_state(&gate, child_a).unwrap();
-
-        assert_eq!(store.len().unwrap(), 1);
-        assert!(store.state_for_child(child_a).unwrap().is_none());
-        let child_b_state = store
-            .state_for_child(child_b)
+        store
+            .record_child_terminal(child_a, terminal_event(TurnStatus::Completed))
+            .unwrap();
+        store
+            .record_child_terminal(child_b, terminal_event(TurnStatus::Completed))
+            .unwrap();
+        let claimed = store
+            .claim_next_terminal_state_for_child(child_a)
             .unwrap()
-            .expect("child B remains");
-        assert_eq!(child_b_state.record.child_run_id, child_b);
+            .expect("child A claimed");
+        assert_eq!(claimed.record.child_run_id, child_a);
+        assert!(!store.mark_child_delivered(&gate, child_a).unwrap());
+
+        store.undo_mark_child_delivered(&gate, child_a).unwrap();
+
+        assert_eq!(store.len().unwrap(), 2);
+        let child_a_state = store
+            .state_for_child(child_a)
+            .unwrap()
+            .expect("child A remains");
+        assert!(!child_a_state.delivered_to_parent);
+        assert!(!child_a_state.delivery_claimed);
+        let retried = store
+            .claim_next_terminal_state_for_child(child_a)
+            .unwrap()
+            .expect("child A is retryable");
+        assert_eq!(retried.record.child_run_id, child_a);
     }
 
     #[tokio::test]

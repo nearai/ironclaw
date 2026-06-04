@@ -191,8 +191,9 @@ where
         for (record, terminal_event) in &blocking_parent_resumes {
             self.resume_parent(terminal_event, record).await?;
         }
-        self.mark_child_deliveries(blocking_deliveries).await?;
-        self.mark_child_deliveries(background_deliveries).await?;
+        let mut deliveries = blocking_deliveries;
+        deliveries.extend(background_deliveries);
+        self.mark_child_deliveries(deliveries).await?;
         Ok(())
     }
 
@@ -517,38 +518,39 @@ where
         Ok(())
     }
 
-    async fn mark_child_delivered(
-        &self,
-        record: &ironclaw_loop_support::AwaitedChildSetRecord,
-    ) -> Result<(), TurnError> {
-        let gate_complete = self
-            .gate_store
-            .mark_child_delivered(&record.gate_ref, record.child_run_id)
-            .map_err(map_host_error)?;
-        if gate_complete {
-            self.gate_store
-                .delete_awaited_child(&record.gate_ref)
-                .await
-                .map_err(map_host_error)?;
-        }
-        Ok(())
-    }
-
     async fn mark_child_deliveries(
         &self,
         records: Vec<ironclaw_loop_support::AwaitedChildSetRecord>,
     ) -> Result<(), TurnError> {
         let mut marked: Vec<ironclaw_loop_support::AwaitedChildSetRecord> = Vec::new();
+        let mut completed_gates = HashSet::new();
         for record in records {
-            if let Err(error) = self.mark_child_delivered(&record).await {
-                for delivered in marked {
-                    let _ = self
-                        .gate_store
-                        .delete_child_state(&delivered.gate_ref, delivered.child_run_id);
+            match self
+                .gate_store
+                .mark_child_delivered(&record.gate_ref, record.child_run_id)
+                .map_err(map_host_error)
+            {
+                Ok(gate_complete) => {
+                    if gate_complete {
+                        completed_gates.insert(record.gate_ref.clone());
+                    }
+                    marked.push(record);
                 }
-                return Err(error);
+                Err(error) => {
+                    for delivered in marked {
+                        let _ = self
+                            .gate_store
+                            .undo_mark_child_delivered(&delivered.gate_ref, delivered.child_run_id);
+                    }
+                    return Err(error);
+                }
             }
-            marked.push(record);
+        }
+        for gate_ref in completed_gates {
+            self.gate_store
+                .delete_awaited_child(&gate_ref)
+                .await
+                .map_err(map_host_error)?;
         }
         Ok(())
     }
@@ -1537,6 +1539,7 @@ mod tests {
         releases: Mutex<Vec<(TurnScope, TurnRunId, u32)>>,
         records: Mutex<Vec<TurnRunRecord>>,
         states: Mutex<Vec<TurnRunState>>,
+        state_lookups: Mutex<Vec<(TurnScope, TurnRunId, TurnRunState)>>,
         run_record_lookups: Mutex<Vec<(TurnScope, TurnRunId)>>,
     }
 
@@ -1551,6 +1554,18 @@ mod tests {
 
         fn add_state(&self, state: TurnRunState) {
             self.states.lock().unwrap().push(state);
+        }
+
+        fn add_state_lookup(
+            &self,
+            lookup_scope: TurnScope,
+            lookup_run_id: TurnRunId,
+            state: TurnRunState,
+        ) {
+            self.state_lookups
+                .lock()
+                .unwrap()
+                .push((lookup_scope, lookup_run_id, state));
         }
 
         fn run_record_lookup_count(&self, scope: &TurnScope, run_id: TurnRunId) -> usize {
@@ -1600,6 +1615,14 @@ mod tests {
             &self,
             request: GetRunStateRequest,
         ) -> Result<TurnRunState, TurnError> {
+            if let Some((_, _, state)) = self.state_lookups.lock().unwrap().iter().find(
+                |(lookup_scope, lookup_run_id, _)| {
+                    lookup_scope == &request.scope && *lookup_run_id == request.run_id
+                },
+            ) {
+                return Ok(state.clone());
+            }
+
             self.states
                 .lock()
                 .unwrap()
@@ -1986,6 +2009,88 @@ mod tests {
 
         assert!(
             matches!(error, TurnError::Unavailable { reason } if reason == "subagent terminal event owner user id recovery resolved mismatched tenant")
+        );
+    }
+
+    #[tokio::test]
+    async fn recover_owner_user_id_rejects_early_event_tenant_mismatch() {
+        let observer = empty_observer();
+        let run_id = TurnRunId::new();
+        let child_scope = TurnScope::new(
+            TenantId::new("tenant-child").unwrap(),
+            Some(AgentId::new("agent1").unwrap()),
+            None,
+            ThreadId::new("thread-child").unwrap(),
+        );
+        let event_scope = TurnScope::new(
+            TenantId::new("tenant-event").unwrap(),
+            Some(AgentId::new("agent1").unwrap()),
+            None,
+            child_scope.thread_id.clone(),
+        );
+        let child_record = test_turn_record(child_scope, run_id);
+
+        let error = observer
+            .recover_owner_user_id(
+                &test_terminal_event(event_scope, run_id),
+                Some(&child_record),
+                None,
+            )
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(error, TurnError::Unavailable { reason } if reason.contains("found mismatched event tenant"))
+        );
+    }
+
+    #[tokio::test]
+    async fn recover_owner_user_id_rejects_mismatched_state_tenant() {
+        let turn_state_store = Arc::new(RecordingTurnStateStore::default());
+        let observer = SubagentCompletionObserver::new_unbound(
+            Arc::new(BoundedSubagentGateResolutionStore::new()),
+            Arc::new(InMemoryBoundedSubagentGoalStore::new()),
+            turn_state_store.clone(),
+            Arc::new(RecordingResultWriter::new(
+                LoopResultRef::new("result:test").unwrap(),
+            )),
+            Arc::new(NoResolveThreadService),
+        );
+        let run_id = TurnRunId::new();
+        let event_scope = TurnScope::new(
+            TenantId::new("tenant-event").unwrap(),
+            Some(AgentId::new("agent1").unwrap()),
+            None,
+            ThreadId::new("thread-state-mismatch").unwrap(),
+        );
+        let child_record = test_turn_record(event_scope.clone(), run_id);
+        let state_scope = TurnScope::new(
+            TenantId::new("tenant-state").unwrap(),
+            event_scope.agent_id.clone(),
+            event_scope.project_id.clone(),
+            event_scope.thread_id.clone(),
+        );
+        turn_state_store.add_state_lookup(
+            event_scope.clone(),
+            run_id,
+            test_state_for_scope(
+                state_scope,
+                run_id,
+                Some(TurnActor::new(UserId::new("owner-state").unwrap())),
+            ),
+        );
+
+        let error = observer
+            .recover_owner_user_id(
+                &test_terminal_event(event_scope, run_id),
+                Some(&child_record),
+                None,
+            )
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(error, TurnError::Unavailable { reason } if reason.contains("found mismatched state tenant"))
         );
     }
 
