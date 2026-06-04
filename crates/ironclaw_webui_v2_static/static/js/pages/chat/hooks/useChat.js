@@ -462,11 +462,7 @@ export function useChat(threadId) {
       setPendingGate(null);
       setIsProcessing(false);
       setActiveRun(null);
-      try {
-        await cancelRunRequest({ threadId, runId, reason });
-      } finally {
-        setIsProcessing(false);
-      }
+      await cancelRunRequest({ threadId, runId, reason });
     },
     [activeRun, threadId],
   );

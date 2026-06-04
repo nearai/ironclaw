@@ -214,3 +214,75 @@ test("useChat.cancelRun clears local state before cancel request resolves", asyn
   resolveCancelRequest({});
   await cancelPromise;
 });
+
+test("useChat.cancelRun completion does not clear a newer run", async () => {
+  const threadId = "thread-1";
+  const stateUpdates = [];
+  let resolveCancelRequest;
+
+  const context = {
+    AbortController,
+    Date,
+    Error,
+    Map,
+    Math,
+    React: createReactStub({
+      initialByIndex: new Map([
+        [2, { runId: "run-1", threadId, status: "running" }],
+        [3, true],
+      ]),
+      setCalls: stateUpdates,
+    }),
+    addPending,
+    cancelRunRequest: async () =>
+      new Promise((resolve) => {
+        resolveCancelRequest = resolve;
+      }),
+    clearTimeout,
+    createThreadRequest: async () => {
+      throw new Error("createThread should not run");
+    },
+    globalThis: {},
+    queryClient: { invalidateQueries: () => {} },
+    recordAcceptedMessageRef,
+    removePending,
+    resolveGateRequest: async () => {},
+    sendMessage: async () => ({
+      accepted_message_ref: "msg:message-2",
+      run_id: "run-2",
+      status: "queued",
+      thread_id: threadId,
+    }),
+    setInterval,
+    setTimeout,
+    submitManualToken: async () => {},
+    useChatEvents: () => () => {},
+    useHistory: () => ({
+      messages: [],
+      hasMore: false,
+      nextCursor: null,
+      isLoading: false,
+      loadHistory: () => {},
+      setMessages: () => {},
+    }),
+    useSSE: () => ({ status: "idle" }),
+  };
+
+  vm.runInNewContext(useChatSourceForTest(), context);
+
+  const chat = context.globalThis.__testExports.useChat(threadId);
+  const cancelPromise = chat.cancelRun("user_requested");
+  await chat.send("next request");
+
+  const newerRunUpdate = stateUpdates.find(
+    (update) => update.index === 2 && update.value?.runId === "run-2",
+  );
+  assert.equal(newerRunUpdate?.value.threadId, threadId);
+  assert.equal(newerRunUpdate?.value.status, "queued");
+
+  const updatesBeforeCancelResolution = stateUpdates.length;
+  resolveCancelRequest({});
+  await cancelPromise;
+
+  assert.deepEqual(stateUpdates.slice(updatesBeforeCancelResolution), []);
+});
