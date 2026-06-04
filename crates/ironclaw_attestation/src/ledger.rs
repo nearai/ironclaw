@@ -307,6 +307,40 @@ pub mod contract {
         ledger.advance(&g, Finalized).await.expect("finalize");
     }
 
+    /// Cross-tenant / two-gate isolation: two distinct gates — standing in for
+    /// two tenants' independent signing flows — advance with no state bleed
+    /// between them. The ledger is keyed purely by `gate_ref` (it carries no
+    /// tenant component), so tenant isolation here is inherited from the fact
+    /// that two tenants' flows always carry distinct `gate_ref`s. This case
+    /// locks that independence: advancing gate A to a terminal must not move,
+    /// create, or otherwise perturb gate B, and creating/advancing B must not
+    /// touch A.
+    pub async fn distinct_gates_advance_independently<L: SigningLedger>(ledger: L) {
+        use SigningLedgerState::*;
+        // Two gate_refs as two different tenants' flows would carry.
+        let gate_a = GateRef::new("gate:tenant-a:ledger");
+        let gate_b = GateRef::new("gate:tenant-b:ledger");
+
+        ledger.create(&gate_a).await.expect("create A");
+        // B does not exist yet just because A does.
+        assert_eq!(ledger.state(&gate_b).await, Err(LedgerError::NotFound));
+
+        // Drive A all the way to a terminal.
+        ledger.create(&gate_b).await.expect("create B");
+        for to in [Signing, Signed, BroadcastSubmitted, Finalized] {
+            ledger.advance(&gate_a, to).await.expect("advance A");
+        }
+        // B stayed exactly where it was created (Approved) — A's progression
+        // never bled across the tenant/gate boundary.
+        assert_eq!(ledger.state(&gate_b).await.expect("state B"), Approved);
+        assert_eq!(ledger.state(&gate_a).await.expect("state A"), Finalized);
+
+        // Now advance B independently; A (terminal) is unaffected.
+        ledger.advance(&gate_b, Signing).await.expect("advance B");
+        assert_eq!(ledger.state(&gate_a).await.expect("state A"), Finalized);
+        assert_eq!(ledger.state(&gate_b).await.expect("state B"), Signing);
+    }
+
     /// Every terminal state (`Finalized`, `Unknown`, `ManualReview`) rejects
     /// every possible subsequent transition. Each terminal is driven on its own
     /// `gate_ref` row so we exercise the real persisted terminal value, not a
@@ -515,6 +549,52 @@ pub mod contract {
         assert_eq!(ledger.state(&g).await.expect("state"), Signing);
     }
 
+    /// Many concurrent `create(&gate)` against the SAME `gate_ref`: exactly one
+    /// must win (`Ok`) and every other must observe `AlreadyExists`. This is the
+    /// concurrent face of the one-shot create — and the in-CI surfacing of the
+    /// H1 collision concern: two tenants' flows that ever produced the same
+    /// `gate_ref` string would race here, and the ledger guarantees the second
+    /// `create` cannot silently win or duplicate the row (it collapses to
+    /// `AlreadyExists`). A backend doing a non-atomic `SELECT ... ; INSERT` would
+    /// let two creators both observe "absent" and both insert. NOTE: this proves
+    /// the *create* CAS is atomic, NOT that two tenants are isolated — gate_ref
+    /// uniqueness across tenants remains an unenforced caller obligation (see the
+    /// plan doc, H1 follow-up).
+    pub async fn concurrent_create_same_gate_ref_yields_one_winner<L>(ledger: L)
+    where
+        L: SigningLedger + 'static,
+    {
+        let ledger = Arc::new(ledger);
+        let g = gate();
+
+        let mut handles = Vec::new();
+        for _ in 0..32 {
+            let ledger = Arc::clone(&ledger);
+            let g = g.clone();
+            handles.push(tokio::spawn(async move { ledger.create(&g).await }));
+        }
+
+        let mut ok = 0usize;
+        let mut already = 0usize;
+        for h in handles {
+            match h.await.expect("task join") {
+                Ok(()) => ok += 1,
+                Err(LedgerError::AlreadyExists) => already += 1,
+                Err(other) => panic!("unexpected error under contention: {other:?}"),
+            }
+        }
+        assert_eq!(
+            ok, 1,
+            "exactly one create may win the one-shot per-gate row"
+        );
+        assert_eq!(already, 31, "all other creates must be AlreadyExists");
+        // The single winning row rests at Approved — no duplicate clobbered it.
+        assert_eq!(
+            ledger.state(&g).await.expect("state"),
+            SigningLedgerState::Approved
+        );
+    }
+
     /// Drive every contract case against a fresh ledger from `$factory`.
     #[macro_export]
     macro_rules! signing_ledger_contract_cases {
@@ -545,6 +625,11 @@ pub mod contract {
                     $crate::ledger::contract::broadcast_idempotency_guard($factory()).await;
                 }
                 #[tokio::test]
+                async fn distinct_gates_advance_independently() {
+                    $crate::ledger::contract::distinct_gates_advance_independently($factory())
+                        .await;
+                }
+                #[tokio::test]
                 async fn terminal_states_never_advance() {
                     $crate::ledger::contract::terminal_states_never_advance($factory()).await;
                 }
@@ -562,6 +647,13 @@ pub mod contract {
                 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
                 async fn concurrent_advance_to_signing_yields_one_winner() {
                     $crate::ledger::contract::concurrent_advance_to_signing_yields_one_winner(
+                        $factory(),
+                    )
+                    .await;
+                }
+                #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+                async fn concurrent_create_same_gate_ref_yields_one_winner() {
+                    $crate::ledger::contract::concurrent_create_same_gate_ref_yields_one_winner(
                         $factory(),
                     )
                     .await;

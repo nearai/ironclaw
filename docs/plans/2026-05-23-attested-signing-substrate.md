@@ -58,6 +58,54 @@ signed under a human-in-the-loop gate, via a provider-agnostic
 - **HSM/KMS ship-gate:** custodial mainnet is refused unless KMS is wired
   (mirror `HOOKS_THIRD_PARTY_ENABLED`). Hot-key custodial = testnet/dev only.
 
+## Multi-Tenant Operating Model
+
+The substrate is multi-tenant by construction: tenant identity is woven into the
+primitives, not bolted on. `TenantId` is the **first field** of both
+`SigningContext` (`ironclaw_signing_provider`) and `GrantKey`
+(`ironclaw_attestation`), so every downstream artifact carries it.
+
+### Isolation backbone (enforced today, fail-closed)
+
+| Surface | How tenant isolation is enforced |
+|---------|----------------------------------|
+| **One-shot grant** | The sealed-grant `key_hash` (PRIMARY KEY of the durable store) is `grant_key_hash(GrantKey)` over the full 7-tuple **including `tenant`**; the durable row also carries an explicit `tenant` column. The atomic CAS claim is therefore tenant-scoped — tenant A's gate yields a different `key_hash` than B's, so one tenant can never claim or replay another's grant. |
+| **Custodial keys** | Encrypted with `chain_key_aad(scope, chain)` = AES-256-GCM AAD over `tenant_id ∥ user_id ∥ agent_id ∥ project_id ∥ chain` (owner-scope only — independent of invocation/mission/thread). A key sealed for tenant A **cannot decrypt** under tenant B's AAD (authentication-tag failure). The master key is an **operator/instance-level** secret; per-(tenant,user,…) custodial keys are stored ciphertexts under it. |
+| **Ledger / challenge / binding stores** | Keyed by `gate_ref` (ledger/binding) or `GrantKey` (challenge). These stores are **not** tenant-columned: the durable `attested_signing_ledger` and `attested_gate_bindings` schemas are keyed purely by `gate_ref` (PRIMARY KEY), and the `SigningLedger`/binding trait APIs carry no tenant component. Tenant isolation here is inherited, not enforced at the row: `gate_ref` MUST be globally unique and tenant-qualified, but **this is a caller obligation NOT enforced by the store or the `GateRef`/`SigningGateRef` newtype** (the newtype is a transparent string with no prefix validation, and `put`/`create` collapse a colliding key via `ON CONFLICT DO NOTHING` / `AlreadyExists` rather than rejecting a tenant-prefix-less ref). If two tenants' gate-raising paths ever produced the same `gate_ref` string, the second write would collide with the first's row, so the gate-raising path is solely responsible for uniqueness. Adding a `tenant` column to both durable schemas (threaded through the `SigningLedger`/`AttestedGateBindingStore` traits) or enforcing a validated tenant prefix at `GateRef::new` is tracked as a follow-up; until then this row is protected only by that caller contract. Per-tenant binding/grant *lookup* is additionally fail-closed because the binding's bound account + the tenant-scoped grant `key_hash` must both match (see "Gate raise → resolve" / "One-shot grant"), so even a collided row cannot be turned into a cross-tenant signature. |
+| **Gate raise → resolve** | `request_signature` stamps the authenticated tenant/user into `SigningContext`; the binding persists under that tenant. The reborn webui ingress authenticates the caller (`tenant_id`+`user_id`); the binding/grant lookup is tenant-scoped, so a cross-tenant resolve fails closed (`MissingBinding` / `SignerMismatch` / grant-CAS). |
+| **WebAuthn (custodial presence)** | Credentials are registered per user (`userHandle` binding); a credential for user A cannot satisfy user B's gate. |
+| **External wallets** | The signer/account proven by the wallet must equal the grant's **bound** account, so a wallet connected by tenant A's user cannot authorize tenant B's gate. WalletConnect `ProjectId` is a **shared app identity** (config, not a per-tenant secret); per-tenant override is for quota/attribution only. Injected / NEAR-redirect are inherently per-user-session. |
+| **Audit** | The `ActionRecord` is per-tenant/user — the trail isolates by construction. |
+
+**Invariant:** cross-tenant signing, replay, decryption, and resolution all fail
+closed at the primitive layer (grant key, key-encryption AAD, gate binding). This
+is the load-bearing guarantee and is covered by dedicated cross-tenant tests.
+
+### Operational gaps remaining for production multi-tenancy
+
+The *isolation* model above is complete and enforced. The *operational* story is
+not, and splits into three tracks:
+
+1. **Production multi-tenant runtime (gap D — reborn-wide).** `build_reborn_runtime`
+   rejects non-local-dev, so the durable composition + per-tenant wiring is not yet
+   assembled in a running multi-tenant server. The durable assembly seam
+   (`assemble_libsql` / `assemble_postgres`) is built and tested but not driven.
+   End-to-end operation today is local-dev/custodial only. **Owner: reborn runtime
+   track**, not this substrate.
+2. **Per-tenant configuration.** `AttestedProvidersConfig::from_env` resolves one
+   NEAR `state_secret`, one WalletConnect `ProjectId`, and one RPC-endpoint set for
+   the whole instance. A multi-tenant deployment needs a
+   `TenantId → AttestedProvidersConfig` resolver (per-tenant override falling back
+   to instance defaults), and per-tenant KMS key-ref selection (the custodial keystore
+   already AAD-scopes by tenant; the `LocalKmsSigner` is keyed by opaque `key_ref`,
+   so per-tenant key-refs fit — provisioning is the open piece). **Tractable; see
+   the per-tenant-config PR.**
+3. **Per-tenant key/credential lifecycle.** The items in *Open Questions* below are
+   all per-tenant lifecycle concerns and require design decisions before
+   implementation: custodial first-key bootstrap, WebAuthn first-credential
+   bootstrap, connected-wallet trust registration, key rotation, custody
+   recovery/backup, the KMS mainnet threshold, multi-sig/quorum, WC session TTL.
+
 ## Crates
 
 | Crate | Responsibility |

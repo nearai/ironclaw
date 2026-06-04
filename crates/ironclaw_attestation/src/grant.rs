@@ -240,7 +240,12 @@ pub mod contract {
     use super::*;
     use std::sync::Arc;
 
-    /// A deterministic [`GrantKey`] seeded by `seed` (varies the approved hash).
+    /// A deterministic [`GrantKey`] seeded by `seed` (varies only the approved
+    /// hash). Every other component is fixed — in particular `tenant` is ALWAYS
+    /// `"tenant-a"`, so a call like `let tenant_a = key(8)` names the variable
+    /// after the grant's (constant) tenant, not after the seed. Cross-tenant
+    /// cases build the "other tenant" key by cloning and overwriting `.tenant`
+    /// (see `cross_tenant_claim_is_not_found`).
     pub fn key(seed: u8) -> GrantKey {
         GrantKey {
             tenant: TenantId::new("tenant-a"),
@@ -371,6 +376,73 @@ pub mod contract {
             .expect("the sealed grant itself must still be claimable");
     }
 
+    /// Cross-tenant isolation: a grant sealed for tenant A cannot be claimed by
+    /// a [`GrantKey`] identical in every component except `tenant = B`. The
+    /// mismatched-tenant claim is `NotFound` (the tenant is part of the composite
+    /// identity and of `grant_key_hash` in the durable backends), and the
+    /// original tenant-A grant remains claimable afterwards — proving the failed
+    /// cross-tenant claim mutated nothing. This locks the
+    /// `TenantId`-is-the-first-`GrantKey`-field isolation invariant against
+    /// silent regression at the sealed-grant surface, across every backend the
+    /// contract macro runs for.
+    pub async fn cross_tenant_claim_is_not_found<S: SealedGrantStore>(store: S) {
+        let tenant_a = key(8); // tenant = "tenant-a" (see `key`)
+        store
+            .seal(AttestedSigningGrant::seal(tenant_a.clone(), 0, None))
+            .await
+            .expect("seal tenant-a grant");
+
+        // Same run/user/gate/hash/key/chain, different tenant.
+        let mut tenant_b = tenant_a.clone();
+        tenant_b.tenant = TenantId::new("tenant-b");
+        assert_ne!(tenant_b.tenant, tenant_a.tenant);
+        assert_eq!(
+            store.claim(&tenant_b).await,
+            Err(GrantError::NotFound),
+            "a claim carrying a different tenant must not match tenant-a's grant"
+        );
+
+        // Tenant A's grant is untouched and still wins its one-shot claim.
+        let claimed = store
+            .claim(&tenant_a)
+            .await
+            .expect("original tenant-a grant must still be claimable");
+        assert_eq!(claimed.key.tenant, tenant_a.tenant);
+    }
+
+    /// Expiry enforcement on claim — currently UNENFORCED across all backends.
+    ///
+    /// `AttestedSigningGrant.expiry_ms` is carried in the in-memory and durable
+    /// stores but no `claim` path consults it: a grant whose `expiry_ms` is in
+    /// the past can still be claimed. This case pins the *intended* contract —
+    /// claiming an expired grant must fail closed — so that every backend the
+    /// macro runs for is forced to demonstrate enforcement once it lands. It is
+    /// `#[ignore]`d (wired into the macro below with `#[ignore]`) until expiry
+    /// enforcement is implemented; see the H2 follow-up tracked in
+    /// `docs/plans/2026-05-23-attested-signing-substrate.md`. When enforcement
+    /// arrives, drop the `#[ignore]` and add the rejection-error variant.
+    ///
+    /// Seals a grant whose `expiry_ms` is strictly before its `created_at_ms`
+    /// (i.e. already expired at seal time) and asserts the claim is rejected
+    /// rather than succeeding. The assertion intentionally fails today (the
+    /// claim succeeds), which is exactly why the case is ignored: it is a
+    /// red-flag stub, not a passing test.
+    pub async fn claim_expired_grant_is_rejected<S: SealedGrantStore>(store: S) {
+        let k = key(9);
+        // created_at = 10_000, expiry = 1 (long past): unambiguously expired.
+        store
+            .seal(AttestedSigningGrant::seal(k.clone(), 10_000, Some(1)))
+            .await
+            .expect("seal expired grant");
+        // INTENT: an expired grant must NOT be claimable. Today no backend
+        // enforces this, so the claim erroneously succeeds — keep this case
+        // `#[ignore]`d until enforcement lands, then this assertion will hold.
+        assert!(
+            store.claim(&k).await.is_err(),
+            "an expired grant must fail closed on claim (enforcement pending — H2)"
+        );
+    }
+
     pub async fn double_seal_is_already_sealed<S: SealedGrantStore>(store: S) {
         let k = key(5);
         store
@@ -442,6 +514,19 @@ pub mod contract {
                         $factory(),
                     )
                     .await;
+                }
+                #[tokio::test]
+                async fn cross_tenant_claim_is_not_found() {
+                    $crate::grant::contract::cross_tenant_claim_is_not_found($factory()).await;
+                }
+                // Expiry enforcement is not yet implemented in any backend, so
+                // this contract case is `#[ignore]`d: it pins the intended
+                // fail-closed-on-expiry behaviour and forces every future
+                // backend to satisfy it once enforcement lands (H2 follow-up).
+                #[tokio::test]
+                #[ignore = "expiry enforcement not yet implemented (H2 follow-up)"]
+                async fn claim_expired_grant_is_rejected() {
+                    $crate::grant::contract::claim_expired_grant_is_rejected($factory()).await;
                 }
                 #[tokio::test]
                 async fn double_seal_is_already_sealed() {

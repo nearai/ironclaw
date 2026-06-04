@@ -418,7 +418,7 @@ mod tests {
     use ironclaw_host_api::{InvocationId, ProjectId, TenantId, UserId};
     use secrecy::SecretString;
 
-    fn scope(tenant: &str, user: &str, project: Option<&str>) -> ResourceScope {
+    fn account_scope(tenant: &str, user: &str, project: Option<&str>) -> ResourceScope {
         ResourceScope {
             tenant_id: TenantId::new(tenant).unwrap(),
             user_id: UserId::new(user).unwrap(),
@@ -442,7 +442,7 @@ mod tests {
 
     #[test]
     fn chain_key_aad_is_deterministic_and_owner_scope_only() {
-        let a = scope("tenant-a", "user-a", Some("proj"));
+        let a = account_scope("tenant-a", "user-a", Some("proj"));
         // Differs only in invocation/mission/thread — owner scope is identical.
         let mut b = a.clone();
         b.invocation_id = InvocationId::new();
@@ -455,7 +455,7 @@ mod tests {
 
     #[test]
     fn chain_key_aad_differs_per_chain() {
-        let s = scope("tenant-a", "user-a", Some("proj"));
+        let s = account_scope("tenant-a", "user-a", Some("proj"));
         assert_ne!(
             chain_key_aad(&s, "eip155:1"),
             chain_key_aad(&s, "eip155:10"),
@@ -471,12 +471,55 @@ mod tests {
     fn chain_key_aad_differs_per_owner() {
         let chain = "eip155:1";
         assert_ne!(
-            chain_key_aad(&scope("tenant-a", "user-a", Some("proj")), chain),
-            chain_key_aad(&scope("tenant-a", "user-b", Some("proj")), chain),
+            chain_key_aad(&account_scope("tenant-a", "user-a", Some("proj")), chain),
+            chain_key_aad(&account_scope("tenant-a", "user-b", Some("proj")), chain),
         );
         assert_ne!(
-            chain_key_aad(&scope("tenant-a", "user-a", Some("proj")), chain),
-            chain_key_aad(&scope("tenant-a", "user-a", None), chain),
+            chain_key_aad(&account_scope("tenant-a", "user-a", Some("proj")), chain),
+            chain_key_aad(&account_scope("tenant-a", "user-a", None), chain),
+        );
+    }
+
+    #[test]
+    fn chain_key_aad_differs_per_tenant() {
+        // The tenant is the first AAD component (multi-tenant isolation key).
+        // Two scopes identical in user/agent/project but in different tenants
+        // must produce different chain-key AAD, so a chain-A key sealed for
+        // tenant A cannot be addressed under tenant B's AAD.
+        let chain = "eip155:1";
+        assert_ne!(
+            chain_key_aad(&account_scope("tenant-a", "user-a", Some("proj")), chain),
+            chain_key_aad(&account_scope("tenant-b", "user-a", Some("proj")), chain),
+            "different tenants must produce different chain-key AAD"
+        );
+    }
+
+    #[test]
+    fn chain_key_ciphertext_fails_under_wrong_tenant_aad() {
+        // Cross-tenant isolation, crypto half: a custodial key sealed for
+        // tenant A's owner scope cannot be decrypted under tenant B's AAD even
+        // when user/project/chain are otherwise identical. This proves a tenant
+        // cannot recover another tenant's custodial key bytes even with full
+        // ciphertext access (e.g. raw DB read), because the AES-GCM tag is
+        // bound to the tenant via the AAD. Locks the tenant-isolation invariant
+        // at the custodial-key AAD surface against silent regression.
+        let crypto = crypto();
+        let tenant_a = account_scope("tenant-a", "user-a", Some("proj"));
+        let key_material = [7u8; 32];
+        let (ct, salt) = crypto
+            .encrypt(&key_material, &chain_key_aad(&tenant_a, "eip155:1"))
+            .expect("encrypt under tenant-a AAD");
+
+        // Tenant A decrypts.
+        let ok = crypto.decrypt(&ct, &salt, &chain_key_aad(&tenant_a, "eip155:1"));
+        assert!(ok.is_ok(), "owning tenant must decrypt its own key");
+
+        // Tenant B — same user/project/chain — fails closed.
+        let tenant_b = account_scope("tenant-b", "user-a", Some("proj"));
+        let wrong_tenant = crypto.decrypt(&ct, &salt, &chain_key_aad(&tenant_b, "eip155:1"));
+        assert!(
+            matches!(wrong_tenant, Err(SecretError::DecryptionFailed(_))),
+            "cross-tenant AAD must fail decryption, got {wrong_tenant:?}"
         );
     }
 
@@ -485,7 +528,7 @@ mod tests {
         // A chain-key ciphertext must not decrypt under any other AAD domain
         // even with an identical scope: the domain separator prevents
         // cross-shape replay.
-        let s = scope("tenant-a", "user-a", Some("proj"));
+        let s = account_scope("tenant-a", "user-a", Some("proj"));
         let chain_aad = chain_key_aad(&s, "eip155:1");
         assert_ne!(chain_aad, secret_record_aad("tenant-a", "user-a"));
         assert!(chain_aad.starts_with(AAD_DOMAIN_CHAIN_KEY));
@@ -496,7 +539,7 @@ mod tests {
         // The end-to-end crypto property the keystore relies on: a key sealed
         // for chain A cannot be decrypted under chain B's AAD.
         let crypto = crypto();
-        let s = scope("tenant-a", "user-a", Some("proj"));
+        let s = account_scope("tenant-a", "user-a", Some("proj"));
         let key_material = [7u8; 32];
         let (ct, salt) = crypto
             .encrypt(&key_material, &chain_key_aad(&s, "eip155:1"))
@@ -517,7 +560,10 @@ mod tests {
         let wrong_owner = crypto.decrypt(
             &ct,
             &salt,
-            &chain_key_aad(&scope("tenant-a", "user-b", Some("proj")), "eip155:1"),
+            &chain_key_aad(
+                &account_scope("tenant-a", "user-b", Some("proj")),
+                "eip155:1",
+            ),
         );
         assert!(matches!(wrong_owner, Err(SecretError::DecryptionFailed(_))));
     }

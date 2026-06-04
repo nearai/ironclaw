@@ -135,6 +135,10 @@ mod libsql_backend {
         contract::broadcast_idempotency_guard(fresh().await).await;
     }
     #[tokio::test]
+    async fn distinct_gates_advance_independently() {
+        contract::distinct_gates_advance_independently(fresh().await).await;
+    }
+    #[tokio::test]
     async fn terminal_states_never_advance() {
         contract::terminal_states_never_advance(fresh().await).await;
     }
@@ -193,6 +197,7 @@ mod postgres_backend {
     pg_case!(skip_forward_is_invalid);
     pg_case!(regression_is_invalid);
     pg_case!(broadcast_idempotency_guard);
+    pg_case!(distinct_gates_advance_independently);
     pg_case!(terminal_states_never_advance);
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

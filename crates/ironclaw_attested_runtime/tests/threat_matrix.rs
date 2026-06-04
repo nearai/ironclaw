@@ -54,6 +54,14 @@ use secrecy::SecretString;
 
 // ── shared fixtures ──────────────────────────────────────────────────────
 
+// LOAD-BEARING for the cross-tenant cases: `signing_context` and
+// `other_tenant_signing_context` deliberately share this SAME `gate_ref`. The
+// whole point of `gate_resolve_is_tenant_isolated_cross_tenant_grant_fails_closed`
+// and `gate_resolve_cross_tenant_keystore_scope_fails_closed` is "same gate,
+// different tenant" — isolation must hold even when the gate_ref is identical.
+// Do NOT give the two-tenant contexts distinct gate_refs: that would silently
+// neuter the cross-tenant tests (they would then pass trivially via a gate_ref
+// mismatch rather than via tenant-scoped grant-CAS / keystore-scope isolation).
 const GATE: &str = "gate:threat-matrix";
 const DEV_TESTNET_CHAIN: &str = "eip155:11155111"; // sepolia (testnet)
 const MASTER_KEY: &str = "0123456789abcdef0123456789ABCDEF";
@@ -73,6 +81,21 @@ fn owner_scope() -> ResourceScope {
 fn signing_context(account_hex_no_prefix: &str) -> SigningContext {
     SigningContext {
         tenant: SigningTenantId::new("default"),
+        user: SigningUserId::new("alice"),
+        scope: ScopeId::new("scope-x"),
+        actor: ActorId::new("actor-7"),
+        run_id: RunId::new("run-42"),
+        gate_ref: SigningGateRef::new(GATE),
+        chain_id: ChainId::new(DEV_TESTNET_CHAIN),
+        key_or_account_id: KeyOrAccountId::new(account_hex_no_prefix),
+    }
+}
+
+/// A signing context for a *different tenant* but otherwise the same flow shape
+/// as [`signing_context`].
+fn other_tenant_signing_context(account_hex_no_prefix: &str) -> SigningContext {
+    SigningContext {
+        tenant: SigningTenantId::new("tenant-b"),
         user: SigningUserId::new("alice"),
         scope: ScopeId::new("scope-x"),
         actor: ActorId::new("actor-7"),
@@ -382,6 +405,33 @@ async fn put_binding_res(
     decoded: DecodedTransaction,
     hash: ApprovedTxHash,
 ) -> Result<(), ironclaw_attested_runtime::BindingError> {
+    put_binding_with_scope_res(bindings, ctx, decoded, hash, owner_scope()).await
+}
+
+/// A foreign-tenant owner scope (tenant "tenant-b") for the custodial keystore
+/// lookup, otherwise the same owner shape as [`owner_scope`].
+fn other_tenant_owner_scope() -> ResourceScope {
+    ResourceScope {
+        tenant_id: TenantId::new("tenant-b").unwrap(),
+        user_id: UserId::new("alice").unwrap(),
+        agent_id: None,
+        project_id: Some(ProjectId::new("bootstrap").unwrap()),
+        mission_id: None,
+        thread_id: None,
+        invocation_id: InvocationId::new(),
+    }
+}
+
+/// Persist a binding whose authoritative custodial keystore `scope` is supplied
+/// explicitly (rather than always `owner_scope()`), so a test can drive the
+/// keystore-scope isolation layer independently of the grant-CAS layer.
+async fn put_binding_with_scope_res(
+    bindings: &InMemoryAttestedGateBindingStore,
+    ctx: &SigningContext,
+    decoded: DecodedTransaction,
+    hash: ApprovedTxHash,
+    scope: ResourceScope,
+) -> Result<(), ironclaw_attested_runtime::BindingError> {
     bindings
         .put(
             SigningGateRef::new(GATE),
@@ -391,7 +441,7 @@ async fn put_binding_res(
                 approved_tx_hash: hash,
                 decoded,
                 chain: ChainKeyId::new(DEV_TESTNET_CHAIN).expect("valid chain id in test"),
-                scope: owner_scope(),
+                scope,
                 schema_version: RenderingSchemaVersion::CURRENT,
             },
         )
@@ -850,6 +900,233 @@ async fn confirmed_submission_reaches_broadcast_submitted() {
     assert_eq!(
         ledger.state(&gate).await.unwrap(),
         SigningLedgerState::BroadcastSubmitted
+    );
+}
+
+// ── Cross-tenant isolation: a foreign-tenant grant never satisfies the gate ─
+
+/// Drive the REAL custodial continuation for a gate bound to tenant A, with the
+/// ONLY sealed grant belonging to tenant B (identical run/gate/hash/key/chain).
+/// The custodial signer claims `GrantKey::from_context(&binding.context, hash)`
+/// — tenant A's key — which is NOT sealed, so the one-shot claim fails closed
+/// with `GrantError::NotFound`, surfaced as `ContinuationError::ChainSigning`.
+/// No broadcast happens and tenant B's grant stays unclaimed: a grant authorized
+/// for one tenant can never be redeemed inside another tenant's signing flow.
+#[tokio::test]
+async fn gate_resolve_is_tenant_isolated_cross_tenant_grant_fails_closed() {
+    let priv_bytes = [0x21u8; 32];
+    let (keystore, account) = keystore_with_evm_key(&priv_bytes).await;
+    // The gate is bound to tenant A ("default", via `signing_context`).
+    let ctx_a = signing_context(&account);
+    // The attacker holds a grant sealed for tenant B, same in every other
+    // component.
+    let ctx_b = other_tenant_signing_context(&account);
+    assert_ne!(ctx_a.tenant, ctx_b.tenant);
+    let (_tx, decoded, hash) = sample_evm(&account);
+
+    let bindings = Arc::new(InMemoryAttestedGateBindingStore::new());
+    let (driver, grants, ledger) = custodial_driver(Arc::clone(&keystore), Arc::clone(&bindings));
+
+    // Seal ONLY tenant B's grant; persist the authoritative tenant-A binding.
+    seal_grant(&grants, &ctx_b, hash).await;
+    put_binding(&bindings, &ctx_a, decoded, hash).await;
+
+    let gate = SigningGateRef::new(GATE);
+    let err = driver
+        .continue_after_resolved(&gate, &SigningProof::WebAuthnAssertionProof(vec![]))
+        .await
+        .expect_err("a foreign-tenant grant must not satisfy tenant-A's gate");
+    assert!(
+        matches!(
+            err,
+            ContinuationError::ChainSigning(ChainSigningError::Grant(
+                ironclaw_attestation::GrantError::NotFound
+            ))
+        ),
+        "expected tenant-A grant NotFound, got {err:?}"
+    );
+
+    // Tenant B's grant was never claimed — it is still sealed and claimable.
+    let b_key = GrantKey::from_context(&ctx_b, hash);
+    grants
+        .claim(&b_key)
+        .await
+        .expect("tenant-B grant must remain unclaimed by the failed cross-tenant resolve");
+
+    // The ledger never reached a broadcast for this gate.
+    assert_ne!(
+        ledger.state(&gate).await.unwrap(),
+        SigningLedgerState::BroadcastSubmitted,
+        "no broadcast may occur on a cross-tenant grant mismatch"
+    );
+}
+
+/// M1 companion: the OTHER cross-tenant isolation layer — the custodial
+/// keystore scope. Here the grant matches (it is sealed for tenant A's
+/// `context`), but the binding's authoritative custodial `scope` points at
+/// tenant B, while the key is bound ONLY under tenant A's owner scope. The
+/// custodial signer reads the public binding under `binding.scope` (tenant B)
+/// via `keystore.binding(&req.scope, &req.chain)` (custodial.rs:178) BEFORE it
+/// claims the grant, so that keystore read fails closed (`NotFound` ->
+/// `KeyStore` error) and no key material — and no grant — is ever touched. This
+/// proves keystore-scope isolation independently of the grant-CAS isolation
+/// covered by
+/// `gate_resolve_is_tenant_isolated_cross_tenant_grant_fails_closed`.
+#[tokio::test]
+async fn gate_resolve_cross_tenant_keystore_scope_fails_closed() {
+    let priv_bytes = [0x29u8; 32];
+    // The key is bound under tenant A's owner scope (`owner_scope()` inside
+    // `keystore_with_evm_key`).
+    let (keystore, account) = keystore_with_evm_key(&priv_bytes).await;
+    // The grant + gate are tenant A's.
+    let ctx_a = signing_context(&account);
+    let (_tx, decoded, hash) = sample_evm(&account);
+
+    let bindings = Arc::new(InMemoryAttestedGateBindingStore::new());
+    let (driver, grants, ledger) = custodial_driver(Arc::clone(&keystore), Arc::clone(&bindings));
+
+    // Tenant A's grant IS sealed (so this is NOT the grant-CAS path), but the
+    // binding's custodial keystore scope is tenant B's, where no key is bound.
+    seal_grant(&grants, &ctx_a, hash).await;
+    put_binding_with_scope_res(&bindings, &ctx_a, decoded, hash, other_tenant_owner_scope())
+        .await
+        .expect("binding with foreign keystore scope still validates (scope is not validated)");
+
+    let gate = SigningGateRef::new(GATE);
+    let err = driver
+        .continue_after_resolved(&gate, &SigningProof::WebAuthnAssertionProof(vec![]))
+        .await
+        .expect_err("a foreign-tenant keystore scope must fail the key lookup closed");
+    assert!(
+        matches!(
+            err,
+            ContinuationError::ChainSigning(ChainSigningError::KeyStore { .. })
+        ),
+        "expected a keystore NotFound (foreign-tenant scope), got {err:?}"
+    );
+
+    // Tenant A's grant was never claimed — the keystore lookup fails first, so
+    // the one-shot grant is untouched and still claimable.
+    let a_key = GrantKey::from_context(&ctx_a, hash);
+    grants
+        .claim(&a_key)
+        .await
+        .expect("grant must remain unclaimed when the keystore-scope lookup fails first");
+
+    // No broadcast / no ledger advance to broadcast for this gate.
+    assert_ne!(
+        ledger
+            .state(&gate)
+            .await
+            .unwrap_or(SigningLedgerState::Approved),
+        SigningLedgerState::BroadcastSubmitted,
+        "no broadcast may occur on a cross-tenant keystore-scope mismatch"
+    );
+}
+
+/// M3: cross-tenant isolation at the binding-store surface itself. A binding
+/// authoritatively persisted for tenant A under a tenant-qualified `gate_ref`
+/// MUST NOT be retrievable under a different tenant's `gate_ref`, and a tenant-B
+/// binding written under tenant B's own `gate_ref` is wholly independent. This
+/// is the binding-store analogue of `cross_tenant_claim_is_not_found` in the
+/// grant contract suite. Isolation here is inherited from the tenant-qualified
+/// `gate_ref` (the store is keyed purely by `gate_ref`; see the plan-doc H1
+/// note) — this test pins that the store never bleeds one tenant's binding into
+/// another tenant's gate_ref lookup, and that `validate_binding` rejects a
+/// binding whose own `context.gate_ref` does not match the key it is stored
+/// under (so a tenant cannot smuggle its binding under another tenant's key).
+#[tokio::test]
+async fn binding_store_is_tenant_isolated_by_gate_ref() {
+    let priv_bytes = [0x2au8; 32];
+    let (_keystore, account) = keystore_with_evm_key(&priv_bytes).await;
+    let (_tx, decoded, hash) = sample_evm(&account);
+
+    let bindings = InMemoryAttestedGateBindingStore::new();
+
+    // Tenant A's binding under tenant A's tenant-qualified gate_ref.
+    let gate_a = SigningGateRef::new("gate:tenant-a:resolve");
+    let mut ctx_a = signing_context(&account);
+    ctx_a.tenant = SigningTenantId::new("tenant-a");
+    ctx_a.gate_ref = gate_a.clone();
+    bindings
+        .put(
+            gate_a.clone(),
+            AttestedGateBinding {
+                provider_id: ProviderId::Custodial,
+                context: ctx_a.clone(),
+                approved_tx_hash: hash,
+                decoded: decoded.clone(),
+                chain: ChainKeyId::new(DEV_TESTNET_CHAIN).expect("valid chain id in test"),
+                scope: owner_scope(),
+                schema_version: RenderingSchemaVersion::CURRENT,
+            },
+        )
+        .await
+        .expect("tenant-a binding insert succeeds");
+
+    // Tenant B's gate_ref has NO binding just because tenant A's does.
+    let gate_b = SigningGateRef::new("gate:tenant-b:resolve");
+    assert!(
+        bindings.get(&gate_b).await.is_none(),
+        "tenant-B gate_ref must not resolve tenant-A's binding"
+    );
+    assert!(
+        bindings.get_sync(&gate_b).is_none(),
+        "sync read path must also be tenant-isolated by gate_ref"
+    );
+
+    // A tenant-B binding under tenant B's own gate_ref is fully independent.
+    let mut ctx_b = signing_context(&account);
+    ctx_b.tenant = SigningTenantId::new("tenant-b");
+    ctx_b.gate_ref = gate_b.clone();
+    bindings
+        .put(
+            gate_b.clone(),
+            AttestedGateBinding {
+                provider_id: ProviderId::Custodial,
+                context: ctx_b.clone(),
+                approved_tx_hash: hash,
+                decoded: decoded.clone(),
+                chain: ChainKeyId::new(DEV_TESTNET_CHAIN).expect("valid chain id in test"),
+                scope: other_tenant_owner_scope(),
+                schema_version: RenderingSchemaVersion::CURRENT,
+            },
+        )
+        .await
+        .expect("tenant-b binding insert succeeds independently");
+
+    // Each gate_ref resolves to its OWN tenant's binding, never the other's.
+    let got_a = bindings
+        .get(&gate_a)
+        .await
+        .expect("tenant-a binding present");
+    assert_eq!(got_a.context.tenant.as_str(), "tenant-a");
+    let got_b = bindings
+        .get(&gate_b)
+        .await
+        .expect("tenant-b binding present");
+    assert_eq!(got_b.context.tenant.as_str(), "tenant-b");
+
+    // A tenant cannot smuggle its binding under another tenant's gate_ref key:
+    // the store key must equal the binding's own `context.gate_ref`.
+    let err = bindings
+        .put(
+            SigningGateRef::new("gate:tenant-a:resolve"),
+            AttestedGateBinding {
+                provider_id: ProviderId::Custodial,
+                context: ctx_b, // gate_ref is tenant-b's, keyed under tenant-a's
+                approved_tx_hash: hash,
+                decoded,
+                chain: ChainKeyId::new(DEV_TESTNET_CHAIN).expect("valid chain id in test"),
+                scope: other_tenant_owner_scope(),
+                schema_version: RenderingSchemaVersion::CURRENT,
+            },
+        )
+        .await
+        .expect_err("binding whose context.gate_ref != store key must be rejected");
+    assert_eq!(
+        err,
+        ironclaw_attested_runtime::BindingError::GateRefMismatch
     );
 }
 
