@@ -96,22 +96,16 @@ const ALLOWLIST: &[AllowedSite] = &[
     // parallel chat paths now route through the audited
     // `execute_tool_audited` path (which builds an ActionRecord), so the entry
     // was removed from this checklist.
-    // Scheduler autonomous tool execution.
-    // TODO(#4019): migrate through audited dispatch (step 4).
-    AllowedSite {
-        file: "src/agent/scheduler.rs",
-        kind: AllowKind::Bypass,
-    },
+    // Scheduler autonomous tool execution AND routine engine tool execution
+    // were migrated in #4019 step 4: both now route through the audited
+    // `execute_tool_audited` path (which builds an ActionRecord), so their
+    // entries were removed from this checklist. The scheduler correlates the
+    // ActionRecord to its existing persisted job; the routine path additionally
+    // gained the safety pipeline (param validation/redaction) it lacked before.
     // Engine v2 effect bridge (Python orchestrator path).
     // TODO(#4019): migrate through audited dispatch (step 5).
     AllowedSite {
         file: "src/bridge/effect_adapter.rs",
-        kind: AllowKind::Bypass,
-    },
-    // Routine engine tool execution.
-    // TODO(#4019): migrate through audited dispatch (step 4).
-    AllowedSite {
-        file: "src/agent/routine_engine.rs",
         kind: AllowKind::Bypass,
     },
     // CLI `/restart` command runs RestartTool directly.

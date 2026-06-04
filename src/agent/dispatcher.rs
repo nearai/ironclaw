@@ -1448,6 +1448,9 @@ pub(super) async fn execute_chat_tool_standalone(
         params.clone(),
         job_ctx,
         crate::tools::dispatch::DispatchSource::Channel(channel.to_string()),
+        // Chat job contexts are in-memory (no backing agent_jobs row); the
+        // audited path mints a fresh system job for the audit FK.
+        None,
     )
     .await
 }

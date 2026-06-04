@@ -405,6 +405,7 @@ impl Scheduler {
                 let tools = self.tools.clone();
                 let context_manager = self.context_manager.clone();
                 let safety = self.safety.clone();
+                let store = self.store.clone();
 
                 // TODO: propagate parent job's ApprovalContext here when subtasks
                 // are used in autonomous/routine paths (currently only used in tests).
@@ -413,6 +414,7 @@ impl Scheduler {
                         tools,
                         context_manager,
                         safety,
+                        store,
                         None,
                         tool_parent_id,
                         &tool_name,
@@ -540,11 +542,17 @@ impl Scheduler {
     /// Execute a single tool as a subtask.
     ///
     /// Performs scheduler-specific checks (approval, cancellation) then
-    /// delegates to the shared `execute_tool_with_safety` pipeline.
+    /// delegates to the shared audited tool-execution funnel
+    /// (`execute_tool_audited`), which runs the safety pipeline and persists an
+    /// `ActionRecord`. The scheduler `save_job`s before dispatch, so `job_id`
+    /// references a real `agent_jobs` row; the audit record is correlated to
+    /// that job rather than a fresh system job (#4019 step 4 option (a)).
+    #[allow(clippy::too_many_arguments)]
     async fn execute_tool_task(
         tools: Arc<ToolRegistry>,
         context_manager: Arc<ContextManager>,
         safety: Arc<SafetyLayer>,
+        store: Option<SystemScope>,
         approval_context: Option<ApprovalContext>,
         job_id: Uuid,
         tool_name: &str,
@@ -579,9 +587,21 @@ impl Scheduler {
             return Err(autonomous_unavailable_error(tool_name, &job_ctx.user_id).into());
         }
 
-        // Delegate to shared tool execution pipeline
-        let output_str = crate::tools::execute::execute_tool_with_safety(
-            &tools, &safety, tool_name, params, &job_ctx,
+        // Delegate to the shared audited tool-execution funnel. The scheduler's
+        // job is already persisted (`save_job` before dispatch), so the audit
+        // ActionRecord is correlated to the existing `job_id` rather than a
+        // fresh system job (#4019 step 4 option (a)). When there is no store,
+        // `execute_tool_audited` is a pure pass-through (no audit row).
+        let store_ref = store.as_ref().map(|s| s.database());
+        let output_str = crate::tools::execute::execute_tool_audited(
+            &tools,
+            &safety,
+            store_ref,
+            tool_name,
+            params,
+            &job_ctx,
+            crate::tools::dispatch::DispatchSource::System,
+            Some(job_id),
         )
         .await?;
 
@@ -1040,6 +1060,7 @@ mod tests {
             cm.clone(),
             safety.clone(),
             None,
+            None,
             job_id,
             "soft_gate",
             serde_json::json!({}),
@@ -1055,6 +1076,7 @@ mod tests {
             tools,
             cm,
             safety,
+            None,
             None,
             job_id,
             "hard_gate",
@@ -1076,6 +1098,7 @@ mod tests {
             tools.clone(),
             cm.clone(),
             safety.clone(),
+            None,
             Some(ApprovalContext::autonomous_with_tools([
                 "soft_gate".to_string()
             ])),
@@ -1094,6 +1117,7 @@ mod tests {
             tools,
             cm,
             safety,
+            None,
             Some(ApprovalContext::autonomous()),
             job_id,
             "hard_gate",
@@ -1120,6 +1144,7 @@ mod tests {
             tools.clone(),
             cm.clone(),
             safety.clone(),
+            None,
             Some(ctx.clone()),
             job_id,
             "soft_gate",
@@ -1132,6 +1157,7 @@ mod tests {
             tools,
             cm,
             safety,
+            None,
             Some(ctx),
             job_id,
             "hard_gate",
@@ -1206,6 +1232,7 @@ mod tests {
             cm,
             safety,
             None,
+            None,
             job_id,
             "normalized_gate",
             serde_json::json!({"safe": "true"}),
@@ -1216,6 +1243,146 @@ mod tests {
         assert!( // safety: test-only assertion
             result.is_ok(),
             "stringified boolean should normalize before approval: {result:?}"
+        );
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Audit integration test for the scheduler tool-execution funnel (#4019 step 4).
+//
+// Drives `execute_tool_task` against a real libSQL-backed store and asserts that
+// a scheduled tool call now persists an `ActionRecord` correlated to the
+// scheduler's *existing* persisted job (option (a)), not a fresh system job.
+// ────────────────────────────────────────────────────────────────────────────
+#[cfg(all(test, feature = "libsql"))]
+mod audited_integration_tests {
+    use super::*;
+    use crate::config::SafetyConfig;
+    use crate::db::libsql::LibSqlBackend;
+    use crate::db::{Database, UserRecord};
+    use crate::tenant::SystemScope;
+    use crate::tools::{ApprovalRequirement, Tool, ToolError, ToolOutput};
+    use ironclaw_safety::SafetyLayer;
+
+    struct AuditEchoTool;
+
+    #[async_trait::async_trait]
+    impl Tool for AuditEchoTool {
+        fn name(&self) -> &str {
+            "audit_echo"
+        }
+        fn description(&self) -> &str {
+            "Echoes input for audit testing"
+        }
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({
+                "type": "object",
+                "properties": { "message": { "type": "string" } }
+            })
+        }
+        fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+            ApprovalRequirement::Never
+        }
+        fn requires_sanitization(&self) -> bool {
+            false
+        }
+        async fn execute(
+            &self,
+            params: serde_json::Value,
+            _ctx: &JobContext,
+        ) -> Result<ToolOutput, ToolError> {
+            Ok(ToolOutput::success(
+                params,
+                std::time::Duration::from_millis(1),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn scheduled_tool_call_persists_action_record_under_existing_job() {
+        let dir = tempfile::tempdir().expect("tempdir"); // safety: test-only
+        let concrete = Arc::new(
+            LibSqlBackend::new_local(&dir.path().join("test.db"))
+                .await
+                .expect("libsql backend"), // safety: test-only
+        );
+        concrete.run_migrations().await.expect("migrations"); // safety: test-only
+        let db: Arc<dyn Database> = Arc::clone(&concrete) as Arc<dyn Database>;
+
+        let now = chrono::Utc::now();
+        db.create_user(&UserRecord {
+            id: "scheduler_user".to_string(),
+            email: None,
+            display_name: "scheduler_user".to_string(),
+            status: "active".to_string(),
+            role: "admin".to_string(),
+            created_at: now,
+            updated_at: now,
+            last_login_at: None,
+            created_by: None,
+            metadata: serde_json::json!({}),
+        })
+        .await
+        .expect("create user"); // safety: test-only
+
+        let registry = ToolRegistry::new();
+        registry.register(Arc::new(AuditEchoTool)).await;
+        let tools = Arc::new(registry);
+
+        let cm = Arc::new(ContextManager::new(5));
+        let job_id = cm
+            .create_job("scheduler audit", "audit test")
+            .await
+            .expect("create job"); // safety: test-only
+        // Bind the context to the real user and move it to InProgress.
+        cm.update_context(job_id, |ctx| {
+            ctx.user_id = "scheduler_user".to_string();
+            ctx.transition_to(JobState::InProgress, None)
+        })
+        .await
+        .expect("update ctx")
+        .expect("transition"); // safety: test-only
+
+        let scope = SystemScope::new(Arc::clone(&db));
+        // Persist the job (mirrors the scheduler's pre-dispatch save_job), so the
+        // ActionRecord FK to `job_id` is valid.
+        let ctx = cm.get_context(job_id).await.expect("get ctx"); // safety: test-only
+        scope.save_job(&ctx).await.expect("save job"); // safety: test-only
+
+        let safety = Arc::new(SafetyLayer::new(&SafetyConfig {
+            max_output_length: 100_000,
+            injection_check_enabled: false,
+        }));
+
+        let result = Scheduler::execute_tool_task(
+            tools,
+            cm,
+            safety,
+            Some(scope),
+            Some(ApprovalContext::autonomous_with_tools([
+                "audit_echo".to_string()
+            ])),
+            job_id,
+            "audit_echo",
+            serde_json::json!({ "message": "hi" }),
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "scheduled tool call should succeed: {result:?}"
+        ); // safety: test-only
+
+        // The ActionRecord landed under the scheduler's existing job (option a),
+        // not a fresh system job.
+        let actions = db.get_job_actions(job_id).await.expect("get actions"); // safety: test-only
+        let action = actions
+            .iter()
+            .find(|a| a.tool_name == "audit_echo")
+            .expect("an ActionRecord for the scheduled tool call"); // safety: test-only
+        assert!(action.success, "successful call recorded as success");
+        assert_eq!(
+            action.input.get("message").and_then(|v| v.as_str()),
+            Some("hi")
         );
     }
 }

@@ -564,6 +564,15 @@ impl SystemScope {
         Self { inner: db }
     }
 
+    /// Borrow the underlying database handle for the audited tool-execution
+    /// funnel (`crate::tools::execute::execute_tool_audited`), which needs an
+    /// `Arc<dyn Database>` to persist `ActionRecord` audit rows. System-process
+    /// tool callers (scheduler subtasks, routine engine) route their audit
+    /// through this handle rather than re-implementing the audit themselves.
+    pub fn database(&self) -> &Arc<dyn Database> {
+        &self.inner
+    }
+
     /// Construct a per-user workspace for system-process operations.
     ///
     /// Used by the heartbeat and routine engine to get a workspace scoped to

@@ -33,10 +33,7 @@ use crate::error::RoutineError;
 use crate::extensions::ExtensionManager;
 use crate::ownership::Owned;
 use crate::tenant::SystemScope;
-use crate::tools::{
-    ToolError, ToolRegistry, autonomous_allowed_tool_names, autonomous_unavailable_message,
-    prepare_tool_params,
-};
+use crate::tools::{ToolRegistry, autonomous_allowed_tool_names, autonomous_unavailable_message};
 use crate::workspace::Workspace;
 use ironclaw_llm::{
     ChatMessage, CompletionRequest, FinishReason, LlmProvider, ToolCall, ToolCompletionRequest,
@@ -1977,7 +1974,8 @@ async fn execute_lightweight_with_tools(
 
             // Execute tools sequentially
             for tc in response.tool_calls {
-                let result = execute_routine_tool(ctx, &job_ctx, &allowed_tools, &tc).await;
+                let result =
+                    execute_routine_tool(ctx, &job_ctx, &allowed_tools, routine.id, &tc).await;
 
                 // Sanitize and wrap result (including errors)
                 let result_content = match result {
@@ -2039,10 +2037,22 @@ fn snapshot_messages_for_tool_iteration(messages: &[ChatMessage]) -> Vec<ChatMes
 }
 
 /// Execute a single tool for a lightweight routine.
+///
+/// Routes through the shared audited tool-execution funnel
+/// (`execute_tool_audited`), which runs the full safety pipeline (parameter
+/// normalization, schema/injection validation, sensitive-param redaction,
+/// per-tool timeout, output sanitization for the audit row) and persists an
+/// `ActionRecord`. Previously this path called `tool.execute()` raw — with no
+/// audit and no param validation/redaction; #4019 step 4 closes that gap.
+///
+/// The routine's `job_ctx.job_id` is an in-memory run id (no backing
+/// `agent_jobs` row), so a fresh system job is minted for the audit FK
+/// (`existing_job_id = None`), tagged with `DispatchSource::Routine`.
 async fn execute_routine_tool(
     ctx: &EngineContext,
     job_ctx: &JobContext,
     allowed_tools: &std::collections::HashSet<String>,
+    routine_id: Uuid,
     tc: &ToolCall,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     if !allowed_tools.contains(&tc.name) {
@@ -2050,77 +2060,18 @@ async fn execute_routine_tool(
         return Err(message.into());
     }
 
-    // Check if tool exists
-    let tool = ctx
-        .tools
-        .get(&tc.name)
-        .await
-        .ok_or_else(|| format!("Tool '{}' not found", tc.name))?;
-    let normalized_params = prepare_tool_params(tool.as_ref(), &tc.arguments);
-
-    // Validate tool parameters
-    let validation = ctx
-        .safety
-        .validator()
-        .validate_tool_params(&normalized_params);
-    if !validation.is_valid {
-        let details = validation
-            .errors
-            .iter()
-            .map(|e| format!("{}: {}", e.field, e.message))
-            .collect::<Vec<_>>()
-            .join("; ");
-        return Err(format!("Invalid tool parameters: {}", details).into());
-    }
-
-    // Execute with per-tool timeout
-    let timeout = tool.execution_timeout();
-    let start = std::time::Instant::now();
-    let result = tokio::time::timeout(timeout, async {
-        tool.execute(normalized_params.clone(), job_ctx).await
-    })
-    .await;
-    let elapsed = start.elapsed();
-
-    // Log tool execution result (single consolidated log)
-    match &result {
-        Ok(Ok(_)) => {
-            tracing::debug!(
-                tool = %tc.name,
-                elapsed_ms = elapsed.as_millis() as u64,
-                status = "succeeded",
-                "Lightweight routine tool execution completed"
-            );
-        }
-        Ok(Err(e)) => {
-            tracing::debug!(
-                tool = %tc.name,
-                elapsed_ms = elapsed.as_millis() as u64,
-                error = %e,
-                status = "failed",
-                "Lightweight routine tool execution completed"
-            );
-        }
-        Err(_) => {
-            tracing::debug!(
-                tool = %tc.name,
-                elapsed_ms = elapsed.as_millis() as u64,
-                timeout_secs = timeout.as_secs(),
-                status = "timeout",
-                "Lightweight routine tool execution completed"
-            );
-        }
-    }
-
-    let result = result
-        .map_err(|_| ToolError::Timeout(timeout))
-        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?
-        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
-
-    // Serialize result to JSON string
-    let result_str =
-        serde_json::to_string(&result.result).unwrap_or_else(|_| "<serialize error>".to_string());
-    Ok(result_str)
+    crate::tools::execute::execute_tool_audited(
+        &ctx.tools,
+        &ctx.safety,
+        Some(ctx.store.database()),
+        &tc.name,
+        tc.arguments.clone(),
+        job_ctx,
+        crate::tools::dispatch::DispatchSource::Routine { routine_id },
+        None,
+    )
+    .await
+    .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
 }
 
 /// Send a notification based on the routine's notify config and run status.
