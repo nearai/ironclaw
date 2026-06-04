@@ -100,6 +100,58 @@ impl AuthProviderClient for FailingProviderClient {
 }
 
 #[derive(Debug, Default)]
+struct RecordingProviderClient {
+    exchanged_scopes: Mutex<Vec<Vec<String>>>,
+}
+
+impl RecordingProviderClient {
+    fn exchanged_scopes(&self) -> Vec<Vec<String>> {
+        self.exchanged_scopes
+            .lock()
+            .expect("exchanged scopes lock")
+            .clone()
+    }
+}
+
+#[async_trait]
+impl AuthProviderClient for RecordingProviderClient {
+    async fn exchange_callback(
+        &self,
+        _context: OAuthProviderExchangeContext,
+        request: OAuthProviderCallbackRequest,
+    ) -> Result<OAuthProviderExchange, AuthProductError> {
+        let scopes = request
+            .scopes
+            .iter()
+            .map(|scope| scope.as_str().to_string())
+            .collect::<Vec<_>>();
+        self.exchanged_scopes
+            .lock()
+            .expect("exchanged scopes lock")
+            .push(scopes);
+        Ok(OAuthProviderExchange {
+            provider: request.provider,
+            account_label: request.account_label,
+            authorization_code_hash: request.authorization_code_hash,
+            pkce_verifier_hash: request.pkce_verifier_hash,
+            access_secret: SecretHandle::new("recorded-google-access").expect("secret handle"),
+            refresh_secret: Some(
+                SecretHandle::new("recorded-google-refresh").expect("secret handle"),
+            ),
+            scopes: request.scopes,
+            account_id: None,
+        })
+    }
+
+    async fn refresh_token(
+        &self,
+        _request: OAuthProviderRefreshRequest,
+    ) -> Result<OAuthProviderRefresh, AuthProductError> {
+        Err(AuthProductError::RefreshFailed)
+    }
+}
+
+#[derive(Debug, Default)]
 struct SubmitFailingManualTokenInteractions {
     interaction_id: AuthInteractionId,
     abandoned: Mutex<Vec<(AuthProductScope, AuthInteractionId)>>,
@@ -356,6 +408,34 @@ fn build_app_with_google_oauth() -> (axum::Router, Arc<RecordingAuthDispatcher>)
     let dispatcher = Arc::new(RecordingAuthDispatcher::default());
     let product_auth = Arc::new(RebornProductAuthServices::from_shared(
         Arc::new(InMemoryAuthProductServices::new()),
+        dispatcher.clone(),
+    ));
+    (
+        build_app_with_product_auth_service_and_config(
+            product_auth,
+            Some(google_oauth_route_config()),
+        ),
+        dispatcher,
+    )
+}
+
+fn build_app_with_google_oauth_provider(
+    provider_client: Arc<dyn AuthProviderClient>,
+) -> (axum::Router, Arc<RecordingAuthDispatcher>) {
+    let dispatcher = Arc::new(RecordingAuthDispatcher::default());
+    let shared = Arc::new(InMemoryAuthProductServices::new());
+    let flow_manager: Arc<dyn AuthFlowManager> = shared.clone();
+    let interaction_service: Arc<dyn AuthInteractionService> = shared.clone();
+    let credential_setup_service: Arc<dyn CredentialSetupService> = shared.clone();
+    let credential_account_service: Arc<dyn CredentialAccountService> = shared.clone();
+    let cleanup_service: Arc<dyn SecretCleanupService> = shared;
+    let product_auth = Arc::new(RebornProductAuthServices::new(
+        flow_manager,
+        interaction_service,
+        credential_setup_service,
+        credential_account_service,
+        provider_client,
+        cleanup_service,
         dispatcher.clone(),
     ));
     (
@@ -1232,6 +1312,38 @@ async fn product_auth_google_oauth_callback_completes_setup_flow() {
     assert_eq!(callback_json["flow_id"], start_json["flow_id"]);
     assert_eq!(callback_json["status"], "completed");
     assert_eq!(dispatcher.events().len(), 1);
+}
+
+#[tokio::test]
+async fn product_auth_google_oauth_callback_accepts_provider_extra_scopes_without_overclaiming() {
+    let provider_client = Arc::new(RecordingProviderClient::default());
+    let (app, dispatcher) = build_app_with_google_oauth_provider(provider_client.clone());
+    let (start_json, state) = start_google_oauth_flow(&app).await;
+    let scopes = format!(
+        "openid%20email%20profile%20{GOOGLE_GMAIL_READONLY_SCOPE}%20{GOOGLE_CALENDAR_READONLY_SCOPE}"
+    );
+
+    let callback_response = app
+        .oneshot(callback_request(format!(
+            "/api/reborn/product-auth/oauth/google/callback?state={state}&code=google-auth-code&scope={scopes}"
+        )))
+        .await
+        .expect("oneshot");
+
+    assert_eq!(callback_response.status(), StatusCode::OK);
+    let callback_body = read_body_string(callback_response).await;
+    let callback_json: serde_json::Value =
+        serde_json::from_str(&callback_body).expect("callback json");
+    assert_eq!(callback_json["flow_id"], start_json["flow_id"]);
+    assert_eq!(callback_json["status"], "completed");
+    assert_eq!(dispatcher.events().len(), 1);
+    assert_eq!(
+        provider_client.exchanged_scopes(),
+        vec![vec![
+            GOOGLE_GMAIL_READONLY_SCOPE.to_string(),
+            GOOGLE_CALENDAR_READONLY_SCOPE.to_string()
+        ]]
+    );
 }
 
 #[tokio::test]

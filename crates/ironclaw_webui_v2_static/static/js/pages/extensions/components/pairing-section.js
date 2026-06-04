@@ -1,26 +1,68 @@
 import { React, html } from "../../../lib/html.js";
-import { StatusPill } from "../../../design-system/primitives.js";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Button } from "../../../design-system/button.js";
 import { useT } from "../../../lib/i18n.js";
 import { usePairing } from "../hooks/useExtensions.js";
+import { pairingErrorMessage } from "../lib/pairing-errors.js";
 
-export function PairingSection({ channel }) {
+const DEFAULT_PAIRING_I18N_KEYS = {
+  title: "pairing.title",
+  instructions: "pairing.instructions",
+  placeholder: "pairing.placeholder",
+  action: "pairing.approve",
+  success: "pairing.success",
+  error: "pairing.error",
+  empty: "pairing.none",
+};
+
+export function PairingSection({
+  channel,
+  redeemFn,
+  i18nKeys = DEFAULT_PAIRING_I18N_KEYS,
+  queryKeys,
+  showPendingRequests = true,
+}) {
   const t = useT();
-  const { requests, isLoading, approve, isApproving } = usePairing(channel);
+  const customRedeem = typeof redeemFn === "function";
+  const pairing = usePairing(channel, { enabled: !customRedeem });
+  const queryClient = useQueryClient();
   const [manualCode, setManualCode] = React.useState("");
 
+  const redeemMutation = useMutation({
+    mutationFn: ({ code }) => redeemFn(channel, code),
+    onSuccess: () => {
+      setManualCode("");
+      for (const queryKey of queryKeys || [["pairing", channel], ["extensions"]]) {
+        queryClient.invalidateQueries({ queryKey });
+      }
+    },
+  });
+
   const handleApprove = React.useCallback(
-    (code) => approve({ code }),
-    [approve]
+    (code) => pairing.approve({ code }),
+    [pairing.approve]
   );
 
   const handleManualSubmit = React.useCallback(() => {
     const trimmed = manualCode.trim();
-    if (trimmed) {
-      approve({ code: trimmed });
+    if (!trimmed) return;
+    if (customRedeem) {
+      redeemMutation.mutate({ code: trimmed });
+    } else {
+      pairing.approve({ code: trimmed });
       setManualCode("");
     }
-  }, [manualCode, approve]);
+  }, [customRedeem, manualCode, pairing.approve, redeemMutation]);
+
+  const requests = customRedeem ? [] : pairing.requests;
+  const isLoading = customRedeem ? false : pairing.isLoading;
+  const isApproving = customRedeem ? redeemMutation.isPending : pairing.isApproving;
+  const result = customRedeem
+    ? redeemMutation.isSuccess ? redeemMutation.data : null
+    : pairing.result;
+  const error = customRedeem
+    ? redeemMutation.isError ? redeemMutation.error : null
+    : pairing.error;
 
   if (isLoading) {
     return html`
@@ -33,29 +75,43 @@ export function PairingSection({ channel }) {
   return html`
     <div className="mt-3 rounded-xl border border-white/[0.06] bg-white/[0.02] p-4">
       <h4 className="mb-3 font-mono text-[11px] uppercase tracking-[0.14em] text-signal">
-        ${t("pairing.title")}
+        ${t(i18nKeys.title)}
       </h4>
+      <p className="mb-4 text-xs leading-5 text-iron-300">${t(i18nKeys.instructions)}</p>
 
-      <div className="mb-4 flex items-center gap-2">
+      <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center">
         <input
           type="text"
           value=${manualCode}
           onChange=${(e) => setManualCode(e.target.value)}
           onKeyDown=${(e) => e.key === "Enter" && handleManualSubmit()}
-          placeholder=${t("pairing.placeholder")}
-          className="h-9 flex-1 rounded-md border border-white/12 bg-white/[0.04] px-3 font-mono text-sm text-iron-100 outline-none placeholder:text-iron-700 focus:border-signal/45"
+          placeholder=${t(i18nKeys.placeholder)}
+          className="h-9 min-w-0 flex-1 rounded-md border border-white/12 bg-white/[0.04] px-3 font-mono text-sm text-iron-100 outline-none placeholder:text-iron-700 focus:border-signal/45"
         />
         <${Button}
           variant="secondary"
-          className="h-9 px-3 text-xs"
+          className="h-9 shrink-0 px-3 text-xs"
           onClick=${handleManualSubmit}
           disabled=${isApproving || !manualCode.trim()}
         >
-          ${t("pairing.approve")}
+          ${t(i18nKeys.action)}
         <//>
       </div>
 
-      ${requests.length > 0
+      ${result?.success &&
+      html`<p className="mb-3 text-xs text-emerald-300">
+        ${result.message || t(i18nKeys.success)}
+      </p>`}
+      ${result && !result.success &&
+      html`<p className="mb-3 text-xs text-red-300">
+        ${result.message || t(i18nKeys.error)}
+      </p>`}
+      ${error &&
+      html`<p className="mb-3 text-xs text-red-300">
+        ${pairingErrorMessage(error, t(i18nKeys.error))}
+      </p>`}
+
+      ${showPendingRequests && requests.length > 0
         ? html`
             <div className="space-y-2">
               ${requests.map((req) => html`
@@ -75,13 +131,14 @@ export function PairingSection({ channel }) {
                     onClick=${() => handleApprove(req.code || req.id)}
                     disabled=${isApproving}
                   >
-                    ${t("pairing.approve")}
+                    ${t(i18nKeys.action)}
                   <//>
                 </div>
               `)}
             </div>
           `
-        : html`<p className="text-xs text-iron-300">${t("pairing.none")}</p>`}
+        : showPendingRequests &&
+          html`<p className="text-xs text-iron-300">${t(i18nKeys.empty)}</p>`}
     </div>
   `;
 }

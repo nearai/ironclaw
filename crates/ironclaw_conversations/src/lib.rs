@@ -19,6 +19,7 @@ mod inbound;
 mod memory;
 mod state_store;
 mod traits;
+mod trusted_trigger;
 mod types;
 
 pub use error::InboundTurnError;
@@ -29,7 +30,7 @@ pub use ids::{
     AdapterInstallationId, AdapterKind, ExternalActorRef, ExternalConversationIdentity,
     ExternalConversationRef, ExternalEventId, InboundMessageContentRef,
 };
-pub use inbound::InboundTurnService;
+pub use inbound::{InboundTurnService, trusted_trigger_fire_submitter};
 pub use memory::InMemoryConversationServices;
 pub use traits::{
     ConversationActorPairingService, ConversationBindingService, ConversationBindingServiceExt,
@@ -40,5 +41,5 @@ pub use types::{
     AcceptedInboundMessageReplay, ConversationBindingResolution, ConversationRouteKind,
     InboundTurnRequest, InboundTurnResponse, LinkConversationRequest, LinkedConversationBinding,
     MessageIdempotencyStatus, ReplyTargetBinding, ResolveConversationRequest, ThreadAccessDecision,
-    ThreadMessageRecord, TrustedInboundTurnRequest, ValidateReplyTargetRequest,
+    ThreadMessageRecord, ValidateReplyTargetRequest,
 };

@@ -24,7 +24,7 @@ use ironclaw_loop_support::{
 use ironclaw_threads::{
     AppendCapabilityDisplayPreviewRequest, CapabilityDisplayPreviewEnvelope,
     CapabilityDisplayPreviewEnvelopeInput, CapabilityDisplayPreviewStatus, SessionThreadService,
-    ThreadScope,
+    ThreadMessageId, ThreadScope,
 };
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 use ironclaw_turns::{
@@ -253,14 +253,14 @@ impl LocalDevCapabilityIo {
             .map(|results| results.get(result_ref).cloned())
     }
 
-    async fn append_durable_display_preview(
+    async fn try_append_durable_display_preview(
         &self,
         run_context: &LoopRunContext,
         invocation_id: InvocationId,
         capability_id: &CapabilityId,
-    ) -> Result<(), AgentLoopHostError> {
+    ) -> Option<ThreadMessageId> {
         let Some(durable_previews) = &self.durable_previews else {
-            return Ok(());
+            return None;
         };
         let Some(record) = self.display_previews.record_for_invocation(invocation_id) else {
             tracing::debug!(
@@ -268,7 +268,7 @@ impl LocalDevCapabilityIo {
                 capability_id = capability_id.as_str(),
                 "capability display preview record missing after result staging"
             );
-            return Ok(());
+            return None;
         };
         let preview =
             match CapabilityDisplayPreviewEnvelope::new(CapabilityDisplayPreviewEnvelopeInput {
@@ -294,10 +294,10 @@ impl LocalDevCapabilityIo {
                         error,
                         "capability display preview envelope validation failed"
                     );
-                    return Err(capability_io_error());
+                    return None;
                 }
             };
-        let message = durable_previews
+        let message = match durable_previews
             .thread_service
             .append_capability_display_preview(AppendCapabilityDisplayPreviewRequest {
                 scope: durable_previews.thread_scope.clone(),
@@ -306,18 +306,19 @@ impl LocalDevCapabilityIo {
                 preview,
             })
             .await
-            .map_err(|error| {
+        {
+            Ok(message) => message,
+            Err(error) => {
                 tracing::debug!(
                     invocation_id = %invocation_id,
                     capability_id = capability_id.as_str(),
                     error = %error,
-                    "capability display preview durable append failed"
+                    "capability display preview durable append failed; continuing with staged capability result"
                 );
-                capability_io_error()
-            })?;
-        self.display_previews
-            .attach_timeline_message_id(invocation_id, message.message_id);
-        Ok(())
+                return None;
+            }
+        };
+        Some(message.message_id)
     }
 }
 
@@ -502,8 +503,13 @@ impl LoopCapabilityResultWriter for LocalDevCapabilityIo {
             },
             display_preview.as_ref(),
         );
-        self.append_durable_display_preview(run_context, invocation_id, capability_id)
-            .await?;
+        if let Some(message_id) = self
+            .try_append_durable_display_preview(run_context, invocation_id, capability_id)
+            .await
+        {
+            self.display_previews
+                .attach_timeline_message_id(invocation_id, message_id);
+        }
         Ok(result_ref)
     }
 

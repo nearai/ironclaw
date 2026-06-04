@@ -6,7 +6,7 @@ use std::sync::Arc;
 use anyhow::{Context, anyhow};
 use clap::Args;
 #[cfg(feature = "slack-v2-host-beta")]
-use ironclaw_reborn_composition::build_slack_events_route_mount;
+use ironclaw_reborn_composition::build_slack_host_beta_mounts;
 use ironclaw_reborn_composition::{
     GoogleOAuthRouteConfig, RebornBuildInput, RebornReadiness, RebornRuntimeIdentity,
     RebornRuntimeInput, RebornWebuiBundle, WebuiAuthenticator, WebuiServeConfig,
@@ -158,8 +158,7 @@ impl ServeCommand {
             .map(ironclaw_reborn_composition::host_api::ProjectId::new)
             .transpose()
             .map_err(|err| anyhow!("[identity].default_project is invalid: {err}"))?;
-        #[cfg(feature = "slack-v2-host-beta")]
-        let slack_host_beta_config = crate::commands::serve_slack::resolve_slack_host_beta_config(
+        let slack_host_beta_config = crate::commands::serve_slack::resolve_slack_config_for_serve(
             config_file.as_ref().and_then(|file| file.slack.as_ref()),
             &tenant_id,
             &default_agent_id,
@@ -168,9 +167,7 @@ impl ServeCommand {
             &boot_config.home().config_file_path(),
         )?;
         #[cfg(not(feature = "slack-v2-host-beta"))]
-        crate::commands::serve_slack::reject_enabled_slack_without_feature(
-            config_file.as_ref().and_then(|file| file.slack.as_ref()),
-        )?;
+        let _ = slack_host_beta_config;
 
         // Resolve listen address with explicit precedence:
         //   CLI flag (Some(...)) > config file > compile-time default.
@@ -397,9 +394,11 @@ impl ServeCommand {
             }
             #[cfg(feature = "slack-v2-host-beta")]
             if let Some(slack_config) = slack_host_beta_config {
-                let slack_mount = build_slack_events_route_mount(&runtime, slack_config)
-                    .context("failed to compose Slack Events API host-beta route")?;
-                serve_config = serve_config.with_public_route_mount(slack_mount);
+                let slack_mounts = build_slack_host_beta_mounts(&runtime, slack_config)
+                    .context("failed to compose Slack host-beta routes")?;
+                serve_config = serve_config
+                    .with_public_route_mount(slack_mounts.events)
+                    .with_slack_personal_binding_pairing(slack_mounts.personal_binding_pairing);
             }
             if let Some(mount) = public_mount {
                 serve_config = serve_config.with_public_route_mount(mount);

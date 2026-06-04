@@ -48,7 +48,6 @@ slack-v2-host-beta = [
     "webui-v2-beta",
     "ironclaw_reborn_composition/slack-v2-host-beta",
 ]
-
 [dependencies]
 anyhow = "1"
 async-trait = { version = "0.1", optional = true }

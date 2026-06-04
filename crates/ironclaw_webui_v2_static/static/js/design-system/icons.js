@@ -7,6 +7,10 @@ const paths = {
 
   bolt: html`<path d="M13 2.8 5.8 13h5.1L10 21.2 18.2 10h-5.4L13 2.8Z" />`,
 
+  calendar: html`<path d="M6.5 4.5v3M17.5 4.5v3" /><path
+      d="M4.5 7h15v12.5h-15V7Z"
+    /><path d="M4.5 10.5h15" /><path d="M8 14h.1M12 14h.1M16 14h.1M8 17h.1M12 17h.1" />`,
+
   check: html`<path d="m5 12.5 4.3 4.3L19.2 6.7" />`,
 
   chat: html`<path d="M5 5.5h14v10H9.4L5 19.2V5.5Z" /><path

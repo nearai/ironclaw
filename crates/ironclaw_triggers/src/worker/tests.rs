@@ -14,8 +14,8 @@ use crate::{
     ClearActiveFireRequest, FireAcceptedRequest, FirePermanentFailedRequest, FireReplayedRequest,
     FireRetryableFailedRequest, FireTerminalFailedRequest, InMemoryTriggerRepository,
     TriggerCompletionPolicy, TriggerError, TriggerFire, TriggerId, TriggerInboundContentRef,
-    TriggerPromptMaterializer, TriggerRecord, TriggerRepository, TriggerRunStatus, TriggerSchedule,
-    TriggerSourceKind, TriggerSourceProvider, TriggerState,
+    TriggerMaterializedPrompt, TriggerPromptMaterializer, TriggerRecord, TriggerRepository,
+    TriggerRunStatus, TriggerSchedule, TriggerSourceKind, TriggerSourceProvider, TriggerState,
 };
 
 fn ts(seconds: i64) -> Timestamp {
@@ -228,12 +228,47 @@ async fn tick_processes_one_due_trigger_happy_path() {
     assert_eq!(materializer.fires().len(), 1);
     assert_eq!(submitter.requests().len(), 1);
     let request = submitter.requests().pop().expect("submit request");
-    assert_eq!(request.fire.identity.trigger_id, trigger_id);
-    assert_eq!(request.fire.identity.fire_slot, fire_slot);
-    assert_eq!(request.fire.creator_user_id, record.creator_user_id);
-    assert_eq!(request.fire.agent_id, record.agent_id);
-    assert_eq!(request.fire.project_id, record.project_id);
-    assert_eq!(request.content_ref.as_str(), "content:trigger-fire");
+    assert_eq!(request.fire().identity.trigger_id, trigger_id);
+    assert_eq!(request.fire().identity.fire_slot, fire_slot);
+    assert_eq!(request.fire().creator_user_id, record.creator_user_id);
+    assert_eq!(request.fire().agent_id, record.agent_id);
+    assert_eq!(request.fire().project_id, record.project_id);
+    assert_eq!(request.content_ref().as_str(), "content:trigger-fire");
+    assert_eq!(
+        request
+            .materialized_prompt()
+            .trusted_inbound_binding()
+            .external_conversation_id(),
+        format!("trigger-{trigger_id}")
+    );
+    assert_eq!(request.received_at(), fire_slot);
+    let (fire, materialized_prompt, received_at) = request.into_parts();
+    let (content_ref, trusted_inbound_binding) = materialized_prompt.into_parts();
+    assert_eq!(fire.identity.trigger_id, trigger_id);
+    assert_eq!(fire.identity.fire_slot, fire_slot);
+    assert_eq!(fire.creator_user_id, record.creator_user_id);
+    assert_eq!(fire.agent_id, record.agent_id);
+    assert_eq!(fire.project_id, record.project_id);
+    assert_eq!(content_ref.as_str(), "content:trigger-fire");
+    assert_eq!(trusted_inbound_binding.adapter_kind(), "trigger");
+    assert_eq!(
+        trusted_inbound_binding.adapter_installation_id(),
+        "reborn-trigger-poller"
+    );
+    assert_eq!(trusted_inbound_binding.external_actor_namespace(), "user");
+    assert_eq!(
+        trusted_inbound_binding.external_actor_id(),
+        record.creator_user_id.as_str()
+    );
+    assert_eq!(
+        trusted_inbound_binding.route_thread_id(),
+        fire.identity.route_thread_id().as_str()
+    );
+    assert_eq!(
+        trusted_inbound_binding.external_event_id(),
+        fire.identity.external_event_id().as_str()
+    );
+    assert_eq!(received_at, fire_slot);
 
     let persisted = repo
         .get_trigger(tenant("tenant-a"), trigger_id)
@@ -1232,7 +1267,7 @@ async fn tick_keeps_claim_only_active_fire_blocked() {
 }
 
 #[tokio::test]
-async fn tick_advances_active_cleanup_cursor_past_claim_only_record() {
+async fn tick_active_cleanup_cursor_advances_past_claim_only_record() {
     let repo = Arc::new(InMemoryTriggerRepository::default());
     let claim_only_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZY").expect("ulid");
     let claim_only_slot = ts(1_704_067_200);
@@ -1287,7 +1322,15 @@ async fn tick_advances_active_cleanup_cursor_past_claim_only_record() {
         Some(TriggerPollerFireOutcome::ClearedTerminalActive { run_id })
             if *run_id == terminal_run
     ));
-    assert_eq!(active_lookup.requests().len(), 1);
+    assert_eq!(
+        active_lookup.requests(),
+        vec![TriggerActiveRunStateRequest {
+            tenant_id: tenant("tenant-a"),
+            trigger_id: terminal_id,
+            fire_slot: terminal_slot,
+            run_id: terminal_run,
+        }]
+    );
     let claim_only = repo
         .get_trigger(tenant("tenant-a"), claim_only_id)
         .await
@@ -1299,7 +1342,7 @@ async fn tick_advances_active_cleanup_cursor_past_claim_only_record() {
         .get_trigger(tenant("tenant-a"), terminal_id)
         .await
         .expect("load terminal")
-        .expect("terminal active record present");
+        .expect("terminal record present");
     assert_eq!(terminal.active_fire_slot, None);
     assert_eq!(terminal.active_run_ref, None);
 }
@@ -1315,9 +1358,9 @@ async fn tick_retryable_submit_failure_clears_active_and_keeps_slot_retryable() 
     let worker = worker(
         repo.clone(),
         Arc::new(RecordingMaterializer::success("content:trigger-fire")),
-        Arc::new(RecordingSubmitter::with_outcomes(vec![Ok(
-            TrustedTriggerFireSubmitOutcome::RetryableFailed {
-                reason: TrustedTriggerSubmitFailureReason::Retryable,
+        Arc::new(RecordingSubmitter::with_outcomes(vec![Err(
+            TriggerError::Backend {
+                reason: "trusted submit retryable".to_string(),
             },
         )])),
         Arc::new(RecordingActiveRunLookup::default()),
@@ -1328,7 +1371,7 @@ async fn tick_retryable_submit_failure_clears_active_and_keeps_slot_retryable() 
     assert!(matches!(
         report.results.last().map(|result| &result.outcome),
         Some(TriggerPollerFireOutcome::RetryableFailed {
-            reason: TriggerPollerFailureReason::TrustedSubmitRetryable,
+            reason: TriggerPollerFailureReason::Backend,
         })
     ));
     let persisted = repo
@@ -1533,9 +1576,9 @@ async fn tick_permanent_submit_failure_advances_next_slot() {
     let worker = worker(
         repo.clone(),
         Arc::new(RecordingMaterializer::success("content:trigger-fire")),
-        Arc::new(RecordingSubmitter::with_outcomes(vec![Ok(
-            TrustedTriggerFireSubmitOutcome::PermanentFailed {
-                reason: TrustedTriggerSubmitFailureReason::Permanent,
+        Arc::new(RecordingSubmitter::with_outcomes(vec![Err(
+            TriggerError::InvalidMaterialization {
+                reason: "trusted submit permanent".to_string(),
             },
         )])),
         Arc::new(RecordingActiveRunLookup::default()),
@@ -1546,7 +1589,7 @@ async fn tick_permanent_submit_failure_advances_next_slot() {
     assert!(matches!(
         report.results.last().map(|result| &result.outcome),
         Some(TriggerPollerFireOutcome::PermanentFailed {
-            reason: TriggerPollerFailureReason::TrustedSubmitPermanent,
+            reason: TriggerPollerFailureReason::InvalidMaterialization,
         })
     ));
     let persisted = repo
@@ -1855,13 +1898,15 @@ impl TriggerPromptMaterializer for RecordingMaterializer {
     async fn materialize_prompt(
         &self,
         fire: TriggerFire,
-    ) -> Result<TriggerInboundContentRef, TriggerError> {
-        self.fires.lock().expect("fires lock").push(fire);
-        self.result
+    ) -> Result<TriggerMaterializedPrompt, TriggerError> {
+        self.fires.lock().expect("fires lock").push(fire.clone());
+        let content_ref = self
+            .result
             .lock()
             .expect("result lock")
             .take()
-            .expect("materializer result configured")
+            .expect("materializer result configured")?;
+        Ok(TriggerMaterializedPrompt::for_fire(&fire, content_ref))
     }
 }
 

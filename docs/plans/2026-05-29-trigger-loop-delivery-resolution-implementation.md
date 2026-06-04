@@ -108,10 +108,11 @@ PRs should record them as contract language.
 13. Trigger fires bypass `ironclaw_product_workflow` ingress entirely. Product
     workflow remains adapter-facing; scheduled triggers enter only through the
     planned `ironclaw_conversations::InboundTurnService` trusted facade.
-14. Host-trusted trigger ingress authority is owned by the host-only
-    `ironclaw_trusted_ingress` crate and consumed only by conversations and
-    Reborn composition. Product adapters must not depend on that crate, receive
-    constructors, or model trusted trigger ingress in product payload DTOs.
+14. Host-trusted trigger ingress authority is sealed by
+    `TrustedTriggerSubmitRequest` minting in `ironclaw_triggers` and private
+    trusted inbound construction inside `ironclaw_conversations`. Product
+    adapters must not receive constructors, call the trusted trigger submitter
+    factory, or model trusted trigger ingress in product payload DTOs.
 
 ## Dependency DAG
 
@@ -717,10 +718,9 @@ Wire the trigger poller into Reborn composition:
 - readiness semantics for whether a disabled trigger poller is allowed and
   whether a failed trigger worker marks Reborn runtime readiness degraded.
 - PR18 review follow-up status:
-  - host-trusted trigger ingress is hardened with a host-only authority crate,
-    root/crate-local `AGENTS.md` guidance, and architecture tests that restrict
-    dependents and trusted constructor call sites. Rust has no sibling-crate
-    `friend` visibility, so the enforceable boundary is the dependency graph.
+  - host-trusted trigger ingress is hardened with sealed trigger-worker request
+    minting, private conversation-owned trusted inbound construction, and
+    architecture tests that restrict trusted constructor/factory call sites.
   - trigger poller startup is opt-in by default; runtimes must explicitly pass
     enabled trigger poller settings before the background worker starts.
   - runtime shutdown cancels the trigger poller and waits only for a bounded
@@ -734,22 +734,20 @@ Wire the trigger poller into Reborn composition:
     the scheduled prompt.
   - active-run lookup is batched for each cleanup page so composition snapshots
     turn state once per active page rather than once per active trigger record.
-  - PR18.5 / PR19 prerequisite: strengthen host-trusted trigger ingress from
-    architecture-test-enforced dependency ownership into a compile-time sealed
-    host facade or equivalent factory. The prerequisite is not just another
-    dependency-boundary assertion; it needs a concrete API shape where product
-    adapter crates cannot mint trigger authority by adding
-    `ironclaw_trusted_ingress` as a dependency. Expected work:
-    - replace the public zero-argument trusted ingress constructor with a
-      composition-owned host factory or conversation-owned sealed witness that
-      cannot be constructed from adapter/product crates;
+  - PR18.5 / PR19 prerequisite: keep host-trusted trigger ingress as a
+    compile-time sealed trigger submission path, not a reusable generic trusted
+    ingress facade. The prerequisite is not just another dependency-boundary
+    assertion; it needs a concrete API shape where product adapter crates cannot
+    mint trigger authority. Expected work:
+    - keep trusted trigger authority on the worker-minted sealed trigger
+      request, not on a reusable authority-token facade;
     - keep `TrustedInboundTurnRequest` raw construction private inside
       `ironclaw_conversations`;
     - expose only the narrow trigger-fire submission operation needed by
       composition, not a reusable generic trusted-inbound token;
     - update architecture tests so adapter/product crates are forbidden from
-      depending on the authority crate/facade and forbidden from calling the
-      trusted trigger constructor/factory;
+      introducing a generic trusted ingress facade and forbidden from calling
+      the trusted trigger constructor/factory;
     - add a negative or architecture test proving a product adapter path cannot
       construct host-trusted trigger ingress;
     - preserve existing PR18 poller behavior and trusted inbound replay tests.
@@ -834,10 +832,11 @@ Two gaps block shipping user-creatable cron jobs:
    section, no env var, and no `.env.example` entry. Cron triggers can only
    fire from Rust test code today. This is the hard blocker between "backend
    exists" and "cron actually fires."
-2. **Security hardening is deferred.** Trusted-ingress sealing is feature-flag
-   gated (`HostTrustedTriggerIngress::new_for_composition_root()` is a public
-   zero-arg fn behind `#[cfg(feature = "composition-root")]`), not type-sealed.
-   Fire-time creator authorization is a tenant-ID-equality placeholder
+2. **Some security hardening is deferred.** Trusted trigger submission is now
+   type-sealed through `TrustedTriggerSubmitRequest` and converted inside
+   `ironclaw_conversations`; product/adapter crates cannot mint host-trusted
+   inbound turns directly. Fire-time creator authorization is still a
+   tenant-ID-equality placeholder
    (`TrustedTenantTriggerFireAuthorizer`), not wired to a real agent/project
    access source. Both are plan-mandated before any user-visible trigger launch
    path or external delivery ships (see PR 18 follow-up status and PR 19).
@@ -909,10 +908,10 @@ Three independent tracks branch from the PR 18 baseline.
 
 **PR 18.5a — Type-Seal Trusted Ingress Facade (Prereq A)**
 
-- Replace the public zero-arg `HostTrustedTriggerIngress::new_for_composition_root()`
-  with a shape product/adapter crates cannot mint even by adding the dependency
-  and enabling the feature — e.g. construction gated on a private
-  composition-owned witness, or a sealed-trait / private-module token.
+- Seal trusted trigger submission so product/adapter crates cannot mint
+  host-trusted inbound turns even by adding dependencies. Authority lives in
+  `TrustedTriggerSubmitRequest`, constructed only by the trigger worker and
+  converted inside `ironclaw_conversations`.
 - Keep `TrustedInboundTurnRequest` raw construction private in
   `ironclaw_conversations` (already done) and expose only the narrow
   trigger-fire submission operation.

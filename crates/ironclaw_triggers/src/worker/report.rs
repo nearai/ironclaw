@@ -3,8 +3,6 @@ use ironclaw_turns::TurnRunId;
 
 use crate::TriggerId;
 
-use super::TrustedTriggerSubmitFailureReason;
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TriggerPollerTickReport {
     pub now: Timestamp,
@@ -78,16 +76,5 @@ pub enum TriggerPollerFailureReason {
     InvalidMaterialization,
     NotFound,
     SourceNoFire,
-    TrustedSubmitRetryable,
-    TrustedSubmitPermanent,
     ActiveRunLookup,
-}
-
-impl TriggerPollerFailureReason {
-    pub(super) fn from_trusted_submit_failure(reason: TrustedTriggerSubmitFailureReason) -> Self {
-        match reason {
-            TrustedTriggerSubmitFailureReason::Retryable => Self::TrustedSubmitRetryable,
-            TrustedTriggerSubmitFailureReason::Permanent => Self::TrustedSubmitPermanent,
-        }
-    }
 }

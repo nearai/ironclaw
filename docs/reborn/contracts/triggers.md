@@ -196,41 +196,53 @@ plumbing, not capability APIs.
 A trigger fire is synthetic inbound, not a parallel agent loop.
 
 - The fire must enter the normal Reborn inbound/turn pipeline.
-- The trusted facade is `InboundTurnService::handle_inbound_turn_with_trusted_scope(TrustedInboundTurnRequest)`. The raw trusted request constructor stays private inside `ironclaw_conversations`; host/composition code must enter through a host-owned trigger ingress seam instead of constructing trusted requests directly.
+- The trusted submitter implementation is conversation-owned and exposed to host composition through `trusted_trigger_fire_submitter(...) -> Arc<dyn TrustedTriggerFireSubmitter>`. This public factory is wiring only; trusted authority lives in the sealed `TrustedTriggerSubmitRequest` minted by the trigger worker. The raw `TrustedInboundTurnRequest` constructor and concrete submitter type stay private inside `ironclaw_conversations`; host/composition code only wires the trait object into the poller while the conversation crate converts the worker-carried canonical binding into the private trusted turn request.
 - Binding resolution for trigger fires must use the trusted-scope path from `conversation-binding.md`.
-- The host-trusted ingress marker and witness used for trigger submission must be inaccessible to product adapters. PR18 enforces this with a host-only trusted ingress crate plus architecture dependency tests; before trigger delivery launches, the trusted ingress authority should be hardened into a compile-time host facade or equivalent sealed factory so adapter crates cannot mint it merely by adding a dependency.
+- Product adapters, first-party capabilities, and product workflow code must not construct the conversation-owned trusted trigger submitter or submit `TrustedTriggerSubmitRequest`. PR18.5a enforces this with a private trusted request and architecture tests over adapter/product paths.
 - The host mints the trusted trigger ingress request from `TriggerRecord` state:
   `tenant_id`, `creator_user_id`, `agent_id`, and `project_id` are host state,
   not product payload data.
 - Before a trusted trigger fire is submitted, host composition must scan the
   materialized trigger prompt for prompt-injection patterns and reject high- or
-  critical-severity findings as permanent materialization failures. The prompt
-  must not be silently rewritten before turn submission.
+  critical-severity findings as permanent materialization failures. The
+  conversation submitter repeats this scan at the final trusted submission
+  boundary. The prompt must not be silently rewritten before turn submission.
 - Before trigger delivery launches, host composition must also verify at fire
   time that `creator_user_id` is still authorized for the target
   `tenant_id`/`agent_id`/`project_id`; revoked or unauthorized creators must
   produce a permanent authorization failure instead of submitting a turn.
-- The trusted inbound request is a host-owned wrapper around the ordinary inbound fields. It carries only ingress identity and turn scope data needed to create the canonical turn, and it discards adapter-supplied requested-scope hints before binding resolution.
+- The trusted inbound request is a host-owned synthetic inbound shape around the ordinary inbound fields. It carries only ingress identity and turn scope data needed to create the canonical turn, and it has no adapter-supplied requested-scope hints before binding resolution.
 - It must not encode delivery targets, notification targets, or any other outbound routing policy.
 
-Trusted trigger ingress request fields are:
+Host-trusted trigger ingress request fields are:
 
-- `adapter_kind`: sealed host-trusted ingress marker, not a product adapter kind;
-- `adapter_installation_id`: sealed host-trusted trigger installation marker;
+- `source`: `TriggerFire`;
+- `adapter_kind`: host-trusted trigger ingress marker, not a product adapter kind;
+- `adapter_installation_id`: host-trusted trigger installation marker;
 - `external_actor_ref`: canonical actor route for the trigger creator authority;
-- `external_conversation_ref`: synthetic dedicated-thread route for this fire,
-  derived from `tenant_id + trigger_id + fire_slot`;
+- `external_conversation_ref`: synthetic trigger conversation key plus the
+  deterministic route thread digest for this tenant-scoped fire slot;
 - `external_event_id`: deterministic replay key derived from the same
   tenant-scoped fire identity;
 - `route_kind`: direct;
 - `actor`: `TurnActor` for `creator_user_id`;
-- `content_ref`: materialized trigger prompt.
+- `content_ref`: materialized trigger prompt;
+- `trusted_inbound_binding`: the canonical trigger-to-conversation binding
+  fields used for both prompt recording and trusted turn submission.
 
 The trigger-owned materialization seam keeps `ironclaw_triggers` free of
 conversation and product-workflow dependencies: `TriggerPromptMaterializer`
-accepts a `TriggerFire` and returns an opaque `TriggerInboundContentRef`.
-Composition owns the concrete adapter that writes or resolves that content ref
-for the trusted inbound path.
+accepts a `TriggerFire` and returns a `TriggerMaterializedPrompt` bundle
+containing the opaque `TriggerInboundContentRef` plus the canonical trusted
+inbound binding. Composition owns the concrete adapter that writes or resolves
+that content ref and computes the binding once for the trusted inbound path.
+The sealed `TrustedTriggerSubmitRequest` carries that paired materialized
+prompt forward; conversations must not re-derive the binding identity from the
+raw fire when submitting the trusted turn.
+
+`TrustedTriggerFireSubmitOutcome` is success-only: accepted or replayed.
+Submit failures travel through `Err(TriggerError)` and are classified once by
+the trigger worker.
 
 The sealed marker/installation/actor/conversation tuple must resolve to the same
 `SourceBindingRef` on every retry of the same tenant-scoped fire identity. Replay

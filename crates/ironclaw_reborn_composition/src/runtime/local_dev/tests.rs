@@ -462,7 +462,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn capability_io_fails_result_when_durable_preview_append_fails() {
+    async fn capability_io_keeps_result_when_durable_preview_append_fails() {
         let run_context = run_context("durable-preview-failure").await;
         let thread_scope = ThreadScope {
             tenant_id: run_context.scope.tenant_id.clone(),
@@ -488,7 +488,7 @@ mod tests {
         let invocation_id = InvocationId::new();
 
         let capability_id = CapabilityId::new("builtin.echo").expect("capability id");
-        let error = capability_io
+        let result_ref = capability_io
             .write_capability_result(CapabilityResultWrite {
                 run_context: &run_context,
                 input_ref: &input_ref,
@@ -498,9 +498,14 @@ mod tests {
                 display_preview: None,
             })
             .await
-            .expect_err("missing thread rejects durable preview append");
+            .expect("missing thread does not reject staged capability result");
 
-        assert_eq!(error.kind, AgentLoopHostErrorKind::Internal);
+        assert_eq!(
+            capability_io
+                .result_output(result_ref.as_str())
+                .expect("staged result reads"),
+            Some(serde_json::json!({"content": "hello"}))
+        );
         let preview_record = display_previews
             .record_for_invocation(invocation_id)
             .expect("live preview record was staged before durable append");

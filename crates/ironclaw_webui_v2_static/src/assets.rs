@@ -124,6 +124,30 @@ mod tests {
     }
 
     #[test]
+    fn automations_panel_assets_are_embedded() {
+        let app = asset_text("js/app/app.js");
+        assert!(app.contains("AutomationsPage"));
+        assert!(app.contains("path=\"automations\""));
+
+        let routes = asset_text("js/app/routes.js");
+        assert!(routes.contains("nav.automations"));
+        assert!(routes.contains("path: \"/automations\""));
+
+        let api = asset_text("js/lib/api.js");
+        assert!(api.contains("listAutomations"));
+        assert!(api.contains("/automations"));
+
+        let page = asset_text("js/pages/automations/automations-page.js");
+        assert!(page.contains("AutomationsSummaryStrip"));
+        assert!(page.contains("AutomationsList"));
+
+        let presenter = asset_text("js/pages/automations/lib/automations-presenters.js");
+        assert!(presenter.contains("source?.type === \"schedule\""));
+        assert!(presenter.contains("Custom schedule"));
+        assert!(!presenter.contains("Webhook"));
+    }
+
+    #[test]
     fn chat_projection_text_preserves_pending_gate() {
         let events = asset_text("js/pages/chat/lib/useChatEvents.js");
         let text_branch = events

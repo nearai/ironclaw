@@ -116,7 +116,6 @@ ironclaw_secrets = { path = "../ironclaw_secrets" }
 ironclaw_skills = { path = "../ironclaw_skills" }
 ironclaw_slack_v2_adapter = { path = "../ironclaw_slack_v2_adapter", optional = true }
 ironclaw_threads = { path = "../ironclaw_threads" }
-ironclaw_trusted_ingress = { path = "../ironclaw_trusted_ingress", features = ["composition-root"] }
 ironclaw_triggers = { path = "../ironclaw_triggers" }
 ironclaw_trust = { path = "../ironclaw_trust" }
 ironclaw_turns = { path = "../ironclaw_turns" }

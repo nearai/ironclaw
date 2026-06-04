@@ -1,5 +1,7 @@
 use ironclaw_turns::run_profile::{AgentLoopHostError, AgentLoopHostErrorKind};
 
+pub(super) const MAX_PROVIDER_NORMALIZATION_DEPTH: usize = 32;
+
 pub(super) fn prepare_provider_arguments(
     arguments: &serde_json::Value,
     schema: &serde_json::Value,
@@ -15,14 +17,22 @@ pub(super) fn normalize_provider_arguments(
     schema: &serde_json::Value,
     label: &'static str,
 ) -> Result<serde_json::Value, AgentLoopHostError> {
-    normalize_provider_value(arguments, schema, label)
+    normalize_provider_value(arguments, schema, label, 0)
 }
 
 fn normalize_provider_value(
     value: &serde_json::Value,
     schema: &serde_json::Value,
     label: &'static str,
+    depth: usize,
 ) -> Result<serde_json::Value, AgentLoopHostError> {
+    if depth > MAX_PROVIDER_NORMALIZATION_DEPTH {
+        return Err(AgentLoopHostError::new(
+            AgentLoopHostErrorKind::InvalidInvocation,
+            format!("{label} exceeded maximum schema normalization depth"),
+        ));
+    }
+
     if schema_type_matches(schema, "object") {
         let object_value = coerce_json_string(value, label)?;
         let Some(object) = object_value.as_object() else {
@@ -42,7 +52,7 @@ fn normalize_provider_value(
             if let Some(property_value) = normalized.get(property).cloned() {
                 normalized.insert(
                     property.clone(),
-                    normalize_provider_value(&property_value, property_schema, label)?,
+                    normalize_provider_value(&property_value, property_schema, label, depth + 1)?,
                 );
             }
         }
@@ -62,7 +72,7 @@ fn normalize_provider_value(
         };
         return array
             .iter()
-            .map(|item| normalize_provider_value(item, items, label))
+            .map(|item| normalize_provider_value(item, items, label, depth + 1))
             .collect::<Result<Vec<_>, _>>()
             .map(serde_json::Value::Array);
     }
@@ -86,7 +96,7 @@ fn normalize_provider_value(
     // branch above so declared properties are still normalized before full
     // JSON Schema validation enforces the composed constraints.
     if let Some(variants) = schema_variants(schema) {
-        return normalize_one_of_variants(value, variants, label);
+        return normalize_one_of_variants(value, variants, label, depth);
     }
 
     Ok(value.clone())
@@ -97,8 +107,11 @@ fn validate_provider_arguments_schema(
     schema: &serde_json::Value,
     label: &'static str,
 ) -> Result<(), AgentLoopHostError> {
-    if schema_is_unresolved_ref(schema) {
-        return Ok(());
+    if schema_contains_external_ref(schema, 0) {
+        return Err(AgentLoopHostError::new(
+            AgentLoopHostErrorKind::StaleSurface,
+            format!("{label} schema contains an unresolved $ref"),
+        ));
     }
     let validator = jsonschema::validator_for(schema).map_err(|error| {
         AgentLoopHostError::new(
@@ -161,13 +174,28 @@ fn replace_ascii_case_insensitive(input: &str, needle: &str, replacement: &str) 
     replaced
 }
 
-fn schema_is_unresolved_ref(schema: &serde_json::Value) -> bool {
-    schema.as_object().is_some_and(|object| {
-        object
-            .get("$ref")
-            .and_then(serde_json::Value::as_str)
-            .is_some()
-    })
+pub(super) fn schema_contains_external_ref(schema: &serde_json::Value, depth: usize) -> bool {
+    if depth > MAX_PROVIDER_NORMALIZATION_DEPTH {
+        return true;
+    }
+    match schema {
+        serde_json::Value::Object(object) => {
+            if object
+                .get("$ref")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|reference| !reference.starts_with('#'))
+            {
+                return true;
+            }
+            object
+                .values()
+                .any(|value| schema_contains_external_ref(value, depth + 1))
+        }
+        serde_json::Value::Array(items) => items
+            .iter()
+            .any(|value| schema_contains_external_ref(value, depth + 1)),
+        _ => false,
+    }
 }
 
 fn schema_variants(schema: &serde_json::Value) -> Option<&Vec<serde_json::Value>> {
@@ -181,6 +209,7 @@ fn normalize_one_of_variants(
     value: &serde_json::Value,
     variants: &[serde_json::Value],
     label: &'static str,
+    depth: usize,
 ) -> Result<serde_json::Value, AgentLoopHostError> {
     // Use `unwrap_or_else` rather than `?` so that an unparseable string
     // (e.g. a plain string that starts with `{` or `[` but is not valid
@@ -194,7 +223,7 @@ fn normalize_one_of_variants(
         if schema_type_matches(variant, shape)
             || (shape == "integer" && schema_type_matches(variant, "number"))
         {
-            return normalize_provider_value(&candidate, variant, label);
+            return normalize_provider_value(&candidate, variant, label, depth + 1);
         }
     }
     // No declared variant matches the value's shape; leave the original value

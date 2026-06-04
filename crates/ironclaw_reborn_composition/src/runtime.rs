@@ -40,7 +40,7 @@ use ironclaw_first_party_extension_ports::{
     FirstPartySkillsExtension, FirstPartySkillsExtensionHandles, SelectableSkillContextSource,
     SkillActivationSelectorConfig, SkillExecutionAdapter,
 };
-#[cfg(test)]
+#[cfg(all(test, feature = "slack-v2-host-beta"))]
 use ironclaw_host_api::RuntimeHttpEgress;
 use ironclaw_host_api::{
     ActionResultSummary, ActionSummary, AgentId, AuditEnvelope, AuditEventId, AuditStage,
@@ -94,10 +94,9 @@ use crate::local_dev_capability_policy::local_dev_capability_policy;
 use crate::projection::{RebornProjectionServices, build_reborn_projection_services};
 use crate::runtime_input::{PollSettings, RebornRuntimeIdentity, RebornRuntimeInput};
 use crate::trigger_poller::{
-    ConversationContentRefMaterializer, ConversationTrustedTriggerSubmitter,
-    LocalTriggerTurnSnapshotSource, SnapshotActiveRunLookup, TRIGGER_POLLER_SHUTDOWN_TIMEOUT,
-    TriggerPollerCompositionDeps, TriggerPollerRuntimeHandle, TriggerTurnSnapshotSource,
-    TrustedTenantTriggerFireAuthorizer, spawn_trigger_poller,
+    ConversationContentRefMaterializer, LocalTriggerTurnSnapshotSource, SnapshotActiveRunLookup,
+    TRIGGER_POLLER_SHUTDOWN_TIMEOUT, TriggerPollerCompositionDeps, TriggerPollerRuntimeHandle,
+    TriggerTurnSnapshotSource, TrustedTenantTriggerFireAuthorizer, spawn_trigger_poller,
 };
 use crate::{
     RebornBuildError, RebornCompositionProfile, RebornProductAuthServices, RebornServices,
@@ -276,8 +275,6 @@ async fn build_trigger_poller_services(
     default_agent_id: AgentId,
 ) -> Result<TriggerPollerServices, RebornRuntimeError> {
     let authorizer = Arc::new(TrustedTenantTriggerFireAuthorizer::new(tenant_id));
-    let trusted_ingress =
-        ironclaw_trusted_ingress::HostTrustedTriggerIngress::new_for_composition_root();
     #[cfg(any(feature = "libsql", feature = "postgres"))]
     {
         let conversations = RebornFilesystemConversationServices::new(Arc::clone(
@@ -301,7 +298,6 @@ async fn build_trigger_poller_services(
             thread_service,
             default_agent_id,
             authorizer,
-            trusted_ingress,
         );
         Ok(TriggerPollerServices {
             materializer,
@@ -328,7 +324,6 @@ async fn build_trigger_poller_services(
             thread_service,
             default_agent_id,
             authorizer,
-            trusted_ingress,
         );
         Ok(TriggerPollerServices {
             materializer,
@@ -351,7 +346,6 @@ fn build_trigger_poller_services_from_conversation_services<B, S>(
     thread_service: Arc<dyn SessionThreadService>,
     default_agent_id: AgentId,
     authorizer: Arc<dyn crate::trigger_poller_trusted_submit::TriggerFireAuthorizer>,
-    trusted_ingress: ironclaw_trusted_ingress::HostTrustedTriggerIngress,
 ) -> TriggerPollerServicesInner
 where
     B: ironclaw_conversations::ConversationBindingService + Clone + 'static,
@@ -363,12 +357,11 @@ where
         default_agent_id.clone(),
         authorizer,
     ));
-    let trusted_submitter = Arc::new(ConversationTrustedTriggerSubmitter::new(
+    let trusted_submitter = ironclaw_conversations::trusted_trigger_fire_submitter(
         binding_service,
         session_thread_service,
         turn_coordinator,
-        trusted_ingress,
-    ));
+    );
     TriggerPollerServicesInner {
         materializer,
         trusted_submitter,
@@ -547,7 +540,7 @@ impl RebornRuntime {
         )))
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "slack-v2-host-beta"))]
     pub(crate) fn set_local_runtime_http_egress_for_test(
         &mut self,
         runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
@@ -3960,7 +3953,7 @@ mod tests {
             )
             .await
             .expect("google setup extension lifecycle projection");
-        assert_eq!(google_setup.secrets.len(), 2);
+        assert_eq!(google_setup.secrets.len(), 1);
         let google_oauth_setups = google_setup
             .secrets
             .iter()
@@ -3984,12 +3977,11 @@ mod tests {
                 .iter()
                 .map(|(_, scopes)| scopes.clone())
                 .collect::<Vec<_>>(),
-            vec![
-                vec![GOOGLE_CALENDAR_READONLY_SCOPE.to_string()],
-                vec![GOOGLE_CALENDAR_EVENTS_SCOPE.to_string()],
-            ]
+            vec![vec![
+                GOOGLE_CALENDAR_READONLY_SCOPE.to_string(),
+                GOOGLE_CALENDAR_EVENTS_SCOPE.to_string(),
+            ]]
         );
-        assert_ne!(google_oauth_setups[0].0, google_oauth_setups[1].0);
         let google_setup_json =
             serde_json::to_value(&google_setup.secrets[0]).expect("serialize setup secret");
         assert_eq!(google_setup_json["setup"]["kind"], "oauth");

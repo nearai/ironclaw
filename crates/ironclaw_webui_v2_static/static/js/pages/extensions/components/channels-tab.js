@@ -2,9 +2,28 @@ import { StatusPill } from "../../../design-system/primitives.js";
 import { html } from "../../../lib/html.js";
 import { ExtensionCard, RegistryCard } from "./extension-card.js";
 import { PairingSection } from "./pairing-section.js";
+import { redeemPairingCode } from "../lib/pairing-api.js";
+
+const SLACK_PAIRING_I18N_KEYS = {
+  title: "pairing.slackTitle",
+  instructions: "pairing.slackInstructions",
+  placeholder: "pairing.slackPlaceholder",
+  action: "pairing.connect",
+  success: "pairing.slackSuccess",
+  error: "pairing.slackError",
+  empty: "pairing.none",
+};
+
+const SLACK_PAIRING_QUERY_KEYS = [["extensions"], ["pairing", "slack"]];
 
 function packageId(item) {
   return item.package_ref?.id || "";
+}
+
+export function isSlackChannelEnabled(enabledChannels) {
+  return ["slack", "slack_v2", "slack-v2"].some((channel) =>
+    enabledChannels.includes(channel)
+  );
 }
 
 export function ChannelsTab({
@@ -18,6 +37,7 @@ export function ChannelsTab({
   isBusy,
 }) {
   const enabledChannels = status.enabled_channels || [];
+  const slackEnabled = isSlackChannelEnabled(enabledChannels);
 
   return html`
     <div className="space-y-5">
@@ -42,6 +62,22 @@ export function ChannelsTab({
           enabled=${enabledChannels.includes("http")}
           detail="ENABLE_HTTP=true"
         />
+        <${BuiltinRow}
+          name="Slack"
+          description="Tenant app channel for DMs and app mentions"
+          enabled=${slackEnabled}
+          statusLabel=${slackEnabled ? "on" : "connect"}
+          statusTone=${slackEnabled ? "success" : "info"}
+          detail="Tenant Slack app install"
+        >
+          <${PairingSection}
+            channel="slack"
+            redeemFn=${redeemPairingCode}
+            i18nKeys=${SLACK_PAIRING_I18N_KEYS}
+            queryKeys=${SLACK_PAIRING_QUERY_KEYS}
+            showPendingRequests=${false}
+          />
+        <//>
         <${BuiltinRow}
           name="CLI"
           description="Terminal interface with TUI or simple REPL"
@@ -110,25 +146,36 @@ export function ChannelsTab({
   `;
 }
 
-function BuiltinRow({ name, description, enabled, detail }) {
+function BuiltinRow({
+  name,
+  description,
+  enabled,
+  detail,
+  children,
+  statusLabel = enabled ? "on" : "off",
+  statusTone = enabled ? "success" : "muted",
+}) {
   return html`
     <div
-      className="flex items-start justify-between gap-4 border-t border-white/[0.06] py-4 first:border-0 first:pt-0"
+      className="border-t border-white/[0.06] py-4 first:border-0 first:pt-0"
     >
-      <div className="min-w-0">
-        <div className="flex items-center gap-2">
-          <span className="text-sm font-medium text-iron-200">${name}</span>
-          <${StatusPill}
-            tone=${enabled ? "success" : "muted"}
-            label=${enabled ? "on" : "off"}
-          />
+      <div className="flex items-start justify-between gap-4">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2">
+            <span className="text-sm font-medium text-iron-200">${name}</span>
+            <${StatusPill}
+              tone=${statusTone}
+              label=${statusLabel}
+            />
+          </div>
+          <div className="mt-1 text-xs text-iron-300">${description}</div>
+          ${detail &&
+          html`<div className="mt-1 font-mono text-[11px] text-iron-700">
+            ${detail}
+          </div>`}
         </div>
-        <div className="mt-1 text-xs text-iron-300">${description}</div>
-        ${detail &&
-        html`<div className="mt-1 font-mono text-[11px] text-iron-700">
-          ${detail}
-        </div>`}
       </div>
+      ${children}
     </div>
   `;
 }

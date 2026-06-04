@@ -542,23 +542,67 @@ fn io_error(
     operation: FilesystemOperation,
     error: std::io::Error,
 ) -> FilesystemError {
+    if error.kind() == std::io::ErrorKind::NotFound {
+        return FilesystemError::NotFound { path, operation };
+    }
+
     tracing::debug!(
         virtual_path = path.as_str(),
         %operation,
         error = %error,
         "local filesystem backend error"
     );
-    if error.kind() == std::io::ErrorKind::NotFound {
-        FilesystemError::NotFound { path, operation }
-    } else {
-        FilesystemError::Backend {
-            path,
-            operation,
-            reason: error.kind().to_string(),
-        }
+    FilesystemError::Backend {
+        path,
+        operation,
+        reason: error.kind().to_string(),
     }
 }
 
 fn io_reason(error: std::io::Error) -> String {
     error.kind().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn missing_local_paths_do_not_log_backend_error() {
+        let storage = tempdir().unwrap();
+        let mut root = LocalFilesystem::new();
+        root.mount_local(
+            VirtualPath::new("/projects").unwrap(),
+            HostPath::from_path_buf(storage.path().to_path_buf()),
+        )
+        .unwrap();
+
+        let read_error = root
+            .read_file(&VirtualPath::new("/projects/missing.txt").unwrap())
+            .await
+            .unwrap_err();
+        let stat_error = root
+            .stat(&VirtualPath::new("/projects/also-missing.txt").unwrap())
+            .await
+            .unwrap_err();
+
+        assert!(matches!(read_error, FilesystemError::NotFound { .. }));
+        assert!(matches!(stat_error, FilesystemError::NotFound { .. }));
+        assert!(!logs_contain("local filesystem backend error"));
+    }
+
+    #[test]
+    #[tracing_test::traced_test]
+    fn non_not_found_io_error_logs_backend_error() {
+        let error = io_error(
+            VirtualPath::new("/projects/secret.txt").unwrap(),
+            FilesystemOperation::ReadFile,
+            std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+        );
+
+        assert!(matches!(error, FilesystemError::Backend { .. }));
+        assert!(logs_contain("local filesystem backend error"));
+    }
 }

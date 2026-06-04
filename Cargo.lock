@@ -4210,13 +4210,15 @@ dependencies = [
  "chrono",
  "ironclaw_filesystem",
  "ironclaw_host_api",
- "ironclaw_trusted_ingress",
+ "ironclaw_safety",
+ "ironclaw_triggers",
  "ironclaw_turns",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
  "uuid",
 ]
 
@@ -4368,6 +4370,7 @@ dependencies = [
  "tokio",
  "tokio-postgres",
  "tracing",
+ "tracing-test",
  "uuid",
 ]
 
@@ -4932,7 +4935,6 @@ dependencies = [
  "ironclaw_threads",
  "ironclaw_triggers",
  "ironclaw_trust",
- "ironclaw_trusted_ingress",
  "ironclaw_turns",
  "ironclaw_wasm_product_adapters",
  "ironclaw_webui_v2",
@@ -5277,10 +5279,6 @@ dependencies = [
  "static_assertions",
  "thiserror 2.0.18",
 ]
-
-[[package]]
-name = "ironclaw_trusted_ingress"
-version = "0.1.0"
 
 [[package]]
 name = "ironclaw_tui"
