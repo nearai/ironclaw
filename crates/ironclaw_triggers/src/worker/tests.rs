@@ -1267,7 +1267,7 @@ async fn tick_keeps_claim_only_active_fire_blocked() {
 }
 
 #[tokio::test]
-async fn tick_does_not_advance_active_cleanup_cursor_past_claim_only_record() {
+async fn tick_active_cleanup_cursor_advances_past_claim_only_record() {
     let repo = Arc::new(InMemoryTriggerRepository::default());
     let claim_only_id = TriggerId::parse("01HZZZZZZZZZZZZZZZZZZZZZZY").expect("ulid");
     let claim_only_slot = ts(1_704_067_200);
@@ -1319,12 +1319,18 @@ async fn tick_does_not_advance_active_cleanup_cursor_past_claim_only_record() {
     ));
     assert!(matches!(
         second_report.results.first().map(|result| &result.outcome),
-        Some(TriggerPollerFireOutcome::SkippedAlreadyActive {
-            active_run_ref: None,
-            ..
-        })
+        Some(TriggerPollerFireOutcome::ClearedTerminalActive { run_id })
+            if *run_id == terminal_run
     ));
-    assert_eq!(active_lookup.requests().len(), 0);
+    assert_eq!(
+        active_lookup.requests(),
+        vec![TriggerActiveRunStateRequest {
+            tenant_id: tenant("tenant-a"),
+            trigger_id: terminal_id,
+            fire_slot: terminal_slot,
+            run_id: terminal_run,
+        }]
+    );
     let claim_only = repo
         .get_trigger(tenant("tenant-a"), claim_only_id)
         .await
@@ -1336,9 +1342,9 @@ async fn tick_does_not_advance_active_cleanup_cursor_past_claim_only_record() {
         .get_trigger(tenant("tenant-a"), terminal_id)
         .await
         .expect("load terminal")
-        .expect("terminal active record present");
-    assert_eq!(terminal.active_fire_slot, Some(terminal_slot));
-    assert_eq!(terminal.active_run_ref, Some(terminal_run));
+        .expect("terminal record present");
+    assert_eq!(terminal.active_fire_slot, None);
+    assert_eq!(terminal.active_run_ref, None);
 }
 
 #[tokio::test]
