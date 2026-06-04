@@ -373,26 +373,37 @@ struct SpawnCompensationState {
     submitted_child_tree: Option<(TurnScope, TurnRunId)>,
     submitted_child_run: Option<(TurnScope, TurnActor, TurnRunId)>,
     thread_written: Option<(ThreadScope, ThreadId)>,
+    spawn_slot_committed: bool,
 }
 
 impl SpawnCompensationState {
     async fn rollback(&mut self, deps: &SubagentSpawnDeps, run_context: &LoopRunContext) {
-        if let Some((scope, actor, run_id)) = self.submitted_child_run.as_ref()
-            && let Ok(idempotency_key) = IdempotencyKey::new(format!(
+        if let Some((scope, actor, run_id)) = self.submitted_child_run.as_ref() {
+            match IdempotencyKey::new(format!(
                 "subagent-rollback-cancel:{}:{}",
                 run_context.run_id, run_id
-            ))
-        {
-            let _ = deps
-                .turn_state_store
-                .request_cancel(CancelRunRequest {
-                    scope: scope.clone(),
-                    actor: actor.clone(),
-                    run_id: *run_id,
-                    reason: SanitizedCancelReason::Superseded,
-                    idempotency_key,
-                })
-                .await;
+            )) {
+                Ok(idempotency_key) => {
+                    let _ = deps
+                        .turn_state_store
+                        .request_cancel(CancelRunRequest {
+                            scope: scope.clone(),
+                            actor: actor.clone(),
+                            run_id: *run_id,
+                            reason: SanitizedCancelReason::Superseded,
+                            idempotency_key,
+                        })
+                        .await;
+                }
+                Err(reason) => {
+                    tracing::warn!(
+                        run_id = %run_context.run_id,
+                        child_run_id = %run_id,
+                        %reason,
+                        "subagent rollback skipped child-run cancel because idempotency key was invalid"
+                    );
+                }
+            }
         }
         if let Some(gate_ref) = self.gate_written.as_ref() {
             let _ = deps.gate_store.delete_awaited_child(gate_ref).await;
@@ -540,9 +551,9 @@ impl SubagentSpawnCapabilityPort {
         args: SpawnSubagentArgs,
         gate_override: Option<GateRef>,
     ) -> Result<CapabilityOutcome, AgentLoopHostError> {
-        self.handle_spawn_with_gate_recording(invocation, args, gate_override)
+        let mut compensation = SpawnCompensationState::default();
+        self.handle_spawn_with_gate_recording(invocation, args, gate_override, &mut compensation)
             .await
-            .map(|(outcome, _)| outcome)
     }
 
     async fn handle_spawn_with_gate_recording(
@@ -550,25 +561,17 @@ impl SubagentSpawnCapabilityPort {
         invocation: &CapabilityInvocation,
         args: SpawnSubagentArgs,
         gate_override: Option<GateRef>,
-    ) -> Result<(CapabilityOutcome, SpawnCompensationState), AgentLoopHostError> {
+        compensation: &mut SpawnCompensationState,
+    ) -> Result<CapabilityOutcome, AgentLoopHostError> {
         let Some(spawn_slot) = self.reserve_spawn_slot() else {
-            return Ok((
-                spawn_rejected("fanout_cap_exceeded"),
-                SpawnCompensationState::default(),
-            ));
+            return Ok(spawn_rejected("fanout_cap_exceeded"));
         };
 
         let Some(agent_id) = self.run_context.scope.agent_id.clone() else {
-            return Ok((
-                spawn_rejected("spawn_requires_agent_scope"),
-                SpawnCompensationState::default(),
-            ));
+            return Ok(spawn_rejected("spawn_requires_agent_scope"));
         };
         let Some(actor) = self.run_context.actor.clone() else {
-            return Ok((
-                spawn_rejected("spawn_requires_actor"),
-                SpawnCompensationState::default(),
-            ));
+            return Ok(spawn_rejected("spawn_requires_actor"));
         };
         let owner_user_id = actor.user_id.clone();
         let parent_record = self
@@ -585,10 +588,7 @@ impl SubagentSpawnCapabilityPort {
             })?;
         let child_depth = parent_record.subagent_depth.saturating_add(1);
         if child_depth > self.limits.max_depth {
-            return Ok((
-                spawn_rejected("depth_cap_exceeded"),
-                SpawnCompensationState::default(),
-            ));
+            return Ok(spawn_rejected("depth_cap_exceeded"));
         }
         let parent_definition = self
             .deps
@@ -597,16 +597,10 @@ impl SubagentSpawnCapabilityPort {
             .await?;
         match parent_definition {
             Some(parent_definition) if !parent_definition.allow_nesting => {
-                return Ok((
-                    spawn_rejected("nesting_not_permitted"),
-                    SpawnCompensationState::default(),
-                ));
+                return Ok(spawn_rejected("nesting_not_permitted"));
             }
             None if parent_record.subagent_depth > 0 => {
-                return Ok((
-                    spawn_rejected("nesting_not_permitted"),
-                    SpawnCompensationState::default(),
-                ));
+                return Ok(spawn_rejected("nesting_not_permitted"));
             }
             _ => {}
         }
@@ -617,10 +611,7 @@ impl SubagentSpawnCapabilityPort {
             .resolve_kind(&args.subagent_kind)
             .await?;
         let Some(definition) = resolved else {
-            return Ok((
-                spawn_rejected("unknown_subagent_kind"),
-                SpawnCompensationState::default(),
-            ));
+            return Ok(spawn_rejected("unknown_subagent_kind"));
         };
 
         let child_scope = ThreadScope {
@@ -634,7 +625,6 @@ impl SubagentSpawnCapabilityPort {
         let tree_root = parent_record
             .spawn_tree_root_run_id
             .unwrap_or(self.run_context.run_id);
-        let mut compensation = SpawnCompensationState::default();
         let spawn_ctx = SpawnContext {
             definition,
             child_scope,
@@ -644,12 +634,13 @@ impl SubagentSpawnCapabilityPort {
         };
 
         let result = self
-            .finish_spawn(args, spawn_ctx, actor, invocation, &mut compensation)
+            .finish_spawn(args, spawn_ctx, actor, invocation, compensation)
             .await;
         match result {
             Ok(outcome) => {
                 spawn_slot.commit();
-                Ok((outcome, compensation))
+                compensation.spawn_slot_committed = true;
+                Ok(outcome)
             }
             Err(error) => {
                 compensation
@@ -878,9 +869,13 @@ impl SubagentSpawnCapabilityPort {
 
     async fn rollback_batch_compensation(&self, compensations: &mut Vec<SpawnCompensationState>) {
         while let Some(mut compensation) = compensations.pop() {
+            let release_spawn_slot = compensation.spawn_slot_committed;
             compensation
                 .rollback(self.deps.as_ref(), &self.run_context)
                 .await;
+            if release_spawn_slot {
+                self.release_spawn_slot();
+            }
         }
     }
 }
@@ -1056,8 +1051,14 @@ impl LoopCapabilityPort for SubagentSpawnCapabilityPort {
                             }
                         };
                         let gate_override = batch_blocking_gate.clone();
-                        let (outcome, compensation) = match self
-                            .handle_spawn_with_gate_recording(invocation, args, gate_override)
+                        let mut compensation = SpawnCompensationState::default();
+                        let outcome = match self
+                            .handle_spawn_with_gate_recording(
+                                invocation,
+                                args,
+                                gate_override,
+                                &mut compensation,
+                            )
                             .await
                         {
                             Ok(result) => result,

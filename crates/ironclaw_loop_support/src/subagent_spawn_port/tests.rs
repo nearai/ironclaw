@@ -1851,7 +1851,10 @@ async fn invoke_capability_batch_rolls_back_preceding_spawn_on_inner_batch_failu
         Arc::new(FailingBatchPort),
         context,
         CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
-        SubagentSpawnLimits::default(),
+        SubagentSpawnLimits {
+            max_spawn_per_turn: 1,
+            ..SubagentSpawnLimits::default()
+        },
         deps,
     );
     port.auth_input_refs
@@ -1898,6 +1901,18 @@ async fn invoke_capability_batch_rolls_back_preceding_spawn_on_inner_batch_failu
         read,
         Err(SessionThreadError::UnknownThread { .. })
     ));
+
+    port.auth_input_refs.lock().unwrap().insert(
+        input_ref(),
+        CapabilityInputRef::new("input:auth-retry").unwrap(),
+    );
+    assert!(
+        matches!(
+            invoke_spawn(&port).await,
+            CapabilityOutcome::AwaitDependentRun { .. }
+        ),
+        "rolled-back batch spawns must release their per-turn spawn slot"
+    );
 }
 
 #[tokio::test]

@@ -1309,17 +1309,13 @@ where
         scope: &ThreadScope,
         thread_id: &ThreadId,
     ) -> Result<(), SessionThreadError> {
-        let record = self
-            .read_thread(ThreadHistoryRequest {
-                scope: scope.clone(),
-                thread_id: thread_id.clone(),
-            })
-            .await?;
-        if record.scope != *scope {
-            return Err(SessionThreadError::UnknownThread {
-                thread_id: thread_id.clone(),
-            });
-        }
+        // read_thread/read_thread_versioned enforce exact-scope ownership and
+        // preserve the same UnknownThread shape for absent or cross-scope rows.
+        self.read_thread(ThreadHistoryRequest {
+            scope: scope.clone(),
+            thread_id: thread_id.clone(),
+        })
+        .await?;
         match self
             .filesystem
             .delete(&scope.to_resource_scope(), &thread_root(scope, thread_id)?)

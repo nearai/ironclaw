@@ -1142,14 +1142,14 @@ impl RebornRuntime {
                 );
                 break;
             }
+            if child.status.is_terminal() {
+                continue;
+            }
             let grandchildren = self
                 .turn_tree_store
                 .children_of(&child.scope, child.run_id)
                 .await?;
             stack.extend(grandchildren);
-            if child.status.is_terminal() {
-                continue;
-            }
             let idempotency_key = IdempotencyKey::new(format!(
                 "{}-{}-descendant-{}",
                 self.source_binding_ref.as_str(),
