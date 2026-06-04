@@ -321,6 +321,40 @@ where
     );
 }
 
+/// Internal: emit the base (search-agnostic) contract arms shared by
+/// [`contract_test!`] and [`contract_test_indexed!`].
+///
+/// This macro is the single source of truth for the round-trip / write
+/// / list contracts. Both public macros invoke it **inside their own
+/// `mod $label` block**, so the base arms are defined exactly once and
+/// cannot drift between the two suites. Each public macro then adds its
+/// own search arm (opt-out vs. real isolation) after this invocation.
+///
+/// Not part of the public API — callers wire suites via
+/// [`contract_test!`] / [`contract_test_indexed!`]. It must be exported
+/// (`#[macro_export]`) so those macros can reach it via `$crate::` when
+/// expanded in downstream test crates.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! contract_test_base {
+    ($factory:expr) => {
+        #[tokio::test]
+        async fn round_trip_returns_written_bytes() {
+            $crate::contract_tests::round_trip_returns_written_bytes($factory).await;
+        }
+
+        #[tokio::test]
+        async fn writes_isolated_across_scopes() {
+            $crate::contract_tests::writes_isolated_across_scopes($factory).await;
+        }
+
+        #[tokio::test]
+        async fn list_documents_honors_scope() {
+            $crate::contract_tests::list_documents_honors_scope($factory).await;
+        }
+    };
+}
+
 /// Wire the standard [`MemoryDocumentRepository`] contract suite for a
 /// concrete impl.
 ///
@@ -350,6 +384,10 @@ where
 /// [`MemoryDocumentIndexRepository`] and therefore serve search — the
 /// latter additionally wires the real (chunk-seeded) search-isolation
 /// contract.
+///
+/// The shared base contracts (round-trip / write / list) come from
+/// [`contract_test_base!`], so adding a base contract there
+/// automatically flows into both suites — no manual sync required.
 #[macro_export]
 macro_rules! contract_test {
     ($label:ident, $factory:expr) => {
@@ -358,26 +396,10 @@ macro_rules! contract_test {
             // contract function name.
             use super::*;
 
-            // SYNC: the round-trip/write/list arms below are duplicated
-            // verbatim into `contract_test_indexed!`. Any base contract
-            // added here MUST be added there too — there is no
-            // compile-time guard against drift. (Only the search arm
-            // intentionally differs: opt-out vs. real isolation.)
-            #[tokio::test]
-            async fn round_trip_returns_written_bytes() {
-                $crate::contract_tests::round_trip_returns_written_bytes($factory).await;
-            }
+            // Shared base contracts (single source of truth).
+            $crate::contract_test_base!($factory);
 
-            #[tokio::test]
-            async fn writes_isolated_across_scopes() {
-                $crate::contract_tests::writes_isolated_across_scopes($factory).await;
-            }
-
-            #[tokio::test]
-            async fn list_documents_honors_scope() {
-                $crate::contract_tests::list_documents_honors_scope($factory).await;
-            }
-
+            // Search arm: this impl opts out of search.
             #[tokio::test]
             async fn search_documents_unsupported_is_documented() {
                 $crate::contract_tests::search_documents_unsupported_is_documented($factory).await;
@@ -391,38 +413,24 @@ macro_rules! contract_test {
 /// (i.e. an impl that actually serves search).
 ///
 /// Expands to the same write/list/round-trip base contracts as
-/// [`contract_test!`], replacing the opt-out search contract with the
-/// real isolation contract `search_documents_isolated_across_scopes`,
-/// which seeds chunk records in two tenants and asserts a scope-A
-/// search returns only scope-A hits. See the function docs for why
-/// chunk seeding is load-bearing (without it the search returns
-/// `Ok([])` and the isolation assertion is vacuous).
+/// [`contract_test!`] (both share [`contract_test_base!`]), replacing
+/// the opt-out search contract with the real isolation contract
+/// `search_documents_isolated_across_scopes`, which seeds chunk records
+/// in two tenants and asserts a scope-A search returns only scope-A
+/// hits. See the function docs for why chunk seeding is load-bearing
+/// (without it the search returns `Ok([])` and the isolation assertion
+/// is vacuous).
 #[macro_export]
 macro_rules! contract_test_indexed {
     ($label:ident, $factory:expr) => {
         mod $label {
             use super::*;
 
-            // SYNC: the round-trip/write/list arms below are duplicated
-            // verbatim from `contract_test!`. Any base contract added to
-            // one macro MUST be added to the other — there is no
-            // compile-time guard against drift. (Only the search arm
-            // intentionally differs: opt-out vs. real isolation.)
-            #[tokio::test]
-            async fn round_trip_returns_written_bytes() {
-                $crate::contract_tests::round_trip_returns_written_bytes($factory).await;
-            }
+            // Shared base contracts (single source of truth).
+            $crate::contract_test_base!($factory);
 
-            #[tokio::test]
-            async fn writes_isolated_across_scopes() {
-                $crate::contract_tests::writes_isolated_across_scopes($factory).await;
-            }
-
-            #[tokio::test]
-            async fn list_documents_honors_scope() {
-                $crate::contract_tests::list_documents_honors_scope($factory).await;
-            }
-
+            // Search arm: this impl serves search, so run the real
+            // chunk-seeded cross-scope isolation contract.
             #[tokio::test]
             async fn search_documents_isolated_across_scopes() {
                 $crate::contract_tests::search_documents_isolated_across_scopes($factory).await;
