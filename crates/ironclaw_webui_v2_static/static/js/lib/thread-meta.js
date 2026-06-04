@@ -4,9 +4,10 @@
  * Recent group is the only consumer; future surfaces (resume cards, palette,
  * etc.) should reuse it so threads sort consistently everywhere.
  *
- * `formatRelativeTime` is the project-wide thread time-label format.
- * Anything that renders "when did this thread last move" should go through
- * here so the wording stays consistent.
+ * `formatThreadActivityLabel` and `formatThreadActivityTooltip` are the
+ * project-wide thread time-label functions. Anything that renders "when did
+ * this thread last move" should go through here so the wording stays
+ * consistent.
  */
 
 /** ISO timestamp the UI considers most recent for sorting/labelling. */
