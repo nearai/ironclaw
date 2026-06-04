@@ -2280,6 +2280,38 @@ async fn builtin_http_save_passes_save_to_and_returns_saved_body_metadata() {
 }
 
 #[tokio::test]
+async fn builtin_http_save_rejects_response_body_limit_above_save_ceiling_before_egress() {
+    let egress = Arc::new(RecordingRuntimeHttpEgress::default());
+    let runtime = runtime_with_http_egress(Arc::clone(&egress));
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/workspace").unwrap(),
+        VirtualPath::new("/projects/workspace").unwrap(),
+        MountPermissions::read_write(),
+    )])
+    .unwrap();
+
+    let error = invoke_with_context(
+        &runtime,
+        HTTP_SAVE_CAPABILITY_ID,
+        json!({
+            "url": "https://api.example.test/v1/items",
+            "save_to": "/workspace/response.json",
+            "response_body_limit": 10 * 1024 * 1024 + 1
+        }),
+        execution_context_with_mounts_and_network(
+            [HTTP_SAVE_CAPABILITY_ID],
+            mounts,
+            http_test_policy(),
+        ),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error, RuntimeFailureKind::InvalidInput);
+    assert!(egress.requests().is_empty());
+}
+
+#[tokio::test]
 async fn builtin_http_save_returns_saved_body_for_large_responses_without_inline_body() {
     let egress = Arc::new(
         RecordingRuntimeHttpEgress::with_body(vec![b'a'; 12 * 1024])
@@ -2321,6 +2353,49 @@ async fn builtin_http_save_returns_saved_body_for_large_responses_without_inline
     assert!(output.get("body_base64").is_none());
     assert!(serialized_json_len(&output) <= 2_000);
 
+    let requests = egress.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].response_body_limit, Some(4096));
+}
+
+#[tokio::test]
+async fn builtin_http_save_succeeds_with_strict_host_egress_only() {
+    let egress = Arc::new(
+        RecordingRuntimeHttpEgress::with_body(vec![b'a'; 12 * 1024])
+            .with_saved_body("/workspace/strict-only-save.json", 12 * 1024),
+    );
+    let runtime = runtime_with_strict_http_egress_only(Arc::clone(&egress));
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/workspace").unwrap(),
+        VirtualPath::new("/projects/workspace").unwrap(),
+        MountPermissions::read_write(),
+    )])
+    .unwrap();
+
+    let output = invoke_with_context(
+        &runtime,
+        HTTP_SAVE_CAPABILITY_ID,
+        json!({
+            "url": "https://api.example.test/v1/items",
+            "save_to": "/workspace/strict-only-save.json",
+            "response_body_limit": 4096
+        }),
+        execution_context_with_mounts_and_network(
+            [HTTP_SAVE_CAPABILITY_ID],
+            mounts,
+            http_test_policy(),
+        ),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        output["saved_body"],
+        json!({
+            "path": "/workspace/strict-only-save.json",
+            "bytes_written": 12 * 1024
+        })
+    );
     let requests = egress.requests();
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].response_body_limit, Some(4096));
@@ -2417,6 +2492,33 @@ async fn builtin_http_does_not_inline_huge_binary_payloads() {
 }
 
 #[tokio::test]
+async fn builtin_http_truncates_tiny_binary_responses_without_panicking() {
+    for response_body_limit in 1..=3 {
+        let egress = Arc::new(RecordingRuntimeHttpEgress::with_body(vec![0xFF; 8]));
+        let runtime = runtime_with_http_egress(Arc::clone(&egress));
+
+        let output = invoke_with_context(
+            &runtime,
+            HTTP_CAPABILITY_ID,
+            json!({
+                "url": "https://api.example.test/v1/items",
+                "response_body_limit": response_body_limit
+            }),
+            execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy()),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(output["body_base64"], json!(""));
+        assert_eq!(output["body_truncated"], json!(true));
+        assert_eq!(output["body_bytes_returned"], json!(0));
+        assert_eq!(output["truncation"]["body"], json!(true));
+        assert_eq!(output["truncation"]["bytes_returned"], json!(0));
+        assert!(serialized_json_len(&output) <= 2 * 1024 + response_body_limit as usize);
+    }
+}
+
+#[tokio::test]
 async fn builtin_http_final_budget_trim_preserves_base64_alignment() {
     let headers = (0..4)
         .map(|index| (format!("x-large-{index}"), "h".repeat(512)))
@@ -2444,6 +2546,73 @@ async fn builtin_http_final_budget_trim_preserves_base64_alignment() {
     assert_eq!(body_base64.len() % 4, 0);
     assert_eq!(output["truncation"]["body"], json!(true));
     assert!(serialized_json_len(&output) <= 6_000);
+}
+
+#[tokio::test]
+async fn builtin_http_final_budget_trims_headers_when_body_cannot_absorb_overage() {
+    let headers = (0..32)
+        .map(|index| (format!("x-large-{index}"), "h".repeat(1024)))
+        .collect::<Vec<_>>();
+    let egress = Arc::new(RecordingRuntimeHttpEgress::with_body(Vec::new()).with_headers(headers));
+    let runtime = runtime_with_http_egress(Arc::clone(&egress));
+
+    let output = invoke_with_context(
+        &runtime,
+        HTTP_CAPABILITY_ID,
+        json!({
+            "url": "https://api.example.test/v1/items",
+            "response_body_limit": 1
+        }),
+        execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy()),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(output["headers_truncated"], json!(true));
+    assert_eq!(output["truncation"]["headers"], json!(true));
+    assert!(serialized_json_len(&output) <= 2 * 1024 + 1);
+}
+
+#[tokio::test]
+async fn builtin_http_save_final_budget_trims_headers_without_inlining_body() {
+    let headers = (0..32)
+        .map(|index| (format!("x-large-{index}"), "h".repeat(1024)))
+        .collect::<Vec<_>>();
+    let egress = Arc::new(
+        RecordingRuntimeHttpEgress::with_body(vec![b'a'; 12 * 1024])
+            .with_saved_body("/workspace/header-heavy-save.json", 12 * 1024)
+            .with_headers(headers),
+    );
+    let runtime = runtime_with_http_egress(Arc::clone(&egress));
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/workspace").unwrap(),
+        VirtualPath::new("/projects/workspace").unwrap(),
+        MountPermissions::read_write(),
+    )])
+    .unwrap();
+
+    let output = invoke_with_context(
+        &runtime,
+        HTTP_SAVE_CAPABILITY_ID,
+        json!({
+            "url": "https://api.example.test/v1/items",
+            "save_to": "/workspace/header-heavy-save.json",
+            "response_body_limit": 1
+        }),
+        execution_context_with_mounts_and_network(
+            [HTTP_SAVE_CAPABILITY_ID],
+            mounts,
+            http_test_policy(),
+        ),
+    )
+    .await
+    .unwrap();
+
+    assert!(output.get("body_text").is_none());
+    assert!(output.get("body_base64").is_none());
+    assert_eq!(output["headers_truncated"], json!(true));
+    assert_eq!(output["truncation"]["headers"], json!(true));
+    assert!(serialized_json_len(&output) <= 2 * 1024 + 1);
 }
 
 #[tokio::test]
