@@ -4876,9 +4876,10 @@ mod tests {
 
         let runtime = build_reborn_runtime(input).await.expect("runtime builds");
         let bundle = build_webui_services(&runtime, None).expect("webui bundle");
+        let webui_user_id = UserId::new("runtime-webui-skill-user").unwrap();
         let caller = WebUiAuthenticatedCaller::new(
             TenantId::new("runtime-webui-skill-tenant").unwrap(),
-            UserId::new("runtime-webui-skill-user").unwrap(),
+            webui_user_id.clone(),
             Some(AgentId::new("runtime-webui-skill-agent").unwrap()),
             None,
         );
@@ -4920,16 +4921,21 @@ mod tests {
         let source = runtime
             .webui_skill_activation_source()
             .expect("webui skill activation source");
+        let turn_scope = TurnScope::new_with_owner(
+            TenantId::new("runtime-webui-skill-tenant").unwrap(),
+            Some(AgentId::new("runtime-webui-skill-agent").unwrap()),
+            None,
+            thread_id.clone(),
+            Some(webui_user_id.clone()),
+        );
         let context = LoopRunContext::new(
-            runtime.turn_scope_for(&thread_id),
+            turn_scope,
             TurnId::new(),
             TurnRunId::new(),
             resolved_run_profile,
         )
         .with_accepted_message_ref(accepted_message_ref)
-        .with_actor(TurnActor::new(
-            UserId::new("runtime-webui-skill-user").unwrap(),
-        ));
+        .with_actor(TurnActor::new(webui_user_id));
         let selected = source
             .load_skill_context_candidates(&context)
             .await

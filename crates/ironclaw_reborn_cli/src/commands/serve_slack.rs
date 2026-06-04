@@ -533,7 +533,6 @@ mod tests {
             user_id: Some("invalid\nuser".to_string()),
             signing_secret_env: Some("IRONCLAW_TEST_SLACK_SIGNING_SECRET_INVALID_USER".to_string()),
             bot_token_env: Some("IRONCLAW_TEST_SLACK_BOT_TOKEN_INVALID_USER".to_string()),
-            ..Default::default()
         };
 
         let error = resolve_slack_host_beta_config(
