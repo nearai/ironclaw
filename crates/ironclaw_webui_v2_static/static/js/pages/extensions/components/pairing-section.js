@@ -1,12 +1,11 @@
 import { React, html } from "../../../lib/html.js";
-import { StatusPill } from "../../../design-system/primitives.js";
 import { Button } from "../../../design-system/button.js";
 import { useT } from "../../../lib/i18n.js";
 import { usePairing } from "../hooks/useExtensions.js";
 
 export function PairingSection({ channel }) {
   const t = useT();
-  const { requests, isLoading, approve, isApproving } = usePairing(channel);
+  const { requests, isLoading, approve, isApproving, result, error } = usePairing(channel);
   const [manualCode, setManualCode] = React.useState("");
 
   const handleApprove = React.useCallback(
@@ -35,25 +34,35 @@ export function PairingSection({ channel }) {
       <h4 className="mb-3 font-mono text-[11px] uppercase tracking-[0.14em] text-signal">
         ${t("pairing.title")}
       </h4>
+      <p className="mb-4 text-xs leading-5 text-iron-300">${t("pairing.instructions")}</p>
 
-      <div className="mb-4 flex items-center gap-2">
+      <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center">
         <input
           type="text"
           value=${manualCode}
           onChange=${(e) => setManualCode(e.target.value)}
           onKeyDown=${(e) => e.key === "Enter" && handleManualSubmit()}
           placeholder=${t("pairing.placeholder")}
-          className="h-9 flex-1 rounded-md border border-white/12 bg-white/[0.04] px-3 font-mono text-sm text-iron-100 outline-none placeholder:text-iron-700 focus:border-signal/45"
+          className="h-9 min-w-0 flex-1 rounded-md border border-white/12 bg-white/[0.04] px-3 font-mono text-sm text-iron-100 outline-none placeholder:text-iron-700 focus:border-signal/45"
         />
         <${Button}
           variant="secondary"
-          className="h-9 px-3 text-xs"
+          className="h-9 shrink-0 px-3 text-xs"
           onClick=${handleManualSubmit}
           disabled=${isApproving || !manualCode.trim()}
         >
           ${t("pairing.approve")}
         <//>
       </div>
+
+      ${result?.success &&
+      html`<p className="mb-3 text-xs text-emerald-300">
+        ${result.message || t("pairing.success")}
+      </p>`}
+      ${error &&
+      html`<p className="mb-3 text-xs text-red-300">
+        ${pairingErrorMessage(error, t("pairing.error"))}
+      </p>`}
 
       ${requests.length > 0
         ? html`
@@ -84,4 +93,8 @@ export function PairingSection({ channel }) {
         : html`<p className="text-xs text-iron-300">${t("pairing.none")}</p>`}
     </div>
   `;
+}
+
+function pairingErrorMessage(error, fallback) {
+  return error?.payload?.error || error?.payload?.message || error?.message || fallback;
 }
