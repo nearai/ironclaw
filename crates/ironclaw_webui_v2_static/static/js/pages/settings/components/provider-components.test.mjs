@@ -5,6 +5,12 @@ import vm from "node:vm";
 
 import { groupProvidersByStatus } from "../lib/llm-providers.js";
 
+const PROVIDER_GROUP_LABELS = [
+  "llm.groupActive",
+  "llm.groupReady",
+  "llm.groupSetup",
+];
+
 function sourceForTest(path, exportNames) {
   const source = readFileSync(new URL(path, import.meta.url), "utf8");
   const lines = [];
@@ -25,24 +31,6 @@ function sourceForTest(path, exportNames) {
 
 function html(strings, ...values) {
   return { strings: Array.from(strings), values };
-}
-
-function createReactStateStub(state) {
-  return {
-    useCallback: (fn) => fn,
-    useEffect: (fn) => fn(),
-    useState: (initial) => {
-      if (!Object.hasOwn(state, "expanded")) {
-        state.expanded = typeof initial === "function" ? initial() : initial;
-      }
-      return [
-        state.expanded,
-        (next) => {
-          state.expanded = typeof next === "function" ? next(state.expanded) : next;
-        },
-      ];
-    },
-  };
 }
 
 function visit(node, fn) {
@@ -101,20 +89,113 @@ function valuesAfter(rendered, fragment) {
   }, []);
 }
 
-function renderProviderCard(context, props) {
-  return context.globalThis.__testExports.ProviderCard({
-    activeProviderId: "nearai",
-    selectedModel: "active-model",
-    builtinOverrides: {},
-    isBusy: false,
-    onUse: () => {},
-    onConfigure: () => {},
-    onDelete: () => {},
-    ...props,
+function builtinProvider(id, overrides = {}) {
+  return {
+    id,
+    name: id,
+    builtin: true,
+    adapter: "open_ai_completions",
+    api_key_required: true,
+    base_url_required: false,
+    has_api_key: true,
+    default_model: "model",
+    ...overrides,
+  };
+}
+
+function customProvider(id, overrides = {}) {
+  return {
+    id,
+    name: id,
+    builtin: false,
+    adapter: "ollama",
+    configured: true,
+    default_model: "llama",
+    ...overrides,
+  };
+}
+
+function useProviderManagementActionsStub({ providers, activeProviderId }) {
+  return () => ({
+    allProviderIds: providers.map((provider) => provider.id),
+    closeDialog: () => {},
+    dialogProvider: null,
+    filteredProviders: providers,
+    handleDelete: () => {},
+    handleSave: () => {},
+    handleUse: () => {},
+    isDialogOpen: false,
+    message: null,
+    openDialog: () => {},
+    providerState: {
+      activeProviderId,
+      builtinOverrides: {},
+      error: null,
+      isBusy: false,
+      isLoading: false,
+      selectedModel: "llama",
+    },
   });
 }
 
-function createProviderCardContext({ state = {} } = {}) {
+function renderProviderManagement({ providers, activeProviderId = "nearai", searchQuery = "" }) {
+  const ProviderCard = "ProviderCard";
+  const context = {
+    Button: "Button",
+    Card: "Card",
+    Icon: "Icon",
+    ProviderCard,
+    ProviderDialog: "ProviderDialog",
+    SettingsSearchEmpty: "SettingsSearchEmpty",
+    globalThis: {},
+    groupProvidersByStatus,
+    html,
+    useProviderManagementActions: useProviderManagementActionsStub({
+      providers,
+      activeProviderId,
+    }),
+    useT: () => (key) => key,
+  };
+
+  vm.runInNewContext(
+    sourceForTest("./provider-management.js", ["ProviderManagement"]),
+    context
+  );
+  const rendered = context.globalThis.__testExports.ProviderManagement({
+    settings: {},
+    gatewayStatus: {},
+    searchQuery,
+  });
+  const cardProps = findComponentNodes(rendered, ProviderCard).map((node) =>
+    componentProps(node, ProviderCard)
+  );
+  return { rendered, cardProps };
+}
+
+function groupLabels(rendered) {
+  return collectScalars(rendered).filter((value) => PROVIDER_GROUP_LABELS.includes(value));
+}
+
+function createReactStateStub(state) {
+  return {
+    useCallback: (fn) => fn,
+    useEffect: (fn) => fn(),
+    useState: (initial) => {
+      if (!Object.hasOwn(state, "expanded")) {
+        state.expanded = typeof initial === "function" ? initial() : initial;
+      }
+      return [
+        state.expanded,
+        (next) => {
+          state.expanded = typeof next === "function" ? next(state.expanded) : next;
+        },
+      ];
+    },
+  };
+}
+
+function createProviderCardHarness() {
+  const state = {};
   const context = {
     Badge: "Badge",
     Button: "Button",
@@ -130,95 +211,45 @@ function createProviderCardContext({ state = {} } = {}) {
     providerMissingReason: (provider) => provider.missing || "api_key",
     useT: () => (key) => key,
   };
+
   vm.runInNewContext(
     sourceForTest("./provider-card.js", ["ProviderCard"]),
     context
   );
-  return { context, state };
+
+  return {
+    state,
+    render: (props) =>
+      context.globalThis.__testExports.ProviderCard({
+        activeProviderId: "nearai",
+        selectedModel: "active-model",
+        builtinOverrides: {},
+        isBusy: false,
+        onUse: () => {},
+        onConfigure: () => {},
+        onDelete: () => {},
+        ...props,
+      }),
+  };
+}
+
+function firstButtonProps(rendered) {
+  return componentProps(findComponentNodes(rendered, "Button")[0], "Button");
 }
 
 test("ProviderManagement groups filtered providers through the render caller", () => {
-  const ProviderCard = "ProviderCard";
-  const providers = [
-    {
-      id: "nearai",
-      name: "NEAR AI",
-      builtin: true,
-      adapter: "nearai",
-      api_key_required: true,
-      base_url_required: false,
-      has_api_key: true,
-    },
-    {
-      id: "openai",
-      name: "OpenAI",
-      builtin: true,
-      adapter: "open_ai_completions",
-      api_key_required: true,
-      base_url_required: false,
-      has_api_key: true,
-    },
-    {
-      id: "anthropic",
-      name: "Anthropic",
-      builtin: true,
-      adapter: "anthropic",
-      api_key_required: true,
-      base_url_required: false,
-      has_api_key: false,
-    },
-  ];
-  const context = {
-    Button: "Button",
-    Card: "Card",
-    Icon: "Icon",
-    ProviderCard,
-    ProviderDialog: "ProviderDialog",
-    SettingsSearchEmpty: "SettingsSearchEmpty",
-    globalThis: {},
-    groupProvidersByStatus,
-    html,
-    useProviderManagementActions: () => ({
-      allProviderIds: providers.map((provider) => provider.id),
-      closeDialog: () => {},
-      dialogProvider: null,
-      filteredProviders: providers,
-      handleDelete: () => {},
-      handleSave: () => {},
-      handleUse: () => {},
-      isDialogOpen: false,
-      message: null,
-      openDialog: () => {},
-      providerState: {
-        activeProviderId: "nearai",
-        builtinOverrides: {},
-        error: null,
-        isBusy: false,
-        isLoading: false,
-        selectedModel: "llama",
-      },
-    }),
-    useT: () => (key) => key,
-  };
-
-  vm.runInNewContext(
-    sourceForTest("./provider-management.js", ["ProviderManagement"]),
-    context
-  );
-  const rendered = context.globalThis.__testExports.ProviderManagement({
-    settings: {},
-    gatewayStatus: {},
-    searchQuery: "",
+  const { rendered, cardProps } = renderProviderManagement({
+    providers: [
+      builtinProvider("nearai", { adapter: "nearai" }),
+      builtinProvider("openai"),
+      builtinProvider("anthropic", {
+        adapter: "anthropic",
+        has_api_key: false,
+      }),
+    ],
   });
 
-  const labels = collectScalars(rendered).filter((value) =>
-    ["llm.groupActive", "llm.groupReady", "llm.groupSetup"].includes(value)
-  );
-  assert.deepEqual(labels, ["llm.groupActive", "llm.groupReady", "llm.groupSetup"]);
-
-  const cardProps = findComponentNodes(rendered, ProviderCard).map((node) =>
-    componentProps(node, ProviderCard)
-  );
+  assert.deepEqual(groupLabels(rendered), PROVIDER_GROUP_LABELS);
   assert.deepEqual(
     cardProps.map((props) => props.provider.id),
     ["nearai", "openai", "anthropic"]
@@ -230,68 +261,12 @@ test("ProviderManagement groups filtered providers through the render caller", (
 });
 
 test("ProviderManagement hides empty buckets after search filtering", () => {
-  const ProviderCard = "ProviderCard";
-  const providers = [
-    {
-      id: "openai",
-      name: "OpenAI",
-      builtin: true,
-      adapter: "open_ai_completions",
-      api_key_required: true,
-      base_url_required: false,
-      has_api_key: true,
-    },
-  ];
-  const context = {
-    Button: "Button",
-    Card: "Card",
-    Icon: "Icon",
-    ProviderCard,
-    ProviderDialog: "ProviderDialog",
-    SettingsSearchEmpty: "SettingsSearchEmpty",
-    globalThis: {},
-    groupProvidersByStatus,
-    html,
-    useProviderManagementActions: () => ({
-      allProviderIds: providers.map((provider) => provider.id),
-      closeDialog: () => {},
-      dialogProvider: null,
-      filteredProviders: providers,
-      handleDelete: () => {},
-      handleSave: () => {},
-      handleUse: () => {},
-      isDialogOpen: false,
-      message: null,
-      openDialog: () => {},
-      providerState: {
-        activeProviderId: "nearai",
-        builtinOverrides: {},
-        error: null,
-        isBusy: false,
-        isLoading: false,
-        selectedModel: "llama",
-      },
-    }),
-    useT: () => (key) => key,
-  };
-
-  vm.runInNewContext(
-    sourceForTest("./provider-management.js", ["ProviderManagement"]),
-    context
-  );
-  const rendered = context.globalThis.__testExports.ProviderManagement({
-    settings: {},
-    gatewayStatus: {},
+  const { rendered, cardProps } = renderProviderManagement({
+    providers: [builtinProvider("openai")],
     searchQuery: "open",
   });
 
-  const labels = collectScalars(rendered).filter((value) =>
-    ["llm.groupActive", "llm.groupReady", "llm.groupSetup"].includes(value)
-  );
-  assert.deepEqual(labels, ["llm.groupReady"]);
-  const cardProps = findComponentNodes(rendered, ProviderCard).map((node) =>
-    componentProps(node, ProviderCard)
-  );
+  assert.deepEqual(groupLabels(rendered), ["llm.groupReady"]);
   assert.deepEqual(
     cardProps.map((props) => props.provider.id),
     ["openai"]
@@ -299,32 +274,19 @@ test("ProviderManagement hides empty buckets after search filtering", () => {
 });
 
 test("ProviderCard disclosure responds to row, keyboard, and chevron controls", () => {
-  const { context, state } = createProviderCardContext();
-  let rendered = renderProviderCard(context, {
-    provider: {
-      id: "openai",
-      name: "OpenAI",
-      builtin: true,
-      adapter: "open_ai_completions",
-      configured: true,
-      default_model: "gpt",
-    },
-  });
+  const harness = createProviderCardHarness();
+  const renderOpenAi = () =>
+    harness.render({
+      provider: builtinProvider("openai", { default_model: "gpt" }),
+    });
+
+  let rendered = renderOpenAi();
   assert.equal(valueAfter(rendered, "aria-expanded="), false);
 
   valueAfter(rendered, "onClick=")();
-  assert.equal(state.expanded, true);
+  assert.equal(harness.state.expanded, true);
 
-  rendered = renderProviderCard(context, {
-    provider: {
-      id: "openai",
-      name: "OpenAI",
-      builtin: true,
-      adapter: "open_ai_completions",
-      configured: true,
-      default_model: "gpt",
-    },
-  });
+  rendered = renderOpenAi();
   assert.equal(valueAfter(rendered, "aria-expanded="), true);
 
   let prevented = 0;
@@ -335,85 +297,56 @@ test("ProviderCard disclosure responds to row, keyboard, and chevron controls", 
     },
   });
   assert.equal(prevented, 1);
-  assert.equal(state.expanded, false);
+  assert.equal(harness.state.expanded, false);
 
-  rendered = renderProviderCard(context, {
-    provider: {
-      id: "openai",
-      name: "OpenAI",
-      builtin: true,
-      adapter: "open_ai_completions",
-      configured: true,
-      default_model: "gpt",
-    },
-  });
-  const chevronClick = valuesAfter(rendered, "onClick=")[2];
-  chevronClick();
-  assert.equal(state.expanded, true);
+  rendered = renderOpenAi();
+  valuesAfter(rendered, "onClick=")[2]();
+  assert.equal(harness.state.expanded, true);
 });
 
 test("ProviderCard actions keep existing callbacks without toggling disclosure", () => {
   const calls = [];
-  const { context, state } = createProviderCardContext();
-  let rendered = renderProviderCard(context, {
+  const harness = createProviderCardHarness();
+
+  let rendered = harness.render({
     onUse: (provider) => calls.push(["use", provider.id]),
-    provider: {
-      id: "openai",
-      name: "OpenAI",
-      builtin: true,
-      adapter: "open_ai_completions",
-      configured: true,
-      default_model: "gpt",
-    },
+    provider: builtinProvider("openai", { default_model: "gpt" }),
   });
-  const actionBarrier = valuesAfter(rendered, "onClick=")[1];
   let stopped = 0;
-  actionBarrier({
+  valuesAfter(rendered, "onClick=")[1]({
     stopPropagation: () => {
       stopped += 1;
     },
   });
   assert.equal(stopped, 1);
 
-  const useButton = findComponentNodes(rendered, "Button")[0];
-  componentProps(useButton, "Button").onClick();
+  firstButtonProps(rendered).onClick();
   assert.deepEqual(calls, [["use", "openai"]]);
-  assert.equal(state.expanded, false);
+  assert.equal(harness.state.expanded, false);
 
-  rendered = renderProviderCard(context, {
+  rendered = harness.render({
     onConfigure: (provider) => calls.push(["configure", provider.id]),
-    provider: {
-      id: "anthropic",
-      name: "Anthropic",
-      builtin: true,
+    provider: builtinProvider("anthropic", {
       adapter: "anthropic",
       configured: false,
       default_model: "claude",
       missing: "api_key",
-    },
+    }),
   });
-  const configureButton = findComponentNodes(rendered, "Button")[0];
-  componentProps(configureButton, "Button").onClick();
+  firstButtonProps(rendered).onClick();
   assert.deepEqual(calls.at(-1), ["configure", "anthropic"]);
-  assert.equal(state.expanded, false);
+  assert.equal(harness.state.expanded, false);
 
-  state.expanded = true;
-  rendered = renderProviderCard(context, {
-    onConfigure: (provider) => calls.push(["edit", provider.id]),
+  harness.state.expanded = true;
+  rendered = harness.render({
     onDelete: (provider) => calls.push(["delete", provider.id]),
-    provider: {
-      id: "local",
-      name: "Local",
-      builtin: false,
-      adapter: "ollama",
-      configured: true,
-      default_model: "llama",
-    },
+    provider: customProvider("local"),
   });
-  const buttonNodes = findComponentNodes(rendered, "Button");
-  const deleteButton = buttonNodes.find((node) => collectScalars(node).includes("common.delete"));
+  const deleteButton = findComponentNodes(rendered, "Button").find((node) =>
+    collectScalars(node).includes("common.delete")
+  );
   assert.ok(deleteButton, "expected delete button for expanded custom provider");
   componentProps(deleteButton, "Button").onClick();
   assert.deepEqual(calls.at(-1), ["delete", "local"]);
-  assert.equal(state.expanded, true);
+  assert.equal(harness.state.expanded, true);
 });

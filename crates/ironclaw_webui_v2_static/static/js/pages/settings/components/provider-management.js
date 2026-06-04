@@ -9,9 +9,6 @@ import { ProviderDialog } from "./provider-dialog.js";
 import { useProviderManagementActions } from "../hooks/useProviderManagementActions.js";
 import { groupProvidersByStatus } from "../lib/llm-providers.js";
 
-// Display order: Active first (one click away from "what's running"), then
-// Ready (one click to switch), then Setup (requires user action). Each entry
-// is rendered iff it has providers — empty groups don't pollute the UI.
 const GROUP_ORDER = [
   { key: "active", labelKey: "llm.groupActive", dotClass: "bg-[var(--v2-positive-text)]" },
   { key: "ready", labelKey: "llm.groupReady", dotClass: "bg-[var(--v2-accent)]" },
@@ -41,9 +38,6 @@ export function ProviderManagement({ settings, gatewayStatus, searchQuery = "" }
     return html`<${SettingsSearchEmpty} query=${searchQuery} />`;
   }
 
-  // Bucket the search-filtered list into Active / Ready / Setup. Filtering
-  // happens upstream so a search query still produces sensible groups even
-  // when some buckets are empty.
   const groups = groupProvidersByStatus(
     actions.filteredProviders,
     state.builtinOverrides,

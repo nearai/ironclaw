@@ -64,27 +64,11 @@ export function isProviderConfigured(provider, overrides) {
   return providerEffectiveBaseUrl(provider, overrides).trim().length > 0;
 }
 
-/**
- * Classify a provider for the grouped-list UI.
- *
- *   "active"  — currently selected provider
- *   "ready"   — configured (has key + base URL where required), usable with one click
- *   "setup"   — needs configuration before it can be activated
- *
- * Pure helper: no side effects, safe to call during render.
- */
 export function providerStatus(provider, overrides, activeProviderId) {
   if (provider.id === activeProviderId) return "active";
   return isProviderConfigured(provider, overrides) ? "ready" : "setup";
 }
 
-/**
- * Bucket providers into the three groups used by the progressive-disclosure
- * settings layout. Preserves the input order inside each bucket so the
- * upstream sort (alphabetical, recently-added, etc.) is respected.
- *
- * Returns `{ active, ready, setup }` — each an array of providers.
- */
 export function groupProvidersByStatus(providers, overrides, activeProviderId) {
   const buckets = { active: [], ready: [], setup: [] };
   for (const provider of providers) {

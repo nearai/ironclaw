@@ -12,27 +12,6 @@ import {
   providerMissingReason,
 } from "../lib/llm-providers.js";
 
-/**
- * One row in the grouped LLM-providers list.
- *
- * Visual: compact name + status pill + primary action + chevron, with the
- * adapter / base-URL / model grid hidden behind an inline expand toggle.
- * The active provider expands by default so its config is visible without
- * an extra click.
- *
- * Markup contract:
- *   - The row is a `<div role="button">` not a `<button>` because it
- *     embeds other interactive elements (primary action button, chevron
- *     toggle). Nested `<button>`s are invalid HTML and break clicks in
- *     some browsers; the `role` + `tabIndex` + keydown handler give us
- *     equivalent keyboard semantics without the parser hazard.
- *   - Action buttons stop propagation so clicking "Use" / "Configure"
- *     does not also toggle the disclosure.
- *
- * Behavioral parity with the old card: `onUse`, `onConfigure`, `onDelete`
- * are unchanged so all upstream wiring (provider dialog, activation flow,
- * delete confirmation) keeps working.
- */
 export function ProviderCard({
   provider,
   activeProviderId,
@@ -50,15 +29,9 @@ export function ProviderCard({
   const model = providerDisplayModel(provider, builtinOverrides, activeProviderId, selectedModel);
   const missing = providerMissingReason(provider, builtinOverrides);
 
-  // Active row defaults to expanded — user almost always wants to see the
-  // running model. Other rows start collapsed and reveal on demand.
   const [expanded, setExpanded] = React.useState(isActive);
   const toggle = React.useCallback(() => setExpanded((v) => !v), []);
 
-  // When a different row gets activated via the Use flow we want it to
-  // auto-expand even if the user had it collapsed before. Without this
-  // effect a row that was rendered collapsed before becoming active would
-  // stay collapsed despite the "active row expands by default" rule.
   React.useEffect(() => {
     if (isActive) setExpanded(true);
   }, [isActive]);
@@ -73,9 +46,6 @@ export function ProviderCard({
     [toggle]
   );
 
-  // Inline meta line shown on the collapsed row: adapter · model when
-  // configured, "Missing X" when something blocks activation. Keeps the row
-  // scannable without forcing the user to expand to see "why can't I use this".
   const inlineMeta = !configured
     ? html`<span className="font-mono text-[11px] text-[var(--v2-warning-text)]">
         ${missing === "api_key" ? t("llm.missingApiKey") : t("llm.missingBaseUrl")}
@@ -84,8 +54,6 @@ export function ProviderCard({
         ${adapterLabel(provider.adapter)} · ${model || provider.default_model || t("llm.none")}
       </span>`;
 
-  // Primary action: "Use" for ready providers, "Configure" / "Add API key" for
-  // not-yet-configured ones, nothing for the already-active row.
   const primaryAction = isActive
     ? null
     : configured
@@ -112,6 +80,8 @@ export function ProviderCard({
         <//>
       `;
 
+  // The row contains action buttons, so it cannot be a native <button>.
+  // Stop action clicks from bubbling to the disclosure row.
   const stop = React.useCallback((e) => e.stopPropagation(), []);
 
   return html`
@@ -194,11 +164,7 @@ export function ProviderCard({
           </div>
 
           <div className="mt-4 flex flex-wrap justify-end gap-2 border-t border-[var(--v2-panel-border)] pt-3">
-            ${/* Edit/Configure button — built-ins always show Configure,
-                custom providers show Edit. Bedrock has no configurable
-                surface beyond credentials handled elsewhere, so we omit it
-                like the previous design did. */
-            ((provider.builtin && provider.id !== "bedrock") || !provider.builtin) &&
+            ${((provider.builtin && provider.id !== "bedrock") || !provider.builtin) &&
             html`
               <${Button}
                 type="button"
