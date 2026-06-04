@@ -35,6 +35,8 @@ function useChatEventsSourceForTest() {
 function createUseChatEventsHarness({ gateFromEvent = () => null } = {}) {
   let messages = [];
   let pendingGate = null;
+  let isProcessing = false;
+  let activeRun = null;
   const context = {
     Date,
     React: {
@@ -56,12 +58,17 @@ function createUseChatEventsHarness({ gateFromEvent = () => null } = {}) {
     setMessages: (updater) => {
       messages = typeof updater === "function" ? updater(messages) : updater;
     },
-    setIsProcessing: () => {},
+    setIsProcessing: (updater) => {
+      isProcessing =
+        typeof updater === "function" ? updater(isProcessing) : updater;
+    },
     setPendingGate: (updater) => {
       pendingGate =
         typeof updater === "function" ? updater(pendingGate) : updater;
     },
-    setActiveRun: () => {},
+    setActiveRun: (updater) => {
+      activeRun = typeof updater === "function" ? updater(activeRun) : updater;
+    },
     onRunCompleted: () => {},
   });
 
@@ -72,6 +79,12 @@ function createUseChatEventsHarness({ gateFromEvent = () => null } = {}) {
     },
     get pendingGate() {
       return pendingGate;
+    },
+    get isProcessing() {
+      return isProcessing;
+    },
+    get activeRun() {
+      return activeRun;
     },
   };
 }
@@ -252,4 +265,40 @@ test("useChatEvents: cleared non-auth gates are not restored by later projection
   });
 
   assert.equal(harness.pendingGate, null);
+});
+
+test("useChatEvents: stale terminal run status does not clear newer run", () => {
+  const harness = createUseChatEventsHarness();
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [{ run_status: { run_id: "run-1", status: "running" } }],
+      },
+    },
+  });
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [{ run_status: { run_id: "run-2", status: "running" } }],
+      },
+    },
+  });
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [{ run_status: { run_id: "run-1", status: "cancelled" } }],
+      },
+    },
+  });
+
+  assert.equal(harness.isProcessing, true);
+  assert.deepEqual(plain(harness.activeRun), {
+    runId: "run-2",
+    threadId: "thread-1",
+    status: "running",
+  });
 });

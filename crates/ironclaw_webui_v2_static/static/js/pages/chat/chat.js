@@ -63,7 +63,9 @@ export function Chat({
   const composerDisabled = (isProcessing && !pendingGate) || cooldownSeconds > 0;
   const composerStatusText =
     cooldownSeconds > 0 ? `Retry in ${cooldownSeconds}s` : undefined;
-  const canCancelRun = Boolean(activeThreadId && activeRun?.runId);
+  const canCancelRun = Boolean(
+    activeThreadId && activeRun?.runId && activeRun.threadId === activeThreadId
+  );
 
   const handleSend = React.useCallback(
     async (content, { images = [], attachments = [] } = {}) => {
