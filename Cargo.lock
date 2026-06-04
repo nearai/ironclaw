@@ -4210,13 +4210,15 @@ dependencies = [
  "chrono",
  "ironclaw_filesystem",
  "ironclaw_host_api",
- "ironclaw_trusted_ingress",
+ "ironclaw_safety",
+ "ironclaw_triggers",
  "ironclaw_turns",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
  "uuid",
 ]
 
@@ -4849,6 +4851,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "uuid",
  "wat",
 ]
 
@@ -4857,6 +4860,7 @@ name = "ironclaw_reborn_cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "chrono",
  "clap",
  "clap_complete",
@@ -4929,7 +4933,6 @@ dependencies = [
  "ironclaw_threads",
  "ironclaw_triggers",
  "ironclaw_trust",
- "ironclaw_trusted_ingress",
  "ironclaw_turns",
  "ironclaw_wasm_product_adapters",
  "ironclaw_webui_v2",
@@ -5034,6 +5037,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "hex",
+ "hmac 0.12.1",
  "http 1.4.1",
  "http-body-util",
  "ironclaw_host_api",
@@ -5273,10 +5277,6 @@ dependencies = [
  "static_assertions",
  "thiserror 2.0.18",
 ]
-
-[[package]]
-name = "ironclaw_trusted_ingress"
-version = "0.1.0"
 
 [[package]]
 name = "ironclaw_tui"

@@ -339,6 +339,8 @@ pub struct LifecycleExtensionSummary {
     pub description: String,
     pub source: LifecycleExtensionSource,
     pub runtime_kind: LifecycleExtensionRuntimeKind,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub visible_capability_ids: Vec<String>,
     pub visible_read_only_capability_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub credential_requirements: Vec<LifecycleExtensionCredentialRequirement>,

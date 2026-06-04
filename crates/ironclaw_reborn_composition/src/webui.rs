@@ -8,7 +8,7 @@ use ironclaw_product_workflow::{
 
 use crate::{
     RebornBuildError, RebornProductAuthServices, RebornReadiness, RebornRuntime,
-    lifecycle::RebornLocalLifecycleFacade,
+    RebornWebuiAutomationFacade, lifecycle::RebornLocalLifecycleFacade,
     webui_extension_credentials::ProductAuthExtensionCredentialSetup,
 };
 
@@ -49,6 +49,10 @@ pub fn build_webui_services(
     event_stream: Option<Arc<dyn ProjectionStream>>,
 ) -> Result<RebornWebuiBundle, RebornBuildError> {
     let services = runtime.services();
+    let automation_facade = services
+        .host_runtime
+        .as_ref()
+        .map(|host_runtime| Arc::new(RebornWebuiAutomationFacade::new(Arc::clone(host_runtime))));
 
     let mut api = ProductRebornServices::new(
         runtime.webui_thread_service(),
@@ -103,6 +107,9 @@ pub fn build_webui_services(
         api = api.with_extension_credentials(Arc::new(ProductAuthExtensionCredentialSetup::new(
             Arc::clone(product_auth),
         )));
+    }
+    if let Some(automation_facade) = automation_facade {
+        api = api.with_automation_product_facade(automation_facade);
     }
     api = api.with_event_stream(event_stream.unwrap_or_else(|| runtime.webui_event_stream()));
 

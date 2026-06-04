@@ -2117,6 +2117,20 @@ mod tests {
             .find(|extension| extension.package_ref.id.as_str() == "google-calendar")
             .expect("google-calendar search result");
         assert_eq!(
+            calendar.visible_capability_ids,
+            vec![
+                "google-calendar.list_calendars",
+                "google-calendar.list_events",
+                "google-calendar.get_event",
+                "google-calendar.find_free_slots",
+                "google-calendar.create_event",
+                "google-calendar.update_event",
+                "google-calendar.delete_event",
+                "google-calendar.add_attendees",
+                "google-calendar.set_reminder",
+            ]
+        );
+        assert_eq!(
             calendar.visible_read_only_capability_ids,
             vec![
                 "google-calendar.list_calendars",
@@ -2142,6 +2156,17 @@ mod tests {
         };
         assert_eq!(extensions.len(), 1);
         assert_eq!(extensions[0].package_ref.id.as_str(), "gmail");
+        assert_eq!(
+            extensions[0].visible_capability_ids,
+            vec![
+                "gmail.list_messages",
+                "gmail.get_message",
+                "gmail.send_message",
+                "gmail.create_draft",
+                "gmail.reply_to_message",
+                "gmail.trash_message",
+            ]
+        );
         assert_eq!(
             extensions[0].visible_read_only_capability_ids,
             vec!["gmail.list_messages", "gmail.get_message"]

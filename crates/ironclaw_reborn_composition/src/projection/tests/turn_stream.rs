@@ -296,6 +296,7 @@ async fn webui_event_stream_rejects_foreign_composite_turn_cursor() {
     let scope_b = TurnScope::new(tenant_id, Some(agent_id), None, thread_b);
     let cursor = product_cursor_from_webui_cursor(&WebuiProjectionCursor {
         runtime: None,
+        live: None,
         runtime_item: None,
         turn: Some(TurnEventProjectionCursor::for_scope(
             scope_a,
@@ -348,6 +349,7 @@ async fn webui_event_stream_rejects_foreign_composite_runtime_cursor() {
         runtime: Some(EventProjectionCursor::origin_for_scope(
             runtime_projection_scope(&actor, &scope_a),
         )),
+        live: None,
         runtime_item: None,
         turn: None,
         runtime_payloads_delivered: 1,

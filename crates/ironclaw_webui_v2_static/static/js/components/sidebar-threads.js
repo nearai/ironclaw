@@ -1,62 +1,71 @@
 import { React, html } from "../lib/html.js";
 import { Icon } from "../design-system/icons.js";
+import { THREAD_STATE, useThreadStates } from "../lib/thread-state.js";
+import {
+  byActivityDesc,
+  formatThreadActivityLabel,
+  formatThreadActivityTooltip,
+  threadActivityIso,
+} from "../lib/thread-meta.js";
 import { cn } from "../utils/cn.js";
 
-function formatRelativeTime(iso) {
-  if (!iso) return "";
-  const d = new Date(iso);
-  const now = new Date();
-  if (d.toDateString() === now.toDateString())
-    return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-  return d.toLocaleDateString([], { month: "short", day: "numeric" });
+/* Single source of truth for how a thread state renders in the sidebar.
+ *
+ * Adding a state to THREAD_STATE means adding one row here — the
+ * partition predicate, the dot, the border, and the label all read
+ * from this table so the row component stays free of state-by-state
+ * branching. */
+const STATE_PRESENTATION = Object.freeze({
+  [THREAD_STATE.NEEDS_ATTENTION]: {
+    label: "Needs your attention",
+    textClass: "text-[var(--v2-warning-text)]",
+    dotClass: "bg-[var(--v2-warning-text)]",
+    borderClass: "border-[var(--v2-warning-text)]",
+  },
+  [THREAD_STATE.RUNNING]: {
+    label: "Running",
+    textClass: "text-[var(--v2-positive-text)]",
+    dotClass: "bg-[var(--v2-positive-text)]",
+    borderClass: "border-[var(--v2-positive-text)]",
+  },
+  [THREAD_STATE.FAILED]: {
+    label: "Failed",
+    textClass: "text-[var(--v2-danger-text)]",
+    dotClass: "bg-[var(--v2-danger-text)]",
+    borderClass: "border-[var(--v2-danger-text)]",
+  },
+});
+
+function presentationFor(state) {
+  return state ? STATE_PRESENTATION[state] || null : null;
 }
 
-function formatExactTime(iso) {
-  if (!iso) return "";
-  return new Date(iso).toLocaleString([], {
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
+function ThreadItem({ thread, isActive, presentation, onSelect, onDelete }) {
+  const activityIso = threadActivityIso(thread);
+  const timeLabel = formatThreadActivityLabel(activityIso);
+  const timeTitle = formatThreadActivityTooltip(activityIso);
 
-function threadTimeLabel(thread) {
-  const started = formatRelativeTime(thread.created_at);
-  const updated = formatRelativeTime(thread.updated_at);
-  if (!started && !updated) return "";
-  if (!updated || started === updated) return `Started ${started}`;
-  return `Started ${started} · Last ${updated}`;
-}
-
-function threadTimeTitle(thread) {
-  const started = formatExactTime(thread.created_at);
-  const updated = formatExactTime(thread.updated_at);
-  if (!started && !updated) return "";
-  if (!updated || started === updated) return `Started ${started}`;
-  return `Started ${started}\nLast activity ${updated}`;
-}
-
-function ThreadItem({ thread, isActive, onSelect, onDelete }) {
-  const isProcessing = thread.state === "Processing";
-  const timeLabel = threadTimeLabel(thread);
-  const timeTitle = threadTimeTitle(thread);
   const handleDelete = React.useCallback(
     (event) => {
       event.preventDefault();
       event.stopPropagation();
-      if (isProcessing || !window.confirm("Delete this chat?")) return;
+      if (!window.confirm("Delete this chat?")) return;
       Promise.resolve(onDelete?.(thread.id)).catch((err) => {
         window.alert(err?.message || "Unable to delete chat");
       });
     },
-    [isProcessing, onDelete, thread.id]
+    [onDelete, thread.id]
   );
 
   return html`
     <div
       className=${cn(
-        "group flex w-full items-stretch rounded-[8px]",
+        "group flex w-full items-stretch rounded-[8px] border-l-2",
+        presentation
+          ? presentation.borderClass
+          : isActive
+          ? "border-[var(--v2-accent)]"
+          : "border-transparent",
         isActive
           ? "bg-[var(--v2-accent-soft)] text-[var(--v2-accent-text)]"
           : "text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)]"
@@ -71,29 +80,32 @@ function ThreadItem({ thread, isActive, onSelect, onDelete }) {
           <span className="min-w-0 flex-1 truncate text-[13px] font-medium leading-snug">
             ${thread.title || `Thread ${thread.id.slice(0, 8)}`}
           </span>
-          ${isProcessing &&
+          ${presentation &&
           html`<span
-            className="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--v2-accent)]"
+            aria-label=${presentation.label}
+            className=${cn("h-1.5 w-1.5 shrink-0 rounded-full", presentation.dotClass)}
           />`}
         </div>
-        ${timeLabel &&
-        html`<span className="block truncate text-[11px] text-[var(--v2-text-faint)]">
-          ${timeLabel}
+        ${(presentation || timeLabel) &&
+        html`<span
+          className=${cn(
+            "block truncate text-[11px]",
+            presentation ? presentation.textClass : "text-[var(--v2-text-faint)]"
+          )}
+        >
+          ${presentation ? presentation.label : timeLabel}
         </span>`}
       </button>
       ${onDelete &&
       html`<button
         type="button"
         onClick=${handleDelete}
-        disabled=${isProcessing}
-        title=${isProcessing ? "Cannot delete while processing" : "Delete chat"}
+        title="Delete chat"
         aria-label="Delete chat"
         className=${cn(
           "my-1 mr-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-[6px]",
           "opacity-0 transition group-hover:opacity-100 focus:opacity-100",
-          isProcessing
-            ? "cursor-not-allowed text-[var(--v2-text-faint)]"
-            : "text-[var(--v2-text-faint)] hover:bg-[var(--v2-danger-soft)] hover:text-[var(--v2-danger-text)]"
+          "text-[var(--v2-text-faint)] hover:bg-[var(--v2-danger-soft)] hover:text-[var(--v2-danger-text)]"
         )}
       >
         <${Icon} name="trash" className="h-3.5 w-3.5" strokeWidth=${2} />
@@ -102,53 +114,68 @@ function ThreadItem({ thread, isActive, onSelect, onDelete }) {
   `;
 }
 
-const BUCKET_ORDER = [
-  "Today",
-  "Yesterday",
-  "Previous 7 days",
-  "Previous 30 days",
-  "Older",
-];
-
-function bucketOf(thread) {
-  const iso = thread.updated_at || thread.created_at;
-  if (!iso) return "Older";
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return "Older";
-  const dayMs = 86400000;
-  const startOf = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate());
-  const diff = startOf(new Date()) - startOf(date);
-  if (diff <= 0) return "Today";
-  if (diff <= dayMs) return "Yesterday";
-  if (diff <= 7 * dayMs) return "Previous 7 days";
-  if (diff <= 30 * dayMs) return "Previous 30 days";
-  return "Older";
+function ThreadGroup({ label, items, activeThreadId, states, onSelect, onDelete }) {
+  if (items.length === 0) return null;
+  return html`
+    <div className="flex flex-col gap-1">
+      <span className="px-3 pt-1 text-[10px] font-semibold uppercase tracking-wider text-[var(--v2-text-faint)]">
+        ${label}
+      </span>
+      ${items.map(
+        (thread) => html`
+          <${ThreadItem}
+            key=${thread.id}
+            thread=${thread}
+            isActive=${thread.id === activeThreadId}
+            presentation=${presentationFor(states.get(thread.id))}
+            onSelect=${onSelect}
+            onDelete=${onDelete}
+          />
+        `
+      )}
+    </div>
+  `;
 }
 
 export function SidebarThreads({ threads, activeThreadId, onSelect, onDelete }) {
   const [collapsed, setCollapsed] = React.useState(false);
   const [query, setQuery] = React.useState("");
+  const states = useThreadStates();
 
-  const groups = React.useMemo(() => {
+  /* Two-group partition (replaces the previous date-bucketed layout):
+   *   - Pinned: active thread + any thread with a non-idle state.
+   *     These are the rows you care about right now regardless of age.
+   *   - Recent: everything else, newest-first by updated_at || created_at.
+   *
+   * Title search runs before partitioning so the filter still matches
+   * any thread, pinned or not. */
+  const { pinned, recent, totalMatches } = React.useMemo(() => {
     const q = query.trim().toLowerCase();
     const filtered = q
       ? threads.filter((thread) =>
           (thread.title || thread.id || "").toLowerCase().includes(q)
         )
       : threads;
-    const byBucket = new Map();
-    for (const thread of filtered) {
-      const bucket = bucketOf(thread);
-      if (!byBucket.has(bucket)) byBucket.set(bucket, []);
-      byBucket.get(bucket).push(thread);
-    }
-    return BUCKET_ORDER.filter((b) => byBucket.has(b)).map((b) => ({
-      bucket: b,
-      items: byBucket.get(b),
-    }));
-  }, [threads, query]);
 
-  const totalMatches = groups.reduce((n, g) => n + g.items.length, 0);
+    const pinnedList = [];
+    const recentList = [];
+    for (const thread of filtered) {
+      const isActive = thread.id === activeThreadId;
+      const hasState = states.has(thread.id);
+      if (isActive || hasState) {
+        pinnedList.push(thread);
+      } else {
+        recentList.push(thread);
+      }
+    }
+    pinnedList.sort(byActivityDesc);
+    recentList.sort(byActivityDesc);
+    return {
+      pinned: pinnedList,
+      recent: recentList,
+      totalMatches: pinnedList.length + recentList.length,
+    };
+  }, [threads, query, activeThreadId, states]);
 
   return html`
     <div className="flex min-h-0 flex-1 flex-col px-2">
@@ -159,7 +186,7 @@ export function SidebarThreads({ threads, activeThreadId, onSelect, onDelete }) 
         <span
           className="flex-1 text-left text-[11px] font-semibold uppercase tracking-wider text-[var(--v2-text-faint)]"
         >
-          Recent
+          Conversations
         </span>
         <${Icon}
           name="chevron"
@@ -198,26 +225,23 @@ export function SidebarThreads({ threads, activeThreadId, onSelect, onDelete }) 
           html`<div className="px-3 py-2 text-[12px] text-[var(--v2-text-faint)]">
             No chats match “${query}”
           </div>`}
-          ${groups.map(
-            (group) => html`
-              <div key=${group.bucket} className="flex flex-col gap-1">
-                <span className="px-3 pt-1 text-[10px] font-semibold uppercase tracking-wider text-[var(--v2-text-faint)]">
-                  ${group.bucket}
-                </span>
-                ${group.items.map(
-                  (thread) => html`
-                    <${ThreadItem}
-                      key=${thread.id}
-                      thread=${thread}
-                      isActive=${thread.id === activeThreadId}
-                      onSelect=${onSelect}
-                      onDelete=${onDelete}
-                    />
-                  `
-                )}
-              </div>
-            `
-          )}
+
+          <${ThreadGroup}
+            label="Pinned"
+            items=${pinned}
+            activeThreadId=${activeThreadId}
+            states=${states}
+            onSelect=${onSelect}
+            onDelete=${onDelete}
+          />
+          <${ThreadGroup}
+            label="Recent"
+            items=${recent}
+            activeThreadId=${activeThreadId}
+            states=${states}
+            onSelect=${onSelect}
+            onDelete=${onDelete}
+          />
         </div>
       `}
     </div>

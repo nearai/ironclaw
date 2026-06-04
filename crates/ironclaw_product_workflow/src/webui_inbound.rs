@@ -102,6 +102,13 @@ pub struct WebUiListThreadsRequest {
     pub cursor: Option<String>,
 }
 
+/// Browser query for WebUI automation listing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct WebUiListAutomationsRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+}
+
 /// Browser body for WebUI extension-setup interaction.
 ///
 /// This is the v2 entrypoint inventory's "extensions onboarding" row.

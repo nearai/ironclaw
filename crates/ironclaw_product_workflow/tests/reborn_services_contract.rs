@@ -11,8 +11,9 @@ use ironclaw_product_adapters::{
     ProjectionStream, ProjectionSubscriptionRequest, ProtocolAuthFailure, RedactedString,
 };
 use ironclaw_product_workflow::{
-    ApprovalInteractionDecision, ApprovalInteractionService, AuthInteractionDecision,
-    AuthInteractionService, ExtensionCredentialSetupService, ExtensionCredentialStatusRequest,
+    AUTOMATION_LIST_DEFAULT_PAGE_SIZE, AUTOMATION_LIST_MAX_PAGE_SIZE, ApprovalInteractionDecision,
+    ApprovalInteractionService, AuthInteractionDecision, AuthInteractionService,
+    AutomationProductFacade, ExtensionCredentialSetupService, ExtensionCredentialStatusRequest,
     ExtensionCredentialSubmitRequest, LifecycleExtensionCredentialRequirement,
     LifecycleExtensionCredentialSetup, LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind,
     LifecycleExtensionSource, LifecycleExtensionSummary, LifecycleInstalledExtensionSummary,
@@ -20,15 +21,16 @@ use ironclaw_product_workflow::{
     LifecycleProductContext, LifecycleProductFacade, LifecycleProductPayload,
     LifecycleProductResponse, LifecycleReadinessBlocker, ListPendingApprovalsRequest,
     ListPendingApprovalsResponse, ListPendingAuthInteractionsRequest,
-    ListPendingAuthInteractionsResponse, ProductWorkflowError, RebornExtensionOnboardingState,
-    RebornGetRunStateRequest, RebornResolveGateResponse, RebornServices, RebornServicesApi,
-    RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
-    RebornStreamEventsRequest, RebornSubmitTurnResponse, RebornTimelineRequest,
-    ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
+    ListPendingAuthInteractionsResponse, ProductAgentBoundCaller, ProductWorkflowError,
+    RebornAutomationInfo, RebornAutomationRunStatus, RebornAutomationSource, RebornAutomationState,
+    RebornExtensionOnboardingState, RebornGetRunStateRequest, RebornResolveGateResponse,
+    RebornServices, RebornServicesApi, RebornServicesError, RebornServicesErrorCode,
+    RebornServicesErrorKind, RebornStreamEventsRequest, RebornSubmitTurnResponse,
+    RebornTimelineRequest, ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
     ResolveAuthInteractionRequest, ResolveAuthInteractionResponse, WebUiAuthenticatedCaller,
     WebUiCancelRunRequest, WebUiCreateThreadRequest, WebUiInboundValidationCode,
-    WebUiListThreadsRequest, WebUiResolveGateRequest, WebUiSendMessageRequest,
-    WebUiSetupExtensionRequest, approval_gate_ref,
+    WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiResolveGateRequest,
+    WebUiSendMessageRequest, WebUiSetupExtensionRequest, approval_gate_ref,
 };
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
@@ -65,6 +67,15 @@ fn turn_actor_for_user(user_id: &str) -> TurnActor {
 
 fn caller_with_project(project_id: Option<&str>) -> WebUiAuthenticatedCaller {
     caller_for_user_with_project("user-alpha", project_id)
+}
+
+fn caller_without_agent() -> WebUiAuthenticatedCaller {
+    WebUiAuthenticatedCaller::new(
+        TenantId::new("tenant-alpha").expect("valid tenant"),
+        UserId::new("user-alpha").expect("valid user"),
+        None,
+        Some(ProjectId::new("project-alpha").expect("valid project")),
+    )
 }
 
 fn caller_for_user_with_project(
@@ -539,6 +550,7 @@ impl RecordingLifecycleFacade {
             description: "test extension".to_string(),
             source: LifecycleExtensionSource::HostBundled,
             runtime_kind: LifecycleExtensionRuntimeKind::FirstParty,
+            visible_capability_ids: Vec::new(),
             visible_read_only_capability_ids: Vec::new(),
             credential_requirements: self.credential_requirements.clone(),
             onboarding: self.onboarding.clone(),
@@ -619,6 +631,78 @@ impl LifecycleProductFacade for ListingLifecycleFacade {
         _package_ref: LifecyclePackageRef,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
         panic!("list_extensions should execute the list action, not project one package")
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ListAutomationCall {
+    caller: ProductAgentBoundCaller,
+    limit: usize,
+}
+
+#[derive(Default)]
+struct RecordingAutomationFacade {
+    list_calls: Mutex<Vec<ListAutomationCall>>,
+}
+
+impl RecordingAutomationFacade {
+    fn list_calls(&self) -> Vec<ListAutomationCall> {
+        self.list_calls.lock().expect("lock").clone()
+    }
+}
+
+#[async_trait]
+impl AutomationProductFacade for RecordingAutomationFacade {
+    async fn list_automations(
+        &self,
+        caller: ProductAgentBoundCaller,
+        limit: usize,
+    ) -> Result<Vec<RebornAutomationInfo>, RebornServicesError> {
+        self.list_calls
+            .lock()
+            .expect("lock")
+            .push(ListAutomationCall { caller, limit });
+        Ok(vec![automation_info(
+            "trigger-listed",
+            "Daily status",
+            "0 9 * * *",
+            Some(RebornAutomationRunStatus::Ok),
+        )])
+    }
+}
+
+#[derive(Clone)]
+struct StaticAutomationFacade {
+    output: Vec<RebornAutomationInfo>,
+}
+
+#[async_trait]
+impl AutomationProductFacade for StaticAutomationFacade {
+    async fn list_automations(
+        &self,
+        _caller: ProductAgentBoundCaller,
+        _limit: usize,
+    ) -> Result<Vec<RebornAutomationInfo>, RebornServicesError> {
+        Ok(self.output.clone())
+    }
+}
+
+fn automation_info(
+    trigger_id: &str,
+    name: impl Into<String>,
+    cron: impl Into<String>,
+    last_status: Option<RebornAutomationRunStatus>,
+) -> RebornAutomationInfo {
+    RebornAutomationInfo {
+        automation_id: trigger_id.to_string(),
+        name: name.into(),
+        source: RebornAutomationSource::Schedule { cron: cron.into() },
+        state: RebornAutomationState::Active,
+        next_run_at: Some("2026-06-03T09:00:00Z".parse().expect("next run")),
+        last_run_at: None,
+        last_status,
+        is_active: true,
+        created_at: Some("2026-06-02T18:00:00Z".parse().expect("created at")),
     }
 }
 
@@ -3472,6 +3556,7 @@ async fn list_extensions_projects_onboarding_payload_through_reborn_services() {
         .expect("extension list response");
     let extension = response.extensions.first().expect("one extension");
 
+    assert_eq!(extension.tools, vec!["github.read", "github.write"]);
     assert_eq!(
         extension.onboarding_state,
         Some(RebornExtensionOnboardingState::SetupRequired)
@@ -3485,6 +3570,197 @@ async fn list_extensions_projects_onboarding_payload_through_reborn_services() {
         onboarding.credential_next_step.as_deref(),
         Some("After saving the token, activate GitHub to publish its tools.")
     );
+}
+
+#[tokio::test]
+async fn list_automation_dispatches_through_product_facade() {
+    let automation_facade = Arc::new(RecordingAutomationFacade::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_automation_product_facade(automation_facade.clone());
+
+    let listed = services
+        .list_automations(caller(), WebUiListAutomationsRequest { limit: Some(10) })
+        .await
+        .expect("list automations");
+    assert_eq!(listed.automations.len(), 1);
+    assert_eq!(listed.automations[0].automation_id, "trigger-listed");
+    assert_eq!(
+        listed.automations[0].source,
+        RebornAutomationSource::Schedule {
+            cron: "0 9 * * *".to_string()
+        }
+    );
+    assert_eq!(listed.automations[0].state, RebornAutomationState::Active);
+    assert_eq!(
+        listed.automations[0].last_status,
+        Some(RebornAutomationRunStatus::Ok)
+    );
+
+    let list_calls = automation_facade.list_calls();
+    assert_eq!(list_calls.len(), 1);
+    assert_eq!(list_calls[0].caller.user_id.as_str(), "user-alpha");
+    assert_eq!(list_calls[0].caller.agent_id.as_str(), "agent-alpha");
+    assert_eq!(
+        list_calls[0]
+            .caller
+            .project_id
+            .as_ref()
+            .map(ProjectId::as_str),
+        Some("project-alpha")
+    );
+    assert_eq!(list_calls[0].limit, 10);
+}
+
+#[tokio::test]
+async fn list_automations_rejects_missing_agent_id() {
+    let automation_facade = Arc::new(RecordingAutomationFacade::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_automation_product_facade(automation_facade.clone());
+
+    let err = services
+        .list_automations(
+            caller_without_agent(),
+            WebUiListAutomationsRequest { limit: Some(10) },
+        )
+        .await
+        .expect_err("missing agent id should fail closed");
+
+    assert_eq!(err.code, RebornServicesErrorCode::InvalidRequest);
+    assert_eq!(err.status_code, 400);
+    assert_eq!(automation_facade.list_calls().len(), 0);
+}
+
+#[tokio::test]
+async fn list_automations_clamps_oversize_limit_before_product_facade() {
+    let automation_facade = Arc::new(RecordingAutomationFacade::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_automation_product_facade(automation_facade.clone());
+
+    services
+        .list_automations(
+            caller(),
+            WebUiListAutomationsRequest {
+                limit: Some(u32::MAX),
+            },
+        )
+        .await
+        .expect("list automations");
+
+    let list_calls = automation_facade.list_calls();
+    assert_eq!(list_calls.len(), 1);
+    assert_eq!(
+        list_calls[0].limit, AUTOMATION_LIST_MAX_PAGE_SIZE as usize,
+        "automation list limit must be clamped to AUTOMATION_LIST_MAX_PAGE_SIZE ({}) before the product facade",
+        AUTOMATION_LIST_MAX_PAGE_SIZE
+    );
+}
+
+#[tokio::test]
+async fn list_automations_clamps_zero_limit_before_product_facade() {
+    let automation_facade = Arc::new(RecordingAutomationFacade::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_automation_product_facade(automation_facade.clone());
+
+    services
+        .list_automations(caller(), WebUiListAutomationsRequest { limit: Some(0) })
+        .await
+        .expect("list automations");
+
+    let list_calls = automation_facade.list_calls();
+    assert_eq!(list_calls.len(), 1);
+    assert_eq!(
+        list_calls[0].limit, 1,
+        "automation list limit must be clamped to at least one row"
+    );
+}
+
+#[tokio::test]
+async fn list_automations_uses_default_limit_when_omitted() {
+    let automation_facade = Arc::new(RecordingAutomationFacade::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_automation_product_facade(automation_facade.clone());
+
+    services
+        .list_automations(caller(), WebUiListAutomationsRequest { limit: None })
+        .await
+        .expect("list automations");
+
+    let list_calls = automation_facade.list_calls();
+    assert_eq!(list_calls.len(), 1);
+    assert_eq!(
+        list_calls[0].limit, AUTOMATION_LIST_DEFAULT_PAGE_SIZE as usize,
+        "omitted automation list limit must use AUTOMATION_LIST_DEFAULT_PAGE_SIZE ({})",
+        AUTOMATION_LIST_DEFAULT_PAGE_SIZE
+    );
+}
+
+#[test]
+fn reborn_automation_state_round_trips_serde_for_every_variant() {
+    let cases = [
+        (RebornAutomationState::Active, "\"active\""),
+        (RebornAutomationState::Scheduled, "\"scheduled\""),
+        (RebornAutomationState::Paused, "\"paused\""),
+        (RebornAutomationState::Disabled, "\"disabled\""),
+        (RebornAutomationState::Inactive, "\"inactive\""),
+        (RebornAutomationState::Completed, "\"completed\""),
+        (RebornAutomationState::Unknown, "\"unknown\""),
+    ];
+
+    for (state, expected_wire) in cases {
+        let serialized = serde_json::to_string(&state).expect("serialize state");
+        assert_eq!(serialized, expected_wire);
+        let deserialized: RebornAutomationState =
+            serde_json::from_str(&serialized).expect("deserialize state");
+        assert_eq!(deserialized, state);
+    }
+}
+
+#[tokio::test]
+async fn list_automations_returns_empty_list() {
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_automation_product_facade(Arc::new(StaticAutomationFacade { output: Vec::new() }));
+
+    let listed = services
+        .list_automations(caller(), WebUiListAutomationsRequest::default())
+        .await
+        .expect("list automations");
+
+    assert!(listed.automations.is_empty());
+}
+
+#[tokio::test]
+async fn automation_facade_unwired_fails_closed() {
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    );
+
+    let error = services
+        .list_automations(caller(), WebUiListAutomationsRequest::default())
+        .await
+        .expect_err("unwired automation facade");
+
+    assert_eq!(error.code, RebornServicesErrorCode::Unavailable);
+    assert_eq!(error.status_code, 503);
+    assert!(error.retryable);
 }
 
 #[tokio::test]
@@ -3634,6 +3910,7 @@ fn extension_summary(
         description: "test extension".to_string(),
         source: LifecycleExtensionSource::HostBundled,
         runtime_kind: LifecycleExtensionRuntimeKind::FirstParty,
+        visible_capability_ids: vec![format!("{package_id}.read"), format!("{package_id}.write")],
         visible_read_only_capability_ids: Vec::new(),
         credential_requirements,
         onboarding,

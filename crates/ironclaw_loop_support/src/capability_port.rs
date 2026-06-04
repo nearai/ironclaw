@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     sync::{Arc, Mutex},
 };
 
@@ -34,7 +34,9 @@ mod provider_input;
 mod provider_validation;
 mod surface_snapshot;
 
-use self::provider_input::{normalize_provider_arguments, prepare_provider_arguments};
+use self::provider_input::{
+    normalize_provider_arguments, prepare_provider_arguments, schema_contains_external_ref,
+};
 use self::provider_validation::{
     PROVIDER_TOOL_NAME_MAX_BYTES, validate_provider_arguments, validate_provider_tool_call,
 };
@@ -48,6 +50,7 @@ use self::surface_snapshot::{
 // existing adapter boundary.
 const PROVIDER_TOOL_NAME_DIGEST_BYTES: usize = 32;
 const PROVIDER_TOOL_CALL_INPUT_REF_PREFIX: &str = "input:provider-tool-";
+const MAX_IN_MEMORY_PROVIDER_TOOL_CALL_EFFECTIVE_CAPABILITY_IDS: usize = 128;
 
 #[async_trait]
 pub trait LoopCapabilityInputResolver: Send + Sync {
@@ -483,6 +486,59 @@ impl Drop for DispatchReservationGuard<'_> {
     }
 }
 
+#[derive(Default)]
+struct ProviderToolCallEffectiveCapabilityIdStore {
+    records: HashMap<String, HashSet<CapabilityId>>,
+    insertion_order: VecDeque<String>,
+}
+
+impl ProviderToolCallEffectiveCapabilityIdStore {
+    fn record(
+        &mut self,
+        input_ref: &CapabilityInputRef,
+        capability_ids: HashSet<CapabilityId>,
+    ) -> Result<(), AgentLoopHostError> {
+        let key = input_ref.as_str().to_string();
+        if !self.records.contains_key(input_ref.as_str()) {
+            self.evict_until_below_limit()?;
+            self.insertion_order.push_back(key.clone());
+        }
+        self.records.insert(key, capability_ids);
+        Ok(())
+    }
+
+    fn staged_effective_capability_ids_for(
+        &self,
+        input_ref: &CapabilityInputRef,
+    ) -> HashSet<CapabilityId> {
+        self.records
+            .get(input_ref.as_str())
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    fn evict_until_below_limit(&mut self) -> Result<(), AgentLoopHostError> {
+        let mut scanned = 0;
+        let scan_limit = self.insertion_order.len();
+        while self.records.len() >= MAX_IN_MEMORY_PROVIDER_TOOL_CALL_EFFECTIVE_CAPABILITY_IDS
+            && scanned < scan_limit
+        {
+            let Some(candidate) = self.insertion_order.pop_front() else {
+                break;
+            };
+            scanned += 1;
+            self.records.remove(&candidate);
+        }
+        if self.records.len() >= MAX_IN_MEMORY_PROVIDER_TOOL_CALL_EFFECTIVE_CAPABILITY_IDS {
+            return Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::Unavailable,
+                "provider tool-call effective capability id store is unavailable",
+            ));
+        }
+        Ok(())
+    }
+}
+
 pub struct HostRuntimeLoopCapabilityPort {
     runtime: Arc<dyn HostRuntime>,
     run_context: LoopRunContext,
@@ -495,6 +551,7 @@ pub struct HostRuntimeLoopCapabilityPort {
     snapshots: Mutex<HashMap<String, SurfaceSnapshot>>,
     current_surface_version: Mutex<Option<String>>,
     dispatch_records: Mutex<DispatchRecordStore>,
+    provider_tool_call_effective_capability_ids: Mutex<ProviderToolCallEffectiveCapabilityIdStore>,
 }
 
 /// Lock a poisoned-aware `Mutex` and wrap a poison error as the canonical
@@ -536,6 +593,9 @@ impl HostRuntimeLoopCapabilityPort {
             snapshots: Mutex::new(HashMap::new()),
             current_surface_version: Mutex::new(None),
             dispatch_records: Mutex::new(DispatchRecordStore::default()),
+            provider_tool_call_effective_capability_ids: Mutex::new(
+                ProviderToolCallEffectiveCapabilityIdStore::default(),
+            ),
         }
     }
 
@@ -667,6 +727,30 @@ impl HostRuntimeLoopCapabilityPort {
         Ok(())
     }
 
+    fn record_provider_tool_call_effective_capability_ids(
+        &self,
+        input_ref: &CapabilityInputRef,
+        capability_ids: HashSet<CapabilityId>,
+    ) -> Result<(), AgentLoopHostError> {
+        lock_mut(
+            &self.provider_tool_call_effective_capability_ids,
+            "provider tool-call effective capability id store",
+        )?
+        .record(input_ref, capability_ids)?;
+        Ok(())
+    }
+
+    fn staged_effective_capability_ids_for(
+        &self,
+        input_ref: &CapabilityInputRef,
+    ) -> Result<HashSet<CapabilityId>, AgentLoopHostError> {
+        Ok(lock_mut(
+            &self.provider_tool_call_effective_capability_ids,
+            "provider tool-call effective capability id store",
+        )?
+        .staged_effective_capability_ids_for(input_ref))
+    }
+
     /// Drop guard for an `InFlight` dispatch reservation. Releases the
     /// reservation (and wakes any waiters) unless [`commit`] is called first.
     /// Use after a successful `reserve_dispatch` returns `Reserved` so any
@@ -794,6 +878,7 @@ impl HostRuntimeLoopCapabilityPort {
         self.milestone_sink
             .publish_loop_milestone(LoopHostMilestone {
                 scope: self.run_context.scope.clone(),
+                actor: self.run_context.actor.clone(),
                 turn_id: self.run_context.turn_id,
                 run_id: self.run_context.run_id,
                 loop_driver_id: self.run_context.loop_driver_id.clone(),
@@ -812,22 +897,29 @@ impl HostRuntimeLoopCapabilityPort {
             .input_resolver
             .resolve_capability_input(&self.run_context, &request.input_ref)
             .await?;
-        let output =
-            match capability.output(&input, |requested| snapshot.capability_info(requested)) {
-                Ok(output) => output,
-                Err(error) if error.kind == AgentLoopHostErrorKind::InvalidInvocation => {
-                    // Synthetic capability InvalidInvocation errors are model-side input failures
-                    // such as bad arguments or an unknown capability_info target. Keep those
-                    // model-visible so the driver can retry instead of terminalizing the host.
-                    // INVARIANT: synthetic capabilities must not use InvalidInvocation for
-                    // internal or host-fatal conditions.
-                    return Ok(CapabilityOutcome::Failed(CapabilityFailure {
-                        error_kind: CapabilityFailureKind::InvalidInput,
-                        safe_summary: error.safe_summary,
-                    }));
-                }
-                Err(error) => return Err(error),
-            };
+        let effective_capability_ids =
+            self.staged_effective_capability_ids_for(&request.input_ref)?;
+        let output = match capability.output(&input, |requested| {
+            let capability = snapshot.capability_info(requested)?;
+            if !effective_capability_ids.contains(capability.capability_id) {
+                return None;
+            }
+            Some(capability)
+        }) {
+            Ok(output) => output,
+            Err(error) if error.kind == AgentLoopHostErrorKind::InvalidInvocation => {
+                // Synthetic capability InvalidInvocation errors are model-side input failures
+                // such as bad arguments or an unknown capability_info target. Keep those
+                // model-visible so the driver can retry instead of terminalizing the host.
+                // INVARIANT: synthetic capabilities must not use InvalidInvocation for
+                // internal or host-fatal conditions.
+                return Ok(CapabilityOutcome::Failed(CapabilityFailure {
+                    error_kind: CapabilityFailureKind::InvalidInput,
+                    safe_summary: error.safe_summary,
+                }));
+            }
+            Err(error) => return Err(error),
+        };
         let result_ref = self
             .result_writer
             .write_capability_result(CapabilityResultWrite {
@@ -932,6 +1024,12 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
             .input_resolver
             .register_provider_tool_call_input(&self.run_context, &normalized_tool_call)
             .await?;
+        if prepared.capability_id.as_str() == crate::capability_info::CAPABILITY_ID {
+            self.record_provider_tool_call_effective_capability_ids(
+                &input_ref,
+                prepared.effective_capability_ids.iter().cloned().collect(),
+            )?;
+        }
         Ok(ironclaw_turns::run_profile::CapabilityCallCandidate {
             surface_version: prepared.surface_version,
             capability_id: prepared.capability_id,
@@ -1272,10 +1370,13 @@ fn provider_schema_is_usable(schema: &serde_json::Value) -> bool {
     let Some(object) = schema.as_object() else {
         return false;
     };
+    if schema_contains_external_ref(schema, 0) {
+        return false;
+    }
     if object
         .get("$ref")
         .and_then(serde_json::Value::as_str)
-        .is_some()
+        .is_some_and(|reference| reference.starts_with('#'))
     {
         return true;
     }
@@ -2264,8 +2365,27 @@ mod tests {
         assert!(provider_schema_is_usable(
             &serde_json::json!({"type":"object","properties":{}})
         ));
-        assert!(provider_schema_is_usable(&serde_json::json!({
+        assert!(!provider_schema_is_usable(&serde_json::json!({
             "$ref": "schemas/builtin/write-file.input.v1.json"
+        })));
+        assert!(provider_schema_is_usable(&serde_json::json!({
+            "$ref": "#/$defs/input",
+            "$defs": {
+                "input": {
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string" }
+                    }
+                }
+            }
+        })));
+        assert!(!provider_schema_is_usable(&serde_json::json!({
+            "type": "object",
+            "properties": {
+                "payload": {
+                    "$ref": "schemas/builtin/write-file.input.v1.json"
+                }
+            }
         })));
         assert!(!provider_schema_is_usable(
             &serde_json::json!({"type":"string"})
@@ -2612,6 +2732,259 @@ mod tests {
         assert!(
             ironclaw_turns::run_profile::LoopSafeSummary::new(error.safe_summary.clone()).is_ok()
         );
+    }
+
+    #[test]
+    fn provider_argument_preparation_rejects_unresolved_ref_schema() {
+        let schema = serde_json::json!({
+            "$ref": "schemas/demo/echo.input.v1.json"
+        });
+
+        let error = prepare_provider_arguments(
+            &serde_json::json!({ "message": "hello" }),
+            &schema,
+            "provider arguments",
+        )
+        .expect_err("unresolved ref schemas must fail closed");
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::StaleSurface);
+    }
+
+    #[test]
+    fn provider_argument_preparation_rejects_nested_unresolved_ref_schema() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "payload": {
+                    "type": "object",
+                    "properties": {
+                        "tool_input": {
+                            "$ref": "schemas/demo/echo.input.v1.json"
+                        }
+                    }
+                }
+            }
+        });
+
+        let error = prepare_provider_arguments(
+            &serde_json::json!({
+                "payload": {
+                    "tool_input": {
+                        "message": "hello"
+                    }
+                }
+            }),
+            &schema,
+            "provider arguments",
+        )
+        .expect_err("nested unresolved refs must fail closed");
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::StaleSurface);
+    }
+
+    #[test]
+    fn provider_argument_preparation_allows_internal_ref_schema() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "payload": {
+                    "$ref": "#/$defs/payload"
+                }
+            },
+            "$defs": {
+                "payload": {
+                    "type": "object",
+                    "properties": {
+                        "message": { "type": "string" }
+                    },
+                    "required": ["message"],
+                    "additionalProperties": false
+                }
+            }
+        });
+
+        let normalized = prepare_provider_arguments(
+            &serde_json::json!({
+                "payload": {
+                    "message": "hello"
+                }
+            }),
+            &schema,
+            "provider arguments",
+        )
+        .expect("internal refs should be allowed");
+
+        assert_eq!(
+            normalized,
+            serde_json::json!({
+                "payload": {
+                    "message": "hello"
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn provider_argument_preparation_rejects_excessive_schema_ref_scan_depth() {
+        fn wrap_unknown_keyword(inner_schema: serde_json::Value) -> serde_json::Value {
+            serde_json::json!({
+                "x-next": inner_schema
+            })
+        }
+
+        let mut deep_annotation = serde_json::json!({ "type": "null" });
+        for _ in 0..40 {
+            deep_annotation = wrap_unknown_keyword(deep_annotation);
+        }
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "message": { "type": "string" }
+            },
+            "required": ["message"],
+            "x-adversarial-depth": deep_annotation
+        });
+
+        let error = prepare_provider_arguments(
+            &serde_json::json!({ "message": "hello" }),
+            &schema,
+            "provider arguments",
+        )
+        .expect_err("excessively deep schema ref scans should fail closed");
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::StaleSurface);
+    }
+
+    #[test]
+    fn provider_argument_depth_limit_allows_exact_boundary() {
+        fn wrap_object_property(
+            name: String,
+            inner_schema: serde_json::Value,
+        ) -> serde_json::Value {
+            let mut properties = serde_json::Map::new();
+            properties.insert(name, inner_schema);
+            let mut schema = serde_json::Map::new();
+            schema.insert("type".to_string(), serde_json::json!("object"));
+            schema.insert(
+                "properties".to_string(),
+                serde_json::Value::Object(properties),
+            );
+            serde_json::Value::Object(schema)
+        }
+
+        fn wrap_object_value(name: String, inner_value: serde_json::Value) -> serde_json::Value {
+            let mut object = serde_json::Map::new();
+            object.insert(name, inner_value);
+            serde_json::Value::Object(object)
+        }
+
+        fn wrap_unknown_keyword(inner_schema: serde_json::Value) -> serde_json::Value {
+            serde_json::json!({
+                "x-next": inner_schema
+            })
+        }
+
+        let mut schema = serde_json::json!({ "type": "integer" });
+        let mut value = serde_json::json!("1");
+        for depth in (0..provider_input::MAX_PROVIDER_NORMALIZATION_DEPTH).rev() {
+            let property = format!("level_{depth}");
+            schema = wrap_object_property(property.clone(), schema);
+            value = wrap_object_value(property, value);
+        }
+
+        let normalized = normalize_provider_arguments(&value, &schema, "provider arguments")
+            .expect("exact normalization depth boundary should pass");
+
+        assert_eq!(normalized, {
+            let mut expected = serde_json::json!(1);
+            for depth in (0..provider_input::MAX_PROVIDER_NORMALIZATION_DEPTH).rev() {
+                expected = wrap_object_value(format!("level_{depth}"), expected);
+            }
+            expected
+        });
+
+        let mut deep_annotation = serde_json::json!({ "type": "null" });
+        for _ in 2..provider_input::MAX_PROVIDER_NORMALIZATION_DEPTH {
+            deep_annotation = wrap_unknown_keyword(deep_annotation);
+        }
+        let ref_scan_schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "message": { "type": "string" }
+            },
+            "required": ["message"],
+            "x-depth-boundary": deep_annotation
+        });
+
+        prepare_provider_arguments(
+            &serde_json::json!({ "message": "hello" }),
+            &ref_scan_schema,
+            "provider arguments",
+        )
+        .expect("exact schema ref-scan depth boundary should pass");
+    }
+
+    #[test]
+    fn provider_argument_normalization_rejects_excessive_schema_depth() {
+        fn wrap_object_property(
+            name: String,
+            inner_schema: serde_json::Value,
+        ) -> serde_json::Value {
+            let mut properties = serde_json::Map::new();
+            properties.insert(name, inner_schema);
+            let mut schema = serde_json::Map::new();
+            schema.insert("type".to_string(), serde_json::json!("object"));
+            schema.insert(
+                "properties".to_string(),
+                serde_json::Value::Object(properties),
+            );
+            serde_json::Value::Object(schema)
+        }
+
+        fn wrap_object_value(name: String, inner_value: serde_json::Value) -> serde_json::Value {
+            let mut object = serde_json::Map::new();
+            object.insert(name, inner_value);
+            serde_json::Value::Object(object)
+        }
+
+        let mut schema = serde_json::json!({ "type": "integer" });
+        let mut value = serde_json::json!("1");
+        for depth in (0..40).rev() {
+            let property = format!("level_{depth}");
+            schema = wrap_object_property(property.clone(), schema);
+            value = wrap_object_value(property, value);
+        }
+
+        let error = normalize_provider_arguments(&value, &schema, "provider arguments")
+            .expect_err("excessively deep schema normalization should fail closed");
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+    }
+
+    #[test]
+    fn provider_argument_normalization_rejects_excessive_array_items_schema_depth() {
+        fn wrap_array_schema(inner_schema: serde_json::Value) -> serde_json::Value {
+            serde_json::json!({
+                "type": "array",
+                "items": inner_schema
+            })
+        }
+
+        fn wrap_array_value(inner_value: serde_json::Value) -> serde_json::Value {
+            serde_json::Value::Array(vec![inner_value])
+        }
+
+        let mut schema = serde_json::json!({ "type": "integer" });
+        let mut value = serde_json::json!("1");
+        for _ in 0..40 {
+            schema = wrap_array_schema(schema);
+            value = wrap_array_value(value);
+        }
+
+        let error = normalize_provider_arguments(&value, &schema, "provider arguments")
+            .expect_err("excessively deep array item normalization should fail closed");
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
     }
 
     #[test]
@@ -3546,6 +3919,165 @@ mod tests {
             runtime.take_requests().is_empty(),
             "capability_info failure must not dispatch to the host runtime"
         );
+    }
+
+    #[tokio::test]
+    async fn capability_info_output_requires_staged_effective_target_for_visible_target() {
+        let capability_id = CapabilityId::new("demo.echo").expect("valid capability id");
+        let provider_id = ExtensionId::new("demo").expect("valid provider id");
+        let context = execution_context("thread-capability-info-unstaged-target");
+        let run_context = loop_run_context(&context).await;
+        let runtime = Arc::new(RecordingHostRuntime::new(vec![visible_capability(
+            capability_id.clone(),
+            provider_id,
+        )]));
+        let result_writer = Arc::new(RecordingResultWriter::default());
+        let port = HostRuntimeLoopCapabilityPortFactory::new(
+            runtime.clone(),
+            visible_request(context),
+            Arc::new(JsonInputResolver(serde_json::json!({
+                "name": capability_id.as_str(),
+                "detail": "schema"
+            }))),
+            result_writer.clone(),
+            dummy_milestone_sink(),
+        )
+        .port_for_run_context(run_context);
+        let surface = port
+            .visible_capabilities(VisibleCapabilityRequest {})
+            .await
+            .expect("visible capabilities load");
+        assert!(
+            surface
+                .descriptors
+                .iter()
+                .any(|descriptor| descriptor.capability_id == capability_id),
+            "target should be visible even when the synthetic capability_info call is unstaged"
+        );
+
+        let outcome = port
+            .invoke_capability(CapabilityInvocation {
+                surface_version: surface.version,
+                capability_id: CapabilityId::new(capability_info::CAPABILITY_ID)
+                    .expect("synthetic capability id"),
+                input_ref: CapabilityInputRef::new("input:direct-capability-info")
+                    .expect("test input ref"),
+            })
+            .await
+            .expect("unstaged synthetic invocation should return a model-visible failure");
+
+        assert!(matches!(
+            outcome,
+            CapabilityOutcome::Failed(CapabilityFailure {
+                error_kind: CapabilityFailureKind::InvalidInput,
+                safe_summary
+            }) if safe_summary == "capability_info target is not on the visible surface"
+        ));
+        assert!(
+            result_writer.records().is_empty(),
+            "unstaged capability_info calls must not write hidden schema output"
+        );
+        assert!(
+            runtime.take_requests().is_empty(),
+            "capability_info failure must not dispatch to the host runtime"
+        );
+    }
+
+    #[tokio::test]
+    async fn capability_info_output_rejects_visible_target_excluded_from_staged_effective_ids() {
+        let allowed_capability_id =
+            CapabilityId::new("demo.allowed").expect("valid allowed capability id");
+        let denied_capability_id =
+            CapabilityId::new("demo.denied").expect("valid denied capability id");
+        let provider_id = ExtensionId::new("demo").expect("valid provider id");
+        let context = execution_context("thread-capability-info-excluded-visible-target");
+        let run_context = loop_run_context(&context).await;
+        let runtime = Arc::new(RecordingHostRuntime::new(vec![
+            visible_capability(allowed_capability_id.clone(), provider_id.clone()),
+            visible_capability(denied_capability_id.clone(), provider_id),
+        ]));
+        let result_writer = Arc::new(RecordingResultWriter::default());
+        let port = HostRuntimeLoopCapabilityPortFactory::new(
+            runtime.clone(),
+            visible_request(context),
+            Arc::new(JsonInputResolver(serde_json::json!({
+                "name": denied_capability_id.as_str(),
+                "detail": "schema"
+            }))),
+            result_writer.clone(),
+            dummy_milestone_sink(),
+        )
+        .port_for_run_context(run_context);
+        let surface = port
+            .visible_capabilities(VisibleCapabilityRequest {})
+            .await
+            .expect("visible capabilities load");
+        assert!(
+            surface
+                .descriptors
+                .iter()
+                .any(|descriptor| descriptor.capability_id == denied_capability_id),
+            "target should be visible on the raw surface"
+        );
+
+        let input_ref = CapabilityInputRef::new("input:capability-info-excluded-target")
+            .expect("test input ref");
+        port.record_provider_tool_call_effective_capability_ids(
+            &input_ref,
+            [
+                CapabilityId::new(capability_info::CAPABILITY_ID).expect("synthetic id"),
+                allowed_capability_id,
+            ]
+            .into_iter()
+            .collect(),
+        )
+        .expect("staged effective capability ids");
+
+        let outcome = port
+            .invoke_capability(CapabilityInvocation {
+                surface_version: surface.version,
+                capability_id: CapabilityId::new(capability_info::CAPABILITY_ID)
+                    .expect("synthetic capability id"),
+                input_ref,
+            })
+            .await
+            .expect("excluded target should return a model-visible failure");
+
+        assert!(matches!(
+            outcome,
+            CapabilityOutcome::Failed(CapabilityFailure {
+                error_kind: CapabilityFailureKind::InvalidInput,
+                safe_summary
+            }) if safe_summary == "capability_info target is not on the visible surface"
+        ));
+        assert!(
+            result_writer.records().is_empty(),
+            "excluded capability_info calls must not write schema output"
+        );
+        assert!(
+            runtime.take_requests().is_empty(),
+            "capability_info failure must not dispatch to the host runtime"
+        );
+    }
+
+    #[test]
+    fn provider_tool_call_effective_capability_id_store_returns_unavailable_when_full() {
+        let mut records = HashMap::new();
+        for index in 0..MAX_IN_MEMORY_PROVIDER_TOOL_CALL_EFFECTIVE_CAPABILITY_IDS {
+            records.insert(format!("input:staged-capability-{index}"), HashSet::new());
+        }
+        let mut store = ProviderToolCallEffectiveCapabilityIdStore {
+            records,
+            insertion_order: VecDeque::new(),
+        };
+        let input_ref =
+            CapabilityInputRef::new("input:staged-capability-new").expect("valid input ref");
+
+        let error = store
+            .record(&input_ref, HashSet::new())
+            .expect_err("full store with exhausted insertion order should fail closed");
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::Unavailable);
     }
 
     /// Regression: `capability_info` previously used `as_runtime()` for

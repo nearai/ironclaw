@@ -293,6 +293,34 @@ fn webui_extension_setup_scope(extension_id: &str) -> AuthProductScope {
 
 // ─── tests ────────────────────────────────────────────────────────────
 
+#[tokio::test]
+async fn webui_v2_http_list_automations_uses_composed_runtime_facade() {
+    let harness = build_harness().await;
+
+    let response = harness
+        .router
+        .clone()
+        .oneshot(bearer_get("/api/webchat/v2/automations?limit=10"))
+        .await
+        .expect("list automations oneshot");
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "list_automations must be wired through the real composed bundle"
+    );
+    let body = read_json(response).await;
+    assert!(
+        body["automations"].as_array().is_some(),
+        "list_automations response must include an automations array, got: {body:#?}"
+    );
+
+    harness
+        .runtime
+        .shutdown()
+        .await
+        .expect("runtime shutdown clean");
+}
+
 /// Step 2 of Lane 7: drive `create_thread` → `submit_turn` → poll
 /// `timeline` through the composed v2 HTTP surface, against a real
 /// local-dev runtime whose LLM gateway is scripted to call
@@ -497,6 +525,55 @@ async fn webui_v2_gmail_oauth_setup_complete_allows_activation() {
         "activation should succeed after setup completion: {activate_body}"
     );
     assert_eq!(activate_body["activated"], true);
+}
+
+#[tokio::test]
+async fn webui_v2_google_docs_setup_projects_oauth_before_install() {
+    let harness = build_harness().await;
+
+    let setup = harness
+        .router
+        .clone()
+        .oneshot(bearer_get("/api/webchat/v2/extensions/google-docs/setup"))
+        .await
+        .expect("setup Google Docs oneshot");
+    assert_eq!(setup.status(), StatusCode::OK);
+    let setup_body = read_json(setup).await;
+    assert_eq!(setup_body["package_ref"]["id"], "google-docs");
+    assert_eq!(setup_body["phase"], "discovered");
+
+    let secrets = setup_body["secrets"]
+        .as_array()
+        .expect("setup secrets should be an array");
+    let google_oauth_scopes = secrets
+        .iter()
+        .filter(|secret| secret["provider"] == "google")
+        .map(|secret| {
+            let setup = &secret["setup"];
+            assert_eq!(setup["kind"], "oauth", "secret should be OAuth: {secret}");
+            setup["scopes"]
+                .as_array()
+                .expect("OAuth scopes should be an array")
+                .iter()
+                .map(|scope| scope.as_str().expect("scope string").to_string())
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        google_oauth_scopes,
+        vec![
+            vec!["https://www.googleapis.com/auth/documents".to_string()],
+            vec!["https://www.googleapis.com/auth/documents.readonly".to_string()],
+        ],
+        "Google Docs setup should expose WASM-declared OAuth scopes before install: {setup_body}"
+    );
+
+    harness
+        .runtime
+        .shutdown()
+        .await
+        .expect("runtime shutdown clean");
 }
 
 #[tokio::test]

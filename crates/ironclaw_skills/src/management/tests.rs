@@ -12,6 +12,8 @@ use ironclaw_host_api::{
 use super::install_bundle::MAX_INSTALL_BUNDLE_FILE_BYTES;
 use super::*;
 
+mod install_name;
+
 #[tokio::test]
 async fn install_list_and_remove_user_skills_through_scoped_mounts() {
     let filesystem = Arc::new(InMemoryBackend::default());

@@ -15,9 +15,10 @@ use ironclaw_product_workflow::RebornServicesApi;
 use crate::descriptors::{
     WEBUI_V2_PATTERN_ACTIVATE_EXTENSION, WEBUI_V2_PATTERN_CANCEL_RUN,
     WEBUI_V2_PATTERN_CREATE_THREAD, WEBUI_V2_PATTERN_GET_TIMELINE,
-    WEBUI_V2_PATTERN_INSTALL_EXTENSION, WEBUI_V2_PATTERN_LIST_EXTENSION_REGISTRY,
-    WEBUI_V2_PATTERN_LIST_EXTENSIONS, WEBUI_V2_PATTERN_REMOVE_EXTENSION,
-    WEBUI_V2_PATTERN_RESOLVE_GATE, WEBUI_V2_PATTERN_SEND_MESSAGE, WEBUI_V2_PATTERN_SETUP_EXTENSION,
+    WEBUI_V2_PATTERN_INSTALL_EXTENSION, WEBUI_V2_PATTERN_LIST_AUTOMATIONS,
+    WEBUI_V2_PATTERN_LIST_EXTENSION_REGISTRY, WEBUI_V2_PATTERN_LIST_EXTENSIONS,
+    WEBUI_V2_PATTERN_REMOVE_EXTENSION, WEBUI_V2_PATTERN_RESOLVE_GATE,
+    WEBUI_V2_PATTERN_SEND_MESSAGE, WEBUI_V2_PATTERN_SETUP_EXTENSION,
     WEBUI_V2_PATTERN_STREAM_EVENTS, WEBUI_V2_PATTERN_STREAM_EVENTS_WS,
 };
 use crate::handlers;
@@ -64,8 +65,8 @@ impl WebUiV2State {
     }
 }
 
-/// Build a [`Router`] mounting the six WebChat v2 routes against the
-/// supplied facade. Path patterns match
+/// Build a [`Router`] mounting the WebChat v2 routes against the supplied
+/// facade. Path patterns match
 /// [`crate::descriptors::webui_v2_routes`] exactly; host composition is
 /// expected to apply its own auth / CORS / body-limit middleware in front
 /// of this router.
@@ -88,6 +89,10 @@ pub fn webui_v2_router(state: WebUiV2State) -> Router {
         )
         .route(WEBUI_V2_PATTERN_CANCEL_RUN, post(handlers::cancel_run))
         .route(WEBUI_V2_PATTERN_RESOLVE_GATE, post(handlers::resolve_gate))
+        .route(
+            WEBUI_V2_PATTERN_LIST_AUTOMATIONS,
+            get(handlers::list_automations),
+        )
         .route(
             WEBUI_V2_PATTERN_LIST_EXTENSIONS,
             get(handlers::list_extensions),

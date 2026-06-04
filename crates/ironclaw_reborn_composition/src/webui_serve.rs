@@ -294,19 +294,33 @@ impl WebuiServeConfig {
         self
     }
 
-    /// Attach a host-supplied public sub-router plus descriptors outside bearer
-    /// auth but inside the shared policy stack.
+    /// Attach a host-supplied public sub-router PLUS its route
+    /// descriptors. The router is merged into the composed app
+    /// outside the bearer auth layer; the descriptors fold into
+    /// the same per-route rate-limit / body-limit middlewares the
+    /// v2 facade and the product-auth callback already use, so
+    /// the public surface rides on the canonical policy stack —
+    /// no descriptor-less side door. Multiple public mounts are
+    /// allowed so OAuth/login routes and protocol webhooks can coexist
+    /// on the same Reborn listener.
     ///
-    /// # Important
+    /// Today this is the seam
+    /// `ironclaw_reborn_webui_ingress::webui_v2_auth_router` plugs
+    /// into; future host-owned public surfaces can reuse the same
+    /// hook by returning a [`PublicRouteMount`].
     ///
-    /// Do NOT pass a v1 gateway router through this hook. v1's `/auth/*`
-    /// handlers in `src/channels/web/handlers/auth.rs` share path names with
-    /// the v2-native auth router (`/auth/providers`, `/auth/login/{p}`,
-    /// `/auth/callback/{p}`, `/auth/logout`) by design: they implement the
-    /// same protocol on independent listeners. Merging the v1 router here
-    /// would conflict with the v2-native router and route v1 traffic into the
-    /// v2 host-owned `SessionStore` it never had access to. This seam is only
-    /// for host-native public routes such as v2 login and protocol webhooks.
+    /// **Do NOT pass a v1 gateway router through this hook.** v1's
+    /// `/auth/*` handlers in `src/channels/web/handlers/auth.rs`
+    /// share path names with the v2-native router from
+    /// `webui_v2_auth_router` (`/auth/providers`,
+    /// `/auth/login/{p}`, `/auth/callback/{p}`, `/auth/logout`) by
+    /// design — they implement the same protocol on two
+    /// independent listeners. Merging the v1 router here would
+    /// conflict with the v2-native router and, more importantly,
+    /// would route v1 traffic into the v2 host-owned `SessionStore`
+    /// it never had access to. The v2 listener is exclusively for
+    /// `webui_v2_auth_router` (and any future host-native public
+    /// surface that follows the same boundary rules).
     pub fn with_public_route_mount(mut self, mount: PublicRouteMount) -> Self {
         self.public_mounts.push(mount);
         self

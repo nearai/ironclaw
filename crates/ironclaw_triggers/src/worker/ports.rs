@@ -2,19 +2,53 @@ use async_trait::async_trait;
 use ironclaw_host_api::{TenantId, Timestamp};
 use ironclaw_turns::TurnRunId;
 
-use crate::{TriggerError, TriggerFire, TriggerId, TriggerInboundContentRef};
+use crate::{TriggerError, TriggerFire, TriggerId, TriggerMaterializedPrompt};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrustedTriggerSubmitRequest {
-    pub fire: TriggerFire,
-    pub content_ref: TriggerInboundContentRef,
-    pub received_at: Timestamp,
+    fire: TriggerFire,
+    materialized_prompt: TriggerMaterializedPrompt,
+    received_at: Timestamp,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TrustedTriggerSubmitFailureReason {
-    Retryable,
-    Permanent,
+impl TrustedTriggerSubmitRequest {
+    /// Create a sealed trusted trigger submit request.
+    ///
+    /// `materialized_prompt` must have been produced from the exact `fire`
+    /// supplied here. The worker is the only crate allowed to pair those values,
+    /// so downstream trusted submitters cannot forge or mix prompt content and
+    /// trigger identity.
+    pub(crate) fn new(
+        fire: TriggerFire,
+        materialized_prompt: TriggerMaterializedPrompt,
+        received_at: Timestamp,
+    ) -> Self {
+        Self {
+            fire,
+            materialized_prompt,
+            received_at,
+        }
+    }
+
+    pub fn fire(&self) -> &TriggerFire {
+        &self.fire
+    }
+
+    pub fn materialized_prompt(&self) -> &TriggerMaterializedPrompt {
+        &self.materialized_prompt
+    }
+
+    pub fn content_ref(&self) -> &crate::TriggerInboundContentRef {
+        self.materialized_prompt.content_ref()
+    }
+
+    pub fn received_at(&self) -> Timestamp {
+        self.received_at
+    }
+
+    pub fn into_parts(self) -> (TriggerFire, TriggerMaterializedPrompt, Timestamp) {
+        (self.fire, self.materialized_prompt, self.received_at)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,12 +60,6 @@ pub enum TrustedTriggerFireSubmitOutcome {
     Replayed {
         original_run_id: TurnRunId,
         replayed_at: Timestamp,
-    },
-    RetryableFailed {
-        reason: TrustedTriggerSubmitFailureReason,
-    },
-    PermanentFailed {
-        reason: TrustedTriggerSubmitFailureReason,
     },
 }
 

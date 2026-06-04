@@ -1,6 +1,5 @@
 use chrono::{DateTime, Utc};
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
-use ironclaw_trusted_ingress::HostTrustedTriggerIngress;
 use ironclaw_turns::{
     AcceptedMessageRef, ReplyTargetBindingRef, RunProfileRequest, SourceBindingRef,
     SubmitTurnResponse, TurnActor, TurnScope,
@@ -167,14 +166,14 @@ pub struct InboundTurnRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TrustedInboundTurnRequest {
+pub(crate) struct TrustedInboundTurnRequest {
     request: InboundTurnRequest,
     trusted_agent_id: Option<AgentId>,
     trusted_project_id: Option<ProjectId>,
 }
 
 impl TrustedInboundTurnRequest {
-    fn new(
+    pub(crate) fn new(
         request: InboundTurnRequest,
         trusted_agent_id: Option<AgentId>,
         trusted_project_id: Option<ProjectId>,
@@ -184,30 +183,6 @@ impl TrustedInboundTurnRequest {
             trusted_agent_id,
             trusted_project_id,
         }
-    }
-
-    /// Public host-composition constructor for scheduled trigger fires.
-    ///
-    /// Product adapters must continue to use [`InboundTurnRequest`] through
-    /// the untrusted path. This constructor is for the composition-owned
-    /// background trigger poller after it has already crossed the host trust
-    /// boundary.
-    pub fn for_host_trigger_fire(
-        _authority: &HostTrustedTriggerIngress,
-        request: InboundTurnRequest,
-        trusted_agent_id: Option<AgentId>,
-        trusted_project_id: Option<ProjectId>,
-    ) -> Self {
-        Self::new(request, trusted_agent_id, trusted_project_id)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn for_conversation_tests(
-        request: InboundTurnRequest,
-        trusted_agent_id: Option<AgentId>,
-        trusted_project_id: Option<ProjectId>,
-    ) -> Self {
-        Self::new(request, trusted_agent_id, trusted_project_id)
     }
 
     pub(crate) fn into_parts(self) -> (InboundTurnRequest, Option<AgentId>, Option<ProjectId>) {
@@ -220,4 +195,6 @@ pub struct InboundTurnResponse {
     pub resolution: ConversationBindingResolution,
     pub accepted_message: AcceptedInboundMessage,
     pub turn_submission: Option<SubmitTurnResponse>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub replayed_turn_submission: bool,
 }

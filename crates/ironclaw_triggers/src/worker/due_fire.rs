@@ -100,7 +100,7 @@ impl TriggerPollerWorker {
                     .await;
             }
         };
-        let content_ref = match self
+        let materialized_prompt = match self
             .deps
             .materializer
             .materialize_prompt(fire.clone())
@@ -122,11 +122,11 @@ impl TriggerPollerWorker {
         match self
             .deps
             .trusted_submitter
-            .submit_trusted_trigger_fire(TrustedTriggerSubmitRequest {
+            .submit_trusted_trigger_fire(TrustedTriggerSubmitRequest::new(
                 fire,
-                content_ref,
-                received_at: now,
-            })
+                materialized_prompt,
+                now,
+            ))
             .await
         {
             Ok(TrustedTriggerFireSubmitOutcome::Accepted {
@@ -176,24 +176,6 @@ impl TriggerPollerWorker {
                     });
                 }
                 Ok(TriggerPollerFireOutcome::Replayed { original_run_id })
-            }
-            Ok(TrustedTriggerFireSubmitOutcome::RetryableFailed { reason }) => {
-                self.persist_failed_fire(
-                    record,
-                    fire_slot,
-                    FireFailureDisposition::Retryable,
-                    TriggerPollerFailureReason::from_trusted_submit_failure(reason),
-                )
-                .await
-            }
-            Ok(TrustedTriggerFireSubmitOutcome::PermanentFailed { reason }) => {
-                self.persist_failed_fire(
-                    record,
-                    fire_slot,
-                    FireFailureDisposition::PermanentReschedule(next_run_at),
-                    TriggerPollerFailureReason::from_trusted_submit_failure(reason),
-                )
-                .await
             }
             Err(error) => {
                 let classification = classify_failure(&error);

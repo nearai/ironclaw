@@ -99,6 +99,11 @@ mod tests {
             provider_user_id: sub.to_string(),
             email: email.map(str::to_string),
             email_verified: verified,
+            verified_emails: email
+                .filter(|_| verified)
+                .map(str::to_string)
+                .into_iter()
+                .collect(),
             display_name: None,
         }
     }

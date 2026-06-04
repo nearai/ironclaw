@@ -5,8 +5,8 @@ use ironclaw_host_api::{CapabilityId, ExtensionId, RuntimeKind};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    CapabilityActivityId, LoopExitId, LoopGateRef, LoopMessageRef, TurnCheckpointId, TurnId,
-    TurnRunId, TurnScope,
+    CapabilityActivityId, LoopExitId, LoopGateRef, LoopMessageRef, TurnActor, TurnCheckpointId,
+    TurnId, TurnRunId, TurnScope,
 };
 
 use super::host::{
@@ -21,6 +21,13 @@ use crate::{LoopCompletionKind, LoopFailureKind};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LoopHostMilestone {
     pub scope: TurnScope,
+    /// Canonical actor that owns the run this milestone belongs to. Carried
+    /// alongside `scope` (which is owner-agnostic) so live-progress
+    /// projection can be keyed to the per-run caller rather than a fixed
+    /// runtime owner. Optional and `#[serde(default)]` for wire-compat with
+    /// historical milestones and host paths that do not bind an actor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<TurnActor>,
     pub turn_id: TurnId,
     pub run_id: TurnRunId,
     pub loop_driver_id: LoopDriverId,
@@ -31,6 +38,7 @@ impl LoopHostMilestone {
     fn from_context(context: &LoopRunContext, kind: LoopHostMilestoneKind) -> Self {
         Self {
             scope: context.scope.clone(),
+            actor: context.actor.clone(),
             turn_id: context.turn_id,
             run_id: context.run_id,
             loop_driver_id: context.loop_driver_id.clone(),

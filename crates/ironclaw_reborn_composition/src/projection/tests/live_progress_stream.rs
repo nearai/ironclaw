@@ -58,6 +58,7 @@ async fn webui_event_stream_drains_live_reasoning_projection_from_update_source(
         .sink
         .publish_loop_milestone(LoopHostMilestone {
             scope: scope.clone(),
+            actor: None,
             turn_id: TurnId::new(),
             run_id: TurnRunId::new(),
             loop_driver_id: LoopDriverId::new("test_loop").unwrap(),
@@ -103,6 +104,7 @@ async fn webui_event_stream_preserves_live_reasoning_and_tool_start_order() {
     let activity_id = CapabilityActivityId::new();
     let milestone_base = || LoopHostMilestone {
         scope: scope.clone(),
+        actor: None,
         turn_id: TurnId::new(),
         run_id,
         loop_driver_id: LoopDriverId::new("test_loop").unwrap(),

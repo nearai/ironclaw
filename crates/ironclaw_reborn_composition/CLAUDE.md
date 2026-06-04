@@ -3,6 +3,7 @@
 - Own only top-level Reborn composition for production/app startup.
 - Expose facade-shaped handles only: `HostRuntime`, `TurnCoordinator`, product-auth `RebornProductAuthServices`, WebUI `RebornServicesApi`, readiness.
 - Keep lower substrate handles private to factories and owning crates.
+- Substrate handles MAY be exposed via `#[cfg(any(test, feature = "test-support"))]` pub accessors on `RebornRuntime` when downstream integration tests need to drive production-shape state the facade doesn't yet surface (e.g. seeding `TriggerRecord` rows, `pair_external_actor` calls). These seams ship zero bytes in production binaries. New test-support accessors must carry a doc-comment naming the production call site they mirror and an explicit note that the handle is for tests only.
 - Do not depend on the root `ironclaw` crate or `src/` modules.
 - Do not add legacy bridge modes here until an accepted migration contract exists.
 - Do not route live v1/product traffic here; callers must opt in through explicit Reborn adapters.
@@ -117,10 +118,10 @@ Inbound order (outer → inner → handler):
    `ConnectInfo<SocketAddr>`, never `X-Forwarded-For` / `X-Real-IP`.
    Composition fails closed if a future descriptor declares an unsupported
    scope.
-9. `webui_v2_router(WebUiV2State::new(bundle.api))` — the nine v2
+9. `webui_v2_router(WebUiV2State::new(bundle.api))` — the v2
    handlers from `ironclaw_webui_v2` (create-thread, list-threads,
    send-message, get-timeline, stream-events SSE, stream-events WS,
-   cancel-run, resolve-gate, setup-extension).
+   cancel-run, resolve-gate, setup-extension, list-automations).
 
 ### Product-auth routes
 
