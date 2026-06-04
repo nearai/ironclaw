@@ -261,6 +261,15 @@ registerPack("en", {
   "llm.testConnection": "Test connection",
   "llm.testing": "Testing...",
   "llm.use": "Use",
+  // Settings — LLM providers (progressive disclosure)
+  "llm.groupActive": "Active",
+  "llm.groupReady": "Ready to use",
+  "llm.groupSetup": "Needs setup",
+  "llm.expandDetails": "Show details",
+  "llm.collapseDetails": "Hide details",
+  "llm.missingApiKey": "Missing API key",
+  "llm.missingBaseUrl": "Missing base URL",
+  "llm.addApiKey": "Add API key",
 
   // Settings — inference groups
   "settings.group.embeddings": "Embeddings",

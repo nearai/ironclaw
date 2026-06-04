@@ -7,6 +7,30 @@ import { SettingsSearchEmpty } from "./settings-search-empty.js";
 import { ProviderCard } from "./provider-card.js";
 import { ProviderDialog } from "./provider-dialog.js";
 import { useProviderManagementActions } from "../hooks/useProviderManagementActions.js";
+import { groupProvidersByStatus } from "../lib/llm-providers.js";
+
+// Display order: Active first (one click away from "what's running"), then
+// Ready (one click to switch), then Setup (requires user action). Each entry
+// is rendered iff it has providers — empty groups don't pollute the UI.
+const GROUP_ORDER = [
+  { key: "active", labelKey: "llm.groupActive", dotClass: "bg-[var(--v2-positive-text)]" },
+  { key: "ready", labelKey: "llm.groupReady", dotClass: "bg-[var(--v2-accent)]" },
+  { key: "setup", labelKey: "llm.groupSetup", dotClass: "bg-[var(--v2-warning-text)]" },
+];
+
+function GroupHeader({ label, count, dotClass }) {
+  return html`
+    <div className="mb-2 mt-1 flex items-center gap-2 px-1">
+      <span className=${"h-1.5 w-1.5 rounded-full " + dotClass} />
+      <span className="font-mono text-[10.5px] uppercase tracking-[0.14em] text-[var(--v2-text-faint)]">
+        ${label}
+      </span>
+      <span className="font-mono text-[10.5px] text-[var(--v2-text-faint)]">·</span>
+      <span className="font-mono text-[10.5px] text-[var(--v2-text-faint)]">${count}</span>
+      <span className="ml-2 h-px flex-1 bg-[var(--v2-panel-border)]" />
+    </div>
+  `;
+}
 
 export function ProviderManagement({ settings, gatewayStatus, searchQuery = "" }) {
   const t = useT();
@@ -16,6 +40,15 @@ export function ProviderManagement({ settings, gatewayStatus, searchQuery = "" }
   if (searchQuery && actions.filteredProviders.length === 0) {
     return html`<${SettingsSearchEmpty} query=${searchQuery} />`;
   }
+
+  // Bucket the search-filtered list into Active / Ready / Setup. Filtering
+  // happens upstream so a search query still produces sensible groups even
+  // when some buckets are empty.
+  const groups = groupProvidersByStatus(
+    actions.filteredProviders,
+    state.builtinOverrides,
+    state.activeProviderId
+  );
 
   return html`
     <${Card} className="p-4 sm:p-6">
@@ -52,22 +85,38 @@ export function ProviderManagement({ settings, gatewayStatus, searchQuery = "" }
         : state.error
         ? html`<div className="text-sm text-red-200">${t("error.loadFailed", { what: t("llm.providers"), message: state.error.message })}</div>`
         : html`
-            <div className="space-y-3">
-              ${actions.filteredProviders.map(
-                (provider) => html`
-                  <${ProviderCard}
-                    key=${provider.id}
-                    provider=${provider}
-                    activeProviderId=${state.activeProviderId}
-                    selectedModel=${state.selectedModel}
-                    builtinOverrides=${state.builtinOverrides}
-                    isBusy=${state.isBusy}
-                    onUse=${actions.handleUse}
-                    onConfigure=${actions.openDialog}
-                    onDelete=${actions.handleDelete}
-                  />
-                `
-              )}
+            <div className="space-y-1">
+              ${GROUP_ORDER.flatMap((group) => {
+                const items = groups[group.key];
+                if (!items.length) return [];
+                return [
+                  html`<${GroupHeader}
+                    key=${"head-" + group.key}
+                    label=${t(group.labelKey)}
+                    count=${items.length}
+                    dotClass=${group.dotClass}
+                  />`,
+                  html`
+                    <div key=${"body-" + group.key} className="mb-3 space-y-2">
+                      ${items.map(
+                        (provider) => html`
+                          <${ProviderCard}
+                            key=${provider.id}
+                            provider=${provider}
+                            activeProviderId=${state.activeProviderId}
+                            selectedModel=${state.selectedModel}
+                            builtinOverrides=${state.builtinOverrides}
+                            isBusy=${state.isBusy}
+                            onUse=${actions.handleUse}
+                            onConfigure=${actions.openDialog}
+                            onDelete=${actions.handleDelete}
+                          />
+                        `
+                      )}
+                    </div>
+                  `,
+                ];
+              })}
             </div>
           `}
 
