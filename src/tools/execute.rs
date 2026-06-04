@@ -23,7 +23,7 @@ use ironclaw_safety::SafetyLayer;
 /// bound is generous relative to the realistic fan-out of concurrent subtasks
 /// under one parent job — exhausting it means sustained contention, not a
 /// transient race.
-const MAX_SEQUENCE_ALLOC_ATTEMPTS: u32 = 8;
+const MAX_SEQUENCE_ALLOC_ATTEMPTS: u32 = 32;
 
 /// True when a `DatabaseError` represents a unique/primary-key constraint
 /// violation, across both backends. PostgreSQL surfaces the typed driver error
