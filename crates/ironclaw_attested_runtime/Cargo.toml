@@ -13,6 +13,13 @@ publish = false
 [package.metadata.dist]
 dist = false
 
+[features]
+# Opt-in escape hatch for the `AlwaysTrustNearAccessKeyVerifier` stub, which
+# bypasses the on-chain NEAR access-key check. Compiled out of production builds
+# by default so the privilege-escalation stub cannot be wired by accident; only
+# single-user-trusted deployments that knowingly accept the risk enable it.
+unsafe-always-trust-near = []
+
 [dependencies]
 async-trait = "0.1"
 # Structured diagnostics for the broadcast-failure recovery path (a non-benign
@@ -38,6 +45,23 @@ ironclaw_host_api = { path = "../ironclaw_host_api" }
 alloy-consensus = "1"
 alloy-primitives = "1"
 alloy-eips = "1"
+# Trust-registration ceremony (#4052): typed error, domain-separated challenge
+# digest (keccak256), and constant-time challenge/evidence comparison. All
+# already in the workspace tree; the chain-specific signature crypto itself is
+# reused from ironclaw_wallet_external (no duplicated ecrecover/ed25519 here).
+thiserror = "2"
+sha3 = "0.10"
+subtle = "2"
+# Base58 decode for Solana account pubkeys: real wallets (Phantom/Solflare,
+# wallet-adapter standard) present their key as base58, which the ceremony
+# normalizes to canonical lowercase hex at the API boundary. Version matches the
+# root crate's pin; already in-tree via the Solana toolchain, so no new
+# transitive deps are introduced.
+bs58 = "0.5"
+# OS CSPRNG for the production NonceSource (challenge nonce entropy). getrandom
+# is already in the dependency closure (ed25519-dalek / k256 via rand_core);
+# pinning it directly only surfaces the OS-entropy call we need.
+getrandom = "0.2"
 
 [dev-dependencies]
 async-trait = "0.1"
@@ -49,8 +73,10 @@ ed25519-dalek = "2"
 # only to derive the EVM address from a fixed test private key, mirroring the
 # `ironclaw_chain_signing` custodial tests. `evm::signing_key_from_bytes` became
 # crate-private, so the test constructs the `SigningKey` directly. Adds no new
-# transitive deps to the workspace tree.
+# transitive deps to the workspace tree. sha3 for the EIP-191 digest in the
+# trust-registration tests (#4052).
 k256 = { version = "0.13", features = ["ecdsa"] }
+sha3 = "0.10"
 ironclaw_secrets = { path = "../ironclaw_secrets" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
 secrecy = "0.10"

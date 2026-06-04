@@ -60,7 +60,10 @@
 
 mod injected;
 mod near_redirect;
+mod verify;
 mod walletconnect;
+
+pub use verify::{verify_ed25519_signer_over_digest, verify_evm_signer_over_digest};
 
 pub use injected::{
     InjectedProofPayload, InjectedScheme, InjectedSigningProvider, decode_injected_proof,
