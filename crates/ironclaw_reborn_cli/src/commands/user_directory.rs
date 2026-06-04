@@ -142,17 +142,25 @@ impl UserDirectory for WebuiUserDirectory {
 mod tests {
     use super::*;
 
-    async fn directory(domains: &[&str]) -> WebuiUserDirectory {
+    // Open through the same composition facade production uses, so the CLI
+    // test needs no direct libSQL dependency. The opener's tenant only
+    // scopes legacy migration (a no-op on this fresh DB); each directory
+    // carries its own tenant for resolution.
+    async fn shared_resolver() -> Arc<dyn RebornIdentityResolver> {
         let tmp = tempfile::tempdir().expect("tempdir");
         // Leak the tempdir so the libSQL file outlives the test body.
         let path = tmp.keep().join("reborn-local-dev.db");
-        // Open through the same composition facade production uses, so the
-        // CLI test needs no direct libSQL dependency.
-        let resolver = ironclaw_reborn_composition::open_reborn_identity_resolver(&path)
-            .await
-            .expect("resolver");
+        ironclaw_reborn_composition::open_reborn_identity_resolver(
+            &path,
+            &TenantId::new("tenant-test").expect("tenant"),
+        )
+        .await
+        .expect("resolver")
+    }
+
+    async fn directory(domains: &[&str]) -> WebuiUserDirectory {
         WebuiUserDirectory::new(
-            resolver,
+            shared_resolver().await,
             TenantId::new("tenant-test").expect("tenant"),
             domains.iter().map(|d| d.to_string()).collect(),
         )
@@ -184,6 +192,41 @@ mod tests {
             .await
             .expect("an allowed verified domain must be admitted");
         assert!(!user.as_str().is_empty());
+    }
+
+    #[tokio::test]
+    async fn directory_forwards_its_tenant_to_the_resolver() {
+        // Two directories share ONE resolver but carry DIFFERENT tenants.
+        // The same provider + verified email resolved through each must
+        // yield DIFFERENT users — proving the adapter forwards its own
+        // tenant into ResolveExternalIdentity rather than hardcoding or
+        // dropping it (either of which would collapse both to one user).
+        let resolver = shared_resolver().await;
+        let dir_a = WebuiUserDirectory::new(
+            Arc::clone(&resolver),
+            TenantId::new("tenant-a").expect("tenant"),
+            vec!["example.com".to_string()],
+        );
+        let dir_b = WebuiUserDirectory::new(
+            resolver,
+            TenantId::new("tenant-b").expect("tenant"),
+            vec!["example.com".to_string()],
+        );
+
+        let in_a = dir_a
+            .resolve(&google(), &profile(Some("alice@example.com"), true))
+            .await
+            .expect("tenant-a admits the verified allowlisted email");
+        let in_b = dir_b
+            .resolve(&google(), &profile(Some("alice@example.com"), true))
+            .await
+            .expect("tenant-b admits the verified allowlisted email");
+
+        assert_ne!(
+            in_a.as_str(),
+            in_b.as_str(),
+            "the same identity under two directory tenants must resolve to two users"
+        );
     }
 
     #[tokio::test]

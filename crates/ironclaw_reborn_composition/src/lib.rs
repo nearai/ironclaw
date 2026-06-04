@@ -273,27 +273,33 @@ pub mod host_api {
     pub use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
 }
 
-/// Canonical Reborn identity resolver (issue #4381): the one boundary that
-/// maps every external identity — WebUI OAuth logins and external
-/// channel/product actors — to a stable `UserId` before runtime state is
-/// touched. Re-exported here so host wiring (`ironclaw-reborn serve`, the
-/// CLI `UserDirectory` adapter, product/channel actor resolution) depends
-/// only on the composition facade, never on `ironclaw_reborn_identity`
-/// directly.
+/// Canonical Reborn identity resolver vocabulary (issue #4381): the one
+/// boundary that maps every external identity — WebUI OAuth logins and
+/// external channel/product actors — to a stable `UserId` before runtime
+/// state is touched. Only the resolver trait, request, surface, and error
+/// types are re-exported so host wiring (`ironclaw-reborn serve`, the CLI
+/// `UserDirectory` adapter) depends on the facade vocabulary, never on
+/// `ironclaw_reborn_identity` directly. The concrete libSQL store and its
+/// persistence record types stay private to this composition layer
+/// (composition CLAUDE.md: "keep lower substrate handles private").
 #[cfg(feature = "webui-v2-beta")]
 pub use ironclaw_reborn_identity::{
-    ExternalIdentityRecord, RebornIdentityError, RebornIdentityResolver, RebornLibSqlIdentityStore,
-    ResolveExternalIdentity, SurfaceKind, UserRecord,
+    RebornIdentityError, RebornIdentityResolver, ResolveExternalIdentity, SurfaceKind,
 };
 
 /// Open the canonical Reborn identity resolver on the substrate DB at
-/// `path`, creating the parent directory and running its idempotent
-/// migrations. Keeps the libSQL handle private to the composition layer
+/// `path`, creating the parent directory and running its idempotent schema
+/// migrations. Also folds any legacy pre-#4381 WebUI `user_identities` rows
+/// (written by the old store into this same substrate DB) into the
+/// canonical store under `tenant_id`, so existing SSO users keep their
+/// `UserId` across upgrade rather than being re-minted. Returns a
+/// trait-object handle and keeps the concrete libSQL store private
 /// (composition CLAUDE.md: "keep lower substrate handles private").
 #[cfg(feature = "webui-v2-beta")]
 pub async fn open_reborn_identity_resolver(
     path: &std::path::Path,
-) -> Result<std::sync::Arc<RebornLibSqlIdentityStore>, RebornIdentityError> {
+    tenant_id: &ironclaw_host_api::TenantId,
+) -> Result<std::sync::Arc<dyn RebornIdentityResolver>, RebornIdentityError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|err| RebornIdentityError::Backend(err.to_string()))?;
@@ -304,9 +310,10 @@ pub async fn open_reborn_identity_resolver(
             .await
             .map_err(|err| RebornIdentityError::Backend(err.to_string()))?,
     );
-    Ok(std::sync::Arc::new(
-        RebornLibSqlIdentityStore::open(db).await?,
-    ))
+    let store = ironclaw_reborn_identity::RebornLibSqlIdentityStore::open(db).await?;
+    store.migrate_legacy_webui_identities(tenant_id).await?;
+    let resolver: std::sync::Arc<dyn RebornIdentityResolver> = std::sync::Arc::new(store);
+    Ok(resolver)
 }
 
 /// Reborn model purpose slot names exposed for diagnostic callers.

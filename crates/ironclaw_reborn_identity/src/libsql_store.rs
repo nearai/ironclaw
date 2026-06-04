@@ -17,12 +17,12 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{SecondsFormat, Utc};
-use ironclaw_host_api::UserId;
+use ironclaw_host_api::{TenantId, UserId};
 use uuid::Uuid;
 
 use crate::{
     ExternalIdentityKey, ExternalIdentityRecord, RebornIdentityError, RebornIdentityResolver,
-    ResolveExternalIdentity, UserRecord,
+    ResolveExternalIdentity, SurfaceKind, UserRecord,
 };
 
 /// libSQL-backed canonical identity store.
@@ -85,6 +85,46 @@ impl RebornLibSqlIdentityStore {
         .map_err(backend)?;
         Ok(())
     }
+
+    /// Fold legacy WebUI OAuth identities into the canonical store.
+    ///
+    /// The pre-#4381 WebUI store wrote `user_identities(provider,
+    /// provider_user_id, user_id, email, email_verified, created_at)` into
+    /// this same substrate DB, keyed only by `(provider, provider_user_id)`
+    /// — single-tenant, OAuth-only. This copies those rows into
+    /// `external_identities` under `tenant_id` as `oauth`-surface identities
+    /// (no provider instance; the legacy subject is the external subject),
+    /// reproducing the exact key the live OAuth path resolves with, so
+    /// existing SSO users keep their `UserId` across upgrade instead of
+    /// being re-minted into orphaned accounts. The shared `users` rows
+    /// already live in the same table, so no user copy is needed.
+    ///
+    /// Idempotent: `INSERT OR IGNORE` skips keys already present, and the
+    /// step is a no-op when the legacy table is absent (fresh installs).
+    /// Run once at startup, before accepting logins. Returns the number of
+    /// legacy identities folded in.
+    pub async fn migrate_legacy_webui_identities(
+        &self,
+        tenant_id: &TenantId,
+    ) -> Result<u64, RebornIdentityError> {
+        let conn = self.conn().await?;
+        if !legacy_user_identities_table_exists(&conn).await? {
+            return Ok(0);
+        }
+        // Bind the surface via `SurfaceKind::Oauth.as_str()` rather than a
+        // literal so the migrated key cannot drift from the live path's key.
+        conn.execute(
+            "INSERT OR IGNORE INTO external_identities \
+                 (tenant_id, surface_kind, provider_kind, provider_instance_id, \
+                  external_subject_id, user_id, email, email_verified, created_at) \
+             SELECT ?1, ?2, provider, '', provider_user_id, user_id, email, \
+                    email_verified, created_at \
+             FROM user_identities",
+            libsql::params![tenant_id.as_str(), SurfaceKind::Oauth.as_str()],
+        )
+        .await
+        .map_err(backend)
+    }
 }
 
 #[async_trait]
@@ -107,24 +147,40 @@ impl RebornIdentityResolver for RebornLibSqlIdentityStore {
         let instance = identity.provider_instance_id.unwrap_or("");
 
         let conn = self.conn().await?;
+
+        // Fast path: a returning external identity (the common case)
+        // resolves with a read-only query and never takes the IMMEDIATE
+        // write lock, so logins for already-provisioned users don't
+        // serialize behind a write transaction.
+        if let Some(user_id) = select_identity_user(
+            &conn,
+            tenant,
+            surface,
+            identity.provider_kind,
+            instance,
+            identity.external_subject_id,
+        )
+        .await?
+        {
+            return to_user_id(user_id);
+        }
+
         let tx = conn
             .transaction_with_behavior(libsql::TransactionBehavior::Immediate)
             .await
             .map_err(backend)?;
 
-        // 1. Known external identity → its existing user.
-        if let Some(user_id) = query_one_string(
+        // 1. Re-check the external identity key under the write lock: a
+        //    concurrent first-login for the same key may have inserted it
+        //    between the read above and acquiring the lock, so the create
+        //    path below must not race to a second user.
+        if let Some(user_id) = select_identity_user(
             &tx,
-            "SELECT user_id FROM external_identities \
-                 WHERE tenant_id = ?1 AND surface_kind = ?2 AND provider_kind = ?3 \
-                     AND provider_instance_id = ?4 AND external_subject_id = ?5",
-            libsql::params![
-                tenant,
-                surface,
-                identity.provider_kind,
-                instance,
-                identity.external_subject_id
-            ],
+            tenant,
+            surface,
+            identity.provider_kind,
+            instance,
+            identity.external_subject_id,
         )
         .await?
         {
@@ -166,8 +222,6 @@ impl RebornIdentityResolver for RebornLibSqlIdentityStore {
                 id: new_user_id.clone(),
                 email: identity.email.map(str::to_string),
                 display_name: identity.display_name.map(str::to_string),
-                status: "active".to_string(),
-                role: "member".to_string(),
                 created_at: now.clone(),
                 updated_at: now.clone(),
             },
@@ -190,18 +244,13 @@ impl RebornIdentityResolver for RebornLibSqlIdentityStore {
     ) -> Result<Option<UserId>, RebornIdentityError> {
         let instance = key.provider_instance_id.unwrap_or("");
         let conn = self.conn().await?;
-        match query_one_string(
+        match select_identity_user(
             &conn,
-            "SELECT user_id FROM external_identities \
-                 WHERE tenant_id = ?1 AND surface_kind = ?2 AND provider_kind = ?3 \
-                     AND provider_instance_id = ?4 AND external_subject_id = ?5",
-            libsql::params![
-                key.tenant_id.as_str(),
-                key.surface_kind.as_str(),
-                key.provider_kind,
-                instance,
-                key.external_subject_id
-            ],
+            key.tenant_id.as_str(),
+            key.surface_kind.as_str(),
+            key.provider_kind,
+            instance,
+            key.external_subject_id,
         )
         .await?
         {
@@ -279,6 +328,42 @@ fn to_user_id(raw: String) -> Result<UserId, RebornIdentityError> {
 }
 
 /// First column of the first row, as a `String`, if any.
+/// Whether the legacy pre-#4381 WebUI `user_identities` table is present in
+/// this substrate DB. Used to make legacy migration a no-op on fresh DBs.
+async fn legacy_user_identities_table_exists(
+    conn: &libsql::Connection,
+) -> Result<bool, RebornIdentityError> {
+    Ok(query_one_string(
+        conn,
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'user_identities'",
+        (),
+    )
+    .await?
+    .is_some())
+}
+
+/// Look up the user bound to an external-identity key. Shared by the
+/// `resolve_or_create` fast path, its in-transaction re-check, and
+/// `lookup`, so the keyed SELECT lives in exactly one place. Accepts a
+/// `&Connection` or (via deref) a `&Transaction`.
+async fn select_identity_user(
+    conn: &libsql::Connection,
+    tenant: &str,
+    surface: &str,
+    provider_kind: &str,
+    instance: &str,
+    subject: &str,
+) -> Result<Option<String>, RebornIdentityError> {
+    query_one_string(
+        conn,
+        "SELECT user_id FROM external_identities \
+             WHERE tenant_id = ?1 AND surface_kind = ?2 AND provider_kind = ?3 \
+                 AND provider_instance_id = ?4 AND external_subject_id = ?5",
+        libsql::params![tenant, surface, provider_kind, instance, subject],
+    )
+    .await
+}
+
 async fn query_one_string(
     conn: &libsql::Connection,
     sql: &str,
@@ -295,16 +380,16 @@ async fn insert_user(
     conn: &libsql::Connection,
     user: &UserRecord,
 ) -> Result<(), RebornIdentityError> {
+    // `status` / `role` are intentionally omitted; the `users` table fills
+    // them from its column DEFAULTs (`active` / `member`). See UserRecord.
     conn.execute(
         "INSERT INTO users \
-             (id, email, display_name, status, role, created_at, updated_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+             (id, email, display_name, created_at, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
         libsql::params![
             user.id.as_str(),
             text_or_null(user.email.as_deref()),
             text_or_null(user.display_name.as_deref()),
-            user.status.as_str(),
-            user.role.as_str(),
             user.created_at.as_str(),
             user.updated_at.as_str(),
         ],
@@ -453,6 +538,104 @@ mod tests {
             via_github.as_str(),
             "a verified shared email links both provider identities to one user"
         );
+    }
+
+    #[tokio::test]
+    async fn verified_email_link_is_case_insensitive() {
+        // Two providers assert the SAME verified email in DIFFERENT casing.
+        // Linking lowercases both the stored and the queried address, so
+        // they must still collapse to one user — regression guard for the
+        // cross-provider linking rule under mixed-case provider claims.
+        let store = store().await;
+        let t = tenant("t");
+        let via_google = store
+            .resolve_or_create(oauth(&t, "google", "g-1", Some("Alice@Example.COM"), true))
+            .await
+            .expect("resolve");
+        let via_github = store
+            .resolve_or_create(oauth(&t, "github", "gh-9", Some("alice@example.com"), true))
+            .await
+            .expect("resolve");
+        assert_eq!(
+            via_google.as_str(),
+            via_github.as_str(),
+            "verified-email linking must be case-insensitive across providers"
+        );
+    }
+
+    #[tokio::test]
+    async fn migrate_legacy_webui_identities_preserves_user_id_across_upgrade() {
+        // A pre-#4381 deployment has legacy `user_identities` rows in the
+        // shared substrate DB. After upgrade, migration must fold them into
+        // `external_identities` so the user's NEXT login resolves to their
+        // EXISTING UserId instead of minting a fresh, orphaned account.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.keep().join("reborn-local-dev.db");
+        let db = Arc::new(
+            libsql::Builder::new_local(&path)
+                .build()
+                .await
+                .expect("open libsql"),
+        );
+
+        // Seed the legacy WebUI identity exactly as the old store wrote it.
+        let seed = db.connect().expect("connect");
+        seed.execute_batch(
+            "CREATE TABLE user_identities (\
+                 provider TEXT NOT NULL, provider_user_id TEXT NOT NULL, \
+                 user_id TEXT NOT NULL, email TEXT, email_verified INTEGER NOT NULL, \
+                 created_at TEXT NOT NULL, \
+                 PRIMARY KEY (provider, provider_user_id));",
+        )
+        .await
+        .expect("seed legacy schema");
+        seed.execute(
+            "INSERT INTO user_identities \
+                 (provider, provider_user_id, user_id, email, email_verified, created_at) \
+                 VALUES ('google', 'g-legacy', 'legacy-user-7', 'legacy@x.com', 1, \
+                     '2026-01-01T00:00:00Z')",
+            (),
+        )
+        .await
+        .expect("seed legacy identity");
+
+        let store = RebornLibSqlIdentityStore::open(db)
+            .await
+            .expect("open store");
+        let t = tenant("t");
+        let migrated = store
+            .migrate_legacy_webui_identities(&t)
+            .await
+            .expect("migration runs");
+        assert_eq!(migrated, 1, "exactly one legacy identity is folded in");
+
+        let resolved = store
+            .resolve_or_create(oauth(&t, "google", "g-legacy", Some("legacy@x.com"), true))
+            .await
+            .expect("resolve");
+        assert_eq!(
+            resolved.as_str(),
+            "legacy-user-7",
+            "a returning legacy SSO user keeps their original UserId after upgrade"
+        );
+
+        let again = store
+            .migrate_legacy_webui_identities(&t)
+            .await
+            .expect("re-run");
+        assert_eq!(again, 0, "re-running the migration folds nothing new");
+    }
+
+    #[tokio::test]
+    async fn migrate_legacy_webui_identities_is_noop_without_legacy_table() {
+        // Fresh installs have no `user_identities` table; migration must be
+        // a clean no-op rather than erroring on the missing table.
+        let store = store().await;
+        let migrated = store
+            .migrate_legacy_webui_identities(&tenant("t"))
+            .await
+            .expect("no-op migration succeeds");
+        assert_eq!(migrated, 0);
     }
 
     #[tokio::test]

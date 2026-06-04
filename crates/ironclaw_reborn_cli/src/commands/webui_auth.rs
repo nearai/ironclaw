@@ -57,7 +57,7 @@ pub(crate) async fn build_webui_auth_surface(
     // facade (which keeps the libSQL substrate handle private). The host
     // `WebuiUserDirectory` adapter layers the fail-closed email-domain
     // admission allowlist on top before any user is created.
-    let identity_resolver = open_reborn_identity_resolver(user_store_path)
+    let identity_resolver = open_reborn_identity_resolver(user_store_path, &tenant_id)
         .await
         .context("failed to initialize the Reborn identity resolver")?;
 

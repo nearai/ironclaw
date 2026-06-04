@@ -97,13 +97,18 @@ pub struct ExternalIdentityKey<'a> {
 }
 
 /// A persisted canonical user.
+///
+/// `status` and `role` are intentionally absent: the store has no typed
+/// semantics for them yet, so the `users` table carries them as columns
+/// with DB-level defaults (`active` / `member`) rather than threading
+/// stringly-typed values through this record (see `.claude/rules/types.md`
+/// — fixed small sets must be enums, not strings). Reintroduce them as
+/// `UserStatus` / `UserRole` enums when a caller actually reads them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UserRecord {
     pub id: UserId,
     pub email: Option<String>,
     pub display_name: Option<String>,
-    pub status: String,
-    pub role: String,
     pub created_at: String,
     pub updated_at: String,
 }
