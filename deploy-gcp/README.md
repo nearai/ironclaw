@@ -16,7 +16,7 @@ All VMs have no public IP. Shell access is via IAP tunnel only.
 | **testnet** | `t3claw-testnet` | `https://t3claw-testnet.agent.prod.gc.terminal3.io` | `t3claw-testnet-env` | `:testnet` |
 
 - **staging** — auto-deploys on every push to the `staging` branch.
-- **testnet** — manually promoted from staging via the `testnet-gcp.yml` workflow. Stable snapshot of a known-good staging build.
+- **testnet** — auto-deploys on every push to the `testnet` branch.
 
 ---
 
@@ -55,7 +55,7 @@ SKIP_BUILD=1 bash deploy-gcp/gcp-provision.sh         # skip image build/push
 NETWORK=my-vpc bash deploy-gcp/gcp-provision.sh       # override VPC name
 ```
 
-For testnet, Phase 1 promotes `agent:latest` → `agent:testnet` instead of building from source.
+For testnet, Phase 1 builds and pushes images tagged `:testnet` (same Dockerfile targets as staging).
 
 ### Terminal B — bootstrap the VM (steps 1–3)
 
@@ -150,12 +150,9 @@ Expected: `{"status":"healthy","channel":"gateway"}`
 
 `.github/workflows/staging-gcp.yml` triggers on every push to `staging`. Builds and pushes both images to AR, then IAP-SSHes into the staging VM for a rolling update.
 
-### testnet — manual promote
+### testnet — auto-deploy on push
 
-`.github/workflows/testnet-gcp.yml` is triggered manually via **Actions → Deploy to GCP Testnet → Run workflow**.
-
-- **image_sha** (optional): git SHA whose AR image to promote. Leave blank to promote current `agent:latest`.
-- Promotes `agent:<sha>` → `agent:testnet` (and same for `t3n-mcp-sidecar`), then deploys to `t3claw-testnet`.
+`.github/workflows/testnet-gcp.yml` triggers on every push to `testnet`. Builds and pushes both images to AR, then IAP-SSHes into the testnet VM for a rolling update.
 
 ### One-time WIF setup
 
