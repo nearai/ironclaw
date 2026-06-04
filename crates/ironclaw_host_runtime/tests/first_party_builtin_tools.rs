@@ -35,7 +35,7 @@ use ironclaw_host_runtime::{
     SKILL_REMOVE_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID, SandboxCommandTransport, SurfaceKind,
     TIME_CAPABILITY_ID, TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID,
     TRIGGER_REMOVE_CAPABILITY_ID, TenantSandboxProcessPort, TriggerCreateHook,
-    VisibleCapabilityAccess, VisibleCapabilityRequest, WRITE_FILE_CAPABILITY_ID,
+    ToolCallHttpEgress, VisibleCapabilityAccess, VisibleCapabilityRequest, WRITE_FILE_CAPABILITY_ID,
     builtin_first_party_handlers, builtin_first_party_handlers_with_trigger_create_hook,
     builtin_first_party_package,
 };
@@ -2060,10 +2060,154 @@ async fn builtin_http_invokes_through_host_runtime_egress() {
     assert_eq!(request.method, NetworkMethod::Post);
     assert_eq!(request.url, "https://api.example.test/v1/items");
     assert_eq!(request.body, br#"{"ok":true}"#);
-    assert_eq!(request.response_body_limit, Some(10 * 1024 * 1024));
+    assert_eq!(request.response_body_limit, Some(4096));
     assert_eq!(request.save_body_to, None);
     assert_eq!(request.timeout_ms, Some(2500));
     assert!(request.credential_injections.is_empty());
+}
+
+#[tokio::test]
+async fn builtin_http_requires_tool_call_http_egress_for_inline_output() {
+    let egress = Arc::new(RecordingRuntimeHttpEgress::with_body(b"ok".to_vec()));
+    let runtime = runtime_with_strict_http_egress_only(Arc::clone(&egress));
+
+    let failure = invoke_with_context(
+        &runtime,
+        HTTP_CAPABILITY_ID,
+        json!({
+            "url": "https://api.example.test/v1/items"
+        }),
+        execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy()),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(failure, RuntimeFailureKind::Backend);
+    assert!(egress.requests().is_empty());
+}
+
+#[tokio::test]
+async fn builtin_http_preserves_exact_body_cap_for_text_responses() {
+    let egress = Arc::new(RecordingRuntimeHttpEgress::with_body(vec![b'a'; 4096]));
+    let runtime = runtime_with_http_egress(Arc::clone(&egress));
+
+    let output = invoke_with_context(
+        &runtime,
+        HTTP_CAPABILITY_ID,
+        json!({
+            "url": "https://api.example.test/v1/items",
+            "response_body_limit": 4096
+        }),
+        execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy()),
+    )
+    .await
+    .unwrap();
+
+    let body_text = output["body_text"].as_str().expect("text response");
+    assert_eq!(body_text.len(), 4096);
+    assert_eq!(output.get("body_truncated"), None);
+    assert!(output.get("body_base64").is_none());
+    assert!(serialized_json_len(&output) <= 6_000);
+}
+
+#[tokio::test]
+async fn builtin_http_truncates_one_byte_over_text_responses_with_a_hint() {
+    let egress = Arc::new(RecordingRuntimeHttpEgress::with_body(vec![b'a'; 4097]));
+    let runtime = runtime_with_http_egress(Arc::clone(&egress));
+
+    let output = invoke_with_context(
+        &runtime,
+        HTTP_CAPABILITY_ID,
+        json!({
+            "url": "https://api.example.test/v1/items",
+            "response_body_limit": 4096
+        }),
+        execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy()),
+    )
+    .await
+    .unwrap();
+
+    let body_text = output["body_text"].as_str().expect("text response");
+    assert_eq!(body_text.len(), 4096);
+    assert_eq!(output["body_truncated"], json!(true));
+    assert_eq!(output["truncation"]["body"], json!(true));
+    assert_eq!(output["truncation"]["headers"], json!(false));
+    assert_eq!(output["truncation"]["bytes_returned"], json!(4096));
+    assert_eq!(
+        output["truncation"]["reason"],
+        json!("model_visible_budget")
+    );
+    assert!(
+        output["body_truncation_hint"]
+            .as_str()
+            .expect("hint")
+            .contains("builtin.http.save")
+    );
+    assert!(output.get("body_base64").is_none());
+    assert!(serialized_json_len(&output) <= 6_000);
+}
+
+#[tokio::test]
+async fn builtin_http_default_large_response_result_stays_under_documented_cap() {
+    let egress = Arc::new(RecordingRuntimeHttpEgress::with_body(vec![
+        b'a';
+        1024 * 1024
+    ]));
+    let runtime = runtime_with_http_egress(Arc::clone(&egress));
+
+    let output = invoke_with_context(
+        &runtime,
+        HTTP_CAPABILITY_ID,
+        json!({
+            "url": "https://api.example.test/large-page"
+        }),
+        execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy()),
+    )
+    .await
+    .unwrap();
+
+    let body_text = output["body_text"].as_str().expect("text response");
+    assert_eq!(body_text.len(), 48 * 1024);
+    assert_eq!(output["body_truncated"], json!(true));
+    assert!(
+        output["body_truncation_hint"]
+            .as_str()
+            .expect("hint")
+            .contains("builtin.http.save")
+    );
+    assert!(serialized_json_len(&output) <= 50 * 1024);
+
+    let requests = egress.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].response_body_limit, Some(48 * 1024));
+}
+
+#[tokio::test]
+async fn builtin_http_truncates_escaped_text_to_serialized_body_budget() {
+    let egress = Arc::new(RecordingRuntimeHttpEgress::with_body(
+        "\n".repeat(4096).into_bytes(),
+    ));
+    let runtime = runtime_with_http_egress(Arc::clone(&egress));
+
+    let output = invoke_with_context(
+        &runtime,
+        HTTP_CAPABILITY_ID,
+        json!({
+            "url": "https://api.example.test/escaped",
+            "response_body_limit": 4096
+        }),
+        execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy()),
+    )
+    .await
+    .unwrap();
+
+    let body_text = output["body_text"].as_str().expect("text response");
+    let serialized_body = serde_json::to_string(body_text).unwrap();
+    assert!(serialized_body.len().saturating_sub(2) <= 4096);
+    assert_eq!(body_text.len(), 2048);
+    assert_eq!(output["body_bytes_returned"], json!(2048));
+    assert_eq!(output["body_truncated"], json!(true));
+    assert_eq!(output["truncation"]["bytes_returned"], json!(2048));
 }
 
 #[tokio::test]
@@ -2114,6 +2258,7 @@ async fn builtin_http_save_passes_save_to_and_returns_saved_body_metadata() {
 
     let requests = egress.requests();
     assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].response_body_limit, Some(10 * 1024 * 1024));
     let save_target = requests[0]
         .save_body_to
         .as_ref()
@@ -2132,6 +2277,292 @@ async fn builtin_http_save_passes_save_to_and_returns_saved_body_metadata() {
         VirtualPath::new("/projects/workspace/response.json").unwrap()
     );
     assert!(grant.permissions.write);
+}
+
+#[tokio::test]
+async fn builtin_http_save_returns_saved_body_for_large_responses_without_inline_body() {
+    let egress = Arc::new(
+        RecordingRuntimeHttpEgress::with_body(vec![b'a'; 12 * 1024])
+            .with_saved_body("/workspace/large-response.json", 12 * 1024),
+    );
+    let runtime = runtime_with_http_egress(Arc::clone(&egress));
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/workspace").unwrap(),
+        VirtualPath::new("/projects/workspace").unwrap(),
+        MountPermissions::read_write(),
+    )])
+    .unwrap();
+
+    let output = invoke_with_context(
+        &runtime,
+        HTTP_SAVE_CAPABILITY_ID,
+        json!({
+            "url": "https://api.example.test/v1/items",
+            "save_to": "/workspace/large-response.json",
+            "response_body_limit": 4096
+        }),
+        execution_context_with_mounts_and_network(
+            [HTTP_SAVE_CAPABILITY_ID],
+            mounts,
+            http_test_policy(),
+        ),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        output["saved_body"],
+        json!({
+            "path": "/workspace/large-response.json",
+            "bytes_written": 12 * 1024
+        })
+    );
+    assert!(output.get("body_text").is_none());
+    assert!(output.get("body_base64").is_none());
+    assert!(serialized_json_len(&output) <= 2_000);
+
+    let requests = egress.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].response_body_limit, Some(10 * 1024 * 1024));
+}
+
+#[tokio::test]
+async fn builtin_http_save_uses_strict_host_egress_when_tool_call_port_exists() {
+    let strict_egress = Arc::new(
+        RecordingRuntimeHttpEgress::with_body(vec![b'a'; 12 * 1024])
+            .with_saved_body("/workspace/strict-save.json", 12 * 1024),
+    );
+    let runtime = HostRuntimeServices::new(
+        Arc::new(registry()),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ironclaw_processes::ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_first_party_capabilities(Arc::new(
+        builtin_first_party_handlers(Arc::new(InMemoryTriggerRepository::default())).unwrap(),
+    ))
+    .with_runtime_http_egress(Arc::clone(&strict_egress))
+    .with_tool_call_http_egress(Arc::new(PanickingToolCallHttpEgress))
+    .with_trust_policy(Arc::new(trust_policy()))
+    .host_runtime_for_local_testing();
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/workspace").unwrap(),
+        VirtualPath::new("/projects/workspace").unwrap(),
+        MountPermissions::read_write(),
+    )])
+    .unwrap();
+
+    let output = invoke_with_context(
+        &runtime,
+        HTTP_SAVE_CAPABILITY_ID,
+        json!({
+            "url": "https://api.example.test/v1/items",
+            "save_to": "/workspace/strict-save.json",
+            "response_body_limit": 4096
+        }),
+        execution_context_with_mounts_and_network(
+            [HTTP_SAVE_CAPABILITY_ID],
+            mounts,
+            http_test_policy(),
+        ),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        output["saved_body"],
+        json!({
+            "path": "/workspace/strict-save.json",
+            "bytes_written": 12 * 1024
+        })
+    );
+    let requests = strict_egress.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].response_body_limit, Some(10 * 1024 * 1024));
+}
+
+#[tokio::test]
+async fn builtin_http_does_not_inline_huge_binary_payloads() {
+    let egress = Arc::new(RecordingRuntimeHttpEgress::with_body(vec![0xFF; 8 * 1024]));
+    let runtime = runtime_with_http_egress(Arc::clone(&egress));
+
+    let output = invoke_with_context(
+        &runtime,
+        HTTP_CAPABILITY_ID,
+        json!({
+            "url": "https://api.example.test/v1/items",
+            "response_body_limit": 4096
+        }),
+        execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy()),
+    )
+    .await
+    .unwrap();
+
+    let body_base64 = output["body_base64"].as_str().expect("binary response");
+    assert_eq!(output["body_truncated"], json!(true));
+    assert!(body_base64.len() <= 4096);
+    assert_eq!(output["body_bytes_returned"], json!(3072));
+    assert_eq!(output["truncation"]["body"], json!(true));
+    assert_eq!(output["truncation"]["bytes_returned"], json!(3072));
+    assert!(
+        output["body_truncation_hint"]
+            .as_str()
+            .expect("hint")
+            .contains("builtin.http.save")
+    );
+    assert!(output.get("body_text").is_none());
+    assert!(serialized_json_len(&output) <= 6_000);
+}
+
+#[tokio::test]
+async fn builtin_http_truncates_overlong_response_headers_to_model_visible_budget() {
+    let mut headers = vec![(format!("x-{}", "n".repeat(200)), "\n".repeat(2 * 1024))];
+    for index in 0..40 {
+        headers.push((format!("x-extra-{index}"), "ok".to_string()));
+    }
+    let egress =
+        Arc::new(RecordingRuntimeHttpEgress::with_body(b"ok".to_vec()).with_headers(headers));
+    let runtime = runtime_with_http_egress(Arc::clone(&egress));
+
+    let output = invoke_with_context(
+        &runtime,
+        HTTP_CAPABILITY_ID,
+        json!({
+            "url": "https://api.example.test/v1/items",
+            "response_body_limit": 4096
+        }),
+        execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy()),
+    )
+    .await
+    .unwrap();
+
+    let headers = output["headers"].as_array().expect("headers array");
+    assert!(headers.len() < 32);
+    assert_eq!(output["headers_truncated"], json!(true));
+    assert_eq!(output["truncation"]["headers"], json!(true));
+    assert_eq!(output["truncation"]["body"], json!(false));
+    assert_eq!(headers[0]["name"].as_str().unwrap().len(), 128);
+    let header_value = headers[0]["value"].as_str().unwrap();
+    assert_eq!(header_value.len(), 512);
+    assert!(
+        serde_json::to_string(header_value)
+            .unwrap()
+            .len()
+            .saturating_sub(2)
+            <= 1024
+    );
+    assert_eq!(headers[0]["truncated"], json!(true));
+    assert!(serialized_json_len(&output["headers"]) <= 2 * 1024);
+}
+
+#[tokio::test]
+async fn builtin_http_reports_body_and_header_truncation_together() {
+    let mut headers = vec![(format!("x-{}", "n".repeat(200)), "\n".repeat(2 * 1024))];
+    for index in 0..40 {
+        headers.push((format!("x-extra-{index}"), "ok".to_string()));
+    }
+    let egress = Arc::new(
+        RecordingRuntimeHttpEgress::with_body(vec![b'a'; 1024 * 1024]).with_headers(headers),
+    );
+    let runtime = runtime_with_http_egress(Arc::clone(&egress));
+
+    let output = invoke_with_context(
+        &runtime,
+        HTTP_CAPABILITY_ID,
+        json!({
+            "url": "https://api.example.test/large-page"
+        }),
+        execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy()),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(output["headers_truncated"], json!(true));
+    assert_eq!(output["body_truncated"], json!(true));
+    assert_eq!(output["truncation"]["headers"], json!(true));
+    assert_eq!(output["truncation"]["body"], json!(true));
+    assert!(
+        output["truncation"]["bytes_returned"]
+            .as_u64()
+            .expect("bytes returned")
+            < 48 * 1024
+    );
+    assert!(output["headers"][0]["truncated"].as_bool().unwrap());
+    assert!(serialized_json_len(&output) <= 50 * 1024);
+}
+
+#[tokio::test]
+async fn builtin_http_keeps_sensitive_material_out_of_sanitized_output() {
+    let egress = Arc::new(
+        RecordingRuntimeHttpEgress::with_status_and_body(200, b"sanitized response body".to_vec())
+            .with_headers(vec![
+                (
+                    "content-type".to_string(),
+                    "text/plain; charset=utf-8".to_string(),
+                ),
+                ("x-request-id".to_string(), "sanitized-request".to_string()),
+            ])
+            .with_redaction_applied(true),
+    );
+    let runtime = runtime_with_http_egress(Arc::clone(&egress));
+
+    let output = invoke_with_context(
+        &runtime,
+        HTTP_CAPABILITY_ID,
+        json!({
+            "url": "https://api.example.test/v1/items",
+            "headers": {
+                "authorization": "Bearer sk-provider-secret",
+                "x-debug-token": "RAW_SECRET"
+            },
+            "body": {
+                "token": "RAW_SECRET"
+            },
+            "response_body_limit": 4096
+        }),
+        execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy()),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(output["redaction_applied"], json!(true));
+    assert_eq!(output["headers"][0]["name"], json!("content-type"));
+    assert_eq!(output["headers"][1]["value"], json!("sanitized-request"));
+
+    let serialized = serde_json::to_string(&output).unwrap();
+    assert!(!serialized.contains("sk-provider-secret"));
+    assert!(!serialized.contains("RAW_SECRET"));
+    assert!(serialized.contains("sanitized response body"));
+}
+
+#[tokio::test]
+async fn builtin_http_does_not_report_redaction_as_truncation() {
+    let egress = Arc::new(
+        RecordingRuntimeHttpEgress::with_body(b"sanitized".to_vec())
+            .with_redaction_applied(true)
+            .with_response_bytes(1024),
+    );
+    let runtime = runtime_with_http_egress(Arc::clone(&egress));
+
+    let output = invoke_with_context(
+        &runtime,
+        HTTP_CAPABILITY_ID,
+        json!({
+            "url": "https://api.example.test/v1/items",
+            "response_body_limit": 4096
+        }),
+        execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy()),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(output["redaction_applied"], json!(true));
+    assert_eq!(output["body_text"], json!("sanitized"));
+    assert!(output.get("body_truncated").is_none());
+    assert!(output.get("body_bytes_returned").is_none());
+    assert!(output.get("truncation").is_none());
 }
 
 #[tokio::test]
@@ -3701,7 +4132,7 @@ async fn builtin_http_rejects_request_bodies_over_network_egress_cap() {
 }
 
 #[tokio::test]
-async fn builtin_http_accounts_request_bytes_when_output_is_too_large() {
+async fn builtin_http_accounts_request_bytes_when_large_output_is_truncated() {
     let egress = Arc::new(RecordingRuntimeHttpEgress::with_body(vec![
         b'\\';
         8 * 1024 * 1024
@@ -3709,7 +4140,7 @@ async fn builtin_http_accounts_request_bytes_when_output_is_too_large() {
     let governor = Arc::new(InMemoryResourceGovernor::new());
     let runtime = runtime_with_http_egress_and_governor(Arc::clone(&egress), Arc::clone(&governor));
 
-    let error = invoke_with_context(
+    let output = invoke_with_context(
         &runtime,
         HTTP_CAPABILITY_ID,
         json!({
@@ -3721,9 +4152,12 @@ async fn builtin_http_accounts_request_bytes_when_output_is_too_large() {
         execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy()),
     )
     .await
-    .unwrap_err();
+    .unwrap();
 
-    assert_eq!(error, RuntimeFailureKind::OutputTooLarge);
+    let body_text = output["body_text"].as_str().expect("text response");
+    assert_eq!(body_text.len(), 5 * 1024 * 1024);
+    assert_eq!(output["body_bytes_returned"], json!(5 * 1024 * 1024));
+    assert_eq!(output["body_truncated"], json!(true));
     let tenant_account = ResourceAccount::tenant(TenantId::new(LOCAL_DEFAULT_TENANT_ID).unwrap());
     assert_eq!(governor.usage_for(&tenant_account).network_egress_bytes, 4);
 }
@@ -3953,6 +4387,50 @@ async fn builtin_http_exercises_real_policy_private_ip_rejection() {
 
     assert_eq!(error, RuntimeFailureKind::PolicyDenied);
     assert!(requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn builtin_http_uses_tool_call_port_for_model_visible_partial_response() {
+    let transport = RecordingTransport::err(NetworkHttpError::ResponseBodyLimit {
+        limit: 4,
+        request_bytes: 0,
+        response_bytes: 5,
+        partial_response: Some(NetworkHttpResponse {
+            status: 200,
+            headers: vec![("content-type".to_string(), "text/plain".to_string())],
+            body: b"abcd".to_vec(),
+            usage: NetworkUsage {
+                request_bytes: 0,
+                response_bytes: 5,
+                resolved_ip: None,
+            },
+        }),
+    });
+    let requests = transport.requests.clone();
+    let network = PolicyNetworkHttpEgress::new_with_resolver(
+        transport,
+        StaticResolver::new(vec![IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))]),
+    );
+    let runtime = runtime_with_host_http_egress(network);
+
+    let output = invoke_with_context(
+        &runtime,
+        HTTP_CAPABILITY_ID,
+        json!({
+            "url": "https://api.example.test/v1/items",
+            "response_body_limit": 4
+        }),
+        execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy()),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(output["status"], json!(200));
+    assert_eq!(output["body_text"], json!("abcd"));
+    assert_eq!(output["body_truncated"], json!(true));
+    assert_eq!(output["truncation"]["body"], json!(true));
+    assert_eq!(output["response_bytes"], json!(5));
+    assert_eq!(requests.lock().unwrap().len(), 1);
 }
 
 #[tokio::test]
@@ -5867,7 +6345,7 @@ fn hosted_dev_policy() -> EffectiveRuntimePolicy {
 
 fn runtime_with_http_egress<T>(egress: Arc<T>) -> impl HostRuntime
 where
-    T: RuntimeHttpEgress + 'static,
+    T: RuntimeHttpEgress + ToolCallHttpEgress + 'static,
 {
     runtime_with_http_egress_and_governor(egress, Arc::new(InMemoryResourceGovernor::new()))
 }
@@ -5877,7 +6355,7 @@ fn runtime_with_http_egress_and_policy<T>(
     policy: EffectiveRuntimePolicy,
 ) -> impl HostRuntime
 where
-    T: RuntimeHttpEgress + 'static,
+    T: RuntimeHttpEgress + ToolCallHttpEgress + 'static,
 {
     HostRuntimeServices::new(
         Arc::new(registry()),
@@ -5890,7 +6368,8 @@ where
     .with_first_party_capabilities(Arc::new(
         builtin_first_party_handlers(Arc::new(InMemoryTriggerRepository::default())).unwrap(),
     ))
-    .with_runtime_http_egress(egress)
+    .with_runtime_http_egress(Arc::clone(&egress))
+    .with_tool_call_http_egress(egress)
     .with_trust_policy(Arc::new(trust_policy()))
     .with_runtime_policy(policy)
     .host_runtime_for_local_testing()
@@ -5901,12 +6380,33 @@ fn runtime_with_http_egress_and_governor<T>(
     governor: Arc<InMemoryResourceGovernor>,
 ) -> impl HostRuntime
 where
-    T: RuntimeHttpEgress + 'static,
+    T: RuntimeHttpEgress + ToolCallHttpEgress + 'static,
 {
     HostRuntimeServices::new(
         Arc::new(registry()),
         Arc::new(LocalFilesystem::new()),
         governor,
+        Arc::new(GrantAuthorizer::new()),
+        ironclaw_processes::ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_first_party_capabilities(Arc::new(
+        builtin_first_party_handlers(Arc::new(InMemoryTriggerRepository::default())).unwrap(),
+    ))
+    .with_runtime_http_egress(Arc::clone(&egress))
+    .with_tool_call_http_egress(egress)
+    .with_trust_policy(Arc::new(trust_policy()))
+    .host_runtime_for_local_testing()
+}
+
+fn runtime_with_strict_http_egress_only<T>(egress: Arc<T>) -> impl HostRuntime
+where
+    T: RuntimeHttpEgress + 'static,
+{
+    HostRuntimeServices::new(
+        Arc::new(registry()),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ironclaw_processes::ProcessServices::in_memory(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
@@ -6150,6 +6650,9 @@ struct RecordingRuntimeHttpEgress {
     saved_body: Option<RuntimeHttpSavedBody>,
     error: Option<RuntimeHttpEgressError>,
     responses: Option<BTreeMap<String, (u16, Vec<u8>)>>,
+    headers: Option<Vec<(String, String)>>,
+    redaction_applied: bool,
+    response_bytes_override: Option<u64>,
 }
 
 impl RecordingRuntimeHttpEgress {
@@ -6161,6 +6664,9 @@ impl RecordingRuntimeHttpEgress {
             saved_body: None,
             error: None,
             responses: None,
+            headers: None,
+            redaction_applied: false,
+            response_bytes_override: None,
         }
     }
 
@@ -6172,6 +6678,9 @@ impl RecordingRuntimeHttpEgress {
             saved_body: None,
             error: None,
             responses: None,
+            headers: None,
+            redaction_applied: false,
+            response_bytes_override: None,
         }
     }
 
@@ -6183,6 +6692,9 @@ impl RecordingRuntimeHttpEgress {
             saved_body: None,
             error: Some(error),
             responses: None,
+            headers: None,
+            redaction_applied: false,
+            response_bytes_override: None,
         }
     }
 
@@ -6194,6 +6706,21 @@ impl RecordingRuntimeHttpEgress {
         self
     }
 
+    fn with_headers(mut self, headers: Vec<(String, String)>) -> Self {
+        self.headers = Some(headers);
+        self
+    }
+
+    fn with_redaction_applied(mut self, redaction_applied: bool) -> Self {
+        self.redaction_applied = redaction_applied;
+        self
+    }
+
+    fn with_response_bytes(mut self, response_bytes: u64) -> Self {
+        self.response_bytes_override = Some(response_bytes);
+        self
+    }
+
     fn with_url_bodies(responses: BTreeMap<String, (u16, Vec<u8>)>) -> Self {
         Self {
             requests: Arc::new(std::sync::Mutex::new(Vec::new())),
@@ -6202,6 +6729,9 @@ impl RecordingRuntimeHttpEgress {
             saved_body: None,
             error: None,
             responses: Some(responses),
+            headers: None,
+            redaction_applied: false,
+            response_bytes_override: None,
         }
     }
 
@@ -6232,14 +6762,30 @@ impl RuntimeHttpEgress for RecordingRuntimeHttpEgress {
             });
         Ok(RuntimeHttpEgressResponse {
             status,
-            headers: vec![("content-type".to_string(), "application/json".to_string())],
+            headers: self.headers.clone().unwrap_or_else(|| {
+                vec![("content-type".to_string(), "application/json".to_string())]
+            }),
             body: body.clone(),
             saved_body: self.saved_body.clone(),
             request_bytes: request.body.len() as u64,
-            response_bytes: body.len() as u64,
-            redaction_applied: false,
+            response_bytes: self.response_bytes_override.unwrap_or(body.len() as u64),
+            redaction_applied: self.redaction_applied,
         })
     }
+}
+
+#[async_trait::async_trait]
+impl ToolCallHttpEgress for RecordingRuntimeHttpEgress {
+    async fn execute_for_model_visible_output(
+        &self,
+        request: RuntimeHttpEgressRequest,
+    ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
+        self.execute(request).await
+    }
+}
+
+fn serialized_json_len(value: &Value) -> usize {
+    serde_json::to_vec(value).unwrap().len()
 }
 
 #[derive(Debug, Clone)]
@@ -6272,6 +6818,16 @@ impl RuntimeHttpEgress for SleepingRuntimeHttpEgress {
     }
 }
 
+#[async_trait::async_trait]
+impl ToolCallHttpEgress for SleepingRuntimeHttpEgress {
+    async fn execute_for_model_visible_output(
+        &self,
+        request: RuntimeHttpEgressRequest,
+    ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
+        self.execute(request).await
+    }
+}
+
 #[derive(Debug, Clone)]
 struct PanickingRuntimeHttpEgress;
 
@@ -6285,6 +6841,29 @@ impl RuntimeHttpEgress for PanickingRuntimeHttpEgress {
     }
 }
 
+#[async_trait::async_trait]
+impl ToolCallHttpEgress for PanickingRuntimeHttpEgress {
+    async fn execute_for_model_visible_output(
+        &self,
+        request: RuntimeHttpEgressRequest,
+    ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
+        self.execute(request).await
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PanickingToolCallHttpEgress;
+
+#[async_trait::async_trait]
+impl ToolCallHttpEgress for PanickingToolCallHttpEgress {
+    async fn execute_for_model_visible_output(
+        &self,
+        _request: RuntimeHttpEgressRequest,
+    ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
+        panic!("tool-call HTTP egress must not be used")
+    }
+}
+
 #[derive(Debug, Clone)]
 struct RecordingTransport {
     response: Result<NetworkHttpResponse, NetworkHttpError>,
@@ -6295,6 +6874,13 @@ impl RecordingTransport {
     fn ok(response: NetworkHttpResponse) -> Self {
         Self {
             response: Ok(response),
+            requests: Arc::new(std::sync::Mutex::new(Vec::new())),
+        }
+    }
+
+    fn err(error: NetworkHttpError) -> Self {
+        Self {
+            response: Err(error),
             requests: Arc::new(std::sync::Mutex::new(Vec::new())),
         }
     }

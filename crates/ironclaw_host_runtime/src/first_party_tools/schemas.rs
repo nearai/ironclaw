@@ -372,13 +372,7 @@ fn http_schema(require_save_to: bool) -> Value {
             "type": ["string", "object", "array", "number", "boolean", "null"]
         },
         "body_base64": { "type": "string", "description": "Base64-encoded request body" },
-        "response_body_limit": {
-            "type": "integer",
-            "minimum": 1,
-            "maximum": 10485760,
-            "default": 10485760,
-            "description": "Maximum response body bytes. Defaults to 10 MiB; smaller values are raised to 10 MiB."
-        },
+        "response_body_limit": response_body_limit_schema(require_save_to),
         "timeout_ms": {
             "type": "integer",
             "minimum": 1,
@@ -391,7 +385,7 @@ fn http_schema(require_save_to: bool) -> Value {
     if require_save_to {
         properties["save_to"] = json!({
             "type": "string",
-            "description": "Scoped path to save the sanitized response body, e.g. /workspace/response.json"
+            "description": "Scoped path to save the sanitized response body for builtin.http.save instead of inlining body data, e.g. /workspace/response.json"
         });
         required.push("save_to");
     }
@@ -401,5 +395,21 @@ fn http_schema(require_save_to: bool) -> Value {
         "properties": properties,
         "required": required,
         "additionalProperties": false
+    })
+}
+
+fn response_body_limit_schema(require_save_to: bool) -> Value {
+    let default = if require_save_to { 10_485_760 } else { 49_152 };
+    let description = if require_save_to {
+        "Maximum sanitized response body bytes to fetch and save. Defaults to 10 MiB; smaller values are honored."
+    } else {
+        "Maximum inline response body bytes exposed to the model. Defaults to a small model-visible budget; smaller values are honored, and oversized bodies are truncated or summarized with guidance to use builtin.http.save."
+    };
+    json!({
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 10485760,
+        "default": default,
+        "description": description
     })
 }

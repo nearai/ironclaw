@@ -82,12 +82,13 @@ use crate::{
     FirstPartyCapabilityRegistry, FirstPartyCapabilityRequest, HostRuntimeError,
     InvocationServicesResolutionRequest, InvocationServicesResolver, LocalHostProcessPort,
     LocalInvocationServicesResolver, PlannerError, ProcessObligationLifecycleStore,
-    RuntimeBackendHealth, RuntimeProcessPort, TenantSandboxProcessPort, TurnRunExecutor,
-    TurnRunScheduler, TurnRunSchedulerConfig, plan_capability,
+    RuntimeBackendHealth, RuntimeProcessPort, TenantSandboxProcessPort, ToolCallHttpEgress,
+    TurnRunExecutor, TurnRunScheduler, TurnRunSchedulerConfig, plan_capability,
 };
 use process_executor::{HostProcessExecutor, RuntimeDispatchProcessExecutor};
 
 type SharedRuntimeHttpEgress = Arc<Mutex<Option<Arc<dyn RuntimeHttpEgress>>>>;
+type SharedToolCallHttpEgress = Arc<Mutex<Option<Arc<dyn ToolCallHttpEgress>>>>;
 
 mod builder;
 mod production_services;
@@ -144,6 +145,7 @@ where
     secret_injection_store: Arc<RuntimeSecretInjectionStore>,
     process_lifecycle_store: Arc<ProcessObligationLifecycleStore>,
     runtime_http_egress: SharedRuntimeHttpEgress,
+    tool_call_http_egress: SharedToolCallHttpEgress,
     process_port: Arc<dyn RuntimeProcessPort>,
     managed_process_port: bool,
     tenant_sandbox_process_port: Option<Arc<dyn RuntimeProcessPort>>,
@@ -314,6 +316,7 @@ where
             secret_injection_store,
             process_lifecycle_store,
             runtime_http_egress: Arc::new(Mutex::new(None)),
+            tool_call_http_egress: Arc::new(Mutex::new(None)),
             process_port: Arc::new(LocalHostProcessPort::new()),
             managed_process_port: true,
             tenant_sandbox_process_port: None,
@@ -380,7 +383,8 @@ where
             runtime_http_egress(&self.runtime_http_egress),
             Arc::clone(&self.process_port),
             self.secret_store.clone(),
-        );
+        )
+        .with_tool_call_http_egress(tool_call_http_egress(&self.tool_call_http_egress));
         if let Some(audit_sink) = &self.audit_sink {
             invocation_services_resolver =
                 invocation_services_resolver.with_audit_sink(Arc::clone(audit_sink));
@@ -672,7 +676,28 @@ fn set_runtime_http_egress(
     }
 }
 
+fn set_tool_call_http_egress(
+    slot: &SharedToolCallHttpEgress,
+    tool_call_http_egress: Arc<dyn ToolCallHttpEgress>,
+) {
+    match slot.lock() {
+        Ok(mut guard) => {
+            *guard = Some(tool_call_http_egress);
+        }
+        Err(poisoned) => {
+            *poisoned.into_inner() = Some(tool_call_http_egress);
+        }
+    }
+}
+
 fn runtime_http_egress(slot: &SharedRuntimeHttpEgress) -> Option<Arc<dyn RuntimeHttpEgress>> {
+    match slot.lock() {
+        Ok(guard) => guard.clone(),
+        Err(poisoned) => poisoned.into_inner().clone(),
+    }
+}
+
+fn tool_call_http_egress(slot: &SharedToolCallHttpEgress) -> Option<Arc<dyn ToolCallHttpEgress>> {
     match slot.lock() {
         Ok(guard) => guard.clone(),
         Err(poisoned) => poisoned.into_inner().clone(),

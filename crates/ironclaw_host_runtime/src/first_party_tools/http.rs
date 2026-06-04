@@ -19,13 +19,20 @@ pub const HTTP_SAVE_CAPABILITY_ID: &str = "builtin.http.save";
 const DEFAULT_HTTP_TIMEOUT_MS: u32 = 10_000;
 const MAX_HTTP_TIMEOUT_MS: u32 = 30_000;
 pub(super) const MAX_HTTP_OUTPUT_BYTES: u64 = 15 * 1024 * 1024;
-const DEFAULT_RESPONSE_BODY_LIMIT: u64 = 10 * 1024 * 1024;
+const DEFAULT_INLINE_RESPONSE_BODY_LIMIT: u64 = 48 * 1024;
+const DEFAULT_SAVE_RESPONSE_BODY_LIMIT: u64 = 10 * 1024 * 1024;
 const MAX_RESPONSE_BODY_LIMIT: u64 = 10 * 1024 * 1024;
+const MODEL_VISIBLE_HTTP_OUTPUT_OVERHEAD_BYTES: usize = 2 * 1024;
+const MODEL_VISIBLE_HTTP_TRUNCATION_ENVELOPE_BYTES: usize = 1024;
 const DEFAULT_NETWORK_EGRESS_BYTES: u64 = 16 * 1024;
 const MAX_NETWORK_EGRESS_BYTES: u64 = 256 * 1024;
 const MAX_HTTP_HEADERS: usize = 64;
 const MAX_HTTP_HEADER_NAME_BYTES: usize = 512;
 const MAX_HTTP_HEADER_VALUE_BYTES: usize = 8 * 1024;
+const MAX_MODEL_VISIBLE_RESPONSE_HEADERS: usize = 32;
+const MAX_MODEL_VISIBLE_RESPONSE_HEADER_NAME_BYTES: usize = 128;
+const MAX_MODEL_VISIBLE_RESPONSE_HEADER_VALUE_BYTES: usize = 1024;
+const HTTP_TRUNCATION_HINT: &str = "Response body was truncated for the model-visible budget. Use builtin.http.save with save_to, then builtin.read_file with offsets, to inspect the full sanitized body.";
 pub(super) struct HttpDispatchOutput {
     pub output: Value,
     pub network_egress_bytes: u64,
@@ -85,7 +92,7 @@ fn http_resource_profile() -> ResourceProfile {
     ResourceProfile {
         default_estimate: ResourceEstimate {
             wall_clock_ms: Some(DEFAULT_HTTP_TIMEOUT_MS.into()),
-            output_bytes: Some(DEFAULT_RESPONSE_BODY_LIMIT),
+            output_bytes: Some(DEFAULT_INLINE_RESPONSE_BODY_LIMIT),
             network_egress_bytes: Some(DEFAULT_NETWORK_EGRESS_BYTES),
             ..ResourceEstimate::default()
         },
@@ -154,7 +161,8 @@ pub(super) async fn dispatch(
             error,
         )
     })?;
-    let response_body_limit = response_body_limit(&request.input).map_err(|error| {
+    let save_mode = HttpSaveMode::for_capability(request.capability_id.as_str());
+    let response_body_limit = response_body_limit(&request.input, save_mode).map_err(|error| {
         log_raw_http_input_error_for_local_diagnostics(
             unsafe_raw_diagnostics_allowed,
             &request.input,
@@ -170,19 +178,15 @@ pub(super) async fn dispatch(
             error,
         )
     })?;
-    let save_body_to = save_body_to(
-        &request.input,
-        request.mounts.as_ref(),
-        HttpSaveMode::for_capability(request.capability_id.as_str()),
-    )
-    .map_err(|error| {
-        log_raw_http_input_error_for_local_diagnostics(
-            unsafe_raw_diagnostics_allowed,
-            &request.input,
-            "save_to",
-            error,
-        )
-    })?;
+    let save_body_to =
+        save_body_to(&request.input, request.mounts.as_ref(), save_mode).map_err(|error| {
+            log_raw_http_input_error_for_local_diagnostics(
+                unsafe_raw_diagnostics_allowed,
+                &request.input,
+                "save_to",
+                error,
+            )
+        })?;
     let http_request = RuntimeHttpEgressRequest {
         runtime: RuntimeKind::FirstParty,
         scope: request.scope.clone(),
@@ -199,17 +203,52 @@ pub(super) async fn dispatch(
         save_body_to,
         timeout_ms: Some(timeout_ms),
     };
+    let tool_call_egress = if matches!(save_mode, HttpSaveMode::Disabled) {
+        Some(
+            request
+                .services
+                .tool_call_http_egress
+                .as_ref()
+                .ok_or_else(|| FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::Backend))?
+                .clone(),
+        )
+    } else {
+        None
+    };
+    let egress_future = async move {
+        match save_mode {
+            HttpSaveMode::Disabled => {
+                let Some(tool_call_egress) = tool_call_egress else {
+                    return Err(RuntimeHttpEgressError::Network {
+                        reason: "tool-call HTTP egress was not configured".to_string(),
+                        request_bytes: 0,
+                        response_bytes: 0,
+                    });
+                };
+                tool_call_egress
+                    .execute_for_model_visible_output(http_request)
+                    .await
+            }
+            HttpSaveMode::Required => egress.execute(http_request).await,
+        }
+    };
     let response = super::run_egress_catching_panic(
-        egress.execute(http_request),
+        egress_future,
         "first-party HTTP egress future panicked",
         || FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::Backend),
     )
     .await?
     .map_err(http_error)?;
+    let body_was_truncated_by_egress = response.response_bytes > response_body_limit;
     let mut output = Map::new();
     output.insert("status".to_string(), json!(response.status));
-    output.insert("headers".to_string(), response_headers(response.headers));
-    if let Some(saved_body) = response.saved_body {
+    let (headers, headers_truncated) = response_headers(response.headers);
+    let inline_body_budget = inline_body_budget(response_body_limit, &headers);
+    output.insert("headers".to_string(), headers);
+    if headers_truncated {
+        output.insert("headers_truncated".to_string(), json!(true));
+    }
+    let mut body_bytes_returned = if let Some(saved_body) = response.saved_body {
         output.insert(
             "saved_body".to_string(),
             json!({
@@ -217,27 +256,28 @@ pub(super) async fn dispatch(
                 "bytes_written": saved_body.bytes_written,
             }),
         );
+        None
     } else {
-        // Response bodies must be valid UTF-8 to appear as body_text. Any invalid
-        // byte returns the full response as body_base64 to avoid lossy surprises.
-        match String::from_utf8(response.body) {
-            Ok(body_text) => {
-                output.insert("body_text".to_string(), Value::String(body_text));
-            }
-            Err(error) => {
-                output.insert(
-                    "body_base64".to_string(),
-                    Value::String(BASE64_STANDARD.encode(error.into_bytes())),
-                );
-            }
-        }
-    }
+        insert_inline_body(
+            &mut output,
+            response.body,
+            inline_body_budget,
+            body_was_truncated_by_egress,
+        )
+    };
     output.insert("request_bytes".to_string(), json!(response.request_bytes));
     output.insert("response_bytes".to_string(), json!(response.response_bytes));
     output.insert(
         "redaction_applied".to_string(),
         json!(response.redaction_applied),
     );
+    if !output.contains_key("saved_body")
+        && let Some(final_body_bytes_returned) =
+            enforce_final_model_visible_output_budget(&mut output, response_body_limit)
+    {
+        body_bytes_returned = Some(final_body_bytes_returned);
+    }
+    insert_truncation_envelope(&mut output, headers_truncated, body_bytes_returned);
     Ok(HttpDispatchOutput {
         output: Value::Object(output),
         network_egress_bytes: response.request_bytes,
@@ -354,15 +394,25 @@ fn staged_policy_placeholder() -> NetworkPolicy {
     NetworkPolicy::default()
 }
 
-fn response_body_limit(input: &Value) -> Result<u64, FirstPartyCapabilityError> {
+fn response_body_limit(
+    input: &Value,
+    save_mode: HttpSaveMode,
+) -> Result<u64, FirstPartyCapabilityError> {
+    let default = match save_mode {
+        HttpSaveMode::Disabled => DEFAULT_INLINE_RESPONSE_BODY_LIMIT,
+        HttpSaveMode::Required => DEFAULT_SAVE_RESPONSE_BODY_LIMIT,
+    };
     let limit = ranged_u64(
         input,
         "response_body_limit",
-        DEFAULT_RESPONSE_BODY_LIMIT,
+        default,
         1,
         MAX_RESPONSE_BODY_LIMIT,
     )?;
-    Ok(limit.max(DEFAULT_RESPONSE_BODY_LIMIT))
+    Ok(match save_mode {
+        HttpSaveMode::Disabled => limit,
+        HttpSaveMode::Required => limit.max(DEFAULT_SAVE_RESPONSE_BODY_LIMIT),
+    })
 }
 
 fn timeout_ms(input: &Value) -> Result<u32, FirstPartyCapabilityError> {
@@ -445,13 +495,234 @@ fn ranged_u64(
     Ok(value)
 }
 
-fn response_headers(headers: Vec<(String, String)>) -> Value {
-    Value::Array(
-        headers
-            .into_iter()
-            .map(|(name, value)| json!({ "name": name, "value": value }))
-            .collect(),
+fn response_headers(headers: Vec<(String, String)>) -> (Value, bool) {
+    let mut headers_truncated = headers.len() > MAX_MODEL_VISIBLE_RESPONSE_HEADERS;
+    let mut value_truncated = false;
+    let mut visible_headers = Vec::new();
+    for (index, (name, value)) in headers.into_iter().enumerate() {
+        if index >= MAX_MODEL_VISIBLE_RESPONSE_HEADERS {
+            break;
+        }
+        let (name, name_truncated) = truncate_string_for_json_content_budget(
+            name,
+            MAX_MODEL_VISIBLE_RESPONSE_HEADER_NAME_BYTES,
+        );
+        let (value, header_value_truncated) = truncate_string_for_json_content_budget(
+            value,
+            MAX_MODEL_VISIBLE_RESPONSE_HEADER_VALUE_BYTES,
+        );
+        value_truncated |= name_truncated || header_value_truncated;
+        let mut header = Map::new();
+        header.insert("name".to_string(), Value::String(name));
+        header.insert("value".to_string(), Value::String(value));
+        if name_truncated || header_value_truncated {
+            header.insert("truncated".to_string(), json!(true));
+        }
+        let header = Value::Object(header);
+        let mut candidate_headers = visible_headers.clone();
+        candidate_headers.push(header.clone());
+        if serialized_json_len(&Value::Array(candidate_headers))
+            > MODEL_VISIBLE_HTTP_OUTPUT_OVERHEAD_BYTES
+        {
+            headers_truncated = true;
+            break;
+        }
+        visible_headers.push(header);
+    }
+    (
+        Value::Array(visible_headers),
+        headers_truncated || value_truncated,
     )
+}
+
+fn inline_body_budget(response_body_limit: u64, headers: &Value) -> u64 {
+    let response_body_limit = usize::try_from(response_body_limit).unwrap_or(usize::MAX);
+    let header_bytes = serialized_json_len(headers);
+    let excess_header_bytes = header_bytes.saturating_sub(MODEL_VISIBLE_HTTP_OUTPUT_OVERHEAD_BYTES);
+    let body_budget = response_body_limit
+        .saturating_sub(excess_header_bytes)
+        .max(1);
+    u64::try_from(body_budget).unwrap_or(u64::MAX)
+}
+
+fn serialized_json_len(value: &Value) -> usize {
+    serde_json::to_vec(value).map_or(usize::MAX, |serialized| serialized.len())
+}
+
+fn insert_inline_body(
+    output: &mut Map<String, Value>,
+    body: Vec<u8>,
+    response_body_limit: u64,
+    body_was_truncated_by_egress: bool,
+) -> Option<usize> {
+    let limit = usize::try_from(response_body_limit).unwrap_or(usize::MAX);
+    let returned_body_bytes;
+    let mut body_truncated = body_was_truncated_by_egress;
+
+    match String::from_utf8(body) {
+        Ok(body_text) => {
+            let (returned_len, truncated) = if body_text.len() <= limit / 6 {
+                (body_text.len(), false)
+            } else {
+                let (body_text, truncated) =
+                    truncate_str_for_json_content_budget(&body_text, limit);
+                (body_text.len(), truncated)
+            };
+            returned_body_bytes = returned_len;
+            body_truncated |= truncated;
+            let body_text = if truncated {
+                body_text[..returned_len].to_string()
+            } else {
+                body_text
+            };
+            output.insert("body_text".to_string(), Value::String(body_text));
+        }
+        Err(error) => {
+            let body = error.into_bytes();
+            let binary_limit = max_binary_bytes_for_base64_budget(limit);
+            let returned = body.len().min(binary_limit);
+            body_truncated |= returned < body.len();
+            returned_body_bytes = returned;
+            output.insert(
+                "body_base64".to_string(),
+                Value::String(BASE64_STANDARD.encode(&body[..returned])),
+            );
+        }
+    }
+
+    if body_truncated {
+        output.insert("body_truncated".to_string(), json!(true));
+        output.insert(
+            "body_bytes_returned".to_string(),
+            json!(returned_body_bytes),
+        );
+        output.insert(
+            "body_truncation_hint".to_string(),
+            Value::String(HTTP_TRUNCATION_HINT.to_string()),
+        );
+        return Some(returned_body_bytes);
+    }
+    None
+}
+
+fn insert_truncation_envelope(
+    output: &mut Map<String, Value>,
+    headers_truncated: bool,
+    body_bytes_returned: Option<usize>,
+) {
+    if !headers_truncated && body_bytes_returned.is_none() {
+        return;
+    }
+    let mut truncation = Map::new();
+    truncation.insert("body".to_string(), json!(body_bytes_returned.is_some()));
+    truncation.insert("headers".to_string(), json!(headers_truncated));
+    if let Some(body_bytes_returned) = body_bytes_returned {
+        truncation.insert("bytes_returned".to_string(), json!(body_bytes_returned));
+    }
+    truncation.insert(
+        "reason".to_string(),
+        Value::String("model_visible_budget".to_string()),
+    );
+    truncation.insert(
+        "next_step".to_string(),
+        Value::String(HTTP_TRUNCATION_HINT.to_string()),
+    );
+    output.insert("truncation".to_string(), Value::Object(truncation));
+}
+
+fn enforce_final_model_visible_output_budget(
+    output: &mut Map<String, Value>,
+    response_body_limit: u64,
+) -> Option<usize> {
+    let response_body_limit = usize::try_from(response_body_limit).unwrap_or(usize::MAX);
+    let final_budget = response_body_limit
+        .saturating_add(MODEL_VISIBLE_HTTP_OUTPUT_OVERHEAD_BYTES)
+        .saturating_sub(MODEL_VISIBLE_HTTP_TRUNCATION_ENVELOPE_BYTES);
+    let current_len = serialized_json_len(&Value::Object(output.clone()));
+    if current_len <= final_budget {
+        return None;
+    }
+    let excess_bytes = current_len.saturating_sub(final_budget);
+    if let Some(Value::String(body_text)) = output.get("body_text").cloned() {
+        let current_body_budget = serialized_json_content_len(&body_text);
+        let target_body_budget = current_body_budget.saturating_sub(excess_bytes);
+        let (body_text, _) = truncate_str_for_json_content_budget(&body_text, target_body_budget);
+        let returned_body_bytes = body_text.len();
+        output.insert(
+            "body_text".to_string(),
+            Value::String(body_text.to_string()),
+        );
+        mark_inline_body_truncated(output, returned_body_bytes);
+        return Some(returned_body_bytes);
+    }
+    if let Some(Value::String(body_base64)) = output.get("body_base64").cloned() {
+        let target_len = body_base64.len().saturating_sub(excess_bytes);
+        let target_len = target_len / 4 * 4;
+        output.insert(
+            "body_base64".to_string(),
+            Value::String(body_base64[..target_len].to_string()),
+        );
+        let returned_body_bytes = max_binary_bytes_for_base64_budget(target_len);
+        mark_inline_body_truncated(output, returned_body_bytes);
+        return Some(returned_body_bytes);
+    }
+    None
+}
+
+fn mark_inline_body_truncated(output: &mut Map<String, Value>, returned_body_bytes: usize) {
+    output.insert("body_truncated".to_string(), json!(true));
+    output.insert(
+        "body_bytes_returned".to_string(),
+        json!(returned_body_bytes),
+    );
+    output.insert(
+        "body_truncation_hint".to_string(),
+        Value::String(HTTP_TRUNCATION_HINT.to_string()),
+    );
+}
+
+fn truncate_string_for_json_content_budget(
+    value: String,
+    max_serialized_content_bytes: usize,
+) -> (String, bool) {
+    let (truncated, was_truncated) =
+        truncate_str_for_json_content_budget(&value, max_serialized_content_bytes);
+    if !was_truncated {
+        return (value, false);
+    }
+    (truncated.to_string(), true)
+}
+
+fn truncate_str_for_json_content_budget(
+    value: &str,
+    max_serialized_content_bytes: usize,
+) -> (&str, bool) {
+    let mut used = 0_usize;
+    for (index, character) in value.char_indices() {
+        let next = used.saturating_add(json_escaped_character_len(character));
+        if next > max_serialized_content_bytes {
+            return (&value[..index], true);
+        }
+        used = next;
+    }
+    (value, false)
+}
+
+fn json_escaped_character_len(character: char) -> usize {
+    match character {
+        '"' | '\\' => 2,
+        '\u{08}' | '\t' | '\n' | '\u{0c}' | '\r' => 2,
+        '\u{00}'..='\u{1f}' => 6,
+        _ => character.len_utf8(),
+    }
+}
+
+fn serialized_json_content_len(value: &str) -> usize {
+    value.chars().map(json_escaped_character_len).sum()
+}
+
+fn max_binary_bytes_for_base64_budget(max_serialized_content_bytes: usize) -> usize {
+    max_serialized_content_bytes / 4 * 3
 }
 
 fn http_error(error: RuntimeHttpEgressError) -> FirstPartyCapabilityError {

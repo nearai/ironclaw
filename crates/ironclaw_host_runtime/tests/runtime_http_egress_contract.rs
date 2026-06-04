@@ -15,6 +15,7 @@ use ironclaw_host_api::{
 use ironclaw_host_runtime::{
     BuiltinObligationServices, RuntimeCredentialAccessSecret, RuntimeCredentialAccountRequest,
     RuntimeCredentialAccountResolver, RuntimeHttpBodyStore, RuntimeHttpBodyStoreError,
+    ToolCallHttpEgress,
 };
 use ironclaw_mcp::{
     McpClient, McpClientRequest, McpHostHttpClient, McpHostHttpEgressPlan, McpHostHttpRequest,
@@ -37,6 +38,150 @@ use std::{
     time::Duration,
 };
 use tempfile::tempdir;
+
+#[test]
+fn tool_call_http_egress_returns_sanitized_partial_response_for_model_visible_output() {
+    let network = RecordingNetwork::err(NetworkHttpError::ResponseBodyLimit {
+        limit: 4,
+        request_bytes: 0,
+        response_bytes: 5,
+        partial_response: Some(NetworkHttpResponse {
+            status: 200,
+            headers: vec![
+                (
+                    "authorization".to_string(),
+                    "Bearer sk-response-secret".to_string(),
+                ),
+                ("x-safe".to_string(), "visible".to_string()),
+            ],
+            body: b"abcd".to_vec(),
+            usage: NetworkUsage {
+                request_bytes: 0,
+                response_bytes: 5,
+                resolved_ip: None,
+            },
+        }),
+    });
+    let scope = sample_scope();
+    let capability_id = CapabilityId::new("builtin.http").unwrap();
+    let services = test_obligation_services();
+    stage_policy_sync(&services, &scope, &capability_id, sample_policy());
+    let service = services.host_http_egress(network);
+
+    let response = block_on_test(service.execute_for_model_visible_output(
+        RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::FirstParty,
+            scope,
+            capability_id,
+            method: NetworkMethod::Get,
+            url: "https://api.example.test/v1/items".to_string(),
+            headers: vec![],
+            body: Vec::new(),
+            network_policy: sample_policy(),
+            credential_injections: Vec::new(),
+            response_body_limit: Some(4),
+            save_body_to: None,
+            timeout_ms: None,
+        },
+    ))
+    .expect("tool-call port should receive sanitized partial response");
+
+    assert_eq!(response.status, 200);
+    assert_eq!(response.body, b"abcd");
+    assert_eq!(response.response_bytes, 5);
+    assert_eq!(
+        response.headers,
+        vec![("x-safe".to_string(), "visible".to_string())]
+    );
+    assert!(response.redaction_applied);
+}
+
+#[test]
+fn runtime_http_egress_keeps_partial_response_limit_strict() {
+    let network = RecordingNetwork::err(NetworkHttpError::ResponseBodyLimit {
+        limit: 4,
+        request_bytes: 0,
+        response_bytes: 5,
+        partial_response: Some(NetworkHttpResponse {
+            status: 200,
+            headers: vec![],
+            body: b"abcd".to_vec(),
+            usage: NetworkUsage {
+                request_bytes: 0,
+                response_bytes: 5,
+                resolved_ip: None,
+            },
+        }),
+    });
+    let scope = sample_scope();
+    let capability_id = CapabilityId::new("builtin.http").unwrap();
+    let services = test_obligation_services();
+    stage_policy_sync(&services, &scope, &capability_id, sample_policy());
+    let service = services.host_http_egress(network);
+
+    let error = block_on_test(service.execute(RuntimeHttpEgressRequest {
+        runtime: RuntimeKind::FirstParty,
+        scope,
+        capability_id,
+        method: NetworkMethod::Get,
+        url: "https://api.example.test/v1/items".to_string(),
+        headers: vec![],
+        body: Vec::new(),
+        network_policy: sample_policy(),
+        credential_injections: Vec::new(),
+        response_body_limit: Some(4),
+        save_body_to: None,
+        timeout_ms: None,
+    }))
+    .expect_err("generic runtime HTTP egress should keep response limits strict");
+
+    assert!(matches!(error, RuntimeHttpEgressError::Network { .. }));
+    assert_eq!(
+        error.stable_runtime_reason(),
+        "response_body_limit_exceeded"
+    );
+    assert_eq!(error.response_bytes(), 5);
+}
+
+#[test]
+fn tool_call_http_egress_returns_network_error_when_partial_response_is_missing() {
+    let network = RecordingNetwork::err(NetworkHttpError::ResponseBodyLimit {
+        limit: 4,
+        request_bytes: 0,
+        response_bytes: 5,
+        partial_response: None,
+    });
+    let scope = sample_scope();
+    let capability_id = CapabilityId::new("builtin.http").unwrap();
+    let services = test_obligation_services();
+    stage_policy_sync(&services, &scope, &capability_id, sample_policy());
+    let service = services.host_http_egress(network);
+
+    let error = block_on_test(
+        service.execute_for_model_visible_output(RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::FirstParty,
+            scope,
+            capability_id,
+            method: NetworkMethod::Get,
+            url: "https://api.example.test/v1/items".to_string(),
+            headers: vec![],
+            body: Vec::new(),
+            network_policy: sample_policy(),
+            credential_injections: Vec::new(),
+            response_body_limit: Some(4),
+            save_body_to: None,
+            timeout_ms: None,
+        }),
+    )
+    .expect_err("missing partial response should keep response limits strict");
+
+    assert!(matches!(error, RuntimeHttpEgressError::Network { .. }));
+    assert_eq!(
+        error.stable_runtime_reason(),
+        "response_body_limit_exceeded"
+    );
+    assert_eq!(error.response_bytes(), 5);
+}
 
 #[tokio::test]
 async fn host_http_egress_consumes_staged_obligation_secret_once() {

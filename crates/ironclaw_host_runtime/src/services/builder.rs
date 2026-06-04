@@ -22,6 +22,7 @@ use super::{
     TurnRunWakeNotifier, TurnStateStore, WasmError, WasmRuntimeAdapter,
     WasmRuntimeCredentialProvider, WasmStagedRuntimeCredentials, WitToolHost, WitToolRuntimeConfig,
     build_reborn_event_stores, production_wiring_report, set_runtime_http_egress,
+    set_tool_call_http_egress,
 };
 use crate::LocalHostProcessPort;
 use crate::RuntimeHttpBodyStore;
@@ -64,6 +65,7 @@ where
             secret_injection_store,
             process_lifecycle_store,
             runtime_http_egress,
+            tool_call_http_egress,
             process_port,
             managed_process_port,
             tenant_sandbox_process_port,
@@ -105,6 +107,7 @@ where
             secret_injection_store,
             process_lifecycle_store,
             runtime_http_egress,
+            tool_call_http_egress,
             process_port,
             managed_process_port,
             tenant_sandbox_process_port,
@@ -167,6 +170,7 @@ where
             secret_injection_store,
             process_lifecycle_store: _,
             runtime_http_egress,
+            tool_call_http_egress,
             process_port,
             managed_process_port,
             tenant_sandbox_process_port,
@@ -218,6 +222,7 @@ where
             secret_injection_store,
             process_lifecycle_store,
             runtime_http_egress,
+            tool_call_http_egress,
             process_port,
             managed_process_port,
             tenant_sandbox_process_port,
@@ -629,6 +634,15 @@ where
         self
     }
 
+    pub fn with_tool_call_http_egress<T>(self, tool_call_http_egress: Arc<T>) -> Self
+    where
+        T: crate::ToolCallHttpEgress + 'static,
+    {
+        let tool_call_http_egress: Arc<dyn crate::ToolCallHttpEgress> = tool_call_http_egress;
+        set_tool_call_http_egress(&self.tool_call_http_egress, tool_call_http_egress);
+        self
+    }
+
     pub fn with_runtime_process_port<T>(mut self, process_port: Arc<T>) -> Self
     where
         T: RuntimeProcessPort + 'static,
@@ -692,8 +706,10 @@ where
         >());
         self.component_types.runtime_http_egress_verified = runtime_http_egress
             .is_production_wired_with(&self.network_policy_store, &self.secret_injection_store);
+        let tool_call_http_egress: Arc<dyn crate::ToolCallHttpEgress> = runtime_http_egress.clone();
         let runtime_http_egress: Arc<dyn RuntimeHttpEgress> = runtime_http_egress;
         set_runtime_http_egress(&self.runtime_http_egress, runtime_http_egress);
+        set_tool_call_http_egress(&self.tool_call_http_egress, tool_call_http_egress);
         self
     }
 
