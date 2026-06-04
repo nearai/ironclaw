@@ -467,10 +467,12 @@ mod tests {
             ironclaw_skills::registry::InstallFile {
                 relative_path: Path::new("requirements.txt").to_path_buf(),
                 contents: b"httpx==0.27.0\n".to_vec(),
+                executable: false,
             },
             ironclaw_skills::registry::InstallFile {
                 relative_path: Path::new("scripts/run.py").to_path_buf(),
                 contents: b"print('ok')\n".to_vec(),
+                executable: false,
             },
         ];
 

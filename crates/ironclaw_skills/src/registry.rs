@@ -14,6 +14,8 @@
 //! Uses async I/O throughout to avoid blocking the tokio runtime.
 
 use std::collections::HashSet;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -208,6 +210,7 @@ pub struct SkillRegistry {
 pub struct InstallFile {
     pub relative_path: PathBuf,
     pub contents: Vec<u8>,
+    pub executable: bool,
 }
 
 /// Persisted metadata about how a skill bundle was installed.
@@ -673,6 +676,23 @@ impl SkillRegistry {
                     path: absolute_path.display().to_string(),
                     reason: e.to_string(),
                 })?;
+            #[cfg(unix)]
+            if file.executable {
+                let metadata = tokio::fs::metadata(&absolute_path).await.map_err(|e| {
+                    SkillRegistryError::WriteError {
+                        path: absolute_path.display().to_string(),
+                        reason: e.to_string(),
+                    }
+                })?;
+                let mode = metadata.permissions().mode();
+                let perms = std::fs::Permissions::from_mode(mode | 0o111);
+                tokio::fs::set_permissions(&absolute_path, perms)
+                    .await
+                    .map_err(|e| SkillRegistryError::WriteError {
+                        path: absolute_path.display().to_string(),
+                        reason: e.to_string(),
+                    })?;
+            }
         }
 
         if let Some(metadata) = install_metadata {
@@ -1221,10 +1241,12 @@ mod tests {
             InstallFile {
                 relative_path: PathBuf::from("requirements.txt"),
                 contents: b"requests>=2.32.5\n".to_vec(),
+                executable: false,
             },
             InstallFile {
                 relative_path: PathBuf::from("scripts/run.py"),
                 contents: b"print('ok')\n".to_vec(),
+                executable: false,
             },
         ];
         let metadata = InstalledSkillMetadata {
@@ -1261,6 +1283,7 @@ mod tests {
         let extra_files = vec![InstallFile {
             relative_path: PathBuf::from("../escape.sh"),
             contents: b"echo no\n".to_vec(),
+            executable: false,
         }];
 
         let err = SkillRegistry::prepare_install_bundle_to_disk(
