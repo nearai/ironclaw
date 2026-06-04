@@ -59,6 +59,13 @@ CREATE INDEX IF NOT EXISTS idx_hooks_predicate_invocations_key_ts
 -- index, avoiding a global GROUP BY aggregation over the scope.
 CREATE INDEX IF NOT EXISTS idx_hooks_predicate_invocations_scope
     ON hooks_predicate_invocations (scope_hash, occurred_at);
+-- (scope_hash, key_hash): covering index for the per-tenant
+-- `COUNT(DISTINCT key_hash) WHERE scope_hash = ?` in enforce_caps. With both
+-- columns in the index tree the DISTINCT count is answered index-only (no heap
+-- fetch of key_hash per matching row). The (scope_hash, occurred_at) index above
+-- stays — it serves the LRU victim ORDER BY occurred_at.
+CREATE INDEX IF NOT EXISTS idx_hooks_predicate_invocations_scope_key
+    ON hooks_predicate_invocations (scope_hash, key_hash);
 CREATE INDEX IF NOT EXISTS idx_hooks_predicate_invocations_ts
     ON hooks_predicate_invocations (occurred_at);
 
@@ -75,5 +82,10 @@ CREATE INDEX IF NOT EXISTS idx_hooks_predicate_values_key_ts
 -- (scope_hash, occurred_at): see invocations table above.
 CREATE INDEX IF NOT EXISTS idx_hooks_predicate_values_scope
     ON hooks_predicate_values (scope_hash, occurred_at);
+-- (scope_hash, key_hash): covering index for the same per-tenant
+-- COUNT(DISTINCT key_hash) in enforce_caps (the values table uses the identical
+-- scope query pattern). See the invocations table above.
+CREATE INDEX IF NOT EXISTS idx_hooks_predicate_values_scope_key
+    ON hooks_predicate_values (scope_hash, key_hash);
 CREATE INDEX IF NOT EXISTS idx_hooks_predicate_values_ts
     ON hooks_predicate_values (occurred_at);

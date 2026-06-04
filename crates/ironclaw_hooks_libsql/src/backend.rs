@@ -191,11 +191,15 @@ impl LibSqlPredicateStateBackend {
         conn.execute("BEGIN IMMEDIATE", ()).await.map_err(map_err)?;
         let result = run_migrations_inner(&conn).await;
         match result {
-            Ok(()) => conn
-                .execute("COMMIT", ())
-                .await
-                .map(|_| ())
-                .map_err(map_err),
+            Ok(()) => match conn.execute("COMMIT", ()).await {
+                Ok(_) => Ok(()),
+                Err(e) => {
+                    // Roll back explicitly on a failed COMMIT (libSQL
+                    // replication state); same rationale as `finish_txn`.
+                    let _ = conn.execute("ROLLBACK", ()).await;
+                    Err(map_err(e))
+                }
+            },
             Err(err) => {
                 let _ = conn.execute("ROLLBACK", ()).await;
                 Err(err)
@@ -498,10 +502,16 @@ impl PredicateStateBackend for LibSqlPredicateStateBackend {
         }
         .await;
         match result {
-            Ok(dropped) => {
-                conn.execute("COMMIT", ()).await.map_err(map_err)?;
-                Ok(dropped)
-            }
+            Ok(dropped) => match conn.execute("COMMIT", ()).await {
+                Ok(_) => Ok(dropped),
+                Err(e) => {
+                    // Same rationale as `finish_txn`: roll back explicitly on a
+                    // failed COMMIT so libSQL replication state can't be left
+                    // indeterminate, then surface the commit error.
+                    let _ = conn.execute("ROLLBACK", ()).await;
+                    Err(map_err(e))
+                }
+            },
             Err(err) => {
                 let _ = conn.execute("ROLLBACK", ()).await;
                 Err(err)
@@ -519,11 +529,20 @@ async fn finish_txn<T>(
     backend: &LibSqlPredicateStateBackend,
 ) -> Result<T, PredicateBackendError> {
     match result {
-        Ok((value, evicted)) => {
-            conn.execute("COMMIT", ()).await.map_err(map_err)?;
-            backend.bump_evictions(evicted);
-            Ok(value)
-        }
+        Ok((value, evicted)) => match conn.execute("COMMIT", ()).await {
+            Ok(_) => {
+                backend.bump_evictions(evicted);
+                Ok(value)
+            }
+            Err(e) => {
+                // A failed COMMIT leaves the transaction open: for local SQLite
+                // conn-drop auto-rolls back, but in libSQL replication mode the
+                // replication state can stay indeterminate until an explicit
+                // ROLLBACK. Best-effort rollback, then surface the commit error.
+                let _ = conn.execute("ROLLBACK", ()).await;
+                Err(map_err(e))
+            }
+        },
         Err(err) => {
             let _ = conn.execute("ROLLBACK", ()).await;
             Err(err)
@@ -555,13 +574,15 @@ async fn event_id_exists(
     key_hash: &[u8],
     event_id: &PredicateEventId,
 ) -> Result<bool, PredicateBackendError> {
-    let count = scalar_u32(
+    // `(key_hash, event_id)` is the PRIMARY KEY, so this is a unique point
+    // lookup matching at most one row — `LIMIT 1` is not a perf win here (it is
+    // for `key_exists`), but kept consistent with the existence-check form.
+    row_exists(
         conn,
-        &format!("SELECT count(*) FROM {table} WHERE key_hash = ?1 AND event_id = ?2"),
+        &format!("SELECT 1 FROM {table} WHERE key_hash = ?1 AND event_id = ?2 LIMIT 1"),
         params![key_hash.to_vec(), event_id.as_str()],
     )
-    .await?;
-    Ok(count > 0)
+    .await
 }
 
 /// Whether any row exists for `key_hash` — i.e. whether this is an existing
@@ -571,13 +592,25 @@ async fn key_exists(
     table: &str,
     key_hash: &[u8],
 ) -> Result<bool, PredicateBackendError> {
-    let count = scalar_u32(
+    // `WHERE key_hash = ?1` can match up to `MAX_SAMPLES_PER_KEY` rows; a
+    // `SELECT 1 ... LIMIT 1` stops at the first index entry (O(1)) instead of
+    // counting them all (O(N)).
+    row_exists(
         conn,
-        &format!("SELECT count(*) FROM {table} WHERE key_hash = ?1"),
+        &format!("SELECT 1 FROM {table} WHERE key_hash = ?1 LIMIT 1"),
         params![key_hash.to_vec()],
     )
-    .await?;
-    Ok(count > 0)
+    .await
+}
+
+/// Whether the query yields at least one row (the existence-check form).
+async fn row_exists(
+    conn: &Connection,
+    sql: &str,
+    params: impl libsql::params::IntoParams,
+) -> Result<bool, PredicateBackendError> {
+    let mut rows = conn.query(sql, params).await.map_err(map_err)?;
+    Ok(rows.next().await.map_err(map_err)?.is_some())
 }
 
 /// Enforce the per-tenant [`MAX_KEYS_PER_TENANT`] distinct-key quota before

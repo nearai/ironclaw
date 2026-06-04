@@ -4449,7 +4449,6 @@ dependencies = [
  "rust_decimal",
  "tempfile",
  "tokio",
- "tracing",
 ]
 
 [[package]]

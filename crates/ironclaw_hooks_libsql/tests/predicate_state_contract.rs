@@ -134,6 +134,11 @@ fn main() {
         cross_host_replay_is_deduped,
     );
     ok &= run(
+        "separate_handles_share_durable_state",
+        Rt::Current,
+        separate_handles_share_durable_state,
+    );
+    ok &= run(
         "cross_host_replay_is_deduped_for_values",
         Rt::Current,
         cross_host_replay_is_deduped_for_values,
@@ -274,6 +279,16 @@ fn val_key(tenant_name: &str, capability: &str, field: &str) -> ValueKey {
 /// Build a backend over a shared temp-file db (the `Database` handle is
 /// returned so a second backend can open the SAME database, simulating a
 /// second host).
+///
+/// # In-process vs cross-process coverage
+///
+/// Backends built from the returned `Arc<libsql::Database>` (via `db.clone()`)
+/// share ONE `Database` handle: they exercise two in-process `write_lock`
+/// mutexes racing over the same handle. That is NOT the cross-process path,
+/// where two separate processes each call `Builder::new_local(path).build()`
+/// against the same file and rely on OS file locking + `PRAGMA busy_timeout`.
+/// For the latter, build two independent handles to the same path via
+/// [`separate_handle_backends`].
 async fn shared_db_backend() -> (Arc<libsql::Database>, TempDir) {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("shared.db");
@@ -286,6 +301,43 @@ async fn shared_db_backend() -> (Arc<libsql::Database>, TempDir) {
     let backend = LibSqlPredicateStateBackend::new(db.clone());
     backend.run_migrations().await.expect("migrate");
     (db, dir)
+}
+
+/// Build TWO backends over two INDEPENDENT `libsql::Database` handles opened
+/// against the SAME file path — the durable cross-process shape. Unlike
+/// [`shared_db_backend`] (one `Arc<Database>` cloned), each handle here is a
+/// fresh `Builder::new_local(path).build()`, so concurrency between the two
+/// reduces to OS file locking + `PRAGMA busy_timeout` rather than the
+/// in-process `write_lock`. Returns both backends and the `TempDir` guard.
+///
+/// Per the crate's runner docs, multiple independent `Database` handles
+/// operating concurrently in one process can trip a driver-level
+/// `SQLITE_MISUSE` on the replication-enabled libSQL build, so callers must
+/// drive these handles SEQUENTIALLY (the serial runner default), not race them.
+async fn separate_handle_backends() -> (
+    LibSqlPredicateStateBackend,
+    LibSqlPredicateStateBackend,
+    TempDir,
+) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("separate.db");
+    let path_str = path.to_string_lossy().to_string();
+    let db_a = Arc::new(
+        libsql::Builder::new_local(path_str.clone())
+            .build()
+            .await
+            .expect("build libsql db a"),
+    );
+    let db_b = Arc::new(
+        libsql::Builder::new_local(path_str)
+            .build()
+            .await
+            .expect("build libsql db b"),
+    );
+    let backend_a = LibSqlPredicateStateBackend::new(db_a);
+    backend_a.run_migrations().await.expect("migrate a");
+    let backend_b = LibSqlPredicateStateBackend::new(db_b);
+    (backend_a, backend_b, dir)
 }
 
 // ---------------------------------------------------------------------------
@@ -368,6 +420,59 @@ async fn cross_host_replay_is_deduped() {
         .await
         .expect("ok");
     assert_eq!(c3, 2);
+}
+
+/// True cross-process durability: two INDEPENDENT `Database` handles opened
+/// against the same file path (via [`separate_handle_backends`]) — not one
+/// shared `Arc<Database>`. This exercises the OS-file-lock + `PRAGMA
+/// busy_timeout` path that the `db.clone()` cases above cannot, since there is
+/// no in-process `write_lock` spanning the two handles. The handles are driven
+/// sequentially (the serial runner) because concurrently racing independent
+/// handles trips a driver-level `SQLITE_MISUSE` on this libSQL build (see the
+/// module + Cargo.toml runner docs); sequential access is the realistic
+/// two-process interleaving and is what verifies durable visibility across
+/// handles.
+async fn separate_handles_share_durable_state() {
+    let (backend_a, backend_b, _dir) = separate_handle_backends().await;
+    let key = inv_key("alpha", "cap.separate");
+    let window = Duration::from_secs(3600);
+
+    // Handle A records two distinct ids.
+    let c1 = backend_a
+        .record_invocation(&key, &ev("sep-1"), at_secs(0), window)
+        .await
+        .expect("ok");
+    assert_eq!(c1, 1);
+    let c2 = backend_a
+        .record_invocation(&key, &ev("sep-2"), at_secs(1), window)
+        .await
+        .expect("ok");
+    assert_eq!(c2, 2);
+
+    // Handle B (independent build over the same file) sees A's writes through
+    // OS-level durability, and a replay of A's id dedups across handles.
+    let c3 = backend_b
+        .record_invocation(&key, &ev("sep-1"), at_secs(2), window)
+        .await
+        .expect("ok");
+    assert_eq!(
+        c3, 2,
+        "independent handle must see persisted rows and dedup A's id across handles"
+    );
+
+    // A fresh distinct id on handle B advances the shared count.
+    let c4 = backend_b
+        .record_invocation(&key, &ev("sep-3"), at_secs(3), window)
+        .await
+        .expect("ok");
+    assert_eq!(c4, 3);
+
+    // Handle A observes B's write in turn.
+    let c5 = backend_a
+        .record_invocation(&key, &ev("sep-3"), at_secs(4), window)
+        .await
+        .expect("ok");
+    assert_eq!(c5, 3, "handle A must see B's persisted write");
 }
 
 /// Cross-host replay dedup for the value path.

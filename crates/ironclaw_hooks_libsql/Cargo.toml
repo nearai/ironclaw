@@ -16,7 +16,6 @@ rust_decimal = { version = "1", features = ["serde", "serde-with-str"] }
 # `sync` for the connection-admission Semaphore; `time` for connect-retry
 # backoff sleeps (see the concurrency contract on LibSqlPredicateStateBackend).
 tokio = { version = "1", features = ["sync", "time"] }
-tracing = "0.1"
 
 [dev-dependencies]
 # Run the shared PredicateStateBackend contract harness from ironclaw_hooks
