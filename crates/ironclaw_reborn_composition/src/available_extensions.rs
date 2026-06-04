@@ -240,7 +240,7 @@ fn merge_credential_setup(
     ) = (existing, candidate)
     {
         for scope in candidate {
-            if !existing.iter().any(|seen| seen == &scope) {
+            if !existing.contains(&scope) {
                 existing.push(scope);
             }
         }
@@ -1655,7 +1655,7 @@ mod tests {
                         capability.id
                     );
                     for scope in scopes {
-                        if !expected_setup_scopes.iter().any(|seen| seen == scope) {
+                        if !expected_setup_scopes.contains(scope) {
                             expected_setup_scopes.push(scope.clone());
                         }
                     }
