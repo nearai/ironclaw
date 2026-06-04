@@ -45,6 +45,10 @@ mod webui_ws_origin;
 
 use ironclaw_runtime_policy::{EffectiveRuntimePolicy as ResolvedRuntimePolicy, ResolveError};
 
+#[cfg(all(feature = "libsql", feature = "attested-broadcast"))]
+pub use attested::LibSqlAttestedComposition;
+#[cfg(all(feature = "postgres", feature = "attested-broadcast"))]
+pub use attested::PostgresAttestedComposition;
 pub use attested::{NoopBroadcaster, RebornAttestedComposition};
 pub use auth::{
     RebornAuthContinuationDispatcher, RebornOAuthCallbackError, RebornOAuthCallbackOutcome,

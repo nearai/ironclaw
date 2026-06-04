@@ -64,6 +64,8 @@
 #![warn(unreachable_pub)]
 #![forbid(unsafe_code)]
 
+#[cfg(feature = "broadcast-http")]
+pub(crate) mod broadcast_http;
 mod chain;
 mod custodial;
 mod error;
@@ -86,6 +88,8 @@ pub mod evm;
 pub mod near;
 pub mod solana;
 
+#[cfg(feature = "broadcast-http")]
+pub use broadcast_http::RpcEndpoint;
 pub use chain::{ChainFamily, ChainKeyId};
 pub use custodial::{
     CustodialSignOutcome, CustodialSignRequest, CustodialSigner, recompute_approved_hash,

@@ -226,8 +226,8 @@ impl SealedGrantStore for InMemorySealedGrantStore {
 ///
 /// Mirrors `predicate_backend_contract_test!` in `ironclaw_hooks`: the
 /// behavioural contract lives once and every backend (in-memory here, durable
-/// PG / libSQL in stacked follow-ups) is driven through it. Invoke with a label
-/// and a zero-arg factory closure returning a fresh store.
+/// PG / libSQL in `ironclaw_attested_store`) is driven through it. Invoke with a
+/// label and a zero-arg factory closure returning a fresh store.
 #[cfg(any(test, feature = "contract-tests"))]
 pub mod contract {
     // The `pub` items below are reachable as `ironclaw_attestation::grant::
@@ -240,6 +240,7 @@ pub mod contract {
     use super::*;
     use std::sync::Arc;
 
+    /// A deterministic [`GrantKey`] seeded by `seed` (varies the approved hash).
     pub fn key(seed: u8) -> GrantKey {
         GrantKey {
             tenant: TenantId::new("tenant-a"),

@@ -1,46 +1,52 @@
-//! Attested-signing signer-continuation wiring for the reborn runtime (PR10).
+//! Attested-signing signer-continuation wiring for the reborn runtime.
 //!
 //! This is the composition seam that turns an `AttestedResolved` turn into a
 //! real, ledger-guarded sign + broadcast. It assembles the
-//! [`AttestedSignerContinuationDriver`] from the in-memory substrate stores
-//! (gate bindings shared with the resume port, sealed grants, broadcast ledger)
-//! and the external-wallet provider registry.
+//! [`AttestedSignerContinuationDriver`] from the substrate stores (gate
+//! bindings shared with the resume port, sealed grants, broadcast ledger) and
+//! the external-wallet provider registry.
 //!
 //! The driver is constructed here rather than buried in the giant
 //! `RebornRuntime` struct so the runtime does not have to name the custodial
 //! signer's concrete keystore/grant/ledger generic parameters. PR11's web
 //! ingress (`/api/chat/gate/resolve`) calls
-//! [`RebornAttestedComposition::driver`] to continue a resolved gate; this
-//! module owns the deny-first default policy and the in-memory stores (durable
-//! backends are PR12).
+//! [`RebornAttestedComposition::driver`] to continue a resolved gate.
 //!
-//! Why in-memory only: the prompt for this slice mandates the existing
-//! in-memory stores and explicitly defers durable PG/libSQL backends to PR12,
-//! so no single-backend persistence feature is introduced here (dual-backend
-//! rule).
+//! ## Backend selection (PR12)
+//!
+//! [`RebornAttestedComposition`] is generic over the grant store `G`, ledger
+//! `L`, and broadcaster `B`. Local-dev/tests use the in-memory stores and the
+//! [`NoopBroadcaster`] (the [`LocalDevAttestedComposition`] alias). Production
+//! selects the durable PG / libSQL grant store + ledger from
+//! `ironclaw_attested_store` and the real [`MultiChainBroadcaster`]; the
+//! ledger-guard behaviour (threats #6 / #7) is identical regardless of backend,
+//! because the guard lives in the `SigningLedger` state machine, not the
+//! broadcaster. Backend choice mirrors every other reborn store: it follows the
+//! configured database backend.
 
 use std::sync::Arc;
 
-use ironclaw_attestation::{InMemorySealedGrantStore, InMemorySigningLedger};
+use ironclaw_attestation::{
+    InMemorySealedGrantStore, InMemorySigningLedger, SealedGrantStore, SigningLedger,
+};
 use ironclaw_attested_runtime::{
-    AttestedSignerContinuationDriver, BroadcastOutcome, Broadcaster, ContinuationError,
-    InMemoryAttestedGateBindingStore, ProviderRegistry,
+    AttestedGateBindingStore, AttestedSignerContinuationDriver, BroadcastOutcome, Broadcaster,
+    ContinuationError, InMemoryAttestedGateBindingStore, ProviderRegistry,
 };
 use ironclaw_chain_signing::{CustodialSigner, DenyFirstCustodyPolicy, SecretsKeyStore, ShipGate};
 use ironclaw_signing_provider::SigningContext;
 
-/// The concrete custodial signer type the local-dev composition assembles. Its
-/// generic parameters are pinned here so the rest of the runtime never names
-/// them.
-pub(crate) type LocalDevCustodialSigner =
-    CustodialSigner<SecretsKeyStore, InMemorySealedGrantStore, InMemorySigningLedger>;
+/// The custodial signer type, generic over the grant store and ledger backend.
+pub(crate) type ComposedCustodialSigner<G, L> = CustodialSigner<SecretsKeyStore, G, L>;
 
-/// The concrete driver type the local-dev composition assembles.
-pub(crate) type LocalDevContinuationDriver = AttestedSignerContinuationDriver<
-    NoopBroadcaster,
-    InMemorySigningLedger,
-    LocalDevCustodialSigner,
->;
+/// The continuation driver type, generic over broadcaster / ledger / signer.
+pub(crate) type ComposedContinuationDriver<B, G, L> =
+    AttestedSignerContinuationDriver<B, L, ComposedCustodialSigner<G, L>>;
+
+/// The local-dev / test monomorphization of [`RebornAttestedComposition`] the
+/// `RebornRuntime` holds (in-memory stores + no-op broadcaster).
+pub(crate) type LocalDevAttestedComposition =
+    RebornAttestedComposition<NoopBroadcaster, InMemorySealedGrantStore, InMemorySigningLedger>;
 
 /// A dry-run broadcaster that records intent but performs NO network I/O and,
 /// critically, NEVER advances the ledger to `BroadcastSubmitted`.
@@ -48,9 +54,10 @@ pub(crate) type LocalDevContinuationDriver = AttestedSignerContinuationDriver<
 /// It reports [`Broadcaster::submits`] == `false`, so the driver leaves the
 /// ledger at `Signed` and surfaces a
 /// [`ironclaw_attested_runtime::BroadcastDisposition::NotBroadcast`] outcome —
-/// the local-dev path can never be mislabeled as a real broadcast. A real
-/// per-chain broadcaster (PR12 / production) reports `submits() == true` and
-/// returns [`BroadcastOutcome::Submitted`].
+/// the local-dev path can never be mislabeled as a real broadcast. The real
+/// per-chain broadcaster is `ironclaw_attested_store::MultiChainBroadcaster`,
+/// selected in production; it reports `submits() == true` and returns
+/// [`BroadcastOutcome::Submitted`].
 #[derive(Debug, Default)]
 pub struct NoopBroadcaster;
 
@@ -73,83 +80,121 @@ impl Broadcaster for NoopBroadcaster {
     }
 }
 
-/// Bundles the attested-signing composition the reborn runtime exposes to the
-/// PR11 ingress: the shared binding store, the shared sealed-grant store (so
-/// external-wallet providers can be registered against the SAME one-shot CAS
-/// the driver uses), and the assembled continuation driver.
-pub struct RebornAttestedComposition {
-    bindings: Arc<InMemoryAttestedGateBindingStore>,
-    grants: Arc<InMemorySealedGrantStore>,
-    driver: Arc<LocalDevContinuationDriver>,
+/// PR11 ingress: the shared binding store and the assembled continuation driver.
+///
+/// Generic over the durable-vs-in-memory grant store `G`, ledger `L`, and
+/// broadcaster `B`.
+pub struct RebornAttestedComposition<B, G, L>
+where
+    B: Broadcaster + 'static,
+    G: SealedGrantStore + 'static,
+    L: SigningLedger + 'static,
+{
+    bindings: Arc<dyn AttestedGateBindingStore>,
+    driver: Arc<ComposedContinuationDriver<B, G, L>>,
 }
 
-impl RebornAttestedComposition {
-    /// Assemble the composition for local-dev from the gate-binding store the
-    /// resume port already shares, a custodial keystore, the operator
-    /// ship-gate, and the shared sealed-grant store.
+impl<B, G, L> RebornAttestedComposition<B, G, L>
+where
+    B: Broadcaster + 'static,
+    G: SealedGrantStore + 'static,
+    L: SigningLedger + 'static,
+{
+    /// Assemble the composition from the gate-binding store the resume port
+    /// already shares, a custodial keystore, the operator ship-gate, the shared
+    /// sealed-grant store, the broadcast ledger, the provider registry, and the
+    /// broadcaster.
     ///
-    /// `build_providers` is the **provider-registration seam**: it is handed the
-    /// shared sealed-grant store and returns the external-wallet
-    /// [`ProviderRegistry`] to wire into the driver. Building the registry here
-    /// — BEFORE the driver is constructed, over the exact `grants` the custodial
-    /// signer also uses — guarantees the one-shot CAS (threat #1) is
-    /// authoritative across BOTH the custodial signer and every external-wallet
-    /// provider, so external-wallet continuations cannot fail `ProviderMismatch`
-    /// and cannot claim a grant out of a different store. PR13's
-    /// `AttestedProvidersConfig` / provider registration layers cleanly on top:
-    /// it implements `build_providers` to register WalletConnect / Injected /
-    /// NEAR providers over this shared store.
-    pub fn new(
-        bindings: Arc<InMemoryAttestedGateBindingStore>,
+    /// The grant store is shared so the one-shot CAS (threat #1) is
+    /// authoritative across both the custodial signer and the external-wallet
+    /// providers. The ledger is shared between the custodial signer and the
+    /// driver so the broadcast-idempotency guard covers both paths.
+    // arch-exempt: too_many_args, assemble fans the substrate stores
+    // (grants/ledger/broadcaster/providers) plus keystore/ship-gate into one
+    // driver; needs an AttestedSigningServices bundle,
+    // plan docs/plans/2026-05-23-attested-signing-substrate.md
+    #[allow(clippy::too_many_arguments)]
+    pub fn assemble(
+        bindings: Arc<dyn AttestedGateBindingStore>,
         keystore: Arc<SecretsKeyStore>,
         ship_gate: ShipGate,
-        grants: Arc<InMemorySealedGrantStore>,
-        build_providers: impl FnOnce(&Arc<InMemorySealedGrantStore>) -> ProviderRegistry,
+        grants: Arc<G>,
+        ledger: Arc<L>,
+        broadcaster: Arc<B>,
+        providers: ProviderRegistry,
     ) -> Self {
-        let providers = build_providers(&grants);
-        let ledger = Arc::new(InMemorySigningLedger::new());
         let custodial_signer = Arc::new(CustodialSigner::new(
             keystore,
-            Arc::clone(&grants),
+            grants,
             Arc::clone(&ledger),
             ship_gate,
             Arc::new(DenyFirstCustodyPolicy),
         ));
         let driver = Arc::new(AttestedSignerContinuationDriver::new(
-            Arc::clone(&bindings) as Arc<dyn ironclaw_attested_runtime::AttestedGateBindingStore>,
+            Arc::clone(&bindings),
             providers,
             custodial_signer,
             ledger,
-            Arc::new(NoopBroadcaster),
+            broadcaster,
         ));
-        Self {
-            bindings,
-            grants,
-            driver,
-        }
+        Self { bindings, driver }
     }
 
     /// The authoritative gate-binding store. The PR11 ingress persists a
     /// binding here when it raises an attested gate, and the driver reads it
     /// back on continuation.
-    pub fn bindings(&self) -> &Arc<InMemoryAttestedGateBindingStore> {
+    pub fn bindings(&self) -> &Arc<dyn AttestedGateBindingStore> {
         &self.bindings
-    }
-
-    /// The shared sealed-grant store. Exposed so downstream provider
-    /// registration (PR13) can build providers that claim grants out of the
-    /// exact same store the driver's custodial signer uses (shared one-shot CAS,
-    /// threat #1).
-    pub fn grants(&self) -> &Arc<InMemorySealedGrantStore> {
-        &self.grants
     }
 
     /// The assembled signer-continuation driver dispatched when a turn reaches
     /// `AttestedResolved`.
-    pub fn driver(&self) -> &Arc<LocalDevContinuationDriver> {
+    pub fn driver(&self) -> &Arc<ComposedContinuationDriver<B, G, L>> {
         &self.driver
     }
 }
+
+impl RebornAttestedComposition<NoopBroadcaster, InMemorySealedGrantStore, InMemorySigningLedger> {
+    /// Local-dev / test constructor: in-memory grant store + ledger + no-op
+    /// broadcaster. Matches the pre-PR12 behaviour.
+    pub fn new_in_memory(
+        bindings: Arc<InMemoryAttestedGateBindingStore>,
+        keystore: Arc<SecretsKeyStore>,
+        ship_gate: ShipGate,
+        grants: Arc<InMemorySealedGrantStore>,
+        providers: ProviderRegistry,
+    ) -> Self {
+        let ledger = Arc::new(InMemorySigningLedger::new());
+        Self::assemble(
+            bindings as Arc<dyn AttestedGateBindingStore>,
+            keystore,
+            ship_gate,
+            grants,
+            ledger,
+            Arc::new(NoopBroadcaster),
+            providers,
+        )
+    }
+}
+
+/// Durable PostgreSQL attested-signing composition: PG sealed-grant store + PG
+/// signing ledger + the real per-chain broadcaster. The DB-enforced one-shot
+/// CAS / broadcast-idempotency guards hold across process restarts and the
+/// `Stuck -> InProgress` recovery race.
+#[cfg(all(feature = "postgres", feature = "attested-broadcast"))]
+pub type PostgresAttestedComposition = RebornAttestedComposition<
+    ironclaw_attested_store::MultiChainBroadcaster,
+    ironclaw_attested_store::PostgresSealedGrantStore,
+    ironclaw_attested_store::PostgresSigningLedger,
+>;
+
+/// Durable libSQL / Turso attested-signing composition.
+#[cfg(all(feature = "libsql", feature = "attested-broadcast"))]
+pub type LibSqlAttestedComposition = RebornAttestedComposition<
+    ironclaw_attested_store::MultiChainBroadcaster,
+    ironclaw_attested_store::LibSqlSealedGrantStore,
+    ironclaw_attested_store::LibSqlSigningLedger,
+>;
 
 #[cfg(test)]
 mod tests {
@@ -162,8 +207,7 @@ mod tests {
         SealedGrantStore,
     };
     use ironclaw_attested_runtime::{
-        AttestedGateBinding, AttestedGateBindingStore, BroadcastDisposition, ContinuationError,
-        CustodialMainnetShipGate,
+        AttestedGateBinding, BroadcastDisposition, ContinuationError, CustodialMainnetShipGate,
     };
     use ironclaw_chain_signing::{ChainKeyBinding, ChainKeyId, KeyStore, evm};
     use ironclaw_host_api::{InvocationId, ProjectId, ResourceScope, TenantId, UserId};
@@ -254,18 +298,18 @@ mod tests {
         let ship_gate = CustodialMainnetShipGate::new(false).build_chain_ship_gate(None);
         let grants = Arc::new(InMemorySealedGrantStore::new());
 
-        let composition = RebornAttestedComposition::new(
+        let composition = RebornAttestedComposition::new_in_memory(
             Arc::clone(&bindings),
             keystore,
             ship_gate,
             Arc::clone(&grants),
-            |_grants| ProviderRegistry::new(),
+            ProviderRegistry::new(),
         );
 
-        // Seal the grant the custodial signer will claim, over the SHARED store.
+        // Seal the grant the custodial signer will claim, over the SHARED store
+        // (the same `grants` Arc handed to `new_in_memory`).
         let grant_key = GrantKey::from_context(&ctx, hash);
-        composition
-            .grants()
+        grants
             .seal(AttestedSigningGrant::seal(grant_key, 0, None))
             .await
             .unwrap();

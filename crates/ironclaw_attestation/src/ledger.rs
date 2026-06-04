@@ -110,6 +110,24 @@ pub enum LedgerError {
         to: SigningLedgerState,
     },
 
+    /// A concurrent advance won the conditional-update (CAS) race: the row's
+    /// observed `from` state changed between the read and the conditional
+    /// `UPDATE`, so this advance matched zero rows. Distinct from
+    /// [`LedgerError::InvalidTransition`], which means the *caller's* requested
+    /// move is illegal for the current state; a lost CAS means another writer
+    /// moved the row first (e.g. a `Stuck -> InProgress` recovery racing the
+    /// original turn). Durable backends only — the in-memory ledger performs
+    /// read-validate-write under one lock and can never lose this race.
+    #[error(
+        "signing-ledger advance lost a concurrent CAS race (observed {observed:?}, target {to:?})"
+    )]
+    ConcurrentAdvance {
+        /// State observed when the lost-CAS path re-read the row.
+        observed: SigningLedgerState,
+        /// Target state this advance attempted.
+        to: SigningLedgerState,
+    },
+
     /// No ledger row exists for the given `gate_ref`.
     #[error("no signing-ledger row for this gate_ref")]
     NotFound,
@@ -200,7 +218,8 @@ pub mod contract {
     use super::*;
     use std::sync::Arc;
 
-    fn gate() -> GateRef {
+    /// The fixed `gate_ref` every ledger contract case operates on.
+    pub fn gate() -> GateRef {
         GateRef::new("gate:ledger")
     }
 

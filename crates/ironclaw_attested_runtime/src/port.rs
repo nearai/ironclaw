@@ -31,7 +31,7 @@ use std::sync::{Arc, Mutex};
 use ironclaw_signing_provider::GateRef as SigningGateRef;
 use ironclaw_turns::{AttestedResumePort, AttestedResumeRejection, AttestedResumeRequest};
 
-use crate::binding::InMemoryAttestedGateBindingStore;
+use crate::binding::SyncBindingRead;
 
 /// A synchronous one-shot guard claimed at resume time, keyed by `gate_ref`.
 ///
@@ -71,7 +71,7 @@ impl ResumeGuard for InMemoryResumeGuard {
 
 /// The production [`AttestedResumePort`] for the reborn composition.
 pub struct RuntimeAttestedResumePort {
-    bindings: Arc<InMemoryAttestedGateBindingStore>,
+    bindings: Arc<dyn SyncBindingRead>,
     resume_guard: Arc<dyn ResumeGuard>,
 }
 
@@ -79,10 +79,11 @@ impl RuntimeAttestedResumePort {
     /// Build the port over the authoritative gate-binding store and the
     /// one-shot resume guard. Both are shared with the driver (which reads the
     /// same binding to verify + broadcast).
-    pub fn new(
-        bindings: Arc<InMemoryAttestedGateBindingStore>,
-        resume_guard: Arc<dyn ResumeGuard>,
-    ) -> Self {
+    ///
+    /// `bindings` is any [`SyncBindingRead`] — the in-memory store or a durable
+    /// store's write-through cache — so the resume path stays sync regardless of
+    /// the persistence backend.
+    pub fn new(bindings: Arc<dyn SyncBindingRead>, resume_guard: Arc<dyn ResumeGuard>) -> Self {
         Self {
             bindings,
             resume_guard,

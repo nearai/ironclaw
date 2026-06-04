@@ -1,0 +1,68 @@
+[package]
+name = "ironclaw_attested_store"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+description = "Durable PostgreSQL + libSQL backends for the IronClaw attested-signing stores (sealed-grant CAS, signing/broadcast ledger, attested-gate binding) — DB-enforced one-shot/idempotency invariants"
+authors = ["NEAR AI <support@near.ai>"]
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/nearai/ironclaw"
+repository = "https://github.com/nearai/ironclaw"
+publish = false
+
+[package.metadata.dist]
+dist = false
+
+[features]
+default = []
+# Durable PostgreSQL backend. rustls-only TLS stack (no openssl) to keep the
+# attested-signing substrate openssl-free (architecture test
+# `workspace_graph_is_openssl_free`).
+postgres = ["dep:deadpool-postgres", "dep:tokio-postgres"]
+# Durable libSQL / Turso backend.
+libsql = ["dep:libsql"]
+# Pull in the canonical contract suites from `ironclaw_attestation` so the
+# durable backends are driven through the SAME behavioural cases as the
+# in-memory reference impl.
+contract-suite = ["ironclaw_attestation/contract-tests"]
+# DB-backed contract tests require a live database; gated so unit builds and CI
+# without a DB still compile. Combine with `postgres`/`libsql`.
+integration = []
+# The real per-chain JSON-RPC broadcaster (MultiChainBroadcaster) wired under
+# the signing-ledger state machine. Pulls in chain_signing's HTTP broadcasters
+# (rustls-only) plus bs58 for Solana signature encoding.
+broadcast-http = ["ironclaw_chain_signing/broadcast-http", "dep:bs58"]
+
+[dependencies]
+async-trait = "0.1"
+ironclaw_attestation = { path = "../ironclaw_attestation" }
+ironclaw_attested_runtime = { path = "../ironclaw_attested_runtime" }
+ironclaw_signing_provider = { path = "../ironclaw_signing_provider" }
+ironclaw_chain_signing = { path = "../ironclaw_chain_signing" }
+ironclaw_host_api = { path = "../ironclaw_host_api" }
+hex = "0.4"
+bs58 = { version = "0.5", optional = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+tracing = "0.1"
+
+# PostgreSQL (rustls-only; TLS is wired by the composition layer that supplies
+# the deadpool pool, mirroring ironclaw_reborn_event_store).
+deadpool-postgres = { version = "0.14", optional = true }
+tokio-postgres = { version = "0.7", optional = true, features = ["with-serde_json-1"] }
+
+# libSQL / Turso (rustls-backed; no openssl).
+libsql = { version = "0.6", optional = true, default-features = false, features = ["core", "replication", "remote", "tls"] }
+
+[dev-dependencies]
+ironclaw_attestation = { path = "../ironclaw_attestation", features = ["contract-tests"] }
+ironclaw_chain_signing = { path = "../ironclaw_chain_signing" }
+ironclaw_host_api = { path = "../ironclaw_host_api" }
+ironclaw_attested_runtime = { path = "../ironclaw_attested_runtime" }
+ironclaw_signing_provider = { path = "../ironclaw_signing_provider" }
+alloy-consensus = "1"
+alloy-primitives = "1"
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
+tempfile = "3"

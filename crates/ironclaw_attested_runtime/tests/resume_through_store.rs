@@ -17,7 +17,8 @@ use chrono::{TimeZone, Utc};
 use ironclaw_attestation::{DecodedTransaction, RenderingSchemaVersion};
 use ironclaw_attested_runtime::{
     AttestedGateBinding, AttestedGateBindingStore, InMemoryAttestedGateBindingStore,
-    InMemoryResumeGuard, ResumeGuard, RuntimeAttestedResumePort, approved_tx_hash_ref_hex,
+    InMemoryResumeGuard, ResumeGuard, RuntimeAttestedResumePort, SyncBindingRead,
+    approved_tx_hash_ref_hex,
 };
 use ironclaw_chain_signing::{ChainKeyId, evm};
 use ironclaw_host_api::{AgentId, ProjectId, ResourceScope, TenantId, ThreadId, UserId};
@@ -156,7 +157,7 @@ async fn real_port_resolves_attested_gate_and_never_requeues_loop() {
     let bindings = Arc::new(InMemoryAttestedGateBindingStore::new());
     let resume_guard: Arc<dyn ResumeGuard> = Arc::new(InMemoryResumeGuard::new());
     let port: Arc<dyn AttestedResumePort> = Arc::new(RuntimeAttestedResumePort::new(
-        Arc::clone(&bindings),
+        Arc::clone(&bindings) as Arc<dyn SyncBindingRead>,
         Arc::clone(&resume_guard),
     ));
     let store = Arc::new(InMemoryTurnStateStore::default().with_attested_resume_port(port));

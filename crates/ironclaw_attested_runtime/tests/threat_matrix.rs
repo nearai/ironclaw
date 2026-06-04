@@ -33,7 +33,7 @@ use ironclaw_attestation::{
 use ironclaw_attested_runtime::{
     AttestedGateBinding, AttestedGateBindingStore, AttestedSignerContinuationDriver,
     ContinuationError, CustodialMainnetShipGate, InMemoryAttestedGateBindingStore,
-    InMemoryResumeGuard, ProviderRegistry, ResumeGuard, RuntimeAttestedResumePort,
+    InMemoryResumeGuard, ProviderRegistry, ResumeGuard, RuntimeAttestedResumePort, SyncBindingRead,
     approved_tx_hash_ref_hex,
 };
 use ironclaw_chain_signing::{
@@ -527,6 +527,11 @@ async fn driver_rechecks_inconsistent_binding() {
     use ironclaw_attested_runtime::AttestedGateBinding;
 
     struct InconsistentStore(AttestedGateBinding);
+    impl SyncBindingRead for InconsistentStore {
+        fn get_sync(&self, _gate_ref: &SigningGateRef) -> Option<AttestedGateBinding> {
+            Some(self.0.clone())
+        }
+    }
     #[async_trait]
     impl AttestedGateBindingStore for InconsistentStore {
         async fn put(
@@ -839,7 +844,10 @@ fn threat_16_resume_port_validates_then_one_shot_no_loop_reentry() {
     // section: it re-checks the bound hash and claims a one-shot resume guard.
     let bindings = Arc::new(InMemoryAttestedGateBindingStore::new());
     let resume_guard: Arc<dyn ResumeGuard> = Arc::new(InMemoryResumeGuard::new());
-    let port = RuntimeAttestedResumePort::new(Arc::clone(&bindings), Arc::clone(&resume_guard));
+    let port = RuntimeAttestedResumePort::new(
+        Arc::clone(&bindings) as Arc<dyn SyncBindingRead>,
+        Arc::clone(&resume_guard),
+    );
 
     let ctx = signing_context(&hex::encode([0xAAu8; 20]));
     let (_tx, decoded, hash) = sample_evm(&hex::encode([0xAAu8; 20]));
@@ -884,7 +892,10 @@ fn threat_16_resume_port_validates_then_one_shot_no_loop_reentry() {
 fn threat_3_resume_port_rejects_mismatched_expected_hash() {
     let bindings = Arc::new(InMemoryAttestedGateBindingStore::new());
     let resume_guard: Arc<dyn ResumeGuard> = Arc::new(InMemoryResumeGuard::new());
-    let port = RuntimeAttestedResumePort::new(Arc::clone(&bindings), resume_guard);
+    let port = RuntimeAttestedResumePort::new(
+        Arc::clone(&bindings) as Arc<dyn SyncBindingRead>,
+        resume_guard,
+    );
 
     let ctx = signing_context(&hex::encode([0xABu8; 20]));
     let (_tx, decoded, hash) = sample_evm(&hex::encode([0xABu8; 20]));
@@ -1219,6 +1230,11 @@ async fn driver_rejects_binding_chain_mismatch() {
     use async_trait::async_trait;
 
     struct ChainMismatchStore(AttestedGateBinding);
+    impl SyncBindingRead for ChainMismatchStore {
+        fn get_sync(&self, _gate_ref: &SigningGateRef) -> Option<AttestedGateBinding> {
+            Some(self.0.clone())
+        }
+    }
     #[async_trait]
     impl AttestedGateBindingStore for ChainMismatchStore {
         async fn put(

@@ -184,7 +184,8 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     let attested_resume_guard: Arc<dyn ResumeGuard> = Arc::new(InMemoryResumeGuard::new());
     let attested_resume_port: Arc<dyn AttestedResumePort> =
         Arc::new(RuntimeAttestedResumePort::new(
-            Arc::clone(&attested_gate_bindings),
+            Arc::clone(&attested_gate_bindings)
+                as Arc<dyn ironclaw_attested_runtime::SyncBindingRead>,
             Arc::clone(&attested_resume_guard),
         ));
     let turn_state =
