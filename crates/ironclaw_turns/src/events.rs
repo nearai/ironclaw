@@ -105,7 +105,10 @@ impl TurnLifecycleEvent {
             cursor: state.event_cursor,
             scope: state.scope.clone(),
             occurred_at: Some(Utc::now()),
-            owner_user_id: state.actor.as_ref().map(|actor| actor.user_id.clone()),
+            owner_user_id: lifecycle_owner_user_id(
+                &state.scope,
+                state.actor.as_ref().map(|actor| &actor.user_id),
+            ),
             run_id: state.run_id,
             status: state.status,
             kind,
@@ -124,6 +127,16 @@ impl TurnLifecycleEvent {
         self.owner_user_id = None;
         self
     }
+}
+
+pub(crate) fn lifecycle_owner_user_id(
+    scope: &TurnScope,
+    fallback_actor_user_id: Option<&UserId>,
+) -> Option<UserId> {
+    scope
+        .explicit_owner_user_id()
+        .cloned()
+        .or_else(|| fallback_actor_user_id.cloned())
 }
 
 #[async_trait]
@@ -403,7 +416,9 @@ mod tests {
     use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 
     use crate::{
-        GateRef, TurnError, TurnRunId, TurnScope, TurnStatus,
+        AcceptedMessageRef, GateRef, ReplyTargetBindingRef, RunProfileId, RunProfileVersion,
+        SourceBindingRef, TurnActor, TurnError, TurnId, TurnRunId, TurnRunState, TurnScope,
+        TurnStatus,
         events::{
             EventCursor, TurnBlockedGateKind, TurnBlockedGateMetadata, TurnEventKind,
             TurnEventPage, TurnEventProjectionService, TurnEventProjectionSource,
@@ -473,6 +488,42 @@ mod tests {
         ] {
             assert_eq!(TurnBlockedGateKind::from_status(status), None);
         }
+    }
+
+    #[test]
+    fn run_state_lifecycle_event_prefers_explicit_owner_over_actor() {
+        let actor = UserId::new("user:actor").expect("actor");
+        let owner = UserId::new("user:subject").expect("subject");
+        let scope = TurnScope::new_with_owner(
+            TenantId::new("tenant-a").expect("tenant"),
+            Some(AgentId::new("agent-a").expect("agent")),
+            Some(ProjectId::new("project-a").expect("project")),
+            ThreadId::new("thread-a").expect("thread"),
+            Some(owner.clone()),
+        );
+        let state = TurnRunState {
+            scope,
+            actor: Some(TurnActor::new(actor)),
+            turn_id: TurnId::new(),
+            run_id: TurnRunId::new(),
+            status: TurnStatus::BlockedAuth,
+            accepted_message_ref: AcceptedMessageRef::new("accepted-a").expect("accepted ref"),
+            source_binding_ref: SourceBindingRef::new("source-a").expect("source ref"),
+            reply_target_binding_ref: ReplyTargetBindingRef::new("reply-a").expect("reply ref"),
+            resolved_run_profile_id: RunProfileId::default_profile(),
+            resolved_run_profile_version: RunProfileVersion::new(1),
+            resolved_model_route: None,
+            received_at: chrono::Utc::now(),
+            checkpoint_id: None,
+            gate_ref: Some(GateRef::new("gate:auth-a").expect("gate ref")),
+            credential_requirements: Vec::new(),
+            failure: None,
+            event_cursor: EventCursor(1),
+        };
+
+        let event = TurnLifecycleEvent::from_run_state(&state, TurnEventKind::Blocked, None);
+
+        assert_eq!(event.owner_user_id, Some(owner));
     }
 
     #[test]

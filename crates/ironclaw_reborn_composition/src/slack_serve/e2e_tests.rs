@@ -450,6 +450,34 @@ async fn slack_dm_delivers_auth_prompt_with_setup_link_after_immediate_ack() {
 }
 
 #[tokio::test]
+async fn slack_channel_auth_prompt_omits_setup_link_after_immediate_ack() {
+    let auth_challenges: Arc<dyn AuthChallengeProvider> =
+        Arc::new(FakeAuthChallengeProvider::default());
+    let harness = build_harness_with_actor_user_resolver_and_auth_challenges(
+        TurnMode::BlockAuth,
+        static_personal_actor_user_resolver(),
+        Some(auth_challenges),
+    )
+    .await;
+
+    let response = harness
+        .post_event(app_mention_message("Ev-auth-channel", "needs auth"))
+        .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    harness.drain().await;
+
+    let messages = harness.slack_messages();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0]["channel"], "C123");
+    assert_eq!(messages[0]["thread_ts"], "1710000000.000008");
+    let text = messages[0]["text"].as_str().expect("Slack message text");
+    assert!(text.contains("Authentication required"));
+    assert!(!text.contains("Setup link:"));
+    assert!(!text.contains("https://provider.example/oauth"));
+}
+
+#[tokio::test]
 async fn slack_approval_reply_resumes_and_delivers_final_reply() {
     let harness = build_harness(TurnMode::BlockApproval).await;
 
@@ -876,6 +904,13 @@ fn dm_message(event_id: &'static str, text: &'static str) -> &'static str {
     }
 }
 
+fn app_mention_message(event_id: &'static str, text: &'static str) -> &'static str {
+    match (event_id, text) {
+        ("Ev-auth-channel", "needs auth") => APP_MENTION_AUTH,
+        _ => panic!("unknown fixture"),
+    }
+}
+
 async fn assert_body(response: axum::response::Response, expected: &str) {
     let body = response
         .into_body()
@@ -941,3 +976,11 @@ const DM_AUTH: &str = r#"{
   "event_id":"Ev-auth",
 	  "event":{"type":"message","channel_type":"im","user":"U123","channel":"D123","text":"needs auth","ts":"1710000000.000007"}
 	}"#;
+
+const APP_MENTION_AUTH: &str = r#"{
+  "type":"event_callback",
+  "team_id":"T-A",
+  "api_app_id":"A-slack",
+  "event_id":"Ev-auth-channel",
+  "event":{"type":"app_mention","user":"U123","channel":"C123","text":"<@UBOT> needs auth","ts":"1710000000.000008"}
+}"#;

@@ -23,7 +23,8 @@ use ironclaw_outbound::{
 use ironclaw_product_adapters::{
     ExternalActorRef, ExternalConversationRef, FinalReplyView, GatePromptView,
     OutboundDeliverySink, ProductAdapter, ProductAdapterError, ProductInboundAck,
-    ProductInboundEnvelope, ProductOutboundPayload, ProtocolHttpEgress,
+    ProductInboundEnvelope, ProductInboundPayload, ProductOutboundPayload, ProductTriggerReason,
+    ProtocolHttpEgress,
 };
 use ironclaw_product_workflow::{
     ConversationBindingService, ProductOutboundDeliveryRequest, ProductOutboundTargetResolver,
@@ -160,16 +161,19 @@ impl SlackFinalReplyDeliveryObserver {
                     );
                     return Ok(());
                 };
-                let view = auth_prompt_view_for_blocked_auth(
-                    &binding.actor_user_id,
-                    &scope,
-                    run_id,
-                    gate_ref.as_str(),
-                    "Authenticate to continue this run.".to_string(),
-                    &actionable_state.credential_requirements,
-                    self.services.auth_challenges.as_deref(),
-                )
-                .await?;
+                let view = slack_auth_prompt_view(
+                    &envelope,
+                    auth_prompt_view_for_blocked_auth(
+                        &binding.actor_user_id,
+                        &scope,
+                        run_id,
+                        gate_ref.as_str(),
+                        "Authenticate to continue this run.".to_string(),
+                        &actionable_state.credential_requirements,
+                        self.services.auth_challenges.as_deref(),
+                    )
+                    .await?,
+                );
                 (
                     RunNotificationEventKind::AuthRequired,
                     ProductOutboundPayload::AuthPrompt(view),
@@ -283,6 +287,24 @@ impl SlackFinalReplyDeliveryObserver {
             .await?
             .and_then(|message| message.content))
     }
+}
+
+fn slack_auth_prompt_view(
+    envelope: &ProductInboundEnvelope,
+    mut view: ironclaw_product_adapters::AuthPromptView,
+) -> ironclaw_product_adapters::AuthPromptView {
+    if !slack_auth_setup_link_is_private(envelope) {
+        view.authorization_url = None;
+    }
+    view
+}
+
+fn slack_auth_setup_link_is_private(envelope: &ProductInboundEnvelope) -> bool {
+    matches!(
+        envelope.payload(),
+        ProductInboundPayload::UserMessage(payload)
+            if payload.trigger == ProductTriggerReason::DirectChat
+    )
 }
 
 fn jittered_poll_interval(base: Duration, run_id: &TurnRunId) -> Duration {
