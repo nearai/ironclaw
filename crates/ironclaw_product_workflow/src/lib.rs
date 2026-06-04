@@ -133,22 +133,26 @@ pub use ironclaw_product_adapters::{
     ProgressKind, ProgressUpdateView, ProjectionCursor,
 };
 pub use reborn_services::{
+    AUTOMATION_LIST_DEFAULT_PAGE_SIZE, AUTOMATION_LIST_MAX_PAGE_SIZE, AutomationProductFacade,
     ExtensionCredentialSetupService, ExtensionCredentialStatusRequest,
-    ExtensionCredentialSubmitRequest, RebornCancelRunResponse, RebornCreateThreadResponse,
-    RebornExtensionActionResponse, RebornExtensionCredentialSetup, RebornExtensionInfo,
-    RebornExtensionListResponse, RebornExtensionOnboardingPayload, RebornExtensionOnboardingState,
-    RebornExtensionRegistryEntry, RebornExtensionRegistryResponse, RebornExtensionSetupField,
-    RebornExtensionSetupSecret, RebornGetRunStateRequest, RebornGetRunStateResponse,
+    ExtensionCredentialSubmitRequest, ProductAgentBoundCaller, RebornAutomationInfo,
+    RebornAutomationRunStatus, RebornAutomationSource, RebornAutomationState,
+    RebornCancelRunResponse, RebornCreateThreadResponse, RebornExtensionActionResponse,
+    RebornExtensionCredentialSetup, RebornExtensionInfo, RebornExtensionListResponse,
+    RebornExtensionOnboardingPayload, RebornExtensionOnboardingState, RebornExtensionRegistryEntry,
+    RebornExtensionRegistryResponse, RebornExtensionSetupField, RebornExtensionSetupSecret,
+    RebornGetRunStateRequest, RebornGetRunStateResponse, RebornListAutomationsResponse,
     RebornListThreadsResponse, RebornResolveGateResponse, RebornResumeGateResponse, RebornServices,
     RebornServicesApi, RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
     RebornSetupExtensionResponse, RebornStreamEventsRequest, RebornStreamEventsResponse,
     RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
+    UnsupportedAutomationProductFacade,
 };
 
 pub use webui_inbound::{
     WebUiAuthenticatedCaller, WebUiCancelReason, WebUiCancelRunRequest, WebUiCreateThreadRequest,
     WebUiGateResolution, WebUiInboundCommand, WebUiInboundValidationCode,
-    WebUiInboundValidationError, WebUiListThreadsRequest, WebUiResolveGateRequest,
-    WebUiSendMessageRequest, WebUiSetupExtensionRequest,
+    WebUiInboundValidationError, WebUiListAutomationsRequest, WebUiListThreadsRequest,
+    WebUiResolveGateRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
 };
 pub use workflow::DefaultProductWorkflow;

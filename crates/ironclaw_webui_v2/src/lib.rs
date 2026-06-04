@@ -6,9 +6,8 @@
 //!
 //! ## Boundaries
 //!
-//! - Handlers consume only [`RebornServicesApi`] for all six commands
-//!   (`create_thread`, `submit_turn`, `get_timeline`, `stream_events`,
-//!   `cancel_run`, `resolve_gate`). They never reach into the dispatcher,
+//! - Handlers consume only [`RebornServicesApi`] for chat, run/gate,
+//!   extension, and automation reads. They never reach into the dispatcher,
 //!   `HostRuntime`, run-state, DB stores, or any runtime lane.
 //! - Auth and CORS are **not** enforced here. Host composition runs the
 //!   bearer-token middleware that builds a [`WebUiAuthenticatedCaller`] and
@@ -59,18 +58,19 @@ mod sse_capacity;
 pub use descriptors::{
     WEBUI_V2_ROUTE_ACTIVATE_EXTENSION, WEBUI_V2_ROUTE_CANCEL_RUN, WEBUI_V2_ROUTE_CREATE_THREAD,
     WEBUI_V2_ROUTE_GET_EXTENSION_SETUP, WEBUI_V2_ROUTE_GET_TIMELINE,
-    WEBUI_V2_ROUTE_INSTALL_EXTENSION, WEBUI_V2_ROUTE_LIST_EXTENSION_REGISTRY,
-    WEBUI_V2_ROUTE_LIST_EXTENSIONS, WEBUI_V2_ROUTE_LIST_THREADS, WEBUI_V2_ROUTE_REMOVE_EXTENSION,
-    WEBUI_V2_ROUTE_RESOLVE_GATE, WEBUI_V2_ROUTE_SEND_MESSAGE, WEBUI_V2_ROUTE_SETUP_EXTENSION,
-    WEBUI_V2_ROUTE_STREAM_EVENTS, WEBUI_V2_ROUTE_STREAM_EVENTS_WS, webui_v2_routes,
+    WEBUI_V2_ROUTE_INSTALL_EXTENSION, WEBUI_V2_ROUTE_LIST_AUTOMATIONS,
+    WEBUI_V2_ROUTE_LIST_EXTENSION_REGISTRY, WEBUI_V2_ROUTE_LIST_EXTENSIONS,
+    WEBUI_V2_ROUTE_LIST_THREADS, WEBUI_V2_ROUTE_REMOVE_EXTENSION, WEBUI_V2_ROUTE_RESOLVE_GATE,
+    WEBUI_V2_ROUTE_SEND_MESSAGE, WEBUI_V2_ROUTE_SETUP_EXTENSION, WEBUI_V2_ROUTE_STREAM_EVENTS,
+    WEBUI_V2_ROUTE_STREAM_EVENTS_WS, webui_v2_routes,
 };
 #[cfg(feature = "webui-v2-beta")]
 pub use error::{WebUiV2HttpError, WebUiV2HttpErrorBody};
 #[cfg(feature = "webui-v2-beta")]
 pub use handlers::{
     activate_extension, cancel_run, create_thread, get_extension_setup, get_timeline,
-    install_extension, list_extension_registry, list_extensions, list_threads, remove_extension,
-    resolve_gate, send_message, setup_extension, stream_events, stream_events_ws,
+    install_extension, list_automations, list_extension_registry, list_extensions, list_threads,
+    remove_extension, resolve_gate, send_message, setup_extension, stream_events, stream_events_ws,
 };
 #[cfg(feature = "webui-v2-beta")]
 pub use router::{WebUiV2State, webui_v2_router};

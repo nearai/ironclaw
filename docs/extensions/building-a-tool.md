@@ -1,648 +1,702 @@
 ---
-title: How to build a tool
-description: "Build a weather tool from scratch with Rust"
+title: How to implement a Reborn tool extension
+description: "A Reborn-only implementation guide for IronClaw extension tools"
 ---
 
-In this tutorial you will build **weather-tool** from scratch — a WASM tool that fetches current conditions, a 5-day forecast, and air quality data using the free [Open-Meteo](https://open-meteo.com) API (no API key required).
+# How to implement a Reborn tool extension
 
-By the end you will have a working tool your agent can call like this:
+This guide is for coding agents and engineers adding an IronClaw Reborn
+extension tool. It is intentionally Reborn-only. Do not use V1 extension,
+native-extension, pending-OAuth-map, or legacy tool-router patterns when
+following this document.
 
-> "What's the weather in Tokyo right now?"
+The guide is grounded in the current GitHub, GSuite, and Notion implementations:
 
-The complete source code for this tool is available on GitHub:
+- GitHub: bundled WASM capability provider under
+  `crates/ironclaw_first_party_extensions/assets/github/`.
+- GSuite: bundled WASM capability providers for Gmail, Calendar, Docs, Drive,
+  Sheets, and Slides.
+- Notion: bundled hosted HTTP MCP capability provider under
+  `crates/ironclaw_first_party_extensions/assets/notion-mcp/`, with product
+  auth / OAuth DCR wiring in Reborn composition.
 
-<Card title="weather-tool source" icon="github" href="https://github.com/matiasbenary/ironclaw/tree/tools/weather/tools-src/weather">
-  Browse the full implementation — `lib.rs`, `Cargo.toml`, and `weather-tool.capabilities.json`.
-</Card>
+## Success criteria
 
----
+A Reborn tool extension is complete only when all of the following are true:
 
-## Prerequisites
+1. The extension package has a `schema_version = "reborn.extension_manifest.v2"`
+   manifest and every model-visible capability has schema, output schema, and
+   prompt assets.
+2. The manifest declares the correct runtime lane: `wasm`, `mcp`, or `script`.
+3. The manifest exposes tools through `ironclaw.capability_provider/v1` via the
+   registry extension manifest path. Do not add or copy top-level
+   `[[capabilities]]` declarations.
+4. The runtime code does not read raw secrets, create its own HTTP client for
+   external provider calls, bypass approvals, or dispatch directly into the
+   agent loop.
+5. Network, credentials, approvals, and resource bounds are enforced by the
+   Reborn host APIs and runtime services.
+6. Tests cover manifest validation, runtime dispatch behavior, credential/auth
+   gates, and caller-facing behavior through the runtime or lifecycle call site.
 
-If you don't have Rust yet, install it from [rustup.rs](https://rustup.rs):
+## Reborn extension flow
 
-```bash
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+Use this mental model before touching files:
+
+```text
+Extension package
+  -> lifecycle/discovery materializes it into the extension registry
+  -> ironclaw_extensions parses manifest v2 host APIs and projects descriptors
+  -> ironclaw_host_runtime publishes hot model-facing schemas/prompts
+  -> model selects a visible capability
+  -> ironclaw_capabilities performs authorization, approvals, obligations, run state
+  -> host runtime selects the runtime adapter by RuntimeKind
+  -> runtime executes through host-provided services
+  -> host HTTP egress injects staged credentials and enforces network policy
+  -> sanitized JSON output returns to the loop
 ```
 
-Then add the WASM target:
+Important ownership rule:
 
-```bash
-rustup target add wasm32-wasip2
+```text
+ironclaw_extensions knows what can run.
+runtime crates know how to run it.
+authorization/approvals decide whether it may run.
+host runtime/composition wires the concrete services.
 ```
 
----
+Do not collapse those layers into a shortcut.
 
-## 1. Create the project
+## Choose the runtime lane
 
-```bash
-cargo new --lib weather-tool
-cd weather-tool
-```
+Pick one lane first. Do not blend lanes to make a tool work.
 
-Replace the generated `Cargo.toml` with:
+| Lane | Use when | Current examples | Main files |
+| --- | --- | --- | --- |
+| WASM capability provider | Provider logic can run in a sandboxed component and use host HTTP egress. This is the default for provider tools. | GitHub, Gmail, Google Calendar, Google Drive, Google Docs, Google Sheets, Google Slides | `crates/ironclaw_first_party_extensions/assets/<id>/manifest.toml`, `schemas/`, `prompts/`, optional `wasm-src/` |
+| Hosted HTTP MCP | The provider already exposes an MCP server and the host should lock egress to that endpoint. | Notion hosted MCP | `assets/<id>-mcp/manifest.toml`, schemas/prompts, `crates/ironclaw_reborn_composition/src/mcp.rs` only if adding a new host-bundled MCP policy shape |
+| Product adapter | The extension receives external inbound events or product webhooks. This is not just a model-callable tool lane. | Slack/Telegram-style adapters, not the main focus of this guide | `crates/ironclaw_product_adapters`, `crates/ironclaw_product_adapter_registry`, `crates/ironclaw_wasm_product_adapters` |
+| Script | Sandboxed process/CLI capability. Use only when a process boundary is the product requirement. | Project tools / CLI-style tools | `crates/ironclaw_scripts` runtime path plus manifest runtime `script` |
 
-```toml Cargo.toml
-[package]
-name = "weather-tool"
+For a new provider API like Linear, Jira, or a small internal SaaS API, start
+with WASM unless you have a concrete reason not to.
+
+## Crates to touch
+
+Touch only the smallest set for your lane.
+
+### Common extension package work
+
+Usually touch:
+
+- `crates/ironclaw_first_party_extensions/assets/<extension>/manifest.toml`
+- `crates/ironclaw_first_party_extensions/assets/<extension>/schemas/<extension>/*.json`
+- `crates/ironclaw_first_party_extensions/assets/<extension>/prompts/<extension>/*.md`
+- `crates/ironclaw_reborn_composition/src/available_extensions.rs` only when adding
+  a host-bundled available extension to the built-in install catalog.
+
+Do not touch for ordinary tools:
+
+- `crates/ironclaw_extensions/src/v2.rs`, unless changing the manifest contract
+  itself.
+- `crates/ironclaw_host_api/src/*`, unless adding a new shared host API type.
+- `crates/ironclaw_capabilities`, unless changing authorization/approval
+  orchestration for all capabilities.
+- `crates/ironclaw_approvals`, unless changing approval lease semantics.
+- `crates/ironclaw_secrets`, unless changing low-level secret storage/lease
+  semantics.
+- `crates/ironclaw_network`, unless changing global network policy/HTTP egress
+  semantics.
+- agent loop crates for tool-specific routing. Tool selection must come from the
+  published capability surface, not hardcoded model-routing logic.
+
+### WASM lane
+
+Usually touch:
+
+- `crates/ironclaw_first_party_extensions/assets/<extension>/wasm-src/`
+- `crates/ironclaw_first_party_extensions/assets/<extension>/wasm/<tool>.wasm`
+- the extension manifest, schemas, and prompts.
+- `crates/ironclaw_reborn_composition/src/available_extensions.rs` to package
+  the manifest, schemas, prompts, and WASM bytes if host-bundled.
+
+Use as references:
+
+- `crates/ironclaw_first_party_extensions/assets/github/wasm-src/src/lib.rs`
+- `crates/ironclaw_first_party_extensions/assets/github/wasm-src/src/request.rs`
+- `crates/ironclaw_host_runtime/src/wasm_credentials.rs`
+
+Do not add a direct `reqwest`/HTTP client inside the WASM tool. Use the WIT host
+HTTP import (`near::agent::host::http_request`) so Reborn can enforce egress,
+inject staged credentials, and sanitize failures.
+
+### Hosted MCP lane
+
+Usually touch:
+
+- `crates/ironclaw_first_party_extensions/assets/<provider>-mcp/manifest.toml`
+- `schemas/<provider>/...`
+- `prompts/<provider>/...`
+- `crates/ironclaw_reborn_composition/src/available_extensions.rs` if
+  host-bundled.
+
+Use as references:
+
+- `crates/ironclaw_first_party_extensions/assets/notion-mcp/manifest.toml`
+- `crates/ironclaw_reborn_composition/src/mcp.rs`
+- `crates/ironclaw_reborn_composition/src/notion_oauth.rs`
+
+Only touch `crates/ironclaw_reborn_composition/src/mcp.rs` if the hosted MCP
+runtime policy needs a new generic rule. Notion already demonstrates the common
+shape: HTTPS-only endpoint, exact host/path match, no URL credentials, no query,
+no fragment, host-mediated egress, staged product-auth token.
+
+### Auth/OAuth lane
+
+Usually touch only when adding a new product-auth provider:
+
+- `crates/ironclaw_auth` for provider/scopes/account-domain vocabulary when it
+  must be shared and durable.
+- `crates/ironclaw_reborn_composition/src/<provider>_oauth.rs` for provider
+  specs like Notion.
+- `crates/ironclaw_reborn_composition/src/oauth_provider_client.rs` only if the
+  provider needs a new generic exchange behavior.
+- `crates/ironclaw_reborn_composition/src/product_auth_serve/` only for product
+  auth HTTP setup/callback surfaces.
+
+Do not create extension-local OAuth maps or store OAuth tokens in runtime code.
+Credential accounts and secrets belong to `ironclaw_auth` /
+`ironclaw_secrets` through Reborn composition.
+
+## Files not to touch
+
+For a normal extension, do not touch these:
+
+- `src/agent/*` or Reborn loop strategy code to special-case your tool.
+- `crates/ironclaw_llm/*` to teach the model your tool name.
+- `crates/ironclaw_engine/*` V1 runtime paths.
+- `src/tools/*` V1 tools.
+- `crates/ironclaw_host_api` for one provider's fields.
+- `crates/ironclaw_extensions/src/v2.rs` to allow a one-off manifest shortcut.
+- `crates/ironclaw_network` to allow one provider host.
+- `crates/ironclaw_secrets` to fetch one provider token.
+- `crates/ironclaw_approvals` to make one write operation easier.
+
+If your implementation appears to require one of these, stop and identify the
+missing Reborn contract or composition seam first.
+
+## Manifest v2 structure
+
+All Reborn packages use:
+
+```toml
+schema_version = "reborn.extension_manifest.v2"
+id = "example"
+name = "Example"
 version = "0.1.0"
-edition = "2021"
-description = "Weather information tool for IronClaw (WASM component)"
+description = "Example tools for Reborn."
+trust = "third_party"
 
-[lib]
-crate-type = ["cdylib"]
-
-[dependencies]
-wit-bindgen = "=0.36"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-
-[profile.release]
-opt-level = "s"
-lto = true
-strip = true
-codegen-units = 1
-
-[workspace]
+[runtime]
+kind = "wasm"
+module = "wasm/example_tool.wasm"
 ```
 
-<Note>
-`crate-type = ["cdylib"]` tells Cargo to produce a dynamic library — the format WASM components require. `[workspace]` stops Cargo from merging this crate into a parent workspace.
-</Note>
+Extension IDs and capability IDs are authority-bearing:
 
----
+- `id` must be lowercase ASCII letters/digits plus `_`, `-`, or `.`.
+- Capability IDs are `<extension_id>.<capability_name>`.
+- Do not use slashes, uppercase, raw host paths, or `..`.
+- Registry extensions cannot claim effective first-party/system authority.
+  Host composition decides effective trust.
 
-## 2. Wire up the WIT interface
+### All tool extensions: use `host_api`
 
-Every IronClaw tool is a WASM component that implements a WIT interface. The host provides HTTP, logging, and workspace capabilities; your tool exports `execute`, `schema`, and `description`.
+Publish model-visible tools via the capability-provider host API:
 
-Replace `src/lib.rs` with the following skeleton:
+```toml
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
 
-```rust src/lib.rs
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
+id = "example.search"
+description = "Search Example records."
+effects = ["dispatch_capability", "network", "use_secret"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/example/search.input.v1.json"
+output_schema_ref = "schemas/example/search.output.v1.json"
+prompt_doc_ref = "prompts/example/search.md"
+required_host_ports = ["host.runtime.http_egress"]
+runtime_credentials = [
+  { handle = "example_runtime_token", source = { type = "product_auth_account", provider = "example", setup = { kind = "oauth", scopes = ["records.read"] } }, provider_scopes = ["records.read"], audience = { scheme = "https", host_pattern = "api.example.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+```
+
+Do not use top-level `[[capabilities]]` for Reborn tool work. If a current
+bundled manifest still has that shape, do not treat that file shape as a
+reference. Treat it as migration debt and move it to `[[host_api]]` plus
+`[capability_provider.tools]` when touching that extension.
+
+### Capability fields
+
+Required per model-visible capability:
+
+- `id`: stable `<extension>.<name>` capability ID.
+- `description`: short, model-facing description.
+- `effects`: accurate effects. Include `external_write` for provider writes,
+  mutations, sends, deletes, comments, or workflow dispatches.
+- `default_permission`: use `ask` for writes and high-risk reads; use `allow`
+  only for low-risk read capabilities that policy deliberately permits.
+- `visibility`: usually `model`.
+- `input_schema_ref`: relative path to JSON schema.
+- `output_schema_ref`: relative path to JSON schema.
+- `prompt_doc_ref`: relative path to concise operation guidance.
+- `required_host_ports`: include `host.runtime.http_egress` when the runtime
+  must make host-mediated HTTP calls.
+- `runtime_credentials`: declare every credential the runtime may receive.
+
+Validation catches common mistakes:
+
+- `runtime_credentials` without `use_secret` is rejected. This includes
+  product-auth account credentials: product auth selects/refreshes the account,
+  but runtime dispatch still uses a host-staged access-secret handle.
+- Duplicate effects and duplicate credential handles are rejected.
+- Unknown host ports are rejected.
+- Credential audiences must be declared as HTTPS.
+- Schema and prompt refs must be relative package paths, not absolute paths,
+  URLs, backslash paths, or paths with `..`.
+
+### Effects and approvals
+
+Use effects as authorization inputs, not as documentation.
+
+Common mapping:
+
+- Read-only API call with credentials: `["dispatch_capability", "network",
+  "use_secret"]`.
+- Provider write: add `"external_write"`.
+- Local filesystem read/write: use `read_filesystem`, `write_filesystem`,
+  `delete_filesystem` as appropriate.
+- Process/CLI work: use `execute_code` or `spawn_process` as appropriate.
+- Money or irreversible financial actions: include `financial`.
+
+`default_permission = "ask"` is the normal default for anything with
+`external_write`, `financial`, local write/delete, process execution, approval
+mutation, extension mutation, or budget mutation.
+
+Approvals are resolved by `ironclaw_capabilities`, `ironclaw_approvals`, and run
+state. Runtime code must return a normal runtime error when blocked; it must not
+prompt the user, mint approval leases, or resume turns directly.
+
+## Schemas and prompts
+
+Schemas are part of the hot model-facing surface. They should make the desired
+input shape obvious and reject ambiguous or unsafe input before side effects.
+
+Follow these rules:
+
+- Use JSON Schema object inputs with `additionalProperties: false` unless the
+  upstream provider truly requires arbitrary JSON.
+- Require the fields needed to construct one provider operation.
+- Prefer provider-neutral names only when they are already established locally.
+- Put path/ID/URL validation in runtime code too; schemas are not a security
+  boundary.
+- Output schemas may be provider raw JSON for compatibility, as GitHub and many
+  Google WASM tools do, but typed output is better when the runtime owns the
+  shape.
+
+Prompt docs are lazy help metadata. Keep them operation-specific:
+
+- What the tool does.
+- Required identifiers.
+- How to avoid common destructive mistakes.
+- Any provider constraints the model should know.
+
+Do not put secrets, host paths, environment assumptions, or V1 setup commands in
+prompt docs.
+
+## HTTP and network integration
+
+Runtime code must use host-mediated HTTP:
+
+- WASM tools call the WIT host HTTP import, as GitHub does through
+  `near::agent::host::http_request`.
+- Hosted MCP uses `McpHostHttpClient` with `McpRuntimeHttpAdapter` and a
+  host-owned egress planner.
+
+Do not:
+
+- instantiate direct `reqwest` clients in runtime code for provider API calls;
+- follow redirects yourself to bypass host policy;
+- accept model-provided `Authorization`, cookie, API-key, or token headers;
+- put credentials in URLs;
+- widen global network policy for one extension.
+
+Network policy belongs in host/runtime planning:
+
+- WASM credential injection is derived from manifest descriptors in
+  `crates/ironclaw_host_runtime/src/wasm_credentials.rs`.
+- Hosted MCP policy is planned in
+  `crates/ironclaw_reborn_composition/src/mcp.rs`.
+- GSuite WASM tools should declare narrow credential audiences and use host
+  HTTP egress for Google API hosts.
+- Shared HTTP enforcement and redaction live in
+  `crates/ironclaw_host_runtime/src/egress/` and `crates/ironclaw_network`.
+
+Provider requests should set ordinary provider headers like `Accept`,
+`Content-Type`, API version, and User-Agent in runtime code. Credential headers
+must come from `runtime_credentials` and host egress injection.
+
+## Secrets and runtime credentials
+
+Secrets are opaque handles in manifests and host API types. Runtime code should
+never see raw token material except as already-injected HTTP request data inside
+the host egress boundary.
+
+Use `runtime_credentials` for every credential. Product auth is the preferred
+source for provider accounts, but it is still represented as a runtime
+credential because host egress injects the selected account's access-secret
+handle at dispatch time:
+
+```toml
+runtime_credentials = [
+  { handle = "github_runtime_token", source = { type = "product_auth_account", provider = "github" }, audience = { scheme = "https", host_pattern = "api.github.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+]
+```
+
+Important fields:
+
+- `handle`: extension/runtime-local credential handle. Keep it stable.
+- `source`: omit or use `{ type = "secret_handle" }` only for manual direct
+  secret-handle credentials. Prefer `{ type = "product_auth_account", ... }`
+  for OAuth/account-backed integrations.
+- `source.provider`: provider account namespace, for example `github`,
+  `google`, or `notion`.
+- `source.setup`: `manual_token` or `oauth` with scopes.
+- `provider_scopes`: scopes required for this capability. Use this for account
+  selection and scope mismatch checks.
+- `audience`: exact HTTPS provider host pattern the credential may be sent to.
+- `target`: header/query/path-placeholder injection target. Header is preferred.
+- `required`: defaults to `true`.
+
+Credential flow:
+
+```text
+manifest runtime_credentials
+  -> authorization obligation for use_secret
+  -> product-auth account selection or secret lease
+  -> RuntimeSecretInjectionStore staging
+  -> HostHttpEgressService injects once for matching capability + audience
+  -> host strips/redacts sensitive request and response material
+```
+
+Do not call `SecretStore::put`, `lease_once`, or `consume` from an extension
+runtime. Those are trusted setup/composition primitives, not tool APIs.
+
+## Product auth and OAuth
+
+Use product-auth account sources for provider accounts. Current patterns:
+
+- GitHub uses provider `github` and injects a bearer token for
+  `api.github.com`.
+- GSuite uses provider `google`, OAuth scopes per capability, and host egress
+  to Google API hosts.
+- Notion uses provider `notion`, DCR/OAuth provider spec in composition, and a
+  bearer token for `mcp.notion.com`.
+
+For a new OAuth provider:
+
+1. Add provider ID and shared scope vocabulary only if it must be shared across
+   crates.
+2. Add a provider spec in Reborn composition, like
+   `crates/ironclaw_reborn_composition/src/notion_oauth.rs`.
+3. Wire OAuth start/callback through product-auth services, not an
+   extension-local map.
+4. Store access/refresh material as credential-account secret handles.
+5. Declare per-capability scopes in `runtime_credentials`.
+6. Ensure auth-required dispatch errors map to structured product-auth
+   requirements instead of leaking provider or backend details.
+
+Missing credentials should produce an auth-required gate, not a plain backend
+failure and not a model-visible token prompt.
+
+## WASM implementation pattern
+
+WASM tools implement `wit/tool.wit`:
+
+```rust
 wit_bindgen::generate!({
     world: "sandboxed-tool",
-    path: "../../wit/tool.wit", // path relative to your Cargo.toml
+    path: "../../../../../wit/tool.wit",
 });
 
-use serde::{Deserialize, Serialize};
+struct ExampleTool;
 
-struct WeatherTool;
-
-impl exports::near::agent::tool::Guest for WeatherTool {
+impl exports::near::agent::tool::Guest for ExampleTool {
     fn execute(req: exports::near::agent::tool::Request) -> exports::near::agent::tool::Response {
-        match execute_inner(&req.params) {
-            Ok(result) => exports::near::agent::tool::Response {
-                output: Some(result),
+        match execute_inner(&req.params, req.context.as_deref()) {
+            Ok(output) => exports::near::agent::tool::Response {
+                output: Some(output),
                 error: None,
             },
-            Err(e) => exports::near::agent::tool::Response {
+            Err(code) => exports::near::agent::tool::Response {
                 output: None,
-                error: Some(e),
+                error: Some(error_payload(&code)),
             },
         }
     }
 
     fn schema() -> String {
-        SCHEMA.to_string()
+        schema::schema()
     }
 
     fn description() -> String {
-        "Get weather information using Open-Meteo (no API key required). \
-         Supports three actions: 'get_current' returns current weather conditions \
-         for a city; 'get_forecast' returns a 5-day daily forecast; \
-         'get_air_quality' returns air pollution data for given coordinates."
-            .to_string()
+        "Example Reborn tool. Credentials are injected only by host HTTP egress.".to_string()
     }
 }
 
-export!(WeatherTool);
+export!(ExampleTool);
 ```
 
-`execute_inner` is where the real logic lives — you will fill it in next.
+Rules:
 
-<Note>
-The `wit/tool.wit` file ships with IronClaw. If you are building inside the IronClaw repo (e.g. under `tools-src/my-tool/`), the path `../../wit/tool.wit` is correct. If you are building in a standalone directory, copy `wit/tool.wit` from the repo root and adjust the path accordingly.
-</Note>
+- Prefer operation selection from `req.context.capability_id`, as GitHub does.
+  Do not let the model choose a hidden `action` that can mismatch the
+  capability ID.
+- Deserialize with unknown fields denied.
+- Validate provider path segments, refs, IDs, pagination, and limits in runtime
+  code before HTTP.
+- Use host HTTP imports for provider calls.
+- Return stable, sanitized error codes. Do not echo raw host egress errors,
+  provider credentials, provider response bodies containing sensitive data, or
+  raw backend messages.
+- Keep schema and runtime input expectations in sync.
 
-<Note>
-If your tool uses private credentials (API keys, OAuth tokens), you still keep the same WIT interface. Secret handling is declared in `*.capabilities.json` and injected by the host at runtime. Your WASM tool should not ask the model for secrets in `params`.
-</Note>
+GitHub is the strongest current reference for this lane:
 
----
+- `operation_comes_from_host_context_not_param_shape`
+- `serde_rejects_unknown_fields_before_egress`
+- `sanitizes_host_egress_errors_without_leaking_details`
+- path/ref validation tests
 
-## 3. Define the Execute Logic
+## Hosted MCP implementation pattern
 
-The tool will receive parameters provided by the LLM in JSON format, then execute the right logic based on those parameters and return a result also in JSON format.
+Hosted MCP packages declare runtime:
 
-```rust src/lib.rs
-#[derive(Debug, Deserialize)]
-#[serde(tag = "action", rename_all = "snake_case")]
-enum Action {
-    GetCurrent(WeatherParams),
-    GetForecast(WeatherParams),
-    GetAirQuality(AirQualityParams),
-}
-
-#[derive(Debug, Deserialize)]
-struct WeatherParams {
-    city: String,
-    #[serde(default)]
-    country_code: Option<String>,
-    #[serde(default)]
-    units: Option<String>, // "metric" (default) or "imperial"
-}
-
-#[derive(Debug, Deserialize)]
-struct AirQualityParams {
-    lat: f64,
-    lon: f64,
-}
-
-fn execute_inner(params: &str) -> Result<String, String> {
-    let action: Action =
-        serde_json::from_str(params).map_err(|e| format!("Invalid parameters: {e}"))?;
-
-    match action {
-        Action::GetCurrent(p)    => get_current(p),
-        Action::GetForecast(p)   => get_forecast(p),
-        Action::GetAirQuality(p) => get_air_quality(p),
-    }
-}
+```toml
+[runtime]
+kind = "mcp"
+transport = "http"
+url = "https://mcp.notion.com/mcp"
 ```
 
-<Note>
+For host-bundled hosted HTTP MCP, Reborn composition:
 
-Remember to match the action names and parameter structure in the JSON schema you will define later. The LLM relies on that schema to know what JSON to send, so if your Rust code expects `country_code` but the schema calls it `country`, the LLM won't know to include it and you'll get errors at runtime.
+- accepts only HTTPS endpoint URLs;
+- rejects userinfo, query strings, fragments, wrong scheme, wrong host, and
+  wrong path;
+- derives a locked network policy from the manifest endpoint;
+- projects `runtime_credentials` to staged credential injections when the
+  capability and endpoint audience match;
+- uses `RuntimeHttpEgress` instead of ambient MCP HTTP clients.
 
-</Note>
+Notion is the reference. Its manifest declares each MCP tool as a capability,
+with per-tool schemas and prompts, and a product-auth `notion` credential for
+`mcp.notion.com`.
 
----
+Do not make a hosted MCP runtime call directly from an extension lifecycle or
+agent-loop path. Let the MCP runtime and host egress planner own it.
 
-## 4. Implement the Actions
+## Packaging host-bundled extensions
 
-We will now implement the three actions: `get_current`, `get_forecast`, and `get_air_quality`. Each action will call the appropriate Open-Meteo API endpoint, parse the response, and return a JSON string with the relevant information.
+Host-bundled extension packages are included in:
 
-<Accordion title="Handling authenticated APIs" icon="key">
+- `crates/ironclaw_reborn_composition/src/available_extensions.rs`
 
-If your API needs a secret (for example a bearer token), you do not inject it in these Rust functions manually. 
+That file:
 
-Instead you will declare them in the [capabilities file](#9-add-secrets-and-auth-for-tools-that-need-credentials) and let the host inject them at runtime.
+- includes manifest strings and WASM bytes;
+- includes schema and prompt assets;
+- builds `AvailableExtensionPackage`s;
+- defines lifecycle summaries and onboarding text;
+- materializes assets into `/system/extensions/<extension_id>/...`.
 
-Your Rust code just calls `api_get(...)` with the right URL and headers, and the host adds credentials automatically for allowlisted hosts.
+When adding a host-bundled package:
 
-You can still check for the presence of secrets if you want to return a custom error message when credentials are missing:
+1. Add manifest/assets under
+   `crates/ironclaw_first_party_extensions/assets/<extension>/`.
+2. Add `include_str!` / `include_bytes!` entries in `available_extensions.rs`.
+3. Add a package constructor like `github_package()` or `notion_mcp_package()`.
+4. Add assets for every `input_schema_ref`, `output_schema_ref`, and
+   `prompt_doc_ref`.
+5. Add onboarding only if setup is needed.
+6. Add tests that every manifest asset ref is packaged.
 
-```rust
-if !near::agent::host::secret_exists("example_api_token") {
-        return Err("Missing secret: example_api_token. Run: ironclaw tool auth <tool-name>".into());
-}
+For non-bundled registry packages, do not add them to this host-bundled catalog.
+They should be discovered from `/system/extensions/<id>/` through the same
+manifest host API path.
+
+## Publication to the model
+
+Hot model-facing publication happens in:
+
+- `crates/ironclaw_host_runtime/src/capability_catalog.rs`
+
+It resolves input schema refs, output schema refs, and optional prompt docs
+under the extension root. It does not grant authority and does not execute
+runtime code.
+
+Constraints to keep in mind:
+
+- input/output schema files are bounded to 64 KiB;
+- prompt docs are bounded to 16 KiB;
+- schema files must parse as valid JSON Schema;
+- only `visibility = "model"` capabilities enter the model-facing catalog.
+
+If a tool does not appear to the model, inspect manifest visibility, lifecycle
+activation, asset packaging, and schema validity before touching the agent loop.
+
+## Approval and auth outcomes
+
+A capability can stop before runtime dispatch for authorization or approval.
+That is expected. Do not bypass it.
+
+Approval path:
+
+```text
+CapabilityHost invokes
+  -> authorization requires approval
+  -> approval record is stored with invocation fingerprint
+  -> run state marks blocked approval
+  -> user resolves approval
+  -> resolver issues scoped lease
+  -> resume validates fingerprint
+  -> runtime dispatch happens once
 ```
 
-</Accordion>
+Auth-required path:
 
-
-### Geocoding helper
-
-Open-Meteo needs coordinates, not city names. Add a helper that calls the free geocoding API:
-
-```rust src/lib.rs
-#[derive(Debug, Deserialize)]
-struct GeoResult {
-    latitude: f64,
-    longitude: f64,
-    name: String,
-    country: String,
-}
-
-fn geocode(city: &str, country_code: Option<&str>) -> Result<GeoResult, String> {
-    let mut url = format!(
-        "https://geocoding-api.open-meteo.com/v1/search?name={}&count=1&language=en&format=json",
-        url_encode(city)
-    );
-    if let Some(cc) = country_code {
-        if !cc.is_empty() {
-            url.push_str(&format!("&countryCode={}", url_encode(cc)));
-        }
-    }
-
-    near::agent::host::log(
-        near::agent::host::LogLevel::Info,
-        &format!("Geocoding: {city}"),
-    );
-
-    let resp = api_get(&url)?;
-    let data: serde_json::Value =
-        serde_json::from_str(&resp).map_err(|e| format!("Failed to parse geocoding: {e}"))?;
-
-    let results = data["results"]
-        .as_array()
-        .ok_or_else(|| format!("City not found: {city}"))?;
-
-    if results.is_empty() {
-        return Err(format!("City not found: {city}"));
-    }
-
-    let r = &results[0];
-    Ok(GeoResult {
-        latitude:  r["latitude"].as_f64().unwrap_or(0.0),
-        longitude: r["longitude"].as_f64().unwrap_or(0.0),
-        name:      r["name"].as_str().unwrap_or(city).to_string(),
-        country:   r["country"].as_str().unwrap_or("").to_string(),
-    })
-}
+```text
+runtime credential missing or scope-mismatched
+  -> runtime/obligation returns auth-required context
+  -> product-auth creates setup/OAuth/manual-token gate
+  -> credential account stores access secret handle
+  -> continuation resumes or the next invocation selects the account
 ```
 
-`near::agent::host::log` emits a structured log line visible in `ironclaw` output. The host collects all log entries and flushes them after the call completes.
-
-### API helper
-
-```rust src/lib.rs
-fn api_get(url: &str) -> Result<String, String> {
-    let headers = serde_json::json!({
-        "Accept": "application/json",
-        "User-Agent": "IronClaw-Weather-Tool/0.1"
-    }).to_string();
-
-    let resp = near::agent::host::http_request("GET", url, &headers, None, None)
-        .map_err(|e| format!("HTTP request failed: {e}"))?;
-
-    if resp.status < 200 || resp.status >= 300 {
-        return Err(format!("API error (HTTP {}): {}", resp.status,
-            String::from_utf8_lossy(&resp.body)));
-    }
-
-    String::from_utf8(resp.body).map_err(|e| format!("Invalid UTF-8 response: {e}"))
-}
-
-fn url_encode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() * 2);
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(b as char);
-            }
-            b' ' => out.push_str("%20"),
-            _ => {
-                out.push('%');
-                out.push(char::from(b"0123456789ABCDEF"[(b >> 4) as usize]));
-                out.push(char::from(b"0123456789ABCDEF"[(b & 0xf) as usize]));
-            }
-        }
-    }
-    out
-}
-
-fn wmo_description(code: u32) -> String {
-    match code {
-        0  => "Clear sky",
-        1  => "Mainly clear",
-        2  => "Partly cloudy",
-        3  => "Overcast",
-        45 => "Fog",
-        51 => "Light drizzle",
-        61 => "Slight rain",
-        63 => "Moderate rain",
-        65 => "Heavy rain",
-        71 => "Slight snow",
-        73 => "Moderate snow",
-        75 => "Heavy snow",
-        80 => "Slight rain showers",
-        95 => "Thunderstorm",
-        _  => "Unknown",
-    }.to_string()
-}
-
-fn european_aqi_label(aqi: u32) -> String {
-    match aqi {
-        0..=20  => "Good",
-        21..=40 => "Fair",
-        41..=60 => "Moderate",
-        61..=80 => "Poor",
-        81..=100 => "Very Poor",
-        _        => "Extremely Poor",
-    }.to_string()
-}
-```
-
-### Get current weather
-
-```rust 
-fn get_current(params: WeatherParams) -> Result<String, String> {
-    if params.city.is_empty() {
-        return Err("'city' must not be empty".into());
-    }
-
-    let geo = geocode(&params.city, params.country_code.as_deref())?;
-    let units     = params.units.as_deref().unwrap_or("metric");
-    let temp_unit = if units == "imperial" { "fahrenheit" } else { "celsius" };
-    let wind_unit = if units == "imperial" { "mph" } else { "ms" };
-
-    let url = format!(
-        "https://api.open-meteo.com/v1/forecast\
-         ?latitude={}&longitude={}\
-         &current=temperature_2m,apparent_temperature,relative_humidity_2m,\
-         weather_code,wind_speed_10m\
-         &temperature_unit={}&wind_speed_unit={}",
-        geo.latitude, geo.longitude, temp_unit, wind_unit
-    );
-
-    let resp = api_get(&url)?;
-    let data: serde_json::Value =
-        serde_json::from_str(&resp).map_err(|e| format!("Failed to parse response: {e}"))?;
-
-    let current = &data["current"];
-    let output = CurrentWeatherOutput {
-        city:        geo.name,
-        country:     geo.country,
-        temperature: current["temperature_2m"].as_f64().unwrap_or(0.0),
-        feels_like:  current["apparent_temperature"].as_f64().unwrap_or(0.0),
-        humidity:    current["relative_humidity_2m"].as_u64().unwrap_or(0) as u32,
-        description: wmo_description(current["weather_code"].as_u64().unwrap_or(0) as u32),
-        wind_speed:  current["wind_speed_10m"].as_f64().unwrap_or(0.0),
-        units:       units.to_string(),
-    };
-
-    serde_json::to_string(&output).map_err(|e| format!("Serialization error: {e}"))
-}
-```
-
-### Get forecast
-
-```rust src/lib.rs
-fn get_forecast(params: WeatherParams) -> Result<String, String> {
-    if params.city.is_empty() {
-        return Err("'city' must not be empty".into());
-    }
-
-    let geo       = geocode(&params.city, params.country_code.as_deref())?;
-    let units     = params.units.as_deref().unwrap_or("metric");
-    let temp_unit = if units == "imperial" { "fahrenheit" } else { "celsius" };
-    let wind_unit = if units == "imperial" { "mph" } else { "ms" };
-
-    let url = format!(
-        "https://api.open-meteo.com/v1/forecast\
-         ?latitude={}&longitude={}\
-         &daily=temperature_2m_max,temperature_2m_min,weather_code,\
-         precipitation_probability_max\
-         &temperature_unit={}&wind_speed_unit={}&forecast_days=5",
-        geo.latitude, geo.longitude, temp_unit, wind_unit
-    );
-
-    let resp  = api_get(&url)?;
-    let data: serde_json::Value =
-        serde_json::from_str(&resp).map_err(|e| format!("Failed to parse response: {e}"))?;
-
-    let daily    = &data["daily"];
-    let times    = daily["time"].as_array().cloned().unwrap_or_default();
-    let temp_max = daily["temperature_2m_max"].as_array().cloned().unwrap_or_default();
-    let temp_min = daily["temperature_2m_min"].as_array().cloned().unwrap_or_default();
-    let codes    = daily["weather_code"].as_array().cloned().unwrap_or_default();
-    let precip   = daily["precipitation_probability_max"].as_array().cloned().unwrap_or_default();
-
-    let entries = times.iter().enumerate().map(|(i, t)| ForecastEntry {
-        date:        t.as_str().unwrap_or("").to_string(),
-        temp_max:    temp_max.get(i).and_then(|v| v.as_f64()).unwrap_or(0.0),
-        temp_min:    temp_min.get(i).and_then(|v| v.as_f64()).unwrap_or(0.0),
-        description: wmo_description(codes.get(i).and_then(|v| v.as_u64()).unwrap_or(0) as u32),
-        precipitation_probability_max: precip.get(i).and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-    }).collect();
-
-    let output = ForecastOutput { city: geo.name, country: geo.country, units: units.to_string(), entries };
-    serde_json::to_string(&output).map_err(|e| format!("Serialization error: {e}"))
-}
-```
-
-### Get air quality
-
-```rust src/lib.rs
-fn get_air_quality(params: AirQualityParams) -> Result<String, String> {
-    if params.lat < -90.0 || params.lat > 90.0 {
-        return Err(format!("'lat' must be -90..90, got {}", params.lat));
-    }
-    if params.lon < -180.0 || params.lon > 180.0 {
-        return Err(format!("'lon' must be -180..180, got {}", params.lon));
-    }
-
-    let url = format!(
-        "https://air-quality-api.open-meteo.com/v1/air-quality\
-         ?latitude={}&longitude={}\
-         &current=pm10,pm2_5,european_aqi",
-        params.lat, params.lon
-    );
-
-    let resp = api_get(&url)?;
-    let data: serde_json::Value =
-        serde_json::from_str(&resp).map_err(|e| format!("Failed to parse response: {e}"))?;
-
-    let current = &data["current"];
-    let aqi     = current["european_aqi"].as_u64().unwrap_or(0) as u32;
-
-    let output = AirQualityOutput {
-        lat:           params.lat,
-        lon:           params.lon,
-        european_aqi:  aqi,
-        aqi_label:     european_aqi_label(aqi),
-        pm2_5:         current["pm2_5"].as_f64().unwrap_or(0.0),
-        pm10:          current["pm10"].as_f64().unwrap_or(0.0),
-    };
-
-    serde_json::to_string(&output).map_err(|e| format!("Serialization error: {e}"))
-}
-```
-
----
-
-## 5. Define the JSON schema
-
-The `SCHEMA` constant tells the LLM exactly what JSON to send. Use `oneOf` because the three actions have different required fields:
-
-```rust src/lib.rs
-const SCHEMA: &str = r#"{
-    "oneOf": [
-        {
-            "type": "object",
-            "description": "Get current weather conditions for a city",
-            "properties": {
-                "action":       { "type": "string", "const": "get_current" },
-                "city":         { "type": "string", "description": "City name, e.g. 'Tokyo'" },
-                "country_code": { "type": "string", "description": "ISO 3166-1 alpha-2 code, e.g. 'JP'" },
-                "units":        { "type": "string", "enum": ["metric", "imperial"] }
-            },
-            "required": ["action", "city"],
-            "additionalProperties": false
-        },
-        {
-            "type": "object",
-            "description": "Get a 5-day daily weather forecast for a city",
-            "properties": {
-                "action":       { "type": "string", "const": "get_forecast" },
-                "city":         { "type": "string" },
-                "country_code": { "type": "string" },
-                "units":        { "type": "string", "enum": ["metric", "imperial"] }
-            },
-            "required": ["action", "city"],
-            "additionalProperties": false
-        },
-        {
-            "type": "object",
-            "description": "Get air quality data for a location by coordinates",
-            "properties": {
-                "action": { "type": "string", "const": "get_air_quality" },
-                "lat":    { "type": "number", "description": "Latitude (-90 to 90)" },
-                "lon":    { "type": "number", "description": "Longitude (-180 to 180)" }
-            },
-            "required": ["action", "lat", "lon"],
-            "additionalProperties": false
-        }
-    ]
-}"#;
-```
-
----
-
-## 6. Declare capabilities
-
-Create `weather-tool.capabilities.json` next to `Cargo.toml`. This file is the sandbox allowlist — any host not listed here is blocked at runtime:
-
-```json weather-tool.capabilities.json
-{
-  "version": "0.1.0",
-  "wit_version": "0.3.0",
-  "http": {
-    "allowlist": [
-      {
-        "host": "geocoding-api.open-meteo.com",
-        "path_prefix": "/v1/",
-        "methods": ["GET"]
-      },
-      {
-        "host": "api.open-meteo.com",
-        "path_prefix": "/v1/",
-        "methods": ["GET"]
-      },
-      {
-        "host": "air-quality-api.open-meteo.com",
-        "path_prefix": "/v1/",
-        "methods": ["GET"]
-      }
-    ],
-    "rate_limit": {
-      "requests_per_minute": 60,
-      "requests_per_hour": 500
-    },
-    "timeout_secs": 15
-  }
-}
-```
-
-The weather tool needs three hosts because `get_current` and `get_forecast` make two requests each: one to geocode the city name and one to fetch the weather data.
-
----
-
-## 7. Add secrets and auth (for tools that need credentials)
-
-This weather tool uses Open-Meteo, so it does not need a secret. If your tool calls an API that needs a token, declare that in the capabilities file so IronClaw can inject it at request time.
-
-Example capability sections (pattern used in `tools-src/*` on the IronClaw repo):
-
-```json weather-tool.capabilities.json
-{
-    "http": {
-        "allowlist": [
-            {
-                "host": "api.example.com",
-                "path_prefix": "/v1/",
-                "methods": ["GET", "POST"]
-            }
-        ],
-        "credentials": {
-            "example_api_token": {
-                "secret_name": "example_api_token",
-                "location": { "type": "bearer" },
-                "host_patterns": ["api.example.com"]
-            }
-        }
-    },
-    "secrets": {
-        "allowed_names": ["example_api_token"]
-    },
-    "auth": {
-        "secret_name": "example_api_token",
-        "display_name": "Example API",
-        "instructions": "Create an API token in your provider dashboard",
-        "setup_url": "https://example.com/settings/api",
-        "token_hint": "Starts with 'ex_'",
-        "env_var": "EXAMPLE_API_TOKEN"
-    }
-}
-```
-
-How this works:
-
-- `http.credentials` maps a stored secret to where it should be injected (`bearer`, custom header, query param, or URL placeholder).
-- `secrets.allowed_names` lets the tool check secret presence with `near::agent::host::secret_exists(...)`.
-- `auth` tells IronClaw how to collect credentials.
-
-After installing the tool, run auth once:
-
-```bash
-ironclaw tool auth <tool-name>
-```
-
-Auth flow priority is:
-
-1. Use `auth.env_var` if it is set in your environment.
-2. Use OAuth if `auth.oauth` is configured.
-3. Fall back to manual token entry using `instructions` and `setup_url`.
-
-If your capabilities include `setup.required_secrets` (for example OAuth client id/client secret fields), run setup as well:
-
-```bash
-ironclaw tool setup <tool-name>
-```
-
-This keeps credentials outside agent-visible prompts and lets the host inject them only where allowlisted.
-
----
-
-## 8. Build and install
-
-```bash
-cargo build --target wasm32-wasip2 --release
-```
-
-```bash
-ironclaw tool install ./target/wasm32-wasip2/release/weather_tool.wasm \
-  --capabilities ./weather-tool.capabilities.json \
-  --name weather-tool
-```
-
-Verify it loaded:
-
-```bash
-ironclaw tool list
-```
-
-If your tool defines secret variables, authenticate now:
-
-```bash
-ironclaw tool auth <tool-name>
-```
-
-If your tool defines `setup.required_secrets`, run:
-
-```bash
-ironclaw tool setup <tool-name>
-```
-
----
-
-## Try it out
-
-Start IronClaw and ask your agent:
-
-- "What's the weather in Buenos Aires?"
-- "Give me a 5-day forecast for London, GB in imperial units."
-- "What's the air quality at coordinates 35.6762, 139.6503?"
-
-The agent resolves the right action from the schema and calls the tool automatically.
+Runtime code should produce typed/sanitized failures that map into these paths.
+It should not serialize raw OAuth URLs, raw tokens, approval IDs, or provider
+errors into model output.
+
+## Tests to add
+
+Minimum tests for a Reborn tool:
+
+### Manifest and packaging
+
+- manifest parses as `reborn.extension_manifest.v2`;
+- capability IDs use the extension prefix;
+- every capability has matching schema and prompt assets;
+- credential capabilities include `use_secret`;
+- write capabilities include `external_write` and default to `ask`;
+- bundled package assets include every manifest ref;
+- extension manifests use `[[host_api]]` / `[capability_provider.tools]`, never
+  top-level `[[capabilities]]`.
+
+Useful existing test areas:
+
+- `crates/ironclaw_extensions/tests/manifest_v2_contract.rs`
+- `crates/ironclaw_reborn_composition/src/available_extensions.rs` tests
+- `crates/ironclaw_host_runtime/src/capability_catalog.rs` tests
+
+### Runtime behavior
+
+For WASM:
+
+- operation comes from invocation context capability ID;
+- unknown fields are rejected before egress;
+- unsafe provider paths/refs are rejected;
+- host egress errors are sanitized;
+- auth status maps to auth-required rather than leaking backend detail;
+- output-size/body-limit cases map to stable errors.
+
+For hosted MCP:
+
+- planner denies wrong provider, wrong host, HTTP scheme, wrong path, query,
+  fragment, and URL userinfo;
+- planner emits locked network policy for the canonical endpoint;
+- manifest runtime credentials project to staged injections.
+
+### Integration/caller-facing
+
+Add a test through the actual call site that gates side effects:
+
+- `CapabilityHost` or runtime adapter dispatch for capability invocation.
+- Extension lifecycle install/activate path for package publication.
+- Product-auth setup/callback path for OAuth-backed credentials.
+
+A helper-only test is not enough when a helper gates HTTP, DB writes, OAuth,
+tool execution, or lifecycle activation.
+
+## Review checklist
+
+Before opening a PR, verify:
+
+- No V1 architecture paths were touched.
+- No runtime code fetches raw secrets.
+- No runtime code creates ambient external HTTP clients for provider calls.
+- Every provider write has `external_write` and default `ask`.
+- Every credential audience is HTTPS and as narrow as possible.
+- Every schema/prompt ref is package-relative and packaged.
+- Auth-required paths include provider/scopes/requester extension context.
+- Error messages are sanitized and stable.
+- Relevant docs/specs and `FEATURE_PARITY.md` were checked if behavior changed.
+- Targeted tests pass.
+
+## Concrete examples to copy
+
+Copy these runtime, credential, and security patterns, not legacy manifest
+shape. If one of these manifests still uses top-level `[[capabilities]]`, port
+the semantics into the registry `[[host_api]]` / `[capability_provider.tools]`
+shape before extending it.
+
+- GitHub WASM operation dispatch:
+  `crates/ironclaw_first_party_extensions/assets/github/wasm-src/src/lib.rs`
+- GitHub host HTTP request wrapper:
+  `crates/ironclaw_first_party_extensions/assets/github/wasm-src/src/request.rs`
+- GitHub manifest credential/effect semantics:
+  `crates/ironclaw_first_party_extensions/assets/github/manifest.toml`
+- Google Drive WASM OAuth scopes by operation:
+  `crates/ironclaw_first_party_extensions/assets/google-drive/manifest.toml`
+- Gmail and Google Calendar follow the bundled WASM GSuite manifest and runtime
+  shape.
+- Notion hosted MCP credential/effect semantics:
+  `crates/ironclaw_first_party_extensions/assets/notion-mcp/manifest.toml`
+- Hosted MCP egress planner:
+  `crates/ironclaw_reborn_composition/src/mcp.rs`
+- Notion OAuth provider spec:
+  `crates/ironclaw_reborn_composition/src/notion_oauth.rs`
+- Hot capability catalog:
+  `crates/ironclaw_host_runtime/src/capability_catalog.rs`
+- Host HTTP egress service:
+  `crates/ironclaw_host_runtime/src/egress/`
+- Manifest v2 contract:
+  `crates/ironclaw_extensions/src/v2.rs`
+
+## Quick implementation checklist
+
+1. Pick lane: WASM, hosted MCP, script, or product adapter.
+2. Create package assets under `assets/<extension>/`.
+3. Write manifest v2 with the capability-provider host API and make it flow
+   through extension registry discovery/publication.
+4. Add schemas and prompt docs for every model-visible capability.
+5. Implement runtime code using host services only.
+6. Declare credentials with narrow HTTPS audiences and provider scopes.
+7. Add packaging/onboarding only if host-bundled.
+8. Add manifest, packaging, runtime, auth/approval, and integration tests.
+9. Run targeted tests.
+10. Check docs/specs and `FEATURE_PARITY.md` for behavior-status updates.

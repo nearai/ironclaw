@@ -1,7 +1,9 @@
 # Trigger Loop and Delivery Resolution — Implementation Plan
 
 **Date:** 2026-05-29
-**Status:** Draft — reviewed by codebase subagents, pending owner decisions
+**Status:** PR 1–18 merged on `reborn-integration`. Post-PR-18 delivery plan
+added below (see "Post-PR-18 Work Plan"). Reborn ownership audit (2026-06-02)
+found no boundary breaches.
 **Branch:** reborn-integration
 **Primary specs:**
 - `docs/superpowers/specs/2026-05-21-trigger-loop-design.md`
@@ -106,10 +108,11 @@ PRs should record them as contract language.
 13. Trigger fires bypass `ironclaw_product_workflow` ingress entirely. Product
     workflow remains adapter-facing; scheduled triggers enter only through the
     planned `ironclaw_conversations::InboundTurnService` trusted facade.
-14. Host-trusted trigger ingress authority is owned by the host-only
-    `ironclaw_trusted_ingress` crate and consumed only by conversations and
-    Reborn composition. Product adapters must not depend on that crate, receive
-    constructors, or model trusted trigger ingress in product payload DTOs.
+14. Host-trusted trigger ingress authority is sealed by
+    `TrustedTriggerSubmitRequest` minting in `ironclaw_triggers` and private
+    trusted inbound construction inside `ironclaw_conversations`. Product
+    adapters must not receive constructors, call the trusted trigger submitter
+    factory, or model trusted trigger ingress in product payload DTOs.
 
 ## Dependency DAG
 
@@ -715,10 +718,9 @@ Wire the trigger poller into Reborn composition:
 - readiness semantics for whether a disabled trigger poller is allowed and
   whether a failed trigger worker marks Reborn runtime readiness degraded.
 - PR18 review follow-up status:
-  - host-trusted trigger ingress is hardened with a host-only authority crate,
-    root/crate-local `AGENTS.md` guidance, and architecture tests that restrict
-    dependents and trusted constructor call sites. Rust has no sibling-crate
-    `friend` visibility, so the enforceable boundary is the dependency graph.
+  - host-trusted trigger ingress is hardened with sealed trigger-worker request
+    minting, private conversation-owned trusted inbound construction, and
+    architecture tests that restrict trusted constructor/factory call sites.
   - trigger poller startup is opt-in by default; runtimes must explicitly pass
     enabled trigger poller settings before the background worker starts.
   - runtime shutdown cancels the trigger poller and waits only for a bounded
@@ -732,22 +734,20 @@ Wire the trigger poller into Reborn composition:
     the scheduled prompt.
   - active-run lookup is batched for each cleanup page so composition snapshots
     turn state once per active page rather than once per active trigger record.
-  - PR18.5 / PR19 prerequisite: strengthen host-trusted trigger ingress from
-    architecture-test-enforced dependency ownership into a compile-time sealed
-    host facade or equivalent factory. The prerequisite is not just another
-    dependency-boundary assertion; it needs a concrete API shape where product
-    adapter crates cannot mint trigger authority by adding
-    `ironclaw_trusted_ingress` as a dependency. Expected work:
-    - replace the public zero-argument trusted ingress constructor with a
-      composition-owned host factory or conversation-owned sealed witness that
-      cannot be constructed from adapter/product crates;
+  - PR18.5 / PR19 prerequisite: keep host-trusted trigger ingress as a
+    compile-time sealed trigger submission path, not a reusable generic trusted
+    ingress facade. The prerequisite is not just another dependency-boundary
+    assertion; it needs a concrete API shape where product adapter crates cannot
+    mint trigger authority. Expected work:
+    - keep trusted trigger authority on the worker-minted sealed trigger
+      request, not on a reusable authority-token facade;
     - keep `TrustedInboundTurnRequest` raw construction private inside
       `ironclaw_conversations`;
     - expose only the narrow trigger-fire submission operation needed by
       composition, not a reusable generic trusted-inbound token;
     - update architecture tests so adapter/product crates are forbidden from
-      depending on the authority crate/facade and forbidden from calling the
-      trusted trigger constructor/factory;
+      introducing a generic trusted ingress facade and forbidden from calling
+      the trusted trigger constructor/factory;
     - add a negative or architecture test proving a product adapter path cannot
       construct host-trusted trigger ingress;
     - preserve existing PR18 poller behavior and trusted inbound replay tests.
@@ -813,6 +813,258 @@ If concrete Reborn product egress is not ready, leave this as fast-follow and
 ship trigger V1 as local persisted threads only.
 
 Expected size: less than 1000 lines.
+
+## Post-PR-18 Work Plan
+
+### Status Snapshot (2026-06-02)
+
+PR 1–18 merged. Trigger backend complete: `ironclaw_triggers` domain crate,
+dual-backend persistence, atomic fire claim, poller worker, trusted inbound
+facade, `trigger_*` first-party capabilities, and worker lifecycle composition
+wiring. A Reborn ownership audit found no boundary breaches.
+
+Two gaps block shipping user-creatable cron jobs:
+
+1. **Poller is never enabled in any shipped binary.** `TriggerPollerSettings`
+   defaults `enabled: false` (`runtime_input.rs`), and the CLI runtime builder
+   (`ironclaw_reborn_cli/src/runtime.rs::build_runtime_input_with_options`)
+   never calls `.with_trigger_poller_settings(...)`. There is no config-file
+   section, no env var, and no `.env.example` entry. Cron triggers can only
+   fire from Rust test code today. This is the hard blocker between "backend
+   exists" and "cron actually fires."
+2. **Some security hardening is deferred.** Trusted trigger submission is now
+   type-sealed through `TrustedTriggerSubmitRequest` and converted inside
+   `ironclaw_conversations`; product/adapter crates cannot mint host-trusted
+   inbound turns directly. Fire-time creator authorization is still a
+   tenant-ID-equality placeholder
+   (`TrustedTenantTriggerFireAuthorizer`), not wired to a real agent/project
+   access source. Both are plan-mandated before any user-visible trigger launch
+   path or external delivery ships (see PR 18 follow-up status and PR 19).
+
+### Goal
+
+Deliver user-creatable cron jobs that actually fire end-to-end: a user creates a
+cron trigger, the host poller fires it on schedule, a synthetic inbound turn runs
+through trusted ingress, and a dedicated thread is persisted. External delivery
+of the trigger result stays fast-follow (PR 19).
+
+**Cron is the first of several trigger sources, not the end state.** Today the
+domain models only one source: `TriggerSchedule::Cron`, `TriggerSourceKind::Schedule`,
+and the single `ScheduleTriggerSourceProvider` impl
+(`crates/ironclaw_triggers/src/lib.rs`). `TriggerSourceProvider` is the pluggable
+seam — future sources (webhook, inbound event, email-arrival, etc.) are new
+enum variants plus new provider impls, with the poller, persistence, trusted
+ingress, and capabilities all unchanged. The user-facing surface is therefore
+designed source-agnostic from day one and labeled **Automations**: cron presents
+as a "Schedule" trigger type; later sources add new trigger types under the same
+list/create/manage UI and API. Build the API and UI around a generic
+trigger-type selector, not a cron-only form.
+
+### Work Items
+
+Three independent tracks branch from the PR 18 baseline.
+
+#### Track E — Firing Enablement (turns the poller on)
+
+**PR 18.6 — Trigger Poller Config and Runtime Enablement**
+
+- Add a `[trigger_poller]` section to `ironclaw_reborn_config` (`config_file.rs`):
+  `enabled`, poll interval, fires per tick, and per-trigger active-run cap. Map
+  onto the existing `TriggerPollerWorkerConfig` / `TriggerPollerSettings` shape —
+  do not invent a parallel type.
+- Honor an env fallback (`IRONCLAW_TRIGGER_POLLER_ENABLED`, plus optional
+  interval/cap overrides) so smoke tests do not need a config file.
+- Read the resolved settings in
+  `ironclaw_reborn_cli::build_runtime_input_with_options` and call
+  `.with_trigger_poller_settings(...)`.
+- Document the flag in `.env.example`, off by default.
+- Preserve the PR 18 opt-in-default rule: absent config/env ⇒ poller stays off.
+- Deps: none (PR 18 merged). Can start immediately.
+- Expected size: less than 400 lines.
+
+**PR 18.7 — Full-Path Poller Integration Test**
+
+- Rust integration test (`--features integration`): enable the poller, create a
+  trigger via the `trigger_create` capability with `next_fire_at` in the past,
+  await one poll tick, and assert a thread + run record persisted.
+- Extend `tests/support/reborn/harness.rs` to start the poller (it currently
+  registers the trigger tools but never starts the background worker).
+- Use real domain classes and composition-owned ports per the PR 16 testing
+  rule; intercept external infrastructure only.
+- Deps: PR 18.6.
+- Expected size: less than 500 lines.
+
+**PR 18.8 — Python E2E Cron Trigger Scenario**
+
+- New `tests/e2e/scenarios/test_cron_trigger_autofires.py`: create a cron
+  trigger through chat send, wait one poller interval, and assert a completed
+  run exists under the new `ironclaw_triggers` domain. Distinct from the v1
+  routines scenario (`test_routine_full_job.py`), which exercises the legacy
+  Mission/routine path, not `ironclaw_triggers`.
+- Deps: PR 18.6 (e2e runs the real binary; the poller must be enableable there).
+- Expected size: less than 300 lines.
+
+#### Track S — Security Hardening (gates user-visible launch and delivery)
+
+**PR 18.5a — Type-Seal Trusted Ingress Facade (Prereq A)**
+
+- Seal trusted trigger submission so product/adapter crates cannot mint
+  host-trusted inbound turns even by adding dependencies. Authority lives in
+  `TrustedTriggerSubmitRequest`, constructed only by the trigger worker and
+  converted inside `ironclaw_conversations`.
+- Keep `TrustedInboundTurnRequest` raw construction private in
+  `ironclaw_conversations` (already done) and expose only the narrow
+  trigger-fire submission operation.
+- Add a negative/structural test proving an adapter path cannot construct
+  host-trusted ingress — not just another dependency-edge assertion.
+- Preserve existing PR 18 poller behavior and trusted inbound replay tests.
+- Deps: none. Parallel to Track E.
+- Expected size: less than 400 lines.
+
+**PR 18.5b — Fire-Time Creator Authorization (Prereq B)**
+
+- Define a typed `TriggerFireAuthRequest` carrying `tenant_id`,
+  `creator_user_id`, `agent_id`, `project_id`, `trigger_id`, and `fire_slot`
+  (today the trait takes the whole `TriggerFire`).
+- Implement the port against the real agent/project access-control source of
+  truth (today `TrustedTenantTriggerFireAuthorizer` checks tenant-ID equality
+  only). If no real source exists, keep external delivery disabled.
+- Add a `TriggerFireAuthError::Retryable` variant for backend unavailability;
+  `Denied`/revoked stays permanent (clear claim, advance slot); retryable does
+  not mark the fire active and keeps `next_run_at` retryable.
+- The wiring position is already correct (authz runs before binding resolution
+  and prompt recording in `trigger_poller_trusted_submit.rs`).
+- Caller tests: authorized creator, revoked creator, project-specific denial,
+  retryable authz backend failure, and replay-after-deny does not submit.
+- Deps: none. Parallel to 18.5a and Track E. **Both 18.5a and 18.5b edit
+  `trigger_poller_trusted_submit.rs` — coordinate merge order.**
+- Expected size: less than 600 lines.
+
+#### Track U — User-Facing "Automations" Surface
+
+The user-facing label is **Automations**. The API and UI are trigger-source
+agnostic: cron is the first selectable trigger type ("Schedule"), and future
+source providers add new types under the same surface without reshaping it.
+
+**PR 18.9 — Automations Management HTTP API (v2 surface)**
+
+- Add a read-only automation list route to the `ironclaw_webui_v2` router.
+  Match the existing WebUI v2 pattern:
+  `ironclaw_webui_v2` handlers consume only
+  `ironclaw_product_workflow::RebornServicesApi`; product-workflow owns the
+  WebUI-facing automation facade/DTOs; `ironclaw_reborn_composition` wires the
+  concrete facade to the Reborn host-runtime capability path.
+- Do not put dispatcher, host-runtime, trigger repository, DB/storage, or
+  product-adapter transport/rendering dependencies in `ironclaw_webui_v2`.
+  Browser management ingress is moderated by host composition
+  (auth/CORS/body/rate limits) plus `WebUiAuthenticatedCaller` and the
+  product-workflow facade. Product adapters continue to moderate external
+  product ingress such as Slack/Telegram events; they are not the browser
+  management API boundary.
+- Route reads through the existing shared trigger capability path
+  (`builtin.trigger_list`) from composition. Do not bypass that path with direct
+  trigger repository reads from WebUI/product-workflow.
+- Do not expose browser create/delete HTTP routes in this slice. Automation
+  mutations must go through the LLM/tool path so the same product workflow,
+  trigger capability, trust, authorization, and audit boundaries that create
+  automation changes today remain in charge.
+- Avoid exposing "cron" as the primary user-facing label. API fields may carry
+  the cron expression where needed, but browser copy and response labels should
+  use **Schedule** / scheduled automation language.
+- List responses surface the source type per record so the UI can render mixed
+  source kinds later without a schema change; for V1 the only rendered type is
+  Schedule. Do not show unsupported source types such as webhooks in the
+  Automations tab.
+- Stamp scope from session/auth context; recheck on list.
+- Keep separate from the v1 `/api/routines/*` surface and the v1
+  `static/js/surfaces/routines.js` UI.
+- Deps: PR 18.5a (a user-visible launch path requires the sealed facade per the
+  PR 18 follow-up rule).
+- Expected size: less than 600 lines.
+
+**PR 18.10 — Automations Web UI Panel**
+
+- Add a read-only Automations panel in the webui_v2 static JS, pulling scheduled
+  automation records from the new trigger domain via the PR 18.9 API. Distinct
+  from the v1 routines panel (`static/js/surfaces/routines.js`).
+- Do not add create/delete controls in the browser panel. For now, automation
+  changes are initiated through the LLM/tool path; the UI only shows the
+  projected state.
+- The list view shows each automation's trigger type, summary, next fire, and
+  state. Use user-facing **Schedule** language instead of leading with "cron",
+  and do not render unsupported types such as webhooks.
+- Deps: PR 18.9 (API) and PR 18.6 (enabled poller, so a created automation
+  actually fires).
+- Expected size: less than 800 lines.
+
+#### Future Trigger Sources (post-cron, out of scope here)
+
+Each new source is an independent slice on top of the surface above and needs no
+poller/persistence/ingress/UI-shell changes:
+
+- New `TriggerSourceKind` + `TriggerSchedule`/source-config variant.
+- New `TriggerSourceProvider` impl (the seam already used by
+  `ScheduleTriggerSourceProvider`).
+- API/UI: flip the new trigger type from "coming soon" to enabled and add its
+  source-specific config fields.
+- Source-specific validation and tests.
+
+Examples to scope later: webhook/inbound HTTP, system/inbound event, scheduled
+one-shot (vs recurring cron). These belong in their own plans once cron
+automations ship.
+
+### Updated Dependency DAG
+
+```text
+PR 18 (merged)
+  │
+  ├─ Track E — firing enablement (no security gate; agent-created triggers)
+  │    PR 18.6 Poller config + runtime/env wiring
+  │      ├─> PR 18.7 Full-path integration test
+  │      └─> PR 18.8 Python e2e cron scenario
+  │
+  ├─ Track S — security hardening (gates user-visible launch + delivery)
+  │    PR 18.5a Type-seal trusted ingress facade ─┐
+  │    PR 18.5b Fire-time creator authorization ──┘ (independent;
+  │                                                  same file — merge order)
+  │
+  └─ Track U — user-facing "Automations" surface (source-agnostic; cron first)
+       PR 18.9 Automations management HTTP API (v2)  [needs 18.5a]
+         └─> PR 18.10 Automations web UI panel       [needs 18.9 + 18.6]
+
+External trigger result delivery (unchanged):
+  PR 19 Trigger Delivery Fast-Follow
+      [needs 18.5a + 18.5b + PR 1, 3, 4, 5, 6, 7 + named ready adapter]
+```
+
+### Parallelization
+
+- Tracks E, S, and the 18.5a head of U start immediately from the PR 18
+  baseline — they touch disjoint crates (`reborn_config`/`reborn_cli` vs
+  `trusted_ingress`/composition authz vs `webui_v2`).
+- Within E: 18.6 → 18.7 and 18.6 → 18.8 (both need the poller enableable).
+- Within S: 18.5a ∥ 18.5b — but both edit `trigger_poller_trusted_submit.rs`,
+  so land one, rebase the other.
+- 18.5b is required only for external delivery (PR 19), not for cron creation +
+  firing. If the milestone is "cron job creation support," 18.5b can lag.
+- U: 18.9 needs 18.5a; 18.10 needs 18.9 + 18.6.
+
+### Milestone Gates
+
+- **M1 — Cron fires (agent-created):** PR 18.6 (+ PR 18.7 for confidence). An
+  agent creates a trigger via `trigger_create` in chat, the poller fires it, and
+  a thread persists. Meets the plan's V1 acceptance. No Track S gate — the
+  fire path is host-owned and already witness-sealed at runtime by PR 18; no
+  user-visible *launch* surface is added here.
+- **M2 — Validated cron e2e:** M1 + PR 18.8 (Python e2e proof against the real
+  binary).
+- **M3 — User-managed Automations (UI):** M2 + PR 18.5a (seal the facade before
+  exposing a user-visible launch surface) + PR 18.9 + PR 18.10. **This is the
+  "deliver cron job creation support" milestone** — cron ships as the first
+  Automations trigger type, on a source-agnostic surface ready for future
+  sources.
+- **M4 — Externally delivered cron result:** M3 + PR 18.5b + the delivery track
+  (PR 1, 3, 4, 5, 6, 7) + PR 19.
 
 ## Review Summary
 

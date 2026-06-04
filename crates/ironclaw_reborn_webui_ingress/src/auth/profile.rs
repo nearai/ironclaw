@@ -22,6 +22,16 @@ pub struct OAuthUserProfile {
     /// `false` if missing — only trust verified emails when matching
     /// to existing identities.
     pub email_verified: bool,
+    /// Every email the provider asserts is verified for this account,
+    /// not just the primary one in [`email`](Self::email). GitHub returns
+    /// a full `/user/emails` list, so a user whose primary address is off
+    /// an operator's allowlist may still have a verified secondary address
+    /// that is on it; an admission allowlist must see all of them to avoid
+    /// wrongly denying that user. Empty when the provider exposes no
+    /// verified email. `#[serde(default)]` for wire-compat with historical
+    /// profiles and providers that only surface a single email.
+    #[serde(default)]
+    pub verified_emails: Vec<String>,
     /// Optional display name from the provider.
     pub display_name: Option<String>,
 }

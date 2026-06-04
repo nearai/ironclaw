@@ -24,13 +24,14 @@ use futures::stream::Stream;
 use ironclaw_product_workflow::{
     LifecyclePackageKind, LifecyclePackageRef, ProductWorkflowError, ProjectionCursor,
     RebornCancelRunResponse, RebornCreateThreadResponse, RebornExtensionActionResponse,
-    RebornExtensionListResponse, RebornExtensionRegistryResponse, RebornListThreadsResponse,
-    RebornResolveGateResponse, RebornServicesApi, RebornServicesError, RebornServicesErrorCode,
-    RebornServicesErrorKind, RebornSetupExtensionResponse, RebornStreamEventsRequest,
-    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
-    WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
-    WebUiInboundValidationCode, WebUiInboundValidationError, WebUiListThreadsRequest,
-    WebUiResolveGateRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
+    RebornExtensionListResponse, RebornExtensionRegistryResponse, RebornListAutomationsResponse,
+    RebornListThreadsResponse, RebornResolveGateResponse, RebornServicesApi, RebornServicesError,
+    RebornServicesErrorCode, RebornServicesErrorKind, RebornSetupExtensionResponse,
+    RebornStreamEventsRequest, RebornSubmitTurnResponse, RebornTimelineRequest,
+    RebornTimelineResponse, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
+    WebUiCreateThreadRequest, WebUiInboundValidationCode, WebUiInboundValidationError,
+    WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiResolveGateRequest,
+    WebUiSendMessageRequest, WebUiSetupExtensionRequest,
 };
 use serde::{Deserialize, Serialize};
 
@@ -392,6 +393,28 @@ pub struct ListThreadsQuery {
     pub cursor: Option<String>,
 }
 
+/// `GET /api/webchat/v2/automations`
+///
+/// Lists the caller-scoped schedule automations visible to the browser. The
+/// optional `?limit=N` query is capped by the product workflow facade; the
+/// response is a single bounded page and does not include a cursor.
+pub async fn list_automations(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Query(query): Query<ListAutomationsQuery>,
+) -> Result<Json<RebornListAutomationsResponse>, WebUiV2HttpError> {
+    let request = WebUiListAutomationsRequest { limit: query.limit };
+    let response = state.services().list_automations(caller, request).await?;
+    Ok(Json(response))
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct ListAutomationsQuery {
+    /// Optional maximum number of schedule automations to return.
+    #[serde(default)]
+    pub limit: Option<u32>,
+}
+
 /// `GET /api/webchat/v2/extensions`
 pub async fn list_extensions(
     State(state): State<WebUiV2State>,
@@ -544,6 +567,8 @@ pub async fn stream_events_ws(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Path(thread_id): Path<String>,
+    headers: HeaderMap,
+    Query(query): Query<StreamEventsQuery>,
     upgrade: axum::extract::ws::WebSocketUpgrade,
 ) -> Result<axum::response::Response, WebUiV2HttpError> {
     let slot = state
@@ -551,13 +576,21 @@ pub async fn stream_events_ws(
         .try_acquire(&caller.tenant_id, &caller.user_id)
         .ok_or_else(sse_concurrency_exhausted)?;
     let services = state.services().clone();
-    Ok(upgrade.on_upgrade(move |socket| ws_drain_loop(services, caller, thread_id, slot, socket)))
+    let initial_cursor = headers
+        .get(LAST_EVENT_ID_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string)
+        .or(query.after_cursor);
+    Ok(upgrade.on_upgrade(move |socket| {
+        ws_drain_loop(services, caller, thread_id, initial_cursor, slot, socket)
+    }))
 }
 
 async fn ws_drain_loop(
     services: std::sync::Arc<dyn RebornServicesApi>,
     caller: WebUiAuthenticatedCaller,
     thread_id: String,
+    initial_cursor: Option<String>,
     slot: SseSlot,
     mut socket: axum::extract::ws::WebSocket,
 ) {
@@ -579,7 +612,7 @@ async fn ws_drain_loop(
     //    is released within the lifetime budget regardless.
     let _slot_guard = slot;
     let started_at = tokio::time::Instant::now();
-    let mut after_cursor: Option<ProjectionCursor> = None;
+    let mut after_cursor = initial_cursor.and_then(parse_cursor_token);
     loop {
         let remaining = SSE_MAX_LIFETIME.saturating_sub(started_at.elapsed());
         if remaining.is_zero() {

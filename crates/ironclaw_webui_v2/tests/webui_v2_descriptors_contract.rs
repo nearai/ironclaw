@@ -20,10 +20,11 @@ use ironclaw_host_api::{IngressScopeSource, NetworkMethod};
 use ironclaw_webui_v2::{
     WEBUI_V2_ROUTE_ACTIVATE_EXTENSION, WEBUI_V2_ROUTE_CANCEL_RUN, WEBUI_V2_ROUTE_CREATE_THREAD,
     WEBUI_V2_ROUTE_GET_EXTENSION_SETUP, WEBUI_V2_ROUTE_GET_TIMELINE,
-    WEBUI_V2_ROUTE_INSTALL_EXTENSION, WEBUI_V2_ROUTE_LIST_EXTENSION_REGISTRY,
-    WEBUI_V2_ROUTE_LIST_EXTENSIONS, WEBUI_V2_ROUTE_LIST_THREADS, WEBUI_V2_ROUTE_REMOVE_EXTENSION,
-    WEBUI_V2_ROUTE_RESOLVE_GATE, WEBUI_V2_ROUTE_SEND_MESSAGE, WEBUI_V2_ROUTE_SETUP_EXTENSION,
-    WEBUI_V2_ROUTE_STREAM_EVENTS, WEBUI_V2_ROUTE_STREAM_EVENTS_WS, webui_v2_routes,
+    WEBUI_V2_ROUTE_INSTALL_EXTENSION, WEBUI_V2_ROUTE_LIST_AUTOMATIONS,
+    WEBUI_V2_ROUTE_LIST_EXTENSION_REGISTRY, WEBUI_V2_ROUTE_LIST_EXTENSIONS,
+    WEBUI_V2_ROUTE_LIST_THREADS, WEBUI_V2_ROUTE_REMOVE_EXTENSION, WEBUI_V2_ROUTE_RESOLVE_GATE,
+    WEBUI_V2_ROUTE_SEND_MESSAGE, WEBUI_V2_ROUTE_SETUP_EXTENSION, WEBUI_V2_ROUTE_STREAM_EVENTS,
+    WEBUI_V2_ROUTE_STREAM_EVENTS_WS, webui_v2_routes,
 };
 
 /// Expected policy surface for one route. Everything host composition
@@ -190,6 +191,23 @@ fn expected_table() -> Vec<Expected> {
             streaming: StreamingMode::WebSocket,
             audit: AuditTraceClass::StreamingSubscription,
             effect_path: AllowedEffectPath::ProjectionOnly,
+        },
+        Expected {
+            route_id: WEBUI_V2_ROUTE_LIST_AUTOMATIONS,
+            method: NetworkMethod::Get,
+            pattern: "/api/webchat/v2/automations",
+            listener_class: ListenerClass::LocalGateway,
+            auth_schemes: &[IngressAuthScheme::BearerToken],
+            scope_source: IngressScopeSource::AuthenticatedCaller,
+            body_limit: BodyLimitPolicy::NoBody,
+            rate_limit_max: 120,
+            rate_limit_window_seconds: 60,
+            rate_limit_scope: RateLimitScope::PerCaller,
+            cors: CorsPolicy::SameOriginOnly,
+            websocket_origin: WebSocketOriginPolicy::NotApplicable,
+            streaming: StreamingMode::None,
+            audit: AuditTraceClass::UserAction,
+            effect_path: AllowedEffectPath::ProductWorkflow,
         },
         Expected {
             route_id: WEBUI_V2_ROUTE_LIST_EXTENSIONS,

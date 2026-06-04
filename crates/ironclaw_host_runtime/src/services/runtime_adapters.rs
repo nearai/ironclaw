@@ -8,6 +8,7 @@ use async_trait::async_trait;
 use futures_util::FutureExt;
 use serde::Deserialize;
 
+use super::wasm_diagnostics::{log_wasm_guest_error, log_wasm_runtime_error};
 use super::{
     CapabilityId, DenyWasmHostHttp, DispatchError, ExtensionRuntime, FirstPartyCapabilityRegistry,
     FirstPartyCapabilityRequest, InvocationServicesResolutionRequest, InvocationServicesResolver,
@@ -608,6 +609,7 @@ where
     ) {
         Ok(execution) => execution,
         Err(error) => {
+            log_wasm_runtime_error(request.capability_id, &error);
             if let Some(usage) = preserved_wasm_error_usage(&error) {
                 account_or_release_failed_wasm_execution(request.governor, reservation.id, &usage)?;
             } else {
@@ -619,6 +621,7 @@ where
         }
     };
     if let Some(error) = execution.error {
+        log_wasm_guest_error(request.capability_id, &execution.logs, &error);
         account_or_release_failed_wasm_execution(
             request.governor,
             reservation.id,

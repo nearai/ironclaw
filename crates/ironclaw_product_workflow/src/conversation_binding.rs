@@ -1,7 +1,7 @@
 //! Adapter from product workflow binding requests to `ironclaw_conversations`.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     sync::{Arc, Mutex},
 };
 
@@ -13,6 +13,8 @@ use crate::{
     ConversationBindingService, ProductConversationRouteKind, ProductWorkflowError,
     ResolveBindingRequest, ResolvedBinding,
 };
+
+const RESOLVED_ACTOR_PAIRING_CACHE_LIMIT: usize = 50_000;
 
 /// Tenant-scoped installation identity used before external actor/conversation
 /// refs enter the conversation binding layer.
@@ -96,7 +98,10 @@ pub enum ProductActorBindingPolicy {
     /// Allow only actors resolved by this host-owned resolver and write their
     /// pairings into the canonical conversations service before resolving the
     /// external conversation binding.
-    ResolveActor(Arc<dyn ProductActorUserResolver>),
+    ResolveActor {
+        resolver: Arc<dyn ProductActorUserResolver>,
+        actor_pairings: Arc<dyn ironclaw_conversations::ConversationActorPairingService>,
+    },
 }
 
 impl std::fmt::Debug for ProductActorBindingPolicy {
@@ -105,7 +110,7 @@ impl std::fmt::Debug for ProductActorBindingPolicy {
             Self::ExistingConversationPairings => {
                 formatter.write_str("ExistingConversationPairings")
             }
-            Self::ResolveActor(_) => formatter.write_str("ResolveActor(..)"),
+            Self::ResolveActor { .. } => formatter.write_str("ResolveActor(..)"),
         }
     }
 }
@@ -150,20 +155,32 @@ impl ProductInstallationScope {
     pub fn with_preconfigured_actor_bindings(
         self,
         bindings: impl IntoIterator<Item = (ExternalActorRef, UserId)>,
+        actor_pairings: Arc<dyn ironclaw_conversations::ConversationActorPairingService>,
     ) -> Self {
-        self.with_actor_user_resolver(Arc::new(StaticProductActorUserResolver::new(bindings)))
+        self.with_actor_user_resolver(
+            Arc::new(StaticProductActorUserResolver::new(bindings)),
+            actor_pairings,
+        )
     }
 
     pub fn with_preconfigured_actor_binding(
         self,
         external_actor_ref: ExternalActorRef,
         user_id: UserId,
+        actor_pairings: Arc<dyn ironclaw_conversations::ConversationActorPairingService>,
     ) -> Self {
-        self.with_preconfigured_actor_bindings([(external_actor_ref, user_id)])
+        self.with_preconfigured_actor_bindings([(external_actor_ref, user_id)], actor_pairings)
     }
 
-    pub fn with_actor_user_resolver(self, resolver: Arc<dyn ProductActorUserResolver>) -> Self {
-        self.with_actor_binding_policy(ProductActorBindingPolicy::ResolveActor(resolver))
+    pub fn with_actor_user_resolver(
+        self,
+        resolver: Arc<dyn ProductActorUserResolver>,
+        actor_pairings: Arc<dyn ironclaw_conversations::ConversationActorPairingService>,
+    ) -> Self {
+        self.with_actor_binding_policy(ProductActorBindingPolicy::ResolveActor {
+            resolver,
+            actor_pairings,
+        })
     }
 }
 
@@ -209,14 +226,37 @@ struct ResolvedActorCacheKey {
     user_id: UserId,
 }
 
+#[derive(Debug, Default)]
+struct ResolvedActorPairingCache {
+    set: HashSet<ResolvedActorCacheKey>,
+    order: VecDeque<ResolvedActorCacheKey>,
+}
+
+impl ResolvedActorPairingCache {
+    fn contains(&self, key: &ResolvedActorCacheKey) -> bool {
+        self.set.contains(key)
+    }
+
+    fn insert(&mut self, key: ResolvedActorCacheKey) {
+        if !self.set.insert(key.clone()) {
+            return;
+        }
+        self.order.push_back(key);
+        while self.set.len() > RESOLVED_ACTOR_PAIRING_CACHE_LIMIT {
+            if let Some(oldest) = self.order.pop_front() {
+                self.set.remove(&oldest);
+            }
+        }
+    }
+}
+
 /// Product workflow binding service backed by the canonical conversations
 /// service. Tenant selection comes only from trusted installation config.
 #[derive(Clone)]
 pub struct ProductConversationBindingService {
     conversations: Arc<dyn ironclaw_conversations::ConversationBindingService>,
-    actor_pairings: Option<Arc<dyn ironclaw_conversations::ConversationActorPairingService>>,
     installations: StaticProductInstallationResolver,
-    resolved_actor_pairing_cache: Arc<Mutex<HashSet<ResolvedActorCacheKey>>>,
+    resolved_actor_pairing_cache: Arc<Mutex<ResolvedActorPairingCache>>,
 }
 
 impl ProductConversationBindingService {
@@ -226,18 +266,11 @@ impl ProductConversationBindingService {
     ) -> Self {
         Self {
             conversations,
-            actor_pairings: None,
             installations,
-            resolved_actor_pairing_cache: Arc::new(Mutex::new(HashSet::new())),
+            resolved_actor_pairing_cache: Arc::new(
+                Mutex::new(ResolvedActorPairingCache::default()),
+            ),
         }
-    }
-
-    pub fn with_actor_pairings(
-        mut self,
-        actor_pairings: Arc<dyn ironclaw_conversations::ConversationActorPairingService>,
-    ) -> Self {
-        self.actor_pairings = Some(actor_pairings);
-        self
     }
 
     async fn apply_resolved_actor_binding(
@@ -256,12 +289,11 @@ impl ProductConversationBindingService {
             .contains(&cache_key)
         {
             return Ok(());
-        }
-        let Some(actor_pairings) = &self.actor_pairings else {
-            return Err(ProductWorkflowError::BindingResolutionFailed {
-                reason: "actor binding resolver policy requires a conversation pairing service"
-                    .into(),
-            });
+        };
+        let ProductActorBindingPolicy::ResolveActor { actor_pairings, .. } =
+            &installation_scope.actor_binding_policy
+        else {
+            return Ok(());
         };
         actor_pairings
             .pair_external_actor(
@@ -311,7 +343,7 @@ async fn resolve_actor_user(
 ) -> Result<Option<UserId>, ProductWorkflowError> {
     match &installation_scope.actor_binding_policy {
         ProductActorBindingPolicy::ExistingConversationPairings => Ok(None),
-        ProductActorBindingPolicy::ResolveActor(resolver) => resolver
+        ProductActorBindingPolicy::ResolveActor { resolver, .. } => resolver
             .resolve_product_actor_user(actor_user_resolution_request(request))
             .await?
             .map(Some)

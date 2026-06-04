@@ -22,13 +22,13 @@ use ironclaw_host_api::{AgentId, NetworkMethod, ProjectId, TenantId, ThreadId, U
 use ironclaw_product_workflow::{
     LifecyclePackageRef, LifecyclePhase, RebornCancelRunResponse, RebornCreateThreadResponse,
     RebornExtensionActionResponse, RebornExtensionListResponse, RebornExtensionRegistryResponse,
-    RebornGetRunStateRequest, RebornGetRunStateResponse, RebornListThreadsResponse,
-    RebornResolveGateResponse, RebornServicesApi, RebornServicesError, RebornServicesErrorCode,
-    RebornServicesErrorKind, RebornSetupExtensionResponse, RebornStreamEventsRequest,
-    RebornStreamEventsResponse, RebornSubmitTurnResponse, RebornTimelineRequest,
-    RebornTimelineResponse, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
-    WebUiCreateThreadRequest, WebUiListThreadsRequest, WebUiResolveGateRequest,
-    WebUiSendMessageRequest, WebUiSetupExtensionRequest,
+    RebornGetRunStateRequest, RebornGetRunStateResponse, RebornListAutomationsResponse,
+    RebornListThreadsResponse, RebornResolveGateResponse, RebornServicesApi, RebornServicesError,
+    RebornServicesErrorCode, RebornServicesErrorKind, RebornSetupExtensionResponse,
+    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
+    RebornTimelineRequest, RebornTimelineResponse, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
+    WebUiCreateThreadRequest, WebUiListAutomationsRequest, WebUiListThreadsRequest,
+    WebUiResolveGateRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
 };
 use ironclaw_reborn_composition::{
     PublicRouteMount, RebornReadiness, RebornWebuiBundle, WebuiAuthenticator, WebuiServeConfig,
@@ -207,6 +207,16 @@ impl RebornServicesApi for StubServices {
         Ok(RebornListThreadsResponse {
             threads: Vec::new(),
             next_cursor: None,
+        })
+    }
+
+    async fn list_automations(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _request: WebUiListAutomationsRequest,
+    ) -> Result<RebornListAutomationsResponse, RebornServicesError> {
+        Ok(RebornListAutomationsResponse {
+            automations: Vec::new(),
         })
     }
 
@@ -1339,8 +1349,14 @@ async fn static_chat_events_clear_gate_when_run_resumes() {
         "non-blocked run_status updates must clear stale gates for the resumed run"
     );
     assert!(
-        body.contains("progress.turn_run_id,\n              promptRunIdRef,"),
-        "typed running/progress events must clear stale gates for the resumed run"
+        !body.contains(
+            "clearPendingGateForRun(\n              setPendingGate,\n              progress.turn_run_id,"
+        ),
+        "typed running/progress events must not clear blocked auth gates"
+    );
+    assert!(
+        body.contains("clearPendingNonAuthGateForRun(\n              setPendingGate,\n              progress.turn_run_id,\n              promptRunIdRef,"),
+        "typed running/progress events should still clear stale non-auth gates"
     );
     assert!(
         body.contains("promptRunIdRef?.current === activeRunId"),

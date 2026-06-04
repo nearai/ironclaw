@@ -105,6 +105,30 @@ impl Harness {
             .await
     }
 
+    async fn post_retry_event(
+        &self,
+        body: &'static str,
+        retry_num: u32,
+    ) -> axum::response::Response {
+        let timestamp = current_unix_timestamp();
+        let signature = slack_signature(timestamp, body);
+        self.mount
+            .router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(SLACK_EVENTS_PATH)
+                    .header(SLACK_TIMESTAMP_HEADER, timestamp.to_string())
+                    .header(SLACK_SIGNATURE_HEADER, signature)
+                    .header("X-Slack-Retry-Num", retry_num.to_string())
+                    .body(Body::from(body))
+                    .expect("request should build"), // safety: static test request fixtures are valid.
+            )
+            .await
+            .expect("router should respond") // safety: in-process test router should not fail
+    }
+
     async fn post_event_with_signature(
         &self,
         body: &'static str,
@@ -154,7 +178,7 @@ async fn build_harness_with_actor_user_resolver(
     let conversation_port: Arc<dyn ironclaw_conversations::ConversationBindingService> =
         conversations.clone();
     let actor_pairings: Arc<dyn ironclaw_conversations::ConversationActorPairingService> =
-        conversations;
+        conversations.clone();
 
     let adapter_id = ironclaw_product_adapters::ProductAdapterId::new(ADAPTER).expect("adapter id"); // safety: static test adapter id is valid.
     let installation_id = AdapterInstallationId::new(INSTALLATION).expect("installation id"); // safety: static test installation id is valid.
@@ -172,13 +196,12 @@ async fn build_harness_with_actor_user_resolver(
             ProjectId::new(PROJECT).expect("project"), // safety: static test project id is valid.
         ),
     )
-    .with_actor_user_resolver(actor_user_resolver);
+    .with_actor_user_resolver(actor_user_resolver, actor_pairings);
     let resolver = StaticProductInstallationResolver::new([(
         ProductInstallationKey::new(adapter_id, installation_id.clone()),
         scope,
     )]);
-    let binding = ProductConversationBindingService::new(conversation_port, resolver)
-        .with_actor_pairings(actor_pairings);
+    let binding = ProductConversationBindingService::new(conversation_port, resolver);
 
     let threads = InMemorySessionThreadService::default();
     let coordinator = RecordingTurnCoordinator::new(threads.clone(), mode);
@@ -334,6 +357,27 @@ async fn slack_dm_for_personally_bound_user_routes_through_reborn_identity() {
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0]["channel"], CHANNEL);
     assert_eq!(messages[0]["text"], "hello personal Slack binding");
+}
+
+#[tokio::test]
+async fn slack_dm_retry_delivery_is_idempotent() {
+    let harness = build_harness(TurnMode::Complete {
+        assistant_text: "hello from reborn".into(),
+    })
+    .await;
+    let body = dm_message("Ev-final", "hello");
+
+    let first = harness.post_event(body).await;
+    let retry = harness.post_retry_event(body, 1).await;
+
+    assert_eq!(first.status(), StatusCode::OK);
+    assert_eq!(retry.status(), StatusCode::OK);
+    harness.drain().await;
+
+    let messages = harness.slack_messages();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0]["channel"], CHANNEL);
+    assert_eq!(messages[0]["text"], "hello from reborn");
 }
 
 #[tokio::test]

@@ -124,6 +124,7 @@ fn alice_profile() -> OAuthUserProfile {
         provider_user_id: "google-sub-123".to_string(),
         email: Some("alice@example.com".to_string()),
         email_verified: true,
+        verified_emails: vec!["alice@example.com".to_string()],
         display_name: Some("Alice".to_string()),
     }
 }

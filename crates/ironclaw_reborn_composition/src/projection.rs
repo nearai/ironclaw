@@ -383,7 +383,7 @@ impl WebuiProjectionBatch {
         &self.cursor
     }
 
-    fn push_runtime_payloads(
+    fn push_durable_runtime_payloads(
         &mut self,
         final_cursor: EventProjectionCursor,
         item_cursor: EventProjectionCursor,
@@ -427,6 +427,20 @@ impl WebuiProjectionBatch {
         Ok(self.cursor.runtime_payloads_delivered == 0)
     }
 
+    fn push_live_payload(
+        &mut self,
+        cursor: EventProjectionCursor,
+        payload: ProductOutboundPayload,
+    ) -> bool {
+        if !self.has_runtime_payload_capacity() {
+            return false;
+        }
+        self.runtime_payloads_pushed += 1;
+        self.cursor.live = Some(cursor);
+        self.push(payload);
+        true
+    }
+
     async fn push_runtime_item(
         &mut self,
         item: ProjectionStreamItem,
@@ -441,18 +455,26 @@ impl WebuiProjectionBatch {
             scope,
             display_previews,
             self.cursor.runtime_item,
+            self.cursor.live.as_ref().map(|cursor| cursor.runtime),
             already_delivered,
             remaining_capacity,
         )
         .await?
         {
-            return self.push_runtime_payloads(
-                runtime_item.final_cursor,
-                runtime_item.item_cursor,
-                runtime_item.payloads,
-                runtime_item.total,
-                runtime_item.already_delivered,
-            );
+            match runtime_item {
+                RuntimePayloadItem::Durable(durable) => {
+                    return self.push_durable_runtime_payloads(
+                        durable.final_cursor,
+                        durable.item_cursor,
+                        durable.payloads,
+                        durable.total,
+                        durable.already_delivered,
+                    );
+                }
+                RuntimePayloadItem::Live { cursor, payload } => {
+                    return Ok(self.push_live_payload(cursor, payload));
+                }
+            }
         }
         Ok(true)
     }
@@ -497,6 +519,8 @@ fn runtime_projection_scope(actor: &TurnActor, scope: &TurnScope) -> EventProjec
 struct WebuiProjectionCursor {
     runtime: Option<EventProjectionCursor>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    live: Option<EventProjectionCursor>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     runtime_item: Option<EventCursor>,
     turn: Option<TurnEventProjectionCursor>,
     #[serde(default, skip_serializing_if = "is_zero")]
@@ -512,6 +536,7 @@ fn parse_webui_projection_cursor(
 ) -> Result<WebuiProjectionCursor, ProductAdapterError> {
     if let Ok(parsed) = serde_json::from_str::<WebuiProjectionCursor>(cursor)
         && (parsed.runtime.is_some()
+            || parsed.live.is_some()
             || parsed.turn.is_some()
             || parsed.runtime_payloads_delivered > 0)
     {
@@ -531,6 +556,7 @@ fn parse_webui_projection_cursor(
     })?;
     Ok(WebuiProjectionCursor {
         runtime: Some(runtime),
+        live: None,
         runtime_item: None,
         turn: None,
         runtime_payloads_delivered: 0,
@@ -548,6 +574,14 @@ fn validate_webui_projection_cursor_scope(
         return Err(ProductAdapterError::InvalidIdentifier {
             kind: "projection_cursor",
             reason: "runtime cursor scope does not match subscription scope".to_string(),
+        });
+    }
+    if let Some(live) = cursor.live.as_ref()
+        && &live.scope != projection_scope
+    {
+        return Err(ProductAdapterError::InvalidIdentifier {
+            kind: "projection_cursor",
+            reason: "live cursor scope does not match subscription scope".to_string(),
         });
     }
     if let Some(turn) = cursor.turn.as_ref()
@@ -574,6 +608,7 @@ async fn item_to_payloads(
     scope: &TurnScope,
     display_previews: &dyn CapabilityDisplayPreviewSource,
     expected_item: Option<EventCursor>,
+    last_live_cursor: Option<EventCursor>,
     already_delivered: usize,
     capacity: usize,
 ) -> RuntimePayloadItemResult {
@@ -607,7 +642,7 @@ async fn item_to_payloads(
                     .await
                 }
                 ironclaw_event_streams::ProductProjectionEnvelope::ThreadLiveUpdate(update) => {
-                    live_update_payloads(scope, update, cursor, expected_item, already_delivered)
+                    live_update_payloads(scope, update, cursor, last_live_cursor)
                 }
                 _ => Err(internal_projection_error(
                     "unexpected projection update envelope",
@@ -641,29 +676,56 @@ fn live_update_payloads(
     scope: &TurnScope,
     update: &ThreadLiveProjectionUpdate,
     cursor: EventProjectionCursor,
-    expected_item: Option<EventCursor>,
-    already_delivered: usize,
+    last_live_cursor: Option<EventCursor>,
 ) -> RuntimePayloadItemResult {
-    let already_delivered =
-        effective_runtime_payload_offset(already_delivered, expected_item, cursor.runtime);
-    if already_delivered > 0 {
-        return Err(ProductAdapterError::InvalidIdentifier {
-            kind: "projection_cursor",
-            reason: "runtime delivery offset exceeds runtime item payload count".to_string(),
-        });
+    if last_live_cursor.is_some_and(|last| cursor.runtime <= last) {
+        return Ok(None);
     }
     let items = product_items_for_live_update(update);
     if items.is_empty() {
         return Ok(None);
     }
     let state = ProductProjectionState::new(scope.thread_id.to_string(), items)?;
-    Ok(Some(RuntimePayloadItem {
-        final_cursor: cursor.clone(),
-        item_cursor: cursor,
-        payloads: vec![ProductOutboundPayload::ProjectionUpdate { state }],
-        total: 1,
-        already_delivered: 0,
+    Ok(Some(RuntimePayloadItem::Live {
+        cursor,
+        payload: ProductOutboundPayload::ProjectionUpdate { state },
     }))
+}
+
+#[derive(Debug)]
+struct DurableRuntimePayloadItem {
+    final_cursor: EventProjectionCursor,
+    item_cursor: EventProjectionCursor,
+    payloads: Vec<ProductOutboundPayload>,
+    total: usize,
+    already_delivered: usize,
+}
+
+#[derive(Debug)]
+enum RuntimePayloadItem {
+    Durable(DurableRuntimePayloadItem),
+    Live {
+        cursor: EventProjectionCursor,
+        payload: ProductOutboundPayload,
+    },
+}
+
+type RuntimePayloadItemResult = Result<Option<RuntimePayloadItem>, ProductAdapterError>;
+
+fn durable_runtime_payload_item(
+    final_cursor: EventProjectionCursor,
+    item_cursor: EventProjectionCursor,
+    payloads: Vec<ProductOutboundPayload>,
+    total: usize,
+    already_delivered: usize,
+) -> RuntimePayloadItem {
+    RuntimePayloadItem::Durable(DurableRuntimePayloadItem {
+        final_cursor,
+        item_cursor,
+        payloads,
+        total,
+        already_delivered,
+    })
 }
 
 async fn snapshot_payloads(
@@ -701,13 +763,13 @@ async fn snapshot_payloads(
         .skip(already_delivered)
         .take(capacity)
         .collect();
-    Ok(Some(RuntimePayloadItem {
-        final_cursor: cursor,
+    Ok(Some(durable_runtime_payload_item(
+        cursor,
         item_cursor,
         payloads,
         total,
         already_delivered,
-    }))
+    )))
 }
 
 async fn replay_payloads(
@@ -745,25 +807,14 @@ async fn replay_payloads(
         .skip(already_delivered)
         .take(capacity)
         .collect();
-    Ok(Some(RuntimePayloadItem {
-        final_cursor: cursor,
+    Ok(Some(durable_runtime_payload_item(
+        cursor,
         item_cursor,
         payloads,
         total,
         already_delivered,
-    }))
+    )))
 }
-
-#[derive(Debug)]
-struct RuntimePayloadItem {
-    final_cursor: EventProjectionCursor,
-    item_cursor: EventProjectionCursor,
-    payloads: Vec<ProductOutboundPayload>,
-    total: usize,
-    already_delivered: usize,
-}
-
-type RuntimePayloadItemResult = Result<Option<RuntimePayloadItem>, ProductAdapterError>;
 
 #[cfg(test)]
 struct RuntimePayloadItemInput {
@@ -787,7 +838,7 @@ async fn runtime_payloads_for_item(
     expected_item: Option<EventCursor>,
     already_delivered: usize,
     capacity: usize,
-) -> RuntimePayloadItemResult {
+) -> Result<Option<DurableRuntimePayloadItem>, ProductAdapterError> {
     let RuntimePayloadItemInput {
         runs,
         capability_activities,
@@ -824,7 +875,7 @@ async fn runtime_payloads_for_item(
         .skip(already_delivered)
         .take(capacity)
         .collect();
-    Ok(Some(RuntimePayloadItem {
+    Ok(Some(DurableRuntimePayloadItem {
         final_cursor: cursor,
         item_cursor,
         payloads,

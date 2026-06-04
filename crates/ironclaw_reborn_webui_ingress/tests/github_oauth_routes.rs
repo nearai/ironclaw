@@ -122,6 +122,7 @@ fn github_provider(addr: SocketAddr) -> Arc<dyn OAuthProvider> {
             GitHubOAuthConfig {
                 client_id: "gh-client-id".to_string(),
                 client_secret: SecretString::from("gh-client-secret".to_string()),
+                http_timeout: None,
             },
             "https://github.test/login/oauth/authorize",
             format!("http://{addr}/token"),
@@ -450,6 +451,7 @@ async fn callback_exchange_failure_redirects_with_exchange_failed() {
             GitHubOAuthConfig {
                 client_id: "gh-client-id".to_string(),
                 client_secret: SecretString::from("gh-client-secret".to_string()),
+                http_timeout: None,
             },
             "https://github.test/login/oauth/authorize",
             format!("http://{addr}/token"),
@@ -613,6 +615,7 @@ async fn callback_profile_fetch_failure_redirects_with_exchange_failed() {
             GitHubOAuthConfig {
                 client_id: "gh-client-id".to_string(),
                 client_secret: SecretString::from("gh-client-secret".to_string()),
+                http_timeout: None,
             },
             "https://github.test/login/oauth/authorize",
             format!("http://{addr}/token"),
@@ -678,6 +681,7 @@ async fn callback_exchange_timeout_redirects_with_exchange_failed() {
             GitHubOAuthConfig {
                 client_id: "gh-client-id".to_string(),
                 client_secret: SecretString::from("gh-client-secret".to_string()),
+                http_timeout: None,
             },
             "https://github.test/login/oauth/authorize",
             format!("http://{addr}/token"),

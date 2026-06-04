@@ -12,7 +12,7 @@ use ironclaw_auth::{
     AuthProductScope, AuthProviderId, CredentialAccountId, CredentialAccountProjection,
     CredentialAccountUpdateBinding, ProviderScope,
 };
-use ironclaw_host_api::{AgentId, ExtensionId, ThreadId};
+use ironclaw_host_api::{AgentId, ExtensionId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_product_adapters::{
     ProductAdapterError, ProductWorkflowRejectionKind, ProjectionStream,
     ProjectionSubscriptionRequest,
@@ -37,8 +37,9 @@ use crate::{
     ResolveApprovalInteractionResponse, ResolveAuthInteractionRequest,
     ResolveAuthInteractionResponse, UnsupportedLifecycleProductFacade, WebUiAuthenticatedCaller,
     WebUiCancelRunRequest, WebUiCreateThreadRequest, WebUiGateResolution, WebUiInboundCommand,
-    WebUiInboundValidationCode, WebUiInboundValidationError, WebUiListThreadsRequest,
-    WebUiResolveGateRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
+    WebUiInboundValidationCode, WebUiInboundValidationError, WebUiListAutomationsRequest,
+    WebUiListThreadsRequest, WebUiResolveGateRequest, WebUiSendMessageRequest,
+    WebUiSetupExtensionRequest,
     approval_interaction::RejectingApprovalInteractionService,
     auth_interaction::RejectingAuthInteractionService,
     binding_ref::{
@@ -57,14 +58,15 @@ mod types;
 
 pub use error::{RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind};
 pub use types::{
+    RebornAutomationInfo, RebornAutomationRunStatus, RebornAutomationSource, RebornAutomationState,
     RebornCancelRunResponse, RebornCreateThreadResponse, RebornExtensionActionResponse,
     RebornExtensionCredentialSetup, RebornExtensionInfo, RebornExtensionListResponse,
     RebornExtensionOnboardingPayload, RebornExtensionOnboardingState, RebornExtensionRegistryEntry,
     RebornExtensionRegistryResponse, RebornExtensionSetupField, RebornExtensionSetupSecret,
-    RebornGetRunStateRequest, RebornGetRunStateResponse, RebornListThreadsResponse,
-    RebornResolveGateResponse, RebornResumeGateResponse, RebornSetupExtensionResponse,
-    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
-    RebornTimelineRequest, RebornTimelineResponse,
+    RebornGetRunStateRequest, RebornGetRunStateResponse, RebornListAutomationsResponse,
+    RebornListThreadsResponse, RebornResolveGateResponse, RebornResumeGateResponse,
+    RebornSetupExtensionResponse, RebornStreamEventsRequest, RebornStreamEventsResponse,
+    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
 };
 
 type SkillActivationRecorder =
@@ -101,6 +103,60 @@ pub trait ExtensionCredentialSetupService: Send + Sync {
         &self,
         request: ExtensionCredentialSubmitRequest,
     ) -> Result<CredentialAccountId, RebornServicesError>;
+}
+
+/// Product caller scope for actions that must run against a concrete agent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProductAgentBoundCaller {
+    pub tenant_id: TenantId,
+    pub user_id: UserId,
+    pub agent_id: AgentId,
+    pub project_id: Option<ProjectId>,
+}
+
+impl ProductAgentBoundCaller {
+    pub fn new(
+        tenant_id: TenantId,
+        user_id: UserId,
+        agent_id: AgentId,
+        project_id: Option<ProjectId>,
+    ) -> Self {
+        Self {
+            tenant_id,
+            user_id,
+            agent_id,
+            project_id,
+        }
+    }
+}
+
+#[async_trait]
+pub trait AutomationProductFacade: Send + Sync {
+    async fn list_automations(
+        &self,
+        caller: ProductAgentBoundCaller,
+        limit: usize,
+    ) -> Result<Vec<RebornAutomationInfo>, RebornServicesError>;
+}
+
+#[derive(Debug)]
+pub struct UnsupportedAutomationProductFacade;
+
+impl UnsupportedAutomationProductFacade {
+    pub fn new_static() -> Self {
+        Self
+    }
+}
+
+#[async_trait]
+impl AutomationProductFacade for UnsupportedAutomationProductFacade {
+    async fn list_automations(
+        &self,
+        _caller: ProductAgentBoundCaller,
+        _limit: usize,
+    ) -> Result<Vec<RebornAutomationInfo>, RebornServicesError> {
+        Err(automation_unavailable())
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -214,6 +270,12 @@ pub trait RebornServicesApi: Send + Sync {
         request: WebUiListThreadsRequest,
     ) -> Result<RebornListThreadsResponse, RebornServicesError>;
 
+    async fn list_automations(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: WebUiListAutomationsRequest,
+    ) -> Result<RebornListAutomationsResponse, RebornServicesError>;
+
     async fn list_extensions(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -269,6 +331,7 @@ pub struct RebornServices {
     turn_coordinator: Arc<dyn TurnCoordinator>,
     event_stream: Option<Arc<dyn ProjectionStream>>,
     lifecycle_facade: Arc<dyn LifecycleProductFacade>,
+    automation_facade: Arc<dyn AutomationProductFacade>,
     approval_interactions: Arc<dyn ApprovalInteractionService>,
     auth_interactions: Arc<dyn AuthInteractionService>,
     extension_credentials: Option<Arc<dyn ExtensionCredentialSetupService>>,
@@ -288,6 +351,7 @@ impl RebornServices {
             lifecycle_facade: Arc::new(UnsupportedLifecycleProductFacade::new_static(
                 "reborn_lifecycle_facade_unwired",
             )),
+            automation_facade: Arc::new(UnsupportedAutomationProductFacade::new_static()),
             approval_interactions: Arc::new(RejectingApprovalInteractionService),
             auth_interactions: Arc::new(RejectingAuthInteractionService),
             extension_credentials: None,
@@ -306,6 +370,14 @@ impl RebornServices {
         lifecycle_facade: Arc<dyn LifecycleProductFacade>,
     ) -> Self {
         self.lifecycle_facade = lifecycle_facade;
+        self
+    }
+
+    pub fn with_automation_product_facade(
+        mut self,
+        automation_facade: Arc<dyn AutomationProductFacade>,
+    ) -> Self {
+        self.automation_facade = automation_facade;
         self
     }
 
@@ -823,6 +895,26 @@ impl RebornServicesApi for RebornServices {
         })
     }
 
+    async fn list_automations(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: WebUiListAutomationsRequest,
+    ) -> Result<RebornListAutomationsResponse, RebornServicesError> {
+        let Some(caller) = product_agent_bound_caller_from_webui(caller) else {
+            return Err(RebornServicesError::from_status(
+                RebornServicesErrorCode::InvalidRequest,
+                400,
+                false,
+            ));
+        };
+        let limit = clamp_automation_list_limit(request.limit);
+        let automations = self
+            .automation_facade
+            .list_automations(caller, limit)
+            .await?;
+        Ok(RebornListAutomationsResponse { automations })
+    }
+
     async fn list_extensions(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -876,6 +968,10 @@ impl RebornServicesApi for RebornServices {
         )
         .await
     }
+}
+
+fn automation_unavailable() -> RebornServicesError {
+    RebornServicesError::service_unavailable(true)
 }
 
 struct AcceptedWebUiMessage {
@@ -1510,6 +1606,15 @@ pub(crate) const TIMELINE_DEFAULT_PAGE_SIZE: u32 = 100;
 /// issue.
 pub(crate) const TIMELINE_MAX_PAGE_SIZE: u32 = 200;
 
+/// Default number of automation rows returned when the browser does not
+/// request a smaller page.
+pub const AUTOMATION_LIST_DEFAULT_PAGE_SIZE: u32 = 50;
+
+/// Hard ceiling for the beta automation management list response. This keeps
+/// the user-facing endpoint bounded until the trigger capability exposes an
+/// opaque cursor contract.
+pub const AUTOMATION_LIST_MAX_PAGE_SIZE: u32 = 100;
+
 /// Hard ceiling on summary artifacts returned per response. Summary
 /// artifacts are typically much smaller than the message transcript so
 /// this cap is generous; it exists to bound the worst case where a
@@ -1519,6 +1624,12 @@ const TIMELINE_MAX_SUMMARY_ARTIFACTS: usize = 200;
 fn clamp_timeline_limit(requested: Option<u32>) -> usize {
     let raw = requested.unwrap_or(TIMELINE_DEFAULT_PAGE_SIZE);
     let clamped = raw.clamp(1, TIMELINE_MAX_PAGE_SIZE);
+    clamped as usize
+}
+
+fn clamp_automation_list_limit(requested: Option<u32>) -> usize {
+    let raw = requested.unwrap_or(AUTOMATION_LIST_DEFAULT_PAGE_SIZE);
+    let clamped = raw.clamp(1, AUTOMATION_LIST_MAX_PAGE_SIZE);
     clamped as usize
 }
 
@@ -1848,6 +1959,18 @@ fn create_thread_metadata_json(
         "client_action_id": client_action_id.as_str(),
     }))
     .map_err(|_| RebornServicesError::internal_invariant())
+}
+
+fn product_agent_bound_caller_from_webui(
+    caller: WebUiAuthenticatedCaller,
+) -> Option<ProductAgentBoundCaller> {
+    let agent_id = caller.agent_id?;
+    Some(ProductAgentBoundCaller::new(
+        caller.tenant_id,
+        caller.user_id,
+        agent_id,
+        caller.project_id,
+    ))
 }
 
 fn generated_thread_id(

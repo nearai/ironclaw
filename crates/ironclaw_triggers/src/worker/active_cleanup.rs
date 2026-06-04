@@ -39,6 +39,11 @@ impl TriggerPollerWorker {
             let Some(run_id) = record.active_run_ref else {
                 // Keep claim-only rows blocked until recovery has lease or age
                 // evidence that clearing cannot double-submit after a crash.
+                // Still advance the scan cursor: otherwise one claim-only row
+                // at the front of a page can starve every later active run.
+                if first_unadvanced_cursor.is_none() {
+                    next_cursor = Some(record_cursor);
+                }
                 report.results.push(TriggerPollerFireReport {
                     tenant_id: record.tenant_id,
                     trigger_id: record.trigger_id,
@@ -48,9 +53,6 @@ impl TriggerPollerWorker {
                         active_run_ref: None,
                     },
                 });
-                if first_unadvanced_cursor.is_none() {
-                    next_cursor = Some(record_cursor);
-                }
                 continue;
             };
             let result_index = lookup_requests.len();

@@ -93,6 +93,7 @@ mod builder;
 mod production_services;
 mod production_wiring;
 mod runtime_adapters;
+mod wasm_diagnostics;
 
 use production_wiring::{
     ProductionComponentType, ProductionComponentTypes, ProductionImplementationReadiness,

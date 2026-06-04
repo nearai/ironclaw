@@ -151,11 +151,7 @@ fn render_search_payload(
                 format_args!("  description: {}", terminal_safe(&extension.description)),
             );
         }
-        render_string_array(
-            output,
-            &extension.visible_read_only_capability_ids,
-            "  capability",
-        );
+        render_string_array(output, &extension.visible_capability_ids, "  capability");
     }
 }
 
@@ -238,6 +234,7 @@ mod tests {
                     source: LifecycleExtensionSource::HostBundled,
                     runtime_kind:
                         ironclaw_product_workflow::LifecycleExtensionRuntimeKind::WasmTool,
+                    visible_capability_ids: Vec::new(),
                     visible_read_only_capability_ids: Vec::new(),
                     credential_requirements: Vec::new(),
                     onboarding: None,

@@ -49,6 +49,11 @@ export function messagesFromTimeline(records, pendingMessages = []) {
     });
   }
 
+  // Pending rows are dropped from the ref by the caller as soon as
+  // `sendMessage` returns (server has accepted the message and the
+  // confirmed row will arrive via timeline). The id-based guard
+  // remains as defense-in-depth in case a caller passes a pending
+  // that was already merged into the timeline.
   for (const pending of pendingMessages) {
     if (seen.has(pending.id)) continue;
     const message = pendingMessageForRender(pending);

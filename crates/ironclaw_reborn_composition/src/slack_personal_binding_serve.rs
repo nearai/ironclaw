@@ -55,6 +55,7 @@ const SLACK_PERSONAL_BINDING_CALLBACK_MAX_REQUESTS: NonZeroU32 = NonZeroU32::new
 const SLACK_PERSONAL_BINDING_RATE_WINDOW_SECONDS: NonZeroU32 = NonZeroU32::new(60).unwrap(); // safety: 60 is non-zero.
 const SLACK_PERSONAL_BINDING_STATE_TTL: Duration = Duration::from_secs(5 * 60);
 const SLACK_PERSONAL_BINDING_STATE_CAPACITY: usize = 1024;
+const SLACK_PERSONAL_BINDING_STATE_CAPACITY_PER_USER: usize = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SlackPersonalBindingAuthorizationUrl(String);
@@ -325,7 +326,10 @@ async fn slack_personal_binding_oauth_start_handler(
     let expires_at = Utc::now()
         + ChronoDuration::from_std(SLACK_PERSONAL_BINDING_STATE_TTL)
             .map_err(|_| SlackPersonalBindingRouteFailure::server_error())?;
-    let oauth_state = state.pending.insert(pending);
+    let oauth_state = state
+        .pending
+        .insert(pending)
+        .ok_or_else(SlackPersonalBindingRouteFailure::server_error)?;
     let authorization_url = state
         .oauth_client
         .authorization_url(&state.callback_url, oauth_state.as_str())
@@ -500,7 +504,10 @@ impl PendingSlackPersonalBindingStore {
         Self::default()
     }
 
-    fn insert(&self, pending: PendingSlackPersonalBinding) -> SlackPersonalBindingOAuthState {
+    fn insert(
+        &self,
+        pending: PendingSlackPersonalBinding,
+    ) -> Option<SlackPersonalBindingOAuthState> {
         let state = SlackPersonalBindingOAuthState::mint();
         let mut guard = self
             .inner
@@ -511,16 +518,16 @@ impl PendingSlackPersonalBindingStore {
                 pending.created_at.elapsed() < SLACK_PERSONAL_BINDING_STATE_TTL
             });
         }
-        if guard.len() >= SLACK_PERSONAL_BINDING_STATE_CAPACITY
-            && let Some(oldest) = guard
-                .iter()
-                .min_by_key(|(_, pending)| pending.created_at)
-                .map(|(state, _)| state.clone())
+        while pending_count_for_principal(&guard, &pending.principal)
+            >= SLACK_PERSONAL_BINDING_STATE_CAPACITY_PER_USER
         {
-            guard.remove(&oldest);
+            remove_oldest_for_principal(&mut guard, &pending.principal)?;
+        }
+        if guard.len() >= SLACK_PERSONAL_BINDING_STATE_CAPACITY {
+            remove_oldest_for_principal(&mut guard, &pending.principal)?;
         }
         guard.insert(state.clone(), pending);
-        state
+        Some(state)
     }
 
     fn take(&self, state: &SlackPersonalBindingOAuthState) -> Option<PendingSlackPersonalBinding> {
@@ -534,6 +541,28 @@ impl PendingSlackPersonalBindingStore {
         }
         Some(pending)
     }
+}
+
+fn pending_count_for_principal(
+    pending: &HashMap<SlackPersonalBindingOAuthState, PendingSlackPersonalBinding>,
+    principal: &SlackPersonalBindingPrincipal,
+) -> usize {
+    pending
+        .values()
+        .filter(|pending| pending.principal == *principal)
+        .count()
+}
+
+fn remove_oldest_for_principal(
+    pending: &mut HashMap<SlackPersonalBindingOAuthState, PendingSlackPersonalBinding>,
+    principal: &SlackPersonalBindingPrincipal,
+) -> Option<PendingSlackPersonalBinding> {
+    let oldest = pending
+        .iter()
+        .filter(|(_, pending)| pending.principal == *principal)
+        .min_by_key(|(_, pending)| pending.created_at)
+        .map(|(state, _)| state.clone())?;
+    pending.remove(&oldest)
 }
 
 fn sanitize_redirect(input: Option<String>) -> Option<String> {
@@ -747,15 +776,18 @@ mod tests {
             SlackPersonalBindingRouteConfig::new(service, oauth, "https://app.example")
                 .expect("valid config"),
         );
-        let pending_state = state.pending.insert(PendingSlackPersonalBinding {
-            principal: SlackPersonalBindingPrincipal {
-                tenant_id: tenant("tenant-alpha"),
-                user_id: user("user:alice"),
-            },
-            installation_id: installation("install-alpha"),
-            redirect_after: None,
-            created_at: Instant::now(),
-        });
+        let pending_state = state
+            .pending
+            .insert(PendingSlackPersonalBinding {
+                principal: SlackPersonalBindingPrincipal {
+                    tenant_id: tenant("tenant-alpha"),
+                    user_id: user("user:alice"),
+                },
+                installation_id: installation("install-alpha"),
+                redirect_after: None,
+                created_at: Instant::now(),
+            })
+            .expect("pending state");
         let mount = slack_personal_binding_route_mount(state);
         let app = Router::new().merge(mount.public);
         let uri = format!(
@@ -804,6 +836,133 @@ mod tests {
         assert_eq!(store.bindings().len(), 1);
     }
 
+    #[tokio::test]
+    async fn callback_redirects_denied_on_slack_error_query_param() {
+        let response = callback_with_state(
+            route_state(
+                Arc::new(RecordingBindingStore::default()),
+                Arc::new(RecordingOAuthClient::default()),
+            ),
+            PendingOptions::default(),
+            "error=access_denied",
+        )
+        .await;
+
+        assert_redirect_location(response, "/v2?slack_binding_error=denied");
+    }
+
+    #[tokio::test]
+    async fn callback_redirects_invalid_request_on_missing_code() {
+        let response = callback_with_state(
+            route_state(
+                Arc::new(RecordingBindingStore::default()),
+                Arc::new(RecordingOAuthClient::default()),
+            ),
+            PendingOptions::default(),
+            "",
+        )
+        .await;
+
+        assert_redirect_location(response, "/v2?slack_binding_error=invalid_request");
+    }
+
+    #[tokio::test]
+    async fn callback_redirects_exchange_failed_on_client_error() {
+        let response = callback_with_state(
+            route_state(
+                Arc::new(RecordingBindingStore::default()),
+                Arc::new(FailingOAuthClient),
+            ),
+            PendingOptions::default(),
+            "code=bad",
+        )
+        .await;
+
+        assert_redirect_location(response, "/v2?slack_binding_error=exchange_failed");
+    }
+
+    #[tokio::test]
+    async fn callback_redirects_unauthorized_on_binding_mismatch() {
+        let service = SlackPersonalUserBindingService::new(
+            [SlackPersonalBindingInstallation {
+                tenant_id: tenant("tenant-alpha"),
+                installation_id: installation("install-alpha"),
+                selector: crate::slack_serve::SlackInstallationSelector::app_team(
+                    "A-other", "T-team",
+                ),
+            }],
+            Arc::new(RecordingBindingStore::default()),
+        );
+        let state = SlackPersonalBindingRouteState::new(
+            SlackPersonalBindingRouteConfig::new(
+                service,
+                Arc::new(RecordingOAuthClient::default()),
+                "https://app.example",
+            )
+            .expect("valid config"),
+        );
+
+        let response = callback_with_state(state, PendingOptions::default(), "code=ok").await;
+
+        assert_redirect_location(response, "/v2?slack_binding_error=unauthorized");
+    }
+
+    #[tokio::test]
+    async fn callback_redirects_server_error_on_store_failure() {
+        let response = callback_with_state(
+            route_state(
+                Arc::new(FailingBindingStore),
+                Arc::new(RecordingOAuthClient::default()),
+            ),
+            PendingOptions::default(),
+            "code=ok",
+        )
+        .await;
+
+        assert_redirect_location(response, "/v2?slack_binding_error=server_error");
+    }
+
+    #[tokio::test]
+    async fn callback_redirects_invalid_state_for_expired_oauth_state() {
+        let response = callback_with_state(
+            route_state(
+                Arc::new(RecordingBindingStore::default()),
+                Arc::new(RecordingOAuthClient::default()),
+            ),
+            PendingOptions {
+                created_at: Instant::now() - SLACK_PERSONAL_BINDING_STATE_TTL,
+                ..PendingOptions::default()
+            },
+            "code=ok",
+        )
+        .await;
+
+        assert_redirect_location(response, "/v2?slack_binding_error=invalid_state");
+    }
+
+    #[test]
+    fn pending_store_evicts_requester_oldest_without_evicting_other_users() {
+        let store = PendingSlackPersonalBindingStore::new();
+        let other_state = store
+            .insert(pending_for("tenant-alpha", "user:other", 10))
+            .expect("other pending");
+        let first_requester_state = store
+            .insert(pending_for("tenant-alpha", "user:alice", 9))
+            .expect("first requester pending");
+        store
+            .insert(pending_for("tenant-alpha", "user:alice", 8))
+            .expect("second requester pending");
+        store
+            .insert(pending_for("tenant-alpha", "user:alice", 7))
+            .expect("third requester pending");
+        store
+            .insert(pending_for("tenant-alpha", "user:alice", 6))
+            .expect("fourth requester pending");
+
+        assert!(store.take(&first_requester_state).is_none());
+        assert!(store.take(&other_state).is_some());
+    }
+
     #[derive(Default)]
     struct RecordingOAuthClient {
         exchanges: Mutex<Vec<String>>,
@@ -844,6 +1003,27 @@ mod tests {
         }
     }
 
+    struct FailingOAuthClient;
+
+    #[async_trait::async_trait]
+    impl SlackPersonalBindingOAuthClient for FailingOAuthClient {
+        fn authorization_url(
+            &self,
+            _callback_url: &str,
+            _state: &str,
+        ) -> Result<SlackPersonalBindingAuthorizationUrl, SlackPersonalBindingOAuthError> {
+            SlackPersonalBindingAuthorizationUrl::new("https://slack.example/oauth")
+        }
+
+        async fn exchange_code(
+            &self,
+            _code: &str,
+            _callback_url: &str,
+        ) -> Result<SlackPersonalBindingOAuthIdentity, SlackPersonalBindingOAuthError> {
+            Err(SlackPersonalBindingOAuthError::Backend("down".into()))
+        }
+    }
+
     #[derive(Default)]
     struct RecordingBindingStore {
         bindings: Mutex<Vec<RebornUserIdentityBinding>>,
@@ -863,6 +1043,115 @@ mod tests {
         ) -> Result<(), RebornUserIdentityBindingError> {
             self.bindings.lock().expect("lock").push(binding);
             Ok(())
+        }
+    }
+
+    struct FailingBindingStore;
+
+    #[async_trait::async_trait]
+    impl RebornUserIdentityBindingStore for FailingBindingStore {
+        async fn bind_user_identity(
+            &self,
+            _binding: RebornUserIdentityBinding,
+        ) -> Result<(), RebornUserIdentityBindingError> {
+            Err(RebornUserIdentityBindingError::Backend("down".into()))
+        }
+    }
+
+    #[derive(Clone)]
+    struct PendingOptions {
+        created_at: Instant,
+        redirect_after: Option<String>,
+    }
+
+    impl Default for PendingOptions {
+        fn default() -> Self {
+            Self {
+                created_at: Instant::now(),
+                redirect_after: None,
+            }
+        }
+    }
+
+    async fn callback_with_state(
+        state: SlackPersonalBindingRouteState,
+        options: PendingOptions,
+        extra_query: &str,
+    ) -> Response {
+        let pending_state = state
+            .pending
+            .insert(PendingSlackPersonalBinding {
+                principal: SlackPersonalBindingPrincipal {
+                    tenant_id: tenant("tenant-alpha"),
+                    user_id: user("user:alice"),
+                },
+                installation_id: installation("install-alpha"),
+                redirect_after: options.redirect_after,
+                created_at: options.created_at,
+            })
+            .expect("pending state");
+        let separator = if extra_query.is_empty() { "" } else { "&" };
+        let app = Router::new().merge(slack_personal_binding_route_mount(state).public);
+        app.oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!(
+                    "{SLACK_PERSONAL_BINDING_OAUTH_CALLBACK_PATH}?state={}{}{}",
+                    pending_state.as_str(),
+                    separator,
+                    extra_query
+                ))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("callback response")
+    }
+
+    fn route_state(
+        store: Arc<dyn RebornUserIdentityBindingStore>,
+        oauth: Arc<dyn SlackPersonalBindingOAuthClient>,
+    ) -> SlackPersonalBindingRouteState {
+        let service = SlackPersonalUserBindingService::new(
+            [SlackPersonalBindingInstallation {
+                tenant_id: tenant("tenant-alpha"),
+                installation_id: installation("install-alpha"),
+                selector: crate::slack_serve::SlackInstallationSelector::app_team(
+                    "A-app", "T-team",
+                ),
+            }],
+            store,
+        );
+        SlackPersonalBindingRouteState::new(
+            SlackPersonalBindingRouteConfig::new(service, oauth, "https://app.example")
+                .expect("valid config"),
+        )
+    }
+
+    fn assert_redirect_location(response: Response, expected: &str) {
+        assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::LOCATION)
+                .and_then(|value| value.to_str().ok()),
+            Some(expected)
+        );
+    }
+
+    fn pending_for(
+        tenant_id: &str,
+        user_id: &str,
+        age_seconds: u64,
+    ) -> PendingSlackPersonalBinding {
+        PendingSlackPersonalBinding {
+            principal: SlackPersonalBindingPrincipal {
+                tenant_id: tenant(tenant_id),
+                user_id: user(user_id),
+            },
+            installation_id: installation("install-alpha"),
+            redirect_after: None,
+            created_at: Instant::now() - Duration::from_secs(age_seconds),
         }
     }
 

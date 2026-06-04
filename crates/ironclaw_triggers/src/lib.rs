@@ -26,7 +26,10 @@ use ulid::Ulid;
 mod libsql;
 #[cfg(feature = "postgres")]
 mod postgres;
+mod trusted_submit;
 mod worker;
+
+pub use trusted_submit::{TriggerMaterializedPrompt, TriggerTrustedInboundBinding};
 
 const MIN_FIRE_CADENCE: Duration = Duration::from_secs(60);
 const MAX_DUE_TRIGGER_POLL_LIMIT: usize = 128;
@@ -453,7 +456,7 @@ pub trait TriggerPromptMaterializer: Send + Sync {
     async fn materialize_prompt(
         &self,
         fire: TriggerFire,
-    ) -> Result<TriggerInboundContentRef, TriggerError>;
+    ) -> Result<TriggerMaterializedPrompt, TriggerError>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -738,7 +741,7 @@ pub use worker::{
     TriggerPollerFailureReason, TriggerPollerFireOutcome, TriggerPollerFireReport,
     TriggerPollerTickReport, TriggerPollerWorker, TriggerPollerWorkerConfig,
     TriggerPollerWorkerDeps, TrustedTriggerFireSubmitOutcome, TrustedTriggerFireSubmitter,
-    TrustedTriggerSubmitFailureReason, TrustedTriggerSubmitRequest,
+    TrustedTriggerSubmitRequest,
 };
 
 #[derive(Clone, Default)]
@@ -1582,7 +1585,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn prompt_materializer_port_receives_fire_and_returns_content_ref() {
+    async fn prompt_materializer_port_receives_fire_and_returns_materialized_prompt() {
         struct RecordingMaterializer;
 
         #[async_trait]
@@ -1590,15 +1593,16 @@ mod tests {
             async fn materialize_prompt(
                 &self,
                 fire: TriggerFire,
-            ) -> Result<TriggerInboundContentRef, TriggerError> {
+            ) -> Result<TriggerMaterializedPrompt, TriggerError> {
                 assert_eq!(fire.creator_user_id, user("user-a"));
                 assert_eq!(fire.agent_id, Some(AgentId::new("agent-a").unwrap()));
                 assert_eq!(fire.project_id, Some(ProjectId::new("project-a").unwrap()));
                 assert_eq!(fire.prompt, "summarize unread mail");
-                TriggerInboundContentRef::new(format!(
+                let content_ref = TriggerInboundContentRef::new(format!(
                     "content:{}",
                     fire.identity.external_event_id
-                ))
+                ))?;
+                Ok(TriggerMaterializedPrompt::for_fire(&fire, content_ref))
             }
         }
 
@@ -1616,8 +1620,12 @@ mod tests {
             .expect("materialized");
 
         assert_eq!(
-            materialized.as_str(),
+            materialized.content_ref().as_str(),
             format!("content:{}", fire.identity.external_event_id)
+        );
+        assert_eq!(
+            materialized.trusted_inbound_binding().external_event_id(),
+            fire.identity.external_event_id().as_str()
         );
     }
 

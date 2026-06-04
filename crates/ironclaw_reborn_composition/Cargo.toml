@@ -41,6 +41,7 @@ webui-v2-beta = [
     "ironclaw_webui_v2/webui-v2-beta",
     "dep:ironclaw_webui_v2_static",
     "ironclaw_webui_v2_static/webui-v2-beta",
+    "ironclaw_reborn/webui-user-store",
     "libsql",
     "dep:axum",
     "dep:tower",
@@ -115,7 +116,6 @@ ironclaw_secrets = { path = "../ironclaw_secrets" }
 ironclaw_skills = { path = "../ironclaw_skills" }
 ironclaw_slack_v2_adapter = { path = "../ironclaw_slack_v2_adapter", optional = true }
 ironclaw_threads = { path = "../ironclaw_threads" }
-ironclaw_trusted_ingress = { path = "../ironclaw_trusted_ingress", features = ["composition-root"] }
 ironclaw_triggers = { path = "../ironclaw_triggers" }
 ironclaw_trust = { path = "../ironclaw_trust" }
 ironclaw_turns = { path = "../ironclaw_turns" }
