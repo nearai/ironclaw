@@ -30,6 +30,25 @@ fn state_serializes_round_trips() {
 }
 
 #[test]
+fn state_serializes_round_trips_with_last_deferred_compaction_watermark() {
+    let context = test_run_context("compaction-watermark-round-trip");
+    let mut state = LoopExecutionState::initial_for_run(&context);
+    state.compaction_state.last_deferred_through_seq = Some(42);
+    state.compaction_state.last_deferred_prompt_fingerprint = Some(7_777);
+
+    let encoded = serde_json::to_vec(&state).expect("state should serialize");
+    let decoded: LoopExecutionState =
+        serde_json::from_slice(&encoded).expect("state should deserialize");
+
+    assert_eq!(decoded.compaction_state, state.compaction_state);
+    assert_eq!(decoded.compaction_state.last_deferred_through_seq, Some(42));
+    assert_eq!(
+        decoded.compaction_state.last_deferred_prompt_fingerprint,
+        Some(7_777)
+    );
+}
+
+#[test]
 fn from_checkpoint_payload_rejects_non_state_payload() {
     let payload = serde_json::to_vec(&json!({
         "schema_id": "wrong",

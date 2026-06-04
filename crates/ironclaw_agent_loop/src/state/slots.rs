@@ -15,6 +15,10 @@ pub struct ModelStrategyState {
 pub struct CompactionStrategyState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_compacted_through_seq: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_deferred_through_seq: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_deferred_prompt_fingerprint: Option<u64>,
     #[serde(default)]
     pub force_compact_on_next_iteration: bool,
 }
@@ -47,6 +51,34 @@ impl CompactionPromptSnapshot {
             keep
         });
         self.observed_prompt_tokens = self.observed_prompt_tokens.saturating_sub(removed_tokens);
+    }
+
+    pub fn fingerprint(&self) -> u64 {
+        let mut fingerprint = 0xcbf2_9ce4_8422_2325_u64;
+        fingerprint = mix_fingerprint(fingerprint, self.observed_prompt_tokens);
+        fingerprint = mix_fingerprint(fingerprint, self.message_index.len() as u64);
+        for entry in &self.message_index {
+            fingerprint = mix_fingerprint(fingerprint, entry.sequence);
+            fingerprint = mix_fingerprint(fingerprint, indexed_message_kind_code(entry.kind));
+            fingerprint = mix_fingerprint(fingerprint, entry.estimated_tokens);
+        }
+        fingerprint
+    }
+}
+
+fn mix_fingerprint(current: u64, value: u64) -> u64 {
+    current
+        .wrapping_mul(0x0000_0100_0000_01b3)
+        .wrapping_add(value)
+}
+
+fn indexed_message_kind_code(kind: IndexedMessageKind) -> u64 {
+    match kind {
+        IndexedMessageKind::User => 1,
+        IndexedMessageKind::Assistant => 2,
+        IndexedMessageKind::System => 3,
+        IndexedMessageKind::Summary => 4,
+        IndexedMessageKind::Other => 5,
     }
 }
 

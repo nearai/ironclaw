@@ -4,11 +4,11 @@ use ironclaw_turns::{
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, CapabilityCallCandidate, CapabilityFailureKind,
         CapabilityInputRef, CapabilityOutcome, CapabilityResultMessage, LoopCancelReasonKind,
-        LoopCheckpointKind, LoopCompactionError, LoopCompactionResponse, LoopContextCompactionKind,
-        LoopContextCompactionMetadata, LoopInput, LoopInputAckToken, LoopInputBatch,
-        LoopInputCursor, LoopInterruptKind, LoopProcessRef, LoopRunInfoPort, LoopSafeSummary,
-        LoopSummaryArtifactId, ParentLoopOutput, ProcessHandleSummary, ProviderToolCallReplay,
-        VisibleCapabilityRequest,
+        LoopCheckpointKind, LoopCompactionError, LoopCompactionOutcome, LoopCompactionResponse,
+        LoopContextCompactionKind, LoopContextCompactionMetadata, LoopInput, LoopInputAckToken,
+        LoopInputBatch, LoopInputCursor, LoopInterruptKind, LoopProcessRef, LoopRunInfoPort,
+        LoopSafeSummary, LoopSummaryArtifactId, ParentLoopOutput, ProcessHandleSummary,
+        ProviderToolCallReplay, VisibleCapabilityRequest,
     },
 };
 
@@ -298,6 +298,192 @@ async fn prompt_stage_compacts_candidate_prompt_then_rebuilds_final_bundle() {
             "compaction_completed",
             "checkpoint_written",
             "prompt_bundle_built",
+        ]
+    );
+}
+
+#[tokio::test]
+async fn prompt_stage_deferred_compaction_returns_to_normal_prompt_path() {
+    let host = MockHost::new(Vec::new())
+        .with_prompt_compaction_index(vec![compaction_metadata(
+            1,
+            LoopContextCompactionKind::User,
+            10,
+        )])
+        .with_compaction_outcome(Ok(LoopCompactionOutcome::Deferred {
+            safe_summary: LoopSafeSummary::new("compaction deferred until transcript stabilizes")
+                .unwrap(),
+        }));
+    let family = family_with_compaction_strategy(DefaultCompactionStrategy {
+        deadline_ms: 100,
+        ..Default::default()
+    });
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+    state.compaction_state.force_compact_on_next_iteration = true;
+
+    let step = PromptStage
+        .process(
+            ctx,
+            PromptInput {
+                state,
+                pending_input_ack: PendingInputAck::default(),
+            },
+        )
+        .await
+        .expect("prompt stage");
+
+    let output = match step {
+        PromptStep::Prepared(output) => output,
+        PromptStep::Exit(exit) => panic!("expected prepared prompt, got {exit:?}"),
+    };
+    assert_eq!(host.prompt_requests().len(), 1);
+    assert_eq!(
+        output.state.compaction_state.last_compacted_through_seq,
+        None
+    );
+    assert_eq!(
+        output.state.compaction_state.last_deferred_through_seq,
+        Some(1)
+    );
+    assert_eq!(
+        output
+            .state
+            .compaction_state
+            .last_deferred_prompt_fingerprint,
+        Some(output.state.compaction_prompt.fingerprint())
+    );
+    assert!(
+        !output
+            .state
+            .compaction_state
+            .force_compact_on_next_iteration
+    );
+    assert_eq!(
+        output.state.compaction_prompt.message_index,
+        vec![MessageIndexEntry {
+            sequence: 1,
+            kind: IndexedMessageKind::User,
+            estimated_tokens: 10,
+        }]
+    );
+    assert!(host.checkpoint_kinds().is_empty());
+    assert_eq!(
+        host.progress_event_names(),
+        vec!["prompt_bundle_built", "compaction_started"]
+    );
+}
+
+#[tokio::test]
+async fn prompt_stage_successful_compaction_clears_deferred_watermark() {
+    let host = MockHost::new(Vec::new())
+        .with_prompt_compaction_indexes(vec![
+            vec![
+                compaction_metadata(1, LoopContextCompactionKind::User, 10),
+                compaction_metadata(2, LoopContextCompactionKind::Assistant, 10),
+            ],
+            vec![compaction_metadata(
+                2,
+                LoopContextCompactionKind::Assistant,
+                10,
+            )],
+        ])
+        .with_compaction_result(Ok(LoopCompactionResponse {
+            summary_artifact_id: LoopSummaryArtifactId::new("summary-1").unwrap(),
+            compression_ratio_ppm: 250_000,
+        }));
+    let family = family_with_compaction_strategy(DefaultCompactionStrategy {
+        deadline_ms: 1,
+        ..Default::default()
+    });
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+    state.compaction_state.force_compact_on_next_iteration = true;
+    state.compaction_state.last_deferred_through_seq = Some(99);
+    state.compaction_state.last_deferred_prompt_fingerprint = Some(123);
+
+    let step = PromptStage
+        .process(
+            ctx,
+            PromptInput {
+                state,
+                pending_input_ack: PendingInputAck::default(),
+            },
+        )
+        .await
+        .expect("prompt stage");
+
+    let output = match step {
+        PromptStep::Prepared(output) => output,
+        PromptStep::Exit(exit) => panic!("expected prepared prompt, got {exit:?}"),
+    };
+    assert_eq!(
+        output.state.compaction_state.last_compacted_through_seq,
+        Some(1)
+    );
+    assert_eq!(
+        output.state.compaction_state.last_deferred_through_seq,
+        None
+    );
+    assert_eq!(
+        output
+            .state
+            .compaction_state
+            .last_deferred_prompt_fingerprint,
+        None
+    );
+}
+
+#[tokio::test]
+async fn prompt_stage_cancellation_after_deferred_compaction_returns_cancelled_exit() {
+    let host = MockHost::new(Vec::new())
+        .with_prompt_compaction_index(vec![compaction_metadata(
+            1,
+            LoopContextCompactionKind::User,
+            10,
+        )])
+        .with_compaction_outcome(Ok(LoopCompactionOutcome::Deferred {
+            safe_summary: LoopSafeSummary::new("compaction deferred until transcript stabilizes")
+                .unwrap(),
+        }))
+        .cancel_after_compaction_success();
+    let family = family_with_compaction_strategy(DefaultCompactionStrategy {
+        deadline_ms: 100,
+        ..Default::default()
+    });
+    let ctx = StageContext {
+        planner: family.planner(),
+        host: &host,
+    };
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+    state.compaction_state.force_compact_on_next_iteration = true;
+
+    let step = PromptStage
+        .process(
+            ctx,
+            PromptInput {
+                state,
+                pending_input_ack: PendingInputAck::default(),
+            },
+        )
+        .await
+        .expect("prompt stage");
+
+    assert!(matches!(step, PromptStep::Exit(LoopExit::Cancelled(_))));
+    assert_eq!(host.prompt_requests().len(), 1);
+    assert_eq!(host.checkpoint_kinds(), vec![LoopCheckpointKind::Final]);
+    assert_eq!(
+        host.progress_event_names(),
+        vec![
+            "prompt_bundle_built",
+            "compaction_started",
+            "checkpoint_written",
         ]
     );
 }

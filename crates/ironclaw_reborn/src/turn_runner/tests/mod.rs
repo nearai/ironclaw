@@ -520,7 +520,7 @@ impl ironclaw_turns::run_profile::LoopCompactionPort for StubHost {
         &self,
         _request: ironclaw_turns::run_profile::LoopCompactionRequest,
     ) -> Result<
-        ironclaw_turns::run_profile::LoopCompactionResponse,
+        ironclaw_turns::run_profile::LoopCompactionOutcome,
         ironclaw_turns::run_profile::LoopCompactionError,
     > {
         unimplemented!("stub host: never called by mock driver")

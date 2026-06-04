@@ -4,9 +4,10 @@ use ironclaw_turns::{
     LoopExit,
     run_profile::{
         CapabilitySurfaceVersion, CompactionInitiator, LoopCompactionError, LoopCompactionMode,
-        LoopCompactionRequest, LoopContextCompactionKind, LoopContextCompactionMetadata,
-        LoopModelCapabilityView, LoopModelMessage, LoopProgressEvent, LoopSafeSummary,
-        SystemInferenceTaskId, VisibleCapabilityRequest, VisibleCapabilitySurface,
+        LoopCompactionOutcome, LoopCompactionRequest, LoopContextCompactionKind,
+        LoopContextCompactionMetadata, LoopModelCapabilityView, LoopModelMessage,
+        LoopProgressEvent, LoopSafeSummary, SystemInferenceTaskId, VisibleCapabilityRequest,
+        VisibleCapabilitySurface,
     },
 };
 use std::time::Duration;
@@ -198,6 +199,10 @@ impl<'a> PromptPlanningPipeline<'a> {
                 self.state = state;
                 candidate_bundle.into_final_without_rebuild()
             }
+            PromptCompactionOutcome::Deferred(state) => {
+                self.state = state;
+                candidate_bundle.into_final_without_rebuild()
+            }
             PromptCompactionOutcome::Compacted(state) => {
                 self.state = state;
                 let bundle = FinalPromptBundle::rebuild_after_successful_compaction(
@@ -278,6 +283,7 @@ impl<'a> PromptPlanningPipeline<'a> {
 
 enum PromptCompactionOutcome {
     Skipped(LoopExecutionState),
+    Deferred(LoopExecutionState),
     Compacted(LoopExecutionState),
     Exited(LoopExit),
 }
@@ -350,7 +356,35 @@ impl<'a, 'b> PromptCompactionStep<'a, 'b> {
         )
         .await;
         let response = match compaction_result {
-            CompactionCallOutcome::Completed(Ok(response)) => response,
+            CompactionCallOutcome::Completed(Ok(LoopCompactionOutcome::Compacted(response))) => {
+                response
+            }
+            CompactionCallOutcome::Completed(Ok(LoopCompactionOutcome::Deferred {
+                safe_summary,
+            })) => {
+                tracing::debug!(
+                    %safe_summary,
+                    "agent loop compaction deferred; continuing with the existing prompt"
+                );
+                state.compaction_state.force_compact_on_next_iteration = false;
+                state.compaction_state.last_deferred_through_seq = Some(drop_through_seq);
+                state.compaction_state.last_deferred_prompt_fingerprint =
+                    Some(state.compaction_prompt.fingerprint());
+                state = match CheckpointStage
+                    .cancel_if_requested_after_pending_input_ack(
+                        self.ctx,
+                        state,
+                        self.pending_input_ack,
+                    )
+                    .await?
+                {
+                    CancelCheck::Continue(state) => *state,
+                    CancelCheck::Exit(exit) => {
+                        return Ok(PromptCompactionOutcome::Exited(exit));
+                    }
+                };
+                return Ok(PromptCompactionOutcome::Deferred(state));
+            }
             CompactionCallOutcome::Completed(Err(LoopCompactionError::Cancelled))
             | CompactionCallOutcome::Cancelled => {
                 return compaction_cancelled_exit(self.ctx, state, self.pending_input_ack).await;
@@ -391,6 +425,8 @@ impl<'a, 'b> PromptCompactionStep<'a, 'b> {
         };
 
         state.compaction_state.last_compacted_through_seq = Some(drop_through_seq);
+        state.compaction_state.last_deferred_through_seq = None;
+        state.compaction_state.last_deferred_prompt_fingerprint = None;
         state.compaction_state.force_compact_on_next_iteration = false;
         state
             .compaction_prompt
@@ -413,7 +449,7 @@ impl<'a, 'b> PromptCompactionStep<'a, 'b> {
 }
 
 enum CompactionCallOutcome {
-    Completed(Result<ironclaw_turns::run_profile::LoopCompactionResponse, LoopCompactionError>),
+    Completed(Result<LoopCompactionOutcome, ironclaw_turns::run_profile::LoopCompactionError>),
     TimedOut,
     Cancelled,
 }
@@ -424,12 +460,7 @@ async fn await_compaction_with_cancellation<F>(
     call: F,
 ) -> CompactionCallOutcome
 where
-    F: std::future::Future<
-            Output = Result<
-                ironclaw_turns::run_profile::LoopCompactionResponse,
-                LoopCompactionError,
-            >,
-        >,
+    F: std::future::Future<Output = Result<LoopCompactionOutcome, LoopCompactionError>>,
 {
     let call = call;
     tokio::pin!(call);

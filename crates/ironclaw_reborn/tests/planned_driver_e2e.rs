@@ -25,8 +25,8 @@ use ironclaw_turns::{
         CapabilityBatchOutcome, CapabilityInvocation, CapabilityOutcome, FinalizeAssistantMessage,
         LoadCheckpointPayloadRequest, LoadedCheckpointPayload, LoopCancelReasonKind,
         LoopCancellationPort, LoopCancellationSignal, LoopCapabilityPort, LoopCheckpointPort,
-        LoopCheckpointRequest, LoopCheckpointStateRef, LoopCompactionError, LoopCompactionPort,
-        LoopCompactionRequest, LoopCompactionResponse, LoopContextBundle, LoopContextPort,
+        LoopCheckpointRequest, LoopCheckpointStateRef, LoopCompactionError, LoopCompactionOutcome,
+        LoopCompactionPort, LoopCompactionRequest, LoopContextBundle, LoopContextPort,
         LoopContextRequest, LoopInput, LoopInputAckToken, LoopInputBatch, LoopInputCursor,
         LoopInputPort, LoopModelPort, LoopModelRequest, LoopModelResponse, LoopProgressEvent,
         LoopProgressPort, LoopPromptBundle, LoopPromptBundleRequest, LoopPromptPort,
@@ -558,7 +558,7 @@ impl LoopCompactionPort for ForbiddenResumeHost {
     async fn compact_loop_context(
         &self,
         _request: LoopCompactionRequest,
-    ) -> Result<LoopCompactionResponse, LoopCompactionError> {
+    ) -> Result<LoopCompactionOutcome, LoopCompactionError> {
         let error = self.forbidden_call("compact_loop_context");
         Err(LoopCompactionError::PersistenceFailed {
             safe_summary: LoopSafeSummary::new(error.safe_summary)

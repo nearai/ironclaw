@@ -29,8 +29,8 @@ mod system_inference;
 pub use crate::CapabilityActivityId;
 
 pub use compaction::{
-    CompactionInitiator, LoopCompactionError, LoopCompactionMode, LoopCompactionPort,
-    LoopCompactionRequest, LoopCompactionResponse, LoopSummaryArtifactId,
+    CompactionInitiator, LoopCompactionError, LoopCompactionMode, LoopCompactionOutcome,
+    LoopCompactionPort, LoopCompactionRequest, LoopCompactionResponse, LoopSummaryArtifactId,
 };
 pub use driver::{
     AgentLoopDriver, AgentLoopDriverDescriptor, AgentLoopDriverError, AgentLoopDriverResumeRequest,

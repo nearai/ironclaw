@@ -105,8 +105,8 @@ use ironclaw_turns::{
         InMemoryLoopHostMilestoneSink, InstructionSafetyContext, LoopCancelReasonKind,
         LoopCancellationPort, LoopCapabilityPort, LoopCheckpointKind, LoopCheckpointPort,
         LoopCheckpointRequest, LoopCheckpointStateRef, LoopCompactionError, LoopCompactionMode,
-        LoopCompactionPort, LoopCompactionRequest, LoopContextRequest, LoopDriverId,
-        LoopDriverNoteKind, LoopGateKind, LoopHostMilestone, LoopHostMilestoneKind,
+        LoopCompactionOutcome, LoopCompactionPort, LoopCompactionRequest, LoopContextRequest,
+        LoopDriverId, LoopDriverNoteKind, LoopGateKind, LoopHostMilestone, LoopHostMilestoneKind,
         LoopInlineMessage, LoopInlineMessageRole, LoopInput, LoopInputAckToken, LoopInputCursor,
         LoopInputCursorToken, LoopInputPort, LoopModelBudgetAccountant, LoopModelGatewayError,
         LoopModelPort, LoopModelRequest, LoopModelRouteSnapshot, LoopProgressEvent,
@@ -484,6 +484,9 @@ async fn compact_loop_context_dispatches_system_inference_and_persists_summary()
         .summary_artifacts
         .first()
         .expect("host compaction should persist a summary artifact");
+    let LoopCompactionOutcome::Compacted(response) = response else {
+        panic!("host compaction should produce a persisted summary artifact");
+    };
     assert_eq!(
         response.summary_artifact_id.as_str(),
         summary.summary_id.to_string()

@@ -23,8 +23,9 @@ use ironclaw_turns::{
         CapabilitySurfaceVersion, CheckpointPolicy, CheckpointSchemaId, ConcurrencyClass,
         ConcurrencyHint, ContextProfileId, FinalizeAssistantMessage, LoopCancellationPort,
         LoopCancellationSignal, LoopCheckpointKind, LoopCheckpointRequest, LoopCheckpointStateRef,
-        LoopCompactionError, LoopCompactionRequest, LoopCompactionResponse, LoopContextBundle,
-        LoopContextCompactionMetadata, LoopContextRequest, LoopDriverId, LoopInput, LoopInputAck,
+        LoopCompactionError, LoopCompactionOutcome, LoopCompactionRequest, LoopCompactionResponse,
+        LoopContextBundle, LoopContextCompactionMetadata, LoopContextRequest, LoopDriverId,
+        LoopInput, LoopInputAck,
         LoopInputAckToken, LoopInputBatch, LoopInputCursor, LoopInputCursorToken, LoopModelMessage,
         LoopModelRequest, LoopModelResponse, LoopProgressEvent, LoopPromptBundle,
         LoopPromptBundleRef, LoopPromptBundleRequest, LoopRunContext, LoopRunInfoPort,
@@ -56,7 +57,7 @@ pub struct MockAgentLoopDriverHost {
     staged_iterations: Mutex<VecDeque<u32>>,
     fail_prompt_with: Mutex<Option<AgentLoopHostErrorKind>>,
     fail_model_with: Mutex<Option<AgentLoopHostErrorKind>>,
-    compaction_result: Mutex<Result<LoopCompactionResponse, LoopCompactionError>>,
+    compaction_result: Mutex<Result<LoopCompactionOutcome, LoopCompactionError>>,
     progress_events: Mutex<Vec<LoopProgressEvent>>,
     acked_tokens: Mutex<Vec<LoopInputAckToken>>,
     finalized_assistant_messages: Mutex<Vec<String>>,
@@ -117,7 +118,7 @@ pub struct MockAgentLoopDriverHostBuilder {
     prompt_compaction_indexes: VecDeque<Vec<LoopContextCompactionMetadata>>,
     fail_prompt_with: Option<AgentLoopHostErrorKind>,
     fail_model_with: Option<AgentLoopHostErrorKind>,
-    compaction_result: Result<LoopCompactionResponse, LoopCompactionError>,
+    compaction_result: Result<LoopCompactionOutcome, LoopCompactionError>,
     cancellation: Option<LoopCancellationSignal>,
 }
 
@@ -189,7 +190,16 @@ impl MockAgentLoopDriverHostBuilder {
         mut self,
         result: Result<LoopCompactionResponse, LoopCompactionError>,
     ) -> Self {
-        self.compaction_result = result;
+        self.compaction_result = result.map(LoopCompactionOutcome::Compacted);
+        self
+    }
+
+    /// Sets the full outcome returned by the host compaction port.
+    pub fn compaction_outcome(
+        mut self,
+        outcome: Result<LoopCompactionOutcome, LoopCompactionError>,
+    ) -> Self {
+        self.compaction_result = outcome;
         self
     }
 
@@ -846,7 +856,7 @@ impl ironclaw_turns::run_profile::LoopCompactionPort for MockAgentLoopDriverHost
     async fn compact_loop_context(
         &self,
         _request: LoopCompactionRequest,
-    ) -> Result<LoopCompactionResponse, LoopCompactionError> {
+    ) -> Result<LoopCompactionOutcome, LoopCompactionError> {
         lock_or_panic(&self.compaction_result).clone()
     }
 }
