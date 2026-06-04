@@ -302,8 +302,10 @@ fn project_latent_action(action: LatentProviderAction) -> ActionDef {
 }
 
 pub(crate) fn default_model_tool_surface(action_name: &str) -> ModelToolSurface {
-    if matches!(action_name, "echo" | "http" | "json" | "time")
-        || action_name.starts_with("memory_")
+    if matches!(
+        action_name,
+        "echo" | "http" | "image_edit" | "image_generate" | "json" | "time"
+    ) || action_name.starts_with("memory_")
         || action_name.starts_with("skill_")
         || action_name.starts_with("tool_")
     {
@@ -726,6 +728,14 @@ mod tests {
         );
         assert_eq!(
             default_model_tool_surface("http"),
+            ModelToolSurface::FullSchema
+        );
+        assert_eq!(
+            default_model_tool_surface("image_generate"),
+            ModelToolSurface::FullSchema
+        );
+        assert_eq!(
+            default_model_tool_surface("image_edit"),
             ModelToolSurface::FullSchema
         );
         assert_eq!(

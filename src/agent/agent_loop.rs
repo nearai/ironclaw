@@ -80,6 +80,9 @@ impl From<crate::bridge::BridgeOutcome> for HandleOutcome {
             crate::bridge::BridgeOutcome::Respond(s) => {
                 HandleOutcome::Respond(OutgoingResponse::text(s))
             }
+            crate::bridge::BridgeOutcome::RespondWithAttachments { text, attachments } => {
+                HandleOutcome::Respond(OutgoingResponse::text(text).with_attachments(attachments))
+            }
             crate::bridge::BridgeOutcome::NoResponse => HandleOutcome::NoResponse,
             crate::bridge::BridgeOutcome::Pending => HandleOutcome::Pending,
         }
@@ -2277,6 +2280,13 @@ impl Agent {
                             attachments: Vec::new(),
                         })
                     }
+                    Ok(crate::bridge::BridgeOutcome::RespondWithAttachments {
+                        text,
+                        attachments,
+                    }) => Ok(SubmissionResult::Response {
+                        content: text,
+                        attachments,
+                    }),
                     Ok(crate::bridge::BridgeOutcome::NoResponse)
                     | Ok(crate::bridge::BridgeOutcome::Pending) => {
                         Ok(SubmissionResult::Ok { message: None })

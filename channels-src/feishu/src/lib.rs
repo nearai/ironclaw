@@ -60,6 +60,7 @@ const CONNECTION_MODE_PATH: &str = "connection_mode";
 const WEBSOCKET_EVENT_QUEUE_PATH: &str = "state/gateway_event_queue_processing";
 const WEBHOOK_EVENT_QUEUE_PATH: &str = "state/webhook_event_queue";
 const WEBHOOK_POLL_INTERVAL_MS: u32 = 30_000;
+const INBOUND_IMAGE_DOWNLOAD_TIMEOUT_MS: u32 = 10_000;
 const MAX_INBOUND_IMAGE_BYTES: usize = 20 * 1024 * 1024;
 const MAX_OUTBOUND_IMAGE_BYTES: usize = 10 * 1024 * 1024;
 
@@ -1005,9 +1006,14 @@ fn hydrate_feishu_image_attachment(
         "Content-Type": "application/json; charset=utf-8",
     });
 
-    let response =
-        channel_host::http_request("GET", source_url, &headers.to_string(), None, Some(30_000))
-            .map_err(|e| format!("Failed to download Feishu image: {e}"))?;
+    let response = channel_host::http_request(
+        "GET",
+        source_url,
+        &headers.to_string(),
+        None,
+        Some(INBOUND_IMAGE_DOWNLOAD_TIMEOUT_MS),
+    )
+    .map_err(|e| format!("Failed to download Feishu image: {e}"))?;
     if response.status != 200 {
         return Err(format!(
             "Feishu image download returned {}: {}",
