@@ -34,6 +34,10 @@ export function useLlmProviders({ settings: _settings, gatewayStatus }) {
     name: provider.description,
     has_api_key: provider.api_key_set === true,
   }));
+  // Whether the backend has a persisted active selection (config.toml). Unlike
+  // `activeProviderId` (which defaults to "nearai" for display), this is the
+  // honest "is anything configured?" signal the first-run gate keys off.
+  const hasActiveProvider = Boolean(snapshot.active?.provider_id);
   const activeProviderId =
     snapshot.active?.provider_id || gatewayStatus?.llm_backend || "nearai";
   const selectedModel = snapshot.active?.model || gatewayStatus?.llm_model || "";
@@ -107,6 +111,7 @@ export function useLlmProviders({ settings: _settings, gatewayStatus }) {
     builtinOverrides,
     activeProviderId,
     selectedModel,
+    hasActiveProvider,
     isLoading: providersQuery.isLoading,
     error: providersQuery.error,
     setActiveProvider: (provider) => setActiveMutation.mutateAsync(provider),
