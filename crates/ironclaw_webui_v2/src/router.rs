@@ -26,6 +26,25 @@ use crate::descriptors::{
 use crate::handlers;
 use crate::sse_capacity::{DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER, SseCapacity};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WebUiV2RouteOptions {
+    pub mount_llm_config_routes: bool,
+}
+
+impl WebUiV2RouteOptions {
+    pub const fn all() -> Self {
+        Self {
+            mount_llm_config_routes: true,
+        }
+    }
+
+    pub const fn without_llm_config_routes() -> Self {
+        Self {
+            mount_llm_config_routes: false,
+        }
+    }
+}
+
 /// Shared state injected into every WebChat v2 handler.
 ///
 /// Handlers receive a single facade so they can never reach into the
@@ -73,7 +92,11 @@ impl WebUiV2State {
 /// expected to apply its own auth / CORS / body-limit middleware in front
 /// of this router.
 pub fn webui_v2_router(state: WebUiV2State) -> Router {
-    Router::new()
+    webui_v2_router_with_options(state, WebUiV2RouteOptions::all())
+}
+
+pub fn webui_v2_router_with_options(state: WebUiV2State, options: WebUiV2RouteOptions) -> Router {
+    let mut router = Router::new()
         // GET and POST share the `/api/webchat/v2/threads` path
         // (`WEBUI_V2_PATTERN_CREATE_THREAD == WEBUI_V2_PATTERN_LIST_THREADS`);
         // mount both verbs in one `.route()` so axum's matcher
@@ -118,28 +141,31 @@ pub fn webui_v2_router(state: WebUiV2State) -> Router {
         .route(
             WEBUI_V2_PATTERN_SETUP_EXTENSION,
             get(handlers::get_extension_setup).post(handlers::setup_extension),
-        )
-        // `WEBUI_V2_PATTERN_GET_LLM_CONFIG == WEBUI_V2_PATTERN_UPSERT_LLM_PROVIDER`
-        // (`/llm/providers`); mount GET + POST in one `.route()`.
-        .route(
-            WEBUI_V2_PATTERN_GET_LLM_CONFIG,
-            get(handlers::get_llm_config).post(handlers::upsert_llm_provider),
-        )
-        .route(
-            WEBUI_V2_PATTERN_DELETE_LLM_PROVIDER,
-            post(handlers::delete_llm_provider),
-        )
-        .route(
-            WEBUI_V2_PATTERN_SET_ACTIVE_LLM,
-            post(handlers::set_active_llm),
-        )
-        .route(
-            WEBUI_V2_PATTERN_TEST_LLM_CONNECTION,
-            post(handlers::test_llm_connection),
-        )
-        .route(
-            WEBUI_V2_PATTERN_LIST_LLM_MODELS,
-            post(handlers::list_llm_models),
-        )
-        .with_state(state)
+        );
+    if options.mount_llm_config_routes {
+        router = router
+            // `WEBUI_V2_PATTERN_GET_LLM_CONFIG == WEBUI_V2_PATTERN_UPSERT_LLM_PROVIDER`
+            // (`/llm/providers`); mount GET + POST in one `.route()`.
+            .route(
+                WEBUI_V2_PATTERN_GET_LLM_CONFIG,
+                get(handlers::get_llm_config).post(handlers::upsert_llm_provider),
+            )
+            .route(
+                WEBUI_V2_PATTERN_DELETE_LLM_PROVIDER,
+                post(handlers::delete_llm_provider),
+            )
+            .route(
+                WEBUI_V2_PATTERN_SET_ACTIVE_LLM,
+                post(handlers::set_active_llm),
+            )
+            .route(
+                WEBUI_V2_PATTERN_TEST_LLM_CONNECTION,
+                post(handlers::test_llm_connection),
+            )
+            .route(
+                WEBUI_V2_PATTERN_LIST_LLM_MODELS,
+                post(handlers::list_llm_models),
+            );
+    }
+    router.with_state(state)
 }

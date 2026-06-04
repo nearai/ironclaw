@@ -105,25 +105,22 @@ impl RebornLlmConfigService {
     }
 
     async fn build_snapshot(&self) -> Result<LlmConfigSnapshot, LlmConfigServiceError> {
-        let list = self.admin().list(None, true).map_err(map_admin_error)?;
-        let overlay_ids = self
-            .repo
-            .load()
-            .map_err(|_| LlmConfigServiceError::Unavailable)?
-            .into_iter()
-            .map(|definition| definition.id.to_lowercase())
-            .collect::<Vec<_>>();
+        let list = self.admin_list_async().await.map_err(map_admin_error)?;
+        let builtin_registry = ironclaw_llm::ProviderRegistry::try_load_from_path(None)
+            .map_err(|_| LlmConfigServiceError::Unavailable)?;
 
         let mut providers = Vec::with_capacity(list.providers.len());
         let mut active = None;
         for info in list.providers {
-            let api_key_set = self
+            let stored_key_set = self
                 .keys
                 .exists(&info.id)
                 .await
                 .map_err(|_| LlmConfigServiceError::Unavailable)?;
-            let builtin = !overlay_ids.contains(&info.id.to_lowercase());
+            let builtin = builtin_registry.find(&info.id).is_some();
             let metadata = info.metadata;
+            let env_key_set = metadata.as_ref().is_some_and(metadata_env_key_set);
+            let api_key_set = stored_key_set || env_key_set;
             if info.active && active.is_none() {
                 active = Some(LlmActiveSelection {
                     provider_id: info.id.clone(),
@@ -181,6 +178,7 @@ impl RebornLlmConfigService {
 
         let definition = custom_definition(&request.provider_id, protocol, base_url.clone(), model);
         let registry = ProviderRegistry::new(vec![definition]);
+        let stored_key_allowed = self.probe_matches_persisted_provider(request).await?;
         let selection = LlmSlotSelection {
             provider_id: Some(request.provider_id.clone()),
             model: request
@@ -197,22 +195,110 @@ impl RebornLlmConfigService {
             }
         })?;
 
-        // Prefer the request's inline key; fall back to a stored one.
+        // Prefer the request's inline key. Stored operator credentials are only
+        // safe when the probe targets the persisted provider endpoint; otherwise
+        // a caller-controlled base_url could exfiltrate that key.
         if let Some(key) = request.api_key.as_ref() {
             apply_stored_api_key(&mut config, key.clone());
-        } else if let Some(stored) = self
-            .keys
-            .read(&request.provider_id)
-            .await
-            .map_err(|_| LlmConfigServiceError::Unavailable)?
-        {
-            apply_stored_api_key(&mut config, stored);
+        } else if stored_key_allowed {
+            if let Some(stored) = self
+                .keys
+                .read(&request.provider_id)
+                .await
+                .map_err(|_| LlmConfigServiceError::Unavailable)?
+            {
+                apply_stored_api_key(&mut config, stored);
+            }
+        } else {
+            return Err(LlmConfigServiceError::InvalidRequest {
+                field: Some("api_key".to_string()),
+                reason: "inline api_key is required when probing an overridden provider endpoint"
+                    .to_string(),
+            });
         }
 
         let session = ironclaw_llm::create_session_manager(config.session.clone()).await;
         ironclaw_llm::build_static_provider_chain(&config, session)
             .await
             .map_err(|_| LlmConfigServiceError::Unavailable)
+    }
+
+    async fn probe_matches_persisted_provider(
+        &self,
+        request: &LlmProbeRequest,
+    ) -> Result<bool, LlmConfigServiceError> {
+        let providers_path = self.boot.home().providers_file_path();
+        let provider_id = request.provider_id.clone();
+        let registry = tokio::task::spawn_blocking(move || {
+            ironclaw_llm::ProviderRegistry::try_load_from_path(Some(providers_path.as_path()))
+        })
+        .await
+        .map_err(|_| LlmConfigServiceError::Unavailable)?
+        .map_err(|_| LlmConfigServiceError::Unavailable)?;
+        let Some(definition) = registry.find(&provider_id) else {
+            return Ok(false);
+        };
+        let Some(protocol) = parse_adapter(&request.adapter) else {
+            return Ok(false);
+        };
+        Ok(protocol == definition.protocol
+            && normalized_endpoint(request.base_url.as_deref())
+                == normalized_endpoint(definition.default_base_url.as_deref()))
+    }
+
+    async fn admin_list_async(
+        &self,
+    ) -> Result<crate::RebornProviderList, crate::RebornProviderAdminError> {
+        let admin = self.admin();
+        tokio::task::spawn_blocking(move || admin.list(None, true))
+            .await
+            .map_err(|error| crate::RebornProviderAdminError::InvalidRequest {
+                reason: format!("provider-admin task failed: {error}"),
+            })?
+    }
+
+    async fn set_provider_async(
+        &self,
+        id: String,
+        model: Option<String>,
+    ) -> Result<(), crate::RebornProviderAdminError> {
+        let admin = self.admin();
+        tokio::task::spawn_blocking(move || admin.set_provider(&id, model.as_deref()).map(|_| ()))
+            .await
+            .map_err(|error| crate::RebornProviderAdminError::InvalidRequest {
+                reason: format!("provider-admin task failed: {error}"),
+            })?
+    }
+
+    async fn rollback_upsert(
+        &self,
+        id: &str,
+        previous_overlay: Vec<ProviderDefinition>,
+        previous_key: Option<SecretString>,
+        key_was_updated: bool,
+    ) {
+        if let Err(error) = self.repo.replace_all_async(previous_overlay).await {
+            tracing::warn!(
+                provider_id = %id,
+                error = %error,
+                "failed to roll back LLM provider overlay after active-selection failure",
+            );
+        }
+        if !key_was_updated {
+            return;
+        }
+        let key_result = if let Some(previous_key) = previous_key {
+            self.keys.put(id, previous_key).await.map(|_| ())
+        } else {
+            self.keys.delete(id).await.map(|_| ())
+        };
+        if let Err(error) = key_result {
+            tracing::warn!(
+                provider_id = %id,
+                error = %error,
+                "failed to roll back LLM provider key after active-selection failure",
+            );
+        }
     }
 }
 
@@ -244,12 +330,27 @@ impl LlmConfigService for RebornLlmConfigService {
             .api_key
             .as_ref()
             .is_some_and(|key| !is_masked_sentinel(key));
-        let key_present = has_new_key
-            || self
-                .keys
+        let previous_key = if has_new_key {
+            self.keys
+                .read(&id)
+                .await
+                .map_err(|_| LlmConfigServiceError::Unavailable)?
+        } else {
+            None
+        };
+        let stored_key_present = if has_new_key {
+            previous_key.is_some()
+        } else {
+            self.keys
                 .exists(&id)
                 .await
-                .map_err(|_| LlmConfigServiceError::Unavailable)?;
+                .map_err(|_| LlmConfigServiceError::Unavailable)?
+        };
+        let previous_overlay = self
+            .repo
+            .load_async()
+            .await
+            .map_err(|_| LlmConfigServiceError::Unavailable)?;
 
         // Editing a built-in must PRESERVE its compiled-in definition (protocol,
         // setup hints, env-var names) and overlay only what the operator
@@ -257,19 +358,18 @@ impl LlmConfigService for RebornLlmConfigService {
         // from providers like openai_codex, gemini_oauth, nearai, and bedrock.
         let builtin_registry = ironclaw_llm::ProviderRegistry::try_load_from_path(None)
             .map_err(|_| LlmConfigServiceError::Unavailable)?;
+        let builtin = builtin_registry.find(&id);
+        let key_present =
+            has_new_key || stored_key_present || builtin.is_some_and(definition_env_key_set);
         let definition = build_overlay_definition(
             &id,
-            builtin_registry.find(&id),
+            builtin,
             &request.adapter,
             base_url,
             model,
             key_present,
             request.name.as_deref(),
         )?;
-
-        self.repo
-            .upsert(definition)
-            .map_err(|_| LlmConfigServiceError::Unavailable)?;
 
         // Store the key value only when a real (non-sentinel) one was supplied.
         if has_new_key && let Some(key) = request.api_key.as_ref() {
@@ -279,10 +379,23 @@ impl LlmConfigService for RebornLlmConfigService {
                 .map_err(|_| LlmConfigServiceError::Unavailable)?;
         }
 
+        if self.repo.upsert_async(definition).await.is_err() {
+            if has_new_key {
+                self.rollback_upsert(&id, previous_overlay, previous_key, true)
+                    .await;
+            }
+            return Err(LlmConfigServiceError::Unavailable);
+        }
+
         if request.set_active {
-            self.admin()
-                .set_provider(&id, request.model.as_deref())
-                .map_err(map_admin_error)?;
+            let active_result = self
+                .set_provider_async(id.clone(), request.model.clone())
+                .await;
+            if let Err(error) = active_result {
+                self.rollback_upsert(&id, previous_overlay, previous_key, has_new_key)
+                    .await;
+                return Err(map_admin_error(error));
+            }
         }
 
         self.refresh_running_provider().await;
@@ -297,7 +410,8 @@ impl LlmConfigService for RebornLlmConfigService {
         let id = validate_provider_id(&provider_id)?;
         let removed = self
             .repo
-            .delete(&id)
+            .delete_async(&id)
+            .await
             .map_err(|_| LlmConfigServiceError::Unavailable)?;
         if !removed {
             return Err(LlmConfigServiceError::NotFound);
@@ -315,8 +429,8 @@ impl LlmConfigService for RebornLlmConfigService {
         request: SetActiveLlmRequest,
     ) -> Result<LlmConfigSnapshot, LlmConfigServiceError> {
         let id = validate_provider_id(&request.provider_id)?;
-        self.admin()
-            .set_provider(&id, request.model.as_deref())
+        self.set_provider_async(id, request.model)
+            .await
             .map_err(map_admin_error)?;
         self.refresh_running_provider().await;
         self.snapshot(caller).await
@@ -369,6 +483,28 @@ impl LlmConfigService for RebornLlmConfigService {
 /// Parse a wire adapter name (e.g. `open_ai_completions`) into a protocol.
 fn parse_adapter(adapter: &str) -> Option<ProviderProtocol> {
     serde_json::from_value(serde_json::Value::String(adapter.to_string())).ok()
+}
+
+fn metadata_env_key_set(metadata: &crate::RebornProviderMetadata) -> bool {
+    metadata.api_key_env.as_deref().is_some_and(env_var_present)
+}
+
+fn definition_env_key_set(definition: &ProviderDefinition) -> bool {
+    definition
+        .api_key_env
+        .as_deref()
+        .is_some_and(env_var_present)
+}
+
+fn env_var_present(name: &str) -> bool {
+    std::env::var_os(name).is_some()
+}
+
+fn normalized_endpoint(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.trim_end_matches('/').to_string())
 }
 
 /// Resolve the overlay `ProviderDefinition` to write for an upsert.
@@ -553,6 +689,59 @@ impl LlmReloadTrigger for RebornLlmReloadAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
+    use ironclaw_reborn_config::{RebornHome, RebornProfile};
+    use ironclaw_secrets::InMemorySecretStore;
+
+    fn boot_for_home(reborn_home: &std::path::Path) -> RebornBootConfig {
+        let home = RebornHome::resolve_from_env_parts(
+            Some(reborn_home.as_os_str().to_os_string()),
+            None,
+            None,
+        )
+        .expect("valid reborn home");
+        RebornBootConfig::new(home, RebornProfile::LocalDev)
+    }
+
+    fn key_store() -> LlmKeyStore {
+        LlmKeyStore::new(Arc::new(InMemorySecretStore::new()))
+    }
+
+    fn caller() -> WebUiAuthenticatedCaller {
+        WebUiAuthenticatedCaller::new(
+            TenantId::new("tenant-alpha").expect("tenant"),
+            UserId::new("user-alpha").expect("user"),
+            Some(AgentId::new("agent-alpha").expect("agent")),
+            Some(ProjectId::new("project-alpha").expect("project")),
+        )
+    }
+
+    fn upsert_request(
+        id: &str,
+        api_key: Option<&str>,
+        set_active: bool,
+    ) -> UpsertLlmProviderRequest {
+        UpsertLlmProviderRequest {
+            id: id.to_string(),
+            name: Some("Acme".to_string()),
+            adapter: "open_ai_completions".to_string(),
+            base_url: Some("https://api.acme.test/v1".to_string()),
+            default_model: Some("acme-1".to_string()),
+            api_key: api_key.map(SecretString::from),
+            set_active,
+            model: Some("acme-1".to_string()),
+        }
+    }
+
+    fn probe_request(id: &str, base_url: &str, api_key: Option<&str>) -> LlmProbeRequest {
+        LlmProbeRequest {
+            provider_id: id.to_string(),
+            adapter: "open_ai_completions".to_string(),
+            base_url: Some(base_url.to_string()),
+            model: Some("acme-1".to_string()),
+            api_key: api_key.map(SecretString::from),
+        }
+    }
 
     #[test]
     fn parses_known_adapters() {
@@ -671,5 +860,152 @@ mod tests {
         let err = build_overlay_definition("acme", None, "nonsense", None, None, false, None)
             .expect_err("unknown adapter must fail");
         assert!(matches!(err, LlmConfigServiceError::InvalidRequest { .. }));
+    }
+
+    #[tokio::test]
+    async fn upsert_provider_persists_overlay_stores_key_and_preserves_existing_key() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("reborn-home");
+        let boot = boot_for_home(&reborn_home);
+        let keys = key_store();
+        let service = RebornLlmConfigService::new(boot.clone(), keys.clone());
+
+        let snapshot = service
+            .upsert_provider(caller(), upsert_request("acme", Some("sk-original"), true))
+            .await
+            .expect("upsert with key");
+
+        let acme = snapshot
+            .providers
+            .iter()
+            .find(|provider| provider.id == "acme")
+            .expect("acme provider in snapshot");
+        assert!(!acme.builtin);
+        assert!(acme.api_key_set);
+        assert_eq!(snapshot.active.expect("active").provider_id, "acme");
+        let overlay = ProviderRepo::new(boot.home().providers_file_path())
+            .load()
+            .expect("load overlay");
+        assert_eq!(
+            overlay
+                .iter()
+                .filter(|provider| provider.id == "acme")
+                .count(),
+            1
+        );
+        assert_eq!(
+            keys.read("acme")
+                .await
+                .expect("read key")
+                .expect("stored key")
+                .expose_secret(),
+            "sk-original"
+        );
+
+        service
+            .upsert_provider(
+                caller(),
+                upsert_request("acme", Some("\u{2022}\u{2022}\u{2022}"), false),
+            )
+            .await
+            .expect("masked-key upsert");
+
+        assert_eq!(
+            keys.read("acme")
+                .await
+                .expect("read key")
+                .expect("stored key")
+                .expose_secret(),
+            "sk-original",
+            "masked sentinel must preserve the existing stored key"
+        );
+    }
+
+    #[tokio::test]
+    async fn probe_override_requires_inline_key_before_using_stored_key() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("reborn-home");
+        let boot = boot_for_home(&reborn_home);
+        let keys = key_store();
+        let service = RebornLlmConfigService::new(boot, keys);
+
+        service
+            .upsert_provider(
+                caller(),
+                upsert_request("acme", Some("sk-stored-secret"), false),
+            )
+            .await
+            .expect("persist provider and stored key");
+
+        let error = service
+            .list_models(
+                caller(),
+                probe_request("acme", "https://attacker.example.test/v1", None),
+            )
+            .await
+            .expect_err("overridden endpoint requires an inline key");
+
+        assert!(
+            matches!(
+                error,
+                LlmConfigServiceError::InvalidRequest {
+                    field: Some(ref field),
+                    ref reason,
+                } if field == "api_key" && reason.contains("overridden provider endpoint")
+            ),
+            "stored operator keys must not be applied to caller-controlled probe endpoints"
+        );
+    }
+
+    #[tokio::test]
+    async fn upsert_builtin_remains_builtin_in_snapshot() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("reborn-home");
+        let boot = boot_for_home(&reborn_home);
+        let service = RebornLlmConfigService::new(boot, key_store());
+
+        let snapshot = service
+            .upsert_provider(caller(), upsert_request("openai", Some("sk-openai"), false))
+            .await
+            .expect("upsert builtin");
+
+        let openai = snapshot
+            .providers
+            .iter()
+            .find(|provider| provider.id == "openai")
+            .expect("openai provider in snapshot");
+        assert!(
+            openai.builtin,
+            "overlay edits must not make built-ins custom"
+        );
+        assert!(openai.api_key_set);
+    }
+
+    #[tokio::test]
+    async fn upsert_active_failure_rolls_back_overlay_and_new_key() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("reborn-home");
+        std::fs::create_dir_all(reborn_home.join("config.toml")).expect("mkdir config path");
+        let boot = boot_for_home(&reborn_home);
+        let keys = key_store();
+        let service = RebornLlmConfigService::new(boot.clone(), keys.clone());
+
+        let error = service
+            .upsert_provider(caller(), upsert_request("acme", Some("sk-rollback"), true))
+            .await
+            .expect_err("config write must fail");
+
+        assert!(matches!(error, LlmConfigServiceError::Unavailable));
+        let overlay = ProviderRepo::new(boot.home().providers_file_path())
+            .load()
+            .expect("load overlay");
+        assert!(
+            overlay.is_empty(),
+            "overlay must roll back when active selection fails"
+        );
+        assert!(
+            !keys.exists("acme").await.expect("key exists check"),
+            "new key must roll back when active selection fails"
+        );
     }
 }

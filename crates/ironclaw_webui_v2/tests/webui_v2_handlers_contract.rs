@@ -27,17 +27,18 @@ use ironclaw_product_adapters::{
     ProgressKind, ProgressUpdateView, ProjectionCursor,
 };
 use ironclaw_product_workflow::{
-    LifecyclePackageRef, LifecyclePhase, RebornAutomationInfo, RebornAutomationSource,
+    LifecyclePackageRef, LifecyclePhase, LlmActiveSelection, LlmConfigSnapshot, LlmModelsResult,
+    LlmProbeRequest, LlmProbeResult, LlmProviderView, RebornAutomationInfo, RebornAutomationSource,
     RebornAutomationState, RebornCancelRunResponse, RebornCreateThreadResponse,
     RebornExtensionActionResponse, RebornExtensionListResponse, RebornExtensionRegistryResponse,
     RebornGetRunStateRequest, RebornGetRunStateResponse, RebornListAutomationsResponse,
     RebornListThreadsResponse, RebornResolveGateResponse, RebornResumeGateResponse,
     RebornServicesApi, RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
     RebornSetupExtensionResponse, RebornStreamEventsRequest, RebornStreamEventsResponse,
-    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
-    WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
-    WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiResolveGateRequest,
-    WebUiSendMessageRequest, WebUiSetupExtensionRequest,
+    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse, SetActiveLlmRequest,
+    UpsertLlmProviderRequest, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
+    WebUiCreateThreadRequest, WebUiListAutomationsRequest, WebUiListThreadsRequest,
+    WebUiResolveGateRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
 };
 use ironclaw_threads::SessionThreadRecord;
 use ironclaw_turns::{
@@ -80,6 +81,12 @@ struct StubServices {
     install_extension_calls: Mutex<Vec<String>>,
     activate_extension_calls: Mutex<Vec<String>>,
     remove_extension_calls: Mutex<Vec<String>>,
+    get_llm_config_calls: Mutex<usize>,
+    upsert_llm_provider_calls: Mutex<Vec<String>>,
+    delete_llm_provider_calls: Mutex<Vec<String>>,
+    set_active_llm_calls: Mutex<Vec<(String, Option<String>)>>,
+    test_llm_connection_calls: Mutex<Vec<String>>,
+    list_llm_models_calls: Mutex<Vec<String>>,
     next_create_thread_error: Mutex<Option<RebornServicesError>>,
     /// Per-call queued responses for `stream_events`. When non-empty, the
     /// front entry is popped and returned on each call so SSE tests can
@@ -391,6 +398,81 @@ impl RebornServicesApi for StubServices {
             onboarding: None,
         })
     }
+
+    async fn get_llm_config(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<LlmConfigSnapshot, RebornServicesError> {
+        *self.get_llm_config_calls.lock().expect("lock") += 1;
+        Ok(llm_snapshot("openai"))
+    }
+
+    async fn upsert_llm_provider(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        request: UpsertLlmProviderRequest,
+    ) -> Result<LlmConfigSnapshot, RebornServicesError> {
+        self.upsert_llm_provider_calls
+            .lock()
+            .expect("lock")
+            .push(request.id.clone());
+        Ok(llm_snapshot(&request.id))
+    }
+
+    async fn delete_llm_provider(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        provider_id: String,
+    ) -> Result<LlmConfigSnapshot, RebornServicesError> {
+        self.delete_llm_provider_calls
+            .lock()
+            .expect("lock")
+            .push(provider_id);
+        Ok(llm_snapshot("openai"))
+    }
+
+    async fn set_active_llm(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        request: SetActiveLlmRequest,
+    ) -> Result<LlmConfigSnapshot, RebornServicesError> {
+        self.set_active_llm_calls
+            .lock()
+            .expect("lock")
+            .push((request.provider_id.clone(), request.model.clone()));
+        Ok(llm_snapshot(&request.provider_id))
+    }
+
+    async fn test_llm_connection(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        request: LlmProbeRequest,
+    ) -> Result<LlmProbeResult, RebornServicesError> {
+        self.test_llm_connection_calls
+            .lock()
+            .expect("lock")
+            .push(request.provider_id);
+        Ok(LlmProbeResult {
+            ok: true,
+            message: "ok".to_string(),
+        })
+    }
+
+    async fn list_llm_models(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        request: LlmProbeRequest,
+    ) -> Result<LlmModelsResult, RebornServicesError> {
+        self.list_llm_models_calls
+            .lock()
+            .expect("lock")
+            .push(request.provider_id);
+        Ok(LlmModelsResult {
+            ok: true,
+            models: vec!["model-a".to_string()],
+            message: String::new(),
+        })
+    }
 }
 
 fn extension_action_response(message: &str) -> RebornExtensionActionResponse {
@@ -419,6 +501,28 @@ fn automation_info(automation_id: &str, name: &str, cron: &str) -> RebornAutomat
         last_status: None,
         is_active: true,
         created_at: None,
+    }
+}
+
+fn llm_snapshot(provider_id: &str) -> LlmConfigSnapshot {
+    LlmConfigSnapshot {
+        providers: vec![LlmProviderView {
+            id: provider_id.to_string(),
+            description: "provider".to_string(),
+            adapter: "open_ai_completions".to_string(),
+            default_model: "model-a".to_string(),
+            base_url: Some("https://api.example.test/v1".to_string()),
+            builtin: true,
+            active: true,
+            active_model: Some("model-a".to_string()),
+            api_key_required: true,
+            api_key_set: true,
+            can_list_models: true,
+        }],
+        active: Some(LlmActiveSelection {
+            provider_id: provider_id.to_string(),
+            model: Some("model-a".to_string()),
+        }),
     }
 }
 
@@ -1092,6 +1196,138 @@ async fn get_extension_setup_rejects_malformed_package_id_with_400() {
     assert_eq!(body["error"], "invalid_request");
     assert_eq!(body["field"], "package_id");
     assert_eq!(body["validation_code"], "invalid_id");
+}
+
+#[tokio::test]
+async fn llm_provider_routes_dispatch_to_facade_methods() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let get_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/llm/providers")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(get_response.status(), StatusCode::OK);
+
+    let upsert_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/llm/providers")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"id":"acme","name":"Acme","adapter":"open_ai_completions","base_url":"https://api.acme.test/v1","default_model":"acme-1","api_key":"sk-test","set_active":true,"model":"acme-1"}"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(upsert_response.status(), StatusCode::OK);
+
+    let delete_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/llm/providers/acme/delete")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(delete_response.status(), StatusCode::OK);
+
+    let active_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/llm/active")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"provider_id":"openai","model":"gpt-5"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(active_response.status(), StatusCode::OK);
+
+    let probe_body = r#"{"provider_id":"openai","adapter":"open_ai_completions","base_url":"https://api.openai.com/v1","model":"gpt-5","api_key":"sk-test"}"#;
+    let test_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/llm/test-connection")
+                .header("content-type", "application/json")
+                .body(Body::from(probe_body))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(test_response.status(), StatusCode::OK);
+
+    let models_response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/llm/list-models")
+                .header("content-type", "application/json")
+                .body(Body::from(probe_body))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(models_response.status(), StatusCode::OK);
+
+    assert_eq!(*services.get_llm_config_calls.lock().expect("lock"), 1);
+    assert_eq!(
+        services
+            .upsert_llm_provider_calls
+            .lock()
+            .expect("lock")
+            .as_slice(),
+        ["acme"]
+    );
+    assert_eq!(
+        services
+            .delete_llm_provider_calls
+            .lock()
+            .expect("lock")
+            .as_slice(),
+        ["acme"]
+    );
+    assert_eq!(
+        services
+            .set_active_llm_calls
+            .lock()
+            .expect("lock")
+            .as_slice(),
+        [("openai".to_string(), Some("gpt-5".to_string()))]
+    );
+    assert_eq!(
+        services
+            .test_llm_connection_calls
+            .lock()
+            .expect("lock")
+            .as_slice(),
+        ["openai"]
+    );
+    assert_eq!(
+        services
+            .list_llm_models_calls
+            .lock()
+            .expect("lock")
+            .as_slice(),
+        ["openai"]
+    );
 }
 
 fn url_encode(value: &str) -> String {

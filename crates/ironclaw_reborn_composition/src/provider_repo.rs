@@ -62,6 +62,17 @@ impl ProviderRepo {
         }
     }
 
+    /// Async wrapper for [`Self::load`]. Keeps filesystem work off Tokio
+    /// worker threads when called from HTTP handlers.
+    pub async fn load_async(&self) -> Result<Vec<ProviderDefinition>, ProviderRepoError> {
+        let repo = self.clone();
+        tokio::task::spawn_blocking(move || repo.load())
+            .await
+            .map_err(|source| ProviderRepoError::Task {
+                reason: source.to_string(),
+            })?
+    }
+
     /// Insert or replace a custom provider definition by `id`, atomically.
     ///
     /// Returns `true` when an existing entry with the same id was replaced,
@@ -83,6 +94,41 @@ impl ProviderRepo {
         Ok(replaced)
     }
 
+    /// Async wrapper for [`Self::upsert`]. The lock/read/write section is
+    /// synchronous by design, so run it on the blocking pool.
+    pub async fn upsert_async(
+        &self,
+        definition: ProviderDefinition,
+    ) -> Result<bool, ProviderRepoError> {
+        let repo = self.clone();
+        tokio::task::spawn_blocking(move || repo.upsert(definition))
+            .await
+            .map_err(|source| ProviderRepoError::Task {
+                reason: source.to_string(),
+            })?
+    }
+
+    /// Replace the whole overlay atomically. Used for best-effort compensation
+    /// when a multi-store LLM configuration mutation fails after publishing an
+    /// overlay update.
+    pub fn replace_all(&self, overlay: Vec<ProviderDefinition>) -> Result<(), ProviderRepoError> {
+        let _lock = self.acquire_lock()?;
+        self.write_overlay(&overlay)
+    }
+
+    /// Async wrapper for [`Self::replace_all`].
+    pub async fn replace_all_async(
+        &self,
+        overlay: Vec<ProviderDefinition>,
+    ) -> Result<(), ProviderRepoError> {
+        let repo = self.clone();
+        tokio::task::spawn_blocking(move || repo.replace_all(overlay))
+            .await
+            .map_err(|source| ProviderRepoError::Task {
+                reason: source.to_string(),
+            })?
+    }
+
     /// Remove a custom provider definition by `id`, atomically.
     ///
     /// Returns whether an entry was removed. Built-ins are never stored in
@@ -98,6 +144,18 @@ impl ProviderRepo {
             self.write_overlay(&overlay)?;
         }
         Ok(removed)
+    }
+
+    /// Async wrapper for [`Self::delete`]. Keeps the exclusive filesystem lock
+    /// out of the async worker thread.
+    pub async fn delete_async(&self, id: &str) -> Result<bool, ProviderRepoError> {
+        let repo = self.clone();
+        let id = id.to_string();
+        tokio::task::spawn_blocking(move || repo.delete(&id))
+            .await
+            .map_err(|source| ProviderRepoError::Task {
+                reason: source.to_string(),
+            })?
     }
 
     fn write_overlay(&self, overlay: &[ProviderDefinition]) -> Result<(), ProviderRepoError> {
@@ -202,6 +260,8 @@ pub enum ProviderRepoError {
         #[source]
         source: std::io::Error,
     },
+    #[error("provider overlay blocking task failed: {reason}")]
+    Task { reason: String },
 }
 
 #[cfg(test)]

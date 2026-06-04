@@ -77,6 +77,8 @@ pub use handlers::{
     upsert_llm_provider,
 };
 #[cfg(feature = "webui-v2-beta")]
-pub use router::{WebUiV2State, webui_v2_router};
+pub use router::{
+    WebUiV2RouteOptions, WebUiV2State, webui_v2_router, webui_v2_router_with_options,
+};
 #[cfg(feature = "webui-v2-beta")]
 pub use schema::{WebChatV2Event, WebChatV2EventFrame};
