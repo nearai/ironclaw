@@ -62,12 +62,21 @@ pub const WALLETCONNECT_PROJECT_ID_ENV: &str = "ATTESTED_WALLETCONNECT_PROJECT_I
 /// floor for a binding MAC key.
 pub const MIN_STATE_SECRET_BYTES: usize = 32;
 
-/// Minimum number of *distinct* bytes a `state_secret` must contain. A 32-byte
-/// key drawn from a tiny alphabet (e.g. 8 distinct symbols) carries far less
-/// entropy than its length implies; requiring at least 16 distinct bytes rejects
-/// such degenerate low-entropy keys while leaving any real CSPRNG-generated
-/// 32-byte secret (which has ~32 distinct bytes with overwhelming probability)
+/// Minimum number of *distinct* bytes a `state_secret`'s key material must
+/// contain. A key drawn from a tiny alphabet (e.g. 8 distinct symbols) carries
+/// far less entropy than its length implies; requiring at least 16 distinct
+/// bytes rejects such degenerate low-entropy keys while leaving any real
+/// CSPRNG-generated 32-byte secret (~30 distinct bytes in expectation)
 /// comfortably above the floor.
+///
+/// The floor is applied to the *decoded* key material when the env value is
+/// hex text: lowercase hex has at most 16 distinct characters total, so
+/// counting distinct bytes of the text form would false-reject a substantial
+/// fraction of valid `openssl rand -hex 32` secrets (any whose 64 digits don't
+/// happen to use all 16 symbols). Base64 needs no such special-casing — its
+/// 64-symbol alphabet keeps any high-entropy key's text form far above the
+/// floor. For decoded forms shorter than 32 bytes the floor scales to half the
+/// key length (see [`StateSecret::has_min_distinct`]).
 pub(crate) const MIN_DISTINCT_SECRET_BYTES: usize = 16;
 
 /// Substrings that mark an obvious placeholder / dev secret. A `state_secret`
@@ -203,9 +212,17 @@ impl StateSecret {
     }
 
     /// Reject obvious placeholders and degenerate low-entropy keys: known
-    /// marker substrings, single repeated byte, or fewer than
-    /// [`MIN_DISTINCT_SECRET_BYTES`] distinct bytes (e.g. "abababab…" or
-    /// 8-symbol patterns) across a >=32-byte string.
+    /// marker substrings, single repeated byte, or key material with fewer
+    /// than [`MIN_DISTINCT_SECRET_BYTES`] distinct bytes (e.g. "abababab…" or
+    /// 8-symbol patterns).
+    ///
+    /// The distinct-byte floor is checked against the raw text *and*, when the
+    /// value is hex, against the decoded key bytes — passing either form is
+    /// sufficient. Hex text caps out at 16 distinct characters, so judging the
+    /// text form alone would false-reject valid `openssl rand -hex 32`
+    /// secrets; see [`MIN_DISTINCT_SECRET_BYTES`]. The decoded check can only
+    /// ever *accept* values the raw check would reject, never the reverse, so
+    /// non-hex secrets are unaffected.
     ///
     /// Note: an exact-match list of short words ("test", "key", "near", …) was
     /// dropped as dead code — every such word is shorter than
@@ -226,19 +243,66 @@ impl StateSecret {
         if bytes.windows(2).all(|w| w[0] == w[1]) {
             return true;
         }
-        // Very small alphabet across a long string indicates a trivial pattern.
-        let distinct = {
-            let mut seen = [false; 256];
-            let mut count = 0usize;
-            for &b in bytes {
-                if !seen[b as usize] {
-                    seen[b as usize] = true;
-                    count += 1;
+        if Self::has_min_distinct(bytes) {
+            return false;
+        }
+        // Very small alphabet across a long string indicates a trivial
+        // pattern — unless the string is hex, whose alphabet is small by
+        // construction. Judge the decoded key material instead.
+        match Self::decode_hex_text(value) {
+            Some(decoded) => !Self::has_min_distinct(&decoded),
+            None => true,
+        }
+    }
+
+    /// Whether `bytes` clears the distinct-byte entropy floor. The floor is
+    /// [`MIN_DISTINCT_SECRET_BYTES`], scaled down to `len / 2` for inputs
+    /// shorter than 32 bytes (a random 16-byte key has ~15.5 distinct bytes in
+    /// expectation, so a flat floor of 16 would reject roughly half of them).
+    fn has_min_distinct(bytes: &[u8]) -> bool {
+        let floor = MIN_DISTINCT_SECRET_BYTES.min(bytes.len() / 2);
+        let mut seen = [false; 256];
+        let mut count = 0usize;
+        for &b in bytes {
+            if !seen[b as usize] {
+                seen[b as usize] = true;
+                count += 1;
+                if count >= floor {
+                    return true;
                 }
             }
-            count
+        }
+        count >= floor
+    }
+
+    /// Decode `value` as hex text (optional `0x`/`0X` prefix, even length,
+    /// ASCII hex digits only, case-insensitive). Returns `None` when the value
+    /// is not hex — callers then judge the raw bytes as before.
+    fn decode_hex_text(value: &str) -> Option<Vec<u8>> {
+        let stripped = value
+            .strip_prefix("0x")
+            .or_else(|| value.strip_prefix("0X"))
+            .unwrap_or(value);
+        if stripped.is_empty()
+            || !stripped.len().is_multiple_of(2)
+            || !stripped.bytes().all(|b| b.is_ascii_hexdigit())
+        {
+            return None;
+        }
+        let nibble = |b: u8| -> u8 {
+            match b {
+                b'0'..=b'9' => b - b'0',
+                b'a'..=b'f' => b - b'a' + 10,
+                _ => b - b'A' + 10,
+            }
         };
-        distinct < MIN_DISTINCT_SECRET_BYTES
+        Some(
+            stripped
+                .as_bytes()
+                .chunks_exact(2)
+                .map(|pair| (nibble(pair[0]) << 4) | nibble(pair[1]))
+                .collect(),
+        )
     }
 
     fn expose_bytes(&self) -> Vec<u8> {
@@ -538,6 +602,57 @@ mod tests {
             "abababababababababababababababababab",
         )
         .expect_err("low-distinct secret rejected");
+        assert_eq!(err, AttestedConfigError::StateSecretLowEntropy);
+    }
+
+    /// A deterministic stand-in for `openssl rand -hex 32` output: 32 bytes
+    /// with 32 distinct values whose hex rendering happens to never use the
+    /// symbol `f` — i.e. only 15 distinct *characters*. Counting distinct
+    /// bytes of the text form would reject it; the decoded key material is
+    /// maximally distinct.
+    fn csprng_like_hex_missing_f() -> String {
+        const KEY: [u8; 32] = [
+            0x01, 0x12, 0x23, 0x34, 0x45, 0x56, 0x67, 0x78, 0x89, 0x9a, 0xab, 0xbc, 0xcd, 0xde,
+            0xe0, 0x02, 0x13, 0x24, 0x35, 0x46, 0x57, 0x68, 0x79, 0x8a, 0x9b, 0xac, 0xbd, 0xce,
+            0xd0, 0xe1, 0x03, 0x14,
+        ];
+        let hex: String = KEY.iter().map(|b| format!("{b:02x}")).collect();
+        // Premise guard: the regression only reproduces when the text form has
+        // fewer than MIN_DISTINCT_SECRET_BYTES distinct characters.
+        assert!(!hex.contains('f'));
+        assert_eq!(hex.len(), 64);
+        hex
+    }
+
+    #[test]
+    fn state_secret_accepts_csprng_hex() {
+        NearRedirectConfig::new(
+            "https://wallet.near.org/sign",
+            "https://app.example/cb",
+            csprng_like_hex_missing_f(),
+        )
+        .expect("valid CSPRNG hex secret accepted");
+    }
+
+    #[test]
+    fn state_secret_accepts_csprng_hex_uppercase_and_prefixed() {
+        NearRedirectConfig::new(
+            "https://wallet.near.org/sign",
+            "https://app.example/cb",
+            format!("0x{}", csprng_like_hex_missing_f().to_ascii_uppercase()),
+        )
+        .expect("0x-prefixed uppercase hex secret accepted");
+    }
+
+    #[test]
+    fn state_secret_rejects_degenerate_hex() {
+        // Valid hex, but the decoded key is a single repeated byte.
+        let err = NearRedirectConfig::new(
+            "https://wallet.near.org/sign",
+            "https://app.example/cb",
+            "1b".repeat(32),
+        )
+        .expect_err("repeated-byte hex secret rejected");
         assert_eq!(err, AttestedConfigError::StateSecretLowEntropy);
     }
 
