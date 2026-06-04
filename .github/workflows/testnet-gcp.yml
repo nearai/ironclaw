@@ -1,26 +1,19 @@
 name: Deploy to GCP Testnet
 
-# Manual promote from staging. Pulls the staging image at the given git SHA
-# (or latest if omitted), re-tags as :testnet, pushes, then deploys to the
-# testnet VM.
 on:
-  workflow_dispatch:
-    inputs:
-      image_sha:
-        description: 'Git SHA to promote (leave blank for current staging :latest)'
-        required: false
-        default: ''
+  push:
+    branches: [testnet]
 
 concurrency:
   group: deploy-gcp-testnet
   cancel-in-progress: true
 
 jobs:
-  promote:
+  build-agent:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      id-token: write
+      id-token: write   # required for Workload Identity Federation
 
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -37,18 +30,94 @@ jobs:
 
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
-      - name: Promote images → :testnet
+      - name: Build and push agent image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: Dockerfile
+          target: runtime-staging   # includes pre-built WASM extensions
+          platforms: linux/amd64
+          push: true
+          tags: |
+            us-central1-docker.pkg.dev/gen-lang-client-0263867259/t3claw/agent:testnet
+            us-central1-docker.pkg.dev/gen-lang-client-0263867259/t3claw/agent:${{ github.sha }}
+          cache-from: type=gha,scope=agent-testnet
+          cache-to: type=gha,mode=max,scope=agent-testnet
+
+  build-sidecar:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      # Sidecar Dockerfile COPYs from trinity via named build contexts (see
+      # docker-compose.yml additional_contexts). Without this checkout, buildx
+      # resolves trinity_* as docker.io/library/* and fails.
+      - name: Checkout trinity (sidecar sources)
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          repository: Terminal-3/trinity
+          path: trinity
+          token: ${{ secrets.TRINITY_CHECKOUT_TOKEN }}
+
+      - name: Verify trinity build context
         run: |
-          AR="us-central1-docker.pkg.dev/gen-lang-client-0263867259/t3claw"
-          SHA="${{ github.event.inputs.image_sha }}"
-          SRC_TAG="${SHA:-latest}"
-          gcloud artifacts docker tags add "${AR}/agent:${SRC_TAG}" "${AR}/agent:testnet" \
-            --project=gen-lang-client-0263867259
-          gcloud artifacts docker tags add "${AR}/t3n-mcp-sidecar:${SRC_TAG}" "${AR}/t3n-mcp-sidecar:testnet" \
-            --project=gen-lang-client-0263867259
-          echo "Promoted :${SRC_TAG} → :testnet for agent and sidecar"
+          test -f trinity/client/pnpm-lock.yaml
+          test -f trinity/client/pnpm-workspace.yaml
+          test -d trinity/client/mcp/t3n-mcp
+          test -d trinity/client/shared
+          test -d trinity/client/t3n-sdk
+
+      - uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
+
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Build and push sidecar image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: docker/t3n-mcp-sidecar.Dockerfile
+          platforms: linux/amd64
+          push: true
+          build-contexts: |
+            trinity_client=trinity/client
+          tags: |
+            us-central1-docker.pkg.dev/gen-lang-client-0263867259/t3claw/t3n-mcp-sidecar:testnet
+            us-central1-docker.pkg.dev/gen-lang-client-0263867259/t3claw/t3n-mcp-sidecar:${{ github.sha }}
+          cache-from: type=gha,scope=sidecar-testnet
+          cache-to: type=gha,mode=max,scope=sidecar-testnet
+
+  deploy:
+    needs: [build-agent, build-sidecar]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2
 
       - name: Rolling update on testnet VM
+        # Pulls new images first, then restarts via systemctl so ExecStartPre
+        # runs on every deploy and refreshes /opt/t3claw/.env from Secret Manager.
         run: |
           gcloud compute ssh t3claw-testnet \
             --zone=asia-southeast1-a \

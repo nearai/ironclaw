@@ -1,7 +1,7 @@
 # Compose file used on the GCP testnet VM.
 #
 # Identical to docker-compose.staging.yml except:
-#   1. Images use the :testnet tag (promoted from staging via testnet-gcp.yml).
+#   1. Images use the :testnet tag (built on push to the testnet branch).
 #   2. T3N_SDK_ENV defaults to "testnet".
 
 services:
