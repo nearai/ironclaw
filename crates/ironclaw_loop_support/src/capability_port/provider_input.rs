@@ -107,7 +107,7 @@ fn validate_provider_arguments_schema(
     schema: &serde_json::Value,
     label: &'static str,
 ) -> Result<(), AgentLoopHostError> {
-    if schema_contains_external_ref(schema) {
+    if schema_contains_external_ref(schema, 0) {
         return Err(AgentLoopHostError::new(
             AgentLoopHostErrorKind::StaleSurface,
             format!("{label} schema contains an unresolved $ref"),
@@ -174,7 +174,10 @@ fn replace_ascii_case_insensitive(input: &str, needle: &str, replacement: &str) 
     replaced
 }
 
-fn schema_contains_external_ref(schema: &serde_json::Value) -> bool {
+fn schema_contains_external_ref(schema: &serde_json::Value, depth: usize) -> bool {
+    if depth > MAX_PROVIDER_NORMALIZATION_DEPTH {
+        return true;
+    }
     match schema {
         serde_json::Value::Object(object) => {
             if object
@@ -184,9 +187,13 @@ fn schema_contains_external_ref(schema: &serde_json::Value) -> bool {
             {
                 return true;
             }
-            object.values().any(schema_contains_external_ref)
+            object
+                .values()
+                .any(|value| schema_contains_external_ref(value, depth + 1))
         }
-        serde_json::Value::Array(items) => items.iter().any(schema_contains_external_ref),
+        serde_json::Value::Array(items) => items
+            .iter()
+            .any(|value| schema_contains_external_ref(value, depth + 1)),
         _ => false,
     }
 }

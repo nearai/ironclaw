@@ -2759,6 +2759,79 @@ mod tests {
     }
 
     #[test]
+    fn provider_argument_preparation_allows_internal_ref_schema() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "payload": {
+                    "$ref": "#/$defs/payload"
+                }
+            },
+            "$defs": {
+                "payload": {
+                    "type": "object",
+                    "properties": {
+                        "message": { "type": "string" }
+                    },
+                    "required": ["message"],
+                    "additionalProperties": false
+                }
+            }
+        });
+
+        let normalized = prepare_provider_arguments(
+            &serde_json::json!({
+                "payload": {
+                    "message": "hello"
+                }
+            }),
+            &schema,
+            "provider arguments",
+        )
+        .expect("internal refs should be allowed");
+
+        assert_eq!(
+            normalized,
+            serde_json::json!({
+                "payload": {
+                    "message": "hello"
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn provider_argument_preparation_rejects_excessive_schema_ref_scan_depth() {
+        fn wrap_unknown_keyword(inner_schema: serde_json::Value) -> serde_json::Value {
+            serde_json::json!({
+                "x-next": inner_schema
+            })
+        }
+
+        let mut deep_annotation = serde_json::json!({ "type": "null" });
+        for _ in 0..40 {
+            deep_annotation = wrap_unknown_keyword(deep_annotation);
+        }
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "message": { "type": "string" }
+            },
+            "required": ["message"],
+            "x-adversarial-depth": deep_annotation
+        });
+
+        let error = prepare_provider_arguments(
+            &serde_json::json!({ "message": "hello" }),
+            &schema,
+            "provider arguments",
+        )
+        .expect_err("excessively deep schema ref scans should fail closed");
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::StaleSurface);
+    }
+
+    #[test]
     fn provider_argument_normalization_rejects_excessive_schema_depth() {
         fn wrap_object_property(
             name: String,
@@ -3892,6 +3965,26 @@ mod tests {
             runtime.take_requests().is_empty(),
             "capability_info failure must not dispatch to the host runtime"
         );
+    }
+
+    #[test]
+    fn provider_tool_call_effective_capability_id_store_returns_unavailable_when_full() {
+        let mut records = HashMap::new();
+        for index in 0..MAX_IN_MEMORY_PROVIDER_TOOL_CALL_EFFECTIVE_CAPABILITY_IDS {
+            records.insert(format!("input:staged-capability-{index}"), HashSet::new());
+        }
+        let mut store = ProviderToolCallEffectiveCapabilityIdStore {
+            records,
+            insertion_order: VecDeque::new(),
+        };
+        let input_ref =
+            CapabilityInputRef::new("input:staged-capability-new").expect("valid input ref");
+
+        let error = store
+            .record(&input_ref, HashSet::new())
+            .expect_err("full store with exhausted insertion order should fail closed");
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::Unavailable);
     }
 
     /// Regression: `capability_info` previously used `as_runtime()` for
