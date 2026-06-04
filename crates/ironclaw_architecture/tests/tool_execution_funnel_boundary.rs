@@ -33,11 +33,15 @@
 //! `examples/`, comments, and doc comments are excluded (mirroring the sibling
 //! boundary tests in `reborn_dependency_boundaries.rs`). Two call shapes are
 //! flagged:
-//!   * `execute_tool_with_safety(` — the un-audited primitive, anywhere.
+//!   * `execute_tool_with_safety(` and its `pub` String-error wrapper
+//!     `execute_tool_simple(` — the un-audited primitives, anywhere.
 //!   * `.execute(` on a tool trait object — but only within the
 //!     tool-execution subsystems (`src/tools/`, `src/worker/`, `src/agent/`,
 //!     `src/bridge/`), where a bare `.execute(` reliably means `Tool::execute`
-//!     rather than a DB statement, OS process, or HTTP client.
+//!     rather than a DB statement, OS process, or HTTP client. Both same-line
+//!     (`tool.execute(`) and multi-line (`tool\n    .execute(`) call shapes are
+//!     flagged — the multi-line, leading-dot idiom is the dominant one in the
+//!     codebase.
 //!
 //! See #4019 / #4017.
 
@@ -147,13 +151,10 @@ fn tool_execution_flows_through_audited_dispatch_funnel() {
 
     let mut found: BTreeSet<String> = BTreeSet::new();
 
-    // 1. `execute_tool_with_safety(` anywhere in production `src/`.
-    collect_callers(
-        &root.join("src"),
-        &root,
-        &|line| line.contains("execute_tool_with_safety("),
-        &mut found,
-    );
+    // 1. The un-audited primitives anywhere in production `src/`:
+    //    `execute_tool_with_safety(` and its `pub` String-error wrapper
+    //    `execute_tool_simple(` (a live entry point at `worker/container.rs`).
+    collect_callers(&root.join("src"), &root, &is_primitive_call, &mut found);
 
     // 2. `.execute(` on a tool object, restricted to the tool-execution
     //    subsystems where the call shape is unambiguous.
@@ -206,31 +207,83 @@ fn tool_execution_flows_through_audited_dispatch_funnel() {
     );
 }
 
+/// The un-audited tool-execution primitives, matched anywhere in `src/`.
+///
+/// `execute_tool_with_safety(` is the shared primitive; `execute_tool_simple(`
+/// is its `pub` String-error wrapper (`src/tools/execute.rs`), which forwards to
+/// the same primitive (same audit/permit skip) and is itself a live entry point
+/// (`src/worker/container.rs`). A new caller of either is a bypass.
+fn is_primitive_call(lines: &[&str], index: usize) -> bool {
+    let line = lines[index];
+    line.contains("execute_tool_with_safety(") || line.contains("execute_tool_simple(")
+}
+
 /// Heuristic for a `Tool::execute` invocation on a trait object.
 ///
 /// Matches a `<receiver>.execute(` call where the receiver identifier is
 /// `tool` or ends in `tool` / `_tool` (case-insensitive) — e.g. `tool`,
-/// `restart_tool`, `self.tool`. This is the shape every current tool-execute
-/// call site uses, and it deliberately excludes the unrelated `.execute(`
-/// receivers that share the tool subsystems: SQL handles (`tx.execute(`,
-/// `conn.execute(`, `stmt.execute(`), HTTP/process clients, etc. It also
-/// excludes the trait/impl method *definitions* (`fn execute(`,
+/// `restart_tool`, `self.tool`. It deliberately excludes the unrelated
+/// `.execute(` receivers that share the tool subsystems: SQL handles
+/// (`tx.execute(`, `conn.execute(`, `stmt.execute(`), HTTP/process clients,
+/// etc. It also excludes the trait/impl method *definitions* (`fn execute(`,
 /// `async fn execute(`), which have no receiver and no leading dot.
-fn is_tool_execute_call(line: &str) -> bool {
+///
+/// Two call shapes are handled:
+///   * same-line — `let r = tool.execute(...)`: the receiver is the identifier
+///     immediately preceding `.execute(` on the same line.
+///   * multi-line — `let r = tool\n    .execute(...)`: the dominant idiom in the
+///     codebase, where `.execute(` sits alone on its line with an empty
+///     same-line receiver. The receiver is then the trailing identifier of the
+///     previous non-blank code line.
+fn is_tool_execute_call(lines: &[&str], index: usize) -> bool {
+    let line = lines[index];
     let Some(prefix_end) = line.find(".execute(") else {
         return false;
     };
-    // The receiver is the identifier immediately preceding `.execute(`.
-    let receiver: String = line[..prefix_end]
-        .chars()
+    // Same-line receiver: the identifier immediately preceding `.execute(`.
+    let receiver = trailing_identifier(&line[..prefix_end]);
+    if !receiver.is_empty() {
+        return is_tool_like(&receiver);
+    }
+    // Empty same-line receiver: this is a leading-dot continuation. Only treat
+    // it as a continuation if everything before `.execute(` on this line is
+    // whitespace (the dominant multi-line idiom); otherwise the empty receiver
+    // came from punctuation like `).execute(` (a method-chain result), which is
+    // not a bare tool receiver.
+    if !line[..prefix_end].trim().is_empty() {
+        return false;
+    }
+    // Look back to the previous non-blank code line and take its trailing
+    // identifier as the receiver.
+    let mut prev = index;
+    while prev > 0 {
+        prev -= 1;
+        let candidate = lines[prev].trim_end();
+        if candidate.trim().is_empty() {
+            continue;
+        }
+        return is_tool_like(&trailing_identifier(candidate));
+    }
+    false
+}
+
+/// The trailing `[A-Za-z0-9_]` identifier of `text` (empty if `text` does not
+/// end in an identifier character).
+fn trailing_identifier(text: &str) -> String {
+    text.chars()
         .rev()
         .take_while(|c| c.is_alphanumeric() || *c == '_')
         .collect::<String>()
         .chars()
         .rev()
-        .collect();
-    let receiver = receiver.to_ascii_lowercase();
-    receiver == "tool" || receiver.ends_with("_tool") || receiver.ends_with("tool")
+        .collect()
+}
+
+/// Whether an identifier names a tool receiver (`tool` / `*_tool` / `*tool`,
+/// case-insensitive).
+fn is_tool_like(identifier: &str) -> bool {
+    let lower = identifier.to_ascii_lowercase();
+    lower == "tool" || lower.ends_with("_tool") || lower.ends_with("tool")
 }
 
 /// Recursively scan production `.rs` files under `dir`, collecting the
@@ -242,7 +295,7 @@ fn is_tool_execute_call(line: &str) -> bool {
 fn collect_callers(
     dir: &Path,
     root: &Path,
-    predicate: &dyn Fn(&str) -> bool,
+    predicate: &dyn Fn(&[&str], usize) -> bool,
     found: &mut BTreeSet<String>,
 ) {
     let entries = std::fs::read_dir(dir)
@@ -264,48 +317,68 @@ fn collect_callers(
         }
         let contents = std::fs::read_to_string(&path)
             .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
-        let lines: Vec<&str> = contents.lines().collect();
-        let mut index = 0;
-        while index < lines.len() {
-            let line = lines[index];
-            let trimmed = line.trim_start();
-            // A `#[cfg(test)]` guarding a `mod` is the trailing test module —
-            // everything from here to EOF is test code, so stop scanning.
-            // A `#[cfg(test)]` on a single item (e.g. a test-only `use` near
-            // the top of the file) must NOT terminate the scan: skip only the
-            // guarded item.
-            if trimmed.starts_with("#[cfg(test)]") {
-                // Peek at the next non-attribute line to classify the guard.
-                let mut peek = index + 1;
-                while peek < lines.len() && lines[peek].trim_start().starts_with("#[") {
-                    peek += 1;
-                }
-                let guarded = lines.get(peek).map(|l| l.trim_start()).unwrap_or("");
-                if guarded.starts_with("mod ")
-                    || guarded.starts_with("pub mod ")
-                    || guarded.starts_with("pub(crate) mod ")
-                {
-                    break;
-                }
-                // Inline test-only item: skip the attribute line and continue.
-                index += 1;
-                continue;
-            }
-            // Skip line comments and doc comments.
-            if trimmed.starts_with("//") {
-                index += 1;
-                continue;
-            }
-            if predicate(line) {
-                let relative = path.strip_prefix(root).unwrap_or(&path);
-                // Normalize to forward slashes so the allowlist is
-                // platform-independent.
-                found.insert(relative.to_string_lossy().replace('\\', "/"));
-                break;
-            }
-            index += 1;
+        if file_has_caller(&contents, predicate) {
+            let relative = path.strip_prefix(root).unwrap_or(&path);
+            // Normalize to forward slashes so the allowlist is
+            // platform-independent.
+            found.insert(relative.to_string_lossy().replace('\\', "/"));
         }
     }
+}
+
+/// Scan one file's contents for a predicate match against production code.
+///
+/// Produces the production code-line view (trailing `#[cfg(test)]` module
+/// dropped, line/doc comments blanked) and runs `predicate` over it, giving the
+/// predicate access to the full window so multi-line call chains are visible.
+/// Comments are blanked rather than removed so blank-line-skipping look-back in
+/// the predicate still sees the original line geometry.
+fn file_has_caller(contents: &str, predicate: &dyn Fn(&[&str], usize) -> bool) -> bool {
+    let code_lines = production_code_lines(contents);
+    (0..code_lines.len()).any(|index| predicate(&code_lines, index))
+}
+
+/// The production code-line view of a file: the trailing `#[cfg(test)]` module
+/// is dropped, and line/doc comments are blanked to empty strings.
+fn production_code_lines(contents: &str) -> Vec<&str> {
+    let lines: Vec<&str> = contents.lines().collect();
+    let mut out: Vec<&str> = Vec::with_capacity(lines.len());
+    let mut index = 0;
+    while index < lines.len() {
+        let line = lines[index];
+        let trimmed = line.trim_start();
+        // A `#[cfg(test)]` guarding a `mod` is the trailing test module —
+        // everything from here to EOF is test code, so stop scanning. A
+        // `#[cfg(test)]` on a single item (e.g. a test-only `use` near the top
+        // of the file) must NOT terminate the scan: skip only the guarded item.
+        if trimmed.starts_with("#[cfg(test)]") {
+            // Peek at the next non-attribute line to classify the guard.
+            let mut peek = index + 1;
+            while peek < lines.len() && lines[peek].trim_start().starts_with("#[") {
+                peek += 1;
+            }
+            let guarded = lines.get(peek).map(|l| l.trim_start()).unwrap_or("");
+            if guarded.starts_with("mod ")
+                || guarded.starts_with("pub mod ")
+                || guarded.starts_with("pub(crate) mod ")
+            {
+                break;
+            }
+            // Inline test-only item: blank the attribute line and continue.
+            out.push("");
+            index += 1;
+            continue;
+        }
+        // Blank line comments and doc comments (keep the slot so multi-line
+        // look-back preserves line geometry).
+        if trimmed.starts_with("//") {
+            out.push("");
+        } else {
+            out.push(line);
+        }
+        index += 1;
+    }
+    out
 }
 
 fn workspace_root() -> PathBuf {
@@ -314,4 +387,127 @@ fn workspace_root() -> PathBuf {
         .and_then(|path| path.parent())
         .expect("architecture crate under crates/")
         .to_path_buf()
+}
+
+#[cfg(test)]
+mod scanner_fixtures {
+    use super::*;
+
+    /// The multi-line, leading-dot idiom — the dominant tool-execute shape in
+    /// the codebase. Before the fix this was invisible (empty same-line
+    /// receiver → predicate returned `false`).
+    #[test]
+    fn detects_multiline_tool_execute() {
+        let src = "\
+fn run(tool: &dyn Tool) {
+    let result = tool
+        .execute(args, &ctx)
+        .await;
+}
+";
+        assert!(file_has_caller(src, &is_tool_execute_call));
+    }
+
+    #[test]
+    fn detects_multiline_tool_execute_field_receiver() {
+        let src = "\
+fn run(&self) {
+    let result = self.restart_tool
+        .execute(args, &ctx)
+        .await;
+}
+";
+        assert!(file_has_caller(src, &is_tool_execute_call));
+    }
+
+    #[test]
+    fn detects_same_line_tool_execute() {
+        let src = "    let r = tool.execute(args, &ctx).await;\n";
+        assert!(file_has_caller(src, &is_tool_execute_call));
+    }
+
+    /// `execute_tool_simple(` is the `pub` String-error wrapper (a live entry
+    /// point at `worker/container.rs`); a new caller must be flagged.
+    #[test]
+    fn detects_execute_tool_simple() {
+        let src = "\
+fn run() {
+    let result = execute_tool_simple(
+        &self.tools,
+        &self.safety,
+    )
+    .await;
+}
+";
+        assert!(file_has_caller(src, &is_primitive_call));
+    }
+
+    #[test]
+    fn detects_execute_tool_with_safety() {
+        let src = "    let r = execute_tool_with_safety(&tools, &safety).await;\n";
+        assert!(file_has_caller(src, &is_primitive_call));
+    }
+
+    /// DB / non-tool receivers on the same line must not be flagged.
+    #[test]
+    fn ignores_db_receivers_same_line() {
+        for src in [
+            "    conn.execute(sql).await?;\n",
+            "    tx.execute(stmt, params).await?;\n",
+            "    statement.execute(&[]).await?;\n",
+        ] {
+            assert!(
+                !file_has_caller(src, &is_tool_execute_call),
+                "false positive on: {src}"
+            );
+        }
+    }
+
+    /// A leading-dot `.execute(` whose previous code line ends in a non-tool
+    /// identifier (e.g. a DB handle) must not be flagged.
+    #[test]
+    fn ignores_multiline_db_receiver() {
+        let src = "\
+fn run(conn: &Conn) {
+    let rows = conn
+        .execute(sql)
+        .await?;
+}
+";
+        assert!(!file_has_caller(src, &is_tool_execute_call));
+    }
+
+    /// A method-chain result (`).execute(`) is not a bare tool receiver; the
+    /// empty same-line receiver must not trigger the multi-line look-back.
+    #[test]
+    fn ignores_method_chain_result() {
+        let src = "    let r = build_query(tool).execute(args).await;\n";
+        assert!(!file_has_caller(src, &is_tool_execute_call));
+    }
+
+    /// A `.execute(` hidden in a line comment is not a real call.
+    #[test]
+    fn ignores_commented_tool_execute() {
+        let src = "    // tool.execute(args);\n";
+        assert!(!file_has_caller(src, &is_tool_execute_call));
+    }
+
+    /// A multi-line call inside a trailing `#[cfg(test)]` module is test code,
+    /// not production, and must not be flagged.
+    #[test]
+    fn ignores_tool_execute_in_test_module() {
+        let src = "\
+fn prod() {}
+
+#[cfg(test)]
+mod tests {
+    fn t(tool: &dyn Tool) {
+        let r = tool
+            .execute(args)
+            .await;
+    }
+}
+";
+        assert!(!file_has_caller(src, &is_tool_execute_call));
+    }
 }
