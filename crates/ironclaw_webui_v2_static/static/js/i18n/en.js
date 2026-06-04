@@ -678,9 +678,18 @@ registerPack("en", {
 
   // Extensions — pairing
   "pairing.title": "Pairing",
+  "pairing.instructions": "Enter the code from the channel to finish pairing.",
   "pairing.placeholder": "Enter pairing code…",
   "pairing.approve": "Approve",
+  "pairing.success": "Pairing complete.",
+  "pairing.error": "Pairing failed.",
   "pairing.none": "No pending pairing requests.",
+  "pairing.slackTitle": "Slack account connection",
+  "pairing.slackInstructions": "Message the Slack app, then enter the code here.",
+  "pairing.slackPlaceholder": "Enter Slack pairing code…",
+  "pairing.connect": "Connect",
+  "pairing.slackSuccess": "Slack account connected.",
+  "pairing.slackError": "Invalid or expired Slack pairing code.",
 
   // Admin — tabs
   "admin.tab.dashboard": "Dashboard",

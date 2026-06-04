@@ -286,5 +286,7 @@ export function usePairing(channel) {
     isLoading: query.isLoading,
     approve: approveMutation.mutate,
     isApproving: approveMutation.isPending,
+    result: approveMutation.isSuccess ? approveMutation.data : null,
+    error: approveMutation.isError ? approveMutation.error : null,
   };
 }
