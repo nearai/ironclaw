@@ -2372,6 +2372,102 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn terminal_event_after_restart_skips_malformed_recovery_metadata() {
+        let tenant = TenantId::new("tenant").unwrap();
+        let agent = AgentId::new("agent").unwrap();
+        let owner = UserId::new("owner").unwrap();
+        let parent_scope = TurnScope::new(
+            tenant.clone(),
+            Some(agent.clone()),
+            None,
+            ThreadId::new("parent-thread-malformed-metadata").unwrap(),
+        );
+        let child_scope = TurnScope::new(
+            tenant.clone(),
+            Some(agent.clone()),
+            None,
+            ThreadId::new("child-thread-malformed-metadata").unwrap(),
+        );
+        let thread_scope = ThreadScope {
+            tenant_id: tenant,
+            agent_id: agent,
+            project_id: None,
+            owner_user_id: Some(owner.clone()),
+            mission_id: None,
+        };
+        let parent_run_id = TurnRunId::new();
+        let child_run_id = TurnRunId::new();
+        let result_ref = LoopResultRef::new("result:subagent.malformed-metadata").unwrap();
+
+        let mut parent_run_context =
+            ironclaw_agent_loop::test_support::test_run_context("malformed-metadata-parent");
+        parent_run_context.scope = parent_scope.clone();
+        parent_run_context.thread_id = parent_scope.thread_id.clone();
+        parent_run_context.run_id = parent_run_id;
+
+        let mut child_run_context =
+            ironclaw_agent_loop::test_support::test_run_context("malformed-metadata-child");
+        child_run_context.scope = child_scope.clone();
+        child_run_context.thread_id = child_scope.thread_id.clone();
+        child_run_context.run_id = child_run_id;
+
+        let turn_state_store = Arc::new(RecordingTurnStateStore::default());
+        turn_state_store.add_record(turn_record_for_context(&parent_run_context, None, 0, None));
+        turn_state_store.add_record(turn_record_for_context(
+            &child_run_context,
+            Some(parent_run_id),
+            1,
+            Some(parent_run_id),
+        ));
+
+        let thread_service = Arc::new(InMemorySessionThreadService::default());
+        thread_service
+            .ensure_thread(EnsureThreadRequest {
+                scope: thread_scope,
+                thread_id: Some(child_scope.thread_id.clone()),
+                created_by_actor_id: "test".to_string(),
+                title: None,
+                metadata_json: Some("{not json".to_string()),
+            })
+            .await
+            .unwrap();
+
+        let gate_store = Arc::new(BoundedSubagentGateResolutionStore::new());
+        let goal_store = Arc::new(InMemoryBoundedSubagentGoalStore::new());
+        let result_writer = Arc::new(RecordingResultWriter::new(result_ref));
+        let coordinator = Arc::new(RecordingCoordinator::default());
+        let observer = SubagentCompletionObserver::new(
+            Arc::clone(&gate_store),
+            goal_store,
+            turn_state_store.clone(),
+            result_writer.clone(),
+            coordinator.clone(),
+            thread_service,
+        )
+        .unwrap();
+
+        observer
+            .handle_terminal(&TurnLifecycleEvent {
+                cursor: EventCursor(12),
+                scope: child_scope,
+                occurred_at: None,
+                owner_user_id: Some(owner),
+                run_id: child_run_id,
+                status: TurnStatus::Completed,
+                kind: TurnEventKind::Completed,
+                blocked_gate: None,
+                sanitized_reason: None,
+            })
+            .await
+            .unwrap();
+
+        assert!(result_writer.writes().is_empty());
+        assert!(coordinator.resumed.lock().unwrap().is_empty());
+        assert!(turn_state_store.releases().is_empty());
+        assert!(gate_store.is_empty().unwrap());
+    }
+
+    #[tokio::test]
     async fn persisted_blocking_reconstruction_preserves_existing_parent_gate_ref() {
         let parent_gate = GateRef::new("gate:subagent.legacy-blocking").unwrap();
         let parent_run_id = TurnRunId::new();
