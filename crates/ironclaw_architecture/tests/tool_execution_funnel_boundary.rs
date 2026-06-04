@@ -90,6 +90,34 @@ const ALLOWLIST: &[AllowedSite] = &[
         file: "src/worker/container.rs",
         kind: AllowKind::Executor,
     },
+    // Tool-builder verification (#4019 step 5): `execute_build_tool`
+    // (`src/tools/builder/core.rs`, the `.execute(` at ~core.rs:886) resolves a
+    // tool *by name* from the registry and runs it under a synthetic build
+    // `JobContext` with a build-specific autonomous approval context. This is
+    // NOT limited to "the tool under construction": the build loop drives
+    // arbitrary LLM-selected registry tools (`shell`, `write_file`,
+    // `apply_patch`, `read_file`, `list_dir`) to scaffold, compile, and verify
+    // the artifact. It is exempt as an `Executor` because there is no real
+    // user/agent/channel/job behind these calls — it is internal build
+    // machinery with its own `check_approval_in_context` gate (so the
+    // `Always`-approval tools still can't run unless whitelisted for the
+    // build), not a user- or agent-initiated dispatch. An `ActionRecord` per
+    // build-step tool call would be audit noise, not signal. The narrower
+    // ratchet below still forbids this file from reaching the *un-audited*
+    // primitive `execute_tool_with_safety` directly.
+    AllowedSite {
+        file: "src/tools/builder/core.rs",
+        kind: AllowKind::Executor,
+    },
+    // Tool-builder test harness (#4019 step 5): runs a freshly built WASM tool
+    // against its declared test cases under a default `JobContext`. Same
+    // rationale as `builder/core.rs` above — executing a tool-under-construction
+    // against its own test suite is build machinery, not a user/agent dispatch,
+    // so it is a justified terminal executor rather than an un-migrated bypass.
+    AllowedSite {
+        file: "src/tools/builder/testing.rs",
+        kind: AllowKind::Executor,
+    },
     // --- Un-migrated bypasses: #4019 migration checklist ---
     // NOTE: src/agent/dispatcher.rs (interactive chat tool calls — the headline
     // bypass from #4017) was migrated in #4019 step 3: both the inline and
@@ -102,28 +130,26 @@ const ALLOWLIST: &[AllowedSite] = &[
     // entries were removed from this checklist. The scheduler correlates the
     // ActionRecord to its existing persisted job; the routine path additionally
     // gained the safety pipeline (param validation/redaction) it lacked before.
-    // Engine v2 effect bridge (Python orchestrator path).
-    // TODO(#4019): migrate through audited dispatch (step 5).
+    //
+    // #4019 step 5 resolved the remaining bypasses:
+    //   * The CLI `/restart` command (`src/agent/commands.rs`) — a
+    //     user-initiated, gateway-only control action — was MIGRATED through
+    //     the audited `execute_tool_audited` path (`DispatchSource::Channel`,
+    //     `existing_job_id = None`), so it now builds an ActionRecord; its
+    //     entry was removed from this checklist.
+    //   * The two tool-builder sites (`builder/core.rs`, `builder/testing.rs`)
+    //     were RECLASSIFIED to `Executor` above: they execute a
+    //     tool-under-construction as internal build machinery, not as a
+    //     user/agent dispatch, so an audit record would be noise.
+    //
+    // The only remaining bypass is the engine v2 effect bridge, deferred
+    // because it has no `Arc<dyn Database>` handle (it holds an engine-v2
+    // DocType `Store`, a different abstraction) and its sandbox-interception
+    // branch bypasses `execute_tool_with_safety` entirely — migrating it
+    // cleanly needs dedicated store plumbing and an interception-path audit
+    // decision. Tracked as #4019 follow-up.
     AllowedSite {
         file: "src/bridge/effect_adapter.rs",
-        kind: AllowKind::Bypass,
-    },
-    // CLI `/restart` command runs RestartTool directly.
-    // TODO(#4019): migrate through audited dispatch (step 5).
-    AllowedSite {
-        file: "src/agent/commands.rs",
-        kind: AllowKind::Bypass,
-    },
-    // Tool-builder verification: runs a freshly built tool during the build
-    // flow. // TODO(#4019): migrate through audited dispatch (step 5).
-    AllowedSite {
-        file: "src/tools/builder/core.rs",
-        kind: AllowKind::Bypass,
-    },
-    // Tool-builder test harness: runs a built WASM tool against its test
-    // cases. // TODO(#4019): migrate through audited dispatch (step 5).
-    AllowedSite {
-        file: "src/tools/builder/testing.rs",
         kind: AllowKind::Bypass,
     },
 ];
@@ -192,6 +218,46 @@ fn tool_execution_flows_through_audited_dispatch_funnel() {
          been migrated through `ToolDispatcher::dispatch`. Delete them from the allowlist \
          in this test so it stays an accurate migration checklist:\n{}",
         stale
+            .iter()
+            .map(|file| format!("  - {file}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}
+
+/// The two tool-builder sites are exempted as `Executor` (build machinery runs
+/// registry tools by design — see the allowlist rationale), which removes them
+/// from the staleness ratchet. To keep a regression net under them, assert the
+/// narrower invariant that they never reach the *un-audited* primitive
+/// `execute_tool_with_safety` directly: they may run tools via the bare
+/// `tool.execute(...)` build path, but introducing the un-audited safety
+/// primitive there would be a new, separately-reviewable bypass.
+#[test]
+fn tool_builder_sites_do_not_call_unaudited_primitive() {
+    let root = workspace_root();
+    let builder_dir = root.join("src/tools/builder");
+    if !builder_dir.exists() {
+        // Directory moved/removed — the main funnel test covers regressions in
+        // the new location; nothing to assert here.
+        return;
+    }
+
+    let mut found: BTreeSet<String> = BTreeSet::new();
+    collect_callers(
+        &builder_dir,
+        &root,
+        &|line| line.contains("execute_tool_with_safety("),
+        &mut found,
+    );
+
+    let offenders: Vec<&String> = found.iter().collect();
+    assert!(
+        offenders.is_empty(),
+        "Tool-builder file(s) call the un-audited primitive `execute_tool_with_safety` — \
+         the tool-builder `Executor` exemption only covers the bare `tool.execute(...)` build \
+         path, not the un-audited safety primitive. Route through the audited funnel or justify \
+         a new bypass explicitly:\n{}",
+        offenders
             .iter()
             .map(|file| format!("  - {file}"))
             .collect::<Vec<_>>()

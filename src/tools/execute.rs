@@ -1447,4 +1447,121 @@ mod audited_integration_tests {
             "raw non-object arguments of an unresolved tool must never be persisted verbatim"
         );
     }
+
+    // ── Fail-closed audit anchor (#4025 review) ───────────────────────────
+    // The audited funnel must resolve/create its audit FK job *before* running
+    // the tool. If the anchor cannot be created (DB failure on the `None`
+    // path), the call aborts with a typed error and the tool never executes —
+    // an audited path must never produce an executed-but-unaudited effect.
+    #[tokio::test]
+    async fn audited_anchor_failure_aborts_execution_fail_closed() {
+        let (db, backend, _dir) = test_store().await;
+        let seen = Arc::new(std::sync::Mutex::new(None));
+        let registry = registry_with(Arc::new(ContextEchoTool {
+            seen_user: Arc::clone(&seen),
+        }))
+        .await;
+        let safety = safety();
+
+        // Force `create_system_job` to fail by removing the table its INSERT
+        // targets. This simulates a DB hiccup on the audit-anchor write.
+        {
+            let conn = backend.connect().await.expect("connect");
+            conn.execute("DROP TABLE agent_jobs", ())
+                .await
+                .expect("drop");
+        }
+
+        let job_ctx = JobContext::with_user("chatter", "chat", "interactive");
+        let result = execute_tool_audited(
+            &registry,
+            &safety,
+            Some(&db),
+            "ctx_echo",
+            serde_json::json!({ "message": "must-not-run" }),
+            &job_ctx,
+            DispatchSource::Channel("web".into()),
+            None,
+        )
+        .await;
+
+        assert!(
+            matches!(
+                result,
+                Err(crate::error::Error::Tool(
+                    crate::error::ToolError::ExecutionFailed { .. }
+                ))
+            ),
+            "anchor failure must abort with a typed ExecutionFailed error: {result:?}"
+        );
+        assert!(
+            seen.lock().unwrap().is_none(),
+            "tool must NOT execute when the audit anchor cannot be created"
+        );
+    }
+
+    // ── Sequence allocation on the existing_job_id path (#4025 review) ─────
+    // `ActionRecord::new(0, ...)` collides on `UNIQUE(job_id, sequence_num)`
+    // when a real persisted job already has actions. The audited path must
+    // allocate `max(existing sequence) + 1` for the `existing_job_id` case.
+    #[tokio::test]
+    async fn audited_existing_job_allocates_next_sequence_no_collision() {
+        let (db, backend, _dir) = test_store().await;
+        let seen = Arc::new(std::sync::Mutex::new(None));
+        let registry = registry_with(Arc::new(ContextEchoTool {
+            seen_user: Arc::clone(&seen),
+        }))
+        .await;
+        let safety = safety();
+
+        // A real persisted job that already owns an action at sequence 0.
+        let job_id = db
+            .create_system_job("chatter", "scheduler")
+            .await
+            .expect("create job");
+        let seeded = ActionRecord::new(0, "seed_tool", serde_json::json!({}));
+        db.save_action(job_id, &seeded).await.expect("seed action");
+
+        // First audited call against the existing job: must NOT collide on
+        // sequence 0; it should land at sequence 1.
+        execute_tool_audited(
+            &registry,
+            &safety,
+            Some(&db),
+            "ctx_echo",
+            serde_json::json!({ "message": "first" }),
+            &JobContext::with_user("chatter", "scheduler", "lightweight"),
+            DispatchSource::Channel("scheduler".into()),
+            Some(job_id),
+        )
+        .await
+        .expect("first audited call must succeed (no sequence collision)");
+
+        // A second audited call against the same job must also succeed and take
+        // the next free sequence (2).
+        execute_tool_audited(
+            &registry,
+            &safety,
+            Some(&db),
+            "ctx_echo",
+            serde_json::json!({ "message": "second" }),
+            &JobContext::with_user("chatter", "scheduler", "lightweight"),
+            DispatchSource::Channel("scheduler".into()),
+            Some(job_id),
+        )
+        .await
+        .expect("second audited call must succeed (no sequence collision)");
+
+        let actions = db.get_job_actions(job_id).await.expect("get actions");
+        // 1 seeded + 2 audited, all persisted with distinct sequence numbers.
+        assert_eq!(actions.len(), 3, "all three actions must persist");
+        let mut sequences: Vec<u32> = actions.iter().map(|a| a.sequence).collect();
+        sequences.sort_unstable();
+        assert_eq!(
+            sequences,
+            vec![0, 1, 2],
+            "sequences must be contiguous and unique, not all 0"
+        );
+        let _ = backend;
+    }
 }

@@ -100,6 +100,15 @@ impl TenantScope {
         self.identity.role()
     }
 
+    /// Borrow the underlying database handle for the audited tool-execution
+    /// funnel (`crate::tools::execute::execute_tool_audited`), which needs an
+    /// `Arc<dyn Database>` to persist `ActionRecord` audit rows. Channel-scoped
+    /// tool callers (e.g. the gateway `/restart` command) route their audit
+    /// through this handle rather than re-implementing the audit themselves.
+    pub fn database(&self) -> &Arc<dyn Database> {
+        &self.inner
+    }
+
     // === Jobs ===
 
     pub async fn list_agent_jobs(&self) -> Result<Vec<AgentJobRecord>, DatabaseError> {

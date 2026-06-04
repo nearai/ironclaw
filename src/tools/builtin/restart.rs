@@ -12,8 +12,10 @@
 //!
 //! ## Security
 //!
-//! - **Approval Model:** User approval happens at the command level via web modal confirmation,
-//!   not at tool execution level. This allows approved commands to execute in autonomous jobs.
+//! - **Approval Model:** The tool returns `ApprovalRequirement::Always`, so a model/agent
+//!   invocation through the dispatch loop is gated at execution time. The `/restart` command
+//!   path additionally confirms via a web modal. The dispatch-time gate is the backstop that
+//!   prevents an unattended model or prompt-injection from restarting the process.
 //! - **Web-Only Access:** The `/restart` command only works via the web gateway (enforced in commands.rs)
 //! - **Parameter Validation:** Delay clamped to 1-30 seconds
 //!
@@ -27,15 +29,15 @@ use async_trait::async_trait;
 use std::time::Duration;
 
 use crate::context::JobContext;
-#[allow(unused_imports)]
 use crate::tools::tool::{ApprovalRequirement, Tool, ToolError, ToolOutput};
 
 /// Tool for triggering a graceful process restart via exit code 0.
 ///
 /// This tool signals the Docker entrypoint loop to restart the process by exiting cleanly
-/// (exit code 0). User approval happens at the command level (via the web modal confirmation),
-/// not at tool execution level. The `/restart` command is only callable via the web gateway
-/// interface to prevent unauthorized restarts.
+/// (exit code 0). It returns `ApprovalRequirement::Always`, so any dispatch-loop invocation
+/// (including a model/agent call) is gated by explicit approval; the `/restart` command path
+/// layers a web-modal confirmation on top. The `/restart` command itself is only callable via
+/// the web gateway interface.
 pub struct RestartTool;
 
 #[async_trait]
@@ -156,10 +158,17 @@ impl Tool for RestartTool {
         false
     }
 
-    // NOTE: Approval is handled at the command level (/restart via web modal confirmation),
-    // not at the tool execution level. By the time the tool executes, the user has already
-    // confirmed via the web interface. So we don't require approval here.
-    // This allows the tool to execute in autonomous jobs created from approved commands.
+    // The `/restart` command path gates on a web-modal confirmation, but that
+    // guard only covers the HTTP command handler — it does NOT cover a direct
+    // model/agent tool invocation through the ordinary dispatch loop (the tool
+    // is registered into the live gateway registry and appears in the
+    // model-facing tool list). To prevent a model or prompt-injection from
+    // restarting the process unattended, require explicit approval at dispatch
+    // time regardless of caller. `Always` also blocks autonomous execution
+    // unless `restart` is explicitly listed in the job's allowed tools.
+    fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+        ApprovalRequirement::Always
+    }
 }
 
 #[cfg(test)]
@@ -223,14 +232,18 @@ mod tests {
     }
 
     #[test]
-    fn test_restart_tool_approval_handled_at_command_level() {
-        // Approval is handled at the /restart command level (web modal confirmation),
-        // not at tool execution. Tool execution approval is for user-interactive approvals
-        // that happen during job execution. The restart confirmation modal provides that gate.
+    fn test_restart_tool_requires_approval_at_dispatch() {
+        // The `/restart` web-modal confirmation only gates the HTTP command
+        // handler. A model or prompt-injection can reach the registered
+        // `restart` tool through the ordinary dispatch loop, so the tool itself
+        // must demand explicit approval at dispatch time regardless of caller.
         let tool = RestartTool;
         let approval = tool.requires_approval(&serde_json::json!({}));
-        // Default (Never) allows tool to execute in autonomous jobs created from approved commands
-        assert!(matches!(approval, ApprovalRequirement::Never));
+        assert!(
+            matches!(approval, ApprovalRequirement::Always),
+            "restart must require explicit approval to block unattended model invocation"
+        );
+        assert!(approval.is_required());
     }
 
     #[test]
@@ -506,10 +519,10 @@ mod tests {
         let approval2 = tool.requires_approval(&serde_json::json!({"delay_secs": 100}));
         let approval3 = tool.requires_approval(&serde_json::json!({}));
 
-        // All should return the default (Never) since approval happens at command level
-        assert!(matches!(approval1, ApprovalRequirement::Never));
-        assert!(matches!(approval2, ApprovalRequirement::Never));
-        assert!(matches!(approval3, ApprovalRequirement::Never));
+        // All should require explicit approval regardless of caller-supplied params.
+        assert!(matches!(approval1, ApprovalRequirement::Always));
+        assert!(matches!(approval2, ApprovalRequirement::Always));
+        assert!(matches!(approval3, ApprovalRequirement::Always));
     }
 
     #[test]

@@ -770,23 +770,49 @@ impl Agent {
                     ));
                 }
 
-                // Execute restart tool directly (don't dispatch as a job for LLM planning)
-                // This ensures the tool runs immediately without LLM involvement
-                use crate::tools::Tool;
-                let tool = crate::tools::builtin::RestartTool;
+                // Run the restart tool immediately (don't dispatch as a job for
+                // LLM planning) so it executes without LLM involvement. This is a
+                // user-initiated control action arriving over the gateway channel,
+                // so it goes through the audited funnel (`execute_tool_audited`)
+                // like every other channel-initiated tool execution: it builds an
+                // `ActionRecord` when a store is available, applies the shared
+                // safety pipeline, and is a pure pass-through when no store is
+                // present (store-less setups, exactly like other callers).
+                //
+                // `existing_job_id = None`: there is no pre-persisted `agent_jobs`
+                // row for this control command, so the audited path mints a fresh
+                // system job to back the audit FK. The channel guard above already
+                // restricts this to `gateway`, so `DispatchSource::Channel` carries
+                // that originating channel verbatim.
                 let params = serde_json::json!({});
+                let base_ctx = crate::context::JobContext::with_user(
+                    tenant.user_id(),
+                    "Restart",
+                    "Graceful restart",
+                );
 
-                // Create a minimal JobContext for the tool
-                let dummy_ctx =
-                    crate::context::JobContext::with_user("system", "Restart", "Graceful restart");
-
-                match tool.execute(params, &dummy_ctx).await {
+                let store = tenant.store().map(|scope| scope.database());
+                match crate::tools::execute::execute_tool_audited(
+                    self.tools(),
+                    self.safety(),
+                    store,
+                    "restart",
+                    params,
+                    &base_ctx,
+                    crate::tools::dispatch::DispatchSource::Channel(channel.to_string()),
+                    None,
+                )
+                .await
+                {
                     Ok(output) => {
                         tracing::info!("[commands::restart] RestartTool executed successfully");
-                        // Extract text from the ToolOutput result
-                        let response = match output.result {
-                            serde_json::Value::String(s) => s,
-                            _ => output.result.to_string(),
+                        // `execute_tool_audited` returns the pretty-printed JSON of
+                        // the tool result. RestartTool returns a string result, so
+                        // unwrap the JSON string to preserve the historical
+                        // response shape (plain text, not a quoted JSON string).
+                        let response = match serde_json::from_str::<serde_json::Value>(&output) {
+                            Ok(serde_json::Value::String(s)) => s,
+                            _ => output,
                         };
                         Ok(SubmissionResult::response(response))
                     }
@@ -1284,6 +1310,203 @@ mod tests {
             Some(Arc::new(crate::context::ContextManager::new(1))),
             None,
         )
+    }
+
+    // ── /restart audited-funnel migration (#4019 step 5) ─────────────────────
+    // The /restart command previously ran RestartTool via a throwaway
+    // JobContext and a raw `tool.execute()` — no ActionRecord, no shared safety
+    // pipeline. It now routes through `execute_tool_audited` with
+    // `DispatchSource::Channel(gateway)` and `existing_job_id = None`, so a
+    // gateway-initiated restart persists an audit row like any other
+    // channel-initiated tool execution. This test drives the *caller*
+    // (`handle_system_command`), not the helper, and asserts the ActionRecord
+    // lands while restart behavior (gateway+Docker gating, success response) is
+    // preserved.
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn restart_command_persists_audit_record_via_audited_funnel() {
+        use crate::agent::agent_loop::{Agent, AgentDeps};
+        use crate::agent::cost_guard::{CostGuard, CostGuardConfig};
+        use crate::channels::ChannelManager;
+        use crate::context::ContextManager;
+        use crate::db::{Database as _, UserRecord};
+        use std::ffi::OsString;
+
+        // Serialize env mutation with the global config env lock and enable the
+        // Docker gate without ever terminating the test process (mirrors the
+        // RestartTool tests' guard).
+        struct DockerEnvGuard {
+            _guard: std::sync::MutexGuard<'static, ()>,
+            original_in_docker: Option<OsString>,
+            original_disable_restart: Option<OsString>,
+        }
+        impl DockerEnvGuard {
+            fn enable() -> Self {
+                let guard = crate::config::helpers::lock_env();
+                let original_in_docker = std::env::var_os("IRONCLAW_IN_DOCKER");
+                let original_disable_restart = std::env::var_os("IRONCLAW_DISABLE_RESTART");
+                // SAFETY: env access is serialized via lock_env().
+                unsafe {
+                    std::env::set_var("IRONCLAW_IN_DOCKER", "true");
+                    std::env::set_var("IRONCLAW_DISABLE_RESTART", "true");
+                }
+                Self {
+                    _guard: guard,
+                    original_in_docker,
+                    original_disable_restart,
+                }
+            }
+        }
+        impl Drop for DockerEnvGuard {
+            fn drop(&mut self) {
+                // SAFETY: env access is serialized via lock_env().
+                unsafe {
+                    match &self.original_in_docker {
+                        Some(v) => std::env::set_var("IRONCLAW_IN_DOCKER", v),
+                        None => std::env::remove_var("IRONCLAW_IN_DOCKER"),
+                    }
+                    match &self.original_disable_restart {
+                        Some(v) => std::env::set_var("IRONCLAW_DISABLE_RESTART", v),
+                        None => std::env::remove_var("IRONCLAW_DISABLE_RESTART"),
+                    }
+                }
+            }
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let backend = Arc::new(
+            crate::db::libsql::LibSqlBackend::new_local(&dir.path().join("test.db"))
+                .await
+                .expect("libsql backend"),
+        );
+        backend.run_migrations().await.expect("migrations");
+        let db: Arc<dyn crate::db::Database> = Arc::clone(&backend) as Arc<dyn crate::db::Database>;
+        let now = chrono::Utc::now();
+        db.create_user(&UserRecord {
+            id: "restarter".to_string(),
+            email: None,
+            display_name: "restarter".to_string(),
+            status: "active".to_string(),
+            role: "admin".to_string(),
+            created_at: now,
+            updated_at: now,
+            last_login_at: None,
+            created_by: None,
+            metadata: serde_json::json!({}),
+        })
+        .await
+        .expect("create user");
+
+        let tools = Arc::new(ToolRegistry::new());
+        tools.register_sync(Arc::new(crate::tools::builtin::RestartTool));
+
+        let deps = AgentDeps {
+            owner_id: "restarter".to_string(),
+            store: Some(Arc::clone(&db)),
+            settings_store: None,
+            llm: Arc::new(StaticLlmProvider),
+            cheap_llm: None,
+            safety: Arc::new(SafetyLayer::new(&SafetyConfig {
+                max_output_length: 100_000,
+                injection_check_enabled: false,
+            })),
+            tools,
+            workspace: None,
+            extension_manager: None,
+            skill_registry: None,
+            skill_catalog: None,
+            skills_config: SkillsConfig::default(),
+            hooks: Arc::new(HookRegistry::new()),
+            auth_manager: None,
+            cost_guard: Arc::new(CostGuard::new(CostGuardConfig::default())),
+            sse_tx: None,
+            http_interceptor: None,
+            transcription: None,
+            document_extraction: None,
+            sandbox_readiness: crate::agent::routine_engine::SandboxReadiness::DisabledByConfig,
+            builder: None,
+            llm_backend: "nearai".to_string(),
+            tenant_rates: Arc::new(crate::tenant::TenantRateRegistry::new(4, 3)),
+            runtime_policy: None,
+        };
+        let agent = Agent::new(
+            AgentConfig {
+                name: "restart-test-agent".to_string(),
+                max_parallel_jobs: 1,
+                job_timeout: Duration::from_secs(60),
+                stuck_threshold: Duration::from_secs(60),
+                repair_check_interval: Duration::from_secs(30),
+                max_repair_attempts: 1,
+                use_planning: false,
+                session_idle_timeout: Duration::from_secs(300),
+                allow_local_tools: false,
+                max_cost_per_day_cents: None,
+                max_actions_per_hour: None,
+                max_cost_per_user_per_day_cents: None,
+                max_tool_iterations: 5,
+                auto_approve_tools: false,
+                default_timezone: "UTC".to_string(),
+                max_jobs_per_user: None,
+                max_tokens_per_job: 0,
+                multi_tenant: false,
+                max_llm_concurrent_per_user: None,
+                max_jobs_concurrent_per_user: None,
+                engine_v2: false,
+            },
+            deps,
+            Arc::new(ChannelManager::new()),
+            None,
+            None,
+            None,
+            Some(Arc::new(ContextManager::new(1))),
+            None,
+        );
+
+        let tenant = agent.tenant_ctx("restarter").await;
+
+        let result = {
+            let _env = DockerEnvGuard::enable();
+            agent
+                .handle_system_command("restart", &[], "gateway", &tenant)
+                .await
+                .expect("restart command should run")
+        };
+
+        // Restart behavior preserved: success response (process not terminated
+        // because IRONCLAW_DISABLE_RESTART is set).
+        assert!(
+            matches!(&result, SubmissionResult::Response { content } if content.contains("Restarting")),
+            "restart should return the success response, got: {result:?}"
+        );
+
+        // Audit: a fresh system job for the restart was created and carries a
+        // `restart` ActionRecord — the bypass is now funneled. System jobs are
+        // excluded from `list_agent_jobs_for_user` (source != 'direct'), so we
+        // read them out of the `category = 'system'` rows directly.
+        let actions = {
+            use libsql::params;
+            let conn = backend.connect().await.expect("connect");
+            let mut rows = conn
+                .query(
+                    "SELECT id FROM agent_jobs WHERE category = 'system' AND user_id = ?1",
+                    params!["restarter"],
+                )
+                .await
+                .expect("query system jobs");
+            let mut found = Vec::new();
+            while let Some(row) = rows.next().await.expect("next") {
+                let id_str: String = row.get(0).expect("id");
+                if let Ok(job_id) = id_str.parse::<uuid::Uuid>() {
+                    found.extend(db.get_job_actions(job_id).await.expect("get actions"));
+                }
+            }
+            found
+        };
+        assert!(
+            actions.iter().any(|a| a.tool_name == "restart"),
+            "an ActionRecord for the restart tool call must be persisted, got: {:?}",
+            actions.iter().map(|a| &a.tool_name).collect::<Vec<_>>()
+        );
     }
 
     #[cfg(feature = "libsql")]
