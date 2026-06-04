@@ -395,12 +395,14 @@ mod tests {
         UpdateAssistantDraftRequest, UpdateThreadGoalRequest, UpdateToolResultReferenceRequest,
     };
     use ironclaw_triggers::{
-        InMemoryTriggerRepository, ScheduleTriggerSourceProvider, TriggerActiveRunLookup,
-        TriggerActiveRunState, TriggerActiveRunStateRequest, TriggerCompletionPolicy, TriggerError,
-        TriggerFire, TriggerFireIdentity, TriggerId, TriggerInboundContentRef,
-        TriggerMaterializedPrompt, TriggerPollerFailureReason, TriggerPollerFireOutcome,
-        TriggerPollerWorker, TriggerPollerWorkerConfig, TriggerPollerWorkerDeps, TriggerRecord,
-        TriggerRepository, TriggerSchedule, TriggerSourceKind, TriggerState,
+        InMemoryTriggerRepository, ScheduleTriggerSourceProvider,
+        TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID, TRIGGER_TRUSTED_ADAPTER_KIND,
+        TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerActiveRunLookup, TriggerActiveRunState,
+        TriggerActiveRunStateRequest, TriggerCompletionPolicy, TriggerError, TriggerFire,
+        TriggerFireIdentity, TriggerId, TriggerInboundContentRef, TriggerMaterializedPrompt,
+        TriggerPollerFailureReason, TriggerPollerFireOutcome, TriggerPollerWorker,
+        TriggerPollerWorkerConfig, TriggerPollerWorkerDeps, TriggerRecord, TriggerRepository,
+        TriggerSchedule, TriggerSourceKind, TriggerState,
     };
     use ironclaw_turns::{
         AcceptedMessageRef, AdmissionRejection, AdmissionRejectionReason, CancelRunRequest,
@@ -1104,9 +1106,14 @@ mod tests {
         conversations
             .pair_external_actor(
                 tenant_id.clone(),
-                AdapterKind::new("trigger").expect("adapter kind"),
-                AdapterInstallationId::new("reborn-trigger-poller").expect("installation id"),
-                ExternalActorRef::new("user", creator_user_id.as_str()).expect("actor ref"),
+                AdapterKind::new(TRIGGER_TRUSTED_ADAPTER_KIND).expect("adapter kind"),
+                AdapterInstallationId::new(TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID)
+                    .expect("installation id"),
+                ExternalActorRef::new(
+                    TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE,
+                    creator_user_id.as_str(),
+                )
+                .expect("actor ref"),
                 creator_user_id.clone(),
             )
             .await;
@@ -1236,9 +1243,14 @@ mod tests {
         conversations
             .pair_external_actor(
                 tenant_id.clone(),
-                AdapterKind::new("trigger").expect("adapter kind"),
-                AdapterInstallationId::new("reborn-trigger-poller").expect("installation id"),
-                ExternalActorRef::new("user", creator_user_id.as_str()).expect("actor ref"),
+                AdapterKind::new(TRIGGER_TRUSTED_ADAPTER_KIND).expect("adapter kind"),
+                AdapterInstallationId::new(TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID)
+                    .expect("installation id"),
+                ExternalActorRef::new(
+                    TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE,
+                    creator_user_id.as_str(),
+                )
+                .expect("actor ref"),
                 creator_user_id.clone(),
             )
             .await;
@@ -1384,9 +1396,14 @@ mod tests {
         conversations
             .pair_external_actor(
                 tenant_id.clone(),
-                AdapterKind::new("trigger").expect("adapter kind"),
-                AdapterInstallationId::new("reborn-trigger-poller").expect("installation id"),
-                ExternalActorRef::new("user", creator_user_id.as_str()).expect("actor ref"),
+                AdapterKind::new(TRIGGER_TRUSTED_ADAPTER_KIND).expect("adapter kind"),
+                AdapterInstallationId::new(TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID)
+                    .expect("installation id"),
+                ExternalActorRef::new(
+                    TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE,
+                    creator_user_id.as_str(),
+                )
+                .expect("actor ref"),
                 creator_user_id.clone(),
             )
             .await;
@@ -1495,9 +1512,14 @@ mod tests {
         conversations
             .pair_external_actor(
                 tenant_id.clone(),
-                AdapterKind::new("trigger").expect("adapter kind"),
-                AdapterInstallationId::new("reborn-trigger-poller").expect("installation id"),
-                ExternalActorRef::new("user", creator_user_id.as_str()).expect("actor ref"),
+                AdapterKind::new(TRIGGER_TRUSTED_ADAPTER_KIND).expect("adapter kind"),
+                AdapterInstallationId::new(TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID)
+                    .expect("installation id"),
+                ExternalActorRef::new(
+                    TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE,
+                    creator_user_id.as_str(),
+                )
+                .expect("actor ref"),
                 creator_user_id.clone(),
             )
             .await;

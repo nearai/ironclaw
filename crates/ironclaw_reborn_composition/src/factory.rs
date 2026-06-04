@@ -1,3 +1,4 @@
+// arch-exempt: large_file, needs Reborn composition helper extraction, plan #4469
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
@@ -1181,7 +1182,10 @@ async fn pair_trigger_creator(
 }
 
 fn trigger_pairing_error(_error: impl std::fmt::Display) -> TriggerError {
-    tracing::debug!("trigger creator actor pairing failed");
+    tracing::debug!(
+        error_kind = "pairing_failure",
+        "trigger creator actor pairing failed"
+    );
     TriggerError::Backend {
         reason: "trigger creator actor pairing failed".to_string(),
     }
@@ -2508,8 +2512,10 @@ mod tests {
         CredentialOwnership, GOOGLE_CALENDAR_EVENTS_SCOPE, GOOGLE_GMAIL_SEND_SCOPE,
         NewCredentialAccount, ProviderScope,
     };
+    use ironclaw_filesystem::FilesystemError;
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
     use ironclaw_filesystem::{
-        DirEntry, FileStat, FilesystemError, FilesystemOperation, RootFilesystem, VersionedEntry,
+        DirEntry, FileStat, FilesystemOperation, RootFilesystem, VersionedEntry,
     };
     use ironclaw_host_api::{
         CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind,
@@ -2619,17 +2625,75 @@ mod tests {
     #[cfg(any(feature = "libsql", feature = "postgres"))]
     #[tokio::test]
     async fn durable_trigger_conversation_services_propagates_init_error() {
-        let filesystem = Arc::new(ScopedFilesystem::with_fixed_view(
-            Arc::new(FailingConversationStateFilesystem),
-            MountView::new(vec![MountGrant::new(
-                MountAlias::new("/conversations").expect("mount alias"),
-                VirtualPath::new("/conversations").expect("virtual path"),
-                MountPermissions::read_write_list_delete(),
-            )])
-            .expect("mount view"),
-        ));
+        let local_dev_root = tempfile::tempdir().expect("tempdir");
+        let owner_user_id = "pairing-owner";
+        let services = build_reborn_services(RebornBuildInput::local_dev(
+            owner_user_id,
+            local_dev_root.path().join("local-dev"),
+        ))
+        .await
+        .expect("local-dev services build");
 
-        let error = match RebornFilesystemConversationServices::new(filesystem).await {
+        let base_runtime = services.local_runtime.expect("local runtime");
+        let mut failing_root = CompositeRootFilesystem::new();
+        failing_root
+            .mount(
+                local_dev_mount_descriptor(
+                    "/conversations",
+                    "failing-conversation-state",
+                    BackendKind::Custom("test".to_string()),
+                    StorageClass::StructuredRecords,
+                    ContentKind::StructuredRecord,
+                    IndexPolicy::NotIndexed,
+                    BackendCapabilities::default(),
+                )
+                .expect("mount descriptor"),
+                Arc::new(FailingConversationStateFilesystem),
+            )
+            .expect("mount failing backend");
+        let runtime = Arc::new(RebornLocalRuntimeServices {
+            approval_requests: Arc::clone(&base_runtime.approval_requests),
+            capability_leases: Arc::clone(&base_runtime.capability_leases),
+            turn_state: Arc::clone(&base_runtime.turn_state),
+            trigger_repository: Arc::clone(&base_runtime.trigger_repository),
+            #[cfg(not(any(feature = "libsql", feature = "postgres")))]
+            trigger_conversation_services: base_runtime.trigger_conversation_services.clone(),
+            #[cfg(any(feature = "libsql", feature = "postgres"))]
+            trigger_conversation_services: tokio::sync::OnceCell::new(),
+            checkpoint_state_store: Arc::clone(&base_runtime.checkpoint_state_store),
+            loop_checkpoint_store: Arc::clone(&base_runtime.loop_checkpoint_store),
+            thread_service: Arc::clone(&base_runtime.thread_service),
+            resource_governor: Arc::clone(&base_runtime.resource_governor),
+            budget_event_sink: Arc::clone(&base_runtime.budget_event_sink),
+            in_memory_budget_event_sink: Arc::clone(&base_runtime.in_memory_budget_event_sink),
+            broadcast_budget_event_sink: Arc::clone(&base_runtime.broadcast_budget_event_sink),
+            budget_gate_store: Arc::clone(&base_runtime.budget_gate_store),
+            skill_management: Arc::clone(&base_runtime.skill_management),
+            extension_management: base_runtime.extension_management.clone(),
+            runtime_http_egress: base_runtime.runtime_http_egress.clone(),
+            skill_mounts: base_runtime.skill_mounts.clone(),
+            memory_mounts: base_runtime.memory_mounts.clone(),
+            skill_filesystem: Arc::clone(&base_runtime.skill_filesystem),
+            workspace_filesystem: Arc::clone(&base_runtime.workspace_filesystem),
+            #[cfg(feature = "slack-v2-host-beta")]
+            host_state_filesystem: Arc::clone(&base_runtime.host_state_filesystem),
+            subagent_goal_filesystem: Arc::new(ScopedFilesystem::with_fixed_view(
+                Arc::new(failing_root),
+                MountView::new(vec![MountGrant::new(
+                    MountAlias::new("/conversations").expect("mount alias"),
+                    VirtualPath::new("/conversations").expect("virtual path"),
+                    MountPermissions::read_write_list_delete(),
+                )])
+                .expect("mount view"),
+            )),
+            workspace_mounts: base_runtime.workspace_mounts.clone(),
+            local_dev_storage_root: base_runtime.local_dev_storage_root.clone(),
+            default_system_prompt_path: base_runtime.default_system_prompt_path.clone(),
+            event_log: Arc::clone(&base_runtime.event_log),
+            audit_log: Arc::clone(&base_runtime.audit_log),
+        });
+
+        let error = match runtime.durable_trigger_conversation_services().await {
             Ok(_) => panic!("conversation service init should fail"),
             Err(error) => error,
         };
