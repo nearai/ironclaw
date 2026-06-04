@@ -175,6 +175,7 @@ fn flatten_config(config: &ironclaw_reborn_config::RebornConfigFile) -> Vec<Conf
         trigger_poller: Some(config.trigger_poller.clone().unwrap_or_default()),
     };
 
+    // safety: RebornConfigFile and all section structs derive Serialize — serialization to Value cannot fail.
     let value = serde_json::to_value(&expanded).expect("RebornConfigFile implements Serialize");
     let mut entries = Vec::new();
     collect_leaf_entries(&value, String::new(), &mut entries);
