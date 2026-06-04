@@ -26,3 +26,25 @@ test("fetchAutomations reads through the v2 automations route", async () => {
   assert.equal(calls[0].options.credentials, "same-origin");
   assert.equal(calls[0].options.headers.get("Authorization"), "Bearer token-1");
 });
+
+test("fetchAutomations propagates api errors from the automations route", async () => {
+  globalThis.sessionStorage = {
+    getItem: () => "",
+    setItem: () => {},
+    removeItem: () => {},
+  };
+  globalThis.fetch = async () =>
+    new Response("temporarily unavailable", {
+      status: 503,
+      statusText: "Service Unavailable",
+      headers: { "content-type": "text/plain" },
+    });
+
+  await assert.rejects(fetchAutomations(), (error) => {
+    assert.equal(error.name, "ApiError");
+    assert.equal(error.status, 503);
+    assert.equal(error.statusText, "Service Unavailable");
+    assert.equal(error.body, "temporarily unavailable");
+    return true;
+  });
+});

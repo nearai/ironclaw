@@ -2,11 +2,15 @@ import { Button } from "../../../design-system/button.js";
 import { Icon } from "../../../design-system/icons.js";
 import { EmptyPanel, Panel, StatusPill } from "../../../design-system/primitives.js";
 import { html } from "../../../lib/html.js";
+import { useT } from "../../../lib/i18n.js";
 import { cn } from "../../../utils/cn.js";
-import {
-  AUTOMATION_FILTERS,
-  filterAutomations,
-} from "../lib/automations-presenters.js";
+import { filterAutomations } from "../lib/automations-presenters.js";
+
+const AUTOMATION_FILTERS = [
+  { value: "all", labelKey: "automations.filter.all" },
+  { value: "active", labelKey: "automations.filter.active" },
+  { value: "paused", labelKey: "automations.filter.paused" },
+];
 
 export function AutomationsList({
   automations,
@@ -15,7 +19,9 @@ export function AutomationsList({
   onRefresh,
   isRefreshing,
 }) {
+  const t = useT();
   const filtered = filterAutomations(automations, filter);
+  const hasAutomations = automations.length > 0;
 
   return html`
     <div className="space-y-5">
@@ -23,13 +29,13 @@ export function AutomationsList({
         <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
           <div>
             <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-iron-300">
-              Scheduled work
+              ${t("automations.eyebrow")}
             </div>
             <h2 className="mt-2 text-2xl font-semibold tracking-tight text-iron-100">
-              Automations
+              ${t("automations.title")}
             </h2>
             <p className="mt-2 max-w-2xl text-sm leading-6 text-iron-300">
-              Scheduled automations only.
+              ${t("automations.description")}
             </p>
           </div>
 
@@ -37,7 +43,7 @@ export function AutomationsList({
             <div
               className="inline-flex overflow-hidden rounded-[10px] border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)]"
               role="group"
-              aria-label="Automation status filter"
+              aria-label=${t("automations.filterLabel")}
             >
               ${AUTOMATION_FILTERS.map((item) => html`
                 <button
@@ -52,14 +58,14 @@ export function AutomationsList({
                       : "text-[var(--v2-text-muted)] hover:bg-[var(--v2-surface-muted)] hover:text-[var(--v2-text-strong)]"
                   )}
                 >
-                  ${item.label}
+                  ${t(item.labelKey)}
                 </button>
               `)}
             </div>
             <${Button}
               variant="secondary"
               size="icon-sm"
-              aria-label="Refresh automations"
+              aria-label=${t("automations.refresh")}
               disabled=${isRefreshing}
               onClick=${onRefresh}
             >
@@ -72,10 +78,12 @@ export function AutomationsList({
       ${!filtered.length
         ? html`
             <${EmptyPanel}
-              title=${automations.length ? "No matching automations" : "No scheduled automations yet."}
-              description=${automations.length
-                ? "Try a different status filter."
-                : "This agent has no scheduled work to show."}
+              title=${hasAutomations
+                ? t("automations.empty.matchingTitle")
+                : t("automations.empty.noneTitle")}
+              description=${hasAutomations
+                ? t("automations.empty.matchingDescription")
+                : t("automations.empty.noneDescription")}
             />
           `
         : html`
@@ -85,19 +93,19 @@ export function AutomationsList({
                   <thead>
                     <tr className="border-b border-[var(--v2-panel-border)] text-left">
                       <th className="px-5 py-3 text-xs font-semibold uppercase tracking-[0.12em] text-iron-300">
-                        Name
+                        ${t("automations.table.name")}
                       </th>
                       <th className="px-5 py-3 text-xs font-semibold uppercase tracking-[0.12em] text-iron-300">
-                        Schedule
+                        ${t("automations.table.schedule")}
                       </th>
                       <th className="px-5 py-3 text-xs font-semibold uppercase tracking-[0.12em] text-iron-300">
-                        Next run
+                        ${t("automations.table.nextRun")}
                       </th>
                       <th className="px-5 py-3 text-xs font-semibold uppercase tracking-[0.12em] text-iron-300">
-                        Last run
+                        ${t("automations.table.lastRun")}
                       </th>
                       <th className="px-5 py-3 text-xs font-semibold uppercase tracking-[0.12em] text-iron-300">
-                        Status
+                        ${t("automations.table.status")}
                       </th>
                     </tr>
                   </thead>

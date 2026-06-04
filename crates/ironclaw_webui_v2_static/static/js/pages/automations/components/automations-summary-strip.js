@@ -1,35 +1,37 @@
 import { html } from "../../../lib/html.js";
+import { useT } from "../../../lib/i18n.js";
 import { Panel, StatCard } from "../../../design-system/primitives.js";
 
 export function AutomationsSummaryStrip({ summary }) {
+  const t = useT();
   const cards = [
     {
       key: "scheduled",
-      label: "Scheduled",
+      label: t("automations.summary.scheduled"),
       value: summary?.scheduled ?? 0,
       tone: "muted",
-      detail: "Scheduled automations visible to this agent.",
+      detail: t("automations.summary.scheduledDetail"),
     },
     {
       key: "active",
-      label: "Active",
+      label: t("automations.summary.active"),
       value: summary?.active ?? 0,
       tone: "signal",
-      detail: "Enabled schedules waiting for their next run.",
+      detail: t("automations.summary.activeDetail"),
     },
     {
       key: "paused",
-      label: "Paused",
+      label: t("automations.summary.paused"),
       value: summary?.paused ?? 0,
       tone: "warning",
-      detail: "Schedules currently not expected to run.",
+      detail: t("automations.summary.pausedDetail"),
     },
     {
       key: "nextRun",
-      label: "Next run",
-      value: summary?.nextRun || "None",
+      label: t("automations.summary.nextRun"),
+      value: summary?.nextRun || t("automations.summary.none"),
       tone: "info",
-      detail: "Soonest scheduled run in this list.",
+      detail: t("automations.summary.nextRunDetail"),
     },
   ];
 

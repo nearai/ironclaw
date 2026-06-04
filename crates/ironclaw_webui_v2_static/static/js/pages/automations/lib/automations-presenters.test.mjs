@@ -79,40 +79,75 @@ test("scheduleLabel presents common recurring schedules in friendly language", (
   assert.equal(scheduleLabel("* 0 9 * * *"), "Custom schedule");
 });
 
-test("filterAutomations and automationSummary use browser-safe state fields", () => {
+test("filterAutomations, sorting, and summary use browser-visible active state", () => {
   const automations = normalizeAutomations({
     automations: [
       {
         automation_id: "active",
         name: "Active",
         source: { type: "schedule", cron: "0 9 * * *" },
-        state: "scheduled",
-        is_active: true,
+        state: "active",
+        is_active: false,
         next_run_at: "2026-06-05T17:00:00Z",
+      },
+      {
+        automation_id: "scheduled",
+        name: "Scheduled",
+        source: { type: "schedule", cron: "0 10 * * *" },
+        state: "scheduled",
+        is_active: false,
+        next_run_at: "2026-06-05T16:00:00Z",
       },
       {
         automation_id: "paused",
         name: "Paused",
-        source: { type: "schedule", cron: "0 10 * * *" },
+        source: { type: "schedule", cron: "0 11 * * *" },
         state: "paused",
-        is_active: false,
-        next_run_at: "2026-06-05T16:00:00Z",
+        is_active: true,
+        next_run_at: "2026-06-05T18:00:00Z",
       },
     ],
   });
 
   assert.deepEqual(
+    automations.map((automation) => automation.automation_id),
+    ["scheduled", "active", "paused"],
+  );
+  assert.deepEqual(
     filterAutomations(automations, "active").map((automation) => automation.automation_id),
-    ["active"],
+    ["scheduled", "active"],
   );
   assert.deepEqual(
     filterAutomations(automations, "paused").map((automation) => automation.automation_id),
     ["paused"],
   );
   assert.deepEqual(automationSummary(automations), {
-    scheduled: 2,
-    active: 1,
+    scheduled: 3,
+    active: 2,
     paused: 1,
-    nextRun: automations[1].next_run_label,
+    nextRun: automations[0].next_run_label,
+  });
+});
+
+test("automationSummary ignores unparseable next_run_at values", () => {
+  const automations = normalizeAutomations({
+    automations: [
+      {
+        automation_id: "invalid-next-run",
+        name: "Invalid next run",
+        source: { type: "schedule", cron: "0 9 * * *" },
+        state: "scheduled",
+        is_active: false,
+        next_run_at: "not-a-date",
+      },
+    ],
+  });
+
+  assert.equal(automations[0].next_run_label, "Not scheduled");
+  assert.deepEqual(automationSummary(automations), {
+    scheduled: 1,
+    active: 1,
+    paused: 0,
+    nextRun: "None",
   });
 });

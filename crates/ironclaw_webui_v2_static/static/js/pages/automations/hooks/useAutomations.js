@@ -10,7 +10,8 @@ export function useAutomations() {
   const query = useQuery({
     queryKey: ["automations"],
     queryFn: fetchAutomations,
-    refetchInterval: 5000,
+    refetchInterval: 30000,
+    refetchIntervalInBackground: false,
   });
 
   const automations = normalizeAutomations(query.data);

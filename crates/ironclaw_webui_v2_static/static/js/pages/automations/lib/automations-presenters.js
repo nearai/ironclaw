@@ -22,11 +22,19 @@ const MONTHS = [
   "Dec",
 ];
 
-export const AUTOMATION_FILTERS = [
-  { value: "all", label: "All" },
-  { value: "active", label: "Active" },
-  { value: "paused", label: "Paused" },
-];
+const STATE_PRESENTATION = {
+  active: { label: "Active", tone: "signal" },
+  scheduled: { label: "Scheduled", tone: "signal" },
+  paused: { label: "Paused", tone: "warning" },
+  disabled: { label: "Disabled", tone: "warning" },
+  inactive: { label: "Inactive", tone: "warning" },
+  completed: { label: "Completed", tone: "success" },
+};
+
+const LAST_STATUS_PRESENTATION = {
+  ok: { label: "Done", tone: "success" },
+  error: { label: "Error", tone: "danger" },
+};
 
 export function normalizeAutomations(response) {
   const automations = Array.isArray(response?.automations)
@@ -40,6 +48,7 @@ export function normalizeAutomations(response) {
       schedule_label: scheduleLabel(automation.source?.cron),
       state_label: stateLabel(automation.state, automation.is_active),
       state_tone: stateTone(automation.state, automation.is_active),
+      next_run_timestamp: parseTimestamp(automation.next_run_at),
       next_run_label: formatAutomationDate(automation.next_run_at, "Not scheduled"),
       last_run_label: formatAutomationDate(automation.last_run_at, "No runs yet"),
       last_status_label: lastStatusLabel(automation.last_status),
@@ -51,7 +60,7 @@ export function normalizeAutomations(response) {
 
 export function filterAutomations(automations, filter) {
   if (filter === "active") {
-    return automations.filter((automation) => automation.is_active);
+    return automations.filter((automation) => isBrowserActive(automation));
   }
   if (filter === "paused") {
     return automations.filter((automation) =>
@@ -62,13 +71,17 @@ export function filterAutomations(automations, filter) {
 }
 
 export function automationSummary(automations) {
-  const active = automations.filter((automation) => automation.is_active).length;
+  const active = automations.filter((automation) => isBrowserActive(automation)).length;
   const paused = automations.filter((automation) =>
     ["paused", "disabled", "inactive"].includes(automation.state)
   ).length;
   const next = automations
-    .filter((automation) => automation.next_run_at)
-    .sort((a, b) => timestamp(a.next_run_at) - timestamp(b.next_run_at))[0];
+    .filter((automation) => nextRunTimestamp(automation) !== null)
+    .sort(
+      (a, b) =>
+        (nextRunTimestamp(a) ?? Number.MAX_SAFE_INTEGER) -
+        (nextRunTimestamp(b) ?? Number.MAX_SAFE_INTEGER),
+    )[0];
   return {
     scheduled: automations.length,
     active,
@@ -134,45 +147,41 @@ export function formatAutomationDate(value, fallback = "Unknown") {
 }
 
 export function stateLabel(state, isActive) {
-  if (state === "paused") return "Paused";
-  if (state === "disabled") return "Disabled";
-  if (state === "inactive") return "Inactive";
-  if (state === "completed") return "Completed";
-  if (state === "scheduled") return "Scheduled";
-  if (state === "active" || isActive) return "Active";
-  return "Unknown";
+  return STATE_PRESENTATION[state]?.label || (isActive ? "Active" : "Unknown");
 }
 
 export function stateTone(state, isActive) {
-  if (state === "paused" || state === "disabled" || state === "inactive") {
-    return "warning";
-  }
-  if (state === "completed") return "success";
-  if (state === "active" || state === "scheduled" || isActive) return "signal";
-  return "muted";
+  return STATE_PRESENTATION[state]?.tone || (isActive ? "signal" : "muted");
 }
 
 export function lastStatusLabel(status) {
-  if (status === "ok") return "Done";
-  if (status === "error") return "Error";
-  return "No result";
+  return LAST_STATUS_PRESENTATION[status]?.label || "No result";
 }
 
 export function lastStatusTone(status) {
-  if (status === "ok") return "success";
-  if (status === "error") return "danger";
-  return "muted";
+  return LAST_STATUS_PRESENTATION[status]?.tone || "muted";
 }
 
 function compareAutomations(a, b) {
-  if (a.is_active !== b.is_active) return a.is_active ? -1 : 1;
-  return timestamp(a.next_run_at) - timestamp(b.next_run_at);
+  const aActive = isBrowserActive(a);
+  const bActive = isBrowserActive(b);
+  if (aActive !== bActive) return aActive ? -1 : 1;
+  return (nextRunTimestamp(a) ?? Number.MAX_SAFE_INTEGER) -
+    (nextRunTimestamp(b) ?? Number.MAX_SAFE_INTEGER);
 }
 
-function timestamp(value) {
-  if (!value) return Number.MAX_SAFE_INTEGER;
+function parseTimestamp(value) {
+  if (!value) return null;
   const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? Number.MAX_SAFE_INTEGER : date.getTime();
+  return Number.isNaN(date.getTime()) ? null : date.getTime();
+}
+
+function isBrowserActive(automation) {
+  return automation?.state === "active" || automation?.state === "scheduled";
+}
+
+function nextRunTimestamp(automation) {
+  return automation?.next_run_timestamp ?? parseTimestamp(automation?.next_run_at);
 }
 
 function formatCronTime(hour, minute) {

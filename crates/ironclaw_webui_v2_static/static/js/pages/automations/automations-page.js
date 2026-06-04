@@ -1,9 +1,11 @@
 import { React, html } from "../../lib/html.js";
+import { useT } from "../../lib/i18n.js";
 import { AutomationsList } from "./components/automations-list.js";
 import { AutomationsSummaryStrip } from "./components/automations-summary-strip.js";
 import { useAutomations } from "./hooks/useAutomations.js";
 
 export function AutomationsPage() {
+  const t = useT();
   const [filter, setFilter] = React.useState("all");
   const automationsState = useAutomations();
 
@@ -16,7 +18,7 @@ export function AutomationsPage() {
             <div
               className="rounded-xl border border-red-400/30 bg-red-500/10 px-4 py-3 text-sm text-red-200"
             >
-              ${automationsState.error.message || "Unable to load automations"}
+              ${automationsState.error.message || t("automations.error.loadFailed")}
             </div>
           `}
 

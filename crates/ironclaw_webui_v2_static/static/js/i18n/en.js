@@ -564,6 +564,38 @@ registerPack("en", {
   "missions.summary.completedFailed": "{completed} completed / {failed} failed",
   "missions.summary.acrossProjects": "Across every project workspace",
 
+  // Automations page
+  "automations.eyebrow": "Scheduled work",
+  "automations.title": "Automations",
+  "automations.description": "Scheduled automations only.",
+  "automations.filterLabel": "Automation status filter",
+  "automations.filter.all": "All",
+  "automations.filter.active": "Active",
+  "automations.filter.paused": "Paused",
+  "automations.refresh": "Refresh automations",
+  "automations.error.loadFailed": "Unable to load automations",
+  "automations.summary.scheduled": "Scheduled",
+  "automations.summary.scheduledDetail":
+    "Scheduled automations visible to this agent.",
+  "automations.summary.active": "Active",
+  "automations.summary.activeDetail":
+    "Enabled schedules waiting for their next run.",
+  "automations.summary.paused": "Paused",
+  "automations.summary.pausedDetail":
+    "Schedules currently not expected to run.",
+  "automations.summary.nextRun": "Next run",
+  "automations.summary.none": "None",
+  "automations.summary.nextRunDetail": "Soonest scheduled run in this list.",
+  "automations.empty.matchingTitle": "No matching automations",
+  "automations.empty.matchingDescription": "Try a different status filter.",
+  "automations.empty.noneTitle": "No scheduled automations yet.",
+  "automations.empty.noneDescription": "This agent has no scheduled work to show.",
+  "automations.table.name": "Name",
+  "automations.table.schedule": "Schedule",
+  "automations.table.nextRun": "Next run",
+  "automations.table.lastRun": "Last run",
+  "automations.table.status": "Status",
+
   // Routines page
   "routines.explorer": "Tasks",
   "routines.title": "Routines",
