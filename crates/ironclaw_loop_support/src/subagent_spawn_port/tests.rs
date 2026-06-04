@@ -1206,6 +1206,18 @@ async fn spawn_tool_definition_is_present_in_structured_tools() {
         definition.parameters["properties"]["handoff"]["maxLength"],
         json!(DEFAULT_SUBAGENT_GOAL_MAX_BYTES)
     );
+    assert!(
+        definition.parameters["properties"]["task"]["description"]
+            .as_str()
+            .expect("task description")
+            .contains("UTF-8 byte budget")
+    );
+    assert!(
+        definition.parameters["properties"]["handoff"]["description"]
+            .as_str()
+            .expect("handoff description")
+            .contains("UTF-8 byte budget")
+    );
     assert!(definition.parameters["properties"].get("handoff").is_some());
     assert!(definition.parameters["properties"].get("mode").is_none());
     assert!(
@@ -2094,6 +2106,32 @@ async fn json_spawn_input_codec_rejects_oversized_goal_fields() {
             error.safe_summary
         );
     }
+}
+
+#[tokio::test]
+async fn json_spawn_input_codec_uses_utf8_byte_budget_for_multibyte_goal_fields() {
+    let context = test_run_context("spawn-codec-multibyte-goal").await;
+    let multibyte = "\u{8a9e}";
+    let oversized = multibyte.repeat(DEFAULT_SUBAGENT_GOAL_MAX_BYTES / multibyte.len() + 1);
+    assert!(oversized.chars().count() <= DEFAULT_SUBAGENT_GOAL_MAX_BYTES);
+    assert!(oversized.len() > DEFAULT_SUBAGENT_GOAL_MAX_BYTES);
+
+    let codec = JsonSpawnSubagentInputCodec::new(Arc::new(StaticInputResolver {
+        value: Ok(json!({
+            "flavor_id": "general",
+            "task": oversized,
+        })),
+    }));
+
+    let error = codec.decode(&context, &input_ref()).await.unwrap_err();
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+    assert!(
+        error
+            .safe_summary
+            .contains("spawn_subagent task is too large")
+    );
+    assert!(error.safe_summary.contains("bytes"));
 }
 
 #[tokio::test]

@@ -58,12 +58,12 @@ fn spawn_subagent_parameters_schema() -> serde_json::Value {
             "task": {
                 "type": "string",
                 "maxLength": DEFAULT_SUBAGENT_GOAL_MAX_BYTES,
-                "description": "Self-contained task for the child subagent run."
+                "description": "Self-contained task for the child subagent run. Runtime enforces a UTF-8 byte budget; maxLength is a provider-facing character-count hint."
             },
             "handoff": {
                 "type": "string",
                 "maxLength": DEFAULT_SUBAGENT_GOAL_MAX_BYTES,
-                "description": "Optional context appended to the child subagent prompt."
+                "description": "Optional context appended to the child subagent prompt. Runtime enforces a UTF-8 byte budget; maxLength is a provider-facing character-count hint."
             }
         }
     })
