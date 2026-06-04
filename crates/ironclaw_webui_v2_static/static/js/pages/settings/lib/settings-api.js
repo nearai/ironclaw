@@ -60,6 +60,15 @@ export function startNearaiLogin(payload) {
     body: JSON.stringify(payload),
   });
 }
+
+// Begin an OpenAI Codex (ChatGPT subscription) device-code login. Returns
+// { user_code, verification_uri } to display; a background task polls for
+// authorization, stores the tokens, and makes Codex active once authorized.
+export function startCodexLogin() {
+  return apiFetch("/api/webchat/v2/llm/codex/login", {
+    method: "POST",
+  });
+}
 export function fetchTools() {
   return Promise.resolve({ tools: [], todo: true });
 }

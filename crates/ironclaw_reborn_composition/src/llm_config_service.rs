@@ -21,10 +21,12 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_llm::registry::{ProviderDefinition, ProviderProtocol, ProviderRegistry};
+use ironclaw_llm::{OpenAiCodexConfig, OpenAiCodexSessionManager};
 use ironclaw_product_workflow::{
-    LlmActiveSelection, LlmConfigService, LlmConfigServiceError, LlmConfigSnapshot,
-    LlmModelsResult, LlmProbeRequest, LlmProbeResult, LlmProviderView, NearAiLoginRequest,
-    NearAiLoginStart, SetActiveLlmRequest, UpsertLlmProviderRequest, WebUiAuthenticatedCaller,
+    CodexLoginStart, LlmActiveSelection, LlmConfigService, LlmConfigServiceError,
+    LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult, LlmProviderView,
+    NearAiLoginRequest, NearAiLoginStart, SetActiveLlmRequest, UpsertLlmProviderRequest,
+    WebUiAuthenticatedCaller,
 };
 use ironclaw_reborn_config::{LlmSlotSelection, RebornBootConfig};
 use secrecy::{ExposeSecret as _, SecretString};
@@ -547,6 +549,68 @@ impl LlmConfigService for RebornLlmConfigService {
             auth_url: auth_url.to_string(),
         })
     }
+
+    async fn start_codex_login(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<CodexLoginStart, LlmConfigServiceError> {
+        // Point the login manager at the same session file the live openai_codex
+        // provider reads on reload (mirror resolution.rs env precedence). The
+        // model is irrelevant to the device-code flow, so leave it defaulted.
+        let codex_config = OpenAiCodexConfig::build(
+            None,
+            nonempty_env("OPENAI_CODEX_AUTH_URL"),
+            nonempty_env("OPENAI_CODEX_API_URL"),
+            nonempty_env("OPENAI_CODEX_CLIENT_ID"),
+            nonempty_env("OPENAI_CODEX_SESSION_PATH").map(std::path::PathBuf::from),
+            None,
+        );
+        let manager = OpenAiCodexSessionManager::new(codex_config)
+            .map_err(|_| LlmConfigServiceError::Internal)?;
+        let start = manager
+            .initiate_device_code()
+            .await
+            .map_err(|_| LlmConfigServiceError::Internal)?;
+
+        let login = CodexLoginStart {
+            user_code: start.user_code.clone(),
+            verification_uri: start.verification_uri.clone(),
+        };
+
+        // Poll for authorization off-thread: persist the tokens, make Codex the
+        // active provider, and hot-swap the running provider. The frontend polls
+        // the snapshot until openai_codex is active. The on-disk session file is
+        // the source of truth, so a reload failure still applies on restart.
+        let boot = self.boot.clone();
+        let reload = self.reload.clone();
+        tokio::spawn(async move {
+            if let Err(error) = manager.complete_device_code(&start).await {
+                tracing::debug!(%error, "codex device login did not complete");
+                return;
+            }
+            if let Err(error) = RebornProviderAdmin::new(boot).set_provider("openai_codex", None) {
+                tracing::debug!(%error, "codex login: could not set active provider");
+                return;
+            }
+            if let Some(reload) = reload
+                && let Err(error) = reload.reload().await
+            {
+                tracing::debug!(%error, "codex login: live reload failed; applies on restart");
+            }
+        });
+
+        Ok(login)
+    }
+}
+
+/// Read an env var, treating empty/whitespace as absent. Mirrors the precedence
+/// `ironclaw_llm::resolution` uses so the Codex login manager resolves the same
+/// session path / client id / auth URL as the live provider.
+fn nonempty_env(key: &str) -> Option<String> {
+    std::env::var(key)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 /// Server route prefix handed to NEAR AI as `frontend_callback`. NEAR AI

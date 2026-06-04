@@ -10,6 +10,7 @@ import { useProviderManagementActions } from "../settings/hooks/useProviderManag
 import {
   fetchLlmProviders,
   setActiveLlm,
+  startCodexLogin,
   startNearaiLogin,
 } from "../settings/lib/settings-api.js";
 
@@ -71,6 +72,41 @@ export function OnboardingPage() {
     },
     [navigate, queryClient, t]
   );
+
+  const [codexBusy, setCodexBusy] = React.useState(false);
+  const [codexError, setCodexError] = React.useState("");
+  const [codexCode, setCodexCode] = React.useState(null);
+
+  // Codex device-code login: ask the backend for a user code, show it + open the
+  // verification URL, then poll the snapshot until Codex becomes active (the
+  // backend completes the device flow and reloads in the background).
+  const handleCodexLogin = React.useCallback(async () => {
+    setCodexError("");
+    setCodexCode(null);
+    setCodexBusy(true);
+    try {
+      const { user_code: userCode, verification_uri: verificationUri } =
+        await startCodexLogin();
+      setCodexCode({ userCode, verificationUri });
+      window.open(verificationUri, "_blank", "noopener");
+      // Device codes typically expire after ~15 minutes.
+      const deadline = Date.now() + 900_000;
+      while (Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 3000));
+        const snapshot = await fetchLlmProviders().catch(() => null);
+        if (snapshot?.active?.provider_id === "openai_codex") {
+          await queryClient.invalidateQueries({ queryKey: ["llm-providers"] });
+          navigate("/chat");
+          return;
+        }
+      }
+      setCodexError(t("onboarding.codexTimeout"));
+    } catch (_err) {
+      setCodexError(t("onboarding.codexFailed"));
+    } finally {
+      setCodexBusy(false);
+    }
+  }, [navigate, queryClient, t]);
 
   const handleOnboardingSave = React.useCallback(
     async ({ form, apiKey, provider }) => {
@@ -148,17 +184,29 @@ export function OnboardingPage() {
                         <//>
                       </div>
                     `
-                  : html`
-                      <${Button}
-                        type="button"
-                        size="sm"
-                        variant="primary"
-                        disabled=${state.isBusy}
-                        onClick=${() => actions.openDialog(provider)}
-                      >
-                        ${t("onboarding.setUp")}
-                      <//>
-                    `}
+                  : provider.id === "openai_codex"
+                    ? html`
+                        <${Button}
+                          type="button"
+                          size="sm"
+                          variant="secondary"
+                          disabled=${codexBusy}
+                          onClick=${handleCodexLogin}
+                        >
+                          ${t("onboarding.codexSignIn")}
+                        <//>
+                      `
+                    : html`
+                        <${Button}
+                          type="button"
+                          size="sm"
+                          variant="primary"
+                          disabled=${state.isBusy}
+                          onClick=${() => actions.openDialog(provider)}
+                        >
+                          ${t("onboarding.setUp")}
+                        <//>
+                      `}
               <//>
             `
           )}
@@ -170,6 +218,32 @@ export function OnboardingPage() {
         </div>`}
         ${nearaiError &&
         html`<div className="text-center text-xs text-red-300">${nearaiError}</div>`}
+
+        ${codexCode &&
+        html`<div
+          className="mx-auto max-w-md rounded-lg border border-[var(--v2-border)] bg-[var(--v2-surface-raised)] p-4 text-center"
+        >
+          <div className="text-xs text-[var(--v2-text-muted)]">
+            ${t("onboarding.codexEnterCode")}
+          </div>
+          <div className="mt-2 font-mono text-2xl font-semibold tracking-[0.3em] text-[var(--v2-text-strong)]">
+            ${codexCode.userCode}
+          </div>
+          <a
+            className="mt-2 inline-block text-xs underline hover:text-[var(--v2-text-strong)]"
+            href=${codexCode.verificationUri}
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            ${codexCode.verificationUri}
+          </a>
+        </div>`}
+        ${codexBusy &&
+        html`<div className="text-center text-xs text-[var(--v2-text-muted)]">
+          ${t("onboarding.codexWaiting")}
+        </div>`}
+        ${codexError &&
+        html`<div className="text-center text-xs text-red-300">${codexError}</div>`}
 
         <div className="text-center text-xs text-[var(--v2-text-muted)]">
           ${t("onboarding.moreInSettings")}${" "}

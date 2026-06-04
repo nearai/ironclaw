@@ -75,6 +75,16 @@ pub trait LlmConfigService: Send + Sync {
         caller: WebUiAuthenticatedCaller,
         request: NearAiLoginRequest,
     ) -> Result<NearAiLoginStart, LlmConfigServiceError>;
+
+    /// Begin an OpenAI Codex (ChatGPT subscription) device-code login. Returns
+    /// the user code + verification URL for the frontend to display; a
+    /// background task polls the device-auth endpoint, persists the tokens,
+    /// makes Codex the active provider, and hot-swaps the running provider. The
+    /// caller polls the snapshot until Codex is active.
+    async fn start_codex_login(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<CodexLoginStart, LlmConfigServiceError>;
 }
 
 /// OAuth identity provider for NEAR AI session login.
@@ -109,6 +119,15 @@ pub struct NearAiLoginRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NearAiLoginStart {
     pub auth_url: String,
+}
+
+/// The device code + verification URL the frontend displays for Codex login.
+/// The user enters `user_code` at `verification_uri`; the backend polls for
+/// completion in the background.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodexLoginStart {
+    pub user_code: String,
+    pub verification_uri: String,
 }
 
 /// Merged catalog plus the active selection. Keys are masked.

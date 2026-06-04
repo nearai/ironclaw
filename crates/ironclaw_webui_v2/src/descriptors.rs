@@ -37,6 +37,7 @@ pub const WEBUI_V2_ROUTE_SET_ACTIVE_LLM: &str = "webui.v2.set_active_llm";
 pub const WEBUI_V2_ROUTE_TEST_LLM_CONNECTION: &str = "webui.v2.test_llm_connection";
 pub const WEBUI_V2_ROUTE_LIST_LLM_MODELS: &str = "webui.v2.list_llm_models";
 pub const WEBUI_V2_ROUTE_START_NEARAI_LOGIN: &str = "webui.v2.start_nearai_login";
+pub const WEBUI_V2_ROUTE_START_CODEX_LOGIN: &str = "webui.v2.start_codex_login";
 
 pub const WEBUI_V2_PATTERN_CREATE_THREAD: &str = "/api/webchat/v2/threads";
 pub const WEBUI_V2_PATTERN_LIST_THREADS: &str = "/api/webchat/v2/threads";
@@ -66,6 +67,7 @@ pub const WEBUI_V2_PATTERN_SET_ACTIVE_LLM: &str = "/api/webchat/v2/llm/active";
 pub const WEBUI_V2_PATTERN_TEST_LLM_CONNECTION: &str = "/api/webchat/v2/llm/test-connection";
 pub const WEBUI_V2_PATTERN_LIST_LLM_MODELS: &str = "/api/webchat/v2/llm/list-models";
 pub const WEBUI_V2_PATTERN_START_NEARAI_LOGIN: &str = "/api/webchat/v2/llm/nearai/login";
+pub const WEBUI_V2_PATTERN_START_CODEX_LOGIN: &str = "/api/webchat/v2/llm/codex/login";
 
 /// Return the canonical [`IngressRouteDescriptor`] set for the WebChat v2
 /// beta route surface.
@@ -99,6 +101,7 @@ pub fn webui_v2_routes() -> Vec<IngressRouteDescriptor> {
         test_llm_connection_descriptor(),
         list_llm_models_descriptor(),
         start_nearai_login_descriptor(),
+        start_codex_login_descriptor(),
     ]
 }
 
@@ -446,6 +449,20 @@ fn start_nearai_login_descriptor() -> IngressRouteDescriptor {
         WEBUI_V2_ROUTE_START_NEARAI_LOGIN,
         NetworkMethod::Post,
         WEBUI_V2_PATTERN_START_NEARAI_LOGIN,
+        mutation_policy(
+            body_limit_kib(4),
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+        ),
+    )
+}
+
+fn start_codex_login_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_START_CODEX_LOGIN,
+        NetworkMethod::Post,
+        WEBUI_V2_PATTERN_START_CODEX_LOGIN,
         mutation_policy(
             body_limit_kib(4),
             mutation_rate_limit(),
