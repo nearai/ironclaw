@@ -539,14 +539,12 @@ impl RebornRuntime {
     pub(crate) fn webui_llm_reload_trigger(&self) -> Option<Arc<dyn crate::LlmReloadTrigger>> {
         let boot = self.boot.as_ref()?;
         let parts = self.llm_reload.as_ref()?;
-        Some(Arc::new(
-            crate::llm_config_service::RebornLlmReloadAdapter::new(
-                boot.clone(),
-                Arc::clone(&parts.reload_handle),
-                Arc::clone(&parts.session),
-                crate::LlmKeyStore::new(self.services.secret_store()),
-            ),
-        ))
+        Some(Arc::new(crate::llm_reload::RebornLlmReloadAdapter::new(
+            boot.clone(),
+            Arc::clone(&parts.reload_handle),
+            Arc::clone(&parts.session),
+            crate::LlmKeyStore::new(self.services.secret_store()),
+        )))
     }
 
     #[cfg(test)]

@@ -108,27 +108,6 @@ impl ProviderRepo {
             })?
     }
 
-    /// Replace the whole overlay atomically. Used for best-effort compensation
-    /// when a multi-store LLM configuration mutation fails after publishing an
-    /// overlay update.
-    pub fn replace_all(&self, overlay: Vec<ProviderDefinition>) -> Result<(), ProviderRepoError> {
-        let _lock = self.acquire_lock()?;
-        self.write_overlay(&overlay)
-    }
-
-    /// Async wrapper for [`Self::replace_all`].
-    pub async fn replace_all_async(
-        &self,
-        overlay: Vec<ProviderDefinition>,
-    ) -> Result<(), ProviderRepoError> {
-        let repo = self.clone();
-        tokio::task::spawn_blocking(move || repo.replace_all(overlay))
-            .await
-            .map_err(|source| ProviderRepoError::Task {
-                reason: source.to_string(),
-            })?
-    }
-
     /// Remove a custom provider definition by `id`, atomically.
     ///
     /// Returns whether an entry was removed. Built-ins are never stored in

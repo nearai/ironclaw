@@ -48,10 +48,8 @@ use ironclaw_auth::GoogleOAuthRouteConfig;
 use ironclaw_host_api::ingress::IngressRouteDescriptor;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
 use ironclaw_webui_v2::{
-    WEBUI_V2_ROUTE_DELETE_LLM_PROVIDER, WEBUI_V2_ROUTE_GET_LLM_CONFIG,
-    WEBUI_V2_ROUTE_LIST_LLM_MODELS, WEBUI_V2_ROUTE_SET_ACTIVE_LLM,
-    WEBUI_V2_ROUTE_TEST_LLM_CONNECTION, WEBUI_V2_ROUTE_UPSERT_LLM_PROVIDER, WebUiV2RouteOptions,
-    WebUiV2State, webui_v2_router_with_options,
+    WebUiV2RouteOptions, WebUiV2State, is_webui_v2_llm_config_route_id,
+    webui_v2_router_with_options,
 };
 use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::cors::{AllowHeaders, CorsLayer};
@@ -475,7 +473,8 @@ pub fn webui_v2_app_with_lifecycle(
     let mount_llm_config_routes = config.authenticator.allows_operator_llm_config();
     let mut descriptors = ironclaw_webui_v2::webui_v2_routes();
     if !mount_llm_config_routes {
-        descriptors.retain(|descriptor| !is_llm_config_route_id(descriptor.route_id().as_str()));
+        descriptors
+            .retain(|descriptor| !is_webui_v2_llm_config_route_id(descriptor.route_id().as_str()));
     }
     if let Some(mount) = &product_auth_mount {
         descriptors.extend(mount.descriptors.iter().cloned());
@@ -615,18 +614,6 @@ pub fn webui_v2_app_with_lifecycle(
         router: app,
         public_route_drains,
     })
-}
-
-fn is_llm_config_route_id(route_id: &str) -> bool {
-    matches!(
-        route_id,
-        WEBUI_V2_ROUTE_GET_LLM_CONFIG
-            | WEBUI_V2_ROUTE_UPSERT_LLM_PROVIDER
-            | WEBUI_V2_ROUTE_DELETE_LLM_PROVIDER
-            | WEBUI_V2_ROUTE_SET_ACTIVE_LLM
-            | WEBUI_V2_ROUTE_TEST_LLM_CONNECTION
-            | WEBUI_V2_ROUTE_LIST_LLM_MODELS
-    )
 }
 
 // ─── auth middleware ──────────────────────────────────────────────────

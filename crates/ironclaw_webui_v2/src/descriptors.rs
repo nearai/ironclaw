@@ -96,6 +96,22 @@ pub fn webui_v2_routes() -> Vec<IngressRouteDescriptor> {
     ]
 }
 
+/// Returns whether a route id belongs to the operator-wide LLM config surface.
+/// Host composition uses this to keep route mounting and descriptor policy
+/// filtering in sync when non-operator authenticators leave those routes
+/// unmounted.
+pub fn is_webui_v2_llm_config_route_id(route_id: &str) -> bool {
+    matches!(
+        route_id,
+        WEBUI_V2_ROUTE_GET_LLM_CONFIG
+            | WEBUI_V2_ROUTE_UPSERT_LLM_PROVIDER
+            | WEBUI_V2_ROUTE_DELETE_LLM_PROVIDER
+            | WEBUI_V2_ROUTE_SET_ACTIVE_LLM
+            | WEBUI_V2_ROUTE_TEST_LLM_CONNECTION
+            | WEBUI_V2_ROUTE_LIST_LLM_MODELS
+    )
+}
+
 fn create_thread_descriptor() -> IngressRouteDescriptor {
     descriptor(
         WEBUI_V2_ROUTE_CREATE_THREAD,

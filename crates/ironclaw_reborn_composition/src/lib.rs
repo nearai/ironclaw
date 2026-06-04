@@ -45,6 +45,8 @@ mod llm_catalog;
 mod llm_config_service;
 #[cfg(feature = "root-llm-provider")]
 mod llm_key_store;
+#[cfg(feature = "root-llm-provider")]
+mod llm_reload;
 mod local_dev_capability_policy;
 mod local_dev_mounts;
 mod local_runtime_profile;

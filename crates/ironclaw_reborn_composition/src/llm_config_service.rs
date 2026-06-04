@@ -26,12 +26,10 @@ use ironclaw_product_workflow::{
     LlmModelsResult, LlmProbeRequest, LlmProbeResult, LlmProviderView, SetActiveLlmRequest,
     UpsertLlmProviderRequest, WebUiAuthenticatedCaller,
 };
-use ironclaw_reborn_config::{LlmSlotSelection, RebornBootConfig, RebornConfigFile};
+use ironclaw_reborn_config::{LlmSlotSelection, RebornBootConfig};
 use secrecy::{ExposeSecret as _, SecretString};
 
-use crate::llm_catalog::{
-    apply_stored_api_key, resolve_against_registry, resolve_reborn_runtime_llm,
-};
+use crate::llm_catalog::{apply_stored_api_key, resolve_against_registry};
 use crate::{LlmKeyStore, ProviderRepo, RebornProviderAdmin};
 
 /// Live-reload seam. The runtime supplies an impl that re-resolves the LLM
@@ -270,23 +268,29 @@ impl RebornLlmConfigService {
             })?
     }
 
-    async fn rollback_upsert(
+    async fn rollback_provider_definition(
         &self,
         id: &str,
-        previous_overlay: Vec<ProviderDefinition>,
-        previous_key: Option<SecretString>,
-        key_was_updated: bool,
+        previous_definition: Option<ProviderDefinition>,
     ) {
-        if let Err(error) = self.repo.replace_all_async(previous_overlay).await {
+        let overlay_result = if let Some(previous_definition) = previous_definition {
+            self.repo
+                .upsert_async(previous_definition)
+                .await
+                .map(|_| ())
+        } else {
+            self.repo.delete_async(id).await.map(|_| ())
+        };
+        if let Err(error) = overlay_result {
             tracing::warn!(
                 provider_id = %id,
                 error = %error,
                 "failed to roll back LLM provider overlay after active-selection failure",
             );
         }
-        if !key_was_updated {
-            return;
-        }
+    }
+
+    async fn rollback_provider_key(&self, id: &str, previous_key: Option<SecretString>) {
         let key_result = if let Some(previous_key) = previous_key {
             self.keys.put(id, previous_key).await.map(|_| ())
         } else {
@@ -298,6 +302,20 @@ impl RebornLlmConfigService {
                 error = %error,
                 "failed to roll back LLM provider key after active-selection failure",
             );
+        }
+    }
+
+    async fn rollback_upsert(
+        &self,
+        id: &str,
+        previous_definition: Option<ProviderDefinition>,
+        previous_key: Option<SecretString>,
+        key_was_updated: bool,
+    ) {
+        self.rollback_provider_definition(id, previous_definition)
+            .await;
+        if key_was_updated {
+            self.rollback_provider_key(id, previous_key).await;
         }
     }
 }
@@ -351,6 +369,10 @@ impl LlmConfigService for RebornLlmConfigService {
             .load_async()
             .await
             .map_err(|_| LlmConfigServiceError::Unavailable)?;
+        let previous_definition = previous_overlay
+            .iter()
+            .find(|definition| definition.id.eq_ignore_ascii_case(&id))
+            .cloned();
 
         // Editing a built-in must PRESERVE its compiled-in definition (protocol,
         // setup hints, env-var names) and overlay only what the operator
@@ -381,8 +403,7 @@ impl LlmConfigService for RebornLlmConfigService {
 
         if self.repo.upsert_async(definition).await.is_err() {
             if has_new_key {
-                self.rollback_upsert(&id, previous_overlay, previous_key, true)
-                    .await;
+                self.rollback_provider_key(&id, previous_key).await;
             }
             return Err(LlmConfigServiceError::Unavailable);
         }
@@ -392,7 +413,7 @@ impl LlmConfigService for RebornLlmConfigService {
                 .set_provider_async(id.clone(), request.model.clone())
                 .await;
             if let Err(error) = active_result {
-                self.rollback_upsert(&id, previous_overlay, previous_key, has_new_key)
+                self.rollback_upsert(&id, previous_definition, previous_key, has_new_key)
                     .await;
                 return Err(map_admin_error(error));
             }
@@ -629,60 +650,6 @@ fn map_admin_error(error: crate::RebornProviderAdminError) -> LlmConfigServiceEr
         E::LoadRegistry { .. } | E::LoadConfig { .. } | E::UpdateConfig { .. } => {
             LlmConfigServiceError::Unavailable
         }
-    }
-}
-
-/// Live-reload adapter wired by the runtime. Re-resolves the LLM config from
-/// `config.toml` + `providers.json` + the stored key, then hot-swaps the
-/// running provider's inner backend via the `ironclaw_llm` reload handle.
-pub(crate) struct RebornLlmReloadAdapter {
-    boot: RebornBootConfig,
-    reload_handle: Arc<ironclaw_llm::LlmReloadHandle>,
-    session: Arc<ironclaw_llm::SessionManager>,
-    keys: LlmKeyStore,
-}
-
-impl RebornLlmReloadAdapter {
-    pub(crate) fn new(
-        boot: RebornBootConfig,
-        reload_handle: Arc<ironclaw_llm::LlmReloadHandle>,
-        session: Arc<ironclaw_llm::SessionManager>,
-        keys: LlmKeyStore,
-    ) -> Self {
-        Self {
-            boot,
-            reload_handle,
-            session,
-            keys,
-        }
-    }
-}
-
-#[async_trait]
-impl LlmReloadTrigger for RebornLlmReloadAdapter {
-    async fn reload(&self) -> Result<(), String> {
-        let config_file = RebornConfigFile::load(&self.boot.home().config_file_path())
-            .map_err(|error| error.to_string())?;
-        let Some(resolved) = resolve_reborn_runtime_llm(&self.boot, config_file.as_ref())
-            .map_err(|error| error.to_string())?
-        else {
-            // No provider selected yet — nothing to swap.
-            return Ok(());
-        };
-        let provider_id = resolved.provider_id().to_string();
-        let mut config = resolved.config;
-        if let Some(stored) = self
-            .keys
-            .read(&provider_id)
-            .await
-            .map_err(|error| error.to_string())?
-        {
-            apply_stored_api_key(&mut config, stored);
-        }
-        self.reload_handle
-            .reload(&config, Arc::clone(&self.session))
-            .await
-            .map_err(|error| error.to_string())
     }
 }
 
