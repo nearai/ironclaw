@@ -56,8 +56,9 @@ pub enum BridgeOutcome {
 impl BridgeOutcome {
     fn response_text(&self) -> Option<&str> {
         match self {
-            Self::Respond(text) => Some(text),
-            Self::RespondWithAttachments { text, .. } => Some(text),
+            Self::Respond(text) | Self::RespondWithAttachments { text, .. } => {
+                (!text.trim().is_empty()).then_some(text.as_str())
+            }
             Self::NoResponse | Self::Pending => None,
         }
     }
@@ -77,7 +78,7 @@ fn dedupe_existing_attachment_paths(paths: Vec<String>) -> Vec<String> {
     deduped
 }
 
-fn user_visible_generated_image_text(text: String, has_attachments: bool) -> String {
+fn suppress_generated_image_sentinel_text(text: String, has_attachments: bool) -> String {
     if !has_attachments {
         return text;
     }
@@ -85,7 +86,7 @@ fn user_visible_generated_image_text(text: String, has_attachments: bool) -> Str
     if GeneratedImageSentinel::from_output(trimmed).is_some()
         || (trimmed.starts_with("Generated image (") && trimmed.ends_with(')'))
     {
-        return "已生成图片。".to_string();
+        return String::new();
     }
     text
 }
@@ -5098,9 +5099,9 @@ fn spawn_post_park_continuation(
                 response_attachments
                     .extend(collect_v2_generated_image_attachments(&store, thread_id).await);
                 response_attachments = dedupe_existing_attachment_paths(response_attachments);
-                response.clone().or_else(|| {
-                    (!response_attachments.is_empty()).then(|| "已生成图片。".to_string())
-                })
+                response
+                    .clone()
+                    .or_else(|| (!response_attachments.is_empty()).then(String::new))
             }
             ThreadOutcome::Stopped => {
                 discard_pending_v2_generated_image_attachments(effect_adapter.as_ref(), thread_id)
@@ -5260,10 +5261,13 @@ fn spawn_post_park_continuation(
         };
 
         if let Some(ref text) = response_text {
-            let text =
-                user_visible_generated_image_text(text.clone(), !response_attachments.is_empty());
+            let text = suppress_generated_image_sentinel_text(
+                text.clone(),
+                !response_attachments.is_empty(),
+            );
             // SSE Response broadcast (web).
-            if let Some(ref sse) = sse {
+            let has_text = !text.trim().is_empty();
+            if has_text && let Some(ref sse) = sse {
                 sse.broadcast_for_user(
                     // projection-exempt: bridge dispatcher, post-park final response
                     &user_id,
@@ -5303,7 +5307,7 @@ fn spawn_post_park_continuation(
             }
             // Persist to v1 DB so the history API renders the final
             // assistant message.
-            if let Some(ref db) = db {
+            if has_text && let Some(ref db) = db {
                 let scope_uuid = message
                     .conversation_scope()
                     .and_then(|s| uuid::Uuid::parse_str(s).ok());
@@ -6172,12 +6176,12 @@ async fn bridge_outcome_for_completed_response(
     match response {
         Some(text) if attachments.is_empty() => BridgeOutcome::Respond(text),
         Some(text) => BridgeOutcome::RespondWithAttachments {
-            text: user_visible_generated_image_text(text, true),
+            text: suppress_generated_image_sentinel_text(text, true),
             attachments,
         },
         None if attachments.is_empty() => BridgeOutcome::NoResponse,
         None => BridgeOutcome::RespondWithAttachments {
-            text: "已生成图片。".to_string(),
+            text: String::new(),
             attachments,
         },
     }
