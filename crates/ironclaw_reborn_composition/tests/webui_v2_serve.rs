@@ -57,6 +57,23 @@ impl WebuiAuthenticator for OnlyValidToken {
             None
         }
     }
+
+    fn allows_operator_llm_config(&self) -> bool {
+        true
+    }
+}
+
+struct MultiUserToken;
+
+#[async_trait]
+impl WebuiAuthenticator for MultiUserToken {
+    async fn authenticate(&self, token: &str) -> Option<UserId> {
+        if token == VALID_TOKEN {
+            Some(UserId::new(USER).expect("user id"))
+        } else {
+            None
+        }
+    }
 }
 
 #[cfg(feature = "slack-v2-host-beta")]
@@ -469,6 +486,26 @@ fn build_app() -> (axum::Router, Arc<StubServices>) {
     let config = WebuiServeConfig::new(
         TenantId::new(TENANT).expect("tenant"),
         Arc::new(OnlyValidToken),
+        vec![HeaderValue::from_static("http://localhost:1234")],
+    )
+    .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
+    .with_default_project_id(ProjectId::new(PROJECT).expect("project"));
+    let app = webui_v2_app(bundle, config).expect("webui v2 app");
+    (app, services)
+}
+
+fn build_app_with_authenticator(
+    authenticator: Arc<dyn WebuiAuthenticator>,
+) -> (axum::Router, Arc<StubServices>) {
+    let services = Arc::new(StubServices::default());
+    let bundle = RebornWebuiBundle {
+        api: services.clone(),
+        product_auth: None,
+        readiness: RebornReadiness::disabled(),
+    };
+    let config = WebuiServeConfig::new(
+        TenantId::new(TENANT).expect("tenant"),
+        authenticator,
         vec![HeaderValue::from_static("http://localhost:1234")],
     )
     .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
@@ -1306,6 +1343,38 @@ async fn every_webui_v2_descriptor_is_mounted_on_composed_app() {
             route_id = descriptor.route_id().as_str(),
             method = method,
             uri = uri,
+        );
+    }
+}
+
+#[tokio::test]
+async fn llm_config_routes_are_not_mounted_for_multi_user_authenticator() {
+    let (app, _services) = build_app_with_authenticator(Arc::new(MultiUserToken));
+
+    for (method, uri) in [
+        (Method::GET, "/api/webchat/v2/llm/providers"),
+        (Method::POST, "/api/webchat/v2/llm/providers"),
+        (Method::POST, "/api/webchat/v2/llm/providers/openai/delete"),
+        (Method::POST, "/api/webchat/v2/llm/active"),
+        (Method::POST, "/api/webchat/v2/llm/test-connection"),
+        (Method::POST, "/api/webchat/v2/llm/list-models"),
+    ] {
+        let mut builder = Request::builder()
+            .method(method.clone())
+            .uri(uri)
+            .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"));
+        if method == Method::POST {
+            builder = builder.header(header::CONTENT_TYPE, "application/json");
+        }
+        let response = app
+            .clone()
+            .oneshot(builder.body(Body::empty()).expect("request"))
+            .await
+            .expect("oneshot must complete");
+        assert_eq!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "{method} {uri} must not be mounted for non-operator auth"
         );
     }
 }

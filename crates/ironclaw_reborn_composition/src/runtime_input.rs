@@ -27,6 +27,8 @@ use std::time::Duration;
 use ironclaw_loop_support::HostManagedModelGateway;
 use ironclaw_loop_support::HostSkillContextSource;
 use ironclaw_reborn_config::BudgetDefaults;
+#[cfg(feature = "root-llm-provider")]
+use ironclaw_reborn_config::RebornBootConfig;
 use ironclaw_triggers::TriggerPollerWorkerConfig;
 
 use crate::input::RebornBuildInput;
@@ -164,6 +166,11 @@ pub struct RebornRuntimeInput {
     pub services: Option<RebornBuildInput>,
     #[cfg(feature = "root-llm-provider")]
     pub llm: Option<ResolvedRebornLlm>,
+    /// Operator boot config. When present (and `root-llm-provider` is on), the
+    /// WebUI facade composes the LLM-config settings service from it so the
+    /// settings surface can read/write `providers.json` + `config.toml`.
+    #[cfg(feature = "root-llm-provider")]
+    pub boot: Option<RebornBootConfig>,
     pub runner: TurnRunnerSettings,
     pub trigger_poller: TriggerPollerSettings,
     pub poll: PollSettings,
@@ -207,6 +214,8 @@ impl RebornRuntimeInput {
             services: Some(services),
             #[cfg(feature = "root-llm-provider")]
             llm: None,
+            #[cfg(feature = "root-llm-provider")]
+            boot: None,
             runner: TurnRunnerSettings::default(),
             trigger_poller: TriggerPollerSettings::default(),
             poll: PollSettings::default(),
@@ -249,6 +258,14 @@ impl RebornRuntimeInput {
     #[cfg(feature = "root-llm-provider")]
     pub fn with_resolved_llm(mut self, llm: ResolvedRebornLlm) -> Self {
         self.llm = Some(llm);
+        self
+    }
+
+    /// Supply the operator boot config so the WebUI facade can compose the
+    /// LLM-config settings service.
+    #[cfg(feature = "root-llm-provider")]
+    pub fn with_boot_config(mut self, boot: RebornBootConfig) -> Self {
+        self.boot = Some(boot);
         self
     }
 

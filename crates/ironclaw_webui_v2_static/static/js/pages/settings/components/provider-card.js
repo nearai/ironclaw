@@ -75,7 +75,12 @@ export function ProviderCard({
               ${configured ? t("llm.use") : t("llm.configure")}
             <//>
           `}
-          ${(provider.builtin && provider.id !== "bedrock") || !provider.builtin
+          ${/* Secondary configure/edit button — only when the primary button
+                isn't already the "Configure" action (i.e. active or already
+                configured), otherwise an unconfigured provider shows two
+                identical "Configure" buttons. */
+          (isActive || configured) &&
+          ((provider.builtin && provider.id !== "bedrock") || !provider.builtin)
             ? html`
                 <${Button}
                   type="button"

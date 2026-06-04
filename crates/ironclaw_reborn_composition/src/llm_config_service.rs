@@ -1,0 +1,978 @@
+//! Composition-side implementation of the WebChat v2 LLM-config port.
+//!
+//! Ties together the read/set-active surface ([`RebornProviderAdmin`]), the
+//! custom-provider overlay writer ([`ProviderRepo`]), the operator-scoped key
+//! store ([`LlmKeyStore`]), and the live provider-reload seam
+//! ([`LlmReloadTrigger`]). Everything the webui2 Inference tab needs lands here;
+//! the product facade stays a thin, sanitized pass-through.
+//!
+//! Persistence is operator-wide and split across three surfaces, mirroring how
+//! reborn already resolves an LLM at boot:
+//! - custom provider definitions  → `$IRONCLAW_REBORN_HOME/providers.json`
+//! - active provider + model      → `config.toml [llm.default]`
+//! - API-key **values**           → scoped secret store (never the file)
+//!
+//! After a successful write the running provider's inner backend is hot-swapped
+//! via the reload trigger. The on-disk files are the source of truth: if reload
+//! fails the change is still persisted and applies on the next restart, so the
+//! operator is never left with a silently-dropped edit (the failure is logged).
+
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use ironclaw_llm::registry::{ProviderDefinition, ProviderProtocol, ProviderRegistry};
+use ironclaw_product_workflow::{
+    LlmActiveSelection, LlmConfigService, LlmConfigServiceError, LlmConfigSnapshot,
+    LlmModelsResult, LlmProbeRequest, LlmProbeResult, LlmProviderView, SetActiveLlmRequest,
+    UpsertLlmProviderRequest, WebUiAuthenticatedCaller,
+};
+use ironclaw_reborn_config::{LlmSlotSelection, RebornBootConfig};
+use secrecy::{ExposeSecret as _, SecretString};
+
+use crate::llm_catalog::{apply_stored_api_key, resolve_against_registry};
+use crate::{LlmKeyStore, ProviderRepo, RebornProviderAdmin};
+
+/// Live-reload seam. The runtime supplies an impl that re-resolves the LLM
+/// config (including any stored key) and atomically swaps the running
+/// provider's inner backend; tests / unwired runtimes leave it absent.
+#[async_trait]
+pub trait LlmReloadTrigger: Send + Sync {
+    /// Re-resolve and hot-swap the active provider. The error string is for
+    /// logging only and must stay free of secrets / backend internals.
+    async fn reload(&self) -> Result<(), String>;
+}
+
+/// Operator-wide LLM configuration service backing the webui2 settings surface.
+pub struct RebornLlmConfigService {
+    boot: RebornBootConfig,
+    repo: ProviderRepo,
+    keys: LlmKeyStore,
+    reload: Option<Arc<dyn LlmReloadTrigger>>,
+}
+
+impl RebornLlmConfigService {
+    pub fn new(boot: RebornBootConfig, keys: LlmKeyStore) -> Self {
+        let repo = ProviderRepo::new(boot.home().providers_file_path());
+        Self {
+            boot,
+            repo,
+            keys,
+            reload: None,
+        }
+    }
+
+    /// Attach the live-reload trigger (from the runtime).
+    pub fn with_reload_trigger(mut self, reload: Arc<dyn LlmReloadTrigger>) -> Self {
+        self.reload = Some(reload);
+        self
+    }
+
+    fn admin(&self) -> RebornProviderAdmin {
+        RebornProviderAdmin::new(self.boot.clone())
+    }
+
+    /// Persist-then-reload: the file write already happened; refresh the
+    /// running provider. A reload failure is logged, not fatal — the on-disk
+    /// config is authoritative and applies on next restart.
+    ///
+    /// The reload swaps the live provider's *inner* backend. It does NOT yet
+    /// update the model gateway's pinned model-profile route or cost table
+    /// (those are built once at boot), so changing the active *model* fully
+    /// applies on restart; for providers that honor per-request model overrides
+    /// the gateway still pins the boot model until then. A swappable model
+    /// gateway (and live reload from a no-LLM cold boot, where no reload handle
+    /// exists at all) is owned by the first-run provider work.
+    async fn refresh_running_provider(&self) {
+        let Some(reload) = self.reload.as_ref() else {
+            // Cold boot: no LLM was configured at startup, so there is no live
+            // provider to swap into. Don't fail silently — tell the operator the
+            // saved config needs a restart to take effect.
+            tracing::warn!(
+                "LLM configuration saved, but no live LLM provider was configured at startup \
+                 (no config.toml or provider env creds), so it cannot be applied to the running \
+                 process. Restart the server to use the new configuration."
+            );
+            return;
+        };
+        if let Err(reason) = reload.reload().await {
+            tracing::warn!(
+                reason = %reason,
+                "LLM config persisted but live provider reload failed; change applies on restart"
+            );
+        }
+    }
+
+    async fn build_snapshot(&self) -> Result<LlmConfigSnapshot, LlmConfigServiceError> {
+        let list = self.admin_list_async().await.map_err(map_admin_error)?;
+        let builtin_registry = ironclaw_llm::ProviderRegistry::try_load_from_path(None)
+            .map_err(|_| LlmConfigServiceError::Unavailable)?;
+
+        let mut providers = Vec::with_capacity(list.providers.len());
+        let mut active = None;
+        for info in list.providers {
+            let stored_key_set = self
+                .keys
+                .exists(&info.id)
+                .await
+                .map_err(|_| LlmConfigServiceError::Unavailable)?;
+            let builtin = builtin_registry.find(&info.id).is_some();
+            let metadata = info.metadata;
+            let env_key_set = metadata.as_ref().is_some_and(metadata_env_key_set);
+            let api_key_set = stored_key_set || env_key_set;
+            if info.active && active.is_none() {
+                active = Some(LlmActiveSelection {
+                    provider_id: info.id.clone(),
+                    model: info.active_model.clone(),
+                });
+            }
+            providers.push(LlmProviderView {
+                id: info.id,
+                description: info.description,
+                adapter: metadata
+                    .as_ref()
+                    .map(|meta| meta.protocol.clone())
+                    .unwrap_or_default(),
+                default_model: info.default_model,
+                base_url: metadata.as_ref().and_then(|meta| meta.base_url.clone()),
+                builtin,
+                active: info.active,
+                active_model: info.active_model,
+                api_key_required: metadata
+                    .as_ref()
+                    .map(|meta| meta.api_key_required)
+                    .unwrap_or(false),
+                api_key_set,
+                can_list_models: metadata
+                    .as_ref()
+                    .map(|meta| meta.can_list_models)
+                    .unwrap_or(false),
+            });
+        }
+
+        Ok(LlmConfigSnapshot { providers, active })
+    }
+
+    /// Build a transient provider from a probe request and run a closure
+    /// against it. Reused by `test_connection` and `list_models`.
+    async fn probe_provider(
+        &self,
+        request: &LlmProbeRequest,
+    ) -> Result<Arc<dyn ironclaw_llm::LlmProvider>, LlmConfigServiceError> {
+        let protocol = parse_adapter(&request.adapter).ok_or_else(|| {
+            LlmConfigServiceError::InvalidRequest {
+                field: Some("adapter".to_string()),
+                reason: format!("unknown adapter `{}`", request.adapter),
+            }
+        })?;
+        let base_url = request
+            .base_url
+            .clone()
+            .filter(|url| !url.trim().is_empty());
+        let model = request
+            .model
+            .clone()
+            .filter(|model| !model.trim().is_empty())
+            .unwrap_or_default();
+
+        let definition = custom_definition(&request.provider_id, protocol, base_url.clone(), model);
+        let registry = ProviderRegistry::new(vec![definition]);
+        let stored_key_allowed = self.probe_matches_persisted_provider(request).await?;
+        let selection = LlmSlotSelection {
+            provider_id: Some(request.provider_id.clone()),
+            model: request
+                .model
+                .clone()
+                .filter(|model| !model.trim().is_empty()),
+            api_key_env: None,
+            base_url,
+        };
+        let mut config = resolve_against_registry(&selection, &registry).map_err(|error| {
+            LlmConfigServiceError::InvalidRequest {
+                field: None,
+                reason: error.to_string(),
+            }
+        })?;
+
+        // Prefer the request's inline key. Stored operator credentials are only
+        // safe when the probe targets the persisted provider endpoint; otherwise
+        // a caller-controlled base_url could exfiltrate that key.
+        if let Some(key) = request.api_key.as_ref() {
+            apply_stored_api_key(&mut config, key.clone());
+        } else if stored_key_allowed {
+            if let Some(stored) = self
+                .keys
+                .read(&request.provider_id)
+                .await
+                .map_err(|_| LlmConfigServiceError::Unavailable)?
+            {
+                apply_stored_api_key(&mut config, stored);
+            }
+        } else {
+            return Err(LlmConfigServiceError::InvalidRequest {
+                field: Some("api_key".to_string()),
+                reason: "inline api_key is required when probing an overridden provider endpoint"
+                    .to_string(),
+            });
+        }
+
+        let session = ironclaw_llm::create_session_manager(config.session.clone()).await;
+        ironclaw_llm::build_static_provider_chain(&config, session)
+            .await
+            .map_err(|_| LlmConfigServiceError::Unavailable)
+    }
+
+    async fn probe_matches_persisted_provider(
+        &self,
+        request: &LlmProbeRequest,
+    ) -> Result<bool, LlmConfigServiceError> {
+        let providers_path = self.boot.home().providers_file_path();
+        let provider_id = request.provider_id.clone();
+        let registry = tokio::task::spawn_blocking(move || {
+            ironclaw_llm::ProviderRegistry::try_load_from_path(Some(providers_path.as_path()))
+        })
+        .await
+        .map_err(|_| LlmConfigServiceError::Unavailable)?
+        .map_err(|_| LlmConfigServiceError::Unavailable)?;
+        let Some(definition) = registry.find(&provider_id) else {
+            return Ok(false);
+        };
+        let Some(protocol) = parse_adapter(&request.adapter) else {
+            return Ok(false);
+        };
+        Ok(protocol == definition.protocol
+            && normalized_endpoint(request.base_url.as_deref())
+                == normalized_endpoint(definition.default_base_url.as_deref()))
+    }
+
+    async fn admin_list_async(
+        &self,
+    ) -> Result<crate::RebornProviderList, crate::RebornProviderAdminError> {
+        let admin = self.admin();
+        tokio::task::spawn_blocking(move || admin.list(None, true))
+            .await
+            .map_err(|error| crate::RebornProviderAdminError::InvalidRequest {
+                reason: format!("provider-admin task failed: {error}"),
+            })?
+    }
+
+    async fn set_provider_async(
+        &self,
+        id: String,
+        model: Option<String>,
+    ) -> Result<(), crate::RebornProviderAdminError> {
+        let admin = self.admin();
+        tokio::task::spawn_blocking(move || admin.set_provider(&id, model.as_deref()).map(|_| ()))
+            .await
+            .map_err(|error| crate::RebornProviderAdminError::InvalidRequest {
+                reason: format!("provider-admin task failed: {error}"),
+            })?
+    }
+
+    async fn rollback_provider_definition(
+        &self,
+        id: &str,
+        previous_definition: Option<ProviderDefinition>,
+    ) {
+        let overlay_result = if let Some(previous_definition) = previous_definition {
+            self.repo
+                .upsert_async(previous_definition)
+                .await
+                .map(|_| ())
+        } else {
+            self.repo.delete_async(id).await.map(|_| ())
+        };
+        if let Err(error) = overlay_result {
+            tracing::warn!(
+                provider_id = %id,
+                error = %error,
+                "failed to roll back LLM provider overlay after active-selection failure",
+            );
+        }
+    }
+
+    async fn rollback_provider_key(&self, id: &str, previous_key: Option<SecretString>) {
+        let key_result = if let Some(previous_key) = previous_key {
+            self.keys.put(id, previous_key).await.map(|_| ())
+        } else {
+            self.keys.delete(id).await.map(|_| ())
+        };
+        if let Err(error) = key_result {
+            tracing::warn!(
+                provider_id = %id,
+                error = %error,
+                "failed to roll back LLM provider key after active-selection failure",
+            );
+        }
+    }
+
+    async fn rollback_upsert(
+        &self,
+        id: &str,
+        previous_definition: Option<ProviderDefinition>,
+        previous_key: Option<SecretString>,
+        key_was_updated: bool,
+    ) {
+        self.rollback_provider_definition(id, previous_definition)
+            .await;
+        if key_was_updated {
+            self.rollback_provider_key(id, previous_key).await;
+        }
+    }
+}
+
+#[async_trait]
+impl LlmConfigService for RebornLlmConfigService {
+    async fn snapshot(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<LlmConfigSnapshot, LlmConfigServiceError> {
+        self.build_snapshot().await
+    }
+
+    async fn upsert_provider(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: UpsertLlmProviderRequest,
+    ) -> Result<LlmConfigSnapshot, LlmConfigServiceError> {
+        let id = validate_provider_id(&request.id)?;
+
+        let base_url = request
+            .base_url
+            .clone()
+            .filter(|url| !url.trim().is_empty());
+        let model = request
+            .default_model
+            .clone()
+            .filter(|model| !model.trim().is_empty());
+        let has_new_key = request
+            .api_key
+            .as_ref()
+            .is_some_and(|key| !is_masked_sentinel(key));
+        let previous_key = if has_new_key {
+            self.keys
+                .read(&id)
+                .await
+                .map_err(|_| LlmConfigServiceError::Unavailable)?
+        } else {
+            None
+        };
+        let stored_key_present = if has_new_key {
+            previous_key.is_some()
+        } else {
+            self.keys
+                .exists(&id)
+                .await
+                .map_err(|_| LlmConfigServiceError::Unavailable)?
+        };
+        let previous_overlay = self
+            .repo
+            .load_async()
+            .await
+            .map_err(|_| LlmConfigServiceError::Unavailable)?;
+        let previous_definition = previous_overlay
+            .iter()
+            .find(|definition| definition.id.eq_ignore_ascii_case(&id))
+            .cloned();
+
+        // Editing a built-in must PRESERVE its compiled-in definition (protocol,
+        // setup hints, env-var names) and overlay only what the operator
+        // changed. Writing a fresh generic definition would strip OAuth/setup
+        // from providers like openai_codex, gemini_oauth, nearai, and bedrock.
+        let builtin_registry = ironclaw_llm::ProviderRegistry::try_load_from_path(None)
+            .map_err(|_| LlmConfigServiceError::Unavailable)?;
+        let builtin = builtin_registry.find(&id);
+        let key_present =
+            has_new_key || stored_key_present || builtin.is_some_and(definition_env_key_set);
+        let definition = build_overlay_definition(
+            &id,
+            builtin,
+            &request.adapter,
+            base_url,
+            model,
+            key_present,
+            request.name.as_deref(),
+        )?;
+
+        // Store the key value only when a real (non-sentinel) one was supplied.
+        if has_new_key && let Some(key) = request.api_key.as_ref() {
+            self.keys
+                .put(&id, key.clone())
+                .await
+                .map_err(|_| LlmConfigServiceError::Unavailable)?;
+        }
+
+        if self.repo.upsert_async(definition).await.is_err() {
+            if has_new_key {
+                self.rollback_provider_key(&id, previous_key).await;
+            }
+            return Err(LlmConfigServiceError::Unavailable);
+        }
+
+        if request.set_active {
+            let active_result = self
+                .set_provider_async(id.clone(), request.model.clone())
+                .await;
+            if let Err(error) = active_result {
+                self.rollback_upsert(&id, previous_definition, previous_key, has_new_key)
+                    .await;
+                return Err(map_admin_error(error));
+            }
+        }
+
+        self.refresh_running_provider().await;
+        self.snapshot(caller).await
+    }
+
+    async fn delete_provider(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        provider_id: String,
+    ) -> Result<LlmConfigSnapshot, LlmConfigServiceError> {
+        let id = validate_provider_id(&provider_id)?;
+        let removed = self
+            .repo
+            .delete_async(&id)
+            .await
+            .map_err(|_| LlmConfigServiceError::Unavailable)?;
+        if !removed {
+            return Err(LlmConfigServiceError::NotFound);
+        }
+        // Best-effort: drop any stored key for the deleted provider.
+        let _ = self.keys.delete(&id).await;
+
+        self.refresh_running_provider().await;
+        self.snapshot(caller).await
+    }
+
+    async fn set_active(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: SetActiveLlmRequest,
+    ) -> Result<LlmConfigSnapshot, LlmConfigServiceError> {
+        let id = validate_provider_id(&request.provider_id)?;
+        self.set_provider_async(id, request.model)
+            .await
+            .map_err(map_admin_error)?;
+        self.refresh_running_provider().await;
+        self.snapshot(caller).await
+    }
+
+    async fn test_connection(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        request: LlmProbeRequest,
+    ) -> Result<LlmProbeResult, LlmConfigServiceError> {
+        let provider = self.probe_provider(&request).await?;
+        match provider.list_models().await {
+            Ok(models) if !models.is_empty() => Ok(LlmProbeResult {
+                ok: true,
+                message: format!("connection ok — {} models available", models.len()),
+            }),
+            Ok(_) => Ok(LlmProbeResult {
+                ok: true,
+                message: "provider configured; this adapter does not expose a model list to verify"
+                    .to_string(),
+            }),
+            Err(_) => Ok(LlmProbeResult {
+                ok: false,
+                message: "could not reach the provider with these settings".to_string(),
+            }),
+        }
+    }
+
+    async fn list_models(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        request: LlmProbeRequest,
+    ) -> Result<LlmModelsResult, LlmConfigServiceError> {
+        let provider = self.probe_provider(&request).await?;
+        match provider.list_models().await {
+            Ok(models) => Ok(LlmModelsResult {
+                ok: true,
+                models,
+                message: String::new(),
+            }),
+            Err(_) => Ok(LlmModelsResult {
+                ok: false,
+                models: Vec::new(),
+                message: "could not list models for this provider".to_string(),
+            }),
+        }
+    }
+}
+
+/// Parse a wire adapter name (e.g. `open_ai_completions`) into a protocol.
+fn parse_adapter(adapter: &str) -> Option<ProviderProtocol> {
+    serde_json::from_value(serde_json::Value::String(adapter.to_string())).ok()
+}
+
+fn metadata_env_key_set(metadata: &crate::RebornProviderMetadata) -> bool {
+    metadata.api_key_env.as_deref().is_some_and(env_var_present)
+}
+
+fn definition_env_key_set(definition: &ProviderDefinition) -> bool {
+    definition
+        .api_key_env
+        .as_deref()
+        .is_some_and(env_var_present)
+}
+
+fn env_var_present(name: &str) -> bool {
+    std::env::var_os(name).is_some()
+}
+
+fn normalized_endpoint(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.trim_end_matches('/').to_string())
+}
+
+/// Resolve the overlay `ProviderDefinition` to write for an upsert.
+///
+/// When `builtin` is `Some` the id names a compiled-in provider: clone its
+/// definition (preserving protocol, setup hints, env-var names) and overlay
+/// only the operator's `base_url`/`model`, relaxing `api_key_required` when a
+/// key is stored (so resolution doesn't demand the env var; the stored value is
+/// injected at provider-build time). When `builtin` is `None` it's a brand-new
+/// custom provider, which needs a valid `adapter`.
+fn build_overlay_definition(
+    id: &str,
+    builtin: Option<&ProviderDefinition>,
+    adapter: &str,
+    base_url: Option<String>,
+    model: Option<String>,
+    key_present: bool,
+    name: Option<&str>,
+) -> Result<ProviderDefinition, LlmConfigServiceError> {
+    if let Some(builtin) = builtin {
+        let mut def = builtin.clone();
+        if let Some(base_url) = base_url {
+            def.default_base_url = Some(base_url);
+        }
+        if let Some(model) = model {
+            def.default_model = model;
+        }
+        if key_present {
+            def.api_key_required = false;
+        }
+        return Ok(def);
+    }
+
+    let protocol = parse_adapter(adapter).ok_or_else(|| LlmConfigServiceError::InvalidRequest {
+        field: Some("adapter".to_string()),
+        reason: format!("unknown adapter `{adapter}`"),
+    })?;
+    let mut def = custom_definition(id, protocol, base_url, model.unwrap_or_default());
+    def.description = name
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| id.to_string());
+    Ok(def)
+}
+
+/// Build a custom (operator-defined) provider definition. The API key is never
+/// stored in the catalog — `api_key_required = false` so resolution succeeds
+/// without an env var, and the stored value is injected at provider-build time.
+fn custom_definition(
+    id: &str,
+    protocol: ProviderProtocol,
+    base_url: Option<String>,
+    default_model: String,
+) -> ProviderDefinition {
+    ProviderDefinition {
+        id: id.to_string(),
+        aliases: Vec::new(),
+        protocol,
+        default_base_url: base_url,
+        base_url_env: None,
+        base_url_required: false,
+        api_key_env: None,
+        api_key_required: false,
+        model_env: synthetic_model_env(id),
+        default_model,
+        description: id.to_string(),
+        extra_headers_env: None,
+        unsupported_params: Vec::new(),
+        setup: None,
+    }
+}
+
+fn synthetic_model_env(id: &str) -> String {
+    let upper: String = id
+        .chars()
+        .map(|c| {
+            if c == '-' {
+                '_'
+            } else {
+                c.to_ascii_uppercase()
+            }
+        })
+        .collect();
+    format!("LLM_CUSTOM_{upper}_MODEL")
+}
+
+/// The masked sentinel the UI sends for "key unchanged".
+fn is_masked_sentinel(value: &SecretString) -> bool {
+    value.expose_secret().chars().all(|c| c == '\u{2022}')
+}
+
+fn validate_provider_id(id: &str) -> Result<String, LlmConfigServiceError> {
+    let trimmed = id.trim();
+    if trimmed.is_empty() {
+        return Err(LlmConfigServiceError::InvalidRequest {
+            field: Some("id".to_string()),
+            reason: "provider id cannot be empty".to_string(),
+        });
+    }
+    if !trimmed
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
+    {
+        return Err(LlmConfigServiceError::InvalidRequest {
+            field: Some("id".to_string()),
+            reason: "provider id may only contain lowercase letters, digits, '_' or '-'"
+                .to_string(),
+        });
+    }
+    Ok(trimmed.to_string())
+}
+
+fn map_admin_error(error: crate::RebornProviderAdminError) -> LlmConfigServiceError {
+    use crate::RebornProviderAdminError as E;
+    match error {
+        E::UnknownProvider { .. } => LlmConfigServiceError::NotFound,
+        E::InvalidRequest { reason } => LlmConfigServiceError::InvalidRequest {
+            field: None,
+            reason,
+        },
+        E::LoadRegistry { .. } | E::LoadConfig { .. } | E::UpdateConfig { .. } => {
+            LlmConfigServiceError::Unavailable
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
+    use ironclaw_reborn_config::{RebornHome, RebornProfile};
+    use ironclaw_secrets::InMemorySecretStore;
+
+    fn boot_for_home(reborn_home: &std::path::Path) -> RebornBootConfig {
+        let home = RebornHome::resolve_from_env_parts(
+            Some(reborn_home.as_os_str().to_os_string()),
+            None,
+            None,
+        )
+        .expect("valid reborn home");
+        RebornBootConfig::new(home, RebornProfile::LocalDev)
+    }
+
+    fn key_store() -> LlmKeyStore {
+        LlmKeyStore::new(Arc::new(InMemorySecretStore::new()))
+    }
+
+    fn caller() -> WebUiAuthenticatedCaller {
+        WebUiAuthenticatedCaller::new(
+            TenantId::new("tenant-alpha").expect("tenant"),
+            UserId::new("user-alpha").expect("user"),
+            Some(AgentId::new("agent-alpha").expect("agent")),
+            Some(ProjectId::new("project-alpha").expect("project")),
+        )
+    }
+
+    fn upsert_request(
+        id: &str,
+        api_key: Option<&str>,
+        set_active: bool,
+    ) -> UpsertLlmProviderRequest {
+        UpsertLlmProviderRequest {
+            id: id.to_string(),
+            name: Some("Acme".to_string()),
+            adapter: "open_ai_completions".to_string(),
+            base_url: Some("https://api.acme.test/v1".to_string()),
+            default_model: Some("acme-1".to_string()),
+            api_key: api_key.map(SecretString::from),
+            set_active,
+            model: Some("acme-1".to_string()),
+        }
+    }
+
+    fn probe_request(id: &str, base_url: &str, api_key: Option<&str>) -> LlmProbeRequest {
+        LlmProbeRequest {
+            provider_id: id.to_string(),
+            adapter: "open_ai_completions".to_string(),
+            base_url: Some(base_url.to_string()),
+            model: Some("acme-1".to_string()),
+            api_key: api_key.map(SecretString::from),
+        }
+    }
+
+    #[test]
+    fn parses_known_adapters() {
+        assert_eq!(
+            parse_adapter("open_ai_completions"),
+            Some(ProviderProtocol::OpenAiCompletions)
+        );
+        assert_eq!(
+            parse_adapter("anthropic"),
+            Some(ProviderProtocol::Anthropic)
+        );
+        assert_eq!(parse_adapter("ollama"), Some(ProviderProtocol::Ollama));
+        assert_eq!(parse_adapter("nearai"), Some(ProviderProtocol::NearAi));
+        assert_eq!(parse_adapter("near_ai"), Some(ProviderProtocol::NearAi));
+        assert_eq!(parse_adapter("not_a_real_adapter"), None);
+    }
+
+    #[test]
+    fn custom_definition_never_requires_or_names_a_key() {
+        let def = custom_definition(
+            "acme",
+            ProviderProtocol::OpenAiCompletions,
+            Some("https://api.acme.test/v1".to_string()),
+            "acme-large".to_string(),
+        );
+        assert!(!def.api_key_required);
+        assert!(def.api_key_env.is_none());
+        assert_eq!(def.model_env, "LLM_CUSTOM_ACME_MODEL");
+        assert_eq!(def.default_model, "acme-large");
+    }
+
+    #[test]
+    fn masked_sentinel_detected() {
+        assert!(is_masked_sentinel(&SecretString::from(
+            "\u{2022}\u{2022}\u{2022}"
+        )));
+        assert!(!is_masked_sentinel(&SecretString::from("sk-real-key")));
+    }
+
+    #[test]
+    fn provider_id_validation_rejects_bad_input() {
+        assert!(validate_provider_id("acme_1").is_ok());
+        assert!(validate_provider_id("Acme").is_err());
+        assert!(validate_provider_id("has space").is_err());
+        assert!(validate_provider_id("  ").is_err());
+    }
+
+    #[test]
+    fn editing_a_builtin_preserves_protocol_and_setup() {
+        // openai_codex is a built-in with a dedicated protocol + OAuth setup.
+        let registry = ironclaw_llm::ProviderRegistry::try_load_from_path(None).expect("registry");
+        let builtin = registry.find("openai_codex").expect("openai_codex builtin");
+        assert_eq!(builtin.protocol, ProviderProtocol::OpenAiCodex);
+        let had_setup = builtin.setup.is_some();
+
+        let def = build_overlay_definition(
+            "openai_codex",
+            Some(builtin),
+            "ignored_adapter",
+            None,
+            Some("gpt-5.3-codex".to_string()),
+            false,
+            None,
+        )
+        .expect("overlay def");
+
+        // Protocol + setup preserved; only the model changed.
+        assert_eq!(def.protocol, ProviderProtocol::OpenAiCodex);
+        assert_eq!(def.setup.is_some(), had_setup);
+        assert_eq!(def.default_model, "gpt-5.3-codex");
+        assert_eq!(def.id, "openai_codex");
+    }
+
+    #[test]
+    fn editing_a_builtin_relaxes_key_requirement_when_key_stored() {
+        let registry = ironclaw_llm::ProviderRegistry::try_load_from_path(None).expect("registry");
+        let openai = registry.find("openai").expect("openai builtin");
+        assert!(openai.api_key_required, "openai requires a key by default");
+
+        let def = build_overlay_definition(
+            "openai",
+            Some(openai),
+            "open_ai_completions",
+            None,
+            None,
+            true, // a key is stored
+            None,
+        )
+        .expect("overlay def");
+        assert!(
+            !def.api_key_required,
+            "stored key means resolution must not demand the env var"
+        );
+        assert_eq!(def.protocol, ProviderProtocol::OpenAiCompletions);
+    }
+
+    #[test]
+    fn brand_new_custom_provider_uses_the_request_adapter() {
+        let def = build_overlay_definition(
+            "acme",
+            None,
+            "anthropic",
+            Some("https://acme.test/v1".to_string()),
+            Some("acme-1".to_string()),
+            false,
+            Some("Acme"),
+        )
+        .expect("overlay def");
+        assert_eq!(def.protocol, ProviderProtocol::Anthropic);
+        assert_eq!(def.description, "Acme");
+        assert!(!def.api_key_required);
+    }
+
+    #[test]
+    fn brand_new_custom_provider_rejects_unknown_adapter() {
+        let err = build_overlay_definition("acme", None, "nonsense", None, None, false, None)
+            .expect_err("unknown adapter must fail");
+        assert!(matches!(err, LlmConfigServiceError::InvalidRequest { .. }));
+    }
+
+    #[tokio::test]
+    async fn upsert_provider_persists_overlay_stores_key_and_preserves_existing_key() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("reborn-home");
+        let boot = boot_for_home(&reborn_home);
+        let keys = key_store();
+        let service = RebornLlmConfigService::new(boot.clone(), keys.clone());
+
+        let snapshot = service
+            .upsert_provider(caller(), upsert_request("acme", Some("sk-original"), true))
+            .await
+            .expect("upsert with key");
+
+        let acme = snapshot
+            .providers
+            .iter()
+            .find(|provider| provider.id == "acme")
+            .expect("acme provider in snapshot");
+        assert!(!acme.builtin);
+        assert!(acme.api_key_set);
+        assert_eq!(snapshot.active.expect("active").provider_id, "acme");
+        let overlay = ProviderRepo::new(boot.home().providers_file_path())
+            .load()
+            .expect("load overlay");
+        assert_eq!(
+            overlay
+                .iter()
+                .filter(|provider| provider.id == "acme")
+                .count(),
+            1
+        );
+        assert_eq!(
+            keys.read("acme")
+                .await
+                .expect("read key")
+                .expect("stored key")
+                .expose_secret(),
+            "sk-original"
+        );
+
+        service
+            .upsert_provider(
+                caller(),
+                upsert_request("acme", Some("\u{2022}\u{2022}\u{2022}"), false),
+            )
+            .await
+            .expect("masked-key upsert");
+
+        assert_eq!(
+            keys.read("acme")
+                .await
+                .expect("read key")
+                .expect("stored key")
+                .expose_secret(),
+            "sk-original",
+            "masked sentinel must preserve the existing stored key"
+        );
+    }
+
+    #[tokio::test]
+    async fn probe_override_requires_inline_key_before_using_stored_key() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("reborn-home");
+        let boot = boot_for_home(&reborn_home);
+        let keys = key_store();
+        let service = RebornLlmConfigService::new(boot, keys);
+
+        service
+            .upsert_provider(
+                caller(),
+                upsert_request("acme", Some("sk-stored-secret"), false),
+            )
+            .await
+            .expect("persist provider and stored key");
+
+        let error = service
+            .list_models(
+                caller(),
+                probe_request("acme", "https://attacker.example.test/v1", None),
+            )
+            .await
+            .expect_err("overridden endpoint requires an inline key");
+
+        assert!(
+            matches!(
+                error,
+                LlmConfigServiceError::InvalidRequest {
+                    field: Some(ref field),
+                    ref reason,
+                } if field == "api_key" && reason.contains("overridden provider endpoint")
+            ),
+            "stored operator keys must not be applied to caller-controlled probe endpoints"
+        );
+    }
+
+    #[tokio::test]
+    async fn upsert_builtin_remains_builtin_in_snapshot() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("reborn-home");
+        let boot = boot_for_home(&reborn_home);
+        let service = RebornLlmConfigService::new(boot, key_store());
+
+        let snapshot = service
+            .upsert_provider(caller(), upsert_request("openai", Some("sk-openai"), false))
+            .await
+            .expect("upsert builtin");
+
+        let openai = snapshot
+            .providers
+            .iter()
+            .find(|provider| provider.id == "openai")
+            .expect("openai provider in snapshot");
+        assert!(
+            openai.builtin,
+            "overlay edits must not make built-ins custom"
+        );
+        assert!(openai.api_key_set);
+    }
+
+    #[tokio::test]
+    async fn upsert_active_failure_rolls_back_overlay_and_new_key() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("reborn-home");
+        std::fs::create_dir_all(reborn_home.join("config.toml")).expect("mkdir config path");
+        let boot = boot_for_home(&reborn_home);
+        let keys = key_store();
+        let service = RebornLlmConfigService::new(boot.clone(), keys.clone());
+
+        let error = service
+            .upsert_provider(caller(), upsert_request("acme", Some("sk-rollback"), true))
+            .await
+            .expect_err("config write must fail");
+
+        assert!(matches!(error, LlmConfigServiceError::Unavailable));
+        let overlay = ProviderRepo::new(boot.home().providers_file_path())
+            .load()
+            .expect("load overlay");
+        assert!(
+            overlay.is_empty(),
+            "overlay must roll back when active selection fails"
+        );
+        assert!(
+            !keys.exists("acme").await.expect("key exists check"),
+            "new key must roll back when active selection fails"
+        );
+    }
+}

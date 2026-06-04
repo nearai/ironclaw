@@ -258,6 +258,7 @@ rows are inventoried here, not implemented in the current PR.
 | Approval shim | `POST /api/chat/approval` | (Subsumed by `resolve_gate`) | Mapped |
 | Auth-token / auth-cancel | `POST /api/chat/auth-{token,cancel}` | (Engine v1 compatibility shim; delete with v1) | v1-only (legacy) |
 | Extensions registry/list/install/activate/remove/setup | `GET\|POST /api/extensions/*` | `GET /api/webchat/v2/extensions`, `GET /api/webchat/v2/extensions/registry`, `POST /api/webchat/v2/extensions/install`, `POST /api/webchat/v2/extensions/{package_id}/{activate,remove,setup}` | Mapped to lifecycle package refs and registry projections; setup projects credential requirements and product-auth OAuth start is mounted under the extension setup surface |
+| LLM provider config | v1 settings/provider config surface | `GET /api/webchat/v2/llm/providers`, `POST /api/webchat/v2/llm/providers`, `POST /api/webchat/v2/llm/providers/{provider_id}/delete`, `POST /api/webchat/v2/llm/active`, `POST /api/webchat/v2/llm/{test-connection,list-models}` | Mapped for trusted operator-token deployments; left unmounted for multi-user authenticators until an admin role boundary exists |
 | SSO login (Google) | `GET /auth/providers`, `GET /auth/login/{p}`, `GET /auth/callback/{p}`, `POST /auth/logout` | Same paths on the v2 listener via `ironclaw_reborn_webui_ingress::webui_v2_auth_router`, merged into `webui_v2_app` through [`WebuiServeConfig::with_public_route_mount`] (typed `{ router, descriptors }` so the per-route body-limit / rate-limit middleware applies) | Mapped (Google); GitHub + NEAR follow under #4116 |
 
 ### Security invariants on every "Mapped" row
@@ -266,6 +267,11 @@ rows are inventoried here, not implemented in the current PR.
   `auth_middleware`. The Reborn binary owns its own
   `WebuiAuthenticator` impl (env tokens, DB-backed sessions, OIDC,
   whatever the host wires) and supplies it via `WebuiServeConfig`.
+- **Operator LLM config** — the `/api/webchat/v2/llm/*` routes mutate
+  operator-wide provider settings and secrets. `webui_v2_app` only
+  mounts them when the host authenticator opts into operator LLM config;
+  multi-user authenticators must leave them unmounted until a real admin
+  authorization boundary exists.
 - **`?token=` exception** — only `GET /api/webchat/v2/threads/{id}/events`;
   any other v2 route receiving a `?token=` query parameter ignores it
   and falls through to bearer-header check (so a stale referer link

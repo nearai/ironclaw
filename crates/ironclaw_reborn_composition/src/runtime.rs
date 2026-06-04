@@ -230,6 +230,13 @@ pub struct RebornRuntime {
     send_locks: Mutex<HashMap<ConversationId, Arc<Mutex<()>>>>,
     skill_activation_source: Option<Arc<LocalDevSelectableSkillContextSource>>,
     skill_execution_adapter: Option<Arc<LocalDevSkillExecutionAdapter>>,
+    /// Operator boot config, carried so the WebUI facade can compose the
+    /// LLM-config settings service over `providers.json` / `config.toml`.
+    #[cfg(feature = "root-llm-provider")]
+    boot: Option<ironclaw_reborn_config::RebornBootConfig>,
+    /// Hot-swap handle for the live LLM provider, when one was wired at boot.
+    #[cfg(feature = "root-llm-provider")]
+    llm_reload: Option<RebornLlmReloadParts>,
 }
 
 pub(crate) type LocalDevSelectableSkillContextSource =
@@ -508,6 +515,29 @@ impl RebornRuntime {
     /// Exposed for diagnostics / readiness reporting; **not** for traffic.
     pub fn services(&self) -> &RebornServices {
         &self.services
+    }
+
+    /// Operator boot config, when the runtime was assembled with one. The
+    /// WebUI facade uses it to compose the LLM-config settings service.
+    #[cfg(feature = "root-llm-provider")]
+    pub(crate) fn webui_boot_config(&self) -> Option<&ironclaw_reborn_config::RebornBootConfig> {
+        self.boot.as_ref()
+    }
+
+    /// Live LLM-provider reload trigger for the settings service. Returns the
+    /// hot-swap adapter when an LLM provider was wired at boot; otherwise
+    /// `None`, in which case config edits persist to disk and apply on the
+    /// next restart.
+    #[cfg(feature = "root-llm-provider")]
+    pub(crate) fn webui_llm_reload_trigger(&self) -> Option<Arc<dyn crate::LlmReloadTrigger>> {
+        let boot = self.boot.as_ref()?;
+        let parts = self.llm_reload.as_ref()?;
+        Some(Arc::new(crate::llm_reload::RebornLlmReloadAdapter::new(
+            boot.clone(),
+            Arc::clone(&parts.reload_handle),
+            Arc::clone(&parts.session),
+            crate::LlmKeyStore::new(self.services.secret_store()),
+        )))
     }
 
     #[cfg(all(test, feature = "slack-v2-host-beta"))]
@@ -1149,6 +1179,8 @@ pub async fn build_reborn_runtime(
         services: services_input,
         #[cfg(feature = "root-llm-provider")]
         llm,
+        #[cfg(feature = "root-llm-provider")]
+        boot,
         runner,
         trigger_poller,
         poll,
@@ -1250,7 +1282,8 @@ pub async fn build_reborn_runtime(
     #[cfg(any(test, feature = "test-support"))]
     let test_model_gateway_override = model_gateway_override;
     #[cfg(feature = "root-llm-provider")]
-    let (production_gateway, llm_cost_table) = build_production_model_gateway(llm).await?;
+    let (production_gateway, llm_cost_table, llm_reload) =
+        build_production_model_gateway(llm).await?;
     #[cfg(not(feature = "root-llm-provider"))]
     let (production_gateway, llm_cost_table) = build_production_model_gateway()?;
 
@@ -1641,6 +1674,10 @@ pub async fn build_reborn_runtime(
         send_locks: Mutex::new(HashMap::new()),
         skill_activation_source,
         skill_execution_adapter,
+        #[cfg(feature = "root-llm-provider")]
+        boot,
+        #[cfg(feature = "root-llm-provider")]
+        llm_reload,
     })
 }
 
@@ -1843,15 +1880,20 @@ async fn build_production_model_gateway(
     (
         Arc<dyn ironclaw_loop_support::HostManagedModelGateway>,
         Option<ironclaw_loop_support::StaticModelCostTable>,
+        Option<RebornLlmReloadParts>,
     ),
     RebornRuntimeError,
 > {
     match llm {
         Some(cfg) => {
-            let LlmGatewayBundle { gateway, policy } = build_llm_gateway(cfg).await?;
-            Ok((gateway, Some(policy.build_cost_table())))
+            let LlmGatewayBundle {
+                gateway,
+                policy,
+                reload,
+            } = build_llm_gateway(cfg).await?;
+            Ok((gateway, Some(policy.build_cost_table()), Some(reload)))
         }
-        None => Ok((build_stub_gateway(), None)),
+        None => Ok((build_stub_gateway(), None, None)),
     }
 }
 
@@ -1873,18 +1915,39 @@ struct LlmGatewayBundle {
     /// alongside the gateway so the composer doesn't re-derive the
     /// `ModelProfileId → provider-model` mapping in two places.
     policy: ironclaw_reborn::model_gateway::LlmModelProfilePolicy,
+    /// Hot-swap handle + session for the live-reload path. The model gateway
+    /// wraps a [`SwappableLlmProvider`], so the settings service can rebuild
+    /// the provider chain from updated config and atomically swap the inner
+    /// backend without rebuilding the gateway or restarting the binary.
+    reload: RebornLlmReloadParts,
+}
+
+/// The pieces the LLM-config settings service needs to hot-swap the running
+/// provider: the reload handle wrapping the live `SwappableLlmProvider`, and
+/// the session manager to rebuild the chain against.
+#[cfg(feature = "root-llm-provider")]
+pub(crate) struct RebornLlmReloadParts {
+    pub(crate) reload_handle: Arc<ironclaw_llm::LlmReloadHandle>,
+    pub(crate) session: Arc<ironclaw_llm::SessionManager>,
 }
 
 #[cfg(feature = "root-llm-provider")]
 async fn build_llm_gateway(llm: ResolvedRebornLlm) -> Result<LlmGatewayBundle, RebornRuntimeError> {
+    use ironclaw_llm::{LlmProvider, LlmReloadHandle, SwappableLlmProvider};
     use ironclaw_reborn::model_gateway::{LlmModelProfilePolicy, LlmProviderModelGateway};
     use ironclaw_turns::run_profile::ModelProfileId;
 
     let model = llm.model().to_string();
     let session = ironclaw_llm::create_session_manager(llm.config.session.clone()).await;
-    let provider = ironclaw_llm::build_static_provider_chain(&llm.config, session)
+    let raw = ironclaw_llm::build_static_provider_chain(&llm.config, Arc::clone(&session))
         .await
         .map_err(|error| RebornRuntimeError::LlmProvider(error.to_string()))?;
+
+    // Wrap in a swappable provider and keep its reload handle so settings
+    // changes can hot-swap the inner backend live.
+    let swappable = Arc::new(SwappableLlmProvider::new(raw));
+    let reload_handle = Arc::new(LlmReloadHandle::new(Arc::clone(&swappable), None));
+    let provider: Arc<dyn LlmProvider> = swappable;
 
     let model_profile_id = ModelProfileId::new("interactive_model").map_err(|reason| {
         RebornRuntimeError::LlmProvider(format!("invalid interactive model profile id: {reason}"))
@@ -1894,6 +1957,10 @@ async fn build_llm_gateway(llm: ResolvedRebornLlm) -> Result<LlmGatewayBundle, R
     Ok(LlmGatewayBundle {
         gateway: Arc::new(gateway),
         policy,
+        reload: RebornLlmReloadParts {
+            reload_handle,
+            session,
+        },
     })
 }
 

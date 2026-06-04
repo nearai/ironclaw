@@ -135,8 +135,10 @@ pub use ironclaw_product_adapters::{
 pub use reborn_services::{
     AUTOMATION_LIST_DEFAULT_PAGE_SIZE, AUTOMATION_LIST_MAX_PAGE_SIZE, AutomationProductFacade,
     ConnectableChannelsProductFacade, ExtensionCredentialSetupService,
-    ExtensionCredentialStatusRequest, ExtensionCredentialSubmitRequest, ProductAgentBoundCaller,
-    RebornAutomationInfo, RebornAutomationRunStatus, RebornAutomationSource, RebornAutomationState,
+    ExtensionCredentialStatusRequest, ExtensionCredentialSubmitRequest, LlmActiveSelection,
+    LlmConfigService, LlmConfigServiceError, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest,
+    LlmProbeResult, LlmProviderView, ProductAgentBoundCaller, RebornAutomationInfo,
+    RebornAutomationRunStatus, RebornAutomationSource, RebornAutomationState,
     RebornCancelRunResponse, RebornChannelConnectAction, RebornChannelConnectStrategy,
     RebornConnectableChannelInfo, RebornConnectableChannelListResponse, RebornCreateThreadResponse,
     RebornExtensionActionResponse, RebornExtensionCredentialSetup, RebornExtensionInfo,
@@ -147,8 +149,9 @@ pub use reborn_services::{
     RebornResumeGateResponse, RebornServices, RebornServicesApi, RebornServicesError,
     RebornServicesErrorCode, RebornServicesErrorKind, RebornSetupExtensionResponse,
     RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
-    RebornTimelineRequest, RebornTimelineResponse, StaticConnectableChannelsProductFacade,
-    UnsupportedAutomationProductFacade,
+    RebornTimelineRequest, RebornTimelineResponse, SetActiveLlmRequest,
+    StaticConnectableChannelsProductFacade, UnsupportedAutomationProductFacade,
+    UpsertLlmProviderRequest,
 };
 
 pub use webui_inbound::{

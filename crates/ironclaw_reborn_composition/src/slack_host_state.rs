@@ -558,18 +558,18 @@ impl StoredSlackUserIdentity {
     }
 
     #[cfg(test)]
-    fn binding(&self) -> RebornUserIdentityBinding {
-        RebornUserIdentityBinding {
+    fn binding(&self) -> Option<RebornUserIdentityBinding> {
+        Some(RebornUserIdentityBinding {
             provider: crate::slack_personal_binding::RebornIdentityProviderId::new(
                 self.provider.clone(),
             )
-            .expect("valid provider"),
+            .ok()?,
             provider_user_id: crate::slack_personal_binding::RebornIdentityProviderUserId::new(
                 self.provider_user_id.clone(),
             )
-            .expect("valid provider user id"),
-            user_id: UserId::new(self.user_id.clone()).expect("valid user id"),
-        }
+            .ok()?,
+            user_id: UserId::new(self.user_id.clone()).ok()?,
+        })
     }
 }
 
@@ -708,7 +708,7 @@ mod tests {
 
         assert_eq!(resolved, Some(user("user:alice")));
         let stored = read_identity(&state, "slack", "install-alpha:U123").await;
-        assert_eq!(stored.binding(), binding);
+        assert_eq!(stored.binding(), Some(binding));
     }
 
     #[tokio::test]
