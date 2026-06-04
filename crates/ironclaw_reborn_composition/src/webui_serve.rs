@@ -55,6 +55,11 @@ use tower_http::set_header::SetResponseHeaderLayer;
 
 use crate::product_auth_serve::{ProductAuthRouteState, product_auth_route_mount};
 #[cfg(feature = "slack-v2-host-beta")]
+use crate::slack_personal_binding_pairing_serve::{
+    SlackPersonalBindingPairingRouteConfig, SlackPersonalBindingPairingRouteState,
+    slack_personal_binding_pairing_route_mount,
+};
+#[cfg(feature = "slack-v2-host-beta")]
 use crate::slack_personal_binding_serve::{
     SlackPersonalBindingRouteConfig, SlackPersonalBindingRouteState,
     slack_personal_binding_route_mount,
@@ -173,6 +178,9 @@ pub struct WebuiServeConfig {
     /// Slack OAuth client plus identity binding store.
     #[cfg(feature = "slack-v2-host-beta")]
     pub(crate) slack_personal_binding: Option<SlackPersonalBindingRouteConfig>,
+    /// Optional Slack personal-binding pairing-code redeem route config.
+    #[cfg(feature = "slack-v2-host-beta")]
+    pub(crate) slack_personal_binding_pairing: Option<SlackPersonalBindingPairingRouteConfig>,
 }
 
 /// Async drain hook for public route mounts that schedule work outside the
@@ -262,6 +270,8 @@ impl WebuiServeConfig {
             google_oauth: None,
             #[cfg(feature = "slack-v2-host-beta")]
             slack_personal_binding: None,
+            #[cfg(feature = "slack-v2-host-beta")]
+            slack_personal_binding_pairing: None,
         }
     }
 
@@ -276,33 +286,19 @@ impl WebuiServeConfig {
         self
     }
 
-    /// Attach a host-supplied public sub-router PLUS its route
-    /// descriptors. The router is merged into the composed app
-    /// outside the bearer auth layer; the descriptors fold into
-    /// the same per-route rate-limit / body-limit middlewares the
-    /// v2 facade and the product-auth callback already use, so
-    /// the public surface rides on the canonical policy stack —
-    /// no descriptor-less side door. Multiple public mounts are
-    /// allowed so OAuth/login routes and protocol webhooks can coexist
-    /// on the same Reborn listener.
-    ///
-    /// Today this is the seam
-    /// `ironclaw_reborn_webui_ingress::webui_v2_auth_router` plugs
-    /// into; future host-owned public surfaces can reuse the same
-    /// hook by returning a [`PublicRouteMount`].
-    ///
-    /// **Do NOT pass a v1 gateway router through this hook.** v1's
-    /// `/auth/*` handlers in `src/channels/web/handlers/auth.rs`
-    /// share path names with the v2-native router from
-    /// `webui_v2_auth_router` (`/auth/providers`,
-    /// `/auth/login/{p}`, `/auth/callback/{p}`, `/auth/logout`) by
-    /// design — they implement the same protocol on two
-    /// independent listeners. Merging the v1 router here would
-    /// conflict with the v2-native router and, more importantly,
-    /// would route v1 traffic into the v2 host-owned `SessionStore`
-    /// it never had access to. The v2 listener is exclusively for
-    /// `webui_v2_auth_router` (and any future host-native public
-    /// surface that follows the same boundary rules).
+    #[cfg(feature = "slack-v2-host-beta")]
+    pub fn with_slack_personal_binding_pairing(
+        mut self,
+        config: SlackPersonalBindingPairingRouteConfig,
+    ) -> Self {
+        self.slack_personal_binding_pairing = Some(config);
+        self
+    }
+
+    /// Attach a host-supplied public sub-router plus descriptors outside bearer
+    /// auth but inside the shared policy stack. Do not pass v1 gateway routers
+    /// here; this seam is only for host-native public routes such as v2 login
+    /// and protocol webhooks.
     pub fn with_public_route_mount(mut self, mount: PublicRouteMount) -> Self {
         self.public_mounts.push(mount);
         self
@@ -476,6 +472,12 @@ pub fn webui_v2_app_with_lifecycle(
         .clone()
         .map(SlackPersonalBindingRouteState::new)
         .map(slack_personal_binding_route_mount);
+    #[cfg(feature = "slack-v2-host-beta")]
+    let slack_personal_binding_pairing_mount = config
+        .slack_personal_binding_pairing
+        .clone()
+        .map(SlackPersonalBindingPairingRouteState::new)
+        .map(slack_personal_binding_pairing_route_mount);
     let public_mounts = config.public_mounts;
     let public_route_drains = PublicRouteDrains::new(
         public_mounts
@@ -489,6 +491,10 @@ pub fn webui_v2_app_with_lifecycle(
     }
     #[cfg(feature = "slack-v2-host-beta")]
     if let Some(mount) = &slack_personal_binding_mount {
+        descriptors.extend(mount.descriptors.iter().cloned());
+    }
+    #[cfg(feature = "slack-v2-host-beta")]
+    if let Some(mount) = &slack_personal_binding_pairing_mount {
         descriptors.extend(mount.descriptors.iter().cloned());
     }
     for mount in &public_mounts {
@@ -521,6 +527,10 @@ pub fn webui_v2_app_with_lifecycle(
             Some(existing) => existing.merge(mount.public),
             None => mount.public,
         });
+    }
+    #[cfg(feature = "slack-v2-host-beta")]
+    if let Some(mount) = slack_personal_binding_pairing_mount {
+        protected_inner = protected_inner.merge(mount.protected);
     }
     for mount in public_mounts {
         public_inner = Some(match public_inner {

@@ -82,6 +82,10 @@ mod slack_host_beta;
 #[cfg(feature = "slack-v2-host-beta")]
 mod slack_personal_binding;
 #[cfg(feature = "slack-v2-host-beta")]
+mod slack_personal_binding_pairing;
+#[cfg(feature = "slack-v2-host-beta")]
+mod slack_personal_binding_pairing_serve;
+#[cfg(feature = "slack-v2-host-beta")]
 mod slack_personal_binding_serve;
 #[cfg(feature = "slack-v2-host-beta")]
 pub mod slack_serve;
@@ -198,6 +202,19 @@ pub use slack_personal_binding::{
     RebornUserIdentityBindingError, RebornUserIdentityBindingStore,
     SlackPersonalBindingInstallation, SlackPersonalBindingPrincipal, SlackPersonalUserBindingError,
     SlackPersonalUserBindingRequest, SlackPersonalUserBindingService,
+};
+#[cfg(feature = "slack-v2-host-beta")]
+pub use slack_personal_binding_pairing::{
+    IssuedSlackPersonalBindingPairingChallenge, SlackPairingActorResolver,
+    SlackPersonalBindingPairingChallenge, SlackPersonalBindingPairingChallengeStore,
+    SlackPersonalBindingPairingCode, SlackPersonalBindingPairingError,
+    SlackPersonalBindingPairingNotification, SlackPersonalBindingPairingNotifier,
+    SlackPersonalBindingPairingService,
+};
+#[cfg(feature = "slack-v2-host-beta")]
+pub use slack_personal_binding_pairing_serve::{
+    SLACK_PERSONAL_BINDING_PAIRING_REDEEM_PATH, SlackPersonalBindingPairingRedeemResponse,
+    SlackPersonalBindingPairingRouteConfig,
 };
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack_personal_binding_serve::{
