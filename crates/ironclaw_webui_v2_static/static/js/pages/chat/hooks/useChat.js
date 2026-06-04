@@ -459,6 +459,9 @@ export function useChat(threadId) {
     async (reason) => {
       const runId = activeRun?.runId;
       if (!runId || !threadId) return;
+      setPendingGate(null);
+      setIsProcessing(false);
+      setActiveRun(null);
       try {
         await cancelRunRequest({ threadId, runId, reason });
       } finally {

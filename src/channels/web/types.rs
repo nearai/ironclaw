@@ -212,11 +212,6 @@ pub struct AuthCancelRequest {
     pub thread_id: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
-pub struct InterruptRequest {
-    pub thread_id: Option<String>,
-}
-
 // --- App Event (re-exported from ironclaw_common) ---
 
 pub use ironclaw_common::{AppEvent, OnboardingStateDto, ToolDecisionDto};

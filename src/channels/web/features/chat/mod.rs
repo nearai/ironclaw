@@ -16,7 +16,6 @@
 //! | POST | `/api/chat/gate/resolve` | [`chat_gate_resolve_handler`] |
 //! | POST | `/api/chat/auth-token` | [`chat_auth_token_handler`] (legacy v1 shim) |
 //! | POST | `/api/chat/auth-cancel` | [`chat_auth_cancel_handler`] (legacy v1 shim) |
-//! | POST | `/api/chat/interrupt` | [`chat_interrupt_handler`] |
 //! | GET | `/api/chat/ws` | [`chat_ws_handler`] |
 //! | GET | `/api/chat/events` | [`chat_events_handler`] |
 //! | GET | `/api/chat/history` | [`chat_history_handler`] |
@@ -69,8 +68,8 @@ use crate::channels::web::auth::AuthenticatedUser;
 use crate::channels::web::platform::state::GatewayState;
 use crate::channels::web::types::{
     ActionResponse, ApprovalRequest, GateResolutionPayload, GateResolveRequest, HistoryResponse,
-    InProgressInfo, InterruptRequest, PendingGateInfo, SendMessageRequest, SendMessageResponse,
-    ThreadInfo, ThreadListResponse, ToolCallInfo, TurnInfo,
+    InProgressInfo, PendingGateInfo, SendMessageRequest, SendMessageResponse, ThreadInfo,
+    ThreadListResponse, ToolCallInfo, TurnInfo,
 };
 use crate::channels::web::util::{
     build_turns_from_db_messages, collect_generated_images_from_tool_results,
@@ -470,25 +469,6 @@ pub(crate) async fn chat_auth_cancel_handler(
     )
     .await
     .map(Json)
-}
-
-pub(crate) async fn chat_interrupt_handler(
-    State(state): State<Arc<GatewayState>>,
-    AuthenticatedUser(user): AuthenticatedUser,
-    Json(req): Json<InterruptRequest>,
-) -> Result<Json<ActionResponse>, (StatusCode, String)> {
-    let thread_id = req.thread_id.ok_or((
-        StatusCode::BAD_REQUEST,
-        "thread_id is required for interrupt".to_string(),
-    ))?;
-    crate::channels::web::platform::engine_dispatch::dispatch_engine_submission(
-        &state,
-        &user.user_id,
-        &thread_id,
-        crate::agent::submission::Submission::Interrupt,
-    )
-    .await?;
-    Ok(Json(ActionResponse::ok("Interrupt requested.")))
 }
 
 pub(crate) async fn chat_events_handler(
@@ -1402,7 +1382,7 @@ mod tests {
     use crate::channels::web::features::chat::{
         IN_PROGRESS_STALE_AFTER_MINUTES, chat_approval_handler, chat_auth_cancel_handler,
         chat_auth_token_handler, chat_gate_resolve_handler, chat_history_handler,
-        chat_interrupt_handler, pending_gate_extension_name,
+        pending_gate_extension_name,
     };
     use crate::db::Database;
 
@@ -2017,42 +1997,6 @@ mod tests {
         .await
         .expect_err("31st call must be rate-limited");
         assert_eq!(err.0, StatusCode::TOO_MANY_REQUESTS);
-    }
-
-    #[tokio::test]
-    async fn test_chat_interrupt_handler_dispatches_structured_interrupt() {
-        let state = test_gateway_state_with_dependencies(None, None, None, None);
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::channels::IncomingMessage>(8);
-        *state.msg_tx.write().await = Some(tx);
-
-        let res = chat_interrupt_handler(
-            axum::extract::State(Arc::clone(&state)),
-            crate::channels::web::auth::AuthenticatedUser(UserIdentity {
-                user_id: "alice".to_string(),
-                role: "member".to_string(),
-                workspace_read_scopes: Vec::new(),
-            }),
-            axum::Json(crate::channels::web::types::InterruptRequest {
-                thread_id: Some("thread-123".to_string()),
-            }),
-        )
-        .await
-        .expect("handler ok");
-        assert!(res.success);
-
-        let received = tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv())
-            .await
-            .expect("accepted interrupt must enqueue a message promptly")
-            .expect("msg_tx must receive the interrupt the handler just accepted");
-        assert_eq!(received.user_id, "alice");
-        assert_eq!(
-            received.thread_id.as_ref().map(|id| id.as_str()),
-            Some("thread-123")
-        );
-        assert!(matches!(
-            received.structured_submission,
-            Some(crate::agent::submission::Submission::Interrupt)
-        ));
     }
 
     // The three WS handler tests below use `tower::ServiceExt::oneshot`,

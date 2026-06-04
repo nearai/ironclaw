@@ -1466,19 +1466,6 @@ fn parse_scope_uuid(scope: Option<&str>) -> Option<uuid::Uuid> {
     scope.and_then(|s| uuid::Uuid::parse_str(s).ok())
 }
 
-fn select_interrupt_threads(
-    active_threads: &[ironclaw_engine::ThreadId],
-    requested_thread_scope: Option<&str>,
-) -> Vec<ironclaw_engine::ThreadId> {
-    let requested_thread_id = parse_engine_thread_id(requested_thread_scope);
-    match (requested_thread_scope, requested_thread_id) {
-        (Some(_), None) => Vec::new(),
-        (Some(_), Some(thread_id)) if active_threads.contains(&thread_id) => vec![thread_id],
-        (Some(_), Some(_)) => Vec::new(),
-        (None, _) => active_threads.to_vec(),
-    }
-}
-
 async fn reconcile_pending_gate_state(
     store: &Arc<dyn Store>,
     pending_gates: &crate::gate::store::PendingGateStore,
@@ -3831,14 +3818,9 @@ pub async fn handle_interrupt(
         .as_ref()
         .map(|c| c.active_threads.clone())
         .unwrap_or_default();
-    let requested_thread_scope = message.thread_id.as_ref().map(|id| id.as_str());
-    let threads_to_stop = select_interrupt_threads(&active_threads, requested_thread_scope);
-    if requested_thread_scope.is_some() && threads_to_stop.is_empty() {
-        debug!("engine v2: interrupt requested for invalid or inactive thread");
-    }
 
     let mut stopped = 0u32;
-    for tid in &threads_to_stop {
+    for tid in &active_threads {
         if state.thread_manager.is_running(*tid).await {
             if let Err(e) = state
                 .thread_manager
@@ -11448,47 +11430,6 @@ mod tests {
         let result = find_most_recent_thread(&state, &conv_opt, "alice").await;
         assert!(result.is_some(), "should find thread");
         assert_eq!(result.unwrap().id, tid);
-    }
-
-    #[test]
-    fn select_interrupt_threads_without_scope_returns_all_active_threads() {
-        let first = ironclaw_engine::ThreadId::new();
-        let second = ironclaw_engine::ThreadId::new();
-
-        let selected = select_interrupt_threads(&[first, second], None);
-
-        assert_eq!(selected, vec![first, second]);
-    }
-
-    #[test]
-    fn select_interrupt_threads_with_scope_returns_only_matching_active_thread() {
-        let first = ironclaw_engine::ThreadId::new();
-        let second = ironclaw_engine::ThreadId::new();
-        let second_scope = second.to_string();
-
-        let selected = select_interrupt_threads(&[first, second], Some(second_scope.as_str()));
-
-        assert_eq!(selected, vec![second]);
-    }
-
-    #[test]
-    fn select_interrupt_threads_with_inactive_scope_returns_no_threads() {
-        let active = ironclaw_engine::ThreadId::new();
-        let inactive = ironclaw_engine::ThreadId::new();
-        let inactive_scope = inactive.to_string();
-
-        let selected = select_interrupt_threads(&[active], Some(inactive_scope.as_str()));
-
-        assert!(selected.is_empty());
-    }
-
-    #[test]
-    fn select_interrupt_threads_with_invalid_scope_returns_no_threads() {
-        let active = ironclaw_engine::ThreadId::new();
-
-        let selected = select_interrupt_threads(&[active], Some("not-a-thread-id"));
-
-        assert!(selected.is_empty());
     }
 
     /// find_most_recent_thread returns None for empty conversation.

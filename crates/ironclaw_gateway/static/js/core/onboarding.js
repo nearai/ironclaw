@@ -812,9 +812,7 @@ function cancelAuth(extensionName) {
   requestAuthCancellation(requestId, threadId).catch(() => {});
   removeAuthCard(extensionName);
   setAuthFlowPending(false);
-  cancelCurrentRun(threadId || currentThreadId).catch((err) => {
-    console.warn('[chat] failed to interrupt after auth cancellation:', err);
-  });
+  enableChatInput();
 }
 
 function showAuthCardError(extensionName, message) {
