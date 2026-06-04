@@ -87,7 +87,11 @@ function parseOAuthCallbackStoragePayload(value) {
 
 async function resolveConnectAction(content) {
   if (!looksLikeChannelConnectCommand(content)) return null;
-  const channels = (await listConnectableChannels())?.channels || [];
+  const channelsResponse = await queryClient.fetchQuery({
+    queryKey: ["connectable-channels"],
+    queryFn: listConnectableChannels,
+  });
+  const channels = channelsResponse?.channels || [];
   return resolveChannelConnectCommand(content, channels);
 }
 

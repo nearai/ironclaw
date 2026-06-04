@@ -4866,6 +4866,7 @@ dependencies = [
  "clap_complete",
  "dotenvy",
  "hex",
+ "ironclaw_product_workflow",
  "ironclaw_reborn_composition",
  "ironclaw_reborn_config",
  "ironclaw_reborn_traces",

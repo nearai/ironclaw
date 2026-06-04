@@ -6,11 +6,19 @@ use std::sync::Arc;
 use anyhow::{Context, anyhow};
 use clap::Args;
 #[cfg(feature = "slack-v2-host-beta")]
+use ironclaw_product_workflow::{
+    ConnectableChannelsProductFacade, StaticConnectableChannelsProductFacade,
+};
+#[cfg(feature = "slack-v2-host-beta")]
 use ironclaw_reborn_composition::build_slack_host_beta_mounts;
+#[cfg(not(feature = "slack-v2-host-beta"))]
+use ironclaw_reborn_composition::build_webui_services;
+#[cfg(feature = "slack-v2-host-beta")]
+use ironclaw_reborn_composition::build_webui_services_with_connectable_channels;
 use ironclaw_reborn_composition::{
     GoogleOAuthRouteConfig, RebornBuildInput, RebornReadiness, RebornRuntimeIdentity,
     RebornRuntimeInput, RebornWebuiBundle, WebuiAuthenticator, WebuiServeConfig,
-    build_reborn_runtime, build_webui_services, webui_v2_app_with_lifecycle,
+    build_reborn_runtime, webui_v2_app_with_lifecycle,
 };
 use ironclaw_reborn_config::IdentitySection;
 use ironclaw_reborn_webui_ingress::{
@@ -329,6 +337,29 @@ impl ServeCommand {
             let runtime = build_reborn_runtime(runtime_input)
                 .await
                 .context("failed to assemble Reborn runtime for `serve`")?;
+            #[cfg(feature = "slack-v2-host-beta")]
+            let slack_mounts = if let Some(slack_config) = slack_host_beta_config {
+                Some(
+                    build_slack_host_beta_mounts(&runtime, slack_config)
+                        .context("failed to compose Slack host-beta routes")?,
+                )
+            } else {
+                None
+            };
+            #[cfg(feature = "slack-v2-host-beta")]
+            let bundle: RebornWebuiBundle = {
+                let connectable_channels = slack_mounts.as_ref().map(|mounts| {
+                    Arc::new(StaticConnectableChannelsProductFacade::new(vec![
+                        mounts.connectable_channel.clone(),
+                    ])) as Arc<dyn ConnectableChannelsProductFacade>
+                });
+                build_webui_services_with_connectable_channels(
+                    &runtime,
+                    None,
+                    connectable_channels,
+                )?
+            };
+            #[cfg(not(feature = "slack-v2-host-beta"))]
             let bundle: RebornWebuiBundle = build_webui_services(&runtime, None)?;
 
             // Assemble the WebChat v2 auth surface (authenticator + optional
@@ -387,9 +418,7 @@ impl ServeCommand {
                 serve_config = serve_config.with_canonical_host(host);
             }
             #[cfg(feature = "slack-v2-host-beta")]
-            if let Some(slack_config) = slack_host_beta_config {
-                let slack_mounts = build_slack_host_beta_mounts(&runtime, slack_config)
-                    .context("failed to compose Slack host-beta routes")?;
+            if let Some(slack_mounts) = slack_mounts {
                 serve_config = serve_config
                     .with_public_route_mount(slack_mounts.events)
                     .with_slack_personal_binding_pairing(slack_mounts.personal_binding_pairing);

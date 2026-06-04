@@ -20,6 +20,7 @@ use ironclaw_product_workflow::{
     DefaultInboundTurnService, DefaultProductWorkflow, InMemoryIdempotencyLedger,
     ProductActorUserResolutionRequest, ProductActorUserResolver, ProductConversationBindingService,
     ProductInstallationKey, ProductInstallationScope, ProductWorkflowError,
+    RebornChannelConnectAction, RebornChannelConnectStrategy, RebornConnectableChannelInfo,
     StaticProductInstallationResolver,
 };
 use ironclaw_slack_v2_adapter::{
@@ -164,6 +165,7 @@ pub enum SlackHostBetaBuildError {
 pub struct SlackHostBetaMounts {
     pub events: PublicRouteMount,
     pub personal_binding_pairing: SlackPersonalBindingPairingRouteConfig,
+    pub connectable_channel: RebornConnectableChannelInfo,
 }
 
 pub fn build_slack_events_route_mount(
@@ -229,7 +231,25 @@ pub fn build_slack_host_beta_mounts(
     Ok(SlackHostBetaMounts {
         events,
         personal_binding_pairing: SlackPersonalBindingPairingRouteConfig::new(pairing),
+        connectable_channel: slack_personal_binding_pairing_connectable_channel(),
     })
+}
+
+pub(crate) fn slack_personal_binding_pairing_connectable_channel() -> RebornConnectableChannelInfo {
+    RebornConnectableChannelInfo {
+        channel: "slack".to_string(),
+        display_name: "Slack".to_string(),
+        strategy: RebornChannelConnectStrategy::InboundProofCode,
+        action: RebornChannelConnectAction {
+            title: "Slack account connection".to_string(),
+            instructions: "Message the Slack app, then enter the code here.".to_string(),
+            code_placeholder: "Enter Slack pairing code...".to_string(),
+            submit_label: "Connect".to_string(),
+            success_message: "Slack account connected.".to_string(),
+            error_message: "Invalid or expired Slack pairing code.".to_string(),
+        },
+        command_aliases: vec!["slack".to_string(), "slack account".to_string()],
+    }
 }
 
 pub fn build_slack_events_route_mount_with_actor_user_resolver(
@@ -664,6 +684,15 @@ mod tests {
         .expect("runtime builds");
 
         let mounts = build_slack_host_beta_mounts(&runtime, config()).expect("mounts build");
+        assert_eq!(mounts.connectable_channel.channel, "slack");
+        assert_eq!(
+            mounts.connectable_channel.strategy,
+            RebornChannelConnectStrategy::InboundProofCode
+        );
+        assert_eq!(
+            mounts.connectable_channel.action.instructions,
+            "Message the Slack app, then enter the code here."
+        );
         let pairing_mount =
             slack_personal_binding_pairing_route_mount(mounts.personal_binding_pairing);
 

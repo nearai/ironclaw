@@ -75,7 +75,12 @@ test("useChat.send: accepted ref reconciles pending message on timeline reload",
       throw new Error("ordinary prompts should not fetch connectable channels");
     },
     looksLikeChannelConnectCommand,
-    queryClient: { invalidateQueries: () => {} },
+    queryClient: {
+      fetchQuery: async () => {
+        throw new Error("ordinary prompts should not fetch connectable channels");
+      },
+      invalidateQueries: () => {},
+    },
     recordAcceptedMessageRef,
     removePending,
     resolveChannelConnectCommand,
@@ -177,7 +182,10 @@ test("useChat.send: channel connect requests return an action without submitting
       ],
     }),
     looksLikeChannelConnectCommand,
-    queryClient: { invalidateQueries: () => {} },
+    queryClient: {
+      fetchQuery: async ({ queryFn }) => queryFn(),
+      invalidateQueries: () => {},
+    },
     recordAcceptedMessageRef,
     removePending,
     resolveChannelConnectCommand,
@@ -210,4 +218,81 @@ test("useChat.send: channel connect requests return an action without submitting
   assert.equal(sendMessageCalled, false);
   assert.equal(response.channel_connect_action.channel, "slack");
   assert.equal(response.channel_connect_action.strategy, "inbound_proof_code");
+});
+
+test("useChat.send: unmatched channel connect requests submit the prompt", async () => {
+  let createThreadCalled = false;
+  let sentContent = null;
+
+  const context = {
+    AbortController,
+    Date,
+    Error,
+    Map,
+    Math,
+    React: createReactStub(),
+    addPending,
+    cancelRunRequest: async () => {},
+    clearTimeout,
+    createThreadRequest: async () => {
+      createThreadCalled = true;
+      return { thread: { thread_id: "thread-created" } };
+    },
+    globalThis: {},
+    listConnectableChannels: async () => ({
+      channels: [
+        {
+          channel: "slack",
+          display_name: "Slack",
+          strategy: "inbound_proof_code",
+          command_aliases: ["slack", "slack account"],
+          action: {
+            title: "Slack account connection",
+            instructions: "Message the Slack app, then enter the code here.",
+          },
+        },
+      ],
+    }),
+    looksLikeChannelConnectCommand,
+    queryClient: {
+      fetchQuery: async ({ queryFn }) => queryFn(),
+      invalidateQueries: () => {},
+    },
+    recordAcceptedMessageRef,
+    removePending,
+    resolveChannelConnectCommand,
+    resolveGateRequest: async () => {},
+    sendMessage: async ({ content, threadId }) => {
+      sentContent = content;
+      return {
+        accepted_message_ref: "msg:message-2",
+        run_id: "run-2",
+        status: "queued",
+        thread_id: threadId,
+      };
+    },
+    setInterval,
+    setTimeout,
+    submitManualToken: async () => {},
+    useChatEvents: () => () => {},
+    useHistory: () => ({
+      messages: [],
+      hasMore: false,
+      nextCursor: null,
+      isLoading: false,
+      loadHistory: () => {},
+      setMessages: () => {},
+    }),
+    useSSE: () => ({ status: "idle" }),
+  };
+
+  vm.runInNewContext(useChatSourceForTest(), context);
+
+  const chat = context.globalThis.__testExports.useChat(null);
+  const response = await chat.send("connect telegram account");
+
+  assert.equal(createThreadCalled, true);
+  assert.equal(sentContent, "connect telegram account");
+  assert.equal(response.channel_connect_action, undefined);
+  assert.equal(response.thread_id, "thread-created");
 });

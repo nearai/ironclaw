@@ -134,9 +134,9 @@ pub use ironclaw_product_adapters::{
 };
 pub use reborn_services::{
     AUTOMATION_LIST_DEFAULT_PAGE_SIZE, AUTOMATION_LIST_MAX_PAGE_SIZE, AutomationProductFacade,
-    ExtensionCredentialSetupService, ExtensionCredentialStatusRequest,
-    ExtensionCredentialSubmitRequest, ProductAgentBoundCaller, RebornAutomationInfo,
-    RebornAutomationRunStatus, RebornAutomationSource, RebornAutomationState,
+    ConnectableChannelsProductFacade, ExtensionCredentialSetupService,
+    ExtensionCredentialStatusRequest, ExtensionCredentialSubmitRequest, ProductAgentBoundCaller,
+    RebornAutomationInfo, RebornAutomationRunStatus, RebornAutomationSource, RebornAutomationState,
     RebornCancelRunResponse, RebornChannelConnectAction, RebornChannelConnectStrategy,
     RebornConnectableChannelInfo, RebornConnectableChannelListResponse, RebornCreateThreadResponse,
     RebornExtensionActionResponse, RebornExtensionCredentialSetup, RebornExtensionInfo,
@@ -147,7 +147,8 @@ pub use reborn_services::{
     RebornResumeGateResponse, RebornServices, RebornServicesApi, RebornServicesError,
     RebornServicesErrorCode, RebornServicesErrorKind, RebornSetupExtensionResponse,
     RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
-    RebornTimelineRequest, RebornTimelineResponse, UnsupportedAutomationProductFacade,
+    RebornTimelineRequest, RebornTimelineResponse, StaticConnectableChannelsProductFacade,
+    UnsupportedAutomationProductFacade,
 };
 
 pub use webui_inbound::{

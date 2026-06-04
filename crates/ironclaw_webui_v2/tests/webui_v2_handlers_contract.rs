@@ -78,6 +78,7 @@ struct StubServices {
     list_automations_calls: Mutex<Vec<WebUiListAutomationsRequest>>,
     next_list_automations_error: Mutex<Option<RebornServicesError>>,
     list_connectable_channels_calls: Mutex<usize>,
+    next_list_connectable_channels_error: Mutex<Option<RebornServicesError>>,
     list_extensions_calls: Mutex<usize>,
     list_extension_registry_calls: Mutex<usize>,
     install_extension_calls: Mutex<Vec<String>>,
@@ -99,6 +100,13 @@ impl StubServices {
 
     fn fail_list_automations(&self, error: RebornServicesError) {
         *self.next_list_automations_error.lock().expect("lock") = Some(error);
+    }
+
+    fn fail_list_connectable_channels(&self, error: RebornServicesError) {
+        *self
+            .next_list_connectable_channels_error
+            .lock()
+            .expect("lock") = Some(error);
     }
 
     /// Queue one response for the next `stream_events` call. Tests use this
@@ -337,6 +345,14 @@ impl RebornServicesApi for StubServices {
         _caller: WebUiAuthenticatedCaller,
     ) -> Result<RebornConnectableChannelListResponse, RebornServicesError> {
         *self.list_connectable_channels_calls.lock().expect("lock") += 1;
+        if let Some(error) = self
+            .next_list_connectable_channels_error
+            .lock()
+            .expect("lock")
+            .take()
+        {
+            return Err(error);
+        }
         Ok(RebornConnectableChannelListResponse {
             channels: vec![RebornConnectableChannelInfo {
                 channel: "slack".to_string(),
@@ -900,6 +916,37 @@ async fn list_connectable_channels_dispatches_through_facade() {
             .expect("lock"),
         1
     );
+}
+
+#[tokio::test]
+async fn list_connectable_channels_error_maps_to_http_status() {
+    let services = Arc::new(StubServices::default());
+    services.fail_list_connectable_channels(RebornServicesError {
+        code: RebornServicesErrorCode::Unavailable,
+        kind: RebornServicesErrorKind::ServiceUnavailable,
+        status_code: 503,
+        retryable: true,
+        field: None,
+        validation_code: None,
+    });
+    let router = router_with(services);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/channels/connectable")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = read_json(response).await;
+    assert_eq!(body["error"], "unavailable");
+    assert_eq!(body["kind"], "service_unavailable");
+    assert_eq!(body["retryable"], true);
 }
 
 #[tokio::test]

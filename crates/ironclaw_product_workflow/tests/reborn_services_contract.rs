@@ -23,14 +23,16 @@ use ironclaw_product_workflow::{
     ListPendingApprovalsResponse, ListPendingAuthInteractionsRequest,
     ListPendingAuthInteractionsResponse, ProductAgentBoundCaller, ProductWorkflowError,
     RebornAutomationInfo, RebornAutomationRunStatus, RebornAutomationSource, RebornAutomationState,
+    RebornChannelConnectAction, RebornChannelConnectStrategy, RebornConnectableChannelInfo,
     RebornExtensionOnboardingState, RebornGetRunStateRequest, RebornResolveGateResponse,
     RebornServices, RebornServicesApi, RebornServicesError, RebornServicesErrorCode,
     RebornServicesErrorKind, RebornStreamEventsRequest, RebornSubmitTurnResponse,
     RebornTimelineRequest, ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
-    ResolveAuthInteractionRequest, ResolveAuthInteractionResponse, WebUiAuthenticatedCaller,
-    WebUiCancelRunRequest, WebUiCreateThreadRequest, WebUiInboundValidationCode,
-    WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiResolveGateRequest,
-    WebUiSendMessageRequest, WebUiSetupExtensionRequest, approval_gate_ref,
+    ResolveAuthInteractionRequest, ResolveAuthInteractionResponse,
+    StaticConnectableChannelsProductFacade, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
+    WebUiCreateThreadRequest, WebUiInboundValidationCode, WebUiListAutomationsRequest,
+    WebUiListThreadsRequest, WebUiResolveGateRequest, WebUiSendMessageRequest,
+    WebUiSetupExtensionRequest, approval_gate_ref,
 };
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
@@ -3612,6 +3614,66 @@ async fn list_automation_dispatches_through_product_facade() {
         Some("project-alpha")
     );
     assert_eq!(list_calls[0].limit, 10);
+}
+
+#[tokio::test]
+async fn list_connectable_channels_unwired_returns_empty_list() {
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    );
+
+    let response = services
+        .list_connectable_channels(caller())
+        .await
+        .expect("connectable channels response");
+
+    assert!(response.channels.is_empty());
+}
+
+#[tokio::test]
+async fn list_connectable_channels_returns_configured_action_metadata() {
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_connectable_channels_facade(Arc::new(StaticConnectableChannelsProductFacade::new(vec![
+        RebornConnectableChannelInfo {
+            channel: "slack".to_string(),
+            display_name: "Slack".to_string(),
+            strategy: RebornChannelConnectStrategy::InboundProofCode,
+            action: RebornChannelConnectAction {
+                title: "Slack account connection".to_string(),
+                instructions: "Message the Slack app, then enter the code here.".to_string(),
+                code_placeholder: "Enter Slack pairing code...".to_string(),
+                submit_label: "Connect".to_string(),
+                success_message: "Slack account connected.".to_string(),
+                error_message: "Invalid or expired Slack pairing code.".to_string(),
+            },
+            command_aliases: vec!["slack".to_string(), "slack account".to_string()],
+        },
+    ])));
+
+    let response = services
+        .list_connectable_channels(caller())
+        .await
+        .expect("connectable channels response");
+
+    let channel = response.channels.first().expect("configured channel");
+    assert_eq!(channel.channel, "slack");
+    assert_eq!(channel.display_name, "Slack");
+    assert_eq!(
+        channel.strategy,
+        RebornChannelConnectStrategy::InboundProofCode
+    );
+    assert_eq!(
+        channel.action.instructions,
+        "Message the Slack app, then enter the code here."
+    );
+    assert_eq!(
+        channel.command_aliases,
+        vec!["slack".to_string(), "slack account".to_string()]
+    );
 }
 
 #[tokio::test]

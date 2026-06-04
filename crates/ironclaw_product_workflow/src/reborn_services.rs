@@ -76,6 +76,39 @@ type SkillActivationRecorder =
 type SkillActivationClearer =
     dyn Fn(&TurnScope, &AcceptedMessageRef) -> Result<(), RebornServicesError> + Send + Sync;
 
+#[async_trait]
+pub trait ConnectableChannelsProductFacade: Send + Sync {
+    async fn list_connectable_channels(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornConnectableChannelListResponse, RebornServicesError>;
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct StaticConnectableChannelsProductFacade {
+    channels: Arc<[RebornConnectableChannelInfo]>,
+}
+
+impl StaticConnectableChannelsProductFacade {
+    pub fn new(channels: impl Into<Vec<RebornConnectableChannelInfo>>) -> Self {
+        Self {
+            channels: Arc::from(channels.into()),
+        }
+    }
+}
+
+#[async_trait]
+impl ConnectableChannelsProductFacade for StaticConnectableChannelsProductFacade {
+    async fn list_connectable_channels(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornConnectableChannelListResponse, RebornServicesError> {
+        Ok(RebornConnectableChannelListResponse {
+            channels: self.channels.iter().cloned().collect(),
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExtensionCredentialStatusRequest {
     pub scope: AuthProductScope,
@@ -282,7 +315,9 @@ pub trait RebornServicesApi: Send + Sync {
         &self,
         _caller: WebUiAuthenticatedCaller,
     ) -> Result<RebornConnectableChannelListResponse, RebornServicesError> {
-        Ok(default_connectable_channels())
+        Ok(RebornConnectableChannelListResponse {
+            channels: Vec::new(),
+        })
     }
 
     async fn list_extensions(
@@ -333,25 +368,6 @@ pub trait RebornServicesApi: Send + Sync {
     ) -> Result<RebornSetupExtensionResponse, RebornServicesError>;
 }
 
-fn default_connectable_channels() -> RebornConnectableChannelListResponse {
-    RebornConnectableChannelListResponse {
-        channels: vec![RebornConnectableChannelInfo {
-            channel: "slack".to_string(),
-            display_name: "Slack".to_string(),
-            strategy: RebornChannelConnectStrategy::InboundProofCode,
-            action: RebornChannelConnectAction {
-                title: "Slack account connection".to_string(),
-                instructions: "Message the Slack app, then enter the code here.".to_string(),
-                code_placeholder: "Enter Slack pairing code...".to_string(),
-                submit_label: "Connect".to_string(),
-                success_message: "Slack account connected.".to_string(),
-                error_message: "Invalid or expired Slack pairing code.".to_string(),
-            },
-            command_aliases: vec!["slack".to_string(), "slack account".to_string()],
-        }],
-    }
-}
-
 /// Default facade implementation composed at the WebUI boundary.
 #[derive(Clone)]
 pub struct RebornServices {
@@ -360,6 +376,7 @@ pub struct RebornServices {
     event_stream: Option<Arc<dyn ProjectionStream>>,
     lifecycle_facade: Arc<dyn LifecycleProductFacade>,
     automation_facade: Arc<dyn AutomationProductFacade>,
+    connectable_channels_facade: Arc<dyn ConnectableChannelsProductFacade>,
     approval_interactions: Arc<dyn ApprovalInteractionService>,
     auth_interactions: Arc<dyn AuthInteractionService>,
     extension_credentials: Option<Arc<dyn ExtensionCredentialSetupService>>,
@@ -380,6 +397,7 @@ impl RebornServices {
                 "reborn_lifecycle_facade_unwired",
             )),
             automation_facade: Arc::new(UnsupportedAutomationProductFacade::new_static()),
+            connectable_channels_facade: Arc::new(StaticConnectableChannelsProductFacade::default()),
             approval_interactions: Arc::new(RejectingApprovalInteractionService),
             auth_interactions: Arc::new(RejectingAuthInteractionService),
             extension_credentials: None,
@@ -406,6 +424,14 @@ impl RebornServices {
         automation_facade: Arc<dyn AutomationProductFacade>,
     ) -> Self {
         self.automation_facade = automation_facade;
+        self
+    }
+
+    pub fn with_connectable_channels_facade(
+        mut self,
+        connectable_channels_facade: Arc<dyn ConnectableChannelsProductFacade>,
+    ) -> Self {
+        self.connectable_channels_facade = connectable_channels_facade;
         self
     }
 
@@ -941,6 +967,15 @@ impl RebornServicesApi for RebornServices {
             .list_automations(caller, limit)
             .await?;
         Ok(RebornListAutomationsResponse { automations })
+    }
+
+    async fn list_connectable_channels(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornConnectableChannelListResponse, RebornServicesError> {
+        self.connectable_channels_facade
+            .list_connectable_channels(caller)
+            .await
     }
 
     async fn list_extensions(

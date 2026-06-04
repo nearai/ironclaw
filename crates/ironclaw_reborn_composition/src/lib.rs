@@ -236,7 +236,9 @@ pub use slack_serve::{
     SLACK_EVENTS_PATH, SlackEventsRouteState, SlackEventsWebhookDispatcher,
     SlackInstallationSelector, slack_events_route_descriptors, slack_events_route_mount,
 };
-pub use webui::{RebornWebuiBundle, build_webui_services};
+pub use webui::{
+    RebornWebuiBundle, build_webui_services, build_webui_services_with_connectable_channels,
+};
 #[cfg(feature = "webui-v2-beta")]
 pub use webui_rate_limit::RateLimitConfigError;
 #[cfg(feature = "webui-v2-beta")]
