@@ -67,6 +67,11 @@ struct RecordingBatchPort {
 
 struct FailingBatchPort;
 
+#[derive(Default)]
+struct SuspendedBatchPort {
+    batches: std::sync::Mutex<Vec<CapabilityBatchInvocation>>,
+}
+
 struct NoopResultWriter;
 
 struct NoopGoalStore;
@@ -456,6 +461,43 @@ impl LoopCapabilityPort for RecordingBatchPort {
                 .map(|invocation| completed_outcome(invocation.capability_id.as_str()))
                 .collect(),
             stopped_on_suspension: false,
+        })
+    }
+}
+
+#[async_trait]
+impl LoopCapabilityPort for SuspendedBatchPort {
+    async fn visible_capabilities(
+        &self,
+        _request: VisibleCapabilityRequest,
+    ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
+        Ok(VisibleCapabilitySurface {
+            version: CapabilitySurfaceVersion::new("surface:test").unwrap(),
+            descriptors: Vec::new(),
+        })
+    }
+
+    async fn invoke_capability(
+        &self,
+        _request: CapabilityInvocation,
+    ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+        Ok(CapabilityOutcome::ApprovalRequired {
+            gate_ref: LoopGateRef::new("gate:inner-suspended").unwrap(),
+            safe_summary: "approval required".to_string(),
+        })
+    }
+
+    async fn invoke_capability_batch(
+        &self,
+        request: CapabilityBatchInvocation,
+    ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
+        self.batches.lock().unwrap().push(request);
+        Ok(CapabilityBatchOutcome {
+            outcomes: vec![CapabilityOutcome::ApprovalRequired {
+                gate_ref: LoopGateRef::new("gate:inner-suspended").unwrap(),
+                safe_summary: "approval required".to_string(),
+            }],
+            stopped_on_suspension: true,
         })
     }
 }
@@ -1857,10 +1899,7 @@ async fn invoke_capability_batch_rolls_back_preceding_spawn_on_inner_batch_failu
         },
         deps,
     );
-    port.auth_input_refs
-        .lock()
-        .unwrap()
-        .insert(input_ref(), CapabilityInputRef::new("input:auth").unwrap());
+    port.auth_input_refs.lock().unwrap().insert(input_ref());
 
     let error = port
         .invoke_capability_batch(CapabilityBatchInvocation {
@@ -1902,10 +1941,7 @@ async fn invoke_capability_batch_rolls_back_preceding_spawn_on_inner_batch_failu
         Err(SessionThreadError::UnknownThread { .. })
     ));
 
-    port.auth_input_refs.lock().unwrap().insert(
-        input_ref(),
-        CapabilityInputRef::new("input:auth-retry").unwrap(),
-    );
+    port.auth_input_refs.lock().unwrap().insert(input_ref());
     assert!(
         matches!(
             invoke_spawn(&port).await,
@@ -1918,15 +1954,20 @@ async fn invoke_capability_batch_rolls_back_preceding_spawn_on_inner_batch_failu
 #[tokio::test]
 async fn invoke_capability_batch_stops_on_first_spawn_suspension_when_requested() {
     let context = test_run_context_with_agent_actor("spawn-batch-stop").await;
+    let actor = context.actor.clone().unwrap();
     let turn_store = Arc::new(StaticTurnStateStore::new(Some(turn_record(&context, 0))));
+    let child_runs = Arc::new(RecordingChildRuns::default());
+    let goal_store = Arc::new(RecordingGoalStore::default());
+    let gate_store = Arc::new(InMemorySubagentGateResolutionStore::default());
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
     let inner = Arc::new(RecordingBatchPort::default());
     let deps = Arc::new(SubagentSpawnDeps {
         coordinator: Arc::new(StaticCoordinator),
-        child_runs: Arc::new(RecordingChildRuns::default()),
-        turn_state_store: turn_store,
-        thread_service: Arc::new(InMemorySessionThreadService::default()),
-        goal_store: Arc::new(NoopGoalStore),
-        gate_store: Arc::new(InMemorySubagentGateResolutionStore::default()),
+        child_runs: child_runs.clone(),
+        turn_state_store: turn_store.clone(),
+        thread_service: thread_service.clone(),
+        goal_store: goal_store.clone(),
+        gate_store: gate_store.clone(),
         definition_resolver: Arc::new(StaticDefinitionResolver {
             resolved: Some(subagent_definition(false)),
             parent: None,
@@ -1959,6 +2000,110 @@ async fn invoke_capability_batch_stops_on_first_spawn_suspension_when_requested(
     assert_eq!(outcome.outcomes.len(), 1);
     assert!(outcome.stopped_on_suspension);
     assert!(inner.batches.lock().unwrap().is_empty());
+    let child_requests = child_runs.requests();
+    assert_eq!(child_requests.len(), 1);
+    assert!(turn_store.cancels().is_empty());
+    assert!(turn_store.releases.lock().unwrap().is_empty());
+    assert!(goal_store.deletes().is_empty());
+    assert_eq!(goal_store.puts().len(), 1);
+    assert_eq!(gate_store.records().len(), 1);
+
+    let child_request = &child_requests[0];
+    let child_thread_scope = ThreadScope {
+        tenant_id: child_request.child_scope.tenant_id.clone(),
+        agent_id: child_request.child_scope.agent_id.clone().unwrap(),
+        project_id: child_request.child_scope.project_id.clone(),
+        owner_user_id: Some(actor.user_id),
+        mission_id: None,
+    };
+    let read = thread_service
+        .read_thread(ThreadHistoryRequest {
+            scope: child_thread_scope,
+            thread_id: child_request.child_scope.thread_id.clone(),
+        })
+        .await;
+    assert!(
+        read.is_ok(),
+        "partial-success suspension must keep the child thread committed"
+    );
+}
+
+#[tokio::test]
+async fn invoke_capability_batch_preserves_spawns_on_inner_batch_suspension() {
+    let context = test_run_context_with_agent_actor("spawn-inner-batch-stop").await;
+    let turn_store = Arc::new(StaticTurnStateStore::new(Some(turn_record(&context, 0))));
+    let child_runs = Arc::new(RecordingChildRuns::default());
+    let goal_store = Arc::new(RecordingGoalStore::default());
+    let gate_store = Arc::new(InMemorySubagentGateResolutionStore::default());
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let inner = Arc::new(SuspendedBatchPort::default());
+    let deps = Arc::new(SubagentSpawnDeps {
+        coordinator: Arc::new(StaticCoordinator),
+        child_runs: child_runs.clone(),
+        turn_state_store: turn_store.clone(),
+        thread_service,
+        goal_store: goal_store.clone(),
+        gate_store: gate_store.clone(),
+        definition_resolver: Arc::new(StaticDefinitionResolver {
+            resolved: Some(subagent_definition(false)),
+            parent: None,
+        }),
+        spawn_input_codec: Arc::new(StaticSpawnInputCodec {
+            args: default_spawn_args(),
+        }),
+        result_writer: Arc::new(NoopResultWriter),
+    });
+    let port = SubagentSpawnCapabilityPort::new(
+        inner.clone(),
+        context,
+        CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
+        SubagentSpawnLimits::default(),
+        deps,
+    );
+    let input_ref_a = CapabilityInputRef::new("input:spawn-a").unwrap();
+    let input_ref_b = CapabilityInputRef::new("input:spawn-b").unwrap();
+    {
+        let mut refs = port.auth_input_refs.lock().unwrap();
+        refs.insert(input_ref_a.clone());
+        refs.insert(input_ref_b.clone());
+    }
+
+    let spawn_id = CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap();
+    let inner_id = CapabilityId::new("inner.suspended").unwrap();
+    let surface_version = CapabilitySurfaceVersion::new("surface:test").unwrap();
+    let outcome = port
+        .invoke_capability_batch(CapabilityBatchInvocation {
+            invocations: vec![
+                CapabilityInvocation {
+                    surface_version: surface_version.clone(),
+                    capability_id: spawn_id.clone(),
+                    input_ref: input_ref_a,
+                },
+                CapabilityInvocation {
+                    surface_version: surface_version.clone(),
+                    capability_id: spawn_id,
+                    input_ref: input_ref_b,
+                },
+                CapabilityInvocation {
+                    surface_version,
+                    capability_id: inner_id,
+                    input_ref: CapabilityInputRef::new("input:inner").unwrap(),
+                },
+            ],
+            stop_on_first_suspension: true,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.outcomes.len(), 3);
+    assert!(outcome.stopped_on_suspension);
+    assert_eq!(inner.batches.lock().unwrap().len(), 1);
+    assert_eq!(child_runs.requests().len(), 2);
+    assert!(turn_store.cancels().is_empty());
+    assert!(turn_store.releases.lock().unwrap().is_empty());
+    assert!(goal_store.deletes().is_empty());
+    assert_eq!(goal_store.puts().len(), 2);
+    assert_eq!(gate_store.records().len(), 1);
 }
 
 #[tokio::test]

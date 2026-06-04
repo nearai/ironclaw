@@ -868,6 +868,9 @@ impl SubagentSpawnCapabilityPort {
     }
 
     async fn rollback_batch_compensation(&self, compensations: &mut Vec<SpawnCompensationState>) {
+        // Roll back in reverse creation order. Each compensation performs
+        // destructive best-effort cleanup, so keeping this serial preserves a
+        // deterministic unwind order across child runs and their resources.
         while let Some(mut compensation) = compensations.pop() {
             let release_spawn_slot = compensation.spawn_slot_committed;
             compensation
@@ -1089,6 +1092,7 @@ impl LoopCapabilityPort for SubagentSpawnCapabilityPort {
                 if suspended && request.stop_on_first_suspension && !batch_await_dependent {
                     // Suspension is a partial-success boundary, not a failed
                     // batch; prior successful spawns remain committed.
+                    batch_compensations.clear();
                     return Ok(CapabilityBatchOutcome {
                         outcomes,
                         stopped_on_suspension: true,
@@ -1124,6 +1128,7 @@ impl LoopCapabilityPort for SubagentSpawnCapabilityPort {
             if stopped && request.stop_on_first_suspension {
                 // Propagate the inner partial-success stop without rolling back
                 // earlier successful spawns from this outer batch.
+                batch_compensations.clear();
                 return Ok(CapabilityBatchOutcome {
                     outcomes,
                     stopped_on_suspension: true,
