@@ -111,8 +111,16 @@ impl HostRuntimeHttpEgressPort {
         let staged_scope = request.request.scope.clone();
         let staged_capability_id = request.request.capability_id.clone();
         let staged_credentials = !request.credentials.is_empty();
-        self.stage_credentials(&mut request.request, request.credentials)
-            .await?;
+        if let Err(error) = self
+            .stage_credentials(&mut request.request, request.credentials)
+            .await
+        {
+            if staged_credentials {
+                self.secret_stager
+                    .discard_secret_material_for_capability(&staged_scope, &staged_capability_id);
+            }
+            return Err(error);
+        }
         let result = self.runtime_http_egress.execute(request.request).await;
         if staged_credentials {
             self.secret_stager

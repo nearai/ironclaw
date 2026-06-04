@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+#[cfg(test)]
 use ironclaw_host_api::UserId;
 use ironclaw_product_adapters::{
     ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload, ProductRejection,
@@ -333,7 +334,7 @@ where
             replay,
             prepared.submit_idempotency_key.clone(),
             envelope.received_at(),
-            Some(prepared),
+            prepared,
         )
         .await
         .map(Some)
@@ -399,7 +400,7 @@ async fn submit_or_replay_accepted_message<T, C>(
     replay: AcceptedInboundMessageReplay,
     submit_idempotency_key: String,
     received_at: DateTime<Utc>,
-    prepared: Option<&PreparedUserMessage>,
+    prepared: &PreparedUserMessage,
 ) -> Result<InboundTurnOutcome, ProductWorkflowError>
 where
     T: SessionThreadService,
@@ -431,19 +432,39 @@ impl ProductInboundTurnHandoff {
         submit_idempotency_key: String,
         received_at: DateTime<Utc>,
     ) -> Result<Self, ProductWorkflowError> {
-        Self::from_replay_with_prepared(replay, submit_idempotency_key, received_at, None)
+        let binding = binding_from_replay(&replay)?;
+        let thread_scope = replay.scope.clone();
+        Self::from_replay_parts(
+            replay,
+            submit_idempotency_key,
+            received_at,
+            binding,
+            thread_scope,
+        )
     }
 
     fn from_replay_with_prepared(
         replay: AcceptedInboundMessageReplay,
         submit_idempotency_key: String,
         received_at: DateTime<Utc>,
-        prepared: Option<&PreparedUserMessage>,
+        prepared: &PreparedUserMessage,
     ) -> Result<Self, ProductWorkflowError> {
-        let (binding, thread_scope) = match prepared {
-            Some(prepared) => (prepared.binding.clone(), prepared.thread_scope.clone()),
-            None => (binding_from_replay(&replay)?, replay.scope.clone()),
-        };
+        Self::from_replay_parts(
+            replay,
+            submit_idempotency_key,
+            received_at,
+            prepared.binding.clone(),
+            prepared.thread_scope.clone(),
+        )
+    }
+
+    fn from_replay_parts(
+        replay: AcceptedInboundMessageReplay,
+        submit_idempotency_key: String,
+        received_at: DateTime<Utc>,
+        binding: ResolvedBinding,
+        thread_scope: ThreadScope,
+    ) -> Result<Self, ProductWorkflowError> {
         let accepted_message_ref = accepted_message_ref(replay.message_id)?;
 
         if replay.status == MessageStatus::Submitted {
@@ -652,6 +673,7 @@ fn accepted_message_ref(
     })
 }
 
+#[cfg(test)]
 fn binding_from_replay(
     replay: &AcceptedInboundMessageReplay,
 ) -> Result<ResolvedBinding, ProductWorkflowError> {
@@ -909,7 +931,7 @@ mod tests {
             replay,
             "turn-key".to_string(),
             received_at(),
-            Some(&prepared),
+            &prepared,
         )
         .expect("prepared replay handoff");
 
