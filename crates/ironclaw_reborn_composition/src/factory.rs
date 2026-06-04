@@ -2678,7 +2678,7 @@ mod tests {
                 Arc::new(FailingConversationStateFilesystem),
             )
             .expect("mount failing backend");
-        let runtime = Arc::new(RebornLocalRuntimeServices {
+        Arc::new(RebornLocalRuntimeServices {
             approval_requests: Arc::clone(&base_runtime.approval_requests),
             capability_leases: Arc::clone(&base_runtime.capability_leases),
             turn_state: Arc::clone(&base_runtime.turn_state),
@@ -2718,8 +2718,7 @@ mod tests {
             default_system_prompt_path: base_runtime.default_system_prompt_path.clone(),
             event_log: Arc::clone(&base_runtime.event_log),
             audit_log: Arc::clone(&base_runtime.audit_log),
-        });
-        runtime
+        })
     }
 
     #[cfg(any(feature = "libsql", feature = "postgres"))]
