@@ -37,6 +37,7 @@ function createUseChatEventsHarness({ gateFromEvent = () => null } = {}) {
   let pendingGate = null;
   let isProcessing = false;
   let activeRun = null;
+  const completedRuns = [];
   const context = {
     Date,
     React: {
@@ -69,7 +70,7 @@ function createUseChatEventsHarness({ gateFromEvent = () => null } = {}) {
     setActiveRun: (updater) => {
       activeRun = typeof updater === "function" ? updater(activeRun) : updater;
     },
-    onRunCompleted: () => {},
+    onRunCompleted: (runId) => completedRuns.push(runId),
   });
 
   return {
@@ -85,6 +86,9 @@ function createUseChatEventsHarness({ gateFromEvent = () => null } = {}) {
     },
     get activeRun() {
       return activeRun;
+    },
+    get completedRuns() {
+      return completedRuns;
     },
   };
 }
@@ -323,6 +327,38 @@ test("useChatEvents: stale failed run status does not append error", () => {
 
   assert.equal(harness.isProcessing, true);
   assert.deepEqual(harness.messages, []);
+  assert.deepEqual(plain(harness.activeRun), {
+    runId: "run-2",
+    threadId: "thread-1",
+    status: "running",
+  });
+});
+
+test("useChatEvents: stale completed run status does not refetch timeline", () => {
+  const harness = createUseChatEventsHarness();
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [{ run_status: { run_id: "run-1", status: "running" } }],
+      },
+    },
+  });
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          { run_status: { run_id: "run-2", status: "running" } },
+          { run_status: { run_id: "run-1", status: "completed" } },
+        ],
+      },
+    },
+  });
+
+  assert.deepEqual(harness.completedRuns, []);
+  assert.equal(harness.isProcessing, true);
   assert.deepEqual(plain(harness.activeRun), {
     runId: "run-2",
     threadId: "thread-1",

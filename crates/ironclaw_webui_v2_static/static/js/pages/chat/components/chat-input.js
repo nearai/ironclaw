@@ -91,8 +91,6 @@ export function ChatInput({
     setIsCancelling(true);
     try {
       await onCancel();
-    } catch {
-      // The stream will reconcile the run state if the cancel request fails.
     } finally {
       setIsCancelling(false);
     }
@@ -293,4 +291,3 @@ export function ChatInput({
     </div>
   `;
 }
-

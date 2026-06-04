@@ -126,7 +126,7 @@ test("ChatInput cancel button resets cancelling state after rejection", async ()
   });
 
   const cancelButton = findComponent(tree, components.Button);
-  await cancelButton.values[1]();
+  await assert.rejects(cancelButton.values[1](), /cancel failed/);
 
   assert.deepEqual(setCalls, [
     { index: 2, value: true },
