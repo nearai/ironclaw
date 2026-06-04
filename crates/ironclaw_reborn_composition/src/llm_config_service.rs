@@ -23,8 +23,8 @@ use async_trait::async_trait;
 use ironclaw_llm::registry::{ProviderDefinition, ProviderProtocol, ProviderRegistry};
 use ironclaw_product_workflow::{
     LlmActiveSelection, LlmConfigService, LlmConfigServiceError, LlmConfigSnapshot,
-    LlmModelsResult, LlmProbeRequest, LlmProbeResult, LlmProviderView, SetActiveLlmRequest,
-    UpsertLlmProviderRequest, WebUiAuthenticatedCaller,
+    LlmModelsResult, LlmProbeRequest, LlmProbeResult, LlmProviderView, NearAiLoginRequest,
+    NearAiLoginStart, SetActiveLlmRequest, UpsertLlmProviderRequest, WebUiAuthenticatedCaller,
 };
 use ironclaw_reborn_config::{LlmSlotSelection, RebornBootConfig};
 use secrecy::{ExposeSecret as _, SecretString};
@@ -48,6 +48,10 @@ pub struct RebornLlmConfigService {
     repo: ProviderRepo,
     keys: LlmKeyStore,
     reload: Option<Arc<dyn LlmReloadTrigger>>,
+    /// The runtime's NEAR AI session manager — the same instance the live
+    /// provider reads its token from, so a completed login takes effect on
+    /// reload. Absent when the runtime has no LLM seam wired.
+    nearai_session: Option<Arc<ironclaw_llm::SessionManager>>,
 }
 
 impl RebornLlmConfigService {
@@ -58,12 +62,19 @@ impl RebornLlmConfigService {
             repo,
             keys,
             reload: None,
+            nearai_session: None,
         }
     }
 
     /// Attach the live-reload trigger (from the runtime).
     pub fn with_reload_trigger(mut self, reload: Arc<dyn LlmReloadTrigger>) -> Self {
         self.reload = Some(reload);
+        self
+    }
+
+    /// Attach the runtime's NEAR AI session manager (enables NEAR AI login).
+    pub fn with_nearai_session(mut self, session: Arc<ironclaw_llm::SessionManager>) -> Self {
+        self.nearai_session = Some(session);
         self
     }
 
@@ -499,6 +510,89 @@ impl LlmConfigService for RebornLlmConfigService {
             }),
         }
     }
+
+    async fn start_nearai_login(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        request: NearAiLoginRequest,
+    ) -> Result<NearAiLoginStart, LlmConfigServiceError> {
+        let session = self
+            .nearai_session
+            .as_ref()
+            .ok_or(LlmConfigServiceError::Unavailable)?;
+
+        // Point NEAR AI at the server's own public callback route (aligned with
+        // the SSO PublicRouteMount pattern, not a second loopback listener).
+        // NEAR AI redirects to `<frontend_callback>/auth/callback?token=...`, so
+        // `frontend_callback` is this server's NEAR AI route prefix on the
+        // browser's own origin (validated to a bare scheme://host[:port]).
+        let origin = sanitize_origin(&request.origin).ok_or_else(|| {
+            LlmConfigServiceError::InvalidRequest {
+                field: Some("origin".to_string()),
+                reason: "origin must be a bare http(s) origin".to_string(),
+            }
+        })?;
+        let frontend_callback = format!("{origin}{NEARAI_LOGIN_PREFIX}");
+        let mut auth_url = url::Url::parse(&format!(
+            "{}/v1/auth/{}",
+            session.auth_base_url(),
+            request.provider.as_path()
+        ))
+        .map_err(|_| LlmConfigServiceError::Internal)?;
+        auth_url
+            .query_pairs_mut()
+            .append_pair("frontend_callback", &frontend_callback);
+
+        Ok(NearAiLoginStart {
+            auth_url: auth_url.to_string(),
+        })
+    }
+}
+
+/// Server route prefix handed to NEAR AI as `frontend_callback`. NEAR AI
+/// appends `/auth/callback?token=...`, so the public callback route is
+/// `{NEARAI_LOGIN_PREFIX}/auth/callback`.
+pub(crate) const NEARAI_LOGIN_PREFIX: &str = "/api/webchat/v2/llm/nearai";
+
+/// The public callback path NEAR AI redirects to (token in the query). Consumed
+/// by the webui public callback mount.
+#[cfg(feature = "webui-v2-beta")]
+pub(crate) const NEARAI_LOGIN_CALLBACK_PATH: &str = "/api/webchat/v2/llm/nearai/auth/callback";
+
+/// Reduce a browser-supplied origin to a bare `scheme://host[:port]`, rejecting
+/// anything with a path/query or a non-http scheme. NEAR AI redirects the token
+/// here, so it must be a clean same-machine origin.
+fn sanitize_origin(raw: &str) -> Option<String> {
+    let parsed = url::Url::parse(raw.trim()).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return None;
+    }
+    let host = parsed.host_str()?;
+    let mut origin = format!("{}://{host}", parsed.scheme());
+    if let Some(port) = parsed.port() {
+        origin.push_str(&format!(":{port}"));
+    }
+    Some(origin)
+}
+
+/// Apply a completed NEAR AI login: store the session token on the live
+/// session, make NEAR AI the active provider, and hot-swap the running
+/// provider. Shared by the public callback route. Errors are log-only strings.
+#[cfg(feature = "webui-v2-beta")]
+pub(crate) async fn apply_nearai_login(
+    session: &ironclaw_llm::SessionManager,
+    boot: &RebornBootConfig,
+    reload: &dyn LlmReloadTrigger,
+    token: &str,
+) -> Result<(), String> {
+    session
+        .save_session_for_renewer(token, Some("nearai"))
+        .await
+        .map_err(|error| error.to_string())?;
+    RebornProviderAdmin::new(boot.clone())
+        .set_provider("nearai", None)
+        .map_err(|error| format!("set nearai active: {error}"))?;
+    reload.reload().await
 }
 
 /// Parse a wire adapter name (e.g. `open_ai_completions`) into a protocol.

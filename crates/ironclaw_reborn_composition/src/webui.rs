@@ -134,6 +134,9 @@ pub(crate) fn build_webui_services_with_connectable_channels(
         if let Some(reload) = runtime.webui_llm_reload_trigger() {
             llm_config = llm_config.with_reload_trigger(reload);
         }
+        if let Some(session) = runtime.webui_llm_session() {
+            llm_config = llm_config.with_nearai_session(session);
+        }
         api = api.with_llm_config_service(Arc::new(llm_config));
     }
 

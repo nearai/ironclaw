@@ -7,7 +7,11 @@ import { Button } from "../../design-system/button.js";
 import { Card } from "../../design-system/card.js";
 import { ProviderDialog } from "../settings/components/provider-dialog.js";
 import { useProviderManagementActions } from "../settings/hooks/useProviderManagementActions.js";
-import { setActiveLlm } from "../settings/lib/settings-api.js";
+import {
+  fetchLlmProviders,
+  setActiveLlm,
+  startNearaiLogin,
+} from "../settings/lib/settings-api.js";
 
 // First-run "choose your provider" screen. Curated providers are surfaced first,
 // in this order; everything else stays reachable via Settings → Inference. The
@@ -30,6 +34,43 @@ export function OnboardingPage() {
   const featured = FEATURED_IDS.map((id) =>
     state.providers.find((provider) => provider.id === id)
   ).filter(Boolean);
+
+  const [nearaiBusy, setNearaiBusy] = React.useState(false);
+  const [nearaiError, setNearaiError] = React.useState("");
+
+  // NEAR AI browser login: open the returned auth URL, then poll the snapshot
+  // until NEAR AI becomes active (the backend stores the token + reloads), then
+  // head to chat.
+  const handleNearaiLogin = React.useCallback(
+    async (provider) => {
+      setNearaiError("");
+      setNearaiBusy(true);
+      try {
+        const { auth_url: authUrl } = await startNearaiLogin({
+          provider,
+          origin: window.location.origin,
+        });
+        window.open(authUrl, "_blank", "noopener");
+        const deadline = Date.now() + 300_000;
+        // eslint-disable-next-line no-constant-condition
+        while (Date.now() < deadline) {
+          await new Promise((resolve) => setTimeout(resolve, 2000));
+          const snapshot = await fetchLlmProviders().catch(() => null);
+          if (snapshot?.active?.provider_id === "nearai") {
+            await queryClient.invalidateQueries({ queryKey: ["llm-providers"] });
+            navigate("/chat");
+            return;
+          }
+        }
+        setNearaiError(t("onboarding.nearaiTimeout"));
+      } catch (_err) {
+        setNearaiError(t("onboarding.nearaiFailed"));
+      } finally {
+        setNearaiBusy(false);
+      }
+    },
+    [navigate, queryClient, t]
+  );
 
   const handleOnboardingSave = React.useCallback(
     async ({ form, apiKey, provider }) => {
@@ -84,19 +125,51 @@ export function OnboardingPage() {
                     ${provider.description || provider.id}
                   </div>
                 </div>
-                <${Button}
-                  type="button"
-                  size="sm"
-                  variant="primary"
-                  disabled=${state.isBusy}
-                  onClick=${() => actions.openDialog(provider)}
-                >
-                  ${t("onboarding.setUp")}
-                <//>
+                ${provider.id === "nearai"
+                  ? html`
+                      <div className="flex shrink-0 gap-2">
+                        <${Button}
+                          type="button"
+                          size="sm"
+                          variant="secondary"
+                          disabled=${nearaiBusy}
+                          onClick=${() => handleNearaiLogin("github")}
+                        >
+                          GitHub
+                        <//>
+                        <${Button}
+                          type="button"
+                          size="sm"
+                          variant="secondary"
+                          disabled=${nearaiBusy}
+                          onClick=${() => handleNearaiLogin("google")}
+                        >
+                          Google
+                        <//>
+                      </div>
+                    `
+                  : html`
+                      <${Button}
+                        type="button"
+                        size="sm"
+                        variant="primary"
+                        disabled=${state.isBusy}
+                        onClick=${() => actions.openDialog(provider)}
+                      >
+                        ${t("onboarding.setUp")}
+                      <//>
+                    `}
               <//>
             `
           )}
         </div>
+
+        ${nearaiBusy &&
+        html`<div className="text-center text-xs text-[var(--v2-text-muted)]">
+          ${t("onboarding.nearaiWaiting")}
+        </div>`}
+        ${nearaiError &&
+        html`<div className="text-center text-xs text-red-300">${nearaiError}</div>`}
 
         <div className="text-center text-xs text-[var(--v2-text-muted)]">
           ${t("onboarding.moreInSettings")}${" "}

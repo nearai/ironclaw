@@ -64,6 +64,51 @@ pub trait LlmConfigService: Send + Sync {
         caller: WebUiAuthenticatedCaller,
         request: LlmProbeRequest,
     ) -> Result<LlmModelsResult, LlmConfigServiceError>;
+
+    /// Begin a NEAR AI browser login. Returns the provider authorization URL
+    /// for the frontend to open; a background task waits for the loopback
+    /// callback, stores the session token, makes NEAR AI active, and hot-swaps
+    /// the running provider. The caller polls the snapshot until NEAR AI is
+    /// active.
+    async fn start_nearai_login(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: NearAiLoginRequest,
+    ) -> Result<NearAiLoginStart, LlmConfigServiceError>;
+}
+
+/// OAuth identity provider for NEAR AI session login.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NearAiAuthProvider {
+    Github,
+    Google,
+}
+
+impl NearAiAuthProvider {
+    /// Path segment used in the NEAR AI auth URL (`/v1/auth/<segment>`).
+    pub fn as_path(self) -> &'static str {
+        match self {
+            Self::Github => "github",
+            Self::Google => "google",
+        }
+    }
+}
+
+/// Start a NEAR AI login with the chosen identity provider.
+#[derive(Debug, Clone, Deserialize)]
+pub struct NearAiLoginRequest {
+    pub provider: NearAiAuthProvider,
+    /// The browser's own origin (`window.location.origin`), used to build the
+    /// NEAR AI `frontend_callback` back to this server's public callback route.
+    /// Validated server-side to a bare `scheme://host[:port]`.
+    pub origin: String,
+}
+
+/// The authorization URL the frontend opens to complete NEAR AI login.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NearAiLoginStart {
+    pub auth_url: String,
 }
 
 /// Merged catalog plus the active selection. Keys are masked.

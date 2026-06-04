@@ -53,6 +53,8 @@ mod local_runtime_profile;
 mod manual_token_flow;
 mod mcp;
 mod mcp_discovery;
+#[cfg(all(feature = "root-llm-provider", feature = "webui-v2-beta"))]
+mod nearai_login_serve;
 mod nearai_mcp;
 mod notion_oauth;
 mod oauth_dcr;
@@ -164,6 +166,8 @@ pub use local_runtime_profile::{
     local_dev_yolo_runtime_policy, local_runtime_build_input,
     local_runtime_build_input_with_options,
 };
+#[cfg(all(feature = "root-llm-provider", feature = "webui-v2-beta"))]
+pub use nearai_login_serve::nearai_login_callback_mount;
 pub use product_live_adapters::{
     ProductLiveCapabilityAuthorityResolver, ProductLiveCapabilityIo, ProductLiveModelRouteSettings,
     ProductLivePlannedRuntimeAdapterConfig, ProductLivePlannedRuntimeAdapterError,

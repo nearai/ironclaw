@@ -567,6 +567,28 @@ impl RebornRuntime {
         self.boot.as_ref()
     }
 
+    /// The runtime's NEAR AI session manager, when an LLM seam is wired. The
+    /// LLM-config service uses it so a completed NEAR AI login applies to the
+    /// live provider on reload.
+    #[cfg(feature = "root-llm-provider")]
+    pub(crate) fn webui_llm_session(&self) -> Option<Arc<ironclaw_llm::SessionManager>> {
+        self.llm_reload
+            .as_ref()
+            .map(|parts| Arc::clone(&parts.session))
+    }
+
+    /// Public NEAR AI login callback mount for the host ingress to merge via
+    /// [`crate::webui_serve::WebuiServeConfig::with_public_route_mount`]. Built
+    /// from the runtime's private session/reload/boot so those stay internal.
+    /// `None` when no LLM seam or boot config was wired.
+    #[cfg(all(feature = "root-llm-provider", feature = "webui-v2-beta"))]
+    pub fn nearai_login_callback_mount(&self) -> Option<crate::webui_serve::PublicRouteMount> {
+        let boot = self.boot.clone()?;
+        let session = self.webui_llm_session()?;
+        let reload = self.webui_llm_reload_trigger()?;
+        Some(crate::nearai_login_callback_mount(session, reload, boot))
+    }
+
     /// Live LLM-provider reload trigger for the settings service. Returns the
     /// hot-swap adapter when an LLM provider was wired at boot; otherwise
     /// `None`, in which case config edits persist to disk and apply on the

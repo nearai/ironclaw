@@ -52,6 +52,14 @@ export function listLlmProviderModels(payload) {
     body: JSON.stringify(payload),
   });
 }
+// Begin NEAR AI browser login. Returns { auth_url } to open; a background task
+// stores the session token and makes NEAR AI active once the user authorizes.
+export function startNearaiLogin(payload) {
+  return apiFetch("/api/webchat/v2/llm/nearai/login", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
 export function fetchTools() {
   return Promise.resolve({ tools: [], todo: true });
 }
