@@ -190,6 +190,21 @@ where
             });
         }
 
+        // --- KMS curve-capability gate (mainnet path only), hoisted ahead of the
+        //     grant claim / ledger advance. This is a pure-configuration check
+        //     (it depends only on the wired backend and the family's native
+        //     curve), so a refusal here must be side-effect-free: it must NOT burn
+        //     the one-shot grant nor wedge the ledger at `Signing`, leaving a
+        //     clean retryable state so the request can succeed after an
+        //     ed25519-capable KMS is wired (Codex P2). The alg is the family's
+        //     native curve — the same one each `sign_*` arm passes to the
+        //     backend, kept in sync via `ChainFamily::signing_alg`. ---
+        if path == SigningPath::Kms
+            && let Some(alg) = requested_family.signing_alg()
+        {
+            self.require_kms_supporting(bound_chain, alg)?;
+        }
+
         // --- Enforcement point #1: claim the sealed one-shot grant. ---
         // Refuse to sign without a successfully-claimed grant. A second claim
         // of the same grant fails (one-shot), so a replayed approval cannot

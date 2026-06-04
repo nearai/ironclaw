@@ -929,6 +929,193 @@ async fn solana_mainnet_refused_when_kms_lacks_ed25519() {
     );
 }
 
+/// Curve refusal is a pure-config error and MUST be side-effect-free: it must
+/// occur before the one-shot grant is claimed and before the ledger advances out
+/// of `Approved`, so that retrying after wiring an ed25519-capable KMS is not
+/// blocked by a consumed grant or a wedged ledger row (Medium / Codex P2).
+#[tokio::test]
+async fn curve_refusal_leaves_grant_unconsumed_and_ledger_retryable() {
+    use ed25519_dalek::SigningKey as EdKey;
+    use ironclaw_attestation::{
+        Bytes32, SolanaCompiledInstruction, SolanaMessageHeader, SolanaMessageVersion,
+        SolanaTransaction,
+    };
+
+    let chain = "solana:mainnet";
+    let ed = EdKey::from_bytes(&[0x42u8; 32]);
+    let pubkey = ed.verifying_key().to_bytes();
+
+    let sol = SolanaTransaction {
+        cluster: "mainnet".into(),
+        version: SolanaMessageVersion::Legacy,
+        header: SolanaMessageHeader {
+            num_required_signatures: 1,
+            num_readonly_signed_accounts: 0,
+            num_readonly_unsigned_accounts: 1,
+        },
+        static_account_keys: vec![Bytes32(pubkey), Bytes32([9u8; 32])],
+        recent_blockhash: Bytes32([2u8; 32]),
+        instructions: vec![SolanaCompiledInstruction {
+            program_id_index: 1,
+            account_indices: vec![0],
+            data: vec![1, 2, 3],
+        }],
+        address_table_lookups: vec![],
+    };
+    let decoded = DecodedTransaction::Solana(sol);
+    let approved = recompute_approved_hash(&decoded, "custodial", SCHEMA).unwrap();
+
+    let keystore = Arc::new(SecretsKeyStore::new(crypto()));
+    keystore
+        .bind(
+            &host_scope(),
+            binding(chain, hex::encode(pubkey), Some("kms-sol".to_string())),
+            ed.to_bytes().to_vec(),
+        )
+        .await
+        .unwrap();
+    let grants = Arc::new(InMemorySealedGrantStore::new());
+    let ledger = Arc::new(InMemorySigningLedger::new());
+    let context = ctx(chain);
+    ledger.create(&context.gate_ref).await.unwrap();
+    grants
+        .seal(AttestedSigningGrant::seal(
+            GrantKey::from_context(&context, approved),
+            0,
+            None,
+        ))
+        .await
+        .unwrap();
+
+    let kms: Arc<dyn ironclaw_chain_signing::KmsSigner> = Arc::new(Secp256k1OnlyKms);
+    let signer = CustodialSigner::with_kms(
+        Arc::clone(&keystore),
+        Arc::clone(&grants),
+        Arc::clone(&ledger),
+        ShipGate::new(true, Some(kms.as_ref())),
+        kms,
+        Arc::new(DenyFirstCustodyPolicy),
+    );
+    let req = CustodialSignRequest {
+        context,
+        scope: host_scope(),
+        chain: ChainKeyId::new(chain).expect("valid chain id in test"),
+        decoded,
+        approved_tx_hash: approved,
+        schema_version: SCHEMA,
+    };
+
+    let err = signer.sign_solana(&req).await.unwrap_err();
+    assert!(
+        matches!(err, ChainSigningError::ShipGateRefused { .. }),
+        "got {err:?}"
+    );
+
+    // The ledger must still be at Approved: a pure-config refusal must not wedge
+    // it at Signing.
+    assert_eq!(
+        ledger.state(&req.context.gate_ref).await.unwrap(),
+        SigningLedgerState::Approved,
+        "curve refusal must not advance the ledger out of Approved"
+    );
+
+    // The one-shot grant must be unconsumed: a subsequent claim succeeds (it
+    // would be AlreadyClaimed if the refusal had burned it).
+    grants
+        .claim(&GrantKey::from_context(&req.context, req.approved_tx_hash))
+        .await
+        .expect("grant must be unconsumed after a pure-config curve refusal");
+}
+
+/// The curve refusal reason must name BOTH the chain and the algorithm so an
+/// operator can tell which mainnet chain and which curve the configured KMS
+/// cannot service.
+#[tokio::test]
+async fn curve_refusal_reason_names_chain_and_alg() {
+    use ed25519_dalek::SigningKey as EdKey;
+    use ironclaw_attestation::{
+        Bytes32, SolanaCompiledInstruction, SolanaMessageHeader, SolanaMessageVersion,
+        SolanaTransaction,
+    };
+
+    let chain = "solana:mainnet";
+    let ed = EdKey::from_bytes(&[0x42u8; 32]);
+    let pubkey = ed.verifying_key().to_bytes();
+
+    let sol = SolanaTransaction {
+        cluster: "mainnet".into(),
+        version: SolanaMessageVersion::Legacy,
+        header: SolanaMessageHeader {
+            num_required_signatures: 1,
+            num_readonly_signed_accounts: 0,
+            num_readonly_unsigned_accounts: 1,
+        },
+        static_account_keys: vec![Bytes32(pubkey), Bytes32([9u8; 32])],
+        recent_blockhash: Bytes32([2u8; 32]),
+        instructions: vec![SolanaCompiledInstruction {
+            program_id_index: 1,
+            account_indices: vec![0],
+            data: vec![1, 2, 3],
+        }],
+        address_table_lookups: vec![],
+    };
+    let decoded = DecodedTransaction::Solana(sol);
+    let approved = recompute_approved_hash(&decoded, "custodial", SCHEMA).unwrap();
+
+    let keystore = Arc::new(SecretsKeyStore::new(crypto()));
+    keystore
+        .bind(
+            &host_scope(),
+            binding(chain, hex::encode(pubkey), Some("kms-sol".to_string())),
+            ed.to_bytes().to_vec(),
+        )
+        .await
+        .unwrap();
+    let grants = Arc::new(InMemorySealedGrantStore::new());
+    let ledger = Arc::new(InMemorySigningLedger::new());
+    let context = ctx(chain);
+    ledger.create(&context.gate_ref).await.unwrap();
+    grants
+        .seal(AttestedSigningGrant::seal(
+            GrantKey::from_context(&context, approved),
+            0,
+            None,
+        ))
+        .await
+        .unwrap();
+
+    let kms: Arc<dyn ironclaw_chain_signing::KmsSigner> = Arc::new(Secp256k1OnlyKms);
+    let signer = CustodialSigner::with_kms(
+        keystore,
+        grants,
+        Arc::clone(&ledger),
+        ShipGate::new(true, Some(kms.as_ref())),
+        kms,
+        Arc::new(DenyFirstCustodyPolicy),
+    );
+    let req = CustodialSignRequest {
+        context,
+        scope: host_scope(),
+        chain: ChainKeyId::new(chain).expect("valid chain id in test"),
+        decoded,
+        approved_tx_hash: approved,
+        schema_version: SCHEMA,
+    };
+
+    let err = signer.sign_solana(&req).await.unwrap_err();
+    let ChainSigningError::ShipGateRefused { reason } = err else {
+        panic!("expected ShipGateRefused, got {err:?}");
+    };
+    assert!(
+        reason.contains(chain),
+        "refusal reason must name the chain ({chain}), got: {reason}"
+    );
+    assert!(
+        reason.contains("Ed25519"),
+        "refusal reason must name the algorithm (Ed25519), got: {reason}"
+    );
+}
+
 /// Curve-capability fail-closed for NEAR mainnet (ed25519) with a secp256k1-only
 /// secure KMS.
 #[tokio::test]
