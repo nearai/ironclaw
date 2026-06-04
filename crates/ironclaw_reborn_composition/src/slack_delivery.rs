@@ -39,7 +39,7 @@ use ironclaw_wasm_product_adapters::ImmediateAckWorkflowObserver;
 use tokio::sync::Semaphore;
 
 use crate::AuthChallengeProvider;
-use crate::projection::auth_prompt_view_for_blocked_auth;
+use crate::auth_prompt::auth_prompt_view_for_blocked_auth;
 
 const MAX_SLACK_RUN_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const SLACK_RUN_POLL_JITTER_BUCKETS: u32 = 5;

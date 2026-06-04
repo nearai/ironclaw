@@ -6,9 +6,8 @@ use std::{
 use async_trait::async_trait;
 use futures::{StreamExt, stream};
 use ironclaw_product_adapters::{
-    AuthPromptChallengeKind, AuthPromptView, GatePromptView, ProductAdapterError,
-    ProductOutboundPayload, ProductProjectionItem, ProductProjectionState,
-    ProductWorkflowRejectionKind, RedactedString,
+    GatePromptView, ProductAdapterError, ProductOutboundPayload, ProductProjectionItem,
+    ProductProjectionState, ProductWorkflowRejectionKind, RedactedString,
 };
 use ironclaw_turns::{
     GetRunStateRequest, SanitizedFailure, TurnCoordinator, TurnError, TurnEventKind,
@@ -25,7 +24,8 @@ use tokio::sync::{Mutex, OnceCell, Semaphore};
 
 use ironclaw_reborn::failure_categories::MODEL_CREDITS_EXHAUSTED_CATEGORY;
 
-use crate::projection::AuthChallengeProvider;
+use crate::AuthChallengeProvider;
+use crate::auth_prompt::auth_prompt_view_for_blocked_auth;
 
 pub(super) const WEBUI_TURN_EVENT_PAGE_LIMIT: usize = 256;
 const FAILURE_EXPLANATION_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1500);
@@ -367,74 +367,6 @@ async fn blocked_prompt_payload(
         | TurnStatus::Cancelled
         | TurnStatus::Failed => Ok(None),
     }
-}
-
-pub(crate) async fn auth_prompt_view_for_blocked_auth(
-    fallback_owner_user_id: &ironclaw_host_api::UserId,
-    scope: &TurnScope,
-    run_id: TurnRunId,
-    gate_ref: &str,
-    body: String,
-    credential_requirements: &[ironclaw_host_api::RuntimeCredentialAuthRequirement],
-    auth_challenges: Option<&dyn AuthChallengeProvider>,
-) -> Result<AuthPromptView, ProductAdapterError> {
-    // Enrich the prompt with auth-flow metadata when the provider is available.
-    // Explicit turn owners represent shared/team subjects; actor fallback keeps
-    // the existing personal/WebUI behavior for legacy scopes.
-    let owner_user_id = scope
-        .explicit_owner_user_id()
-        .unwrap_or(fallback_owner_user_id);
-    let challenge = match auth_challenges {
-        Some(provider) => provider
-            .challenge_for_gate(
-                scope,
-                owner_user_id,
-                run_id,
-                gate_ref,
-                credential_requirements,
-            )
-            .await
-            .map_err(|error| {
-                tracing::debug!(
-                    %error,
-                    %run_id,
-                    "auth challenge lookup failed during prompt projection"
-                );
-                ProductAdapterError::WorkflowTransient {
-                    reason: RedactedString::new("auth challenge lookup failed"),
-                }
-            })?,
-        None => None,
-    };
-    let base_view = AuthPromptView {
-        turn_run_id: run_id,
-        auth_request_ref: gate_ref.to_string(),
-        headline: "Authentication required".to_string(),
-        body,
-        challenge_kind: None,
-        provider: None,
-        account_label: None,
-        authorization_url: None,
-        expires_at: None,
-    };
-    Ok(match challenge {
-        Some(c) => c.enrich(base_view),
-        None => auth_prompt_from_credential_requirement(base_view, credential_requirements),
-    })
-}
-
-fn auth_prompt_from_credential_requirement(
-    mut view: AuthPromptView,
-    credential_requirements: &[ironclaw_host_api::RuntimeCredentialAuthRequirement],
-) -> AuthPromptView {
-    let [requirement] = credential_requirements else {
-        return view;
-    };
-    let provider = requirement.provider.as_str().to_string();
-    view.challenge_kind = Some(AuthPromptChallengeKind::ManualToken);
-    view.provider = Some(provider.clone());
-    view.account_label = Some(provider);
-    view
 }
 
 fn gate_prompt(

@@ -14,16 +14,15 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use hmac::{Hmac, Mac};
 use http_body_util::BodyExt;
-use ironclaw_auth::{AuthProductError, AuthProviderId, OAuthAuthorizationUrl};
 use ironclaw_conversations::InMemoryConversationServices;
 use ironclaw_host_api::{AgentId, ApprovalRequestId, ProjectId, TenantId, UserId};
 use ironclaw_outbound::{
     CommunicationPreferenceRepository, InMemoryOutboundStateStore, OutboundStateStore,
 };
 use ironclaw_product_adapters::{
-    AdapterInstallationId, AuthPromptChallengeKind, DeliveryStatus, EgressCredentialHandle,
-    EgressRequest, EgressResponse, ExternalActorRef, OutboundDeliverySink, ProductAdapter,
-    ProtocolHttpEgress, ProtocolHttpEgressError,
+    AdapterInstallationId, DeliveryStatus, EgressCredentialHandle, EgressRequest, EgressResponse,
+    ExternalActorRef, OutboundDeliverySink, ProductAdapter, ProtocolHttpEgress,
+    ProtocolHttpEgressError,
 };
 use ironclaw_product_workflow::{
     ApprovalInteractionActionView, ApprovalInteractionDecision, ApprovalInteractionScope,
@@ -59,9 +58,13 @@ use crate::slack_delivery::{
     SlackFinalReplyDeliverySettings,
 };
 use crate::{
-    AuthChallengeProvider, AuthChallengeView, RebornUserIdentityLookup,
-    RebornUserIdentityLookupError, SlackUserIdentityActorResolver,
+    AuthChallengeProvider, RebornUserIdentityLookup, RebornUserIdentityLookupError,
+    SlackUserIdentityActorResolver,
 };
+
+#[path = "e2e_auth_challenge.rs"]
+mod e2e_auth_challenge;
+use e2e_auth_challenge::FakeAuthChallengeProvider;
 
 const TENANT: &str = "tenant:slack";
 const AGENT: &str = "agent:slack";
@@ -421,10 +424,12 @@ async fn slack_dm_delivers_approval_prompt_after_immediate_ack() {
 
 #[tokio::test]
 async fn slack_dm_delivers_auth_prompt_with_setup_link_after_immediate_ack() {
+    let auth_provider = Arc::new(FakeAuthChallengeProvider::default());
+    let auth_challenges: Arc<dyn AuthChallengeProvider> = auth_provider.clone();
     let harness = build_harness_with_actor_user_resolver_and_auth_challenges(
         TurnMode::BlockAuth,
         static_personal_actor_user_resolver(),
-        Some(Arc::new(FakeAuthChallengeProvider)),
+        Some(auth_challenges),
     )
     .await;
 
@@ -441,6 +446,7 @@ async fn slack_dm_delivers_auth_prompt_with_setup_link_after_immediate_ack() {
     let text = messages[0]["text"].as_str().expect("Slack message text");
     assert!(text.contains("Authentication required"));
     assert!(text.contains("Setup link: https://provider.example/oauth"));
+    auth_provider.assert_single_call();
 }
 
 #[tokio::test]
@@ -587,7 +593,7 @@ impl TurnCoordinator for RecordingTurnCoordinator {
             accepted_message_ref: request.accepted_message_ref.clone(),
             reply_target_binding_ref: request.reply_target_binding_ref.clone(),
         };
-        let mut run_state = turn_state(
+        let run_state = turn_state(
             request.scope,
             request.actor,
             run_id,
@@ -596,9 +602,6 @@ impl TurnCoordinator for RecordingTurnCoordinator {
             request.reply_target_binding_ref,
             request.accepted_message_ref,
         );
-        if status == TurnStatus::BlockedAuth {
-            run_state.credential_requirements = Vec::new();
-        }
         let mut state = self
             .state
             .lock()
@@ -870,35 +873,6 @@ fn dm_message(event_id: &'static str, text: &'static str) -> &'static str {
         ("Ev-identity", "hello") => DM_IDENTITY,
         ("Ev-auth", "needs auth") => DM_AUTH,
         _ => panic!("unknown fixture"),
-    }
-}
-
-struct FakeAuthChallengeProvider;
-
-#[async_trait]
-impl AuthChallengeProvider for FakeAuthChallengeProvider {
-    async fn challenge_for_gate(
-        &self,
-        _scope: &TurnScope,
-        owner_user_id: &UserId,
-        _run_id: TurnRunId,
-        gate_ref: &str,
-        _credential_requirements: &[ironclaw_host_api::RuntimeCredentialAuthRequirement],
-    ) -> Result<Option<AuthChallengeView>, AuthProductError> {
-        if owner_user_id.as_str() != USER || gate_ref != AUTH_GATE {
-            return Ok(None);
-        }
-        Ok(Some(AuthChallengeView {
-            kind: AuthPromptChallengeKind::OAuthUrl,
-            provider: AuthProviderId::new("provider".to_string())
-                .expect("static provider id should be valid"), // safety: static test provider id is valid.
-            account_label: None,
-            authorization_url: Some(
-                OAuthAuthorizationUrl::new("https://provider.example/oauth".to_string())
-                    .expect("static OAuth URL should be valid"), // safety: static test URL is valid.
-            ),
-            expires_at: None,
-        }))
     }
 }
 
