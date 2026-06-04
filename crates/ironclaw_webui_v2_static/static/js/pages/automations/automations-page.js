@@ -8,7 +8,10 @@ export function AutomationsPage() {
   const t = useT();
   const [filter, setFilter] = React.useState("all");
   const automationsState = useAutomations();
-  const showErrorOnly = automationsState.error && !automationsState.isLoading;
+  const showErrorOnly =
+    automationsState.error &&
+    !automationsState.isLoading &&
+    automationsState.automations.length === 0;
 
   return html`
     <div className="flex h-full flex-col overflow-y-auto">

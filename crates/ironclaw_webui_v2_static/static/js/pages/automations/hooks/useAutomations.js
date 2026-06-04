@@ -1,16 +1,18 @@
 import { useQuery } from "@tanstack/react-query";
 import { React } from "../../../lib/html.js";
+import { listAutomations } from "../../../lib/api.js";
 
-import { fetchAutomations } from "../lib/automations-api.js";
 import {
   automationSummary,
   normalizeAutomations,
 } from "../lib/automations-presenters.js";
 
+const AUTOMATIONS_PAGE_LIMIT = 50;
+
 export function useAutomations() {
   const query = useQuery({
     queryKey: ["automations"],
-    queryFn: fetchAutomations,
+    queryFn: () => listAutomations({ limit: AUTOMATIONS_PAGE_LIMIT }),
     refetchInterval: 30000,
     refetchIntervalInBackground: false,
   });

@@ -77,9 +77,15 @@ test("scheduleLabel presents common recurring schedules in friendly language", (
   assert.equal(scheduleLabel("0 8 * * 7"), "Sundays at 8:00 AM");
   assert.equal(scheduleLabel("0 9 * * MON-FRI"), "Weekdays at 9:00 AM");
   assert.equal(scheduleLabel("0 17 1 * *"), "1st day of each month at 5:00 PM");
+  assert.equal(scheduleLabel("0 17 11 * *"), "11th day of each month at 5:00 PM");
+  assert.equal(scheduleLabel("0 17 12 * *"), "12th day of each month at 5:00 PM");
+  assert.equal(scheduleLabel("0 17 13 * *"), "13th day of each month at 5:00 PM");
   assert.equal(scheduleLabel("0 0 9 1 1 * 2027"), "Jan 1, 2027 at 9:00 AM");
   assert.equal(scheduleLabel("*/5 * * * *"), "Custom schedule");
   assert.equal(scheduleLabel("* 0 9 * * *"), "Custom schedule");
+  assert.equal(scheduleLabel("0 24 * * *"), "Custom schedule");
+  assert.equal(scheduleLabel("0 0 32 * *"), "Custom schedule");
+  assert.equal(scheduleLabel("0 0 * 13 *"), "Custom schedule");
 });
 
 test("filterAutomations, sorting, and summary use browser-visible active state", () => {
@@ -151,7 +157,7 @@ test("automationSummary ignores unparseable next_run_at values", () => {
     scheduled: 1,
     active: 1,
     paused: 0,
-    nextRun: "None",
+    nextRun: null,
   });
 });
 

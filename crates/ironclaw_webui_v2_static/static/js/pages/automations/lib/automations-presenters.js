@@ -64,30 +64,26 @@ export function filterAutomations(automations, filter) {
     return automations.filter((automation) => isBrowserActive(automation));
   }
   if (filter === "paused") {
-    return automations.filter((automation) =>
-      ["paused", "disabled", "inactive"].includes(automation.state)
-    );
+    return automations.filter((automation) => isBrowserPaused(automation));
   }
   return automations;
 }
 
 export function automationSummary(automations) {
   const active = automations.filter((automation) => isBrowserActive(automation)).length;
-  const paused = automations.filter((automation) =>
-    ["paused", "disabled", "inactive"].includes(automation.state)
-  ).length;
+  const paused = automations.filter((automation) => isBrowserPaused(automation)).length;
   const next = automations
     .filter((automation) => nextRunTimestamp(automation) !== null)
     .sort(
       (a, b) =>
-        (nextRunTimestamp(a) ?? Number.MAX_SAFE_INTEGER) -
-        (nextRunTimestamp(b) ?? Number.MAX_SAFE_INTEGER),
+        (a.next_run_timestamp ?? Number.MAX_SAFE_INTEGER) -
+        (b.next_run_timestamp ?? Number.MAX_SAFE_INTEGER),
     )[0];
   return {
     scheduled: automations.length,
     active,
     paused,
-    nextRun: next?.next_run_label || "None",
+    nextRun: next?.next_run_label || null,
   };
 }
 
@@ -181,6 +177,10 @@ function parseTimestamp(value) {
 
 function isBrowserActive(automation) {
   return automation?.state === "active" || automation?.state === "scheduled";
+}
+
+function isBrowserPaused(automation) {
+  return ["paused", "disabled", "inactive"].includes(automation?.state);
 }
 
 function nextRunTimestamp(automation) {
