@@ -34,8 +34,10 @@ use ironclaw_reborn_composition::{
     TriggerPollerSettings, build_reborn_runtime,
 };
 use ironclaw_triggers::{
-    TriggerCompletionPolicy, TriggerId, TriggerPollerWorkerConfig, TriggerRecord,
-    TriggerRepository, TriggerRunStatus, TriggerSchedule, TriggerSourceKind, TriggerState,
+    TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID, TRIGGER_TRUSTED_ADAPTER_KIND,
+    TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerCompletionPolicy, TriggerId,
+    TriggerPollerWorkerConfig, TriggerRecord, TriggerRepository, TriggerRunStatus, TriggerSchedule,
+    TriggerSourceKind, TriggerState,
 };
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 use serde_json::{Value, json};
@@ -238,15 +240,12 @@ async fn trigger_poller_drives_trusted_ingress_for_due_scheduled_trigger() {
     let runtime = build_runtime_with(
         &root,
         Arc::clone(&recording_gateway),
-        TriggerPollerSettings {
-            enabled: true,
-            worker: TriggerPollerWorkerConfig {
+        TriggerPollerSettings::enabled_with_tenant_scoped_authorizer_for_test().with_worker_config(
+            TriggerPollerWorkerConfig {
                 poll_interval: Duration::from_millis(20),
                 ..Default::default()
             },
-            startup_jitter_max: Duration::ZERO,
-            tick_jitter_max: Duration::ZERO,
-        },
+        ),
     )
     .await;
 
@@ -267,15 +266,15 @@ async fn trigger_poller_drives_trusted_ingress_for_due_scheduled_trigger() {
     // submission path fails closed for unpaired actors by design; in
     // production, onboarding establishes this pairing before any trigger
     // can be created. The adapter kind / installation id / external actor
-    // ref must match the values
-    // `crates/ironclaw_reborn_composition/src/trigger_poller_trusted_submit.rs`
-    // hardcodes for trigger fires.
+    // ref must match the trusted trigger constants used for trigger fires.
     pairing
         .pair_external_actor(
             tenant_id.clone(),
-            AdapterKind::new("trigger").expect("adapter kind"),
-            AdapterInstallationId::new("reborn-trigger-poller").expect("installation id"),
-            ExternalActorRef::new("user", user_id.as_str()).expect("actor ref"),
+            AdapterKind::new(TRIGGER_TRUSTED_ADAPTER_KIND).expect("adapter kind"),
+            AdapterInstallationId::new(TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID)
+                .expect("installation id"),
+            ExternalActorRef::new(TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, user_id.as_str())
+                .expect("actor ref"),
             user_id.clone(),
         )
         .await
@@ -399,15 +398,12 @@ async fn builtin_trigger_create_pairs_creator_and_poller_submits_turn() {
     let runtime = build_runtime_with(
         &root,
         Arc::clone(&recording_gateway),
-        TriggerPollerSettings {
-            enabled: true,
-            worker: TriggerPollerWorkerConfig {
+        TriggerPollerSettings::enabled_with_tenant_scoped_authorizer_for_test().with_worker_config(
+            TriggerPollerWorkerConfig {
                 poll_interval: Duration::from_millis(20),
                 ..Default::default()
             },
-            startup_jitter_max: Duration::ZERO,
-            tick_jitter_max: Duration::ZERO,
-        },
+        ),
     )
     .await;
 
@@ -557,15 +553,12 @@ async fn trigger_poller_does_not_fire_trigger_with_future_next_run_at() {
     let runtime = build_runtime_with(
         &root,
         Arc::clone(&recording_gateway),
-        TriggerPollerSettings {
-            enabled: true,
-            worker: TriggerPollerWorkerConfig {
+        TriggerPollerSettings::enabled_with_tenant_scoped_authorizer_for_test().with_worker_config(
+            TriggerPollerWorkerConfig {
                 poll_interval: Duration::from_millis(20),
                 ..Default::default()
             },
-            startup_jitter_max: Duration::ZERO,
-            tick_jitter_max: Duration::ZERO,
-        },
+        ),
     )
     .await;
 
@@ -584,9 +577,11 @@ async fn trigger_poller_does_not_fire_trigger_with_future_next_run_at() {
     pairing
         .pair_external_actor(
             tenant_id.clone(),
-            AdapterKind::new("trigger").expect("adapter kind"),
-            AdapterInstallationId::new("reborn-trigger-poller").expect("installation id"),
-            ExternalActorRef::new("user", user_id.as_str()).expect("actor ref"),
+            AdapterKind::new(TRIGGER_TRUSTED_ADAPTER_KIND).expect("adapter kind"),
+            AdapterInstallationId::new(TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID)
+                .expect("installation id"),
+            ExternalActorRef::new(TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, user_id.as_str())
+                .expect("actor ref"),
             user_id.clone(),
         )
         .await
@@ -679,15 +674,12 @@ async fn trigger_poller_does_not_submit_turn_for_unpaired_actor() {
     let runtime = build_runtime_with(
         &root,
         Arc::clone(&recording_gateway),
-        TriggerPollerSettings {
-            enabled: true,
-            worker: TriggerPollerWorkerConfig {
+        TriggerPollerSettings::enabled_with_tenant_scoped_authorizer_for_test().with_worker_config(
+            TriggerPollerWorkerConfig {
                 poll_interval: Duration::from_millis(20),
                 ..Default::default()
             },
-            startup_jitter_max: Duration::ZERO,
-            tick_jitter_max: Duration::ZERO,
-        },
+        ),
     )
     .await;
 
@@ -775,15 +767,12 @@ async fn trigger_poller_fires_recurring_trigger_and_leaves_it_scheduled() {
     let runtime = build_runtime_with(
         &root,
         Arc::clone(&recording_gateway),
-        TriggerPollerSettings {
-            enabled: true,
-            worker: TriggerPollerWorkerConfig {
+        TriggerPollerSettings::enabled_with_tenant_scoped_authorizer_for_test().with_worker_config(
+            TriggerPollerWorkerConfig {
                 poll_interval: Duration::from_millis(20),
                 ..Default::default()
             },
-            startup_jitter_max: Duration::ZERO,
-            tick_jitter_max: Duration::ZERO,
-        },
+        ),
     )
     .await;
 
@@ -803,9 +792,11 @@ async fn trigger_poller_fires_recurring_trigger_and_leaves_it_scheduled() {
     pairing
         .pair_external_actor(
             tenant_id.clone(),
-            AdapterKind::new("trigger").expect("adapter kind"),
-            AdapterInstallationId::new("reborn-trigger-poller").expect("installation id"),
-            ExternalActorRef::new("user", user_id.as_str()).expect("actor ref"),
+            AdapterKind::new(TRIGGER_TRUSTED_ADAPTER_KIND).expect("adapter kind"),
+            AdapterInstallationId::new(TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID)
+                .expect("installation id"),
+            ExternalActorRef::new(TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, user_id.as_str())
+                .expect("actor ref"),
             user_id.clone(),
         )
         .await

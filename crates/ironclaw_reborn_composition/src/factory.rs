@@ -339,7 +339,8 @@ pub(crate) struct RebornLocalRuntimeServices {
     #[cfg(not(any(feature = "libsql", feature = "postgres")))]
     pub(crate) trigger_conversation_services: InMemoryConversationServices,
     #[cfg(any(feature = "libsql", feature = "postgres"))]
-    trigger_conversation_services: tokio::sync::OnceCell<RebornFilesystemConversationServices>,
+    pub(crate) trigger_conversation_services:
+        tokio::sync::OnceCell<RebornFilesystemConversationServices>,
     pub(crate) checkpoint_state_store: Arc<dyn CheckpointStateStore>,
     pub(crate) loop_checkpoint_store: Arc<dyn LoopCheckpointStore>,
     pub(crate) thread_service: Arc<dyn SessionThreadService>,
@@ -1179,8 +1180,8 @@ async fn pair_trigger_creator(
         .map_err(trigger_pairing_error)
 }
 
-fn trigger_pairing_error(error: impl std::fmt::Display) -> TriggerError {
-    tracing::debug!(%error, "trigger creator actor pairing failed");
+fn trigger_pairing_error(_error: impl std::fmt::Display) -> TriggerError {
+    tracing::debug!("trigger creator actor pairing failed");
     TriggerError::Backend {
         reason: "trigger creator actor pairing failed".to_string(),
     }
@@ -2507,13 +2508,16 @@ mod tests {
         CredentialOwnership, GOOGLE_CALENDAR_EVENTS_SCOPE, GOOGLE_GMAIL_SEND_SCOPE,
         NewCredentialAccount, ProviderScope,
     };
-    use ironclaw_filesystem::FilesystemError;
+    use ironclaw_filesystem::{
+        DirEntry, FileStat, FilesystemError, FilesystemOperation, RootFilesystem, VersionedEntry,
+    };
     use ironclaw_host_api::{
         CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind,
         ExecutionContext, ExtensionId, GrantConstraints, InvocationId, MountAlias, MountGrant,
-        NetworkPolicy, NetworkScheme, NetworkTargetPattern, Principal, ResourceEstimate,
-        ResourceScope, RuntimeCredentialAccountProviderId, RuntimeCredentialRequirementSource,
-        RuntimeKind, ScopedPath, SecretHandle, TenantId, TrustClass, UserId, VirtualPath,
+        MountPermissions, NetworkPolicy, NetworkScheme, NetworkTargetPattern, Principal,
+        ResourceEstimate, ResourceScope, RuntimeCredentialAccountProviderId,
+        RuntimeCredentialRequirementSource, RuntimeKind, ScopedPath, SecretHandle, TenantId,
+        TrustClass, UserId, VirtualPath,
     };
     use ironclaw_host_runtime::{
         MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
@@ -2544,6 +2548,32 @@ mod tests {
         ) -> Result<(), ironclaw_conversations::InboundTurnError> {
             Err(ironclaw_conversations::InboundTurnError::DurableState {
                 reason: "raw durable store error".to_string(),
+            })
+        }
+    }
+
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
+    struct FailingConversationStateFilesystem;
+
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
+    #[async_trait::async_trait]
+    impl RootFilesystem for FailingConversationStateFilesystem {
+        async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+            Err(FilesystemError::Backend {
+                path: path.clone(),
+                operation: FilesystemOperation::ReadFile,
+                reason: "conversation state load failed".to_string(),
+            })
+        }
+
+        async fn list_dir(&self, _path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+            Ok(Vec::new())
+        }
+
+        async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+            Err(FilesystemError::NotFound {
+                path: path.clone(),
+                operation: FilesystemOperation::ReadFile,
             })
         }
     }
@@ -2584,6 +2614,30 @@ mod tests {
             panic!("expected backend trigger error");
         };
         assert_eq!(reason, "trigger creator actor pairing failed");
+    }
+
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
+    #[tokio::test]
+    async fn durable_trigger_conversation_services_propagates_init_error() {
+        let filesystem = Arc::new(ScopedFilesystem::with_fixed_view(
+            Arc::new(FailingConversationStateFilesystem),
+            MountView::new(vec![MountGrant::new(
+                MountAlias::new("/conversations").expect("mount alias"),
+                VirtualPath::new("/conversations").expect("virtual path"),
+                MountPermissions::read_write_list_delete(),
+            )])
+            .expect("mount view"),
+        ));
+
+        let error = match RebornFilesystemConversationServices::new(filesystem).await {
+            Ok(_) => panic!("conversation service init should fail"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            ironclaw_conversations::InboundTurnError::DurableState { .. }
+        ));
     }
 
     #[tokio::test]

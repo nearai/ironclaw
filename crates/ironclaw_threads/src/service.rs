@@ -188,6 +188,19 @@ pub trait SessionThreadService: Send + Sync {
             .map(|history| history.thread)
     }
 
+    /// Delete a thread and its transcript only when it belongs to the supplied
+    /// exact scope. Implementations must return the same non-enumerating
+    /// missing shape for absent and cross-scope threads.
+    async fn delete_thread(
+        &self,
+        _scope: &ThreadScope,
+        _thread_id: &ThreadId,
+    ) -> Result<(), SessionThreadError> {
+        Err(SessionThreadError::Backend(
+            "delete_thread is not implemented by this SessionThreadService backend".to_string(),
+        ))
+    }
+
     async fn create_summary_artifact(
         &self,
         request: CreateSummaryArtifactRequest,
@@ -406,6 +419,14 @@ where
         request: ThreadHistoryRequest,
     ) -> Result<SessionThreadRecord, SessionThreadError> {
         self.as_ref().read_thread(request).await
+    }
+
+    async fn delete_thread(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+    ) -> Result<(), SessionThreadError> {
+        self.as_ref().delete_thread(scope, thread_id).await
     }
 
     async fn create_summary_artifact(

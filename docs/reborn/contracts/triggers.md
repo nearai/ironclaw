@@ -211,6 +211,13 @@ A trigger fire is synthetic inbound, not a parallel agent loop.
   time that `creator_user_id` is still authorized for the target
   `tenant_id`/`agent_id`/`project_id`; revoked or unauthorized creators must
   produce a permanent authorization failure instead of submitting a turn.
+  Backend unavailability while checking that policy must be retryable. The
+  fire-time authorization request is a host-owned shape over
+  `tenant_id`/`creator_user_id`/`agent_id`/`project_id`/`trigger_id`/`fire_slot`;
+  trigger-domain crates must not own the membership policy. Until that request
+  is backed by the real agent/project membership source of truth, a normal
+  runtime must fail closed instead of enabling the trigger poller with the
+  tenant-scope placeholder.
 - The trusted inbound request is a host-owned synthetic inbound shape around the ordinary inbound fields. It carries only ingress identity and turn scope data needed to create the canonical turn, and it has no adapter-supplied requested-scope hints before binding resolution.
 - It must not encode delivery targets, notification targets, or any other outbound routing policy.
 

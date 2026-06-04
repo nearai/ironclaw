@@ -1304,6 +1304,31 @@ where
         Ok(thread.record)
     }
 
+    async fn delete_thread(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+    ) -> Result<(), SessionThreadError> {
+        // read_thread/read_thread_versioned enforce exact-scope ownership and
+        // preserve the same UnknownThread shape for absent or cross-scope rows.
+        self.read_thread(ThreadHistoryRequest {
+            scope: scope.clone(),
+            thread_id: thread_id.clone(),
+        })
+        .await?;
+        match self
+            .filesystem
+            .delete(&scope.to_resource_scope(), &thread_root(scope, thread_id)?)
+            .await
+        {
+            Ok(()) => Ok(()),
+            Err(error) if is_not_found(&error) => Err(SessionThreadError::UnknownThread {
+                thread_id: thread_id.clone(),
+            }),
+            Err(error) => Err(error.into()),
+        }
+    }
+
     async fn create_summary_artifact(
         &self,
         request: CreateSummaryArtifactRequest,
@@ -1599,6 +1624,13 @@ fn thread_record_path(
         "{}/thread.json",
         thread_root_string(scope, thread_id)
     ))
+}
+
+fn thread_root(
+    scope: &ThreadScope,
+    thread_id: &ThreadId,
+) -> Result<ScopedPath, SessionThreadError> {
+    scoped_path(&thread_root_string(scope, thread_id))
 }
 
 fn messages_root(
