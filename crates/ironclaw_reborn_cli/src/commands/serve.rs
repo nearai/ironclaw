@@ -273,16 +273,6 @@ impl ServeCommand {
                  value is {token_byte_len} bytes — generate one with e.g. `openssl rand -hex 32`."
             ));
         }
-        // The user-identity tables live IN the reborn local-dev substrate
-        // database (a second handle to the same `reborn-local-dev.db` the
-        // runtime opens), not a separate identity-store file — so there is
-        // one durable user source, not two.
-        let user_store_path = boot_config
-            .home()
-            .path()
-            .join("local-dev")
-            .join("reborn-local-dev.db");
-
         // CORS allow-origin list. Empty = fail-closed on every
         // cross-origin preflight; operators MUST opt in to the
         // specific origins the host installation actually serves.
@@ -357,16 +347,28 @@ impl ServeCommand {
             #[cfg(not(feature = "slack-v2-host-beta"))]
             let bundle: RebornWebuiBundle = build_webui_services(&runtime, None)?;
 
+            // Open the canonical Reborn identity resolver on the runtime's
+            // existing substrate handle (the same `reborn-local-dev.db` the
+            // runtime owns) rather than opening a second handle to the file.
+            // `None` means the runtime carries no local-runtime substrate;
+            // the auth surface fails closed when SSO is configured.
+            let identity_resolver = match runtime.open_reborn_identity_resolver(&tenant_id).await {
+                Some(result) => {
+                    Some(result.context("failed to initialize the Reborn identity resolver")?)
+                }
+                None => None,
+            };
+
             // Assemble the WebChat v2 auth surface (authenticator + optional
-            // public login mount). The auth/identity module owns the store
-            // opening + signed-session wiring; `serve` only supplies host
-            // config.
+            // public login mount). The auth/identity module owns the
+            // signed-session wiring; `serve` supplies host config plus the
+            // runtime-owned identity resolver.
             let crate::commands::webui_auth::WebuiAuthSurface {
                 authenticator,
                 public_mount,
             } = crate::commands::webui_auth::build_webui_auth_surface(
                 sso_startup,
-                &user_store_path,
+                identity_resolver,
                 tenant_id.clone(),
                 session_signing_secret,
                 env_authenticator,

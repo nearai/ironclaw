@@ -142,10 +142,12 @@ impl UserDirectory for WebuiUserDirectory {
 mod tests {
     use super::*;
 
-    // Open through the same composition facade production uses, so the CLI
-    // test needs no direct libSQL dependency. The opener's tenant only
-    // scopes legacy migration (a no-op on this fresh DB); each directory
-    // carries its own tenant for resolution.
+    // Build a standalone resolver against a throwaway temp DB via the
+    // composition `test-support` seam, so the CLI test needs no direct
+    // libSQL dependency. Production opens the resolver on the runtime's own
+    // substrate handle (`RebornRuntime::open_reborn_identity_resolver`); here
+    // the opener's tenant only scopes legacy migration (a no-op on this fresh
+    // DB), and each directory carries its own tenant for resolution.
     async fn shared_resolver() -> Arc<dyn RebornIdentityResolver> {
         let tmp = tempfile::tempdir().expect("tempdir");
         // Leak the tempdir so the libSQL file outlives the test body.

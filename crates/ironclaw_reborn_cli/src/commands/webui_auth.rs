@@ -9,14 +9,11 @@
 //! ([`crate::commands::user_directory`]) and the startup config
 //! ([`crate::commands::serve_sso`]).
 
-use std::path::Path;
 use std::sync::Arc;
 
-use anyhow::Context;
+use anyhow::anyhow;
 use ironclaw_reborn_composition::host_api::TenantId;
-use ironclaw_reborn_composition::{
-    PublicRouteMount, WebuiAuthenticator, open_reborn_identity_resolver,
-};
+use ironclaw_reborn_composition::{PublicRouteMount, RebornIdentityResolver, WebuiAuthenticator};
 use ironclaw_reborn_webui_ingress::{SignedSessionLoginConfig, build_signed_session_login};
 use secrecy::SecretString;
 
@@ -35,13 +32,18 @@ pub(crate) struct WebuiAuthSurface {
 ///
 /// With no SSO provider configured (`sso_startup` is `None`), the
 /// listener keeps its plain env-bearer authenticator and mounts no public
-/// routes. With providers configured, this opens the canonical Reborn
-/// identity resolver on the substrate DB, layers the fail-closed
-/// email-domain admission adapter on top, and hands the result to the
-/// ingress signed-session builder.
+/// routes. With providers configured, this layers the fail-closed
+/// email-domain admission adapter on top of the runtime-owned canonical
+/// Reborn identity resolver and hands the result to the ingress
+/// signed-session builder.
+///
+/// `identity_resolver` is the resolver the runtime opened on its own
+/// substrate handle. It is `None` only when the runtime carries no
+/// local-runtime substrate; with SSO configured that is unrecoverable, so
+/// this fails closed rather than minting users against a missing store.
 pub(crate) async fn build_webui_auth_surface(
     sso_startup: Option<SsoStartupConfig>,
-    user_store_path: &Path,
+    identity_resolver: Option<Arc<dyn RebornIdentityResolver>>,
     tenant_id: TenantId,
     session_signing_secret: SecretString,
     env_authenticator: Arc<dyn WebuiAuthenticator>,
@@ -53,13 +55,16 @@ pub(crate) async fn build_webui_auth_surface(
         });
     };
 
-    // Open the canonical Reborn identity resolver through the composition
-    // facade (which keeps the libSQL substrate handle private). The host
-    // `WebuiUserDirectory` adapter layers the fail-closed email-domain
-    // admission allowlist on top before any user is created.
-    let identity_resolver = open_reborn_identity_resolver(user_store_path, &tenant_id)
-        .await
-        .context("failed to initialize the Reborn identity resolver")?;
+    // The host `WebuiUserDirectory` adapter layers the fail-closed
+    // email-domain admission allowlist on top of the runtime-owned resolver
+    // before any user is created. No resolver means no durable user source —
+    // fail closed instead of admitting SSO logins against nothing.
+    let identity_resolver = identity_resolver.ok_or_else(|| {
+        anyhow!(
+            "WebChat v2 SSO is configured but the runtime exposes no identity \
+             resolver (no local-runtime substrate); refusing to start"
+        )
+    })?;
 
     let wiring = build_signed_session_login(SignedSessionLoginConfig {
         tenant_id: tenant_id.clone(),

@@ -598,6 +598,38 @@ impl RebornRuntime {
         self.trigger_conversation_pairing.as_ref().map(Arc::clone)
     }
 
+    /// Open the canonical Reborn identity resolver on the runtime's existing
+    /// local-dev libSQL substrate handle, running the store's idempotent
+    /// schema migrations plus the one-time legacy WebUI identity fold under
+    /// `tenant_id`. Rides the same `reborn-local-dev.db` handle the runtime
+    /// already owns rather than opening a second handle to that file (the
+    /// host filesystem abstraction owns the substrate, not the caller).
+    /// Returns `None` when the runtime was built without a local-runtime
+    /// substrate (production-shape profiles not yet wired), so callers fail
+    /// closed.
+    #[cfg(feature = "webui-v2-beta")]
+    pub async fn open_reborn_identity_resolver(
+        &self,
+        tenant_id: &TenantId,
+    ) -> Option<
+        Result<
+            Arc<dyn ironclaw_reborn_identity::RebornIdentityResolver>,
+            ironclaw_reborn_identity::RebornIdentityError,
+        >,
+    > {
+        let db = Arc::clone(&self.services.local_runtime.as_ref()?.identity_substrate_db);
+        let store = match ironclaw_reborn_identity::RebornLibSqlIdentityStore::open(db).await {
+            Ok(store) => store,
+            Err(err) => return Some(Err(err)),
+        };
+        if let Err(err) = store.migrate_legacy_webui_identities(tenant_id).await {
+            return Some(Err(err));
+        }
+        Some(Ok(
+            Arc::new(store) as Arc<dyn ironclaw_reborn_identity::RebornIdentityResolver>
+        ))
+    }
+
     pub(crate) fn webui_thread_service(&self) -> Arc<dyn SessionThreadService> {
         self.thread_service.clone()
     }

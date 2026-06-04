@@ -323,6 +323,14 @@ pub(crate) struct RebornLocalRuntimeServices {
     pub(crate) checkpoint_state_store: Arc<dyn CheckpointStateStore>,
     pub(crate) loop_checkpoint_store: Arc<dyn LoopCheckpointStore>,
     pub(crate) thread_service: Arc<dyn SessionThreadService>,
+    /// Raw libSQL substrate handle backing `reborn-local-dev.db`. Carried so
+    /// the canonical Reborn identity store
+    /// (`RebornRuntime::open_reborn_identity_resolver`) rides the same DB file
+    /// instead of opening a second handle to it. Only the WebUI v2 SSO surface
+    /// reads it today, hence `dead_code` when that feature is off.
+    #[cfg(feature = "libsql")]
+    #[allow(dead_code)]
+    pub(crate) identity_substrate_db: Arc<libsql::Database>,
     /// Resource governor handle used by the budget accountant. Kept here
     /// separately from the type-erased `dyn HostRuntime` so the runtime
     /// composer can construct a `GovernorBackedAccountant` without losing
@@ -544,8 +552,11 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         }
     })?;
     crate::bundled_skills::ensure_bundled_reborn_skills_installed(&root).await?;
-    let filesystem =
-        build_local_dev_root_filesystem(&root, &workspace_root, host_home_root.as_ref()).await?;
+    let LocalDevFilesystemAssembly {
+        filesystem,
+        #[cfg(feature = "libsql")]
+        substrate_db,
+    } = build_local_dev_root_filesystem(&root, &workspace_root, host_home_root.as_ref()).await?;
     let (skill_filesystem, workspace_filesystem, runtime_workspace_mounts) =
         build_workspace_filesystems(
             Arc::clone(&filesystem),
@@ -560,7 +571,11 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         reason: error.to_string(),
     })?;
     let mut store_graph = build_local_dev_store_graph(
-        Arc::clone(&filesystem),
+        LocalDevFilesystemAssembly {
+            filesystem: Arc::clone(&filesystem),
+            #[cfg(feature = "libsql")]
+            substrate_db,
+        },
         owner_user_id,
         skill_filesystem,
         workspace_filesystem,
@@ -784,7 +799,7 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
 
 #[cfg(feature = "libsql")]
 fn build_local_dev_store_graph(
-    filesystem: Arc<LocalDevRootFilesystem>,
+    filesystem_assembly: LocalDevFilesystemAssembly,
     owner_user_id: UserId,
     skill_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
     workspace_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
@@ -792,6 +807,10 @@ fn build_local_dev_store_graph(
     local_dev_storage_root: PathBuf,
     default_system_prompt_path: PathBuf,
 ) -> Result<RebornLocalDevStoreGraph, RebornBuildError> {
+    let LocalDevFilesystemAssembly {
+        filesystem,
+        substrate_db: identity_substrate_db,
+    } = filesystem_assembly;
     let scoped_filesystem = local_dev_scoped_filesystem(Arc::clone(&filesystem));
     let event_log = local_dev_event_log(Arc::clone(&filesystem))?;
     let audit_log = local_dev_audit_log(Arc::clone(&filesystem))?;
@@ -860,6 +879,7 @@ fn build_local_dev_store_graph(
         #[cfg(feature = "slack-v2-host-beta")]
         host_state_filesystem: Arc::clone(&scoped_filesystem),
         subagent_goal_filesystem: Arc::clone(&scoped_filesystem),
+        identity_substrate_db,
         workspace_mounts,
         local_dev_storage_root,
         default_system_prompt_path,
@@ -882,7 +902,7 @@ fn build_local_dev_store_graph(
 
 #[cfg(not(feature = "libsql"))]
 fn build_local_dev_store_graph(
-    filesystem: Arc<LocalDevRootFilesystem>,
+    filesystem_assembly: LocalDevFilesystemAssembly,
     owner_user_id: UserId,
     skill_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
     workspace_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
@@ -890,6 +910,7 @@ fn build_local_dev_store_graph(
     local_dev_storage_root: PathBuf,
     default_system_prompt_path: PathBuf,
 ) -> Result<RebornLocalDevStoreGraph, RebornBuildError> {
+    let LocalDevFilesystemAssembly { filesystem } = filesystem_assembly;
     #[cfg(feature = "postgres")]
     let subagent_goal_filesystem = local_dev_scoped_filesystem(Arc::clone(&filesystem));
     let event_log = local_dev_event_log(Arc::clone(&filesystem))?;
@@ -1001,12 +1022,23 @@ fn build_budget_sinks() -> BudgetSinks {
     }
 }
 
+/// Output of [`build_local_dev_root_filesystem`]: the composed local-dev
+/// root filesystem and, when libSQL is the substrate, a clone of the raw
+/// libSQL handle. The handle lets the runtime hang the canonical Reborn
+/// identity store off the same `reborn-local-dev.db` rather than opening a
+/// second handle to the same file (see `RebornRuntime::open_reborn_identity_resolver`).
+struct LocalDevFilesystemAssembly {
+    filesystem: Arc<LocalDevRootFilesystem>,
+    #[cfg(feature = "libsql")]
+    substrate_db: Arc<libsql::Database>,
+}
+
 #[cfg(feature = "libsql")]
 async fn build_local_dev_root_filesystem(
     root: &Path,
     workspace_root: &Path,
     host_home_root: Option<&LocalDevHostHomeRoot>,
-) -> Result<Arc<LocalDevRootFilesystem>, RebornBuildError> {
+) -> Result<LocalDevFilesystemAssembly, RebornBuildError> {
     let db_path = root.join("reborn-local-dev.db");
     let db = Arc::new(
         libsql::Builder::new_local(&db_path)
@@ -1016,6 +1048,9 @@ async fn build_local_dev_root_filesystem(
                 reason: format!("local-dev libSQL database could not be opened: {error}"),
             })?,
     );
+    // Keep a clone of the raw handle so the canonical identity store can ride
+    // the same substrate DB; `db` itself is moved into the root filesystem.
+    let substrate_db = Arc::clone(&db);
     let database = Arc::new(LibSqlRootFilesystem::new(db));
     database.run_migrations().await?;
 
@@ -1051,7 +1086,10 @@ async fn build_local_dev_root_filesystem(
         database,
     )?;
     mount_local_dev_project_roots(&mut root, local)?;
-    Ok(Arc::new(root))
+    Ok(LocalDevFilesystemAssembly {
+        filesystem: Arc::new(root),
+        substrate_db,
+    })
 }
 
 #[cfg(not(feature = "libsql"))]
@@ -1059,7 +1097,7 @@ async fn build_local_dev_root_filesystem(
     root: &Path,
     workspace_root: &Path,
     host_home_root: Option<&LocalDevHostHomeRoot>,
-) -> Result<Arc<LocalDevRootFilesystem>, RebornBuildError> {
+) -> Result<LocalDevFilesystemAssembly, RebornBuildError> {
     let local = Arc::new(local_dev_project_filesystem(
         root,
         workspace_root,
@@ -1071,7 +1109,9 @@ async fn build_local_dev_root_filesystem(
     let mut composite = CompositeRootFilesystem::new();
     mount_local_dev_memory_root(&mut composite, Arc::new(InMemoryBackend::new()))?;
     mount_local_dev_project_roots(&mut composite, local)?;
-    Ok(Arc::new(composite))
+    Ok(LocalDevFilesystemAssembly {
+        filesystem: Arc::new(composite),
+    })
 }
 
 fn local_dev_project_filesystem(
@@ -2521,7 +2561,8 @@ mod tests {
             None,
         )
         .await
-        .expect("local-dev filesystem rebuild");
+        .expect("local-dev filesystem rebuild")
+        .filesystem;
         let rebuilt_secret_store = build_local_dev_secret_store(
             &local_dev_root,
             local_dev_scoped_filesystem(rebuilt_filesystem),

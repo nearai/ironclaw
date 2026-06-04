@@ -287,15 +287,20 @@ pub use ironclaw_reborn_identity::{
     RebornIdentityError, RebornIdentityResolver, ResolveExternalIdentity, SurfaceKind,
 };
 
-/// Open the canonical Reborn identity resolver on the substrate DB at
-/// `path`, creating the parent directory and running its idempotent schema
-/// migrations. Also folds any legacy pre-#4381 WebUI `user_identities` rows
-/// (written by the old store into this same substrate DB) into the
-/// canonical store under `tenant_id`, so existing SSO users keep their
-/// `UserId` across upgrade rather than being re-minted. Returns a
-/// trait-object handle and keeps the concrete libSQL store private
-/// (composition CLAUDE.md: "keep lower substrate handles private").
-#[cfg(feature = "webui-v2-beta")]
+/// Test-support: open a standalone canonical Reborn identity resolver on the
+/// libSQL substrate DB at `path`, creating the parent directory, running the
+/// store's idempotent schema migrations, and folding any legacy pre-#4381
+/// WebUI `user_identities` rows into the canonical store under `tenant_id`.
+///
+/// This mirrors the production path
+/// [`RebornRuntime::open_reborn_identity_resolver`](crate::RebornRuntime::open_reborn_identity_resolver),
+/// which rides the runtime's *already-open* substrate handle instead of
+/// opening a second handle to the file. Production callers must use that
+/// accessor; this free function exists only so tests (and downstream
+/// integration crates via `test-support`) can build a resolver against a
+/// throwaway temp DB without standing up a full runtime. Gated so it ships
+/// zero bytes in production binaries.
+#[cfg(all(feature = "webui-v2-beta", any(test, feature = "test-support")))]
 pub async fn open_reborn_identity_resolver(
     path: &std::path::Path,
     tenant_id: &ironclaw_host_api::TenantId,
