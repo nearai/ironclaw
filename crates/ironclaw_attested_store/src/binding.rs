@@ -10,7 +10,30 @@
 //!   restart, and
 //! * write-through on every [`AttestedGateBindingStore::put`].
 //!
-//! The DB row is the source of truth; the cache is the sync read path. Bindings
+//! The DB row is the source of truth; the cache is the sync read path. The
+//! async [`AttestedGateBindingStore::get`] is read-through: on a cache miss it
+//! queries the table and warms the cache, so a binding written by another
+//! process/replica (or after this instance's `load()` ran) is still readable
+//! on the async path, per `.claude/rules/database.md` ("Load methods must fall
+//! back to the database on a cache miss").
+//!
+//! ## Single-instance affinity of the sync resume read
+//!
+//! [`SyncBindingRead::get_sync`] is called inside the turn store's non-await
+//! critical section and so **cannot** perform DB I/O. It reads the in-memory
+//! cache only. This is a structural constraint, not an oversight, and it
+//! imposes an operational invariant: **a gate resume must land on the same
+//! instance that raised the gate** (the instance whose `put()` warmed the cache
+//! write-through, or whose `load()` saw the row), OR the binding must be
+//! DB-hydrated into this instance's cache (e.g. via the async `get` read-through
+//! above) before the sync critical section runs. A multi-instance deployment
+//! that routes a resume to an instance which never saw the binding will get
+//! `None` from `get_sync` and fail the resume fail-closed (no wrong signature);
+//! it must therefore pin resume routing to the raising instance until that
+//! affinity is lifted. The async-`get` read-through makes the gap recoverable
+//! on the non-resume read paths.
+//!
+//! Bindings
 //! are stored as a single JSON column and rows are never deleted. A binding is
 //! **immutable once written**: the upsert is insert-only per `gate_ref`
 //! (`ON CONFLICT DO NOTHING`), so a re-`put` after approval is rejected at the
@@ -125,6 +148,31 @@ mod postgres {
         async fn client(&self) -> Result<deadpool_postgres::Object, StoreError> {
             self.pool.get().await.map_err(StoreError::backend)
         }
+
+        /// Read a single binding from the table by `gate_ref`. Used as the
+        /// read-through fallback when the async `get` misses the cache.
+        async fn load_one(
+            &self,
+            gate_ref: &GateRef,
+        ) -> Result<Option<AttestedGateBinding>, StoreError> {
+            let client = self.client().await?;
+            let row = client
+                .query_opt(
+                    "SELECT binding_json FROM attested_gate_bindings WHERE gate_ref = $1",
+                    &[&gate_ref.as_str()],
+                )
+                .await
+                .map_err(StoreError::backend)?;
+            match row {
+                Some(row) => {
+                    let json: String = row.get(0);
+                    let binding: AttestedGateBinding =
+                        serde_json::from_str(&json).map_err(StoreError::backend)?;
+                    Ok(Some(binding))
+                }
+                None => Ok(None),
+            }
+        }
     }
 
     impl SyncBindingRead for PostgresAttestedGateBindingStore {
@@ -181,7 +229,28 @@ mod postgres {
         }
 
         async fn get(&self, gate_ref: &GateRef) -> Option<AttestedGateBinding> {
-            self.cache.get(gate_ref)
+            if let Some(binding) = self.cache.get(gate_ref) {
+                return Some(binding);
+            }
+            // Cache miss: the DB row is the source of truth. Fall back to a
+            // table read (a binding written by another process/replica, or
+            // after this instance's `load()`, is otherwise invisible) and warm
+            // the cache on a hit.
+            match self.load_one(gate_ref).await {
+                Ok(Some(binding)) => {
+                    self.cache.insert(gate_ref.clone(), binding.clone());
+                    Some(binding)
+                }
+                Ok(None) => None,
+                Err(error) => {
+                    tracing::error!(
+                        %error,
+                        gate_ref = %gate_ref.as_str(),
+                        "failed to read attested gate binding from db on cache miss"
+                    );
+                    None
+                }
+            }
         }
     }
 }
@@ -250,6 +319,31 @@ mod libsql_backend {
                 .map_err(StoreError::backend)?;
             Ok(conn)
         }
+
+        /// Read a single binding from the table by `gate_ref`. Used as the
+        /// read-through fallback when the async `get` misses the cache.
+        async fn load_one(
+            &self,
+            gate_ref: &GateRef,
+        ) -> Result<Option<AttestedGateBinding>, StoreError> {
+            let conn = self.connect_db().await?;
+            let mut rows = conn
+                .query(
+                    "SELECT binding_json FROM attested_gate_bindings WHERE gate_ref = ?1",
+                    libsql::params![gate_ref.as_str()],
+                )
+                .await
+                .map_err(StoreError::backend)?;
+            match rows.next().await.map_err(StoreError::backend)? {
+                Some(row) => {
+                    let json: String = row.get(0).map_err(StoreError::backend)?;
+                    let binding: AttestedGateBinding =
+                        serde_json::from_str(&json).map_err(StoreError::backend)?;
+                    Ok(Some(binding))
+                }
+                None => Ok(None),
+            }
+        }
     }
 
     impl SyncBindingRead for LibSqlAttestedGateBindingStore {
@@ -304,7 +398,26 @@ mod libsql_backend {
         }
 
         async fn get(&self, gate_ref: &GateRef) -> Option<AttestedGateBinding> {
-            self.cache.get(gate_ref)
+            if let Some(binding) = self.cache.get(gate_ref) {
+                return Some(binding);
+            }
+            // Cache miss: the DB row is the source of truth. Fall back to a
+            // table read and warm the cache on a hit.
+            match self.load_one(gate_ref).await {
+                Ok(Some(binding)) => {
+                    self.cache.insert(gate_ref.clone(), binding.clone());
+                    Some(binding)
+                }
+                Ok(None) => None,
+                Err(error) => {
+                    tracing::error!(
+                        %error,
+                        gate_ref = %gate_ref.as_str(),
+                        "failed to read attested gate binding from db on cache miss"
+                    );
+                    None
+                }
+            }
         }
     }
 }

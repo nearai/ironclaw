@@ -110,6 +110,18 @@ impl EvmBroadcaster for JsonRpcEvmBroadcaster {
         let tx_hash: [u8; 32] = bytes
             .try_into()
             .map_err(|_| broadcast("tx hash was not 32 bytes".to_string()))?;
+        // An EVM tx hash is deterministically keccak256(signed_rlp) and is fully
+        // verifiable from the bytes in hand. A malicious, buggy, or
+        // proxy/load-balanced node can return a hash that does not correspond to
+        // the submitted payload; recording it would corrupt finalization
+        // tracking and user-facing tx links. Reject the response and record only
+        // the locally-derived hash as canonical.
+        let expected = alloy_primitives::keccak256(signed_rlp);
+        if tx_hash != expected.0 {
+            return Err(broadcast(
+                "node-returned tx hash does not match keccak256(signed_rlp)".to_string(),
+            ));
+        }
         Ok(EvmBroadcastOutcome { tx_hash })
     }
 }
@@ -149,5 +161,80 @@ mod tests {
         let out = b.send_raw(&[1, 2, 3]).await.expect("send");
         assert_eq!(out.tx_hash, [7u8; 32]);
         assert_eq!(b.submissions.lock().unwrap().as_slice(), &[vec![1, 2, 3]]);
+    }
+
+    /// A one-shot mock JSON-RPC node that returns the `result` hex string it is
+    /// configured with, so we can exercise the live `send_raw` hash check
+    /// against both an honest and a lying node. Uses `std::net` only (no extra
+    /// dev-dep) and serves exactly one request before shutting down.
+    #[cfg(feature = "broadcast-http")]
+    fn spawn_mock_node(result_hex: String) -> (String, std::thread::JoinHandle<()>) {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock node");
+        let addr = listener.local_addr().expect("local addr");
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut buf = [0u8; 4096];
+            // Drain the request; we don't assert on it here (the
+            // RecordingBroadcaster test already proves exact-bytes submission).
+            let _ = stream.read(&mut buf);
+            let body = format!(r#"{{"jsonrpc":"2.0","id":1,"result":"{result_hex}"}}"#);
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.flush();
+        });
+        (format!("http://127.0.0.1:{}", addr.port()), handle)
+    }
+
+    #[cfg(feature = "broadcast-http")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn send_raw_rejects_node_hash_mismatch() {
+        let signed_rlp = [0x11u8, 0x22, 0x33, 0x44];
+        // A hash that is NOT keccak256(signed_rlp): the hostile/buggy node lies.
+        let wrong_hash = format!("0x{}", crate::broadcast_http::hex_encode(&[0xaau8; 32]));
+        let (url, handle) = spawn_mock_node(wrong_hash);
+
+        let endpoint = crate::RpcEndpoint::parse_with_allowlist(&url, &["127.0.0.1"])
+            .expect("loopback allowlisted endpoint");
+        let client = crate::broadcast_http::build_broadcast_client("evm").expect("client");
+        let broadcaster = JsonRpcEvmBroadcaster::with_client(client, endpoint);
+
+        let err = broadcaster
+            .send_raw(&signed_rlp)
+            .await
+            .expect_err("mismatched node hash must be rejected");
+        assert!(
+            format!("{err}").contains("does not match keccak256(signed_rlp)"),
+            "{err}"
+        );
+        handle.join().expect("mock node thread");
+    }
+
+    #[cfg(feature = "broadcast-http")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn send_raw_accepts_node_hash_matching_keccak256() {
+        let signed_rlp = [0x11u8, 0x22, 0x33, 0x44];
+        let expected = alloy_primitives::keccak256(signed_rlp);
+        let honest_hash = format!("0x{}", crate::broadcast_http::hex_encode(&expected.0));
+        let (url, handle) = spawn_mock_node(honest_hash);
+
+        let endpoint = crate::RpcEndpoint::parse_with_allowlist(&url, &["127.0.0.1"])
+            .expect("loopback allowlisted endpoint");
+        let client = crate::broadcast_http::build_broadcast_client("evm").expect("client");
+        let broadcaster = JsonRpcEvmBroadcaster::with_client(client, endpoint);
+
+        let out = broadcaster
+            .send_raw(&signed_rlp)
+            .await
+            .expect("honest node hash accepted");
+        // The canonical recorded hash is the locally-derived keccak256.
+        assert_eq!(out.tx_hash, expected.0);
+        handle.join().expect("mock node thread");
     }
 }

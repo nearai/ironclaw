@@ -109,6 +109,10 @@ where
     /// authoritative across both the custodial signer and the external-wallet
     /// providers. The ledger is shared between the custodial signer and the
     /// driver so the broadcast-idempotency guard covers both paths.
+    // arch-exempt: too_many_args, assemble fans the substrate stores
+    // (grants/ledger/broadcaster/providers) plus keystore/ship-gate into one
+    // driver; needs an AttestedSigningServices bundle,
+    // plan docs/plans/2026-05-23-attested-signing-substrate.md
     #[allow(clippy::too_many_arguments)]
     pub fn assemble(
         bindings: Arc<dyn AttestedGateBindingStore>,
