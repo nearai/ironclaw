@@ -20,6 +20,7 @@
 //! property that satisfies the "narrow Reborn public surface" requirement
 //! pinned by `crates/ironclaw_architecture/tests/reborn_dependency_boundaries.rs`.
 
+// arch-exempt: large_file, needs Reborn runtime helper extraction, plan #4471
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;

@@ -123,7 +123,7 @@ trait TriggerManagementClock: Send + Sync {
 
 #[async_trait]
 pub trait TriggerCreateHook: Send + Sync {
-    async fn before_trigger_persisted(&self, record: &TriggerRecord) -> Result<(), TriggerError>;
+    async fn after_trigger_persisted(&self, record: &TriggerRecord) -> Result<(), TriggerError>;
 }
 
 #[derive(Debug)]
@@ -131,7 +131,7 @@ struct NoopTriggerCreateHook;
 
 #[async_trait]
 impl TriggerCreateHook for NoopTriggerCreateHook {
-    async fn before_trigger_persisted(&self, _record: &TriggerRecord) -> Result<(), TriggerError> {
+    async fn after_trigger_persisted(&self, _record: &TriggerRecord) -> Result<(), TriggerError> {
         Ok(())
     }
 }
@@ -242,18 +242,18 @@ async fn create_trigger(
         .upsert_trigger(record.clone())
         .await
         .map_err(|error| trigger_repository_error("upsert_trigger", error))?;
-    if let Err(error) = create_hook.before_trigger_persisted(&record).await {
-        let hook_error = trigger_create_hook_error("before_trigger_persisted", error);
+    if let Err(error) = create_hook.after_trigger_persisted(&record).await {
+        let hook_error = trigger_create_hook_error("after_trigger_persisted", error);
         if let Err(remove_error) = repository
             .remove_trigger(record.tenant_id.clone(), record.trigger_id)
             .await
         {
             tracing::warn!(
                 trigger_id = %record.trigger_id,
+                %remove_error,
                 error_kind = "trigger_create_rollback_failed",
                 "failed to remove trigger after create hook failure"
             );
-            return Err(trigger_repository_error("remove_trigger", remove_error));
         }
         return Err(hook_error);
     }

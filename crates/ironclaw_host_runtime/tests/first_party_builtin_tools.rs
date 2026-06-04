@@ -392,6 +392,40 @@ async fn builtin_trigger_create_maps_create_hook_error_to_backend_and_rolls_back
 }
 
 #[tokio::test]
+async fn builtin_trigger_create_preserves_hook_error_when_rollback_fails() {
+    let repository = Arc::new(RemoveFailingTriggerRepository::default());
+    let runtime = runtime_with_trigger_repository_and_create_hook(
+        repository.clone(),
+        Arc::new(FailingTriggerCreateHook),
+    );
+    let context = execution_context([TRIGGER_CREATE_CAPABILITY_ID]);
+
+    let error = invoke_with_context(
+        &runtime,
+        TRIGGER_CREATE_CAPABILITY_ID,
+        json!({
+            "name": "Rollback failure",
+            "prompt": "Keep the hook failure as the user-visible cause",
+            "cron": "0 8 * * *"
+        }),
+        context.clone(),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error, RuntimeFailureKind::Backend);
+    assert_eq!(repository.remove_attempts(), 1);
+    assert_eq!(
+        repository
+            .list_triggers(context.resource_scope.tenant_id)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
 async fn builtin_trigger_create_rejects_sub_minute_schedule_before_persistence() {
     let repository = Arc::new(InMemoryTriggerRepository::default());
     let runtime = runtime_with_trigger_repository(repository.clone());
@@ -5335,7 +5369,7 @@ impl PersistedRecordTriggerCreateHook {
 
 #[async_trait]
 impl TriggerCreateHook for PersistedRecordTriggerCreateHook {
-    async fn before_trigger_persisted(&self, record: &TriggerRecord) -> Result<(), TriggerError> {
+    async fn after_trigger_persisted(&self, record: &TriggerRecord) -> Result<(), TriggerError> {
         let persisted = self
             .repository
             .get_trigger(record.tenant_id.clone(), record.trigger_id)
@@ -5355,7 +5389,7 @@ struct FailingTriggerCreateHook;
 
 #[async_trait]
 impl TriggerCreateHook for FailingTriggerCreateHook {
-    async fn before_trigger_persisted(&self, _record: &TriggerRecord) -> Result<(), TriggerError> {
+    async fn after_trigger_persisted(&self, _record: &TriggerRecord) -> Result<(), TriggerError> {
         Err(TriggerError::Backend {
             reason: "hook unavailable".to_string(),
         })
@@ -5375,9 +5409,153 @@ impl TriggerManagementClock for FixedTriggerClock {
 
 struct FailingTriggerRepository;
 
+#[derive(Default)]
+struct RemoveFailingTriggerRepository {
+    inner: InMemoryTriggerRepository,
+    remove_attempts: std::sync::Mutex<usize>,
+}
+
+impl RemoveFailingTriggerRepository {
+    fn remove_attempts(&self) -> usize {
+        *self.remove_attempts.lock().unwrap()
+    }
+}
+
 fn trigger_backend_error() -> ironclaw_triggers::TriggerError {
     ironclaw_triggers::TriggerError::Backend {
         reason: "test backend failure".to_string(),
+    }
+}
+
+#[async_trait]
+impl TriggerRepository for RemoveFailingTriggerRepository {
+    async fn upsert_trigger(
+        &self,
+        record: ironclaw_triggers::TriggerRecord,
+    ) -> Result<(), ironclaw_triggers::TriggerError> {
+        self.inner.upsert_trigger(record).await
+    }
+
+    async fn get_trigger(
+        &self,
+        tenant_id: TenantId,
+        trigger_id: ironclaw_triggers::TriggerId,
+    ) -> Result<Option<ironclaw_triggers::TriggerRecord>, ironclaw_triggers::TriggerError> {
+        self.inner.get_trigger(tenant_id, trigger_id).await
+    }
+
+    async fn list_triggers(
+        &self,
+        tenant_id: TenantId,
+    ) -> Result<Vec<ironclaw_triggers::TriggerRecord>, ironclaw_triggers::TriggerError> {
+        self.inner.list_triggers(tenant_id).await
+    }
+
+    async fn list_scoped_triggers(
+        &self,
+        tenant_id: TenantId,
+        creator_user_id: UserId,
+        agent_id: Option<AgentId>,
+        project_id: Option<ProjectId>,
+        limit: usize,
+    ) -> Result<Vec<ironclaw_triggers::TriggerRecord>, ironclaw_triggers::TriggerError> {
+        self.inner
+            .list_scoped_triggers(tenant_id, creator_user_id, agent_id, project_id, limit)
+            .await
+    }
+
+    async fn remove_trigger(
+        &self,
+        _tenant_id: TenantId,
+        _trigger_id: ironclaw_triggers::TriggerId,
+    ) -> Result<Option<ironclaw_triggers::TriggerRecord>, ironclaw_triggers::TriggerError> {
+        *self.remove_attempts.lock().unwrap() += 1;
+        Err(trigger_backend_error())
+    }
+
+    async fn remove_scoped_trigger(
+        &self,
+        tenant_id: TenantId,
+        creator_user_id: UserId,
+        agent_id: Option<AgentId>,
+        project_id: Option<ProjectId>,
+        trigger_id: ironclaw_triggers::TriggerId,
+    ) -> Result<Option<ironclaw_triggers::TriggerRecord>, ironclaw_triggers::TriggerError> {
+        self.inner
+            .remove_scoped_trigger(tenant_id, creator_user_id, agent_id, project_id, trigger_id)
+            .await
+    }
+
+    async fn list_due_triggers(
+        &self,
+        now: Timestamp,
+        limit: usize,
+    ) -> Result<Vec<ironclaw_triggers::TriggerRecord>, ironclaw_triggers::TriggerError> {
+        self.inner.list_due_triggers(now, limit).await
+    }
+
+    async fn list_active_triggers(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<ironclaw_triggers::TriggerRecord>, ironclaw_triggers::TriggerError> {
+        self.inner.list_active_triggers(limit).await
+    }
+
+    async fn list_active_triggers_after(
+        &self,
+        after: Option<ironclaw_triggers::ActiveTriggerScanCursor>,
+        limit: usize,
+    ) -> Result<Vec<ironclaw_triggers::TriggerRecord>, ironclaw_triggers::TriggerError> {
+        self.inner.list_active_triggers_after(after, limit).await
+    }
+
+    async fn claim_due_fire(
+        &self,
+        request: ironclaw_triggers::ClaimDueFireRequest,
+    ) -> Result<ironclaw_triggers::ClaimDueFireOutcome, ironclaw_triggers::TriggerError> {
+        self.inner.claim_due_fire(request).await
+    }
+
+    async fn mark_fire_accepted(
+        &self,
+        request: ironclaw_triggers::FireAcceptedRequest,
+    ) -> Result<Option<ironclaw_triggers::TriggerRecord>, ironclaw_triggers::TriggerError> {
+        self.inner.mark_fire_accepted(request).await
+    }
+
+    async fn mark_fire_replayed(
+        &self,
+        request: ironclaw_triggers::FireReplayedRequest,
+    ) -> Result<Option<ironclaw_triggers::TriggerRecord>, ironclaw_triggers::TriggerError> {
+        self.inner.mark_fire_replayed(request).await
+    }
+
+    async fn mark_fire_retryable_failed(
+        &self,
+        request: ironclaw_triggers::FireRetryableFailedRequest,
+    ) -> Result<Option<ironclaw_triggers::TriggerRecord>, ironclaw_triggers::TriggerError> {
+        self.inner.mark_fire_retryable_failed(request).await
+    }
+
+    async fn mark_fire_permanently_failed(
+        &self,
+        request: ironclaw_triggers::FirePermanentFailedRequest,
+    ) -> Result<Option<ironclaw_triggers::TriggerRecord>, ironclaw_triggers::TriggerError> {
+        self.inner.mark_fire_permanently_failed(request).await
+    }
+
+    async fn mark_fire_terminally_failed(
+        &self,
+        request: ironclaw_triggers::FireTerminalFailedRequest,
+    ) -> Result<Option<ironclaw_triggers::TriggerRecord>, ironclaw_triggers::TriggerError> {
+        self.inner.mark_fire_terminally_failed(request).await
+    }
+
+    async fn clear_active_fire(
+        &self,
+        request: ironclaw_triggers::ClearActiveFireRequest,
+    ) -> Result<Option<ironclaw_triggers::TriggerRecord>, ironclaw_triggers::TriggerError> {
+        self.inner.clear_active_fire(request).await
     }
 }
 

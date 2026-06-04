@@ -1089,7 +1089,7 @@ struct InMemoryTriggerCreatorPairingHook {
 #[cfg(not(any(feature = "libsql", feature = "postgres")))]
 #[async_trait::async_trait]
 impl TriggerCreateHook for InMemoryTriggerCreatorPairingHook {
-    async fn before_trigger_persisted(&self, record: &TriggerRecord) -> Result<(), TriggerError> {
+    async fn after_trigger_persisted(&self, record: &TriggerRecord) -> Result<(), TriggerError> {
         pair_trigger_creator(&self.conversations, record).await
     }
 }
@@ -1102,7 +1102,7 @@ struct LocalRuntimeTriggerCreatorPairingHook {
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 #[async_trait::async_trait]
 impl TriggerCreateHook for LocalRuntimeTriggerCreatorPairingHook {
-    async fn before_trigger_persisted(&self, record: &TriggerRecord) -> Result<(), TriggerError> {
+    async fn after_trigger_persisted(&self, record: &TriggerRecord) -> Result<(), TriggerError> {
         let conversations = self
             .runtime
             .durable_trigger_conversation_services()
@@ -1140,7 +1140,7 @@ impl<F> TriggerCreateHook for ScopedFilesystemTriggerCreatorPairingHook<F>
 where
     F: RootFilesystem + 'static,
 {
-    async fn before_trigger_persisted(&self, record: &TriggerRecord) -> Result<(), TriggerError> {
+    async fn after_trigger_persisted(&self, record: &TriggerRecord) -> Result<(), TriggerError> {
         let filesystem = Arc::clone(&self.filesystem);
         let conversations = self
             .conversations
@@ -2623,8 +2623,7 @@ mod tests {
     }
 
     #[cfg(any(feature = "libsql", feature = "postgres"))]
-    #[tokio::test]
-    async fn durable_trigger_conversation_services_propagates_init_error() {
+    async fn local_runtime_with_failing_trigger_conversations() -> Arc<RebornLocalRuntimeServices> {
         let local_dev_root = tempfile::tempdir().expect("tempdir");
         let owner_user_id = "pairing-owner";
         let services = build_reborn_services(RebornBuildInput::local_dev(
@@ -2692,6 +2691,13 @@ mod tests {
             event_log: Arc::clone(&base_runtime.event_log),
             audit_log: Arc::clone(&base_runtime.audit_log),
         });
+        runtime
+    }
+
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
+    #[tokio::test]
+    async fn durable_trigger_conversation_services_propagates_init_error() {
+        let runtime = local_runtime_with_failing_trigger_conversations().await;
 
         let error = match runtime.durable_trigger_conversation_services().await {
             Ok(_) => panic!("conversation service init should fail"),
@@ -2702,6 +2708,25 @@ mod tests {
             error,
             ironclaw_conversations::InboundTurnError::DurableState { .. }
         ));
+    }
+
+    #[cfg(any(feature = "libsql", feature = "postgres"))]
+    #[tokio::test]
+    async fn local_runtime_trigger_create_hook_maps_conversation_init_error_to_backend() {
+        let hook = LocalRuntimeTriggerCreatorPairingHook {
+            runtime: local_runtime_with_failing_trigger_conversations().await,
+        };
+        let record = trigger_record_for_pairing_test();
+
+        let error = hook
+            .after_trigger_persisted(&record)
+            .await
+            .expect_err("conversation init failure should surface as trigger backend error");
+
+        let TriggerError::Backend { reason } = error else {
+            panic!("expected backend trigger error");
+        };
+        assert_eq!(reason, "trigger creator actor pairing failed");
     }
 
     #[tokio::test]
