@@ -15,9 +15,9 @@ use ironclaw_threads::{
     ThreadHistoryRequest, ThreadScope, ToolResultSafeSummary, UpdateToolResultReferenceRequest,
 };
 use ironclaw_turns::{
-    GateRef, IdempotencyKey, ResumeTurnPrecondition, ResumeTurnRequest, TurnActor,
-    TurnCommittedEventObserver, TurnCoordinator, TurnError, TurnEventKind, TurnLifecycleEvent,
-    TurnRunRecord, TurnRunState, TurnSpawnTreeStateStore, TurnStatus,
+    GateRef, GetRunStateRequest, IdempotencyKey, ResumeTurnPrecondition, ResumeTurnRequest,
+    TurnActor, TurnCommittedEventObserver, TurnCoordinator, TurnError, TurnEventKind,
+    TurnLifecycleEvent, TurnRunRecord, TurnRunState, TurnSpawnTreeStateStore, TurnStatus,
     run_profile::{AgentLoopHostError, LoopRunContext, sanitize_model_visible_text},
 };
 
@@ -107,6 +107,13 @@ where
         } else {
             None
         };
+        let gate_state = if has_gate_record {
+            self.gate_store
+                .state_for_child(event.run_id)
+                .map_err(map_host_error)?
+        } else {
+            None
+        };
         let is_subagent_child = child_record
             .as_ref()
             .is_some_and(|record| record.parent_run_id.is_some() && record.subagent_depth > 0);
@@ -116,8 +123,12 @@ where
         let event = if event.owner_user_id.is_some() {
             event.clone()
         } else {
-            self.terminal_event_with_recovered_owner(event, child_record.as_ref())
-                .await?
+            self.terminal_event_with_recovered_owner(
+                event,
+                child_record.as_ref(),
+                gate_state.as_ref().map(|state| &state.record),
+            )
+            .await?
         };
         self.gate_store
             .record_child_terminal(event.run_id, terminal_event_from_lifecycle(&event))
@@ -145,7 +156,8 @@ where
         &self,
         states: Vec<AwaitedChildState>,
     ) -> Result<(), TurnError> {
-        let mut blocking_resumes = Vec::new();
+        let mut blocking_parent_resumes = Vec::new();
+        let mut blocking_deliveries = Vec::new();
         let mut blocking_resume_gates = HashSet::new();
         let mut background_deliveries = Vec::new();
         for state in states {
@@ -160,11 +172,10 @@ where
             match state.record.mode {
                 SpawnSubagentMode::Blocking => {
                     self.write_terminal_result(&state, &terminal_event).await?;
-                    blocking_resumes.push((
-                        state.record.clone(),
-                        terminal_event,
-                        blocking_resume_gates.insert(state.record.gate_ref.clone()),
-                    ));
+                    if blocking_resume_gates.insert(state.record.gate_ref.clone()) {
+                        blocking_parent_resumes.push((state.record.clone(), terminal_event));
+                    }
+                    blocking_deliveries.push(state.record.clone());
                 }
                 SpawnSubagentMode::Background => {
                     self.write_terminal_result(&state, &terminal_event).await?;
@@ -177,17 +188,11 @@ where
                 .await
                 .map_err(map_host_error)?;
         }
-        for (record, terminal_event, should_resume_parent) in &blocking_resumes {
-            if *should_resume_parent {
-                self.resume_parent(terminal_event, record).await?;
-            }
+        for (record, terminal_event) in &blocking_parent_resumes {
+            self.resume_parent(terminal_event, record).await?;
         }
-        for (record, _, _) in blocking_resumes {
-            self.mark_child_delivered(&record).await?;
-        }
-        for record in background_deliveries {
-            self.mark_child_delivered(&record).await?;
-        }
+        self.mark_child_deliveries(blocking_deliveries).await?;
+        self.mark_child_deliveries(background_deliveries).await?;
         Ok(())
     }
 
@@ -195,8 +200,11 @@ where
         &self,
         event: &TurnLifecycleEvent,
         child_record: Option<&TurnRunRecord>,
+        gate_record: Option<&AwaitedChildSetRecord>,
     ) -> Result<TurnLifecycleEvent, TurnError> {
-        let owner_user_id = self.recover_owner_user_id(event, child_record).await?;
+        let owner_user_id = self
+            .recover_owner_user_id(event, child_record, gate_record)
+            .await?;
         let mut recovered = event.clone();
         recovered.owner_user_id = Some(owner_user_id);
         Ok(recovered)
@@ -206,11 +214,17 @@ where
         &self,
         event: &TurnLifecycleEvent,
         child_record: Option<&TurnRunRecord>,
+        gate_record: Option<&AwaitedChildSetRecord>,
     ) -> Result<UserId, TurnError> {
         let (child_tenant_id, thread_id) = if let Some(child_record) = child_record {
             (
                 child_record.scope.tenant_id.clone(),
                 child_record.scope.thread_id.clone(),
+            )
+        } else if let Some(gate_record) = gate_record {
+            (
+                gate_record.child_scope.tenant_id.clone(),
+                gate_record.child_scope.thread_id.clone(),
             )
         } else {
             let Some(child_record) = self
@@ -227,6 +241,50 @@ where
             };
             (child_record.scope.tenant_id, child_record.scope.thread_id)
         };
+        if event.scope.tenant_id != child_tenant_id {
+            tracing::warn!(
+                run_id = %event.run_id,
+                event_tenant_id = %event.scope.tenant_id,
+                child_record_tenant_id = %child_tenant_id,
+                "subagent terminal event owner user id recovery found mismatched event tenant"
+            );
+            return Err(TurnError::Unavailable {
+                reason:
+                    "subagent terminal event owner user id recovery found mismatched event tenant"
+                        .to_string(),
+            });
+        }
+        if let Some(actor) = gate_record.and_then(|record| record.parent_run_context.actor()) {
+            return Ok(actor.user_id.clone());
+        }
+        match self
+            .turn_state_store
+            .get_run_state(GetRunStateRequest {
+                scope: event.scope.clone(),
+                run_id: event.run_id,
+            })
+            .await
+        {
+            Ok(state) if state.scope.tenant_id != child_tenant_id => {
+                tracing::warn!(
+                    run_id = %event.run_id,
+                    state_tenant_id = %state.scope.tenant_id,
+                    child_record_tenant_id = %child_tenant_id,
+                    "subagent terminal event owner user id recovery found mismatched state tenant"
+                );
+                return Err(TurnError::Unavailable {
+                    reason: "subagent terminal event owner user id recovery found mismatched state tenant"
+                        .to_string(),
+                });
+            }
+            Ok(state) => {
+                if let Some(actor) = state.actor {
+                    return Ok(actor.user_id);
+                }
+            }
+            Err(TurnError::ScopeNotFound) => {}
+            Err(error) => return Err(error),
+        }
         if !self.thread_service.supports_resolve_scope() {
             return Err(TurnError::Unavailable {
                 reason: format!(
@@ -472,6 +530,25 @@ where
                 .delete_awaited_child(&record.gate_ref)
                 .await
                 .map_err(map_host_error)?;
+        }
+        Ok(())
+    }
+
+    async fn mark_child_deliveries(
+        &self,
+        records: Vec<ironclaw_loop_support::AwaitedChildSetRecord>,
+    ) -> Result<(), TurnError> {
+        let mut marked: Vec<ironclaw_loop_support::AwaitedChildSetRecord> = Vec::new();
+        for record in records {
+            if let Err(error) = self.mark_child_delivered(&record).await {
+                for delivered in marked {
+                    let _ = self
+                        .gate_store
+                        .delete_child_state(&delivered.gate_ref, delivered.child_run_id);
+                }
+                return Err(error);
+            }
+            marked.push(record);
         }
         Ok(())
     }
@@ -1459,6 +1536,7 @@ mod tests {
     struct RecordingTurnStateStore {
         releases: Mutex<Vec<(TurnScope, TurnRunId, u32)>>,
         records: Mutex<Vec<TurnRunRecord>>,
+        states: Mutex<Vec<TurnRunState>>,
         run_record_lookups: Mutex<Vec<(TurnScope, TurnRunId)>>,
     }
 
@@ -1469,6 +1547,10 @@ mod tests {
 
         fn add_record(&self, record: TurnRunRecord) {
             self.records.lock().unwrap().push(record);
+        }
+
+        fn add_state(&self, state: TurnRunState) {
+            self.states.lock().unwrap().push(state);
         }
 
         fn run_record_lookup_count(&self, scope: &TurnScope, run_id: TurnRunId) -> usize {
@@ -1516,11 +1598,15 @@ mod tests {
 
         async fn get_run_state(
             &self,
-            _request: GetRunStateRequest,
+            request: GetRunStateRequest,
         ) -> Result<TurnRunState, TurnError> {
-            Err(TurnError::Unavailable {
-                reason: "get_run_state not used by completion observer tests".to_string(),
-            })
+            self.states
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|state| state.scope == request.scope && state.run_id == request.run_id)
+                .cloned()
+                .ok_or(TurnError::ScopeNotFound)
         }
     }
 
@@ -1636,6 +1722,32 @@ mod tests {
             turn_id: ironclaw_turns::TurnId::new(),
             run_id: TurnRunId::new(),
             status,
+            accepted_message_ref: AcceptedMessageRef::new("message-test").unwrap(),
+            source_binding_ref: SourceBindingRef::new("source-test").unwrap(),
+            reply_target_binding_ref: ReplyTargetBindingRef::new("reply-test").unwrap(),
+            resolved_run_profile_id: RunProfileId::new("default").unwrap(),
+            resolved_run_profile_version: RunProfileVersion::new(1),
+            resolved_model_route: None,
+            received_at: chrono::Utc::now(),
+            checkpoint_id: None,
+            gate_ref: None,
+            credential_requirements: Vec::new(),
+            failure: None,
+            event_cursor: EventCursor(1),
+        }
+    }
+
+    fn test_state_for_scope(
+        scope: TurnScope,
+        run_id: TurnRunId,
+        actor: Option<TurnActor>,
+    ) -> TurnRunState {
+        TurnRunState {
+            scope,
+            actor,
+            turn_id: ironclaw_turns::TurnId::new(),
+            run_id,
+            status: TurnStatus::Completed,
             accepted_message_ref: AcceptedMessageRef::new("message-test").unwrap(),
             source_binding_ref: SourceBindingRef::new("source-test").unwrap(),
             reply_target_binding_ref: ReplyTargetBindingRef::new("reply-test").unwrap(),
@@ -1826,7 +1938,7 @@ mod tests {
         );
 
         let error = observer
-            .recover_owner_user_id(&event, None)
+            .recover_owner_user_id(&event, None, None)
             .await
             .unwrap_err();
 
@@ -1868,7 +1980,7 @@ mod tests {
 
         let event = test_terminal_event(child_scope, run_id);
         let error = observer
-            .recover_owner_user_id(&event, None)
+            .recover_owner_user_id(&event, None, None)
             .await
             .unwrap_err();
 
@@ -1878,7 +1990,92 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn recover_owner_user_id_rejects_thread_service_without_scope_resolution() {
+    async fn recover_owner_user_id_uses_run_state_actor_without_thread_scope_resolution() {
+        let turn_state_store = Arc::new(RecordingTurnStateStore::default());
+        let observer = SubagentCompletionObserver::new_unbound(
+            Arc::new(BoundedSubagentGateResolutionStore::new()),
+            Arc::new(InMemoryBoundedSubagentGoalStore::new()),
+            turn_state_store.clone(),
+            Arc::new(RecordingResultWriter::new(
+                LoopResultRef::new("result:test").unwrap(),
+            )),
+            Arc::new(NoResolveThreadService),
+        );
+        let run_id = TurnRunId::new();
+        let scope = TurnScope::new(
+            TenantId::new("tenant1").unwrap(),
+            Some(AgentId::new("agent1").unwrap()),
+            None,
+            ThreadId::new("thread-no-resolve").unwrap(),
+        );
+        let owner = UserId::new("owner-from-state").unwrap();
+        turn_state_store.add_record(test_turn_record(scope.clone(), run_id));
+        turn_state_store.add_state(test_state_for_scope(
+            scope.clone(),
+            run_id,
+            Some(TurnActor::new(owner.clone())),
+        ));
+
+        let recovered = observer
+            .recover_owner_user_id(&test_terminal_event(scope, run_id), None, None)
+            .await
+            .unwrap();
+
+        assert_eq!(recovered, owner);
+    }
+
+    #[tokio::test]
+    async fn recover_owner_user_id_uses_gate_record_actor_without_run_record() {
+        let observer = SubagentCompletionObserver::new_unbound(
+            Arc::new(BoundedSubagentGateResolutionStore::new()),
+            Arc::new(InMemoryBoundedSubagentGoalStore::new()),
+            Arc::new(RecordingTurnStateStore::default()),
+            Arc::new(RecordingResultWriter::new(
+                LoopResultRef::new("result:test").unwrap(),
+            )),
+            Arc::new(NoResolveThreadService),
+        );
+        let owner = UserId::new("owner-from-gate").unwrap();
+        let child_scope = TurnScope::new(
+            TenantId::new("tenant1").unwrap(),
+            Some(AgentId::new("agent1").unwrap()),
+            None,
+            ThreadId::new("thread-gate-owner").unwrap(),
+        );
+        let child_run_id = TurnRunId::new();
+        let mut parent_run_context =
+            ironclaw_agent_loop::test_support::test_run_context("owner-from-gate");
+        parent_run_context = parent_run_context.with_actor(TurnActor::new(owner.clone()));
+        let gate_record = AwaitedChildSetRecord {
+            gate_ref: GateRef::new("gate:subagent-owner-from-gate").unwrap(),
+            parent_run_context,
+            tree_root_run_id: TurnRunId::new(),
+            child_scope: child_scope.clone(),
+            child_run_id,
+            child_thread_id: child_scope.thread_id.clone(),
+            source_binding_ref: SourceBindingRef::new("subagent-source:owner-from-gate").unwrap(),
+            reply_target_binding_ref: ReplyTargetBindingRef::new("subagent-reply:owner-from-gate")
+                .unwrap(),
+            subagent_kind: SubagentKindId::new("general").unwrap(),
+            spawn_capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
+            result_ref: LoopResultRef::new("result:subagent.owner-from-gate").unwrap(),
+            mode: SpawnSubagentMode::Background,
+        };
+
+        let recovered = observer
+            .recover_owner_user_id(
+                &test_terminal_event(child_scope, child_run_id),
+                None,
+                Some(&gate_record),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(recovered, owner);
+    }
+
+    #[tokio::test]
+    async fn recover_owner_user_id_rejects_actorless_state_without_scope_resolution() {
         let turn_state_store = Arc::new(RecordingTurnStateStore::default());
         let observer = SubagentCompletionObserver::new_unbound(
             Arc::new(BoundedSubagentGateResolutionStore::new()),
@@ -1897,9 +2094,10 @@ mod tests {
             ThreadId::new("thread-no-resolve").unwrap(),
         );
         turn_state_store.add_record(test_turn_record(scope.clone(), run_id));
+        turn_state_store.add_state(test_state_for_scope(scope.clone(), run_id, None));
 
         let error = observer
-            .recover_owner_user_id(&test_terminal_event(scope, run_id), None)
+            .recover_owner_user_id(&test_terminal_event(scope, run_id), None, None)
             .await
             .unwrap_err();
 
@@ -1939,7 +2137,7 @@ mod tests {
             .unwrap();
 
         let error = observer
-            .recover_owner_user_id(&test_terminal_event(child_scope, run_id), None)
+            .recover_owner_user_id(&test_terminal_event(child_scope, run_id), None, None)
             .await
             .unwrap_err();
 
@@ -1984,6 +2182,7 @@ mod tests {
             .recover_owner_user_id(
                 &test_terminal_event(child_scope, run_id),
                 Some(&child_record),
+                None,
             )
             .await
             .unwrap();

@@ -298,6 +298,48 @@ impl BoundedSubagentGateResolutionStore {
             .and_then(|states| states.first().cloned()))
     }
 
+    pub fn state_for_child(
+        &self,
+        child_run_id: TurnRunId,
+    ) -> Result<Option<AwaitedChildState>, AgentLoopHostError> {
+        let inner = lock(&self.inner)?;
+        let Some(gates) = inner.gates_by_child.get(&child_run_id) else {
+            return Ok(None);
+        };
+        Ok(gates
+            .iter()
+            .filter_map(|gate| inner.by_gate.get(gate))
+            .flat_map(|states| states.iter())
+            .find(|state| state.record.child_run_id == child_run_id)
+            .cloned())
+    }
+
+    pub fn delete_child_state(
+        &self,
+        gate_ref: &GateRef,
+        child_run_id: TurnRunId,
+    ) -> Result<(), AgentLoopHostError> {
+        let mut inner = lock(&self.inner)?;
+        let (removed, gate_empty) = {
+            let Some(states) = inner.by_gate.get_mut(gate_ref) else {
+                return Ok(());
+            };
+            let before = states.len();
+            states.retain(|state| state.record.child_run_id != child_run_id);
+            let removed = before.saturating_sub(states.len());
+            (removed, states.is_empty())
+        };
+        if removed == 0 {
+            return Ok(());
+        }
+        inner.total_states = inner.total_states.saturating_sub(removed);
+        prune_child_index(&mut inner.gates_by_child, child_run_id, gate_ref);
+        if gate_empty {
+            inner.by_gate.remove(gate_ref);
+        }
+        Ok(())
+    }
+
     pub fn subagent_kind_for_child(
         &self,
         child_run_id: TurnRunId,
@@ -678,6 +720,32 @@ mod tests {
             assert!(!state_b.delivered_to_parent);
         }
         assert!(store.mark_child_delivered(&gate, child_b).unwrap());
+    }
+
+    #[tokio::test]
+    async fn delete_child_state_removes_only_one_shared_gate_child() {
+        let store = BoundedSubagentGateResolutionStore::new();
+        let child_a = TurnRunId::new();
+        let child_b = TurnRunId::new();
+        let gate = GateRef::new("gate:subagent-delete-child-state").unwrap();
+        store
+            .record_awaited_child(record(gate.as_str(), child_a))
+            .await
+            .unwrap();
+        store
+            .record_awaited_child(record(gate.as_str(), child_b))
+            .await
+            .unwrap();
+
+        store.delete_child_state(&gate, child_a).unwrap();
+
+        assert_eq!(store.len().unwrap(), 1);
+        assert!(store.state_for_child(child_a).unwrap().is_none());
+        let child_b_state = store
+            .state_for_child(child_b)
+            .unwrap()
+            .expect("child B remains");
+        assert_eq!(child_b_state.record.child_run_id, child_b);
     }
 
     #[tokio::test]
