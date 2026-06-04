@@ -96,11 +96,12 @@ use crate::runtime_input::{
     PollSettings, RebornRuntimeIdentity, RebornRuntimeInput, TriggerPollerAuthorizerConfig,
     TriggerPollerSettings,
 };
+#[cfg(any(test, feature = "test-support"))]
+use crate::trigger_poller::TenantScopedTrustedTriggerFireAuthorizer;
 use crate::trigger_poller::{
     ConversationContentRefMaterializer, LocalTriggerTurnSnapshotSource, SnapshotActiveRunLookup,
-    TRIGGER_POLLER_SHUTDOWN_TIMEOUT, TenantScopedTrustedTriggerFireAuthorizer,
-    TriggerPollerCompositionDeps, TriggerPollerRuntimeHandle, TriggerTurnSnapshotSource,
-    spawn_trigger_poller,
+    TRIGGER_POLLER_SHUTDOWN_TIMEOUT, TriggerPollerCompositionDeps, TriggerPollerRuntimeHandle,
+    TriggerTurnSnapshotSource, spawn_trigger_poller,
 };
 use crate::{
     RebornBuildError, RebornCompositionProfile, RebornProductAuthServices, RebornServices,
@@ -268,10 +269,11 @@ async fn build_trigger_poller_services(
     local_runtime: &crate::factory::RebornLocalRuntimeServices,
     turn_coordinator: Arc<dyn TurnCoordinator>,
     thread_service: Arc<dyn SessionThreadService>,
+    authorizer_config: TriggerPollerAuthorizerConfig,
     tenant_id: TenantId,
     default_agent_id: AgentId,
 ) -> Result<TriggerPollerServices, RebornRuntimeError> {
-    let authorizer = Arc::new(TenantScopedTrustedTriggerFireAuthorizer::new(tenant_id));
+    let authorizer = build_trigger_fire_authorizer(authorizer_config, tenant_id)?;
     #[cfg(any(feature = "libsql", feature = "postgres"))]
     {
         let conversations = RebornFilesystemConversationServices::new(Arc::clone(
@@ -331,6 +333,12 @@ async fn build_trigger_poller_services(
     }
 }
 
+fn trigger_poller_authorization_required_error() -> RebornRuntimeError {
+    RebornRuntimeError::InvalidArgument {
+        reason: "trigger poller cannot be enabled until fire-time creator authorization is backed by the real agent/project membership source of truth".to_string(),
+    }
+}
+
 /// Validate the temporary trigger-poller authorizer shape after the caller has
 /// already decided to enable the poller.
 fn validate_trigger_poller_authorization(
@@ -341,10 +349,25 @@ fn validate_trigger_poller_authorization(
         #[cfg(any(test, feature = "test-support"))]
         TriggerPollerAuthorizerConfig::TenantScopedPlaceholderForTest => Ok(()),
         TriggerPollerAuthorizerConfig::CreatorMembershipRequired => {
-            let reason = "trigger poller cannot be enabled until fire-time creator authorization is backed by the real agent/project membership source of truth";
-            Err(RebornRuntimeError::InvalidArgument {
-                reason: reason.to_string(),
-            })
+            Err(trigger_poller_authorization_required_error())
+        }
+    }
+}
+
+fn build_trigger_fire_authorizer(
+    authorizer_config: TriggerPollerAuthorizerConfig,
+    tenant_id: TenantId,
+) -> Result<Arc<dyn crate::trigger_poller_trusted_submit::TriggerFireAuthorizer>, RebornRuntimeError>
+{
+    #[cfg(not(any(test, feature = "test-support")))]
+    let _ = tenant_id;
+    match authorizer_config {
+        #[cfg(any(test, feature = "test-support"))]
+        TriggerPollerAuthorizerConfig::TenantScopedPlaceholderForTest => Ok(Arc::new(
+            TenantScopedTrustedTriggerFireAuthorizer::new(tenant_id),
+        )),
+        TriggerPollerAuthorizerConfig::CreatorMembershipRequired => {
+            Err(trigger_poller_authorization_required_error())
         }
     }
 }
@@ -1580,6 +1603,7 @@ pub async fn build_reborn_runtime(
             local_runtime,
             Arc::clone(&planned_turn_coordinator),
             Arc::clone(&thread_service),
+            trigger_poller.authorizer,
             thread_scope.tenant_id.clone(),
             validated_identity.agent_id.clone(),
         )
@@ -2638,7 +2662,9 @@ mod tests {
                     .shutdown()
                     .await
                     .expect("unexpected runtime shutdown");
-                panic!("tenant-scoped placeholder must not enable trigger poller");
+                panic!(
+                    "creator-membership-required setting must not enable trigger poller without real membership backend"
+                );
             }
             Err(err) => err,
         };

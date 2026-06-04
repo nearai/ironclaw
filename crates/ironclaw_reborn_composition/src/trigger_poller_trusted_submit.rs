@@ -58,29 +58,30 @@ pub(crate) trait TriggerFireAuthorizer: Send + Sync {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum TriggerFireAuthError {
-    Denied {
-        reason: String,
-    },
+    // arch-exempt: dead_code, Denied is reserved for real fire-time auth backend denials, plan #4436
+    #[allow(dead_code)]
+    Denied { reason: String },
     // Part of the fire-time authorization contract now so backend
     // unavailability has stable retry semantics before the real membership
     // authorizer is wired. The tenant-scope placeholder does not construct it.
     // arch-exempt: dead_code, Retryable is reserved for real fire-time auth backend failures, plan #4436
     #[allow(dead_code)]
-    Retryable {
-        reason: String,
-    },
+    Retryable { reason: String },
 }
 
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) struct TenantScopedTrustedTriggerFireAuthorizer {
     tenant_id: TenantId,
 }
 
+#[cfg(any(test, feature = "test-support"))]
 impl TenantScopedTrustedTriggerFireAuthorizer {
     pub(crate) fn new(tenant_id: TenantId) -> Self {
         Self { tenant_id }
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 #[async_trait]
 impl TriggerFireAuthorizer for TenantScopedTrustedTriggerFireAuthorizer {
     async fn authorize_trigger_fire(
