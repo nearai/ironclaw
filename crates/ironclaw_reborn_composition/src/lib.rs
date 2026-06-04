@@ -75,6 +75,8 @@ mod skill_listing;
 #[cfg(feature = "slack-v2-host-beta")]
 mod slack_actor_identity;
 #[cfg(feature = "slack-v2-host-beta")]
+mod slack_connectable_channel;
+#[cfg(feature = "slack-v2-host-beta")]
 mod slack_delivery;
 #[cfg(feature = "slack-v2-host-beta")]
 mod slack_egress;
@@ -188,6 +190,8 @@ pub use slack_actor_identity::{
     slack_user_identity_provider_user_id,
 };
 #[cfg(feature = "slack-v2-host-beta")]
+pub use slack_connectable_channel::build_webui_services_with_slack_host_beta_mounts;
+#[cfg(feature = "slack-v2-host-beta")]
 pub use slack_delivery::{
     SlackFinalReplyDeliveryObserver, SlackFinalReplyDeliveryServices,
     SlackFinalReplyDeliverySettings,
@@ -236,9 +240,7 @@ pub use slack_serve::{
     SLACK_EVENTS_PATH, SlackEventsRouteState, SlackEventsWebhookDispatcher,
     SlackInstallationSelector, slack_events_route_descriptors, slack_events_route_mount,
 };
-pub use webui::{
-    RebornWebuiBundle, build_webui_services, build_webui_services_with_connectable_channels,
-};
+pub use webui::{RebornWebuiBundle, build_webui_services};
 #[cfg(feature = "webui-v2-beta")]
 pub use webui_rate_limit::RateLimitConfigError;
 #[cfg(feature = "webui-v2-beta")]

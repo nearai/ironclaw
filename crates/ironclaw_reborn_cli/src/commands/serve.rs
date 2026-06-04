@@ -5,20 +5,16 @@ use std::sync::Arc;
 
 use anyhow::{Context, anyhow};
 use clap::Args;
-#[cfg(feature = "slack-v2-host-beta")]
-use ironclaw_product_workflow::{
-    ConnectableChannelsProductFacade, StaticConnectableChannelsProductFacade,
-};
-#[cfg(feature = "slack-v2-host-beta")]
-use ironclaw_reborn_composition::build_slack_host_beta_mounts;
 #[cfg(not(feature = "slack-v2-host-beta"))]
 use ironclaw_reborn_composition::build_webui_services;
-#[cfg(feature = "slack-v2-host-beta")]
-use ironclaw_reborn_composition::build_webui_services_with_connectable_channels;
 use ironclaw_reborn_composition::{
     GoogleOAuthRouteConfig, RebornBuildInput, RebornReadiness, RebornRuntimeIdentity,
     RebornRuntimeInput, RebornWebuiBundle, WebuiAuthenticator, WebuiServeConfig,
     build_reborn_runtime, webui_v2_app_with_lifecycle,
+};
+#[cfg(feature = "slack-v2-host-beta")]
+use ironclaw_reborn_composition::{
+    build_slack_host_beta_mounts, build_webui_services_with_slack_host_beta_mounts,
 };
 use ironclaw_reborn_config::IdentitySection;
 use ironclaw_reborn_webui_ingress::{
@@ -347,18 +343,11 @@ impl ServeCommand {
                 None
             };
             #[cfg(feature = "slack-v2-host-beta")]
-            let bundle: RebornWebuiBundle = {
-                let connectable_channels = slack_mounts.as_ref().map(|mounts| {
-                    Arc::new(StaticConnectableChannelsProductFacade::new(vec![
-                        mounts.connectable_channel.clone(),
-                    ])) as Arc<dyn ConnectableChannelsProductFacade>
-                });
-                build_webui_services_with_connectable_channels(
-                    &runtime,
-                    None,
-                    connectable_channels,
-                )?
-            };
+            let bundle: RebornWebuiBundle = build_webui_services_with_slack_host_beta_mounts(
+                &runtime,
+                None,
+                slack_mounts.as_ref(),
+            )?;
             #[cfg(not(feature = "slack-v2-host-beta"))]
             let bundle: RebornWebuiBundle = build_webui_services(&runtime, None)?;
 

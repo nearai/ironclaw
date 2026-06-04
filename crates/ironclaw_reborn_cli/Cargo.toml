@@ -47,7 +47,6 @@ webui-v2-beta = [
 slack-v2-host-beta = [
     "webui-v2-beta",
     "ironclaw_reborn_composition/slack-v2-host-beta",
-    "dep:ironclaw_product_workflow",
 ]
 [dependencies]
 anyhow = "1"
@@ -61,7 +60,6 @@ ironclaw_reborn_composition = { path = "../ironclaw_reborn_composition", version
 ironclaw_reborn_config = { path = "../ironclaw_reborn_config", version = "0.1.0" }
 ironclaw_reborn_traces = { path = "../ironclaw_reborn_traces", version = "0.1.0" }
 ironclaw_reborn_webui_ingress = { path = "../ironclaw_reborn_webui_ingress", version = "0.1.0", optional = true }
-ironclaw_product_workflow = { path = "../ironclaw_product_workflow", version = "0.1.0", optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls-native-roots", "stream"] }
 secrecy = "0.10"
 serde = { version = "1", features = ["derive"] }

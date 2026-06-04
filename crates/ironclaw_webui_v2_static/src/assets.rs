@@ -139,6 +139,11 @@ mod tests {
         assert!(section.contains("redeemSlackPairingCode(code)"));
         assert!(section.contains("queryKey: [\"connectable-channels\"]"));
 
+        let channels_tab = asset_text("js/pages/extensions/components/channels-tab.js");
+        assert!(channels_tab.contains("slackStatusLabel"));
+        assert!(channels_tab.contains("slackConnectAction &&"));
+        assert!(channels_tab.contains("action=${slackConnectAction.action}"));
+
         let regression = asset_text("js/pages/chat/lib/useChat-send.test.mjs");
         assert!(regression.contains("channel connect requests return an action"));
         assert!(regression.contains("without submitting a prompt"));

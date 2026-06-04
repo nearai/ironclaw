@@ -22,6 +22,8 @@ export function ChannelsTab({
   const enabledChannels = status.enabled_channels || [];
   const slackEnabled = enabledChannels.includes("slack") || enabledChannels.includes("slack_v2");
   const slackConnectAction = connectableChannels?.find((channel) => channel.channel === "slack");
+  const slackStatusLabel = slackEnabled ? "on" : slackConnectAction ? "connect" : "off";
+  const slackStatusTone = slackEnabled ? "success" : slackConnectAction ? "info" : "muted";
 
   return html`
     <div className="space-y-5">
@@ -50,11 +52,12 @@ export function ChannelsTab({
           name="Slack"
           description="Tenant app channel for DMs and app mentions"
           enabled=${slackEnabled}
-          statusLabel=${slackEnabled ? "on" : "connect"}
-          statusTone=${slackEnabled ? "success" : "info"}
+          statusLabel=${slackStatusLabel}
+          statusTone=${slackStatusTone}
           detail="Tenant Slack app install"
         >
-          <${SlackPairingSection} action=${slackConnectAction?.action} />
+          ${slackConnectAction &&
+          html`<${SlackPairingSection} action=${slackConnectAction.action} />`}
         <//>
         <${BuiltinRow}
           name="CLI"

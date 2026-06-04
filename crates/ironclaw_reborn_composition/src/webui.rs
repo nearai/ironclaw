@@ -51,7 +51,7 @@ pub fn build_webui_services(
     build_webui_services_with_connectable_channels(runtime, event_stream, None)
 }
 
-pub fn build_webui_services_with_connectable_channels(
+pub(crate) fn build_webui_services_with_connectable_channels(
     runtime: &RebornRuntime,
     event_stream: Option<Arc<dyn ProjectionStream>>,
     connectable_channels: Option<Arc<dyn ConnectableChannelsProductFacade>>,
