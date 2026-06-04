@@ -70,7 +70,10 @@ use ironclaw_threads::FilesystemSessionThreadService;
 #[cfg(not(feature = "libsql"))]
 use ironclaw_threads::InMemorySessionThreadService;
 use ironclaw_threads::SessionThreadService;
-use ironclaw_triggers::{TriggerError, TriggerRecord, TriggerRepository};
+use ironclaw_triggers::{
+    TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID, TRIGGER_TRUSTED_ADAPTER_KIND,
+    TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerError, TriggerRecord, TriggerRepository,
+};
 use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy};
 #[cfg(feature = "libsql")]
 use ironclaw_turns::FilesystemTurnStateStore;
@@ -846,8 +849,6 @@ fn build_local_dev_store_graph(
         })?;
     let skill_management = build_local_skill_management_port(owner_user_id, filesystem)?;
     let trigger_repository = local_dev_trigger_repository();
-    #[cfg(not(any(feature = "libsql", feature = "postgres")))]
-    let trigger_conversation_services = InMemoryConversationServices::default();
     let local_runtime = Arc::new(RebornLocalRuntimeServices {
         approval_requests: Arc::clone(&approval_requests),
         capability_leases: Arc::clone(&capability_leases),
@@ -939,7 +940,7 @@ fn build_local_dev_store_graph(
     let skill_management = build_local_skill_management_port(owner_user_id, filesystem)?;
     let trigger_repository = local_dev_trigger_repository();
     #[cfg(not(any(feature = "libsql", feature = "postgres")))]
-    let trigger_conversation_services = InMemoryConversationServices::default();
+    let trigger_conversation_services = local_dev_trigger_conversation_services();
     let local_runtime = Arc::new(RebornLocalRuntimeServices {
         approval_requests: Arc::clone(&approval_requests),
         capability_leases: Arc::clone(&capability_leases),
@@ -989,6 +990,11 @@ fn build_local_dev_store_graph(
 
 fn local_dev_trigger_repository() -> Arc<dyn TriggerRepository> {
     Arc::new(ironclaw_triggers::InMemoryTriggerRepository::default())
+}
+
+#[cfg(not(any(feature = "libsql", feature = "postgres")))]
+fn local_dev_trigger_conversation_services() -> InMemoryConversationServices {
+    InMemoryConversationServices::default()
 }
 
 fn local_dev_trigger_create_hook(
@@ -1051,14 +1057,13 @@ where
     F: RootFilesystem + 'static,
 {
     async fn before_trigger_persisted(&self, record: &TriggerRecord) -> Result<(), TriggerError> {
+        let filesystem = Arc::clone(&self.filesystem);
         let conversations = self
             .conversations
-            .get_or_try_init(|| async {
-                ironclaw_conversations::RebornFilesystemConversationServices::new(Arc::clone(
-                    &self.filesystem,
-                ))
-                .await
-                .map_err(trigger_pairing_error)
+            .get_or_try_init(|| async move {
+                ironclaw_conversations::RebornFilesystemConversationServices::new(filesystem)
+                    .await
+                    .map_err(trigger_pairing_error)
             })
             .await?;
         pair_trigger_creator(conversations, record).await
@@ -1069,11 +1074,16 @@ async fn pair_trigger_creator(
     pairing: &dyn ConversationActorPairingService,
     record: &TriggerRecord,
 ) -> Result<(), TriggerError> {
-    let adapter_kind = AdapterKind::new("trigger").map_err(trigger_pairing_error)?;
+    let adapter_kind =
+        AdapterKind::new(TRIGGER_TRUSTED_ADAPTER_KIND).map_err(trigger_pairing_error)?;
     let adapter_installation_id =
-        AdapterInstallationId::new("reborn-trigger-poller").map_err(trigger_pairing_error)?;
-    let external_actor_ref = ExternalActorRef::new("user", record.creator_user_id.as_str())
-        .map_err(trigger_pairing_error)?;
+        AdapterInstallationId::new(TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID)
+            .map_err(trigger_pairing_error)?;
+    let external_actor_ref = ExternalActorRef::new(
+        TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE,
+        record.creator_user_id.as_str(),
+    )
+    .map_err(trigger_pairing_error)?;
     pairing
         .pair_external_actor(
             record.tenant_id.clone(),
@@ -1087,8 +1097,9 @@ async fn pair_trigger_creator(
 }
 
 fn trigger_pairing_error(error: impl std::fmt::Display) -> TriggerError {
+    tracing::debug!(%error, "trigger creator actor pairing failed");
     TriggerError::Backend {
-        reason: format!("trigger creator actor pairing failed: {error}"),
+        reason: "trigger creator actor pairing failed".to_string(),
     }
 }
 
@@ -2414,7 +2425,7 @@ mod tests {
         ExecutionContext, ExtensionId, GrantConstraints, InvocationId, MountAlias, MountGrant,
         NetworkPolicy, NetworkScheme, NetworkTargetPattern, Principal, ResourceEstimate,
         ResourceScope, RuntimeCredentialAccountProviderId, RuntimeCredentialRequirementSource,
-        RuntimeKind, ScopedPath, SecretHandle, TrustClass, UserId, VirtualPath,
+        RuntimeKind, ScopedPath, SecretHandle, TenantId, TrustClass, UserId, VirtualPath,
     };
     use ironclaw_host_runtime::{
         MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
@@ -2430,6 +2441,62 @@ mod tests {
     use crate::{
         extension_lifecycle::ExtensionActivationMode, runtime::SKILL_ACTIVATE_CAPABILITY_ID,
     };
+
+    struct FailingConversationActorPairingService;
+
+    #[async_trait::async_trait]
+    impl ConversationActorPairingService for FailingConversationActorPairingService {
+        async fn pair_external_actor(
+            &self,
+            _tenant_id: TenantId,
+            _adapter_kind: AdapterKind,
+            _adapter_installation_id: AdapterInstallationId,
+            _external_actor_ref: ExternalActorRef,
+            _user_id: UserId,
+        ) -> Result<(), ironclaw_conversations::InboundTurnError> {
+            Err(ironclaw_conversations::InboundTurnError::DurableState {
+                reason: "raw durable store error".to_string(),
+            })
+        }
+    }
+
+    fn trigger_record_for_pairing_test() -> TriggerRecord {
+        TriggerRecord {
+            trigger_id: ironclaw_triggers::TriggerId::new(),
+            tenant_id: TenantId::new("pairing-test-tenant").expect("tenant id"),
+            creator_user_id: UserId::new("pairing-test-user").expect("user id"),
+            agent_id: None,
+            project_id: None,
+            name: "pairing test".to_string(),
+            source: ironclaw_triggers::TriggerSourceKind::Schedule,
+            schedule: ironclaw_triggers::TriggerSchedule::cron("* * * * *")
+                .expect("valid cron expression"),
+            completion_policy: ironclaw_triggers::TriggerCompletionPolicy::Recurring,
+            prompt: "pairing test prompt".to_string(),
+            state: ironclaw_triggers::TriggerState::Scheduled,
+            next_run_at: chrono::Utc::now(),
+            last_run_at: None,
+            last_fired_slot: None,
+            last_status: None,
+            active_fire_slot: None,
+            active_run_ref: None,
+            created_at: chrono::Utc::now(),
+        }
+    }
+
+    #[tokio::test]
+    async fn pair_trigger_creator_maps_pairing_failure_to_sanitized_backend_error() {
+        let record = trigger_record_for_pairing_test();
+
+        let error = pair_trigger_creator(&FailingConversationActorPairingService, &record)
+            .await
+            .expect_err("pairing failure should surface");
+
+        let TriggerError::Backend { reason } = error else {
+            panic!("expected backend trigger error");
+        };
+        assert_eq!(reason, "trigger creator actor pairing failed");
+    }
 
     #[tokio::test]
     async fn local_dev_services_include_repl_runtime_substrate() {

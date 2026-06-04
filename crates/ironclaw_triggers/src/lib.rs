@@ -29,7 +29,11 @@ mod postgres;
 mod trusted_submit;
 mod worker;
 
-pub use trusted_submit::{TriggerMaterializedPrompt, TriggerTrustedInboundBinding};
+pub use trusted_submit::{
+    TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID, TRIGGER_TRUSTED_ADAPTER_KIND,
+    TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerMaterializedPrompt,
+    TriggerTrustedInboundBinding,
+};
 
 const MIN_FIRE_CADENCE: Duration = Duration::from_secs(60);
 const MAX_DUE_TRIGGER_POLL_LIMIT: usize = 128;
