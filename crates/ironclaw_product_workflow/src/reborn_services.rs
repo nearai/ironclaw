@@ -1333,13 +1333,16 @@ fn attested_invalid_field(field: &str) -> RebornServicesError {
 
 /// Map a sanitized attested-continuation rejection to the WebUI error surface.
 ///
-/// Most categories are terminal: the one-shot resume guard / sealed grant was
+/// Every category is terminal: the one-shot resume guard / sealed grant was
 /// already consumed (or the request was rejected before it could be), so the
-/// client cannot retry the same proof. The lone exception is `Unavailable`,
-/// which is a POST-verification broadcast-tail failure (RPC timeout, etc.): the
-/// grant IS already claimed and the broadcast is idempotency-guarded by the
-/// ledger row, so the client may safely retry only the broadcast tail. The
-/// per-arm `retryable` flag reflects that distinction.
+/// client cannot retry the same proof. `Unavailable` is a POST-verification
+/// broadcast-tail failure (RPC timeout, etc.) where the grant is already
+/// claimed, but it is still non-retryable: there is no broadcast-tail-only
+/// re-drive path — the only public retry re-enters `verify_and_claim` and is
+/// rejected by the grant/ledger CAS. A real tail-retry path (re-fetch the
+/// verified handle from a durable store and re-drive only the broadcast) is
+/// deferred to the durable binding store follow-up. The per-arm `retryable`
+/// flag reflects that everything here is `false` for now.
 fn map_attested_continuation_rejection(
     rejection: AttestedContinuationRejection,
 ) -> RebornServicesError {
@@ -1376,15 +1379,21 @@ fn map_attested_continuation_rejection(
             409,
             false,
         ),
-        // Broadcast-tail failure after the grant was already claimed: the
-        // ledger row makes the broadcast idempotent, so the client may retry
-        // the broadcast tail. Retryable, matching how `Unavailable` is treated
-        // by the other mappers in this file.
+        // Broadcast-tail failure after the grant was already claimed. There is
+        // no broadcast-tail-only re-drive path today: `broadcast_resolved` is
+        // only ever reached from inside `resolve_attested_gate`, after
+        // `verify_and_claim` has already burned the one-shot grant, and the
+        // sole public retry re-enters `verify_and_claim` where the grant/ledger
+        // CAS rejects the second claim as `LedgerGuard`/409. Ledger idempotency
+        // only prevents a *double* broadcast; it does not provide a *re-drive*
+        // path for the consumed `verified` handle. So this is non-retryable
+        // until the durable binding store lands and a real tail-retry path can
+        // re-fetch the handle (tracked alongside the PR12 dedup TODO).
         AttestedContinuationRejection::Unavailable => (
             RebornServicesErrorCode::Unavailable,
             RebornServicesErrorKind::ServiceUnavailable,
             503,
-            true,
+            false,
         ),
     };
     RebornServicesError::from_status_kind(code, kind, status, retryable)
@@ -1667,11 +1676,14 @@ mod attested_rejection_mapping_tests {
             map_attested_continuation_rejection(AttestedContinuationRejection::Unavailable);
         assert_eq!(unavailable.code, RebornServicesErrorCode::Unavailable);
         assert_eq!(unavailable.status_code, 503);
-        // Broadcast-tail failure after a claimed grant: the ledger row makes the
-        // broadcast idempotent, so the client may retry the broadcast tail.
+        // Broadcast-tail failure after a claimed grant is NOT retryable through
+        // any public path: the only retry re-enters `verify_and_claim`, where
+        // the already-burned one-shot grant rejects the second claim. There is
+        // no broadcast-tail-only re-drive path until the durable binding store
+        // lands, so the client must not be told to retry.
         assert!(
-            unavailable.retryable,
-            "a post-verification broadcast-tail Unavailable must be retryable"
+            !unavailable.retryable,
+            "a post-verification broadcast-tail Unavailable has no retry path and must be non-retryable"
         );
     }
 }
