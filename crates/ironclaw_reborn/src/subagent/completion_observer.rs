@@ -798,7 +798,9 @@ mod tests {
         TurnStateStore, events::TurnLifecycleEvent,
     };
 
-    use crate::subagent::goal_store::InMemoryBoundedSubagentGoalStore;
+    use crate::subagent::goal_store::{
+        InMemoryBoundedSubagentGoalStore, SubagentGoal, SubagentGoalStoreError,
+    };
 
     use super::*;
 
@@ -1290,6 +1292,16 @@ mod tests {
 
         let gate_store = Arc::new(BoundedSubagentGateResolutionStore::new());
         let goal_store = Arc::new(InMemoryBoundedSubagentGoalStore::new());
+        goal_store
+            .put(
+                &child_scope,
+                child_run_id,
+                SubagentGoal {
+                    task: "child task".to_string(),
+                    handoff: None,
+                },
+            )
+            .unwrap();
         let mut parent_run_context =
             ironclaw_agent_loop::test_support::test_run_context("completion-observer");
         parent_run_context.scope = parent_scope.clone();
@@ -1318,7 +1330,7 @@ mod tests {
         let result_writer = Arc::new(RecordingResultWriter::new(result_ref));
         let observer = SubagentCompletionObserver::new(
             Arc::clone(&gate_store),
-            goal_store,
+            goal_store.clone(),
             turn_state_store.clone(),
             result_writer.clone(),
             Arc::new(RecordingCoordinator::default()),
@@ -1329,7 +1341,7 @@ mod tests {
         observer
             .handle_terminal(&TurnLifecycleEvent {
                 cursor: EventCursor(7),
-                scope: child_scope,
+                scope: child_scope.clone(),
                 occurred_at: None,
                 owner_user_id: Some(owner),
                 run_id: child_run_id,
@@ -1345,6 +1357,10 @@ mod tests {
             turn_state_store.releases(),
             vec![(parent_scope.clone(), tree_root_run_id, 1)]
         );
+        assert!(matches!(
+            goal_store.get(&child_scope, child_run_id),
+            Err(SubagentGoalStoreError::NotFound { .. })
+        ));
         let writes = result_writer.writes();
         assert_eq!(writes.len(), 1);
         assert_eq!(writes[0]["status"], "completed");

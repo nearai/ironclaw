@@ -65,6 +65,8 @@ struct RecordingBatchPort {
     batches: std::sync::Mutex<Vec<CapabilityBatchInvocation>>,
 }
 
+struct FailingBatchPort;
+
 struct NoopResultWriter;
 
 struct NoopGoalStore;
@@ -469,6 +471,36 @@ impl LoopCapabilityResultWriter for NoopResultWriter {
 }
 
 #[async_trait]
+impl LoopCapabilityPort for FailingBatchPort {
+    async fn visible_capabilities(
+        &self,
+        _request: VisibleCapabilityRequest,
+    ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
+        Ok(VisibleCapabilitySurface {
+            version: CapabilitySurfaceVersion::new("surface:test").unwrap(),
+            descriptors: Vec::new(),
+        })
+    }
+
+    async fn invoke_capability(
+        &self,
+        request: CapabilityInvocation,
+    ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+        Ok(completed_outcome(request.capability_id.as_str()))
+    }
+
+    async fn invoke_capability_batch(
+        &self,
+        _request: CapabilityBatchInvocation,
+    ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
+        Err(AgentLoopHostError::new(
+            AgentLoopHostErrorKind::Unavailable,
+            "forced batch failure",
+        ))
+    }
+}
+
+#[async_trait]
 impl SubagentSpawnGoalStore for NoopGoalStore {
     async fn put_goal(
         &self,
@@ -715,6 +747,14 @@ impl SessionThreadService for FailingMarkThreadService {
         request: ThreadHistoryRequest,
     ) -> Result<SessionThreadRecord, SessionThreadError> {
         self.inner.read_thread(request).await
+    }
+
+    async fn delete_thread(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+    ) -> Result<(), SessionThreadError> {
+        self.inner.delete_thread(scope, thread_id).await
     }
 
     async fn create_summary_artifact(
@@ -1783,6 +1823,84 @@ async fn invoke_capability_batch_handles_mixed_spawn_and_non_spawn_invocations()
 }
 
 #[tokio::test]
+async fn invoke_capability_batch_rolls_back_preceding_spawn_on_inner_batch_failure() {
+    let context = test_run_context_with_agent_actor("spawn-batch-rollback").await;
+    let actor = context.actor.clone().unwrap();
+    let turn_store = Arc::new(StaticTurnStateStore::new(Some(turn_record(&context, 0))));
+    let child_runs = Arc::new(RecordingChildRuns::default());
+    let goal_store = Arc::new(RecordingGoalStore::default());
+    let gate_store = Arc::new(InMemorySubagentGateResolutionStore::default());
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let deps = Arc::new(SubagentSpawnDeps {
+        coordinator: Arc::new(StaticCoordinator),
+        child_runs: child_runs.clone(),
+        turn_state_store: turn_store.clone(),
+        thread_service: thread_service.clone(),
+        goal_store: goal_store.clone(),
+        gate_store: gate_store.clone(),
+        definition_resolver: Arc::new(StaticDefinitionResolver {
+            resolved: Some(subagent_definition(false)),
+            parent: None,
+        }),
+        spawn_input_codec: Arc::new(StaticSpawnInputCodec {
+            args: default_spawn_args(),
+        }),
+        result_writer: Arc::new(NoopResultWriter),
+    });
+    let port = SubagentSpawnCapabilityPort::new(
+        Arc::new(FailingBatchPort),
+        context,
+        CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
+        SubagentSpawnLimits::default(),
+        deps,
+    );
+    port.auth_input_refs
+        .lock()
+        .unwrap()
+        .insert(input_ref(), CapabilityInputRef::new("input:auth").unwrap());
+
+    let error = port
+        .invoke_capability_batch(CapabilityBatchInvocation {
+            invocations: vec![
+                invocation(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID),
+                invocation("regular.fails"),
+            ],
+            stop_on_first_suspension: false,
+        })
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::Unavailable);
+    let child_requests = child_runs.requests();
+    assert_eq!(child_requests.len(), 1);
+    let child_request = &child_requests[0];
+    let cancels = turn_store.cancels();
+    assert_eq!(cancels.len(), 1);
+    assert_eq!(Some(cancels[0].run_id), child_request.requested_run_id);
+    assert!(gate_store.records().is_empty());
+    assert_eq!(goal_store.deletes().len(), 1);
+    assert_eq!(turn_store.releases.lock().unwrap().len(), 1);
+
+    let child_thread_scope = ThreadScope {
+        tenant_id: child_request.child_scope.tenant_id.clone(),
+        agent_id: child_request.child_scope.agent_id.clone().unwrap(),
+        project_id: child_request.child_scope.project_id.clone(),
+        owner_user_id: Some(actor.user_id),
+        mission_id: None,
+    };
+    let read = thread_service
+        .read_thread(ThreadHistoryRequest {
+            scope: child_thread_scope,
+            thread_id: child_request.child_scope.thread_id.clone(),
+        })
+        .await;
+    assert!(matches!(
+        read,
+        Err(SessionThreadError::UnknownThread { .. })
+    ));
+}
+
+#[tokio::test]
 async fn invoke_capability_batch_stops_on_first_spawn_suspension_when_requested() {
     let context = test_run_context_with_agent_actor("spawn-batch-stop").await;
     let turn_store = Arc::new(StaticTurnStateStore::new(Some(turn_record(&context, 0))));
@@ -1831,15 +1949,17 @@ async fn invoke_capability_batch_stops_on_first_spawn_suspension_when_requested(
 #[tokio::test]
 async fn invoke_spawn_cancels_child_when_post_submit_thread_mark_fails() {
     let context = test_run_context_with_agent_actor("spawn-mark-fails").await;
+    let actor = context.actor.clone().unwrap();
     let turn_store = Arc::new(StaticTurnStateStore::new(Some(turn_record(&context, 0))));
     let child_runs = Arc::new(RecordingChildRuns::default());
     let goal_store = Arc::new(RecordingGoalStore::default());
     let gate_store = Arc::new(InMemorySubagentGateResolutionStore::default());
+    let thread_service = Arc::new(FailingMarkThreadService::default());
     let deps = Arc::new(SubagentSpawnDeps {
         coordinator: Arc::new(StaticCoordinator),
         child_runs: child_runs.clone(),
         turn_state_store: turn_store.clone(),
-        thread_service: Arc::new(FailingMarkThreadService::default()),
+        thread_service: thread_service.clone(),
         goal_store: goal_store.clone(),
         gate_store: gate_store.clone(),
         definition_resolver: Arc::new(StaticDefinitionResolver {
@@ -1880,6 +2000,25 @@ async fn invoke_spawn_cancels_child_when_post_submit_thread_mark_fails() {
     );
     assert!(gate_store.records().is_empty());
     assert_eq!(goal_store.deletes().len(), 1);
+    let child_requests = child_runs.requests();
+    let child_request = &child_requests[0];
+    let child_thread_scope = ThreadScope {
+        tenant_id: child_request.child_scope.tenant_id.clone(),
+        agent_id: child_request.child_scope.agent_id.clone().unwrap(),
+        project_id: child_request.child_scope.project_id.clone(),
+        owner_user_id: Some(actor.user_id),
+        mission_id: None,
+    };
+    let read = thread_service
+        .read_thread(ThreadHistoryRequest {
+            scope: child_thread_scope,
+            thread_id: child_request.child_scope.thread_id.clone(),
+        })
+        .await;
+    assert!(matches!(
+        read,
+        Err(SessionThreadError::UnknownThread { .. })
+    ));
 }
 
 #[tokio::test]
