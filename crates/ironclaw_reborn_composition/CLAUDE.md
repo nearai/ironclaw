@@ -167,6 +167,16 @@ Reborn-native product-auth surface:
 rate-limit middlewares consume so the two enforcers cannot drift on
 which request belongs to which descriptor.
 
+### Extension pairing routes
+
+When Slack host-beta personal binding is configured, `webui_v2_app`
+mounts `POST /api/webchat/v2/extensions/pairing/redeem` inside the same
+bearer-auth layer as the native WebUI v2 extension routes. The request
+body carries `{ channel, code }`; the route validates the channel server-side
+and currently resolves the supported Slack channel aliases to the Slack
+personal-binding pairing service. The browser must not call provider-specific
+pairing paths directly.
+
 ### Host-supplied public route mount (#4116 — SSO login surface)
 
 `WebuiServeConfig::with_public_route_mount(PublicRouteMount)`

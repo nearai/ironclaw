@@ -2,10 +2,28 @@ import { StatusPill } from "../../../design-system/primitives.js";
 import { html } from "../../../lib/html.js";
 import { ExtensionCard, RegistryCard } from "./extension-card.js";
 import { PairingSection } from "./pairing-section.js";
-import { SlackPairingSection } from "./slack-pairing-section.js";
+import { redeemPairingCode } from "../lib/pairing-api.js";
+
+const SLACK_PAIRING_I18N_KEYS = {
+  title: "pairing.slackTitle",
+  instructions: "pairing.slackInstructions",
+  placeholder: "pairing.slackPlaceholder",
+  action: "pairing.connect",
+  success: "pairing.slackSuccess",
+  error: "pairing.slackError",
+  empty: "pairing.none",
+};
+
+const SLACK_PAIRING_QUERY_KEYS = [["extensions"], ["pairing", "slack"]];
 
 function packageId(item) {
   return item.package_ref?.id || "";
+}
+
+export function isSlackChannelEnabled(enabledChannels) {
+  return ["slack", "slack_v2", "slack-v2"].some((channel) =>
+    enabledChannels.includes(channel)
+  );
 }
 
 export function ChannelsTab({
@@ -19,7 +37,7 @@ export function ChannelsTab({
   isBusy,
 }) {
   const enabledChannels = status.enabled_channels || [];
-  const slackEnabled = enabledChannels.includes("slack") || enabledChannels.includes("slack_v2");
+  const slackEnabled = isSlackChannelEnabled(enabledChannels);
 
   return html`
     <div className="space-y-5">
@@ -52,7 +70,13 @@ export function ChannelsTab({
           statusTone=${slackEnabled ? "success" : "info"}
           detail="Tenant Slack app install"
         >
-          <${SlackPairingSection} />
+          <${PairingSection}
+            channel="slack"
+            redeemFn=${redeemPairingCode}
+            i18nKeys=${SLACK_PAIRING_I18N_KEYS}
+            queryKeys=${SLACK_PAIRING_QUERY_KEYS}
+            showPendingRequests=${false}
+          />
         <//>
         <${BuiltinRow}
           name="CLI"
