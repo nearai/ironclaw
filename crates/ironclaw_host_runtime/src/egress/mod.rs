@@ -1,4 +1,5 @@
 mod credential;
+mod host_port;
 mod pipeline;
 mod sanitize;
 
@@ -14,6 +15,11 @@ use std::{fmt, sync::Arc};
 
 use crate::obligations::{NetworkObligationPolicyStore, RuntimeSecretInjectionStore};
 use crate::{ToolCallHttpEgress, http_body::RuntimeHttpBodyStore};
+
+pub use host_port::{
+    HostRuntimeCredentialMaterial, HostRuntimeHttpEgressPort, HostRuntimeHttpEgressRequest,
+    RuntimeSecretMaterialStager, RuntimeSecretStageError,
+};
 
 #[derive(Clone)]
 pub struct HostHttpEgressService<N, S> {

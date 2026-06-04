@@ -60,7 +60,10 @@ pub use capability_catalog::{
     HotCapabilityCatalog, HotCapabilityRecord, MAX_HOT_PROMPT_BYTES, MAX_HOT_SCHEMA_BYTES,
     publish_hot_capability_catalog,
 };
-pub use egress::HostHttpEgressService;
+pub use egress::{
+    HostHttpEgressService, HostRuntimeCredentialMaterial, HostRuntimeHttpEgressPort,
+    HostRuntimeHttpEgressRequest, RuntimeSecretMaterialStager, RuntimeSecretStageError,
+};
 pub use extension_contracts::{
     default_host_api_contract_registry, default_host_port_catalog,
     discover_extensions_with_default_host_api_contracts,
@@ -109,11 +112,10 @@ pub use sandbox_process::{
     RebornScopedSandboxCommandTransport,
 };
 pub use services::{
-    HostRuntimeCredentialMaterial, HostRuntimeHttpEgressPort, HostRuntimeHttpEgressRequest,
     HostRuntimeServices, ProductAuthCredentialStageError, ProductAuthProviderRuntimePorts,
     ProductionEventStoreWiringError, ProductionWiringComponent, ProductionWiringConfig,
     ProductionWiringIssue, ProductionWiringIssueKind, ProductionWiringReport,
-    RegisteredRuntimeHealth, RuntimeSecretMaterialStager, RuntimeSecretStageError,
+    RegisteredRuntimeHealth,
 };
 pub use surface::{CapabilitySurfacePolicy, VisibleCapability, VisibleCapabilityAccess};
 pub use turn_scheduler::{

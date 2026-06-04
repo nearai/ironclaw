@@ -366,11 +366,11 @@ fn slack_protocol_egress(
             config.bot_token.expose_secret().to_string(),
         )),
         EgressPolicy::new(slack_declared_egress_targets(token_handle)?),
-        slack_egress_scope(config),
+        slack_egress_scope_template(config),
     )))
 }
 
-fn slack_egress_scope(config: &SlackHostBetaConfig) -> ResourceScope {
+fn slack_egress_scope_template(config: &SlackHostBetaConfig) -> ResourceScope {
     ResourceScope {
         tenant_id: config.tenant_id.clone(),
         user_id: config.user_id.clone(),
@@ -935,10 +935,10 @@ mod tests {
     }
 
     #[test]
-    fn slack_egress_scope_uses_configured_tenant_agent_and_project() {
+    fn slack_egress_scope_template_uses_configured_tenant_agent_and_project() {
         let config = config();
 
-        let scope = slack_egress_scope(&config);
+        let scope = slack_egress_scope_template(&config);
 
         assert_eq!(scope.tenant_id, TenantId::new(TENANT).expect("tenant"));
         assert_eq!(scope.user_id, UserId::new(USER).expect("user"));

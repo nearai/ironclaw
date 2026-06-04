@@ -2263,6 +2263,61 @@ async fn concrete_product_workflow_keeps_installations_tenant_isolated() {
 }
 
 #[tokio::test]
+async fn shared_route_without_configured_subject_yields_none_subject_user_id() {
+    let tenant_id = TenantId::new("tenant:alpha").expect("tenant");
+    let adapter_kind = ironclaw_conversations::AdapterKind::new("test_adapter").expect("adapter");
+    let installation_id =
+        ironclaw_conversations::AdapterInstallationId::new("install_alpha").expect("install");
+    let conversations = Arc::new(InMemoryConversationServices::default());
+    conversations
+        .pair_external_actor(
+            tenant_id.clone(),
+            adapter_kind,
+            installation_id,
+            ironclaw_conversations::ExternalActorRef::new("test", "user1").expect("actor"),
+            UserId::new("user:alice").expect("user"),
+        )
+        .await;
+    let conversation_port: Arc<dyn ironclaw_conversations::ConversationBindingService> =
+        conversations;
+    let resolver = StaticProductInstallationResolver::new([(
+        ProductInstallationKey::new(
+            ProductAdapterId::new("test_adapter").expect("adapter"),
+            AdapterInstallationId::new("install_alpha").expect("installation"),
+        ),
+        ProductInstallationScope::with_default_scope(
+            tenant_id,
+            AgentId::new("agent:alpha").expect("agent"),
+            Some(ProjectId::new("project:alpha").expect("project")),
+        ),
+    )]);
+    let binding = ProductConversationBindingService::new(conversation_port, resolver);
+    let envelope = sample_envelope_with_payload(
+        "shared-no-subject",
+        ProductInboundPayload::UserMessage(
+            UserMessagePayload::new("hello shared", vec![], ProductTriggerReason::BotMention)
+                .expect("message"),
+        ),
+    );
+
+    let resolved = binding
+        .resolve_binding(ResolveBindingRequest::from_envelope(&envelope))
+        .await
+        .expect("shared binding should resolve without a configured subject");
+
+    assert_eq!(resolved.actor_user_id.as_str(), "user:alice");
+    assert_eq!(resolved.subject_user_id, None);
+    assert_eq!(
+        resolved.agent_id.as_ref().map(AgentId::as_str),
+        Some("agent:alpha")
+    );
+    assert_eq!(
+        resolved.project_id.as_ref().map(ProjectId::as_str),
+        Some("project:alpha")
+    );
+}
+
+#[tokio::test]
 async fn concrete_product_workflow_bot_mention_uses_shared_route() {
     let binding = Arc::new(FakeConversationBindingService::new());
     let coordinator = Arc::new(RecordingTurnCoordinator::default());

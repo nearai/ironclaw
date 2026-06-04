@@ -276,11 +276,38 @@ fn display_safe_summary() -> String {
 #[cfg(test)]
 mod tests {
     use ironclaw_host_api::{
-        Action, ApprovalRequest, CapabilityId, CorrelationId, InvocationId, Principal,
-        ResourceEstimate, ThreadId, UserId,
+        Action, AgentId, ApprovalRequest, CapabilityId, CorrelationId, InvocationId, Principal,
+        ProjectId, ResourceEstimate, TenantId, ThreadId, UserId,
     };
 
     use super::*;
+
+    #[test]
+    fn approval_interaction_scope_from_turn_uses_scope_owner_over_actor() {
+        let actor = TurnActor::new(UserId::new("user:actor").unwrap());
+        let owner_user_id = UserId::new("user:subject").unwrap();
+        let thread_id = ThreadId::new("thread:shared").unwrap();
+        let scope = TurnScope::new_with_owner(
+            TenantId::new("tenant:shared").unwrap(),
+            Some(AgentId::new("agent:shared").unwrap()),
+            Some(ProjectId::new("project:shared").unwrap()),
+            thread_id.clone(),
+            Some(owner_user_id.clone()),
+        );
+
+        let interaction_scope = ApprovalInteractionScope::from_turn(&scope, &actor);
+
+        assert_eq!(interaction_scope.user_id, owner_user_id);
+        assert_eq!(interaction_scope.thread_id, thread_id);
+        assert_eq!(
+            interaction_scope.agent_id.as_ref().map(AgentId::as_str),
+            Some("agent:shared")
+        );
+        assert_eq!(
+            interaction_scope.project_id.as_ref().map(ProjectId::as_str),
+            Some("project:shared")
+        );
+    }
 
     #[test]
     fn approval_gate_record_with_status_rejects_scope_without_thread_id() {

@@ -26,9 +26,8 @@ use ironclaw_turns::{
 use uuid::Uuid;
 
 use crate::binding::{
-    ConversationBindingService, ProductConversationBindingCreationPolicy,
-    ProductConversationRouteKind, ResolveBindingRequest, ResolvedBinding,
-    binding_creation_policy_for_trigger,
+    ConversationBindingService, ProductConversationBindingCreationPolicy, ResolveBindingRequest,
+    ResolvedBinding, binding_profile_for_trigger,
 };
 use crate::binding_ref::{
     DEFAULT_BINDING_REF_RAW_MAX_BYTES, bounded_idempotency_key, bounded_reply_target_binding_ref,
@@ -276,16 +275,17 @@ where
                 kind: "non_user_message".into(),
             });
         };
+        let (route_kind, creation_policy) = binding_profile_for_trigger(payload.trigger);
         let binding_request = ResolveBindingRequest {
             adapter_id: envelope.adapter_id().clone(),
             installation_id: envelope.installation_id().clone(),
             external_actor_ref: envelope.external_actor_ref().clone(),
             external_conversation_ref: envelope.external_conversation_ref().clone(),
             external_event_id: envelope.external_event_id().clone(),
-            route_kind: route_kind_for_user_message(payload.trigger),
+            route_kind,
             auth_claim: envelope.auth_claim().clone(),
         };
-        let binding = match binding_creation_policy_for_trigger(payload.trigger) {
+        let binding = match creation_policy {
             ProductConversationBindingCreationPolicy::CreateAllowed => {
                 self.binding_service
                     .resolve_binding(binding_request)
@@ -333,6 +333,7 @@ where
             replay,
             prepared.submit_idempotency_key.clone(),
             envelope.received_at(),
+            Some(prepared),
         )
         .await
         .map(Some)
@@ -392,36 +393,26 @@ where
     }
 }
 
-fn route_kind_for_user_message(
-    trigger: ironclaw_product_adapters::ProductTriggerReason,
-) -> ProductConversationRouteKind {
-    match trigger {
-        ironclaw_product_adapters::ProductTriggerReason::DirectChat => {
-            ProductConversationRouteKind::Direct
-        }
-        ironclaw_product_adapters::ProductTriggerReason::BotMention
-        | ironclaw_product_adapters::ProductTriggerReason::ReplyToBot
-        | ironclaw_product_adapters::ProductTriggerReason::BotCommand
-        | ironclaw_product_adapters::ProductTriggerReason::LinkedThreadAction => {
-            ProductConversationRouteKind::Shared
-        }
-    }
-}
-
 async fn submit_or_replay_accepted_message<T, C>(
     thread_service: &T,
     turn_coordinator: &C,
     replay: AcceptedInboundMessageReplay,
     submit_idempotency_key: String,
     received_at: DateTime<Utc>,
+    prepared: Option<&PreparedUserMessage>,
 ) -> Result<InboundTurnOutcome, ProductWorkflowError>
 where
     T: SessionThreadService,
     C: TurnCoordinator,
 {
-    ProductInboundTurnHandoff::from_replay(replay, submit_idempotency_key, received_at)?
-        .submit_or_replay(thread_service, turn_coordinator)
-        .await
+    ProductInboundTurnHandoff::from_replay_with_prepared(
+        replay,
+        submit_idempotency_key,
+        received_at,
+        prepared,
+    )?
+    .submit_or_replay(thread_service, turn_coordinator)
+    .await
 }
 
 enum ProductInboundTurnHandoff {
@@ -434,12 +425,25 @@ enum ProductInboundTurnHandoff {
 }
 
 impl ProductInboundTurnHandoff {
+    #[cfg(test)]
     fn from_replay(
         replay: AcceptedInboundMessageReplay,
         submit_idempotency_key: String,
         received_at: DateTime<Utc>,
     ) -> Result<Self, ProductWorkflowError> {
-        let binding = binding_from_replay(&replay)?;
+        Self::from_replay_with_prepared(replay, submit_idempotency_key, received_at, None)
+    }
+
+    fn from_replay_with_prepared(
+        replay: AcceptedInboundMessageReplay,
+        submit_idempotency_key: String,
+        received_at: DateTime<Utc>,
+        prepared: Option<&PreparedUserMessage>,
+    ) -> Result<Self, ProductWorkflowError> {
+        let (binding, thread_scope) = match prepared {
+            Some(prepared) => (prepared.binding.clone(), prepared.thread_scope.clone()),
+            None => (binding_from_replay(&replay)?, replay.scope.clone()),
+        };
         let accepted_message_ref = accepted_message_ref(replay.message_id)?;
 
         if replay.status == MessageStatus::Submitted {
@@ -485,7 +489,7 @@ impl ProductInboundTurnHandoff {
 
         Ok(Self::NeedsSubmission(AcceptedProductInboundTurn {
             binding,
-            thread_scope: replay.scope,
+            thread_scope,
             message_id: replay.message_id,
             source_binding_id,
             reply_target_binding_id,
@@ -866,6 +870,58 @@ mod tests {
 
         assert_eq!(submission.binding.actor_user_id, user_id());
         assert_eq!(submission.binding.subject_user_id, Some(user_id()));
+        assert_eq!(submission.message_id, message_id);
+    }
+
+    #[test]
+    fn prepared_replay_uses_fresh_binding_scope_over_persisted_scope() {
+        let message_id = ThreadMessageId::new();
+        let mut replay = replay(
+            message_id,
+            MessageStatus::DeferredBusy,
+            Some("src:alpha"),
+            Some("reply:alpha"),
+            None,
+        );
+        replay.scope.owner_user_id = None;
+        let subject_user_id = UserId::new("user:team-subject").unwrap();
+        let prepared = PreparedUserMessage {
+            binding: ResolvedBinding {
+                tenant_id: tenant_id(),
+                actor_user_id: user_id(),
+                subject_user_id: Some(subject_user_id.clone()),
+                thread_id: thread_id(),
+                agent_id: Some(AgentId::new("agent:alpha").unwrap()),
+                project_id: None,
+            },
+            thread_scope: ThreadScope {
+                tenant_id: tenant_id(),
+                agent_id: AgentId::new("agent:alpha").unwrap(),
+                project_id: None,
+                owner_user_id: Some(subject_user_id.clone()),
+                mission_id: None,
+            },
+            source_binding_id: "src:alpha".to_string(),
+            submit_idempotency_key: "turn-key".to_string(),
+        };
+
+        let handoff = ProductInboundTurnHandoff::from_replay_with_prepared(
+            replay,
+            "turn-key".to_string(),
+            received_at(),
+            Some(&prepared),
+        )
+        .expect("prepared replay handoff");
+
+        let ProductInboundTurnHandoff::NeedsSubmission(submission) = handoff else {
+            panic!("expected prepared replay to require a new turn submission")
+        };
+
+        assert_eq!(
+            submission.binding.subject_user_id,
+            Some(subject_user_id.clone())
+        );
+        assert_eq!(submission.thread_scope.owner_user_id, Some(subject_user_id));
         assert_eq!(submission.message_id, message_id);
     }
 

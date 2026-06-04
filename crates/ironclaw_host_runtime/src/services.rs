@@ -15,9 +15,7 @@ use ironclaw_approvals::ApprovalResolver;
 use ironclaw_authorization::{
     CapabilityLeaseStore, InMemoryCapabilityLeaseStore, TrustAwareCapabilityDispatchAuthorizer,
 };
-use ironclaw_capabilities::{
-    CapabilityObligationHandler, CapabilityObligationPhase, CapabilityObligationRequest,
-};
+use ironclaw_capabilities::CapabilityObligationHandler;
 use ironclaw_dispatcher::{
     RuntimeAdapter, RuntimeAdapterRequest, RuntimeAdapterResult, RuntimeDispatcher,
 };
@@ -32,11 +30,8 @@ use ironclaw_filesystem::LibSqlRootFilesystem;
 use ironclaw_filesystem::PostgresRootFilesystem;
 use ironclaw_filesystem::{LocalFilesystem, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
-    CapabilityDispatcher, CapabilityId, CapabilitySet, DispatchError, ExecutionContext,
-    ExtensionId, MountView, Obligation, ResourceEstimate, ResourceReservationId, ResourceScope,
-    ResourceUsage, RuntimeCredentialInjection, RuntimeCredentialSource, RuntimeCredentialTarget,
-    RuntimeDispatchErrorKind, RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
-    RuntimeHttpEgressResponse, RuntimeKind, SecretHandle, TrustClass,
+    CapabilityDispatcher, CapabilityId, DispatchError, ResourceReservationId, ResourceScope,
+    ResourceUsage, RuntimeDispatchErrorKind, RuntimeHttpEgress, RuntimeKind, SecretHandle,
     runtime_policy::{
         DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind, NetworkMode,
         ProcessBackendKind, RuntimeProfile, SecretMode,
@@ -61,7 +56,6 @@ use ironclaw_run_state::{
     InMemoryApprovalRequestStore, InMemoryRunStateStore, RunStateApprovalStore, RunStateStore,
 };
 use ironclaw_scripts::{ScriptError, ScriptExecutionRequest, ScriptExecutor, ScriptInvocation};
-use ironclaw_secrets::SecretMaterial;
 use ironclaw_secrets::{
     CredentialAccountStore, CredentialSessionStore, InMemoryCredentialBroker, InMemorySecretStore,
     SecretStore, SecretStoreError,
@@ -86,10 +80,11 @@ use crate::obligations::{
 use crate::{
     BuiltinObligationHandler, CapabilitySurfaceVersion, DefaultHostRuntime,
     FirstPartyCapabilityRegistry, FirstPartyCapabilityRequest, HostRuntimeError,
-    InvocationServicesResolutionRequest, InvocationServicesResolver, LocalHostProcessPort,
-    LocalInvocationServicesResolver, PlannerError, ProcessObligationLifecycleStore,
-    RuntimeBackendHealth, RuntimeProcessPort, TenantSandboxProcessPort, ToolCallHttpEgress,
-    TurnRunExecutor, TurnRunScheduler, TurnRunSchedulerConfig, plan_capability,
+    HostRuntimeHttpEgressPort, InvocationServicesResolutionRequest, InvocationServicesResolver,
+    LocalHostProcessPort, LocalInvocationServicesResolver, PlannerError,
+    ProcessObligationLifecycleStore, RuntimeBackendHealth, RuntimeProcessPort,
+    RuntimeSecretMaterialStager, RuntimeSecretStageError, TenantSandboxProcessPort,
+    ToolCallHttpEgress, TurnRunExecutor, TurnRunScheduler, TurnRunSchedulerConfig, plan_capability,
 };
 use process_executor::{HostProcessExecutor, RuntimeDispatchProcessExecutor};
 
@@ -170,183 +165,6 @@ where
     component_types: ProductionComponentTypes,
 }
 
-/// Canonical host-runtime one-shot secret material staging port.
-///
-/// This is for host-owned adapters that already hold trusted secret material
-/// and need the shared runtime HTTP egress to inject it without exposing the
-/// material through request headers.
-#[derive(Clone)]
-pub struct RuntimeSecretMaterialStager {
-    secret_injection_store: Arc<RuntimeSecretInjectionStore>,
-}
-
-/// Alias for [`ironclaw_host_api::CredentialStageError`].
-pub type RuntimeSecretStageError = ironclaw_host_api::CredentialStageError;
-
-impl RuntimeSecretMaterialStager {
-    fn new(secret_injection_store: Arc<RuntimeSecretInjectionStore>) -> Self {
-        Self {
-            secret_injection_store,
-        }
-    }
-
-    pub async fn stage_secret_material_once(
-        &self,
-        target_scope: &ResourceScope,
-        capability_id: &CapabilityId,
-        handle: &SecretHandle,
-        material: SecretMaterial,
-    ) -> Result<(), RuntimeSecretStageError> {
-        self.secret_injection_store
-            .insert(target_scope, capability_id, handle, material)
-            .map_err(|_| RuntimeSecretStageError::Backend)
-    }
-}
-
-#[derive(Clone)]
-pub struct HostRuntimeHttpEgressPort {
-    runtime_http_egress: Arc<dyn RuntimeHttpEgress>,
-    obligation_handler: Arc<dyn CapabilityObligationHandler>,
-    secret_stager: RuntimeSecretMaterialStager,
-}
-
-pub struct HostRuntimeHttpEgressRequest {
-    pub extension_id: ExtensionId,
-    pub trust: TrustClass,
-    pub request: RuntimeHttpEgressRequest,
-    pub credentials: Vec<HostRuntimeCredentialMaterial>,
-}
-
-pub struct HostRuntimeCredentialMaterial {
-    pub handle: SecretHandle,
-    pub material: SecretMaterial,
-    pub target: RuntimeCredentialTarget,
-    pub required: bool,
-}
-
-impl HostRuntimeHttpEgressPort {
-    fn new(
-        runtime_http_egress: Arc<dyn RuntimeHttpEgress>,
-        obligation_handler: Arc<dyn CapabilityObligationHandler>,
-        secret_stager: RuntimeSecretMaterialStager,
-    ) -> Self {
-        Self {
-            runtime_http_egress,
-            obligation_handler,
-            secret_stager,
-        }
-    }
-
-    pub async fn execute(
-        &self,
-        mut request: HostRuntimeHttpEgressRequest,
-    ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
-        if !request.request.credential_injections.is_empty() {
-            return Err(RuntimeHttpEgressError::Credential {
-                reason: "host-mediated HTTP egress does not accept caller-provided credential injections"
-                    .to_string(),
-            });
-        }
-        self.authorize_network_egress(&request).await?;
-        self.stage_credentials(&mut request.request, request.credentials)
-            .await?;
-        self.runtime_http_egress.execute(request.request).await
-    }
-
-    async fn stage_credentials(
-        &self,
-        request: &mut RuntimeHttpEgressRequest,
-        credentials: Vec<HostRuntimeCredentialMaterial>,
-    ) -> Result<(), RuntimeHttpEgressError> {
-        for credential in credentials {
-            self.secret_stager
-                .stage_secret_material_once(
-                    &request.scope,
-                    &request.capability_id,
-                    &credential.handle,
-                    credential.material,
-                )
-                .await
-                .map_err(|_| RuntimeHttpEgressError::Credential {
-                    reason: "host credential material could not be staged".to_string(),
-                })?;
-            request
-                .credential_injections
-                .push(RuntimeCredentialInjection {
-                    handle: credential.handle,
-                    source: RuntimeCredentialSource::StagedObligation {
-                        capability_id: request.capability_id.clone(),
-                    },
-                    target: credential.target,
-                    required: credential.required,
-                });
-        }
-        Ok(())
-    }
-
-    async fn authorize_network_egress(
-        &self,
-        request: &HostRuntimeHttpEgressRequest,
-    ) -> Result<(), RuntimeHttpEgressError> {
-        let context = execution_context_for_host_http_egress(
-            &request.request.scope,
-            request.extension_id.clone(),
-            request.request.runtime,
-            request.trust,
-        )?;
-        let estimate = ResourceEstimate {
-            network_egress_bytes: request.request.network_policy.max_egress_bytes,
-            ..ResourceEstimate::default()
-        };
-        self.obligation_handler
-            .satisfy(CapabilityObligationRequest {
-                phase: CapabilityObligationPhase::Invoke,
-                context: &context,
-                capability_id: &request.request.capability_id,
-                estimate: &estimate,
-                obligations: &[Obligation::ApplyNetworkPolicy {
-                    policy: request.request.network_policy.clone(),
-                }],
-            })
-            .await
-            .map_err(|error| RuntimeHttpEgressError::Credential {
-                reason: format!("host network egress policy was not authorized: {error}"),
-            })
-    }
-}
-
-fn execution_context_for_host_http_egress(
-    scope: &ResourceScope,
-    extension_id: ExtensionId,
-    runtime: RuntimeKind,
-    trust: TrustClass,
-) -> Result<ExecutionContext, RuntimeHttpEgressError> {
-    let context = ExecutionContext {
-        invocation_id: scope.invocation_id,
-        correlation_id: ironclaw_host_api::CorrelationId::new(),
-        process_id: None,
-        parent_process_id: None,
-        tenant_id: scope.tenant_id.clone(),
-        user_id: scope.user_id.clone(),
-        agent_id: scope.agent_id.clone(),
-        project_id: scope.project_id.clone(),
-        mission_id: scope.mission_id.clone(),
-        thread_id: scope.thread_id.clone(),
-        extension_id,
-        runtime,
-        trust,
-        grants: CapabilitySet::default(),
-        mounts: MountView::default(),
-        resource_scope: scope.clone(),
-    };
-    context
-        .validate()
-        .map_err(|error| RuntimeHttpEgressError::Credential {
-            reason: format!("invalid host HTTP egress context: {error}"),
-        })?;
-    Ok(context)
-}
-
 /// Canonical host-runtime ports used by product-auth provider adapters.
 ///
 /// This intentionally exposes only the already-composed egress, obligation
@@ -360,8 +178,8 @@ pub struct ProductAuthProviderRuntimePorts {
     secret_injection_store: Arc<RuntimeSecretInjectionStore>,
 }
 
-/// The shared type lives in `ironclaw_host_api` so that per-extension staging
-/// traits can use it without a dependency on `ironclaw_host_runtime`.
+/// Alias for [`RuntimeSecretStageError`], which re-exports
+/// [`ironclaw_host_api::CredentialStageError`].
 pub type ProductAuthCredentialStageError = RuntimeSecretStageError;
 
 impl ProductAuthProviderRuntimePorts {

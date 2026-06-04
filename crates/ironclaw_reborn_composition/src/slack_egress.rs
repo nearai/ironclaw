@@ -11,9 +11,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    CapabilityId, ExtensionId, NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern,
-    ResourceScope, RuntimeCredentialTarget, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
-    RuntimeKind, SecretHandle, TrustClass,
+    CapabilityId, ExtensionId, InvocationId, NetworkMethod, NetworkPolicy, NetworkScheme,
+    NetworkTargetPattern, ResourceScope, RuntimeCredentialTarget, RuntimeHttpEgressError,
+    RuntimeHttpEgressRequest, RuntimeKind, SecretHandle, TrustClass,
 };
 use ironclaw_host_runtime::{
     HostRuntimeCredentialMaterial, HostRuntimeHttpEgressPort, HostRuntimeHttpEgressRequest,
@@ -101,7 +101,7 @@ pub struct SlackProtocolHttpEgress {
     host_egress: HostRuntimeHttpEgressPort,
     credentials: Arc<dyn SlackEgressCredentialProvider>,
     policy: EgressPolicy,
-    scope: ResourceScope,
+    scope_template: ResourceScope,
 }
 
 impl SlackProtocolHttpEgress {
@@ -109,13 +109,13 @@ impl SlackProtocolHttpEgress {
         host_egress: HostRuntimeHttpEgressPort,
         credentials: Arc<dyn SlackEgressCredentialProvider>,
         policy: EgressPolicy,
-        scope: ResourceScope,
+        scope_template: ResourceScope,
     ) -> Self {
         Self {
             host_egress,
             credentials,
             policy,
-            scope,
+            scope_template,
         }
     }
 }
@@ -158,6 +158,7 @@ impl ProtocolHttpEgress for SlackProtocolHttpEgress {
         let credentials = self
             .credential_material(request.credential_handle())
             .await?;
+        let scope = self.request_scope();
         let response = self
             .host_egress
             .execute(HostRuntimeHttpEgressRequest {
@@ -165,7 +166,7 @@ impl ProtocolHttpEgress for SlackProtocolHttpEgress {
                 trust: TrustClass::System,
                 request: RuntimeHttpEgressRequest {
                     runtime: RuntimeKind::FirstParty,
-                    scope: self.scope.clone(),
+                    scope,
                     capability_id,
                     method: network_method(request.method().as_str())?,
                     url: format!(
@@ -191,6 +192,12 @@ impl ProtocolHttpEgress for SlackProtocolHttpEgress {
 }
 
 impl SlackProtocolHttpEgress {
+    fn request_scope(&self) -> ResourceScope {
+        let mut scope = self.scope_template.clone();
+        scope.invocation_id = InvocationId::new();
+        scope
+    }
+
     async fn credential_material(
         &self,
         handle: Option<&EgressCredentialHandle>,
@@ -498,6 +505,28 @@ mod tests {
                 "authorization".to_string(),
                 "Bearer xoxb-secret".to_string()
             ))
+        );
+    }
+
+    #[tokio::test]
+    async fn slack_protocol_http_egress_uses_fresh_invocation_scope_per_send() {
+        let (egress, recorded_requests) =
+            slack_egress_with_network(RecordingNetworkHttpEgress::ok());
+
+        egress
+            .send(slack_request(slack_handle()))
+            .await
+            .expect("first Slack egress should succeed");
+        egress
+            .send(slack_request(slack_handle()))
+            .await
+            .expect("second Slack egress should succeed");
+
+        let requests = recorded_requests.lock().expect("network requests lock");
+        assert_eq!(requests.len(), 2);
+        assert_ne!(
+            requests[0].scope.invocation_id, requests[1].scope.invocation_id,
+            "each Slack protocol egress call must stage credentials in a per-request invocation scope"
         );
     }
 

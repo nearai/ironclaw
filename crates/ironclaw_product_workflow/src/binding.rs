@@ -107,18 +107,27 @@ impl ResolveBindingRequest {
     }
 }
 
-pub fn binding_creation_policy_for_trigger(
+pub fn binding_profile_for_trigger(
     trigger: ProductTriggerReason,
-) -> ProductConversationBindingCreationPolicy {
+) -> (
+    ProductConversationRouteKind,
+    ProductConversationBindingCreationPolicy,
+) {
     match trigger {
-        ProductTriggerReason::ReplyToBot | ProductTriggerReason::LinkedThreadAction => {
-            ProductConversationBindingCreationPolicy::ExistingOnly
-        }
-        ProductTriggerReason::DirectChat
-        | ProductTriggerReason::BotMention
-        | ProductTriggerReason::BotCommand => {
-            ProductConversationBindingCreationPolicy::CreateAllowed
-        }
+        ProductTriggerReason::DirectChat => (
+            ProductConversationRouteKind::Direct,
+            ProductConversationBindingCreationPolicy::CreateAllowed,
+        ),
+        ProductTriggerReason::BotMention | ProductTriggerReason::BotCommand => (
+            ProductConversationRouteKind::Shared,
+            ProductConversationBindingCreationPolicy::CreateAllowed,
+        ),
+        // Reply/action callbacks refer to a prior bot turn by definition, so
+        // they are shared routes that must already have a conversation binding.
+        ProductTriggerReason::ReplyToBot | ProductTriggerReason::LinkedThreadAction => (
+            ProductConversationRouteKind::Shared,
+            ProductConversationBindingCreationPolicy::ExistingOnly,
+        ),
     }
 }
 
@@ -147,13 +156,7 @@ pub fn route_kind_for_inbound_payload(
 }
 
 fn route_kind_for_trigger(trigger: ProductTriggerReason) -> ProductConversationRouteKind {
-    match trigger {
-        ProductTriggerReason::DirectChat => ProductConversationRouteKind::Direct,
-        ProductTriggerReason::BotMention
-        | ProductTriggerReason::ReplyToBot
-        | ProductTriggerReason::BotCommand
-        | ProductTriggerReason::LinkedThreadAction => ProductConversationRouteKind::Shared,
-    }
+    binding_profile_for_trigger(trigger).0
 }
 
 /// Conversation binding resolution contract. Host implementations wire this to
