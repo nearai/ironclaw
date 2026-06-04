@@ -199,10 +199,6 @@ impl<'a> PromptPlanningPipeline<'a> {
                 self.state = state;
                 candidate_bundle.into_final_without_rebuild()
             }
-            PromptCompactionOutcome::Deferred(state) => {
-                self.state = state;
-                candidate_bundle.into_final_without_rebuild()
-            }
             PromptCompactionOutcome::Compacted(state) => {
                 self.state = state;
                 let bundle = FinalPromptBundle::rebuild_after_successful_compaction(
@@ -283,7 +279,6 @@ impl<'a> PromptPlanningPipeline<'a> {
 
 enum PromptCompactionOutcome {
     Skipped(LoopExecutionState),
-    Deferred(LoopExecutionState),
     Compacted(LoopExecutionState),
     Exited(LoopExit),
 }
@@ -384,7 +379,7 @@ impl<'a, 'b> PromptCompactionStep<'a, 'b> {
                         return Ok(PromptCompactionOutcome::Exited(exit));
                     }
                 };
-                return Ok(PromptCompactionOutcome::Deferred(state));
+                return Ok(PromptCompactionOutcome::Skipped(state));
             }
             CompactionCallOutcome::Completed(Err(LoopCompactionError::Cancelled))
             | CompactionCallOutcome::Cancelled => {
