@@ -93,9 +93,13 @@ pub struct ApprovalInteractionScope {
 
 impl ApprovalInteractionScope {
     pub fn from_turn(scope: &TurnScope, actor: &TurnActor) -> Self {
+        let user_id = scope
+            .explicit_owner_user_id()
+            .cloned()
+            .unwrap_or_else(|| actor.user_id.clone());
         Self {
             tenant_id: scope.tenant_id.clone(),
-            user_id: actor.user_id.clone(),
+            user_id,
             agent_id: scope.agent_id.clone(),
             project_id: scope.project_id.clone(),
             thread_id: scope.thread_id.clone(),

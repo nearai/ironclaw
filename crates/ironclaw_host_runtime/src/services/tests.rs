@@ -24,6 +24,7 @@ use ironclaw_resources::{
 use ironclaw_secrets::{
     InMemorySecretStore, SecretLeaseId, SecretMaterial, SecretStore, SecretStoreError,
 };
+use secrecy::ExposeSecret;
 use serde_json::{Value, json};
 
 use super::{
@@ -139,6 +140,35 @@ async fn product_auth_ports_stage_secret_from_source_scope_into_target_scope() {
             .expect("source scope should remain readable")
             .is_none()
     );
+}
+
+#[tokio::test]
+async fn runtime_secret_material_stager_stages_secret_material_into_target_scope() {
+    let services = test_services()
+        .with_secret_store(Arc::new(InMemorySecretStore::new()))
+        .try_with_host_http_egress(RecordingNetwork::ok())
+        .expect("host HTTP egress should wire with graph secret store");
+    let scope = sample_scope();
+    let capability_id = sample_capability_id();
+    let handle = SecretHandle::new("config-secret").unwrap();
+
+    services
+        .runtime_secret_material_stager()
+        .stage_secret_material_once(
+            &scope,
+            &capability_id,
+            &handle,
+            SecretMaterial::from("config-secret-material"),
+        )
+        .await
+        .expect("runtime stager should stage provided secret material");
+
+    let staged = services
+        .secret_injection_store
+        .take(&scope, &capability_id, &handle)
+        .expect("staged secret should be readable for target scope")
+        .expect("provided material should be staged");
+    assert_eq!(staged.expose_secret(), "config-secret-material");
 }
 
 #[tokio::test]

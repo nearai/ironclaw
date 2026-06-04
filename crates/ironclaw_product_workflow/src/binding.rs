@@ -20,7 +20,16 @@ use crate::error::ProductWorkflowError;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolvedBinding {
     pub tenant_id: TenantId,
-    pub user_id: UserId,
+    /// Real paired human actor who sent or authorized the external action.
+    pub actor_user_id: UserId,
+    /// User scope whose agent/context/tools/memory execute the turn.
+    ///
+    /// Direct/personal routes set this to the actor. Shared routes set this to
+    /// the configured team/agent subject when one exists; legacy shared routes
+    /// without an explicit subject remain ownerless until their host route is
+    /// configured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject_user_id: Option<UserId>,
     pub thread_id: ThreadId,
     /// Required for user-message turn submission because Reborn `ThreadScope`
     /// and `TurnScope` are agent-scoped. Product bindings that are only
@@ -51,6 +60,14 @@ pub enum ProductConversationRouteKind {
     Shared,
 }
 
+/// Whether an inbound user message may create a new product conversation
+/// binding, or must target a conversation that the product has already linked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProductConversationBindingCreationPolicy {
+    CreateAllowed,
+    ExistingOnly,
+}
+
 impl ResolveBindingRequest {
     pub fn from_envelope(envelope: &ProductInboundEnvelope) -> Self {
         Self {
@@ -61,6 +78,21 @@ impl ResolveBindingRequest {
             external_event_id: envelope.external_event_id().clone(),
             route_kind: route_kind_for_inbound_payload(envelope.payload()),
             auth_claim: envelope.auth_claim().clone(),
+        }
+    }
+}
+
+pub fn binding_creation_policy_for_trigger(
+    trigger: ProductTriggerReason,
+) -> ProductConversationBindingCreationPolicy {
+    match trigger {
+        ProductTriggerReason::ReplyToBot | ProductTriggerReason::LinkedThreadAction => {
+            ProductConversationBindingCreationPolicy::ExistingOnly
+        }
+        ProductTriggerReason::DirectChat
+        | ProductTriggerReason::BotMention
+        | ProductTriggerReason::BotCommand => {
+            ProductConversationBindingCreationPolicy::CreateAllowed
         }
     }
 }

@@ -48,8 +48,8 @@ use ironclaw_host_api::{
 #[cfg(feature = "libsql")]
 use ironclaw_host_api::{MountAlias, MountGrant};
 use ironclaw_host_runtime::{
-    CapabilitySurfaceVersion, FirstPartyCapabilityRegistry, HostRuntimeServices,
-    LocalHostProcessPort, ProductAuthProviderRuntimePorts, TriggerCreateHook,
+    CapabilitySurfaceVersion, FirstPartyCapabilityRegistry, HostRuntimeHttpEgressPort,
+    HostRuntimeServices, LocalHostProcessPort, ProductAuthProviderRuntimePorts, TriggerCreateHook,
     builtin_first_party_handlers_with_trigger_create_hook, builtin_first_party_package,
 };
 #[cfg(feature = "libsql")]
@@ -383,6 +383,7 @@ pub(crate) struct RebornLocalRuntimeServices {
     // outside local-dev composition. Tracked in #4091.
     pub(crate) extension_management: Option<Arc<RebornLocalExtensionManagementPort>>,
     pub(crate) runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
+    pub(crate) host_runtime_http_egress: Option<HostRuntimeHttpEgressPort>,
     pub(crate) skill_mounts: MountView,
     pub(crate) memory_mounts: MountView,
     pub(crate) skill_filesystem: Arc<ScopedFilesystem<LocalDevRootFilesystem>>,
@@ -526,6 +527,8 @@ fn production_config(
 }
 
 async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, RebornBuildError> {
+    #[cfg(all(test, feature = "slack-v2-host-beta"))]
+    let host_runtime_http_egress_for_test = input.host_runtime_http_egress_for_test.clone();
     let RebornBuildInput {
         profile,
         storage,
@@ -788,6 +791,11 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     if let Some(local_runtime) = Arc::get_mut(&mut store_graph.local_runtime) {
         local_runtime.extension_management = Some(Arc::clone(&extension_management));
         local_runtime.runtime_http_egress = Some(product_auth_runtime_ports.runtime_http_egress());
+        let host_runtime_http_egress = services.host_runtime_http_egress_port();
+        #[cfg(all(test, feature = "slack-v2-host-beta"))]
+        let host_runtime_http_egress =
+            host_runtime_http_egress_for_test.unwrap_or(host_runtime_http_egress);
+        local_runtime.host_runtime_http_egress = host_runtime_http_egress;
     } else {
         return Err(RebornBuildError::InvalidConfig {
             reason: "local-dev extension lifecycle facade could not be attached".to_string(),
@@ -915,6 +923,7 @@ fn build_local_dev_store_graph(
         skill_management,
         extension_management: None,
         runtime_http_egress: None,
+        host_runtime_http_egress: None,
         skill_mounts,
         memory_mounts,
         skill_filesystem,
@@ -1012,6 +1021,7 @@ fn build_local_dev_store_graph(
         skill_management,
         extension_management: None,
         runtime_http_egress: None,
+        host_runtime_http_egress: None,
         skill_mounts,
         memory_mounts,
         skill_filesystem,
@@ -1928,6 +1938,8 @@ async fn build_production_shaped(
         required_runtime_backends,
         require_runtime_http_egress,
         require_wasm_credentials,
+        #[cfg(all(test, feature = "slack-v2-host-beta"))]
+            host_runtime_http_egress_for_test: _,
         product_auth_ports,
         oauth_provider_configs,
         oauth_dcr_provider_configs,
@@ -2698,6 +2710,7 @@ mod tests {
             skill_management: Arc::clone(&base_runtime.skill_management),
             extension_management: base_runtime.extension_management.clone(),
             runtime_http_egress: base_runtime.runtime_http_egress.clone(),
+            host_runtime_http_egress: base_runtime.host_runtime_http_egress.clone(),
             skill_mounts: base_runtime.skill_mounts.clone(),
             memory_mounts: base_runtime.memory_mounts.clone(),
             skill_filesystem: Arc::clone(&base_runtime.skill_filesystem),

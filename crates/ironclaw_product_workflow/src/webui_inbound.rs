@@ -51,11 +51,12 @@ impl WebUiAuthenticatedCaller {
     }
 
     pub fn turn_scope(&self, thread_id: ThreadId) -> TurnScope {
-        TurnScope::new(
+        TurnScope::new_with_owner(
             self.tenant_id.clone(),
             self.agent_id.clone(),
             self.project_id.clone(),
             thread_id,
+            Some(self.user_id.clone()),
         )
     }
 }

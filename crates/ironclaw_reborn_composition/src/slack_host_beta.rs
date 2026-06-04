@@ -82,7 +82,9 @@ pub struct SlackHostBetaConfig {
     /// tests/config. Tenant app host-beta resolution uses durable personal
     /// bindings and does not require a preselected Slack user.
     pub slack_actor: Option<ExternalActorRef>,
-    /// Host user used as the resource owner for Slack bot-token egress.
+    /// User scope that owns Slack shared-route execution, tools, skills, and
+    /// memory in this beta route. Personal DM routes still use the paired actor
+    /// as the subject.
     pub user_id: UserId,
     pub signing_secret: SecretString,
     pub bot_token: SecretString,
@@ -237,8 +239,9 @@ pub fn build_slack_events_route_mount_with_actor_user_resolver(
     config: SlackHostBetaConfig,
     actor_user_resolver: Arc<dyn ProductActorUserResolver>,
 ) -> Result<PublicRouteMount, SlackHostBetaBuildError> {
-    // The resolver controls inbound Slack actor binding. `config.user_id` still
-    // scopes the host-mediated Slack bot-token egress for this beta route.
+    // The resolver controls inbound Slack actor binding. `config.user_id`
+    // scopes shared Slack channel execution and host-mediated Slack bot-token
+    // egress for this beta route.
     tracing::warn!(
         "Slack host-beta uses in-memory conversation bindings, idempotency ledger, and outbound state; Slack continuity, retry deduplication, and delivery state are lost on process restart"
     );
@@ -262,6 +265,7 @@ pub fn build_slack_events_route_mount_with_actor_user_resolver(
         config.agent_id.clone(),
         config.project_id.clone(),
     )
+    .with_default_subject_user_id(config.user_id.clone())
     .with_actor_user_resolver(actor_user_resolver, actor_pairings);
     let installation_resolver = StaticProductInstallationResolver::new([(
         ProductInstallationKey::new(adapter_id, config.installation_id.clone()),
@@ -351,12 +355,12 @@ fn slack_protocol_egress(
         .local_runtime
         .as_ref()
         .ok_or(SlackHostBetaBuildError::RuntimeHttpEgressUnavailable)?;
-    let runtime_http_egress = local_runtime
-        .runtime_http_egress
+    let host_egress = local_runtime
+        .host_runtime_http_egress
         .clone()
         .ok_or(SlackHostBetaBuildError::RuntimeHttpEgressUnavailable)?;
     Ok(Arc::new(SlackProtocolHttpEgress::new(
-        runtime_http_egress,
+        host_egress,
         Arc::new(StaticSlackEgressCredentialProvider::new(
             token_handle.clone(),
             config.bot_token.expose_secret().to_string(),
@@ -467,18 +471,30 @@ mod tests {
     use axum::http::{Request, StatusCode};
     use hmac::{Hmac, Mac};
     use http_body_util::BodyExt;
-    use ironclaw_host_api::{
-        RuntimeHttpEgress, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse,
+    use ironclaw_authorization::GrantAuthorizer;
+    use ironclaw_extensions::ExtensionRegistry;
+    use ironclaw_filesystem::LocalFilesystem;
+    use ironclaw_host_runtime::{
+        CapabilitySurfaceVersion, HostRuntimeHttpEgressPort, HostRuntimeServices,
     };
     use ironclaw_loop_support::{
         HostManagedModelError, HostManagedModelGateway, HostManagedModelRequest,
         HostManagedModelResponse,
     };
+    use ironclaw_network::{
+        NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
+    };
+    use ironclaw_processes::{InMemoryProcessResultStore, InMemoryProcessStore, ProcessServices};
     use ironclaw_product_workflow::{
         ProductActorUserResolutionRequest, ProductWorkflowError, WebUiAuthenticatedCaller,
     };
+    use ironclaw_resources::InMemoryResourceGovernor;
+    use ironclaw_secrets::InMemorySecretStore;
     use ironclaw_threads::{ListThreadsForScopeRequest, ThreadHistoryRequest, ThreadScope};
-    use ironclaw_turns::run_profile::LoopCapabilityPort;
+    use ironclaw_turns::{
+        GetRunStateRequest, TurnCoordinator, TurnRunId, TurnScope, TurnStatus,
+        run_profile::LoopCapabilityPort,
+    };
     use secrecy::ExposeSecret;
     use tower::ServiceExt;
 
@@ -496,9 +512,9 @@ mod tests {
     const PROJECT: &str = "project:slack-host";
     const USER: &str = "user:slack-host";
     const INSTALLATION: &str = "install_host_beta";
-    const TEAM: &str = "T-HOST";
-    const API_APP: &str = "A-HOST";
-    const SLACK_USER: &str = "U-HOST";
+    const TEAM: &str = "T0HOST";
+    const API_APP: &str = "A0HOST";
+    const SLACK_USER: &str = "U0HOST";
     const SECRET: &str = "host-signing-secret";
 
     type HmacSha256 = Hmac<sha2::Sha256>;
@@ -583,8 +599,7 @@ mod tests {
 
     #[tokio::test]
     async fn build_slack_events_route_mount_fails_when_runtime_http_egress_unavailable() {
-        let (mut runtime, _root) = runtime().await;
-        runtime.set_local_runtime_http_egress_for_test(None);
+        let (runtime, _root) = runtime_with_host_egress_override(Some(None)).await;
 
         let error = match build_slack_events_route_mount(&runtime, config()) {
             Ok(_) => panic!("Slack route requires runtime HTTP egress"),
@@ -600,16 +615,18 @@ mod tests {
 
     #[tokio::test]
     async fn build_slack_events_route_mount_dispatches_signed_event_callback() {
-        let (mut runtime, _root) = runtime().await;
         let egress = Arc::new(RecordingRuntimeHttpEgress::default());
-        runtime.set_local_runtime_http_egress_for_test(Some(egress.clone()));
+        let (runtime, _root) = runtime_with_host_egress_override(Some(Some(
+            host_egress_port_for_test(Arc::clone(&egress)),
+        )))
+        .await;
         let mount = build_slack_events_route_mount(&runtime, config()).expect("route builds");
         let body = r#"{
             "type":"event_callback",
-            "team_id":"T-HOST",
-            "api_app_id":"A-HOST",
+            "team_id":"T0HOST",
+            "api_app_id":"A0HOST",
             "event_id":"Ev-host-beta-dispatch",
-            "event":{"type":"message","channel_type":"im","user":"U-HOST","channel":"D-HOST","text":"hello","ts":"1710000000.000010"}
+            "event":{"type":"message","channel_type":"im","user":"U0HOST","channel":"D0HOST","text":"hello","ts":"1710000000.000010"}
         }"#;
         let timestamp = current_unix_timestamp();
 
@@ -633,12 +650,15 @@ mod tests {
             drain.drain().await;
         }
         let history = wait_for_slack_thread_history(&runtime).await;
-        assert_eq!(history.messages.len(), 1);
-        assert_eq!(history.messages[0].content.as_deref(), Some("hello"));
+        let inbound_message = history
+            .messages
+            .iter()
+            .find(|message| message.content.as_deref() == Some("hello"))
+            .expect("inbound Slack message should be recorded");
         assert_eq!(
-            history.messages[0].source_binding_id.as_deref(),
+            inbound_message.source_binding_id.as_deref(),
             Some(
-                "adapter:8:slack_v2;installation:17:install_host_beta;agent:16:agent:slack-host;project:18:project:slack-host;space:6:T-HOST;conversation:6:D-HOST;topic:0:;"
+                "adapter:8:slack_v2;installation:17:install_host_beta;agent:16:agent:slack-host;project:18:project:slack-host;space:6:T0HOST;conversation:6:D0HOST;topic:0:;"
             )
         );
 
@@ -659,6 +679,7 @@ mod tests {
                 source_binding_id: "slack-host-source".to_string(),
                 reply_target_binding_id: "slack-host-reply".to_string(),
             })
+            .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
             .with_model_gateway_override(Arc::new(StaticGateway)),
         )
         .await
@@ -682,9 +703,11 @@ mod tests {
 
     #[tokio::test]
     async fn build_slack_host_beta_mounts_pairs_unknown_slack_actor_then_routes_bound_event() {
-        let (mut runtime, _root) = runtime().await;
         let egress = Arc::new(RecordingRuntimeHttpEgress::default());
-        runtime.set_local_runtime_http_egress_for_test(Some(egress.clone()));
+        let (runtime, _root) = runtime_with_host_egress_override(Some(Some(
+            host_egress_port_for_test(Arc::clone(&egress)),
+        )))
+        .await;
         let mounts =
             build_slack_host_beta_mounts(&runtime, config_without_legacy_actor()).expect("mounts");
 
@@ -731,11 +754,124 @@ mod tests {
         }
 
         let history = wait_for_slack_thread_history(&runtime).await;
-        assert_eq!(history.messages.len(), 1);
+        let accepted_message = history
+            .messages
+            .iter()
+            .find(|message| message.content.as_deref() == Some("after pairing"))
+            .expect("accepted Slack message is present");
+        let run_id = TurnRunId::parse(
+            accepted_message
+                .turn_run_id
+                .as_deref()
+                .expect("accepted Slack message should carry submitted run id"),
+        )
+        .expect("valid submitted run id");
+        let run_state = runtime
+            .webui_turn_coordinator()
+            .get_run_state(GetRunStateRequest {
+                scope: TurnScope::new_with_owner(
+                    TenantId::new(TENANT).expect("tenant"),
+                    Some(AgentId::new(AGENT).expect("agent")),
+                    Some(ProjectId::new(PROJECT).expect("project")),
+                    accepted_message.thread_id.clone(),
+                    Some(UserId::new(USER).expect("user")),
+                ),
+                run_id,
+            })
+            .await
+            .expect("read DM run state");
         assert_eq!(
-            history.messages[0].content.as_deref(),
-            Some("after pairing")
+            run_state.status,
+            TurnStatus::Completed,
+            "DM run failed: {:?}",
+            run_state.failure
         );
+        let final_reply = wait_for_slack_post_message(&egress, "ok").await;
+        assert_eq!(final_reply["channel"], "D0HOST");
+        assert_eq!(final_reply["text"], "ok");
+        assert_eq!(final_reply["mrkdwn"], false);
+
+        runtime.shutdown().await.expect("runtime shuts down");
+    }
+
+    #[tokio::test]
+    async fn build_slack_host_beta_mounts_replies_to_channel_app_mention_thread() {
+        let egress = Arc::new(RecordingRuntimeHttpEgress::default());
+        let (runtime, _root) = runtime_with_host_egress_override(Some(Some(
+            host_egress_port_for_test(Arc::clone(&egress)),
+        )))
+        .await;
+        let mounts = build_slack_host_beta_mounts(&runtime, config()).expect("mounts");
+
+        let body = app_mention_event_body_with(
+            "Ev-host-beta-channel-mention",
+            "<@U-BOT> help in channel",
+            "1710000000.000040",
+        );
+        post_signed_slack_event(&mounts.events, &body).await;
+        if let Some(drain) = mounts.events.drain.as_ref() {
+            drain.drain().await;
+        }
+
+        let history = wait_for_slack_thread_history_with_owner(
+            &runtime,
+            Some(UserId::new(USER).expect("user")),
+        )
+        .await;
+        let accepted_message = history
+            .messages
+            .iter()
+            .find(|message| message.content.as_deref() == Some("help in channel"))
+            .expect("accepted Slack app mention message is present");
+        let run_id = TurnRunId::parse(
+            accepted_message
+                .turn_run_id
+                .as_deref()
+                .expect("accepted Slack message should carry submitted run id"),
+        )
+        .expect("valid submitted run id");
+        let run_state = runtime
+            .webui_turn_coordinator()
+            .get_run_state(GetRunStateRequest {
+                scope: TurnScope::new_with_owner(
+                    TenantId::new(TENANT).expect("tenant"),
+                    Some(AgentId::new(AGENT).expect("agent")),
+                    Some(ProjectId::new(PROJECT).expect("project")),
+                    accepted_message.thread_id.clone(),
+                    Some(UserId::new(USER).expect("user")),
+                ),
+                run_id,
+            })
+            .await
+            .expect("read channel mention run state");
+        assert_eq!(
+            run_state.status,
+            TurnStatus::Completed,
+            "channel mention run failed: {:?}",
+            run_state.failure
+        );
+        let final_reply = wait_for_slack_post_message(&egress, "ok").await;
+        assert_eq!(final_reply["channel"], "C0HOST");
+        assert_eq!(final_reply["text"], "ok");
+        assert_eq!(final_reply["thread_ts"], "1710000000.000040");
+
+        let thread_reply_body = thread_message_event_body_with(
+            "Ev-host-beta-channel-thread-reply",
+            "follow up without mention",
+            "1710000000.000041",
+            "1710000000.000040",
+        );
+        post_signed_slack_event(&mounts.events, &thread_reply_body).await;
+        if let Some(drain) = mounts.events.drain.as_ref() {
+            drain.drain().await;
+        }
+
+        let final_replies = wait_for_slack_post_messages(&egress, "ok", 2).await;
+        let threaded_reply = final_replies
+            .iter()
+            .find(|body| body["thread_ts"] == "1710000000.000040" && body["channel"] == "C0HOST")
+            .expect("thread follow-up reply should post back to original Slack thread");
+        assert_eq!(threaded_reply["text"], "ok");
 
         runtime.shutdown().await.expect("runtime shuts down");
     }
@@ -754,6 +890,7 @@ mod tests {
                 source_binding_id: "slack-host-source".to_string(),
                 reply_target_binding_id: "slack-host-reply".to_string(),
             })
+            .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
             .with_model_gateway_override(Arc::new(StaticGateway)),
         )
         .await
@@ -892,19 +1029,28 @@ mod tests {
     }
 
     async fn runtime() -> (RebornRuntime, tempfile::TempDir) {
+        runtime_with_host_egress_override(None).await
+    }
+
+    async fn runtime_with_host_egress_override(
+        host_egress_override: Option<Option<HostRuntimeHttpEgressPort>>,
+    ) -> (RebornRuntime, tempfile::TempDir) {
         let root = tempfile::tempdir().expect("tempdir");
+        let mut build_input = RebornBuildInput::local_dev(USER, root.path().join("local-dev"))
+            .with_runtime_policy(local_dev_runtime_policy().expect("local policy"));
+        if let Some(host_egress) = host_egress_override {
+            build_input = build_input.with_host_runtime_http_egress_for_test(host_egress);
+        }
         let runtime = build_reborn_runtime(
-            RebornRuntimeInput::from_services(
-                RebornBuildInput::local_dev(USER, root.path().join("local-dev"))
-                    .with_runtime_policy(local_dev_runtime_policy().expect("local policy")),
-            )
-            .with_identity(RebornRuntimeIdentity {
-                tenant_id: TENANT.to_string(),
-                agent_id: AGENT.to_string(),
-                source_binding_id: "slack-host-source".to_string(),
-                reply_target_binding_id: "slack-host-reply".to_string(),
-            })
-            .with_model_gateway_override(Arc::new(StaticGateway)),
+            RebornRuntimeInput::from_services(build_input)
+                .with_identity(RebornRuntimeIdentity {
+                    tenant_id: TENANT.to_string(),
+                    agent_id: AGENT.to_string(),
+                    source_binding_id: "slack-host-source".to_string(),
+                    reply_target_binding_id: "slack-host-reply".to_string(),
+                })
+                .with_default_project_id(ProjectId::new(PROJECT).expect("project"))
+                .with_model_gateway_override(Arc::new(StaticGateway)),
         )
         .await
         .expect("runtime builds");
@@ -914,13 +1060,21 @@ mod tests {
     async fn wait_for_slack_thread_history(
         runtime: &RebornRuntime,
     ) -> ironclaw_threads::ThreadHistory {
+        wait_for_slack_thread_history_with_owner(runtime, Some(UserId::new(USER).expect("user")))
+            .await
+    }
+
+    async fn wait_for_slack_thread_history_with_owner(
+        runtime: &RebornRuntime,
+        owner_user_id: Option<UserId>,
+    ) -> ironclaw_threads::ThreadHistory {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         let thread_service = runtime.webui_thread_service();
         let scope = ThreadScope {
             tenant_id: TenantId::new(TENANT).expect("tenant"),
             agent_id: AgentId::new(AGENT).expect("agent"),
             project_id: Some(ProjectId::new(PROJECT).expect("project")),
-            owner_user_id: Some(UserId::new(USER).expect("user")),
+            owner_user_id,
             mission_id: None,
         };
         loop {
@@ -966,14 +1120,14 @@ mod tests {
     fn dm_event_body() -> &'static str {
         r#"{
           "type":"event_callback",
-          "team_id":"T-HOST",
-          "api_app_id":"A-HOST",
+          "team_id":"T0HOST",
+          "api_app_id":"A0HOST",
           "event_id":"Ev-host-beta-custom-resolver",
           "event":{
             "type":"message",
             "channel_type":"im",
-            "user":"U-HOST",
-            "channel":"D-HOST",
+            "user":"U0HOST",
+            "channel":"D0HOST",
             "text":"hello",
             "ts":"1710000000.000001"
           }
@@ -990,9 +1144,49 @@ mod tests {
                 "type": "message",
                 "channel_type": "im",
                 "user": SLACK_USER,
-                "channel": "D-HOST",
+                "channel": "D0HOST",
                 "text": text,
                 "ts": ts
+            }
+        })
+        .to_string()
+    }
+
+    fn app_mention_event_body_with(event_id: &str, text: &str, ts: &str) -> String {
+        serde_json::json!({
+            "type": "event_callback",
+            "team_id": TEAM,
+            "api_app_id": API_APP,
+            "event_id": event_id,
+            "event": {
+                "type": "app_mention",
+                "user": SLACK_USER,
+                "channel": "C0HOST",
+                "text": text,
+                "ts": ts
+            }
+        })
+        .to_string()
+    }
+
+    fn thread_message_event_body_with(
+        event_id: &str,
+        text: &str,
+        ts: &str,
+        thread_ts: &str,
+    ) -> String {
+        serde_json::json!({
+            "type": "event_callback",
+            "team_id": TEAM,
+            "api_app_id": API_APP,
+            "event_id": event_id,
+            "event": {
+                "type": "message",
+                "user": SLACK_USER,
+                "channel": "C0HOST",
+                "text": text,
+                "ts": ts,
+                "thread_ts": thread_ts
             }
         })
         .to_string()
@@ -1020,6 +1214,40 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
         panic!("Slack pairing notifier did not post a pairing code");
+    }
+
+    async fn wait_for_slack_post_message(
+        egress: &RecordingRuntimeHttpEgress,
+        expected_text: &str,
+    ) -> serde_json::Value {
+        for _ in 0..80 {
+            if let Some(body) = egress.post_message_body_with_text(expected_text) {
+                return body;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        panic!(
+            "Slack final reply was not posted; recorded egress requests: {:?}",
+            egress.request_bodies()
+        );
+    }
+
+    async fn wait_for_slack_post_messages(
+        egress: &RecordingRuntimeHttpEgress,
+        expected_text: &str,
+        expected_len: usize,
+    ) -> Vec<serde_json::Value> {
+        for _ in 0..80 {
+            let bodies = egress.post_message_bodies_with_text(expected_text);
+            if bodies.len() >= expected_len {
+                return bodies;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        panic!(
+            "expected {expected_len} Slack posts with text {expected_text:?}; recorded egress requests: {:?}",
+            egress.request_bodies()
+        );
     }
 
     #[derive(Debug)]
@@ -1096,17 +1324,17 @@ mod tests {
 
     #[derive(Default)]
     struct RecordingRuntimeHttpEgress {
-        requests: std::sync::Mutex<Vec<RuntimeHttpEgressRequest>>,
+        requests: std::sync::Mutex<Vec<NetworkHttpRequest>>,
     }
 
     #[async_trait]
-    impl RuntimeHttpEgress for RecordingRuntimeHttpEgress {
+    impl NetworkHttpEgress for RecordingRuntimeHttpEgress {
         async fn execute(
             &self,
-            request: RuntimeHttpEgressRequest,
-        ) -> Result<RuntimeHttpEgressResponse, ironclaw_host_api::RuntimeHttpEgressError> {
+            request: NetworkHttpRequest,
+        ) -> Result<NetworkHttpResponse, NetworkHttpError> {
             let response = if request.url.contains("/api/conversations.open") {
-                br#"{"ok":true,"channel":{"id":"D-HOST"}}"#.to_vec()
+                br#"{"ok":true,"channel":{"id":"D0HOST"}}"#.to_vec()
             } else {
                 br#"{"ok":true}"#.to_vec()
             };
@@ -1114,19 +1342,70 @@ mod tests {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .push(request);
-            Ok(RuntimeHttpEgressResponse {
+            Ok(NetworkHttpResponse {
                 status: 200,
                 headers: Vec::new(),
                 body: response,
-                saved_body: None,
-                request_bytes: 0,
-                response_bytes: 0,
-                redaction_applied: false,
+                usage: NetworkUsage {
+                    request_bytes: 0,
+                    response_bytes: 0,
+                    resolved_ip: None,
+                },
             })
         }
     }
 
+    fn host_egress_port_for_test(
+        network: Arc<RecordingRuntimeHttpEgress>,
+    ) -> HostRuntimeHttpEgressPort {
+        test_host_runtime_services()
+            .with_secret_store(Arc::new(InMemorySecretStore::new()))
+            .try_with_host_http_egress(RecordingNetworkHttpEgress(network))
+            .expect("host HTTP egress should wire")
+            .host_runtime_http_egress_port()
+            .expect("host runtime HTTP egress port should be configured")
+    }
+
+    fn test_host_runtime_services() -> HostRuntimeServices<
+        LocalFilesystem,
+        InMemoryResourceGovernor,
+        InMemoryProcessStore,
+        InMemoryProcessResultStore,
+    > {
+        HostRuntimeServices::new(
+            Arc::new(ExtensionRegistry::new()),
+            Arc::new(LocalFilesystem::new()),
+            Arc::new(InMemoryResourceGovernor::new()),
+            Arc::new(GrantAuthorizer::new()),
+            ProcessServices::in_memory(),
+            CapabilitySurfaceVersion::new("surface-v1").expect("surface version"),
+        )
+    }
+
+    struct RecordingNetworkHttpEgress(Arc<RecordingRuntimeHttpEgress>);
+
+    #[async_trait]
+    impl NetworkHttpEgress for RecordingNetworkHttpEgress {
+        async fn execute(
+            &self,
+            request: NetworkHttpRequest,
+        ) -> Result<NetworkHttpResponse, NetworkHttpError> {
+            self.0.execute(request).await
+        }
+    }
+
     impl RecordingRuntimeHttpEgress {
+        fn request_bodies(&self) -> Vec<serde_json::Value> {
+            self.requests
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .iter()
+                .filter_map(|request| {
+                    serde_json::from_slice::<serde_json::Value>(&request.body).ok()
+                })
+                .collect()
+        }
+
         fn pairing_code(&self) -> Option<String> {
             self.requests
                 .lock()
@@ -1143,6 +1422,25 @@ mod tests {
                         .and_then(|suffix| suffix.split(" in WebChat").next())
                         .map(str::to_string)
                 })
+        }
+
+        fn post_message_body_with_text(&self, expected_text: &str) -> Option<serde_json::Value> {
+            self.post_message_bodies_with_text(expected_text)
+                .into_iter()
+                .next()
+        }
+
+        fn post_message_bodies_with_text(&self, expected_text: &str) -> Vec<serde_json::Value> {
+            self.requests
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .iter()
+                .filter(|request| request.url.contains("/api/chat.postMessage"))
+                .filter_map(|request| {
+                    serde_json::from_slice::<serde_json::Value>(&request.body).ok()
+                })
+                .filter(|body| body["text"].as_str() == Some(expected_text))
+                .collect()
         }
     }
 }

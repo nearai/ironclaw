@@ -424,7 +424,8 @@ fn action_dispatch_kind_retains_typed_payload_refs() {
 fn fake_binding() -> ResolvedBinding {
     ResolvedBinding {
         tenant_id: TenantId::new("tenant:fake").expect("valid tenant"),
-        user_id: UserId::new("user:fake").expect("valid user"),
+        actor_user_id: UserId::new("user:fake").expect("valid actor user"),
+        subject_user_id: Some(UserId::new("user:fake").expect("valid subject user")),
         thread_id: ThreadId::new("thread:fake").expect("valid thread"),
         agent_id: Some(AgentId::new("agent:fake").expect("valid agent")),
         project_id: None,
@@ -1542,7 +1543,7 @@ async fn projection_subscription_resolves_through_binding_service() {
         .await
         .expect("projection subscription");
 
-    assert_eq!(subscription.actor.user_id, binding.user_id);
+    assert_eq!(subscription.actor.user_id, binding.actor_user_id);
     assert_eq!(subscription.scope.tenant_id, binding.tenant_id);
     assert_eq!(subscription.scope.agent_id, binding.agent_id);
     assert_eq!(subscription.scope.project_id, binding.project_id);
@@ -2097,6 +2098,14 @@ async fn concrete_product_workflow_accepts_shared_route_participant_on_existing_
     );
     assert_eq!(submissions[0].actor.user_id.as_str(), "user:alice");
     assert_eq!(submissions[1].actor.user_id.as_str(), "user:bob");
+    assert_eq!(
+        submissions[0].scope.explicit_owner_user_id(),
+        Some(&UserId::new("user:team-agent").expect("team subject"))
+    );
+    assert_eq!(
+        submissions[1].scope.explicit_owner_user_id(),
+        Some(&UserId::new("user:team-agent").expect("team subject"))
+    );
 }
 
 #[tokio::test]
@@ -2284,6 +2293,78 @@ async fn concrete_product_workflow_bot_mention_uses_shared_route() {
     assert_eq!(
         binding.route_kinds(),
         vec![ironclaw_product_workflow::ProductConversationRouteKind::Shared]
+    );
+}
+
+#[tokio::test]
+async fn concrete_product_workflow_reply_to_bot_requires_existing_binding() {
+    let conversations = Arc::new(InMemoryConversationServices::default());
+    conversations
+        .pair_external_actor(
+            TenantId::new("tenant:alpha").expect("tenant"),
+            ironclaw_conversations::AdapterKind::new("test_adapter").expect("adapter"),
+            ironclaw_conversations::AdapterInstallationId::new("install_alpha").expect("install"),
+            ironclaw_conversations::ExternalActorRef::new("test", "user1").expect("actor"),
+            UserId::new("user:alice").expect("user"),
+        )
+        .await;
+    let binding = product_binding_service(
+        conversations,
+        vec![(
+            "test_adapter",
+            "install_alpha",
+            "tenant:alpha",
+            "agent:alpha",
+            Some("project:alpha"),
+        )],
+    );
+    let coordinator = Arc::new(RecordingTurnCoordinator::default());
+    let inbound = Arc::new(DefaultInboundTurnService::new(
+        binding.clone(),
+        InMemorySessionThreadService::default(),
+        coordinator.clone(),
+    ));
+    let workflow = DefaultProductWorkflow::new(
+        inbound,
+        Arc::new(InMemoryIdempotencyLedger::new()),
+        Arc::new(binding),
+    );
+
+    let err = workflow
+        .accept_inbound(sample_envelope_with_context(
+            ProductAdapterId::new("test_adapter").expect("adapter"),
+            AdapterInstallationId::new("install_alpha").expect("install"),
+            ExternalEventId::new("evt:random-thread-reply").expect("event"),
+            ExternalActorRef::new("test", "user1", Option::<String>::None).expect("actor"),
+            ExternalConversationRef::new(
+                Some("space1"),
+                "conv1",
+                Some("thread-never-linked"),
+                Some("msg1"),
+            )
+            .expect("conversation"),
+            ProductInboundPayload::UserMessage(
+                UserMessagePayload::new(
+                    "ambient thread reply",
+                    vec![],
+                    ProductTriggerReason::ReplyToBot,
+                )
+                .expect("message"),
+            ),
+        ))
+        .await
+        .expect_err("reply-to-bot requires a pre-existing linked thread");
+
+    assert!(matches!(
+        err,
+        ProductAdapterError::WorkflowRejected {
+            kind: ProductWorkflowRejectionKind::ScopeNotFound,
+            ..
+        }
+    ));
+    assert!(
+        coordinator.submissions().is_empty(),
+        "unlinked Slack thread reply must not submit a turn"
     );
 }
 
@@ -2930,6 +3011,9 @@ fn product_binding_service(
                     TenantId::new(tenant).expect("tenant"),
                     AgentId::new(agent).expect("agent"),
                     project.map(|value| ProjectId::new(value).expect("project")),
+                )
+                .with_default_subject_user_id(
+                    UserId::new("user:team-agent").expect("team subject"),
                 ),
             )
         },

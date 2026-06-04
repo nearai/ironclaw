@@ -26,10 +26,9 @@ use ironclaw_product_adapters::{
     ProductOutboundPayload, ProtocolHttpEgress,
 };
 use ironclaw_product_workflow::{
-    ConversationBindingService, ProductConversationRouteKind, ProductOutboundDeliveryRequest,
-    ProductOutboundTargetResolver, ProductWorkflowError, ResolveBindingRequest, ResolvedBinding,
+    ConversationBindingService, ProductOutboundDeliveryRequest, ProductOutboundTargetResolver,
+    ProductWorkflowError, ResolveBindingRequest, ResolvedBinding,
     VerifiedProductOutboundTargetMetadata, prepare_and_render_product_outbound,
-    route_kind_for_inbound_payload,
 };
 use ironclaw_threads::{FinalizedAssistantMessageByRunRequest, SessionThreadService, ThreadScope};
 use ironclaw_turns::{
@@ -100,15 +99,14 @@ impl SlackFinalReplyDeliveryObserver {
         let Some(run_id) = submitted_run_id(&ack) else {
             return Ok(());
         };
-        let route_kind = route_kind_for_inbound_payload(envelope.payload());
         let binding = self
             .services
             .binding_service
             .lookup_binding(ResolveBindingRequest::from_envelope(&envelope))
             .await?;
-        let scope = turn_scope_from_binding(&binding)?;
-        let actor = TurnActor::new(binding.user_id.clone());
-        let thread_scope = thread_scope_from_binding(&binding, route_kind)?;
+        let actor = TurnActor::new(binding.actor_user_id.clone());
+        let thread_scope = thread_scope_from_binding(&binding)?;
+        let scope = turn_scope_from_thread_scope(&binding, &thread_scope)?;
         let actionable_state = self.wait_for_actionable(&scope, run_id).await?;
         let (event_kind, payload) = match actionable_state.status {
             TurnStatus::Completed => {
@@ -118,7 +116,6 @@ impl SlackFinalReplyDeliveryObserver {
                 else {
                     tracing::warn!(
                         %run_id,
-                        ?route_kind,
                         "completed Slack run has no finalized assistant message; skipping final reply delivery"
                     );
                     return Ok(());
@@ -397,38 +394,37 @@ fn submitted_run_id(ack: &ProductInboundAck) -> Option<TurnRunId> {
     }
 }
 
-fn turn_scope_from_binding(binding: &ResolvedBinding) -> Result<TurnScope, ProductWorkflowError> {
+fn turn_scope_from_thread_scope(
+    binding: &ResolvedBinding,
+    thread_scope: &ThreadScope,
+) -> Result<TurnScope, ProductWorkflowError> {
     let Some(agent_id) = binding.agent_id.clone() else {
         return Err(ProductWorkflowError::BindingResolutionFailed {
             reason: "resolved binding missing agent_id required for turn scope".to_string(),
         });
     };
-    Ok(TurnScope::new(
+    Ok(TurnScope::new_with_owner(
         binding.tenant_id.clone(),
         Some(agent_id),
         binding.project_id.clone(),
         binding.thread_id.clone(),
+        thread_scope.owner_user_id.clone(),
     ))
 }
 
 fn thread_scope_from_binding(
     binding: &ResolvedBinding,
-    route_kind: ProductConversationRouteKind,
 ) -> Result<ThreadScope, ProductWorkflowError> {
     let Some(agent_id) = binding.agent_id.clone() else {
         return Err(ProductWorkflowError::BindingResolutionFailed {
             reason: "resolved binding missing agent_id required for thread scope".to_string(),
         });
     };
-    let owner_user_id = match route_kind {
-        ProductConversationRouteKind::Direct => Some(binding.user_id.clone()),
-        ProductConversationRouteKind::Shared => None,
-    };
     Ok(ThreadScope {
         tenant_id: binding.tenant_id.clone(),
         agent_id,
         project_id: binding.project_id.clone(),
-        owner_user_id,
+        owner_user_id: binding.subject_user_id.clone(),
         mission_id: None,
     })
 }
