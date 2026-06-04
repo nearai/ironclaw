@@ -107,7 +107,7 @@ fn validate_provider_arguments_schema(
     schema: &serde_json::Value,
     label: &'static str,
 ) -> Result<(), AgentLoopHostError> {
-    if schema_is_unresolved_ref(schema) {
+    if schema_contains_external_ref(schema) {
         return Err(AgentLoopHostError::new(
             AgentLoopHostErrorKind::StaleSurface,
             format!("{label} schema contains an unresolved $ref"),
@@ -174,13 +174,21 @@ fn replace_ascii_case_insensitive(input: &str, needle: &str, replacement: &str) 
     replaced
 }
 
-fn schema_is_unresolved_ref(schema: &serde_json::Value) -> bool {
-    schema.as_object().is_some_and(|object| {
-        object
-            .get("$ref")
-            .and_then(serde_json::Value::as_str)
-            .is_some()
-    })
+fn schema_contains_external_ref(schema: &serde_json::Value) -> bool {
+    match schema {
+        serde_json::Value::Object(object) => {
+            if object
+                .get("$ref")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|reference| !reference.starts_with('#'))
+            {
+                return true;
+            }
+            object.values().any(schema_contains_external_ref)
+        }
+        serde_json::Value::Array(items) => items.iter().any(schema_contains_external_ref),
+        _ => false,
+    }
 }
 
 fn schema_variants(schema: &serde_json::Value) -> Option<&Vec<serde_json::Value>> {
