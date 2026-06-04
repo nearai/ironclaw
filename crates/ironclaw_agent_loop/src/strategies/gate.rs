@@ -63,6 +63,7 @@ pub(crate) enum GateKind {
     Approval,
     Auth,
     Resource,
+    Attested,
 }
 
 /// Strategy decision for a gate, plus the new `gate_state` slot value.
@@ -95,7 +96,7 @@ impl GateOutcome {
     /// executor honors it.
     pub(crate) fn validate_for_gate_kind(&self, kind: GateKind) -> Result<(), LoopFailureKind> {
         match (kind, self) {
-            (GateKind::Approval, GateOutcome::SkipAndContinue { .. }) => {
+            (GateKind::Approval | GateKind::Attested, GateOutcome::SkipAndContinue { .. }) => {
                 Err(LoopFailureKind::DriverBug)
             }
             _ => Ok(()),
@@ -284,6 +285,29 @@ mod tests {
     }
 
     #[test]
+    fn attested_gate_rejects_skip_and_continue_outcome() {
+        // An attested gate is a hard block awaiting a user signature; skipping
+        // it must surface a DriverBug just like an approval gate, never silently
+        // proceed without the signature.
+        let outcome = GateOutcome::SkipAndContinue {
+            gate: sample_gate(),
+        };
+        assert_eq!(
+            outcome.validate_for_gate_kind(GateKind::Attested),
+            Err(LoopFailureKind::DriverBug)
+        );
+    }
+
+    #[test]
+    fn attested_gate_allows_block_outcome() {
+        // Block is the only valid outcome for an attested gate.
+        let outcome = GateOutcome::Block {
+            gate: sample_gate(),
+        };
+        assert_eq!(outcome.validate_for_gate_kind(GateKind::Attested), Ok(()));
+    }
+
+    #[test]
     fn auth_and_resource_gates_allow_skip_and_continue_outcome() {
         let outcome = GateOutcome::SkipAndContinue {
             gate: sample_gate(),
@@ -298,7 +322,12 @@ mod tests {
         let mut state = LoopExecutionState::initial_for_run(&test_run_context());
         state.gate_state = sample_gate();
 
-        for kind in [GateKind::Approval, GateKind::Auth, GateKind::Resource] {
+        for kind in [
+            GateKind::Approval,
+            GateKind::Auth,
+            GateKind::Resource,
+            GateKind::Attested,
+        ] {
             let summary = GateSummary {
                 kind,
                 gate_ref: LoopGateRef::new("gate:default-test").expect("valid"),

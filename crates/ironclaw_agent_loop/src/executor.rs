@@ -727,16 +727,48 @@ impl CanonicalAgentLoopExecutor {
                 Ok(BatchStep::Continue(Box::new(state)))
             }
             CapabilityOutcome::ApprovalRequired { gate_ref, .. } => {
-                self.handle_gate(planner, host, state, call, GateKind::Approval, gate_ref)
-                    .await
+                self.handle_gate(
+                    planner,
+                    host,
+                    state,
+                    call,
+                    GateKind::Approval,
+                    gate_ref,
+                    None,
+                )
+                .await
             }
             CapabilityOutcome::AuthRequired { gate_ref, .. } => {
-                self.handle_gate(planner, host, state, call, GateKind::Auth, gate_ref)
+                self.handle_gate(planner, host, state, call, GateKind::Auth, gate_ref, None)
                     .await
             }
             CapabilityOutcome::ResourceBlocked { gate_ref, .. } => {
-                self.handle_gate(planner, host, state, call, GateKind::Resource, gate_ref)
-                    .await
+                self.handle_gate(
+                    planner,
+                    host,
+                    state,
+                    call,
+                    GateKind::Resource,
+                    gate_ref,
+                    None,
+                )
+                .await
+            }
+            CapabilityOutcome::AttestedSigningRequired {
+                gate_ref,
+                expected_tx_hash,
+                ..
+            } => {
+                self.handle_gate(
+                    planner,
+                    host,
+                    state,
+                    call,
+                    GateKind::Attested,
+                    gate_ref,
+                    Some(expected_tx_hash),
+                )
+                .await
             }
             CapabilityOutcome::SpawnedProcess(handle) => {
                 self.fail_unsupported_process_wait(host, state, &call, &handle.process_ref)
@@ -874,6 +906,7 @@ impl CanonicalAgentLoopExecutor {
                                         call,
                                         GateKind::Approval,
                                         gate_ref,
+                                        None,
                                     )
                                     .await;
                             }
@@ -886,6 +919,7 @@ impl CanonicalAgentLoopExecutor {
                                         call,
                                         GateKind::Auth,
                                         gate_ref,
+                                        None,
                                     )
                                     .await;
                             }
@@ -898,6 +932,24 @@ impl CanonicalAgentLoopExecutor {
                                         call,
                                         GateKind::Resource,
                                         gate_ref,
+                                        None,
+                                    )
+                                    .await;
+                            }
+                            CapabilityOutcome::AttestedSigningRequired {
+                                gate_ref,
+                                expected_tx_hash,
+                                ..
+                            } => {
+                                return self
+                                    .handle_gate(
+                                        planner,
+                                        host,
+                                        state,
+                                        call,
+                                        GateKind::Attested,
+                                        gate_ref,
+                                        Some(expected_tx_hash),
                                     )
                                     .await;
                             }
@@ -944,6 +996,8 @@ impl CanonicalAgentLoopExecutor {
         )?))
     }
 
+    // arch-exempt: too_many_args, gate-identifying params (call, kind, gate_ref, expected_tx_hash) want a GateInvocation bundle distinct from the planner/host/state framework refs; bundling deferred to the gate-dispatch follow-up, plan #4015
+    #[allow(clippy::too_many_arguments)]
     async fn handle_gate(
         &self,
         planner: &dyn AgentLoopPlannerInternal,
@@ -952,6 +1006,7 @@ impl CanonicalAgentLoopExecutor {
         call: CapabilityCallCandidate,
         kind: GateKind,
         gate_ref: ironclaw_turns::LoopGateRef,
+        expected_tx_hash: Option<ironclaw_turns::ApprovedTxHashRef>,
     ) -> Result<BatchStep, AgentLoopExecutorError> {
         let summary = crate::strategies::GateSummary {
             kind,
@@ -979,9 +1034,10 @@ impl CanonicalAgentLoopExecutor {
                 Ok(BatchStep::Exit(LoopExit::Blocked(LoopBlocked {
                     kind: blocked_kind(kind),
                     gate_ref,
-                    // The executor raises approval/auth/resource gates only;
-                    // attested-signing blocks are produced elsewhere.
-                    expected_tx_hash: None,
+                    // Approval/auth/resource blocks carry no binding; an
+                    // attested-signing block carries the opaque expected-tx-hash
+                    // the resume path verifies the caller's proof against.
+                    expected_tx_hash,
                     checkpoint_id: checked.checkpoint_id,
                     state_ref: checked.state_ref,
                     exit_id: exit_id(host, "blocked")?,
@@ -1477,6 +1533,7 @@ fn blocked_kind(kind: GateKind) -> LoopBlockedKind {
         GateKind::Approval => LoopBlockedKind::Approval,
         GateKind::Auth => LoopBlockedKind::Auth,
         GateKind::Resource => LoopBlockedKind::Resource,
+        GateKind::Attested => LoopBlockedKind::Attested,
     }
 }
 
@@ -1485,6 +1542,7 @@ fn loop_gate_kind(kind: GateKind) -> LoopGateKind {
         GateKind::Approval => LoopGateKind::Approval,
         GateKind::Auth => LoopGateKind::Auth,
         GateKind::Resource => LoopGateKind::ResourceWait,
+        GateKind::Attested => LoopGateKind::Attested,
     }
 }
 
@@ -1507,6 +1565,7 @@ fn capability_batch_counts(outcomes: &[CapabilityOutcome]) -> (u32, u32, u32, u3
             CapabilityOutcome::ApprovalRequired { .. }
             | CapabilityOutcome::AuthRequired { .. }
             | CapabilityOutcome::ResourceBlocked { .. }
+            | CapabilityOutcome::AttestedSigningRequired { .. }
             // SpawnedProcess: treated as gated — it is a non-completing, non-failing, non-denied
             // outcome that defers completion to a background process. Grouped with gated to avoid
             // treating it as completed or failed in batch accounting.
@@ -1784,6 +1843,7 @@ fn gate_tool_result_summary(kind: GateKind, outcome: &'static str) -> String {
         GateKind::Approval => "approval",
         GateKind::Auth => "auth",
         GateKind::Resource => "resource",
+        GateKind::Attested => "attested",
     };
     format!("{gate} gate {outcome}")
 }

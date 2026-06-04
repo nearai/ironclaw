@@ -9,6 +9,7 @@ mod coding;
 mod echo;
 mod http;
 mod json;
+mod request_signature;
 mod shell;
 mod skill_management;
 mod time;
@@ -38,6 +39,7 @@ pub use coding::{
 pub use echo::ECHO_CAPABILITY_ID;
 pub use http::HTTP_CAPABILITY_ID;
 pub use json::JSON_CAPABILITY_ID;
+pub use request_signature::REQUEST_SIGNATURE_CAPABILITY_ID;
 pub use shell::SHELL_CAPABILITY_ID;
 pub use skill_management::{
     SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID,
@@ -80,6 +82,7 @@ pub fn builtin_first_party_package() -> Result<ExtensionPackage, ExtensionError>
                     json::manifest()?,
                     http::manifest()?,
                     shell::manifest()?,
+                    request_signature::manifest()?,
                 ];
                 capabilities.extend(coding::manifests()?);
                 capabilities.extend(skill_management::manifests()?);
@@ -99,6 +102,10 @@ pub fn builtin_first_party_handlers() -> Result<FirstPartyCapabilityRegistry, Ho
         .with_handler(CapabilityId::new(JSON_CAPABILITY_ID)?, handler.clone())
         .with_handler(CapabilityId::new(HTTP_CAPABILITY_ID)?, handler.clone())
         .with_handler(CapabilityId::new(SHELL_CAPABILITY_ID)?, handler.clone())
+        .with_handler(
+            CapabilityId::new(REQUEST_SIGNATURE_CAPABILITY_ID)?,
+            handler.clone(),
+        )
         .with_handler(CapabilityId::new(READ_FILE_CAPABILITY_ID)?, handler.clone())
         .with_handler(
             CapabilityId::new(WRITE_FILE_CAPABILITY_ID)?,
@@ -158,6 +165,13 @@ impl FirstPartyCapabilityHandler for BuiltinFirstPartyTools {
         let mut network_egress_bytes = 0;
         let output = match request.capability_id.as_str() {
             ECHO_CAPABILITY_ID => echo::dispatch(&request.input)?,
+            // Hook-absent fallback ONLY. In production `DefaultHostRuntime`
+            // intercepts `request_signature` before builtin dispatch and routes
+            // it to the composition `AttestedRaiseHook`; this arm is reached just
+            // when no hook is wired (e.g. a bare runtime / test harness), and it
+            // fails closed (`UnsupportedRunner`). Do not "clean up" as dead code:
+            // it is the fail-closed guarantee for the unwired path.
+            REQUEST_SIGNATURE_CAPABILITY_ID => request_signature::dispatch(&request.input)?,
             TIME_CAPABILITY_ID => time::dispatch(&request.input)?,
             JSON_CAPABILITY_ID => json::dispatch(&request.input)?,
             HTTP_CAPABILITY_ID => {

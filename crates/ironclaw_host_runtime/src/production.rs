@@ -37,13 +37,13 @@ use ironclaw_run_state::{
 use ironclaw_trust::{HostTrustPolicy, TrustDecision, TrustError, TrustPolicy, TrustProvenance};
 
 use crate::{
-    BuiltinObligationHandler, BuiltinObligationServices, CancelRuntimeWorkOutcome,
-    CancelRuntimeWorkRequest, CapabilitySurfaceVersion, HostRuntime, HostRuntimeError,
-    HostRuntimeHealth, HostRuntimeStatus, RuntimeApprovalGate, RuntimeBackendHealth,
-    RuntimeBlockedReason, RuntimeCapabilityCompleted, RuntimeCapabilityFailure,
-    RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeCapabilityResumeRequest,
-    RuntimeFailureKind, RuntimeStatusRequest, RuntimeWorkId, RuntimeWorkSummary,
-    VisibleCapabilityRequest, VisibleCapabilitySurface, plan_capability,
+    AttestedRaiseHook, AttestedRaiseRequest, BuiltinObligationHandler, BuiltinObligationServices,
+    CancelRuntimeWorkOutcome, CancelRuntimeWorkRequest, CapabilitySurfaceVersion, HostRuntime,
+    HostRuntimeError, HostRuntimeHealth, HostRuntimeStatus, REQUEST_SIGNATURE_CAPABILITY_ID,
+    RuntimeApprovalGate, RuntimeBackendHealth, RuntimeBlockedReason, RuntimeCapabilityCompleted,
+    RuntimeCapabilityFailure, RuntimeCapabilityOutcome, RuntimeCapabilityRequest,
+    RuntimeCapabilityResumeRequest, RuntimeFailureKind, RuntimeStatusRequest, RuntimeWorkId,
+    RuntimeWorkSummary, VisibleCapabilityRequest, VisibleCapabilitySurface, plan_capability,
     surface::CapabilityCatalog,
 };
 
@@ -63,6 +63,10 @@ pub struct DefaultHostRuntime {
     process_cancellation_registry: Option<Arc<ProcessCancellationRegistry>>,
     runtime_health: Option<Arc<dyn RuntimeBackendHealth>>,
     obligation_handler: Option<Arc<dyn CapabilityObligationHandler>>,
+    /// Composition-owned attested-signing raise hook. When set, a
+    /// `request_signature` invocation is routed here instead of normal dispatch
+    /// (attested-signing PR14). Keeps all crypto/chain logic in composition.
+    attested_raise_hook: Option<Arc<dyn AttestedRaiseHook>>,
     surface_version: CapabilitySurfaceVersion,
     runtime_policy: EffectiveRuntimePolicy,
 }
@@ -106,6 +110,7 @@ impl DefaultHostRuntime {
             process_cancellation_registry: None,
             runtime_health: None,
             obligation_handler: None,
+            attested_raise_hook: None,
             surface_version,
             runtime_policy,
         }
@@ -225,6 +230,17 @@ impl DefaultHostRuntime {
         self
     }
 
+    /// Attaches the composition-owned attested-signing raise hook.
+    ///
+    /// When set, a `request_signature` invocation is routed to this hook instead
+    /// of normal capability dispatch (attested-signing PR14). The hook owns all
+    /// decode/render/hash/bind/seal logic, keeping crypto/chain types out of the
+    /// host-runtime/loop/turns layers, and fails closed on any error.
+    pub fn with_attested_raise_hook(mut self, hook: Arc<dyn AttestedRaiseHook>) -> Self {
+        self.attested_raise_hook = Some(hook);
+        self
+    }
+
     /// Installs a fully configured built-in obligation handler using the shared
     /// service graph supplied by host-runtime composition.
     ///
@@ -294,6 +310,27 @@ impl HostRuntime for DefaultHostRuntime {
             }
         };
         context.trust = trust_decision.effective_trust.class();
+
+        // Attested-signing raise (attested-signing PR14): a `request_signature`
+        // invocation does not sign — it routes to the composition-owned raise
+        // hook, which builds + binds + seals the gate and returns
+        // `AttestedSigningRequired` (or `Failed`, fail-closed). The capability
+        // has already passed runtime-policy + trust evaluation above.
+        if capability_id.as_str() == REQUEST_SIGNATURE_CAPABILITY_ID
+            && let Some(hook) = self.attested_raise_hook.clone()
+        {
+            let outcome = hook
+                .raise(AttestedRaiseRequest::new(
+                    capability_id.clone(),
+                    context,
+                    input,
+                ))
+                .await;
+            return Ok(outcome);
+        }
+        // When `request_signature` has no raise hook wired, fall through to the
+        // fail-closed first-party handler, which refuses (never silently
+        // succeeds).
 
         let host = self.capability_host();
 

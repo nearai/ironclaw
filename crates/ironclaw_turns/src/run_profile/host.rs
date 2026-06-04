@@ -1268,6 +1268,15 @@ pub enum CapabilityOutcome {
         gate_ref: LoopGateRef,
         safe_summary: String,
     },
+    /// An attested-signing gate was raised by the host. The loop blocks until
+    /// the user resolves the gate; `expected_tx_hash` is the opaque binding the
+    /// resume path verifies against. No crypto/chain type crosses into this
+    /// crate — only the opaque [`crate::ApprovedTxHashRef`].
+    AttestedSigningRequired {
+        gate_ref: LoopGateRef,
+        expected_tx_hash: crate::ApprovedTxHashRef,
+        safe_summary: String,
+    },
     SpawnedProcess(ProcessHandleSummary),
     Denied(CapabilityDenied),
     Failed(CapabilityFailure),
@@ -1280,6 +1289,7 @@ impl CapabilityOutcome {
             Self::ApprovalRequired { .. }
                 | Self::AuthRequired { .. }
                 | Self::ResourceBlocked { .. }
+                | Self::AttestedSigningRequired { .. }
                 | Self::SpawnedProcess(_)
         )
     }
@@ -1749,6 +1759,7 @@ pub enum LoopGateKind {
     Approval,
     Auth,
     ResourceWait,
+    Attested,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

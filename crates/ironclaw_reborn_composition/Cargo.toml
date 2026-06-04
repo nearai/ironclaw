@@ -129,6 +129,9 @@ async-trait = "0.1"
 # hash); alloy bits build the binding's decoded-tx field.
 alloy-primitives = "1"
 ed25519-dalek = "2"
+# Lowercase-hex encoding of the EVM signer address for the PR14 custodial
+# raise→resolve end-to-end test.
+hex = "0.4"
 http = "1"
 http-body-util = "0.1"
 ironclaw_host_api = { path = "../ironclaw_host_api" }
@@ -155,7 +158,6 @@ ironclaw_chain_signing = { path = "../ironclaw_chain_signing" }
 ironclaw_attestation = { path = "../ironclaw_attestation" }
 ironclaw_signing_provider = { path = "../ironclaw_signing_provider" }
 secrecy = "0.10"
-hex = "0.4"
 alloy-consensus = "1"
 # Already in-tree via `ironclaw_chain_signing`; used only to derive the EVM
 # address from a fixed test private key (`evm::signing_key_from_bytes` is now

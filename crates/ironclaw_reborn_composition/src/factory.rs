@@ -3,10 +3,13 @@ use std::{
     sync::Arc,
 };
 
+use ironclaw_attestation::InMemorySealedGrantStore;
 use ironclaw_attested_runtime::{
-    InMemoryAttestedGateBindingStore, InMemoryResumeGuard, ResumeGuard, RuntimeAttestedResumePort,
+    CustodialMainnetShipGate, InMemoryAttestedGateBindingStore, InMemoryResumeGuard, ResumeGuard,
+    RuntimeAttestedResumePort,
 };
 use ironclaw_authorization::GrantAuthorizer;
+use ironclaw_chain_signing::SecretsKeyStore;
 use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_filesystem::{LocalFilesystem, ScopedFilesystem};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -21,6 +24,7 @@ use ironclaw_host_runtime::{
 use ironclaw_processes::ProcessServices;
 use ironclaw_resources::InMemoryResourceGovernor;
 use ironclaw_run_state::{InMemoryApprovalRequestStore, InMemoryRunStateStore};
+use ironclaw_secrets::SecretsCrypto;
 use ironclaw_threads::InMemorySessionThreadService;
 use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -51,9 +55,12 @@ pub(crate) struct RebornLocalRuntimeServices {
     pub(crate) thread_service: Arc<InMemorySessionThreadService>,
     pub(crate) skill_filesystem: Arc<ScopedFilesystem<LocalFilesystem>>,
     pub(crate) workspace_filesystem: Arc<ScopedFilesystem<LocalFilesystem>>,
-    /// Authoritative attested-gate binding store shared with the resume port
-    /// (PR10). The signer-continuation driver reads bindings back from here.
-    pub(crate) attested_gate_bindings: Arc<InMemoryAttestedGateBindingStore>,
+    /// The assembled local-dev attested-signing composition (PR10/PR14). Shared
+    /// so the host-runtime raise hook (`request_signature`) and the runtime's
+    /// resume/continuation path both use the SAME binding + grant stores. The
+    /// authoritative gate-binding store the resume port reads lives inside this
+    /// composition.
+    pub(crate) attested_signing: Arc<crate::attested::LocalDevAttestedComposition>,
 }
 
 impl std::fmt::Debug for RebornServices {
@@ -176,6 +183,18 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     // Attested-signing composition (PR10): assemble the binding store + the
     // turn store with the production `AttestedResumePort` wired in.
     let (attested_gate_bindings, turn_state) = local_dev_attested_turn_state();
+    // Assemble the attested-signing composition once and share it: the
+    // host-runtime raise hook (`request_signature`) and the runtime's
+    // resume/continuation path both consume the SAME binding + grant stores so
+    // a raised gate is readable on resume and the one-shot grant is
+    // authoritative across both sides (PR14).
+    let attested_signing = Arc::new(build_local_dev_attested_composition(Arc::clone(
+        &attested_gate_bindings,
+    ))?);
+    let attested_raise_hook: Arc<dyn ironclaw_host_runtime::AttestedRaiseHook> = Arc::new(
+        crate::attested_raise::RebornAttestedRaiseHook::new(Arc::clone(&attested_signing)),
+    );
+
     let local_runtime = Arc::new(RebornLocalRuntimeServices {
         turn_state: Arc::clone(&turn_state),
         checkpoint_state_store: Arc::new(InMemoryCheckpointStateStore::default()),
@@ -183,7 +202,7 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         thread_service: Arc::new(InMemorySessionThreadService::default()),
         skill_filesystem,
         workspace_filesystem,
-        attested_gate_bindings: Arc::clone(&attested_gate_bindings),
+        attested_signing: Arc::clone(&attested_signing),
     });
 
     let mut services = HostRuntimeServices::new(
@@ -195,6 +214,7 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         CapabilitySurfaceVersion::new("reborn-app-v1")?,
     )
     .with_first_party_capabilities(Arc::new(builtin_first_party_registry()?))
+    .with_attested_raise_hook(attested_raise_hook)
     .with_trust_policy(Arc::new(local_dev_first_party_trust_policy()?))
     .with_secret_store(Arc::new(ironclaw_secrets::InMemorySecretStore::new()))
     .try_with_host_http_egress(ironclaw_network::PolicyNetworkHttpEgress::new(
@@ -348,6 +368,44 @@ fn builtin_first_party_registry() -> Result<FirstPartyCapabilityRegistry, Reborn
     builtin_first_party_handlers().map_err(|error| RebornBuildError::InvalidConfig {
         reason: format!("built-in first-party handlers are invalid: {error}"),
     })
+}
+
+/// Assemble the local-dev attested-signing composition (PR14 raise side shares
+/// it with the PR10 resume/continuation side).
+///
+/// The custodial ship-gate reads `CUSTODIAL_MAINNET_ENABLED` (fail-closed
+/// default: mainnet refused without a wired KMS — threat #18). Local-dev has no
+/// KMS backend, so the ship-gate permits only testnet/dev custodial signing.
+/// The external-wallet provider registry is built from the environment
+/// (fail-closed: absent config leaves a provider unregistered; present-but
+/// invalid config is a hard startup error).
+fn build_local_dev_attested_composition(
+    bindings: Arc<InMemoryAttestedGateBindingStore>,
+) -> Result<crate::attested::LocalDevAttestedComposition, RebornBuildError> {
+    use ironclaw_attestation::SealedGrantStore;
+
+    // Local-dev master key for the custodial keystore AAD. Generated per-process
+    // from `OsRng` (no stable key ever lives in source control) — the in-memory
+    // keystore is rebuilt every start anyway, so no stable key is needed across
+    // restarts. Production wires a real master key (OS keychain / KMS); this dev
+    // key never signs mainnet because the ship-gate refuses it without secure
+    // custody.
+    let crypto = SecretsCrypto::generate();
+    let keystore = Arc::new(SecretsKeyStore::new(crypto));
+
+    // No KMS backend in local-dev: mainnet custodial signing stays refused.
+    let ship_gate = CustodialMainnetShipGate::from_env().build_chain_ship_gate(None);
+
+    let grants = Arc::new(InMemorySealedGrantStore::new());
+    let providers = crate::attested_config::AttestedProvidersConfig::from_env()
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("attested provider config: {error}"),
+        })?
+        .build_provider_registry(Arc::clone(&grants) as Arc<dyn SealedGrantStore>);
+
+    Ok(crate::attested::LocalDevAttestedComposition::new_in_memory(
+        bindings, keystore, ship_gate, grants, providers,
+    ))
 }
 
 fn local_dev_first_party_trust_policy() -> Result<HostTrustPolicy, RebornBuildError> {

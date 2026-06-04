@@ -45,6 +45,7 @@ use serde_json::Value;
 use std::{collections::BTreeMap, fmt, sync::Arc};
 use thiserror::Error;
 
+mod attested_raise;
 mod capability_catalog;
 mod extension_contracts;
 mod first_party;
@@ -59,6 +60,7 @@ mod services;
 mod surface;
 mod turn_scheduler;
 
+pub use attested_raise::{AttestedRaiseHook, AttestedRaiseRequest};
 pub use capability_catalog::{
     HotCapabilityCatalog, HotCapabilityRecord, MAX_HOT_PROMPT_BYTES, MAX_HOT_SCHEMA_BYTES,
     publish_hot_capability_catalog,
@@ -75,10 +77,10 @@ pub use first_party::{
 pub use first_party_tools::{
     APPLY_PATCH_CAPABILITY_ID, BUILTIN_FIRST_PARTY_PROVIDER, BuiltinFirstPartyTools,
     ECHO_CAPABILITY_ID, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID,
-    JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, SHELL_CAPABILITY_ID,
-    SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID,
-    TIME_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers,
-    builtin_first_party_package,
+    JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, READ_FILE_CAPABILITY_ID,
+    REQUEST_SIGNATURE_CAPABILITY_ID, SHELL_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID,
+    SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID, TIME_CAPABILITY_ID,
+    WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers, builtin_first_party_package,
 };
 pub use invocation_services::{
     InvocationServices, InvocationServicesError, InvocationServicesResolutionRequest,
@@ -485,6 +487,24 @@ pub struct RuntimeResourceGate {
     pub estimate: ResourceEstimate,
 }
 
+/// Attested-signing suspension state.
+///
+/// Produced by the composition-owned raise hook when a `request_signature`
+/// invocation has had its authoritative gate binding persisted and one-shot
+/// grant sealed. The loop blocks on `gate_ref`; the resume path verifies the
+/// caller's later proof against the bound `expected_tx_hash`.
+///
+/// `expected_tx_hash` is the opaque, already-computed `ApprovedTxHash` rendered
+/// as a stable string ref. No crypto/chain type crosses into the loop/turns
+/// layers — only this opaque ref and the `gate_ref`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeAttestedGate {
+    pub gate_id: RuntimeGateId,
+    pub capability_id: CapabilityId,
+    pub expected_tx_hash: String,
+    pub reason: RuntimeBlockedReason,
+}
+
 /// Spawned/background process summary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeProcessHandle {
@@ -518,6 +538,7 @@ pub enum RuntimeCapabilityOutcome {
     ApprovalRequired(RuntimeApprovalGate),
     AuthRequired(RuntimeAuthGate),
     ResourceBlocked(RuntimeResourceGate),
+    AttestedSigningRequired(RuntimeAttestedGate),
     SpawnedProcess(RuntimeProcessHandle),
     Failed(RuntimeCapabilityFailure),
     Unknown(RuntimeCapabilityUnknown),
@@ -530,6 +551,7 @@ impl RuntimeCapabilityOutcome {
             Self::ApprovalRequired(_) => "approval_required",
             Self::AuthRequired(_) => "auth_required",
             Self::ResourceBlocked(_) => "resource_blocked",
+            Self::AttestedSigningRequired(_) => "attested_signing_required",
             Self::SpawnedProcess(_) => "spawned_process",
             Self::Failed(_) => "failed",
             Self::Unknown(_) => "unknown",
@@ -544,6 +566,7 @@ pub enum RuntimeBlockedReason {
     AuthRequired,
     ResourceLimit,
     ResourceUnavailable,
+    AttestedSigningRequired,
 }
 
 /// Stable, sanitized failure categories.

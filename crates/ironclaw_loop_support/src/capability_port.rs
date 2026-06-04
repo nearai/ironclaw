@@ -1681,6 +1681,20 @@ async fn runtime_outcome_to_loop(
             gate_ref: loop_gate_ref("resource", gate.gate_id.to_string())?,
             safe_summary: blocked_summary(gate.reason).to_string(),
         },
+        RuntimeCapabilityOutcome::AttestedSigningRequired(gate) => {
+            let expected_tx_hash = ironclaw_turns::ApprovedTxHashRef::new(gate.expected_tx_hash)
+                .map_err(|_| {
+                    AgentLoopHostError::new(
+                        AgentLoopHostErrorKind::Internal,
+                        "attested expected-tx-hash ref could not be represented",
+                    )
+                })?;
+            CapabilityOutcome::AttestedSigningRequired {
+                gate_ref: loop_gate_ref("attested", gate.gate_id.to_string())?,
+                expected_tx_hash,
+                safe_summary: blocked_summary(gate.reason).to_string(),
+            }
+        }
         RuntimeCapabilityOutcome::SpawnedProcess(process) => {
             CapabilityOutcome::SpawnedProcess(ProcessHandleSummary {
                 process_ref: LoopProcessRef::new(format!("process:{}", process.process_id))
@@ -1752,6 +1766,7 @@ fn ensure_runtime_outcome_matches(
         RuntimeCapabilityOutcome::ApprovalRequired(gate) => &gate.capability_id,
         RuntimeCapabilityOutcome::AuthRequired(gate) => &gate.capability_id,
         RuntimeCapabilityOutcome::ResourceBlocked(gate) => &gate.capability_id,
+        RuntimeCapabilityOutcome::AttestedSigningRequired(gate) => &gate.capability_id,
         RuntimeCapabilityOutcome::SpawnedProcess(process) => &process.capability_id,
         RuntimeCapabilityOutcome::Failed(failure) => &failure.capability_id,
         RuntimeCapabilityOutcome::Unknown(unknown) => &unknown.capability_id,
@@ -1809,6 +1824,9 @@ fn blocked_summary(reason: RuntimeBlockedReason) -> &'static str {
         RuntimeBlockedReason::AuthRequired => "capability requires authentication",
         RuntimeBlockedReason::ResourceLimit => "capability is blocked by resource limits",
         RuntimeBlockedReason::ResourceUnavailable => "capability resources are unavailable",
+        RuntimeBlockedReason::AttestedSigningRequired => {
+            "capability requires an attested blockchain signature"
+        }
     }
 }
 

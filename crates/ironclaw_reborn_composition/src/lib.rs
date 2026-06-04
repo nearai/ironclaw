@@ -26,6 +26,7 @@ mod attested_continuation;
     any(feature = "libsql", feature = "postgres")
 ))]
 mod attested_durable;
+mod attested_raise;
 mod auth;
 mod error;
 mod factory;
@@ -78,6 +79,7 @@ pub use attested_durable::{
     DurableCustody, EVM_RPC_URL_ENV, NEAR_RPC_URL_ENV, SOLANA_RPC_URL_ENV,
     chain_rpc_endpoints_from_env,
 };
+pub use attested_raise::RebornAttestedRaiseHook;
 pub use auth::{
     RebornAuthContinuationDispatcher, RebornOAuthCallbackError, RebornOAuthCallbackOutcome,
     RebornOAuthCallbackRequest, RebornOAuthCallbackResponse, RebornProductAuthServices,

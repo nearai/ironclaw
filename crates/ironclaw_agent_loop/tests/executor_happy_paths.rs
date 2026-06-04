@@ -10,7 +10,7 @@ use ironclaw_agent_loop::{
     },
 };
 use ironclaw_turns::{
-    LoopExit,
+    LoopBlockedKind, LoopExit,
     run_profile::{ConcurrencyHint, LoopRunInfoPort},
 };
 
@@ -166,6 +166,61 @@ async fn mixed_parallel_batch_blocks_after_recording_completed_results() {
             }
         )
     }));
+    checkpoints.assert_sequence(&[
+        (CheckpointKind::BeforeModel, 0),
+        (CheckpointKind::BeforeSideEffect, 0),
+        (CheckpointKind::BeforeBlock, 0),
+    ]);
+}
+
+#[tokio::test]
+async fn attested_signing_required_blocks_with_expected_tx_hash() {
+    // The primary user-visible attested-signing flow: a request_signature
+    // capability returns AttestedSigningRequired, and the loop must block with
+    // LoopBlockedKind::Attested carrying the expected_tx_hash the resume path
+    // verifies the user's signature against.
+    let script = ScenarioScript {
+        model_responses: VecDeque::from([ScriptedModelResponse::Calls(vec![
+            ScriptedCapabilityCall::new("demo.sign"),
+        ])]),
+        capability_outcomes: VecDeque::from([vec![
+            ScriptedCapabilityOutcome::AttestedSigningRequired {
+                gate_ref: "gate:attested-abc".to_string(),
+                expected_tx_hash: "deadbeef".to_string(),
+            },
+        ]]),
+        single_call_retry_outcomes: VecDeque::new(),
+        pending_inputs: VecDeque::new(),
+    };
+    let (host, checkpoints) = MockAgentLoopDriverHost::builder()
+        .visible_capabilities(vec![capability_descriptor(
+            capability_id("demo.sign"),
+            ConcurrencyHint::SafeForParallel,
+        )])
+        .script(script)
+        .build();
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = CanonicalAgentLoopExecutor
+        .execute_family(&families::default(), &host, state)
+        .await
+        .expect("loop execution should succeed");
+
+    match exit {
+        LoopExit::Blocked(blocked) => {
+            assert_eq!(blocked.kind, LoopBlockedKind::Attested);
+            assert_eq!(blocked.gate_ref.as_str(), "gate:attested-abc");
+            assert_eq!(
+                blocked
+                    .expected_tx_hash
+                    .as_ref()
+                    .expect("attested block carries expected_tx_hash")
+                    .as_str(),
+                "deadbeef"
+            );
+        }
+        other => panic!("expected blocked exit, got {other:?}"),
+    }
     checkpoints.assert_sequence(&[
         (CheckpointKind::BeforeModel, 0),
         (CheckpointKind::BeforeSideEffect, 0),

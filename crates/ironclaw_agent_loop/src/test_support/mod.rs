@@ -394,6 +394,13 @@ pub enum ScriptedCapabilityOutcome {
         /// Gate ref.
         gate_ref: String,
     },
+    /// Attested-signing gate (blockchain signature required).
+    AttestedSigningRequired {
+        /// Gate ref.
+        gate_ref: String,
+        /// Opaque expected-tx-hash ref the resume path verifies against.
+        expected_tx_hash: String,
+    },
     /// Failed result.
     Failed {
         /// Error kind string consumed by the executor classifier.
@@ -931,6 +938,17 @@ fn scripted_capability_outcome(
                 safe_summary: "resource blocked".to_string(),
             })
         }
+        ScriptedCapabilityOutcome::AttestedSigningRequired {
+            gate_ref,
+            expected_tx_hash,
+        } => Ok(CapabilityOutcome::AttestedSigningRequired {
+            gate_ref: loop_gate_ref(&gate_ref),
+            expected_tx_hash: ironclaw_turns::ApprovedTxHashRef::new(expected_tx_hash)
+                .unwrap_or_else(|error| {
+                    panic!("test expected-tx-hash ref should be valid: {error}")
+                }),
+            safe_summary: "attested signing required".to_string(),
+        }),
         ScriptedCapabilityOutcome::Failed { error_kind } => {
             Ok(CapabilityOutcome::Failed(CapabilityFailure {
                 error_kind,

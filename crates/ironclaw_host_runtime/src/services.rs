@@ -81,7 +81,7 @@ use crate::obligations::{
     NetworkObligationPolicyStore, RuntimeSecretInjectionStore, SharedSecretStore,
 };
 use crate::{
-    BuiltinObligationHandler, CapabilitySurfaceVersion, DefaultHostRuntime,
+    AttestedRaiseHook, BuiltinObligationHandler, CapabilitySurfaceVersion, DefaultHostRuntime,
     FirstPartyCapabilityRegistry, FirstPartyCapabilityRequest, HostRuntimeError,
     InvocationServicesResolutionRequest, InvocationServicesResolver, LocalHostProcessPort,
     LocalInvocationServicesResolver, PlannerError, ProcessObligationLifecycleStore,
@@ -393,6 +393,7 @@ where
     run_profile_resolver: Option<Arc<dyn RunProfileResolver>>,
     turn_run_transition_port: Option<Arc<dyn TurnRunTransitionPort>>,
     turn_run_wake_notifier: Option<Arc<dyn TurnRunWakeNotifier>>,
+    attested_raise_hook: Option<Arc<dyn AttestedRaiseHook>>,
     component_types: ProductionComponentTypes,
 }
 
@@ -452,6 +453,7 @@ where
             run_profile_resolver: None,
             turn_run_transition_port: None,
             turn_run_wake_notifier: None,
+            attested_raise_hook: None,
             component_types: ProductionComponentTypes {
                 trust_policy: None,
                 trust_policy_verified: false,
@@ -522,6 +524,7 @@ where
             run_profile_resolver,
             turn_run_transition_port,
             turn_run_wake_notifier,
+            attested_raise_hook,
             mut component_types,
         } = self;
         component_types.filesystem = ProductionComponentType::of::<T>();
@@ -558,6 +561,7 @@ where
             run_profile_resolver,
             turn_run_transition_port,
             turn_run_wake_notifier,
+            attested_raise_hook,
             component_types,
         }
     }
@@ -615,6 +619,7 @@ where
             run_profile_resolver,
             turn_run_transition_port,
             turn_run_wake_notifier,
+            attested_raise_hook,
             mut component_types,
         } = self;
         let lifecycle_governor: Arc<dyn ResourceGovernor> = governor.clone();
@@ -661,6 +666,7 @@ where
             run_profile_resolver,
             turn_run_transition_port,
             turn_run_wake_notifier,
+            attested_raise_hook,
             component_types,
         }
     }
@@ -1177,6 +1183,14 @@ where
         self.component_types.first_party_runtime =
             Some(ProductionComponentType::of::<FirstPartyCapabilityRegistry>());
         self.first_party_runtime = Some(registry);
+        self
+    }
+
+    /// Attaches the composition-owned attested-signing raise hook routed to by
+    /// the produced [`DefaultHostRuntime`] for `request_signature` invocations
+    /// (attested-signing PR14).
+    pub fn with_attested_raise_hook(mut self, hook: Arc<dyn AttestedRaiseHook>) -> Self {
+        self.attested_raise_hook = Some(hook);
         self
     }
 
@@ -1847,6 +1861,9 @@ where
         }
         if let Some(capability_leases) = &self.capability_leases {
             runtime = runtime.with_capability_leases(Arc::clone(capability_leases));
+        }
+        if let Some(hook) = &self.attested_raise_hook {
+            runtime = runtime.with_attested_raise_hook(Arc::clone(hook));
         }
         runtime.with_obligation_handler(Arc::new(self.builtin_obligation_handler()))
     }
