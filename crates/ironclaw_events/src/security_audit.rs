@@ -240,7 +240,7 @@ impl SecurityAuditSink for TracingSecurityAuditSink {
             decision = event.decision.as_str(),
             code = event.code,
             capability_id = event.capability_id.as_ref().map(|c| c.as_str()),
-            scope = event.scope.as_ref().map(|s| format!("{s:?}")),
+            scope = ?event.scope,
             "security boundary decision"
         );
     }

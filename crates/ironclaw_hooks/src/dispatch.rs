@@ -965,13 +965,8 @@ impl HookDispatcher {
                     audit_reason,
                 }) => {
                     let summary = telemetry::gate_decision_summary(&decision);
-                    self.emit_decision_with_audit(
-                        &binding,
-                        summary,
-                        audit_reason,
-                        Some(ctx.capability_name.as_str()),
-                    )
-                    .await;
+                    self.emit_decision_with_audit(&binding, summary, audit_reason)
+                        .await;
                     let was_deny = matches!(composed.inner(), GateDecisionInner::Deny { .. });
                     composed = compose_gate_decision(composed, decision);
                     let is_deny = matches!(composed.inner(), GateDecisionInner::Deny { .. });
@@ -1780,8 +1775,7 @@ impl HookDispatcher {
     }
 
     async fn emit_decision(&self, binding: &HookBinding, decision: HookDecisionSummary) {
-        self.emit_decision_with_audit(binding, decision, None, None)
-            .await;
+        self.emit_decision_with_audit(binding, decision, None).await;
     }
 
     /// Emit a per-hook decision to the milestone sink.
@@ -1791,7 +1785,7 @@ impl HookDispatcher {
     /// path is the wrong ownership boundary — `Telemetry`-phase hooks keep
     /// running after a gate short-circuit, so a later `Telemetry` `Deny`
     /// would record an *extra* `HookDeny` event for the same logical
-    /// capability block (serrrfirat MEDIUM on PR #3922). The audit event is
+    /// capability block. The audit event is
     /// instead recorded exactly once per blocked capability invocation at
     /// the boundary-block level, via
     /// [`Self::record_capability_block_audit`], driven off the *composed*
@@ -1802,7 +1796,6 @@ impl HookDispatcher {
         binding: &HookBinding,
         decision: HookDecisionSummary,
         audit_reason: Option<String>,
-        _capability_name: Option<&str>,
     ) {
         if self.milestone_sink.is_none() {
             return;
