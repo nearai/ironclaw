@@ -42,10 +42,15 @@ use ironclaw_turns::{
 };
 use tracing::debug;
 
-use crate::model_routes::{
-    ModelRoute, ModelRouteError, ModelRouteErrorKind, ModelRouteProviderKey, ModelRouteResolver,
-    ModelSelectionMode, ModelSlot, ResolvedModelRouteSnapshot,
+use crate::{
+    failure_categories::MODEL_CREDITS_EXHAUSTED_REASON_KIND,
+    model_routes::{
+        ModelRoute, ModelRouteError, ModelRouteErrorKind, ModelRouteProviderKey,
+        ModelRouteResolver, ModelSelectionMode, ModelSlot, ResolvedModelRouteSnapshot,
+    },
 };
+
+const MODEL_CREDITS_EXHAUSTED_SUMMARY: &str = "model provider account is out of credits";
 
 /// Fail-closed routing policy from resolved Reborn model profile ids to the
 /// host-selected provider/model envelope.
@@ -682,14 +687,19 @@ fn map_model_route_error(error: ModelRouteError) -> HostManagedModelError {
 
 fn host_error_to_model_gateway_error(error: AgentLoopHostError) -> LoopModelGatewayError {
     let diagnostic_ref = error.diagnostic_ref;
+    let reason_kind = error.reason_kind;
     let mut converted = match LoopModelGatewayError::new(error.kind, error.safe_summary) {
         Ok(error) => error,
         Err(_) => LoopModelGatewayError {
             kind: error.kind,
             safe_summary: LoopSafeSummary::model_gateway_failed(),
+            reason_kind: None,
             diagnostic_ref: None,
         },
     };
+    if let Some(reason_kind) = reason_kind {
+        converted = converted.with_reason_kind(reason_kind);
+    }
     if let Some(diagnostic_ref) = diagnostic_ref {
         converted = converted.with_diagnostic_ref(diagnostic_ref);
     }
@@ -1352,6 +1362,13 @@ fn map_provider_error(error: LlmError) -> HostManagedModelError {
         error_debug = ?error,
         "reborn model provider error mapped to safe summary"
     );
+    if is_credit_exhaustion_error(&error) {
+        return HostManagedModelError::safe(
+            HostManagedModelErrorKind::CredentialUnavailable,
+            MODEL_CREDITS_EXHAUSTED_SUMMARY,
+        )
+        .with_reason_kind(MODEL_CREDITS_EXHAUSTED_REASON_KIND);
+    }
     match error {
         LlmError::ContextLengthExceeded { .. } => HostManagedModelError::safe(
             HostManagedModelErrorKind::BudgetExceeded,
@@ -1371,5 +1388,93 @@ fn map_provider_error(error: LlmError) -> HostManagedModelError {
             HostManagedModelErrorKind::Unavailable,
             "model service is unavailable",
         ),
+    }
+}
+
+fn is_credit_exhaustion_error(error: &LlmError) -> bool {
+    let LlmError::RequestFailed { reason, .. } = error else {
+        return false;
+    };
+    let lower = reason.to_ascii_lowercase();
+    lower.contains("http 402")
+        || lower.contains("402 payment required")
+        || lower.contains("payment required")
+        || lower.contains("insufficient credit")
+        || lower.contains("insufficient credits")
+        || lower.contains("not enough credit")
+        || lower.contains("not enough credits")
+        || lower.contains("credits exhausted")
+        || lower.contains("out of credits")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn request_failed(reason: &str) -> LlmError {
+        LlmError::RequestFailed {
+            provider: "test_provider".to_string(),
+            reason: reason.to_string(),
+        }
+    }
+
+    #[test]
+    fn is_credit_exhaustion_error_matches_all_trigger_phrases() {
+        let phrases = [
+            "HTTP 402",
+            "402 Payment Required",
+            "Payment Required",
+            "insufficient credit",
+            "insufficient credits",
+            "not enough credit",
+            "not enough credits",
+            "credits exhausted",
+            "out of credits",
+        ];
+        for phrase in &phrases {
+            let err = request_failed(&format!("error: {phrase}: some detail"));
+            assert!(
+                is_credit_exhaustion_error(&err),
+                "should match phrase: {phrase}"
+            );
+        }
+        // Case-insensitive
+        let err = request_failed("HTTP 402 payment required");
+        assert!(is_credit_exhaustion_error(&err), "should match lowercase");
+    }
+
+    #[test]
+    fn is_credit_exhaustion_error_returns_false_for_non_request_failed_variants() {
+        let non_request_failed = [
+            LlmError::ContextLengthExceeded {
+                used: 1000,
+                limit: 500,
+            },
+            LlmError::ModelNotAvailable {
+                provider: "p".to_string(),
+                model: "m".to_string(),
+            },
+            LlmError::AuthFailed {
+                provider: "p".to_string(),
+            },
+            LlmError::SessionExpired {
+                provider: "p".to_string(),
+            },
+        ];
+        for err in &non_request_failed {
+            assert!(
+                !is_credit_exhaustion_error(err),
+                "should not match: {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn is_credit_exhaustion_error_returns_false_for_non_matching_request_failed() {
+        let err = request_failed("Internal server error");
+        assert!(!is_credit_exhaustion_error(&err));
+
+        let err = request_failed("rate limit exceeded");
+        assert!(!is_credit_exhaustion_error(&err));
     }
 }

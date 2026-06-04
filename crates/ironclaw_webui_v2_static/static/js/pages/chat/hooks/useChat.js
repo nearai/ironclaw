@@ -87,12 +87,17 @@ function parseOAuthCallbackStoragePayload(value) {
 
 async function resolveConnectAction(content) {
   if (!looksLikeChannelConnectCommand(content)) return null;
-  const channelsResponse = await queryClient.fetchQuery({
-    queryKey: ["connectable-channels"],
-    queryFn: listConnectableChannels,
-  });
-  const channels = channelsResponse?.channels || [];
-  return resolveChannelConnectCommand(content, channels);
+  try {
+    const channelsResponse = await queryClient.fetchQuery({
+      queryKey: ["connectable-channels"],
+      queryFn: listConnectableChannels,
+    });
+    const channels = channelsResponse?.channels || [];
+    return resolveChannelConnectCommand(content, channels);
+  } catch (err) {
+    console.error("Failed to resolve connectable channels:", err);
+    return null;
+  }
 }
 
 // v2 chat hook. Differences from the fork's v1 hook:

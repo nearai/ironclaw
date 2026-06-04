@@ -650,11 +650,27 @@ impl AgentLoopHostErrorKind {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentLoopHostErrorReasonKind {
+    ModelCreditsExhausted,
+}
+
+impl AgentLoopHostErrorReasonKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ModelCreditsExhausted => "model_credits_exhausted",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
 #[error("agent loop host {kind:?}: {safe_summary}")]
 pub struct AgentLoopHostError {
     pub kind: AgentLoopHostErrorKind,
     pub safe_summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason_kind: Option<AgentLoopHostErrorReasonKind>,
     pub diagnostic_ref: Option<LoopDiagnosticRef>,
 }
 
@@ -663,8 +679,14 @@ impl AgentLoopHostError {
         Self {
             kind,
             safe_summary: safe_summary.into(),
+            reason_kind: None,
             diagnostic_ref: None,
         }
+    }
+
+    pub fn with_reason_kind(mut self, reason_kind: AgentLoopHostErrorReasonKind) -> Self {
+        self.reason_kind = Some(reason_kind);
+        self
     }
 
     pub fn with_diagnostic_ref(mut self, diagnostic_ref: LoopDiagnosticRef) -> Self {

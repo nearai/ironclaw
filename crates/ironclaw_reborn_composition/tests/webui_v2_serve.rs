@@ -66,13 +66,13 @@ mod slack_personal_binding_pairing_mount_tests {
     use ironclaw_reborn_composition::slack_serve::SlackUserId;
     use ironclaw_reborn_composition::{
         IssuedSlackPersonalBindingPairingChallenge, RebornUserIdentityBinding,
-        RebornUserIdentityBindingError, RebornUserIdentityBindingStore,
-        SLACK_PERSONAL_BINDING_PAIRING_REDEEM_PATH, SlackInstallationSelector,
+        RebornUserIdentityBindingError, RebornUserIdentityBindingStore, SlackInstallationSelector,
         SlackPersonalBindingInstallation, SlackPersonalBindingPairingChallenge,
         SlackPersonalBindingPairingChallengeStore, SlackPersonalBindingPairingCode,
         SlackPersonalBindingPairingError, SlackPersonalBindingPairingNotification,
         SlackPersonalBindingPairingNotifier, SlackPersonalBindingPairingRouteConfig,
         SlackPersonalBindingPairingService, SlackPersonalUserBindingService,
+        WEBUI_V2_EXTENSION_PAIRING_REDEEM_PATH,
     };
 
     #[tokio::test]
@@ -108,9 +108,9 @@ mod slack_personal_binding_pairing_mount_tests {
             .oneshot(
                 Request::builder()
                     .method(Method::POST)
-                    .uri(SLACK_PERSONAL_BINDING_PAIRING_REDEEM_PATH)
+                    .uri(WEBUI_V2_EXTENSION_PAIRING_REDEEM_PATH)
                     .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(r#"{"code":"abc12345"}"#))
+                    .body(Body::from(r#"{"channel":"slack","code":"abc12345"}"#))
                     .expect("request"),
             )
             .await
@@ -121,10 +121,10 @@ mod slack_personal_binding_pairing_mount_tests {
             .oneshot(
                 Request::builder()
                     .method(Method::POST)
-                    .uri(SLACK_PERSONAL_BINDING_PAIRING_REDEEM_PATH)
+                    .uri(WEBUI_V2_EXTENSION_PAIRING_REDEEM_PATH)
                     .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
                     .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(r#"{"code":"abc12345"}"#))
+                    .body(Body::from(r#"{"channel":"slack","code":"abc12345"}"#))
                     .expect("request"),
             )
             .await

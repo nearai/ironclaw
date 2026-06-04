@@ -40,7 +40,7 @@ use ironclaw_first_party_extension_ports::{
     FirstPartySkillsExtension, FirstPartySkillsExtensionHandles, SelectableSkillContextSource,
     SkillActivationSelectorConfig, SkillExecutionAdapter,
 };
-#[cfg(test)]
+#[cfg(all(test, feature = "slack-v2-host-beta"))]
 use ironclaw_host_api::RuntimeHttpEgress;
 use ironclaw_host_api::{
     ActionResultSummary, ActionSummary, AgentId, AuditEnvelope, AuditEventId, AuditStage,
@@ -510,7 +510,7 @@ impl RebornRuntime {
         &self.services
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "slack-v2-host-beta"))]
     pub(crate) fn set_local_runtime_http_egress_for_test(
         &mut self,
         runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
@@ -3886,7 +3886,7 @@ mod tests {
             )
             .await
             .expect("google setup extension lifecycle projection");
-        assert_eq!(google_setup.secrets.len(), 2);
+        assert_eq!(google_setup.secrets.len(), 1);
         let google_oauth_setups = google_setup
             .secrets
             .iter()
@@ -3910,12 +3910,11 @@ mod tests {
                 .iter()
                 .map(|(_, scopes)| scopes.clone())
                 .collect::<Vec<_>>(),
-            vec![
-                vec![GOOGLE_CALENDAR_READONLY_SCOPE.to_string()],
-                vec![GOOGLE_CALENDAR_EVENTS_SCOPE.to_string()],
-            ]
+            vec![vec![
+                GOOGLE_CALENDAR_READONLY_SCOPE.to_string(),
+                GOOGLE_CALENDAR_EVENTS_SCOPE.to_string(),
+            ]]
         );
-        assert_ne!(google_oauth_setups[0].0, google_oauth_setups[1].0);
         let google_setup_json =
             serde_json::to_value(&google_setup.secrets[0]).expect("serialize setup secret");
         assert_eq!(google_setup_json["setup"]["kind"], "oauth");

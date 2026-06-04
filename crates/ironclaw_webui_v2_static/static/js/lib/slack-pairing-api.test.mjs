@@ -35,5 +35,8 @@ test("redeemSlackPairingCode posts Slack codes to the Reborn pairing endpoint", 
   assert.equal(calls[0].options.credentials, "same-origin");
   assert.equal(calls[0].options.headers.get("Authorization"), "Bearer token-1");
   assert.equal(calls[0].options.headers.get("Content-Type"), "application/json");
-  assert.deepEqual(JSON.parse(calls[0].options.body), { code: "A1B2C3" });
+  assert.deepEqual(JSON.parse(calls[0].options.body), {
+    channel: "slack",
+    code: "A1B2C3",
+  });
 });

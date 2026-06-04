@@ -67,7 +67,7 @@ pub(crate) fn resolve_slack_host_beta_config(
     let installation_id =
         required_slack_config_value("installation_id", &section.installation_id, config_path)?;
     let team_id = required_slack_config_value("team_id", &section.team_id, config_path)?;
-    let api_app_id = optional_slack_config_value("api_app_id", &section.api_app_id)?;
+    let api_app_id = required_slack_config_value("api_app_id", &section.api_app_id, config_path)?;
     let slack_user_id = optional_slack_config_value("slack_user_id", &section.slack_user_id)?;
     let mapped_user_id = match optional_slack_config_value("user_id", &section.user_id)? {
         Some(raw) => {
@@ -104,7 +104,7 @@ pub(crate) fn resolve_slack_host_beta_config(
         project_id: default_project_id.cloned(),
         installation_id,
         team_id,
-        api_app_id,
+        api_app_id: Some(api_app_id),
         slack_user_id,
         user_id: mapped_user_id,
         signing_secret: SecretString::from(signing_secret),
@@ -363,6 +363,32 @@ mod tests {
 
     #[cfg(feature = "slack-v2-host-beta")]
     #[test]
+    fn slack_host_beta_config_requires_api_app_id_for_pairing() {
+        let section = ironclaw_reborn_config::SlackSection {
+            enabled: Some(true),
+            installation_id: Some("install-alpha".to_string()),
+            team_id: Some("T123".to_string()),
+            ..Default::default()
+        };
+
+        let error = resolve_slack_host_beta_config(
+            Some(&section),
+            &tenant_id("tenant"),
+            &agent_id("agent"),
+            None,
+            &user_id("web-user"),
+            Path::new("/tmp/reborn-config.toml"),
+        )
+        .expect_err("enabled Slack pairing must require api_app_id");
+
+        assert!(
+            error.to_string().contains("[slack].api_app_id"),
+            "message: {error}"
+        );
+    }
+
+    #[cfg(feature = "slack-v2-host-beta")]
+    #[test]
     fn slack_host_beta_config_rejects_empty_env_secret_value() {
         let _lock = env_lock();
         let _signing = EnvGuard::set("IRONCLAW_TEST_SLACK_EMPTY_SIGNING_SECRET", "");
@@ -371,6 +397,7 @@ mod tests {
             enabled: Some(true),
             installation_id: Some("install-alpha".to_string()),
             team_id: Some("T123".to_string()),
+            api_app_id: Some("A123".to_string()),
             slack_user_id: Some("U123".to_string()),
             signing_secret_env: Some("IRONCLAW_TEST_SLACK_EMPTY_SIGNING_SECRET".to_string()),
             bot_token_env: Some("IRONCLAW_TEST_SLACK_EMPTY_BOT_TOKEN".to_string()),
@@ -410,11 +437,11 @@ mod tests {
             enabled: Some(true),
             installation_id: Some("install-alpha".to_string()),
             team_id: Some("T123".to_string()),
+            api_app_id: Some("A123".to_string()),
             slack_user_id: Some("U123".to_string()),
             user_id: Some("web-user".to_string()),
             signing_secret_env: Some("IRONCLAW_TEST_SLACK_SIGNING_SECRET_MAPPED_USER".to_string()),
             bot_token_env: Some("IRONCLAW_TEST_SLACK_BOT_TOKEN_MAPPED_USER".to_string()),
-            ..Default::default()
         };
 
         let resolved = resolve_slack_host_beta_config(
@@ -444,13 +471,13 @@ mod tests {
             enabled: Some(true),
             installation_id: Some("install-alpha".to_string()),
             team_id: Some("T123".to_string()),
+            api_app_id: Some("A123".to_string()),
             slack_user_id: Some("U123".to_string()),
             user_id: Some("slack-mapped-user".to_string()),
             signing_secret_env: Some(
                 "IRONCLAW_TEST_SLACK_SIGNING_SECRET_DIVERGENT_USER".to_string(),
             ),
             bot_token_env: Some("IRONCLAW_TEST_SLACK_BOT_TOKEN_DIVERGENT_USER".to_string()),
-            ..Default::default()
         };
 
         let error = resolve_slack_host_beta_config(
@@ -478,6 +505,7 @@ mod tests {
             enabled: Some(true),
             installation_id: Some("install-alpha".to_string()),
             team_id: Some("T123".to_string()),
+            api_app_id: Some("A123".to_string()),
             slack_user_id: Some("U123".to_string()),
             user_id: Some(" web-user".to_string()),
             ..Default::default()
@@ -508,6 +536,7 @@ mod tests {
             enabled: Some(true),
             installation_id: Some("install-alpha".to_string()),
             team_id: Some("T123".to_string()),
+            api_app_id: Some("A123".to_string()),
             slack_user_id: Some("U123".to_string()),
             user_id: Some("invalid user".to_string()),
             ..Default::default()
@@ -539,6 +568,7 @@ mod tests {
             enabled: Some(true),
             installation_id: Some("install-alpha".to_string()),
             team_id: Some("T123".to_string()),
+            api_app_id: Some("A123".to_string()),
             slack_user_id: Some("U123".to_string()),
             signing_secret_env: Some("IRONCLAW_TEST_SLACK_UNSET_SIGNING_SECRET".to_string()),
             bot_token_env: Some("IRONCLAW_TEST_SLACK_BOT_TOKEN_UNSET_SIGNING".to_string()),

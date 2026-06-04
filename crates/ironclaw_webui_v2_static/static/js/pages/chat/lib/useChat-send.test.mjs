@@ -296,3 +296,74 @@ test("useChat.send: unmatched channel connect requests submit the prompt", async
   assert.equal(response.channel_connect_action, undefined);
   assert.equal(response.thread_id, "thread-created");
 });
+
+test("useChat.send: connectable channel fetch failures submit the prompt", async () => {
+  let createThreadCalled = false;
+  let sentContent = null;
+  const loggedErrors = [];
+
+  const context = {
+    AbortController,
+    Date,
+    Error,
+    Map,
+    Math,
+    React: createReactStub(),
+    addPending,
+    cancelRunRequest: async () => {},
+    clearTimeout,
+    console: {
+      error: (...args) => loggedErrors.push(args),
+    },
+    createThreadRequest: async () => {
+      createThreadCalled = true;
+      return { thread: { thread_id: "thread-created" } };
+    },
+    globalThis: {},
+    listConnectableChannels: async () => {
+      throw new Error("connectable channel service unavailable");
+    },
+    looksLikeChannelConnectCommand,
+    queryClient: {
+      fetchQuery: async ({ queryFn }) => queryFn(),
+      invalidateQueries: () => {},
+    },
+    recordAcceptedMessageRef,
+    removePending,
+    resolveChannelConnectCommand,
+    resolveGateRequest: async () => {},
+    sendMessage: async ({ content, threadId }) => {
+      sentContent = content;
+      return {
+        accepted_message_ref: "msg:message-3",
+        run_id: "run-3",
+        status: "queued",
+        thread_id: threadId,
+      };
+    },
+    setInterval,
+    setTimeout,
+    submitManualToken: async () => {},
+    useChatEvents: () => () => {},
+    useHistory: () => ({
+      messages: [],
+      hasMore: false,
+      nextCursor: null,
+      isLoading: false,
+      loadHistory: () => {},
+      setMessages: () => {},
+    }),
+    useSSE: () => ({ status: "idle" }),
+  };
+
+  vm.runInNewContext(useChatSourceForTest(), context);
+
+  const chat = context.globalThis.__testExports.useChat(null);
+  const response = await chat.send("connect my Slack account");
+
+  assert.equal(createThreadCalled, true);
+  assert.equal(sentContent, "connect my Slack account");
+  assert.equal(response.channel_connect_action, undefined);
+  assert.equal(response.thread_id, "thread-created");
+  assert.equal(loggedErrors[0][0], "Failed to resolve connectable channels:");
+});

@@ -224,8 +224,8 @@ pub use slack_personal_binding_pairing::{
 };
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack_personal_binding_pairing_serve::{
-    SLACK_PERSONAL_BINDING_PAIRING_REDEEM_PATH, SlackPersonalBindingPairingRedeemResponse,
-    SlackPersonalBindingPairingRouteConfig,
+    SlackPersonalBindingPairingRedeemResponse, SlackPersonalBindingPairingRouteConfig,
+    WEBUI_V2_EXTENSION_PAIRING_REDEEM_PATH,
 };
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack_personal_binding_serve::{

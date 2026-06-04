@@ -486,8 +486,8 @@ where
     }
 
     async fn cleanup_pairing_code_record(&self, path: &ScopedPath) {
-        if let Err(error) = self.delete_record(path).await {
-            tracing::warn!("failed to delete Slack pairing code record: {error}");
+        if self.delete_record(path).await.is_err() {
+            tracing::warn!("failed to delete Slack pairing code record");
         }
     }
 
@@ -509,19 +509,30 @@ where
         actor_path: &ScopedPath,
         code: &SlackPersonalBindingPairingCode,
     ) {
-        let should_delete = match self
+        let Some((mut record, version)) = (match self
             .read_record::<StoredSlackPairingActorChallenge>(actor_path)
             .await
         {
-            Ok(Some((record, _))) => record.code == code.as_str(),
-            Ok(None) => false,
-            Err(error) => {
-                tracing::warn!("failed to read Slack pairing actor record for cleanup: {error}");
-                false
+            Ok(Some((record, version))) if record.code == code.as_str() => Some((record, version)),
+            Ok(Some(_)) | Ok(None) => None,
+            Err(_) => {
+                tracing::warn!("failed to read Slack pairing actor record for cleanup");
+                None
             }
+        }) else {
+            return;
         };
-        if should_delete && let Err(error) = self.delete_record(actor_path).await {
-            tracing::warn!("failed to delete Slack pairing actor record: {error}");
+        let now = Utc::now();
+        record.expires_at = now;
+        record.updated_at = now;
+        match self
+            .write_record(actor_path, &record, CasExpectation::Version(version))
+            .await
+        {
+            Ok(_) | Err(FilesystemError::VersionMismatch { .. }) => {}
+            Err(_) => {
+                tracing::warn!("failed to expire Slack pairing actor record for cleanup");
+            }
         }
     }
 }
@@ -816,6 +827,38 @@ mod tests {
 
         assert_eq!(successes, 1);
         assert_eq!(not_found, 1);
+    }
+
+    #[tokio::test]
+    async fn filesystem_slack_host_state_reissues_after_consumed_actor_challenge() {
+        let state = state();
+        let consumed = state
+            .issue_challenge(challenge())
+            .await
+            .expect("issue succeeds");
+
+        state
+            .consume_challenge(&consumed.code)
+            .await
+            .expect("consume succeeds");
+        let reissued = state
+            .issue_challenge(challenge())
+            .await
+            .expect("reissue succeeds");
+
+        assert_ne!(reissued.code, consumed.code);
+        assert_eq!(reissued.challenge, challenge());
+        assert!(matches!(
+            state.get_challenge(&consumed.code).await,
+            Err(SlackPersonalBindingPairingError::ChallengeNotFound)
+        ));
+        assert_eq!(
+            state
+                .get_challenge(&reissued.code)
+                .await
+                .expect("reissued code remains active"),
+            challenge()
+        );
     }
 
     #[tokio::test]

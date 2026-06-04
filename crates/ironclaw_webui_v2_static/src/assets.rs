@@ -142,7 +142,7 @@ mod tests {
         let channels_tab = asset_text("js/pages/extensions/components/channels-tab.js");
         assert!(channels_tab.contains("slackStatusLabel"));
         assert!(channels_tab.contains("slackConnectAction &&"));
-        assert!(channels_tab.contains("action=${slackConnectAction.action}"));
+        assert!(channels_tab.contains("copy=${slackConnectAction.action}"));
 
         let regression = asset_text("js/pages/chat/lib/useChat-send.test.mjs");
         assert!(regression.contains("channel connect requests return an action"));

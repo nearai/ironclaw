@@ -32,4 +32,5 @@ tracing = "0.1"
 [dev-dependencies]
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt"] }
+tracing-test = { version = "0.2", features = ["no-env-filter"] }
 uuid = { version = "1", features = ["v4"] }
