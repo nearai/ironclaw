@@ -177,3 +177,5 @@ pg_contract!(duplicate_event_id_is_noop_for_values);
 pg_contract!(invocation_retains_entry_at_exact_window_cutoff);
 pg_contract!(event_id_dedup_isolated_across_maps);
 pg_contract!(record_invocation_overflow_is_fail_closed);
+pg_contract!(evict_older_than_reaps_strictly_older_rows);
+pg_contract!(evict_older_than_retains_entry_at_exact_cutoff);

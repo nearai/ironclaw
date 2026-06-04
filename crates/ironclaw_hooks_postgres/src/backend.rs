@@ -439,6 +439,24 @@ impl PostgresPredicateStateBackend {
     /// (which ranks buckets by their front/oldest entry) and the libSQL
     /// backend. It never touches the key we just inserted.
     ///
+    /// # Reaper requirement — quota counts un-reaped expired rows
+    ///
+    /// The `COUNT(DISTINCT key_hash) WHERE scope_hash = $1` below counts EVERY
+    /// stored row for the scope, including expired rows from OTHER keys: the
+    /// per-key window trim in `record_*` only deletes the current key's
+    /// out-of-window rows, never sibling keys. So a tenant with many idle
+    /// short-window keys can read at `MAX_KEYS_PER_TENANT` and trip LRU eviction
+    /// (advancing `evictions_observed`) even though its *active* key count is
+    /// lower. The evicted keys are already expired, so gate correctness is
+    /// unaffected, but operators MUST schedule a periodic
+    /// [`PredicateStateBackend::evict_older_than`] reaper to keep the quota
+    /// aligned with the active key count. See
+    /// `ironclaw_hooks/docs/successors/03-persistent-counter.md` (Reaper
+    /// requirement). This is NOT fixed by a behavior change here: counting only
+    /// in-window rows would require a per-key window the quota does not have.
+    ///
+    /// [`PredicateStateBackend::evict_older_than`]: ironclaw_hooks::predicate_state::PredicateStateBackend::evict_older_than
+    ///
     /// # Lock discipline for victim eviction (deadlock + race fix)
     ///
     /// Deleting a victim key's rows is itself a write to that bucket, so it

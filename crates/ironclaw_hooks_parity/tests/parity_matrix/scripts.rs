@@ -359,6 +359,92 @@ pub(crate) async fn run_lru_script(backend: &dyn PredicateStateBackend) -> Obser
     log
 }
 
+/// Per-tenant LRU script driven through the **value** path (`record_value`)
+/// rather than `record_invocation`. `enforce_caps` is shared by both record
+/// paths (table-parameterized), so a regression that surfaces only through the
+/// value path — e.g. the value table's eviction wired to the wrong table
+/// constant, or `enforce_caps` not called at all on the value path — would slip
+/// past `run_lru_script` (invocation-only) and `run_multisample_lru_script`.
+/// This mirrors `run_lru_script`'s structure exactly but records monetary
+/// values, so the per-tenant quota / victim-selection / co-tenant-survival
+/// invariants are cross-asserted through the value path against the same oracle
+/// shape (sums instead of counts).
+pub(crate) async fn run_lru_value_script(backend: &dyn PredicateStateBackend) -> ObservationLog {
+    let mut log = ObservationLog::new();
+    let window = Duration::from_secs(3600);
+    let amount = Decimal::from(5);
+
+    // Quiet tenant beta records one value scope.
+    let beta = val_key("beta", "beta.cap", "amount");
+    step_value(
+        backend,
+        &mut log,
+        "lru-value/beta-initial",
+        &beta,
+        &ev("beta-evt"),
+        at_millis(0),
+        amount,
+        window,
+    )
+    .await;
+
+    // Noisy tenant alpha floods K past its quota with distinct value scopes,
+    // one sample each. The overflow ones evict alpha's own oldest scopes via
+    // the SAME `enforce_caps` the invocation path uses, but on the value table.
+    const OVERFLOW: usize = 8;
+    for i in 0..(MAX_KEYS_PER_TENANT + OVERFLOW) {
+        let key = val_key("alpha", &format!("alpha.cap.{i}"), "amount");
+        backend
+            .record_value(
+                &key,
+                &ev(&format!("a-{i}")),
+                at_millis(i as i64 + 1),
+                amount,
+                window,
+            )
+            .await
+            .expect("ok");
+    }
+    log.push(Observation {
+        label: "lru-value/alpha-flood-evictions".to_string(),
+        outcome: StepOutcome::Sum(amount.normalize().to_string()),
+        evictions_after: backend.evictions_observed(),
+    });
+
+    // The OLDEST alpha scope (index 0) was the LRU victim: re-recording a
+    // DISTINCT id against it sums to just this `amount` (the bucket was
+    // evicted, so its prior sample does not carry over). Pins the victim
+    // identity through the value path.
+    let oldest = val_key("alpha", "alpha.cap.0", "amount");
+    step_value(
+        backend,
+        &mut log,
+        "lru-value/oldest-victim-restarts",
+        &oldest,
+        &ev("a-0-revived"),
+        at_millis((MAX_KEYS_PER_TENANT + OVERFLOW) as i64 + 1),
+        amount,
+        window,
+    )
+    .await;
+
+    // Quiet tenant beta's value scope survived: replay of its original id is a
+    // dedup no-op returning the unchanged sum (proves it was never evicted).
+    step_value(
+        backend,
+        &mut log,
+        "lru-value/beta-survives",
+        &beta,
+        &ev("beta-evt"),
+        at_millis((MAX_KEYS_PER_TENANT + OVERFLOW) as i64 + 2),
+        amount,
+        window,
+    )
+    .await;
+
+    log
+}
+
 /// Global-cap parity script: many tenants each record a handful of distinct
 /// scopes, every tenant staying well under `MAX_KEYS_PER_TENANT` and the total
 /// staying well under the in-memory `MAX_HISTORY_KEYS` (8192) global cap. Every

@@ -606,6 +606,21 @@ async fn key_exists(
 /// staying under the per-tenant quota — a cross-backend inconsistency the
 /// parity matrix had to exclude. Dropping it restores parity.
 ///
+/// # Reaper requirement — quota counts un-reaped expired rows
+///
+/// The `COUNT(DISTINCT key_hash) WHERE scope_hash = ?1` below counts EVERY
+/// stored row for the tenant, including expired rows from OTHER keys: the
+/// per-key window trim in `record_*` only deletes `WHERE key_hash = ?1`, never
+/// sibling keys. So a tenant with many idle short-window keys can read at
+/// `MAX_KEYS_PER_TENANT` and trip LRU eviction (advancing `evictions_observed`)
+/// even though its *active* key count is lower. The evicted keys are already
+/// expired, so gate correctness is unaffected, but operators MUST schedule a
+/// periodic [`PredicateStateBackend::evict_older_than`] reaper to keep the
+/// quota aligned with the active key count. See
+/// `ironclaw_hooks/docs/successors/03-persistent-counter.md` (Reaper
+/// requirement). This is NOT fixed by a behavior change here: counting only
+/// in-window rows would require a window per key, which the quota does not have.
+///
 /// [`MAX_HISTORY_KEYS`]: ironclaw_hooks::predicate_state::MAX_HISTORY_KEYS
 /// [`MAX_KEYS_PER_TENANT`]: ironclaw_hooks::predicate_state::MAX_KEYS_PER_TENANT
 /// [`PredicateStateBackend::evict_older_than`]: ironclaw_hooks::predicate_state::PredicateStateBackend::evict_older_than

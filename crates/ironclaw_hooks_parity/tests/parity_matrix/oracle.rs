@@ -78,6 +78,33 @@ pub(crate) fn expected_lru_log() -> ObservationLog {
     ]
 }
 
+/// Independent oracle for [`run_lru_value_script`] — the per-tenant LRU
+/// quota driven through `record_value` instead of `record_invocation`. The
+/// quota/victim/co-tenant semantics are identical to [`expected_lru_log`]
+/// (`enforce_caps` is shared, table-parameterized), so the eviction-count
+/// trajectory matches; only the per-step outcome is a Sum (each fresh value
+/// scope holds the single recorded `amount` of 5) rather than a Count.
+///
+/// beta records one value scope (sum 5, 0 evictions); alpha floods
+/// `MAX_KEYS_PER_TENANT + OVERFLOW` distinct value scopes so exactly `OVERFLOW`
+/// per-tenant evictions fire; the evicted oldest scope restarts (sum 5) and
+/// triggers ONE MORE eviction (8 -> 9); beta's scope survives (replay dedups,
+/// sum unchanged at 5, no new eviction).
+pub(crate) fn expected_lru_value_log() -> ObservationLog {
+    const OVERFLOW: u64 = 8;
+    const AFTER_VICTIM_REINSERT: u64 = OVERFLOW + 1; // 9
+    vec![
+        obs_sum("lru-value/beta-initial", "5", 0),
+        obs_sum("lru-value/alpha-flood-evictions", "5", OVERFLOW),
+        obs_sum(
+            "lru-value/oldest-victim-restarts",
+            "5",
+            AFTER_VICTIM_REINSERT,
+        ),
+        obs_sum("lru-value/beta-survives", "5", AFTER_VICTIM_REINSERT),
+    ]
+}
+
 /// Independent oracle for [`run_global_cap_parity_script`]: every insert and
 /// every replay returns count 1 with zero evictions — the per-tenant quota
 /// never trips (5 < 2048) and the in-memory global cap (8192) is never reached

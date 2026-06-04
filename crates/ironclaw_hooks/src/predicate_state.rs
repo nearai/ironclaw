@@ -375,6 +375,18 @@ pub trait PredicateStateBackend: Send + Sync {
     /// Lockable into the trait signature now (rather than at the durable
     /// backend PR) so trait-object callers don't break when the durable
     /// impl lands — henrypark133 important #5 on PR #3635.
+    ///
+    /// # Operator requirement (durable backends)
+    ///
+    /// Durable backends MUST have this scheduled periodically (typically at the
+    /// slowest configured window). The per-tenant LRU quota counts ALL stored
+    /// rows for a tenant, including expired-but-unreaped rows from idle keys;
+    /// without a reaper, short-window workloads can appear at
+    /// `MAX_KEYS_PER_TENANT` and trigger LRU eviction (advancing
+    /// `evictions_observed`) below their active key count. The `record_*` path
+    /// only trims the current key's window, never sibling keys, so this method
+    /// is the only thing that reclaims idle expired rows. See
+    /// `docs/successors/03-persistent-counter.md` (Reaper requirement).
     #[allow(dead_code)] // operator reaper hook for future durable backends
     async fn evict_older_than(&self, _cutoff: DateTime<Utc>) -> Result<u64, PredicateBackendError> {
         Ok(0)
@@ -1216,6 +1228,138 @@ pub mod contract {
         );
     }
 
+    /// Contract: `evict_older_than` reaps rows STRICTLY older than the cutoff
+    /// (`occurred_at < cutoff`, not `<=`) across BOTH the invocation and value
+    /// tables, and the returned count equals the number of rows actually
+    /// deleted. A backend that reaped with `<=` would also drop the row at the
+    /// exact cutoff; a backend that reaped only one table would leave the other
+    /// unreaped — both are caught here.
+    pub async fn evict_older_than_reaps_strictly_older_rows<B, F>(factory: F)
+    where
+        B: PredicateStateBackend,
+        F: Fn() -> B,
+    {
+        let backend = factory();
+        let inv = inv_key("alpha", "cap.reap");
+        let val = val_key("alpha", "cap.reap", "amount");
+        // A window large enough that no record_* call trims a sibling — we want
+        // evict_older_than to be the only thing that removes rows.
+        let window = Duration::from_secs(86_400);
+        // Seed t0 (strictly before cutoff), t10 (exactly at cutoff), t20 (after)
+        // in BOTH tables.
+        for (i, secs) in [0i64, 10, 20].iter().enumerate() {
+            backend
+                .record_invocation(&inv, &ev(&format!("i{i}")), at(*secs), window)
+                .await
+                .expect("ok");
+            backend
+                .record_value(
+                    &val,
+                    &ev(&format!("v{i}")),
+                    at(*secs),
+                    Decimal::from(10),
+                    window,
+                )
+                .await
+                .expect("ok");
+        }
+
+        // Reap everything strictly older than t10. The t0 row in each table is
+        // strictly older and must go; the t10 row is exactly at the cutoff and
+        // must be retained (< vs <=); t20 survives. Two rows total (one per
+        // table) are deleted.
+        let dropped = backend.evict_older_than(at(10)).await.expect("evict ok");
+        assert_eq!(
+            dropped, 2,
+            "exactly the two strictly-older rows (one per table) are reaped; \
+             the exact-cutoff rows are retained"
+        );
+
+        // Observe surviving rows via a probe whose own window cutoff sits before
+        // t10, so the probe never trims a survivor. The invocation count and the
+        // value sum after the probe expose how many rows the reaper left behind.
+        let probe_window = Duration::from_secs(86_400);
+        let inv_count = backend
+            .record_invocation(&inv, &ev("probe-i"), at(20), probe_window)
+            .await
+            .expect("ok");
+        assert_eq!(
+            inv_count, 3,
+            "invocation table keeps the t10 (exact-cutoff) and t20 rows; \
+             a <= reaper would have dropped t10 and left a count of 2"
+        );
+        let val_sum = backend
+            .record_value(
+                &val,
+                &ev("probe-v"),
+                at(20),
+                Decimal::from(10),
+                probe_window,
+            )
+            .await
+            .expect("ok");
+        assert_eq!(
+            val_sum,
+            Decimal::from(30),
+            "value table keeps the t10 (exact-cutoff) and t20 rows summing 20, \
+             plus the 10 probe; a reaper that skipped the value table would sum 40"
+        );
+    }
+
+    /// Contract: the row whose `occurred_at` equals the cutoff is RETAINED by
+    /// `evict_older_than`. Pinpoints the `<` vs `<=` boundary in isolation:
+    /// seed a single row at the cutoff, reap at that exact instant, and assert
+    /// nothing was dropped and the row is still observable.
+    pub async fn evict_older_than_retains_entry_at_exact_cutoff<B, F>(factory: F)
+    where
+        B: PredicateStateBackend,
+        F: Fn() -> B,
+    {
+        let backend = factory();
+        let inv = inv_key("alpha", "cap.cutoff");
+        let val = val_key("alpha", "cap.cutoff", "amount");
+        let window = Duration::from_secs(86_400);
+        backend
+            .record_invocation(&inv, &ev("i0"), at(10), window)
+            .await
+            .expect("ok");
+        backend
+            .record_value(&val, &ev("v0"), at(10), Decimal::from(10), window)
+            .await
+            .expect("ok");
+
+        let dropped = backend.evict_older_than(at(10)).await.expect("evict ok");
+        assert_eq!(
+            dropped, 0,
+            "the row exactly at the cutoff is retained (< cutoff, not <=)"
+        );
+
+        let probe_window = Duration::from_secs(86_400);
+        let inv_count = backend
+            .record_invocation(&inv, &ev("probe-i"), at(10), probe_window)
+            .await
+            .expect("ok");
+        assert_eq!(
+            inv_count, 2,
+            "exact-cutoff invocation row survived the reaper"
+        );
+        let val_sum = backend
+            .record_value(
+                &val,
+                &ev("probe-v"),
+                at(10),
+                Decimal::from(10),
+                probe_window,
+            )
+            .await
+            .expect("ok");
+        assert_eq!(
+            val_sum,
+            Decimal::from(20),
+            "exact-cutoff value row survived the reaper"
+        );
+    }
+
     /// The **single canonical inventory** of `PredicateStateBackend` contract
     /// cases. Every shared invariant is listed here exactly once, by the
     /// `pub async fn` name in this module. Both the default-harness wiring
@@ -1243,6 +1387,8 @@ pub mod contract {
             $emit!([$($ctx)*] invocation_retains_entry_at_exact_window_cutoff);
             $emit!([$($ctx)*] event_id_dedup_isolated_across_maps);
             $emit!([$($ctx)*] record_invocation_overflow_is_fail_closed);
+            $emit!([$($ctx)*] evict_older_than_reaps_strictly_older_rows);
+            $emit!([$($ctx)*] evict_older_than_retains_entry_at_exact_cutoff);
         };
     }
 

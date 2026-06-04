@@ -271,6 +271,27 @@ identical in the parity matrix.
   quota so it compares apples-to-apples and does not exercise the global
   cap.
 
+#### Reaper requirement for accurate quota counts
+
+The per-tenant quota count is `COUNT(DISTINCT key_hash) WHERE scope_hash = ?`
+over **all stored rows** for the tenant, including expired rows from keys
+that have not yet been reaped by `evict_older_than`. The `record_*` path
+only trims the *current* key's out-of-window rows (`WHERE key_hash = ?`); it
+never touches other keys' expired rows. Consequently a tenant with many
+short-window keys that have gone idle can appear to be at
+`MAX_KEYS_PER_TENANT` and trigger LRU eviction even though its *active* key
+count is much lower. The evicted keys are already expired, so this is benign
+for gate correctness, but `evictions_observed()` advances unexpectedly and
+the effective quota for short-window workloads appears higher than the active
+key count. This is an undocumented behavioral divergence from the in-memory
+backend, whose buckets are process-local and bounded by `MAX_HISTORY_KEYS`.
+
+Deployers MUST schedule a periodic `evict_older_than` reaper (typically
+pointed at the slowest configured window) to keep the durable quota count
+aligned with the active key count. Without a reaper, the per-tenant quota
+degrades gracefully (it over-counts expired keys) rather than failing open,
+but the eviction counter will be noisy.
+
 ### Multi-host guarantees (proven in PR 4/4)
 
 The cross-backend adversarial parity suite (`ironclaw_hooks_parity`)
