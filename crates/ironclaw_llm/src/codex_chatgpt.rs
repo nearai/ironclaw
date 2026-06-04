@@ -765,10 +765,8 @@ impl CodexChatGptProvider {
         allow_text_fallback: bool,
     ) {
         match item.get("type").and_then(|value| value.as_str()) {
-            Some("message") => {
-                if allow_text_fallback {
-                    Self::append_output_message_text(&mut result.text, item);
-                }
+            Some("message") if allow_text_fallback => {
+                Self::append_output_message_text(&mut result.text, item);
             }
             Some("function_call") => {
                 let item_id = item

@@ -1615,7 +1615,7 @@ mod tests {
         TurnLifecycleEvent {
             cursor: EventCursor(1),
             scope,
-            occurred_at: Some(chrono::Utc::now().into()),
+            occurred_at: Some(chrono::Utc::now()),
             owner_user_id: None,
             run_id,
             status: TurnStatus::Completed,
