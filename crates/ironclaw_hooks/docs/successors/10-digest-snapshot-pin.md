@@ -23,7 +23,7 @@ digest value.
 
 ## Scope
 
-Tests in `capability_port_tests.rs` pin one canonical
+Tests in `src/middleware/tests/capability_port.rs` pin one canonical
 `(capability_id, input_ref)` pair and verify the same digest through the
 public `invoke_capability` / `invoke_capability_batch` paths hooks
 actually observe:
