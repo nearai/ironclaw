@@ -83,6 +83,8 @@ mod slack_host_beta;
 #[cfg(feature = "slack-v2-host-beta")]
 mod slack_host_state;
 #[cfg(feature = "slack-v2-host-beta")]
+mod slack_pairing_notifier;
+#[cfg(feature = "slack-v2-host-beta")]
 mod slack_personal_binding;
 #[cfg(feature = "slack-v2-host-beta")]
 mod slack_personal_binding_pairing;

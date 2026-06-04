@@ -18,8 +18,9 @@ use ironclaw_product_adapters::{
 };
 use ironclaw_product_workflow::{
     DefaultInboundTurnService, DefaultProductWorkflow, InMemoryIdempotencyLedger,
-    ProductActorUserResolver, ProductConversationBindingService, ProductInstallationKey,
-    ProductInstallationScope, StaticProductInstallationResolver,
+    ProductActorUserResolutionRequest, ProductActorUserResolver, ProductConversationBindingService,
+    ProductInstallationKey, ProductInstallationScope, ProductWorkflowError,
+    StaticProductInstallationResolver,
 };
 use ironclaw_slack_v2_adapter::{
     SLACK_API_HOST, SLACK_USER_ACTOR_KIND, SLACK_V2_ADAPTER_ID, SlackV2Adapter,
@@ -33,12 +34,14 @@ use secrecy::{ExposeSecret, SecretString};
 use thiserror::Error;
 
 use crate::RebornRuntime;
+use crate::slack_actor_identity::SlackUserIdentityActorResolver;
 use crate::slack_delivery::{
     SlackFinalReplyDeliveryObserver, SlackFinalReplyDeliveryServices,
     SlackFinalReplyDeliverySettings,
 };
 use crate::slack_egress::{SlackProtocolHttpEgress, StaticSlackEgressCredentialProvider};
-use crate::slack_host_state::{FilesystemSlackHostState, SlackPairingChallengeHttpNotifier};
+use crate::slack_host_state::FilesystemSlackHostState;
+use crate::slack_pairing_notifier::SlackPairingChallengeHttpNotifier;
 use crate::slack_personal_binding::{
     RebornUserIdentityBindingStore, SlackPersonalBindingInstallation,
     SlackPersonalUserBindingService,
@@ -150,6 +153,10 @@ pub enum SlackHostBetaBuildError {
     RuntimeHttpEgressUnavailable,
     #[error("Slack host-beta requires durable host state")]
     DurableHostStateUnavailable,
+    #[error(
+        "Slack host-beta personal binding requires [slack].api_app_id for tenant app-scoped pairing"
+    )]
+    TenantAppSelectorRequired,
     #[error("invalid Slack host-beta config field {field}: {reason}")]
     InvalidConfig { field: &'static str, reason: String },
 }
@@ -170,6 +177,12 @@ pub fn build_slack_host_beta_mounts(
     runtime: &RebornRuntime,
     config: SlackHostBetaConfig,
 ) -> Result<SlackHostBetaMounts, SlackHostBetaBuildError> {
+    if !matches!(
+        config.installation_selector,
+        SlackInstallationSelector::AppTeam { .. }
+    ) {
+        return Err(SlackHostBetaBuildError::TenantAppSelectorRequired);
+    }
     let local_runtime = runtime
         .services()
         .local_runtime
@@ -200,7 +213,13 @@ pub fn build_slack_host_beta_mounts(
     let challenge_store: Arc<dyn SlackPersonalBindingPairingChallengeStore> = state.clone();
     let pairing =
         SlackPersonalBindingPairingService::new(binding_service, challenge_store, notifier);
-    let actor_user_resolver = Arc::new(SlackPairingActorResolver::new(state, pairing.clone()));
+    let actor_user_resolver = Arc::new(SlackHostBetaActorUserResolver::new(
+        config.installation_id.clone(),
+        config.slack_actor.clone(),
+        config.user_id.clone(),
+        Arc::new(SlackUserIdentityActorResolver::new(state.clone())),
+        Arc::new(SlackPairingActorResolver::new(state, pairing.clone())),
+    ));
     let events = build_slack_events_route_mount_with_actor_user_resolver(
         runtime,
         config,
@@ -368,6 +387,73 @@ fn slack_declared_egress_targets(
     )]
 }
 
+#[derive(Clone)]
+struct SlackHostBetaActorUserResolver {
+    installation_id: AdapterInstallationId,
+    legacy_slack_actor: Option<ExternalActorRef>,
+    legacy_user_id: UserId,
+    cached_identity: Arc<dyn ProductActorUserResolver>,
+    pairing: Arc<dyn ProductActorUserResolver>,
+}
+
+impl SlackHostBetaActorUserResolver {
+    fn new(
+        installation_id: AdapterInstallationId,
+        legacy_slack_actor: Option<ExternalActorRef>,
+        legacy_user_id: UserId,
+        cached_identity: Arc<dyn ProductActorUserResolver>,
+        pairing: Arc<dyn ProductActorUserResolver>,
+    ) -> Self {
+        Self {
+            installation_id,
+            legacy_slack_actor,
+            legacy_user_id,
+            cached_identity,
+            pairing,
+        }
+    }
+
+    fn resolve_legacy_static_actor(
+        &self,
+        request: &ProductActorUserResolutionRequest,
+    ) -> Option<UserId> {
+        let legacy_actor = self.legacy_slack_actor.as_ref()?;
+        if request.adapter_id.as_str() == SLACK_V2_ADAPTER_ID
+            && request.installation_id == self.installation_id
+            && request.external_actor_ref == *legacy_actor
+        {
+            return Some(self.legacy_user_id.clone());
+        }
+        None
+    }
+}
+
+impl std::fmt::Debug for SlackHostBetaActorUserResolver {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("SlackHostBetaActorUserResolver(..)")
+    }
+}
+
+#[async_trait::async_trait]
+impl ProductActorUserResolver for SlackHostBetaActorUserResolver {
+    async fn resolve_product_actor_user(
+        &self,
+        request: ProductActorUserResolutionRequest,
+    ) -> Result<Option<UserId>, ProductWorkflowError> {
+        if let Some(user_id) = self.resolve_legacy_static_actor(&request) {
+            return Ok(Some(user_id));
+        }
+        if let Some(user_id) = self
+            .cached_identity
+            .resolve_product_actor_user(request.clone())
+            .await?
+        {
+            return Ok(Some(user_id));
+        }
+        self.pairing.resolve_product_actor_user(request).await
+    }
+}
+
 fn invalid_config(field: &'static str, reason: String) -> SlackHostBetaBuildError {
     SlackHostBetaBuildError::InvalidConfig { field, reason }
 }
@@ -396,6 +482,9 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
+    use crate::slack_personal_binding_pairing_serve::{
+        SLACK_PERSONAL_BINDING_PAIRING_REDEEM_PATH, slack_personal_binding_pairing_route_mount,
+    };
     use crate::{
         RebornBuildInput, RebornRuntimeIdentity, RebornRuntimeInput, SLACK_EVENTS_PATH,
         build_reborn_runtime, local_dev_runtime_policy,
@@ -555,6 +644,85 @@ mod tests {
         runtime.shutdown().await.expect("runtime shuts down");
     }
 
+    #[tokio::test]
+    async fn build_slack_host_beta_mounts_exposes_events_and_pairing_redeem_route() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let runtime = build_reborn_runtime(
+            RebornRuntimeInput::from_services(
+                RebornBuildInput::local_dev("slack-host-beta-owner", root.path().join("local-dev"))
+                    .with_runtime_policy(local_dev_runtime_policy().expect("local policy")),
+            )
+            .with_identity(RebornRuntimeIdentity {
+                tenant_id: TENANT.to_string(),
+                agent_id: AGENT.to_string(),
+                source_binding_id: "slack-host-source".to_string(),
+                reply_target_binding_id: "slack-host-reply".to_string(),
+            })
+            .with_model_gateway_override(Arc::new(StaticGateway)),
+        )
+        .await
+        .expect("runtime builds");
+
+        let mounts = build_slack_host_beta_mounts(&runtime, config()).expect("mounts build");
+        let pairing_mount =
+            slack_personal_binding_pairing_route_mount(mounts.personal_binding_pairing);
+
+        assert_eq!(mounts.events.descriptors.len(), 1);
+        assert!(
+            pairing_mount
+                .descriptors
+                .iter()
+                .any(|descriptor| descriptor.route_pattern().as_str()
+                    == SLACK_PERSONAL_BINDING_PAIRING_REDEEM_PATH)
+        );
+
+        runtime.shutdown().await.expect("runtime shuts down");
+    }
+
+    #[tokio::test]
+    async fn build_slack_host_beta_mounts_rejects_team_only_selector_for_pairing() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let runtime = build_reborn_runtime(
+            RebornRuntimeInput::from_services(
+                RebornBuildInput::local_dev("slack-host-beta-owner", root.path().join("local-dev"))
+                    .with_runtime_policy(local_dev_runtime_policy().expect("local policy")),
+            )
+            .with_identity(RebornRuntimeIdentity {
+                tenant_id: TENANT.to_string(),
+                agent_id: AGENT.to_string(),
+                source_binding_id: "slack-host-source".to_string(),
+                reply_target_binding_id: "slack-host-reply".to_string(),
+            })
+            .with_model_gateway_override(Arc::new(StaticGateway)),
+        )
+        .await
+        .expect("runtime builds");
+        let team_only_config = SlackHostBetaConfig::new(SlackHostBetaConfigInput {
+            tenant_id: TenantId::new(TENANT).expect("tenant"),
+            agent_id: AgentId::new(AGENT).expect("agent"),
+            project_id: Some(ProjectId::new(PROJECT).expect("project")),
+            installation_id: INSTALLATION.to_string(),
+            team_id: TEAM.to_string(),
+            api_app_id: None,
+            slack_user_id: Some(SLACK_USER.to_string()),
+            user_id: UserId::new(USER).expect("user"),
+            signing_secret: SecretString::from(SECRET),
+            bot_token: SecretString::from("xoxb-host-token"),
+        })
+        .expect("team-only config still parses");
+
+        let error = match build_slack_host_beta_mounts(&runtime, team_only_config) {
+            Ok(_) => panic!("pairing requires tenant app selector"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            SlackHostBetaBuildError::TenantAppSelectorRequired
+        ));
+        runtime.shutdown().await.expect("runtime shuts down");
+    }
+
     #[test]
     fn slack_host_beta_config_keeps_optional_legacy_slack_actor() {
         let config = config();
@@ -581,6 +749,33 @@ mod tests {
             scope.project_id,
             Some(ProjectId::new(PROJECT).expect("project"))
         );
+    }
+
+    #[tokio::test]
+    async fn layered_resolver_preserves_configured_legacy_slack_actor_mapping() {
+        let resolver = SlackHostBetaActorUserResolver::new(
+            AdapterInstallationId::new(INSTALLATION).expect("installation"),
+            Some(
+                ExternalActorRef::new(SLACK_USER_ACTOR_KIND, SLACK_USER, None::<String>)
+                    .expect("actor"),
+            ),
+            UserId::new(USER).expect("user"),
+            Arc::new(FailingProductActorUserResolver),
+            Arc::new(FailingProductActorUserResolver),
+        );
+        let request = ProductActorUserResolutionRequest::new(
+            ProductAdapterId::new(SLACK_V2_ADAPTER_ID).expect("adapter"),
+            AdapterInstallationId::new(INSTALLATION).expect("installation"),
+            ExternalActorRef::new(SLACK_USER_ACTOR_KIND, SLACK_USER, None::<String>)
+                .expect("actor"),
+        );
+
+        let resolved = resolver
+            .resolve_product_actor_user(request)
+            .await
+            .expect("resolver succeeds");
+
+        assert_eq!(resolved, Some(UserId::new(USER).expect("user")));
     }
 
     fn config() -> SlackHostBetaConfig {
@@ -735,6 +930,21 @@ mod tests {
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .push(request);
             Ok(Some(self.user_id.clone()))
+        }
+    }
+
+    #[derive(Debug)]
+    struct FailingProductActorUserResolver;
+
+    #[async_trait::async_trait]
+    impl ProductActorUserResolver for FailingProductActorUserResolver {
+        async fn resolve_product_actor_user(
+            &self,
+            _request: ProductActorUserResolutionRequest,
+        ) -> Result<Option<UserId>, ProductWorkflowError> {
+            Err(ProductWorkflowError::BindingResolutionFailed {
+                reason: "fallback should not be called".into(),
+            })
         }
     }
 
