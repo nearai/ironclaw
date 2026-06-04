@@ -965,10 +965,12 @@ async fn gate_resolve_is_tenant_isolated_cross_tenant_grant_fails_closed() {
 /// keystore scope. Here the grant matches (it is sealed for tenant A's
 /// `context`), but the binding's authoritative custodial `scope` points at
 /// tenant B, while the key is bound ONLY under tenant A's owner scope. The
-/// custodial signer looks the key up by `binding.scope` (tenant B) BEFORE it
-/// claims the grant, so the keystore lookup fails closed (`NotFound`) and no key
-/// material — and no grant — is ever touched. This proves keystore-scope
-/// isolation independently of the grant-CAS isolation covered by
+/// custodial signer reads the public binding under `binding.scope` (tenant B)
+/// via `keystore.binding(&req.scope, &req.chain)` (custodial.rs:178) BEFORE it
+/// claims the grant, so that keystore read fails closed (`NotFound` ->
+/// `KeyStore` error) and no key material — and no grant — is ever touched. This
+/// proves keystore-scope isolation independently of the grant-CAS isolation
+/// covered by
 /// `gate_resolve_is_tenant_isolated_cross_tenant_grant_fails_closed`.
 #[tokio::test]
 async fn gate_resolve_cross_tenant_keystore_scope_fails_closed() {
