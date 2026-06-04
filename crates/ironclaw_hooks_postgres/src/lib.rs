@@ -17,6 +17,22 @@
 //! dependency surface out of `ironclaw_hooks` keeps the hook framework
 //! itself DB-free.
 //!
+//! # Dual-backend compliance (libSQL counterpart)
+//!
+//! The repo rule "new persistence must support both PostgreSQL and
+//! libSQL" is satisfied across the staged durable-backend series, not in
+//! this crate alone. This crate is the **Postgres** half; the **libSQL**
+//! counterpart lives in the sibling crate `ironclaw_hooks_libsql` (PR
+//! #3936), and behavioral interchangeability between the two is enforced
+//! by the cross-backend parity suite `ironclaw_hooks_parity` (PR #3937),
+//! which runs the identical contract assertions against both backends.
+//! Merge ordering: this crate (PR 2/4, #3933) lands first, then the
+//! libSQL crate (#3936), then the parity suite (#3937) gates that the two
+//! durable backends are drop-in equivalent. Both backends share the one
+//! logical two-table typed schema (see `migrations/V1__predicate_state.sql`);
+//! only the storage column types differ (Postgres TIMESTAMPTZ + NUMERIC
+//! vs. libSQL epoch-ms INTEGER + TEXT).
+//!
 //! [`PredicateStateBackend`]:
 //!     ironclaw_hooks::predicate_state::PredicateStateBackend
 //! [`ironclaw_reborn_event_store`]: https://docs.rs/ironclaw_reborn_event_store
