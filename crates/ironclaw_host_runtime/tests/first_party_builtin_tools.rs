@@ -2082,7 +2082,7 @@ async fn builtin_http_requires_tool_call_http_egress_for_inline_output() {
     .await
     .unwrap_err();
 
-    assert_eq!(failure, RuntimeFailureKind::Backend);
+    assert_eq!(failure, RuntimeFailureKind::Network);
     assert!(egress.requests().is_empty());
 }
 
@@ -2323,7 +2323,7 @@ async fn builtin_http_save_returns_saved_body_for_large_responses_without_inline
 
     let requests = egress.requests();
     assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].response_body_limit, Some(10 * 1024 * 1024));
+    assert_eq!(requests[0].response_body_limit, Some(4096));
 }
 
 #[tokio::test]
@@ -2380,7 +2380,7 @@ async fn builtin_http_save_uses_strict_host_egress_when_tool_call_port_exists() 
     );
     let requests = strict_egress.requests();
     assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].response_body_limit, Some(10 * 1024 * 1024));
+    assert_eq!(requests[0].response_body_limit, Some(4096));
 }
 
 #[tokio::test]
@@ -2417,6 +2417,36 @@ async fn builtin_http_does_not_inline_huge_binary_payloads() {
 }
 
 #[tokio::test]
+async fn builtin_http_final_budget_trim_preserves_base64_alignment() {
+    let headers = (0..4)
+        .map(|index| (format!("x-large-{index}"), "h".repeat(512)))
+        .collect::<Vec<_>>();
+    let egress =
+        Arc::new(RecordingRuntimeHttpEgress::with_body(vec![0xFF; 4 * 1024]).with_headers(headers));
+    let runtime = runtime_with_http_egress(Arc::clone(&egress));
+
+    let output = invoke_with_context(
+        &runtime,
+        HTTP_CAPABILITY_ID,
+        json!({
+            "url": "https://api.example.test/v1/items",
+            "response_body_limit": 4096
+        }),
+        execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy()),
+    )
+    .await
+    .unwrap();
+
+    let body_base64 = output["body_base64"].as_str().expect("binary response");
+    assert_eq!(output["body_truncated"], json!(true));
+    assert!(!body_base64.is_empty());
+    assert!(body_base64.len() < 4096);
+    assert_eq!(body_base64.len() % 4, 0);
+    assert_eq!(output["truncation"]["body"], json!(true));
+    assert!(serialized_json_len(&output) <= 6_000);
+}
+
+#[tokio::test]
 async fn builtin_http_truncates_overlong_response_headers_to_model_visible_budget() {
     let mut headers = vec![(format!("x-{}", "n".repeat(200)), "\n".repeat(2 * 1024))];
     for index in 0..40 {
@@ -2439,7 +2469,7 @@ async fn builtin_http_truncates_overlong_response_headers_to_model_visible_budge
     .unwrap();
 
     let headers = output["headers"].as_array().expect("headers array");
-    assert!(headers.len() < 32);
+    assert!(headers.len() <= 32);
     assert_eq!(output["headers_truncated"], json!(true));
     assert_eq!(output["truncation"]["headers"], json!(true));
     assert_eq!(output["truncation"]["body"], json!(false));
@@ -2454,7 +2484,7 @@ async fn builtin_http_truncates_overlong_response_headers_to_model_visible_budge
             <= 1024
     );
     assert_eq!(headers[0]["truncated"], json!(true));
-    assert!(serialized_json_len(&output["headers"]) <= 2 * 1024);
+    assert!(serialized_json_len(&output["headers"]) <= 8 * 1024);
 }
 
 #[tokio::test]
@@ -4097,6 +4127,10 @@ async fn builtin_http_rejects_ambiguous_body_zero_timeout_and_zero_response_limi
             "url": "https://api.example.test/v1/items",
             "response_body_limit": 0
         }),
+        json!({
+            "url": "https://api.example.test/v1/items",
+            "response_body_limit": 256 * 1024 + 1
+        }),
     ] {
         let error = invoke_with_context(&runtime, HTTP_CAPABILITY_ID, input, context.clone())
             .await
@@ -4147,7 +4181,7 @@ async fn builtin_http_accounts_request_bytes_when_large_output_is_truncated() {
             "method": "post",
             "url": "https://api.example.test/v1/items",
             "body": "paid",
-            "response_body_limit": 10 * 1024 * 1024
+            "response_body_limit": 256 * 1024
         }),
         execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy()),
     )
@@ -4155,8 +4189,8 @@ async fn builtin_http_accounts_request_bytes_when_large_output_is_truncated() {
     .unwrap();
 
     let body_text = output["body_text"].as_str().expect("text response");
-    assert_eq!(body_text.len(), 5 * 1024 * 1024);
-    assert_eq!(output["body_bytes_returned"], json!(5 * 1024 * 1024));
+    assert_eq!(body_text.len(), 128 * 1024);
+    assert_eq!(output["body_bytes_returned"], json!(128 * 1024));
     assert_eq!(output["body_truncated"], json!(true));
     let tenant_account = ResourceAccount::tenant(TenantId::new(LOCAL_DEFAULT_TENANT_ID).unwrap());
     assert_eq!(governor.usage_for(&tenant_account).network_egress_bytes, 4);

@@ -20,9 +20,11 @@ const DEFAULT_HTTP_TIMEOUT_MS: u32 = 10_000;
 const MAX_HTTP_TIMEOUT_MS: u32 = 30_000;
 pub(super) const MAX_HTTP_OUTPUT_BYTES: u64 = 15 * 1024 * 1024;
 const DEFAULT_INLINE_RESPONSE_BODY_LIMIT: u64 = 48 * 1024;
+const MAX_INLINE_RESPONSE_BODY_LIMIT: u64 = 256 * 1024;
 const DEFAULT_SAVE_RESPONSE_BODY_LIMIT: u64 = 10 * 1024 * 1024;
-const MAX_RESPONSE_BODY_LIMIT: u64 = 10 * 1024 * 1024;
+const MAX_SAVE_RESPONSE_BODY_LIMIT: u64 = 10 * 1024 * 1024;
 const MODEL_VISIBLE_HTTP_OUTPUT_OVERHEAD_BYTES: usize = 2 * 1024;
+const MODEL_VISIBLE_HTTP_HEADER_BYTES: usize = 8 * 1024;
 const MODEL_VISIBLE_HTTP_TRUNCATION_ENVELOPE_BYTES: usize = 1024;
 const DEFAULT_NETWORK_EGRESS_BYTES: u64 = 16 * 1024;
 const MAX_NETWORK_EGRESS_BYTES: u64 = 256 * 1024;
@@ -203,28 +205,16 @@ pub(super) async fn dispatch(
         save_body_to,
         timeout_ms: Some(timeout_ms),
     };
-    let tool_call_egress = if matches!(save_mode, HttpSaveMode::Disabled) {
-        Some(
-            request
-                .services
-                .tool_call_http_egress
-                .as_ref()
-                .ok_or_else(|| FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::Backend))?
-                .clone(),
-        )
-    } else {
-        None
-    };
+    let tool_call_egress = request.services.tool_call_http_egress.clone();
     let egress_future = async move {
         match save_mode {
             HttpSaveMode::Disabled => {
-                let Some(tool_call_egress) = tool_call_egress else {
-                    return Err(RuntimeHttpEgressError::Network {
+                let tool_call_egress =
+                    tool_call_egress.ok_or_else(|| RuntimeHttpEgressError::Network {
                         reason: "tool-call HTTP egress was not configured".to_string(),
                         request_bytes: 0,
                         response_bytes: 0,
-                    });
-                };
+                    })?;
                 tool_call_egress
                     .execute_for_model_visible_output(http_request)
                     .await
@@ -402,16 +392,14 @@ fn response_body_limit(
         HttpSaveMode::Disabled => DEFAULT_INLINE_RESPONSE_BODY_LIMIT,
         HttpSaveMode::Required => DEFAULT_SAVE_RESPONSE_BODY_LIMIT,
     };
-    let limit = ranged_u64(
-        input,
-        "response_body_limit",
-        default,
-        1,
-        MAX_RESPONSE_BODY_LIMIT,
-    )?;
+    let max = match save_mode {
+        HttpSaveMode::Disabled => MAX_INLINE_RESPONSE_BODY_LIMIT,
+        HttpSaveMode::Required => MAX_SAVE_RESPONSE_BODY_LIMIT,
+    };
+    let limit = ranged_u64(input, "response_body_limit", default, 1, max)?;
     Ok(match save_mode {
         HttpSaveMode::Disabled => limit,
-        HttpSaveMode::Required => limit.max(DEFAULT_SAVE_RESPONSE_BODY_LIMIT),
+        HttpSaveMode::Required => limit,
     })
 }
 
@@ -499,6 +487,7 @@ fn response_headers(headers: Vec<(String, String)>) -> (Value, bool) {
     let mut headers_truncated = headers.len() > MAX_MODEL_VISIBLE_RESPONSE_HEADERS;
     let mut value_truncated = false;
     let mut visible_headers = Vec::new();
+    let mut serialized_content_len = 0_usize;
     for (index, (name, value)) in headers.into_iter().enumerate() {
         if index >= MAX_MODEL_VISIBLE_RESPONSE_HEADERS {
             break;
@@ -519,14 +508,17 @@ fn response_headers(headers: Vec<(String, String)>) -> (Value, bool) {
             header.insert("truncated".to_string(), json!(true));
         }
         let header = Value::Object(header);
-        let mut candidate_headers = visible_headers.clone();
-        candidate_headers.push(header.clone());
-        if serialized_json_len(&Value::Array(candidate_headers))
-            > MODEL_VISIBLE_HTTP_OUTPUT_OVERHEAD_BYTES
-        {
+        let candidate_content_len =
+            serialized_content_len.saturating_add(serialized_json_len(&header));
+        let candidate_separator_bytes = visible_headers.len();
+        let candidate_array_len = candidate_content_len
+            .saturating_add(candidate_separator_bytes)
+            .saturating_add(2);
+        if candidate_array_len > MODEL_VISIBLE_HTTP_HEADER_BYTES {
             headers_truncated = true;
             break;
         }
+        serialized_content_len = candidate_content_len;
         visible_headers.push(header);
     }
     (
@@ -538,7 +530,7 @@ fn response_headers(headers: Vec<(String, String)>) -> (Value, bool) {
 fn inline_body_budget(response_body_limit: u64, headers: &Value) -> u64 {
     let response_body_limit = usize::try_from(response_body_limit).unwrap_or(usize::MAX);
     let header_bytes = serialized_json_len(headers);
-    let excess_header_bytes = header_bytes.saturating_sub(MODEL_VISIBLE_HTTP_OUTPUT_OVERHEAD_BYTES);
+    let excess_header_bytes = header_bytes.saturating_sub(MODEL_VISIBLE_HTTP_HEADER_BYTES);
     let body_budget = response_body_limit
         .saturating_sub(excess_header_bytes)
         .max(1);
@@ -638,31 +630,40 @@ fn enforce_final_model_visible_output_budget(
     let final_budget = response_body_limit
         .saturating_add(MODEL_VISIBLE_HTTP_OUTPUT_OVERHEAD_BYTES)
         .saturating_sub(MODEL_VISIBLE_HTTP_TRUNCATION_ENVELOPE_BYTES);
-    let current_len = serialized_json_len(&Value::Object(output.clone()));
+    let current_len = serde_json::to_vec(output).map_or(usize::MAX, |serialized| serialized.len());
     if current_len <= final_budget {
         return None;
     }
     let excess_bytes = current_len.saturating_sub(final_budget);
-    if let Some(Value::String(body_text)) = output.get("body_text").cloned() {
-        let current_body_budget = serialized_json_content_len(&body_text);
-        let target_body_budget = current_body_budget.saturating_sub(excess_bytes);
-        let (body_text, _) = truncate_str_for_json_content_budget(&body_text, target_body_budget);
-        let returned_body_bytes = body_text.len();
-        output.insert(
-            "body_text".to_string(),
-            Value::String(body_text.to_string()),
-        );
+    if output.get("body_text").and_then(Value::as_str).is_some() {
+        let (body_text, returned_body_bytes) = {
+            let body_text = output
+                .get("body_text")
+                .and_then(Value::as_str)
+                .expect("checked body_text string");
+            let current_body_budget = serialized_json_content_len(body_text);
+            let target_body_budget = current_body_budget.saturating_sub(excess_bytes);
+            let (body_text, _) =
+                truncate_str_for_json_content_budget(body_text, target_body_budget);
+            (body_text.to_string(), body_text.len())
+        };
+        output.insert("body_text".to_string(), Value::String(body_text));
         mark_inline_body_truncated(output, returned_body_bytes);
         return Some(returned_body_bytes);
     }
-    if let Some(Value::String(body_base64)) = output.get("body_base64").cloned() {
-        let target_len = body_base64.len().saturating_sub(excess_bytes);
-        let target_len = target_len / 4 * 4;
-        output.insert(
-            "body_base64".to_string(),
-            Value::String(body_base64[..target_len].to_string()),
-        );
-        let returned_body_bytes = max_binary_bytes_for_base64_budget(target_len);
+    if output.get("body_base64").and_then(Value::as_str).is_some() {
+        let (body_base64, returned_body_bytes) = {
+            let body_base64 = output
+                .get("body_base64")
+                .and_then(Value::as_str)
+                .expect("checked body_base64 string");
+            let target_len = body_base64.len().saturating_sub(excess_bytes) / 4 * 4;
+            (
+                body_base64[..target_len].to_string(),
+                max_binary_bytes_for_base64_budget(target_len),
+            )
+        };
+        output.insert("body_base64".to_string(), Value::String(body_base64));
         mark_inline_body_truncated(output, returned_body_bytes);
         return Some(returned_body_bytes);
     }

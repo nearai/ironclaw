@@ -3381,6 +3381,126 @@ async fn host_http_egress_discards_staged_secret_on_pre_injection_error() {
     assert!(network_recorder.lock().unwrap().is_empty());
 }
 
+#[test]
+fn tool_call_http_egress_discards_staged_policy_and_secret_on_pre_transport_error() {
+    let network = RecordingNetwork::ok(NetworkHttpResponse {
+        status: 200,
+        headers: vec![],
+        body: b"large patch body".to_vec(),
+        usage: NetworkUsage {
+            request_bytes: 5,
+            response_bytes: 16,
+            resolved_ip: None,
+        },
+    });
+    let network_recorder = network.requests.clone();
+    let store = Arc::new(RecordingBodyStore::default().with_authorize_unavailable());
+    let scope = sample_scope();
+    let capability_id = sample_capability_id();
+    let handle = SecretHandle::new("api-token").unwrap();
+    let services = test_obligation_services();
+    stage_policy_sync(&services, &scope, &capability_id, sample_policy());
+    stage_secret_sync(
+        &services,
+        &scope,
+        &capability_id,
+        &handle,
+        "sk-staged-secret",
+    );
+    let service = services.host_http_egress_with_body_store(network, store);
+
+    block_on_test(
+        service.execute_for_model_visible_output(RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::FirstParty,
+            scope: scope.clone(),
+            capability_id: capability_id.clone(),
+            method: NetworkMethod::Get,
+            url: "https://api.example.test/v1/run".to_string(),
+            headers: vec![],
+            body: b"hello".to_vec(),
+            network_policy: sample_policy(),
+            credential_injections: vec![RuntimeCredentialInjection {
+                handle: handle.clone(),
+                source: RuntimeCredentialSource::StagedObligation {
+                    capability_id: capability_id.clone(),
+                },
+                target: RuntimeCredentialTarget::Header {
+                    name: "authorization".to_string(),
+                    prefix: Some("Bearer ".to_string()),
+                },
+                required: true,
+            }],
+            response_body_limit: Some(4096),
+            save_body_to: Some(save_target("/workspace/pr.diff")),
+            timeout_ms: None,
+        }),
+    )
+    .expect_err("tool-call pre-transport failure should fail closed");
+
+    let policy_retry = block_on_test(service.execute_for_model_visible_output(
+        RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::FirstParty,
+            scope: scope.clone(),
+            capability_id: capability_id.clone(),
+            method: NetworkMethod::Get,
+            url: "https://api.example.test/v1/run".to_string(),
+            headers: vec![],
+            body: b"hello".to_vec(),
+            network_policy: sample_policy(),
+            credential_injections: vec![],
+            response_body_limit: Some(4096),
+            save_body_to: None,
+            timeout_ms: None,
+        },
+    ))
+    .expect_err("pre-transport failure should discard staged policy");
+
+    assert!(matches!(
+        policy_retry,
+        RuntimeHttpEgressError::Network {
+            ref reason,
+            request_bytes: 0,
+            response_bytes: 0,
+        } if reason == "network_policy_missing"
+    ));
+
+    stage_policy_sync(&services, &scope, &capability_id, sample_policy());
+    let secret_retry = block_on_test(service.execute_for_model_visible_output(
+        RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::FirstParty,
+            scope: scope.clone(),
+            capability_id: capability_id.clone(),
+            method: NetworkMethod::Get,
+            url: "https://api.example.test/v1/run".to_string(),
+            headers: vec![],
+            body: b"hello".to_vec(),
+            network_policy: sample_policy(),
+            credential_injections: vec![RuntimeCredentialInjection {
+                handle,
+                source: RuntimeCredentialSource::StagedObligation {
+                    capability_id: capability_id.clone(),
+                },
+                target: RuntimeCredentialTarget::Header {
+                    name: "authorization".to_string(),
+                    prefix: Some("Bearer ".to_string()),
+                },
+                required: true,
+            }],
+            response_body_limit: Some(4096),
+            save_body_to: None,
+            timeout_ms: None,
+        },
+    ))
+    .expect_err("pre-transport failure should discard staged secret");
+
+    assert!(matches!(
+        secret_retry,
+        RuntimeHttpEgressError::Credential { ref reason }
+            if reason == "required credential is unavailable"
+    ));
+    assert!(network_recorder.lock().unwrap().is_empty());
+}
+
 #[tokio::test]
 async fn host_http_egress_fails_closed_when_body_store_write_fails() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {

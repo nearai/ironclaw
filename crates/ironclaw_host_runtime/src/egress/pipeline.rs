@@ -139,7 +139,7 @@ where
         })
 }
 
-pub(super) async fn dispatch_network_for_model_visible_output<N, S>(
+async fn dispatch_network_for_model_visible_output<N, S>(
     service: &HostHttpEgressService<N, S>,
     mut request: RuntimeHttpEgressRequest,
     network_policy: NetworkPolicy,
