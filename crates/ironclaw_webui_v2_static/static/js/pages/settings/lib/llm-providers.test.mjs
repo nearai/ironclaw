@@ -32,6 +32,17 @@ const builtinNeedsKey = (id) => ({
   default_model: "claude",
 });
 
+const builtinNeedsBaseUrl = (id) => ({
+  id,
+  name: id,
+  builtin: true,
+  adapter: "open_ai_completions",
+  api_key_required: false,
+  base_url_required: true,
+  has_api_key: true,
+  default_model: "model-x",
+});
+
 const customReady = (id) => ({
   id,
   name: id,
@@ -54,6 +65,10 @@ test("providerStatus returns 'ready' for configured non-active providers", () =>
 
 test("providerStatus returns 'setup' when an API key is missing", () => {
   assert.equal(providerStatus(builtinNeedsKey("anthropic"), {}, "nearai"), "setup");
+});
+
+test("providerStatus returns 'setup' when a required base URL is missing", () => {
+  assert.equal(providerStatus(builtinNeedsBaseUrl("openai"), {}, "nearai"), "setup");
 });
 
 test("groupProvidersByStatus buckets providers into active/ready/setup", () => {
@@ -117,5 +132,10 @@ test("groupProvidersByStatus honours builtin overrides when classifying", () => 
 
 test("groupProvidersByStatus returns empty arrays for missing buckets, not undefined", () => {
   const groups = groupProvidersByStatus([], {}, null);
+  assert.deepEqual(groups, { active: [], ready: [], setup: [] });
+});
+
+test("groupProvidersByStatus treats non-array input as empty", () => {
+  const groups = groupProvidersByStatus(null, {}, null);
   assert.deepEqual(groups, { active: [], ready: [], setup: [] });
 });

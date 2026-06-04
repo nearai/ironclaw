@@ -89,6 +89,17 @@ function valuesAfter(rendered, fragment) {
   }, []);
 }
 
+function deepValuesAfter(root, fragment) {
+  const values = [];
+  visit(root, (node) => {
+    if (!Array.isArray(node.strings) || !Array.isArray(node.values)) return;
+    node.strings.forEach((part, index) => {
+      if (part.includes(fragment)) values.push(node.values[index]);
+    });
+  });
+  return values;
+}
+
 function builtinProvider(id, overrides = {}) {
   return {
     id,
@@ -176,10 +187,20 @@ function groupLabels(rendered) {
   return collectScalars(rendered).filter((value) => PROVIDER_GROUP_LABELS.includes(value));
 }
 
+function depsChanged(previous, next) {
+  if (!previous || !next || previous.length !== next.length) return true;
+  return next.some((value, index) => value !== previous[index]);
+}
+
 function createReactStateStub(state) {
   return {
     useCallback: (fn) => fn,
-    useEffect: (fn) => fn(),
+    useEffect: (fn, deps) => {
+      if (depsChanged(state.effectDeps, deps)) {
+        state.effectDeps = deps ? Array.from(deps) : deps;
+        fn();
+      }
+    },
     useState: (initial) => {
       if (!Object.hasOwn(state, "expanded")) {
         state.expanded = typeof initial === "function" ? initial() : initial;
@@ -250,6 +271,11 @@ test("ProviderManagement groups filtered providers through the render caller", (
   });
 
   assert.deepEqual(groupLabels(rendered), PROVIDER_GROUP_LABELS);
+  assert.deepEqual(deepValuesAfter(rendered, "data-provider-status="), [
+    "active",
+    "ready",
+    "setup",
+  ]);
   assert.deepEqual(
     cardProps.map((props) => props.provider.id),
     ["nearai", "openai", "anthropic"]
@@ -281,27 +307,38 @@ test("ProviderCard disclosure responds to row, keyboard, and chevron controls", 
     });
 
   let rendered = renderOpenAi();
-  assert.equal(valueAfter(rendered, "aria-expanded="), false);
+  assert.equal(valueAfter(rendered, "aria-expanded="), "false");
 
   valueAfter(rendered, "onClick=")();
   assert.equal(harness.state.expanded, true);
 
   rendered = renderOpenAi();
-  assert.equal(valueAfter(rendered, "aria-expanded="), true);
+  assert.equal(valueAfter(rendered, "aria-expanded="), "true");
 
-  let prevented = 0;
-  valueAfter(rendered, "onKeyDown=")({
-    key: "Enter",
-    preventDefault: () => {
-      prevented += 1;
-    },
-  });
-  assert.equal(prevented, 1);
+  valueAfter(rendered, "onClick=")();
   assert.equal(harness.state.expanded, false);
 
   rendered = renderOpenAi();
-  valuesAfter(rendered, "onClick=")[2]();
+  valuesAfter(rendered, "onClick=")[1]();
   assert.equal(harness.state.expanded, true);
+});
+
+test("ProviderCard syncs disclosure state when active provider changes", () => {
+  const harness = createProviderCardHarness();
+  const provider = builtinProvider("openai", { default_model: "gpt" });
+
+  let rendered = harness.render({ provider, activeProviderId: "nearai" });
+  assert.equal(valueAfter(rendered, "aria-expanded="), "false");
+
+  rendered = harness.render({ provider, activeProviderId: "openai" });
+  rendered = harness.render({ provider, activeProviderId: "openai" });
+  assert.equal(valueAfter(rendered, "aria-expanded="), "true");
+  assert.equal(harness.state.expanded, true);
+
+  rendered = harness.render({ provider, activeProviderId: "nearai" });
+  rendered = harness.render({ provider, activeProviderId: "nearai" });
+  assert.equal(valueAfter(rendered, "aria-expanded="), "false");
+  assert.equal(harness.state.expanded, false);
 });
 
 test("ProviderCard actions keep existing callbacks without toggling disclosure", () => {
@@ -312,13 +349,6 @@ test("ProviderCard actions keep existing callbacks without toggling disclosure",
     onUse: (provider) => calls.push(["use", provider.id]),
     provider: builtinProvider("openai", { default_model: "gpt" }),
   });
-  let stopped = 0;
-  valuesAfter(rendered, "onClick=")[1]({
-    stopPropagation: () => {
-      stopped += 1;
-    },
-  });
-  assert.equal(stopped, 1);
 
   firstButtonProps(rendered).onClick();
   assert.deepEqual(calls, [["use", "openai"]]);

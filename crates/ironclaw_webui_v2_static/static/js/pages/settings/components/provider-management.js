@@ -84,14 +84,19 @@ export function ProviderManagement({ settings, gatewayStatus, searchQuery = "" }
                 const items = groups[group.key];
                 if (!items.length) return [];
                 return [
-                  html`<${GroupHeader}
-                    key=${"head-" + group.key}
-                    label=${t(group.labelKey)}
-                    count=${items.length}
-                    dotClass=${group.dotClass}
-                  />`,
                   html`
-                    <div key=${"body-" + group.key} className="mb-3 space-y-2">
+                    <section
+                      key=${group.key}
+                      data-testid="llm-provider-group"
+                      data-provider-status=${group.key}
+                      className="mb-3"
+                    >
+                      <${GroupHeader}
+                        label=${t(group.labelKey)}
+                        count=${items.length}
+                        dotClass=${group.dotClass}
+                      />
+                      <div className="space-y-2">
                       ${items.map(
                         (provider) => html`
                           <${ProviderCard}
@@ -107,7 +112,8 @@ export function ProviderManagement({ settings, gatewayStatus, searchQuery = "" }
                           />
                         `
                       )}
-                    </div>
+                      </div>
+                    </section>
                   `,
                 ];
               })}

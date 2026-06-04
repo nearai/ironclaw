@@ -71,8 +71,10 @@ export function providerStatus(provider, overrides, activeProviderId) {
 
 export function groupProvidersByStatus(providers, overrides, activeProviderId) {
   const buckets = { active: [], ready: [], setup: [] };
+  if (!Array.isArray(providers)) return buckets;
   for (const provider of providers) {
-    buckets[providerStatus(provider, overrides, activeProviderId)].push(provider);
+    const status = providerStatus(provider, overrides, activeProviderId);
+    if (buckets[status]) buckets[status].push(provider);
   }
   return buckets;
 }
