@@ -48,6 +48,7 @@ use live_progress::{
 use runtime_replay::{
     RuntimePayloadCandidate, replay_payload_candidates, snapshot_payload_candidates,
 };
+pub(crate) use turn_events::auth_prompt_view_for_blocked_auth;
 use turn_events::{
     FailureExplanationProvider, ModelFailureExplanationProvider, TurnEventBridge, TurnEventPayload,
 };

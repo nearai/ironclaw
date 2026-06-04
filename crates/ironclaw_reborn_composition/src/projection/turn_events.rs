@@ -333,49 +333,19 @@ async fn blocked_prompt_payload(
     let gate_ref_str = gate_ref.as_str().to_string();
     match event.status {
         TurnStatus::BlockedAuth => {
-            // Enrich the prompt with auth-flow metadata when the provider is
-            // available. Missing = backward-compatible (fields omitted as None).
-            let owner_user_id = event.owner_user_id.as_ref().unwrap_or(caller_user_id);
-            let challenge = match auth_challenges {
-                Some(provider) => provider
-                    .challenge_for_gate(
-                        &event.scope,
-                        owner_user_id,
-                        event.run_id,
-                        &gate_ref_str,
-                        &state.credential_requirements,
-                    )
-                    .await
-                    .map_err(|error| {
-                        tracing::debug!(
-                            %error,
-                            run_id = %event.run_id,
-                            "auth challenge lookup failed during WebUI projection"
-                        );
-                        ProductAdapterError::WorkflowTransient {
-                            reason: RedactedString::new("auth challenge lookup failed"),
-                        }
-                    })?,
-                None => None,
-            };
-            let base_view = AuthPromptView {
-                turn_run_id: event.run_id,
-                auth_request_ref: gate_ref_str,
-                headline: "Authentication required".to_string(),
-                body: event
+            let view = auth_prompt_view_for_blocked_auth(
+                event.owner_user_id.as_ref().unwrap_or(caller_user_id),
+                &event.scope,
+                event.run_id,
+                &gate_ref_str,
+                event
                     .sanitized_reason
                     .clone()
                     .unwrap_or_else(|| "Authenticate to continue this run.".to_string()),
-                challenge_kind: None,
-                provider: None,
-                account_label: None,
-                authorization_url: None,
-                expires_at: None,
-            };
-            let view = match challenge {
-                Some(c) => c.enrich(base_view),
-                None => auth_prompt_from_credential_requirement(base_view, &state),
-            };
+                &state.credential_requirements,
+                auth_challenges,
+            )
+            .await?;
             Ok(Some(ProductOutboundPayload::AuthPrompt(view)))
         }
         TurnStatus::BlockedApproval => {
@@ -399,11 +369,65 @@ async fn blocked_prompt_payload(
     }
 }
 
+pub(crate) async fn auth_prompt_view_for_blocked_auth(
+    fallback_owner_user_id: &ironclaw_host_api::UserId,
+    scope: &TurnScope,
+    run_id: TurnRunId,
+    gate_ref: &str,
+    body: String,
+    credential_requirements: &[ironclaw_host_api::RuntimeCredentialAuthRequirement],
+    auth_challenges: Option<&dyn AuthChallengeProvider>,
+) -> Result<AuthPromptView, ProductAdapterError> {
+    // Enrich the prompt with auth-flow metadata when the provider is available.
+    // Explicit turn owners represent shared/team subjects; actor fallback keeps
+    // the existing personal/WebUI behavior for legacy scopes.
+    let owner_user_id = scope
+        .explicit_owner_user_id()
+        .unwrap_or(fallback_owner_user_id);
+    let challenge = match auth_challenges {
+        Some(provider) => provider
+            .challenge_for_gate(
+                scope,
+                owner_user_id,
+                run_id,
+                gate_ref,
+                credential_requirements,
+            )
+            .await
+            .map_err(|error| {
+                tracing::debug!(
+                    %error,
+                    %run_id,
+                    "auth challenge lookup failed during prompt projection"
+                );
+                ProductAdapterError::WorkflowTransient {
+                    reason: RedactedString::new("auth challenge lookup failed"),
+                }
+            })?,
+        None => None,
+    };
+    let base_view = AuthPromptView {
+        turn_run_id: run_id,
+        auth_request_ref: gate_ref.to_string(),
+        headline: "Authentication required".to_string(),
+        body,
+        challenge_kind: None,
+        provider: None,
+        account_label: None,
+        authorization_url: None,
+        expires_at: None,
+    };
+    Ok(match challenge {
+        Some(c) => c.enrich(base_view),
+        None => auth_prompt_from_credential_requirement(base_view, credential_requirements),
+    })
+}
+
 fn auth_prompt_from_credential_requirement(
     mut view: AuthPromptView,
-    state: &ironclaw_turns::TurnRunState,
+    credential_requirements: &[ironclaw_host_api::RuntimeCredentialAuthRequirement],
 ) -> AuthPromptView {
-    let [requirement] = state.credential_requirements.as_slice() else {
+    let [requirement] = credential_requirements else {
         return view;
     };
     let provider = requirement.provider.as_str().to_string();

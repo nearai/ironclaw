@@ -641,6 +641,14 @@ impl RebornRuntime {
         self.auth_interaction_service.clone()
     }
 
+    #[cfg(feature = "slack-v2-host-beta")]
+    pub(crate) fn auth_challenge_provider(&self) -> Option<Arc<dyn crate::AuthChallengeProvider>> {
+        self.services
+            .product_auth
+            .as_ref()
+            .and_then(|product_auth| product_auth.as_auth_challenge_provider())
+    }
+
     #[cfg(test)]
     fn webui_approval_audit_sink(&self) -> Arc<InMemoryAuditSink> {
         self.approval_audit_sink.clone()
