@@ -253,17 +253,21 @@ function applyProjectionItems({
         failure_summary: failureSummary,
       } = item.run_status;
       const isTerminalStatus = TERMINAL_RUN_STATUSES.has(status);
+      const currentRunId = activeRunId ?? latestRunIdRef?.current ?? null;
       const isStaleTerminalStatus = Boolean(
         isTerminalStatus &&
           runId &&
-          latestRunIdRef?.current &&
-          latestRunIdRef.current !== runId,
+          currentRunId &&
+          currentRunId !== runId,
       );
       if (isStaleTerminalStatus) {
         continue;
       }
       if (runId) {
         activeRunId = runId;
+        if (!isTerminalStatus && latestRunIdRef) {
+          latestRunIdRef.current = runId;
+        }
         setActiveRun?.((current) =>
           current && current.runId === runId
             ? { ...current, status }

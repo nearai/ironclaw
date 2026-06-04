@@ -282,7 +282,30 @@ test("useChatEvents: stale terminal run status does not clear newer run", () => 
     type: "projection_update",
     frame: {
       state: {
-        items: [{ run_status: { run_id: "run-2", status: "running" } }],
+        items: [
+          { run_status: { run_id: "run-2", status: "running" } },
+          { run_status: { run_id: "run-1", status: "cancelled" } },
+        ],
+      },
+    },
+  });
+
+  assert.equal(harness.isProcessing, true);
+  assert.deepEqual(plain(harness.activeRun), {
+    runId: "run-2",
+    threadId: "thread-1",
+    status: "running",
+  });
+});
+
+test("useChatEvents: stale failed run status does not append error", () => {
+  const harness = createUseChatEventsHarness();
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [{ run_status: { run_id: "run-1", status: "running" } }],
       },
     },
   });
@@ -290,12 +313,16 @@ test("useChatEvents: stale terminal run status does not clear newer run", () => 
     type: "projection_update",
     frame: {
       state: {
-        items: [{ run_status: { run_id: "run-1", status: "cancelled" } }],
+        items: [
+          { run_status: { run_id: "run-2", status: "running" } },
+          { run_status: { run_id: "run-1", status: "failed" } },
+        ],
       },
     },
   });
 
   assert.equal(harness.isProcessing, true);
+  assert.deepEqual(harness.messages, []);
   assert.deepEqual(plain(harness.activeRun), {
     runId: "run-2",
     threadId: "thread-1",
