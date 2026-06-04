@@ -402,19 +402,24 @@ pub(super) async fn google_oauth_callback_handler(
                 return Err(error);
             }
         };
+    let requested_scopes = callback_state.requested_scopes();
     let callback_scopes = match parse_google_callback_scopes(query.scopes.as_deref()) {
-        Ok(callback_scopes) => {
-            callback_scopes.unwrap_or_else(|| callback_state.requested_scopes().to_vec())
+        Ok(Some(callback_scopes)) => {
+            if let Err(error) = validate_google_callback_includes_requested_scopes(
+                &callback_scopes,
+                requested_scopes,
+            ) {
+                state.remove_pkce_verifier(flow_id);
+                return Err(error);
+            }
+            requested_scopes.to_vec()
         }
+        Ok(None) => requested_scopes.to_vec(),
         Err(error) => {
             state.remove_pkce_verifier(flow_id);
             return Err(ProductAuthRouteFailure::from(error));
         }
     };
-    if callback_scopes.is_empty() {
-        state.remove_pkce_verifier(flow_id);
-        return Err(ProductAuthRouteFailure::malformed_callback());
-    }
     let authorization_code_hash = authorization_code_hash(code.expose_secret())?;
     let pkce_verifier_hash = pkce_verifier_hash(pkce_verifier.expose_secret())?;
 
@@ -456,6 +461,20 @@ pub(super) async fn google_oauth_callback_handler(
     };
 
     Ok(oauth_callback_response(&headers, response))
+}
+
+fn validate_google_callback_includes_requested_scopes(
+    callback_scopes: &[ProviderScope],
+    requested_scopes: &[ProviderScope],
+) -> Result<(), ProductAuthRouteFailure> {
+    if callback_scopes.is_empty()
+        || !requested_scopes
+            .iter()
+            .all(|requested| callback_scopes.iter().any(|scope| scope == requested))
+    {
+        return Err(ProductAuthRouteFailure::malformed_callback());
+    }
+    Ok(())
 }
 
 fn oauth_callback_response(headers: &HeaderMap, response: RebornOAuthCallbackResponse) -> Response {
