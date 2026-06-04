@@ -122,7 +122,7 @@ where
         self.gate_store
             .record_child_terminal(event.run_id, terminal_event_from_lifecycle(&event))
             .map_err(map_host_error)?;
-        self.recover_missing_gate_record(&event, has_gate_record)
+        self.recover_missing_gate_record(&event, has_gate_record, child_record.as_ref())
             .await?;
         let claimed = self
             .gate_store
@@ -177,10 +177,12 @@ where
                 .await
                 .map_err(map_host_error)?;
         }
-        for (record, terminal_event, should_resume_parent) in blocking_resumes {
-            if should_resume_parent {
-                self.resume_parent(&terminal_event, &record).await?;
+        for (record, terminal_event, should_resume_parent) in &blocking_resumes {
+            if *should_resume_parent {
+                self.resume_parent(terminal_event, record).await?;
             }
+        }
+        for (record, _, _) in blocking_resumes {
             self.mark_child_delivered(&record).await?;
         }
         for record in background_deliveries {
@@ -269,11 +271,12 @@ where
         &self,
         event: &TurnLifecycleEvent,
         has_gate_record: bool,
+        child_record: Option<&TurnRunRecord>,
     ) -> Result<(), TurnError> {
         if has_gate_record {
             return Ok(());
         }
-        let Some(record) = self.reconstruct_record(event).await? else {
+        let Some(record) = self.reconstruct_record(event, child_record).await? else {
             return Ok(());
         };
         self.gate_store
@@ -289,13 +292,21 @@ where
     async fn reconstruct_record(
         &self,
         event: &TurnLifecycleEvent,
+        child_record: Option<&TurnRunRecord>,
     ) -> Result<Option<AwaitedChildSetRecord>, TurnError> {
-        let Some(child_record) = self
-            .turn_state_store
-            .get_run_record(&event.scope, event.run_id)
-            .await?
-        else {
-            return Ok(None);
+        let owned_child_record;
+        let child_record = if let Some(child_record) = child_record {
+            child_record
+        } else {
+            let Some(record) = self
+                .turn_state_store
+                .get_run_record(&event.scope, event.run_id)
+                .await?
+            else {
+                return Ok(None);
+            };
+            owned_child_record = record;
+            &owned_child_record
         };
         let child_thread_scope = thread_scope_from_turn_scope(&child_record.scope, event)?;
         let child_thread = self
@@ -347,7 +358,7 @@ where
         };
         Ok(Some(awaited_child_record_from_persisted(
             parent_record,
-            child_record,
+            child_record.clone(),
             metadata,
         )?))
     }
@@ -1032,6 +1043,81 @@ mod tests {
         }
     }
 
+    struct FailOnNthResumeCoordinator {
+        fail_on_call: usize,
+        calls: Mutex<usize>,
+        resumed: Mutex<Vec<ResumeTurnRequest>>,
+    }
+
+    impl FailOnNthResumeCoordinator {
+        fn new(fail_on_call: usize) -> Self {
+            Self {
+                fail_on_call,
+                calls: Mutex::new(0),
+                resumed: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl TurnCoordinator for FailOnNthResumeCoordinator {
+        async fn prepare_turn(&self, _scope: TurnScope) -> Result<TurnRunId, TurnError> {
+            Ok(TurnRunId::new())
+        }
+
+        async fn submit_turn(
+            &self,
+            _request: SubmitTurnRequest,
+        ) -> Result<SubmitTurnResponse, TurnError> {
+            Err(TurnError::Unavailable {
+                reason: "submit not used by completion observer tests".to_string(),
+            })
+        }
+
+        async fn resume_turn(
+            &self,
+            request: ResumeTurnRequest,
+        ) -> Result<ResumeTurnResponse, TurnError> {
+            let mut calls = self.calls.lock().unwrap();
+            *calls += 1;
+            if *calls == self.fail_on_call {
+                return Err(TurnError::Unavailable {
+                    reason: "injected resume failure".to_string(),
+                });
+            }
+            self.resumed.lock().unwrap().push(request.clone());
+            Ok(ResumeTurnResponse {
+                run_id: request.run_id,
+                status: TurnStatus::Queued,
+                event_cursor: EventCursor(10),
+            })
+        }
+
+        async fn cancel_run(
+            &self,
+            request: CancelRunRequest,
+        ) -> Result<CancelRunResponse, TurnError> {
+            Err(TurnError::Unavailable {
+                reason: format!(
+                    "cancel not used by completion observer tests: {}",
+                    request.run_id
+                ),
+            })
+        }
+
+        async fn get_run_state(
+            &self,
+            request: GetRunStateRequest,
+        ) -> Result<TurnRunState, TurnError> {
+            Err(TurnError::Unavailable {
+                reason: format!(
+                    "get_run_state not used by completion observer tests: {}",
+                    request.run_id
+                ),
+            })
+        }
+    }
+
     #[test]
     fn parse_subagent_thread_metadata_rejects_invalid_json() {
         assert!(parse_subagent_thread_metadata("{not json").is_err());
@@ -1077,6 +1163,21 @@ mod tests {
     #[tracing_test::traced_test]
     fn parse_optional_subagent_thread_metadata_warns_on_invalid_json_without_raw_preview() {
         let raw = "{not json";
+        assert_eq!(
+            parse_optional_subagent_thread_metadata(Some(raw), TurnRunId::new()).unwrap(),
+            None
+        );
+
+        assert!(logs_contain(
+            "subagent completion recovery ignored malformed thread metadata"
+        ));
+        assert!(!logs_contain(raw));
+    }
+
+    #[test]
+    #[tracing_test::traced_test]
+    fn parse_optional_subagent_thread_metadata_warns_when_kind_subagent_but_body_malformed() {
+        let raw = r#"{"kind":"subagent"}"#;
         assert_eq!(
             parse_optional_subagent_thread_metadata(Some(raw), TurnRunId::new()).unwrap(),
             None
@@ -1358,6 +1459,7 @@ mod tests {
     struct RecordingTurnStateStore {
         releases: Mutex<Vec<(TurnScope, TurnRunId, u32)>>,
         records: Mutex<Vec<TurnRunRecord>>,
+        run_record_lookups: Mutex<Vec<(TurnScope, TurnRunId)>>,
     }
 
     impl RecordingTurnStateStore {
@@ -1367,6 +1469,17 @@ mod tests {
 
         fn add_record(&self, record: TurnRunRecord) {
             self.records.lock().unwrap().push(record);
+        }
+
+        fn run_record_lookup_count(&self, scope: &TurnScope, run_id: TurnRunId) -> usize {
+            self.run_record_lookups
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(lookup_scope, lookup_run_id)| {
+                    lookup_scope == scope && *lookup_run_id == run_id
+                })
+                .count()
         }
     }
 
@@ -1437,6 +1550,10 @@ mod tests {
             scope: &TurnScope,
             run_id: TurnRunId,
         ) -> Result<Option<TurnRunRecord>, TurnError> {
+            self.run_record_lookups
+                .lock()
+                .unwrap()
+                .push((scope.clone(), run_id));
             Ok(self
                 .records
                 .lock()
@@ -1623,6 +1740,60 @@ mod tests {
             blocked_gate: None,
             sanitized_reason: None,
         }
+    }
+
+    #[tokio::test]
+    async fn handle_claimed_states_returns_unavailable_when_terminal_event_missing() {
+        let observer = empty_observer();
+        let mut parent_run_context =
+            ironclaw_agent_loop::test_support::test_run_context("missing-terminal-parent");
+        let parent_run_id = TurnRunId::new();
+        parent_run_context.run_id = parent_run_id;
+        let child_scope = TurnScope::new(
+            parent_run_context.scope.tenant_id.clone(),
+            parent_run_context.scope.agent_id.clone(),
+            parent_run_context.scope.project_id.clone(),
+            ThreadId::new("missing-terminal-child").unwrap(),
+        );
+        let child_run_id = TurnRunId::new();
+        let state = AwaitedChildState {
+            record: AwaitedChildSetRecord {
+                gate_ref: GateRef::new("gate:subagent-missing-terminal").unwrap(),
+                parent_run_context,
+                tree_root_run_id: parent_run_id,
+                child_scope: child_scope.clone(),
+                child_run_id,
+                child_thread_id: child_scope.thread_id,
+                source_binding_ref: SourceBindingRef::new("subagent-source:missing-terminal")
+                    .unwrap(),
+                reply_target_binding_ref: ReplyTargetBindingRef::new(
+                    "subagent-reply:missing-terminal",
+                )
+                .unwrap(),
+                subagent_kind: SubagentKindId::new("general").unwrap(),
+                spawn_capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID)
+                    .unwrap(),
+                result_ref: LoopResultRef::new("result:subagent.missing-terminal").unwrap(),
+                mode: SpawnSubagentMode::Blocking,
+            },
+            terminal_status: None,
+            terminal_event: None,
+            terminal_result_written: false,
+            descendant_reservation_release_claimed: false,
+            descendant_reservation_released: false,
+            delivery_claimed: true,
+            delivered_to_parent: false,
+        };
+
+        let error = observer
+            .handle_claimed_terminal_states(vec![state])
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(error, TurnError::Unavailable { ref reason } if reason.contains("without terminal metadata")),
+            "missing terminal metadata should return typed unavailable error, got {error:?}"
+        );
     }
 
     #[tokio::test]
@@ -2347,7 +2518,7 @@ mod tests {
         observer
             .handle_terminal(&TurnLifecycleEvent {
                 cursor: EventCursor(11),
-                scope: child_scope,
+                scope: child_scope.clone(),
                 occurred_at: None,
                 owner_user_id: None,
                 run_id: child_run_id,
@@ -2369,6 +2540,11 @@ mod tests {
         assert_eq!(writes[0]["final_text"], "|||final reconstructed answer|||");
         assert_eq!(writes[0]["terminal_event"]["kind"], "completed");
         assert_eq!(writes[0]["terminal_event"]["cursor"], 11);
+        assert_eq!(
+            turn_state_store.run_record_lookup_count(&child_scope, child_run_id),
+            1,
+            "restart recovery should reuse handle_terminal's child run record lookup"
+        );
     }
 
     #[tokio::test]
@@ -3111,6 +3287,227 @@ mod tests {
         let resumed = coordinator.resumed.lock().unwrap().clone();
         assert_eq!(resumed.len(), 1);
         assert_eq!(resumed[0].gate_resolution_ref, gate_ref);
+    }
+
+    #[tokio::test]
+    async fn blocking_batch_resume_failure_does_not_mark_earlier_child_delivered() {
+        let tenant = TenantId::new("tenant").unwrap();
+        let agent = AgentId::new("agent").unwrap();
+        let owner = UserId::new("owner").unwrap();
+        let parent_scope = TurnScope::new(
+            tenant.clone(),
+            Some(agent.clone()),
+            None,
+            ThreadId::new("blocking-failure-parent-thread").unwrap(),
+        );
+        let parent_thread_scope = ThreadScope {
+            tenant_id: tenant.clone(),
+            agent_id: agent.clone(),
+            project_id: None,
+            owner_user_id: Some(owner.clone()),
+            mission_id: None,
+        };
+        let child_a_scope = TurnScope::new(
+            tenant.clone(),
+            Some(agent.clone()),
+            None,
+            ThreadId::new("blocking-failure-child-a-thread").unwrap(),
+        );
+        let child_b_scope = TurnScope::new(
+            tenant,
+            Some(agent),
+            None,
+            ThreadId::new("blocking-failure-child-b-thread").unwrap(),
+        );
+        let child_thread_scope = ThreadScope {
+            tenant_id: parent_thread_scope.tenant_id.clone(),
+            agent_id: parent_thread_scope.agent_id.clone(),
+            project_id: None,
+            owner_user_id: Some(owner.clone()),
+            mission_id: None,
+        };
+        let parent_run_id = TurnRunId::new();
+        let child_a_run_id = TurnRunId::new();
+        let child_b_run_id = TurnRunId::new();
+        let result_a_ref = LoopResultRef::new("result:subagent.blocking-failure-a").unwrap();
+        let result_b_ref = LoopResultRef::new("result:subagent.blocking-failure-b").unwrap();
+        let gate_a_ref = GateRef::new("gate:subagent-blocking-failure-a").unwrap();
+        let gate_b_ref = GateRef::new("gate:subagent-blocking-failure-b").unwrap();
+
+        let turn_state_store = Arc::new(RecordingTurnStateStore::default());
+        let thread_service = Arc::new(InMemorySessionThreadService::default());
+        thread_service
+            .ensure_thread(EnsureThreadRequest {
+                scope: parent_thread_scope.clone(),
+                thread_id: Some(parent_scope.thread_id.clone()),
+                created_by_actor_id: "test".to_string(),
+                title: None,
+                metadata_json: None,
+            })
+            .await
+            .unwrap();
+        for result_ref in [&result_a_ref, &result_b_ref] {
+            thread_service
+                .append_tool_result_reference(AppendToolResultReferenceRequest {
+                    scope: parent_thread_scope.clone(),
+                    thread_id: parent_scope.thread_id.clone(),
+                    turn_run_id: parent_run_id.to_string(),
+                    result_ref: result_ref.as_str().to_string(),
+                    safe_summary: ToolResultSafeSummary::new("subagent spawned blocking").unwrap(),
+                    provider_call: None,
+                })
+                .await
+                .unwrap();
+        }
+        for (scope, run_id, final_text) in [
+            (
+                child_a_scope.clone(),
+                child_a_run_id,
+                "first blocking child final",
+            ),
+            (
+                child_b_scope.clone(),
+                child_b_run_id,
+                "second blocking child final",
+            ),
+        ] {
+            thread_service
+                .ensure_thread(EnsureThreadRequest {
+                    scope: child_thread_scope.clone(),
+                    thread_id: Some(scope.thread_id.clone()),
+                    created_by_actor_id: "test".to_string(),
+                    title: None,
+                    metadata_json: None,
+                })
+                .await
+                .unwrap();
+            let draft = thread_service
+                .append_assistant_draft(AppendAssistantDraftRequest {
+                    scope: child_thread_scope.clone(),
+                    thread_id: scope.thread_id.clone(),
+                    turn_run_id: run_id.to_string(),
+                    content: MessageContent::text("draft"),
+                })
+                .await
+                .unwrap();
+            thread_service
+                .finalize_assistant_message(
+                    &child_thread_scope,
+                    &scope.thread_id,
+                    draft.message_id,
+                    MessageContent::text(final_text),
+                )
+                .await
+                .unwrap();
+        }
+
+        let gate_store = Arc::new(BoundedSubagentGateResolutionStore::new());
+        let goal_store = Arc::new(InMemoryBoundedSubagentGoalStore::new());
+        let mut parent_run_context =
+            ironclaw_agent_loop::test_support::test_run_context("blocking-resume-failure");
+        parent_run_context.scope = parent_scope.clone();
+        parent_run_context.thread_id = parent_scope.thread_id.clone();
+        parent_run_context.run_id = parent_run_id;
+        let records = [
+            (
+                gate_a_ref.clone(),
+                child_a_scope.clone(),
+                child_a_run_id,
+                result_a_ref.clone(),
+            ),
+            (
+                gate_b_ref.clone(),
+                child_b_scope.clone(),
+                child_b_run_id,
+                result_b_ref.clone(),
+            ),
+        ]
+        .map(
+            |(gate_ref, child_scope, child_run_id, result_ref)| AwaitedChildSetRecord {
+                gate_ref,
+                parent_run_context: parent_run_context.clone(),
+                tree_root_run_id: parent_run_id,
+                child_scope: child_scope.clone(),
+                child_run_id,
+                child_thread_id: child_scope.thread_id,
+                source_binding_ref: SourceBindingRef::new(format!(
+                    "subagent-source:{child_run_id}"
+                ))
+                .unwrap(),
+                reply_target_binding_ref: ReplyTargetBindingRef::new(format!(
+                    "subagent-reply:{child_run_id}"
+                ))
+                .unwrap(),
+                subagent_kind: SubagentKindId::new("general").unwrap(),
+                spawn_capability_id: CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID)
+                    .unwrap(),
+                result_ref,
+                mode: SpawnSubagentMode::Blocking,
+            },
+        );
+        for record in &records {
+            gate_store
+                .record_awaited_child(record.clone())
+                .await
+                .unwrap();
+        }
+
+        let result_writer = Arc::new(RecordingResultWriter::new(result_a_ref));
+        let coordinator = Arc::new(FailOnNthResumeCoordinator::new(2));
+        let observer = SubagentCompletionObserver::new(
+            Arc::clone(&gate_store),
+            goal_store,
+            turn_state_store,
+            result_writer,
+            coordinator.clone(),
+            thread_service,
+        )
+        .unwrap();
+        let states = records
+            .iter()
+            .cloned()
+            .map(|record| AwaitedChildState {
+                record,
+                terminal_status: Some(TurnStatus::Completed),
+                terminal_event: Some(AwaitedChildTerminalEvent {
+                    status: TurnStatus::Completed,
+                    kind: TurnEventKind::Completed,
+                    cursor: EventCursor(30),
+                    sanitized_reason: None,
+                    owner_user_id: Some(owner.clone()),
+                }),
+                terminal_result_written: true,
+                descendant_reservation_release_claimed: false,
+                descendant_reservation_released: false,
+                delivery_claimed: true,
+                delivered_to_parent: false,
+            })
+            .collect::<Vec<_>>();
+
+        let error = observer
+            .handle_claimed_terminal_states(states)
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(error, TurnError::Unavailable { ref reason } if reason.contains("injected resume failure")),
+            "second resume should surface injected failure, got {error:?}"
+        );
+        assert_eq!(
+            coordinator.resumed.lock().unwrap().len(),
+            1,
+            "first resume should have happened before second resume failed"
+        );
+        for gate_ref in [&gate_a_ref, &gate_b_ref] {
+            assert!(
+                !gate_store
+                    .state_for_gate(gate_ref)
+                    .unwrap()
+                    .unwrap()
+                    .delivered_to_parent,
+                "delivery must not be marked until every blocking resume succeeds"
+            );
+        }
     }
 
     #[tokio::test]

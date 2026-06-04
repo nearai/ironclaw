@@ -681,6 +681,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mark_child_delivered_returns_false_for_partial_gate_and_true_when_all_delivered() {
+        let store = BoundedSubagentGateResolutionStore::new();
+        let child_a = TurnRunId::new();
+        let child_b = TurnRunId::new();
+        let gate = GateRef::new("gate:subagent-batch-child-delivered-bool").unwrap();
+        store
+            .record_awaited_child(record(gate.as_str(), child_a))
+            .await
+            .unwrap();
+        store
+            .record_awaited_child(record(gate.as_str(), child_b))
+            .await
+            .unwrap();
+
+        assert!(
+            !store.mark_child_delivered(&gate, child_a).unwrap(),
+            "first child delivery should leave the shared gate incomplete"
+        );
+        assert!(
+            store.mark_child_delivered(&gate, child_b).unwrap(),
+            "second child delivery should complete the shared gate"
+        );
+    }
+
+    #[tokio::test]
     async fn terminal_child_claims_one_state_at_a_time() {
         let store = BoundedSubagentGateResolutionStore::new();
         let child_run_id = TurnRunId::new();
