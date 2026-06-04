@@ -667,22 +667,33 @@ impl PostgresPredicateStateBackend {
                 // transaction rolls back (this record is not applied) and the
                 // evaluator maps the error restrictively — same posture as the
                 // per-key cap's `WindowOverflow`. A retry (or a concurrent
-                // recorder finishing) clears the contention.
-                return Err(PredicateBackendError::Unavailable(format!(
-                    "per-tenant key quota ({MAX_KEYS_PER_TENANT}) could not be \
-                     enforced: every stale eviction candidate is locked by an \
-                     in-flight recorder; failing closed rather than committing \
-                     an over-quota scope"
-                )));
+                // recorder finishing) clears the contention. The operational
+                // detail (the quota constant, the contention state) stays in
+                // the debug log; the caller-facing message is the sanitized
+                // constant, matching the `DB_UNAVAILABLE_MSG` contract so the
+                // evaluator only observes the error type, not the payload.
+                tracing::debug!(
+                    max_keys_per_tenant = MAX_KEYS_PER_TENANT,
+                    "scope quota enforcement contended: every stale eviction \
+                     candidate is locked by an in-flight recorder; failing \
+                     closed rather than committing an over-quota scope"
+                );
+                return Err(PredicateBackendError::Unavailable(
+                    QUOTA_CONTENDED_MSG.to_string(),
+                ));
             }
         }
 
         // Exhausted the pass budget while still over quota: treat the same as
         // an unenforceable cap and fail closed rather than commit over-quota.
-        Err(PredicateBackendError::Unavailable(format!(
-            "per-tenant key quota ({MAX_KEYS_PER_TENANT}) not met after \
-             {MAX_PASSES} eviction passes; failing closed"
-        )))
+        tracing::debug!(
+            max_keys_per_tenant = MAX_KEYS_PER_TENANT,
+            max_passes = MAX_PASSES,
+            "scope quota not met after eviction-pass budget exhausted; failing closed"
+        );
+        Err(PredicateBackendError::Unavailable(
+            QUOTA_BUDGET_MSG.to_string(),
+        ))
     }
 }
 
@@ -804,6 +815,20 @@ fn scope_advisory_lock_key(scope: &[u8], kind: &[u8]) -> i64 {
 /// it does not need the raw DB error text.
 const DB_UNAVAILABLE_MSG: &str = "predicate state backend unavailable (database error)";
 
+/// Sanitized message for the scope-quota contention fail-closed path. Mirrors
+/// the `DB_UNAVAILABLE_MSG` contract: the operational detail (the quota
+/// constant `MAX_KEYS_PER_TENANT`, the lock-contention state) is logged at
+/// `debug` for operators but NOT surfaced through
+/// [`PredicateBackendError::Unavailable`], whose payload can reach the
+/// evaluator/caller. The evaluator only needs the error type to fail closed.
+const QUOTA_CONTENDED_MSG: &str =
+    "predicate state backend unavailable (quota enforcement contended)";
+
+/// Sanitized message for the scope-quota pass-budget-exhaustion fail-closed
+/// path. Same sanitization posture as [`QUOTA_CONTENDED_MSG`].
+const QUOTA_BUDGET_MSG: &str =
+    "predicate state backend unavailable (quota enforcement budget exhausted)";
+
 fn map_pg(e: tokio_postgres::Error) -> PredicateBackendError {
     tracing::warn!(error = %e, "postgres predicate backend error");
     PredicateBackendError::Unavailable(DB_UNAVAILABLE_MSG.to_string())
@@ -841,6 +866,23 @@ mod tests {
         assert_eq!(
             from_digest, from_bytes,
             "victim try-lock key must equal the recorder's lock key for the same bucket"
+        );
+    }
+
+    /// The `Err(_) => now` arm of `cutoff` fires when `window` exceeds
+    /// chrono's maximum `Duration` (e.g. `Duration::MAX`). In that case
+    /// `cutoff` saturates to `now`, so the entire window is treated as
+    /// in-scope and nothing is trimmed — the conservative trim-nothing posture
+    /// for a rate/value cap. This is a pure `fn cutoff(now, window)` on the
+    /// struct, exercisable via `use super::*` with no live Postgres.
+    #[test]
+    fn cutoff_with_overflow_window_saturates_to_now() {
+        let now = DateTime::from_timestamp(1_700_000_000, 0).expect("static timestamp is in range");
+        // `Duration::MAX` exceeds chrono's max i64-nanosecond `Duration`, so
+        // `chrono::Duration::from_std` returns `Err` and `cutoff` saturates.
+        assert_eq!(
+            PostgresPredicateStateBackend::cutoff(now, Duration::MAX),
+            now
         );
     }
 
