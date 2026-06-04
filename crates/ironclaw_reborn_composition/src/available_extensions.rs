@@ -1,6 +1,6 @@
 use ironclaw_extensions::{
-    CapabilityVisibility, ExtensionAssetPath, ExtensionManifest, ExtensionPackage,
-    ExtensionRuntime, ManifestSource,
+    CapabilityDeclV2, CapabilityVisibility, ExtensionAssetPath, ExtensionManifest,
+    ExtensionPackage, ExtensionRuntime, ManifestSource,
 };
 use ironclaw_filesystem::{FileType, FilesystemError, RootFilesystem};
 use ironclaw_host_api::{CapabilityId, ExtensionId, VirtualPath, sha256_digest_token};
@@ -70,7 +70,10 @@ pub(crate) struct AvailableExtensionPackage {
 
 impl AvailableExtensionPackage {
     pub(crate) fn summary(&self) -> LifecycleExtensionSummary {
-        let visible_read_only_capability_ids = visible_capability_ids(self)
+        let visible_capability_ids = visible_capability_ids(self)
+            .map(|id| id.as_str().to_string())
+            .collect::<Vec<_>>();
+        let visible_read_only_capability_ids = visible_read_only_capability_ids(self)
             .map(|id| id.as_str().to_string())
             .collect::<Vec<_>>();
         LifecycleExtensionSummary {
@@ -80,6 +83,7 @@ impl AvailableExtensionPackage {
             description: self.package.manifest.description.clone(),
             source: LifecycleExtensionSource::HostBundled,
             runtime_kind: runtime_kind(&self.package.manifest.runtime),
+            visible_capability_ids,
             visible_read_only_capability_ids,
             credential_requirements: credential_requirements(self),
             onboarding: onboarding(self.package_ref.id.as_str()),
@@ -158,7 +162,7 @@ fn runtime_kind(runtime: &ExtensionRuntime) -> LifecycleExtensionRuntimeKind {
 fn credential_requirements(
     package: &AvailableExtensionPackage,
 ) -> Vec<LifecycleExtensionCredentialRequirement> {
-    let mut requirements = Vec::new();
+    let mut groups: Vec<CredentialRequirementGroup> = Vec::new();
     for capability in &package.package.manifest.capabilities {
         for requirement in &capability.runtime_credentials {
             let ironclaw_host_api::RuntimeCredentialRequirementSource::ProductAuthAccount {
@@ -168,22 +172,61 @@ fn credential_requirements(
             else {
                 continue;
             };
-            let name = requirement.handle.as_str().to_string();
-            if requirements
-                .iter()
-                .any(|seen: &LifecycleExtensionCredentialRequirement| seen.name == name)
-            {
+            let handle = requirement.handle.as_str().to_string();
+            let provider = provider.as_str().to_string();
+            let setup = credential_setup(setup);
+            if let Some(seen) = groups.iter_mut().find(|seen| {
+                seen.handle == handle && seen.provider == provider && seen.setup == setup
+            }) {
+                seen.required |= requirement.required;
                 continue;
             }
-            requirements.push(LifecycleExtensionCredentialRequirement {
-                name,
-                provider: provider.as_str().to_string(),
+            groups.push(CredentialRequirementGroup {
+                handle,
+                provider,
                 required: requirement.required,
-                setup: credential_setup(setup),
+                setup,
             });
         }
     }
-    requirements
+    groups
+        .iter()
+        .enumerate()
+        .map(|(index, group)| {
+            let has_distinct_source = groups.iter().any(|other| {
+                other.handle == group.handle
+                    && (other.provider != group.provider || other.setup != group.setup)
+            });
+            LifecycleExtensionCredentialRequirement {
+                name: if has_distinct_source {
+                    credential_requirement_name(&groups[..=index], group)
+                } else {
+                    group.handle.clone()
+                },
+                provider: group.provider.clone(),
+                required: group.required,
+                setup: group.setup.clone(),
+            }
+        })
+        .collect()
+}
+
+struct CredentialRequirementGroup {
+    handle: String,
+    provider: String,
+    required: bool,
+    setup: LifecycleExtensionCredentialSetup,
+}
+
+fn credential_requirement_name(
+    seen_groups: &[CredentialRequirementGroup],
+    group: &CredentialRequirementGroup,
+) -> String {
+    let ordinal = seen_groups
+        .iter()
+        .filter(|seen| seen.handle == group.handle)
+        .count();
+    format!("{}__{}", group.handle, ordinal)
 }
 
 fn credential_setup(
@@ -1353,14 +1396,26 @@ fn map_binding_error(error: impl std::fmt::Display) -> ProductWorkflowError {
 pub(crate) fn visible_capability_ids(
     extension: &AvailableExtensionPackage,
 ) -> impl Iterator<Item = &CapabilityId> {
+    visible_capabilities(extension).map(|capability| &capability.id)
+}
+
+pub(crate) fn visible_read_only_capability_ids(
+    extension: &AvailableExtensionPackage,
+) -> impl Iterator<Item = &CapabilityId> {
+    visible_capabilities(extension)
+        .filter(|capability| !capability.effects.iter().any(|effect| effect.is_write()))
+        .map(|capability| &capability.id)
+}
+
+fn visible_capabilities(
+    extension: &AvailableExtensionPackage,
+) -> impl Iterator<Item = &CapabilityDeclV2> {
     extension
         .package
         .manifest
         .capabilities
         .iter()
         .filter(|capability| capability.visibility == CapabilityVisibility::Model)
-        .filter(|capability| !capability.effects.iter().any(|effect| effect.is_write()))
-        .map(|capability| &capability.id)
 }
 
 #[cfg(test)]
@@ -1377,16 +1432,36 @@ mod tests {
         BackendCapabilities, DirEntry, FileStat, FilesystemError, FilesystemOperation,
         InMemoryBackend,
     };
-    use ironclaw_host_api::{EffectKind, HostPortCatalog};
+    use ironclaw_host_api::{
+        EffectKind, HostPortCatalog, RuntimeCredentialAccountSetup,
+        RuntimeCredentialRequirementSource,
+    };
 
     use super::*;
     use crate::nearai_mcp::nearai_mcp_endpoint_from_base;
 
     #[test]
-    fn visible_capability_ids_excludes_write_effects() {
+    fn visible_capability_ids_include_write_effects() {
         let extension = test_extension_package();
 
         let visible = visible_capability_ids(&extension)
+            .cloned()
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            visible,
+            vec![
+                CapabilityId::new("fixture.search").unwrap(),
+                CapabilityId::new("fixture.write").unwrap()
+            ]
+        );
+    }
+
+    #[test]
+    fn visible_read_only_capability_ids_excludes_write_effects() {
+        let extension = test_extension_package();
+
+        let visible = visible_read_only_capability_ids(&extension)
             .cloned()
             .collect::<Vec<_>>();
 
@@ -1497,6 +1572,88 @@ mod tests {
     }
 
     #[test]
+    fn bundled_gsuite_wasm_credentials_declare_oauth_setup() {
+        let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
+
+        for extension_id in [
+            "google-docs",
+            "google-drive",
+            "google-sheets",
+            "google-slides",
+        ] {
+            let package_ref =
+                LifecyclePackageRef::new(LifecyclePackageKind::Extension, extension_id).unwrap();
+            let package = catalog.resolve(&package_ref).unwrap();
+            let summary = package.summary();
+            let google_requirements = summary
+                .credential_requirements
+                .iter()
+                .filter(|requirement| requirement.provider == "google")
+                .collect::<Vec<_>>();
+
+            let mut credential_count = 0;
+            let mut capability_scope_sets: Vec<Vec<String>> = Vec::new();
+            for capability in &package.package.manifest.capabilities {
+                for credential in &capability.runtime_credentials {
+                    let RuntimeCredentialRequirementSource::ProductAuthAccount { provider, setup } =
+                        &credential.source
+                    else {
+                        panic!(
+                            "{extension_id} capability {} should use a Google product auth account",
+                            capability.id
+                        );
+                    };
+                    assert_eq!(provider.as_str(), "google");
+
+                    let RuntimeCredentialAccountSetup::OAuth { scopes } = setup else {
+                        panic!(
+                            "{extension_id} capability {} should declare OAuth setup",
+                            capability.id
+                        );
+                    };
+                    assert_eq!(
+                        scopes, &credential.provider_scopes,
+                        "{extension_id} capability {} OAuth setup scopes should match requested provider scopes",
+                        capability.id
+                    );
+                    if !capability_scope_sets.iter().any(|seen| seen == scopes) {
+                        capability_scope_sets.push(scopes.clone());
+                    }
+                    credential_count += 1;
+                }
+            }
+
+            assert_eq!(
+                google_requirements.len(),
+                capability_scope_sets.len(),
+                "{extension_id} lifecycle setup should keep distinct OAuth scope sets separate"
+            );
+            assert_eq!(
+                google_requirements
+                    .iter()
+                    .map(|requirement| requirement.name.as_str())
+                    .collect::<HashSet<_>>()
+                    .len(),
+                google_requirements.len(),
+                "{extension_id} lifecycle setup should give split OAuth requirements unique names"
+            );
+            for requirement in google_requirements {
+                let LifecycleExtensionCredentialSetup::OAuth { scopes } = &requirement.setup else {
+                    panic!("{extension_id} should expose Google OAuth setup");
+                };
+                assert!(
+                    capability_scope_sets.iter().any(|seen| seen == scopes),
+                    "{extension_id} lifecycle setup should request only operation-level OAuth scopes; got {scopes:?}",
+                );
+            }
+            assert!(
+                credential_count > 0,
+                "{extension_id} should declare runtime credentials"
+            );
+        }
+    }
+
+    #[test]
     fn bundled_gsuite_wasm_capabilities_are_operation_scoped() {
         let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
         let package_ref =
@@ -1515,6 +1672,11 @@ mod tests {
         assert!(capabilities.contains_key("google-drive.upload_file"));
 
         let summary = package.summary();
+        assert!(
+            summary
+                .visible_capability_ids
+                .contains(&"google-drive.upload_file".to_string())
+        );
         assert!(
             summary
                 .visible_read_only_capability_ids

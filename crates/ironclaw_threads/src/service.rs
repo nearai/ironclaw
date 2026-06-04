@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use ironclaw_host_api::ThreadId;
 
@@ -5,13 +7,13 @@ use crate::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
     AppendAssistantDraftRequest, AppendCapabilityDisplayPreviewRequest,
     AppendToolResultReferenceRequest, ContextMessages, ContextWindow, CreateSummaryArtifactRequest,
-    EnsureThreadRequest, LatestThreadMessageRequest, ListThreadsForScopeRequest,
-    ListThreadsForScopeResponse, LoadContextMessagesRequest, LoadContextWindowRequest,
-    MessageContent, RedactMessageRequest, ReplayAcceptedInboundMessageRequest, SessionThreadError,
-    SessionThreadRecord, SummaryArtifact, ThreadGoal, ThreadHistory, ThreadHistoryRequest,
-    ThreadMessageId, ThreadMessageRange, ThreadMessageRangeRequest, ThreadMessageRecord,
-    ThreadScope, UpdateAssistantDraftRequest, UpdateThreadGoalRequest,
-    UpdateToolResultReferenceRequest,
+    EnsureThreadRequest, FinalizedAssistantMessageByRunRequest, LatestThreadMessageRequest,
+    ListThreadsForScopeRequest, ListThreadsForScopeResponse, LoadContextMessagesRequest,
+    LoadContextWindowRequest, MessageContent, RedactMessageRequest,
+    ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadRecord, SummaryArtifact,
+    ThreadGoal, ThreadHistory, ThreadHistoryRequest, ThreadMessageId, ThreadMessageRange,
+    ThreadMessageRangeRequest, ThreadMessageRecord, ThreadScope, UpdateAssistantDraftRequest,
+    UpdateThreadGoalRequest, UpdateToolResultReferenceRequest,
 };
 
 /// Canonical Reborn session thread and transcript boundary.
@@ -141,6 +143,23 @@ pub trait SessionThreadService: Send + Sync {
             .find(|message| message.kind == request.kind && message.status == request.status))
     }
 
+    async fn finalized_assistant_message_by_run(
+        &self,
+        request: FinalizedAssistantMessageByRunRequest,
+    ) -> Result<Option<ThreadMessageRecord>, SessionThreadError> {
+        let history = self
+            .list_thread_history(ThreadHistoryRequest {
+                scope: request.scope,
+                thread_id: request.thread_id,
+            })
+            .await?;
+        Ok(history.messages.into_iter().rev().find(|message| {
+            message.kind == crate::MessageKind::Assistant
+                && message.status == crate::MessageStatus::Finalized
+                && message.turn_run_id.as_deref() == Some(request.turn_run_id.as_str())
+        }))
+    }
+
     /// Cheap, owner-scoped existence probe that returns *only* the
     /// thread record — no message transcript, no summary artifacts.
     ///
@@ -229,5 +248,199 @@ pub trait SessionThreadService: Send + Sync {
              override this method before exposing the v2 list-threads route"
                 .to_string(),
         ))
+    }
+}
+
+#[async_trait]
+impl<S> SessionThreadService for Arc<S>
+where
+    S: SessionThreadService + ?Sized,
+{
+    async fn ensure_thread(
+        &self,
+        request: EnsureThreadRequest,
+    ) -> Result<SessionThreadRecord, SessionThreadError> {
+        self.as_ref().ensure_thread(request).await
+    }
+
+    async fn accept_inbound_message(
+        &self,
+        request: AcceptInboundMessageRequest,
+    ) -> Result<AcceptedInboundMessage, SessionThreadError> {
+        self.as_ref().accept_inbound_message(request).await
+    }
+
+    async fn replay_accepted_inbound_message(
+        &self,
+        request: ReplayAcceptedInboundMessageRequest,
+    ) -> Result<Option<AcceptedInboundMessageReplay>, SessionThreadError> {
+        self.as_ref().replay_accepted_inbound_message(request).await
+    }
+
+    async fn mark_message_submitted(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        message_id: ThreadMessageId,
+        turn_id: String,
+        turn_run_id: String,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        self.as_ref()
+            .mark_message_submitted(scope, thread_id, message_id, turn_id, turn_run_id)
+            .await
+    }
+
+    async fn mark_message_deferred_busy(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        message_id: ThreadMessageId,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        self.as_ref()
+            .mark_message_deferred_busy(scope, thread_id, message_id)
+            .await
+    }
+
+    async fn append_assistant_draft(
+        &self,
+        request: AppendAssistantDraftRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        self.as_ref().append_assistant_draft(request).await
+    }
+
+    async fn append_tool_result_reference(
+        &self,
+        request: AppendToolResultReferenceRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        self.as_ref().append_tool_result_reference(request).await
+    }
+
+    async fn append_capability_display_preview(
+        &self,
+        request: AppendCapabilityDisplayPreviewRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        self.as_ref()
+            .append_capability_display_preview(request)
+            .await
+    }
+
+    async fn update_tool_result_reference(
+        &self,
+        request: UpdateToolResultReferenceRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        self.as_ref().update_tool_result_reference(request).await
+    }
+
+    async fn update_assistant_draft(
+        &self,
+        request: UpdateAssistantDraftRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        self.as_ref().update_assistant_draft(request).await
+    }
+
+    async fn finalize_assistant_message(
+        &self,
+        scope: &ThreadScope,
+        thread_id: &ThreadId,
+        message_id: ThreadMessageId,
+        content: MessageContent,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        self.as_ref()
+            .finalize_assistant_message(scope, thread_id, message_id, content)
+            .await
+    }
+
+    async fn redact_message(
+        &self,
+        request: RedactMessageRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        self.as_ref().redact_message(request).await
+    }
+
+    async fn load_context_window(
+        &self,
+        request: LoadContextWindowRequest,
+    ) -> Result<ContextWindow, SessionThreadError> {
+        self.as_ref().load_context_window(request).await
+    }
+
+    async fn load_context_messages(
+        &self,
+        request: LoadContextMessagesRequest,
+    ) -> Result<ContextMessages, SessionThreadError> {
+        self.as_ref().load_context_messages(request).await
+    }
+
+    async fn list_thread_history(
+        &self,
+        request: ThreadHistoryRequest,
+    ) -> Result<ThreadHistory, SessionThreadError> {
+        self.as_ref().list_thread_history(request).await
+    }
+
+    async fn list_thread_messages_range(
+        &self,
+        request: ThreadMessageRangeRequest,
+    ) -> Result<ThreadMessageRange, SessionThreadError> {
+        self.as_ref().list_thread_messages_range(request).await
+    }
+
+    async fn latest_thread_message(
+        &self,
+        request: LatestThreadMessageRequest,
+    ) -> Result<Option<ThreadMessageRecord>, SessionThreadError> {
+        self.as_ref().latest_thread_message(request).await
+    }
+
+    async fn finalized_assistant_message_by_run(
+        &self,
+        request: FinalizedAssistantMessageByRunRequest,
+    ) -> Result<Option<ThreadMessageRecord>, SessionThreadError> {
+        self.as_ref()
+            .finalized_assistant_message_by_run(request)
+            .await
+    }
+
+    async fn read_thread(
+        &self,
+        request: ThreadHistoryRequest,
+    ) -> Result<SessionThreadRecord, SessionThreadError> {
+        self.as_ref().read_thread(request).await
+    }
+
+    async fn create_summary_artifact(
+        &self,
+        request: CreateSummaryArtifactRequest,
+    ) -> Result<SummaryArtifact, SessionThreadError> {
+        self.as_ref().create_summary_artifact(request).await
+    }
+
+    fn supports_resolve_scope(&self) -> bool {
+        self.as_ref().supports_resolve_scope()
+    }
+
+    async fn resolve_scope(&self, thread_id: ThreadId) -> Result<ThreadScope, SessionThreadError> {
+        self.as_ref().resolve_scope(thread_id).await
+    }
+
+    async fn update_thread_goal(
+        &self,
+        request: UpdateThreadGoalRequest,
+    ) -> Result<ThreadGoal, SessionThreadError> {
+        self.as_ref().update_thread_goal(request).await
+    }
+
+    async fn read_thread_by_id(
+        &self,
+        thread_id: ThreadId,
+    ) -> Result<SessionThreadRecord, SessionThreadError> {
+        self.as_ref().read_thread_by_id(thread_id).await
+    }
+
+    async fn list_threads_for_scope(
+        &self,
+        request: ListThreadsForScopeRequest,
+    ) -> Result<ListThreadsForScopeResponse, SessionThreadError> {
+        self.as_ref().list_threads_for_scope(request).await
     }
 }

@@ -58,6 +58,7 @@ impl SlackEventsWebhookDispatcher for HeaderSecretDispatcher {
         &'a self,
         _body: &'a [u8],
         _evidence: &'a ProtocolAuthEvidence,
+        _observer: Option<Arc<dyn ImmediateAckWorkflowObserver>>,
     ) -> Pin<Box<dyn Future<Output = Result<WebhookProcessOutcome, RunnerError>> + Send + 'a>> {
         self.dispatch_calls.fetch_add(1, Ordering::SeqCst);
         Box::pin(async { Ok(WebhookProcessOutcome::AcceptedForAsyncDispatch) })
@@ -205,7 +206,7 @@ async fn slack_events_handler_rate_limit_refills_after_window() {
     )]);
     let rate_limit = SlackInstallationRateLimitConfig::new(
         NonZeroU32::new(1).expect("nonzero"),
-        Duration::from_millis(1),
+        Duration::from_millis(50),
     );
     let mount = slack_events_route_mount(SlackEventsRouteState::new(
         SlackIngressService::with_rate_limit_config(Arc::new(resolver), rate_limit),
@@ -213,7 +214,7 @@ async fn slack_events_handler_rate_limit_refills_after_window() {
 
     let first = post_to_mount(&mount, TEAM_A_BODY, "secret-a").await;
     let second = post_to_mount(&mount, TEAM_A_BODY, "secret-a").await;
-    tokio::time::sleep(Duration::from_millis(2)).await;
+    tokio::time::sleep(Duration::from_millis(60)).await;
     let third = post_to_mount(&mount, TEAM_A_BODY, "secret-a").await;
 
     assert_eq!(first.status(), StatusCode::OK);

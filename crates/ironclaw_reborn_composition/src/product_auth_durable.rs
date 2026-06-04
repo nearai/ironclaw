@@ -40,8 +40,8 @@ mod provider;
 #[cfg(test)]
 mod tests;
 
-const MAX_OWNER_SESSION_ROOTS_PER_SURFACE: usize = 64;
-const MAX_OWNER_RECORDS_PER_ROOT: usize = 64;
+const MAX_OWNER_SESSION_ROOTS_PER_SURFACE: usize = 1024;
+const MAX_OWNER_RECORDS_PER_ROOT: usize = 1024;
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub(crate) use provider::UnavailableAuthProviderClient;
@@ -125,6 +125,19 @@ where
         let value = serde_json::from_slice(&versioned.entry.body)
             .map_err(|_| AuthProductError::BackendUnavailable)?;
         Ok(Some((value, versioned.version)))
+    }
+
+    async fn read_account_record_for_scan(
+        &self,
+        scope: &ResourceScope,
+        path: &ScopedPath,
+    ) -> Result<Option<CredentialAccount>, AuthProductError> {
+        let Some(versioned) = self.filesystem.get(scope, path).await.map_err(fs_error)? else {
+            return Ok(None);
+        };
+        serde_json::from_slice(&versioned.entry.body)
+            .map(Some)
+            .map_err(|_| AuthProductError::BackendUnavailable)
     }
 
     async fn write_record<T>(
@@ -358,7 +371,7 @@ where
                     let path = join_scoped(&root, &entry.name);
                     async move {
                         let path = path?;
-                        self.read_record::<CredentialAccount>(&scope.resource, &path)
+                        self.read_account_record_for_scan(&scope.resource, &path)
                             .await
                     }
                 }),
@@ -368,7 +381,6 @@ where
         .await?
         .into_iter()
         .flatten()
-        .map(|(account, _)| account)
         .collect();
         accounts.sort_by_key(|account| account.id);
         Ok(accounts)

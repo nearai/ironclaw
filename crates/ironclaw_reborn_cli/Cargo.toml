@@ -30,14 +30,28 @@ root-llm-provider = [
 # does not link the auth/HTTP middleware stack at all — production
 # binaries that genuinely expose v2 over HTTP must opt in. Pulls in
 # `webui-v2-beta` on the composition crate plus the ingress crate
-# that owns the serve loop.
+# that owns the serve loop. Also enables the WebChat v2 SSO login
+# surface (Google / GitHub OAuth): the CLI reads provider env config
+# (`commands/serve_sso.rs`) and hands it to the ingress crate's
+# `build_signed_session_login`, which owns the stateless HMAC-signed
+# session store — so the login surface works in a normal build with no
+# dev-only feature required.
 webui-v2-beta = [
     "ironclaw_reborn_composition/webui-v2-beta",
     "dep:ironclaw_reborn_webui_ingress",
+    "dep:async-trait",
+]
+# Compile in the Slack Events API host-beta mount for `ironclaw-reborn serve`.
+# Still requires `[slack].enabled = true` at runtime before the route is
+# mounted; ambient Slack env vars alone do not enable it.
+slack-v2-host-beta = [
+    "webui-v2-beta",
+    "ironclaw_reborn_composition/slack-v2-host-beta",
 ]
 
 [dependencies]
 anyhow = "1"
+async-trait = { version = "0.1", optional = true }
 chrono = { version = "0.4", features = ["serde"] }
 hex = "0.4.3"
 clap = { version = "4", features = ["derive", "env"] }

@@ -46,6 +46,7 @@ export function useChatEvents({
   // (which doesn't carry `run_id`) with the active run so resolveGate
   // can build its `/runs/{run_id}/gates/{gate_ref}/resolve` URL.
   const latestRunIdRef = React.useRef(null);
+  const promptRunIdRef = React.useRef(null);
 
   return React.useCallback(
     (envelope) => {
@@ -74,6 +75,11 @@ export function useChatEvents({
               current && current.runId === progress.turn_run_id
                 ? current
                 : { runId: progress.turn_run_id, threadId, status: "running" },
+            );
+            clearPendingNonAuthGateForRun(
+              setPendingGate,
+              progress.turn_run_id,
+              promptRunIdRef,
             );
           }
           setIsProcessing(true);
@@ -130,6 +136,7 @@ export function useChatEvents({
               content: reply.text || "",
               timestamp: reply.generated_at || new Date().toISOString(),
               turnRunId: reply.turn_run_id,
+              isFinalReply: true,
             },
           ]);
           setPendingGate(null);
@@ -158,6 +165,7 @@ export function useChatEvents({
             onRunCompleted,
             completedRunsRef,
             latestRunIdRef,
+            promptRunIdRef,
           });
           return;
         }
@@ -187,6 +195,32 @@ const TERMINAL_RUN_STATUSES = new Set([
 ]);
 
 const SUCCESS_RUN_STATUSES = new Set(["completed", "succeeded"]);
+const PROMPT_RUN_STATUSES = new Set([
+  "blocked_auth",
+  "blocked_approval",
+  "blocked_resource",
+]);
+
+function clearPendingGateForRun(setPendingGate, runId, promptRunIdRef) {
+  if (!runId) return;
+  if (promptRunIdRef?.current === runId) {
+    promptRunIdRef.current = null;
+  }
+  setPendingGate((current) => (current?.runId === runId ? null : current));
+}
+
+function clearPendingNonAuthGateForRun(setPendingGate, runId, promptRunIdRef) {
+  if (!runId) return;
+  setPendingGate((current) => {
+    if (current?.runId !== runId || current.kind === "auth_required") {
+      return current;
+    }
+    if (promptRunIdRef?.current === runId) {
+      promptRunIdRef.current = null;
+    }
+    return null;
+  });
+}
 
 function applyProjectionItems({
   items,
@@ -198,6 +232,7 @@ function applyProjectionItems({
   onRunCompleted,
   completedRunsRef,
   latestRunIdRef,
+  promptRunIdRef,
 }) {
   // Snapshot the run_id surfaced by the most recent `run_status` item
   // we've seen — either earlier in this same items batch, or carried
@@ -225,12 +260,20 @@ function applyProjectionItems({
             : { runId, threadId, status },
         );
       }
+      if (runId && PROMPT_RUN_STATUSES.has(status)) {
+        if (promptRunIdRef) promptRunIdRef.current = runId;
+      } else if (runId && promptRunIdRef?.current === runId) {
+        promptRunIdRef.current = null;
+      }
       if (TERMINAL_RUN_STATUSES.has(status)) {
         setIsProcessing(false);
         setPendingGate(null);
         setActiveRun?.(null);
         activeRunId = null;
         if (latestRunIdRef) latestRunIdRef.current = null;
+        if (runId && promptRunIdRef?.current === runId) {
+          promptRunIdRef.current = null;
+        }
         if (
           SUCCESS_RUN_STATUSES.has(status) &&
           onRunCompleted &&
@@ -279,7 +322,8 @@ function applyProjectionItems({
             ];
           });
         }
-      } else {
+      } else if (!PROMPT_RUN_STATUSES.has(status)) {
+        clearPendingGateForRun(setPendingGate, runId, promptRunIdRef);
         setIsProcessing(true);
       }
     }
@@ -289,8 +333,8 @@ function applyProjectionItems({
       // assistant-visible reply text accumulated through projection.
       // Dedup by item id so repeated snapshots don't duplicate the
       // same bubble. Text can arrive in the same projection snapshot
-      // as a still-blocked gate, so terminal run_status is the only
-      // projection item that clears pendingGate.
+      // as a still-blocked gate, so run_status remains the source of
+      // truth for clearing pendingGate.
       const messageId = `text-${item.text.id}`;
       setMessages((prev) => {
         const existing = prev.findIndex((m) => m.id === messageId);
@@ -299,6 +343,7 @@ function applyProjectionItems({
           role: "assistant",
           content: item.text.body || "",
           timestamp: new Date().toISOString(),
+          isFinalReply: true,
         };
         if (existing >= 0) {
           const copy = [...prev];
@@ -319,6 +364,7 @@ function applyProjectionItems({
           role: "thinking",
           content: item.thinking.body || "",
           timestamp: new Date().toISOString(),
+          turnRunId: item.thinking.run_id || null,
         };
         if (existing >= 0) {
           const copy = [...prev];
@@ -329,6 +375,14 @@ function applyProjectionItems({
       });
     }
 
+    if (item.capability_activity) {
+      const activity = item.capability_activity;
+      if (activity.invocation_id) {
+        const card = toolCardFromActivity(activity);
+        upsertToolFromActivity(setMessages, activity.invocation_id, card);
+      }
+    }
+
     if (item.gate) {
       // ProductProjectionItem::Gate { gate_ref, headline } — projection
       // carries gate_ref but not run_id, so we correlate to the
@@ -337,7 +391,7 @@ function applyProjectionItems({
       // construction in `api.js`), so skip emitting the gate entirely
       // if no run is active yet — a later projection_update will
       // re-surface it once a run_status arrives.
-      if (activeRunId) {
+      if (activeRunId && promptRunIdRef?.current === activeRunId) {
         setPendingGate((current) => current || {
           kind: "gate",
           runId: activeRunId,
@@ -414,6 +468,7 @@ function upsertToolFromActivity(setMessages, invocationId, card) {
         toolStatus: nextStatus,
         toolError: card.toolError || current.toolError,
         updatedAt: card.updatedAt || current.updatedAt,
+        turnRunId: card.turnRunId || current.turnRunId || null,
       };
       return copy;
     }

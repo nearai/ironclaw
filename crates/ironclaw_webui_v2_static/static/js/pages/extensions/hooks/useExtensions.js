@@ -14,6 +14,9 @@ import {
   approvePairingCode,
 } from "../lib/extensions-api.js";
 
+const OAUTH_SETUP_REFRESH_MS = 2000;
+const OAUTH_SETUP_TIMEOUT_MS = 10 * 60 * 1000;
+
 export function useExtensions() {
   const queryClient = useQueryClient();
 
@@ -187,21 +190,73 @@ export function useSetupSubmit(packageRef, onSuccess) {
 export function useOauthSetup(packageRef) {
   const queryClient = useQueryClient();
   const packageKey = packageRef?.id || packageRef;
+  const watcherRef = React.useRef(null);
+
+  const clearWatcher = React.useCallback(() => {
+    if (watcherRef.current) {
+      window.clearInterval(watcherRef.current);
+      watcherRef.current = null;
+    }
+  }, []);
+
+  const refreshSetupState = React.useCallback(() => {
+    queryClient.invalidateQueries({ queryKey: ["extensions"] });
+    queryClient.invalidateQueries({ queryKey: ["extension-registry"] });
+    queryClient.invalidateQueries({ queryKey: ["extension-setup", packageKey] });
+  }, [packageKey, queryClient]);
+
+  const setupIsConfigured = React.useCallback(() => {
+    const setup = queryClient.getQueryData(["extension-setup", packageKey]);
+    if (setup?.secrets?.length > 0 && setup.secrets.every((secret) => secret.provided)) {
+      return true;
+    }
+    const extensions = queryClient.getQueryData(["extensions"])?.extensions || [];
+    const extension = extensions.find((item) => item.package_ref?.id === packageKey);
+    const state =
+      extension?.onboarding_state ||
+      extension?.activation_status ||
+      (extension?.active ? "active" : null);
+    return state === "active" || state === "ready";
+  }, [packageKey, queryClient]);
+
+  const watchOauthProgress = React.useCallback(
+    (popup) => {
+      clearWatcher();
+      const startedAt = Date.now();
+      watcherRef.current = window.setInterval(() => {
+        refreshSetupState();
+        if (
+          setupIsConfigured() ||
+          (popup && popup.closed) ||
+          Date.now() - startedAt > OAUTH_SETUP_TIMEOUT_MS
+        ) {
+          clearWatcher();
+          refreshSetupState();
+        }
+      }, OAUTH_SETUP_REFRESH_MS);
+    },
+    [clearWatcher, refreshSetupState, setupIsConfigured]
+  );
+
+  React.useEffect(() => clearWatcher, [clearWatcher]);
 
   return useMutation({
     mutationFn: ({ secret, popup }) =>
       startExtensionOauth(packageRef, secret).then((res) => ({ res, popup })),
     onSuccess: ({ res, popup }) => {
+      let authPopup = popup;
       if (res.authorization_url && popup && !popup.closed) {
         popup.location.href = res.authorization_url;
       } else if (res.authorization_url) {
-        window.open(res.authorization_url, "_blank", "noopener,noreferrer");
+        authPopup = window.open(res.authorization_url, "_blank", "noopener,noreferrer");
       } else if (popup && !popup.closed) {
         popup.close();
       }
-      queryClient.invalidateQueries({ queryKey: ["extension-setup", packageKey] });
+      refreshSetupState();
+      if (authPopup) watchOauthProgress(authPopup);
     },
     onError: (_err, variables) => {
+      clearWatcher();
       const popup = variables?.popup;
       if (popup && !popup.closed) popup.close();
     },

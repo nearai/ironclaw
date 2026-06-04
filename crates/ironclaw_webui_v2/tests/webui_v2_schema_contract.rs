@@ -33,6 +33,7 @@ fn progress(kind: ProgressKind) -> ProgressUpdateView {
 fn capability_activity() -> CapabilityActivityView {
     CapabilityActivityView {
         invocation_id: InvocationId::new(),
+        turn_run_id: Some(run_id()),
         thread_id: Some(ThreadId::new("thread-alpha").expect("thread")),
         capability_id: CapabilityId::new("script.echo").expect("capability"),
         status: CapabilityActivityStatusView::Running,
@@ -49,6 +50,7 @@ fn capability_display_preview() -> CapabilityDisplayPreviewView {
     CapabilityDisplayPreviewView {
         timeline_message_id: Some("timeline-message-1".to_string()),
         invocation_id: InvocationId::new(),
+        turn_run_id: Some(run_id()),
         thread_id: Some(ThreadId::new("thread-alpha").expect("thread")),
         capability_id: CapabilityId::new("builtin.read_file").expect("capability"),
         status: CapabilityActivityStatusView::Completed,

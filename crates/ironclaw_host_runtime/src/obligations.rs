@@ -45,9 +45,15 @@ pub struct RuntimeCredentialAccountRequest<'a> {
     pub requester_extension: &'a ExtensionId,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeCredentialAccessSecret {
+    pub scope: ResourceScope,
+    pub handle: SecretHandle,
+}
+
 #[async_trait]
 pub trait RuntimeCredentialAccountResolver: Send + Sync + fmt::Debug {
-    /// Resolve the access-secret handle for the requested product-auth account.
+    /// Resolve the access-secret source for the requested product-auth account.
     ///
     /// Returns [`CredentialStageError::AuthRequired`] when the account is
     /// missing/unconfigured/expired/revoked (user must re-authenticate), or
@@ -58,7 +64,7 @@ pub trait RuntimeCredentialAccountResolver: Send + Sync + fmt::Debug {
     async fn resolve_access_secret(
         &self,
         request: RuntimeCredentialAccountRequest<'_>,
-    ) -> Result<SecretHandle, CredentialStageError>;
+    ) -> Result<RuntimeCredentialAccessSecret, CredentialStageError>;
 }
 
 /// Runtime secret material staged after `InjectSecretOnce` lease consumption.
@@ -1288,9 +1294,10 @@ impl BuiltinObligationHandler {
             stage_credential_material(
                 secret_store.as_ref(),
                 secret_injections,
+                &access_secret.scope,
                 &request.context.resource_scope,
                 request.capability_id,
-                &access_secret,
+                &access_secret.handle,
                 obligation.handle,
             )
             .await
@@ -1788,21 +1795,28 @@ fn credential_stage_error_to_obligation_error(
 async fn stage_credential_material(
     secret_store: &dyn SecretStore,
     secret_injections: &RuntimeSecretInjectionStore,
-    scope: &ResourceScope,
+    source_scope: &ResourceScope,
+    target_scope: &ResourceScope,
     capability_id: &CapabilityId,
     source: &SecretHandle,
     target: &SecretHandle,
 ) -> Result<(), CredentialStageError> {
-    let lease = secret_store.lease_once(scope, source).await.map_err(|e| {
-        tracing::debug!(err = %e, "stage_credential_material: lease_once failed");
-        crate::services::stage_secret_error(e)
-    })?;
-    let secret = secret_store.consume(scope, lease.id).await.map_err(|e| {
-        tracing::debug!(err = %e, "stage_credential_material: consume failed");
-        crate::services::stage_secret_error(e)
-    })?;
+    let lease = secret_store
+        .lease_once(source_scope, source)
+        .await
+        .map_err(|e| {
+            tracing::debug!(err = %e, "stage_credential_material: lease_once failed");
+            crate::services::stage_secret_error(e)
+        })?;
+    let secret = secret_store
+        .consume(source_scope, lease.id)
+        .await
+        .map_err(|e| {
+            tracing::debug!(err = %e, "stage_credential_material: consume failed");
+            crate::services::stage_secret_error(e)
+        })?;
     secret_injections
-        .insert(scope, capability_id, target, secret)
+        .insert(target_scope, capability_id, target, secret)
         .map_err(|e| {
             tracing::debug!(err = %e, "stage_credential_material: insert failed");
             CredentialStageError::Backend

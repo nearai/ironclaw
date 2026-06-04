@@ -830,6 +830,132 @@ async fn filesystem_list_threads_for_scope_is_scope_filtered_and_paginated() {
     assert_eq!(ids_b, ["t-b-001"]);
 }
 
+#[tokio::test]
+async fn filesystem_list_threads_for_scope_derives_title_from_first_user_message() {
+    use ironclaw_threads::ListThreadsForScopeRequest;
+
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-title-fs", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let scope = scope("fs-title");
+
+    // Thread #1: title-less, assistant speaks before the first user message.
+    // Derivation must skip assistant records and pick the first non-empty
+    // trimmed line from the earliest user message.
+    let derived = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("t-derived").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    service
+        .append_assistant_draft(AppendAssistantDraftRequest {
+            scope: scope.clone(),
+            thread_id: derived.thread_id.clone(),
+            turn_run_id: "run-derived-1".into(),
+            content: MessageContent::text("assistant text must not become the title"),
+        })
+        .await
+        .unwrap();
+    service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope.clone(),
+            thread_id: derived.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: Some("evt-derived-1".into()),
+            content: MessageContent::text("  hello there  \nsecond line"),
+        })
+        .await
+        .unwrap();
+    service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope.clone(),
+            thread_id: derived.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: Some("evt-derived-2".into()),
+            content: MessageContent::text("later user message must not replace the title"),
+        })
+        .await
+        .unwrap();
+
+    // Thread #2: title-less and has no messages at all → must stay None
+    // (the derive helper has nothing to extract from).
+    service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("t-empty").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    // Thread #3: caller supplied an explicit title → list MUST preserve
+    // it untouched. This is the "creator-supplied wins over derivation"
+    // invariant.
+    service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("t-explicit").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: Some("Caller-supplied title".into()),
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+    service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: scope.clone(),
+            thread_id: ThreadId::new("t-explicit").unwrap(),
+            actor_id: "actor-a".into(),
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            external_event_id: Some("evt-explicit-1".into()),
+            content: MessageContent::text("user message that must NOT replace the title"),
+        })
+        .await
+        .unwrap();
+
+    let listed = service
+        .list_threads_for_scope(ListThreadsForScopeRequest {
+            scope,
+            limit: None,
+            cursor: None,
+        })
+        .await
+        .unwrap();
+
+    let by_id: std::collections::HashMap<&str, Option<&str>> = listed
+        .threads
+        .iter()
+        .map(|record| (record.thread_id.as_str(), record.title.as_deref()))
+        .collect();
+
+    assert_eq!(
+        by_id.get("t-derived").copied().flatten(),
+        Some("hello there"),
+        "first user message should seed a trimmed first-line title",
+    );
+    assert!(
+        by_id.get("t-empty").copied().flatten().is_none(),
+        "thread with no user messages must stay title: None",
+    );
+    assert_eq!(
+        by_id.get("t-explicit").copied().flatten(),
+        Some("Caller-supplied title"),
+        "explicit EnsureThreadRequest.title must not be overwritten by derivation",
+    );
+}
+
 fn scope(label: &str) -> ThreadScope {
     ThreadScope {
         tenant_id: TenantId::new(format!("tenant-{label}")).unwrap(),

@@ -5,10 +5,12 @@ use std::sync::Arc;
 
 use anyhow::{Context, anyhow};
 use clap::Args;
+#[cfg(feature = "slack-v2-host-beta")]
+use ironclaw_reborn_composition::build_slack_events_route_mount;
 use ironclaw_reborn_composition::{
     GoogleOAuthRouteConfig, RebornBuildInput, RebornReadiness, RebornRuntimeIdentity,
-    RebornRuntimeInput, RebornWebuiBundle, WebuiServeConfig, build_reborn_runtime,
-    build_webui_services, webui_v2_app_with_lifecycle,
+    RebornRuntimeInput, RebornWebuiBundle, WebuiAuthenticator, WebuiServeConfig,
+    build_reborn_runtime, build_webui_services, webui_v2_app_with_lifecycle,
 };
 use ironclaw_reborn_config::IdentitySection;
 use ironclaw_reborn_webui_ingress::{
@@ -111,9 +113,17 @@ impl ServeCommand {
         let user_id = ironclaw_reborn_composition::host_api::UserId::new(&user_id_raw)
             .map_err(|err| anyhow!("{env_user_id_var} value `{user_id_raw}` is invalid: {err}"))?;
 
-        let authenticator = Arc::new(EnvBearerAuthenticator::new(
+        // Keep a copy of the operator secret to key the SSO session-token
+        // HMAC before the value is moved into the env-bearer authenticator.
+        // Held as `SecretString` so it is redacted in `Debug`/logs and
+        // zeroed on drop — it doubles as the session-signing key. Capture
+        // its byte length first (for the SSO entropy floor below) since the
+        // value is consumed here.
+        let token_byte_len = token_value.len();
+        let session_signing_secret = SecretString::from(token_value.clone());
+        let env_authenticator: Arc<dyn WebuiAuthenticator> = Arc::new(EnvBearerAuthenticator::new(
             SecretString::from(token_value),
-            user_id,
+            user_id.clone(),
         )?);
 
         // Resolve trusted host-installation default agent/project from
@@ -142,6 +152,19 @@ impl ServeCommand {
             .map(ironclaw_reborn_composition::host_api::ProjectId::new)
             .transpose()
             .map_err(|err| anyhow!("[identity].default_project is invalid: {err}"))?;
+        #[cfg(feature = "slack-v2-host-beta")]
+        let slack_host_beta_config = crate::commands::serve_slack::resolve_slack_host_beta_config(
+            config_file.as_ref().and_then(|file| file.slack.as_ref()),
+            &tenant_id,
+            &default_agent_id,
+            default_project_id.as_ref(),
+            &user_id,
+            &boot_config.home().config_file_path(),
+        )?;
+        #[cfg(not(feature = "slack-v2-host-beta"))]
+        crate::commands::serve_slack::reject_enabled_slack_without_feature(
+            config_file.as_ref().and_then(|file| file.slack.as_ref()),
+        )?;
 
         // Resolve listen address with explicit precedence:
         //   CLI flag (Some(...)) > config file > compile-time default.
@@ -222,6 +245,37 @@ impl ServeCommand {
             );
         }
 
+        // WebChat v2 SSO login startup config (providers + base URL +
+        // cleartext guard). Resolved here so misconfiguration fails fast
+        // before the runtime is built; the DB-backed user directory and
+        // the login wiring are assembled inside the async runtime below,
+        // because opening the libSQL user store is async.
+        let sso_startup = crate::commands::serve_sso::sso_startup_config_from_env(listen_addr)?;
+        // When SSO is enabled this same token keys the stateless session
+        // HMAC, so a weak value becomes an OFFLINE forgery target: an
+        // attacker who completes one legitimate login holds a
+        // `{payload}.{hmac}` pair and can brute-force a low-entropy key
+        // locally, then mint a session for any user/tenant. Pre-SSO the
+        // token only ever gated an online, rate-limited bearer guess.
+        // Require real entropy; fail closed rather than warn.
+        if sso_startup.is_some() && token_byte_len < 32 {
+            return Err(anyhow!(
+                "{env_token_var} is also the WebChat SSO session-signing key and must be at \
+                 least 32 bytes of high-entropy random material when an SSO provider is \
+                 configured (it signs stateless, user-visible session tokens). The current \
+                 value is {token_byte_len} bytes — generate one with e.g. `openssl rand -hex 32`."
+            ));
+        }
+        // The user-identity tables live IN the reborn local-dev substrate
+        // database (a second handle to the same `reborn-local-dev.db` the
+        // runtime opens), not a separate identity-store file — so there is
+        // one durable user source, not two.
+        let user_store_path = boot_config
+            .home()
+            .path()
+            .join("local-dev")
+            .join("reborn-local-dev.db");
+
         // CORS allow-origin list. Empty = fail-closed on every
         // cross-origin preflight; operators MUST opt in to the
         // specific origins the host installation actually serves.
@@ -280,6 +334,22 @@ impl ServeCommand {
                 .context("failed to assemble Reborn runtime for `serve`")?;
             let bundle: RebornWebuiBundle = build_webui_services(&runtime, None)?;
 
+            // Assemble the WebChat v2 auth surface (authenticator + optional
+            // public login mount). The auth/identity module owns the store
+            // opening + signed-session wiring; `serve` only supplies host
+            // config.
+            let crate::commands::webui_auth::WebuiAuthSurface {
+                authenticator,
+                public_mount,
+            } = crate::commands::webui_auth::build_webui_auth_surface(
+                sso_startup,
+                &user_store_path,
+                tenant_id.clone(),
+                session_signing_secret,
+                env_authenticator,
+            )
+            .await?;
+
             print_serve_banner(
                 listen_addr,
                 env_token_var,
@@ -318,6 +388,15 @@ impl ServeCommand {
             }
             if let Some(host) = canonical_host {
                 serve_config = serve_config.with_canonical_host(host);
+            }
+            #[cfg(feature = "slack-v2-host-beta")]
+            if let Some(slack_config) = slack_host_beta_config {
+                let slack_mount = build_slack_events_route_mount(&runtime, slack_config)
+                    .context("failed to compose Slack Events API host-beta route")?;
+                serve_config = serve_config.with_public_route_mount(slack_mount);
+            }
+            if let Some(mount) = public_mount {
+                serve_config = serve_config.with_public_route_mount(mount);
             }
             let webui_app = webui_v2_app_with_lifecycle(bundle, serve_config)
                 .context("failed to compose v2 Router")?;

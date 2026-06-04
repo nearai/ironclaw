@@ -3,6 +3,7 @@
 - Own only top-level Reborn composition for production/app startup.
 - Expose facade-shaped handles only: `HostRuntime`, `TurnCoordinator`, product-auth `RebornProductAuthServices`, WebUI `RebornServicesApi`, readiness.
 - Keep lower substrate handles private to factories and owning crates.
+- Substrate handles MAY be exposed via `#[cfg(any(test, feature = "test-support"))]` pub accessors on `RebornRuntime` when downstream integration tests need to drive production-shape state the facade doesn't yet surface (e.g. seeding `TriggerRecord` rows, `pair_external_actor` calls). These seams ship zero bytes in production binaries. New test-support accessors must carry a doc-comment naming the production call site they mirror and an explicit note that the handle is for tests only.
 - Do not depend on the root `ironclaw` crate or `src/` modules.
 - Do not add legacy bridge modes here until an accepted migration contract exists.
 - Do not route live v1/product traffic here; callers must opt in through explicit Reborn adapters.
@@ -117,10 +118,10 @@ Inbound order (outer → inner → handler):
    `ConnectInfo<SocketAddr>`, never `X-Forwarded-For` / `X-Real-IP`.
    Composition fails closed if a future descriptor declares an unsupported
    scope.
-9. `webui_v2_router(WebUiV2State::new(bundle.api))` — the nine v2
+9. `webui_v2_router(WebUiV2State::new(bundle.api))` — the v2
    handlers from `ironclaw_webui_v2` (create-thread, list-threads,
    send-message, get-timeline, stream-events SSE, stream-events WS,
-   cancel-run, resolve-gate, setup-extension).
+   cancel-run, resolve-gate, setup-extension, list-automations).
 
 ### Product-auth routes
 
@@ -246,7 +247,7 @@ rows are inventoried here, not implemented in the current PR.
 | Resolve gate | `POST /api/chat/gate/resolve` | `POST /api/webchat/v2/threads/{tid}/runs/{run_id}/gates/{gate_ref}/resolve` | Mapped |
 | Approval shim | `POST /api/chat/approval` | (Subsumed by `resolve_gate`) | Mapped |
 | Auth-token / auth-cancel | `POST /api/chat/auth-{token,cancel}` | (Engine v1 compatibility shim; delete with v1) | v1-only (legacy) |
-| Extensions registry/list/install/activate/remove/setup | `GET\|POST /api/extensions/*` | `GET /api/webchat/v2/extensions`, `GET /api/webchat/v2/extensions/registry`, `POST /api/webchat/v2/extensions/install`, `POST /api/webchat/v2/extensions/{package_id}/{activate,remove,setup}` | Mapped to lifecycle package refs and registry projections; setup still has no production setup side effects yet |
+| Extensions registry/list/install/activate/remove/setup | `GET\|POST /api/extensions/*` | `GET /api/webchat/v2/extensions`, `GET /api/webchat/v2/extensions/registry`, `POST /api/webchat/v2/extensions/install`, `POST /api/webchat/v2/extensions/{package_id}/{activate,remove,setup}` | Mapped to lifecycle package refs and registry projections; setup projects credential requirements and product-auth OAuth start is mounted under the extension setup surface |
 | SSO login (Google) | `GET /auth/providers`, `GET /auth/login/{p}`, `GET /auth/callback/{p}`, `POST /auth/logout` | Same paths on the v2 listener via `ironclaw_reborn_webui_ingress::webui_v2_auth_router`, merged into `webui_v2_app` through [`WebuiServeConfig::with_public_route_mount`] (typed `{ router, descriptors }` so the per-route body-limit / rate-limit middleware applies) | Mapped (Google); GitHub + NEAR follow under #4116 |
 
 ### Security invariants on every "Mapped" row

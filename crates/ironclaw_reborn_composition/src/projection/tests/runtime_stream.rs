@@ -430,6 +430,7 @@ async fn webui_event_stream_drains_live_reasoning_projection_from_update_source(
 
     sink.publish_loop_milestone(LoopHostMilestone {
         scope: scope.clone(),
+        actor: None,
         turn_id: TurnId::new(),
         run_id: TurnRunId::new(),
         loop_driver_id: LoopDriverId::new("test_loop").unwrap(),
@@ -461,6 +462,95 @@ async fn webui_event_stream_drains_live_reasoning_projection_from_update_source(
                     ))
         )
     }));
+}
+
+#[tokio::test]
+async fn live_projection_is_keyed_to_run_actor_not_publisher_owner() {
+    // A turn run by an SSO user whose id differs from the runtime owner
+    // must publish live progress to THAT user's stream, not the operator's.
+    // Regression for the projection-owner leak: the publisher used to key
+    // every live item to its construction-time owner, so an SSO user never
+    // saw their own thinking/progress while it leaked onto the operator
+    // stream.
+    let tenant_id = TenantId::new("webui-actor-tenant").unwrap();
+    let runtime_owner = UserId::new("runtime-owner").unwrap();
+    let sso_user = UserId::new("sso-user").unwrap();
+    let agent_id = AgentId::new("webui-actor-agent").unwrap();
+    let thread_id = ThreadId::new("webui-actor-thread").unwrap();
+    let event_log: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
+    let services = build_reborn_projection_services(
+        event_log,
+        ReplyTargetBindingRef::new("webui-actor-reply").unwrap(),
+    );
+    // Publisher built with the runtime owner — the fallback owner.
+    let sink = services.with_live_progress_milestone_sink_for_publisher(
+        Arc::new(InMemoryLoopHostMilestoneSink::default()),
+        services.live_projection_publisher(runtime_owner.clone()),
+    );
+    let scope = TurnScope::new(
+        tenant_id.clone(),
+        Some(agent_id.clone()),
+        None,
+        thread_id.clone(),
+    );
+
+    // The milestone is bound to the SSO user, not the runtime owner.
+    sink.publish_loop_milestone(LoopHostMilestone {
+        scope: scope.clone(),
+        actor: Some(TurnActor::new(sso_user.clone())),
+        turn_id: TurnId::new(),
+        run_id: TurnRunId::new(),
+        loop_driver_id: LoopDriverId::new("test_loop").unwrap(),
+        kind: LoopHostMilestoneKind::ModelReasoningDelta {
+            safe_delta: "sso user thinking".to_string(),
+        },
+    })
+    .await
+    .unwrap();
+
+    // The SSO user (the run actor) receives their own live progress.
+    let sso_events = services
+        .webui_event_stream()
+        .drain(ProjectionSubscriptionRequest {
+            actor: TurnActor::new(sso_user.clone()),
+            scope: scope.clone(),
+            after_cursor: None,
+        })
+        .await
+        .unwrap();
+    assert!(
+        sso_events.iter().any(|event| matches!(
+            event.payload(),
+            ProductOutboundPayload::ProjectionUpdate { state }
+                if state.items.iter().any(|item| matches!(
+                    item,
+                    ProductProjectionItem::Thinking { body, .. } if body == "sso user thinking"
+                ))
+        )),
+        "the run actor must receive its own live progress"
+    );
+
+    // The runtime owner (the old, wrong target) must NOT see it.
+    let owner_events = services
+        .webui_event_stream()
+        .drain(ProjectionSubscriptionRequest {
+            actor: TurnActor::new(runtime_owner.clone()),
+            scope,
+            after_cursor: None,
+        })
+        .await
+        .unwrap();
+    assert!(
+        !owner_events.iter().any(|event| matches!(
+            event.payload(),
+            ProductOutboundPayload::ProjectionUpdate { state }
+                if state.items.iter().any(|item| matches!(
+                    item,
+                    ProductProjectionItem::Thinking { body, .. } if body == "sso user thinking"
+                ))
+        )),
+        "live progress must not leak to a different user's stream"
+    );
 }
 
 #[tokio::test]
@@ -645,6 +735,7 @@ async fn webui_event_stream_drains_work_summary_projection_from_driver_note() {
 
     sink.publish_loop_milestone(LoopHostMilestone {
         scope: scope.clone(),
+        actor: None,
         turn_id: TurnId::new(),
         run_id,
         loop_driver_id: LoopDriverId::new("test_loop").unwrap(),
@@ -685,6 +776,107 @@ async fn webui_event_stream_drains_work_summary_projection_from_driver_note() {
 }
 
 #[tokio::test]
+async fn webui_event_stream_live_cursor_does_not_poison_runtime_failure_resume() {
+    let tenant_id = TenantId::new("webui-live-failure-tenant").unwrap();
+    let user_id = UserId::new("webui-live-failure-user").unwrap();
+    let agent_id = AgentId::new("webui-live-failure-agent").unwrap();
+    let thread_id = ThreadId::new("webui-live-failure-thread").unwrap();
+    let invocation_id = InvocationId::new();
+    let event_log = Arc::new(InMemoryDurableEventLog::new());
+    let event_log_for_append = Arc::clone(&event_log);
+    let event_log: Arc<dyn DurableEventLog> = event_log;
+    let services = build_reborn_projection_services(
+        event_log,
+        ReplyTargetBindingRef::new("webui-live-failure-reply").unwrap(),
+    );
+    let sink = services.with_live_progress_milestone_sink_for_publisher(
+        Arc::new(InMemoryLoopHostMilestoneSink::default()),
+        services.live_projection_publisher(user_id.clone()),
+    );
+    let actor = TurnActor::new(user_id.clone());
+    let scope = TurnScope::new(
+        tenant_id.clone(),
+        Some(agent_id.clone()),
+        None,
+        thread_id.clone(),
+    );
+
+    sink.publish_loop_milestone(LoopHostMilestone {
+        scope: scope.clone(),
+        actor: None,
+        turn_id: TurnId::new(),
+        run_id: TurnRunId::from_uuid(invocation_id.as_uuid()),
+        loop_driver_id: LoopDriverId::new("test_loop").unwrap(),
+        kind: LoopHostMilestoneKind::DriverNote {
+            kind: LoopDriverNoteKind::Planning,
+            safe_summary: LoopSafeSummary::new("checking tools").unwrap(),
+        },
+    })
+    .await
+    .unwrap();
+
+    let live_events = services
+        .webui_event_stream()
+        .drain(ProjectionSubscriptionRequest {
+            actor: actor.clone(),
+            scope: scope.clone(),
+            after_cursor: None,
+        })
+        .await
+        .unwrap();
+    assert!(live_events.iter().any(|event| {
+        matches!(
+            event.payload(),
+            ProductOutboundPayload::ProjectionUpdate { state }
+                if state.items.iter().any(|item| matches!(
+                    item,
+                    ProductProjectionItem::WorkSummary { body, .. } if body == "checking tools"
+                ))
+        )
+    }));
+    let live_cursor =
+        parse_webui_projection_cursor(live_events.last().unwrap().projection_cursor().as_str())
+            .unwrap();
+    assert!(
+        live_cursor.runtime.is_none(),
+        "live progress must not advance the durable runtime cursor"
+    );
+    assert!(live_cursor.live.is_some());
+
+    let runtime_scope = resource_scope(&tenant_id, &user_id, &agent_id, &thread_id, invocation_id);
+    event_log_for_append
+        .append(RuntimeEvent::model_started(
+            runtime_scope.clone(),
+            CapabilityId::new("loop.model").unwrap(),
+        ))
+        .await
+        .unwrap();
+    event_log_for_append
+        .append(RuntimeEvent::loop_failed(
+            runtime_scope,
+            CapabilityId::new("loop.run").unwrap(),
+            "driver_unavailable",
+        ))
+        .await
+        .unwrap();
+
+    let resumed_events = services
+        .webui_event_stream()
+        .drain(ProjectionSubscriptionRequest {
+            actor,
+            scope,
+            after_cursor: Some(live_events.last().unwrap().projection_cursor().clone()),
+        })
+        .await
+        .unwrap();
+
+    assert!(
+        contains_run_status(&resumed_events, invocation_id, "failed"),
+        "runtime failure after live progress must still be delivered from the live cursor"
+    );
+}
+
+#[tokio::test]
 async fn webui_event_stream_maps_subscription_terminated_work_summary_to_context() {
     let tenant_id = TenantId::new("webui-terminated-summary-tenant").unwrap();
     let user_id = UserId::new("webui-terminated-summary-user").unwrap();
@@ -709,6 +901,7 @@ async fn webui_event_stream_maps_subscription_terminated_work_summary_to_context
 
     sink.publish_loop_milestone(LoopHostMilestone {
         scope: scope.clone(),
+        actor: None,
         turn_id: TurnId::new(),
         run_id,
         loop_driver_id: LoopDriverId::new("test_loop").unwrap(),
@@ -772,6 +965,7 @@ async fn webui_event_stream_skips_empty_work_summary_body() {
 
     sink.publish_loop_milestone(LoopHostMilestone {
         scope: scope.clone(),
+        actor: None,
         turn_id: TurnId::new(),
         run_id: TurnRunId::new(),
         loop_driver_id: LoopDriverId::new("test_loop").unwrap(),
@@ -896,6 +1090,7 @@ async fn webui_event_stream_accepts_legacy_partial_origin_cursor() {
     let scope = TurnScope::new(tenant_id, Some(agent_id), None, thread_id);
     let legacy_cursor = product_cursor_from_webui_cursor(&WebuiProjectionCursor {
         runtime: None,
+        live: None,
         runtime_item: None,
         turn: None,
         runtime_payloads_delivered: 1,

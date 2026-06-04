@@ -247,7 +247,7 @@ pub(crate) async fn dispatch_ok(
     input: serde_json::Value,
     egress: Arc<RecordingEgress>,
 ) -> serde_json::Value {
-    let executor = GsuiteExecutor::new(auth, noop_credential_stager());
+    let executor = GsuiteExecutor::new(auth.clone(), auth, noop_credential_stager());
     let capability_id = capability_id(capability);
     executor
         .dispatch(GsuiteDispatchRequest {
@@ -268,7 +268,7 @@ pub(crate) async fn dispatch_error(
     input: serde_json::Value,
     egress: Arc<RecordingEgress>,
 ) -> GsuiteDispatchError {
-    let executor = GsuiteExecutor::new(auth, noop_credential_stager());
+    let executor = GsuiteExecutor::new(auth.clone(), auth, noop_credential_stager());
     let capability_id = capability_id(capability);
     executor
         .dispatch(GsuiteDispatchRequest {
@@ -322,7 +322,7 @@ pub(crate) async fn dispatch_error_with_stager(
     egress: Arc<RecordingEgress>,
     stager: Arc<dyn GsuiteCredentialStager>,
 ) -> GsuiteDispatchError {
-    let executor = GsuiteExecutor::new(auth, stager);
+    let executor = GsuiteExecutor::new(auth.clone(), auth, stager);
     let capability_id = capability_id(capability);
     executor
         .dispatch(GsuiteDispatchRequest {

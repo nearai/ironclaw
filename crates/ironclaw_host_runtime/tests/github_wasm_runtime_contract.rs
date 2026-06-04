@@ -15,8 +15,9 @@ use ironclaw_host_api::{
 };
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, HostRuntime, HostRuntimeServices, RuntimeCapabilityOutcome,
-    RuntimeCapabilityRequest, RuntimeCredentialAccountRequest, RuntimeCredentialAccountResolver,
-    RuntimeFailureKind, default_host_api_contract_registry, default_host_port_catalog,
+    RuntimeCapabilityRequest, RuntimeCredentialAccessSecret, RuntimeCredentialAccountRequest,
+    RuntimeCredentialAccountResolver, RuntimeFailureKind, default_host_api_contract_registry,
+    default_host_port_catalog,
 };
 use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
@@ -1245,10 +1246,15 @@ impl RuntimeCredentialAccountResolver for FixedRuntimeCredentialAccountResolver 
     async fn resolve_access_secret(
         &self,
         request: RuntimeCredentialAccountRequest<'_>,
-    ) -> Result<SecretHandle, CredentialStageError> {
+    ) -> Result<RuntimeCredentialAccessSecret, CredentialStageError> {
         assert_eq!(request.provider.as_str(), "github");
         assert_eq!(request.requester_extension.as_str(), "github");
-        self.result.clone()
+        self.result
+            .clone()
+            .map(|handle| RuntimeCredentialAccessSecret {
+                scope: request.scope.clone(),
+                handle,
+            })
     }
 }
 
@@ -1264,14 +1270,19 @@ impl RuntimeCredentialAccountResolver for FixedGoogleRuntimeCredentialAccountRes
     async fn resolve_access_secret(
         &self,
         request: RuntimeCredentialAccountRequest<'_>,
-    ) -> Result<SecretHandle, CredentialStageError> {
+    ) -> Result<RuntimeCredentialAccessSecret, CredentialStageError> {
         assert_eq!(request.provider.as_str(), "google");
         assert_eq!(
             request.requester_extension,
             &self.expected_requester_extension
         );
         assert_eq!(request.provider_scopes, self.expected_scopes.as_slice());
-        self.result.clone()
+        self.result
+            .clone()
+            .map(|handle| RuntimeCredentialAccessSecret {
+                scope: request.scope.clone(),
+                handle,
+            })
     }
 }
 

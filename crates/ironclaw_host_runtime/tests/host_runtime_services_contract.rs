@@ -3662,6 +3662,7 @@ async fn host_runtime_services_maps_mcp_client_failure_through_private_adapter()
         ProcessServices::in_memory(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
+    .with_runtime_http_egress(Arc::new(RecordingRuntimeHttpEgress::new()))
     .with_mcp_runtime(Arc::new(ClientErrorMcpExecutor));
 
     let outcome = services

@@ -27,14 +27,16 @@ use ironclaw_product_adapters::{
     ProgressKind, ProgressUpdateView, ProjectionCursor,
 };
 use ironclaw_product_workflow::{
-    LifecyclePackageRef, LifecyclePhase, RebornCancelRunResponse, RebornCreateThreadResponse,
+    LifecyclePackageRef, LifecyclePhase, RebornAutomationInfo, RebornAutomationSource,
+    RebornAutomationState, RebornCancelRunResponse, RebornCreateThreadResponse,
     RebornExtensionActionResponse, RebornExtensionListResponse, RebornExtensionRegistryResponse,
-    RebornGetRunStateRequest, RebornGetRunStateResponse, RebornListThreadsResponse,
-    RebornResolveGateResponse, RebornResumeGateResponse, RebornServicesApi, RebornServicesError,
-    RebornServicesErrorCode, RebornServicesErrorKind, RebornSetupExtensionResponse,
-    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
-    RebornTimelineRequest, RebornTimelineResponse, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
-    WebUiCreateThreadRequest, WebUiListThreadsRequest, WebUiResolveGateRequest,
+    RebornGetRunStateRequest, RebornGetRunStateResponse, RebornListAutomationsResponse,
+    RebornListThreadsResponse, RebornResolveGateResponse, RebornResumeGateResponse,
+    RebornServicesApi, RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
+    RebornSetupExtensionResponse, RebornStreamEventsRequest, RebornStreamEventsResponse,
+    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
+    WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
+    WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiResolveGateRequest,
     WebUiSendMessageRequest, WebUiSetupExtensionRequest,
 };
 use ironclaw_threads::SessionThreadRecord;
@@ -71,6 +73,8 @@ struct StubServices {
     stream_events_calls: Mutex<Vec<RebornStreamEventsRequest>>,
     cancel_run_calls: Mutex<Vec<WebUiCancelRunRequest>>,
     resolve_gate_calls: Mutex<Vec<WebUiResolveGateRequest>>,
+    list_automations_calls: Mutex<Vec<WebUiListAutomationsRequest>>,
+    next_list_automations_error: Mutex<Option<RebornServicesError>>,
     list_extensions_calls: Mutex<usize>,
     list_extension_registry_calls: Mutex<usize>,
     install_extension_calls: Mutex<Vec<String>>,
@@ -88,6 +92,10 @@ struct StubServices {
 impl StubServices {
     fn fail_create_thread(&self, error: RebornServicesError) {
         *self.next_create_thread_error.lock().expect("lock") = Some(error);
+    }
+
+    fn fail_list_automations(&self, error: RebornServicesError) {
+        *self.next_list_automations_error.lock().expect("lock") = Some(error);
     }
 
     /// Queue one response for the next `stream_events` call. Tests use this
@@ -285,6 +293,32 @@ impl RebornServicesApi for StubServices {
         })
     }
 
+    async fn list_automations(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        request: WebUiListAutomationsRequest,
+    ) -> Result<RebornListAutomationsResponse, RebornServicesError> {
+        self.list_automations_calls
+            .lock()
+            .expect("lock")
+            .push(request);
+        if let Some(error) = self
+            .next_list_automations_error
+            .lock()
+            .expect("lock")
+            .take()
+        {
+            return Err(error);
+        }
+        Ok(RebornListAutomationsResponse {
+            automations: vec![automation_info(
+                "automation-listed",
+                "Daily status",
+                "0 9 * * *",
+            )],
+        })
+    }
+
     async fn list_extensions(
         &self,
         _caller: WebUiAuthenticatedCaller,
@@ -369,6 +403,22 @@ fn extension_action_response(message: &str) -> RebornExtensionActionResponse {
         instructions: None,
         onboarding_state: None,
         onboarding: None,
+    }
+}
+
+fn automation_info(automation_id: &str, name: &str, cron: &str) -> RebornAutomationInfo {
+    RebornAutomationInfo {
+        automation_id: automation_id.to_string(),
+        name: name.to_string(),
+        source: RebornAutomationSource::Schedule {
+            cron: cron.to_string(),
+        },
+        state: RebornAutomationState::Active,
+        next_run_at: None,
+        last_run_at: None,
+        last_status: None,
+        is_active: true,
+        created_at: None,
     }
 }
 
@@ -675,6 +725,122 @@ async fn stream_events_last_event_id_header_takes_precedence_over_query() {
         Some(&header_cursor),
         "Last-Event-ID header must win over ?after_cursor= query param"
     );
+}
+
+#[tokio::test]
+async fn list_automations_forwards_query_limit_to_facade() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/automations?limit=5")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(body["automations"][0]["automation_id"], "automation-listed");
+
+    let calls = services
+        .list_automations_calls
+        .lock()
+        .expect("lock")
+        .clone();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].limit, Some(5));
+}
+
+#[tokio::test]
+async fn list_automations_omits_limit_and_forwards_none() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/automations")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(body["automations"][0]["automation_id"], "automation-listed");
+
+    let calls = services
+        .list_automations_calls
+        .lock()
+        .expect("lock")
+        .clone();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].limit, None);
+}
+
+#[tokio::test]
+async fn list_automations_rejects_invalid_limit_query_with_400() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/automations?limit=not-a-number")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        services
+            .list_automations_calls
+            .lock()
+            .expect("lock")
+            .is_empty(),
+        "invalid query input must be rejected before reaching the facade"
+    );
+}
+
+#[tokio::test]
+async fn list_automations_error_maps_to_http_status() {
+    let services = Arc::new(StubServices::default());
+    services.fail_list_automations(RebornServicesError {
+        code: RebornServicesErrorCode::Forbidden,
+        kind: RebornServicesErrorKind::ParticipantDenied,
+        status_code: 403,
+        retryable: false,
+        field: None,
+        validation_code: None,
+    });
+    let router = router_with(services);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/automations")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let body = read_json(response).await;
+    assert_eq!(body["error"], "forbidden");
+    assert_eq!(body["kind"], "participant_denied");
+    assert_eq!(body["retryable"], false);
 }
 
 #[tokio::test]
@@ -1193,6 +1359,13 @@ async fn stream_events_releases_slot_when_facade_drain_stalls_past_max_lifetime(
         ) -> Result<RebornListThreadsResponse, RebornServicesError> {
             unreachable!("not exercised by this test")
         }
+        async fn list_automations(
+            &self,
+            _caller: WebUiAuthenticatedCaller,
+            _request: WebUiListAutomationsRequest,
+        ) -> Result<RebornListAutomationsResponse, RebornServicesError> {
+            unreachable!("not exercised by this test")
+        }
         async fn list_extensions(
             &self,
             _caller: WebUiAuthenticatedCaller,
@@ -1344,6 +1517,7 @@ fn make_capability_activity_envelope(cursor: &str) -> ProductOutboundEnvelope {
         cursor,
         ProductOutboundPayload::CapabilityActivity(CapabilityActivityView {
             invocation_id: InvocationId::new(),
+            turn_run_id: Some(TurnRunId::new()),
             thread_id: Some(ThreadId::new("thread-x").expect("thread id")),
             capability_id: CapabilityId::new("script.echo").expect("capability id"),
             status: CapabilityActivityStatusView::Running,
@@ -1843,6 +2017,82 @@ async fn stream_events_ws_emits_projection_frames_and_redacted_error() {
         calls[1].after_cursor.as_ref(),
         Some(envelope_b.projection_cursor()),
         "second WS poll must advance after_cursor to the last emitted projection cursor",
+    );
+}
+
+#[tokio::test]
+async fn stream_events_ws_resumes_from_last_event_id_before_query_cursor() {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+    let services = Arc::new(StubServices::default());
+    services.enqueue_stream_events(Err(RebornServicesError {
+        code: RebornServicesErrorCode::Unavailable,
+        kind: RebornServicesErrorKind::ServiceUnavailable,
+        status_code: 503,
+        retryable: true,
+        field: None,
+        validation_code: None,
+    }));
+
+    let query_cursor = make_projection_envelope("cursor:query", "query");
+    let header_cursor = make_projection_envelope("cursor:header", "header");
+    let query_cursor_json =
+        serde_json::to_string(query_cursor.projection_cursor()).expect("query cursor");
+    let header_cursor_json =
+        serde_json::to_string(header_cursor.projection_cursor()).expect("header cursor");
+
+    let router = router_with(services.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("local_addr");
+    let serve_handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, router).await;
+    });
+
+    let url = format!(
+        "ws://{addr}/api/webchat/v2/threads/thread-x/ws?after_cursor={}",
+        url_encode(&query_cursor_json)
+    );
+    let mut request = url.into_client_request().expect("ws request");
+    request.headers_mut().insert(
+        "Last-Event-ID",
+        header_cursor_json.parse().expect("header cursor value"),
+    );
+
+    let (mut ws, response) = tokio::time::timeout(
+        Duration::from_secs(5),
+        tokio_tungstenite::connect_async(request),
+    )
+    .await
+    .expect("ws connect within 5s")
+    .expect("ws upgrade");
+    assert_eq!(response.status().as_u16(), 101);
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        if !services
+            .stream_events_calls
+            .lock()
+            .expect("lock")
+            .is_empty()
+        {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "WS handler did not call stream_events"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let _ = ws.close(None).await;
+    serve_handle.abort();
+
+    let calls = services.stream_events_calls.lock().expect("lock").clone();
+    assert_eq!(
+        calls[0].after_cursor.as_ref(),
+        Some(header_cursor.projection_cursor()),
+        "Last-Event-ID must win over ?after_cursor= for WS reconnects, matching SSE"
     );
 }
 

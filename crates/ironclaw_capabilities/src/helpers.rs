@@ -326,6 +326,7 @@ mod tests {
     fn dispatch_input_encode_returns_no_run_state_transition() {
         let error = CapabilityInvocationError::Dispatch {
             kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::InputEncode),
+            safe_summary: None,
         };
         assert!(error.run_state_transition().is_none());
     }
@@ -334,6 +335,7 @@ mod tests {
     fn dispatch_backend_returns_no_run_state_transition() {
         let error = CapabilityInvocationError::Dispatch {
             kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Backend),
+            safe_summary: None,
         };
         assert!(error.run_state_transition().is_none());
     }
@@ -342,6 +344,7 @@ mod tests {
     fn dispatch_unknown_capability_returns_no_run_state_transition() {
         let error = CapabilityInvocationError::Dispatch {
             kind: DispatchFailureKind::UnknownCapability,
+            safe_summary: None,
         };
         assert!(error.run_state_transition().is_none());
     }

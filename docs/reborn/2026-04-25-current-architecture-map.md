@@ -53,9 +53,10 @@ capabilities. Reborn composition now wires a configurable background trigger
 poller lifecycle for local runtime startup/readiness/shutdown; the poller is
 opt-in by default, uses bounded shutdown for stalled ticks, records trusted
 trigger prompts only after accepted/replayed turn submission, and batches
-active-run lookup snapshots per cleanup page. Trusted trigger ingress is guarded
-by the host-only `ironclaw_trusted_ingress` authority crate plus Reborn
-architecture dependency tests. External trigger result delivery, production
+active-run lookup snapshots per cleanup page. Trusted trigger submission is
+sealed by trigger-worker-owned request minting, private conversation-owned
+trusted inbound construction, and Reborn architecture dependency tests.
+External trigger result delivery, production
 lifecycle/readiness policy, active-run retention/tombstone semantics, and
 production jitter source selection remain follow-up slices.
 

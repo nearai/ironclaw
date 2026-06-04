@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fmt,
     str::FromStr,
     sync::{
@@ -10,7 +10,7 @@ use std::{
 
 use async_trait::async_trait;
 use chrono::Utc;
-use ironclaw_host_api::{CapabilityId, InvocationId, ThreadId};
+use ironclaw_host_api::{CapabilityId, InvocationId, RuntimeKind, ThreadId};
 use ironclaw_threads::{
     AcceptInboundMessageRequest, EnsureThreadRequest, MessageContent, SessionThreadService,
     ThreadMessageId, ThreadScope,
@@ -23,20 +23,51 @@ use ironclaw_turns::{
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation,
         CapabilityBatchOutcome, CapabilityCallCandidate, CapabilityDenied,
-        CapabilityDeniedReasonKind, CapabilityInputRef, CapabilityInvocation, CapabilityOutcome,
-        LoopCapabilityPort, LoopRunContext, LoopSafeSummary, ProviderToolCall,
-        ProviderToolDefinition, VisibleCapabilityRequest, VisibleCapabilitySurface,
-        sanitize_model_visible_text,
+        CapabilityDeniedReasonKind, CapabilityDescriptorView, CapabilityInputRef,
+        CapabilityInvocation, CapabilityOutcome, ConcurrencyHint, LoopCapabilityPort,
+        LoopRunContext, LoopSafeSummary, ProviderToolCall, ProviderToolCallCapabilityIds,
+        ProviderToolCallReplay, ProviderToolDefinition, VisibleCapabilityRequest,
+        VisibleCapabilitySurface, sanitize_model_visible_text,
     },
 };
 use serde::{Deserialize, Serialize};
 
-use crate::{CapabilityResultWrite, LoopCapabilityInputResolver, LoopCapabilityResultWriter};
+use crate::{
+    CapabilityResultWrite, LoopCapabilityInputResolver, LoopCapabilityResultWriter,
+    subagent_prompt_port::DEFAULT_SUBAGENT_GOAL_MAX_BYTES,
+};
 
 pub const DEFAULT_SUBAGENT_MAX_DEPTH: u32 = 1;
 pub const DEFAULT_SUBAGENT_MAX_SPAWN_PER_TURN: u32 = 4;
 pub const DEFAULT_SUBAGENT_MAX_TREE_DESCENDANTS: u32 = 16;
 pub const DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID: &str = "builtin.spawn_subagent";
+const SPAWN_SUBAGENT_PROVIDER_TOOL_NAME: &str = "builtin__spawn_subagent";
+pub(crate) const SPAWN_SUBAGENT_DESCRIPTION: &str =
+    "Spawn a scoped child subagent to handle a focused task and return its result.";
+
+fn spawn_subagent_parameters_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "required": ["flavor_id", "task"],
+        "additionalProperties": false,
+        "properties": {
+            "flavor_id": {
+                "type": "string",
+                "description": "Subagent flavor id for the child run."
+            },
+            "task": {
+                "type": "string",
+                "maxLength": DEFAULT_SUBAGENT_GOAL_MAX_BYTES,
+                "description": "Self-contained task for the child subagent run. Runtime enforces a UTF-8 byte budget; maxLength is a provider-facing character-count hint."
+            },
+            "handoff": {
+                "type": "string",
+                "maxLength": DEFAULT_SUBAGENT_GOAL_MAX_BYTES,
+                "description": "Optional context appended to the child subagent prompt. Runtime enforces a UTF-8 byte budget; maxLength is a provider-facing character-count hint."
+            }
+        }
+    })
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
@@ -155,6 +186,14 @@ impl TryFrom<SpawnSubagentWireArgs> for SpawnSubagentArgs {
         }
         if value.mode == Some(SpawnSubagentWireMode::Background) {
             return Err(background_subagents_disabled());
+        }
+        if value.task.len() > DEFAULT_SUBAGENT_GOAL_MAX_BYTES {
+            return Err(spawn_goal_field_too_large("task", value.task.len()));
+        }
+        if let Some(handoff) = value.handoff.as_deref()
+            && handoff.len() > DEFAULT_SUBAGENT_GOAL_MAX_BYTES
+        {
+            return Err(spawn_goal_field_too_large("handoff", handoff.len()));
         }
         Ok(Self {
             subagent_kind: value.subagent_kind,
@@ -314,7 +353,7 @@ pub struct SubagentSpawnCapabilityPort {
     spawn_id: CapabilityId,
     limits: SubagentSpawnLimits,
     deps: Arc<SubagentSpawnDeps>,
-    auth_input_refs: Mutex<HashMap<CapabilityInputRef, CapabilityInputRef>>,
+    auth_input_refs: Mutex<HashSet<CapabilityInputRef>>,
     spawned_this_turn: AtomicU32,
 }
 
@@ -390,13 +429,53 @@ impl SubagentSpawnCapabilityPort {
             spawn_id,
             limits,
             deps,
-            auth_input_refs: Mutex::new(HashMap::new()),
+            auth_input_refs: Mutex::new(HashSet::new()),
             spawned_this_turn: AtomicU32::new(0),
         }
     }
 
     fn is_spawn(&self, capability_id: &CapabilityId) -> bool {
         capability_id == &self.spawn_id
+    }
+
+    fn is_spawn_provider_tool_name(&self, tool_name: &str) -> bool {
+        tool_name == SPAWN_SUBAGENT_PROVIDER_TOOL_NAME
+    }
+
+    fn spawn_tool_definition(&self) -> ProviderToolDefinition {
+        ProviderToolDefinition {
+            capability_id: self.spawn_id.clone(),
+            name: SPAWN_SUBAGENT_PROVIDER_TOOL_NAME.to_string(),
+            description: SPAWN_SUBAGENT_DESCRIPTION.to_string(),
+            parameters: spawn_subagent_parameters_schema(),
+        }
+    }
+
+    fn spawn_descriptor(&self) -> CapabilityDescriptorView {
+        CapabilityDescriptorView {
+            capability_id: self.spawn_id.clone(),
+            provider: None,
+            runtime: RuntimeKind::FirstParty,
+            safe_name: self.spawn_id.as_str().to_string(),
+            safe_description: SPAWN_SUBAGENT_DESCRIPTION.to_string(),
+            concurrency_hint: ConcurrencyHint::Exclusive,
+            parameters_schema: spawn_subagent_parameters_schema(),
+        }
+    }
+
+    fn validate_spawn_provider_tool_call(
+        &self,
+        tool_call: &ProviderToolCall,
+    ) -> Result<(), AgentLoopHostError> {
+        serde_json::from_value::<SpawnSubagentWireArgs>(tool_call.arguments.clone())
+            .map_err(|error| {
+                AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::InvalidInvocation,
+                    format!("invalid spawn_subagent input: {error}"),
+                )
+            })?
+            .try_into()
+            .map(|_: SpawnSubagentArgs| ())
     }
 
     fn try_reserve_spawn_slot(&self) -> bool {
@@ -531,36 +610,20 @@ impl SubagentSpawnCapabilityPort {
         &self,
         invocation: &CapabilityInvocation,
     ) -> Result<Option<CapabilityOutcome>, AgentLoopHostError> {
-        let auth_input_ref = {
+        let is_registered = {
             let auth_input_refs = self.auth_input_refs.lock().map_err(|_| {
                 AgentLoopHostError::new(
                     AgentLoopHostErrorKind::Unavailable,
                     "subagent spawn authorization input store is unavailable",
                 )
             })?;
-            auth_input_refs.get(&invocation.input_ref).cloned()
+            auth_input_refs.contains(&invocation.input_ref)
         };
-        let Some(auth_input_ref) = auth_input_ref else {
+        if !is_registered {
             return Ok(Some(spawn_rejected("spawn_requires_provider_registration")));
-        };
-        let mut auth_invocation = invocation.clone();
-        auth_invocation.input_ref = auth_input_ref;
-        match self.inner.invoke_capability(auth_invocation).await? {
-            CapabilityOutcome::Completed(result) => {
-                let _ = self
-                    .deps
-                    .result_writer
-                    .delete_capability_result(&self.run_context, &result.result_ref)
-                    .await;
-                self.remove_auth_input_ref(&invocation.input_ref)?;
-                Ok(None)
-            }
-            other if other.is_suspension() => Ok(Some(other)),
-            other => {
-                self.remove_auth_input_ref(&invocation.input_ref)?;
-                Ok(Some(other))
-            }
         }
+        self.remove_auth_input_ref(&invocation.input_ref)?;
+        Ok(None)
     }
 
     fn remove_auth_input_ref(
@@ -787,13 +850,34 @@ impl SubagentSpawnCapabilityPort {
 #[async_trait]
 impl LoopCapabilityPort for SubagentSpawnCapabilityPort {
     fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
-        self.inner.tool_definitions()
+        let mut definitions = self.inner.tool_definitions()?;
+        if !definitions
+            .iter()
+            .any(|definition| definition.capability_id == self.spawn_id)
+        {
+            definitions.push(self.spawn_tool_definition());
+            definitions.sort_by(|left, right| left.name.cmp(&right.name));
+        }
+        Ok(definitions)
+    }
+
+    fn provider_tool_call_capability_ids(
+        &self,
+        tool_call: &ProviderToolCall,
+    ) -> Result<ProviderToolCallCapabilityIds, AgentLoopHostError> {
+        if self.is_spawn_provider_tool_name(&tool_call.name) {
+            return Ok(ProviderToolCallCapabilityIds::single(self.spawn_id.clone()));
+        }
+        self.inner.provider_tool_call_capability_ids(tool_call)
     }
 
     fn validate_provider_tool_call(
         &self,
         tool_call: &ProviderToolCall,
     ) -> Result<(), AgentLoopHostError> {
+        if self.is_spawn_provider_tool_name(&tool_call.name) {
+            return self.validate_spawn_provider_tool_call(tool_call);
+        }
         self.inner.validate_provider_tool_call(tool_call)
     }
 
@@ -801,11 +885,18 @@ impl LoopCapabilityPort for SubagentSpawnCapabilityPort {
         &self,
         tool_call: ProviderToolCall,
     ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
-        let inner_candidate = self
-            .inner
-            .register_provider_tool_call(tool_call.clone())
-            .await?;
-        if inner_candidate.capability_id == self.spawn_id {
+        if self.is_spawn_provider_tool_name(&tool_call.name) {
+            let surface = self
+                .inner
+                .visible_capabilities(VisibleCapabilityRequest)
+                .await?;
+            self.validate_spawn_provider_tool_call(&tool_call)?;
+            let provider_turn_id = tool_call.turn_id.clone().ok_or_else(|| {
+                AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::InvalidInvocation,
+                    "provider tool call is missing a provider turn id",
+                )
+            })?;
             let input_ref = self
                 .deps
                 .spawn_input_codec
@@ -819,12 +910,26 @@ impl LoopCapabilityPort for SubagentSpawnCapabilityPort {
                         "subagent spawn authorization input store is unavailable",
                     )
                 })?
-                .insert(input_ref.clone(), inner_candidate.input_ref);
+                .insert(input_ref.clone());
             return Ok(CapabilityCallCandidate {
+                surface_version: surface.version,
+                capability_id: self.spawn_id.clone(),
+                effective_capability_ids: vec![self.spawn_id.clone()],
                 input_ref,
-                ..inner_candidate
+                provider_replay: Some(ProviderToolCallReplay {
+                    provider_id: tool_call.provider_id,
+                    provider_model_id: tool_call.provider_model_id,
+                    provider_turn_id,
+                    provider_call_id: tool_call.id,
+                    provider_tool_name: tool_call.name,
+                    arguments: tool_call.arguments,
+                    response_reasoning: tool_call.response_reasoning,
+                    reasoning: tool_call.reasoning,
+                    signature: tool_call.signature,
+                }),
             });
         }
+        let inner_candidate = self.inner.register_provider_tool_call(tool_call).await?;
         Ok(inner_candidate)
     }
 
@@ -832,7 +937,15 @@ impl LoopCapabilityPort for SubagentSpawnCapabilityPort {
         &self,
         request: VisibleCapabilityRequest,
     ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
-        self.inner.visible_capabilities(request).await
+        let mut surface = self.inner.visible_capabilities(request).await?;
+        if !surface
+            .descriptors
+            .iter()
+            .any(|descriptor| descriptor.capability_id == self.spawn_id)
+        {
+            surface.descriptors.push(self.spawn_descriptor());
+        }
+        Ok(surface)
     }
 
     async fn invoke_capability(
@@ -1031,6 +1144,15 @@ fn background_subagents_disabled() -> AgentLoopHostError {
     AgentLoopHostError::new(
         AgentLoopHostErrorKind::InvalidInvocation,
         "background subagents are disabled pending durable completion delivery design (#4147)",
+    )
+}
+
+fn spawn_goal_field_too_large(field: &'static str, len: usize) -> AgentLoopHostError {
+    AgentLoopHostError::new(
+        AgentLoopHostErrorKind::InvalidInvocation,
+        format!(
+            "spawn_subagent {field} is too large: {len} bytes (max {DEFAULT_SUBAGENT_GOAL_MAX_BYTES})"
+        ),
     )
 }
 

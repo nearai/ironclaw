@@ -1,7 +1,7 @@
 import { React, html } from "../../../lib/html.js";
 import { useT } from "../../../lib/i18n.js";
+import { ActivityRun } from "./activity-run.js";
 import { MessageBubble } from "./message-bubble.js";
-import { ToolRun } from "./tool-activity.js";
 import { Icon } from "../../../design-system/icons.js";
 import { groupMessages } from "../lib/message-groups.js";
 
@@ -70,8 +70,8 @@ export function MessageList({
           </div>
         `}
         ${grouped.map((item) =>
-          item.type === "tool-run"
-            ? html`<${ToolRun} key=${item.id} tools=${item.tools} />`
+          item.type === "activity-run"
+            ? html`<${ActivityRun} key=${item.id} activity=${item.activity} />`
             : html`<${MessageBubble}
                 key=${item.id}
                 message=${item.message}

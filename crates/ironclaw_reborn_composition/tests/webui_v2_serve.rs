@@ -22,13 +22,13 @@ use ironclaw_host_api::{AgentId, NetworkMethod, ProjectId, TenantId, ThreadId, U
 use ironclaw_product_workflow::{
     LifecyclePackageRef, LifecyclePhase, RebornCancelRunResponse, RebornCreateThreadResponse,
     RebornExtensionActionResponse, RebornExtensionListResponse, RebornExtensionRegistryResponse,
-    RebornGetRunStateRequest, RebornGetRunStateResponse, RebornListThreadsResponse,
-    RebornResolveGateResponse, RebornServicesApi, RebornServicesError, RebornServicesErrorCode,
-    RebornServicesErrorKind, RebornSetupExtensionResponse, RebornStreamEventsRequest,
-    RebornStreamEventsResponse, RebornSubmitTurnResponse, RebornTimelineRequest,
-    RebornTimelineResponse, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
-    WebUiCreateThreadRequest, WebUiListThreadsRequest, WebUiResolveGateRequest,
-    WebUiSendMessageRequest, WebUiSetupExtensionRequest,
+    RebornGetRunStateRequest, RebornGetRunStateResponse, RebornListAutomationsResponse,
+    RebornListThreadsResponse, RebornResolveGateResponse, RebornServicesApi, RebornServicesError,
+    RebornServicesErrorCode, RebornServicesErrorKind, RebornSetupExtensionResponse,
+    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
+    RebornTimelineRequest, RebornTimelineResponse, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
+    WebUiCreateThreadRequest, WebUiListAutomationsRequest, WebUiListThreadsRequest,
+    WebUiResolveGateRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
 };
 use ironclaw_reborn_composition::{
     PublicRouteMount, RebornReadiness, RebornWebuiBundle, WebuiAuthenticator, WebuiServeConfig,
@@ -207,6 +207,16 @@ impl RebornServicesApi for StubServices {
         Ok(RebornListThreadsResponse {
             threads: Vec::new(),
             next_cursor: None,
+        })
+    }
+
+    async fn list_automations(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _request: WebUiListAutomationsRequest,
+    ) -> Result<RebornListAutomationsResponse, RebornServicesError> {
+        Ok(RebornListAutomationsResponse {
+            automations: Vec::new(),
         })
     }
 
@@ -1267,6 +1277,94 @@ async fn static_chat_oauth_card_exposes_https_only_authorization_link() {
     assert!(
         body.contains("noopener,noreferrer"),
         "OAuth authorization popup must keep opener isolation"
+    );
+}
+
+#[tokio::test]
+async fn static_chat_hook_listens_for_oauth_callback_completion() {
+    let (app, _) = build_app();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/v2/js/pages/chat/hooks/useChat.js")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_body_string(response).await;
+
+    assert!(
+        body.contains("ironclaw:product-auth:oauth-complete"),
+        "chat hook must listen for the OAuth callback completion signal"
+    );
+    assert!(
+        body.contains("new window.BroadcastChannel(OAUTH_CALLBACK_CHANNEL)"),
+        "chat hook must consume same-origin OAuth callback broadcasts"
+    );
+    assert!(
+        body.contains("window.addEventListener(\"storage\", onStorage)"),
+        "chat hook must keep a localStorage fallback for browsers without BroadcastChannel"
+    );
+    assert!(
+        body.contains("window.localStorage?.getItem?.(OAUTH_CALLBACK_STORAGE_KEY)"),
+        "chat hook must poll localStorage in case the callback write happened before the storage event listener observed it"
+    );
+    assert!(
+        body.contains("oauthCompletionMatchesGate(payload, pendingGate, listeningSince)"),
+        "chat hook must match callback completion to the visible OAuth gate when continuation metadata is present"
+    );
+    assert!(
+        body.contains(
+            "setPendingGate((current) => (isPendingOAuthGate(current) ? null : current))"
+        ),
+        "OAuth callback completion must clear only a pending OAuth auth gate"
+    );
+}
+
+#[tokio::test]
+async fn static_chat_events_clear_gate_when_run_resumes() {
+    let (app, _) = build_app();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/v2/js/pages/chat/lib/useChatEvents.js")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_body_string(response).await;
+
+    assert!(
+        body.contains("const PROMPT_RUN_STATUSES = new Set"),
+        "chat event handler must distinguish active prompts from resumed runs"
+    );
+    assert!(
+        body.contains("clearPendingGateForRun(setPendingGate, runId, promptRunIdRef)"),
+        "non-blocked run_status updates must clear stale gates for the resumed run"
+    );
+    assert!(
+        !body.contains(
+            "clearPendingGateForRun(\n              setPendingGate,\n              progress.turn_run_id,"
+        ),
+        "typed running/progress events must not clear blocked auth gates"
+    );
+    assert!(
+        body.contains("clearPendingNonAuthGateForRun(\n              setPendingGate,\n              progress.turn_run_id,\n              promptRunIdRef,"),
+        "typed running/progress events should still clear stale non-auth gates"
+    );
+    assert!(
+        body.contains("promptRunIdRef?.current === activeRunId"),
+        "projection gates must not be restored after the run has resumed"
+    );
+    assert!(
+        !body.contains("clearPendingAuthGateForForwardProgress"),
+        "tool/reasoning/text progress must not hide a still-blocked auth gate"
     );
 }
 

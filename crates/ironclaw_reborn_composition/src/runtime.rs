@@ -40,6 +40,8 @@ use ironclaw_first_party_extension_ports::{
     FirstPartySkillsExtension, FirstPartySkillsExtensionHandles, SelectableSkillContextSource,
     SkillActivationSelectorConfig, SkillExecutionAdapter,
 };
+#[cfg(test)]
+use ironclaw_host_api::RuntimeHttpEgress;
 use ironclaw_host_api::{
     ActionResultSummary, ActionSummary, AgentId, AuditEnvelope, AuditEventId, AuditStage,
     CapabilityId, CorrelationId, DecisionSummary, EffectKind, InvocationId, ResourceScope,
@@ -92,10 +94,9 @@ use crate::local_dev_capability_policy::local_dev_capability_policy;
 use crate::projection::{RebornProjectionServices, build_reborn_projection_services};
 use crate::runtime_input::{PollSettings, RebornRuntimeIdentity, RebornRuntimeInput};
 use crate::trigger_poller::{
-    ConversationContentRefMaterializer, ConversationTrustedTriggerSubmitter,
-    LocalTriggerTurnSnapshotSource, SnapshotActiveRunLookup, TRIGGER_POLLER_SHUTDOWN_TIMEOUT,
-    TriggerPollerCompositionDeps, TriggerPollerRuntimeHandle, TriggerTurnSnapshotSource,
-    TrustedTenantTriggerFireAuthorizer, spawn_trigger_poller,
+    ConversationContentRefMaterializer, LocalTriggerTurnSnapshotSource, SnapshotActiveRunLookup,
+    TRIGGER_POLLER_SHUTDOWN_TIMEOUT, TriggerPollerCompositionDeps, TriggerPollerRuntimeHandle,
+    TriggerTurnSnapshotSource, TrustedTenantTriggerFireAuthorizer, spawn_trigger_poller,
 };
 use crate::{
     RebornBuildError, RebornCompositionProfile, RebornProductAuthServices, RebornServices,
@@ -210,6 +211,9 @@ pub struct RebornRuntime {
     worker_handle: JoinHandle<()>,
     worker_cancel: CancellationToken,
     trigger_poller_handle: Option<TriggerPollerRuntimeHandle>,
+    #[cfg(any(test, feature = "test-support"))]
+    trigger_conversation_pairing:
+        Option<Arc<dyn ironclaw_conversations::ConversationActorPairingService>>,
     budget_event_projection: Option<crate::budget_events::BudgetEventProjection>,
     poll_settings: PollSettings,
     actor_user_id: UserId,
@@ -233,9 +237,27 @@ pub(crate) type LocalDevSelectableSkillContextSource =
 type LocalDevSkillExecutionAdapter =
     SkillExecutionAdapter<FilesystemSkillBundleSource<LocalDevRootFilesystem>>;
 
+// TODO(#4416): when a second test-only handle is
+// needed off the trigger poller seam (e.g. trusted_submitter,
+// materializer, active_run_lookup for cleanup-state tests), consolidate
+// the cfg-gated fields into a dedicated `TriggerPollerTestHandles`
+// struct exposed via a single `RebornRuntime::trigger_poller_test_handles()`
+// accessor. That removes the current `TriggerPollerServices` /
+// `TriggerPollerServicesInner` split (review f-ptr-1/f-ptr-2) without
+// inventing cfg-gated function parameters. Premature today: only one
+// test-only handle exists, so the shape isn't proven yet.
 struct TriggerPollerServices {
     materializer: Arc<dyn ironclaw_triggers::TriggerPromptMaterializer>,
     trusted_submitter: Arc<dyn ironclaw_triggers::TrustedTriggerFireSubmitter>,
+    /// Test-support handle on the SAME conversation services instance the
+    /// poller-side materializer/submitter use, so integration tests can call
+    /// the production `pair_external_actor` API to seed the trigger
+    /// creator's actor pairing before driving the poller. Without this
+    /// pre-seed, real `ConversationContentRefMaterializer` fails closed with
+    /// `BindingRequired` — by design — and the trusted-ingress turn is
+    /// never submitted.
+    #[cfg(any(test, feature = "test-support"))]
+    pairing_service: Arc<dyn ironclaw_conversations::ConversationActorPairingService>,
 }
 
 async fn build_trigger_poller_services(
@@ -246,8 +268,6 @@ async fn build_trigger_poller_services(
     default_agent_id: AgentId,
 ) -> Result<TriggerPollerServices, RebornRuntimeError> {
     let authorizer = Arc::new(TrustedTenantTriggerFireAuthorizer::new(tenant_id));
-    let trusted_ingress =
-        ironclaw_trusted_ingress::HostTrustedTriggerIngress::new_for_composition_root();
     #[cfg(any(feature = "libsql", feature = "postgres"))]
     {
         let conversations = RebornFilesystemConversationServices::new(Arc::clone(
@@ -257,30 +277,59 @@ async fn build_trigger_poller_services(
         .map_err(|error| RebornRuntimeError::InvalidArgument {
             reason: format!("trigger conversation services unavailable: {error}"),
         })?;
-        Ok(build_trigger_poller_services_from_conversation_services(
+        #[cfg(any(test, feature = "test-support"))]
+        let pairing_service: Arc<
+            dyn ironclaw_conversations::ConversationActorPairingService,
+        > = Arc::new(conversations.clone());
+        let TriggerPollerServicesInner {
+            materializer,
+            trusted_submitter,
+        } = build_trigger_poller_services_from_conversation_services(
             conversations.clone(),
             conversations,
             turn_coordinator,
             thread_service,
             default_agent_id,
             authorizer,
-            trusted_ingress,
-        ))
+        );
+        Ok(TriggerPollerServices {
+            materializer,
+            trusted_submitter,
+            #[cfg(any(test, feature = "test-support"))]
+            pairing_service,
+        })
     }
     #[cfg(not(any(feature = "libsql", feature = "postgres")))]
     {
         let _ = local_runtime;
         let conversations = InMemoryConversationServices::default();
-        Ok(build_trigger_poller_services_from_conversation_services(
+        #[cfg(any(test, feature = "test-support"))]
+        let pairing_service: Arc<
+            dyn ironclaw_conversations::ConversationActorPairingService,
+        > = Arc::new(conversations.clone());
+        let TriggerPollerServicesInner {
+            materializer,
+            trusted_submitter,
+        } = build_trigger_poller_services_from_conversation_services(
             conversations.clone(),
             conversations,
             turn_coordinator,
             thread_service,
             default_agent_id,
             authorizer,
-            trusted_ingress,
-        ))
+        );
+        Ok(TriggerPollerServices {
+            materializer,
+            trusted_submitter,
+            #[cfg(any(test, feature = "test-support"))]
+            pairing_service,
+        })
     }
+}
+
+struct TriggerPollerServicesInner {
+    materializer: Arc<dyn ironclaw_triggers::TriggerPromptMaterializer>,
+    trusted_submitter: Arc<dyn ironclaw_triggers::TrustedTriggerFireSubmitter>,
 }
 
 fn build_trigger_poller_services_from_conversation_services<B, S>(
@@ -290,8 +339,7 @@ fn build_trigger_poller_services_from_conversation_services<B, S>(
     thread_service: Arc<dyn SessionThreadService>,
     default_agent_id: AgentId,
     authorizer: Arc<dyn crate::trigger_poller_trusted_submit::TriggerFireAuthorizer>,
-    trusted_ingress: ironclaw_trusted_ingress::HostTrustedTriggerIngress,
-) -> TriggerPollerServices
+) -> TriggerPollerServicesInner
 where
     B: ironclaw_conversations::ConversationBindingService + Clone + 'static,
     S: ironclaw_conversations::SessionThreadService + 'static,
@@ -302,13 +350,12 @@ where
         default_agent_id.clone(),
         authorizer,
     ));
-    let trusted_submitter = Arc::new(ConversationTrustedTriggerSubmitter::new(
+    let trusted_submitter = ironclaw_conversations::trusted_trigger_fire_submitter(
         binding_service,
         session_thread_service,
         turn_coordinator,
-        trusted_ingress,
-    ));
-    TriggerPollerServices {
+    );
+    TriggerPollerServicesInner {
         materializer,
         trusted_submitter,
     }
@@ -463,9 +510,59 @@ impl RebornRuntime {
         &self.services
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_local_runtime_http_egress_for_test(
+        &mut self,
+        runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
+    ) {
+        let local_runtime = self
+            .services
+            .local_runtime
+            .as_mut()
+            .expect("test runtime must include local runtime services");
+        Arc::get_mut(local_runtime)
+            .expect("test must mutate local runtime services before cloning the service Arc")
+            .runtime_http_egress = runtime_http_egress;
+    }
+
     /// Diagnostic id for the no-profile run profile selected by this runtime.
     pub fn default_run_profile_id(&self) -> &str {
         &self.default_run_profile_id
+    }
+
+    /// Test-only accessor for the composition-owned trigger repository so
+    /// integration tests can seed `TriggerRecord` rows that the spawned
+    /// trigger poller will observe through its production read path. Returns
+    /// `None` when the runtime was built without a local-runtime substrate
+    /// (e.g. production-shape profiles that haven't been wired end-to-end
+    /// yet). Gated behind `test-support` so the substrate handle never leaks
+    /// into production builds. Mirrors the production read path exercised by
+    /// the spawned trigger poller worker, which calls
+    /// `TriggerRepository::list_due_triggers` on every tick and the
+    /// per-trigger `claim_due_fire` / `mark_fire_*` mutation methods.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn trigger_repository(&self) -> Option<Arc<dyn ironclaw_triggers::TriggerRepository>> {
+        self.services
+            .local_runtime
+            .as_ref()
+            .map(|local_runtime| Arc::clone(&local_runtime.trigger_repository))
+    }
+
+    /// Test-only accessor for the SAME `ConversationActorPairingService`
+    /// instance the spawned trigger poller's
+    /// [`ConversationContentRefMaterializer`] consults. Integration tests
+    /// use this to call the production `pair_external_actor` API and seed
+    /// the trigger creator's actor pairing — without it, the materializer
+    /// fails closed with `BindingRequired` (by design: trigger fires never
+    /// auto-pair unknown actors). Returns `None` when the trigger poller
+    /// wasn't built for this runtime (poller disabled). Gated behind
+    /// `test-support` so the conversation handle never leaks into
+    /// production builds.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn trigger_conversation_pairing(
+        &self,
+    ) -> Option<Arc<dyn ironclaw_conversations::ConversationActorPairingService>> {
+        self.trigger_conversation_pairing.as_ref().map(Arc::clone)
     }
 
     pub(crate) fn webui_thread_service(&self) -> Arc<dyn SessionThreadService> {
@@ -1444,7 +1541,18 @@ pub async fn build_reborn_runtime(
     };
     services.turn_coordinator = Some(Arc::clone(&planned_turn_coordinator));
 
-    let trigger_poller_handle = if trigger_poller.enabled {
+    // Both `trigger_poller_handle` and the test-support
+    // `trigger_conversation_pairing_value` are produced atomically inside
+    // a single `if trigger_poller.enabled` expression. Avoid a
+    // `let mut … = None` sentinel pattern flagged by code review
+    // (review f-ptr-3): the `let X;` deferred-init form is single-assign
+    // per branch and Rust's borrow checker prevents reads before init.
+    let trigger_poller_handle: Option<TriggerPollerRuntimeHandle>;
+    #[cfg(any(test, feature = "test-support"))]
+    let trigger_conversation_pairing_value: Option<
+        Arc<dyn ironclaw_conversations::ConversationActorPairingService>,
+    >;
+    if trigger_poller.enabled {
         let trigger_poller_services = build_trigger_poller_services(
             local_runtime,
             Arc::clone(&planned_turn_coordinator),
@@ -1454,7 +1562,12 @@ pub async fn build_reborn_runtime(
         )
         .await?;
         let active_run_lookup = build_trigger_active_run_lookup(Arc::clone(&turn_state_store));
-        spawn_trigger_poller(
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            trigger_conversation_pairing_value =
+                Some(Arc::clone(&trigger_poller_services.pairing_service));
+        }
+        trigger_poller_handle = spawn_trigger_poller(
             trigger_poller,
             TriggerPollerCompositionDeps {
                 repository: Arc::clone(&local_runtime.trigger_repository),
@@ -1465,10 +1578,14 @@ pub async fn build_reborn_runtime(
         )
         .map_err(|error| RebornRuntimeError::InvalidArgument {
             reason: format!("trigger poller could not be started: {error}"),
-        })?
+        })?;
     } else {
-        None
-    };
+        trigger_poller_handle = None;
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            trigger_conversation_pairing_value = None;
+        }
+    }
     let worker_cancel = CancellationToken::new();
     let worker = Arc::clone(&composition.worker);
     let worker_cancel_clone = worker_cancel.clone();
@@ -1506,6 +1623,8 @@ pub async fn build_reborn_runtime(
         worker_handle,
         worker_cancel,
         trigger_poller_handle,
+        #[cfg(any(test, feature = "test-support"))]
+        trigger_conversation_pairing: trigger_conversation_pairing_value,
         budget_event_projection,
         poll_settings: poll,
         actor_user_id,
@@ -1813,7 +1932,7 @@ mod tests {
     use std::time::Duration;
 
     use async_trait::async_trait;
-    use ironclaw_auth::GOOGLE_CALENDAR_READONLY_SCOPE;
+    use ironclaw_auth::{GOOGLE_CALENDAR_EVENTS_SCOPE, GOOGLE_CALENDAR_READONLY_SCOPE};
 
     /// Wiring guard: the `regex_skill_activation_enabled` flag from
     /// [`RebornRuntimeInput`] must reach
@@ -1874,8 +1993,9 @@ mod tests {
         LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase, LifecycleProductPayload,
         LifecycleReadinessBlocker, RebornExtensionCredentialSetup, RebornServicesErrorCode,
         RebornServicesErrorKind, RebornStreamEventsRequest, RebornSubmitTurnResponse,
-        WebUiAuthenticatedCaller, WebUiCreateThreadRequest, WebUiResolveGateRequest,
-        WebUiSendMessageRequest, WebUiSetupExtensionRequest, approval_gate_ref,
+        WebUiAuthenticatedCaller, WebUiCreateThreadRequest, WebUiListAutomationsRequest,
+        WebUiResolveGateRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
+        approval_gate_ref,
     };
     use ironclaw_run_state::ApprovalRequestStore;
     use ironclaw_skills::SkillTrust;
@@ -3766,16 +3886,36 @@ mod tests {
             )
             .await
             .expect("google setup extension lifecycle projection");
-        assert_eq!(google_setup.secrets.len(), 1);
-        assert_eq!(google_setup.secrets[0].provider, "google");
-        assert!(!google_setup.secrets[0].provided);
-        assert!(matches!(
-            &google_setup.secrets[0].setup,
-            RebornExtensionCredentialSetup::OAuth {
-                scopes,
-                ..
-            } if scopes == &vec![GOOGLE_CALENDAR_READONLY_SCOPE.to_string()]
-        ));
+        assert_eq!(google_setup.secrets.len(), 2);
+        let google_oauth_setups = google_setup
+            .secrets
+            .iter()
+            .map(|secret| {
+                assert_eq!(secret.provider, "google");
+                assert!(!secret.provided);
+                match &secret.setup {
+                    RebornExtensionCredentialSetup::OAuth {
+                        account_label,
+                        scopes,
+                        ..
+                    } => (account_label.clone(), scopes.clone()),
+                    RebornExtensionCredentialSetup::ManualToken => {
+                        panic!("Google setup secret should use OAuth")
+                    }
+                }
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            google_oauth_setups
+                .iter()
+                .map(|(_, scopes)| scopes.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                vec![GOOGLE_CALENDAR_READONLY_SCOPE.to_string()],
+                vec![GOOGLE_CALENDAR_EVENTS_SCOPE.to_string()],
+            ]
+        );
+        assert_ne!(google_oauth_setups[0].0, google_oauth_setups[1].0);
         let google_setup_json =
             serde_json::to_value(&google_setup.secrets[0]).expect("serialize setup secret");
         assert_eq!(google_setup_json["setup"]["kind"], "oauth");
@@ -3799,6 +3939,114 @@ mod tests {
             "local webui bundle must not fall back to the default unwired facade"
         );
 
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    #[cfg(feature = "webui-v2-beta")]
+    #[tokio::test]
+    async fn webui_route_rejects_list_automations_without_agent_binding() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use ironclaw_webui_v2::{WebUiV2State, webui_v2_router};
+        use tower::ServiceExt;
+
+        let root = tempfile::tempdir().expect("tempdir");
+        let gateway = Arc::new(RecordingGateway {
+            reply: "unused".to_string(),
+            requests: Arc::new(StdMutex::new(Vec::new())),
+        });
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev(
+                "runtime-webui-no-agent-owner",
+                root.path().join("local-dev"),
+            )
+            .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-webui-no-agent-tenant".to_string(),
+            agent_id: "runtime-webui-no-agent-agent".to_string(),
+            source_binding_id: "runtime-webui-no-agent-source".to_string(),
+            reply_target_binding_id: "runtime-webui-no-agent-reply".to_string(),
+        })
+        .with_poll_settings(PollSettings {
+            interval: Duration::from_millis(10),
+            max_total: Duration::from_secs(3),
+        })
+        .with_model_gateway_override(gateway);
+
+        let mut runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        runtime.services.host_runtime = None;
+        let bundle = build_webui_services(&runtime, None).expect("webui bundle");
+        let caller_without_agent = WebUiAuthenticatedCaller::new(
+            TenantId::new("runtime-webui-no-agent-tenant").unwrap(),
+            UserId::new("runtime-webui-no-agent-owner").unwrap(),
+            None,
+            None,
+        );
+        let router = webui_v2_router(WebUiV2State::new(bundle.api))
+            .layer(axum::Extension(caller_without_agent));
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/webchat/v2/automations")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("route response");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    #[tokio::test]
+    async fn build_webui_services_without_host_runtime_returns_503_on_list_automations() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let gateway = Arc::new(RecordingGateway {
+            reply: "unused".to_string(),
+            requests: Arc::new(StdMutex::new(Vec::new())),
+        });
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev(
+                "runtime-webui-no-host-owner",
+                root.path().join("local-dev"),
+            )
+            .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-webui-no-host-tenant".to_string(),
+            agent_id: "runtime-webui-no-host-agent".to_string(),
+            source_binding_id: "runtime-webui-no-host-source".to_string(),
+            reply_target_binding_id: "runtime-webui-no-host-reply".to_string(),
+        })
+        .with_poll_settings(PollSettings {
+            interval: Duration::from_millis(10),
+            max_total: Duration::from_secs(3),
+        })
+        .with_model_gateway_override(gateway);
+
+        let mut runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        runtime.services.host_runtime = None;
+        let bundle = build_webui_services(&runtime, None).expect("webui bundle");
+        let caller = WebUiAuthenticatedCaller::new(
+            TenantId::new("runtime-webui-no-host-tenant").unwrap(),
+            UserId::new("runtime-webui-no-host-owner").unwrap(),
+            Some(AgentId::new("runtime-webui-no-host-agent").unwrap()),
+            None,
+        );
+
+        let error = bundle
+            .api
+            .list_automations(caller, WebUiListAutomationsRequest::default())
+            .await
+            .expect_err("missing host runtime should leave automation facade unavailable");
+
+        assert_eq!(error.code, RebornServicesErrorCode::Unavailable);
+        assert_eq!(error.kind, RebornServicesErrorKind::ServiceUnavailable);
+        assert_eq!(error.status_code, 503);
+        assert!(error.retryable);
         runtime.shutdown().await.expect("runtime shutdown");
     }
 

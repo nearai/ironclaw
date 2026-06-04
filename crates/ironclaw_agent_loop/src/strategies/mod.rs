@@ -86,7 +86,7 @@ mod tests {
                 2,
             ),
             scope: RetryScope::Call,
-            alter: Some(RetryAlteration::ShrinkContext { drop_messages: 1 }),
+            alter: Some(RetryAlteration::ShrinkContext),
         };
         let stop_outcome = StopOutcome::Stop {
             kind: StopKind::NoProgressDetected,

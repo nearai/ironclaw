@@ -14,8 +14,7 @@ mod report;
 pub use config::{TriggerPollerWorkerConfig, TriggerPollerWorkerDeps};
 pub use ports::{
     TriggerActiveRunLookup, TriggerActiveRunState, TriggerActiveRunStateRequest,
-    TrustedTriggerFireSubmitOutcome, TrustedTriggerFireSubmitter,
-    TrustedTriggerSubmitFailureReason, TrustedTriggerSubmitRequest,
+    TrustedTriggerFireSubmitOutcome, TrustedTriggerFireSubmitter, TrustedTriggerSubmitRequest,
 };
 pub use report::{
     TriggerPollerFailureReason, TriggerPollerFireOutcome, TriggerPollerFireReport,

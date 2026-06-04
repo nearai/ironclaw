@@ -90,9 +90,11 @@ projection update
   ApprovalResolution / AuthResolution / SubscriptionRequest / NoOp.
 
 `ProductInboundEnvelope` does not model host-internal trigger or scheduler
-ingress. Synthetic trusted ingress is handled by the host-side
-`InboundTurnService::handle_inbound_turn_with_trusted_scope(TrustedInboundTurnRequest)`; PR 8 keeps the trusted witness local to `ironclaw_conversations`, and a later trigger-worker/composition PR will introduce the host-owned construction shim when the caller exists.
-facade and is not constructible by product adapters.
+ingress. Synthetic trusted trigger ingress is handled by the conversation-owned
+trusted trigger submitter returned to host composition as a
+`TrustedTriggerFireSubmitter` trait object; the raw `TrustedInboundTurnRequest`
+constructor, concrete submitter type, and trusted scope mapping stay private
+inside `ironclaw_conversations` and are not constructible by product adapters.
 
 `ProductInboundAck` outcomes:
 

@@ -65,7 +65,7 @@ impl RuntimeHttpEgress for HostedMcpDiscoveryEgress {
             "initialize" => runtime_json_response(
                 body["id"].as_u64(),
                 serde_json::json!({
-                    "protocolVersion": "2024-11-05",
+                    "protocolVersion": "2025-06-18",
                     "capabilities": {"tools": {}},
                     "serverInfo": {"name": "notion-test", "version": "1.0.0"}
                 }),

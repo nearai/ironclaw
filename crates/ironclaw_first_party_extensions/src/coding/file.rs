@@ -17,7 +17,7 @@ use super::{
     diff_preview::{file_diff_preview, will_use_large_diff_path},
     input_error,
     inputs::{optional_usize, required_str},
-    operation_error,
+    operation_error_with_summary,
     paths::{
         create_parent_dir_unless_sensitive, deny_sensitive_existing_path, filesystem_error,
         is_excluded_name, is_sensitive_scoped_path, is_workspace_path, operation_allowed,
@@ -40,15 +40,21 @@ pub(super) async fn read_file(
         .filesystem
         .stat(&resolved.virtual_path)
         .await
-        .map_err(filesystem_error)?;
+        .map_err(|error| {
+            filesystem_error_with_summary("read_file", resolved.scoped_path.as_str(), error)
+        })?;
     if stat.sensitive {
         return Err(CodingCapabilityError::new(
             RuntimeDispatchErrorKind::FilesystemDenied,
         ));
     }
     if stat.file_type != FileType::File || stat.len > MAX_READ_SIZE {
-        return Err(CodingCapabilityError::new(
+        return Err(CodingCapabilityError::with_safe_summary(
             RuntimeDispatchErrorKind::Resource,
+            format!(
+                "read_file failed for {}: target is not a readable file or exceeds the size limit",
+                safe_summary_path(resolved.scoped_path.as_str())
+            ),
         ));
     }
 
@@ -56,7 +62,9 @@ pub(super) async fn read_file(
         .filesystem
         .read_file(&resolved.virtual_path)
         .await
-        .map_err(filesystem_error)?;
+        .map_err(|error| {
+            filesystem_error_with_summary("read_file", resolved.scoped_path.as_str(), error)
+        })?;
     reject_binary_probe(&bytes)?;
     let (content, _encoding, _line_ending) = decode_text(&bytes)?;
     let lines: Vec<&str> = content.lines().collect();
@@ -282,30 +290,44 @@ pub(super) async fn apply_patch(
         .filesystem
         .stat(&resolved.virtual_path)
         .await
-        .map_err(filesystem_error)?;
+        .map_err(|error| {
+            filesystem_error_with_summary("apply_patch", resolved.scoped_path.as_str(), error)
+        })?;
     if stat.sensitive {
         return Err(CodingCapabilityError::new(
             RuntimeDispatchErrorKind::FilesystemDenied,
         ));
     }
     if stat.file_type != FileType::File || stat.len > MAX_PATCH_SIZE {
-        return Err(CodingCapabilityError::new(
+        return Err(CodingCapabilityError::with_safe_summary(
             RuntimeDispatchErrorKind::Resource,
+            format!(
+                "apply_patch failed for {}: target is not a file or exceeds the patch size limit",
+                safe_summary_path(resolved.scoped_path.as_str())
+            ),
         ));
     }
     let bytes = request
         .filesystem
         .read_file(&resolved.virtual_path)
         .await
-        .map_err(filesystem_error)?;
+        .map_err(|error| {
+            filesystem_error_with_summary("apply_patch", resolved.scoped_path.as_str(), error)
+        })?;
     reject_binary_probe(&bytes)?;
     let (content, encoding, line_ending) = decode_text(&bytes)?;
     let (match_count, match_method) = count_matches(&content, old_string);
     if match_count == 0 {
-        return Err(operation_error());
+        return Err(operation_error_with_summary(format!(
+            "apply_patch failed for {}: old_string matched 0 times",
+            safe_summary_path(resolved.scoped_path.as_str())
+        )));
     }
     if !replace_all && match_count > 1 {
-        return Err(operation_error());
+        return Err(operation_error_with_summary(format!(
+            "apply_patch failed for {}: old_string matched {match_count} times; set replace_all=true or provide a unique old_string",
+            safe_summary_path(resolved.scoped_path.as_str())
+        )));
     }
 
     let (new_content, replacements) =
@@ -315,7 +337,9 @@ pub(super) async fn apply_patch(
         .filesystem
         .write_file(&resolved.virtual_path, &output)
         .await
-        .map_err(filesystem_error)?;
+        .map_err(|error| {
+            filesystem_error_with_summary("apply_patch", resolved.scoped_path.as_str(), error)
+        })?;
     let mut result = json!({
         "path": resolved.scoped_path.as_str(),
         "replacements": replacements,
@@ -329,6 +353,46 @@ pub(super) async fn apply_patch(
         result,
         Some(display_preview),
     ))
+}
+
+fn filesystem_error_with_summary(
+    operation: &str,
+    scoped_path: &str,
+    error: ironclaw_filesystem::FilesystemError,
+) -> CodingCapabilityError {
+    let scoped_path = safe_summary_path(scoped_path);
+    let summary = match &error {
+        ironclaw_filesystem::FilesystemError::NotFound { .. } => {
+            format!("{operation} failed for {scoped_path}: file not found")
+        }
+        ironclaw_filesystem::FilesystemError::PermissionDenied { .. }
+        | ironclaw_filesystem::FilesystemError::MountNotFound { .. }
+        | ironclaw_filesystem::FilesystemError::PathOutsideMount { .. }
+        | ironclaw_filesystem::FilesystemError::SymlinkEscape { .. }
+        | ironclaw_filesystem::FilesystemError::MountConflict { .. }
+        | ironclaw_filesystem::FilesystemError::VersionMismatch { .. }
+        | ironclaw_filesystem::FilesystemError::Unsupported { .. }
+        | ironclaw_filesystem::FilesystemError::IndexConflict { .. } => {
+            format!("{operation} failed for {scoped_path}: permission denied or unsupported path")
+        }
+        ironclaw_filesystem::FilesystemError::Backend { .. }
+        | ironclaw_filesystem::FilesystemError::BackendInfrastructure { .. } => {
+            format!("{operation} failed for {scoped_path}: filesystem backend error")
+        }
+        ironclaw_filesystem::FilesystemError::Contract(_) => {
+            format!("{operation} failed for {scoped_path}: invalid path")
+        }
+        _ => format!("{operation} failed for {scoped_path}: filesystem error"),
+    };
+    let kind = filesystem_error(error).kind();
+    CodingCapabilityError::with_safe_summary(kind, summary)
+}
+
+fn safe_summary_path(scoped_path: &str) -> String {
+    let path_hint = scoped_path
+        .trim_start_matches('/')
+        .replace(['/', '\\'], " ");
+    format!("path {path_hint}")
 }
 
 async fn existing_text_for_preview(

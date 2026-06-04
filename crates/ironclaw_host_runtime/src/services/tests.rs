@@ -29,15 +29,17 @@ use serde_json::{Value, json};
 use super::{
     CapabilitySurfaceVersion, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
     FirstPartyCapabilityRegistry, FirstPartyRuntimeAdapter, HostRuntimeServices,
-    LocalHostProcessPort, LocalInvocationServicesResolver, NetworkMode, ProcessBackendKind,
-    ProcessResultStore, ProcessStore, ProductionWiringComponent, ProductionWiringConfig,
-    ProductionWiringIssueKind, RootFilesystem, RuntimeAdapter, RuntimeAdapterRequest,
-    RuntimeAdapterResult, RuntimeProfile, SecretMode, ServiceResolvedRuntimeAdapter,
+    LocalHostProcessPort, LocalInvocationServicesResolver, McpRuntimeAdapter, NetworkMode,
+    ProcessBackendKind, ProcessResultStore, ProcessStore, ProductionWiringComponent,
+    ProductionWiringConfig, ProductionWiringIssueKind, RootFilesystem, RuntimeAdapter,
+    RuntimeAdapterRequest, RuntimeAdapterResult, RuntimeProfile, SecretMode,
+    ServiceResolvedRuntimeAdapter,
 };
 use crate::CommandExecutionRequest;
 use crate::obligations::{NetworkObligationPolicyStore, RuntimeSecretInjectionStore};
 
 mod first_party_runtime_adapter;
+mod mcp_runtime_adapter;
 
 #[tokio::test]
 async fn shared_extension_registry_returns_same_instance() {
@@ -92,6 +94,50 @@ async fn product_auth_provider_runtime_ports_returns_configured_egress_and_oblig
             .take(&scope, &capability_id, &handle)
             .expect("staged secret should be readable for assertion")
             .is_some()
+    );
+}
+
+#[tokio::test]
+async fn product_auth_ports_stage_secret_from_source_scope_into_target_scope() {
+    let secret_store = Arc::new(InMemorySecretStore::new());
+    let services = test_services()
+        .with_secret_store(Arc::clone(&secret_store))
+        .try_with_host_http_egress(RecordingNetwork::ok())
+        .expect("host HTTP egress should wire with graph secret store");
+    let source_scope = sample_scope();
+    let mut target_scope = source_scope.clone();
+    target_scope.invocation_id = InvocationId::new();
+    let capability_id = sample_capability_id();
+    let handle = SecretHandle::new("product-auth-secret").unwrap();
+    secret_store
+        .put(
+            source_scope.clone(),
+            handle.clone(),
+            SecretMaterial::from("product-auth-material"),
+        )
+        .await
+        .expect("test secret should store");
+
+    services
+        .product_auth_provider_runtime_ports()
+        .expect("runtime ports should be configured")
+        .stage_secret_from_scope_once(&source_scope, &target_scope, &capability_id, &handle)
+        .await
+        .expect("runtime ports should stage product auth secret across scopes");
+
+    assert!(
+        services
+            .secret_injection_store
+            .take(&target_scope, &capability_id, &handle)
+            .expect("staged secret should be readable for target scope")
+            .is_some()
+    );
+    assert!(
+        services
+            .secret_injection_store
+            .take(&source_scope, &capability_id, &handle)
+            .expect("source scope should remain readable")
+            .is_none()
     );
 }
 
@@ -645,7 +691,8 @@ async fn first_party_adapter_releases_reservation_when_invocation_service_resolu
     assert!(matches!(
         result,
         Err(DispatchError::FirstParty {
-            kind: RuntimeDispatchErrorKind::NetworkDenied
+            kind: RuntimeDispatchErrorKind::NetworkDenied,
+            ..
         })
     ));
     assert_eq!(
@@ -712,7 +759,8 @@ async fn first_party_adapter_releases_reservation_when_planner_denies() {
     assert!(matches!(
         result,
         Err(DispatchError::FirstParty {
-            kind: RuntimeDispatchErrorKind::NetworkDenied
+            kind: RuntimeDispatchErrorKind::NetworkDenied,
+            ..
         })
     ));
     assert_eq!(

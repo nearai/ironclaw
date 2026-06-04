@@ -12,7 +12,7 @@ use futures::future::join_all;
 use ironclaw_host_api::TenantId;
 use ironclaw_product_adapters::{AdapterInstallationId, ProtocolAuthEvidence};
 use ironclaw_slack_v2_adapter::SlackPayloadParseError;
-use ironclaw_wasm_product_adapters::RunnerError;
+use ironclaw_wasm_product_adapters::{ImmediateAckWorkflowObserver, RunnerError};
 use serde::Deserialize;
 use thiserror::Error;
 
@@ -216,6 +216,7 @@ pub struct ResolvedSlackInstallation {
     adapter_installation_id: AdapterInstallationId,
     evidence: ProtocolAuthEvidence,
     dispatcher: Arc<dyn SlackEventsWebhookDispatcher>,
+    workflow_observer: Option<Arc<dyn ImmediateAckWorkflowObserver>>,
 }
 
 impl ResolvedSlackInstallation {
@@ -224,12 +225,14 @@ impl ResolvedSlackInstallation {
         adapter_installation_id: AdapterInstallationId,
         evidence: ProtocolAuthEvidence,
         dispatcher: Arc<dyn SlackEventsWebhookDispatcher>,
+        workflow_observer: Option<Arc<dyn ImmediateAckWorkflowObserver>>,
     ) -> Self {
         Self {
             tenant_id,
             adapter_installation_id,
             evidence,
             dispatcher,
+            workflow_observer,
         }
     }
 
@@ -248,6 +251,10 @@ impl ResolvedSlackInstallation {
     pub fn dispatcher(&self) -> Arc<dyn SlackEventsWebhookDispatcher> {
         Arc::clone(&self.dispatcher)
     }
+
+    pub fn workflow_observer(&self) -> Option<Arc<dyn ImmediateAckWorkflowObserver>> {
+        self.workflow_observer.clone()
+    }
 }
 
 impl std::fmt::Debug for ResolvedSlackInstallation {
@@ -257,6 +264,7 @@ impl std::fmt::Debug for ResolvedSlackInstallation {
             .field("tenant_id", &self.tenant_id)
             .field("adapter_installation_id", &self.adapter_installation_id)
             .field("dispatcher", &"Arc<dyn SlackEventsWebhookDispatcher>")
+            .field("workflow_observer", &self.workflow_observer.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -337,6 +345,7 @@ pub struct SlackInstallationRecord {
     adapter_installation_id: AdapterInstallationId,
     selector: SlackInstallationSelector,
     dispatcher: Arc<dyn SlackEventsWebhookDispatcher>,
+    workflow_observer: Option<Arc<dyn ImmediateAckWorkflowObserver>>,
 }
 
 impl SlackInstallationRecord {
@@ -351,7 +360,16 @@ impl SlackInstallationRecord {
             adapter_installation_id,
             selector,
             dispatcher,
+            workflow_observer: None,
         }
+    }
+
+    pub fn with_workflow_observer(
+        mut self,
+        workflow_observer: Arc<dyn ImmediateAckWorkflowObserver>,
+    ) -> Self {
+        self.workflow_observer = Some(workflow_observer);
+        self
     }
 }
 
@@ -363,6 +381,7 @@ impl std::fmt::Debug for SlackInstallationRecord {
             .field("adapter_installation_id", &self.adapter_installation_id)
             .field("selector", &self.selector)
             .field("dispatcher", &"Arc<dyn SlackEventsWebhookDispatcher>")
+            .field("workflow_observer", &self.workflow_observer.is_some())
             .finish()
     }
 }
@@ -594,8 +613,10 @@ impl StaticSlackInstallationResolver {
         body: &[u8],
         error: SlackPayloadParseError,
     ) -> Result<ResolvedSlackIngress, SlackIngressError> {
-        self.ensure_candidate_budget(self.installations.len())?;
-        self.verify_candidates(self.installations.iter(), headers, body)?;
+        let Some(installation) = self.installations.first() else {
+            return Err(SlackIngressError::InstallationNotFound);
+        };
+        self.verify_candidates(std::iter::once(installation), headers, body)?;
         Err(error.into())
     }
 
@@ -642,6 +663,7 @@ impl StaticSlackInstallationResolver {
             installation.adapter_installation_id.clone(),
             evidence,
             Arc::clone(&installation.dispatcher),
+            installation.workflow_observer.clone(),
         )
     }
 }
@@ -800,15 +822,21 @@ mod tests {
     use std::future::Future;
     use std::pin::Pin;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use axum::http::HeaderMap;
     use ironclaw_product_adapters::auth::mark_request_signature_verified;
-    use ironclaw_wasm_product_adapters::WebhookProcessOutcome;
+    use ironclaw_wasm_product_adapters::{ImmediateAckWorkflowObserver, WebhookProcessOutcome};
 
     use super::*;
 
     struct AlwaysVerifiedDispatcher {
         subject: &'static str,
+    }
+
+    struct CountingVerifiedDispatcher {
+        subject: &'static str,
+        calls: Arc<AtomicUsize>,
     }
 
     impl SlackEventsWebhookDispatcher for AlwaysVerifiedDispatcher {
@@ -828,6 +856,38 @@ mod tests {
             &'a self,
             _body: &'a [u8],
             _evidence: &'a ProtocolAuthEvidence,
+            _observer: Option<Arc<dyn ImmediateAckWorkflowObserver>>,
+        ) -> Pin<Box<dyn Future<Output = Result<WebhookProcessOutcome, RunnerError>> + Send + 'a>>
+        {
+            Box::pin(async { Ok(WebhookProcessOutcome::AcceptedForAsyncDispatch) })
+        }
+
+        fn drain_immediate_ack_tasks<'a>(
+            &'a self,
+        ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+            Box::pin(async {})
+        }
+    }
+
+    impl SlackEventsWebhookDispatcher for CountingVerifiedDispatcher {
+        fn verify_webhook_auth(
+            &self,
+            _headers: &HeaderMap,
+            _body: &[u8],
+        ) -> Result<ProtocolAuthEvidence, RunnerError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(mark_request_signature_verified(
+                "X-Slack-Signature",
+                Some("X-Slack-Request-Timestamp".to_string()),
+                self.subject,
+            ))
+        }
+
+        fn process_verified_webhook_immediate_ack<'a>(
+            &'a self,
+            _body: &'a [u8],
+            _evidence: &'a ProtocolAuthEvidence,
+            _observer: Option<Arc<dyn ImmediateAckWorkflowObserver>>,
         ) -> Pin<Box<dyn Future<Output = Result<WebhookProcessOutcome, RunnerError>> + Send + 'a>>
         {
             Box::pin(async { Ok(WebhookProcessOutcome::AcceptedForAsyncDispatch) })
@@ -850,6 +910,13 @@ mod tests {
 
     fn dispatcher(subject: &'static str) -> Arc<dyn SlackEventsWebhookDispatcher> {
         Arc::new(AlwaysVerifiedDispatcher { subject })
+    }
+
+    fn counting_dispatcher(
+        subject: &'static str,
+        calls: Arc<AtomicUsize>,
+    ) -> Arc<dyn SlackEventsWebhookDispatcher> {
+        Arc::new(CountingVerifiedDispatcher { subject, calls })
     }
 
     #[test]
@@ -976,5 +1043,39 @@ mod tests {
         assert_eq!(installation.adapter_installation_id().as_str(), "install-b");
         assert_eq!(metadata.install_user_id.as_deref(), Some("U-install-b"));
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn static_resolver_verifies_one_candidate_for_unparseable_payload() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let resolver = StaticSlackInstallationResolver::new(vec![
+            SlackInstallationRecord::new(
+                tenant_id("tenant-a"),
+                installation_id("install-a"),
+                SlackInstallationSelector::team("T-A"),
+                counting_dispatcher("install-a", calls.clone()),
+            ),
+            SlackInstallationRecord::new(
+                tenant_id("tenant-b"),
+                installation_id("install-b"),
+                SlackInstallationSelector::team("T-B"),
+                counting_dispatcher("install-b", calls.clone()),
+            ),
+        ]);
+
+        let error = resolver
+            .resolve_ingress(&HeaderMap::new(), br#"{"type":"event_callback""#)
+            .await
+            .expect_err("malformed JSON should stay a parse error after auth");
+
+        assert!(
+            matches!(error, SlackIngressError::Envelope(_)),
+            "error: {error}"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "malformed payloads should not HMAC every configured installation"
+        );
     }
 }

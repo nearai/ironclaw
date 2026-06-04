@@ -1,4 +1,9 @@
-use ironclaw_filesystem::{FilesystemError, FilesystemOperation};
+use std::{
+    borrow::Cow,
+    collections::{BTreeMap, BTreeSet},
+};
+
+use ironclaw_filesystem::{FileType, FilesystemError, FilesystemOperation};
 use ironclaw_host_api::ScopedPath;
 
 use crate::{
@@ -87,6 +92,115 @@ pub(super) async fn publish_skill_install(
         return Err(error);
     }
     Ok(())
+}
+
+pub(super) async fn existing_skill_install_matches(
+    context: &SkillManagementContext,
+    skill_name: &str,
+    normalized_content: &str,
+    files: &[SkillInstallFile<'_>],
+    source: SkillInstallSource,
+    source_url: Option<&str>,
+) -> Result<bool, SkillManagementError> {
+    let skill_dir = skill_root_scoped_path(USER_SKILLS_ROOT, skill_name)?;
+    let expected_files = expected_install_files(normalized_content, files, source, source_url)?;
+    existing_files_match_expected(context, &skill_dir, expected_files).await
+}
+
+fn expected_install_files<'a>(
+    normalized_content: &'a str,
+    files: &'a [SkillInstallFile<'a>],
+    source: SkillInstallSource,
+    source_url: Option<&str>,
+) -> Result<BTreeMap<String, Cow<'a, [u8]>>, SkillManagementError> {
+    let mut expected = BTreeMap::from([(
+        SKILL_FILE_NAME.to_string(),
+        Cow::Borrowed(normalized_content.as_bytes()),
+    )]);
+    if source == SkillInstallSource::InstalledUrl {
+        expected.insert(
+            INSTALL_METADATA_FILE_NAME.to_string(),
+            Cow::Owned(install_metadata_bytes(source_url)?),
+        );
+    }
+    for file in files {
+        let relative_path = normalize_install_relative_path(file.relative_path)?;
+        expected.insert(relative_path, Cow::Borrowed(file.contents));
+    }
+    Ok(expected)
+}
+
+async fn existing_files_match_expected(
+    context: &SkillManagementContext,
+    skill_dir: &ScopedPath,
+    mut expected_files: BTreeMap<String, Cow<'_, [u8]>>,
+) -> Result<bool, SkillManagementError> {
+    let expected_dirs = expected_directory_prefixes(expected_files.keys());
+    let expected_entry_count = expected_files.len().saturating_add(expected_dirs.len());
+    let mut stack = vec![(skill_dir.clone(), String::new())];
+    while let Some((dir_path, relative_prefix)) = stack.pop() {
+        let entries = context
+            .filesystem
+            .list_dir_bounded(
+                &context.scope,
+                &dir_path,
+                expected_entry_count.saturating_add(1),
+            )
+            .await
+            .map_err(filesystem_error)?;
+        if entries.len() > expected_entry_count {
+            return Ok(false);
+        }
+        for entry in entries {
+            let relative_path = if relative_prefix.is_empty() {
+                entry.name.clone()
+            } else {
+                format!("{relative_prefix}{}", entry.name)
+            };
+            match entry.file_type {
+                FileType::File => {
+                    let Some(expected_contents) = expected_files.remove(&relative_path) else {
+                        return Ok(false);
+                    };
+                    let file_path = scoped_child(&dir_path, &entry.name)?;
+                    let Some(existing_contents) =
+                        read_existing_file_bytes(context, &file_path, expected_contents.len())
+                            .await?
+                    else {
+                        return Ok(false);
+                    };
+                    if existing_contents != expected_contents.as_ref() {
+                        return Ok(false);
+                    }
+                }
+                FileType::Directory => {
+                    if !expected_dirs.contains(&relative_path) {
+                        return Ok(false);
+                    }
+                    stack.push((
+                        scoped_child(&dir_path, &entry.name)?,
+                        format!("{relative_path}/"),
+                    ));
+                }
+                FileType::Symlink | FileType::Other => return Ok(false),
+            }
+        }
+    }
+    Ok(expected_files.is_empty())
+}
+
+fn expected_directory_prefixes<'a>(
+    paths: impl IntoIterator<Item = &'a String>,
+) -> BTreeSet<String> {
+    let mut dirs = BTreeSet::new();
+    for path in paths {
+        let mut current = path.as_str();
+        while let Some((parent, _)) = current.rsplit_once('/') {
+            dirs.insert(parent.to_string());
+            current = parent;
+        }
+    }
+    dirs
 }
 
 pub(super) fn validate_install_bundle_files(
@@ -225,6 +339,16 @@ fn scoped_parent(path: &ScopedPath) -> Result<Option<ScopedPath>, SkillManagemen
         .map_err(|_| SkillManagementError::new(SkillManagementErrorKind::InvalidInput))
 }
 
+fn scoped_child(parent: &ScopedPath, name: &str) -> Result<ScopedPath, SkillManagementError> {
+    if name.contains('/') || name.contains('\\') || name.chars().any(char::is_control) {
+        return Err(SkillManagementError::new(
+            SkillManagementErrorKind::InvalidInput,
+        ));
+    }
+    ScopedPath::new(format!("{}/{name}", parent.as_str().trim_end_matches('/')))
+        .map_err(|_| SkillManagementError::new(SkillManagementErrorKind::InvalidInput))
+}
+
 async fn create_dir_all(
     context: &SkillManagementContext,
     skill_name: &str,
@@ -268,6 +392,22 @@ async fn cleanup_partial_install(
         return Err(filesystem_error(error));
     }
     Ok(())
+}
+
+async fn read_existing_file_bytes(
+    context: &SkillManagementContext,
+    path: &ScopedPath,
+    expected_len: usize,
+) -> Result<Option<Vec<u8>>, SkillManagementError> {
+    match context
+        .filesystem
+        .read_bytes_bounded(&context.scope, path, expected_len.saturating_add(1))
+        .await
+    {
+        Ok(Some(bytes)) if bytes.len() == expected_len => Ok(Some(bytes)),
+        Ok(Some(_)) | Ok(None) | Err(FilesystemError::NotFound { .. }) => Ok(None),
+        Err(error) => Err(filesystem_error(error)),
+    }
 }
 
 #[cfg(test)]

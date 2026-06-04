@@ -259,8 +259,9 @@ async fn filesystem_runtime_account_selection_matches_new_thread_reusable_accoun
         .await
         .unwrap();
 
-    assert_eq!(created.access_secret, Some(resolved.clone()));
-    assert_eq!(resolved, access_secret);
+    assert_eq!(created.access_secret, Some(resolved.handle.clone()));
+    assert_eq!(resolved.handle, access_secret);
+    assert_eq!(resolved.scope, created.scope.resource);
 }
 
 #[tokio::test]
@@ -774,6 +775,150 @@ async fn filesystem_account_record_source_projects_session_scoped_accounts_for_r
 
     assert_eq!(projected_account.scope.session_id, setup_scope.session_id);
     assert_eq!(projected_account.provider, google_provider());
+}
+
+#[tokio::test]
+async fn filesystem_account_record_source_rejects_malformed_scan_records() {
+    let filesystem = test_filesystem();
+    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let scope = test_scope();
+    let service = test_service(Arc::clone(&filesystem), secret_store);
+    service
+        .create_account(NewCredentialAccount {
+            scope: scope.clone(),
+            provider: google_provider(),
+            label: account_label(),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: Vec::new(),
+            access_secret: Some(SecretHandle::new("valid-account-access").unwrap()),
+            refresh_secret: None,
+            scopes: Vec::new(),
+        })
+        .await
+        .unwrap();
+
+    let malformed_account_id = ironclaw_auth::CredentialAccountId::new();
+    let malformed_path = super::paths::account_path(&scope, malformed_account_id)
+        .expect("account path derivation must succeed");
+    let malformed = ironclaw_filesystem::Entry::bytes(b"{ malformed account json".to_vec())
+        .with_content_type(ironclaw_filesystem::ContentType::json());
+    filesystem
+        .put(
+            &scope.resource,
+            &malformed_path,
+            malformed,
+            ironclaw_filesystem::CasExpectation::Absent,
+        )
+        .await
+        .expect("malformed account fixture must write");
+
+    assert!(
+        matches!(
+            service.accounts_for_owner(&scope).await,
+            Err(AuthProductError::BackendUnavailable)
+        ),
+        "runtime owner scans should fail loudly on malformed account records"
+    );
+
+    assert!(
+        matches!(
+            service.read_account(&scope, malformed_account_id).await,
+            Err(AuthProductError::BackendUnavailable)
+        ),
+        "exact account reads should remain strict"
+    );
+}
+
+#[tokio::test]
+async fn filesystem_runtime_account_selection_tolerates_many_session_account_roots() {
+    let filesystem = test_filesystem();
+    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let service = Arc::new(test_service(filesystem, secret_store));
+    let mut setup_scope = test_scope();
+    setup_scope.surface = AuthSurface::Callback;
+    setup_scope.resource.thread_id = Some(ThreadId::new("thread-many-sessions").unwrap());
+    let mut runtime_scope = AuthProductScope::new(setup_scope.resource.clone(), AuthSurface::Web);
+    runtime_scope.resource.invocation_id = InvocationId::new();
+
+    for index in 0..70 {
+        let mut account_scope = setup_scope.clone();
+        account_scope.session_id = Some(AuthSessionId::new(format!("session-{index:03}")).unwrap());
+        service
+            .create_account(NewCredentialAccount {
+                scope: account_scope,
+                provider: google_provider(),
+                label: account_label(),
+                status: CredentialAccountStatus::Configured,
+                ownership: CredentialOwnership::UserReusable,
+                owner_extension: None,
+                granted_extensions: Vec::new(),
+                access_secret: Some(
+                    SecretHandle::new(format!("many-session-access-{index}")).unwrap(),
+                ),
+                refresh_secret: None,
+                scopes: vec![ProviderScope::new("drive.readonly").unwrap()],
+            })
+            .await
+            .unwrap();
+    }
+
+    let selector = ProductAuthRuntimeCredentialAccountSelector::new(service);
+    let selected = selector
+        .select_unique_configured_runtime_account(RuntimeCredentialAccountSelectionRequest::new(
+            CredentialAccountSelectionRequest::new(runtime_scope.clone(), google_provider()),
+            runtime_scope,
+            vec![ProviderScope::new("drive.readonly").unwrap()],
+        ))
+        .await
+        .expect("session-root fanout must not make credential selection unavailable");
+
+    assert_eq!(selected.provider, google_provider());
+}
+
+#[tokio::test]
+async fn filesystem_runtime_account_selection_tolerates_many_account_records_per_root() {
+    let filesystem = test_filesystem();
+    let secret_store: Arc<dyn SecretStore> = Arc::new(InMemorySecretStore::new());
+    let service = Arc::new(test_service(filesystem, secret_store));
+    let mut setup_scope = test_scope();
+    setup_scope.surface = AuthSurface::Callback;
+    setup_scope.resource.thread_id = Some(ThreadId::new("thread-many-accounts").unwrap());
+    let mut runtime_scope = AuthProductScope::new(setup_scope.resource.clone(), AuthSurface::Web);
+    runtime_scope.resource.invocation_id = InvocationId::new();
+
+    for index in 0..70 {
+        service
+            .create_account(NewCredentialAccount {
+                scope: setup_scope.clone(),
+                provider: google_provider(),
+                label: account_label(),
+                status: CredentialAccountStatus::Configured,
+                ownership: CredentialOwnership::UserReusable,
+                owner_extension: None,
+                granted_extensions: Vec::new(),
+                access_secret: Some(
+                    SecretHandle::new(format!("many-account-access-{index}")).unwrap(),
+                ),
+                refresh_secret: None,
+                scopes: vec![ProviderScope::new("drive.readonly").unwrap()],
+            })
+            .await
+            .unwrap();
+    }
+
+    let selector = ProductAuthRuntimeCredentialAccountSelector::new(service);
+    let selected = selector
+        .select_unique_configured_runtime_account(RuntimeCredentialAccountSelectionRequest::new(
+            CredentialAccountSelectionRequest::new(runtime_scope.clone(), google_provider()),
+            runtime_scope,
+            vec![ProviderScope::new("drive.readonly").unwrap()],
+        ))
+        .await
+        .expect("account-record fanout must not make credential selection unavailable");
+
+    assert_eq!(selected.provider, google_provider());
 }
 
 #[tokio::test]
@@ -1458,9 +1603,11 @@ async fn filesystem_list_accounts_rejects_zero_and_oversized_limit() {
 
 #[tokio::test]
 async fn filesystem_oauth_reauth_purges_previous_provider_secrets() {
-    // After a successful OAuth re-auth (exchange.account_id == Some(_)),
-    // the OLD access and refresh secret handles must be deleted from SecretStore
-    // so repeated re-auths do not accumulate dead handles.
+    // After a successful OAuth re-auth through a bound flow, the OLD access
+    // and refresh secret handles must be deleted from SecretStore so repeated
+    // re-auths do not accumulate dead handles. Host OAuth provider clients
+    // return exchange.account_id == None, so the durable flow must use the
+    // update_binding account id rather than rejecting the callback.
     use ironclaw_auth::{CredentialAccountUpdateBinding, ProviderCallbackOutcome};
     use ironclaw_secrets::SecretMaterial;
 
@@ -1642,7 +1789,7 @@ async fn filesystem_oauth_reauth_purges_previous_provider_secrets() {
                         access_secret: access_v2.clone(),
                         refresh_secret: Some(refresh_v2.clone()),
                         scopes: vec![ProviderScope::new("gmail.readonly").unwrap()],
-                        account_id: Some(account_id),
+                        account_id: None,
                     },
                 },
             },

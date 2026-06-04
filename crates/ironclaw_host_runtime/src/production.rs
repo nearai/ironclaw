@@ -26,8 +26,8 @@ use ironclaw_extensions::{ExtensionPackage, ExtensionRegistry, SharedExtensionRe
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
     ApprovalRequestId, CapabilityDispatcher, CapabilityId, DispatchFailureKind, InvocationId,
-    PackageSource, ResourceScope, RuntimeDispatchErrorKind, RuntimeKind, SecretHandle,
-    runtime_policy::EffectiveRuntimePolicy,
+    PackageSource, ResourceScope, RuntimeCredentialAuthRequirement, RuntimeDispatchErrorKind,
+    RuntimeKind, SecretHandle, runtime_policy::EffectiveRuntimePolicy, sha256_digest_token,
 };
 use ironclaw_process_sandbox::{
     PROCESS_SANDBOX_CAPABILITY_ID, SandboxProcessPlan, ValidatedSandboxProcessPlan,
@@ -40,6 +40,7 @@ use ironclaw_run_state::{
     ApprovalRequestStore, RunStateApprovalStore, RunStateError, RunStateStore, RunStatus,
 };
 use ironclaw_trust::{HostTrustPolicy, TrustDecision, TrustError, TrustPolicy, TrustProvenance};
+use ironclaw_turns::run_profile::LoopSafeSummary;
 
 use crate::{
     BuiltinObligationHandler, BuiltinObligationServices, CancelRuntimeWorkOutcome,
@@ -1300,12 +1301,51 @@ fn auth_required_outcome(
     credential_requirements: Vec<ironclaw_host_api::RuntimeCredentialAuthRequirement>,
 ) -> RuntimeCapabilityOutcome {
     RuntimeCapabilityOutcome::AuthRequired(RuntimeAuthGate {
-        gate_id: RuntimeGateId::new(),
+        gate_id: stable_auth_gate_id(&capability_id, &required_secrets, &credential_requirements),
         capability_id,
         reason: RuntimeBlockedReason::AuthRequired,
         required_secrets,
         credential_requirements,
     })
+}
+
+fn stable_auth_gate_id(
+    capability_id: &CapabilityId,
+    required_secrets: &[SecretHandle],
+    credential_requirements: &[RuntimeCredentialAuthRequirement],
+) -> RuntimeGateId {
+    let mut parts = Vec::new();
+    parts.push(format!("capability={}", capability_id.as_str()));
+
+    let mut secret_handles = required_secrets
+        .iter()
+        .map(|handle| handle.as_str().to_string())
+        .collect::<Vec<_>>();
+    secret_handles.sort();
+    for handle in secret_handles {
+        parts.push(format!("secret={handle}"));
+    }
+
+    let mut requirements = credential_requirements
+        .iter()
+        .map(|requirement| {
+            let mut scopes = requirement.provider_scopes.clone();
+            scopes.sort();
+            format!(
+                "credential={}:{}:{}",
+                requirement.provider.as_str(),
+                requirement.requester_extension.as_str(),
+                scopes.join(",")
+            )
+        })
+        .collect::<Vec<_>>();
+    requirements.sort();
+    parts.extend(requirements);
+
+    let digest = sha256_digest_token(parts.join("\n").as_bytes());
+    let suffix = digest.strip_prefix("sha256:").unwrap_or(&digest);
+    RuntimeGateId::from_stable_suffix(&format!("auth-{suffix}"))
+        .unwrap_or_else(|_| RuntimeGateId::new())
 }
 
 fn spawned_process_outcome_from(
@@ -1374,13 +1414,25 @@ fn sanitized_failure_message(error: &CapabilityInvocationError) -> Option<String
         | ResumeStoreMissing { .. }
         | ProcessManagerMissing { .. }
         | ResumeNotBlocked { .. }
-        | ResumeContextMismatch { .. }
-        | Dispatch { .. } => Some(error.to_string()),
+        | ResumeContextMismatch { .. } => Some(error.to_string()),
+        Dispatch { safe_summary, .. } => {
+            Some(dispatch_failure_message(safe_summary.as_deref(), error))
+        }
         InvocationFingerprint { .. } => Some("invocation fingerprint failed".to_string()),
         Lease(_) => Some("capability lease store unavailable".to_string()),
         RunState(_) => Some("run-state store unavailable".to_string()),
         Process(_) => Some("process manager unavailable".to_string()),
     }
+}
+
+fn dispatch_failure_message(
+    safe_summary: Option<&str>,
+    error: &CapabilityInvocationError,
+) -> String {
+    safe_summary
+        .and_then(|summary| LoopSafeSummary::new(summary).ok())
+        .map(|summary| summary.to_string())
+        .unwrap_or_else(|| error.to_string())
 }
 
 pub(crate) fn failure_kind_from(error: &CapabilityInvocationError) -> RuntimeFailureKind {
@@ -1427,7 +1479,7 @@ pub(crate) fn failure_kind_from(error: &CapabilityInvocationError) -> RuntimeFai
         CapabilityInvocationError::Lease(_)
         | CapabilityInvocationError::RunState(_)
         | CapabilityInvocationError::Process(_) => RuntimeFailureKind::Backend,
-        CapabilityInvocationError::Dispatch { kind } => RuntimeFailureKind::from(*kind),
+        CapabilityInvocationError::Dispatch { kind, .. } => RuntimeFailureKind::from(*kind),
     }
 }
 
@@ -1506,8 +1558,9 @@ mod tests {
     use ironclaw_extensions::{ExtensionManifest, ManifestSource};
     use ironclaw_filesystem::{FilesystemError, FilesystemOperation};
     use ironclaw_host_api::{
-        CapabilityId, DispatchFailureKind, HostPortCatalog, PackageSource,
-        RuntimeDispatchErrorKind, VirtualPath, sha256_digest_token,
+        CapabilityId, DispatchFailureKind, ExtensionId, HostPortCatalog, PackageSource,
+        RuntimeCredentialAccountProviderId, RuntimeCredentialAuthRequirement,
+        RuntimeDispatchErrorKind, SecretHandle, VirtualPath, sha256_digest_token,
     };
 
     fn cap() -> CapabilityId {
@@ -1515,7 +1568,18 @@ mod tests {
     }
 
     fn dispatch(kind: DispatchFailureKind) -> CapabilityInvocationError {
-        CapabilityInvocationError::Dispatch { kind }
+        CapabilityInvocationError::Dispatch {
+            kind,
+            safe_summary: None,
+        }
+    }
+
+    fn auth_requirement(scopes: &[&str]) -> RuntimeCredentialAuthRequirement {
+        RuntimeCredentialAuthRequirement {
+            provider: RuntimeCredentialAccountProviderId::new("notion").unwrap(),
+            requester_extension: ExtensionId::new("notion").unwrap(),
+            provider_scopes: scopes.iter().map(|scope| scope.to_string()).collect(),
+        }
     }
 
     #[test]
@@ -1568,6 +1632,44 @@ output_schema_ref = "schemas/test.output.json"
             input.identity.digest.as_deref(),
             Some(expected_digest.as_str())
         );
+    }
+
+    #[test]
+    fn auth_required_outcome_uses_stable_gate_for_identical_requirements() {
+        let capability_id = cap();
+        let secrets = vec![SecretHandle::new("notion-token").unwrap()];
+        let requirements = vec![auth_requirement(&["read", "write"])];
+
+        let first =
+            auth_required_outcome(capability_id.clone(), secrets.clone(), requirements.clone());
+        let second = auth_required_outcome(capability_id, secrets, requirements);
+
+        let RuntimeCapabilityOutcome::AuthRequired(first_gate) = first else {
+            panic!("expected auth gate");
+        };
+        let RuntimeCapabilityOutcome::AuthRequired(second_gate) = second else {
+            panic!("expected auth gate");
+        };
+        assert_eq!(first_gate.gate_id, second_gate.gate_id);
+        assert!(
+            first_gate.gate_id.as_str().starts_with("auth-"),
+            "gate id should be stable and auth-specific: {}",
+            first_gate.gate_id.as_str()
+        );
+    }
+
+    #[test]
+    fn auth_required_outcome_changes_gate_when_requirements_change() {
+        let first = auth_required_outcome(cap(), Vec::new(), vec![auth_requirement(&["read"])]);
+        let second = auth_required_outcome(cap(), Vec::new(), vec![auth_requirement(&["write"])]);
+
+        let RuntimeCapabilityOutcome::AuthRequired(first_gate) = first else {
+            panic!("expected auth gate");
+        };
+        let RuntimeCapabilityOutcome::AuthRequired(second_gate) = second else {
+            panic!("expected auth gate");
+        };
+        assert_ne!(first_gate.gate_id, second_gate.gate_id);
     }
 
     #[test]
@@ -1749,6 +1851,34 @@ output_schema_ref = "schemas/test.output.json"
     }
 
     #[test]
+    fn sanitized_failure_message_uses_dispatch_safe_summary() {
+        let error = CapabilityInvocationError::Dispatch {
+            kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::OperationFailed),
+            safe_summary: Some(
+                "apply_patch failed for path workspace main.rs: old_string matched 0 times"
+                    .to_string(),
+            ),
+        };
+
+        assert_eq!(
+            sanitized_failure_message(&error).as_deref(),
+            Some("apply_patch failed for path workspace main.rs: old_string matched 0 times")
+        );
+    }
+
+    #[test]
+    fn sanitized_failure_message_rejects_unsafe_dispatch_safe_summary() {
+        let error = CapabilityInvocationError::Dispatch {
+            kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::OperationFailed),
+            safe_summary: Some("read_file failed for path workspace api_key.txt".to_string()),
+        };
+
+        let message = sanitized_failure_message(&error).expect("dispatch produces a message");
+        assert_eq!(message, "dispatch failed: OperationFailed");
+        assert!(!message.contains("api_key"));
+    }
+
+    #[test]
     fn runtime_failure_kind_as_str_is_stable_snake_case() {
         // Pin the public metric/tracing tokens; renaming any of these is a
         // breaking observability contract change.
@@ -1850,7 +1980,7 @@ output_schema_ref = "schemas/test.output.json"
             Some("x".repeat(3000)),
         );
         let summary = long.safe_summary().expect("long message is still safe");
-        assert_eq!(summary.chars().count(), 515);
+        assert_eq!(summary.chars().count(), 512);
         assert!(summary.ends_with("..."));
 
         let multibyte = RuntimeCapabilityFailure::new(
@@ -1861,8 +1991,15 @@ output_schema_ref = "schemas/test.output.json"
         let summary = multibyte
             .safe_summary()
             .expect("long multibyte message is still safe");
-        assert_eq!(summary.chars().count(), 515);
+        assert_eq!(summary.chars().count(), 512);
         assert!(summary.ends_with("..."));
+
+        let exact = RuntimeCapabilityFailure::new(
+            cap(),
+            RuntimeFailureKind::InvalidInput,
+            Some("x".repeat(512)),
+        );
+        assert_eq!(exact.safe_summary(), Some("x".repeat(512)));
     }
 
     #[test]

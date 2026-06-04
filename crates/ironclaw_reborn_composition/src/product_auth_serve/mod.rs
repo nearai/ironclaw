@@ -20,7 +20,7 @@ use std::{
 use axum::{
     Json, Router,
     extract::{Extension, Path, RawQuery, State},
-    http::{StatusCode, Uri},
+    http::{HeaderMap, StatusCode, Uri, header},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
@@ -38,6 +38,7 @@ use ironclaw_auth::{
     PkceVerifierSecret, ProviderScope, SecretCleanupAction, SecretCleanupReport,
     SecretCleanupRequest, Timestamp, TurnRunRef, build_google_authorization_url,
     parse_google_callback_scopes, parse_google_requested_scopes, pkce_s256_challenge,
+    scope_matches,
 };
 use ironclaw_host_api::NetworkMethod;
 use ironclaw_host_api::ingress::{
@@ -52,6 +53,7 @@ use ironclaw_product_workflow::WebUiAuthenticatedCaller;
 use lru::LruCache;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Deserializer, Serialize};
+use serde_json::json;
 use url::Url;
 use uuid::Uuid;
 
@@ -665,8 +667,8 @@ pub(crate) struct OAuthCallbackScopeHint {
 
 #[derive(Deserialize)]
 pub(super) struct OAuthCallbackQuery {
-    user_id: String,
-    invocation_id: String,
+    user_id: Option<String>,
+    invocation_id: Option<String>,
     state: Option<RawCallbackValue>,
     provider: Option<String>,
     account_label: Option<String>,
@@ -877,17 +879,29 @@ pub(super) async fn scoped_update_binding_for_requester(
         .product_auth
         .runtime_credential_account_selection_service()
         .select_unique_configured_runtime_account(RuntimeCredentialAccountSelectionRequest::new(
-            CredentialAccountSelectionRequest::new(scope.clone(), provider)
+            CredentialAccountSelectionRequest::new(scope.clone(), provider.clone())
                 .for_extension(requester_extension.clone()),
-            scope,
+            scope.clone(),
             provider_scopes,
         ))
         .await;
     match account {
-        Ok(account) => Ok(Some(CredentialAccountUpdateBinding::from_projection(
-            &account.projection(),
-        ))),
+        Ok(account) if scope_matches(&scope, &account.scope) => Ok(Some(
+            CredentialAccountUpdateBinding::from_projection(&account.projection()),
+        )),
+        Ok(_) => Ok(None),
         Err(AuthProductError::CredentialMissing) => Ok(None),
+        Err(AuthProductError::CrossScopeDenied) => Ok(None),
+        Err(AuthProductError::AccountSelectionRequired) => Ok(None),
+        Err(AuthProductError::BackendUnavailable) => {
+            tracing::warn!(
+                target: "ironclaw_reborn_composition::product_auth::oauth",
+                provider = %provider.as_str(),
+                requester_extension = %requester_extension.as_str(),
+                "credential account status unavailable during extension OAuth start; starting setup without update binding"
+            );
+            Ok(None)
+        }
         Err(error) => Err(ProductAuthRouteFailure::from(error)),
     }
 }
@@ -896,10 +910,20 @@ pub(super) fn scope_from_callback_query(
     state: &ProductAuthRouteState,
     query: &OAuthCallbackQuery,
 ) -> Result<AuthProductScope, ProductAuthRouteFailure> {
-    let user_id = UserId::new(query.user_id.clone())
-        .map_err(|_| ProductAuthRouteFailure::malformed_callback())?;
-    let invocation_id = InvocationId::parse(&query.invocation_id)
-        .map_err(|_| ProductAuthRouteFailure::malformed_callback())?;
+    let user_id = UserId::new(
+        query
+            .user_id
+            .clone()
+            .ok_or_else(ProductAuthRouteFailure::malformed_callback)?,
+    )
+    .map_err(|_| ProductAuthRouteFailure::malformed_callback())?;
+    let invocation_id = InvocationId::parse(
+        query
+            .invocation_id
+            .as_deref()
+            .ok_or_else(ProductAuthRouteFailure::malformed_callback)?,
+    )
+    .map_err(|_| ProductAuthRouteFailure::malformed_callback())?;
     let agent_id = query
         .agent_id
         .as_ref()
@@ -965,8 +989,16 @@ pub(super) fn validate_callback_raw_query(
 pub(super) fn validate_callback_query_fields(
     query: &OAuthCallbackQuery,
 ) -> Result<(), ProductAuthRouteFailure> {
-    validate_callback_field(&query.user_id, OAUTH_CALLBACK_FIELD_MAX_BYTES, false)?;
-    validate_callback_field(&query.invocation_id, OAUTH_CALLBACK_FIELD_MAX_BYTES, false)?;
+    validate_optional_callback_field(
+        query.user_id.as_deref(),
+        OAUTH_CALLBACK_FIELD_MAX_BYTES,
+        false,
+    )?;
+    validate_optional_callback_field(
+        query.invocation_id.as_deref(),
+        OAUTH_CALLBACK_FIELD_MAX_BYTES,
+        false,
+    )?;
     validate_optional_callback_field(
         query.provider.as_deref(),
         OAUTH_CALLBACK_FIELD_MAX_BYTES,
@@ -1289,15 +1321,23 @@ mod tests {
     use super::*;
     use crate::oauth_dcr::{OAuthDcrProvider, OAuthDcrProviderConfig, OAuthDcrProviderRegistry};
     use crate::oauth_dcr_protocol::flow_secret_handle;
+    use crate::projection::AuthChallengeProvider;
     use crate::{RebornAuthContinuationDispatcher, notion_oauth::notion_provider_spec};
     use async_trait::async_trait;
     use axum::body::{Body, to_bytes};
     use axum::http::{Method, Request, header};
+    use ironclaw_auth::{
+        AuthFlowManager, AuthInteractionService, AuthProviderClient,
+        CredentialAccountLookupRequest, CredentialAccountService, CredentialAccountStatus,
+        CredentialOwnership, CredentialSetupService, NewCredentialAccount, SecretCleanupService,
+    };
     use ironclaw_capabilities::{CapabilityObligationHandler, CapabilityObligationRequest};
     use ironclaw_host_api::{
-        NetworkMethod, RuntimeHttpEgress, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse,
+        NetworkMethod, RuntimeCredentialAccountProviderId, RuntimeCredentialAuthRequirement,
+        RuntimeHttpEgress, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, SecretHandle,
     };
     use ironclaw_secrets::{InMemorySecretStore, SecretMaterial, SecretStore};
+    use ironclaw_turns::{TurnRunId, TurnScope};
     use tower::ServiceExt;
 
     struct NoopDispatcher;
@@ -1308,6 +1348,34 @@ mod tests {
             &self,
             _event: ironclaw_auth::AuthContinuationEvent,
         ) -> Result<(), AuthProductError> {
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingDispatcher {
+        events: Mutex<Vec<ironclaw_auth::AuthContinuationEvent>>,
+    }
+
+    impl RecordingDispatcher {
+        fn events(&self) -> Vec<ironclaw_auth::AuthContinuationEvent> {
+            self.events
+                .lock()
+                .expect("recording dispatcher lock")
+                .clone()
+        }
+    }
+
+    #[async_trait]
+    impl RebornAuthContinuationDispatcher for RecordingDispatcher {
+        async fn dispatch_auth_continuation(
+            &self,
+            event: ironclaw_auth::AuthContinuationEvent,
+        ) -> Result<(), AuthProductError> {
+            self.events
+                .lock()
+                .expect("recording dispatcher lock")
+                .push(event);
             Ok(())
         }
     }
@@ -1460,6 +1528,239 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn extension_oauth_start_handler_does_not_bind_reconnect_accounts_outside_exact_scope() {
+        let secret_store = Arc::new(InMemorySecretStore::new());
+        let dcr_provider = Arc::new(
+            OAuthDcrProvider::new(
+                OAuthDcrProviderConfig {
+                    spec: notion_provider_spec(),
+                    callback_origin: "http://127.0.0.1:3000".to_string(),
+                    client_name: "Ironclaw".to_string(),
+                    account_label: CredentialAccountLabel::new("notion").expect("label"),
+                    scopes: Vec::new(),
+                },
+                Arc::new(RouteDcrSetupEgress),
+                secret_store,
+                Arc::new(NoopObligationHandler),
+            )
+            .expect("DCR provider"),
+        );
+        let shared = Arc::new(ironclaw_auth::InMemoryAuthProductServices::new());
+        let product_auth =
+            RebornProductAuthServices::from_shared(shared.clone(), Arc::new(NoopDispatcher))
+                .with_dcr_oauth_registry(Arc::new(OAuthDcrProviderRegistry::new(vec![
+                    dcr_provider,
+                ])));
+        let state = ProductAuthRouteState::new(
+            Arc::new(product_auth),
+            TenantId::new("tenant-alpha").expect("tenant"),
+            None,
+            None,
+        );
+        let app = product_auth_route_mount(state)
+            .protected
+            .layer(axum::Extension(test_caller()));
+        let stale_scope = AuthProductScope::new(test_resource_scope(), AuthSurface::Callback);
+        shared
+            .create_account(NewCredentialAccount {
+                scope: stale_scope,
+                provider: AuthProviderId::new("notion").expect("provider"),
+                label: CredentialAccountLabel::new("work notion").expect("label"),
+                status: CredentialAccountStatus::Configured,
+                ownership: CredentialOwnership::UserReusable,
+                owner_extension: None,
+                granted_extensions: Vec::new(),
+                access_secret: Some(SecretHandle::new("stale-notion-access").expect("secret")),
+                refresh_secret: Some(SecretHandle::new("stale-notion-refresh").expect("secret")),
+                scopes: Vec::new(),
+            })
+            .await
+            .expect("seed stale account");
+        shared
+            .create_account(NewCredentialAccount {
+                scope: AuthProductScope::new(test_resource_scope(), AuthSurface::Callback),
+                provider: AuthProviderId::new("notion").expect("provider"),
+                label: CredentialAccountLabel::new("personal notion").expect("label"),
+                status: CredentialAccountStatus::Configured,
+                ownership: CredentialOwnership::UserReusable,
+                owner_extension: None,
+                granted_extensions: Vec::new(),
+                access_secret: Some(SecretHandle::new("other-notion-access").expect("secret")),
+                refresh_secret: Some(SecretHandle::new("other-notion-refresh").expect("secret")),
+                scopes: Vec::new(),
+            })
+            .await
+            .expect("seed second stale account");
+        let flow_invocation_id = InvocationId::new();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/webchat/v2/extensions/notion/setup/oauth/start")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "provider": "notion",
+                            "account_label": "work notion",
+                            "scopes": [],
+                            "expires_at": (Utc::now() + ChronoDuration::minutes(5)).to_rfc3339(),
+                            "invocation_id": flow_invocation_id.to_string(),
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("route response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("start json");
+        let flow_id = AuthFlowId::from_uuid(
+            Uuid::parse_str(json["flow_id"].as_str().expect("flow id")).expect("flow uuid"),
+        );
+        let mut flow_resource = test_resource_scope();
+        flow_resource.invocation_id = flow_invocation_id;
+        let flow_scope = AuthProductScope::new(flow_resource, AuthSurface::Callback);
+        let flow = shared
+            .get_flow(&flow_scope, flow_id)
+            .await
+            .expect("flow lookup")
+            .expect("flow");
+        assert!(flow.update_binding.is_none());
+    }
+
+    #[tokio::test]
+    async fn extension_google_oauth_start_continues_when_update_binding_lookup_is_unavailable() {
+        let shared = Arc::new(ironclaw_auth::InMemoryAuthProductServices::new());
+        let flow_manager: Arc<dyn AuthFlowManager> = shared.clone();
+        let interaction_service: Arc<dyn AuthInteractionService> = shared.clone();
+        let credential_setup_service: Arc<dyn CredentialSetupService> = shared.clone();
+        let credential_account_service: Arc<dyn CredentialAccountService> = shared.clone();
+        let provider_client: Arc<dyn AuthProviderClient> = shared.clone();
+        let cleanup_service: Arc<dyn SecretCleanupService> = shared.clone();
+        let product_auth = Arc::new(RebornProductAuthServices::new(
+            flow_manager,
+            interaction_service,
+            credential_setup_service,
+            credential_account_service,
+            provider_client,
+            cleanup_service,
+            Arc::new(NoopDispatcher),
+        ));
+        let state = ProductAuthRouteState::new(
+            product_auth,
+            TenantId::new("tenant-alpha").expect("tenant"),
+            None,
+            None,
+        )
+        .with_google_oauth(
+            GoogleOAuthRouteConfig::new(
+                "google-client.apps.googleusercontent.com",
+                "http://127.0.0.1:3000/api/reborn/product-auth/oauth/google/callback",
+            )
+            .expect("google oauth route config"),
+        );
+        let app = product_auth_route_mount(state.clone())
+            .protected
+            .layer(axum::Extension(test_caller()));
+        let flow_invocation_id = InvocationId::new();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/webchat/v2/extensions/google-drive/setup/oauth/start")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "provider": GOOGLE_PROVIDER_ID,
+                            "account_label": "google-drive google",
+                            "scopes": ["https://www.googleapis.com/auth/drive"],
+                            "expires_at": (Utc::now() + ChronoDuration::minutes(5)).to_rfc3339(),
+                            "invocation_id": flow_invocation_id.to_string(),
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("route response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("start json");
+        let flow_id = AuthFlowId::from_uuid(
+            Uuid::parse_str(json["flow_id"].as_str().expect("flow id")).expect("flow uuid"),
+        );
+        let mut flow_resource = test_resource_scope();
+        flow_resource.invocation_id = flow_invocation_id;
+        let flow_scope = AuthProductScope::new(flow_resource, AuthSurface::Callback);
+        let flow = shared
+            .get_flow(&flow_scope, flow_id)
+            .await
+            .expect("flow lookup")
+            .expect("flow");
+        assert!(flow.update_binding.is_none());
+
+        let authorization_url = json["authorization_url"]
+            .as_str()
+            .expect("authorization url");
+        let state_value = Url::parse(authorization_url)
+            .expect("authorization url")
+            .query_pairs()
+            .find_map(|(name, value)| (name == "state").then(|| value.into_owned()))
+            .expect("oauth state");
+        let encoded_state =
+            url::form_urlencoded::byte_serialize(state_value.as_bytes()).collect::<String>();
+        let encoded_scope = url::form_urlencoded::byte_serialize(
+            "https://www.googleapis.com/auth/drive".as_bytes(),
+        )
+        .collect::<String>();
+        let uri = format!(
+            "{GOOGLE_OAUTH_CALLBACK_PATH}?state={encoded_state}&code=google-auth-code&scope={encoded_scope}"
+        )
+        .parse::<Uri>()
+        .expect("callback uri");
+
+        let response = oauth::google_oauth_callback_handler(
+            State(state),
+            RawQuery(uri.query().map(str::to_string)),
+            uri,
+            HeaderMap::new(),
+        )
+        .await
+        .expect("extension google callback should complete");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let completed_flow = shared
+            .get_flow(&flow_scope, flow_id)
+            .await
+            .expect("completed flow lookup")
+            .expect("completed flow");
+        let account_id = completed_flow
+            .credential_account_id
+            .expect("callback should persist account id");
+        let account = shared
+            .get_account(CredentialAccountLookupRequest {
+                scope: flow_scope,
+                account_id,
+                requester_extension: Some(ExtensionId::new("google-drive").expect("extension")),
+            })
+            .await
+            .expect("account lookup")
+            .expect("account");
+
+        assert_eq!(account.status, CredentialAccountStatus::Configured);
+        assert_eq!(account.provider.as_str(), GOOGLE_PROVIDER_ID);
+    }
+
+    #[tokio::test]
     async fn extension_oauth_start_handler_returns_config_error_when_dcr_registry_is_missing() {
         let state = ProductAuthRouteState::new(
             Arc::new(RebornProductAuthServices::local_dev_in_memory(Arc::new(
@@ -1545,8 +1846,8 @@ mod tests {
             .expect("stored DCR PKCE verifier");
 
         let query = OAuthCallbackQuery {
-            user_id: scope.resource.user_id.to_string(),
-            invocation_id: scope.resource.invocation_id.to_string(),
+            user_id: Some(scope.resource.user_id.to_string()),
+            invocation_id: Some(scope.resource.invocation_id.to_string()),
             state: Some(RawCallbackValue::new("opaque-state".to_string()).expect("state")),
             provider: Some("notion".to_string()),
             account_label: Some("notion".to_string()),
@@ -1559,10 +1860,16 @@ mod tests {
             scopes: None,
         };
 
-        let outcome =
-            oauth::callback_outcome_from_query(&state, flow_id, &scope, Some(&provider), &query)
-                .await
-                .expect("callback outcome");
+        let outcome = oauth::callback_outcome_from_query(
+            &state,
+            flow_id,
+            &scope,
+            Some(&provider),
+            None,
+            &query,
+        )
+        .await
+        .expect("callback outcome");
 
         let RebornOAuthCallbackOutcome::Authorized { provider_request } = outcome else {
             panic!("expected authorized callback outcome");
@@ -1570,6 +1877,112 @@ mod tests {
         assert_eq!(provider_request.provider, provider);
         assert_eq!(provider_request.account_label.as_str(), "notion");
         assert_eq!(provider_request.pkce_verifier.expose_secret(), verifier);
+    }
+
+    #[tokio::test]
+    async fn dcr_oauth_callback_resumes_blocked_turn_gate() {
+        let shared = Arc::new(ironclaw_auth::InMemoryAuthProductServices::new());
+        let secret_store = Arc::new(InMemorySecretStore::new());
+        let secret_store_for_provider: Arc<dyn SecretStore> = secret_store;
+        let dispatcher = Arc::new(RecordingDispatcher::default());
+        let dcr_provider = Arc::new(
+            OAuthDcrProvider::new(
+                OAuthDcrProviderConfig {
+                    spec: notion_provider_spec(),
+                    callback_origin: "http://127.0.0.1:3000".to_string(),
+                    client_name: "Ironclaw".to_string(),
+                    account_label: CredentialAccountLabel::new("notion").expect("label"),
+                    scopes: Vec::new(),
+                },
+                Arc::new(RouteDcrSetupEgress),
+                secret_store_for_provider,
+                Arc::new(NoopObligationHandler),
+            )
+            .expect("DCR provider"),
+        );
+        let product_auth = Arc::new(
+            RebornProductAuthServices::from_shared(shared.clone(), dispatcher.clone())
+                .with_flow_record_source(shared)
+                .with_dcr_oauth_registry(Arc::new(OAuthDcrProviderRegistry::new(vec![
+                    dcr_provider,
+                ]))),
+        );
+        let state = ProductAuthRouteState::new(
+            product_auth.clone(),
+            TenantId::new("tenant-alpha").expect("tenant"),
+            None,
+            None,
+        );
+        let turn_scope = TurnScope::new(
+            TenantId::new("tenant-alpha").expect("tenant"),
+            None,
+            None,
+            ThreadId::new("thread-alpha").expect("thread"),
+        );
+        let owner_user_id = UserId::new("user-alpha").expect("user");
+        let run_id = TurnRunId::new();
+        let gate_ref = "gate:notion-auth";
+        let requirements = vec![RuntimeCredentialAuthRequirement {
+            provider: RuntimeCredentialAccountProviderId::new("notion").expect("provider"),
+            requester_extension: ExtensionId::new("notion").expect("extension"),
+            provider_scopes: Vec::new(),
+        }];
+
+        let challenge = product_auth
+            .challenge_for_gate(&turn_scope, &owner_user_id, run_id, gate_ref, &requirements)
+            .await
+            .expect("challenge lookup")
+            .expect("notion oauth challenge");
+        let authorization_url = challenge.authorization_url.expect("authorization url");
+        let parsed_authorization =
+            Url::parse(authorization_url.as_str()).expect("authorization URL");
+        let state_value = parsed_authorization
+            .query_pairs()
+            .find_map(|(name, value)| (name == "state").then(|| value.into_owned()))
+            .expect("oauth state");
+        let redirect_uri = parsed_authorization
+            .query_pairs()
+            .find_map(|(name, value)| (name == "redirect_uri").then(|| value.into_owned()))
+            .expect("redirect uri");
+        let mut callback_url = Url::parse(&redirect_uri).expect("callback redirect URL");
+        {
+            let mut query = callback_url.query_pairs_mut();
+            query.append_pair("state", &state_value);
+            query.append_pair("code", "notion-auth-code");
+        }
+        let uri = format!(
+            "{}?{}",
+            callback_url.path(),
+            callback_url.query().expect("callback query")
+        )
+        .parse::<Uri>()
+        .expect("callback uri");
+        let flow_id = callback_url
+            .path_segments()
+            .and_then(|mut segments| segments.next_back())
+            .expect("flow id")
+            .to_string();
+
+        let response = oauth::oauth_callback_handler(
+            State(state),
+            Path(flow_id),
+            RawQuery(uri.query().map(str::to_string)),
+            uri,
+            HeaderMap::new(),
+        )
+        .await
+        .expect("notion callback");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let events = dispatcher.events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].continuation,
+            AuthContinuationRef::TurnGateResume {
+                turn_run_ref: TurnRunRef::new(run_id.to_string()).expect("run ref"),
+                gate_ref: AuthGateRef::new(gate_ref).expect("gate ref"),
+            }
+        );
     }
 
     #[derive(Debug)]

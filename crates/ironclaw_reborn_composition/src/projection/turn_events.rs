@@ -581,6 +581,9 @@ fn failure_summary_for_category(category: &str) -> &'static str {
         "exit_application_failed" => "The run failed while recording its final result.",
         "lease_expired" => "The run failed because its runner lease expired.",
         "interrupted_unexpectedly" => "The run stopped before it could complete cleanly.",
+        "no_progress_detected" => {
+            "The run stopped because it repeated the same step without making progress."
+        }
         "unknown_failure" => "The run failed for an unknown reason.",
         _ => "The run failed before producing a reply.",
     }

@@ -3,6 +3,7 @@ import { Badge } from "../../../design-system/badge.js";
 import { Button } from "../../../design-system/button.js";
 import { Icon } from "../../../design-system/icons.js";
 import { KIND_LABELS, STATE_TONES, STATE_LABELS } from "../lib/extensions-schema.js";
+import { primaryExtensionAction } from "../lib/extension-actions.js";
 
 /* Card layout (Option B): self-contained bordered card. Capabilities collapse
    behind a count disclosure; secondary actions (Configure / Setup / Remove)
@@ -117,15 +118,22 @@ export function ExtensionCard({ ext, onActivate, onConfigure, onRemove, isBusy }
 
   const primaryActions = [];
   const overflowActions = [];
+  const primaryAction = primaryExtensionAction(ext);
 
-  if (canManage && state !== "active" && state !== "ready" && ext.kind !== "wasm_channel") {
+  if (primaryAction === "configure") {
+    primaryActions.push({
+      id: "configure",
+      label: ext.authenticated ? "Reconfigure" : "Configure",
+      run: () => onConfigure(configurePayload),
+    });
+  } else if (primaryAction === "activate") {
     primaryActions.push({
       id: "activate",
       label: "Activate",
       run: () => onActivate(configurePayload),
     });
   }
-  if (canManage && (ext.needs_setup || ext.has_auth)) {
+  if (canManage && (ext.needs_setup || ext.has_auth) && primaryAction !== "configure") {
     overflowActions.push({
       id: "configure",
       label: ext.authenticated ? "Reconfigure" : "Configure",

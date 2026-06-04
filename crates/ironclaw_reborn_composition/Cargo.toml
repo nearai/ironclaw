@@ -41,6 +41,7 @@ webui-v2-beta = [
     "ironclaw_webui_v2/webui-v2-beta",
     "dep:ironclaw_webui_v2_static",
     "ironclaw_webui_v2_static/webui-v2-beta",
+    "ironclaw_reborn/webui-user-store",
     "libsql",
     "dep:axum",
     "dep:tower",
@@ -77,6 +78,7 @@ postgres = [
 ]
 [dependencies]
 async-trait = "0.1"
+base64 = "0.22"
 chrono = "0.4"
 deadpool-postgres = { version = "0.14", optional = true }
 futures = "0.3"
@@ -114,7 +116,6 @@ ironclaw_secrets = { path = "../ironclaw_secrets" }
 ironclaw_skills = { path = "../ironclaw_skills" }
 ironclaw_slack_v2_adapter = { path = "../ironclaw_slack_v2_adapter", optional = true }
 ironclaw_threads = { path = "../ironclaw_threads" }
-ironclaw_trusted_ingress = { path = "../ironclaw_trusted_ingress", features = ["composition-root"] }
 ironclaw_triggers = { path = "../ironclaw_triggers" }
 ironclaw_trust = { path = "../ironclaw_trust" }
 ironclaw_turns = { path = "../ironclaw_turns" }
@@ -145,11 +146,13 @@ uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 async-trait = "0.1"
+hmac = "0.12"
 http = "1"
 http-body-util = "0.1"
 ironclaw_common = { path = "../ironclaw_common" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
 ironclaw_host_runtime = { path = "../ironclaw_host_runtime", features = ["test-support"] }
+ironclaw_conversations = { path = "../ironclaw_conversations" }
 ironclaw_reborn_composition = { path = ".", features = ["test-support"] }
 ironclaw_threads = { path = "../ironclaw_threads" }
 ironclaw_turns = { path = "../ironclaw_turns" }
@@ -157,6 +160,7 @@ ironclaw_product_workflow = { path = "../ironclaw_product_workflow", features = 
 ironclaw_product_adapters = { path = "../ironclaw_product_adapters" }
 rust_decimal = { version = "1", features = ["serde", "serde-with-str"] }
 rust_decimal_macros = "1"
+sha2 = "0.10"
 tempfile = "3"
 testcontainers-modules = { version = "0.11", features = ["postgres"] }
 tokio = { version = "1", features = ["macros", "net", "rt", "rt-multi-thread", "time"] }
