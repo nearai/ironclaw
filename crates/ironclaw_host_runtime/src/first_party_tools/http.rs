@@ -11,7 +11,13 @@ use serde_json::{Map, Value, json};
 
 use crate::{FirstPartyCapabilityError, FirstPartyCapabilityRequest};
 
-use super::{first_party_capability_manifest, input_error};
+use super::{
+    first_party_capability_manifest, input_error,
+    model_visible_output::{
+        max_binary_bytes_for_base64_budget, serialized_json_content_len, serialized_json_len,
+        truncate_str_for_json_content_budget, truncate_string_for_json_content_budget,
+    },
+};
 
 pub const HTTP_CAPABILITY_ID: &str = "builtin.http";
 pub const HTTP_SAVE_CAPABILITY_ID: &str = "builtin.http.save";
@@ -537,10 +543,6 @@ fn inline_body_budget(response_body_limit: u64, headers: &Value) -> u64 {
     u64::try_from(body_budget).unwrap_or(u64::MAX)
 }
 
-fn serialized_json_len(value: &Value) -> usize {
-    serde_json::to_vec(value).map_or(usize::MAX, |serialized| serialized.len())
-}
-
 fn insert_inline_body(
     output: &mut Map<String, Value>,
     body: Vec<u8>,
@@ -680,50 +682,6 @@ fn mark_inline_body_truncated(output: &mut Map<String, Value>, returned_body_byt
         "body_truncation_hint".to_string(),
         Value::String(HTTP_TRUNCATION_HINT.to_string()),
     );
-}
-
-fn truncate_string_for_json_content_budget(
-    value: String,
-    max_serialized_content_bytes: usize,
-) -> (String, bool) {
-    let (truncated, was_truncated) =
-        truncate_str_for_json_content_budget(&value, max_serialized_content_bytes);
-    if !was_truncated {
-        return (value, false);
-    }
-    (truncated.to_string(), true)
-}
-
-fn truncate_str_for_json_content_budget(
-    value: &str,
-    max_serialized_content_bytes: usize,
-) -> (&str, bool) {
-    let mut used = 0_usize;
-    for (index, character) in value.char_indices() {
-        let next = used.saturating_add(json_escaped_character_len(character));
-        if next > max_serialized_content_bytes {
-            return (&value[..index], true);
-        }
-        used = next;
-    }
-    (value, false)
-}
-
-fn json_escaped_character_len(character: char) -> usize {
-    match character {
-        '"' | '\\' => 2,
-        '\u{08}' | '\t' | '\n' | '\u{0c}' | '\r' => 2,
-        '\u{00}'..='\u{1f}' => 6,
-        _ => character.len_utf8(),
-    }
-}
-
-fn serialized_json_content_len(value: &str) -> usize {
-    value.chars().map(json_escaped_character_len).sum()
-}
-
-fn max_binary_bytes_for_base64_budget(max_serialized_content_bytes: usize) -> usize {
-    max_serialized_content_bytes / 4 * 3
 }
 
 fn http_error(error: RuntimeHttpEgressError) -> FirstPartyCapabilityError {
