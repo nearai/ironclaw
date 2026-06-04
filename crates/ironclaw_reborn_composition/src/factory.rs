@@ -160,11 +160,11 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     // `build_reborn_runtime` only wires local-dev today. Computed before the
     // `/projects` mount consumes `root`.
     let extensions_host_root = root.join("system/extensions");
-    std::fs::create_dir_all(&extensions_host_root).map_err(|_| {
-        RebornBuildError::InvalidConfig {
+    tokio::fs::create_dir_all(&extensions_host_root)
+        .await
+        .map_err(|_| RebornBuildError::InvalidConfig {
             reason: "local-dev extensions root could not be initialized".to_string(),
-        }
-    })?;
+        })?;
     let extensions_virtual_root = ironclaw_host_api::VirtualPath::new("/system/extensions")
         .map_err(|error| RebornBuildError::InvalidConfig {
             reason: error.to_string(),
