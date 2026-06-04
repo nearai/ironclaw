@@ -54,9 +54,15 @@ mod extension_onboarding;
 mod extension_setup_credentials;
 mod extensions;
 mod lifecycle_setup;
+mod llm_config;
 mod types;
 
 pub use error::{RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind};
+pub use llm_config::{
+    LlmActiveSelection, LlmConfigService, LlmConfigServiceError, LlmConfigSnapshot,
+    LlmModelsResult, LlmProbeRequest, LlmProbeResult, LlmProviderView, SetActiveLlmRequest,
+    UpsertLlmProviderRequest,
+};
 pub use types::{
     RebornAutomationInfo, RebornAutomationRunStatus, RebornAutomationSource, RebornAutomationState,
     RebornCancelRunResponse, RebornCreateThreadResponse, RebornExtensionActionResponse,
@@ -322,6 +328,69 @@ pub trait RebornServicesApi: Send + Sync {
         package_ref: LifecyclePackageRef,
         request: WebUiSetupExtensionRequest,
     ) -> Result<RebornSetupExtensionResponse, RebornServicesError>;
+
+    /// LLM provider configuration: merged catalog + active selection.
+    ///
+    /// The six LLM-config methods default to "service unavailable" so facade
+    /// impls (and test fakes) that don't wire an [`LlmConfigService`] inherit a
+    /// safe surface; the default `RebornServices` overrides them all.
+    async fn get_llm_config(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<LlmConfigSnapshot, RebornServicesError> {
+        let _ = caller;
+        Err(llm_config::llm_config_unavailable())
+    }
+
+    /// Add or update a custom LLM provider (and optionally its key / active state).
+    async fn upsert_llm_provider(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: UpsertLlmProviderRequest,
+    ) -> Result<LlmConfigSnapshot, RebornServicesError> {
+        let _ = (caller, request);
+        Err(llm_config::llm_config_unavailable())
+    }
+
+    /// Remove a custom LLM provider and any stored key for it.
+    async fn delete_llm_provider(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        provider_id: String,
+    ) -> Result<LlmConfigSnapshot, RebornServicesError> {
+        let _ = (caller, provider_id);
+        Err(llm_config::llm_config_unavailable())
+    }
+
+    /// Select the active LLM provider + model.
+    async fn set_active_llm(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: SetActiveLlmRequest,
+    ) -> Result<LlmConfigSnapshot, RebornServicesError> {
+        let _ = (caller, request);
+        Err(llm_config::llm_config_unavailable())
+    }
+
+    /// Probe an LLM provider's credentials/endpoint without persisting.
+    async fn test_llm_connection(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: LlmProbeRequest,
+    ) -> Result<LlmProbeResult, RebornServicesError> {
+        let _ = (caller, request);
+        Err(llm_config::llm_config_unavailable())
+    }
+
+    /// List the models an LLM provider exposes, without persisting.
+    async fn list_llm_models(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: LlmProbeRequest,
+    ) -> Result<LlmModelsResult, RebornServicesError> {
+        let _ = (caller, request);
+        Err(llm_config::llm_config_unavailable())
+    }
 }
 
 /// Default facade implementation composed at the WebUI boundary.
@@ -337,6 +406,7 @@ pub struct RebornServices {
     extension_credentials: Option<Arc<dyn ExtensionCredentialSetupService>>,
     skill_activation_recorder: Option<Arc<SkillActivationRecorder>>,
     skill_activation_clearer: Option<Arc<SkillActivationClearer>>,
+    llm_config: Option<Arc<dyn LlmConfigService>>,
 }
 
 impl RebornServices {
@@ -357,11 +427,17 @@ impl RebornServices {
             extension_credentials: None,
             skill_activation_recorder: None,
             skill_activation_clearer: None,
+            llm_config: None,
         }
     }
 
     pub fn with_event_stream(mut self, event_stream: Arc<dyn ProjectionStream>) -> Self {
         self.event_stream = Some(event_stream);
+        self
+    }
+
+    pub fn with_llm_config_service(mut self, llm_config: Arc<dyn LlmConfigService>) -> Self {
+        self.llm_config = Some(llm_config);
         self
     }
 
@@ -967,6 +1043,95 @@ impl RebornServicesApi for RebornServices {
             request,
         )
         .await
+    }
+
+    async fn get_llm_config(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<LlmConfigSnapshot, RebornServicesError> {
+        let service = self
+            .llm_config
+            .as_ref()
+            .ok_or_else(llm_config::llm_config_unavailable)?;
+        service
+            .snapshot(caller)
+            .await
+            .map_err(llm_config::map_llm_config_error)
+    }
+
+    async fn upsert_llm_provider(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: UpsertLlmProviderRequest,
+    ) -> Result<LlmConfigSnapshot, RebornServicesError> {
+        let service = self
+            .llm_config
+            .as_ref()
+            .ok_or_else(llm_config::llm_config_unavailable)?;
+        service
+            .upsert_provider(caller, request)
+            .await
+            .map_err(llm_config::map_llm_config_error)
+    }
+
+    async fn delete_llm_provider(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        provider_id: String,
+    ) -> Result<LlmConfigSnapshot, RebornServicesError> {
+        let service = self
+            .llm_config
+            .as_ref()
+            .ok_or_else(llm_config::llm_config_unavailable)?;
+        service
+            .delete_provider(caller, provider_id)
+            .await
+            .map_err(llm_config::map_llm_config_error)
+    }
+
+    async fn set_active_llm(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: SetActiveLlmRequest,
+    ) -> Result<LlmConfigSnapshot, RebornServicesError> {
+        let service = self
+            .llm_config
+            .as_ref()
+            .ok_or_else(llm_config::llm_config_unavailable)?;
+        service
+            .set_active(caller, request)
+            .await
+            .map_err(llm_config::map_llm_config_error)
+    }
+
+    async fn test_llm_connection(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: LlmProbeRequest,
+    ) -> Result<LlmProbeResult, RebornServicesError> {
+        let service = self
+            .llm_config
+            .as_ref()
+            .ok_or_else(llm_config::llm_config_unavailable)?;
+        service
+            .test_connection(caller, request)
+            .await
+            .map_err(llm_config::map_llm_config_error)
+    }
+
+    async fn list_llm_models(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: LlmProbeRequest,
+    ) -> Result<LlmModelsResult, RebornServicesError> {
+        let service = self
+            .llm_config
+            .as_ref()
+            .ok_or_else(llm_config::llm_config_unavailable)?;
+        service
+            .list_models(caller, request)
+            .await
+            .map_err(llm_config::map_llm_config_error)
     }
 }
 
