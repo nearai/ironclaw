@@ -32,16 +32,25 @@ use secrecy::{ExposeSecret, SecretString};
 use thiserror::Error;
 
 use crate::RebornRuntime;
+use crate::reborn_identity_actor::CanonicalRebornUserIdentityStore;
+use crate::slack_actor_identity::{
+    SLACK_PROVIDER, SlackUserIdentityActorResolver, slack_user_identity_provider_user_id,
+};
 use crate::slack_delivery::{
     SlackFinalReplyDeliveryObserver, SlackFinalReplyDeliveryServices,
     SlackFinalReplyDeliverySettings,
 };
 use crate::slack_egress::{SlackProtocolHttpEgress, StaticSlackEgressCredentialProvider};
+use crate::slack_personal_binding::{
+    RebornIdentityProvider, RebornIdentityProviderUserId, RebornUserIdentityBinding,
+    RebornUserIdentityBindingStore,
+};
 use crate::slack_serve::{
     SlackEventsRouteState, SlackInstallationRecord, SlackInstallationSelector,
     StaticSlackInstallationResolver, slack_events_route_mount,
 };
 use crate::webui_serve::PublicRouteMount;
+use ironclaw_reborn_identity::RebornIdentityResolver;
 
 const SLACK_ADAPTER_ID: &str = "slack_v2";
 const SLACK_BOT_TOKEN_HANDLE: &str = "slack_bot_token";
@@ -145,6 +154,44 @@ pub fn build_slack_events_route_mount(
         config.slack_actor.clone(),
         config.user_id.clone(),
     )]));
+    build_slack_events_route_mount_with_actor_user_resolver(runtime, config, actor_user_resolver)
+}
+
+/// Build the Slack host-beta route mount with actor resolution backed by
+/// the canonical Reborn identity store (issue #4381): Slack actors resolve
+/// through the SAME store as WebUI OAuth login, not a parallel one.
+///
+/// Resolution is link-only — an unbound actor fails closed (no
+/// auto-provisioning). The operator's configured Slack actor is seeded
+/// into the canonical store first, so the beta's out-of-the-box
+/// single-actor behavior is preserved (now canonical-backed); additional
+/// actors bind through the Slack personal-binding flow.
+pub async fn build_slack_events_route_mount_with_canonical_identity(
+    runtime: &RebornRuntime,
+    config: SlackHostBetaConfig,
+    identity_resolver: Arc<dyn RebornIdentityResolver>,
+) -> Result<PublicRouteMount, SlackHostBetaBuildError> {
+    let identity_store = Arc::new(CanonicalRebornUserIdentityStore::new(
+        identity_resolver,
+        config.tenant_id.clone(),
+    ));
+    // Seed the configured actor → user binding under the SAME key the
+    // resolver looks up with, so the preconfigured actor resolves through
+    // the canonical store instead of an in-memory static map.
+    let provider_user_id =
+        slack_user_identity_provider_user_id(&config.installation_id, config.slack_actor.id());
+    identity_store
+        .bind_user_identity(RebornUserIdentityBinding {
+            provider: RebornIdentityProvider::new(SLACK_PROVIDER)
+                .map_err(|reason| invalid_config("slack identity provider", reason.to_string()))?,
+            provider_user_id: RebornIdentityProviderUserId::new(provider_user_id)
+                .map_err(|reason| invalid_config("slack identity subject", reason.to_string()))?,
+            user_id: config.user_id.clone(),
+        })
+        .await
+        .map_err(|reason| invalid_config("canonical identity seed", reason.to_string()))?;
+    let actor_user_resolver: Arc<dyn ProductActorUserResolver> =
+        Arc::new(SlackUserIdentityActorResolver::new(identity_store));
     build_slack_events_route_mount_with_actor_user_resolver(runtime, config, actor_user_resolver)
 }
 

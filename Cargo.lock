@@ -4851,7 +4851,6 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
- "uuid",
  "wat",
 ]
 
@@ -4923,6 +4922,7 @@ dependencies = [
  "ironclaw_reborn_composition",
  "ironclaw_reborn_config",
  "ironclaw_reborn_event_store",
+ "ironclaw_reborn_identity",
  "ironclaw_resources",
  "ironclaw_run_state",
  "ironclaw_runtime_policy",
@@ -4999,6 +4999,21 @@ dependencies = [
  "tracing",
  "urlencoding",
  "webpki-roots 0.26.11",
+]
+
+[[package]]
+name = "ironclaw_reborn_identity"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "ironclaw_host_api",
+ "libsql",
+ "serde",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]

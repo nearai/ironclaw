@@ -5,12 +5,14 @@ use std::sync::Arc;
 
 use anyhow::{Context, anyhow};
 use clap::Args;
-#[cfg(feature = "slack-v2-host-beta")]
-use ironclaw_reborn_composition::build_slack_events_route_mount;
 use ironclaw_reborn_composition::{
     GoogleOAuthRouteConfig, RebornBuildInput, RebornReadiness, RebornRuntimeIdentity,
     RebornRuntimeInput, RebornWebuiBundle, WebuiAuthenticator, WebuiServeConfig,
     build_reborn_runtime, build_webui_services, webui_v2_app_with_lifecycle,
+};
+#[cfg(feature = "slack-v2-host-beta")]
+use ironclaw_reborn_composition::{
+    build_slack_events_route_mount_with_canonical_identity, open_reborn_identity_resolver,
 };
 use ironclaw_reborn_config::IdentitySection;
 use ironclaw_reborn_webui_ingress::{
@@ -391,8 +393,18 @@ impl ServeCommand {
             }
             #[cfg(feature = "slack-v2-host-beta")]
             if let Some(slack_config) = slack_host_beta_config {
-                let slack_mount = build_slack_events_route_mount(&runtime, slack_config)
-                    .context("failed to compose Slack Events API host-beta route")?;
+                // Slack actors resolve through the canonical Reborn identity
+                // store (issue #4381), the same store WebUI OAuth login uses.
+                let identity_resolver = open_reborn_identity_resolver(&user_store_path)
+                    .await
+                    .context("failed to initialize the Reborn identity resolver for Slack")?;
+                let slack_mount = build_slack_events_route_mount_with_canonical_identity(
+                    &runtime,
+                    slack_config,
+                    identity_resolver,
+                )
+                .await
+                .context("failed to compose Slack Events API host-beta route")?;
                 serve_config = serve_config.with_public_route_mount(slack_mount);
             }
             if let Some(mount) = public_mount {

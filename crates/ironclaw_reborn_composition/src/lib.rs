@@ -69,6 +69,8 @@ mod provider_admin;
 #[cfg(feature = "root-llm-provider")]
 mod provider_admin_product_command;
 mod readiness;
+#[cfg(feature = "slack-v2-host-beta")]
+mod reborn_identity_actor;
 mod runtime;
 mod runtime_input;
 mod skill_listing;
@@ -160,6 +162,8 @@ pub use provider_admin_product_command::RebornProviderAdminProductCommandService
 pub use readiness::{
     RebornFacadeReadiness, RebornReadiness, RebornReadinessState, RebornWorkerReadiness,
 };
+#[cfg(feature = "slack-v2-host-beta")]
+pub use reborn_identity_actor::CanonicalRebornUserIdentityStore;
 pub use runtime::{
     AssistantReply, ConversationId, RebornRuntime, RebornRuntimeError, RebornSkillActivation,
     RebornSkillActivationMode, RebornSkillAsset, RebornSkillBundle, RebornSkillExecutionPlan,
@@ -191,6 +195,7 @@ pub use slack_egress::{
 pub use slack_host_beta::{
     SlackHostBetaBuildError, SlackHostBetaConfig, SlackHostBetaConfigInput,
     build_slack_events_route_mount, build_slack_events_route_mount_with_actor_user_resolver,
+    build_slack_events_route_mount_with_canonical_identity,
 };
 #[cfg(feature = "slack-v2-host-beta")]
 pub use slack_personal_binding::{
@@ -224,37 +229,40 @@ pub mod host_api {
     pub use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
 }
 
-/// Reborn-owned WebChat user-identity store, re-exported so host
-/// binaries reach it through this composition facade instead of taking a
-/// direct `ironclaw_reborn` dependency (the
-/// `reborn_cli_binary_crate_stays_separate_from_v1_root` architecture
-/// boundary forbids that). The store is a reborn-owned repository;
-/// [`open_webui_user_store`] opens it so the libSQL substrate handle
-/// stays private to this facade and callers never construct one.
+/// Canonical Reborn identity resolver (issue #4381): the one boundary that
+/// maps every external identity — WebUI OAuth logins and external
+/// channel/product actors — to a stable `UserId` before runtime state is
+/// touched. Re-exported here so host wiring (`ironclaw-reborn serve`, the
+/// CLI `UserDirectory` adapter, product/channel actor resolution) depends
+/// only on the composition facade, never on `ironclaw_reborn_identity`
+/// directly.
 #[cfg(feature = "webui-v2-beta")]
-pub use ironclaw_reborn::webui_users::{
-    RebornLibSqlUserStore, RebornUserStoreError, ResolveIdentity,
+pub use ironclaw_reborn_identity::{
+    ExternalIdentityRecord, RebornIdentityError, RebornIdentityResolver, RebornLibSqlIdentityStore,
+    ResolveExternalIdentity, SurfaceKind, UserRecord,
 };
 
-/// Open the reborn-owned WebChat user-identity store on the substrate DB
-/// at `path`, creating the parent directory and running its idempotent
+/// Open the canonical Reborn identity resolver on the substrate DB at
+/// `path`, creating the parent directory and running its idempotent
 /// migrations. Keeps the libSQL handle private to the composition layer
 /// (composition CLAUDE.md: "keep lower substrate handles private").
 #[cfg(feature = "webui-v2-beta")]
-pub async fn open_webui_user_store(
+pub async fn open_reborn_identity_resolver(
     path: &std::path::Path,
-) -> Result<std::sync::Arc<RebornLibSqlUserStore>, RebornUserStoreError> {
+) -> Result<std::sync::Arc<RebornLibSqlIdentityStore>, RebornIdentityError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
-            .map_err(|err| RebornUserStoreError::Backend(err.to_string()))?;
+            .map_err(|err| RebornIdentityError::Backend(err.to_string()))?;
     }
     let db = std::sync::Arc::new(
         libsql::Builder::new_local(path)
             .build()
             .await
-            .map_err(|err| RebornUserStoreError::Backend(err.to_string()))?,
+            .map_err(|err| RebornIdentityError::Backend(err.to_string()))?,
     );
-    Ok(std::sync::Arc::new(RebornLibSqlUserStore::open(db).await?))
+    Ok(std::sync::Arc::new(
+        RebornLibSqlIdentityStore::open(db).await?,
+    ))
 }
 
 /// Reborn model purpose slot names exposed for diagnostic callers.

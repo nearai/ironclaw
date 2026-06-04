@@ -1,14 +1,13 @@
 //! Host [`UserDirectory`] for the WebChat v2 SSO login surface.
 //!
-//! Thin adapter over the reborn-owned
-//! [`RebornLibSqlUserStore`](ironclaw_reborn_composition::RebornLibSqlUserStore)
-//! (reached through the composition facade, not a direct `ironclaw_reborn`
-//! dependency): it applies the operator's email-domain admission policy
-//! (fail-closed),
-//! then delegates identity resolution/persistence to the store. Keeping
-//! admission here — in the host adapter — leaves the storage layer pure
-//! and the ingress trait seam unchanged, and keeps the durable schema in
-//! `ironclaw_reborn` rather than in this command crate.
+//! Thin adapter over the canonical Reborn identity resolver
+//! ([`RebornIdentityResolver`](ironclaw_reborn_composition::RebornIdentityResolver),
+//! reached through the composition facade): it applies the operator's
+//! email-domain admission policy (fail-closed), then delegates identity
+//! resolution/persistence to the canonical resolver as an `oauth`-surface
+//! external identity. Keeping admission here — in the host adapter —
+//! leaves the canonical resolver pure and the ingress trait seam
+//! unchanged.
 //!
 //! Admission is the control that stops a configured provider from
 //! becoming open registration: GitHub has no org/team allowlist and
@@ -21,8 +20,8 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_reborn_composition::host_api::UserId;
-use ironclaw_reborn_composition::{RebornLibSqlUserStore, ResolveIdentity};
+use ironclaw_reborn_composition::host_api::{TenantId, UserId};
+use ironclaw_reborn_composition::{RebornIdentityResolver, ResolveExternalIdentity, SurfaceKind};
 use ironclaw_reborn_webui_ingress::{
     OAuthProviderName, OAuthUserProfile, UserDirectory, UserDirectoryError,
 };
@@ -30,7 +29,10 @@ use ironclaw_reborn_webui_ingress::{
 /// Admission + persistence adapter implementing the ingress
 /// [`UserDirectory`] seam.
 pub(crate) struct WebuiUserDirectory {
-    store: Arc<RebornLibSqlUserStore>,
+    resolver: Arc<dyn RebornIdentityResolver>,
+    /// Trusted host tenant the resolved OAuth identities are scoped to.
+    /// Identity resolution and email-linking happen within this tenant.
+    tenant_id: TenantId,
     /// Lowercased verified-email domains allowed to log in. Never empty
     /// in production — an empty list rejects every login (fail closed).
     allowed_email_domains: Vec<String>,
@@ -38,11 +40,13 @@ pub(crate) struct WebuiUserDirectory {
 
 impl WebuiUserDirectory {
     pub(crate) fn new(
-        store: Arc<RebornLibSqlUserStore>,
+        resolver: Arc<dyn RebornIdentityResolver>,
+        tenant_id: TenantId,
         allowed_email_domains: Vec<String>,
     ) -> Self {
         Self {
-            store,
+            resolver,
+            tenant_id,
             allowed_email_domains,
         }
     }
@@ -114,10 +118,17 @@ impl UserDirectory for WebuiUserDirectory {
             );
             return Err(UserDirectoryError::Unknown);
         };
-        self.store
-            .resolve_or_create(ResolveIdentity {
-                provider: provider.as_str(),
-                provider_user_id: profile.provider_user_id.as_str(),
+        // An OAuth login is an `oauth`-surface external identity: no adapter
+        // installation, keyed by provider + subject within the host tenant.
+        // The admitted (verified, allowlisted) email is what cross-provider
+        // linking keys on, so it is the email handed to the resolver.
+        self.resolver
+            .resolve_or_create(ResolveExternalIdentity {
+                tenant_id: &self.tenant_id,
+                surface_kind: SurfaceKind::Oauth,
+                provider_kind: provider.as_str(),
+                provider_instance_id: None,
+                external_subject_id: profile.provider_user_id.as_str(),
                 email: Some(admitted_email.as_str()),
                 email_verified: true,
                 display_name: profile.display_name.as_deref(),
@@ -137,10 +148,14 @@ mod tests {
         let path = tmp.keep().join("reborn-local-dev.db");
         // Open through the same composition facade production uses, so the
         // CLI test needs no direct libSQL dependency.
-        let store = ironclaw_reborn_composition::open_webui_user_store(&path)
+        let resolver = ironclaw_reborn_composition::open_reborn_identity_resolver(&path)
             .await
-            .expect("store");
-        WebuiUserDirectory::new(store, domains.iter().map(|d| d.to_string()).collect())
+            .expect("resolver");
+        WebuiUserDirectory::new(
+            resolver,
+            TenantId::new("tenant-test").expect("tenant"),
+            domains.iter().map(|d| d.to_string()).collect(),
+        )
     }
 
     fn google() -> OAuthProviderName {

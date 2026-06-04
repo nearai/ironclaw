@@ -15,7 +15,10 @@ use ironclaw_slack_v2_adapter::SLACK_USER_ACTOR_KIND;
 use thiserror::Error;
 
 const SLACK_ADAPTER_ID: &str = "slack_v2";
-const SLACK_PROVIDER: &str = "slack";
+/// Provider key Slack actors are stored under in the canonical identity
+/// store. `pub(crate)` so the host-beta canonical wiring seeds bindings
+/// under the SAME provider the resolver looks up with (no drift).
+pub(crate) const SLACK_PROVIDER: &str = "slack";
 
 #[derive(Debug, Error)]
 pub enum RebornUserIdentityLookupError {

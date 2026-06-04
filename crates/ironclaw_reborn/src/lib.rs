@@ -36,5 +36,3 @@ pub mod turn_runner;
 pub mod model_gateway;
 #[cfg(feature = "libsql-secrets")]
 pub mod secrets;
-#[cfg(feature = "webui-user-store")]
-pub mod webui_users;

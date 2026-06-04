@@ -1,0 +1,25 @@
+[package]
+name = "ironclaw_reborn_identity"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+description = "Canonical Reborn identity resolver: maps OAuth and external-channel actors to stable UserIds"
+authors = ["NEAR AI <support@near.ai>"]
+
+[dependencies]
+async-trait = "0.1"
+chrono = "0.4"
+ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
+libsql = { version = "0.6", default-features = false, features = [
+    "core",
+    "replication",
+    "remote",
+    "tls",
+] }
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
