@@ -21,6 +21,8 @@ pub struct CompactionStrategyState {
     pub force_compact_on_next_iteration: bool,
 }
 
+/// Records the deferred cut point and prompt snapshot fingerprint for a
+/// compaction attempt that should not be retried against the same prompt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DeferredCompactionWatermark {
     pub through_seq: u64,
