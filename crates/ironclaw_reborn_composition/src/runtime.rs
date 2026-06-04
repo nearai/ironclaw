@@ -40,7 +40,7 @@ use ironclaw_first_party_extension_ports::{
     FirstPartySkillsExtension, FirstPartySkillsExtensionHandles, SelectableSkillContextSource,
     SkillActivationSelectorConfig, SkillExecutionAdapter,
 };
-#[cfg(test)]
+#[cfg(all(test, feature = "slack-v2-host-beta"))]
 use ironclaw_host_api::RuntimeHttpEgress;
 use ironclaw_host_api::{
     ActionResultSummary, ActionSummary, AgentId, AuditEnvelope, AuditEventId, AuditStage,
@@ -510,7 +510,7 @@ impl RebornRuntime {
         &self.services
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "slack-v2-host-beta"))]
     pub(crate) fn set_local_runtime_http_egress_for_test(
         &mut self,
         runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
