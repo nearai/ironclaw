@@ -232,14 +232,12 @@ mod tests {
     use crate::oauth_gate::OAuthGateChallengeRequest;
     use ironclaw_auth::{
         AuthFlowManager, AuthFlowRecordSource, AuthGateRef, AuthProductScope, AuthProviderId,
-        AuthSurface, AuthorizationCodeHash, CredentialAccountLabel, GOOGLE_CALENDAR_READONLY_SCOPE,
-        InMemoryAuthProductServices, NewCredentialAccount, OAuthAuthorizationCode, OAuthClientId,
-        OAuthRedirectUri, PkceVerifierHash, PkceVerifierSecret,
-        ProviderBackedCredentialAccountService, ProviderScope,
-    };
-    use ironclaw_auth::{
-        CredentialAccountLookupRequest, CredentialAccountService, CredentialAccountStatus,
-        CredentialOwnership, CredentialRefreshRequest,
+        AuthSurface, AuthorizationCodeHash, CredentialAccountLabel, CredentialAccountLookupRequest,
+        CredentialAccountService, CredentialAccountStatus, CredentialOwnership,
+        CredentialRefreshRequest, GOOGLE_CALENDAR_READONLY_SCOPE, InMemoryAuthProductServices,
+        NewCredentialAccount, OAuthAuthorizationCode, OAuthClientId, OAuthRedirectUri,
+        PkceVerifierHash, PkceVerifierSecret, ProviderBackedCredentialAccountService,
+        ProviderScope,
     };
     use ironclaw_capabilities::{CapabilityObligationError, CapabilityObligationRequest};
     use ironclaw_host_api::{
@@ -449,8 +447,16 @@ mod tests {
             .expect("lookup")
             .expect("refreshed account");
         assert_eq!(stored.status, CredentialAccountStatus::Configured);
-        assert_ne!(stored.access_secret, Some(old_access));
-        assert_ne!(stored.refresh_secret, Some(old_refresh));
+        let new_access = stored
+            .access_secret
+            .as_ref()
+            .expect("refresh must persist a new access token handle");
+        let new_refresh = stored
+            .refresh_secret
+            .as_ref()
+            .expect("refresh must persist a new refresh token handle");
+        assert_ne!(new_access, &old_access);
+        assert_ne!(new_refresh, &old_refresh);
         assert_eq!(
             stored.scopes,
             vec![ProviderScope::new(GOOGLE_CALENDAR_READONLY_SCOPE).unwrap()]
@@ -475,6 +481,99 @@ mod tests {
         assert!(!serialized.contains("stored-google-refresh"));
         assert!(!serialized.contains("new-google-access"));
         assert!(!serialized.contains("new-google-refresh"));
+    }
+
+    #[tokio::test]
+    async fn composed_google_provider_marks_refresh_failed_on_non_200_token_response() {
+        let egress = Arc::new(RecordingEgress::with_status(
+            400,
+            br#"{"error":"invalid_grant"}"#.to_vec(),
+        ));
+        let secret_store = Arc::new(InMemorySecretStore::new());
+        let resource_scope = sample_scope();
+        let auth_scope = AuthProductScope::new(resource_scope.clone(), AuthSurface::Callback);
+        let old_access = SecretHandle::new("google-old-access").unwrap();
+        let old_refresh = SecretHandle::new("google-old-refresh").unwrap();
+        secret_store
+            .put(
+                resource_scope,
+                old_refresh.clone(),
+                SecretString::from("stored-google-refresh".to_string()),
+            )
+            .await
+            .expect("seed refresh token");
+        let shared = Arc::new(InMemoryAuthProductServices::new());
+        let account = shared
+            .create_account(NewCredentialAccount {
+                scope: auth_scope.clone(),
+                provider: AuthProviderId::new(GOOGLE_PROVIDER_ID).unwrap(),
+                label: CredentialAccountLabel::new("work account").unwrap(),
+                status: CredentialAccountStatus::Expired,
+                ownership: CredentialOwnership::UserReusable,
+                owner_extension: None,
+                granted_extensions: Vec::new(),
+                access_secret: Some(old_access.clone()),
+                refresh_secret: Some(old_refresh.clone()),
+                scopes: vec![ProviderScope::new(GOOGLE_CALENDAR_READONLY_SCOPE).unwrap()],
+            })
+            .await
+            .expect("expired google account");
+        let provider = compose_provider_client_with_runtime(
+            vec![OAuthProviderBackendConfig {
+                spec: google_provider_spec(),
+                client: oauth_client("google-client", "https://app.example/oauth/google"),
+            }],
+            Vec::new(),
+            secret_store,
+            OAuthProviderRuntimePorts::new(egress.clone(), Arc::new(NoopObligationHandler)),
+        )
+        .expect("provider composition")
+        .client
+        .expect("google provider client");
+        let auth =
+            ProviderBackedCredentialAccountService::new(shared.clone(), shared.clone(), provider);
+
+        let report = auth
+            .refresh_account(CredentialRefreshRequest::new(
+                auth_scope.clone(),
+                AuthProviderId::new(GOOGLE_PROVIDER_ID).unwrap(),
+                account.id,
+            ))
+            .await
+            .expect("google refresh failure is handled by the account service");
+
+        assert!(!report.refreshed);
+        assert_eq!(
+            report.account.status,
+            CredentialAccountStatus::RefreshFailed
+        );
+        let stored = shared
+            .get_account(CredentialAccountLookupRequest::new(auth_scope, account.id))
+            .await
+            .expect("lookup")
+            .expect("failed refresh account");
+        assert_eq!(stored.status, CredentialAccountStatus::RefreshFailed);
+        assert_eq!(stored.access_secret, Some(old_access));
+        assert_eq!(stored.refresh_secret, Some(old_refresh));
+        assert_eq!(
+            stored.scopes,
+            vec![ProviderScope::new(GOOGLE_CALENDAR_READONLY_SCOPE).unwrap()]
+        );
+        let request = egress.single_request();
+        assert_eq!(request.url, "https://oauth2.googleapis.com/token");
+        let body = form_params(&request.body);
+        assert_eq!(
+            body.get("grant_type").map(String::as_str),
+            Some("refresh_token")
+        );
+        assert_eq!(
+            body.get("client_id").map(String::as_str),
+            Some("google-client")
+        );
+        assert_eq!(
+            body.get("refresh_token").map(String::as_str),
+            Some("stored-google-refresh")
+        );
     }
 
     fn oauth_client(client_id: &str, redirect_uri: &str) -> OAuthClientConfig {
@@ -559,13 +658,19 @@ mod tests {
 
     #[derive(Debug)]
     struct RecordingEgress {
+        status: u16,
         response_body: Vec<u8>,
         requests: Mutex<Vec<RuntimeHttpEgressRequest>>,
     }
 
     impl RecordingEgress {
         fn ok(response_body: Vec<u8>) -> Self {
+            Self::with_status(200, response_body)
+        }
+
+        fn with_status(status: u16, response_body: Vec<u8>) -> Self {
             Self {
+                status,
                 response_body,
                 requests: Mutex::new(Vec::new()),
             }
@@ -586,7 +691,7 @@ mod tests {
         ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
             self.requests.lock().unwrap().push(request);
             Ok(RuntimeHttpEgressResponse {
-                status: 200,
+                status: self.status,
                 headers: vec![("content-type".to_string(), "application/json".to_string())],
                 body: self.response_body.clone(),
                 saved_body: None,
