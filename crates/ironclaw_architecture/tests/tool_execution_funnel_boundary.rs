@@ -95,12 +95,11 @@ const ALLOWLIST: &[AllowedSite] = &[
         kind: AllowKind::Executor,
     },
     // --- Un-migrated bypasses: #4019 migration checklist ---
-    // Interactive chat tool calls (parallel JoinSet path) — the headline
-    // bypass from #4017. // TODO(#4019): migrate through audited dispatch (step 3).
-    AllowedSite {
-        file: "src/agent/dispatcher.rs",
-        kind: AllowKind::Bypass,
-    },
+    // NOTE: src/agent/dispatcher.rs (interactive chat tool calls — the headline
+    // bypass from #4017) was migrated in #4019 step 3: both the inline and
+    // parallel chat paths now route through the audited
+    // `execute_tool_audited` path (which builds an ActionRecord), so the entry
+    // was removed from this checklist.
     // Scheduler autonomous tool execution.
     // TODO(#4019): migrate through audited dispatch (step 4).
     AllowedSite {

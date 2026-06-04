@@ -13,6 +13,7 @@ use crate::agent::Agent;
 use crate::agent::session::{PendingApproval, PendingAuthPrompt, Session, ThreadState};
 use crate::channels::{ChannelManager, IncomingMessage, StatusUpdate};
 use crate::context::JobContext;
+use crate::db::Database;
 use crate::error::Error;
 use async_trait::async_trait;
 use ironclaw_common::ExtensionName;
@@ -387,8 +388,18 @@ impl Agent {
         tool_name: &str,
         params: &serde_json::Value,
         job_ctx: &JobContext,
+        channel: &str,
     ) -> Result<String, Error> {
-        execute_chat_tool_standalone(self.tools(), self.safety(), tool_name, params, job_ctx).await
+        execute_chat_tool_standalone(
+            self.tools(),
+            self.safety(),
+            self.store(),
+            tool_name,
+            params,
+            job_ctx,
+            channel,
+        )
+        .await
     }
 }
 
@@ -1040,7 +1051,12 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                 let started_at = std::time::Instant::now();
                 let result = self
                     .agent
-                    .execute_chat_tool(&tc.name, &tc.arguments, &self.job_ctx)
+                    .execute_chat_tool(
+                        &tc.name,
+                        &tc.arguments,
+                        &self.job_ctx,
+                        &self.message.channel,
+                    )
                     .await;
                 let duration_ms = started_at.elapsed().as_millis() as u64;
 
@@ -1071,6 +1087,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                 let pf_idx = *pf_idx;
                 let tools = self.agent.tools().clone();
                 let safety = self.agent.safety().clone();
+                let store = self.agent.store().cloned();
                 let channels = self.agent.channels.clone();
                 let job_ctx = self.job_ctx.clone();
                 let tc = tc.clone();
@@ -1094,9 +1111,11 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                     let result = execute_chat_tool_standalone(
                         &tools,
                         &safety,
+                        store.as_ref(),
                         &tc.name,
                         &tc.arguments,
                         &job_ctx,
+                        &channel,
                     )
                     .await;
                     let duration_ms = started_at.elapsed().as_millis() as u64;
@@ -1404,21 +1423,31 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
 /// Execute a chat tool without requiring `&Agent`.
 ///
 /// This standalone function enables parallel invocation from spawned JoinSet
-/// tasks, which cannot borrow `&self`. Delegates to the shared
-/// `execute_tool_with_safety` pipeline.
+/// tasks, which cannot borrow `&self`. Routes through the audited execution
+/// path (`execute_tool_audited`) so interactive chat tool calls now produce an
+/// `ActionRecord` audit row, while preserving the caller's `JobContext`
+/// (requester, conversation, timezone, tool-output stash, …) and the exact
+/// output/error/timeout/sanitization behavior of the shared pipeline. When the
+/// agent has no store (local/test), the audited path is a pure pass-through —
+/// behavior is unchanged. See #4019 (step 3) / #4017.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn execute_chat_tool_standalone(
     tools: &crate::tools::ToolRegistry,
     safety: &ironclaw_safety::SafetyLayer,
+    store: Option<&Arc<dyn Database>>,
     tool_name: &str,
     params: &serde_json::Value,
     job_ctx: &crate::context::JobContext,
+    channel: &str,
 ) -> Result<String, Error> {
-    crate::tools::execute::execute_tool_with_safety(
+    crate::tools::execute::execute_tool_audited(
         tools,
         safety,
+        store,
         tool_name,
         params.clone(),
         job_ctx,
+        crate::tools::dispatch::DispatchSource::Channel(channel.to_string()),
     )
     .await
 }
@@ -2803,9 +2832,11 @@ mod tests {
         let result = super::execute_chat_tool_standalone(
             &registry,
             &safety,
+            None,
             "echo",
             &serde_json::json!({"message": "hello"}),
             &job_ctx,
+            "test",
         )
         .await;
 
@@ -2831,9 +2862,11 @@ mod tests {
         let result = super::execute_chat_tool_standalone(
             &registry,
             &safety,
+            None,
             "nonexistent",
             &serde_json::json!({}),
             &job_ctx,
+            "test",
         )
         .await;
 

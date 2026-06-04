@@ -1838,7 +1838,12 @@ impl Agent {
 
             let started_at = std::time::Instant::now();
             let tool_result = self
-                .execute_chat_tool(&pending.tool_name, &pending.parameters, &job_ctx)
+                .execute_chat_tool(
+                    &pending.tool_name,
+                    &pending.parameters,
+                    &job_ctx,
+                    &message.channel,
+                )
                 .await;
             let duration_ms = started_at.elapsed().as_millis() as u64;
 
@@ -2009,7 +2014,7 @@ impl Agent {
 
                     let started_at = std::time::Instant::now();
                     let result = self
-                        .execute_chat_tool(&tc.name, &tc.arguments, &job_ctx)
+                        .execute_chat_tool(&tc.name, &tc.arguments, &job_ctx, &message.channel)
                         .await;
                     let duration_ms = started_at.elapsed().as_millis() as u64;
 
@@ -2041,6 +2046,7 @@ impl Agent {
                 for (spawn_idx, tc) in runnable.iter().enumerate() {
                     let tools = self.tools().clone();
                     let safety = self.safety().clone();
+                    let store = self.store().cloned();
                     let channels = self.channels.clone();
                     let job_ctx = job_ctx.clone();
                     let tc = tc.clone();
@@ -2064,9 +2070,11 @@ impl Agent {
                         let result = execute_chat_tool_standalone(
                             &tools,
                             &safety,
+                            store.as_ref(),
                             &tc.name,
                             &tc.arguments,
                             &job_ctx,
+                            &channel,
                         )
                         .await;
                         let duration_ms = started_at.elapsed().as_millis() as u64;
