@@ -115,6 +115,28 @@ async fn compaction_port_defers_ranges_covering_unstable_statuses() {
 }
 
 #[tokio::test]
+async fn compaction_port_defers_when_terminal_cut_point_has_unstable_status() {
+    let fixture = CompactionFixture::new().await;
+    fixture.append_user("visible-one").await;
+    fixture.append_draft("terminal-draft").await;
+    let inference = Arc::new(CapturingInference::new("summary"));
+    let port = fixture.port_with_inference(
+        inference.clone(),
+        Arc::new(CleanInjectionScanner),
+        Arc::new(CleanLeakScanner),
+        fixture.scope.clone(),
+    );
+
+    let outcome = port
+        .compact_loop_context(fixture.request(2))
+        .await
+        .expect("unstable terminal cut point should return a typed deferral");
+
+    assert!(matches!(outcome, LoopCompactionOutcome::Deferred { .. }));
+    assert!(inference.last_input().is_empty());
+}
+
+#[tokio::test]
 async fn compaction_port_skips_capability_previews() {
     let fixture = CompactionFixture::new().await;
     fixture.append_user("visible-one").await;

@@ -48,7 +48,6 @@ impl MockCompactionSupport {
         *self.result.lock().expect("lock") = result.map(LoopCompactionOutcome::Compacted);
     }
 
-    #[allow(dead_code)]
     pub(super) fn set_outcome(&self, result: Result<LoopCompactionOutcome, LoopCompactionError>) {
         *self.result.lock().expect("lock") = result;
     }
@@ -110,7 +109,6 @@ impl MockHost {
         self
     }
 
-    #[allow(dead_code)]
     pub(in crate::executor::tests) fn with_compaction_outcome(
         self,
         outcome: Result<LoopCompactionOutcome, LoopCompactionError>,

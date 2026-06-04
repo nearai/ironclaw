@@ -16,11 +16,15 @@ pub struct CompactionStrategyState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_compacted_through_seq: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_deferred_through_seq: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_deferred_prompt_fingerprint: Option<u64>,
+    pub last_deferred: Option<DeferredCompactionWatermark>,
     #[serde(default)]
     pub force_compact_on_next_iteration: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DeferredCompactionWatermark {
+    pub through_seq: u64,
+    pub prompt_fingerprint: u64,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -154,6 +158,40 @@ mod tests {
 
         assert_eq!(snapshot.message_index, vec![entry(2, 20), entry(3, 30)]);
         assert_eq!(snapshot.observed_prompt_tokens, 50);
+    }
+
+    #[test]
+    fn fingerprint_is_stable_for_empty_and_identical_snapshots() {
+        let empty = CompactionPromptSnapshot::default();
+        assert_ne!(empty.fingerprint(), 0);
+        assert_eq!(
+            empty.fingerprint(),
+            CompactionPromptSnapshot::default().fingerprint()
+        );
+
+        let first = CompactionPromptSnapshot::from_message_index(vec![entry(1, 10), entry(2, 20)]);
+        let second = CompactionPromptSnapshot::from_message_index(vec![entry(1, 10), entry(2, 20)]);
+
+        assert_eq!(first.fingerprint(), second.fingerprint());
+    }
+
+    #[test]
+    fn fingerprint_changes_when_order_or_entries_change() {
+        let baseline =
+            CompactionPromptSnapshot::from_message_index(vec![entry(1, 10), entry(2, 20)]);
+        let reordered =
+            CompactionPromptSnapshot::from_message_index(vec![entry(2, 20), entry(1, 10)]);
+        let added = CompactionPromptSnapshot::from_message_index(vec![
+            entry(1, 10),
+            entry(2, 20),
+            entry(3, 30),
+        ]);
+        let changed_tokens =
+            CompactionPromptSnapshot::from_message_index(vec![entry(1, 10), entry(2, 21)]);
+
+        assert_ne!(baseline.fingerprint(), reordered.fingerprint());
+        assert_ne!(baseline.fingerprint(), added.fingerprint());
+        assert_ne!(baseline.fingerprint(), changed_tokens.fingerprint());
     }
 }
 

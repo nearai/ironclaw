@@ -402,8 +402,7 @@ crates/ironclaw_agent_loop/src/executor/prompt.rs
        implementations.
     5. On Ok(LoopCompactionOutcome::Compacted(response)): set
          state.compaction_state.last_compacted_through_seq = drop_through_seq
-         state.compaction_state.last_deferred_through_seq = None
-         state.compaction_state.last_deferred_prompt_fingerprint = None
+         state.compaction_state.last_deferred = None
          state.compaction_state.force_compact_on_next_iteration = false
          state.compaction_prompt.retain_after_sequence(drop_through_seq)
          (Phase 3 reads force_compact and clears it; Phase 1 just sets
@@ -411,9 +410,10 @@ crates/ironclaw_agent_loop/src/executor/prompt.rs
        Then write a BeforeModel checkpoint, ack pending input, and rebuild the
        final prompt bundle.
     6. On Ok(LoopCompactionOutcome::Deferred { safe_summary }): set
-         state.compaction_state.last_deferred_through_seq = drop_through_seq
-         state.compaction_state.last_deferred_prompt_fingerprint =
-           state.compaction_prompt.fingerprint()
+         state.compaction_state.last_deferred = Some(DeferredCompactionWatermark {
+           through_seq: drop_through_seq,
+           prompt_fingerprint: state.compaction_prompt.fingerprint(),
+         })
          state.compaction_state.force_compact_on_next_iteration = false
        Then return to the existing candidate prompt without advancing the
        durable compaction high-water mark. The strategy suppresses that exact

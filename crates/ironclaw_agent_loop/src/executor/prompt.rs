@@ -14,8 +14,8 @@ use std::time::Duration;
 use tracing::debug;
 
 use crate::state::{
-    CheckpointKind, CompactionPromptSnapshot, IndexedMessageKind, LoopExecutionState,
-    MessageIndexEntry,
+    CheckpointKind, CompactionPromptSnapshot, DeferredCompactionWatermark, IndexedMessageKind,
+    LoopExecutionState, MessageIndexEntry,
 };
 use crate::strategies::CompactionDecision;
 
@@ -367,9 +367,10 @@ impl<'a, 'b> PromptCompactionStep<'a, 'b> {
                     "agent loop compaction deferred; continuing with the existing prompt"
                 );
                 state.compaction_state.force_compact_on_next_iteration = false;
-                state.compaction_state.last_deferred_through_seq = Some(drop_through_seq);
-                state.compaction_state.last_deferred_prompt_fingerprint =
-                    Some(state.compaction_prompt.fingerprint());
+                state.compaction_state.last_deferred = Some(DeferredCompactionWatermark {
+                    through_seq: drop_through_seq,
+                    prompt_fingerprint: state.compaction_prompt.fingerprint(),
+                });
                 state = match CheckpointStage
                     .cancel_if_requested_after_pending_input_ack(
                         self.ctx,
@@ -425,8 +426,7 @@ impl<'a, 'b> PromptCompactionStep<'a, 'b> {
         };
 
         state.compaction_state.last_compacted_through_seq = Some(drop_through_seq);
-        state.compaction_state.last_deferred_through_seq = None;
-        state.compaction_state.last_deferred_prompt_fingerprint = None;
+        state.compaction_state.last_deferred = None;
         state.compaction_state.force_compact_on_next_iteration = false;
         state
             .compaction_prompt

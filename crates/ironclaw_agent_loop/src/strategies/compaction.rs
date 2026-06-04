@@ -114,9 +114,13 @@ fn is_eligible_user_boundary(
     state: &LoopExecutionState,
     prompt_fingerprint: u64,
 ) -> bool {
-    let matches_deferred_boundary = Some(entry.sequence)
-        == state.compaction_state.last_deferred_through_seq
-        && Some(prompt_fingerprint) == state.compaction_state.last_deferred_prompt_fingerprint;
+    let matches_deferred_boundary = state
+        .compaction_state
+        .last_deferred
+        .is_some_and(|watermark| {
+            watermark.through_seq == entry.sequence
+                && watermark.prompt_fingerprint == prompt_fingerprint
+        });
     entry.kind == IndexedMessageKind::User
         && Some(entry.sequence) > state.compaction_state.last_compacted_through_seq
         && !matches_deferred_boundary
@@ -126,7 +130,8 @@ fn is_eligible_user_boundary(
 mod tests {
     use super::*;
     use crate::state::{
-        CompactionPromptSnapshot, CompactionStrategyState, LoopExecutionState, MessageIndexEntry,
+        CompactionPromptSnapshot, CompactionStrategyState, DeferredCompactionWatermark,
+        LoopExecutionState, MessageIndexEntry,
     };
 
     #[test]
@@ -345,9 +350,10 @@ mod tests {
                 estimated_tokens: 10,
             },
         ]);
-        state.compaction_state.last_deferred_through_seq = Some(3);
-        state.compaction_state.last_deferred_prompt_fingerprint =
-            Some(state.compaction_prompt.fingerprint());
+        state.compaction_state.last_deferred = Some(DeferredCompactionWatermark {
+            through_seq: 3,
+            prompt_fingerprint: state.compaction_prompt.fingerprint(),
+        });
         let strategy = DefaultCompactionStrategy {
             context_limit_tokens: 100,
             reserve_tokens: 10,
@@ -367,11 +373,96 @@ mod tests {
     }
 
     #[test]
+    fn evaluate_skips_deferred_boundary_in_threshold_overflow_path() {
+        let context =
+            crate::test_support::test_run_context("compaction-strategy-deferred-threshold");
+        let mut state = LoopExecutionState::initial_for_run(&context);
+        state.compaction_prompt = CompactionPromptSnapshot::from_message_index(vec![
+            MessageIndexEntry {
+                sequence: 1,
+                kind: IndexedMessageKind::User,
+                estimated_tokens: 50,
+            },
+            MessageIndexEntry {
+                sequence: 2,
+                kind: IndexedMessageKind::Assistant,
+                estimated_tokens: 50,
+            },
+            MessageIndexEntry {
+                sequence: 3,
+                kind: IndexedMessageKind::User,
+                estimated_tokens: 50,
+            },
+            MessageIndexEntry {
+                sequence: 4,
+                kind: IndexedMessageKind::Assistant,
+                estimated_tokens: 50,
+            },
+        ]);
+        state.compaction_state.last_deferred = Some(DeferredCompactionWatermark {
+            through_seq: 3,
+            prompt_fingerprint: state.compaction_prompt.fingerprint(),
+        });
+        let strategy = DefaultCompactionStrategy {
+            context_limit_tokens: 100,
+            reserve_tokens: 10,
+            main_loop_max_output_tokens: 0,
+            preserve_tail_tokens: 60,
+            deadline_ms: 7,
+        };
+
+        assert_eq!(
+            strategy.should_compact(&state, &context),
+            CompactionDecision::Trigger {
+                drop_through_seq: 1,
+                preserve_tail_tokens: 60,
+                deadline_ms: 7,
+            }
+        );
+    }
+
+    #[test]
+    fn evaluate_skips_when_only_deferred_boundary_is_eligible_in_threshold_overflow_path() {
+        let context = crate::test_support::test_run_context("compaction-strategy-deferred-skip");
+        let mut state = LoopExecutionState::initial_for_run(&context);
+        state.compaction_prompt = CompactionPromptSnapshot::from_message_index(vec![
+            MessageIndexEntry {
+                sequence: 1,
+                kind: IndexedMessageKind::User,
+                estimated_tokens: 50,
+            },
+            MessageIndexEntry {
+                sequence: 2,
+                kind: IndexedMessageKind::Assistant,
+                estimated_tokens: 50,
+            },
+        ]);
+        state.compaction_state.last_deferred = Some(DeferredCompactionWatermark {
+            through_seq: 1,
+            prompt_fingerprint: state.compaction_prompt.fingerprint(),
+        });
+        let strategy = DefaultCompactionStrategy {
+            context_limit_tokens: 100,
+            reserve_tokens: 10,
+            main_loop_max_output_tokens: 0,
+            preserve_tail_tokens: 60,
+            deadline_ms: 7,
+        };
+
+        assert_eq!(
+            strategy.should_compact(&state, &context),
+            CompactionDecision::Skip
+        );
+    }
+
+    #[test]
     fn evaluate_retries_deferred_boundary_after_prompt_snapshot_changes() {
         let context = crate::test_support::test_run_context("compaction-strategy-deferred-changed");
         let mut state = LoopExecutionState::initial_for_run(&context);
-        state.compaction_state.last_deferred_through_seq = Some(3);
-        state.compaction_state.last_deferred_prompt_fingerprint = Some(42);
+        state.compaction_state.last_deferred = Some(DeferredCompactionWatermark {
+            through_seq: 3,
+            prompt_fingerprint: 42,
+        });
         state.compaction_state.force_compact_on_next_iteration = true;
         state.compaction_prompt = CompactionPromptSnapshot::from_message_index(vec![
             MessageIndexEntry {
@@ -440,9 +531,10 @@ mod tests {
                 estimated_tokens: 10,
             },
         ]);
-        state.compaction_state.last_deferred_through_seq = Some(3);
-        state.compaction_state.last_deferred_prompt_fingerprint =
-            Some(state.compaction_prompt.fingerprint());
+        state.compaction_state.last_deferred = Some(DeferredCompactionWatermark {
+            through_seq: 3,
+            prompt_fingerprint: state.compaction_prompt.fingerprint(),
+        });
         let strategy = DefaultCompactionStrategy {
             context_limit_tokens: 100,
             reserve_tokens: 10,

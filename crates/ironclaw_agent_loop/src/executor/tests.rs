@@ -12,7 +12,10 @@ use ironclaw_turns::{
     },
 };
 
-use crate::state::{CheckpointKind, IndexedMessageKind, LoopExecutionState, MessageIndexEntry};
+use crate::state::{
+    CheckpointKind, DeferredCompactionWatermark, IndexedMessageKind, LoopExecutionState,
+    MessageIndexEntry,
+};
 use crate::strategies::{
     CapabilityBatchTurnSummary, CapabilityFilter, DefaultCompactionStrategy, GateKind, GateOutcome,
     StopKind, TurnSummary,
@@ -346,15 +349,11 @@ async fn prompt_stage_deferred_compaction_returns_to_normal_prompt_path() {
         None
     );
     assert_eq!(
-        output.state.compaction_state.last_deferred_through_seq,
-        Some(1)
-    );
-    assert_eq!(
-        output
-            .state
-            .compaction_state
-            .last_deferred_prompt_fingerprint,
-        Some(output.state.compaction_prompt.fingerprint())
+        output.state.compaction_state.last_deferred,
+        Some(DeferredCompactionWatermark {
+            through_seq: 1,
+            prompt_fingerprint: output.state.compaction_prompt.fingerprint(),
+        })
     );
     assert!(
         !output
@@ -405,8 +404,10 @@ async fn prompt_stage_successful_compaction_clears_deferred_watermark() {
     };
     let mut state = LoopExecutionState::initial_for_run(host.run_context());
     state.compaction_state.force_compact_on_next_iteration = true;
-    state.compaction_state.last_deferred_through_seq = Some(99);
-    state.compaction_state.last_deferred_prompt_fingerprint = Some(123);
+    state.compaction_state.last_deferred = Some(DeferredCompactionWatermark {
+        through_seq: 99,
+        prompt_fingerprint: 123,
+    });
 
     let step = PromptStage
         .process(
@@ -427,17 +428,7 @@ async fn prompt_stage_successful_compaction_clears_deferred_watermark() {
         output.state.compaction_state.last_compacted_through_seq,
         Some(1)
     );
-    assert_eq!(
-        output.state.compaction_state.last_deferred_through_seq,
-        None
-    );
-    assert_eq!(
-        output
-            .state
-            .compaction_state
-            .last_deferred_prompt_fingerprint,
-        None
-    );
+    assert_eq!(output.state.compaction_state.last_deferred, None);
 }
 
 #[tokio::test]
