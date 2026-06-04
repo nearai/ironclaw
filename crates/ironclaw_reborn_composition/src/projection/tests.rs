@@ -36,6 +36,7 @@ use tokio::sync::Mutex;
 
 mod cursor_validation;
 mod display_preview;
+mod display_preview_runtime;
 mod failure_explanation;
 mod live_progress_stream;
 mod runtime_stream;

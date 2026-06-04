@@ -6,6 +6,7 @@ use ironclaw_event_projections::{
 };
 use ironclaw_events::EventCursor;
 use ironclaw_host_api::InvocationId;
+use ironclaw_product_adapters::{ProductAdapterError, ProductOutboundPayload};
 
 use super::WEBUI_RUNTIME_ITEM_MAX_PAYLOADS;
 
@@ -13,6 +14,76 @@ pub(crate) enum RuntimePayloadCandidate {
     State { runs: Vec<RunStatusProjection> },
     CapabilityActivity(CapabilityActivityProjection),
     CapabilityDisplayPreview(CapabilityActivityProjection),
+}
+
+pub(crate) enum RuntimePayloadResolution {
+    Payload(ProductOutboundPayload),
+    Pending,
+    Empty,
+}
+
+pub(crate) struct RuntimePayloads {
+    slots: Vec<RuntimePayloadSlot>,
+}
+
+enum RuntimePayloadSlot {
+    Payload(ProductOutboundPayload),
+    Pending,
+}
+
+impl RuntimePayloads {
+    pub(crate) fn from_resolutions(
+        resolutions: Vec<Result<RuntimePayloadResolution, ProductAdapterError>>,
+    ) -> Result<Self, ProductAdapterError> {
+        let mut slots = Vec::new();
+        for resolution in resolutions {
+            match resolution? {
+                RuntimePayloadResolution::Payload(payload) => {
+                    slots.push(RuntimePayloadSlot::Payload(payload));
+                }
+                RuntimePayloadResolution::Pending => {
+                    slots.push(RuntimePayloadSlot::Pending);
+                    break;
+                }
+                RuntimePayloadResolution::Empty => {}
+            }
+        }
+        Ok(Self { slots })
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.slots.is_empty()
+    }
+
+    pub(crate) fn total(&self) -> usize {
+        self.slots.len()
+    }
+
+    pub(crate) fn deliver_after(
+        self,
+        already_delivered: usize,
+        capacity: usize,
+    ) -> Vec<DeliveredRuntimePayload> {
+        self.slots
+            .into_iter()
+            .enumerate()
+            .skip(already_delivered)
+            .filter_map(|(index, slot)| match slot {
+                RuntimePayloadSlot::Payload(payload) => Some(DeliveredRuntimePayload {
+                    delivered: index + 1,
+                    payload,
+                }),
+                RuntimePayloadSlot::Pending => None,
+            })
+            .take(capacity)
+            .collect()
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct DeliveredRuntimePayload {
+    pub(crate) delivered: usize,
+    pub(crate) payload: ProductOutboundPayload,
 }
 
 pub(crate) fn snapshot_payload_candidates(
