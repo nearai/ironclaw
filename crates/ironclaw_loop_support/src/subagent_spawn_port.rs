@@ -10,7 +10,7 @@ use std::{
 
 use async_trait::async_trait;
 use chrono::Utc;
-use ironclaw_host_api::{CapabilityId, InvocationId, ThreadId};
+use ironclaw_host_api::{CapabilityId, InvocationId, RuntimeKind, ThreadId};
 use ironclaw_threads::{
     AcceptInboundMessageRequest, EnsureThreadRequest, MessageContent, SessionThreadService,
     ThreadMessageId, ThreadScope,
@@ -23,8 +23,9 @@ use ironclaw_turns::{
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation,
         CapabilityBatchOutcome, CapabilityCallCandidate, CapabilityDenied,
-        CapabilityDeniedReasonKind, CapabilityInputRef, CapabilityInvocation, CapabilityOutcome,
-        LoopCapabilityPort, LoopRunContext, LoopSafeSummary, ProviderToolCall,
+        CapabilityDeniedReasonKind, CapabilityDescriptorView, CapabilityInputRef,
+        CapabilityInvocation, CapabilityOutcome, ConcurrencyHint, LoopCapabilityPort,
+        LoopRunContext, LoopSafeSummary, ProviderToolCall, ProviderToolCallCapabilityIds,
         ProviderToolDefinition, VisibleCapabilityRequest, VisibleCapabilitySurface,
         sanitize_model_visible_text,
     },
@@ -37,6 +38,29 @@ pub const DEFAULT_SUBAGENT_MAX_DEPTH: u32 = 1;
 pub const DEFAULT_SUBAGENT_MAX_SPAWN_PER_TURN: u32 = 4;
 pub const DEFAULT_SUBAGENT_MAX_TREE_DESCENDANTS: u32 = 16;
 pub const DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID: &str = "builtin.spawn_subagent";
+const SPAWN_SUBAGENT_PROVIDER_TOOL_NAME: &str = "builtin__spawn_subagent";
+
+fn spawn_subagent_parameters_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "required": ["flavor_id", "task"],
+        "additionalProperties": false,
+        "properties": {
+            "flavor_id": {
+                "type": "string",
+                "description": "Subagent flavor id for the child run."
+            },
+            "task": {
+                "type": "string",
+                "description": "Self-contained task for the child subagent run."
+            },
+            "handoff": {
+                "type": "string",
+                "description": "Optional context appended to the child subagent prompt."
+            }
+        }
+    })
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
@@ -397,6 +421,35 @@ impl SubagentSpawnCapabilityPort {
 
     fn is_spawn(&self, capability_id: &CapabilityId) -> bool {
         capability_id == &self.spawn_id
+    }
+
+    fn is_spawn_provider_tool_name(&self, tool_name: &str) -> bool {
+        tool_name == SPAWN_SUBAGENT_PROVIDER_TOOL_NAME
+    }
+
+    fn spawn_tool_definition(&self) -> ProviderToolDefinition {
+        ProviderToolDefinition {
+            capability_id: self.spawn_id.clone(),
+            name: SPAWN_SUBAGENT_PROVIDER_TOOL_NAME.to_string(),
+            description:
+                "Spawn a scoped child subagent to handle a focused task and return its result."
+                    .to_string(),
+            parameters: spawn_subagent_parameters_schema(),
+        }
+    }
+
+    fn spawn_descriptor(&self) -> CapabilityDescriptorView {
+        CapabilityDescriptorView {
+            capability_id: self.spawn_id.clone(),
+            provider: None,
+            runtime: RuntimeKind::FirstParty,
+            safe_name: self.spawn_id.as_str().to_string(),
+            safe_description:
+                "Spawn a scoped child subagent to handle a focused task and return its result."
+                    .to_string(),
+            concurrency_hint: ConcurrencyHint::Exclusive,
+            parameters_schema: spawn_subagent_parameters_schema(),
+        }
     }
 
     fn try_reserve_spawn_slot(&self) -> bool {
@@ -787,13 +840,34 @@ impl SubagentSpawnCapabilityPort {
 #[async_trait]
 impl LoopCapabilityPort for SubagentSpawnCapabilityPort {
     fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
-        self.inner.tool_definitions()
+        let mut definitions = self.inner.tool_definitions()?;
+        if !definitions
+            .iter()
+            .any(|definition| definition.capability_id == self.spawn_id)
+        {
+            definitions.push(self.spawn_tool_definition());
+            definitions.sort_by(|left, right| left.name.cmp(&right.name));
+        }
+        Ok(definitions)
+    }
+
+    fn provider_tool_call_capability_ids(
+        &self,
+        tool_call: &ProviderToolCall,
+    ) -> Result<ProviderToolCallCapabilityIds, AgentLoopHostError> {
+        if self.is_spawn_provider_tool_name(&tool_call.name) {
+            return Ok(ProviderToolCallCapabilityIds::single(self.spawn_id.clone()));
+        }
+        self.inner.provider_tool_call_capability_ids(tool_call)
     }
 
     fn validate_provider_tool_call(
         &self,
         tool_call: &ProviderToolCall,
     ) -> Result<(), AgentLoopHostError> {
+        if self.is_spawn_provider_tool_name(&tool_call.name) {
+            return Ok(());
+        }
         self.inner.validate_provider_tool_call(tool_call)
     }
 
@@ -801,6 +875,11 @@ impl LoopCapabilityPort for SubagentSpawnCapabilityPort {
         &self,
         tool_call: ProviderToolCall,
     ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
+        if self.is_spawn_provider_tool_name(&tool_call.name) {
+            self.inner
+                .visible_capabilities(VisibleCapabilityRequest)
+                .await?;
+        }
         let inner_candidate = self
             .inner
             .register_provider_tool_call(tool_call.clone())
@@ -832,7 +911,15 @@ impl LoopCapabilityPort for SubagentSpawnCapabilityPort {
         &self,
         request: VisibleCapabilityRequest,
     ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
-        self.inner.visible_capabilities(request).await
+        let mut surface = self.inner.visible_capabilities(request).await?;
+        if !surface
+            .descriptors
+            .iter()
+            .any(|descriptor| descriptor.capability_id == self.spawn_id)
+        {
+            surface.descriptors.push(self.spawn_descriptor());
+        }
+        Ok(surface)
     }
 
     async fn invoke_capability(
